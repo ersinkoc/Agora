@@ -67,3 +67,15 @@ node's pinned link; a browser on a machine with **no** node still needs the hub'
 
 **Together with ADR-0065** (find a hub on the network, approve on the hub, the owner's devices trusted in the same step), this
 removes the per-machine steps: no enrolment code to copy, no CA file, no certificate import, and no trust command.
+
+**Built (Amendment A):** `agora panel` (`crates/agora/src/panelcmd.rs`) runs the desktop tunnel (`agora-desktop-tunnel`) from the
+node's `link/` folder (hub address and pinned CA) on `127.0.0.1`. Port rule: the first run takes 7480, or any free port when that is
+taken, and keeps it in `link/panel-port`; a later run that finds it taken refuses to start (`cli-panel-port-taken`) rather than move.
+It first checks that the hub answers and presents a certificate from the pinned CA, so a hub that is down or foreign is said at once.
+It runs until Ctrl+C and listens on nothing otherwise. The `Host` check (requirement 2) was already in the desktop tunnel (threat
+model T22) when this was built; `Origin` is now checked in the same place (a request with an `Origin` other than the tunnel's own is
+refused), which covers both. Threat model T27. Not built: opening the browser itself (the command prints the address; launching a
+browser needs per-OS code in `agora-platform`), the desktop app's own use of a stored port, and ADR-0062's first-run window.
+Known gap (threat model T27): a fixed, predictable port can be bound by another local user while the panel is not running (and, on
+Windows, shared with a `SO_REUSEADDR` binder even while it runs, since tokio sets no exclusive bind); the desktop tunnel has the same
+exposure. The mitigation is a follow-up, an exclusive bind in `agora-platform`. A port that cannot be saved is reported (`cli-panel-port-unsaved`).

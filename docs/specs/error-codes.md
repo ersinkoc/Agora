@@ -22,7 +22,7 @@ or a local response timeout has a localized retry message.
 | `node.online` | `node_id` | ADR-0073: the machine is connected, so it cannot be forgotten; only an offline machine can |
 | `node.timeout` | `node_id` | The node did not answer a routed command in time (ADR-0029) |
 | `node.policy_denied` | `node_id`, `rule` | Node local policy rejected the action |
-| `node.resource_limit` | `resource`, `limit` | Limit reached (agents, memory, disk) |
+| `node.resource_limit` | `resource`, `limit` | Limit reached (agents, memory, disk, requests waiting for a node) |
 | `project.not_found` | `project_id` | |
 | `worktree.dirty` | `path` | Uncommitted changes block the operation |
 | `worktree.exists` | `branch` | |
@@ -66,6 +66,7 @@ or a local response timeout has a localized retry message.
 | `mesh.folder_not_allowed` | `folder` | ADR-0057: a helper's folder must be the asking agent's own folder or below it; an outside folder only with the user's single approval naming it (never a grant), and another machine is not offered |
 | `mesh.helper_limit` | `rule`, `limit` | ADR-0057: `rule` is `depth` (a helper cannot start helpers unless the decision that started it allowed it, and a helper of a helper never can), `helpers` (running helpers per agent), `pending` (one start waits for the user at a time) or `prompt` (first prompt over the size limit) |
 | `mesh.start_denied` | `approval_id` | ADR-0057: the user refused the start, or it was withdrawn |
+| `mesh.unavailable` | — | ADR-0075: this agent's `agora mesh stdio` bridge lost its connection to the node (the node is restarting or updating) and is reconnecting. The call was not delivered or its answer was lost; the agent may repeat it. Carried as the `data` of a JSON-RPC error with code -32000 (the bridge answers, the node never sees it) |
 | `task.not_found` | `task_id` | No such task in the caller's project |
 | `task.not_open` | `task_id` | The task is already claimed or done |
 | `task.blocked` | `task_id`, `depends_on` | A dependency of the task is not done |
@@ -75,6 +76,7 @@ or a local response timeout has a localized retry message.
 | `files.not_found` | `path` | |
 | `files.too_large` | `path`, `limit` | |
 | `files.outside_root` | `path` | Path escapes the worktree (`..`, absolute, or a symlink leading out) |
+| `files.secret` | `path` | ADR-0080: the node treats the file as secret by its name (`.env`, a private key, ...) and does not show it; the node's owner can switch this off (`files.show_secret`) |
 | `adapter.signature_invalid` | `package` | |
 | `adapter.crashed` | `kind`, `exit_code` | |
 | `adapter.agent_exited` | `stage`, `exit_code`, `stderr_tail` | ADR-0058: the agent behind an adapter (an ACP agent behind the bridge) exited before it was ready. `stage` is `initialize` or `session`; `exit_code` is its exit code, `?` when it had none; `stderr_tail` the last lines of its error output with secrets removed (docs/specs/adapter-protocol.md), possibly empty |

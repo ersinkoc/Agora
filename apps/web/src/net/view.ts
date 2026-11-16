@@ -419,7 +419,9 @@ export interface ApprovalModel {
 
 // An agent's request to start another (ADR-0057), read from the approval's detail. Every field is the asking agent's text: shown, never
 // interpreted. The detail itself is what the decision is signed over, so it is kept as it came.
-export interface StartRequest { agent: string; agentKind: string; node: string; kind: string; folder: string; prompt: string; inside: boolean; worktree: boolean; depth: number; grantAllowed: boolean }
+export interface StartRequest { agent: string; agentKind: string; node: string; kind: string; folder: string; prompt: string; inside: boolean; worktree: boolean; depth: number; grantAllowed: boolean; settings: StartSetting[] }
+// ADR-0066: a launch setting the request asks for (`label` is the machine's Fluent id for it, `value` the agent's text: shown, never interpreted).
+export interface StartSetting { id: string; label: string; value: string }
 
 // Characters that are invisible or change how text around them looks: the one list in crates/agora-core/src/hidden-characters.txt
 // (Default_Ignorable_Code_Point and every format character, the line and paragraph separators, the private use areas). The node refuses them in a start request; anything that reaches a card
@@ -438,13 +440,24 @@ export function visible(text: string): string {
   return text.replace(HIDDEN, (c) => `\\u{${(c.codePointAt(0) ?? 0).toString(16)}}`);
 }
 
+/** ADR-0066: the `settings` of a start request's detail, read the way the node reads them (a list of `{id, label, value}`; anything that is
+ * not a string is an empty string, so a request is signed over exactly what it shows). */
+export function startSettings(raw: unknown): StartSetting[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.map((x) => {
+    const o = (typeof x === 'object' && x !== null ? x : {}) as Record<string, unknown>;
+    const str = (k: string) => (typeof o[k] === 'string' ? (o[k] as string) : '');
+    return { id: str('id'), label: str('label'), value: str('value') };
+  });
+}
+
 export function startRequest(action: string, detail: string): StartRequest | undefined {
   if (action !== 'agent.start') return undefined;
   try {
     const d = JSON.parse(detail) as Record<string, unknown>;
     const s = (k: string) => (typeof d[k] === 'string' ? (d[k] as string) : '');
     // `grant_allowed` (a scoped grant may be given: not for a shell or plain terminal program); a node that does not say so offers none.
-    return { agent: s('agent'), agentKind: s('agent_kind'), node: s('node'), kind: s('kind'), folder: s('folder'), prompt: s('prompt'), inside: d.inside === true, worktree: d.worktree === true, depth: typeof d.depth === 'number' ? d.depth : 1, grantAllowed: d.grant_allowed === true };
+    return { agent: s('agent'), agentKind: s('agent_kind'), node: s('node'), kind: s('kind'), folder: s('folder'), prompt: s('prompt'), inside: d.inside === true, worktree: d.worktree === true, depth: typeof d.depth === 'number' ? d.depth : 1, grantAllowed: d.grant_allowed === true, settings: startSettings(d.settings) };
   } catch {
     return undefined;
   }

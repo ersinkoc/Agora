@@ -86,3 +86,18 @@ it('says a device limited to other projects is refused, not that the folder or t
   expect(directoryReasonKey(undefined)).toBe('start-directory-failed');
   expect(resumeReasonKey('auth.forbidden')).toBe('resume-failed-forbidden');
 });
+
+it('signs chosen launch settings in the order sent (ADR-0066, directory-action-v4)', async () => {
+  const { launchMessageV4 } = await import('./directory');
+  const { readFileSync } = await import('node:fs');
+  const vectors = JSON.parse(readFileSync('../../schema/fixtures/signing/directory-action-v4.json', 'utf8')) as { cases: { name: string; node: string; path: string; kind: string; project: string; separate: boolean; identity_change: boolean; options: string[]; confirmed: string[]; settings: [string, string][]; nonce: string; expires: number; hex: string }[] };
+  const hex = (b: Uint8Array) => Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
+  for (const c of vectors.cases) expect(hex(launchMessageV4(c.node, c.path, c.kind, c.project, c.separate, c.identity_change, c.options, c.confirmed, c.settings, c.nonce, c.expires)), c.name).toBe(c.hex);
+  const device = await thisDevice({ load: async () => undefined, save: async () => {} });
+  const a = await signDirectory(device, 'node', 'launch', '/selected', 'codex', 'id:p', false, false, [], [], [['model', 'gpt-6.1-sol']]);
+  const verify = (m: Uint8Array) => crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, device.keys.publicKey, a.signature as BufferSource, m as BufferSource);
+  expect(await verify(launchMessageV4('node', '/selected', 'codex', 'id:p', false, false, [], [], [['model', 'gpt-6.1-sol']], a.nonce, a.expiresAtMs))).toBe(true);
+  // Not valid for other settings, none (v1) or options only (v3).
+  expect(await verify(launchMessageV4('node', '/selected', 'codex', 'id:p', false, false, [], [], [['model', 'gpt-6.1-terra']], a.nonce, a.expiresAtMs))).toBe(false);
+  expect(await verify(directoryMessage('node', 'launch', '/selected', 'codex', 'id:p', false, false, a.nonce, a.expiresAtMs))).toBe(false);
+});

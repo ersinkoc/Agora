@@ -1,0 +1,227 @@
+# Pairing: find a hub, compare a number, connected (ADR-0065, rung a)
+
+Status: design for review. Nothing here is built. ADR-0065 is accepted; this document is the protocol it asks for, written before the code
+so that the part that decides who may join (a new way to authenticate) is read on its own. Rung (b), the typed number with a PAKE, is not here.
+
+## 1. What it replaces
+Today a machine joins with the hub's CA file, a one-time code and a long command (ADR-0015, `crates/agora-hub/src/enroll.rs`): the node
+dials `wss://` trusting only the CA it was handed, sends `EnrollRequest { code, node_id, csr_pem }` and gets a certificate. Pairing removes the
+two things a person has to carry between machines (the CA file and the code) and asks the owner for one decision on the hub, once, with a number
+to compare. The join string and the code stay as the fallback.
+
+## 2. The hub's switch: "open for pairing"
+- Closed by default. `agora pair open` (and "Add a machine" in the window) opens it for **10 minutes**; `agora pair close` and the timeout close
+  it; `agora pair status` says which. Opening and closing are owner-only and audited.
+- While closed: no discovery answer (the hub is invisible), and every pairing message is refused with `pair.closed`.
+- Closing ends every pending pairing session at once.
+
+## 3. Finding a hub (UDP)
+- A fixed UDP port (`DISCOVERY_PORT`, one constant, chosen at implementation), `std::net` only, no new dependency.
+- Request: the 12 bytes `AGORA-DISCO1`, then 16 random bytes, **padded to 128 bytes**. A request shorter than 128 bytes or with another prefix is
+  ignored: the reply is never larger than the request, so the hub cannot be used to amplify traffic at a spoofed address.
+- Reply, sent unicast to the sender only: a protobuf `HubAnnouncement { name, port, ca_fingerprint, accepts_pairing: true, version }`
+  (`ca_fingerprint` = SHA-256 of the CA certificate's DER). Replies are rate limited (10 a second for the whole hub).
+- An announcement is a **candidate**, never a trust anchor: nothing is shared with the hub because it answered. The fingerprint is shown to the person
+  next to the hub's name and is public information. (A rogue responder can only get itself listed; it still cannot pass section 5.)
+
+## 4. Messages (new, append-only; ids in `commands.proto` / `events.proto` / `client.proto` at implementation)
+Machine to hub, on a `wss://` connection, in this order: `PairRequest`, `PairReveal`. Hub to machine: `PairChallenge`, `PairResult`.
+Owner to hub (from an owner window): `PairApprove { pair_id }`, `PairDeny { pair_id }`, `PairOpen`, `PairClose`, `PairStatus`.
+Hub to windows: `PairRequested { pair_id, kind (machine|browser), name, os, address, number, expires_ms }` and `PairDecided { pair_id, outcome }`.
+New error codes: `pair.closed`, `pair.limit`, `pair.expired`, `pair.mismatch`, `pair.denied`, `pair.unknown`, `pair.state` (a message that is not allowed in
+the session's current state, section 5a), `pair.insecure_transport` (a browser request over a transport that cannot carry the session safely, section 6)
+(stable codes with parameters; the sentences live in `locales/`). One more is machine-local, never sent: `pair.name_unverified` (section 5, step 6b).
+
+## 5. The handshake for a machine
+Connection: the machine does **not** know the hub's CA yet. It dials the hub's TLS with a verifier that accepts a leaf certificate it cannot chain
+to anything, and records `leaf_hash = SHA-256(leaf DER)` as the machine saw it. This connection carries the pairing messages and nothing else; the
+verifier is used for pairing only, never for the node link, and is a separate type so no other code can pick it up by accident.
+
+The verifier relaxes **one** check, trust in the issuer, and nothing else:
+- It still verifies the TLS 1.3 handshake signature (`CertificateVerify`) against the leaf's public key with the crypto provider's own signature
+  check (proof that the peer holds the key of the leaf it presented). It must never return an unconditional "valid" for the signature, and a
+  missing or empty leaf, a failed or unsupported signature, or a handshake that does not complete is a refusal. Without this a party that merely
+  replays a leaf it saw could pass as that hub.
+- Pairing connections are **TLS 1.3 only** (so no extended-master-secret question and no renegotiation), with a fresh connection per pairing.
+- The verifier cannot be constructed by the node-link or any other path, and the connection is closed after one pairing (section 7).
+- **Session binding.** Immediately after the handshake, and before any pairing message, each side reads `exporter` = the TLS exporter
+  (`export_keying_material`, rustls, no new dependency) with label `EXPORTER-agora-pair-v1`, an empty context and length 32 (the construction of
+  RFC 9266, with our own label). The hub reads it from its side of the same connection. It is frozen for the session and then used in step 4.
+
+1. **Commit.** The machine makes `nonce_n` (16 fresh random bytes from the system CSPRNG, never reused) and its keypair and CSR, and sends
+   `PairRequest { commitment, node_name, os, version }` with
+   `commitment = SHA-256("agora/pair/v1/commit" || nonce_n || csr_hash)`, where `csr_hash = SHA-256(CSR DER)`.
+   The hub checks it is open and the limits (section 7) **before allocating any state**, makes `pair_id` (128 random bits) and `nonce_h` (16 fresh
+   random bytes). The session now owns its tuple (section 5a).
+2. **Challenge.** The hub replies `PairChallenge { pair_id, nonce_h }`.
+3. **Reveal.** The machine sends `PairReveal { pair_id, nonce_n, csr_pem }`. The hub recomputes the commitment from `nonce_n` and the CSR it
+   received; a different value ends the session (`pair.mismatch`, counted as a failure). The CSR is parsed and the proposed node id checked by
+   the same rules as enrolment today.
+4. **The number.** Both sides compute the same short number from what each of them saw:
+   `sas = HKDF-SHA256(salt = "agora/pair/v1", ikm = exporter || leaf_hash || csr_hash || nonce_n || nonce_h, info = "sas")`, first 8 bytes as a
+   big-endian integer, mod 10^6, shown as `482-193` (the bias of 2^64 mod 10^6 is below 10^-13). The hub's `leaf_hash` is its own certificate's and
+   its `exporter` is read from its side of the connection; the machine's are what its verifier recorded and what its side of the connection derived.
+   The machine displays "Approve on the hub. Number 482-193". The hub sends `PairRequested` (with the same number, the node's name and os,
+   and the address the connection came from) to every owner window and every notifier (ADR-0051).
+5. **Approve.** The owner compares the numbers and presses Approve (or Deny). Only an owner session may; the pairing must still be pending and
+   inside its time limit (5 minutes from the reveal). Approve and Deny are **terminal and one-shot**: the first one moves the session out of
+   `Pending`, the hub issues at most one certificate per session, and it does so for the frozen tuple (section 5a), never for values taken from
+   a later message. On approval the hub issues the certificate with the existing `Ca::issue_node` for the node
+   id (a name that already belongs to another machine is refused unless the owner explicitly says "replace", exactly as re-enrolment works today)
+   and sends `PairResult { approved, cert_pem, ca_pem }` on the same connection, then closes it.
+6. **The machine checks before it keeps anything.** (a) the certificate it got is for its own key and node id; (b) the leaf it saw in step 1
+   chains to `ca_pem` (verified with the certificate library, with `ca_pem` as the only root, after the handshake signature was verified during the connection) and the address or name it dialled is one of that leaf's names (section 5b says how the hub's leaf gets that name; the
+   check is never skipped, and a failure is the machine-local `pair.name_unverified`, the machine says so and stores nothing); (c) only then does
+   it store the CA and its certificate in its link folder, as `agora node enroll` does today. A mismatch is thrown away and nothing is stored.
+7. **Device trust in the same step** (ADR-0065 decision 5, ADR-0061): the machine then asks, on the machine, once, "Trust the owner's devices on
+   this machine? [y/N]" with each device's fingerprint, reusing `agora node trust --from-hub`. It is the node's own question; the hub cannot
+   answer it.
+
+### 5a. Session state: what is frozen and what may happen once
+A session is `Awaiting-reveal -> Pending -> Approved | Denied | Expired | Closed`, owned by **one connection**.
+- At the commit the hub freezes, per session: the owning connection, `exporter`, `leaf_hash`, `commitment`, the node's source address and
+  `deadline`; at the reveal it adds `nonce_n`, `csr_hash` and the proposed node id. None of these changes afterwards.
+- `pair_id` is a lookup key and **not a bearer capability**: a message naming a `pair_id` is honoured only on the connection that owns it. Another
+  connection naming it gets `pair.unknown`, gains nothing, and counts as a failure for its own address.
+- A second `PairRequest`, a second `PairChallenge`, a second or replayed `PairReveal`, or a reveal out of order is `pair.state`: it ends the
+  session (not a retry), counts as a failure and never replaces or edits the stored tuple.
+- Approve and Deny are terminal. A reconnecting machine cannot reclaim a session: it starts a new one (new nonces, new limits check). A result is
+  sent once, on the owning connection; if that connection is gone the approval is void and no certificate is issued.
+- Every retry is a fresh session with fresh nonces; no nonce, commitment or exporter is ever accepted twice (the hub keeps the commitments of the
+  last 10 minutes to refuse a repeat).
+
+### 5b. The hub's certificate names (the default LAN install)
+Today `hub_run` issues the hub leaf with the name `localhost` unless `--name` is given, so a hub reached by its LAN address could never pass
+step 6b, and the later node link (which verifies the name against the CA it pinned) would fail for the same reason. Two ways to fix it:
+- **Provision the names (recommended).** When the hub starts and again at every `agora pair open`, it takes the names it is reachable at: the
+  `--name` values, `localhost`, its host name, and the IP addresses of the interfaces it listens on (for a wildcard listen address, each
+  non-loopback address of its interfaces, through `agora-platform` since enumerating them is OS-specific). If that set is not covered by the
+  current leaf it issues a new leaf from the **same CA** (so the CA fingerprint and the nodes already enrolled do not change) and the listener
+  switches to it for new connections. Discovery announces only addresses that are in the leaf. Failure mode: if the interfaces cannot be listed
+  or issuing fails, `agora pair open` fails with an error saying which names are missing and suggests `--name`; it never opens with a leaf that
+  cannot match. An address that appears later (a DHCP change) is picked up at the next `pair open`; until then a machine dialling it gets
+  `pair.name_unverified`, visibly, with nothing stored.
+- **Pin the approved CA instead.** After the number comparison, accept the leaf by `ca_fingerprint` / `leaf_hash` without a name match. The
+  number already authenticates the leaf, so this is not weaker for the pairing itself. It is **not recommended**: the node link afterwards
+  verifies the hub's name against the pinned CA (that is what keeps a stolen-CA-less impostor out), so either that check would have to be
+  relaxed for every later connection, or the machine would pair and then never connect.
+
+Decision recorded here: **provisioning**; pinning is rejected as above (the maintainer may overrule: it would need a rule for the node link, which
+is an ADR-0015/0062 matter and not decided here). Acceptance cases: a default hub (no `--name`) paired from a second machine by its LAN IP and by
+its host name completes and the node link then connects; the same hub dialled at an address that is in no name fails closed with
+`pair.name_unverified`; a leaf from another CA with the right name fails (wrong CA); the right CA with a leaf for another name fails (wrong leaf).
+
+### Why this resists a machine in the middle
+A party in the middle terminates the machine's TLS with its own certificate `C_m` and relays to the hub over a second connection. The machine's
+`leaf_hash` is then `H(C_m)` and the hub's is `H(C_hub)`, and the two TLS sessions have different exporters: the two numbers differ except by
+chance. (The party cannot present the hub's real leaf either: the handshake signature would need the hub's key.) The attacker sees the machine's *commitment*
+before it chooses anything toward the machine, and the machine's nonce and CSR are revealed only after the attacker has fixed its own nonce toward
+the machine, so it cannot grind a collision after the fact: it has one attempt for each pairing, about a 1 in 10^6 chance **per attempt**. A failed attempt shows up as two
+different numbers on two screens, the owner presses Deny, and it counts as a failure (section 7). The hub is the owner's own machine, so the hub's
+nonce needs no commitment. This is a reasoned argument, not a formal proof; a reviewer found no offline grinding break when nonces are fresh and a
+session is one-shot, and the design depends on exactly those two rules (5a).
+
+**Aggregate bound.** 10^-6 is the figure for one constrained comparison, not for a window. The budget that turns it into a bound: every failure
+(mismatch, a Deny, an expiry nobody answered, an abort after the challenge, an invalid transition) counts; **5 failures hub-wide while the switch is
+open close the switch** (`pair.closed` until the owner opens it again), and from one address 5 failures lock that address out for a minute
+(section 7). So one open window admits at most 5 failed comparisons plus the one the owner approves: the chance that a party in the middle gets a
+matching number in a window is at most about 6 x 10^-6, and each failed attempt is a card the owner saw.
+
+## 6. A browser signing in
+- A browser has no key and no TLS binding it can read, so the number here is **not** a handshake: the hub makes a random 6-digit number, shows it
+  on the sign-in page ("Waiting for the owner to approve. Number 731-004") and on the owner's card ("Browser 'Chrome on Mac' (192.168.1.50) wants
+  to sign in. Number 731-004"). Its only job is to let the owner tell two requests apart and to know it is the one they mean. It is a locator, never
+  a password, and nothing is authenticated by it.
+- **The poll token is the capability.** The hub makes it with the system CSPRNG, at least **256 bits**, and returns it **once**, in the response that
+  creates the request, together with the number. The page keeps it in memory only (not in a URL, not in `localStorage`, not in a log, never in
+  the card) and sends it in a request header on each poll. The hub stores only its SHA-256 and compares in constant time. It lives as long as the
+  request (3 minutes at most) and is void on approve, deny, cancel, expiry, the switch closing and a hub restart. Pairing for a browser is only
+  accepted over TLS or from loopback (`pair.insecure_transport` otherwise), because the session cookie is returned to the poll that proves the token.
+- **Only the token's holder continues or ends a request.** A request is polled, cancelled or replaced by presenting its token; the address is never
+  a credential. A new request without a token from an address whose quota is full is **refused** (`pair.limit`); it does not touch the pending one. So a
+  stranger behind the same address (a shared office or home NAT) cannot invalidate the legitimate request. "Replace" means the holder cancels and
+  asks again, and that is an admission like any other (the rates below), and it does not raise a new notice while a cooldown is running.
+- **Bounds (normative for browsers, as for machines; section 7).** At most **4** pending browser requests for the whole hub and **2** per address, each
+  lives **3 minutes**. Creating requests is limited **per address key** (exact address for IPv4, the /64 for IPv6) to **3 a minute and 20 in 10
+  minutes**, and for the whole hub to **10 a minute and 60 in 10 minutes**, counted when a request is **attempted**, before anything is allocated or
+  anyone is notified. Polling is limited to one poll per 2 seconds per token, 60 a minute per address key and 300 a minute for the hub; a poll over
+  the rate gets `pair.limit` and does not extend anything.
+- **Notices are coalesced.** The pending requests are state the owner's windows read as one list (at most 4 cards, each shown once). A push
+  notification (ADR-0051) for a browser request is sent at most **once a minute for the hub**; requests that arrive during the cooldown are
+  summarised in the next one ("2 more sign-in requests are waiting"), and window updates are batched to at most one a second. The trace "one
+  legitimate request, then 10,000 attempts to replace it from the same address" therefore produces: the legitimate request still pending, at
+  most 3 admissions a minute from that address (the rest refused before any state), and at most one notice a minute, not 10,001.
+- Accepted: a flood from many addresses can fill the 4 pending slots (bounded by the rates above) and make a real request get `pair.limit` for up to
+  3 minutes; it cannot cancel or replace anyone's request, cannot produce more than one notice a minute, and is visible to the owner, who can close
+  the switch. Browser sign-in works only for an owner who is signed in somewhere to approve it; a hub with no signed-in window shows "ask the owner".
+- On approval the hub makes a session for the polling browser: the poll that presents the token receives the session cookie **once**, and the token is
+  void from then. Anything else about sessions is as today (ADR-0049, #450).
+- Signing in a stranger by approving the wrong card is the one risk this cannot remove: the card names the browser and the address, and approving is
+  the owner's decision, never the hub's.
+
+## 7. Limits
+These apply to **every kind** of request (machine and browser) and are checked before the hub allocates a session or sends a notice.
+- Pending sessions: machines at most **4**, browsers at most **4** (2 per address key); from one address key at most **3 requests a minute**
+  and **20 in 10 minutes**, and for the whole hub at most **10 a minute** and **60 in 10 minutes**, each kind counted on its own. A refused
+  attempt counts as an attempt.
+- A session lives **5 minutes** from the reveal (a browser request 3 minutes); a reveal must arrive within **30 seconds** of the challenge.
+- **Failures** (commitment mismatch, a Deny, an expiry nobody answered, an abort after the challenge, a message in the wrong state, a `pair_id` not
+  owned by the connection) are counted per address key: **5 failures lock that address key out for a minute**. Hub-wide, **5 failures while the
+  switch is open close the switch** (the aggregate bound of section 5). These are **new keyed counters** (`PairLimits` in `agora-hub`): a map from
+  `(kind, address key)` to sliding-window counts and a lockout time, plus one hub-wide counter, bounded to **1024 keys** and **10 minutes** of
+  retention. A full table refuses new keys (fails closed, never evicts a live key to make room), so filling it cannot reset anyone's counters.
+- They are **separate from fallback enrolment**. The existing `enroll::Lockout` is one `(count, until)` for the whole hub with no address in
+  its interface, so reusing it would either not limit per address or let pairing noise lock out `agora node enroll` for everyone. It is left
+  unchanged; pairing failures never touch it and its failures never touch pairing.
+- One connection carries one pairing; the hub closes it after the result and after 30 seconds without a message.
+- The state of every session is memory only and ends with its session, with the switch closing, or with the hub restarting. Nothing about a
+  pairing is stored except the audit trail and, on approval, the certificate record enrolment already keeps.
+
+## 8. Audit and what is never logged
+Audited: the switch opened and closed (by whom); a request (name, os, address); approve or deny (the owner's device); the certificate issued (serial).
+Never logged: nonces, the commitment, the exporter, the number, the CSR, the poll token or the session cookie. Limit refusals are counted and audited as a rate (kind, address key, count a minute), not one line per attempt, so a flood cannot fill the log.
+
+## 9. Threat-model rows to add when this is built
+The ids below are **placeholders**; the real ids are assigned when the rows go into `docs/security/threat-model.md`.
+- **T-PAIR-1, a machine or browser on the network asks to join or sign in without the owner meaning it:** only while open; bounded, short-lived
+  sessions; creation, replacement and polling rates per address key and for the hub; the pending capability, not the address, owns a browser request;
+  coalesced notices; an owner decision for each; keyed failure counters kept apart from fallback enrolment.
+- **T-PAIR-2, a party in the middle of a pairing:** the commitment, the number bound to the leaf and the TLS exporter each side saw, one attempt per
+  session and at most 5 failures per open window (about 6 x 10^-6 in all), the handshake signature still verified, visible to the owner.
+- **T-PAIR-3, discovery used to find or flood hubs:** a closed hub is silent; a request must be as large as the reply; replies are rate limited and
+  unicast; the answer holds only public data.
+- **T-PAIR-4, the hub's certificate does not name the address it is dialled at:** names provisioned from the listen addresses at start and at
+  `pair open`; failure is explicit (`pair.name_unverified`, or `pair open` refusing); never a skipped check.
+
+## 10. Order of work (each its own pull request, each security-reviewed)
+1. The messages, error codes and golden fixtures (append-only), and this document updated with the ids.
+2. The pairing core in the hub, pure and unit-tested (states, limits, SAS, commitment), `agora pair open|close|status`, audit.
+3. The command path for approve/deny and `PairRequested` to windows and notifiers; the machine handshake over TLS.
+4. The discovery responder (hub) and the finder, `agora join`, with the trust question (node).
+5. The window cards wired in (web #610 and TUI #611 already have the layout), then the browser sign-in by approval (section 6).
+
+## 11. Decisions taken after the first review, and what is still open
+- **Exporter and leaf both.** `leaf_hash` binds the endpoint certificate; the exporter (TLS 1.3, RFC 9266 style, 32 bytes, label
+  `EXPORTER-agora-pair-v1`) binds the TLS session. Both go into the number. Cost: the pairing connection is TLS 1.3 only and the node's client
+  stack must expose `export_keying_material` (rustls does; no new crate). Gain: the number depends on the TLS session, not only on the endpoint
+  certificate. The reviewer found no break in the hash alone; this is chosen as the stronger and cheap option, and can be dropped to the hash if a client stack cannot expose the exporter (then that stack cannot pair).
+- **Provision the leaf's names, do not pin** (section 5b). Open for the maintainer only if pinning is wanted instead: it would change the node link
+  rule (ADR-0015/0062), which this document does not decide.
+- **The verifier accepts an unchained leaf but not a bad signature** (section 5). The alternative, a hub certificate recognised by the discovered
+  `ca_fingerprint`, adds nothing: a rogue responder can announce any fingerprint.
+- **Open: the numbers** (3 a minute, 20 in 10 minutes per address key; 10 and 60 for the hub; 5 failures per window) are proposals for the
+  reviewer. No ADR-0065 decision is changed: it asks for a bounded, owner-approved exchange; these are its bounds written out.
+
+## Tests this design requires (before the code is integrated)
+Machine: a party in the middle with its own certificate gets different numbers; a replayed leaf without its key fails the handshake signature; a
+TLS 1.2 or empty-certificate server is refused; a second `PairRequest`, a second or replayed `PairReveal`, a reveal before the challenge, and a
+reveal with another `nonce_n` or CSR are `pair.state`/`pair.mismatch` and change nothing; another connection naming the `pair_id` gets `pair.unknown`
+and no authority; approve twice and approve-after-deny issue one certificate at most, none for a changed tuple; a reconnect cannot reclaim an
+approval; the numbers use the exporter (two sessions with the same leaf and nonces differ); default hub (no `--name`) paired by LAN IP and by host
+name succeeds and then connects; an address in no name, a leaf of another CA and a leaf for another name each fail with nothing stored; the aggregate
+budget closes the switch at the 5th failure.
+Browser: a stranger behind the same address cannot cancel, replace or poll the legitimate request (the legitimate token still works); a 10,000-request
+churn from one address stays within the admission rates, leaves the legitimate request pending and produces at most one notice a minute; many
+addresses fill at most 4 slots and no more; a token is single-use for the cookie, void after deny, cancel, expiry, close and restart, never appears in
+a URL or a log, and a plain-HTTP non-loopback request is `pair.insecure_transport`; pairing failures do not lock `agora node enroll`, and its failures
+do not lock pairing; a full counter table refuses new keys without resetting the others.

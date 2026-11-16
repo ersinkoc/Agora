@@ -74,7 +74,7 @@ impl Env {
             root.join("manifests/probe.toml"),
             // An agent (it has a mesh section), so a grant may cover it; `screen` is a plain terminal program, which no grant covers.
             // ADR-0059: it declares an option that skips permissions; a helper must never get it.
-            format!("kind = \"probe\"\ndisplay_name = \"Probe\"\nversion = \"1\"\nmin_engine = 2\n[process]\nlaunch = {launch}\n[[launch.option]]\nid = \"skip-permissions\"\nlabel = \"option-skip-permissions\"\nargs = [\"--fake-skip-permissions\"]\nskips_permissions = true\n[mcp]\nmethod = \"cli_flag\"\npath = \".mcp.json\"\nflag = [\"--mcp-config\", \"{{config_file}}\"]\n[[typed]]\nid = \"t\"\nstate = \"idle\"\npriority = 1\nregion = \"bottom_non_empty_lines(12)\"\nregex = \"^> \"\nall = [{{ contains = \"PROBE-FOOTER\" }}]\n"),
+            format!("kind = \"probe\"\ndisplay_name = \"Probe\"\nversion = \"1\"\nmin_engine = 3\n[process]\nlaunch = {launch}\n[[launch.option]]\nid = \"skip-permissions\"\nlabel = \"option-skip-permissions\"\nargs = [\"--fake-skip-permissions\"]\nskips_permissions = true\n[[launch.setting]]\nid = \"model\"\nlabel = \"setting-model\"\nargs = [\"--fake-model\", \"{{value}}\"]\n[[launch.setting]]\nid = \"effort\"\nlabel = \"setting-effort\"\nargs = [\"--fake-effort\", \"{{value}}\"]\nvalues = [\"low\", \"high\"]\n[mcp]\nmethod = \"cli_flag\"\npath = \".mcp.json\"\nflag = [\"--mcp-config\", \"{{config_file}}\"]\n[[typed]]\nid = \"t\"\nstate = \"idle\"\npriority = 1\nregion = \"bottom_non_empty_lines(12)\"\nregex = \"^> \"\nall = [{{ contains = \"PROBE-FOOTER\" }}]\n"),
         )
         .unwrap();
         std::fs::write(
@@ -1028,4 +1028,179 @@ fn a_helper_never_inherits_a_launch_option() {
     let events = e.node().events.events_after(0);
     assert!(events.iter().any(|ev| matches!(&ev.body, Some(Body::AgentStarted(s)) if s.agent_id == parent && s.skips_permissions && s.launch_options == ["skip-permissions"])));
     assert!(events.iter().any(|ev| matches!(&ev.body, Some(Body::AgentStarted(s)) if s.agent_id == helper && !s.skips_permissions && s.launch_options.is_empty())));
+}
+
+/// ADR-0066: an agent's `agent_start` may carry settings. They are checked against the node's manifest before anyone is asked, shown on
+/// the card (in the manifest's order, with the manifest's label), signed under `agora-approval-start-v2`, and applied exactly as shown;
+/// a signature over anything else (the v1 message, other settings) starts nothing.
+#[test]
+fn a_helper_starts_with_the_settings_the_user_was_shown_and_signed() {
+    if !supported() {
+        return;
+    }
+    let e = Env::new("settings");
+    let parent = e.launch(&e.folder, "probe");
+    let mut m = e.mcp(&parent);
+    // Refused before the user is asked: an undeclared setting, a value that would be a flag, a setting that is not a string.
+    for (settings, code) in [
+        (json!({"mode": "plan"}), "agent.setting_unknown"),
+        // (six `agent_start` calls a minute are allowed, refused ones count; the value rules are tested in `launch_options`)
+        (
+            json!({"model": "--fake-skip-permissions"}),
+            "agent.setting_invalid",
+        ),
+    ] {
+        let id = m.call(
+            "agent_start",
+            json!({"kind": "probe", "settings": settings}),
+        );
+        assert_eq!(m.error_code(id), code, "{settings}");
+    }
+    let id = m.call(
+        "agent_start",
+        json!({"kind": "probe", "settings": {"model": 5}}),
+    );
+    assert_eq!(m.reply()["error"]["code"], -32602);
+    let _ = id;
+    assert!(
+        e.node().approvals.waiting().is_empty(),
+        "nothing was asked about"
+    );
+
+    // Asked in the manifest's order whatever order the call used; the card carries the labels; no grant is offered.
+    let call = m.call(
+        "agent_start",
+        json!({"kind": "probe", "settings": {"model": "gpt-6.1-sol", "effort": "high"}}),
+    );
+    let p = e.request_of(&parent);
+    let detail: Value = serde_json::from_str(&p.detail).unwrap();
+    assert_eq!(
+        detail["settings"],
+        json!([
+            {"id": "model", "label": "setting-model", "value": "gpt-6.1-sol"},
+            {"id": "effort", "label": "setting-effort", "value": "high"},
+        ])
+    );
+    assert_eq!(detail["grant_allowed"], false);
+    let signed = agora_node::approvals::detail_settings(&p.detail);
+    let v2 = |settings: &[(String, String)], detail: &str| {
+        e.sign(&agora_node::approvals::start_signed_message_v2(
+            NODE, &p.id, true, 0, false, settings, detail,
+        ))
+    };
+    // The v1 message (a client that does not know settings), other settings, the same ones reordered or extended: all refused.
+    let mut reordered = signed.clone();
+    reordered.reverse();
+    let mut changed = signed.clone();
+    changed[0].1 = "gpt-6.1-terra".into();
+    let mut extra = signed.clone();
+    extra.push(("mode".into(), "plan".into()));
+    let attempts = [
+        e.sign(&start_signed_message(
+            NODE, &p.id, true, 0, false, &p.detail,
+        )),
+        v2(&[], &p.detail),
+        v2(&reordered, &p.detail),
+        v2(&changed, &p.detail),
+        v2(&extra, &p.detail),
+        v2(&signed[..1], &p.detail),
+        v2(&signed, &p.detail.replace("gpt-6.1-sol", "gpt-6.1-terra")),
+    ];
+    for sig in attempts {
+        assert_eq!(
+            e.resolve(&p, true, 0, false, sig).unwrap_err().code,
+            "approval.signature_invalid"
+        );
+    }
+    assert_eq!(probe_args(&e.root).len(), 1, "only the parent runs");
+    // The decision over exactly what was shown starts the helper with exactly those arguments.
+    e.resolve(&p, true, 0, false, v2(&signed, &p.detail))
+        .unwrap();
+    let (v, is_error) = m.result(call);
+    assert!(!is_error, "{v}");
+    wait_until("helper report", || probe_args(&e.root).len() == 2);
+    let args = probe_args(&e.root);
+    let helper_args = args
+        .iter()
+        .find(|a| a.contains(&"--fake-model".to_string()))
+        .expect("the helper got the model");
+    let at = helper_args
+        .iter()
+        .position(|a| a == "--fake-model")
+        .unwrap();
+    assert_eq!(
+        helper_args[at..at + 4],
+        ["--fake-model", "gpt-6.1-sol", "--fake-effort", "high"]
+    );
+    assert!(!helper_args.contains(&"--fake-skip-permissions".to_string()));
+    assert_eq!(
+        args.iter()
+            .filter(|a| a.contains(&"--fake-model".to_string()))
+            .count(),
+        1,
+        "the parent runs without it"
+    );
+
+    // A grant never covers a start with settings, and a start without them under a grant is unchanged.
+    let call = m.call("agent_start", json!({"kind": "probe"}));
+    let p2 = e.request_of(&parent);
+    assert!(serde_json::from_str::<Value>(&p2.detail)
+        .unwrap()
+        .get("settings")
+        .is_none());
+    e.decide(&p2, true, 3, false).unwrap();
+    let (v, is_error) = m.result(call);
+    assert!(!is_error, "{v}");
+    let call = m.call(
+        "agent_start",
+        json!({"kind": "probe", "settings": {"effort": "low"}}),
+    );
+    let p3 = e.request_of(&parent);
+    assert_ne!(
+        p3.id, p2.id,
+        "asked again: the grant does not cover settings"
+    );
+    e.stop(&parent, true);
+    let _ = call;
+}
+
+/// ADR-0066: the node, not the card, refuses a grant (and leave to ask in turn) on a request with settings: a decision that was signed
+/// with `helper_grant` and `helpers_may_start` over such a request starts the helper and grants nothing, while one without settings
+/// still grants.
+#[test]
+fn a_request_with_settings_is_never_granted_even_when_the_decision_says_so() {
+    if !supported() {
+        return;
+    }
+    let e = Env::new("settings-grant");
+    let parent = e.launch(&e.folder, "probe");
+    let mut m = e.mcp(&parent);
+    let call = m.call(
+        "agent_start",
+        json!({"kind": "probe", "settings": {"effort": "low"}}),
+    );
+    let p = e.request_of(&parent);
+    let signed = agora_node::approvals::detail_settings(&p.detail);
+    let sig = e.sign(&agora_node::approvals::start_signed_message_v2(
+        NODE, &p.id, true, 3, true, &signed, &p.detail,
+    ));
+    e.resolve(&p, true, 3, true, sig).unwrap();
+    let (v, is_error) = m.result(call);
+    assert!(!is_error, "{v}");
+    let helper = v["agent_id"].as_str().unwrap().to_string();
+    // No grant: the next start (without settings) is asked about, and the helper may not ask in turn.
+    let call = m.call("agent_start", json!({"kind": "probe"}));
+    let p2 = e.request_of(&parent);
+    assert_ne!(p2.id, p.id);
+    let mut h = e.mcp(&helper);
+    let id = h.call("agent_start", json!({"kind": "probe"}));
+    assert_eq!(h.error_code(id), "mesh.helper_limit");
+    // A request without settings still grants, as before.
+    e.decide(&p2, true, 3, false).unwrap();
+    let (v, is_error) = m.result(call);
+    assert!(!is_error, "{v}");
+    let call = m.call("agent_start", json!({"kind": "probe"}));
+    let (v, is_error) = m.result(call);
+    assert!(!is_error, "started under the grant without asking: {v}");
+    e.stop(&parent, true);
 }

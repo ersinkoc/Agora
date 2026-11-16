@@ -393,11 +393,13 @@ pub fn untrust(file: &Path, id: &str, now_ms: u64) -> Result<bool, String> {
     let _lock = FileLock::take(file).map_err(|e| e.to_string())?;
     let (entries, _) = read_entries(file);
     let was = entries.iter().any(|e| e.id == id);
+    // Remembered before it is removed (as `revoke` does): a failure in between never leaves it gone but not remembered, which an
+    // older endorsement the hub sends again would undo.
+    remember_revocation(&file.with_file_name(REVOCATIONS_FILE), id, now_ms, now_ms)
+        .map_err(|e| e.to_string())?;
     if was {
         write_entries(file, &without(&entries, id)).map_err(|e| e.to_string())?;
     }
-    remember_revocation(&file.with_file_name(REVOCATIONS_FILE), id, now_ms, now_ms)
-        .map_err(|e| e.to_string())?;
     audit(
         &file.with_file_name(AUDIT_FILE),
         now_ms,
@@ -1374,6 +1376,33 @@ mod tests {
         assert!(t
             .trusted_ids(crate::grants::now_ms())
             .contains(&"web-new".to_string()));
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn an_untrust_that_cannot_be_remembered_leaves_the_device_as_it_was() {
+        // Audit F221: removed first and remembered after, a failure in between let the hub's replayed endorsement bring it back.
+        let d = dir("untrust-fails");
+        let file = d.join(crate::approvals::TRUSTED_DEVICES_FILE);
+        let (old, new) = (Key::new(), Key::new());
+        confirm(&file, "web-old", &old.public()).unwrap();
+        let t = DeviceTrust::new("laptop", &file);
+        let now = crate::grants::now_ms();
+        let e = old.endorse("web-old", "web-new", &new.public(), &[], now, DAY);
+        t.endorse(&e, now).unwrap();
+        // The revocations file cannot be replaced (a directory stands where it is renamed to).
+        let blocker = d.join(REVOCATIONS_FILE);
+        std::fs::create_dir_all(blocker.join("x")).unwrap();
+        assert!(untrust(&file, "web-new", now + 1).is_err());
+        assert!(t.trusted_ids(now + 1).contains(&"web-new".to_string()));
+        // Once it can be written, the owner's retry removes it for good.
+        std::fs::remove_dir_all(&blocker).unwrap();
+        assert!(untrust(&file, "web-new", now + 2).unwrap());
+        assert_eq!(
+            t.endorse(&e, now + 3).unwrap_err().code,
+            ErrorCode::DeviceRevoked
+        );
+        assert_eq!(t.trusted_ids(now + 3), ["web-old"]);
         let _ = std::fs::remove_dir_all(d);
     }
 

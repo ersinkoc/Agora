@@ -7,8 +7,16 @@
   **Built (first slice, architecture review R8):** `agora hub run --metrics` turns on `GET /api/metrics` (the owner's bearer
   token, checked before anything is counted; 401 without one, 403 for a member or viewer). Without `--metrics` the path is
   answered byte for byte as any unknown path, for GET and HEAD, so nothing tells that it exists. Each scrape renews the owner's
-  session, as any use does: a scraper holding the owner's token keeps it alive for as long as it scrapes. A read-only scrape token
-  is a later slice. Prometheus text format,
+  session, as any use does: a scraper holding the owner's token keeps it alive for as long as it scrapes. **A scraper should hold a
+  metrics token instead (ADR-0076)**, a credential that can only read this path:
+  `agora hub metrics-token create NAME [--expires DAYS]` prints it once (`agm_` and 64 hex digits, 256 random bits; no expiry unless
+  asked), `list` shows each token's name, when it was made, last used (to the minute) and expires, never the token, and
+  `revoke NAME` ends it at its next use (the hub looks it up on every scrape). Send it as `Authorization: Bearer agm_...`. The hub
+  keeps only its SHA-256, in a table apart from sessions. Every other path and the WebSocket treat it as an unknown token (401); it
+  starts and renews no session and has no user or role. A bearer that is neither a live token nor the owner's session counts toward
+  the sign-in lockout of its address (429 while locked out). Creating and revoking are audit events (`metrics_token.create`,
+  `metrics_token.revoke`, with the name); a scrape is not audited. Not built: a page in the window to manage tokens, per-token rate
+  limits. Prometheus text format,
   written by hand (`agora-hub::metrics`, no new dependency):
 
   | Name | Kind | What it is |
@@ -92,7 +100,7 @@
   It states who may make the machine act, as the node applies its files when it starts: which commands routed through the hub
   need a device-signed grant (the `signed_commands` line, the team default a limited device turns on, or none: a note, since a
   compromised hub could then send them, threat model T1), how many devices are trusted and how many of them may act in every
-  project, the `skip_permissions` setting, and how many policy lines the node did not understand.
+  project, the `skip_permissions` setting, a warning when `files.show_secret` is on (ADR-0080), and how many policy lines the node did not understand.
 - **Failure drills** (architecture review R8). Each one runs in CI and says which hop failed and what it recovered:
 
   | Drill | Test | What it shows |

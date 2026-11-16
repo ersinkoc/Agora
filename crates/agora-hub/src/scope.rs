@@ -11,7 +11,7 @@ use agora_protocol::v1::command_request::Command as C;
 use agora_protocol::v1::event::Body;
 use agora_protocol::v1::Event;
 
-use crate::projection::{qualified, View};
+use crate::projection::{qualified, split_key, View};
 
 /// ADR-0069: what anyone but the owner is shown of a machine's own executable (`NodeOnline.binary`): its file name only. No folder is
 /// kept, not even the one it is in: a program kept straight in its user's home (`/home/alice/agora`, `C:\Users\alice\agora.exe`)
@@ -57,8 +57,11 @@ impl Scope {
             projects,
             ..Self::default()
         };
-        for (k, (node, project, _)) in &view.checkouts {
-            s.checkouts.insert(k.clone(), qualified(node, project));
+        // The machine is the one that reported it (the key's producer), never the node id inside the event.
+        for (k, (_, project, _)) in &view.checkouts {
+            if let Some((node, _)) = split_key(k) {
+                s.checkouts.insert(k.clone(), qualified(node, project));
+            }
         }
         for (k, w) in &view.worktrees {
             if let Some(p) = s.checkouts.get(&w.checkout_id).cloned() {
@@ -70,8 +73,9 @@ impl Scope {
                 .insert(k.clone(), qualified(&w.node_id, &w.project_id));
         }
         for (k, a) in &view.agents {
-            s.agents
-                .insert(k.clone(), qualified(&a.node_id, &a.project_id));
+            if let Some((node, _)) = split_key(k) {
+                s.agents.insert(k.clone(), qualified(node, &a.project_id));
+            }
         }
         for (k, t) in &view.terminals {
             if let Some(p) = s.agents.get(&t.agent_id).cloned() {
@@ -178,8 +182,9 @@ impl Scope {
             Body::NodeForgotten(e) => self.node_visible(&e.node_id),
             Body::NodeResources(e) => self.node_visible(&e.node_id),
             Body::NodeTrustedDevices(_) => self.node_visible(node),
+            // A node speaks for itself only: the project is placed on the producer, whatever `node_id` the event names.
             Body::CheckoutDiscovered(e) => {
-                let p = qualified(&e.node_id, &e.project_id);
+                let p = qualified(node, &e.project_id);
                 self.checkouts.insert(q(&e.checkout_id), p.clone());
                 self.projects.contains(&p)
             }
@@ -197,7 +202,7 @@ impl Scope {
             Body::GitStatusChanged(e) => self.granted(self.worktrees.get(&q(&e.worktree_id))),
             Body::FilesChanged(e) => self.granted(self.worktrees.get(&q(&e.worktree_id))),
             Body::AgentStarted(e) => {
-                let p = qualified(&e.node_id, &e.project_id);
+                let p = qualified(node, &e.project_id);
                 self.agents.insert(q(&e.agent_id), p.clone());
                 self.projects.contains(&p)
             }
@@ -462,6 +467,57 @@ mod tests {
                 ..Default::default()
             })
         )));
+    }
+
+    #[test]
+    fn a_node_cannot_place_its_agent_or_checkout_on_another_machine_by_naming_it() {
+        // `n2` says `node_id: "n1"`: what it reports is still `n2`'s, so a member of `n1/mine` neither sees nor commands it.
+        let forged = [
+            ev(
+                "n2",
+                Body::AgentStarted(v1::AgentStarted {
+                    agent_id: "a".into(),
+                    node_id: "n1".into(),
+                    project_id: "mine".into(),
+                    ..Default::default()
+                }),
+            ),
+            ev(
+                "n2",
+                Body::CheckoutDiscovered(v1::CheckoutDiscovered {
+                    checkout_id: "c".into(),
+                    node_id: "n1".into(),
+                    project_id: "mine".into(),
+                    path: "/p".into(),
+                }),
+            ),
+        ];
+        let mut full = View::default();
+        let mut s = scope(&["n1/mine"]);
+        for e in &forged {
+            full.apply(e);
+            assert!(!s.admit(e));
+        }
+        let rebuilt = Scope::from_view(["n1/mine".to_string()].into(), &full);
+        for sc in [&s, &rebuilt] {
+            assert!(!sc.command_allowed(
+                "n2",
+                &C::AgentPrompt(v1::AgentPrompt {
+                    agent_id: "a".into(),
+                    ..Default::default()
+                })
+            ));
+            assert!(!sc.command_allowed(
+                "n2",
+                &C::WorktreeCreate(v1::WorktreeCreate {
+                    checkout_id: "c".into(),
+                    ..Default::default()
+                })
+            ));
+        }
+        let cut = rebuilt.filter_view(&full);
+        assert!(cut.agents.is_empty() && cut.checkouts.is_empty());
+        assert_eq!(s.filter_view(&full), cut);
     }
 
     #[test]

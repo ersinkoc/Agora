@@ -669,9 +669,29 @@ fn git_capped(dir: &Path, args: &[&str], cap: u64) -> Result<String, GitError> {
     }
 }
 
+/// A changed secret file (ADR-0080): named, counted, never shown.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SecretChange {
+    pub path: String,
+    pub added: u32,
+    pub removed: u32,
+}
+
+/// [`diff_with`] hiding secret files (the default; ADR-0080), without the list of them.
+pub fn diff(worktree: &Path, path: Option<&str>) -> Result<String, GitError> {
+    diff_with(worktree, path, false).map(|(text, _)| text)
+}
+
 /// Unified diff of the changes against HEAD, optionally for one path. A new file that git does not track yet is shown as
 /// all-added (what a reviewer would see), without touching the index.
-pub fn diff(worktree: &Path, path: Option<&str>) -> Result<String, GitError> {
+///
+/// ADR-0080: unless `show_secret` (the owner's policy), a file whose name is secret appears as its `diff --git` header (and its
+/// mode and rename lines, which hold names only) without hunks or blob ids; its line counts are returned beside the text.
+pub fn diff_with(
+    worktree: &Path,
+    path: Option<&str>,
+    show_secret: bool,
+) -> Result<(String, Vec<SecretChange>), GitError> {
     let mut args = vec![
         "diff",
         "--no-color",
@@ -689,7 +709,12 @@ pub fn diff(worktree: &Path, path: Option<&str>) -> Result<String, GitError> {
     // which git would otherwise match against other files too (`a[1].txt` would show `a1.txt`).
     let literal = path.map(|p| format!(":(literal){p}"));
     args.extend(["--", literal.as_deref().unwrap_or(".")]);
-    let mut out = git_capped(worktree, &args, MAX_DIFF_READ)?;
+    let tracked = git_capped(worktree, &args, MAX_DIFF_READ)?;
+    let (mut out, mut secret) = if show_secret {
+        (tracked, Vec::new())
+    } else {
+        hide_secret_sections(&tracked)
+    };
     let mut ls = vec!["ls-files", "--others", "--exclude-standard", "-z"];
     if let Some(p) = &literal {
         ls.extend(["--", p]);
@@ -701,9 +726,176 @@ pub fn diff(worktree: &Path, path: Option<&str>) -> Result<String, GitError> {
         .take(MAX_UNTRACKED)
         .collect();
     if !names.is_empty() {
-        out.push_str(&untracked_diff(worktree, &names)?);
+        out.push_str(&untracked_diff(worktree, &names, show_secret, &mut secret)?);
     }
-    Ok(out)
+    Ok((out, secret))
+}
+
+/// Lines starting with these name a change without showing any content (a mode, a rename).
+const HEADER_KEEP: &[&str] = &[
+    "old mode ",
+    "new mode ",
+    "new file mode ",
+    "deleted file mode ",
+    "rename from ",
+    "rename to ",
+    "copy from ",
+    "copy to ",
+];
+
+/// Git's C-style quoting undone (`"a/\303\251"` as the path it names); an unquoted name is returned as is.
+fn unquote(name: &str) -> String {
+    let Some(inner) = name.strip_prefix('"').and_then(|n| n.strip_suffix('"')) else {
+        return name.to_string();
+    };
+    let mut out = Vec::new();
+    let b = inner.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] != b'\\' || i + 1 >= b.len() {
+            out.push(b[i]);
+            i += 1;
+            continue;
+        }
+        i += 1;
+        let c = b[i];
+        if c.is_ascii_digit() {
+            let end = (i + 3).min(b.len());
+            let v = std::str::from_utf8(&b[i..end])
+                .ok()
+                .and_then(|o| u8::from_str_radix(o, 8).ok());
+            out.push(v.unwrap_or(c));
+            i = end;
+        } else {
+            out.push(match c {
+                b'a' => 0x07,
+                b'b' => 0x08,
+                b't' => b'\t',
+                b'n' => b'\n',
+                b'v' => 0x0b,
+                b'f' => 0x0c,
+                b'r' => b'\r',
+                other => other,
+            });
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// The paths a `diff --git` section names: from its extra header lines (rename, copy, `---`, `+++`), and, since a section without
+/// hunks has no others, every way its first line can be split into an `a/` and a `b/` name. Every one of them is checked
+/// (a file counts as secret when any is); the last element's first value is the name shown for the file (its new name).
+fn section_paths(section: &[&str]) -> (Vec<String>, String) {
+    let strip = |p: &str| -> String {
+        let p = unquote(p.trim_end_matches(['\n', '\r']).trim_end_matches('\t'));
+        p.strip_prefix("a/")
+            .or_else(|| p.strip_prefix("b/"))
+            .unwrap_or(&p)
+            .to_string()
+    };
+    let mut all = Vec::new();
+    let mut shown = None;
+    for line in &section[1..] {
+        if let Some(r) = line
+            .strip_prefix("rename to ")
+            .or_else(|| line.strip_prefix("copy to "))
+        {
+            let p = unquote(r.trim_end());
+            shown.get_or_insert(p.clone());
+            all.push(p);
+        } else if let Some(r) = line
+            .strip_prefix("rename from ")
+            .or_else(|| line.strip_prefix("copy from "))
+        {
+            all.push(unquote(r.trim_end()));
+        } else if let Some(r) = line.strip_prefix("+++ ") {
+            if r.trim_end() != "/dev/null" {
+                let p = strip(r);
+                shown.get_or_insert(p.clone());
+                all.push(p);
+            }
+        } else if let Some(r) = line.strip_prefix("--- ") {
+            if r.trim_end() != "/dev/null" {
+                all.push(strip(r));
+            }
+        }
+        if line.starts_with("@@") {
+            break;
+        }
+    }
+    let rest = section[0]
+        .trim_end()
+        .strip_prefix("diff --git ")
+        .unwrap_or("");
+    let mut guess = None;
+    for (i, _) in rest.match_indices(' ') {
+        let (a, b) = (&rest[..i], rest[i + 1..].trim_start());
+        if !(b.starts_with("b/") || b.starts_with("\"b/")) {
+            continue;
+        }
+        let (pa, pb) = (strip(a), strip(b));
+        if pa == pb {
+            guess.get_or_insert(pb.clone());
+        }
+        all.push(pa);
+        all.push(pb);
+    }
+    let shown = shown
+        .or(guess)
+        .unwrap_or_else(|| all.last().cloned().unwrap_or_default());
+    (all, shown)
+}
+
+/// ADR-0080: `diff` with each secret file's section cut to its header lines that hold names only; the line counts of what was
+/// cut (hunk lines starting with `+` and `-`) come back beside it.
+fn hide_secret_sections(diff: &str) -> (String, Vec<SecretChange>) {
+    let lines: Vec<&str> = diff.split_inclusive('\n').collect();
+    let mut out = String::with_capacity(diff.len());
+    let mut secret = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        if !lines[i].starts_with("diff --git ") {
+            out.push_str(lines[i]);
+            i += 1;
+            continue;
+        }
+        let mut end = i + 1;
+        while end < lines.len() && !lines[end].starts_with("diff --git ") {
+            end += 1;
+        }
+        let section = &lines[i..end];
+        i = end;
+        let (paths, shown) = section_paths(section);
+        if !paths.iter().any(|p| agora_core::secrets::is_secret_path(p)) {
+            section.iter().for_each(|l| out.push_str(l));
+            continue;
+        }
+        let (mut added, mut removed, mut in_hunk) = (0u32, 0u32, false);
+        for line in section {
+            if line.starts_with("@@") {
+                in_hunk = true;
+            } else if in_hunk {
+                match line.as_bytes().first() {
+                    Some(b'+') => added = added.saturating_add(1),
+                    Some(b'-') => removed = removed.saturating_add(1),
+                    _ => {}
+                }
+            }
+        }
+        out.push_str(section[0]);
+        for line in &section[1..] {
+            if HEADER_KEEP.iter().any(|k| line.starts_with(k)) {
+                out.push_str(line);
+            }
+        }
+        secret.push(SecretChange {
+            path: shown,
+            added,
+            removed,
+        });
+    }
+    (out, secret)
 }
 
 /// The diff of each untracked file against nothing, built here rather than by `git diff --no-index`. git given a path in the
@@ -713,9 +905,16 @@ pub fn diff(worktree: &Path, path: Option<&str>) -> Result<String, GitError> {
 /// Linux). Each file is read the way `files.read` reads it ([`crate::files::Files::untracked`]: checked on the open handle,
 /// regular files only, at most [`MAX_UNTRACKED_BYTES`]; a link shows as a link), and the text is git's own for a new file
 /// ([`new_file_diff`]). Files that are not plain, too large, or lead out of the worktree are left out, as before.
-fn untracked_diff(worktree: &Path, names: &[&str]) -> Result<String, GitError> {
+fn untracked_diff(
+    worktree: &Path,
+    names: &[&str],
+    show_secret: bool,
+    secret: &mut Vec<SecretChange>,
+) -> Result<String, GitError> {
+    // Read with secrets allowed so that a secret file can be counted; what it holds never reaches the text below (ADR-0080).
     let files = crate::files::Files::open(worktree, MAX_UNTRACKED_BYTES)
-        .map_err(|e| GitError::Io(format!("{e:?}")))?;
+        .map_err(|e| GitError::Io(format!("{e:?}")))?
+        .with_secret_shown(true);
     let mut out = Vec::new();
     for name in names {
         let (mode, data) = match files.untracked(name) {
@@ -725,6 +924,22 @@ fn untracked_diff(worktree: &Path, names: &[&str]) -> Result<String, GitError> {
             Ok(crate::files::Untracked::Link(target)) => ("120000", target),
             Err(_) => continue,
         };
+        // A file is secret by its own name or by where its folder leads (a folder linked to `.ssh`).
+        if !show_secret && files.resolves_secret(name) {
+            let lines =
+                u32::try_from(data.split_inclusive(|c| *c == b'\n').count()).unwrap_or(u32::MAX);
+            let binary = data[..data.len().min(8000)].contains(&0);
+            secret.push(SecretChange {
+                path: (*name).to_string(),
+                added: if binary || mode == "120000" { 0 } else { lines },
+                removed: 0,
+            });
+            let q = |p: &str| quote_path(&format!("{p}/{name}"));
+            out.extend(
+                format!("diff --git {} {}\nnew file mode {mode}\n", q("a"), q("b")).into_bytes(),
+            );
+            continue;
+        }
         out.extend(new_file_diff(name, mode, &data));
     }
     Ok(String::from_utf8_lossy(&out).into_owned())
@@ -885,6 +1100,51 @@ pub fn exclude_locally(worktree: &Path, rel: &Path) {
 #[cfg(test)]
 #[allow(clippy::expect_used)] // expect is allowed in tests
 mod tests {
+    #[test]
+    fn secret_sections_are_cut_to_their_names_and_counted() {
+        let diff = "diff --git a/.env b/.env\nindex 1111111..2222222 100644\n--- a/.env\n+++ b/.env\n@@ -1,2 +1,3 @@\n A=1\n-B=2\n+B=3\n+C=4\n\
+diff --git a/x.txt b/x.txt\nindex 1..2 100644\n--- a/x.txt\n+++ b/x.txt\n@@ -1 +1 @@\n-one\n+two\n\
+diff --git a/old.txt b/keys/server.pem\nsimilarity index 80%\nrename from old.txt\nrename to keys/server.pem\nindex 1..2 100644\n--- a/old.txt\n+++ b/keys/server.pem\n@@ -1 +1 @@\n-aaa\n+bbb\n\
+diff --git \"a/\\303\\251.pem\" \"b/\\303\\251.pem\"\nindex 1..2 100644\n--- \"a/\\303\\251.pem\"\n+++ \"b/\\303\\251.pem\"\n@@ -1 +1 @@\n-q\n+r\n\
+diff --git a/.ssh/known b/.ssh/known\nold mode 100644\nnew mode 100755\n";
+        let (out, secret) = hide_secret_sections(diff);
+        for leaked in [
+            "A=1",
+            "B=2",
+            "B=3",
+            "C=4",
+            "aaa",
+            "bbb",
+            "index 1111111",
+            "@@ -1,2",
+        ] {
+            assert!(!out.contains(leaked), "{leaked}\n{out}");
+        }
+        // The ordinary file is untouched, byte for byte.
+        assert!(out.contains("diff --git a/x.txt b/x.txt\nindex 1..2 100644\n--- a/x.txt\n+++ b/x.txt\n@@ -1 +1 @@\n-one\n+two\n"));
+        assert!(out.contains("rename from old.txt\nrename to keys/server.pem\n"));
+        assert!(out.contains("old mode 100644\nnew mode 100755\n"));
+        let got: Vec<(&str, u32, u32)> = secret
+            .iter()
+            .map(|c| (c.path.as_str(), c.added, c.removed))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (".env", 2, 1),
+                ("keys/server.pem", 1, 1),
+                ("\u{e9}.pem", 1, 1),
+                (".ssh/known", 0, 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_diff_without_secret_files_is_returned_unchanged() {
+        let diff = "diff --git a/b.txt b/b.txt\nindex 1..2 100644\n--- a/b.txt\n+++ b/b.txt\n@@ -1 +1 @@\n-x\n+y\n";
+        assert_eq!(hide_secret_sections(diff), (diff.to_string(), Vec::new()));
+    }
+
     use std::fs;
     use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -1257,7 +1517,7 @@ mod tests {
         )
         .expect("ls");
         let names: Vec<&str> = listed.split('\0').filter(|n| !n.is_empty()).collect();
-        want.push_str(&untracked_diff(&r.dir, &names).expect("untracked"));
+        want.push_str(&untracked_diff(&r.dir, &names, true, &mut Vec::new()).expect("untracked"));
         let d = diff(&r.dir, None).expect("diff");
         assert_eq!(d, want);
         assert!(

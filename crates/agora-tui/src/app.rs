@@ -779,8 +779,9 @@ impl App {
                         area.right().saturating_sub(m.col + 1).max(MIN_INSPECTOR);
                 }
                 None if self.selecting => {
-                    if let Some(sel) = self.selection.as_mut() {
-                        let t = a.terminal;
+                    let t = a.terminal;
+                    // The window may have shrunk since the press until the pane has no cell to clamp the drag into.
+                    if let Some(sel) = self.selection.as_mut().filter(|_| !t.is_empty()) {
                         sel.to = (
                             m.row.clamp(t.y, t.bottom().saturating_sub(1)) - t.y,
                             m.col.clamp(t.x, t.right().saturating_sub(1)) - t.x,
@@ -1710,11 +1711,26 @@ fn key_bytes(k: &Key, modes: Modes) -> Option<Vec<u8>> {
     })
 }
 
+/// `text` without any bracketed-paste marker, including one that only appears once the bytes around a removed marker join
+/// (`ESC[201` `ESC[200~` `~`). One pass in linear time: each char goes onto the output, and when the output then ends in a marker, that
+/// marker is cut off again. The check runs on the output, so a marker that a deletion put together is caught as well.
+fn strip_paste_markers(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        out.push(c);
+        // Both markers are ASCII, so the cut is always on a char boundary.
+        if c == '~' && (out.ends_with("\x1b[200~") || out.ends_with("\x1b[201~")) {
+            out.truncate(out.len() - 6);
+        }
+    }
+    out
+}
+
 /// Pasted text as the agent should get it: inside bracketed-paste markers when it asked for them, with any marker in the text removed
 /// so a paste cannot end the bracket early and type the rest as keys.
 fn paste_bytes(text: &str, modes: Modes) -> Vec<u8> {
     if modes.bracketed_paste {
-        let body = text.replace("\x1b[201~", "").replace("\x1b[200~", "");
+        let body = strip_paste_markers(text);
         format!("\x1b[200~{body}\x1b[201~").into_bytes()
     } else {
         text.as_bytes().to_vec()
@@ -3065,5 +3081,158 @@ mod tests {
         assert!(line(3).contains("│> wri"));
         let cursor = tui.backend_mut().get_cursor_position().unwrap();
         assert_eq!((cursor.x, cursor.y), (29 + 5, 3));
+    }
+
+    /// The quadratic sanitizer #618 shipped, kept as the reference the linear one must agree with.
+    fn strip_reference(text: &str) -> String {
+        let mut body = text.to_string();
+        while body.contains("\x1b[201~") || body.contains("\x1b[200~") {
+            body = body.replace("\x1b[201~", "").replace("\x1b[200~", "");
+        }
+        body
+    }
+
+    fn no_marker(s: &str) -> bool {
+        !s.contains("\x1b[201~") && !s.contains("\x1b[200~")
+    }
+
+    #[test]
+    fn the_linear_paste_sanitizer_agrees_with_the_reference_on_random_marker_fragments() {
+        const PARTS: [&str; 14] = [
+            "\x1b",
+            "[",
+            "2",
+            "0",
+            "1",
+            "~",
+            "0",
+            "a",
+            "\r",
+            "é",
+            "日",
+            "😀",
+            "\x1b[200~",
+            "\x1b[201~",
+        ];
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for _ in 0..20_000 {
+            let len = usize::try_from(next() % 40).unwrap();
+            let mut text = String::new();
+            for _ in 0..len {
+                text.push_str(PARTS[usize::try_from(next() % 14).unwrap()]);
+            }
+            let got = strip_paste_markers(&text);
+            assert!(no_marker(&got), "marker left from {text:?}");
+            assert_eq!(got, strip_reference(&text), "input {text:?}");
+        }
+    }
+
+    #[test]
+    fn the_linear_paste_sanitizer_agrees_with_the_reference_on_nested_and_split_cases() {
+        for text in [
+            "\x1b[201\x1b[200~~touch x\r",
+            "\x1b[20\x1b[20\x1b[201~1~1~",
+            "\x1b[200\x1b[201~~",
+            "\x1b[2\x1b[200~01~",
+            "\x1b[é\x1b[200~201~",
+            "日\x1b[20\x1b[201~0~本\x1b[201~",
+            "\x1b[201~\x1b[200~",
+            "",
+        ] {
+            let got = strip_paste_markers(text);
+            assert!(no_marker(&got));
+            assert_eq!(got, strip_reference(text), "input {text:?}");
+        }
+    }
+
+    #[test]
+    fn text_without_a_marker_is_not_changed_and_stays_valid_utf8() {
+        for text in [
+            "",
+            "plain",
+            "é日😀 ~ [200~ \x1b[ 201",
+            "\x1b[200 ~",
+            "line\r\nline",
+        ] {
+            assert_eq!(strip_paste_markers(text), text);
+        }
+    }
+
+    #[test]
+    fn nested_markers_are_stripped_in_time_that_grows_linearly() {
+        fn nested(levels: usize) -> String {
+            // `levels` unfinished starts, then the closers that complete each one from the inside out.
+            format!(
+                "{}\x1b[201~{}",
+                "\x1b[20".repeat(levels),
+                "1~".repeat(levels)
+            )
+        }
+        let time = |levels: usize| {
+            let text = nested(levels);
+            let start = std::time::Instant::now();
+            let got = strip_paste_markers(&text);
+            let took = start.elapsed();
+            assert!(no_marker(&got));
+            took
+        };
+        let _ = time(1_000);
+        let small = (0..5).map(|_| time(16_000)).min().unwrap();
+        let big = (0..5).map(|_| time(32_000)).min().unwrap();
+        // Doubling the size must not quadruple the time (the quadratic one: ~4x); generous margin, plus a loose absolute bound.
+        assert!(
+            big.as_nanos() < small.as_nanos().max(1_000_000) * 3,
+            "{small:?} -> {big:?}"
+        );
+        assert!(big < std::time::Duration::from_millis(500), "{big:?}");
+    }
+
+    #[test]
+    fn a_paste_cannot_put_an_end_marker_together_from_the_bytes_around_a_removed_one() {
+        let bracketed = Modes {
+            bracketed_paste: true,
+            ..Modes::default()
+        };
+        // Removing the start marker would join `ESC[201` and `~` into an end marker: the agent would get the rest as keys.
+        let got = paste_bytes("\x1b[201\x1b[200~~touch x\r", bracketed);
+        assert_eq!(got, b"\x1b[200~touch x\r\x1b[201~".to_vec());
+        let nested = paste_bytes("\x1b[20\x1b[20\x1b[201~1~1~", bracketed);
+        assert_eq!(nested, b"\x1b[200~\x1b[201~".to_vec());
+    }
+
+    #[test]
+    fn a_drag_after_the_window_left_the_pane_no_rows_is_ignored() {
+        let rows = rows();
+        let mut app = App::default();
+        key(&mut app, &rows, Key::Enter);
+        let pane = app.areas(AREA).terminal;
+        click(&mut app, &rows, MouseKind::Down, pane.x + 2, pane.y + 2);
+        assert!(app.selection.is_some());
+        // The window shrinks to two rows while the button is held: the pane has none left.
+        let short = Rect::new(0, 0, 120, 2);
+        let small = Ctx {
+            area: short,
+            ..cx(&rows)
+        };
+        app.handle(Event::Resize { cols: 120, rows: 2 }, &small);
+        assert!(app.areas(short).terminal.is_empty());
+        let drag = Event::Mouse(Mouse {
+            kind: MouseKind::Drag,
+            col: 1,
+            row: 1,
+        });
+        app.handle(drag, &small);
+        let up = Event::Mouse(Mouse {
+            kind: MouseKind::Up,
+            col: 1,
+            row: 1,
+        });
+        assert_eq!(app.handle(up, &small), vec![], "nothing was dragged over");
     }
 }

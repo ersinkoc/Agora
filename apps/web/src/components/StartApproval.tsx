@@ -1,12 +1,16 @@
-import { useId, useState } from 'react';
+import { Fragment, useId, useState } from 'react';
 import { t } from '../i18n';
-import { visible, type ApprovalModel, type StartRequest } from '../net/view';
+import { visible, type ApprovalModel, type StartRequest, type StartSetting } from '../net/view';
 import { StateMark } from './StateBadge';
 
 export interface StartChoice { grant: number; nested: boolean }
 
 // How many starts a "more like this" answer allows, this one included (the node takes at most 10).
 export const GRANT_SIZE = 3;
+
+// ADR-0066: a setting's name in the window's own words: the machine's label when it is one of the window's setting texts (`setting-model`,
+// `setting-effort`), else the setting's id as text. Never the agent's words: the label comes from the machine's manifest, not the request.
+const settingName = (st: StartSetting) => (/^setting-[a-z0-9-]{1,32}$/.test(st.label) && t(st.label) !== st.label ? t(st.label) : visible(st.id));
 
 // ADR-0057: an agent asks to start another. Everything it asks for is shown before the user answers, all of it from the signed request
 // itself (never from what the hub says around it): who asks and on which machine, what would start, where (marked when outside its own
@@ -35,6 +39,10 @@ export function StartApproval({ approval, start, busy, onResolve }: {
       <dl className="m-0 grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-xs">
         <dt className="text-muted">{t('start-approval-folder')}</dt>
         <dd className="m-0 break-all font-mono" dir="ltr">{visible(start.folder)}{start.worktree ? ` · ${t('start-approval-worktree')}` : ''}</dd>
+        {start.settings.map((st, i) => <Fragment key={i}>
+          <dt className="text-muted">{settingName(st)}</dt>
+          <dd className="m-0 break-all font-mono" dir="ltr">{visible(st.value)}</dd>
+        </Fragment>)}
         <dt className="text-muted">{t('start-approval-depth')}</dt>
         <dd className="m-0">{start.depth}</dd>
       </dl>
@@ -45,7 +53,7 @@ export function StartApproval({ approval, start, busy, onResolve }: {
           ? <pre className="m-0 mt-1 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded-xs border border-line bg-surface-0 p-2 font-mono text-xs">{visible(start.prompt)}</pre>
           : <p className="m-0 mt-1 text-muted">{t('start-approval-no-prompt')}</p>}
       </div>
-      {start.inside && !start.grantAllowed && <p className="m-0 text-xs text-muted">{t('start-approval-no-grant')}</p>}
+      {start.inside && !start.grantAllowed && <p className="m-0 text-xs text-muted">{t(start.settings.length > 0 ? 'start-approval-settings-once' : 'start-approval-no-grant')}</p>}
       {start.grantAllowed && <fieldset className="m-0 flex flex-col gap-1 border-0 p-0 text-xs">
         <legend className="sr-only">{t('start-approval-scope')}</legend>
         <label className="flex items-center gap-2"><input type="radio" name={group} checked={!more} onChange={() => setMore(false)} />{t('start-approval-once')}</label>

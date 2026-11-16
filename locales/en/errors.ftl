@@ -73,6 +73,7 @@ mesh-helper_limit = The agent cannot start another helper now (limit: { $limit }
         [prompt] Its first prompt is too long.
        *[other] It already runs as many helpers as allowed.
     }
+mesh-unavailable = The mesh is reconnecting. Try again in a moment.
 mesh-start_denied = The start was refused ({ $approval_id }).
 task-not_found = Task { $task_id } was not found.
 task-not_open = Task { $task_id } is already taken or done.
@@ -83,6 +84,7 @@ lease-invalid_path = { $path } cannot be locked.
 files-not_found = { $path } was not found.
 files-too_large = { $path } is too large (limit: { $limit }).
 files-outside_root = { $path } is outside the project folder.
+files-secret = { $path } is a secret file and is not shown.
 adapter-signature_invalid = Package { $package } could not be verified.
 adapter-crashed = { $kind } stopped unexpectedly (exit code { $exit_code }).
 adapter-agent_exited = The agent exited before it was ready (step { $stage }, exit code { $exit_code }). Its last output: { $stderr_tail }

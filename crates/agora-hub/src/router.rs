@@ -39,6 +39,11 @@ pub struct RelayFrame {
 /// Frames a client may have queued before its relay is closed (it resubscribes and gets a fresh snapshot).
 const RELAY_QUEUE: usize = 512;
 
+/// The most commands queued for one node connection and not yet written to it (architecture review R5). The connection's loop
+/// writes them as they come, so the queue only grows while a write to the node waits (it gives up after 25 s); this bounds what
+/// every client together can pile up behind such a node. A command refused for it was never sent: retrying it is safe.
+pub const NODE_QUEUE_MAX: usize = 1024;
+
 struct Link {
     conn: u64,
     capabilities: Vec<String>,
@@ -50,8 +55,8 @@ struct Link {
 /// that ended or was replaced stops counting at once, whatever it still held.
 #[derive(Debug, Default)]
 pub struct LinkLoad {
-    /// Commands queued for the node and not yet written to it (the queue is unbounded: a node that does not read its connection
-    /// grows it).
+    /// Commands queued for the node and not yet written to it. A node that does not read its connection grows it, up to
+    /// `NODE_QUEUE_MAX`: the next command is refused (`node.resource_limit`) before it is queued.
     pub queued: AtomicUsize,
     /// Commands written to the node and not answered yet.
     pub unanswered: AtomicUsize,
@@ -675,6 +680,23 @@ impl Router {
             return Err(Error::new(ErrorCode::ProtocolCapabilityMissing)
                 .with("capability", "agent.launch_options"));
         }
+        // ADR-0066: a start with settings (model, effort) goes only to a node that verifies a signature over them. An older node would
+        // start the agent with its own defaults (or, before ADR-0066, ignore the field), so it is refused here instead: never
+        // silently dropped.
+        let settings = match &request.command {
+            Some(command_request::Command::AgentLaunch(a)) => !a.settings.is_empty(),
+            Some(command_request::Command::AgentStart(a)) => !a.settings.is_empty(),
+            _ => false,
+        };
+        if settings
+            && !link
+                .capabilities
+                .iter()
+                .any(|c| c == "agent.launch_settings")
+        {
+            return Err(Error::new(ErrorCode::ProtocolCapabilityMissing)
+                .with("capability", "agent.launch_settings"));
+        }
         if matches!(
             request.command,
             Some(command_request::Command::BoardJoin(_))
@@ -684,8 +706,20 @@ impl Router {
                 Error::new(ErrorCode::ProtocolCapabilityMissing).with("capability", "board.join")
             );
         }
-        // Counted before it is queued, so the connection's loop never takes one off before it was counted.
-        link.load.queued.fetch_add(1, Ordering::Relaxed);
+        // Counted before it is queued, so the connection's loop never takes one off before it was counted; refused, without
+        // queueing it, when the node already has NODE_QUEUE_MAX waiting (R5).
+        if link
+            .load
+            .queued
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |q| {
+                (q < NODE_QUEUE_MAX).then_some(q + 1)
+            })
+            .is_err()
+        {
+            return Err(Error::new(ErrorCode::NodeResourceLimit)
+                .with("resource", "requests")
+                .with("limit", NODE_QUEUE_MAX as i64));
+        }
         if link
             .tx
             .send(ToNode::Command {
@@ -823,6 +857,46 @@ mod tests {
     }
 
     #[test]
+    fn a_start_with_settings_goes_only_to_a_node_that_verifies_them() {
+        // ADR-0066: an older node (with or without `agent.launch_options`) is refused, never sent a start whose model it would drop.
+        let r = Router::new();
+        let (_old, mut old_rx) = r.register_with_capabilities(
+            "old",
+            vec!["workspace.directory".into(), "agent.launch_options".into()],
+        );
+        let (_new, mut new_rx) = r.register_with_capabilities(
+            "new",
+            vec!["workspace.directory".into(), "agent.launch_settings".into()],
+        );
+        let setting = vec![v1::LaunchSetting {
+            id: "model".into(),
+            value: "gpt-6.1-sol".into(),
+        }];
+        let launch = |settings: Vec<v1::LaunchSetting>| {
+            let mut request = req("old");
+            request.command = Some(command_request::Command::AgentLaunch(v1::AgentLaunch {
+                settings,
+                ..Default::default()
+            }));
+            request
+        };
+        let refused = r.send("old", launch(setting.clone())).err().unwrap();
+        assert_eq!(refused.code, ErrorCode::ProtocolCapabilityMissing);
+        assert!(old_rx.try_recv().is_err());
+        let mut start = req("old");
+        start.command = Some(command_request::Command::AgentStart(v1::AgentStart {
+            settings: setting.clone(),
+            ..Default::default()
+        }));
+        assert!(r.send("old", start).is_err());
+        // Without settings an older node still gets the launch; a node that offers the capability gets one with them.
+        assert!(r.send("old", launch(Vec::new())).is_ok());
+        assert!(matches!(old_rx.try_recv(), Ok(ToNode::Command { .. })));
+        assert!(r.send("new", launch(setting)).is_ok());
+        assert!(matches!(new_rx.try_recv(), Ok(ToNode::Command { .. })));
+    }
+
+    #[test]
     fn a_mode_or_model_switch_goes_only_to_a_node_that_offers_it() {
         let r = Router::new();
         let (_old, mut old_rx) = r.register("old");
@@ -934,6 +1008,26 @@ mod tests {
         drop(rx_a);
         assert!(r.send("a", req("late")).is_err());
         assert_eq!(r.node_load(), (1, 0));
+    }
+
+    #[test]
+    fn a_node_that_does_not_take_its_commands_refuses_more_than_the_queue_holds() {
+        // R5: a node whose connection is not written to (its loop waits on a write) stops piling up commands at NODE_QUEUE_MAX;
+        // the refused one was never queued, so retrying is safe, and taking one makes room again.
+        let r = Router::new();
+        let (a, mut rx) = r.register("a");
+        let _keep: Vec<_> = (0..NODE_QUEUE_MAX)
+            .map(|i| r.send("a", req(&format!("q{i}"))).unwrap())
+            .collect();
+        let refused = r.send("a", req("one-too-many")).unwrap_err();
+        assert_eq!(refused.code, ErrorCode::NodeResourceLimit);
+        assert_eq!(r.node_load(), (NODE_QUEUE_MAX, 0));
+        assert!(matches!(rx.try_recv(), Ok(ToNode::Command { .. })));
+        a.load().queued.fetch_sub(1, Ordering::Relaxed);
+        assert!(r.send("a", req("again")).is_ok());
+        // Another node is not held up by this one.
+        let (_b, _rx_b) = r.register("b");
+        assert!(r.send("b", req("b")).is_ok());
     }
 
     #[test]

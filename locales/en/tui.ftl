@@ -246,3 +246,4 @@ tui-cleanup-done = { $count ->
     }
 tui-cleanup-failed = Could not forget a machine ({ $code }); { $count } forgotten before it.
 tui-app-start-read = You read the whole request. Press y to allow it or n to deny it.
+tui-start-settings = This request chooses a model or effort, which this terminal cannot show yet. Open the web window to allow it, or press n to deny it.

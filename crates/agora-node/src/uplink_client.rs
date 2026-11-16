@@ -41,6 +41,9 @@ pub const CAPABILITIES: &[&str] = &[
     "agent.resume",
     // ADR-0059
     "agent.launch_options",
+    // ADR-0066: verifies a launch's settings (model, effort) under `directory-action-v4`, and an `agent.start` approval's under
+    // `agora-approval-start-v2`.
+    "agent.launch_settings",
     // ADR-0061: verifies the endorsements and revocations the hub carries, and reports `NodeTrustedDevices`.
     "device.trust",
     // ADR-0069: `AgentKind.program` and `NodeOnline.binary` are filled.
@@ -949,10 +952,7 @@ fn run_local_on(
             .first()
             .or_else(|| a.settings.first().map(|st| &st.id))
             .map(|o| (&a.kind, o)),
-        // A signed launch's signature covers its options, not yet its settings.
-        Some(command_request::Command::AgentLaunch(a)) => {
-            a.settings.first().map(|st| (&a.kind, &st.id))
-        }
+        // A signed launch's signature covers its settings too (`directory-action-v4`, checked below by `directory_action`).
         _ => None,
     };
     if let Some((kind, option)) = unsigned {

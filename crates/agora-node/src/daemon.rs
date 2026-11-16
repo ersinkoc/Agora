@@ -1120,6 +1120,9 @@ pub struct Policy {
     pub problems: Vec<String>,
     /// What happens to interrupted agents after the node starts (`resume`, `resume.kinds`, `resume.folders`; ADR-0060).
     pub resume: ResumePolicy,
+    /// Whether the file browser and the review screen show secret files (`files.show_secret = true`; ADR-0080). Default: no. Only the
+    /// word `true` turns it on.
+    pub show_secret: bool,
 }
 
 /// ADR-0060: `resume = ask | auto`. `ask` (the default, and any other value) offers Resume in the window and does nothing by itself;
@@ -1134,6 +1137,9 @@ pub struct ResumePolicy {
     pub auto: bool,
     pub kinds: Vec<String>,
     pub folders: Vec<PathBuf>,
+    /// ADR-0060 Amendment A: `resume.continue = off` (or any word but `on`) keeps the node from giving a working agent its one "carry
+    /// on" message after an automatic resume. On by default, wherever automatic resume is on. Only the owner's policy file sets it.
+    pub no_carry_on: bool,
 }
 
 impl ResumePolicy {
@@ -1172,6 +1178,7 @@ impl Default for Policy {
             device_projects: std::collections::BTreeMap::new(),
             resume: ResumePolicy::default(),
             skip_permissions: crate::launch_options::SkipPermissions::default(),
+            show_secret: false,
             problems: Vec::new(),
         }
     }
@@ -1218,6 +1225,9 @@ pub fn read_policy(path: &std::path::Path) -> Policy {
         Err(_) => {
             p.problems.push("unreadable".into());
             p.skip_permissions = crate::launch_options::SkipPermissions::Forbid;
+            // The stricter reading here too: a policy the owner wrote and the node cannot read may say `resume.continue = off`, so no
+            // "carry on" message is typed into an agent (ADR-0060 Amendment A).
+            p.resume.no_carry_on = true;
             return p;
         }
     };
@@ -1233,6 +1243,7 @@ pub fn read_policy(path: &std::path::Path) -> Policy {
         {
             match k.trim() {
                 "mesh.remote" => p.mesh_remote = v.trim() == "true",
+                "files.show_secret" => p.show_secret = v.trim() == "true",
                 "signed_commands" => {
                     p.signed_commands = crate::grants::SignedCommands(
                         v.split(',')
@@ -1269,6 +1280,7 @@ pub fn read_policy(path: &std::path::Path) -> Policy {
                         .collect();
                 }
                 "resume.folders" => p.resume.folders = paths(v),
+                "resume.continue" => p.resume.no_carry_on = v.trim() != "on",
                 "sandbox" => p.sandbox.level = crate::sandbox::Level::parse(v),
                 "skip_permissions" => {
                     // `"forbid"` as the ADR writes it means the same as `forbid`.
@@ -1595,7 +1607,8 @@ impl Node {
             .with_manifests_dir(cfg.manifests_dir.clone())
             .with_git_wake(Arc::clone(&git_wake))
             .with_spawner(Arc::clone(&spawner))
-            .with_ledger(Arc::clone(&ledger)),
+            .with_ledger(Arc::clone(&ledger))
+            .with_show_secret(read_policy(&cfg.data_dir.join(POLICY_FILE)).show_secret),
         );
         // ADR-0060: `resume = auto` brings back, without anyone asking, the interrupted agents of the kinds and folders the owner listed
         // that can continue their own session. In id order, so a helper comes after its parent (a helper whose parent did not come
@@ -1606,6 +1619,7 @@ impl Node {
         // everything at once: the first round here, before the socket answers, the others every AUTO_RESUME_GAP after (each still
         // offered until then; one resumed or started again by hand meanwhile is refused and skipped).
         let resume = read_policy(&cfg.data_dir.join(POLICY_FILE)).resume;
+        let carry_on = !resume.no_carry_on;
         let started_ms = now_ms();
         let mut waiting: std::collections::VecDeque<String> = ledger
             .interrupted()
@@ -1623,7 +1637,7 @@ impl Node {
             .map(|e| e.agent_id)
             .take(AUTO_RESUME_TOTAL)
             .collect();
-        resume_round(&ctx, &ledger, &mut waiting);
+        resume_round(&ctx, &ledger, &mut waiting, carry_on);
         let resume_ctx = Arc::clone(&ctx);
         let server = ControlServer::start(&cfg.socket, ctx)?;
         let stop = Arc::new(AtomicBool::new(false));
@@ -1878,7 +1892,7 @@ impl Node {
                                 }
                                 std::thread::sleep(TICK);
                             }
-                            resume_round(&resume_ctx, &ledger, &mut waiting);
+                            resume_round(&resume_ctx, &ledger, &mut waiting, carry_on);
                         }
                     })?,
             )
@@ -2025,13 +2039,17 @@ fn resume_round(
     ctx: &ControlContext,
     ledger: &crate::ledger::Ledger,
     waiting: &mut std::collections::VecDeque<String>,
+    carry_on: bool,
 ) {
     let mut brought = 0;
     while brought < AUTO_RESUME_MAX {
         let Some(id) = waiting.pop_front() else {
             return;
         };
-        if crate::control::resume_agent(ctx, &id, false).is_ok() {
+        // ADR-0060 Amendment A: an agent that was working gets its kind's one "carry on" message with its resume, if the owner's policy
+        // allows it and it has not had one for this interruption; the message itself comes from the kind's manifest.
+        let carry = carry_on && ledger.wants_continue(&id);
+        if crate::control::resume_agent(ctx, &id, false, carry).is_ok() {
             ledger.mark_auto_resumed(&id, now_ms());
             brought += 1;
         }

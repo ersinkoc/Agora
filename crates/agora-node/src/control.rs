@@ -76,6 +76,8 @@ pub struct ControlContext {
     git_wake: Option<Arc<AtomicBool>>,
     /// ADR-0060: the session ledger, which holds the agents `agent.resume` can bring back. `None`: nothing can be resumed.
     ledger: Option<Arc<crate::ledger::Ledger>>,
+    /// ADR-0080: the owner's policy `files.show_secret`; off unless the policy file says `true`.
+    show_secret: bool,
     names: AtomicU64,
     seen: Mutex<IdempotencyCache>,
 }
@@ -115,6 +117,7 @@ impl ControlContext {
             spawn: None,
             git_wake: None,
             ledger: None,
+            show_secret: false,
             seen: Mutex::new(IdempotencyCache::default()),
         }
     }
@@ -138,6 +141,13 @@ impl ControlContext {
     #[must_use]
     pub fn with_ledger(mut self, ledger: Arc<crate::ledger::Ledger>) -> Self {
         self.ledger = Some(ledger);
+        self
+    }
+
+    /// ADR-0080: secret files are shown (the owner's policy `files.show_secret = true`). Set at start from the policy file only.
+    #[must_use]
+    pub fn with_show_secret(mut self, shown: bool) -> Self {
+        self.show_secret = shown;
         self
     }
 
@@ -571,7 +581,8 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
             })
         }
         Cmd::AgentResume(a) => {
-            resume_agent(ctx, &a.agent_id, a.new_session).map(|r| v1::CommandOk {
+            // A person pressed Resume: they are there and can say what they want, so no "carry on" message (ADR-0060 Amendment A).
+            resume_agent(ctx, &a.agent_id, a.new_session, false).map(|r| v1::CommandOk {
                 result: Some(Ok_::AgentLaunch(r)),
             })
         }
@@ -864,7 +875,8 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
             }) {
                 return Err(invalid("path"));
             }
-            let mut diff = git::diff(&wt, path).map_err(|e| e.to_protocol())?;
+            let (mut diff, secret) =
+                git::diff_with(&wt, path, ctx.show_secret).map_err(|e| e.to_protocol())?;
             if diff.len() > MAX_DIFF_BYTES {
                 let mut end = MAX_DIFF_BYTES;
                 while !diff.is_char_boundary(end) {
@@ -873,7 +885,17 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                 diff.truncate(end);
             }
             Ok(v1::CommandOk {
-                result: Some(Ok_::GitDiff(v1::GitDiffResult { diff })),
+                result: Some(Ok_::GitDiff(v1::GitDiffResult {
+                    diff,
+                    secret_files: secret
+                        .into_iter()
+                        .map(|c| v1::SecretFileChange {
+                            path: c.path,
+                            added: c.added,
+                            removed: c.removed,
+                        })
+                        .collect(),
+                })),
             })
         }
         Cmd::FilesList(f) => {
@@ -890,6 +912,7 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                     name: e.name,
                     is_dir: e.is_dir,
                     size_bytes: e.size,
+                    secret: e.secret && !ctx.show_secret,
                 })
                 .collect();
             Ok(v1::CommandOk {
@@ -935,10 +958,13 @@ fn stop_survivor(
 /// when the ledger does not hold it as interrupted, when Resume is asked without a session the kind can continue, when the folder is
 /// gone or changed identity (ADR-0052), for a helper whose parent does not run (ADR-0057; its grants and approvals are not restored),
 /// and by the same confinement and limits as a start. The routed path checks the device signature before this (`Grants`).
+/// `carry_on` (Amendment A, only for the node's own automatic resume of an agent that was working): the resume carries the kind's one
+/// "carry on" message when its manifest has one; the ledger then records that it was sent.
 pub(crate) fn resume_agent(
     ctx: &ControlContext,
     agent_id: &str,
     new_session: bool,
+    carry_on: bool,
 ) -> Result<v1::AgentLaunchResult, Error> {
     let ledger = ctx
         .ledger
@@ -1011,13 +1037,14 @@ pub(crate) fn resume_agent(
         directory: entry.directory,
         branch: entry.branch.clone(),
         session: (!new_session).then(|| entry.session_id.clone()),
+        carry_on: carry_on && !new_session,
         private_config: (entry.directory && !entry.managed_worktree).then(|| {
             ctx.worktree_root
                 .join(".sessions")
                 .join(format!("resume-{agent_id}"))
         }),
     };
-    let (events, views, has_terminal) = {
+    let (events, views, has_terminal, carried) = {
         let mut sup = ctx.sup();
         if !sup.sandbox_policy().enforceable() {
             return Err(SupervisorError::SandboxUnavailable(
@@ -1035,13 +1062,23 @@ pub(crate) fn resume_agent(
             sup.set_parent(&id, p);
         }
         match sup.resume(&id, Instant::now()) {
-            Ok(events) => (events, sup.list(), sup.terminal(&id).is_some()),
+            Ok(events) => (
+                events,
+                sup.list(),
+                sup.terminal(&id).is_some(),
+                sup.carried_on(&id),
+            ),
             Err(e) => {
                 sup.unrestore(&id);
                 return Err(sup_err(e));
             }
         }
     };
+    // Said once for this interruption: the ledger remembers it (so it is not sent again), and the node's log says it was sent.
+    if carried {
+        ledger.mark_continue_sent(agent_id, crate::daemon::now_ms());
+        eprintln!("resume: {agent_id} was working when the node stopped; its resume carried the kind's \"carry on\" message");
+    }
     if new_session {
         ledger.forget_session(agent_id, crate::daemon::now_ms());
     }
@@ -1119,7 +1156,9 @@ const MAX_READ_BYTES: u64 = 512 * 1024;
 
 fn open_files(ctx: &ControlContext, worktree_id: &str) -> Result<crate::files::Files, Error> {
     let wt = agent_worktree(ctx, worktree_id)?;
-    crate::files::Files::open(&wt, MAX_READ_BYTES).map_err(|e| e.to_protocol())
+    crate::files::Files::open(&wt, MAX_READ_BYTES)
+        .map(|f| f.with_secret_shown(ctx.show_secret))
+        .map_err(|e| e.to_protocol())
 }
 
 /// Largest diff one answer carries; a bigger one is cut (the file view is for reading, not for patching).
@@ -1423,6 +1462,11 @@ fn exit_payload(st: &agora_platform::ExitStatus) -> Vec<u8> {
     code.to_le_bytes().to_vec()
 }
 
+/// The exit frame of a terminal that ended in a way this subscriber did not see.
+fn unknown_exit_payload() -> Vec<u8> {
+    i32::MIN.to_le_bytes().to_vec()
+}
+
 /// A terminal size as the resize frame carries it: columns, then rows, each a little-endian u16.
 fn size_payload(s: agora_vt::Size) -> Vec<u8> {
     let mut p = s.cols.to_le_bytes().to_vec();
@@ -1458,15 +1502,31 @@ fn pump(
                 let _ = send(writer, stream, KIND_TERM_EXIT, exit_payload(&st));
                 return;
             }
+            // What was dropped can include the exit: a terminal that has ended says so after its last snapshot, and one that is
+            // already gone (or a subscription that ends without its exit) gets the unknown exit, so the client still hears it ended.
             Ok(Output::Lagged) => {
-                let snap = ctx.sup().terminal(agent).map(|h| h.resync(sub));
+                let snap = ctx
+                    .sup()
+                    .terminal(agent)
+                    .map(|h| (h.resync(sub), h.exit_status()));
                 match snap {
-                    Some(s) => repaint(&s),
-                    None => return,
+                    Some((s, None)) => repaint(&s),
+                    Some((s, Some(st))) => {
+                        let _ = repaint(&s)
+                            .and_then(|()| send(writer, stream, KIND_TERM_EXIT, exit_payload(&st)));
+                        return;
+                    }
+                    None => {
+                        let _ = send(writer, stream, KIND_TERM_EXIT, unknown_exit_payload());
+                        return;
+                    }
                 }
             }
             Err(RecvTimeoutError::Timeout) => Ok(()),
-            Err(RecvTimeoutError::Disconnected) => return,
+            Err(RecvTimeoutError::Disconnected) => {
+                let _ = send(writer, stream, KIND_TERM_EXIT, unknown_exit_payload());
+                return;
+            }
         };
         if sent.is_err() {
             return;

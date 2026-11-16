@@ -24,6 +24,7 @@ pub fn run_all<T: Terminal>(make: impl Fn(Size) -> T) {
     pen_is_the_style_of_the_next_character(&make);
     styling_sequences_print_nothing(&make);
     malformed_input_does_not_panic(&make);
+    narrow_terminals_take_wide_characters(&make);
 }
 
 fn text_and_newlines<T: Terminal>(make: &impl Fn(Size) -> T) {
@@ -262,6 +263,25 @@ fn malformed_input_does_not_panic<T: Terminal>(make: &impl Fn(Size) -> T) {
     assert!(c.row < t.size().rows && c.col < t.size().cols);
     t.resize(size(5, 2));
     t.feed(b"ok");
+}
+
+/// The narrowest terminal still prints and reflows double-width characters (F701).
+fn narrow_terminals_take_wide_characters<T: Terminal>(make: &impl Fn(Size) -> T) {
+    for cols in [0, 1, 2] {
+        let mut t = make(size(cols, 3));
+        t.feed("a日✅b".as_bytes());
+        let s = t.size();
+        let c = t.cursor();
+        assert!(
+            c.row < s.rows && c.col < s.cols,
+            "{cols} columns: {c:?} in {s:?}"
+        );
+    }
+    let mut t = make(size(10, 3));
+    t.feed("日本語".as_bytes());
+    t.resize(size(1, 3));
+    t.feed("日".as_bytes());
+    assert!(t.size().cols >= 1 && t.cursor().col < t.size().cols);
 }
 
 #[cfg(test)]

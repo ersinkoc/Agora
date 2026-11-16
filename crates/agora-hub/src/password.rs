@@ -13,7 +13,7 @@ use std::net::IpAddr;
 use std::num::NonZeroU32;
 use std::sync::Mutex;
 
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 
 use crate::store::{EventStore, SqliteStore, StoreError};
 
@@ -182,6 +182,23 @@ pub fn vouch_passkey(store: &SqliteStore, id: &str) -> Result<(), PasswordError>
     Ok(())
 }
 
+/// Forgets the vouch for `id` when no passkey has that id (its passkey went with its person): ids are chosen by the client, so a
+/// passkey added later under the same id without the password must not inherit it ([`drop_unvouched_passkeys`]).
+pub fn forget_stale_vouch(store: &SqliteStore, id: &str) -> Result<(), PasswordError> {
+    let exists = store
+        .lock()?
+        .query_row("SELECT 1 FROM passkeys WHERE id = ?1", [id], |_| Ok(()))
+        .optional()?
+        .is_some();
+    let mut ids = vouched(store);
+    if exists || !ids.iter().any(|v| v == id) {
+        return Ok(());
+    }
+    ids.retain(|v| v != id);
+    store.set_setting(VOUCHED, ids.join("\n").as_bytes())?;
+    Ok(())
+}
+
 fn vouched(store: &SqliteStore) -> Vec<String> {
     store
         .setting(VOUCHED)
@@ -261,7 +278,7 @@ impl Client {
     }
 
     /// The bucket a rate limit counts in: an IPv6 address by its /64 (one host usually holds a whole one).
-    fn bucket(&self) -> IpAddr {
+    pub(crate) fn bucket(&self) -> IpAddr {
         match self.addr {
             None => IpAddr::from([0u8, 0, 0, 0]),
             Some(IpAddr::V6(v6)) => match v6.to_ipv4_mapped() {
