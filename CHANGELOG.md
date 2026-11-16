@@ -42,6 +42,9 @@ _Nothing yet._
 - macOS: a confined agent is not started when a file it may write also has another name elsewhere (a hard link made outside
   confinement), or when a save copy next to it (`state.json.tmp`) is such a link, since writing it would change that other file too; the message says to remove the link or put a copy in its place
   (#571). Such links inside a folder it may write are not looked for at each start.
+- `agora node untrust` that fails partway (for example a full disk) now leaves the device trusted, so you can run it again;
+  before, the device was removed but not remembered as revoked, and the hub could trust it again on its next reconnect.
+  `agora hub devices forget` on a device that is not revoked no longer deletes what endorses it.
 - A passkey added from another machine before the screen password was set now goes away when the password is set, also when it
   was added under the name (credential id) of a removed person's passkey. It used to take over that old passkey's place among the
   ones added at the hub's machine or with the password, so it stayed and kept signing in from elsewhere without the password
