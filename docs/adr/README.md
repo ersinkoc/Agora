@@ -98,4 +98,4 @@ Date: YYYY-MM-DD
 | 0078 | A confined agent gets a git configuration the node wrote | Accepted |
 | 0079 | A terminal holder keeps agents alive when the node stops | Accepted |
 | 0080 | The file browser does not show secret files | Accepted |
-| 0081 | A replayed revocation does not undo the owner's re-trust | Accepted |
+| 0081 | A replayed revocation does not undo the owner's re-trust | Proposed |
