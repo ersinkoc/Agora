@@ -34,6 +34,12 @@ _Nothing yet._
   minimized or not in front (the count only, in your language). Not on macOS yet: there it stays silent for now.
 
 ### Security
+- Linux: a confined agent (`sandbox = worktree`) could cut any of your files outside its folders to nothing (`truncate`), such as
+  `~/.ssh/authorized_keys` or code in another checkout. That is now refused on kernels from Linux 6.2; older kernels cannot refuse it
+  (audit finding F260).
+- Linux: a confined agent can now move a file from one folder of its worktree to another. It was refused ("invalid cross-device
+  link"), so tools without a copy fallback failed; a file from a folder it may only read still cannot be moved or linked in (audit
+  finding F261).
 - A permission to act on a machine for some hours (a grant) now ends as soon as the device that gave it is no longer trusted
   there: removed with `agora node untrust`, revoked from another device, run out, or limited to other projects. It used to keep
   letting commands through until it expired (up to 8 hours) unless it was revoked by hand (audit finding F270). Trusting the device
@@ -99,6 +105,8 @@ _Nothing yet._
   was taken. They now go back to the board (audit finding F281).
 
 ### Machines
+- On Linux and macOS, a folder that failed while it was being read (a disk or network error) was shown as complete, or as empty; the
+  machine now reports that it could not be read (audit finding F262).
 - An agent started in a folder now always keeps that folder in the machine's record. When another agent ended or reported its
   session at the moment it started, the record lost the folder, and after a restart the agent could be neither resumed nor started
   again there (audit finding F271).
