@@ -166,6 +166,7 @@ fn git_with_the_agents_environment_commits_as_the_person_and_sees_no_dangerous_k
 
 #[test]
 fn a_value_with_a_newline_in_the_real_configuration_adds_nothing_to_the_file() {
+    let _serial = serial();
     // A real git reads a quoted value with `\n` as a newline; the node must neither write it raw nor let it open a section.
     let h = home();
     let evil = h.join(".gitconfig");
