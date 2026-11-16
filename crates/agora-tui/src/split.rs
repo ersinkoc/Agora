@@ -123,9 +123,17 @@ pub fn start_card_lines(
     width: usize,
     t: Text<'_>,
 ) -> Option<Vec<String>> {
-    let (line, prompt) = crate::render::start_card(&a.action, &a.detail, t)?;
+    let (line, settings, prompt) = crate::render::start_card(&a.action, &a.detail, t)?;
     let width = width.max(12);
     let mut lines = crate::render::wrap_row(&line, width, width);
+    // ADR-0066: the model, effort and the like sit under the request line, before the prompt, in the lines y / n answers.
+    for s in settings {
+        lines.extend(
+            crate::render::wrap_row(&s, width - 2, width - 2)
+                .into_iter()
+                .map(|w| format!("  {w}")),
+        );
+    }
     lines.push(String::new());
     for p in prompt {
         let wrapped = crate::render::wrap_row(&p, width - 2, width - 2);

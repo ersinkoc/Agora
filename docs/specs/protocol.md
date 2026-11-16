@@ -569,9 +569,13 @@ All additions; nothing published changed.
   settings is decided only over v2 (a client that signs the v1 message does not name the settings and is refused with
   `approval.signature_invalid`); one without keeps `agora-approval-start-v1`. Vectors: `schema/fixtures/signing/approval-start-v2.json`
   (node and web window). The helper starts with exactly the settings shown and signed, and never with a launch option. The node enforces "no grant" itself: a signed `helper_grant` or `helpers_may_start` on a request with settings is ignored.
-- **What is not built yet.** The TUI's `agent.start` card does not list settings: it never allows a request that has them (it says so, `tui-start-settings`) but can deny one (signed over v2); the web window's start pickers and the TUI's offer the settings later (the machine already sends what each kind
-  takes in `AgentKind.settings`); the owner's `start.models` allow-list and the price class on the card; settings are not kept across a
-  node restart's resume.
+- **Clients.** The web start window and the TUI's approval card are built. The window offers each `AgentKind.settings` entry (a list only
+  among its `values`; with no list a text box limited to the node's plain-token rule), sends nothing for "the agent's own default" (that
+  `AgentLaunch` has no `settings` and is signed over `directory-action-v1`/`v3` as before) and signs the chosen pairs in the kind's order
+  over `directory-action-v4`. The TUI card lists the settings under the request line and signs `agora-approval-start-v2` for an
+  `agent.start` that carries them (v1 byte for byte without); there is no other message it signs for a start.
+- **What is not built yet.** The TUI's own start picker; remembering the last choice per kind and machine; the owner's `start.models`
+  allow-list and the price class on the card; settings are not kept across a node restart's resume.
 
 ### Launch options (ADR-0059)
 

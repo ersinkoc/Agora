@@ -4,6 +4,11 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+### Agents
+- The start window and the terminal can now start an agent with a model and an effort (ADR-0066): the window lists what the machine says each
+  agent takes (a list for the effort, a text box for a model the tool checks itself), starts on "the agent's own default", offers nothing the
+  machine did not list and says what it will start with before Start. The terminal's approval card shows an agent's requested model and
+  effort in words and allows it over a signature that covers them; without settings nothing changes.
 ### Agents' mesh tools
 - An agent's mesh tools no longer end for good when the node restarts: the bridge the agent's client runs reconnects to the node
   (waiting up to 2 s between tries, giving up after 15 minutes) and the agent's session stays open. A call made at that moment fails at once with

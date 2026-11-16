@@ -31,6 +31,14 @@ Manifest format (`[[launch.setting]]`), schema (`AgentStart`/`AgentLaunch` setti
   the signed settings; the capability `agent.launch_settings` makes an older hub or node pair refuse rather than drop them; the mesh tool
   `agent_start` takes `settings`; the web approval card lists them in the window's words (decision 2); a request with settings offers no
   grant. Specs: `docs/specs/protocol.md`; threat model T28.
-- **Not built yet:** the start window's and the TUI's pickers and the TUI card (decision 3, "remembers the last choice"), the owner's
-  `start.models` allow-list and the model's price class on the card (decision 4 and 5), `mode` as a shipped setting, and keeping the
-  settings across a resume after a node restart.
+- **PR 3 (built): the clients.** The web start window offers each setting the machine lists for the chosen kind (`AgentKind.settings`): a
+  list is a choice among exactly its values, a setting without a list (a model name) is a text box limited to the plain token the node
+  accepts; both start on "the agent's own default" (nothing is sent, so that request is byte for byte the one without settings), a value
+  the machine did not list is not sendable, and the chosen values are shown before Start and signed over `directory-action-v4`. The TUI
+  approval card shows the settings in words (before the prompt, in the lines that must be read before y counts) and signs
+  `agora-approval-start-v2` for a request that carries them (`decision_message`: an `agent.start` is only ever answered over v1 without
+  settings or v2 with them); the `approval.needs_newer_window` refusal is gone.
+- **Not built yet:** the TUI's start picker (the card is done, the picker in the TUI's own start flow is not), "remembers the last choice per
+  kind per machine" (decision 3), the owner's `start.models` allow-list and the model's price class on the card (decisions 4 and 5: the ADR
+  does not specify the policy key's place or the catalog lookup closely enough for a small change), `mode` as a shipped setting, and
+  keeping the settings across a resume after a node restart.

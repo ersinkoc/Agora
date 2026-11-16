@@ -361,21 +361,7 @@ impl Session {
             .approval_id
             .split_once('/')
             .unwrap_or(("", a.approval_id.as_str()));
-        // ADR-0057: a start is decided over the request as shown (one start; grants are given in the web window).
-        let message = if a.action == "agent.start" {
-            // ADR-0066: this terminal's card does not list launch settings, so it never allows a request that has them (the
-            // answer would be signed over what the user did not see); it can still deny one, over the message that names them.
-            let settings = start_settings(&a.detail);
-            if settings.is_empty() {
-                crate::device::start_message(node, local, approved, 0, false, &a.detail)
-            } else if approved {
-                return Err("approval.needs_newer_window".to_string());
-            } else {
-                crate::device::start_message_v2(node, local, false, 0, false, &settings, &a.detail)
-            }
-        } else {
-            approval_message(node, local, approved)
-        };
+        let message = decision_message(node, local, &a.action, &a.detail, approved);
         let signature = device
             .sign(&message)
             .ok_or_else(|| "client.sign".to_string())?;
@@ -1376,8 +1362,31 @@ mod launch_option_tests {
     }
 }
 
-/// ADR-0066: the `(id, value)` settings an `agent.start` detail lists, read as the node reads them (strings only; anything else is empty).
-fn start_settings(detail: &str) -> Vec<(String, String)> {
+/// The bytes this device signs to answer the request `action` / `detail` (hub-wide id `<node>/<local>` split by the caller). ADR-0057: a
+/// start is decided over the request as shown (one start; grants are given in the web window). ADR-0066: a start whose detail lists launch
+/// settings is decided only over `agora-approval-start-v2`, which names them, so the answer covers what the card showed; one without keeps
+/// `agora-approval-start-v1` byte for byte. There is no other message for an `agent.start`.
+pub fn decision_message(
+    node: &str,
+    local: &str,
+    action: &str,
+    detail: &str,
+    approved: bool,
+) -> Vec<u8> {
+    if action != "agent.start" {
+        return approval_message(node, local, approved);
+    }
+    let settings = start_settings(detail);
+    if settings.is_empty() {
+        crate::device::start_message(node, local, approved, 0, false, detail)
+    } else {
+        crate::device::start_message_v2(node, local, approved, 0, false, &settings, detail)
+    }
+}
+
+/// ADR-0066: the settings an `agent.start` detail lists as `(label, id, value)`, read as the node reads them (strings only; anything else
+/// is empty). The card shows exactly these rows and the signature covers exactly their `(id, value)` pairs.
+pub(crate) fn start_setting_rows(detail: &str) -> Vec<(String, String, String)> {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(detail) else {
         return Vec::new();
     };
@@ -1392,7 +1401,110 @@ fn start_settings(detail: &str) -> Vec<(String, String)> {
                     .unwrap_or_default()
                     .to_string()
             };
-            (get("id"), get("value"))
+            (get("label"), get("id"), get("value"))
         })
         .collect()
+}
+
+/// The `(id, value)` pairs of [`start_setting_rows`]: what the v2 message signs.
+fn start_settings(detail: &str) -> Vec<(String, String)> {
+    start_setting_rows(detail)
+        .into_iter()
+        .map(|(_, id, value)| (id, value))
+        .collect()
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod decision_tests {
+    use super::decision_message;
+    use crate::device::{approval_message, start_message, start_message_v2};
+
+    const PLAIN: &str = r#"{"kind":"codex","folder":"/w","prompt":"x","settings":[]}"#;
+    const WITH: &str = r#"{"kind":"codex","folder":"/w","prompt":"x","settings":[{"id":"model","label":"setting-model","value":"gpt-6.1-sol"},{"id":"effort","label":"setting-effort","value":"high"}]}"#;
+
+    /// Without settings the answer is the v1 message byte for byte (and a detail with no `settings` key at all is the same).
+    #[test]
+    fn a_start_without_settings_keeps_the_v1_message() {
+        for detail in [PLAIN, r#"{"kind":"codex","prompt":"x"}"#, "not json"] {
+            for approved in [true, false] {
+                assert_eq!(
+                    decision_message("laptop", "7", "agent.start", detail, approved),
+                    start_message("laptop", "7", approved, 0, false, detail)
+                );
+            }
+        }
+        assert!(decision_message("laptop", "7", "agent.start", PLAIN, true)
+            .starts_with(b"agora-approval-start-v1\0"));
+    }
+
+    /// A start that lists settings is never answered over a message that does not name them: allow or deny, only v2 is signed.
+    #[test]
+    fn a_start_with_settings_is_only_ever_signed_over_v2() {
+        let settings = vec![
+            ("model".to_string(), "gpt-6.1-sol".to_string()),
+            ("effort".to_string(), "high".to_string()),
+        ];
+        for approved in [true, false] {
+            let m = decision_message("laptop", "7", "agent.start", WITH, approved);
+            assert_eq!(
+                m,
+                start_message_v2("laptop", "7", approved, 0, false, &settings, WITH)
+            );
+            assert!(m.starts_with(b"agora-approval-start-v2\0"));
+            assert_ne!(m, start_message("laptop", "7", approved, 0, false, WITH));
+        }
+        // Other requests are not starts: their message is the plain one.
+        assert_eq!(
+            decision_message("laptop", "7", "files.write", WITH, true),
+            approval_message("laptop", "7", true)
+        );
+    }
+
+    /// The shared vectors (`schema/fixtures/signing/approval-start-v2.json`, also checked by the node and the web window): the message
+    /// this terminal signs for each case is the fixture's bytes, with the settings read out of the detail as the card shows them.
+    #[test]
+    fn the_shared_start_v2_vectors_are_what_this_terminal_signs() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../schema/fixtures/signing/approval-start-v2.json");
+        let v: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let hex = |m: &[u8]| -> String { m.iter().map(|b| format!("{b:02x}")).collect() };
+        for c in v["cases"].as_array().unwrap() {
+            let listed: Vec<(String, String)> = c["settings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|p| {
+                    (
+                        p[0].as_str().unwrap().to_string(),
+                        p[1].as_str().unwrap().to_string(),
+                    )
+                })
+                .collect();
+            let whole = start_message_v2(
+                c["node"].as_str().unwrap(),
+                c["approval_id"].as_str().unwrap(),
+                c["approved"].as_bool().unwrap(),
+                u32::try_from(c["helper_grant"].as_u64().unwrap()).unwrap(),
+                c["helpers_may_start"].as_bool().unwrap(),
+                &listed,
+                c["detail"].as_str().unwrap(),
+            );
+            assert_eq!(hex(&whole), c["hex"].as_str().unwrap(), "{}", c["name"]);
+            // This terminal signs no grant and no nested permission: only the cases without either apply to it.
+            if c["helper_grant"].as_u64() != Some(0)
+                || c["helpers_may_start"].as_bool() != Some(false)
+            {
+                continue;
+            }
+            let m = decision_message(
+                c["node"].as_str().unwrap(),
+                c["approval_id"].as_str().unwrap(),
+                "agent.start",
+                c["detail"].as_str().unwrap(),
+                c["approved"].as_bool().unwrap(),
+            );
+            assert_eq!(hex(&m), c["hex"].as_str().unwrap(), "{}", c["name"]);
+        }
+    }
 }

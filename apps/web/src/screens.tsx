@@ -91,7 +91,9 @@ const demoChat: ChatSource = {
 // ADR-0059: the start window with a kind that offers "Don't ask", for the gallery (nothing is sent anywhere).
 // ADR-0069: and one whose program the machine cannot find, named in the explanation.
 const demoKinds: KindChoice[] = [
-  { kind: 'codex', name: 'Codex', installed: true, options: [{ id: 'skip-permissions', label: 'option-skip-permissions', skipsPermissions: true }] },
+  // ADR-0066: Codex takes a model (any name the tool knows) and an effort (a list, with the tool's own default shown).
+  { kind: 'codex', name: 'Codex', installed: true, options: [{ id: 'skip-permissions', label: 'option-skip-permissions', skipsPermissions: true }],
+    settings: [{ id: 'model', label: 'setting-model', values: [], defaultValue: '' }, { id: 'effort', label: 'setting-effort', values: ['low', 'medium', 'high', 'xhigh', 'max'], defaultValue: 'medium' }] },
   { kind: 'gemini', name: 'Gemini CLI', installed: false, program: 'gemini' },
 ];
 function DemoStart({ onClose }: { onClose: () => void }) {

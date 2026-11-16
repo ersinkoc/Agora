@@ -32,6 +32,7 @@ import { num } from './net/view';
 import { loadAudit } from './net/audit';
 import { agentTarget } from './components/sessionChoice';
 import { usableId } from './components/launchChoice';
+import { launchSettingsField } from './components/launchSettings';
 import { PhoneAgent, PhoneHome, PhoneTheme, usePhone } from './phone/Phone';
 import { approvalRedirect, phoneScreen } from './phone/nav';
 import { requestPanel } from './layout/requests';
@@ -110,6 +111,8 @@ export function App() {
       // ADR-0069: the program the machine looks for in its PATH (empty from an older machine).
       program: k.program ?? '',
       // ADR-0059: the kind's launch options (the machine keeps their arguments).
+      // ADR-0066: the kind's launch settings (model, effort) and what each takes.
+      settings: (k.settings ?? []).map((st) => ({ id: st.id ?? '', label: st.label ?? '', values: st.values ?? [], defaultValue: st.defaultValue ?? '' })),
       options: (k.launchOptions ?? []).filter((o) => usableId(o.id ?? '')).map((o) => ({ id: o.id ?? '', label: o.label ?? '', skipsPermissions: !!o.skipsPermissions })),
     }));
   }, [api]);
@@ -129,12 +132,12 @@ export function App() {
     if (!d) throw { code: 'protocol.capability_missing' };
     return { path: d.path ?? '', parent: d.parent ?? '', entries: (d.entries ?? []).map((e) => ({ name: e.name ?? '', isGit: !!e.isGit })), truncated: !!d.truncated };
   }, [api, device]);
-  const startAgent = useCallback(async (node: string, info: DirectoryInfo, kind: string, separateWorktree: boolean, acceptIdentityChange: boolean, launch: { ids: string[]; confirmed: string[] }): Promise<string | undefined> => {
+  const startAgent = useCallback(async (node: string, info: DirectoryInfo, kind: string, separateWorktree: boolean, acceptIdentityChange: boolean, launch: { ids: string[]; confirmed: string[]; settings: [string, string][] }): Promise<string | undefined> => {
     try {
       if (!api || !device) return 'approval-not-trusted';
       // ADR-0059: the device signs the chosen launch options too, so the hub can neither add nor remove one.
-      const authorization = await signDirectory(device, node, 'launch', info.path, kind, info.projectId, separateWorktree, acceptIdentityChange, launch.ids, launch.confirmed);
-      const ok = await api.command(node, { agentLaunch: { path: info.path, projectId: info.projectId, kind, separateWorktree, acceptIdentityChange, authorization, launchOptions: launch.ids, confirmedLaunchOptions: launch.confirmed } });
+      const authorization = await signDirectory(device, node, 'launch', info.path, kind, info.projectId, separateWorktree, acceptIdentityChange, launch.ids, launch.confirmed, launch.settings);
+      const ok = await api.command(node, { agentLaunch: { path: info.path, projectId: info.projectId, kind, separateWorktree, acceptIdentityChange, authorization, launchOptions: launch.ids, confirmedLaunchOptions: launch.confirmed, ...launchSettingsField(launch.settings) } });
       const id = ok.agentLaunch?.agentId;
       setStarting(false);
       if (id) window.location.hash = `#/agent/${encodeURIComponent(`${node}/${id}`)}`;
@@ -144,6 +147,8 @@ export function App() {
       if (code === 'agent.option_forbidden') return optionForbidden(e);
       if (code === 'agent.option_unconfirmed') return 'start-option-unconfirmed';
       if (code === 'agent.option_invalid') return 'start-option-invalid';
+      if (code === 'agent.setting_unknown' || code === 'agent.setting_invalid') return 'start-setting-refused';
+      if (code === 'protocol.capability_missing' && launch.settings.length > 0) return 'start-settings-unsupported';
       if (code === 'protocol.capability_missing' && launch.ids.length > 0) return 'start-options-unsupported';
       return code === 'agent.mode_unsupported' ? 'start-directory-agent-unsupported' : code === 'approval.signature_invalid' ? 'approval-not-trusted' : code === 'protocol.capability_missing' ? 'start-directory-unsupported' : code === 'agent.kind_unknown' ? 'start-kind-unknown' : code === 'node.resource_limit' ? 'start-limit' : code === 'auth.forbidden' ? 'start-directory-forbidden' : 'start-failed';
     }
