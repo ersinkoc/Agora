@@ -88,7 +88,7 @@ built, tested and seen on a real machine, capability by capability, is in [docs/
 - **One console across machines:** live terminals side by side, agent states, workspace files, diffs, commits, messages and estimated spend.
 - **Structured conversations:** chat, plans, tool calls, diffs and approvals for ACP agents through `agora acp-bridge` and for external adapters.
 - **Coordination:** per-agent MCP endpoints, cross-node messaging, shared project tasks, path leases and handoff. Shared-board calls fail when the hub is unreachable; local agent execution continues.
-- **Clients:** the web app, a [Tauri desktop shell](apps/desktop/README.md) that pins the hub CA, and a [TUI](docs/adr/0043-tui-client.md) for terminals, chat, approvals and agent control. `agora panel` prints the enrolled hub's web address and CA location; the person still signs in.
+- **Clients:** the web app, a [Tauri desktop shell](apps/desktop/README.md) that pins the hub CA, and a [TUI](docs/adr/0043-tui-client.md) for terminals, chat, approvals and agent control. `agora panel` serves the enrolled hub's window on `http://127.0.0.1:<fixed port>/` through the node's pinned link, so no browser on a node machine needs the hub's certificate; the person still signs in (ADR-0056 Amendment A).
 - **Accounts and operations:** passkey sign-in, device-signed approvals, team roles and project access, audit export, hub backup/restore and signed binary updates. English and Turkish interfaces are included.
 
 ### Agent integrations

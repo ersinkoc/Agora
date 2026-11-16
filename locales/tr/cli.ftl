@@ -217,8 +217,13 @@ cli-adapter-listed-revoked = { $name } { $version } (yayımcı { $publisher }, e
 
 cli-project-identity = Proje kimliği: { $id } (klasör: { $path }). .agent-project.json dosyasını projenin diğer kopyalarına taşıyın.
 
-cli-panel = Hub'ın panelini tarayıcıda şu adreste açın: { $url }. Bu makinenin tarayıcısı hub'ın sertifikasına güvenmeli: { $ca } dosyasını sertifika otoritesi olarak içe aktarın (Windows'ta: certutil -user -addstore Root { $ca }). Giriş için hub makinesinde "agora hub login" ile alınan kodu kullanın.
+cli-panel = Hub'ın paneli bu makinede şu adreste açık: { $url }. Bu adresi tarayıcıda açın; sertifika gerekmez. Giriş için, her tarayıcıda olduğu gibi, hub makinesinde "agora hub login" ile alınan kodu kullanın. Kapatmak için Ctrl+C'ye basın.
 cli-panel-none = Bu makine bir hub'a kayıtlı değil, açılacak panel yok. Önce "agora node enroll" ile kaydedin.
+cli-panel-link = Bu makinenin hub adresi veya sertifikası okunamıyor. "agora node enroll" ile yeniden kaydedin.
+cli-panel-port-taken = Panelin { $port } numaralı portunu başka bir program kullanıyor. O programı kapatıp "agora panel" komutunu yeniden çalıştırın; girişiniz ve cihazınız korunsun diye port değişmez.
+cli-panel-no-port = Panel bu makinede bir port açamadı.
+cli-panel-unreachable = Hub bu makineden yanıt vermiyor, açılacak panel yok. Buradaki ajanlar çalışmaya devam eder.
+cli-panel-untrusted = Hub'ın sertifikası bu makinenin kaydolduğu sertifikadan değil, panel açılmadı.
 
 # ADR-0062: yalın `agora` (ön kapı), `agora web`, `agora status`, `agora down`.
 frontdoor-welcome = Agora'ya hoş geldiniz. Bu makine ne yapsın?

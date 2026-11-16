@@ -8,7 +8,8 @@
 //! the request is addressed to the tunnel itself (`Host: 127.0.0.1:<port>`, or `localhost:<port>`). Without that check, any web
 //! page in any browser on this machine could reach the hub through the tunnel by DNS rebinding: a name the page controls is pointed
 //! at 127.0.0.1, the browser then treats the tunnel as that page's own origin, and since the tunnel strips the TLS that would
-//! otherwise expose the wrong name, nothing else stops it. On the hub's own machine the hub sees the tunnel as loopback, which
+//! otherwise expose the wrong name, nothing else stops it. A request that carries an `Origin` (a WebSocket upgrade, a POST) must
+//! name the tunnel's own origin too. On the hub's own machine the hub sees the tunnel as loopback, which
 //! signs in without a code (threat model T22).
 
 use std::net::SocketAddr;
@@ -75,14 +76,16 @@ fn addressed_to_tunnel(head: &[u8], port: u16) -> bool {
     }
     // The fields follow the request line and end at the blank line. A field name has no space before its colon (RFC 9112 5.1),
     // and a line starting with a space continues the previous field, so neither can count as `Host`.
-    let mut hosts = text
-        .split("\r\n")
-        .skip(1)
-        .take_while(|l| !l.is_empty())
-        .filter_map(|l| {
-            let (name, value) = l.split_once(':')?;
-            name.eq_ignore_ascii_case("host").then(|| value.trim())
-        });
+    let field = |wanted: &'static str| {
+        text.split("\r\n")
+            .skip(1)
+            .take_while(|l| !l.is_empty())
+            .filter_map(move |l| {
+                let (name, value) = l.split_once(':')?;
+                name.eq_ignore_ascii_case(wanted).then(|| value.trim())
+            })
+    };
+    let mut hosts = field("host");
     let (Some(host), None) = (hosts.next(), hosts.next()) else {
         return false;
     };
@@ -90,7 +93,28 @@ fn addressed_to_tunnel(head: &[u8], port: u16) -> bool {
         Some((name, p)) => (name, p.parse::<u16>().ok()),
         None => (host, Some(80)),
     };
-    given_port == Some(port) && (name == "127.0.0.1" || name.eq_ignore_ascii_case("localhost"))
+    if !(given_port == Some(port) && is_own_name(name)) {
+        return false;
+    }
+    // A browser adds `Origin` to a WebSocket upgrade, a POST and any cross-origin request. When one is there it must be this
+    // tunnel's own origin (`http://127.0.0.1:<port>` or `http://localhost:<port>`): a page that reached the tunnel under its own
+    // name has another origin, and `null` (a sandboxed frame, a `file:` page) is refused too. No `Origin` is fine (a navigation,
+    // a same-origin GET, a program that is not a browser).
+    let mut origins = field("origin");
+    match (origins.next(), origins.next()) {
+        (None, _) => true,
+        (Some(o), None) => o.strip_prefix("http://").is_some_and(|h| {
+            h.rsplit_once(':')
+                .is_some_and(|(n, p)| p.parse::<u16>().ok() == Some(port) && is_own_name(n))
+                || (port == 80 && is_own_name(h))
+        }),
+        (Some(_), Some(_)) => false,
+    }
+}
+
+/// Whether `name` is one of the two names the tunnel answers to.
+fn is_own_name(name: &str) -> bool {
+    name == "127.0.0.1" || name.eq_ignore_ascii_case("localhost")
 }
 
 /// Connects to `hub` (`host:port`) the way `agora_protocol::dial::connect` does, kept here so the desktop shell does not link the
@@ -562,6 +586,30 @@ mod tests {
         assert!(addressed_to_tunnel(
             b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n",
             80
+        ));
+    }
+
+    /// DNS rebinding and cross-site requests: an `Origin` that is not the tunnel's own is refused, a missing one is not.
+    #[test]
+    fn an_origin_must_be_the_tunnels_own_when_there_is_one() {
+        let ok = |o: &str| {
+            addressed_to_tunnel(
+                format!("GET /ws HTTP/1.1\r\nHost: 127.0.0.1:7000\r\n{o}\r\n").as_bytes(),
+                7000,
+            )
+        };
+        assert!(ok(""));
+        assert!(ok("Origin: http://127.0.0.1:7000\r\n"));
+        assert!(ok("origin: http://LocalHost:7000\r\n"));
+        assert!(!ok("Origin: http://evil.example:7000\r\n"));
+        assert!(!ok("Origin: https://127.0.0.1:7000\r\n"));
+        assert!(!ok("Origin: http://127.0.0.1:7001\r\n"));
+        assert!(!ok("Origin: http://127.0.0.1\r\n"));
+        assert!(!ok("Origin: http://127.0.0.1:7000.evil.example\r\n"));
+        assert!(!ok("Origin: null\r\n"));
+        assert!(!ok("Origin:\r\n"));
+        assert!(!ok(
+            "Origin: http://127.0.0.1:7000\r\nOrigin: http://evil.example:7000\r\n"
         ));
     }
 

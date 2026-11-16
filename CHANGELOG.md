@@ -22,7 +22,14 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 - Every answer to something the window asks a machine (an agent list, a file, a diff, a start) arrives about 20 ms sooner: the hub
   sent it on its next 20 ms tick, and now sends it as soon as the machine answers (0.2 ms through the hub, also while another
   machine floods output).
+### Panel on a node machine
+- `agora panel` now opens the hub's window at `http://127.0.0.1:7480/` on a machine that runs a node, through the link the machine
+  already has to the hub: no certificate to import in any browser and no trust command (ADR-0056 Amendment A). The port is kept
+  across runs so your sign-in and device stay (the first run takes another free port if 7480 is in use); if it is taken later,
+  `agora panel` says so instead of moving. It listens on this machine only, while the command runs (Ctrl+C closes it), and
+  refuses a request meant for another name. You still sign in as from any browser.
 ### Desktop app
+- The app's connection to the hub now also refuses a request whose `Origin` is not the app's own, next to the `Host` check it already had.
 - On Windows and Linux, the desktop app shows one system notification when approvals are waiting while its window is hidden,
   minimized or not in front (the count only, in your language). Not on macOS yet: there it stays silent for now.
 
