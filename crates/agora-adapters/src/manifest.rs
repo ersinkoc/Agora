@@ -92,7 +92,19 @@ pub struct Process {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Resume {
     pub argv: Vec<String>,
+    /// ADR-0060 Amendment A: the resume command with a first message, for a tool that takes one (`claude --resume {session_id}
+    /// "{continue}"`): `{session_id}` and `{continue}` are replaced, and the message is one argument, never part of a shell string. Used
+    /// only when the node brings back by itself an agent that was working. Empty: the kind is resumed as usual and gets no message.
+    #[serde(default)]
+    pub continue_argv: Vec<String>,
+    /// The sentence `{continue}` stands for: that the session was cut off by a restart, to check the state of what it was doing first
+    /// and then carry on. Words are data, so they live here and not in the node's Rust.
+    #[serde(default, rename = "continue")]
+    pub continue_text: Option<String>,
 }
+
+/// The longest `[resume] continue` sentence, in bytes.
+pub const MAX_CONTINUE_BYTES: usize = 512;
 
 /// `[session]` (ADR-0060): how the node learns a terminal agent's own session id, which `[resume]` needs after a restart. Either the
 /// node chooses it (`id_args`) or it reads it from the file the agent writes (`[session.file]`), not both.
@@ -370,6 +382,45 @@ pub fn valid_option_id(s: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
+impl Resume {
+    /// ADR-0060 Amendment A: `continue_argv` and `continue` go together; the sentence is one plain line that cannot be read as an option
+    /// or as a placeholder; `continue_argv` carries both placeholders, `{continue}` as an argument of its own.
+    fn validate(&self) -> Result<(), ManifestError> {
+        let text = self.continue_text.as_deref();
+        match (self.continue_argv.is_empty(), text) {
+            (true, None) => return Ok(()),
+            (false, Some(_)) => {}
+            _ => return Err(invalid("resume.continue")),
+        }
+        let Some(text) = text else {
+            return Err(invalid("resume.continue"));
+        };
+        let sentence_ok = !text.trim().is_empty()
+            && text.len() <= MAX_CONTINUE_BYTES
+            && !text.starts_with('-')
+            && !text.contains(['{', '}'])
+            && !text.chars().any(char::is_control);
+        if !sentence_ok {
+            return Err(invalid("resume.continue"));
+        }
+        let has = |needle: &str| {
+            self.continue_argv
+                .iter()
+                .filter(|a| a.contains(needle))
+                .count()
+        };
+        let own_argument = self.continue_argv.iter().any(|a| a == "{continue}");
+        if self.continue_argv.first().is_none_or(String::is_empty)
+            || has("{session_id}") == 0
+            || has("{continue}") != 1
+            || !own_argument
+        {
+            return Err(invalid("resume.continue_argv"));
+        }
+        Ok(())
+    }
+}
+
 impl Manifest {
     /// ADR-0059: the declared option with this id.
     pub fn launch_option(&self, id: &str) -> Option<&LaunchOption> {
@@ -423,6 +474,9 @@ impl Manifest {
         }
         if self.display_name.trim().is_empty() {
             return Err(invalid("display_name"));
+        }
+        if let Some(r) = &self.resume {
+            r.validate()?;
         }
         if self
             .adapter
@@ -847,5 +901,71 @@ mod mcp_tests {
             },
             "{e}"
         );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod continue_tests {
+    use super::*;
+
+    fn with(resume: &str) -> String {
+        format!("kind = \"k\"\ndisplay_name = \"K\"\nversion = \"1\"\nmin_engine = 2\n[process]\nlaunch = [\"k\"]\n[resume]\n{resume}")
+    }
+
+    const ARGV: &str = "argv = [\"k\", \"--resume\", \"{session_id}\"]\n";
+
+    fn good() -> String {
+        with(&format!("{ARGV}continue_argv = [\"k\", \"--resume\", \"{{session_id}}\", \"{{continue}}\"]\ncontinue = \"Check the state of what you were doing, then carry on.\"\n"))
+    }
+
+    /// ADR-0060 Amendment A: the two fields go together and the sentence is data that cannot act as an option, a placeholder or a second
+    /// line; a manifest without them is resumed as before.
+    #[test]
+    fn a_carry_on_sentence_is_read_and_checked() {
+        let m = Manifest::parse(&good()).unwrap();
+        let r = m.resume.unwrap();
+        assert_eq!(r.continue_argv.last().unwrap(), "{continue}");
+        assert!(r.continue_text.unwrap().starts_with("Check the state"));
+        // None of it: fine.
+        assert!(Manifest::parse(&with(ARGV))
+            .unwrap()
+            .resume
+            .unwrap()
+            .continue_argv
+            .is_empty());
+        let bad = |resume: &str| Manifest::parse(&with(resume)).is_err();
+        let argv = "continue_argv = [\"k\", \"--resume\", \"{session_id}\", \"{continue}\"]\n";
+        // One without the other.
+        assert!(bad(&format!("{ARGV}{argv}")));
+        assert!(bad(&format!("{ARGV}continue = \"Carry on.\"\n")));
+        // The sentence: an option, a placeholder, a second line, empty, too long.
+        for text in [
+            "--yolo",
+            "Carry {session_id}",
+            "Carry on\\nand rm",
+            "  ",
+            &"x".repeat(MAX_CONTINUE_BYTES + 1),
+        ] {
+            assert!(
+                bad(&format!("{ARGV}{argv}continue = \"{text}\"\n")),
+                "{text:?}"
+            );
+        }
+        // The command: no session id, no {continue}, {continue} twice, {continue} glued to another word.
+        let t = "continue = \"Carry on.\"\n";
+        assert!(bad(&format!(
+            "{ARGV}continue_argv = [\"k\", \"{{continue}}\"]\n{t}"
+        )));
+        assert!(bad(&format!(
+            "{ARGV}continue_argv = [\"k\", \"{{session_id}}\"]\n{t}"
+        )));
+        assert!(bad(&format!("{ARGV}continue_argv = [\"k\", \"{{session_id}}\", \"{{continue}}\", \"{{continue}}\"]\n{t}")));
+        assert!(bad(&format!(
+            "{ARGV}continue_argv = [\"k\", \"{{session_id}}\", \"say {{continue}}\"]\n{t}"
+        )));
+        assert!(bad(&format!(
+            "{ARGV}continue_argv = [\"\", \"{{session_id}}\", \"{{continue}}\"]\n{t}"
+        )));
     }
 }

@@ -171,6 +171,66 @@ pub struct View {
     /// ADR-0073: the position of the latest event that brought a forgotten machine back. A client that last saw an earlier position
     /// may not hold that machine's records (it joined while they were hidden), so it is given a snapshot, not a replay.
     pub remembered_at: u64,
+    /// History stored before the session refused cross-node records holds some (T19). The view reads them safely, but a client that
+    /// was connected then may have applied one, and replaying the stored bodies would hand them to a client that did not. So a
+    /// client whose position is at or before this one (the end of the log when the hub opened over such a record; 0 when there is none, which a position never is) is
+    /// given a snapshot, not a replay. Stored events are never rewritten.
+    pub distrusted_until: u64,
+}
+
+/// What a node may say about machines (threat model T19): `Ok(Some(id))` is the node a fact names, which must be the sender;
+/// `Ok(None)` is a fact that names none; `Err(field)` is a fact only the hub writes (producer `hub`). Every body is listed, so a new
+/// one has to be decided here.
+pub(crate) fn named_node(body: &Body) -> Result<Option<&str>, &'static str> {
+    Ok(Some(match body {
+        // ADR-0070, ADR-0073, ADR-0053: presence, forgetting a machine and forgetting an agent (named by its hub-wide key, which
+        // holds its node) are the hub's own facts.
+        Body::NodeLink(_) => return Err("node_link"),
+        Body::NodeForgotten(_) => return Err("node_forgotten"),
+        Body::AgentForgotten(_) => return Err("agent_forgotten"),
+        Body::NodeOnline(e) => &e.node_id,
+        Body::NodeOffline(e) => &e.node_id,
+        Body::NodeResources(e) => &e.node_id,
+        Body::CheckoutDiscovered(e) => &e.node_id,
+        Body::AgentStarted(e) => &e.node_id,
+        Body::TerminalOpened(e) => &e.node_id,
+        Body::WorkspaceRegistered(e) => &e.node_id,
+        Body::NodeTrustedDevices(_)
+        | Body::WorktreeCreated(_)
+        | Body::WorktreeRemoved(_)
+        | Body::GitStatusChanged(_)
+        | Body::WorkspaceStatusChanged(_)
+        | Body::AgentWorkspaceBound(_)
+        | Body::AgentStateChanged(_)
+        | Body::AgentSessionReported(_)
+        | Body::AgentUsageReported(_)
+        | Body::AgentExited(_)
+        | Body::AgentSessionOptions(_)
+        | Body::AgentInterrupted(_)
+        | Body::TerminalTitleChanged(_)
+        | Body::TerminalClosed(_)
+        | Body::ApprovalRequested(_)
+        | Body::ApprovalResolved(_)
+        | Body::MessagePosted(_)
+        | Body::TaskChanged(_)
+        | Body::LeaseGranted(_)
+        | Body::LeaseReleased(_)
+        | Body::HandoffCreated(_)
+        | Body::AgentStartRefused(_)
+        | Body::FilesChanged(_) => return Ok(None),
+    }))
+}
+
+/// Whether a stored event is one the session now refuses (T19): a node's record naming another node, or one only the hub writes. The
+/// one rule for live ingestion and for history; `View::rebuild` and the replay barrier ask it, so they cannot drift. The hub's own
+/// events (producer `hub`) are never forged: they may name any node.
+pub(crate) fn is_forged(ev: &Event) -> bool {
+    ev.producer_id != RESERVED_HUB_ID
+        && match ev.body.as_ref().map(named_node) {
+            Some(Err(_)) => true,
+            Some(Ok(Some(node))) => node != ev.producer_id,
+            _ => false,
+        }
 }
 
 /// The hub-wide key of an entity a producer named with a local id.
@@ -195,7 +255,8 @@ impl View {
                     _ => return false,
                 }
             }
-            Some(Body::NodeOnline(e)) => e.node_id.as_str(),
+            // A node's start is about the node that sent it, whatever the body names.
+            Some(Body::NodeOnline(_)) => ev.producer_id.as_str(),
             _ => return false,
         };
         self.nodes.get(node).is_some_and(|n| n.forgotten)
@@ -277,6 +338,8 @@ impl View {
                     .insert(q(&e.agent_id), q(&e.workspace_id));
             }
 
+            // The node id is the connection's, never the body's: a node speaks for itself only (T19), and a history stored before
+            // the session refused such events is read the same way.
             Body::NodeOnline(e) => {
                 // A node announces itself when its process starts, never when only the link to the hub comes back. A resync
                 // announcement (ADR-0054) leads with it only when the hub missed that start (ADR-0055). So whatever it had running
@@ -284,18 +347,18 @@ impl View {
                 for a in self
                     .agents
                     .values_mut()
-                    .filter(|a| a.node_id == e.node_id && a.running)
+                    .filter(|a| a.node_id == producer && a.running)
                 {
                     a.running = false;
                     a.state = AgentState::Done;
                 }
-                let prefix = format!("{}/", e.node_id);
+                let prefix = format!("{producer}/");
                 self.approvals.retain(|k, _| !k.starts_with(&prefix));
                 self.terminals.retain(|k, _| !k.starts_with(&prefix));
-                self.remember_node(&e.node_id);
+                self.remember_node(producer);
                 let n = self
                     .nodes
-                    .entry(e.node_id.clone())
+                    .entry(producer.to_string())
                     .or_insert_with(|| NodeView::unknown(true));
                 n.hostname = e.hostname.clone();
                 n.os = e.os.clone();
@@ -305,7 +368,14 @@ impl View {
                 n.last_event_ms = n.last_event_ms.max(ev.at_ms);
             }
             Body::NodeOffline(e) => {
-                if let Some(n) = self.nodes.get_mut(&e.node_id) {
+                // The hub writes this for a node whose connection ended (for older clients, ADR-0070): then the body names that
+                // node. From a node it is about the node itself, whatever the body says.
+                let node = if producer == RESERVED_HUB_ID {
+                    e.node_id.as_str()
+                } else {
+                    producer
+                };
+                if let Some(n) = self.nodes.get_mut(node) {
                     n.online = false;
                 }
             }
@@ -349,16 +419,18 @@ impl View {
             }
             Body::NodeForgotten(_) => {}
             Body::NodeResources(e) => {
-                if let Some(n) = self.nodes.get_mut(&e.node_id) {
+                // A node's numbers are its own: the connection's identity decides, never the id in the body (T19).
+                if let Some(n) = self.nodes.get_mut(producer) {
                     n.agents_running = e.agents_running;
                     n.terminals_open = e.terminals_open;
                     n.memory_used_bytes = e.memory_used_bytes;
                 }
             }
             Body::CheckoutDiscovered(e) => {
+                // The checkout is on the node that said so, whatever the body names (T19).
                 self.checkouts.insert(
                     q(&e.checkout_id),
-                    (e.node_id.clone(), e.project_id.clone(), e.path.clone()),
+                    (producer.to_string(), e.project_id.clone(), e.path.clone()),
                 );
             }
             Body::WorktreeCreated(e) => {
@@ -393,7 +465,8 @@ impl View {
                 self.agents.insert(
                     q(&e.agent_id),
                     AgentView {
-                        node_id: e.node_id.clone(),
+                        // The agent runs on the node that started it: the connection decides, not the body (T19).
+                        node_id: producer.to_string(),
                         project_id: e.project_id.clone(),
                         worktree_id: q(&e.worktree_id),
                         kind: e.kind.clone(),
@@ -494,12 +567,14 @@ impl View {
                     }
                 }
             }
-            // ADR-0053: the id is the hub-wide key (the hub made this event); history and usage stay.
-            Body::AgentForgotten(e) => {
+            // ADR-0053: the id is the hub-wide key (the hub made this event); history and usage stay. Written by the hub only: one that
+            // claims to come from a node is ignored (the session refuses it too), as `NodeForgotten` is.
+            Body::AgentForgotten(e) if producer == RESERVED_HUB_ID => {
                 if let Some(a) = self.agents.get_mut(&e.agent_id) {
                     a.forgotten = true;
                 }
             }
+            Body::AgentForgotten(_) => {}
             Body::AgentExited(e) => {
                 if let Some(a) = self.agents.get_mut(&q(&e.agent_id)) {
                     a.running = false;
@@ -511,7 +586,7 @@ impl View {
                 self.terminals.insert(
                     q(&e.terminal_id),
                     TerminalView {
-                        node_id: e.node_id.clone(),
+                        node_id: producer.to_string(),
                         agent_id: q(&e.agent_id),
                         title: String::new(),
                     },
@@ -593,15 +668,20 @@ impl View {
     pub fn rebuild(store: &impl EventStore) -> Result<(Self, u64), StoreError> {
         let mut view = Self::default();
         let mut pos = 0;
+        let mut forged = false;
         loop {
             let batch = store.events_after(pos, 1000)?;
             if batch.is_empty() {
+                if forged {
+                    view.distrusted_until = pos;
+                }
                 return Ok((view, pos));
             }
             for e in batch {
                 pos = e.pos;
                 // A payload that does not decode was stored by a newer build; skip it rather than fail.
                 if let Ok(ev) = Event::decode(e.payload.as_slice()) {
+                    forged |= is_forged(&ev);
                     if view.brings_back(&ev) {
                         view.remembered_at = pos;
                     }
@@ -664,6 +744,136 @@ mod tests {
             state: s as i32,
             reported,
         })
+    }
+
+    /// Threat model T19: a node speaks for itself only. What a node's events say about another node's id changes nothing about that
+    /// node: an agent, a terminal and a checkout are on the node that sent them, and resource numbers are the sender's own.
+    #[test]
+    fn a_node_cannot_place_things_on_or_change_the_numbers_of_another_node() {
+        let online = |id: &str| {
+            Body::NodeOnline(NodeOnline {
+                node_id: id.into(),
+                hostname: id.into(),
+                os: "linux".into(),
+                build: "b".into(),
+                binary: String::new(),
+            })
+        };
+        let mut v = View::default();
+        v.apply(&ev("n1", 1, online("n1")));
+        v.apply(&ev("n2", 1, online("n2")));
+        // n2 says things about n1.
+        v.apply(&ev(
+            "n2",
+            2,
+            Body::NodeResources(NodeResources {
+                node_id: "n1".into(),
+                agents_running: 9,
+                terminals_open: 9,
+                memory_used_bytes: 9,
+            }),
+        ));
+        assert_eq!(v.nodes["n1"].agents_running, 0, "n1's numbers are n1's own");
+        v.apply(&ev("n2", 3, started("a"))); // body names n1
+        assert_eq!(
+            v.agents["n2/a"].node_id, "n2",
+            "the agent runs on the node that started it"
+        );
+        v.apply(&ev(
+            "n2",
+            4,
+            Body::TerminalOpened(TerminalOpened {
+                terminal_id: "t".into(),
+                agent_id: "a".into(),
+                node_id: "n1".into(),
+                ..TerminalOpened::default()
+            }),
+        ));
+        assert_eq!(v.terminals["n2/t"].node_id, "n2");
+        v.apply(&ev(
+            "n2",
+            5,
+            Body::CheckoutDiscovered(CheckoutDiscovered {
+                checkout_id: "c".into(),
+                node_id: "n1".into(),
+                project_id: "p".into(),
+                path: "/x".into(),
+            }),
+        ));
+        assert_eq!(v.checkouts["n2/c"].0, "n2");
+        // The same events from n1 about itself still count.
+        v.apply(&ev(
+            "n1",
+            2,
+            Body::NodeResources(NodeResources {
+                node_id: "n1".into(),
+                agents_running: 2,
+                ..NodeResources::default()
+            }),
+        ));
+        assert_eq!(v.nodes["n1"].agents_running, 2);
+    }
+
+    /// The same, for the events that end or hide things: a history stored before the session refused them must not act on another node
+    /// when it is read again (a hub restart replays the store).
+    #[test]
+    fn a_stored_forged_start_goodbye_or_forget_changes_nothing_on_another_node() {
+        let online = |id: &str| {
+            Body::NodeOnline(NodeOnline {
+                node_id: id.into(),
+                hostname: id.into(),
+                os: "linux".into(),
+                build: "b".into(),
+                binary: String::new(),
+            })
+        };
+        let mut v = View::default();
+        v.apply(&ev("n1", 1, online("n1")));
+        v.apply(&ev("n2", 1, online("n2")));
+        v.apply(&ev("n1", 2, started("a")));
+        assert!(v.agents["n1/a"].running);
+        // n2 claims n1 started again: n1's agent is still running, and n2's own start counted for n2.
+        v.apply(&ev("n2", 2, online("n1")));
+        assert!(v.agents["n1/a"].running, "a forged start ended n1's agent");
+        assert!(v.nodes["n1"].online);
+        // n2 says goodbye for n1: n1 is still online; and for itself it counts.
+        v.apply(&ev(
+            "n2",
+            3,
+            Body::NodeOffline(NodeOffline {
+                node_id: "n1".into(),
+            }),
+        ));
+        assert!(v.nodes["n1"].online, "a forged goodbye took n1 offline");
+        // n2 forgets n1's agent: only the hub may.
+        let forget = |producer: &str, seq| {
+            ev(
+                producer,
+                seq,
+                Body::AgentForgotten(AgentForgotten {
+                    agent_id: "n1/a".into(),
+                }),
+            )
+        };
+        v.apply(&forget("n2", 4));
+        assert!(
+            !v.agents["n1/a"].forgotten,
+            "a node hid another node's agent"
+        );
+        v.apply(&forget(RESERVED_HUB_ID, 1));
+        assert!(
+            v.agents["n1/a"].forgotten,
+            "the hub's own forget still works"
+        );
+        // A node's own goodbye still counts.
+        v.apply(&ev(
+            "n2",
+            5,
+            Body::NodeOffline(NodeOffline {
+                node_id: "n2".into(),
+            }),
+        ));
+        assert!(!v.nodes["n2"].online);
     }
 
     #[test]
@@ -1304,7 +1514,14 @@ mod tests {
         let events = [
             ev("n1", 1, started("a")),
             ev("n1", 2, state("a", AgentState::Working, true)),
-            ev("n2", 1, started("b")),
+            // The machine's own start (the shared fixture names n1): no refused record, so the barrier stays down.
+            ev("n2", 1, {
+                let Body::AgentStarted(mut s) = started("b") else {
+                    unreachable!()
+                };
+                s.node_id = "n2".into();
+                Body::AgentStarted(s)
+            }),
         ];
         for e in &events {
             store
