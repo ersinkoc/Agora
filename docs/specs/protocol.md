@@ -425,7 +425,8 @@ Capability `mesh.spawn` (offered by a node that has the mesh tools `agent_start`
   themselves ask (each of their starts still needs its own approval, and their helpers cannot ask further). Neither is honoured for
   a folder outside the asking agent's own. `ApprovalResolved.helper_grant` (4) and `.helpers_may_start` (5) record what was signed.
 - `GrantList` lists live helper grants as `GrantInfo` with `commands = ["mesh.agent_start"]`, `scope = "agent:<id>"`, the new fields
-  `kind` (6), `folder` (7) and `remaining` (8), and `expires_at_ms = 0` (it ends when the asking agent exits or is stopped). `GrantRevoke { grant_id }`
+  `kind` (6), `folder` (7) and `remaining` (8), and `expires_at_ms = 0` (it ends when the asking agent exits or is stopped, or when the device that signed it is no longer trusted in the
+  same term or within its limits, audit F290). `GrantRevoke { grant_id }`
   with the approval id ends one.
 - `AgentStop.stop_helpers` (2): also stop the helpers this agent started, and theirs. Old nodes ignore it.
 - `AgentStartRefused` (event 65: `agent_id` of the asking agent, `kind`, `folder`, `code`): the node refused a start before asking

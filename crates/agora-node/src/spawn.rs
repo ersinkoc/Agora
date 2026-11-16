@@ -4,7 +4,8 @@
 //! - every start needs the user's decision, signed by a trusted device and verified on this node (ADR-0020); the decision covers a
 //!   hash of the request as announced, so what starts is what the user read (`approvals::start_signed_message`);
 //! - a signed grant may cover more starts of the same kind in the same folder for the asking agent; it ends when that agent exits
-//!   or is stopped, and is never given for a folder outside the asking agent's own;
+//!   or is stopped, or when the device that signed it no longer vouches for it (audit F290), and is never given for a folder outside
+//!   the asking agent's own;
 //! - the helper is never wider than the asking agent: its folder is the asker's folder, below it or a worktree of it (any other
 //!   folder only by a decision that names it), and on a node that confines agents a helper of another kind may not bring a manifest
 //!   the owner trusts to widen its confinement;
@@ -35,7 +36,7 @@ use agora_protocol::v1;
 use agora_protocol::{Error, ErrorCode};
 use serde_json::{json, Value};
 
-use crate::approvals::{HelperGrant, NodeApprovals, Pending};
+use crate::approvals::{start_signed_message, HelperGrant, NodeApprovals, Pending};
 use crate::daemon::EventSink;
 use crate::mesh_server::{Helpers, StartArgs, StartOutcome};
 use crate::supervisor::{AgentView, ScreenCheck, StartRequest, Supervisor};
@@ -684,16 +685,29 @@ impl Spawner {
             )
         };
         if grant > 1 {
-            self.approvals.add_helper_grant(HelperGrant {
-                id: request.id.clone(),
-                agent: req.caller.clone(),
-                kind: req.kind.clone(),
-                folder: req.folder.clone(),
-                worktree: req.worktree,
-                remaining: grant - 1,
-                helpers_may_start: nested,
-                signer_device_id: r.signer_device_id.clone(),
-            });
+            // With the decision as signed, so each later use checks again that its signer still vouches for it (audit F290).
+            let signed = start_signed_message(
+                &self.node_id,
+                &request.id,
+                r.approved,
+                r.helper_grant,
+                r.helpers_may_start,
+                &request.detail,
+            );
+            self.approvals.add_helper_grant(
+                HelperGrant {
+                    id: request.id.clone(),
+                    agent: req.caller.clone(),
+                    kind: req.kind.clone(),
+                    folder: req.folder.clone(),
+                    worktree: req.worktree,
+                    remaining: grant - 1,
+                    helpers_may_start: nested,
+                    signer_device_id: r.signer_device_id.clone(),
+                },
+                signed,
+                r.signature.clone(),
+            );
         }
         if let Some(ev) = &self.events {
             ev.start_resolved(&request.id, r.approved, &r.signer_device_id, grant, nested);

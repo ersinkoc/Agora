@@ -8,6 +8,10 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 - An agent's mesh tools no longer end for good when the node restarts: the bridge the agent's client runs reconnects to the node
   (waiting up to 2 s between tries, giving up after 15 minutes) and the agent's session stays open. A call made at that moment fails at once with
   `mesh.unavailable` and can be repeated (ADR-0075, the first step; applies to agents started by this version).
+### Security
+- "Up to N helpers like this" (ADR-0057) ended only when the asking agent stopped: after the device that approved it was removed
+  (`agora node untrust`, a revocation from another device), ran out or was narrowed to other projects, the agent kept starting
+  helpers without asking. The grant now ends for good with that device's trust, and the next start asks again (audit finding F290).
 _Nothing yet._
 
 ## 0.3.14
