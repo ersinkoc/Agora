@@ -27,6 +27,12 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
   minimized or not in front (the count only, in your language). Not on macOS yet: there it stays silent for now.
 
 ### Security
+- Linux: a confined agent (`sandbox = worktree`) could cut any of your files outside its folders to nothing (`truncate`), such as
+  `~/.ssh/authorized_keys` or code in another checkout. That is now refused on kernels from Linux 6.2; older kernels cannot refuse it
+  (audit finding F260).
+- Linux: a confined agent can now move a file from one folder of its worktree to another. It was refused ("invalid cross-device
+  link"), so tools without a copy fallback failed; a file from a folder it may only read still cannot be moved or linked in (audit
+  finding F261).
 - macOS: a confined agent is not started when a file it may write also has another name elsewhere (a hard link made outside
   confinement), or when a save copy next to it (`state.json.tmp`) is such a link, since writing it would change that other file too; the message says to remove the link or put a copy in its place
   (#571). Such links inside a folder it may write are not looked for at each start.
@@ -41,6 +47,8 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
   nor finish it, stuck until its lease ran out. It is refused (`mesh.recipient_unknown`) and stays with its owner (audit finding F601).
 
 ### Machines
+- On Linux and macOS, a folder that failed while it was being read (a disk or network error) was shown as complete, or as empty; the
+  machine now reports that it could not be read (audit finding F262).
 - Asking for the changes of one file whose name contains `[`, `*` or `?` now returns that file only: the name was read as a pattern, so
   `pages/[id].tsx` also brought `pages/i.tsx`. Nothing outside the workspace folder was ever reachable this way (audit finding F402).
 - The number of changed files a machine shows for a folder is now right when the folder holds new files: a new folder with three files
