@@ -4,6 +4,14 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+### Security
+- A confined agent on Linux can no longer use the node's control socket (ADR-0082, T16): when the node confines agents it keeps a secret
+  in its own folder (`control.token`, readable only by its owner and out of every agent's reach) and answers nothing on the socket until the
+  caller shows it, so an agent can no longer start agents with options nobody confirmed, stop agents or type into another agent's terminal
+  through it. `agora` presents the secret itself, so no command changes; a node that does not confine agents changes nothing. A node whose
+  folder lies inside a folder agents may read or write (a node under `/tmp`) refuses to start confined agents, and `agora doctor` says so.
+  `agora` also tells a node that refused it apart from no node running.
+
 ### Terminals
 - A program that draws its status lines with icon glyphs (WrongStack's Powerline arrows and folder, branch and settings icons) is no longer
   shown as empty boxes in the window and the desktop app: if a Nerd Font is installed on the machine that shows the window, the icons come

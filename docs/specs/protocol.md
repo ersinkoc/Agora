@@ -371,6 +371,18 @@ commands. Terminal ids are `t-<agent id>` (one terminal per agent). Implemented 
 `agent.start`, `agent.stop`, `agent.prompt`, `terminal.input`, `terminal.resize`, `terminal.subscribe`; the rest
 answer `protocol.capability_missing`. `agent.list` (ADR-0025) and `agent.kinds` (ADR-0030: the node's built-in and folder manifests, one per kind (agent-manifest.md, "Where agent kinds come from"), with display name, integration level and whether the launch program is on `PATH`; invalid manifests omitted; `agora agent kinds`). ADR-0069 (capability `kinds.program`): each kind also names `program`, the file name the node looks for on its `PATH` (never a path, and never the node's `PATH` itself), so a kind that is not installed can say what is missing; `NodeOnline.binary` (and `NodeSnapshot.binary`, from the node's latest start) is the node's own executable only when its folder is not on the node's `PATH`, empty otherwise, so a client can say to run `agora` from that folder. It is a full path that may contain a user name: only the owner receives it whole; the hub sends members and viewers its file name alone (snapshot, live and replayed events alike), since any folder, the one it is in included, may be the user's home; the owner's client shows the last two components unless asked for the whole path. Old nodes send both empty.
 
+**Control token (ADR-0082, `ControlAuth` = `CommandRequest` field 101, `message ControlAuth { string token }`, append-only).** On Linux, when the node's
+policy confines agents (`sandbox` is not `off`), the node writes 32 random bytes, hex-encoded (64 characters), to `<home>/control.token`
+(`<socket>.token` when the socket is not named `node.sock`; 0600, replaced at every start, removed when the node stops) and requires the first
+request on every connection to be `ControlAuth`. Until it succeeds every other command answers `auth.unauthenticated`; a wrong token answers
+`auth.unauthenticated` and the node closes the connection. A node that requires no token (not confining, or macOS and Windows) answers `ok` to any
+`ControlAuth`; an older node answers `protocol.invalid_message` (it does not know the command), and a client takes either as "no token needed".
+`agora_node::control::Client::connect` reads the file when it exists and presents it before returning, so callers keep their contract; a client
+that cannot read the file (a confined agent) sends nothing and is refused at its first command. `ControlAuth` is accepted on the local socket
+only: a hub-routed one is refused (`protocol.capability_missing`, `capability` = `control.auth`). The token is never logged, never in an event
+and never sent to the hub. A script that speaks the protocol itself must read the file. Capability: none (a node that requires the token
+says so with `auth.unauthenticated`).
+
 ## 5. Client state model
 
 1. Client connects and receives `Snapshot { as_of_seq, projects, agents, terminals, approvals, ... }`.

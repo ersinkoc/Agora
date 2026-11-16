@@ -757,8 +757,9 @@ pub struct Sandbox {
     /// The node's own folders and files (its data, identity, logs, control socket, other agents' mesh sockets): never read or written,
     /// and no unix socket below them connected to, even when they sit below an allowed folder (a node home under `/tmp`), except
     /// `sockets`, including paths that do not exist yet when the agent starts. Enforced on macOS only (Seatbelt can say "except");
-    /// Linux and Windows ignore it today, so there a node home below an allowed folder stays reachable and T16 stays open (see
-    /// `docs/security/threat-model.md`).
+    /// Linux and Windows ignore it, so there a node home below an allowed folder stays reachable by file rights: on Linux the node
+    /// refuses to start an agent whose grants contain the control token file and the socket needs that token (ADR-0082); Windows
+    /// keeps the files out by its own ACLs (see `docs/security/threat-model.md`, T16).
     pub deny: Vec<PathBuf>,
     /// The folders below `deny` the agent may use after all (the worktree the node made for it). Each is reopened only while it is a
     /// real folder whose own name is not a symbolic link: an agent that swapped its worktree for a link to the node's home would
@@ -788,6 +789,11 @@ pub const NARROW_GIT_WRITES: bool = cfg!(windows);
 /// run in the user's own git and the node's. Windows (narrow profile) and macOS; Linux still gives the whole shared folder. Callers use
 /// this instead of a `cfg`.
 pub const GIT_CONFIG_READ_ONLY: bool = cfg!(any(windows, target_os = "macos"));
+
+/// True where the node's control socket needs a token because the system gives a confined agent no other barrier to it (ADR-0082):
+/// Linux, whose Landlock rules do not restrict connecting to a pathname socket. macOS closes the node's home in the Seatbelt profile
+/// and Windows refuses the pipe to a restricted token. Callers use this instead of a `cfg`.
+pub const CONTROL_TOKEN_REQUIRED: bool = cfg!(target_os = "linux");
 
 /// True where a confined agent gets a temp folder of its own (`TMPDIR`, `TEMP`, `TMP` point at it): on macOS the per-user temp folder
 /// is private to the sandbox and on Windows the profile's is out of reach, so without one compilers and `mktemp` fail. On Linux the

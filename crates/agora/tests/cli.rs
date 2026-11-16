@@ -33,7 +33,11 @@ struct Setup {
 }
 
 fn setup(name: &str) -> Setup {
-    let home = std::env::temp_dir().join(format!("agora-cli-{}-{name}", std::process::id()));
+    setup_in(&std::env::temp_dir(), name)
+}
+
+fn setup_in(base: &Path, name: &str) -> Setup {
+    let home = base.join(format!("agora-cli-{}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&home);
     let repo = home.join("demo");
     std::fs::create_dir_all(&repo).unwrap();
@@ -553,4 +557,88 @@ fn a_registered_project_name_wins_over_same_named_folders_in_both_processes() {
             std::fs::canonicalize(expected).unwrap()
         );
     }
+}
+
+/// ADR-0082: where the node confines agents on Linux, the control socket needs its token; `agora` reads it itself, so the commands and
+/// their output are the same, and `agora node stdio` (the bridge a remote hub uses over ssh) carries a connection that is already
+/// proved.
+#[test]
+fn with_a_confining_node_the_cli_reads_the_control_token_itself() {
+    if !shell_agents_supported()
+        || !agora_platform::CONTROL_TOKEN_REQUIRED
+        || !agora_platform::sandbox_supported()
+    {
+        return;
+    }
+    // A folder agents are not granted (the system temp folder is writable to them, and the node refuses to start one then).
+    let s = setup_in(Path::new(env!("CARGO_TARGET_TMPDIR")), "token");
+    std::fs::create_dir_all(s.home.join("data")).unwrap();
+    std::fs::write(s.home.join("data/policy"), "sandbox = worktree\n").unwrap();
+    let _node = start_node(&s);
+    let token = s.home.join("control.token");
+    let end = Instant::now() + Duration::from_secs(20);
+    while !token.exists() {
+        assert!(Instant::now() < end, "no control token");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let (code, out, err) = cli(&s, &["agent", "list"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("no agents"), "{out}");
+
+    // Without the file the client has nothing to present: refused, said in words.
+    let hidden = s.home.join("hidden.token");
+    std::fs::rename(&token, &hidden).unwrap();
+    let (code, _, err) = cli(&s, &["agent", "list"]);
+    assert_eq!(code, 1);
+    assert!(err.contains("control token"), "{err}");
+    std::fs::rename(&hidden, &token).unwrap();
+
+    // The stdio bridge: one request frame in, its answer out.
+    let mut bridge = Command::new(AGORA)
+        .args(["node", "stdio"])
+        .env("AGORA_HOME", &s.home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let req = agora_protocol::v1::CommandRequest {
+        request_id: "1".into(),
+        command: Some(agora_protocol::v1::command_request::Command::AgentList(
+            agora_protocol::v1::AgentList::default(),
+        )),
+        ..Default::default()
+    };
+    let bytes = agora_protocol::Frame {
+        stream_id: agora_protocol::frame::STREAM_COMMANDS,
+        kind: 0,
+        seq: None,
+        payload: prost::Message::encode_to_vec(&req),
+    }
+    .encode(agora_protocol::frame::DEFAULT_MAX_PAYLOAD)
+    .unwrap();
+    bridge.stdin.as_mut().unwrap().write_all(&bytes).unwrap();
+    let mut dec = agora_protocol::Decoder::new(agora_protocol::frame::DEFAULT_MAX_PAYLOAD);
+    let mut out = bridge.stdout.take().unwrap();
+    let mut buf = [0u8; 4096];
+    let frame = loop {
+        let n = out.read(&mut buf).unwrap();
+        assert!(n > 0, "the bridge closed");
+        dec.push(&buf[..n]);
+        if let Some(f) = dec.next_frame().unwrap() {
+            break f;
+        }
+    };
+    let resp =
+        <agora_protocol::v1::CommandResponse as prost::Message>::decode(frame.payload.as_slice())
+            .unwrap();
+    assert!(
+        matches!(
+            resp.result,
+            Some(agora_protocol::v1::command_response::Result::Ok(_))
+        ),
+        "{resp:?}"
+    );
+    let _ = bridge.kill();
+    let _ = bridge.wait();
 }

@@ -5,7 +5,9 @@
 //! opened by the client sending its `TerminalSubscribe` request on a dynamic stream id (3 or higher) of its
 //! choosing; after the response, the node writes that terminal's frames on that stream (`KIND_TERM_*`), starting
 //! with a snapshot. Input and resize are ordinary commands (`TerminalInput`, `TerminalResize`). The socket is owner-only,
-//! so no further authentication is needed locally; the hub path adds device auth and approvals.
+//! so no further authentication is needed locally, except where the system lets a confined agent connect (Linux, ADR-0082): a node
+//! that confines agents there requires the control token (`ControlAuth`, first on a connection) from every client; the hub path
+//! adds device auth and approvals.
 //!
 //! Retried requests (same `idempotency_key`) get the stored response and do not repeat their effect.
 
@@ -78,6 +80,8 @@ pub struct ControlContext {
     ledger: Option<Arc<crate::ledger::Ledger>>,
     /// ADR-0080: the owner's policy `files.show_secret`; off unless the policy file says `true`.
     show_secret: bool,
+    /// ADR-0082: when set, a connection must present it (`ControlAuth`) before any other command is answered.
+    control_token: Option<(crate::control_token::ControlToken, PathBuf)>,
     names: AtomicU64,
     seen: Mutex<IdempotencyCache>,
 }
@@ -118,8 +122,21 @@ impl ControlContext {
             git_wake: None,
             ledger: None,
             show_secret: false,
+            control_token: None,
             seen: Mutex::new(IdempotencyCache::default()),
         }
+    }
+
+    /// ADR-0082: requires this token from every connection before any command but `ControlAuth` is answered. [`ControlServer::start`]
+    /// writes it to `file` once the socket is bound, and removes the file when the server stops.
+    #[must_use]
+    pub fn with_control_token(
+        mut self,
+        token: crate::control_token::ControlToken,
+        file: PathBuf,
+    ) -> Self {
+        self.control_token = Some((token, file));
+        self
     }
 
     /// Wakes the node's Git watcher (`daemon::watch_git`) after an agent starts, so the new folder's changes are counted at once and
@@ -1242,6 +1259,8 @@ pub(crate) fn command_name(c: &Cmd) -> &'static str {
         Cmd::PairDeny(_) => "pair.deny",
         Cmd::PairRequest(_) => "pair.request",
         Cmd::PairReveal(_) => "pair.reveal",
+        // ADR-0082: only the local control socket answers it (in `handle_request`); anywhere else it is refused as unsupported.
+        Cmd::ControlAuth(_) => "control.auth",
     }
 }
 
@@ -1260,12 +1279,23 @@ pub struct ControlServer {
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
     path: PathBuf,
+    /// ADR-0082: the control token file this server wrote, removed when it stops.
+    token_file: Option<PathBuf>,
 }
 
 impl ControlServer {
     pub fn start(path: &Path, ctx: Arc<ControlContext>) -> io::Result<Self> {
         let listener = local_listen(path)?;
         listener.set_nonblocking(true)?;
+        // After the bind, which holds the node's lock: a second node on the same home fails there and never replaces the token of the
+        // running one. Before the accept loop, so every connection that is answered is checked against the token in the file.
+        let token_file = match &ctx.control_token {
+            Some((token, file)) => {
+                token.write(file)?;
+                Some(file.clone())
+            }
+            None => None,
+        };
         let stop = Arc::new(AtomicBool::new(false));
         let stop2 = Arc::clone(&stop);
         let thread = std::thread::Builder::new()
@@ -1288,6 +1318,7 @@ impl ControlServer {
             stop,
             thread: Some(thread),
             path: path.to_path_buf(),
+            token_file,
         })
     }
 
@@ -1301,6 +1332,9 @@ impl Drop for ControlServer {
         self.stop.store(true, Ordering::Release);
         if let Some(t) = self.thread.take() {
             let _ = t.join();
+        }
+        if let Some(f) = &self.token_file {
+            let _ = std::fs::remove_file(f);
         }
     }
 }
@@ -1331,6 +1365,8 @@ fn handle_connection(stream: LocalStream, ctx: &Arc<ControlContext>, stop: &Arc<
     let alive = Arc::new(AtomicBool::new(true));
     let mut decoder = Decoder::new(DEFAULT_MAX_PAYLOAD);
     let mut buf = vec![0u8; 16 * 1024];
+    // ADR-0082: a node that requires the token answers nothing but `ControlAuth` until it succeeded on this connection.
+    let mut authed = ctx.control_token.is_none();
     'conn: while !stop.load(Ordering::Acquire) {
         match reader.read(&mut buf) {
             Ok(0) => break,
@@ -1348,8 +1384,10 @@ fn handle_connection(stream: LocalStream, ctx: &Arc<ControlContext>, stop: &Arc<
         loop {
             match decoder.next_frame() {
                 Ok(Some(frame)) => {
-                    if frame.kind == KIND_REQUEST {
-                        handle_request(&frame, ctx, &writer, &alive, stop);
+                    if frame.kind == KIND_REQUEST
+                        && !handle_request(&frame, ctx, &writer, &alive, stop, &mut authed)
+                    {
+                        break 'conn;
                     }
                 }
                 Ok(None) => break,
@@ -1367,22 +1405,48 @@ fn handle_request(
     writer: &SharedWriter,
     alive: &Arc<AtomicBool>,
     stop: &Arc<AtomicBool>,
-) {
+    authed: &mut bool,
+) -> bool {
     let Ok(req) = v1::CommandRequest::decode(frame.payload.as_slice()) else {
-        return;
+        return true;
     };
+    // ADR-0082. Before anything else, so not even a stored answer (`idempotency_key`) reaches a connection that has not proved itself.
+    if let Some(Cmd::ControlAuth(a)) = &req.command {
+        let ok = ctx
+            .control_token
+            .as_ref()
+            .is_none_or(|(t, _)| t.verify(&a.token));
+        let result = if ok {
+            Ok(ok_empty())
+        } else {
+            Err(Error::new(ErrorCode::AuthUnauthenticated))
+        };
+        let resp = response(&req.request_id, result);
+        let _ = send(writer, STREAM_COMMANDS, KIND_RESPONSE, resp.encode_to_vec());
+        *authed = ok;
+        // A wrong token ends the connection: no second guess on it.
+        return ok;
+    }
+    if !*authed {
+        let resp = response(
+            &req.request_id,
+            Err(Error::new(ErrorCode::AuthUnauthenticated)),
+        );
+        let _ = send(writer, STREAM_COMMANDS, KIND_RESPONSE, resp.encode_to_vec());
+        return true;
+    }
     if !req.idempotency_key.is_empty() {
         if let Some(mut prev) = ctx.remembered(&req.idempotency_key) {
             // Same result, addressed to this attempt: the client matches responses by request id.
             prev.request_id.clone_from(&req.request_id);
             let _ = send(writer, STREAM_COMMANDS, KIND_RESPONSE, prev.encode_to_vec());
-            return;
+            return true;
         }
     }
     let Some(cmd) = &req.command else {
         let resp = response(&req.request_id, Err(invalid("command")));
         let _ = send(writer, STREAM_COMMANDS, KIND_RESPONSE, resp.encode_to_vec());
-        return;
+        return true;
     };
 
     // Terminal subscriptions need the stream the request arrived on.
@@ -1405,7 +1469,7 @@ fn handle_request(
                 .name("agora-control-term".into())
                 .spawn(move || pump(&ctx, &writer, stream_id, &agent, &snap, &sub, &alive, &stop));
         }
-        return;
+        return true;
     }
 
     // A chat transcript: the snapshot, then every new entry, on the stream the request arrived on.
@@ -1429,7 +1493,7 @@ fn handle_request(
                 .name("agora-control-chat".into())
                 .spawn(move || pump_chat(&writer, stream_id, entries, &rx, &alive, &stop));
         }
-        return;
+        return true;
     }
 
     let resp = response(&req.request_id, execute(ctx, cmd));
@@ -1437,6 +1501,7 @@ fn handle_request(
         ctx.remember(&req.idempotency_key, &resp);
     }
     let _ = send(writer, STREAM_COMMANDS, KIND_RESPONSE, resp.encode_to_vec());
+    true
 }
 
 fn subscribe(
@@ -1577,7 +1642,47 @@ pub struct Client {
 }
 
 impl Client {
+    /// Opens the node's control socket. When the token file beside the socket holds a token (a node that confines agents on Linux
+    /// requires it, ADR-0082) it is presented first, so every caller keeps its own contract; a node that does not know the command (an
+    /// older one) or does not require the token carries on. `PermissionDenied` when the node refuses the token.
     pub fn connect(path: &Path) -> io::Result<Self> {
+        let mut c = Self::open(path)?;
+        let mut tried = None;
+        loop {
+            let Some(token) =
+                crate::control_token::read_token(&crate::control_token::token_path(path))
+            else {
+                return Ok(c);
+            };
+            if tried.as_ref() == Some(&token) {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "the node refused the control token",
+                ));
+            }
+            match c.call(Cmd::ControlAuth(v1::ControlAuth {
+                token: token.clone(),
+            }))? {
+                Ok(_) => return Ok(c),
+                Err(e) if e.code == ErrorCode::AuthUnauthenticated.as_str() => {
+                    // A node starting at this moment may not have replaced the file yet: once more, on a new connection, if the
+                    // file changed since.
+                    tried = Some(token);
+                    c = Self::open(path)?;
+                }
+                // A node that does not know the command: no token needed.
+                Err(_) => return Ok(c),
+            }
+        }
+    }
+
+    /// Opens the socket and presents no token, as a client that does not know the token (an old one, a script, a confined agent) does. A
+    /// node that requires the token answers every command but `ControlAuth` with `auth.unauthenticated`; tests use this to prove it.
+    pub fn connect_unauthenticated(path: &Path) -> io::Result<Self> {
+        Self::open(path)
+    }
+
+    fn open(path: &Path) -> io::Result<Self> {
         let stream = local_connect(path)?;
         Ok(Self {
             stream,
@@ -1585,6 +1690,11 @@ impl Client {
             next_request: 1,
             pending: VecDeque::new(),
         })
+    }
+
+    /// The connection itself, for a caller that carries its bytes on (`agora node stdio`). Whatever was proved at connect stays proved.
+    pub fn into_stream(self) -> LocalStream {
+        self.stream
     }
 
     /// A second handle for writing from another thread (for example forwarding keystrokes).

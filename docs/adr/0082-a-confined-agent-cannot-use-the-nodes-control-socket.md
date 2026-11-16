@@ -94,3 +94,17 @@ Origin: issue #440 (T16), found in the ADR-0059 security review; its Windows hal
 1. Token on Linux only when the node confines agents (decision 3)? Proposed: yes.
 2. Refuse the start when the node home is reachable (decision 4), even though a home under `/tmp` was usable before? Proposed: yes; tests use a home outside any granted folder.
 3. Reuse `auth.unauthenticated` instead of a new code? Proposed: yes.
+
+## Built
+Built on 2026-11-17 (issue #440). The command is `ControlAuth` (`CommandRequest` field 101, golden fixture `agora.v1.ControlAuth` added). The token
+is made in memory by `ControlToken::generate` (`agora-node/src/control_token.rs`) and written by `ControlServer::start` once `local_listen` holds
+the node's lock, before the accept loop; the file is removed when the server stops. Enforcement is the platform constant
+`CONTROL_TOKEN_REQUIRED` (Linux) together with `sandbox != off`; it is a constant in `agora-platform`, so there is no `cfg` outside it. Decision 4 is
+`SandboxPolicy::token_reachable` (the same by-name-and-by-target check as `git_config`'s `under_a_grant`, failing closed), applied to the final
+profile right before the spawn and by `agora doctor` on the static grants. Choices the text left open: the token path for a socket not named
+`node.sock` is `<socket>.token`; a node that does not require the token answers `ok` to any `ControlAuth` (so a stale file from an earlier
+confining run never locks the owner out); the client retries once on a new connection when the file changed after a refusal (a node starting at
+that moment); `agora node stdio` presents the token itself and then carries the proved connection; a routed (hub) `ControlAuth` is refused; the
+refused-connection wording of decision 6 was already in place (`cli-node-refused`, the `PermissionDenied` mapping) and is unchanged, plus a new
+`cli-node-needs-token` for a client that had no token to show. Verified on macOS and Windows by reading only: macOS `deny`/`reopen` in
+`macos.rs` still close the home including the socket, and the Windows pipe keeps `OWNER_ONLY`; neither was run in this change.

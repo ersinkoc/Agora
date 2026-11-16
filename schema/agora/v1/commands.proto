@@ -86,6 +86,8 @@ message CommandRequest {
     PairDeny pair_deny = 98;
     PairRequest pair_request = 99;
     PairReveal pair_reveal = 100;
+    // ADR-0082: the first request on a node's local control socket when the node requires its control token; accepted on no other path.
+    ControlAuth control_auth = 101;
   }
 }
 
@@ -686,4 +688,11 @@ message WorkspaceQuery {
   string operation = 2;
   string path = 3;
   uint32 limit = 4;
+}
+
+// ADR-0082: proves the caller can read the node's `control.token` file (the owner's own processes can, a confined agent cannot).
+// `token` is 64 lowercase hex characters (32 random bytes). A node that does not require the token answers ok to any value;
+// a node that does answers `auth.unauthenticated` to a wrong one and closes the connection. Never logged, never in an event.
+message ControlAuth {
+  string token = 1;
 }

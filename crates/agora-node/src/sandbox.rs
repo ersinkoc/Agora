@@ -46,6 +46,9 @@ pub struct SandboxPolicy {
     /// The node's own folders and sockets, closed to every confined agent whatever else is open (set by the node, not the policy
     /// file): its data (trusted devices, policy, ledger), identity, logs, hub folder, control socket and the agents' mesh sockets.
     pub protect: Vec<PathBuf>,
+    /// ADR-0082: the control token file, set by the node where it requires the token (Linux, confinement on). A profile whose read or
+    /// write grants contain it is refused at the start (`control_token_reachable`).
+    pub control_token: Option<PathBuf>,
 }
 
 /// The system folders every program needs to run.
@@ -353,6 +356,21 @@ impl SandboxPolicy {
         sb
     }
 
+    /// ADR-0082, decision 4: whether `profile` lets the agent read or write the control token file (a grant that is the file, or any
+    /// folder above it, by name or by where the names lead). Always false when the node does not require the token.
+    pub fn token_reachable(&self, profile: &agora_platform::Sandbox) -> bool {
+        let Some(file) = &self.control_token else {
+            return false;
+        };
+        let grants: Vec<PathBuf> = profile
+            .read
+            .iter()
+            .chain(profile.write.iter())
+            .cloned()
+            .collect();
+        under_a_grant(file, &grants)
+    }
+
     /// Whether agents can be started under this policy on this machine.
     pub fn enforceable(&self) -> bool {
         match self.level {
@@ -526,6 +544,7 @@ mod tests {
             write: vec!["/home/x/.cache/agent".into()],
             trusted_kinds: vec![],
             protect: vec![],
+            control_token: None,
         };
         let sb = p.profile("k", None, &wt, "/home/x/bin/agent").unwrap();
         // `worktree` leaves the network alone; `worktree-offline` asks for it to be cut, keeping the node's sockets.
@@ -591,5 +610,46 @@ mod tests {
             .iter()
             .all(|w| *w != out));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_grant_that_contains_the_control_token_makes_it_reachable() {
+        let base = std::fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!("agora-adr82-reach-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("home/worktrees/a")).unwrap();
+        std::fs::create_dir_all(base.join("home2")).unwrap();
+        let tok = base.join("home/control.token");
+        let policy = SandboxPolicy {
+            level: Level::Worktree,
+            control_token: Some(tok.clone()),
+            ..SandboxPolicy::default()
+        };
+        let grant = |read: &[&Path], write: &[&Path]| {
+            agora_platform::Sandbox::new(
+                read.iter().map(|p| p.to_path_buf()).collect(),
+                write.iter().map(|p| p.to_path_buf()).collect(),
+            )
+        };
+        // Outside every grant, also beside it and in a folder of the same name prefix.
+        let (wt, home2) = (base.join("home/worktrees/a"), base.join("home2"));
+        assert!(!policy.token_reachable(&grant(&[Path::new("/usr")], &[&wt, &home2])));
+        // The folder above, the home itself and the file itself, as read or as write grants.
+        for g in [base.clone(), base.join("home"), tok.clone()] {
+            assert!(policy.token_reachable(&grant(&[&g], &[])), "{g:?}");
+            assert!(policy.token_reachable(&grant(&[], &[&g])), "{g:?}");
+        }
+        // Where a link leads counts too: a grant that is a link to the home.
+        #[cfg(unix)]
+        {
+            let link = base.join("link");
+            std::os::unix::fs::symlink(base.join("home"), &link).unwrap();
+            assert!(policy.token_reachable(&grant(&[&link], &[])));
+        }
+        // A node that does not require the token refuses nothing.
+        let off = SandboxPolicy::default();
+        assert!(!off.token_reachable(&grant(&[Path::new("/")], &[Path::new("/")])));
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

@@ -1570,6 +1570,17 @@ impl Supervisor {
             profile.read.extend(extras.read.iter().cloned());
             offline_sockets(profile, extras.socket.as_deref(), worktree);
         }
+        // ADR-0082, decision 4: where the node requires its control token, the file must lie outside every folder the agent may read
+        // or write, because Landlock cannot say "except" (`Sandbox::deny` is ignored there). Refused, never started.
+        if let Some(profile) = &cfg.sandbox {
+            if self.sandbox.token_reachable(profile) {
+                return Err(SupervisorError::SandboxRefused(
+                    kind.to_string(),
+                    self.sandbox.level.name(),
+                    "control_token_reachable",
+                ));
+            }
+        }
         if let Some(k) = self.kinds.get(kind) {
             cfg.env = k
                 .manifest

@@ -379,7 +379,8 @@ fn main() -> ExitCode {
 /// - `mesh stdio --socket PATH` is what an agent's MCP client starts as its mesh server: it carries the MCP
 ///   conversation to that agent's own endpoint on the node.
 fn bridge_stdio(say: &Say, path: &std::path::Path) -> ExitCode {
-    let sock = match agora_platform::local_connect(path) {
+    // The control token is presented by the client (ADR-0082), so the hub that talks through this bridge needs nothing of it.
+    let sock = match Client::connect(path).map(Client::into_stream) {
         Ok(sock) => sock,
         Err(e) => {
             say_unreachable(say, path, &e);
@@ -437,6 +438,7 @@ fn doctor(say: &Say, o: &Opts) -> ExitCode {
             ("sandbox", Status::Ok) => key!("doctor-sandbox"),
             ("sandbox", _) => key!("doctor-sandbox-unsupported"),
             ("git-identity-missing", _) => key!("doctor-git-identity-missing"),
+            ("control-token-reachable", _) => key!("doctor-control-token-reachable"),
             ("git", Status::Ok) => key!("doctor-git"),
             ("git", _) => key!("doctor-git-missing"),
             ("data-dir", Status::Ok) => key!("doctor-data-dir"),
@@ -597,6 +599,11 @@ fn say_unreachable(say: &Say, path: &std::path::Path, e: &std::io::Error) {
 fn call(say: &Say, c: &mut Client, cmd: Cmd) -> Result<v1::CommandOk, ExitCode> {
     match c.call(cmd) {
         Ok(Ok(ok)) => Ok(ok),
+        // ADR-0082: no readable control token (a confined agent): say that, not "you are not signed in".
+        Ok(Err(e)) if e.code == agora_protocol::ErrorCode::AuthUnauthenticated.as_str() => {
+            say.err(key!("cli-node-needs-token"), &[]);
+            Err(ExitCode::from(1))
+        }
         Ok(Err(e)) => {
             say.remote_error(&e);
             Err(ExitCode::from(1))
