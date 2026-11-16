@@ -4,6 +4,10 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+_Nothing yet._
+
+## 0.3.14
+
 ### Starting agents
 - `agora agent start codex --setting model=gpt-6.1-sol --setting effort=high` starts an agent with the model and reasoning effort you
   choose (ADR-0066). Claude Code and Codex offer `model` and `effort` (low, medium, high, xhigh, max). The machine checks every value
@@ -27,6 +31,8 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
   minimized or not in front (the count only, in your language). Not on macOS yet: there it stays silent for now.
 
 ### Security
+- macOS: a confined agent could read and change any app's settings through `defaults` (the system's settings service did it
+  on its behalf, past the file rules). Settings now follow the same rules as files; the language and locale stay readable.
 - macOS: a confined agent is not started when a file it may write also has another name elsewhere (a hard link made outside
   confinement), or when a save copy next to it (`state.json.tmp`) is such a link, since writing it would change that other file too; the message says to remove the link or put a copy in its place
   (#571). Such links inside a folder it may write are not looked for at each start.
@@ -37,7 +43,30 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 - Someone who can reach the hub's address can no longer stop passkey sign-in: asking for many passkey sign-ins without finishing
   them threw away everyone else's waiting one, so the owner's passkey sign-in failed and adding a passkey was refused. One address
   now keeps at most 4 waiting and only loses its own (audit finding F210).
+- A connected machine can no longer speak for another one. Before, it could show another machine's running agents as done and
+  give back their tasks, show that machine online or offline, change its numbers, list its own agents, folders and terminals on
+  it, or hide one of its agents from every window. The hub now refuses such a message and closes the sender's connection.
+  A history written before this check is read the same way: what a machine reports (that it started or left, an agent, a terminal, a folder, its
+  numbers) counts for that machine only, and only the hub can hide an agent.
+  A window that reconnects to a hub holding such an old record is given a fresh snapshot instead of the stored events, so it
+  never applies one (and one that did before is corrected).
 
+### Starting at login
+- An agent that was in the middle of a task when its machine or Agora stopped now carries on by itself when it comes back: Agora tells it
+  that its session was cut off, to check the state of what it was doing first, and to go on where it stopped. Only for an agent that was
+  working, only when Agora brought it back by itself (not when you pressed Resume, and not for one that was waiting for you), once for each
+  interruption, for Claude Code and Codex. `resume.continue = off` in the node's policy file turns it off.
+### Console (`agora tui`)
+- A paste that held pieces of the paste markers could end the paste early and type the rest as keys; it now always arrives as
+  one paste.
+- Dragging a selection after the window shrank so the terminal had no rows left closed the console; the drag is now ignored.
+- A request for your answer that arrived while the console was waiting for something else (opening files, a review) was not
+  announced; it is now.
+- A debug build could stop with an arithmetic error while the inspector was hidden and an agent asked to start another.
+- Esc pressed quickly before Enter, Ctrl+C, Tab or Backspace (or both arriving together over SSH) lost the second key; both
+  keys now arrive.
+- On a terminal that sends Latin-1 or Windows-1254 letters (`ç`, `ğ`), the keys typed after such a letter waited until more
+  were typed; they now arrive at once.
 ### Agents working together
 - A task's title, detail and summary are limited to the same size as a message (16 KiB). They used to take about a megabyte each,
   kept forever and sent to every agent that listed the tasks; an oversize text is now refused (`mesh.body_too_large`, audit
@@ -48,6 +77,8 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
   nor finish it, stuck until its lease ran out. It is refused (`mesh.recipient_unknown`) and stays with its owner (audit finding F601).
 
 ### Machines
+- A terminal resized to one column stopped its machine's screen for that terminal: a wide character (Chinese, Japanese,
+  an emoji) crashed it, and narrowing a screen holding one never finished. A terminal's screen is now at least two columns.
 - Asking for the changes of one file whose name contains `[`, `*` or `?` now returns that file only: the name was read as a pattern, so
   `pages/[id].tsx` also brought `pages/i.tsx`. Nothing outside the workspace folder was ever reachable this way (audit finding F402).
 - The number of changed files a machine shows for a folder is now right when the folder holds new files: a new folder with three files
