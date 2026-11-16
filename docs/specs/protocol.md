@@ -90,6 +90,9 @@ the acknowledgement to send back. Clients page the log by global position. Paylo
 Hub node session (`agora-hub::session`): a state machine over decoded messages, independent of transport and framing.
 The producer id is the node's authenticated identity; an event naming another producer is `protocol.producer_mismatch`
 (`node_id`, `producer_id`).
+An event whose body names a node (its `node_id`) must name that producer, or it is `protocol.invalid_message` (field `node_id`);
+`NodeLink`, `NodeForgotten` and `AgentForgotten` are written by the hub only, and one from a node is `protocol.invalid_message`
+(field `node_link`, `node_forgotten`, `agent_forgotten`). Threat model T19.
 When the hub ends a node's connection because the node broke the protocol (such as
 `protocol.producer_mismatch`), it first sends a WebSocket close (code 1008) whose reason is the stable error code, logs
 `node refused: <node> <code> <params>`, and reads until the node's side of the close (at most 5 s) so the reason is not lost
@@ -509,6 +512,7 @@ All additions; nothing published changed.
   every such agent whatever its kind and folder, but only when the policy has no `resume` line: a `resume` line always wins (`ask`
   stops it, `auto` keeps it to the listed kinds and folders). Either way at most 16 at one start, 8 at a time (the next round 5 s
   later), and never an agent the node brought back by itself in the last 10 minutes (`auto_resumed_at_ms` in the ledger).
+  `resume.continue = on | off` (default on, wherever automatic resume is on; Amendment A of ADR-0060) decides whether an agent that was *working* when the node stopped is given its kind's one "carry on" message (`[resume] continue_argv`, `docs/specs/agent-manifest.md`) with that resume; never for an agent that was waiting for a person, idle, finished or unknown, never when a person pressed Resume, and once for each interruption. No command or message carries the policy line or the sentence.
 
 ### Launch settings (ADR-0066, first part)
 

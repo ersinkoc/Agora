@@ -779,8 +779,9 @@ impl App {
                         area.right().saturating_sub(m.col + 1).max(MIN_INSPECTOR);
                 }
                 None if self.selecting => {
-                    if let Some(sel) = self.selection.as_mut() {
-                        let t = a.terminal;
+                    let t = a.terminal;
+                    // The window may have shrunk since the press until the pane has no cell to clamp the drag into.
+                    if let Some(sel) = self.selection.as_mut().filter(|_| !t.is_empty()) {
                         sel.to = (
                             m.row.clamp(t.y, t.bottom().saturating_sub(1)) - t.y,
                             m.col.clamp(t.x, t.right().saturating_sub(1)) - t.x,
@@ -1714,7 +1715,11 @@ fn key_bytes(k: &Key, modes: Modes) -> Option<Vec<u8>> {
 /// so a paste cannot end the bracket early and type the rest as keys.
 fn paste_bytes(text: &str, modes: Modes) -> Vec<u8> {
     if modes.bracketed_paste {
-        let body = text.replace("\x1b[201~", "").replace("\x1b[200~", "");
+        // Until none is left: removing one marker can join the bytes around it into another (`ESC[201` `ESC[200~` `~`).
+        let mut body = text.to_string();
+        while body.contains("\x1b[201~") || body.contains("\x1b[200~") {
+            body = body.replace("\x1b[201~", "").replace("\x1b[200~", "");
+        }
         format!("\x1b[200~{body}\x1b[201~").into_bytes()
     } else {
         text.as_bytes().to_vec()
@@ -3065,5 +3070,48 @@ mod tests {
         assert!(line(3).contains("│> wri"));
         let cursor = tui.backend_mut().get_cursor_position().unwrap();
         assert_eq!((cursor.x, cursor.y), (29 + 5, 3));
+    }
+
+    #[test]
+    fn a_paste_cannot_put_an_end_marker_together_from_the_bytes_around_a_removed_one() {
+        let bracketed = Modes {
+            bracketed_paste: true,
+            ..Modes::default()
+        };
+        // Removing the start marker would join `ESC[201` and `~` into an end marker: the agent would get the rest as keys.
+        let got = paste_bytes("\x1b[201\x1b[200~~touch x\r", bracketed);
+        assert_eq!(got, b"\x1b[200~touch x\r\x1b[201~".to_vec());
+        let nested = paste_bytes("\x1b[20\x1b[20\x1b[201~1~1~", bracketed);
+        assert_eq!(nested, b"\x1b[200~\x1b[201~".to_vec());
+    }
+
+    #[test]
+    fn a_drag_after_the_window_left_the_pane_no_rows_is_ignored() {
+        let rows = rows();
+        let mut app = App::default();
+        key(&mut app, &rows, Key::Enter);
+        let pane = app.areas(AREA).terminal;
+        click(&mut app, &rows, MouseKind::Down, pane.x + 2, pane.y + 2);
+        assert!(app.selection.is_some());
+        // The window shrinks to two rows while the button is held: the pane has none left.
+        let short = Rect::new(0, 0, 120, 2);
+        let small = Ctx {
+            area: short,
+            ..cx(&rows)
+        };
+        app.handle(Event::Resize { cols: 120, rows: 2 }, &small);
+        assert!(app.areas(short).terminal.is_empty());
+        let drag = Event::Mouse(Mouse {
+            kind: MouseKind::Drag,
+            col: 1,
+            row: 1,
+        });
+        app.handle(drag, &small);
+        let up = Event::Mouse(Mouse {
+            kind: MouseKind::Up,
+            col: 1,
+            row: 1,
+        });
+        assert_eq!(app.handle(up, &small), vec![], "nothing was dragged over");
     }
 }

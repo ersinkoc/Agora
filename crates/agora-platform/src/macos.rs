@@ -243,8 +243,13 @@ pub(crate) fn profile(sb: &crate::Sandbox) -> io::Result<String> {
         .iter()
         .map(|p| quote(std::path::Path::new(p)))
         .collect();
+    // Preferences (`defaults`, CFPreferences) are read and written by `cfprefsd`, not by the process: it checks these operations and,
+    // only when they are denied, the file rules below, so without the deny any domain under `~/Library/Preferences` is open (F201).
+    // The global domain stays readable (language, locale), as the system does.
     let mut out = format!(
-        "(version 1)\n(allow default)\n(deny file-write*)\n(deny file-read-data {})\n",
+        "(version 1)\n(allow default)\n(deny file-write*)\n(deny file-read-data {})\n\
+         (deny user-preference-read user-preference-write)\n\
+         (allow user-preference-read (preference-domain \"kCFPreferencesAnyApplication\"))\n",
         private.join(" ")
     );
     if !reads.is_empty() {
@@ -1468,6 +1473,50 @@ mod sandbox_tests {
                 "{deny:?}"
             );
         }
+    }
+
+    #[test]
+    fn preferences_follow_the_file_rules_and_are_not_a_way_around_them() {
+        // `defaults` goes through cfprefsd, which reads and writes `~/Library/Preferences` itself (F201).
+        struct Domain(String);
+        impl Drop for Domain {
+            fn drop(&mut self) {
+                let _ = std::process::Command::new("/usr/bin/defaults")
+                    .args(["delete", &self.0])
+                    .output();
+                if let Some(home) = std::env::var_os("HOME") {
+                    let plist = format!("Library/Preferences/{}.plist", self.0);
+                    let _ = std::fs::remove_file(std::path::Path::new(&home).join(plist));
+                }
+            }
+        }
+        let domain = Domain(format!("dev.agora.test.prefs.{}", std::process::id()));
+        let defaults = |sb: Option<&crate::Sandbox>, args: &[&str]| {
+            let p = sb.map(|sb| super::profile(sb).unwrap());
+            let mut cmd = std::process::Command::new(match &p {
+                Some(_) => super::SANDBOX_EXEC,
+                None => "/usr/bin/defaults",
+            });
+            if let Some(p) = &p {
+                cmd.args(["-p", p, "/usr/bin/defaults"]);
+            }
+            let out = cmd.args(args).output().unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        defaults(None, &["write", &domain.0, "token", "secret"]);
+        let sb = crate::Sandbox {
+            read: vec!["/usr".into(), "/bin".into()],
+            write: vec!["/dev".into()],
+            ..Default::default()
+        };
+        assert_eq!(defaults(Some(&sb), &["read", &domain.0, "token"]), "");
+        defaults(Some(&sb), &["write", &domain.0, "token", "changed"]);
+        assert_eq!(defaults(None, &["read", &domain.0, "token"]), "secret");
+        // The global domain (language, locale) stays readable.
+        assert_eq!(
+            defaults(Some(&sb), &["read", "-g", "AppleLocale"]),
+            defaults(None, &["read", "-g", "AppleLocale"])
+        );
     }
 
     #[test]
