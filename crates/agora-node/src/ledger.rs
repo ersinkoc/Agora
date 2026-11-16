@@ -76,6 +76,9 @@ pub struct Entry {
     /// ADR-0062 item 4: when the node last brought it back by itself (0: never), so an agent interrupted again soon after (a crash
     /// loop) is not brought back again by itself.
     pub auto_resumed_at_ms: u64,
+    /// ADR-0060 Amendment A: when the node last gave this agent its one "carry on" message after bringing it back by itself (0: never).
+    /// One for each interruption: it is sent only while this is older than `interrupted_at_ms`.
+    pub continue_sent_ms: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -158,6 +161,7 @@ impl Entry {
             "process_boot": self.process_boot,
             "process_name": self.process_name,
             "auto_resumed_at_ms": self.auto_resumed_at_ms,
+            "continue_sent_ms": self.continue_sent_ms,
         })
     }
 
@@ -200,6 +204,7 @@ impl Entry {
             process_boot: field(v, "process_boot"),
             process_name: field(v, "process_name"),
             auto_resumed_at_ms: number(v, "auto_resumed_at_ms"),
+            continue_sent_ms: number(v, "continue_sent_ms"),
         };
         (!e.agent_id.is_empty() && !e.kind.is_empty()).then_some(e)
     }
@@ -429,6 +434,25 @@ impl Ledger {
         let _ = self.flush();
     }
 
+    /// ADR-0060 Amendment A: the agent was given its "carry on" message now, so it is not given another for this interruption.
+    pub fn mark_continue_sent(&self, agent_id: &str, now_ms: u64) {
+        let mut st = self.st();
+        if let Some(e) = st.entries.get_mut(agent_id) {
+            e.continue_sent_ms = now_ms;
+            e.updated_at_ms = now_ms;
+            st.dirty = true;
+        }
+        drop(st);
+        let _ = self.flush();
+    }
+
+    /// Whether an automatic resume of this agent should carry its "carry on" message: it was working when the node stopped (not
+    /// waiting for a person, idle, finished or unknown) and has not had one for this interruption (Amendment A, 1, 2 and 5).
+    pub fn wants_continue(&self, agent_id: &str) -> bool {
+        self.get(agent_id)
+            .is_some_and(|e| e.last_state == "working" && e.continue_sent_ms < e.interrupted_at_ms)
+    }
+
     /// Start again (ADR-0060): the agent's next run is a new session, so the old session id is no longer its own.
     pub fn forget_session(&self, agent_id: &str, now_ms: u64) {
         let mut st = self.st();
@@ -632,10 +656,14 @@ fn apply(st: &mut State, body: &Body, now: u64) -> bool {
 /// Drops entries older than [`KEEP_MS`], then the oldest ended ones (and then the oldest of any) above [`MAX_ENTRIES`]. Running
 /// agents are never dropped by age.
 fn prune(st: &mut State, now: u64) {
-    let before = st.entries.len();
-    st.entries.retain(|_, e| {
+    let mut removed = Vec::new();
+    st.entries.retain(|id, e| {
         let running = !e.ended && e.interrupted_at_ms == 0;
-        running || now.saturating_sub(e.last_touched()) <= KEEP_MS
+        let keep = running || now.saturating_sub(e.last_touched()) <= KEEP_MS;
+        if !keep {
+            removed.push(id.clone());
+        }
+        keep
     });
     if st.entries.len() > MAX_ENTRIES {
         let mut order: Vec<(bool, u64, String)> = st
@@ -647,11 +675,15 @@ fn prune(st: &mut State, now: u64) {
         let extra = st.entries.len() - MAX_ENTRIES;
         for (_, _, id) in order.into_iter().take(extra) {
             st.entries.remove(&id);
+            removed.push(id);
         }
     }
-    let known: BTreeSet<&String> = st.entries.keys().collect();
-    st.bound.retain(|a, _| known.contains(a));
-    if st.entries.len() != before {
+    // Only the bindings of the entries dropped here go: a binding whose agent's start is not recorded yet (another agent's
+    // write can land between `AgentWorkspaceBound` and `AgentStarted`) is still needed for its folder.
+    for id in &removed {
+        st.bound.remove(id);
+    }
+    if !removed.is_empty() {
         st.dirty = true;
     }
 }
@@ -907,6 +939,50 @@ mod tests {
     }
 
     #[test]
+    fn a_write_for_another_agent_between_binding_and_start_keeps_the_folder() {
+        // The daemon records `AgentWorkspaceBound` and `AgentStarted` in two calls; another thread's write can land in between
+        // and prune. Forced here by call order.
+        let dir = temp("bound-race");
+        let l = Ledger::open(&dir, 1).unwrap();
+        l.observe(&started("agent-1", "/wt/one", ""), 1);
+        l.observe(
+            &Body::WorkspaceRegistered(v1::WorkspaceRegistered {
+                workspace_id: "directory:/work/two".into(),
+                node_id: "n".into(),
+                project_id: "p".into(),
+                path: "/work/two".into(),
+                git_root: "/work/two".into(),
+                branch: "main".into(),
+                managed_worktree: false,
+                files_changed: 0,
+            }),
+            2,
+        );
+        l.observe(
+            &Body::AgentWorkspaceBound(v1::AgentWorkspaceBound {
+                agent_id: "agent-2".into(),
+                workspace_id: "directory:/work/two".into(),
+            }),
+            2,
+        );
+        l.observe(
+            &Body::AgentExited(v1::AgentExited {
+                agent_id: "agent-1".into(),
+                exit_code: 0,
+            }),
+            3,
+        );
+        l.observe(&started("agent-2", "", ""), 4);
+        let e = l.get("agent-2").unwrap();
+        assert_eq!((e.folder.as_str(), e.directory), ("/work/two", true));
+        drop(l);
+        // And after a restart, where it is offered again in that folder.
+        let e = Ledger::open(&dir, 10).unwrap().get("agent-2").unwrap();
+        assert!(e.interrupted());
+        assert_eq!((e.folder.as_str(), e.directory), ("/work/two", true));
+    }
+
+    #[test]
     fn an_unreadable_ledger_is_set_aside_not_deleted() {
         let dir = temp("unreadable");
         std::fs::create_dir_all(dir.join(LEDGER_DIR)).unwrap();
@@ -949,5 +1025,79 @@ mod tests {
         l.flush().unwrap();
         let text = std::fs::read_to_string(dir.join(LEDGER_DIR).join(LEDGER_FILE)).unwrap();
         assert!(!text.contains("secret prompt") && !text.contains("TOKEN"));
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod carry_on_tests {
+    use super::*;
+
+    fn state(l: &Ledger, id: &str, s: v1::AgentState, now: u64) {
+        l.observe(
+            &Body::AgentStateChanged(v1::AgentStateChanged {
+                agent_id: id.into(),
+                state: s as i32,
+                reported: false,
+            }),
+            now,
+        );
+    }
+
+    fn agent(l: &Ledger, id: &str, now: u64) {
+        l.observe(
+            &Body::AgentStarted(v1::AgentStarted {
+                agent_id: id.into(),
+                project_id: "p".into(),
+                node_id: "n".into(),
+                worktree_id: "w".into(),
+                kind: "claude-code".into(),
+                level: 1,
+                parent_agent_id: String::new(),
+                launch_options: Vec::new(),
+                skips_permissions: false,
+            }),
+            now,
+        );
+    }
+
+    /// ADR-0060 Amendment A: the "carry on" message is for an agent that was working, once for each interruption.
+    #[test]
+    fn only_a_working_agent_wants_the_message_and_only_once_for_each_interruption() {
+        let dir = std::env::temp_dir().join(format!("agora-carry-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let l = Ledger::open(&dir, 1_000).unwrap();
+        for (id, s) in [
+            ("w", v1::AgentState::Working),
+            ("b", v1::AgentState::Blocked),
+            ("i", v1::AgentState::Idle),
+            ("u", v1::AgentState::Unspecified),
+        ] {
+            agent(&l, id, 1_100);
+            state(&l, id, s, 1_200);
+        }
+        drop(l);
+        // The node stops and starts again: every one of them is found interrupted at 5_000.
+        let l = Ledger::open(&dir, 5_000).unwrap();
+        assert!(l.wants_continue("w"));
+        for id in ["b", "i", "u", "nobody"] {
+            assert!(!l.wants_continue(id), "{id}");
+        }
+        // Said once: not again for this interruption; the field survives a restart of the node.
+        l.mark_continue_sent("w", 5_100);
+        assert!(!l.wants_continue("w"));
+        drop(l);
+        let l = Ledger::open(&dir, 5_200).unwrap();
+        assert_eq!(l.get("w").unwrap().continue_sent_ms, 5_100);
+        assert!(!l.wants_continue("w"));
+        // It was brought back (a start is seen again), works again, and is interrupted by a later stop: a new interruption.
+        agent(&l, "w", 5_250);
+        assert!(!l.get("w").unwrap().interrupted());
+        state(&l, "w", v1::AgentState::Working, 5_300);
+        drop(l);
+        let l = Ledger::open(&dir, 9_000).unwrap();
+        assert!(l.wants_continue("w"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
