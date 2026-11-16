@@ -4,6 +4,10 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+_Nothing yet._
+
+## 0.3.14
+
 ### Starting agents
 - `agora agent start codex --setting model=gpt-6.1-sol --setting effort=high` starts an agent with the model and reasoning effort you
   choose (ADR-0066). Claude Code and Codex offer `model` and `effort` (low, medium, high, xhigh, max). The machine checks every value
@@ -16,6 +20,9 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 - In the review and the file browser, the mouse wheel, a click, Page Up/Down or Ctrl+arrow closed the view and typed the rest of
   the key into the console. They are now ignored there.
 ### Terminal client
+- A terminal you watch (`agora attach`, a window through the hub) that fell behind because the agent printed a lot just
+  before it ended kept waiting forever instead of showing that the agent ended. It now always hears the end, with an unknown exit
+  code when the machine no longer has it (audit finding F251).
 - An agent a machine cannot start is named with the program the machine looked for ("WrongStack (`wstack`)"), and when this
   device is not trusted yet the hub's owner sees the folder of that machine's `agora` program when it is not in its PATH (ADR-0069).
 ### Faster answers
@@ -27,10 +34,55 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
   minimized or not in front (the count only, in your language). Not on macOS yet: there it stays silent for now.
 
 ### Security
+- A permission to act on a machine for some hours (a grant) now ends as soon as the device that gave it is no longer trusted
+  there: removed with `agora node untrust`, revoked from another device, run out, or limited to other projects. It used to keep
+  letting commands through until it expired (up to 8 hours) unless it was revoked by hand (audit finding F270). Trusting the device
+  again does not bring the old grant back.
+- An agent could make its machine's node take memory without limit by sending one endless line to its mesh connection
+  without a newline, and the agent then could not be stopped while it kept sending. A line over 1 MiB now closes the connection as
+  soon as it reaches that size (audit finding F250).
+- macOS: a confined agent could read and change any app's settings through `defaults` (the system's settings service did it
+  on its behalf, past the file rules). Settings now follow the same rules as files; the language and locale stay readable.
 - macOS: a confined agent is not started when a file it may write also has another name elsewhere (a hard link made outside
   confinement), or when a save copy next to it (`state.json.tmp`) is such a link, since writing it would change that other file too; the message says to remove the link or put a copy in its place
   (#571). Such links inside a folder it may write are not looked for at each start.
+- Team mode: a machine could show its own agents and folders to a member granted only a project on another machine, by naming
+  that other machine in what it reported, and the hub then let that member's commands reach them. A member now sees an agent or
+  folder only as part of the machine that reported it (audit finding F282).
+- `agora node untrust` that fails partway (for example a full disk) now leaves the device trusted, so you can run it again;
+  before, the device was removed but not remembered as revoked, and the hub could trust it again on its next reconnect.
+  `agora hub devices forget` on a device that is not revoked no longer deletes what endorses it.
+- A passkey added from another machine before the screen password was set now goes away when the password is set, also when it
+  was added under the name (credential id) of a removed person's passkey. It used to take over that old passkey's place among the
+  ones added at the hub's machine or with the password, so it stayed and kept signing in from elsewhere without the password
+  (audit finding F211).
+- Someone who can reach the hub's address can no longer stop passkey sign-in: asking for many passkey sign-ins without finishing
+  them threw away everyone else's waiting one, so the owner's passkey sign-in failed and adding a passkey was refused. One address
+  now keeps at most 4 waiting and only loses its own (audit finding F210).
+- A connected machine can no longer speak for another one. Before, it could show another machine's running agents as done and
+  give back their tasks, show that machine online or offline, change its numbers, list its own agents, folders and terminals on
+  it, or hide one of its agents from every window. The hub now refuses such a message and closes the sender's connection.
+  A history written before this check is read the same way: what a machine reports (that it started or left, an agent, a terminal, a folder, its
+  numbers) counts for that machine only, and only the hub can hide an agent.
+  A window that reconnects to a hub holding such an old record is given a fresh snapshot instead of the stored events, so it
+  never applies one (and one that did before is corrected).
 
+### Starting at login
+- An agent that was in the middle of a task when its machine or Agora stopped now carries on by itself when it comes back: Agora tells it
+  that its session was cut off, to check the state of what it was doing first, and to go on where it stopped. Only for an agent that was
+  working, only when Agora brought it back by itself (not when you pressed Resume, and not for one that was waiting for you), once for each
+  interruption, for Claude Code and Codex. `resume.continue = off` in the node's policy file turns it off.
+### Console (`agora tui`)
+- A paste that held pieces of the paste markers could end the paste early and type the rest as keys; it now always arrives as
+  one paste.
+- Dragging a selection after the window shrank so the terminal had no rows left closed the console; the drag is now ignored.
+- A request for your answer that arrived while the console was waiting for something else (opening files, a review) was not
+  announced; it is now.
+- A debug build could stop with an arithmetic error while the inspector was hidden and an agent asked to start another.
+- Esc pressed quickly before Enter, Ctrl+C, Tab or Backspace (or both arriving together over SSH) lost the second key; both
+  keys now arrive.
+- On a terminal that sends Latin-1 or Windows-1254 letters (`ç`, `ğ`), the keys typed after such a letter waited until more
+  were typed; they now arrive at once.
 ### Agents working together
 - A task's title, detail and summary are limited to the same size as a message (16 KiB). They used to take about a megabyte each,
   kept forever and sent to every agent that listed the tasks; an oversize text is now refused (`mesh.body_too_large`, audit
@@ -39,8 +91,23 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
   trace: the history never showed it ending, and the shared board and the windows kept showing the path as held (audit finding F602).
 - A task can no longer be handed to an agent of another project: it used to end up claimed by someone who could neither see
   nor finish it, stuck until its lease ran out. It is refused (`mesh.recipient_unknown`) and stays with its owner (audit finding F601).
+- After the hub restarted, a file lock kept from before stayed held when the agent holding it ended or its machine restarted, so
+  the other agents of a shared project could not take that path until the lock's time ran out (up to an hour). It is now freed then,
+  like any other lock (audit finding F280).
+- When the hub and a machine both restarted (an upgrade, say), the machine's new first agent could take over the tasks and locks
+  its old first agent had held, because it got the same name: it could finish a task it never took, and others were told the task
+  was taken. They now go back to the board (audit finding F281).
 
 ### Machines
+- An agent started in a folder now always keeps that folder in the machine's record. When another agent ended or reported its
+  session at the moment it started, the record lost the folder, and after a restart the agent could be neither resumed nor started
+  again there (audit finding F271).
+- A machine's control connection no longer keeps everything it receives: when a read ended in the middle of a message (the usual
+  case), the part already handled stayed in memory, so a console watching a busy terminal, or the machine serving it, grew by every
+  byte of output for as long as it stayed connected (4 MB streamed held 4 MB). It now holds at most one unfinished message, and
+  reading got faster too (audit finding F240).
+- A terminal resized to one column stopped its machine's screen for that terminal: a wide character (Chinese, Japanese,
+  an emoji) crashed it, and narrowing a screen holding one never finished. A terminal's screen is now at least two columns.
 - Asking for the changes of one file whose name contains `[`, `*` or `?` now returns that file only: the name was read as a pattern, so
   `pages/[id].tsx` also brought `pages/i.tsx`. Nothing outside the workspace folder was ever reachable this way (audit finding F402).
 - The number of changed files a machine shows for a folder is now right when the folder holds new files: a new folder with three files
@@ -68,6 +135,12 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
   into the agent's own processes. Walking an agent's processes now visits each one once.
 - `agora hub machines` (and `hub devices`, `hub audit`, `hub fingerprint`) on a machine that does not run the hub
   now says so and where to run it, instead of "unable to open database file".
+
+### Backup and restore
+- `agora hub restore` keeps the database it replaces as `hub.db.before-restore` so a wrong restore can be undone, but after the hub
+  had crashed or been killed that copy could miss its newest events: they were still in the database's write-ahead log
+  (`hub.db-wal`), which the restore deleted. The log now moves with the kept copy (`hub.db.before-restore-wal`; to undo the restore,
+  move both back), so the copy holds everything the replaced database held (audit finding F232).
 
 ## 0.3.13
 

@@ -528,7 +528,8 @@ pub fn verify(path: &Path) -> Result<(), StoreError> {
 }
 
 /// Replaces the database at `dest` with the verified backup `from`. The hub must not have `dest` open. The old
-/// file is kept next to it as `<dest>.before-restore` so a wrong restore can be undone.
+/// file is kept next to it as `<dest>.before-restore` so a wrong restore can be undone, with its write-ahead log as
+/// `<dest>.before-restore-wal` when it has one (after a crash it holds the file's last commits).
 pub fn restore(from: &Path, dest: &Path) -> Result<(), StoreError> {
     verify(from)?;
     let io = |e: std::io::Error| StoreError(e.to_string());
@@ -539,7 +540,17 @@ pub fn restore(from: &Path, dest: &Path) -> Result<(), StoreError> {
     let tmp = dest.with_file_name(format!("{name}.restoring"));
     std::fs::copy(from, &tmp).map_err(io)?;
     if dest.exists() {
-        std::fs::rename(dest, dest.with_file_name(format!("{name}.before-restore"))).map_err(io)?;
+        let kept = format!("{name}.before-restore");
+        std::fs::rename(dest, dest.with_file_name(&kept)).map_err(io)?;
+        // After a crash the replaced database's last commits are only in its write-ahead log: it goes with the kept copy (and an
+        // older kept copy's log, which would corrupt this one, goes away).
+        for ext in ["-wal", "-shm"] {
+            let _ = std::fs::remove_file(dest.with_file_name(format!("{kept}{ext}")));
+        }
+        let wal = dest.with_file_name(format!("{name}-wal"));
+        if wal.exists() {
+            std::fs::rename(&wal, dest.with_file_name(format!("{kept}-wal"))).map_err(io)?;
+        }
     }
     // Stale write-ahead files belong to the replaced database and would corrupt the restored one.
     for ext in ["-wal", "-shm"] {
