@@ -365,9 +365,9 @@ impl crate::web::SessionApi for HubSessions {
         let now = crate::server::now_ms();
         // A try is counted when it starts and given back when it proves itself (ADR-0076 item 4): a burst of wrong tokens from one
         // address locks that address out of sign-in too. Per address only, so a stranger cannot lock the hub for everyone.
-        if self.guard.attempt(client, Scope::AddressOnly, now).is_err() {
+        let Ok(undo) = self.guard.attempt_undoable(client, Scope::AddressOnly, now) else {
             return (429, String::new());
-        }
+        };
         // A metrics token is looked up among metrics tokens only, and anything else among sessions only.
         let allowed = if crate::metrics_token::looks_like(token) {
             crate::metrics_token::MetricsTokens::new(self.hub.store()).check(token, now)
@@ -375,7 +375,7 @@ impl crate::web::SessionApi for HubSessions {
             match self.signin().access(token, now) {
                 None => false,
                 Some(a) if a.role != crate::users::Role::Owner => {
-                    self.guard.succeeded(client, Scope::AddressOnly);
+                    self.guard.undo(undo);
                     return (403, String::new());
                 }
                 Some(_) => true,
@@ -384,7 +384,8 @@ impl crate::web::SessionApi for HubSessions {
         if !allowed {
             return (401, String::new());
         }
-        self.guard.succeeded(client, Scope::AddressOnly);
+        // Only this try's own count goes back: a valid token must not wipe the failures of sign-in guesses (review F1).
+        self.guard.undo(undo);
         self.hub
             .metrics_text()
             .map_or((404, String::new()), |text| (200, text))

@@ -1638,16 +1638,45 @@ fn audit_action(req: &v1::CommandRequest) -> String {
         _ => &[],
     };
     let name = command_name(req);
-    let chosen: Vec<String> = options
+    // The audit text is bounded here, before the node validates anything (what is sent to the node is not touched): at most
+    // `AUDIT_MAX_CHOSEN` entries, each cut to `AUDIT_MAX_ENTRY` bytes, with a mark where something was left out.
+    let mut chosen: Vec<String> = options
         .iter()
-        .cloned()
-        .chain(settings.iter().map(|st| format!("{}={}", st.id, st.value)))
+        .map(String::as_str)
+        .map(clip_for_audit)
+        .chain(
+            settings
+                .iter()
+                .map(|st| format!("{}={}", clip_for_audit(&st.id), clip_for_audit(&st.value))),
+        )
+        .take(AUDIT_MAX_CHOSEN)
         .collect();
+    let total = options.len() + settings.len();
+    if total > AUDIT_MAX_CHOSEN {
+        chosen.push(format!("+{}", total - AUDIT_MAX_CHOSEN));
+    }
     if chosen.is_empty() {
         name
     } else {
         format!("{name}[{}]", chosen.join(","))
     }
+}
+
+/// Most launch options and settings written into one audit row (the manifest's own maximum of settings is 8; this is generous).
+const AUDIT_MAX_CHOSEN: usize = 16;
+/// Longest one id, value or option written into an audit row, in bytes.
+const AUDIT_MAX_ENTRY: usize = 128;
+
+/// `text` cut to [`AUDIT_MAX_ENTRY`] bytes at a character boundary, with `~` where it was cut.
+fn clip_for_audit(text: &str) -> String {
+    if text.len() <= AUDIT_MAX_ENTRY {
+        return text.to_string();
+    }
+    let mut end = AUDIT_MAX_ENTRY;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}~", &text[..end])
 }
 
 use crate::dispatch::command_name;
@@ -1898,6 +1927,36 @@ pub async fn run(
 #[cfg(test)]
 mod audit_cleanup_tests {
     use super::*;
+
+    /// Review F7: the audit text is bounded in count and in the length of each entry, with a mark, and the request is not touched.
+    #[test]
+    fn the_audit_text_of_a_launch_is_bounded_and_marked() {
+        let many = |n: usize, id: &str, value: &str| v1::CommandRequest {
+            command: Some(command_request::Command::AgentLaunch(v1::AgentLaunch {
+                settings: (0..n)
+                    .map(|_| v1::LaunchSetting {
+                        id: id.into(),
+                        value: value.into(),
+                    })
+                    .collect(),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let req = many(40, &"i".repeat(500), &"\u{e9}".repeat(300));
+        let text = audit_action(&req);
+        assert!(text.len() < 16 * (2 * 129 + 3) + 64, "{}", text.len());
+        assert!(text.contains(&format!("{}~=", "i".repeat(128))), "{text}");
+        assert!(text.ends_with(",+24]"), "{text}");
+        assert_eq!(text.matches('~').count(), 32, "{text}");
+        // Nothing of the request itself was cut.
+        let Some(command_request::Command::AgentLaunch(a)) = &req.command else {
+            unreachable!()
+        };
+        assert_eq!((a.settings.len(), a.settings[0].id.len()), (40, 500));
+        // A small one is written as it is.
+        assert_eq!(audit_action(&many(1, "model", "x")), "AgentLaunch[model=x]");
+    }
 
     #[tokio::test]
     async fn an_older_command_must_time_out_while_cleanup_waits_for_a_newer_one(

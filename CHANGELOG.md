@@ -14,6 +14,12 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
   (waiting up to 2 s between tries, giving up after 15 minutes) and the agent's session stays open. A call made at that moment fails at once with
   `mesh.unavailable` and can be repeated (ADR-0075, the first step; applies to agents started by this version).
 ### Security
+- A valid metrics token (or the owner's session) read on `/api/metrics` no longer wipes the failures of wrong sign-in and one-time-code tries
+  from the same address, so it cannot be interleaved with guesses to avoid the lockout (integration review F1).
+- On Linux the git settings file of a confined agent no longer lies beside its worktree, where an older confined agent that could write
+  that folder could rewrite it: it is now in a private folder (`~/.agora/git-config`) that no agent can write (integration review F6).
+- The audit row of an agent start now holds at most 16 launch options and settings, each cut to 128 bytes (marked), however many a
+  client sent (integration review F7).
 - The file browser and the review screen of the web window and of `agora tui` now show a secret file (`.env`, a private key, ...) with a lock
   and "Kept private: it may hold a secret" instead of opening it, and a changed secret file in the review as "Changed, content hidden" with its
   added and removed counts and no content; an older listing that still asks for one gets the same message instead of a raw code (ADR-0080,

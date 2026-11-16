@@ -1,5 +1,7 @@
 //! ADR-0052: real node and fake processes, with user-owned folders and no accounts or real coding agents.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
+#[path = "private_home/mod.rs"]
+mod private_home;
 use agora_node::{
     control::Client,
     daemon::{Node, NodeConfig},
@@ -64,6 +66,7 @@ struct Env {
 }
 impl Env {
     fn new(name: &str) -> Self {
+        private_home::init();
         let root = std::env::temp_dir().join(format!("dir-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("manifests")).unwrap();

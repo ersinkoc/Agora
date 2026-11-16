@@ -384,6 +384,14 @@ pub struct Guard {
     state: Mutex<GuardState>,
 }
 
+/// What one counted try changed ([`Guard::attempt_undoable`]), to take it back exactly ([`Guard::undo`]).
+#[derive(Debug, Clone, Copy)]
+pub struct Undo {
+    key: IpAddr,
+    prev: Option<Tally>,
+    set: Tally,
+}
+
 /// How a try stands with the [`Guard`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scope {
@@ -401,6 +409,16 @@ impl Guard {
     /// Starts a try: `Err(retry_after_ms)` while `client` is locked out, else the try is counted as a failure until
     /// [`Self::succeeded`] gives it back.
     pub fn attempt(&self, client: &Client, scope: Scope, now_ms: u64) -> Result<(), u64> {
+        self.attempt_undoable(client, scope, now_ms).map(|_| ())
+    }
+
+    /// [`Self::attempt`], with what it takes to take this one try back exactly ([`Self::undo`]).
+    pub fn attempt_undoable(
+        &self,
+        client: &Client,
+        scope: Scope,
+        now_ms: u64,
+    ) -> Result<Undo, u64> {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let local = client.is_local();
         let key = client.bucket();
@@ -428,10 +446,14 @@ impl Guard {
         } else {
             MAX_LOCKOUT_MS
         };
-        s.by_address
-            .entry(key)
-            .or_default()
-            .count(now_ms, ADDRESS_FREE_FAILURES, cap, FORGET_MS);
+        let prev = s.by_address.get(&key).copied();
+        let tally = s.by_address.entry(key).or_default();
+        tally.count(now_ms, ADDRESS_FREE_FAILURES, cap, FORGET_MS);
+        let undo = Undo {
+            key,
+            prev,
+            set: *tally,
+        };
         // A passkey cannot be guessed: its tries never count toward the hub-wide cap (nor can its successes lower it).
         if !local && scope == Scope::All {
             s.global.count(
@@ -441,7 +463,38 @@ impl Guard {
                 GLOBAL_FORGET_MS,
             );
         }
-        Ok(())
+        Ok(undo)
+    }
+
+    /// Takes back exactly the one try [`Self::attempt_undoable`] counted, for a try that proved a credential which is not a
+    /// sign-in (a metrics token): the address's count and lockout go back to what they were before that try, in neither
+    /// direction changed by it. What other tries added meanwhile stays: only this try's own count is removed, and a lockout
+    /// is put back only while it is still the one this try set, so a valid token cannot be interleaved with wrong guesses to
+    /// wipe their count, nor lock the address by its own try.
+    pub fn undo(&self, undo: Undo) {
+        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(t) = s.by_address.get_mut(&undo.key) else {
+            return;
+        };
+        let untouched = t.failures == undo.set.failures
+            && t.until_ms == undo.set.until_ms
+            && t.last_ms == undo.set.last_ms;
+        if untouched {
+            // Nothing else happened to the address meanwhile: exactly the state before this try.
+            match undo.prev {
+                Some(prev) => *t = prev,
+                None => {
+                    s.by_address.remove(&undo.key);
+                }
+            }
+            return;
+        }
+        // Another try counted meanwhile: only this try's own count goes, and a lockout only while it is still the one this
+        // try set.
+        t.failures = t.failures.saturating_sub(1);
+        if t.until_ms == undo.set.until_ms {
+            t.until_ms = undo.prev.unwrap_or_default().until_ms;
+        }
     }
 
     /// The try that [`Self::attempt`] started (with the same `scope`) proved who is here: the address starts again from zero, and
@@ -700,5 +753,51 @@ mod tests {
             g.attempt(&remote(201), Scope::All, 0).is_err(),
             "still locked"
         );
+    }
+
+    /// Review of #668: a valid metrics try after an earlier lockout has expired changes nothing in the address's bucket, so the
+    /// next valid try is not refused by a lockout the valid one made itself.
+    #[test]
+    fn a_valid_try_after_an_expired_lockout_changes_nothing() {
+        let g = Guard::new();
+        let c = remote(77);
+        for _ in 0..ADDRESS_FREE_FAILURES {
+            assert_eq!(g.attempt(&c, Scope::AddressOnly, 0), Ok(()));
+        }
+        assert!(g.attempt(&c, Scope::AddressOnly, 1).is_err(), "locked");
+        let snapshot = |g: &Guard| {
+            let s = g.state.lock().unwrap();
+            let t = s.by_address.get(&c.bucket()).copied().unwrap();
+            (t.failures, t.until_ms, t.last_ms)
+        };
+        let before = snapshot(&g);
+        let after_lockout = FIRST_LOCKOUT_MS + 1;
+        for _ in 0..3 {
+            let undo = g
+                .attempt_undoable(&c, Scope::AddressOnly, after_lockout)
+                .expect("the lockout has ended");
+            g.undo(undo);
+            assert_eq!(snapshot(&g), before, "a valid try changed the bucket");
+        }
+        // A wrong try still counts and locks again.
+        assert_eq!(g.attempt(&c, Scope::AddressOnly, after_lockout), Ok(()));
+        assert!(g
+            .attempt(&c, Scope::AddressOnly, after_lockout + 1)
+            .is_err());
+    }
+
+    /// A valid try for an address with no failures leaves no trace, and one that overlaps another try keeps that try's count.
+    #[test]
+    fn a_valid_try_leaves_no_trace_and_keeps_what_overlapped_it() {
+        let g = Guard::new();
+        let c = remote(78);
+        let undo = g.attempt_undoable(&c, Scope::AddressOnly, 0).unwrap();
+        g.undo(undo);
+        assert!(g.state.lock().unwrap().by_address.is_empty());
+        let first = g.attempt_undoable(&c, Scope::AddressOnly, 0).unwrap();
+        assert_eq!(g.attempt(&c, Scope::AddressOnly, 0), Ok(()));
+        g.undo(first);
+        let s = g.state.lock().unwrap();
+        assert_eq!(s.by_address.get(&c.bucket()).unwrap().failures, 1);
     }
 }

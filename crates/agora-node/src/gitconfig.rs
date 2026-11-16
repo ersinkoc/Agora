@@ -133,21 +133,29 @@ pub fn identity_missing() -> bool {
         .any(|k| read_key(k).is_none_or(|v| v.trim().is_empty()))
 }
 
-/// The folder of the files where the system's temp folder is out of the agent's reach (macOS, Windows): one of the node's own inside
-/// it, made private by the platform ([`agora_platform::ensure_private_dir`]) before anything is written, because the temp folder's
-/// own permissions can admit other programs (on Windows, other sandboxes) that could then rewrite what the agent trusts.
-fn private_folder() -> PathBuf {
-    std::env::temp_dir().join("agora-git-config")
+/// The folder of the files: where the system's temp folder is out of the agent's reach (macOS, Windows) one of the node's own inside
+/// it; elsewhere (Linux, where `/tmp` is the agent's to write) one under `~/.agora` of the home folder (the node's own folder by convention; derived from the home folder, not
+/// from the data folder the node was given),
+/// which no confinement profile grants. Either is made private by the platform ([`agora_platform::ensure_private_dir`]) before
+/// anything is written, because the temp folder's own permissions can admit other programs (on Windows, other sandboxes) that
+/// could then rewrite what the agent trusts. `None` when there is no home folder (no file is written then).
+fn private_folder() -> Option<PathBuf> {
+    if agora_platform::PRIVATE_TEMP {
+        return Some(std::env::temp_dir().join("agora-git-config"));
+    }
+    crate::usage_files::home_dir().map(|h| h.join(".agora").join("git-config"))
 }
 
-/// Makes the folder the file goes in ready, where it is one of the node's own (macOS, Windows): created if missing, then checked and
-/// made private through one handle of the folder itself (`agora_platform::ensure_private_dir`: not a link, this user's, mode 0700 or an
-/// owner-only ACL). Nothing to do where the file lies beside the worktree. An error means the folder cannot be trusted: no file.
+/// Makes the folder the file goes in ready: created if missing, then checked and made private through one handle of the folder
+/// itself (`agora_platform::ensure_private_dir`: not a link, this user's, mode 0700 or an owner-only ACL). An error means the folder
+/// cannot be trusted (or does not exist for lack of a home folder): no file.
 pub fn prepare_folder() -> std::io::Result<()> {
-    if agora_platform::PRIVATE_TEMP {
-        agora_platform::ensure_private_dir(&private_folder())?;
+    let dir = private_folder().ok_or_else(|| std::io::Error::other("no home folder"))?;
+    if let Some(parent) = dir.parent().filter(|_| !agora_platform::PRIVATE_TEMP) {
+        // The node's own folder holds the folder, so the folder is never beside what an agent can write.
+        agora_platform::ensure_private_dir(parent)?;
     }
-    Ok(())
+    agora_platform::ensure_private_dir(&dir)
 }
 
 /// A short, stable (across runs and versions, unlike `DefaultHasher`) number for a path: FNV-1a over its bytes, folded to 32 bits.
@@ -159,23 +167,19 @@ fn place_hash(path: &Path) -> u32 {
     (h ^ (h >> 32)) as u32 // truncation intended: the low 32 bits of the folded hash
 }
 
-/// Where the file of the agent that works in `worktree` is written. Always outside what the agent may write: where the system's temp
-/// folder is out of its reach (`PRIVATE_TEMP`, macOS and Windows) it is there, next to, not inside, the agent's private temp folder;
-/// elsewhere (Linux, where `/tmp` is writable to the agent) beside the agent's worktree in the node's worktrees folder, of which the
-/// agent has only its own worktree.
+/// Where the file of the agent that works in `worktree` is written: in the node's private folder ([`private_folder`]), never beside
+/// the worktree, so no other confined agent that can write a parent of the worktree can rewrite it (ADR-0078: the file is the agent's
+/// to read, not to write). Without a home folder the path lies in the temp folder, which the caller's write-grant check refuses on
+/// Linux (the file is then not written).
 pub fn path_for(worktree: &Path) -> PathBuf {
     let name = worktree
         .file_name()
         .map_or_else(|| "agent".into(), |n| n.to_string_lossy().into_owned());
-    // The place is part of the name: in the shared temp folder two worktrees called `a` of different projects must not share a file.
+    // The place is part of the name: in the shared folder two worktrees called `a` of different projects must not share a file.
     let file = format!("agora-gitconfig-{name}-{:08x}", place_hash(worktree));
-    if agora_platform::PRIVATE_TEMP {
-        return private_folder().join(file);
-    }
-    worktree
-        .parent()
-        .map_or_else(std::env::temp_dir, Path::to_path_buf)
-        .join(format!(".{file}"))
+    private_folder()
+        .unwrap_or_else(std::env::temp_dir)
+        .join(file)
 }
 
 /// The name the file is first written under: `.new` appended, not `with_extension`, which would cut a worktree name such as `fix.v1`
@@ -201,6 +205,12 @@ pub fn write_for_result(worktree: &Path) -> std::io::Result<PathBuf> {
 fn write_values(worktree: &Path, values: &[(String, String)]) -> std::io::Result<PathBuf> {
     let path = path_for(worktree);
     prepare_folder()?;
+    write_to(&path, values)
+}
+
+/// Writes the file at `path` (its folder made ready by the caller).
+fn write_to(path: &Path, values: &[(String, String)]) -> std::io::Result<PathBuf> {
+    let path = path.to_path_buf();
     let tmp = temp_name(&path);
     let _ = std::fs::remove_file(&tmp);
     let text = render(values);
@@ -351,8 +361,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("agora-gc-dot-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(
-            temp_name(Path::new("/x/.agora-gitconfig-fix.v1")),
-            Path::new("/x/.agora-gitconfig-fix.v1.new")
+            temp_name(Path::new("/x/agora-gitconfig-fix.v1")),
+            Path::new("/x/agora-gitconfig-fix.v1.new")
         );
         assert_ne!(
             temp_name(&path_for(Path::new("/w/fix.v1"))),
@@ -361,8 +371,10 @@ mod tests {
         let (a, b) = (dir.join("fix.v1"), dir.join("fix.v2"));
         std::fs::create_dir_all(&a).unwrap();
         std::fs::create_dir_all(&b).unwrap();
-        let pa = write_values(&a, &pairs(&[("user.name", "A")])).unwrap();
-        let pb = write_values(&b, &pairs(&[("user.name", "B")])).unwrap();
+        // The files go in a folder of this test, not the node's real one.
+        let here = |w: &Path| dir.join(path_for(w).file_name().unwrap());
+        let pa = write_to(&here(&a), &pairs(&[("user.name", "A")])).unwrap();
+        let pb = write_to(&here(&b), &pairs(&[("user.name", "B")])).unwrap();
         assert_ne!(pa, pb);
         assert!(std::fs::read_to_string(&pa).unwrap().contains("\"A\""));
         assert!(std::fs::read_to_string(&pb).unwrap().contains("\"B\""));
@@ -388,13 +400,30 @@ mod tests {
         assert!(p.to_string_lossy().contains("agent-1"));
     }
 
+    /// Review F6: the file is never beside the worktree (a folder an older agent of the same project may write), but in the node's
+    /// private folder.
+    #[test]
+    fn the_file_is_not_beside_the_worktree() {
+        let wt = Path::new("/srv/project/sub/agent-1");
+        let p = path_for(wt);
+        assert_ne!(p.parent(), wt.parent());
+        assert!(!p.starts_with("/srv/project"));
+        assert!(p
+            .parent()
+            .is_some_and(|d| d.ends_with(if agora_platform::PRIVATE_TEMP {
+                "agora-git-config"
+            } else {
+                "git-config"
+            })));
+    }
+
     #[test]
     fn writing_replaces_a_link_and_the_old_text() {
         let dir = std::env::temp_dir().join(format!("agora-gc-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let wt = dir.join("agent-9");
         std::fs::create_dir_all(&wt).unwrap();
-        let p = path_for(&wt);
+        let p = dir.join(path_for(&wt).file_name().unwrap());
         let victim = dir.join("victim");
         std::fs::write(&victim, "keep").unwrap();
         #[cfg(unix)]
@@ -402,7 +431,7 @@ mod tests {
             let _ = std::fs::remove_file(&p);
             std::os::unix::fs::symlink(&victim, &p).unwrap();
         }
-        let written = write_values(&wt, &pairs(&[("user.name", "A")])).unwrap();
+        let written = write_to(&p, &pairs(&[("user.name", "A")])).unwrap();
         assert_eq!(written, p);
         assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep");
         assert_eq!(

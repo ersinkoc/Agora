@@ -160,7 +160,11 @@ fn git_with_the_agents_environment_commits_as_the_person_and_sees_no_dangerous_k
     // The configuration the agent's git has is the file and the repository's, nothing else.
     let list = run(&["config", "--list", "--show-origin"]);
     let list = String::from_utf8_lossy(&list.stdout);
-    assert!(!list.contains(h.to_string_lossy().as_ref()), "{list}");
+    // (The file itself lies under the home folder, in the node's own folder; the person's file is not among the origins.)
+    assert!(
+        !list.contains(h.join(".gitconfig").to_string_lossy().as_ref()),
+        "{list}"
+    );
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -234,7 +238,10 @@ fn a_really_confined_agent_commits_with_the_copied_identity_and_cannot_read_the_
     let script = format!(
         "{{ echo a > b.txt; git add b.txt; git commit -q -m x; git log -1 --format='%an <%ae>'; \
          git config --get commit.gpgsign; git config --get credential.helper; \
-         cat {}/.gitconfig; echo \"GCG=$GIT_CONFIG_GLOBAL\"; echo done; }} > out 2>&1; sleep 30",
+         cat {}/.gitconfig; echo \"GCG=$GIT_CONFIG_GLOBAL\"; \
+         head -c 6 \"$GIT_CONFIG_GLOBAL\" | tr -d '\\n\\t' | sed 's/^/RD:/'; echo; \
+         echo evil >> \"$GIT_CONFIG_GLOBAL\" || echo WRITE_REFUSED; \
+         touch \"$(dirname \"$GIT_CONFIG_GLOBAL\")/planted\" || echo FOLDER_REFUSED; echo done; }} > out 2>&1; sleep 30",
         h.display()
     );
     let (dir, repo_dir) = repo("landlock");
@@ -271,6 +278,11 @@ fn a_really_confined_agent_commits_with_the_copied_identity_and_cannot_read_the_
     let text = read();
     assert!(text.contains("Ada Example <ada@example.com>"), "{text}");
     assert!(text.contains("GCG="), "{text}");
+    // Review F6: the agent reads its file, and can write neither the file nor its folder.
+    assert!(text.contains("RD:[user]"), "{text}");
+    assert!(text.contains("WRITE_REFUSED"), "{text}");
+    assert!(text.contains("FOLDER_REFUSED"), "{text}");
+    assert!(!text.contains("evil"), "{text}");
     assert!(
         !text.contains("store") && !text.contains("token@") && !text.contains("pwned"),
         "{text}"
@@ -384,23 +396,25 @@ fn a_file_whose_folder_is_reached_through_a_link_into_a_writable_folder_is_not_w
     assert!(made.exists());
     let _ = std::fs::remove_file(made);
 
-    // Where the file lies beside the worktree (not where the system's temp folder is the agent's to avoid), a worktrees folder that is
-    // a link into a writable folder is the same case from the other side.
+    // Review F6: where the system's temp folder is the agent's own, the file is in the node's private folder under the home folder,
+    // never beside the worktree. A grant on the worktrees folder or its parent (an older agent of the same project may hold one)
+    // therefore does not touch it, and the file is written.
     if !agora_platform::PRIVATE_TEMP {
         let writable = dir.join("writable");
-        let real_trees = writable.join("trees");
-        std::fs::create_dir_all(real_trees.join("a")).unwrap();
-        let link = dir.join("linked");
-        std::os::unix::fs::symlink(&real_trees, &link).unwrap();
-        let wt = link.join("a");
-        assert_eq!(
-            policy.git_config(&wt, std::slice::from_ref(&writable)),
-            None
-        );
-        assert!(!gitconfig::path_for(&wt).exists());
-        assert!(!gitconfig::path_for(&real_trees.join("a")).exists());
-        let made = policy.git_config(&wt, &[elsewhere]).unwrap();
+        let trees = writable.join("trees");
+        std::fs::create_dir_all(trees.join("a")).unwrap();
+        let wt = trees.join("a");
+        let file = gitconfig::path_for(&wt);
+        assert!(!file.starts_with(&writable), "{file:?}");
+        assert_ne!(file.parent(), wt.parent());
+        let made = policy
+            .git_config(&wt, &[writable.clone(), trees.clone(), wt.clone()])
+            .expect("a grant on the worktree and its parents must not stop a file kept elsewhere");
+        assert_eq!(made, file);
         assert!(made.exists());
+        // A grant on the folder the file is in is still refused (fail closed).
+        let folder = file.parent().unwrap().to_path_buf();
+        assert_eq!(policy.git_config(&wt, &[folder]), None);
     }
     let _ = std::fs::remove_dir_all(dir);
 }
