@@ -44,6 +44,11 @@ _Nothing yet._
   A window that reconnects to a hub holding such an old record is given a fresh snapshot instead of the stored events, so it
   never applies one (and one that did before is corrected).
 
+### Starting at login
+- An agent that was in the middle of a task when its machine or Agora stopped now carries on by itself when it comes back: Agora tells it
+  that its session was cut off, to check the state of what it was doing first, and to go on where it stopped. Only for an agent that was
+  working, only when Agora brought it back by itself (not when you pressed Resume, and not for one that was waiting for you), once for each
+  interruption, for Claude Code and Codex. `resume.continue = off` in the node's policy file turns it off.
 ### Console (`agora tui`)
 - A paste that held pieces of the paste markers could end the paste early and type the rest as keys; it now always arrives as
   one paste.
