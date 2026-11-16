@@ -2685,6 +2685,31 @@ async fn wrong_bearers_on_the_metrics_path_count_toward_the_lockout() {
     assert_eq!(get_metrics(addr, Some(&token)).await.0, 429);
 }
 
+/// Integration review F1: a valid metrics token interleaved with wrong tries must not wipe the address's failure count; the wrong
+/// ones lock the address out exactly as they do without the token.
+#[tokio::test]
+async fn a_valid_metrics_token_does_not_clear_the_failures_of_wrong_tries() {
+    let (hub, _st, addr) = metrics_hub().await;
+    hub.enable_metrics();
+    let token = agora_hub::metrics_token::MetricsTokens::new(hub.store())
+        .create("prom", server::now_ms(), None)
+        .unwrap();
+    let mut locked_after = None;
+    for round in 1..=agora_hub::password::ADDRESS_FREE_FAILURES + 2 {
+        get_metrics(addr, Some("agm_wrong")).await;
+        // The wrong try that spends the last free one starts the lockout; the good token then waits too.
+        if get_metrics(addr, Some(&token)).await.0 == 429 {
+            locked_after = Some(round);
+            break;
+        }
+    }
+    assert_eq!(
+        locked_after,
+        Some(agora_hub::password::ADDRESS_FREE_FAILURES),
+        "wrong tries interleaved with a valid token lock out as they do alone"
+    );
+}
+
 /// #558 review: a certificate revoked between the node's Hello and its Resume ends the connection too (the handshake is watched as
 /// the conversation is), and the node is never recorded online.
 #[tokio::test]

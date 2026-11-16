@@ -375,7 +375,7 @@ impl crate::web::SessionApi for HubSessions {
             match self.signin().access(token, now) {
                 None => false,
                 Some(a) if a.role != crate::users::Role::Owner => {
-                    self.guard.succeeded(client, Scope::AddressOnly);
+                    self.guard.give_back_one(client);
                     return (403, String::new());
                 }
                 Some(_) => true,
@@ -384,7 +384,8 @@ impl crate::web::SessionApi for HubSessions {
         if !allowed {
             return (401, String::new());
         }
-        self.guard.succeeded(client, Scope::AddressOnly);
+        // Only this try's own count goes back: a valid token must not wipe the failures of sign-in guesses (review F1).
+        self.guard.give_back_one(client);
         self.hub
             .metrics_text()
             .map_or((404, String::new()), |text| (200, text))

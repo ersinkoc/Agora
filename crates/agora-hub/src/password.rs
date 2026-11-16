@@ -444,6 +444,20 @@ impl Guard {
         Ok(())
     }
 
+    /// Gives back only the one count that [`Self::attempt`] (scope `AddressOnly`) just made, for a try that proved a
+    /// credential which is not a sign-in (a metrics token): it never clears the failures other tries left on the address,
+    /// so a valid token cannot be interleaved with wrong guesses to wipe their count.
+    pub fn give_back_one(&self, client: &Client) {
+        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(t) = s.by_address.get_mut(&client.bucket()) {
+            t.failures = t.failures.saturating_sub(1);
+            if t.failures < ADDRESS_FREE_FAILURES {
+                // Below the free tries no lockout stood before this try, so one now is this try's own.
+                t.until_ms = 0;
+            }
+        }
+    }
+
     /// The try that [`Self::attempt`] started (with the same `scope`) proved who is here: the address starts again from zero, and
     /// a code or password try is given back to the hub-wide count.
     pub fn succeeded(&self, client: &Client, scope: Scope) {
