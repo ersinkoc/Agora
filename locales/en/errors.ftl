@@ -83,6 +83,7 @@ lease-invalid_path = { $path } cannot be locked.
 files-not_found = { $path } was not found.
 files-too_large = { $path } is too large (limit: { $limit }).
 files-outside_root = { $path } is outside the project folder.
+files-secret = { $path } is a secret file and is not shown.
 adapter-signature_invalid = Package { $package } could not be verified.
 adapter-crashed = { $kind } stopped unexpectedly (exit code { $exit_code }).
 adapter-agent_exited = The agent exited before it was ready (step { $stage }, exit code { $exit_code }). Its last output: { $stderr_tail }

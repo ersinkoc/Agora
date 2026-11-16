@@ -75,6 +75,7 @@ or a local response timeout has a localized retry message.
 | `files.not_found` | `path` | |
 | `files.too_large` | `path`, `limit` | |
 | `files.outside_root` | `path` | Path escapes the worktree (`..`, absolute, or a symlink leading out) |
+| `files.secret` | `path` | ADR-0080: the node treats the file as secret by its name (`.env`, a private key, ...) and does not show it; the node's owner can switch this off (`files.show_secret`) |
 | `adapter.signature_invalid` | `package` | |
 | `adapter.crashed` | `kind`, `exit_code` | |
 | `adapter.agent_exited` | `stage`, `exit_code`, `stderr_tail` | ADR-0058: the agent behind an adapter (an ACP agent behind the bridge) exited before it was ready. `stage` is `initialize` or `session`; `exit_code` is its exit code, `?` when it had none; `stderr_tail` the last lines of its error output with secrets removed (docs/specs/adapter-protocol.md), possibly empty |

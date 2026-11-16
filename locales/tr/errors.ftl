@@ -82,6 +82,7 @@ lease-invalid_path = { $path } kilitlenemez.
 files-not_found = { $path } bulunamadı.
 files-too_large = { $path } çok büyük (sınır: { $limit }).
 files-outside_root = { $path } proje klasörünün dışında.
+files-secret = { $path } gizli bir dosya ve gösterilmez.
 adapter-signature_invalid = { $package } paketi doğrulanamadı.
 adapter-crashed = { $kind } beklenmedik şekilde durdu (çıkış kodu { $exit_code }).
 adapter-agent_exited = Ajan hazır olmadan kapandı (adım { $stage }, çıkış kodu { $exit_code }). Son çıktısı: { $stderr_tail }

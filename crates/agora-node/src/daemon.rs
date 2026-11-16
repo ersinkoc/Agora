@@ -1120,6 +1120,9 @@ pub struct Policy {
     pub problems: Vec<String>,
     /// What happens to interrupted agents after the node starts (`resume`, `resume.kinds`, `resume.folders`; ADR-0060).
     pub resume: ResumePolicy,
+    /// Whether the file browser and the review screen show secret files (`files.show_secret = true`; ADR-0080). Default: no. Only the
+    /// word `true` turns it on.
+    pub show_secret: bool,
 }
 
 /// ADR-0060: `resume = ask | auto`. `ask` (the default, and any other value) offers Resume in the window and does nothing by itself;
@@ -1172,6 +1175,7 @@ impl Default for Policy {
             device_projects: std::collections::BTreeMap::new(),
             resume: ResumePolicy::default(),
             skip_permissions: crate::launch_options::SkipPermissions::default(),
+            show_secret: false,
             problems: Vec::new(),
         }
     }
@@ -1233,6 +1237,7 @@ pub fn read_policy(path: &std::path::Path) -> Policy {
         {
             match k.trim() {
                 "mesh.remote" => p.mesh_remote = v.trim() == "true",
+                "files.show_secret" => p.show_secret = v.trim() == "true",
                 "signed_commands" => {
                     p.signed_commands = crate::grants::SignedCommands(
                         v.split(',')
@@ -1595,7 +1600,8 @@ impl Node {
             .with_manifests_dir(cfg.manifests_dir.clone())
             .with_git_wake(Arc::clone(&git_wake))
             .with_spawner(Arc::clone(&spawner))
-            .with_ledger(Arc::clone(&ledger)),
+            .with_ledger(Arc::clone(&ledger))
+            .with_show_secret(read_policy(&cfg.data_dir.join(POLICY_FILE)).show_secret),
         );
         // ADR-0060: `resume = auto` brings back, without anyone asking, the interrupted agents of the kinds and folders the owner listed
         // that can continue their own session. In id order, so a helper comes after its parent (a helper whose parent did not come

@@ -247,6 +247,7 @@ mod tests {
             name: name.into(),
             is_dir,
             size_bytes: size,
+            secret: false,
         }
     }
 
