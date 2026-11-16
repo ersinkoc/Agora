@@ -1,0 +1,4 @@
+feed-zero: wide text and down/up reflow preserve valid size/cursor
+feed-one: wide text and down/up reflow preserve valid size/cursor
+reflow: wide text and down/up reflow preserve valid size/cursor
+node: 6 requests agree across screen, real PTY stty and broadcasts; 4 effective resizes

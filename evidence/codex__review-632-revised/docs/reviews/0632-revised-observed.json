@@ -1,0 +1,43 @@
+{
+  "scope": "contract models, not implementation tests or cryptographic proof",
+  "head": "b2281e204aa3bb76ec3852140c5a37c8015372ed",
+  "literal_invalidate_at_approval": {
+    "events": [
+      "create(t=0)",
+      "poll(t=2): pending",
+      "approve(t=3)",
+      "poll(t=4): token invalid",
+      "poll(t=6): token invalid"
+    ],
+    "cookie_deliveries": 0
+  },
+  "proposed_consume_at_delivery": {
+    "events": [
+      "create(t=0)",
+      "poll(t=2): pending",
+      "approve(t=3)",
+      "poll(t=4): cookie delivered",
+      "poll(t=6): token invalid"
+    ],
+    "cookie_deliveries": 1
+  },
+  "literal_30_second_idle": {
+    "reveal": 0,
+    "approve": 45,
+    "closes_at": 30,
+    "approve_at_45_succeeds": false
+  },
+  "proposed_pending_deadline": {
+    "reveal": 0,
+    "approve": 45,
+    "closes_at": 300,
+    "approve_at_45_succeeds": true
+  },
+  "revised_same_address_churn": {
+    "attempts": 10001,
+    "admissions": 2,
+    "pending": 2,
+    "victim_token_unchanged": true,
+    "notices": 1
+  }
+}

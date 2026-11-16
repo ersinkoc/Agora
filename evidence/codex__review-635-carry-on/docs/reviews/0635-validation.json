@@ -1,0 +1,27 @@
+{
+  "head": "11ea0a5692e870bde042903f629e8f4f215c86a1",
+  "baseline": {
+    "passed": 463,
+    "failed": 0,
+    "ignored": 0
+  },
+  "independent_native_controls": {
+    "passed": 3,
+    "failed": 0,
+    "platform": "Linux",
+    "agents": "agora-fake-agent only"
+  },
+  "negative_control": {
+    "mutation": "remove only working-state gate",
+    "expected_failure": "blocked: the sentence was sent",
+    "observed": true,
+    "source_restored": true,
+    "temporary_target_removed": true
+  },
+  "checks": {
+    "fmt": "pass",
+    "docs": "pass",
+    "diff": "pass",
+    "adapters_and_node_all_targets_clippy": "pass"
+  }
+}

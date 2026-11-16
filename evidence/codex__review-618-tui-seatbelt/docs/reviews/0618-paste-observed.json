@@ -1,0 +1,73 @@
+{
+  "esc_control_cases": 33,
+  "head": "dd9a77e8099a84a0c857636dec617a0c9af5c480",
+  "samples": [
+    {
+      "actual_app_ns": [
+        23889377,
+        24079478,
+        24141242
+      ],
+      "bytes": 12011,
+      "depth": 2000,
+      "linear_reference_ns": 88323,
+      "median_app_ns": 24079478,
+      "parser_paste_events": 1,
+      "plain_app_ns": 23633
+    },
+    {
+      "actual_app_ns": [
+        93650858,
+        94234736,
+        94456586
+      ],
+      "bytes": 24011,
+      "depth": 4000,
+      "linear_reference_ns": 174983,
+      "median_app_ns": 94234736,
+      "parser_paste_events": 1,
+      "plain_app_ns": 40485
+    },
+    {
+      "actual_app_ns": [
+        372955519,
+        375869199,
+        376495305
+      ],
+      "bytes": 48011,
+      "depth": 8000,
+      "linear_reference_ns": 348834,
+      "median_app_ns": 375869199,
+      "parser_paste_events": 1,
+      "plain_app_ns": 54891
+    },
+    {
+      "actual_app_ns": [
+        1465506391,
+        1483993944,
+        1484610022
+      ],
+      "bytes": 96011,
+      "depth": 16000,
+      "linear_reference_ns": 688321,
+      "median_app_ns": 1483993944,
+      "parser_paste_events": 1,
+      "plain_app_ns": 164794
+    },
+    {
+      "actual_app_ns": [
+        5818075618,
+        5975529977,
+        6017309715
+      ],
+      "bytes": 192011,
+      "depth": 32000,
+      "linear_reference_ns": 1368196,
+      "median_app_ns": 5975529977,
+      "parser_paste_events": 1,
+      "plain_app_ns": 304362
+    }
+  ],
+  "scope": "release build, real Parser and App::handle; linear reference is reviewer code",
+  "utf8_split_controls": "pass"
+}

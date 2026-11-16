@@ -1,0 +1,73 @@
+{
+  "verified_main": "f3b79827e586bd64303c6fd1eeb63dda8500a91a",
+  "scope": "Original P1 option-ID and P2 ended-survivor reproductions, current main; isolated tests only",
+  "browser": [
+    {
+      "lang": "en",
+      "id": "skip-permissions!",
+      "checkboxes": 0,
+      "options": [],
+      "confirmed": [],
+      "signatureValid": true,
+      "tamperedSignatureValid": false,
+      "dialogs": 0
+    },
+    {
+      "lang": "en",
+      "id": "resume-last,skip-permissions!",
+      "checkboxes": 0,
+      "options": [],
+      "confirmed": [],
+      "signatureValid": true,
+      "tamperedSignatureValid": false,
+      "dialogs": 0
+    },
+    {
+      "lang": "en",
+      "id": "skip-permissions",
+      "checkboxes": 1,
+      "options": [
+        "skip-permissions"
+      ],
+      "confirmed": [],
+      "signatureValid": true,
+      "tamperedSignatureValid": false,
+      "dialogs": 0
+    },
+    {
+      "lang": "tr",
+      "id": "skip-permissions!",
+      "checkboxes": 0,
+      "options": [],
+      "confirmed": [],
+      "signatureValid": true,
+      "tamperedSignatureValid": false,
+      "dialogs": 0
+    },
+    {
+      "lang": "tr",
+      "id": "resume-last,skip-permissions!",
+      "checkboxes": 0,
+      "options": [],
+      "confirmed": [],
+      "signatureValid": true,
+      "tamperedSignatureValid": false,
+      "dialogs": 0
+    },
+    {
+      "lang": "tr",
+      "id": "skip-permissions",
+      "checkboxes": 1,
+      "options": [
+        "skip-permissions"
+      ],
+      "confirmed": [],
+      "signatureValid": true,
+      "tamperedSignatureValid": false,
+      "dialogs": 0
+    }
+  ],
+  "unit_regressions": "12 web choice/signature tests passed",
+  "ended_survivor": "Original fake-agent restart proof, now tracked in session_resume.rs, passed and resumed the same agent",
+  "node_checks": "Full workspace tests at refreshed #433 baseline passed; no real agent/service changes"
+}

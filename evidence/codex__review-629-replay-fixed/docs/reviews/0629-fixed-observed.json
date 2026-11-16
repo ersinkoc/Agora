@@ -1,0 +1,23 @@
+{
+  "browser": {
+    "before": {
+      "pos": 8,
+      "agent": false,
+      "count": 99,
+      "checkout": "n1"
+    },
+    "healed": {
+      "pos": 12,
+      "agent": true,
+      "count": 0,
+      "checkout": "n2"
+    },
+    "equal_to_fresh": true
+  },
+  "native_controls": [
+    "33 schema fixture bodies: live refusal matches classifier; 10 forbidden, 23 accepted; all hub-body controls trusted",
+    "7 unsafe/beyond-end checkpoints equal fresh snapshot; clean tail replays; at-end resume empty; 8 stored records byte-identical",
+    "Second disk-backed open refreshes legacy barrier; clean history replays; stored bytes unchanged"
+  ],
+  "negative_control": "barrier removed: checkpoint0 receives event instead of snapshot; expected exit101"
+}

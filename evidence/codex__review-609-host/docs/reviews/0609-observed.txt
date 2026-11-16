@@ -1,0 +1,7 @@
+14 rejected heads: 421, hub TCP count 0; valid TLS control: ACK and exact bytes, count 1
+Binary body, exact 16KiB head and local-program pipeline preserved; 16KiB+1 head closed before dialing
+Valid parallel request finished <3s; incomplete head expired near 10s with no response/no extra hub connection
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 10.00s
+
+Bypassed-guard negative control: case 0 wrong Host reached the fixture TLS upstream and got 200 instead of 421; expected exit 101.
+Product source restored after both modes.

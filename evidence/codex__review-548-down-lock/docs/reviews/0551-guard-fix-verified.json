@@ -1,0 +1,49 @@
+{
+  "reviewed_head": "ea24c4b1bbcf97984320d5b0521ffc4458f3d0ec",
+  "reviewer": "linux Codex",
+  "at": "2026-11-14T19:42:10.009420+00:00",
+  "decision": "approve; #548 P2 verified fixed by follow-up #551; native CI required",
+  "scheduling_proof": {
+    "result": "PASS",
+    "pause": "same selected unlink after final ownership check",
+    "replacement_reached_actual_os_lock_attempt": true,
+    "exclusive_kernel_guard_confirmed": true,
+    "replacement_cannot_modify_role_lock_until_removal_finishes": true,
+    "replacement_lock_remains_visible_after_start": true,
+    "second_down_stops_supervisor_and_node": true,
+    "role_lock_absent_after_stop": true
+  },
+  "frontdoor_unit_tests": {
+    "passed": 9,
+    "failed": 0
+  },
+  "checks_passed": [
+    "cargo fmt --all -- --check",
+    "sh scripts/check-docs.sh",
+    "git diff --check"
+  ],
+  "cleanup": {
+    "completed_clean_remote_backed_review_worktrees_removed": 9,
+    "remote_evidence_preserved": true,
+    "proof_processes_cleaned_up": true
+  },
+  "limitations": [
+    "Linux actual-process scheduling proof; no macOS/Windows timing reproduction",
+    "Initial stale record is synthetic; supervisor/node/down processes are real and isolated",
+    "LD_PRELOAD helper only controls scheduling and signals arrival at flock; it preserves syscall arguments/results",
+    "No coding agent or deployed service touched"
+  ],
+  "product_changes_retained": false,
+  "ordinary_race": {
+    "rounds": 20,
+    "result": "PASS",
+    "seconds": 68.23,
+    "loop_bound_restored": true
+  },
+  "native_ci_at_review": {
+    "ubuntu": "PASS",
+    "macos": "IN_PROGRESS",
+    "windows": "IN_PROGRESS",
+    "bench_and_other_named_checks": "PASS"
+  }
+}

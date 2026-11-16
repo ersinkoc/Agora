@@ -1,0 +1,43 @@
+Owner scoped=false snapshot /home/alice/agora -> /home/alice/agora
+Owner scoped=false live /home/alice/agora -> /home/alice/agora
+Owner scoped=false backlog /home/alice/agora -> /home/alice/agora
+Member scoped=false snapshot /home/alice/agora -> agora
+Member scoped=false live /home/alice/agora -> agora
+Member scoped=false backlog /home/alice/agora -> agora
+Member scoped=true snapshot /home/alice/agora -> agora
+Member scoped=true live /home/alice/agora -> agora
+Viewer scoped=false snapshot /home/alice/agora -> agora
+Viewer scoped=false live /home/alice/agora -> agora
+Viewer scoped=false backlog /home/alice/agora -> agora
+Viewer scoped=true snapshot /home/alice/agora -> agora
+Viewer scoped=true live /home/alice/agora -> agora
+Owner scoped=false snapshot /Users/alice/agora -> /Users/alice/agora
+Owner scoped=false live /Users/alice/agora -> /Users/alice/agora
+Owner scoped=false backlog /Users/alice/agora -> /Users/alice/agora
+Member scoped=false snapshot /Users/alice/agora -> agora
+Member scoped=false live /Users/alice/agora -> agora
+Member scoped=false backlog /Users/alice/agora -> agora
+Member scoped=true snapshot /Users/alice/agora -> agora
+Member scoped=true live /Users/alice/agora -> agora
+Viewer scoped=false snapshot /Users/alice/agora -> agora
+Viewer scoped=false live /Users/alice/agora -> agora
+Viewer scoped=false backlog /Users/alice/agora -> agora
+Viewer scoped=true snapshot /Users/alice/agora -> agora
+Viewer scoped=true live /Users/alice/agora -> agora
+Owner scoped=false snapshot C:\Users\alice\agora.exe -> C:\Users\alice\agora.exe
+Owner scoped=false live C:\Users\alice\agora.exe -> C:\Users\alice\agora.exe
+Owner scoped=false backlog C:\Users\alice\agora.exe -> C:\Users\alice\agora.exe
+Member scoped=false snapshot C:\Users\alice\agora.exe -> agora.exe
+Member scoped=false live C:\Users\alice\agora.exe -> agora.exe
+Member scoped=false backlog C:\Users\alice\agora.exe -> agora.exe
+Member scoped=true snapshot C:\Users\alice\agora.exe -> agora.exe
+Member scoped=true live C:\Users\alice\agora.exe -> agora.exe
+Viewer scoped=false snapshot C:\Users\alice\agora.exe -> agora.exe
+Viewer scoped=false live C:\Users\alice\agora.exe -> agora.exe
+Viewer scoped=false backlog C:\Users\alice\agora.exe -> agora.exe
+Viewer scoped=true snapshot C:\Users\alice\agora.exe -> agora.exe
+Viewer scoped=true live C:\Users\alice\agora.exe -> agora.exe
+
+Original proof passes, exit 0.
+30/30 nonowner deliveries contain exactly the filename.
+9/9 owner controls retain the original full path.

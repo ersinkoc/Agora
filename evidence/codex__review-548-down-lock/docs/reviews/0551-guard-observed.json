@@ -1,0 +1,24 @@
+{
+  "replacement_reached_os_lock": true,
+  "guard_exclusively_held_before_unlink": true,
+  "role_lock_unchanged_while_guard_held": true,
+  "replacement_pid": 622446,
+  "first_down": {
+    "exit": 0,
+    "stdout": "Nothing to stop: `agora` did not start anything that is still running.",
+    "stderr": ""
+  },
+  "replacement_lock_after_release": "622446 73353747 0.3.11",
+  "replacement_children": [
+    622449
+  ],
+  "replacement_alive_with_visible_lock": true,
+  "second_down": {
+    "exit": 0,
+    "stdout": "Stopped the node and its supervisor (process 622446).",
+    "stderr": ""
+  },
+  "supervisor_stopped_by_second_down": true,
+  "node_stopped_by_second_down": true,
+  "role_lock_absent_after_second_down": true
+}

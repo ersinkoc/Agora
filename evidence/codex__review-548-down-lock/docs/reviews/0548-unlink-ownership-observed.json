@@ -1,0 +1,22 @@
+{
+  "replacement_lock_before_release": "542525 73213703 0.3.11",
+  "replacement_pid": 542525,
+  "replacement_children": [
+    542526
+  ],
+  "first_down": {
+    "exit": 0,
+    "stdout": "Nothing to stop: `agora` did not start anything that is still running.",
+    "stderr": ""
+  },
+  "lock_exists_after_first_down": false,
+  "supervisor_alive_after_first_down": true,
+  "node_alive_after_first_down": true,
+  "second_down": {
+    "exit": 0,
+    "stdout": "Nothing to stop: `agora` did not start anything that is still running.",
+    "stderr": ""
+  },
+  "supervisor_alive_after_second_down": true,
+  "node_alive_after_second_down": true
+}

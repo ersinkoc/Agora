@@ -1,0 +1,27 @@
+{
+  "head": "8ec3665edbb3529cc67681948e98d73fb95fdf8f",
+  "verdict": "APPROVE",
+  "existing_hub_tests": {
+    "passed": 279,
+    "failed": 0,
+    "ignored": 5
+  },
+  "native_proofs": {
+    "passed": 3,
+    "failed": 0
+  },
+  "browser_proof": {
+    "exit": 0,
+    "already_corrupt_checkpoint": 8,
+    "healed_pos": 12,
+    "equals_fresh": true
+  },
+  "negative_control_exit": 101,
+  "checks": {
+    "fmt": 0,
+    "docs": 0,
+    "hub_all_target_clippy_warnings_denied": 0
+  },
+  "product_and_test_sources_restored": true,
+  "host": "Linux"
+}

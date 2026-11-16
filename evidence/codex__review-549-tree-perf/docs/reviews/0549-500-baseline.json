@@ -1,0 +1,23 @@
+{
+ "fleet": "10x5x10",
+ "agents": 500,
+ "firstLoadMs": 135,
+ "rows": 500,
+ "treeNodes": 3810,
+ "pageNodes": 4901,
+ "heapMB": 11,
+ "scrollFrameMs": {
+  "p50": 16.8,
+  "p95": 21.8,
+  "max": 31.9
+ },
+ "longTasksWhileScrolling": 0,
+ "pickToFrameMs": {
+  "p50": 31.6,
+  "p95": 41.9
+ },
+ "fullRerenderMs": {
+  "p50": 26.1,
+  "p95": 35.1
+ }
+}

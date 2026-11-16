@@ -1,0 +1,68 @@
+{
+  "reviewed_head": "601a30f3d074755bb26f3d449da4c57b89d63039",
+  "reviewer": "linux Codex",
+  "at": "2026-11-14T20:11:47.982607+00:00",
+  "decision": "changes requested",
+  "priority": "P2",
+  "finding": {
+    "path": "scripts/perf-tree.mjs",
+    "line": 80,
+    "summary": "Scrolling long-task metric includes later picking and filtering tasks",
+    "natural_2000_agent_run": {
+      "reported_longTasksWhileScrolling": 85,
+      "inside_scroll_window": 49,
+      "after_scroll_window": 36,
+      "injected_work_ms": 0
+    },
+    "controlled_500_agent_run": {
+      "reported_longTasksWhileScrolling": 1,
+      "inside_scroll_window": 0,
+      "after_scroll_window": 1,
+      "controlled_post_scroll_work_ms": 80,
+      "observed_control_duration_ms": 80
+    }
+  },
+  "unmodified_500_baseline": {
+    "fleet": "10x5x10",
+    "agents": 500,
+    "firstLoadMs": 135,
+    "rows": 500,
+    "treeNodes": 3810,
+    "pageNodes": 4901,
+    "heapMB": 11,
+    "scrollFrameMs": {
+      "p50": 16.8,
+      "p95": 21.8,
+      "max": 31.9
+    },
+    "longTasksWhileScrolling": 0,
+    "pickToFrameMs": {
+      "p50": 31.6,
+      "p95": 41.9
+    },
+    "fullRerenderMs": {
+      "p50": 26.1,
+      "p95": 35.1
+    }
+  },
+  "scope_notes": [
+    "Both seeded fleets were offline after hub reopen (10 and 20 offline machine headings observed)",
+    "Full-rerender metric changes only Explorer local filter state; source does not support equating it to the entire App view-event cost",
+    "First-load endpoint waits for DOM row count rather than an explicit paint observation"
+  ],
+  "checks_passed": [
+    "node --check scripts/perf-tree.mjs",
+    "Python seed script AST parse",
+    "sh scripts/check-docs.sh",
+    "git diff --check"
+  ],
+  "native_ci": "All named checks green including Linux/macOS/Windows Rust and benchmark",
+  "artifact_provenance": "Reused author-produced local binary/web assets from the clean r6-lists worktree at the reviewed commit, referenced read-only by review-local symlinks; no new Rust build",
+  "limitations": [
+    "Headless Chromium software rendering on one Linux machine",
+    "The 80 ms post-scroll task is deliberately injected to test attribution, not a real product slowdown",
+    "Natural 2000-agent run has no injected task",
+    "No coding agent, real account or deployed service touched"
+  ],
+  "product_changes_retained": false
+}

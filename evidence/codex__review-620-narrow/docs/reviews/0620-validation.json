@@ -1,0 +1,35 @@
+{
+  "head": "be1c6a0f004471d3f26f460376efc70d10131e74",
+  "verdict": "APPROVE",
+  "host": "Linux",
+  "targeted_tests": {
+    "vt_lib": 3,
+    "tui_lib": 122,
+    "node_terminal": 12,
+    "node_session_resume": 10,
+    "passed": 147,
+    "failed": 0
+  },
+  "initial_broad_run": {
+    "passed": 318,
+    "failed": 1,
+    "failure": "review_a_survivor_that_ended_after_announcement_can_be_cleared_by_stop: owned probe process ledger timeout",
+    "node_unit_passed": 202,
+    "isolated_rerun": "1/1 passed",
+    "entire_affected_binary_rerun": "10/10 passed without changes"
+  },
+  "driver": {
+    "bounded_cases": 4,
+    "exit": 0,
+    "node_requests": 6,
+    "effective_resize_broadcasts": 4,
+    "pty_screen_broadcast_agree": true
+  },
+  "checks": {
+    "fmt": 0,
+    "check-docs": 0,
+    "vt_node_tui_all_target_clippy_warnings_denied": 0
+  },
+  "source_tests_modified": false,
+  "full_suite_pass_claimed": false
+}

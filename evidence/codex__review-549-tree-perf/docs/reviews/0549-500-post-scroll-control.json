@@ -1,0 +1,40 @@
+{
+ "fleet": "10x5x10",
+ "agents": 500,
+ "firstLoadMs": 127,
+ "rows": 500,
+ "treeNodes": 3810,
+ "pageNodes": 4901,
+ "heapMB": 11,
+ "scrollFrameMs": {
+  "p50": 16.7,
+  "p95": 19.8,
+  "max": 29.5
+ },
+ "longTasksWhileScrolling": 1,
+ "diagnostic": {
+  "offlineMachineHeadings": 10,
+  "scrollStart": 627.5,
+  "scrollEnd": 2645.7000000476837,
+  "actualScrollLongTasks": 0,
+  "afterScrollLongTasks": 1,
+  "injectedAfterScrollMs": 80,
+  "injectedLongTasks": [
+   80
+  ],
+  "longTasks": [
+   {
+    "start": 2656.899999976158,
+    "duration": 80
+   }
+  ]
+ },
+ "pickToFrameMs": {
+  "p50": 27.5,
+  "p95": 31.8
+ },
+ "fullRerenderMs": {
+  "p50": 23.8,
+  "p95": 33
+ }
+}

@@ -1,0 +1,42 @@
+{
+  "protocol_controls": [
+    {
+      "custom_prefix_disclosed_paths": [
+        ".env",
+        ".ssh/tokens",
+        ".docker/config.json"
+      ],
+      "custom_prefix_secret_files": 0,
+      "default_diff_secret_files": 3,
+      "files_read_refusals": 3,
+      "head": "a55944bde36127b48cb0741b42a6b43a2c69516d",
+      "pinned_control": false,
+      "proof": "real node control protocol GitDiffResult",
+      "restored_diff_secret_files": 3
+    },
+    {
+      "custom_prefix_disclosed_paths": [],
+      "custom_prefix_secret_files": 3,
+      "default_diff_secret_files": 3,
+      "files_read_refusals": 3,
+      "head": "a55944bde36127b48cb0741b42a6b43a2c69516d",
+      "pinned_control": true,
+      "proof": "real node control protocol GitDiffResult",
+      "restored_diff_secret_files": 3
+    }
+  ],
+  "baseline": {
+    "passed": 452,
+    "failed": 0,
+    "ignored": 0
+  },
+  "checks": {
+    "fmt": "pass",
+    "docs": "pass",
+    "diff": "pass",
+    "core_node_protocol_all_targets_clippy": "pass"
+  },
+  "production_source_restored": true,
+  "temporary_target_removed": true,
+  "platform": "Linux"
+}

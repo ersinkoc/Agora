@@ -1,0 +1,62 @@
+{
+  "reviewed_head": "863f4488b1a1a43c09fe6ab0696e191ee4fc0546",
+  "reviewer": "linux Codex",
+  "at": "2026-11-14T18:44:35.256016+00:00",
+  "decision": "approve; original P2 fixed; native CI required for merge",
+  "socket_proof": {
+    "result": "PASS",
+    "transport": "real loopback TCP/WebSocket test server, synthetic node",
+    "hidden_snapshot_position": 9,
+    "hidden_snapshot_records": 0,
+    "node_resume_from_seq": 6,
+    "late_client_socket_actually_closed": true,
+    "reconnect_response": "Snapshot",
+    "recovered_snapshot_position": 10,
+    "restored_hostname": "laptop",
+    "restored_running_agents": 1,
+    "restored_checkouts": 1,
+    "restored_workspaces": 1,
+    "restored_agent_workspace_bindings": 1,
+    "next_live_event_position": 11,
+    "no_duplicate_next_event": true,
+    "resume_cutoff_survives_hub_reopen": true
+  },
+  "web_live_proof": {
+    "result": "PASS",
+    "implementation": "unchanged actual connectLive with controllable Socket transport and real captured binary snapshots",
+    "automatically_resumes_from_hidden_position": 9,
+    "states": [
+      "connecting",
+      "live",
+      "offline",
+      "connecting",
+      "live"
+    ],
+    "restores_retained_records_without_reload": true,
+    "session_not_rejected": true
+  },
+  "checks_passed": [
+    "cargo fmt --all -- --check",
+    "sh scripts/check-docs.sh",
+    "git diff --check"
+  ],
+  "limitations": [
+    "Synthetic node events, no coding agent/model/account used",
+    "Server test runs real sockets without TLS using existing authenticated test fixtures",
+    "Web lifecycle uses controllable Socket, not rendered browser automation",
+    "Reopen check rebuilds a copied temporary SQLite event store through Hub::open",
+    "No deployed services changed"
+  ],
+  "product_changes_retained": false,
+  "tracked_hub_tests": {
+    "passed": 243,
+    "failed": 0,
+    "ignored": 1
+  },
+  "tracked_web_tests": {
+    "passed": 379,
+    "failed": 0,
+    "files_passed": 44
+  },
+  "native_ci": "All named checks passed, including Ubuntu/macOS/Windows Rust and benchmark"
+}

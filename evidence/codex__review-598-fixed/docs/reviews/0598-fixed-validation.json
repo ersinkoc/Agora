@@ -1,0 +1,29 @@
+{
+  "head": "8bd1ffe931c3dc935247f859f3e096481bae22fc",
+  "verdict": "TECHNICAL APPROVE",
+  "host": "Linux",
+  "tests": {
+    "command": "cargo test -p agora-protocol -p agora-node -p agora-hub",
+    "exit": 0,
+    "passed": 660,
+    "failed": 0,
+    "ignored": 4
+  },
+  "original_proof": {
+    "command": "python3 docs/reviews/0598-fixed-run-proof.py",
+    "exit": 0,
+    "observations": 39,
+    "nonowner_filename_only": 30,
+    "owner_full_path": 9,
+    "source_sha256": "f3e75dd0364e936cfbb7923e8645454f5222a77f3f0d46fc24c755c2313095d0",
+    "unchanged_from_original_evidence": true,
+    "server_source_restored": true
+  },
+  "checks": {
+    "cargo fmt --all -- --check": 0,
+    "bash scripts/check-docs.sh": 0,
+    "cargo clippy -p agora-protocol -p agora-node -p agora-hub --all-targets -- -D warnings": 0
+  },
+  "ci": "Required GitHub checks at reviewed head all SUCCESS including Rust ubuntu/macos/windows.",
+  "adr_acceptance": "Independent maintainer acceptance/integration hold; no acceptance granted or relayed."
+}

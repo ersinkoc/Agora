@@ -1,0 +1,37 @@
+{
+  "head": "7e649632e1e58d87c1254891bca6e7d8f869d8c4",
+  "verdict": "APPROVE",
+  "host": "Linux",
+  "existing_tests": {
+    "command": "cargo test -p agora-desktop-tunnel",
+    "exit": 0,
+    "passed": 11,
+    "failed": 0,
+    "ignored": 0
+  },
+  "proof": {
+    "command": "python3 docs/reviews/0609-run-transport-proof.py",
+    "exit": 0,
+    "passed": 3,
+    "refused_heads": 14,
+    "upstream_accepts_for_refusals": 0,
+    "exact_head_limit_bytes": 16384,
+    "oversized_head_bytes": 16385,
+    "timeout_seconds": 10,
+    "valid_parallel_under_seconds": 3,
+    "pipeline": "intentionally forwarded unchanged after valid first request"
+  },
+  "negative_control": {
+    "flag": "--bypass-guard-control",
+    "exit": 101,
+    "reason": "first wrong-host request gets upstream 200 instead of 421"
+  },
+  "checks": {
+    "fmt": 0,
+    "check-docs": 0,
+    "tunnel_all_target_clippy_warnings_denied": 0
+  },
+  "source_restored": true,
+  "browser_dns_rebinding_executed": false,
+  "native_windows_macos_runtime_executed": false
+}

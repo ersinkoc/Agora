@@ -1,0 +1,23 @@
+{
+  "reviewed_head": "3a5d41f9e21bfaf5dfb533d258cef0600f0cf81b",
+  "control_exit": 101,
+  "platform": "Linux execution of unchanged production traversal with DACL/owner stubs and native link-count metadata; not Windows confinement execution",
+  "ordinary_file_refused": true,
+  "documented_directory_exemptions_pass": 3,
+  "regular_files_unexpectedly_exempt": [
+    "node_modules",
+    "target",
+    ".git"
+  ],
+  "native_windows_regression": "cross-compiled; not executed here",
+  "native_linux_tests": {
+    "passed": 74,
+    "ignored": 0
+  },
+  "windows_clippy": "PASS all targets on updated head; -D warnings",
+  "windows_regression_compile": "PASS on updated head; not executed on Windows here",
+  "source_sha256": "78446a87195a16818318122f594b7981ec4831593e03978b908975a9cf7c22b7",
+  "product_source_unchanged": true,
+  "verdict": "changes needed: regular files inherit directory exclusions; macOS mitigation needs PR #592 first or planned wording",
+  "native_linux_tests_revision": "8669780d094e8554f6eba874e8a7238d06b00d44"
+}

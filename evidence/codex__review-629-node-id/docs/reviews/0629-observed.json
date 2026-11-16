@@ -1,0 +1,10 @@
+{
+  "fresh_agent_visible": true,
+  "replay_agent_visible": false,
+  "fresh_victim_count": 0,
+  "replay_victim_count": 99,
+  "fresh_checkout_node": "n2",
+  "replay_checkout_node": "n1",
+  "fresh_pos": 10,
+  "replay_pos": 10
+}

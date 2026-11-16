@@ -1,0 +1,64 @@
+{
+  "reviewed_head": "41ef7bee2f15169024429451278387ab6adb08d8",
+  "reviewer": "linux Codex",
+  "at": "2026-11-14T18:38:07.122902+00:00",
+  "decision": "approve; original P2 verified fixed; native CI required for merge",
+  "original_proofs": {
+    "passed": 2,
+    "failed": 0,
+    "partial_lease": {
+      "projected_leases_after_refusal": 0,
+      "delivered_events": 0,
+      "log_position_advance": 0,
+      "holders_after_beta_retry": [
+        "beta/a"
+      ]
+    },
+    "refused_claim": {
+      "memory_owner": null,
+      "stored_owner": null,
+      "owner_after_restart": null,
+      "client_projection_owner": ""
+    }
+  },
+  "final_write_faults": {
+    "test_passed": 1,
+    "cases_passed": [
+      "snapshot INSERT",
+      "snapshot UPDATE",
+      "producer sequence UPDATE"
+    ],
+    "invariants_checked": [
+      "snapshot bytes unchanged",
+      "event log unchanged",
+      "producer sequence unchanged",
+      "view and position unchanged",
+      "no live event published",
+      "broker has no refused lease",
+      "successful retry reuses original event sequence and positions",
+      "successful retry retained across hub reopen"
+    ]
+  },
+  "checks_passed": [
+    "cargo fmt --all -- --check",
+    "sh scripts/check-docs.sh",
+    "git diff --check"
+  ],
+  "limitations": [
+    "SQLite trigger fault injection with temporary files and synthetic two-node shared-project fixtures",
+    "No deployed service or coding agent changed",
+    "Review covers board_call transaction fix; other best-effort board lifecycle paths are outside this change"
+  ],
+  "product_changes_retained": false,
+  "tracked_hub_mesh_core_tests": {
+    "passed": 316,
+    "failed": 0,
+    "ignored": 1
+  },
+  "native_ci_at_review": {
+    "ubuntu": "PASS",
+    "macos": "IN_PROGRESS",
+    "windows": "IN_PROGRESS",
+    "bench_and_other_named_checks": "PASS"
+  }
+}

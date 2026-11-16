@@ -1,0 +1,511 @@
+{
+  "reviewed_head": "8c35c59a3bf03d6b4dcaef9d11debd1c2be27b11",
+  "at": "2026-11-15T09:39:28.893289+00:00",
+  "hub_tests": {
+    "passed": 261,
+    "ignored": 4
+  },
+  "original_regression": {
+    "head": "8c35c59a3bf03d6b4dcaef9d11debd1c2be27b11",
+    "exit": 0,
+    "chat_bytes": 4104,
+    "expected_terminal_bytes": 4,
+    "observed_terminal_bytes": 4
+  },
+  "paired_relay_benchmark": {
+    "reviewed_head": "8c35c59a3bf03d6b4dcaef9d11debd1c2be27b11",
+    "baseline": "b2fe875",
+    "method": "same release binary, 9 alternated pairs per case, 100000 frames per sample, drain every 256 rounds",
+    "summary": [
+      {
+        "clients": 1,
+        "payload_bytes": 64,
+        "before_median_ns": 79.0,
+        "after_median_ns": 81.5,
+        "ratio_percent": 3.16
+      },
+      {
+        "clients": 1,
+        "payload_bytes": 4096,
+        "before_median_ns": 155.5,
+        "after_median_ns": 158.4,
+        "ratio_percent": 1.86
+      },
+      {
+        "clients": 8,
+        "payload_bytes": 64,
+        "before_median_ns": 82.2,
+        "after_median_ns": 84.8,
+        "ratio_percent": 3.16
+      },
+      {
+        "clients": 8,
+        "payload_bytes": 4096,
+        "before_median_ns": 403.3,
+        "after_median_ns": 399.5,
+        "ratio_percent": -0.94
+      },
+      {
+        "clients": 32,
+        "payload_bytes": 4096,
+        "before_median_ns": 767.1,
+        "after_median_ns": 750.7,
+        "ratio_percent": -2.14
+      }
+    ],
+    "samples": [
+      {
+        "clients": 1,
+        "payload_bytes": 64,
+        "sample": 0,
+        "before_ns": 75.6,
+        "after_ns": 79.7
+      },
+      {
+        "clients": 1,
+        "payload_bytes": 64,
+        "sample": 1,
+        "before_ns": 78.8,
+        "after_ns": 81.1
+      },
+      {
+        "clients": 1,
+        "payload_bytes": 64,
+        "sample": 2,
+        "before_ns": 79.2,
+        "after_ns": 81.5
+      },
+      {
+        "clients": 1,
+        "payload_bytes": 64,
+        "sample": 3,
+        "before_ns": 79.1,
+        "after_ns": 82.0
+      },
+      {
+        "clients": 1,
+        "payload_bytes": 64,
+        "sample": 4,
+        "before_ns": 79.1,
+        "after_ns": 81.3
+      },
+      {
+        "clients": 1,
+        "payload_bytes": 64,
+        "sample": 5,
+        "before_ns": 79.0,
+        "after_ns": 82.1
+      },
+      {
+        "clients": 1,
+        "payload_bytes": 64,
+        "sample": 6,
+        "before_ns": 79.0,
+        "after_ns": 82.0
+      },
+      {
+        "clients": 1,
+        "payload_bytes": 64,
+        "sample": 7,
+        "before_ns": 78.4,
+        "after_ns": 82.1
+      },
+      {
+        "clients": 1,
+        "payload_bytes": 64,
+        "sample": 8,
+        "before_ns": 79.1,
+        "after_ns": 81.2
+      },
+      {
+        "clients": 1,
+        "payload_bytes": 4096,
+        "sample": 0,
+        "before_ns": 161.2,
+        "after_ns": 152.4
+      },
+      {
+        "clients": 1,
+        "payload_bytes": 4096,
+        "sample": 1,
+        "before_ns": 158.6,
+        "after_ns": 155.3
+      },
+      {
+        "clients": 1,
+        "payload_bytes": 4096,
+        "sample": 2,
+        "before_ns": 153.1,
+        "after_ns": 155.6
+      },
+      {
+        "clients": 1,
+        "payload_bytes": 4096,
+        "sample": 3,
+        "before_ns": 150.1,
+        "after_ns": 159.2
+      },
+      {
+        "clients": 1,
+        "payload_bytes": 4096,
+        "sample": 4,
+        "before_ns": 155.3,
+        "after_ns": 158.4
+      },
+      {
+        "clients": 1,
+        "payload_bytes": 4096,
+        "sample": 5,
+        "before_ns": 155.5,
+        "after_ns": 158.4
+      },
+      {
+        "clients": 1,
+        "payload_bytes": 4096,
+        "sample": 6,
+        "before_ns": 157.9,
+        "after_ns": 159.4
+      },
+      {
+        "clients": 1,
+        "payload_bytes": 4096,
+        "sample": 7,
+        "before_ns": 155.6,
+        "after_ns": 159.0
+      },
+      {
+        "clients": 1,
+        "payload_bytes": 4096,
+        "sample": 8,
+        "before_ns": 154.3,
+        "after_ns": 157.3
+      },
+      {
+        "clients": 8,
+        "payload_bytes": 64,
+        "sample": 0,
+        "before_ns": 80.2,
+        "after_ns": 84.3
+      },
+      {
+        "clients": 8,
+        "payload_bytes": 64,
+        "sample": 1,
+        "before_ns": 82.7,
+        "after_ns": 84.8
+      },
+      {
+        "clients": 8,
+        "payload_bytes": 64,
+        "sample": 2,
+        "before_ns": 81.6,
+        "after_ns": 85.4
+      },
+      {
+        "clients": 8,
+        "payload_bytes": 64,
+        "sample": 3,
+        "before_ns": 82.9,
+        "after_ns": 84.6
+      },
+      {
+        "clients": 8,
+        "payload_bytes": 64,
+        "sample": 4,
+        "before_ns": 81.6,
+        "after_ns": 88.6
+      },
+      {
+        "clients": 8,
+        "payload_bytes": 64,
+        "sample": 5,
+        "before_ns": 80.9,
+        "after_ns": 83.4
+      },
+      {
+        "clients": 8,
+        "payload_bytes": 64,
+        "sample": 6,
+        "before_ns": 82.2,
+        "after_ns": 84.7
+      },
+      {
+        "clients": 8,
+        "payload_bytes": 64,
+        "sample": 7,
+        "before_ns": 82.4,
+        "after_ns": 86.5
+      },
+      {
+        "clients": 8,
+        "payload_bytes": 64,
+        "sample": 8,
+        "before_ns": 82.4,
+        "after_ns": 85.0
+      },
+      {
+        "clients": 8,
+        "payload_bytes": 4096,
+        "sample": 0,
+        "before_ns": 438.1,
+        "after_ns": 405.3
+      },
+      {
+        "clients": 8,
+        "payload_bytes": 4096,
+        "sample": 1,
+        "before_ns": 391.0,
+        "after_ns": 409.8
+      },
+      {
+        "clients": 8,
+        "payload_bytes": 4096,
+        "sample": 2,
+        "before_ns": 403.3,
+        "after_ns": 407.8
+      },
+      {
+        "clients": 8,
+        "payload_bytes": 4096,
+        "sample": 3,
+        "before_ns": 422.6,
+        "after_ns": 394.9
+      },
+      {
+        "clients": 8,
+        "payload_bytes": 4096,
+        "sample": 4,
+        "before_ns": 397.3,
+        "after_ns": 397.4
+      },
+      {
+        "clients": 8,
+        "payload_bytes": 4096,
+        "sample": 5,
+        "before_ns": 461.8,
+        "after_ns": 407.9
+      },
+      {
+        "clients": 8,
+        "payload_bytes": 4096,
+        "sample": 6,
+        "before_ns": 396.6,
+        "after_ns": 399.5
+      },
+      {
+        "clients": 8,
+        "payload_bytes": 4096,
+        "sample": 7,
+        "before_ns": 411.2,
+        "after_ns": 394.4
+      },
+      {
+        "clients": 8,
+        "payload_bytes": 4096,
+        "sample": 8,
+        "before_ns": 400.0,
+        "after_ns": 395.1
+      },
+      {
+        "clients": 32,
+        "payload_bytes": 4096,
+        "sample": 0,
+        "before_ns": 907.2,
+        "after_ns": 777.8
+      },
+      {
+        "clients": 32,
+        "payload_bytes": 4096,
+        "sample": 1,
+        "before_ns": 781.8,
+        "after_ns": 777.5
+      },
+      {
+        "clients": 32,
+        "payload_bytes": 4096,
+        "sample": 2,
+        "before_ns": 775.2,
+        "after_ns": 761.3
+      },
+      {
+        "clients": 32,
+        "payload_bytes": 4096,
+        "sample": 3,
+        "before_ns": 741.9,
+        "after_ns": 748.3
+      },
+      {
+        "clients": 32,
+        "payload_bytes": 4096,
+        "sample": 4,
+        "before_ns": 769.4,
+        "after_ns": 744.7
+      },
+      {
+        "clients": 32,
+        "payload_bytes": 4096,
+        "sample": 5,
+        "before_ns": 759.7,
+        "after_ns": 743.2
+      },
+      {
+        "clients": 32,
+        "payload_bytes": 4096,
+        "sample": 6,
+        "before_ns": 759.8,
+        "after_ns": 750.5
+      },
+      {
+        "clients": 32,
+        "payload_bytes": 4096,
+        "sample": 7,
+        "before_ns": 739.6,
+        "after_ns": 750.7
+      },
+      {
+        "clients": 32,
+        "payload_bytes": 4096,
+        "sample": 8,
+        "before_ns": 767.1,
+        "after_ns": 757.3
+      }
+    ],
+    "load_at_end": [
+      12.3466796875,
+      12.97021484375,
+      6.6181640625
+    ]
+  },
+  "unpaired_runs_with_concurrent_load": [
+    {
+      "name": "fixed-1",
+      "seconds_including_compile": 129.84,
+      "load_at_start": [
+        0.71630859375,
+        1.50439453125,
+        1.0
+      ],
+      "rows": [
+        {
+          "clients": 1,
+          "payload_bytes": 64,
+          "ns_per_frame": 81.4
+        },
+        {
+          "clients": 1,
+          "payload_bytes": 4096,
+          "ns_per_frame": 1646.5
+        },
+        {
+          "clients": 8,
+          "payload_bytes": 64,
+          "ns_per_frame": 82.6
+        },
+        {
+          "clients": 8,
+          "payload_bytes": 4096,
+          "ns_per_frame": 366.8
+        },
+        {
+          "clients": 32,
+          "payload_bytes": 4096,
+          "ns_per_frame": 575.3
+        }
+      ]
+    },
+    {
+      "name": "baseline",
+      "seconds_including_compile": 73.37,
+      "load_at_start": [
+        4.90576171875,
+        3.05029296875,
+        1.64501953125
+      ],
+      "rows": [
+        {
+          "clients": 1,
+          "payload_bytes": 64,
+          "ns_per_frame": 76.5
+        },
+        {
+          "clients": 1,
+          "payload_bytes": 4096,
+          "ns_per_frame": 1600.5
+        },
+        {
+          "clients": 8,
+          "payload_bytes": 64,
+          "ns_per_frame": 88.0
+        },
+        {
+          "clients": 8,
+          "payload_bytes": 4096,
+          "ns_per_frame": 574.7
+        },
+        {
+          "clients": 32,
+          "payload_bytes": 4096,
+          "ns_per_frame": 653.7
+        }
+      ]
+    },
+    {
+      "name": "fixed-2",
+      "seconds_including_compile": 109.71,
+      "load_at_start": [
+        6.26318359375,
+        3.73388671875,
+        1.98291015625
+      ],
+      "rows": [
+        {
+          "clients": 1,
+          "payload_bytes": 64,
+          "ns_per_frame": 87.1
+        },
+        {
+          "clients": 1,
+          "payload_bytes": 4096,
+          "ns_per_frame": 1658.9
+        },
+        {
+          "clients": 8,
+          "payload_bytes": 64,
+          "ns_per_frame": 502.8
+        },
+        {
+          "clients": 8,
+          "payload_bytes": 4096,
+          "ns_per_frame": 1393.3
+        },
+        {
+          "clients": 32,
+          "payload_bytes": 4096,
+          "ns_per_frame": 1425.0
+        }
+      ]
+    }
+  ],
+  "source_sha256": {
+    "hub.rs": "9363f68c1e71320ac28c0c41750797a8b2284cae23adb57a0ff74f22ea25979f",
+    "metrics.rs": "aaeed22d08e7917fceaed4b89871651b85d42ecc3aade321e44b22640d65762c",
+    "projection.rs": "c11987d6d4eeb27668ac07280cb910f84e958fa29504fe33e928963589b84a35",
+    "router.rs": "3b6b83e9e080b4d06aae4bf714aa85e27141e92ec15b31e0cab71aa711f262c4",
+    "store.rs": "63f48880d352f76e839f56b7d5d9a8320127fc9d35053ebce88bc5daa05fd413"
+  },
+  "product_source_unchanged": true,
+  "checks_passed": [
+    "cargo test -p agora-hub",
+    "original chat contamination proof",
+    "paired release relay measurement",
+    "cargo fmt --all -- --check",
+    "cargo clippy -p agora-hub --all-targets -- -D warnings",
+    "sh scripts/check-docs.sh",
+    "git diff --check"
+  ],
+  "verdict": "approve",
+  "limitations": [
+    "Synthetic warm queue-path benchmark on one Linux machine, not a full network/PTY budget certification",
+    "Unpaired runs were noisy; paired results control the comparison"
+  ]
+}

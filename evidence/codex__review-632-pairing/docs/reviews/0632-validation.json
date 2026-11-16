@@ -1,0 +1,11 @@
+{
+  "head": "87e595d7f8ef9a5d4cde490a29ad358cdc492167",
+  "verdict": "DESIGN CHANGES NEEDED",
+  "implemented_pairing_tested": false,
+  "design_trace_exit": 1,
+  "certificate_shape_control_exit": 0,
+  "check_docs_exit": 0,
+  "production_schema_or_source_modified": false,
+  "cryptographic_break_claimed": false,
+  "scope": "Executable trace of permitted design transitions plus representative certificate-name verification, not server or formal cryptographic proofs."
+}

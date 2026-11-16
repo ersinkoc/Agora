@@ -1,0 +1,32 @@
+{
+  "head": "f2c002504309111e635b9f6fb7a337ac91c1b7e8",
+  "verdict": "CHANGES NEEDED",
+  "host": "Linux",
+  "existing_tests": {
+    "command": "cargo test -p agora-platform -p agora-i18n",
+    "exit": 0,
+    "passed": 76,
+    "failed": 0,
+    "ignored": 0
+  },
+  "replay": {
+    "command": "python3 docs/reviews/0296-run-controls.py",
+    "exit": 1,
+    "reason": "Linux notification has no actions/activation path",
+    "positive_action_control": "passed",
+    "source_callback_control": "passed (mock window, not GUI)",
+    "argv_control": "passed"
+  },
+  "checks": {
+    "root fmt": 0,
+    "desktop fmt": 0,
+    "check-docs": 0,
+    "platform+i18n all-target Clippy -D warnings": 0
+  },
+  "desktop_local_test": {
+    "exit": 101,
+    "reason": "missing system pkg-config and D-Bus development libraries; no GUI test claim"
+  },
+  "native_ci": "Reported GitHub shell builds/Clippy green on all three OSes; workflow does not run unit tests or GUI activation.",
+  "scope": "Only evidence files added; product source/tests untouched; no system notification or policy change."
+}

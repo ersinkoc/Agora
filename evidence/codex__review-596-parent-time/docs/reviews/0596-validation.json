@@ -1,0 +1,31 @@
+{
+  "exit": 0,
+  "existing_tests_passed": 1,
+  "helper_sha256": "bc2610d898f160af3a1b5f5f7fecc772e054b7286b282af1258b04b59088b076",
+  "test_sha256": "d190c7743a61ceaf4b6996678c22204b4f432d69d71aac4edfaedbfd4e716381",
+  "source_unchanged": true,
+  "windows_api_execution": false,
+  "reviewed_head": "54c61dfa0e9649d3c224702edabe70614bef7393",
+  "at": "2026-11-15T13:32:46.376208+00:00",
+  "native_linux_tests": {
+    "passed": 60,
+    "ignored": 0
+  },
+  "native_windows_report": {
+    "performed_by": "Windows author and CI, not Linux reviewer",
+    "author_result": "winproc 3/3; clippy clean",
+    "source": "https://github.com/ersinkoc/Agora/pull/596#issuecomment-6893351668"
+  },
+  "source_sha256": "170cd34c97b0d704994b29f9323336b89441ada35d288159f2c4dfd7a40e7560",
+  "checks_passed": [
+    "cargo test -p agora-platform on Linux",
+    "existing pure decision test extracted unchanged",
+    "Windows all-target clippy -D warnings",
+    "Linux all-target clippy -D warnings",
+    "cargo fmt --all -- --check",
+    "sh scripts/check-docs.sh",
+    "git diff --check"
+  ],
+  "product_source_unchanged": true,
+  "verdict": "approve"
+}

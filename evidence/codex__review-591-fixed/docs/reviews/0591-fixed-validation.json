@@ -1,0 +1,37 @@
+{
+  "reviewed_head": "0999a1e0435e494ede9e36e7508705b820541838",
+  "at": "2026-11-15T10:34:22.215683+00:00",
+  "walk_control": {
+    "exit": 0,
+    "ordinary_file_refused": true,
+    "directory_exemptions_pass": 3,
+    "same_named_regular_files_refused": 3,
+    "unchanged_from_original_review": true,
+    "scope": "Linux traversal execution with DACL/owner stubs; not native Windows confinement"
+  },
+  "native_linux_tests": {
+    "passed": 74,
+    "ignored": 0
+  },
+  "native_windows_execution": {
+    "performed_by": "Windows author",
+    "report": "PR #591 Fixed at 0999a1e0 comment and comms 2026-11-19-1730-windows-591-fixed-process-tree.md",
+    "result": "submitted review_591_regular_file module passes; winconfine 11/11, winsandbox 12/12",
+    "executed_by_linux_reviewer": false
+  },
+  "reviewer_windows_cross_compile": "PASS actual regression module",
+  "reviewer_windows_clippy": "PASS all targets, -D warnings",
+  "checks_passed": [
+    "native Linux platform/i18n tests",
+    "unchanged production-walk control",
+    "Windows regression cross-compilation",
+    "Windows all-target clippy",
+    "Linux all-target clippy",
+    "cargo fmt --all -- --check",
+    "sh scripts/check-docs.sh",
+    "git diff --check"
+  ],
+  "source_sha256": "8385ef13d7c42c8e1efdf629d9636884308ea667633520dfe1c0c9b97d295c87",
+  "product_source_unchanged": true,
+  "verdict": "approve Windows correction; macOS documentation depends on #592"
+}

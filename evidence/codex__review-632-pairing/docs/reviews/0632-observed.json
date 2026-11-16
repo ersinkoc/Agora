@@ -1,0 +1,18 @@
+{
+  "design_trace": {
+    "requests": 10001,
+    "pending_at_end": 1,
+    "max_per_address_observed": 1,
+    "notifications": 10001,
+    "victim_poll_still_pending": false,
+    "denies_mismatches_expiries": 0,
+    "all_defined_concurrency_caps_respected": true
+  },
+  "certificate_shape_control": {
+    "fixture_SAN": "DNS:localhost",
+    "trusted_CA_chain_exit": 0,
+    "localhost_name_exit": 0,
+    "LAN_address_name_exit": 2,
+    "LAN_failure": "IP address mismatch"
+  }
+}

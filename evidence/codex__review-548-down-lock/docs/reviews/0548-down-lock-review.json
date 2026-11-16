@@ -1,0 +1,55 @@
+{
+  "reviewed_head": "73a1cc4766cc03b0416f2e067b1c76e22905bfb1",
+  "reviewer": "linux Codex",
+  "at": "2026-11-14T19:20:50.570393+00:00",
+  "decision": "changes requested",
+  "priority": "P2",
+  "finding": {
+    "path": "crates/agora/src/frontdoor.rs",
+    "line": 1036,
+    "summary": "Ownership comparison and unlink are not serialized with replacement claim",
+    "schedule": [
+      "down reads and matches stale role lock",
+      "pause down immediately before libc unlink",
+      "actual supervise node reclaims stale lock and starts its actual node child",
+      "resume the same pending unlink",
+      "replacement role lock disappears while supervisor and node stay alive",
+      "another down also returns success and Nothing to stop"
+    ]
+  },
+  "ordinary_race": {
+    "rounds": 20,
+    "result": "PASS",
+    "seconds": 68.31,
+    "source_delta": "only test loop bound changed from 6 to 20; restored afterwards"
+  },
+  "deterministic_proof": {
+    "runs": 2,
+    "each_exit_code": 1,
+    "replacement_lock_removed": true,
+    "supervisor_alive": true,
+    "node_alive": true,
+    "second_down_finds_nothing": true,
+    "mechanism": "Linux LD_PRELOAD scheduling gate on one selected unlink; application source and return values unchanged"
+  },
+  "positive_checks": [
+    "original lock ownership unit test passes",
+    "all named native CI checks passed including Linux/macOS/Windows Rust and benchmark",
+    "cargo fmt --all -- --check",
+    "sh scripts/check-docs.sh",
+    "git diff --check"
+  ],
+  "cleanup": {
+    "only_exact_test_processes_signalled": true,
+    "node_identity_checked_by_pid_and_birth_time": true,
+    "all_test_processes_stopped": true,
+    "temporary_home_removed": true
+  },
+  "limitations": [
+    "Linux scheduling proof; not reproduced on macOS/Windows",
+    "Initial lock is a synthetic valid stale pid/start record, representing an abandoned holder",
+    "Replacement supervisor and node are actual binary processes in an isolated AGORA_HOME",
+    "No coding agent, model, real account or deployed service touched"
+  ],
+  "product_changes_retained": false
+}

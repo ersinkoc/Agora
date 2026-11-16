@@ -1,0 +1,22 @@
+{
+  "head": "d1be1b0079d2d11933c2604f40b0607a34d2f2ea",
+  "verdict": "APPROVE posting-only increment; activation deferred",
+  "tests": {
+    "passed": 76,
+    "failed": 0,
+    "ignored": 0
+  },
+  "argv_control": {
+    "calls": 5,
+    "exit": 0,
+    "only_change_from_previous_control": "expected app-name is now caller title"
+  },
+  "checks": {
+    "root_fmt": 0,
+    "desktop_fmt": 0,
+    "docs": 0,
+    "platform_i18n_all_target_clippy": 0
+  },
+  "native_gui_claim": false,
+  "source_tests_modified": false
+}

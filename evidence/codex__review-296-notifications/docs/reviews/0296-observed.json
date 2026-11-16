@@ -1,0 +1,35 @@
+{
+  "captures": [
+    {
+      "positive_control": true,
+      "notifier_result": "default",
+      "notification": {
+        "app": "notify-send",
+        "summary": "Review fixture",
+        "body": "An approval is waiting for you.",
+        "actions": [
+          "default",
+          "Open"
+        ],
+        "hints": {
+          "urgency": "\u0001"
+        }
+      }
+    },
+    {
+      "positive_control": false,
+      "notifier_result": "ok",
+      "notification": {
+        "app": "Agora",
+        "summary": "Review fixture",
+        "body": "An approval is waiting for you.",
+        "actions": [],
+        "hints": {
+          "urgency": "\u0001"
+        }
+      }
+    }
+  ],
+  "title_control": "10 cases, 3 expected notices, 10 title forwards, 4 locale renders; passed",
+  "argv_control": "5 calls; passed"
+}

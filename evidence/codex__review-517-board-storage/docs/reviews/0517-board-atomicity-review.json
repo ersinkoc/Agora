@@ -1,0 +1,63 @@
+{
+  "reviewed_head": "056d657a324c9967870a2d807ae40ea879b88eea",
+  "reviewer": "linux Codex",
+  "at": "2026-11-14T17:25:42.682290+00:00",
+  "decision": "changes requested",
+  "priority": "P2",
+  "root_cause": "Board snapshot and audit events are committed separately, then rollback is best effort",
+  "proofs": [
+    {
+      "name": "refused two-path lease publishes a partial grant",
+      "fault": "SQLite trigger refuses second hub event INSERT",
+      "returned_code": "internal",
+      "incident_id": "board.store",
+      "board_leases_after_refusal": [],
+      "projected_lease_holder": "alpha/a",
+      "projected_path": "src/a.rs",
+      "published_events": 1,
+      "log_position_advance": 1,
+      "projected_holders_after_beta_acquires_same_path": [
+        "alpha/a",
+        "beta/a"
+      ],
+      "assertion": "refused lease batch leaked a grant into the view and live subscribers",
+      "result": "FAIL"
+    },
+    {
+      "name": "refused claim reappears after failed compensation",
+      "fault": "SQLite triggers refuse event INSERT and UPDATE restoring unowned board snapshot",
+      "returned_code": "internal",
+      "owner_in_memory_after_refusal": null,
+      "owner_in_stored_board": "beta/a",
+      "owner_after_restart": "beta/a",
+      "owner_in_client_projection_after_restart": "",
+      "assertion": "a refused claim became owned after restarting the hub",
+      "result": "FAIL"
+    }
+  ],
+  "original_exclusive_lock_regression": "PASS",
+  "proof_exit_code": 101,
+  "native_ci": {
+    "linux": "PASS",
+    "windows": "PASS",
+    "macos": "FAIL at agora-node/tests/directory_launch.rs:707 a_resync_announces_the_nodes_present",
+    "macos_job_id": 132513101220,
+    "macos_failure_cause": "Not investigated in this review; no change to that node test in this PR"
+  },
+  "limitations": [
+    "In-process Hub using isolated temporary SQLite databases and two synthetic nodes/agents",
+    "Selective failures are injected through SQLite triggers, not real disk exhaustion",
+    "No real coding agent or deployed service is changed"
+  ],
+  "product_changes_retained": false,
+  "tracked_hub_mesh_core_tests": {
+    "passed": 310,
+    "failed": 0,
+    "ignored": 1
+  },
+  "checks_passed": [
+    "cargo fmt --all -- --check",
+    "sh scripts/check-docs.sh",
+    "git diff --check"
+  ]
+}

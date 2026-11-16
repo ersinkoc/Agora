@@ -1,0 +1,67 @@
+{
+  "reviewed_head": "5363f1165294bc44db7a08f24286bcc09dedfb95",
+  "web_slice_2_head_checked": "bafedd89c93fdcabdf4b4d0a4d3a99eff005602c",
+  "reviewer": "linux Codex",
+  "at": "2026-11-14T18:25:38.581656+00:00",
+  "decision": "changes requested",
+  "priority": "P2",
+  "summary": "A window opened during forgotten state never receives retained records when the machine reconnects",
+  "wire_observation": {
+    "initial_snapshot": {
+      "nodes": 0,
+      "agents": 0,
+      "checkouts": 0,
+      "workspaces": 0
+    },
+    "return_events": [
+      "NodeLink(up)"
+    ],
+    "next_node_sequence": 6,
+    "fresh_snapshot_after_return": {
+      "nodes": 1,
+      "agents": 1,
+      "checkouts": 1,
+      "workspaces": 1
+    }
+  },
+  "web_observation": {
+    "got": {
+      "hostname": "",
+      "agents": 0,
+      "checkouts": 0,
+      "workspaces": 0
+    },
+    "expected": {
+      "hostname": "laptop",
+      "agents": 1,
+      "checkouts": 1,
+      "workspaces": 1
+    },
+    "slice_1_result": "1 failing consistency test, 1 passing fresh-snapshot control",
+    "slice_2_result": "same failure with pending web reducer"
+  },
+  "additional_authorization_check": "Member and Viewer NodeForget requests refused with auth.forbidden over real test sockets",
+  "tracked_hub_tests": {
+    "passed": 239,
+    "failed": 0,
+    "ignored": 1
+  },
+  "native_ci": "All named CI checks passed, including Linux/macOS/Windows Rust and benchmark",
+  "checks_passed": [
+    "cargo fmt --all -- --check",
+    "sh scripts/check-docs.sh",
+    "git diff --check"
+  ],
+  "limitations": [
+    "Return event fixture uses in-process Hub and negotiated NodeSession, no real daemon restart",
+    "Actual web fromSnapshot/applyEvent reducers consume binary fixtures; no rendered-browser automation",
+    "Role checks use test TCP sockets and synthetic sessions; no real account",
+    "No real coding agent or deployed service changed"
+  ],
+  "product_changes_retained": false,
+  "tracked_web_tests": {
+    "passed": 354,
+    "files_passed": 41,
+    "failed": 0
+  }
+}

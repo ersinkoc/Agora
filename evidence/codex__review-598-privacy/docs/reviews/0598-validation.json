@@ -1,0 +1,25 @@
+{
+  "head": "96dc373984cd9cb2ca9158b6a6c6e146a0c4ea8d",
+  "host": "Linux",
+  "verdict": "CHANGES NEEDED",
+  "existing_tests": {
+    "command": "cargo test -p agora-protocol -p agora-node -p agora-hub",
+    "passed": 659,
+    "failed": 0,
+    "ignored": 4
+  },
+  "proof": {
+    "command": "python3 docs/reviews/0598-run-home-proof.py",
+    "exit": 101,
+    "observations": 39,
+    "owner_controls_passed": 9,
+    "nonowner_leaks": 30,
+    "server_test_source_restored": true
+  },
+  "checks": {
+    "cargo fmt --all -- --check": 0,
+    "bash scripts/check-docs.sh": 0,
+    "cargo clippy -p agora-protocol -p agora-node -p agora-hub --all-targets -- -D warnings": 0
+  },
+  "native_os_claim": "Linux hub transport with synthetic Windows/macOS/Linux paths; native OS CI attributed to GitHub checks, not local execution."
+}

@@ -1,0 +1,20 @@
+{
+  "profile_control_exit": 101,
+  "direct_file_guard_control_passed": true,
+  "config_links": 1,
+  "sibling_links": 2,
+  "sibling_allowed_by_generated_regex": true,
+  "scope": "unchanged profile/quoting/sibling functions; Linux metadata/path shims; no Seatbelt execution",
+  "reviewed_head": "10e52f24b9a80cbecce92c2d86865b2e9c548a8d",
+  "executed_source_head": "8363d5f278e17479f5324282fee36a82d9dedc0f",
+  "macos_source_blob": "cebf6ba7b508cd88327e8749d67783d685ae0ef8",
+  "native_linux_tests": {
+    "passed": 74,
+    "ignored": 0
+  },
+  "native_macos_regression": "cross-compiles; not executed here",
+  "macos_all_target_clippy": "PASS -D warnings",
+  "source_sha256": "38001d970659a4e57f2355c3584a144373767fb7706bbd9030301630735b6484",
+  "product_source_unchanged": true,
+  "verdict": "changes needed: unexamined pre-existing hard-linked atomic-save siblings remain writable"
+}

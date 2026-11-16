@@ -1,0 +1,36 @@
+{
+  "reviewed_head": "ad6e878ef78ee0d6e0b4b2ee0e6971b8a456b7e3",
+  "holder": "real read-only flock, confirmed SIGSTOP state T",
+  "supervise_stopped_holder": {
+    "seconds": 10.01,
+    "exit": 1,
+    "stdout": "",
+    "stderr": "Another process has held <isolated-home>/run/hub.lock.guard for more than 10 seconds (it may be stopped or hung), so Agora did not change what runs. Find it with `agora status`, or end it, and try again.\n"
+  },
+  "existing_permissions_tightened": {
+    "run": "0700",
+    "guard": "0600",
+    "contents_unchanged": true
+  },
+  "down_stale_lock_stopped_holder": {
+    "seconds": 10.022,
+    "exit": 0,
+    "stdout": "Nothing to stop: `agora` did not start anything that is still running.\n",
+    "stderr": "",
+    "stale_lock_left": true,
+    "reports_busy": false
+  },
+  "symlink_guard_refused": {
+    "seconds": 0.021,
+    "exit": 1,
+    "stdout": "",
+    "stderr": "Agora could not start: a link\n",
+    "target_unchanged": true
+  },
+  "fifo_guard_refused_without_waiting": {
+    "seconds": 0.02,
+    "exit": 1,
+    "stdout": "",
+    "stderr": "Agora could not start: a link\n"
+  }
+}

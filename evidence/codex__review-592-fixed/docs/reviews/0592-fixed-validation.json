@@ -1,0 +1,37 @@
+{
+  "profile_control_exit": 0,
+  "direct_file_guard_control_passed": true,
+  "config_links": 1,
+  "sibling_links": 2,
+  "sibling_allowed_by_generated_regex": false,
+  "ordinary_save_sibling_allowed": true,
+  "lookalike_does_not_reject_profile": true,
+  "scope": "unchanged profile/quoting/sibling functions; Linux metadata/path shims; no Seatbelt execution",
+  "reviewed_head": "6c7703e1fde644939f4f235452dee7d41ebdbe69",
+  "at": "2026-11-15T12:23:24.169559+00:00",
+  "native_linux_tests": {
+    "passed": 76,
+    "ignored": 0
+  },
+  "native_macos_evidence": {
+    "executed_by": "macOS author, not Linux reviewer",
+    "before": "native_exit=Some(0), outside_unchanged=false",
+    "after": "original submitted native proof passes; profile refuses",
+    "report": "https://github.com/ersinkoc/Agora/pull/592#issuecomment-6893711942",
+    "os_reported": "macOS 27.2"
+  },
+  "native_regression_cross_compile": "PASS aarch64-apple-darwin on reviewed head",
+  "checks_passed": [
+    "Linux platform/i18n tests",
+    "profile generator control with real metadata/path-walk shims",
+    "macOS regression cross-compilation",
+    "macOS all-target clippy -D warnings",
+    "Linux all-target clippy -D warnings",
+    "cargo fmt --all -- --check",
+    "sh scripts/check-docs.sh",
+    "git diff --check"
+  ],
+  "source_sha256": "917fde6846b8d00c68b0f4fe734139643c75f376b496fa6b2d582c32553729f2",
+  "product_source_unchanged": true,
+  "verdict": "approve"
+}

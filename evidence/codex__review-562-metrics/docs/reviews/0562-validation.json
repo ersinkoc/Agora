@@ -1,0 +1,57 @@
+{
+  "pr": 562,
+  "reviewed_head": "a87f339e042d12ed7ab421c3f897c1951a6af194",
+  "at": "2026-11-14T23:37:08.760499+00:00",
+  "hub_tests": {
+    "passed": 257,
+    "ignored": 3
+  },
+  "proofs": [
+    {
+      "name": "auth-fixed",
+      "exit": 0,
+      "expected_exit": 0,
+      "expected_marker_found": true
+    },
+    {
+      "name": "http-fixed",
+      "exit": 0,
+      "expected_exit": 0,
+      "expected_marker_found": true
+    },
+    {
+      "name": "auth-original",
+      "exit": 101,
+      "expected_exit": 101,
+      "expected_marker_found": true
+    },
+    {
+      "name": "http-original",
+      "exit": 101,
+      "expected_exit": 101,
+      "expected_marker_found": true
+    }
+  ],
+  "production_source_unchanged": true,
+  "source_sha256": {
+    "hub.rs": "1d517f343d569bc1b4df859004e476f237973b597c5026b06798c556cd7cdbfb",
+    "signin.rs": "6e2d1a71f21175e33f90406e1689ee1064b5d88353aadbcd399c7e7d21cce7ab",
+    "web.rs": "fc4f43b984f8a74b81379bef6c94e786e0990187732b98ead8eced1cc0644edd",
+    "store.rs": "2cfac96551187108d0b4d7278789145b727963cd83e9a217a9c30213656902e3",
+    "metrics.rs": "e4b06690a8b7695e22b633fb0c356edb8dece086b66d12277b83e051878fac78"
+  },
+  "checks_passed": [
+    "cargo test -p agora-hub",
+    "both additional proofs",
+    "both expected original-defect failures",
+    "cargo fmt --all -- --check",
+    "cargo clippy -p agora-hub --all-targets -- -D warnings",
+    "sh scripts/check-docs.sh",
+    "git diff --check"
+  ],
+  "limitations": [
+    "Linux local verification only; native platform CI all green",
+    "Earlier release performance comparison not repeated"
+  ],
+  "verdict": "approve corrected route/auth behavior"
+}

@@ -1,0 +1,36 @@
+{
+  "head": "7ae30408a2b49df1c04d96c16db5e2eeae46a9ec",
+  "verdict": "CHANGES NEEDED",
+  "host": "Linux",
+  "baseline": {
+    "command": "cargo test -p agora-hub",
+    "exit": 0,
+    "passed": 270,
+    "ignored": 4,
+    "failed": 0
+  },
+  "proofs": {
+    "real_websocket_replay": {
+      "exit": 101,
+      "unsafe_historical_events": 3,
+      "restored_test_source": true
+    },
+    "actual_browser_reducer": {
+      "exit": 1,
+      "fresh_pos": 10,
+      "replay_pos": 10,
+      "differences": [
+        "agent visibility",
+        "victim resource count",
+        "checkout machine"
+      ]
+    }
+  },
+  "checks": {
+    "fmt": 0,
+    "check-docs": 0,
+    "hub_all_target_clippy_warnings_denied": 0
+  },
+  "ci": "All reported required checks SUCCESS at reviewed SHA; native runtime here is Linux only.",
+  "scope": "Requires pre-fix stored forgeries; no claimed bypass of new live ingestion check."
+}
