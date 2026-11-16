@@ -8,7 +8,7 @@ cli-usage =
       agora down
       agora service install|remove|status
       agora node run [--socket PATH] [--manifests DIR] [--project PATH]... [--data DIR] [--worktrees DIR] [--resume auto]
-      agora agent start KIND [--cwd PATH] [--worktree] [--project NAME] [--name NAME] [--accept-project-id-change] [--socket PATH]
+      agora agent start KIND [--cwd PATH] [--worktree] [--project NAME] [--name NAME] [--setting ID=VALUE]... [--accept-project-id-change] [--socket PATH]
       agora project init [--cwd PATH] [--socket PATH]
       agora agent stop AGENT_ID [--socket PATH]
       agora agent prompt AGENT_ID TEXT... [--socket PATH]

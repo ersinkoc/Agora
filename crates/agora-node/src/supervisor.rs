@@ -223,6 +223,10 @@ pub enum SupervisorError {
     OptionInvalid(String, String),
     /// ADR-0059: an option that skips permissions without the user's signed confirmation: `(kind, option)`.
     OptionUnconfirmed(String, String),
+    /// ADR-0066: a setting the kind does not declare (or named twice): `(kind, setting)`.
+    SettingUnknown(String, String),
+    /// ADR-0066: a value the setting does not take: `(kind, setting)`.
+    SettingInvalid(String, String),
     /// The node is at one of its limits; `resource` is `agents` or `terminals`.
     ResourceLimit {
         resource: &'static str,
@@ -278,6 +282,12 @@ impl SupervisorError {
             Self::OptionUnconfirmed(k, o) => Error::new(ErrorCode::AgentOptionUnconfirmed)
                 .with("kind", k.as_str())
                 .with("option", o.as_str()),
+            Self::SettingUnknown(k, st) => Error::new(ErrorCode::AgentSettingUnknown)
+                .with("kind", k.as_str())
+                .with("setting", st.as_str()),
+            Self::SettingInvalid(k, st) => Error::new(ErrorCode::AgentSettingInvalid)
+                .with("kind", k.as_str())
+                .with("setting", st.as_str()),
             Self::OptionForbidden(k, o, p) => Error::new(ErrorCode::AgentOptionForbidden)
                 .with("kind", k.as_str())
                 .with("option", o.as_str())
@@ -394,6 +404,8 @@ pub struct KindInfo {
     pub program: String,
     /// ADR-0059: the kind's `[[launch.option]]`s, in the manifest's order.
     pub launch_options: Vec<agora_adapters::manifest::LaunchOption>,
+    /// ADR-0066: the kind's `[[launch.setting]]`s, in the manifest's order.
+    pub settings: Vec<agora_adapters::manifest::LaunchSetting>,
 }
 
 struct KindEntry {
@@ -530,6 +542,12 @@ impl Supervisor {
                 }
                 Refusal::Forbidden { option, policy } => {
                     SupervisorError::OptionForbidden(kind.to_string(), option, policy)
+                }
+                Refusal::SettingUnknown { setting } => {
+                    SupervisorError::SettingUnknown(kind.to_string(), setting)
+                }
+                Refusal::SettingInvalid { setting } => {
+                    SupervisorError::SettingInvalid(kind.to_string(), setting)
                 }
             },
         )
@@ -2194,6 +2212,7 @@ impl Supervisor {
                     installed: program.is_some_and(crate::doctor::on_path),
                     program: program.unwrap_or_default().to_string(),
                     launch_options: m.launch.option.clone(),
+                    settings: m.launch.setting.clone(),
                 }
             })
             .collect()

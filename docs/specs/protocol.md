@@ -90,6 +90,9 @@ the acknowledgement to send back. Clients page the log by global position. Paylo
 Hub node session (`agora-hub::session`): a state machine over decoded messages, independent of transport and framing.
 The producer id is the node's authenticated identity; an event naming another producer is `protocol.producer_mismatch`
 (`node_id`, `producer_id`).
+An event whose body names a node (its `node_id`) must name that producer, or it is `protocol.invalid_message` (field `node_id`);
+`NodeLink`, `NodeForgotten` and `AgentForgotten` are written by the hub only, and one from a node is `protocol.invalid_message`
+(field `node_link`, `node_forgotten`, `agent_forgotten`). Threat model T19.
 When the hub ends a node's connection because the node broke the protocol (such as
 `protocol.producer_mismatch`), it first sends a WebSocket close (code 1008) whose reason is the stable error code, logs
 `node refused: <node> <code> <params>`, and reads until the node's side of the close (at most 5 s) so the reason is not lost
@@ -510,6 +513,20 @@ All additions; nothing published changed.
   stops it, `auto` keeps it to the listed kinds and folders). Either way at most 16 at one start, 8 at a time (the next round 5 s
   later), and never an agent the node brought back by itself in the last 10 minutes (`auto_resumed_at_ms` in the ledger).
   `resume.continue = on | off` (default on, wherever automatic resume is on; Amendment A of ADR-0060) decides whether an agent that was *working* when the node stopped is given its kind's one "carry on" message (`[resume] continue_argv`, `docs/specs/agent-manifest.md`) with that resume; never for an agent that was waiting for a person, idle, finished or unknown, never when a person pressed Resume, and once for each interruption. No command or message carries the policy line or the sentence.
+
+### Launch settings (ADR-0066, first part)
+
+All additions; nothing published changed.
+- **What may be given.** `AgentKind.settings` (7) lists a kind's `[[launch.setting]]`s as `LaunchSettingSpec { id, label, values,
+  default_value }` (the manifest's order; the arguments stay on the node). Old nodes send none.
+- **The choice.** `AgentStart.settings` (9) and `AgentLaunch.settings` (9) carry `LaunchSetting { id, value }` pairs. The node checks
+  them against its own manifest (`agent.setting_unknown {kind, setting}`, `agent.setting_invalid {kind, setting}`, nothing starts) and
+  puts each value into its argument template as one argument (agent-manifest.md, "Launch settings").
+- **Only from the machine itself, for now.** `AgentLaunch`'s authorization (`directory-action-v3`) does not cover settings yet, so a
+  start with settings that came through the hub, `AgentStart` or `AgentLaunch`, is refused where the hub's commands enter the node
+  (`agent.option_forbidden {kind, option: <setting id>, policy: signature}`); a grant never covers one. A signing domain version that
+  includes them, the approval card and the `agent_start` mesh tool are ADR-0066's second part. `agora agent start KIND --setting
+  id=value` (repeatable) gives them on the node's own control socket.
 
 ### Launch options (ADR-0059)
 

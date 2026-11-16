@@ -8,7 +8,7 @@ cli-usage =
       agora down
       agora service install|remove|status
       agora node run [--socket YOL] [--manifests DİZİN] [--project YOL]... [--data DİZİN] [--worktrees DİZİN] [--resume auto]
-      agora agent start TÜR [--cwd YOL] [--worktree] [--project AD] [--name AD] [--accept-project-id-change] [--socket YOL]
+      agora agent start TÜR [--cwd YOL] [--worktree] [--project AD] [--name AD] [--setting KİMLİK=DEĞER]... [--accept-project-id-change] [--socket YOL]
       agora project init [--cwd YOL] [--socket YOL]
       agora agent stop AJAN_KİMLİĞİ [--socket YOL]
       agora agent prompt AJAN_KİMLİĞİ METİN... [--socket YOL]

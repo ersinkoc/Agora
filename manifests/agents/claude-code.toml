@@ -1,7 +1,7 @@
 kind = "claude-code"
 display_name = "Claude Code"
-version = "2026.11.13.1"
-min_engine = 2
+version = "2026.11.15.1"
+min_engine = 3
 # ADR-0057: before Enter, the box between its two rules must hold the typed prompt (and only it), with the mode footer and no dialog.
 input_box = '^─{20,}\n❯[^\S\n]?((?s:.*?))\n─{20,}$'
 
@@ -16,6 +16,20 @@ id = "skip-permissions"
 label = "option-skip-permissions"
 args = ["--dangerously-skip-permissions"]
 skips_permissions = true
+
+# ADR-0066: chosen when an agent starts; the node checks the value and puts it into one argument. Checked with `claude --help` on
+# Claude Code 2.1.325: `--model <model>` ("an alias for the latest model (e.g. 'fable', 'opus', or 'sonnet') or a model's full name")
+# and `--effort <level>` ("low, medium, high, xhigh, max"). No `mode` here: `--permission-mode` has a value that skips permissions.
+[[launch.setting]]
+id = "model"
+label = "setting-model"
+args = ["--model", "{value}"]
+
+[[launch.setting]]
+id = "effort"
+label = "setting-effort"
+args = ["--effort", "{value}"]
+values = ["low", "medium", "high", "xhigh", "max"]
 
 [accounts]
 login = ["claude", "auth", "login"]

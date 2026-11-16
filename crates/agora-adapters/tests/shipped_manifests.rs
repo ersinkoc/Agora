@@ -152,8 +152,8 @@ fn the_usage_fixtures_add_up_to_what_the_files_say() {
     );
 }
 
-/// ADR-0059: every shipped `[[launch.option]]` label is a message the windows can show: it is in the English web and terminal-client
-/// locale files (the clients that list the options), so no window shows a bare id.
+/// ADR-0059: every shipped `[[launch.option]]` label (and ADR-0066 `[[launch.setting]]` label) is a message the windows can show: it is
+/// in the English web and terminal-client locale files (the clients that list them), so no window shows a bare id.
 #[test]
 fn every_shipped_launch_option_label_is_in_the_english_locales() {
     let locales = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../locales/en");
@@ -173,14 +173,19 @@ fn every_shipped_launch_option_label_is_in_the_english_locales() {
             continue;
         }
         let manifest = Manifest::parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        for o in &manifest.launch.option {
+        let labels = manifest
+            .launch
+            .option
+            .iter()
+            .map(|o| &o.label)
+            .chain(manifest.launch.setting.iter().map(|s| &s.label));
+        for label in labels {
             options += 1;
             for (file, have) in [("web.ftl", &web), ("tui.ftl", &tui)] {
                 assert!(
-                    have.contains(&o.label),
-                    "{}: label {} is not in locales/en/{file}",
+                    have.contains(label),
+                    "{}: label {label} is not in locales/en/{file}",
                     path.display(),
-                    o.label
                 );
             }
         }

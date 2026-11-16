@@ -143,6 +143,14 @@ fn utf8(b: &[u8]) -> Step {
         0xf0..=0xf4 => 4,
         _ => return Step::Done(None, 1),
     };
+    // A byte already here that cannot continue the character (a Latin-1 or cp1254 terminal's `ç`, then Enter): the lead is invalid
+    // now, not a character still arriving, so it never holds back the keys typed after it.
+    if b[1..b.len().min(len)]
+        .iter()
+        .any(|c| !(0x80..=0xbf).contains(c))
+    {
+        return Step::Done(None, 1);
+    }
     if b.len() < len {
         return Step::More;
     }
@@ -177,7 +185,8 @@ fn escape(b: &[u8]) -> Step {
                 3,
             ),
         },
-        0x1b => Step::Done(key(Key::Esc), 1),
+        // ESC then a control (Enter, Ctrl+C, Tab, Backspace, another ESC): Esc, then that key, as `flush` reads it.
+        0x00..=0x1f | 0x7f => Step::Done(key(Key::Esc), 1),
         c if (0x20..0x7f).contains(&c) => Step::Done(key(Key::Alt(char::from(c))), 2),
         // Alt with a non-ASCII character: ESC then its UTF-8.
         _ => match utf8(&b[1..]) {
@@ -353,6 +362,46 @@ mod tests {
             keys(b"ab\x1b[A"),
             vec![k(Key::Char('a')), k(Key::Char('b')), k(Key::Up)]
         );
+    }
+
+    #[test]
+    fn esc_then_a_control_is_esc_then_that_key() {
+        // Esc then Enter / Ctrl+C typed quickly (or coalesced over SSH) read as Alt+CR / Alt+^C, and the key was lost (F801).
+        assert_eq!(keys(b"\x1b\r"), vec![k(Key::Esc), k(Key::Enter)]);
+        assert_eq!(keys(b"\x1b\x03"), vec![k(Key::Esc), k(Key::Ctrl('c'))]);
+        assert_eq!(keys(b"\x1b\x7f"), vec![k(Key::Esc), k(Key::Backspace)]);
+        assert_eq!(
+            keys(b"a\x1b\t"),
+            vec![k(Key::Char('a')), k(Key::Esc), k(Key::Tab)]
+        );
+        let mut p = Parser::default();
+        assert_eq!(p.push(b"\x1b"), vec![]);
+        assert_eq!(p.push(b"\r"), vec![k(Key::Esc), k(Key::Enter)]);
+        // Alt with a printable or a non-ASCII character is unchanged.
+        assert_eq!(keys(b"\x1by"), vec![k(Key::Alt('y'))]);
+        assert_eq!(keys("\x1bş".as_bytes()), vec![k(Key::Alt('ş'))]);
+    }
+
+    #[test]
+    fn an_invalid_lead_byte_never_holds_back_the_keys_after_it() {
+        // A Latin-1 / cp1254 terminal's `ç` (0xE7) or `ğ` (0xF0) then Enter / Ctrl+C: the key waited for bytes that could never
+        // complete the character, even past a flush (F802).
+        let mut p = Parser::default();
+        assert_eq!(p.push(&[0xe7]), vec![]);
+        assert_eq!(p.flush(), vec![]);
+        assert_eq!(p.push(b"\r"), vec![k(Key::Enter)]);
+        assert_eq!(keys(&[0xf0, 0x03]), vec![k(Key::Ctrl('c'))]);
+        assert_eq!(
+            keys(&[0xf0, 0x9f, b'x']),
+            vec![k(Key::Char('x'))],
+            "a valid prefix cut short"
+        );
+        // A valid character split anywhere still waits for its end.
+        let mut p = Parser::default();
+        let s = "😀".as_bytes();
+        assert_eq!(p.push(&s[..1]), vec![]);
+        assert_eq!(p.push(&s[1..3]), vec![]);
+        assert_eq!(p.push(&s[3..]), vec![k(Key::Char('😀'))]);
     }
 
     #[test]

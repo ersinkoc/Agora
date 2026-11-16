@@ -883,95 +883,71 @@ where
             .await?;
         return Ok(());
     }
-    // ADR-0049: a viewer's commands stop here, before any node hears of them. (The node still decides what its devices may do.)
-    let may = req.command.as_ref().is_some_and(|c| {
-        (who.role != crate::users::Role::Viewer || crate::users::viewer_may(c))
-            && scope.is_none_or(|s| s.command_allowed(&req.target_node, c))
-    });
-    if !may {
-        let action = command_name(&req);
-        audit(hub, who, &action, &req.target_node, "auth.forbidden");
-        conn.send(&frame(
-            STREAM_COMMANDS,
-            1,
-            refuse(Error::new(ErrorCode::AuthForbidden).with("action", action.as_str()))
-                .encode_to_vec(),
-        ))
-        .await?;
-        return Ok(());
-    }
-    // ADR-0053: the hub forgets a closed agent. It names the agent by its hub-wide key, so it names no node.
-    if let Some(command_request::Command::AgentForget(f)) = &req.command {
-        let node = f.agent_id.split('/').next().unwrap_or_default().to_string();
-        let resp = if req.target_node.is_empty() {
-            match hub.forget_agent(&f.agent_id, now_ms()) {
+    // Who may do what is decided apart from the transport (R9, `dispatch.rs`); here only what the answer says is done.
+    let ok_empty = |request_id: String| v1::CommandResponse {
+        request_id,
+        result: Some(command_response::Result::Ok(v1::CommandOk {
+            result: Some(command_ok::Result::Empty(v1::Empty {})),
+        })),
+    };
+    let resp = match crate::dispatch::route(who, scope, &req) {
+        crate::dispatch::Route::Forward => None,
+        crate::dispatch::Route::Forbidden { action } => {
+            audit(hub, who, &action, &req.target_node, "auth.forbidden");
+            Some(refuse(
+                Error::new(ErrorCode::AuthForbidden).with("action", action.as_str()),
+            ))
+        }
+        crate::dispatch::Route::TargetNotAllowed => Some(refuse(
+            Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "target_node"),
+        )),
+        // ADR-0053: the hub forgets a closed agent. It names the agent by its hub-wide key, so it names no node.
+        crate::dispatch::Route::ForgetAgent { agent_id, node } => {
+            Some(match hub.forget_agent(&agent_id, now_ms()) {
                 Ok(()) => {
                     audit(hub, who, "agent.forget", &node, "ok");
-                    v1::CommandResponse {
-                        request_id: client_request_id,
-                        result: Some(command_response::Result::Ok(v1::CommandOk {
-                            result: Some(command_ok::Result::Empty(v1::Empty {})),
-                        })),
-                    }
+                    ok_empty(client_request_id.clone())
                 }
                 Err(e) => {
                     audit(hub, who, "agent.forget", &node, e.code.as_str());
                     refuse(e)
                 }
+            })
+        }
+        // ADR-0073: the hub forgets an offline machine (owner only, decided in `dispatch`).
+        crate::dispatch::Route::ForgetNodeForbidden { node_id } => {
+            audit(hub, who, "node.forget", &node_id, "auth.forbidden");
+            Some(refuse(
+                Error::new(ErrorCode::AuthForbidden).with("action", "node.forget"),
+            ))
+        }
+        crate::dispatch::Route::ForgetNode {
+            node_id,
+            refuse_return,
+        } => Some(match hub.forget_node(&node_id, refuse_return, now_ms()) {
+            Ok(()) => {
+                let outcome = if refuse_return {
+                    "ok refused_return"
+                } else {
+                    "ok"
+                };
+                audit(hub, who, "node.forget", &node_id, outcome);
+                ok_empty(client_request_id.clone())
             }
-        } else {
-            refuse(Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "target_node"))
-        };
-        conn.send(&frame(STREAM_COMMANDS, 1, resp.encode_to_vec()))
-            .await?;
-        return Ok(());
-    }
-    // ADR-0073: the hub forgets an offline machine. Owner only (machines belong to the owner, not to a project); it names the machine
-    // in the command, not as the target.
-    if let Some(command_request::Command::NodeForget(f)) = &req.command {
-        let resp = if !req.target_node.is_empty() {
-            refuse(Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "target_node"))
-        } else if who.role != crate::users::Role::Owner {
-            audit(hub, who, "node.forget", &f.node_id, "auth.forbidden");
-            refuse(Error::new(ErrorCode::AuthForbidden).with("action", "node.forget"))
-        } else {
-            match hub.forget_node(&f.node_id, f.refuse_return, now_ms()) {
-                Ok(()) => {
-                    let outcome = if f.refuse_return {
-                        "ok refused_return"
-                    } else {
-                        "ok"
-                    };
-                    audit(hub, who, "node.forget", &f.node_id, outcome);
-                    v1::CommandResponse {
-                        request_id: client_request_id,
-                        result: Some(command_response::Result::Ok(v1::CommandOk {
-                            result: Some(command_ok::Result::Empty(v1::Empty {})),
-                        })),
-                    }
-                }
-                Err(e) => {
-                    audit(hub, who, "node.forget", &f.node_id, e.code.as_str());
-                    refuse(e)
-                }
+            Err(e) => {
+                audit(hub, who, "node.forget", &node_id, e.code.as_str());
+                refuse(e)
             }
-        };
-        conn.send(&frame(STREAM_COMMANDS, 1, resp.encode_to_vec()))
-            .await?;
-        return Ok(());
-    }
-    // Answered by the hub itself from its own view and prices (ADR-0033); it names no node.
-    if matches!(req.command, Some(command_request::Command::UsageReport(_))) {
-        let resp = if req.target_node.is_empty() {
-            v1::CommandResponse {
-                request_id: client_request_id,
-                result: Some(command_response::Result::Ok(v1::CommandOk {
-                    result: Some(command_ok::Result::UsageReport(hub.usage_report())),
-                })),
-            }
-        } else {
-            refuse(Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "target_node"))
-        };
+        }),
+        // Answered by the hub itself from its own view and prices (ADR-0033); it names no node.
+        crate::dispatch::Route::UsageReport => Some(v1::CommandResponse {
+            request_id: client_request_id.clone(),
+            result: Some(command_response::Result::Ok(v1::CommandOk {
+                result: Some(command_ok::Result::UsageReport(hub.usage_report())),
+            })),
+        }),
+    };
+    if let Some(resp) = resp {
         conn.send(&frame(STREAM_COMMANDS, 1, resp.encode_to_vec()))
             .await?;
         return Ok(());
@@ -1663,12 +1639,7 @@ fn audit_action(req: &v1::CommandRequest) -> String {
     }
 }
 
-/// The command's schema name (`AgentStop`), for an error that names what was refused.
-fn command_name(req: &v1::CommandRequest) -> String {
-    let dbg = format!("{:?}", req.command);
-    let inner = dbg.strip_prefix("Some(").unwrap_or(&dbg);
-    inner.split('(').next().unwrap_or("").to_string()
-}
+use crate::dispatch::command_name;
 
 fn error_response(request_id: &str, e: &Error) -> v1::CommandResponse {
     v1::CommandResponse {

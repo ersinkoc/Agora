@@ -5,6 +5,7 @@ pub mod board;
 pub mod ca;
 pub mod deliver;
 pub mod devices;
+pub mod dispatch;
 pub mod enroll;
 pub mod hub;
 pub mod metrics;
