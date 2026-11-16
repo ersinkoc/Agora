@@ -513,6 +513,20 @@ All additions; nothing published changed.
   stops it, `auto` keeps it to the listed kinds and folders). Either way at most 16 at one start, 8 at a time (the next round 5 s
   later), and never an agent the node brought back by itself in the last 10 minutes (`auto_resumed_at_ms` in the ledger).
 
+### Launch settings (ADR-0066, first part)
+
+All additions; nothing published changed.
+- **What may be given.** `AgentKind.settings` (7) lists a kind's `[[launch.setting]]`s as `LaunchSettingSpec { id, label, values,
+  default_value }` (the manifest's order; the arguments stay on the node). Old nodes send none.
+- **The choice.** `AgentStart.settings` (9) and `AgentLaunch.settings` (9) carry `LaunchSetting { id, value }` pairs. The node checks
+  them against its own manifest (`agent.setting_unknown {kind, setting}`, `agent.setting_invalid {kind, setting}`, nothing starts) and
+  puts each value into its argument template as one argument (agent-manifest.md, "Launch settings").
+- **Only from the machine itself, for now.** `AgentLaunch`'s authorization (`directory-action-v3`) does not cover settings yet, so a
+  start with settings that came through the hub, `AgentStart` or `AgentLaunch`, is refused where the hub's commands enter the node
+  (`agent.option_forbidden {kind, option: <setting id>, policy: signature}`); a grant never covers one. A signing domain version that
+  includes them, the approval card and the `agent_start` mesh tool are ADR-0066's second part. `agora agent start KIND --setting
+  id=value` (repeatable) gives them on the node's own control socket.
+
 ### Launch options (ADR-0059)
 
 All additions; nothing published changed. Node capability `agent.launch_options`.

@@ -280,6 +280,9 @@ impl TerminalHandle {
     pub fn resize(&self, size: Size) -> io::Result<()> {
         let control = self.control()?;
         let mut g = self.inner.lock();
+        // The size the screen will really have (it keeps a minimum width): the process's terminal and the clients get that one, so a
+        // request for one column leaves the screen, the process and the broadcast in agreement, not the process at one column.
+        let size = g.term.clamp_size(size);
         // The same size again changes nothing; a console that is resized needlessly can drop input typed at that moment (Git `sh`
         // on Windows lost the first key this way).
         if g.term.size() == size {

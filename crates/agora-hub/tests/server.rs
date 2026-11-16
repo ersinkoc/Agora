@@ -799,6 +799,8 @@ async fn a_clients_command_is_routed_to_its_node_and_the_answer_comes_back() {
     client.send(&routed("mine", "n1")).await.unwrap();
     let got = recv(&mut node).await;
     assert_eq!((got.stream_id, got.kind), (STREAM_COMMANDS, 0));
+    // `GET /api/metrics` (R8): written to the node and not answered yet.
+    assert_eq!(st.hub.router().node_load(), (0, 1));
     let forwarded = v1::CommandRequest::decode(got.payload.as_slice()).unwrap();
     assert_ne!(forwarded.request_id, "mine", "the hub picks the id");
     assert!(matches!(
@@ -817,6 +819,16 @@ async fn a_clients_command_is_routed_to_its_node_and_the_answer_comes_back() {
     let r = response(&mut client).await;
     assert_eq!(r.request_id, "mine", "mapped back to the client's id");
     assert!(matches!(r.result, Some(command_response::Result::Ok(_))));
+    // Answered: nothing is waiting any more (the count follows the answer on the node's own loop).
+    let end = std::time::Instant::now() + Duration::from_secs(10);
+    while st.hub.router().node_load() != (0, 0) {
+        assert!(
+            std::time::Instant::now() < end,
+            "{:?}",
+            st.hub.router().node_load()
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
 
 #[tokio::test]
@@ -2507,6 +2519,8 @@ async fn only_the_owner_reads_the_hubs_metrics_and_only_when_they_are_on() {
         "agora_hub_lock_wait_seconds_count 5\n",
         "agora_hub_nodes_online 1\n",
         "agora_hub_resyncs_total 0\n",
+        "agora_hub_node_commands_queued 0\n",
+        "agora_hub_node_commands_unanswered 0\n",
         "agora_hub_approvals_waiting 0\n",
         "agora_hub_approval_wait_seconds_bucket{le=\"5\"} 0\n",
         "agora_hub_approval_wait_seconds_bucket{le=\"15\"} 1\n",

@@ -73,6 +73,9 @@ pub struct LocalListener {
     inner: std::os::unix::net::UnixListener,
     #[cfg(unix)]
     path: PathBuf,
+    /// `<path>.lock`, held while this listener serves the socket (see `unix::local_listen`).
+    #[cfg(unix)]
+    _lock: std::fs::File,
     #[cfg(windows)]
     inner: windows::Listener,
 }
@@ -1188,6 +1191,16 @@ pub fn process_children(pid: u32) -> io::Result<Vec<u32>> {
         let _ = pid;
         Err(unsupported())
     }
+}
+
+/// Makes a helper program the node runs for itself (git, and the like) start with no window of its own. The node has no console
+/// (it runs detached, ADR-0062), and on Windows every console program started by a process without one gets a new console window:
+/// each `git` behind a diff flashed a window and took the focus. Windows: `CREATE_NO_WINDOW`, so the helper gets a console with no
+/// window, which the programs it starts share. Elsewhere nothing changes. Not for agents: they run on a terminal of their own.
+pub fn no_console_window(cmd: &mut std::process::Command) -> &mut std::process::Command {
+    #[cfg(windows)]
+    std::os::windows::process::CommandExt::creation_flags(cmd, winproc::NO_WINDOW_FLAGS);
+    cmd
 }
 
 /// Starts `cmd` detached from this process, its terminal and its session (ADR-0062): it survives the terminal closing, the SSH session

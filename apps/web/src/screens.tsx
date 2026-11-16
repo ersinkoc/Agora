@@ -1,6 +1,9 @@
 import { StartApproval, type StartChoice } from './components/StartApproval';
 import { HelperGrants } from './components/HelperGrants';
 import { DeviceRequest } from './components/DeviceRequest';
+import { PairRequest } from './components/PairRequest';
+import { SignInWaiting } from './components/SignInWaiting';
+import type { SignInApprovalModel } from './components/pairChoice';
 import { ApprovalBanner } from './components/ApprovalBanner';
 import { AgentAddress } from './components/AgentAddress';
 import { LanguagePicker } from './components/LanguagePicker';
@@ -86,7 +89,11 @@ const demoChat: ChatSource = {
 };
 
 // ADR-0059: the start window with a kind that offers "Don't ask", for the gallery (nothing is sent anywhere).
-const demoKinds: KindChoice[] = [{ kind: 'codex', name: 'Codex', installed: true, options: [{ id: 'skip-permissions', label: 'option-skip-permissions', skipsPermissions: true }] }];
+// ADR-0069: and one whose program the machine cannot find, named in the explanation.
+const demoKinds: KindChoice[] = [
+  { kind: 'codex', name: 'Codex', installed: true, options: [{ id: 'skip-permissions', label: 'option-skip-permissions', skipsPermissions: true }] },
+  { kind: 'gemini', name: 'Gemini CLI', installed: false, program: 'gemini' },
+];
 function DemoStart({ onClose }: { onClose: () => void }) {
   return <StartAgent projects={[{ node: 'laptop', projectId: 'p', label: 'login-fix', path: '/home/dev/code/login-fix' }]}
     machines={[{ id: 'laptop', name: 'laptop', os: 'linux', online: true, agentsRunning: 1, lastSeenMs: 0 }]}
@@ -110,6 +117,13 @@ function Themed({ theme, onStart }: { theme: 'dark' | 'light'; onStart?: () => v
       <HelperGrants list={async () => [{ id: 'ap-1', kind: 'codex', folder: '/home/dev/code/login-fix', remaining: 2 }]} revoke={async () => {}} refresh={0} />
       <DeviceRequest inline request={{ id: 'web-3fa9c1d24e5b6a70', name: 'Firefox · Linux', fingerprint: 'f947-3cb5-e304-81be-ecf2-64cd' }}
         machines={[{ id: 'laptop', name: 'laptop' }, { id: 'vps-1', name: 'vps-1' }]} onApprove={async () => true} onLater={() => {}} />
+      {/* ADR-0065: a fake pairing request until the hub sends real ones. */}
+      <PairRequest inline request={{ id: 'pair-machine', kind: 'machine', name: 'laptop', os: 'windows', address: '192.168.1.50', number: '482193' }} onAnswer={async () => true} />
+      <PairRequest inline request={{ id: 'pair-browser', kind: 'browser', name: 'Chrome · macOS', address: '192.168.1.57', number: '731004' }} onAnswer={async () => true} />
+      <div className="gallery__row">
+        <SignInWaiting approval={{ number: '731004', state: 'waiting' }} onAskAgain={() => {}} onUseCode={() => {}} />
+        <SignInWaiting approval={{ number: '731004', state: 'denied' }} onAskAgain={() => {}} onUseCode={() => {}} />
+      </div>
       <div className="gallery__row">
         <button type="button" className="button button--primary" onClick={onStart}>{t('action-start-agent')}</button>
         <button type="button" className="button">{t('action-open')}</button>
@@ -362,13 +376,17 @@ function actionLabel(action: string): string {
 }
 
 // `passwordRequired`: the hub asks this browser for the screen password too (ADR-0067; never on the hub's own machine).
-export function SignInPage({ onSubmit, onPasskey, notice, passwordRequired = false, initialCode = '' }: { onSubmit: (code: string, password?: string) => void; onPasskey?: () => void; notice?: string; passwordRequired?: boolean; initialCode?: string }) {
+// `approval`: this browser asked the owner to approve it (ADR-0065 decision 6); the page shows the number to compare instead of the
+// code form, which stays one click away.
+export function SignInPage({ onSubmit, onPasskey, notice, passwordRequired = false, initialCode = '', approval, onAskAgain }: { onSubmit: (code: string, password?: string) => void; onPasskey?: () => void; notice?: string; passwordRequired?: boolean; initialCode?: string; approval?: SignInApprovalModel; onAskAgain?: () => void }) {
   const [code, setCode] = useState(initialCode);
   const [password, setPassword] = useState('');
+  const [byCode, setByCode] = useState(false);
   return (
     <main className="page">
       <div className="flex justify-end"><LanguagePicker /></div>
       <h1>{t('signin-title')}</h1>
+      {approval && !byCode ? <SignInWaiting approval={approval} onAskAgain={() => onAskAgain?.()} onUseCode={() => setByCode(true)} /> : <>
       <p>{t('signin-intro')}</p>
       <form onSubmit={(e) => { e.preventDefault(); if (code.trim() && (!passwordRequired || password)) onSubmit(code, passwordRequired ? password : undefined); }}>
         <label>
@@ -386,6 +404,7 @@ export function SignInPage({ onSubmit, onPasskey, notice, passwordRequired = fal
         <button type="submit" className="button button--primary">{t('signin-action')}</button>
       </form>
       {passwordRequired && <p className="muted">{t('signin-password-hint')}</p>}
+      </>}
       {onPasskey && <p><button type="button" className="button" onClick={onPasskey}>{t('signin-passkey')}</button></p>}
       {notice && <p role="alert">{notice}</p>}
     </main>

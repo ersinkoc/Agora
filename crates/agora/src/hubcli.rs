@@ -70,6 +70,16 @@ pub(crate) fn hub_dir(o: &Opts) -> PathBuf {
     o.hub_dir.clone().unwrap_or_else(|| home().join("hub"))
 }
 
+/// `agora hub <command>` on a machine that does not run the hub: there is no hub folder, so say that the command belongs on the hub's
+/// machine instead of showing the database error it would hit.
+pub fn not_here(say: &Say, o: &Opts) -> ExitCode {
+    say.err(
+        key!("cli-hub-not-here"),
+        &[("dir", hub_dir(o).display().to_string().into())],
+    );
+    ExitCode::from(1)
+}
+
 pub fn link_dir() -> PathBuf {
     home().join("link")
 }

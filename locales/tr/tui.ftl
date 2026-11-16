@@ -44,6 +44,7 @@ tui-no-project = (proje yok)
 tui-hint-answer = Yukarıdaki ilk isteğe izin vermek için y, reddetmek için n tuşuna basın.
 tui-allowed = İzin verildi.
 tui-denied = Reddedildi.
+tui-not-trusted-at = Bu cihaza o makinede henüz güvenilmiyor. O makinede { $binary } dosyasının klasöründe şunu çalıştırın: ./agora node trust { $id } { $key }   (Windows'ta .\agora.exe). Ya da başka bir cihazınızdan bunu onaylamasını istemek için a tuşuna basın (parmak izi { $fingerprint }).
 tui-not-trusted = Bu cihaza o makinede henüz güvenilmiyor. O makinede şunu çalıştırın: agora node trust { $id } { $key }   (`agora` orada bulunamazsa komutu agora programının klasöründe çalıştırın: ./agora, Windows'ta .\agora.exe). Ya da başka bir cihazınızdan bunu onaylamasını istemek için a tuşuna basın (parmak izi { $fingerprint }).
 tui-device-name = { $host } üzerindeki terminal
 tui-device-asked = İstendi. Bu terminali ({ $fingerprint }) makinelerinizin güvendiği başka bir cihazınızda onaylayın: pencerede ya da onun terminal istemcisinde v ile.
@@ -85,6 +86,7 @@ tui-send-failed = Gönderilemedi ({ $code }).
 tui-start-pick = { $machine } makinesinde hangi ajan başlatılsın? Numarasına basın; başka bir tuşa basarsanız işlem iptal edilir.
 tui-start-item = { $n }  { $name }
 tui-start-none = { $machine } makinesinde kurulu bir ajan yok.
+tui-start-missing-item = { $name } (`{ $program }`)
 tui-start-missing = Bu makinede bulunamadı: { $names }. Makine bu programları PATH içinde bulamıyor. Onları oraya kurun ya da düğümü bu programların çalıştığı bir terminalden başlatın.
 tui-start-nowhere = Projesi olan çevrimiçi bir makine yok.
 tui-started = { $agent } başlatıldı.
@@ -139,6 +141,8 @@ tui-resume-still-running = Yeniden başlamadan önceki işlemi hâlâ çalışı
 
 # ADR-0059: launch options (manifest `[[launch.option]]` labels)
 option-skip-permissions = Sormadan
+setting-model = Model
+setting-effort = Efor
 option-ask = Önce sorsun
 tui-start-acts = Nasıl çalışsın? Numarasına basın; Enter ya da başka bir tuş önce sordurur.
 tui-start-confirm-skip = Ajan sormadan çalışsın mı? "{ $name }" seçiliyken çalıştığı sürece komut çalıştırır ve dosyaları size sormadan değiştirir. Sormadan başlatmak için y'ye basın; başka bir tuş sormaya devam ettirir.

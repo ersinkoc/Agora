@@ -99,6 +99,27 @@ device-request-some = Yalnızca işaretlilerde.
 device-request-failed = Onay gönderilemedi. Yeniden deneyin.
 device-request-later = Şimdi değil
 device-request-approve = Onayla
+# ADR-0065: katılmak isteyen bir makine ya da başka bir makinede oturum açmak isteyen bir tarayıcı, sahibinin yanıtını bekler.
+pair-machine-title = Yeni bir makine katılmak istiyor
+pair-browser-title = Bir tarayıcı oturum açmak istiyor
+pair-name = Ad
+pair-system = Sistem
+pair-address = Adres
+pair-number = Numara
+pair-machine-compare = Yalnızca yeni makine aynı numarayı gösteriyorsa onaylayın.
+pair-browser-compare = Yalnızca o tarayıcı aynı numarayı gösteriyorsa onaylayın.
+pair-failed = Yanıtınız gönderilemedi. Yeniden deneyin.
+pair-deny = Reddet
+pair-approve = Onayla
+os-windows = Windows
+os-macos = macOS
+os-linux = Linux
+signin-waiting = Sahibinin bu tarayıcıyı onaylaması bekleniyor…
+signin-waiting-hint = Sahibi bu numarayı, zaten oturum açtığı bir penceredeki kartta görür ve yalnızca eşleşiyorsa onaylar.
+signin-denied = Sahibi bu tarayıcıyı onaylamadı.
+signin-expired = Bu tarayıcıyı zamanında onaylayan olmadı.
+signin-ask-again = Yeniden iste
+signin-use-code = Bunun yerine kod kullan
 trust-ask = Başka bir cihazdan onay iste
 trust-asked = İstendi. Bu tarayıcıyı o makinenin güvendiği bir cihazda onaylayın, sonra yeniden başlatın.
 
@@ -159,6 +180,7 @@ start-no-kinds = Bu makinede henüz ajan tanımlı değil.
 start-no-projects = Bağlı hiçbir makinede proje yok. Birinde "agora node run --project YOL" çalıştırın.
 start-not-installed = kurulu değil
 start-not-installed-why = Bu makine "kurulu değil" olarak işaretlenen ajanların programlarını PATH içinde bulamıyor. Onları oraya kurun ya da düğümü bu programların çalıştığı bir terminalden başlatın.
+start-not-installed-program = Bu makine { $program } programını PATH içinde bulamıyor. Onu oraya kurun ya da Agora'yı o makinede { $program } programının çalıştığı bir terminalden başlatın.
 start-go = Başlat
 start-cancel = Vazgeç
 start-kind-unknown = Bu makine o ajanı tanımıyor.
@@ -549,7 +571,10 @@ closed-reason-running = yeniden çalışıyor
 closed-reason-gone = hub artık bunu tanımıyor
 closed-reason-other = hub'a ulaşılamadı ya da reddetti
 
-trust-hint = Bu makine ({ $machine }) bu cihaza henüz güvenmiyor. Bu komutu o makinede bir kez çalıştırın, sonra yeniden Başlat'a basın:
+trust-hint = { $machine }, ajan başlatmadan önce bu tarayıcıya bir kez güvenmeli; böylece hub tek başına orada hiçbir program çalıştıramaz. { $machine } üzerinde bir terminalde bu komutu çalıştırın, gösterdiği parmak izinin "Bu cihaz" ile aynı olduğunu kontrol edin ve y yazın. Sonra yeniden Başlat'a basın:
+trust-hint-binary = { $machine }, ajan başlatmadan önce bu tarayıcıya bir kez güvenmeli; böylece hub tek başına orada hiçbir program çalıştıramaz. Agora orada PATH üzerinde olmayan { $where } konumundan çalışıyor: o klasörde bir terminalde (Windows'ta PowerShell) bu komutu çalıştırın, parmak izinin "Bu cihaz" ile aynı olduğunu kontrol edin ve y yazın. Sonra yeniden Başlat'a basın:
+trust-hint-file = { $machine }, ajan başlatmadan önce bu tarayıcıya bir kez güvenmeli; böylece hub tek başına orada hiçbir program çalıştıramaz. Oradaki Agora programı ({ $file }) PATH üzerinde değil: o dosyanın bulunduğu klasörde bir terminalde (Windows'ta PowerShell) bu komutu çalıştırın, parmak izinin "Bu cihaz" ile aynı olduğunu kontrol edin ve y yazın. Sonra yeniden Başlat'a basın:
+trust-show-path = Yolun tamamını göster
 trust-copy = Kopyala
 trust-copied = Kopyalandı
 interrupted-section = Makineyle birlikte durdu
@@ -572,6 +597,8 @@ resume-failed-forbidden = Bu cihaz bu makinede başka projelerle sınırlı, bu 
 
 # ADR-0059: launch options (manifest `[[launch.option]]` labels)
 option-skip-permissions = Sormadan
+setting-model = Model
+setting-effort = Efor
 option-ask = Önce sorsun
 start-how-it-acts = Nasıl çalışsın
 start-confirm-skip-body = "{ $name }" seçiliyken ajan, çalıştığı sürece komut çalıştırır ve dosyaları size sormadan değiştirir.
