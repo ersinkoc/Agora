@@ -1,9 +1,9 @@
 # 0084. A confined agent gets its login from a secret the node holds
-Status: Proposed
+Status: Accepted
 Date: 2026-11-16
+Accepted: 2026-11-17 (the maintainer's own reply in the merger chat, "1 kabul et geç", to the merger's list that named ADR-0081, ADR-0082, ADR-0083 and ADR-0084 as the decisions waiting for them). The open questions' proposed answers stand.
 Origin: issue #546, second half. On macOS a confined Claude Code says "Not logged in": its login is in the Keychain, and `~/Library/Keychains` is unreadable under the same rule that blocks everything below `/Users` (ADR-0047). The first half (git configuration) is ADR-0078.
 
-Not accepted. Nothing here may be built until the maintainer names this ADR in an acceptance message.
 
 ## Context
 - **Why the login is missing.** The Seatbelt profile denies reading file contents below `/Users`, `/Volumes` and the temp folders unless listed
