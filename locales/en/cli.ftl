@@ -222,8 +222,14 @@ cli-adapter-listed-revoked = { $name } { $version } (publisher { $publisher }, r
 
 cli-project-identity = Project identity: { $id } (folder: { $path }). Share .agent-project.json with the other copies of this project.
 
-cli-panel = Open the hub's panel at { $url } in a browser. This machine's browser must trust the hub's certificate: import { $ca } as a certificate authority (on Windows: certutil -user -addstore Root { $ca }). Sign in with a code from "agora hub login" on the hub machine.
+cli-panel = The hub's panel is open at { $url } on this machine. Open that address in a browser; no certificate is needed. Sign in with a code from "agora hub login" on the hub machine, as from any browser. Press Ctrl+C to close it.
 cli-panel-none = This machine is not enrolled with a hub, so there is no panel to open. Enroll it first with "agora node enroll".
+cli-panel-link = This machine's hub address or certificate is unreadable. Enroll it again with "agora node enroll".
+cli-panel-port-taken = The panel's port { $port } is taken by another program. Close that program and run "agora panel" again; the port stays the same so that your sign-in and device are kept.
+cli-panel-no-port = The panel could not open a port on this machine.
+cli-panel-port-unsaved = The panel's port could not be saved, so the next "agora panel" may use another port, and your browser would treat it as a new device and ask you to sign in again. Check that this machine's node folder is writable.
+cli-panel-unreachable = The hub does not answer from this machine, so there is no panel to open. The agents here keep running.
+cli-panel-untrusted = The hub's certificate is not from the certificate this machine was enrolled with, so the panel was not opened.
 
 # ADR-0062: plain `agora` (the front door), `agora web`, `agora status`, `agora down`.
 frontdoor-welcome = Welcome to Agora. What should this machine do?

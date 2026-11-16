@@ -28,6 +28,7 @@ mod adaptercmd;
 mod frontdoor;
 mod hubcli;
 mod meshbridge;
+mod panelcmd;
 mod servicecmd;
 mod supervise;
 mod trustcli;
@@ -315,7 +316,7 @@ fn main() -> ExitCode {
         ["agent", "list"] => agent_list(&say, &opts),
         ["agent", "kinds"] => agent_kinds(&say, &opts),
         ["terminal", "attach"] => terminal_attach(&say, &opts),
-        ["panel"] => hubcli::panel(&say),
+        ["panel"] => panelcmd::panel(&say),
         ["doctor"] => doctor(&say, &opts),
         ["tui"] => tuicmd::tui(&say, &opts),
         ["update"] => update::update(&say, &opts),
