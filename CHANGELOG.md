@@ -45,6 +45,8 @@ _Nothing yet._
   nor finish it, stuck until its lease ran out. It is refused (`mesh.recipient_unknown`) and stays with its owner (audit finding F601).
 
 ### Machines
+- A terminal resized to one column stopped its machine's screen for that terminal: a wide character (Chinese, Japanese,
+  an emoji) crashed it, and narrowing a screen holding one never finished. A terminal's screen is now at least two columns.
 - Asking for the changes of one file whose name contains `[`, `*` or `?` now returns that file only: the name was read as a pattern, so
   `pages/[id].tsx` also brought `pages/i.tsx`. Nothing outside the workspace folder was ever reachable this way (audit finding F402).
 - The number of changed files a machine shows for a folder is now right when the folder holds new files: a new folder with three files
