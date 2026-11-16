@@ -594,6 +594,125 @@ pub fn hub_user(say: &Say, o: &Opts) -> ExitCode {
     }
 }
 
+/// `agora hub metrics-token create NAME [--expires DAYS] | list | revoke NAME` (ADR-0076): tokens that can only read `GET /api/metrics`.
+/// The token is shown once, by `create`; `list` never shows one. The hub looks a token up at every scrape, so `revoke` ends it at its
+/// next use without a restart.
+pub fn hub_metrics_token(say: &Say, o: &Opts) -> ExitCode {
+    use agora_hub::metrics_token::{MetricsTokens, TokenError};
+    let fail = |e: String| {
+        say.err(key!("cli-hub-failed"), &[("reason", e.into())]);
+        ExitCode::from(1)
+    };
+    let bad = || {
+        say.err(key!("cli-bad-arguments"), &[]);
+        ExitCode::from(2)
+    };
+    let words: Vec<&str> = o.positional.iter().map(String::as_str).collect();
+    // Arguments first, so a wrong command line never creates the hub folder.
+    if !matches!(words.as_slice(), ["create", _] | ["list"] | ["revoke", _])
+        || (o.expires.is_some() && words.first() != Some(&"create"))
+        || o.expires == Some(0)
+    {
+        return bad();
+    }
+    let dir = hub_dir(o);
+    if std::fs::create_dir_all(&dir).is_err() {
+        return fail(dir.display().to_string());
+    }
+    let store = match SqliteStore::open(&dir.join("hub.db")) {
+        Ok(s) => s,
+        Err(e) => return fail(e.to_string()),
+    };
+    let tokens = MetricsTokens::new(&store);
+    let now = server::now_ms();
+    match words.as_slice() {
+        ["create", name] => {
+            let expires = o
+                .expires
+                .map(|days| now.saturating_add(days.saturating_mul(86_400_000)));
+            match tokens.create(name, now, expires) {
+                Ok(token) => {
+                    say.out(
+                        key!("cli-metrics-token-created"),
+                        &[("name", (*name).into()), ("token", token.into())],
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(TokenError::BadName) => {
+                    say.err(key!("cli-metrics-token-bad-name"), &[]);
+                    ExitCode::from(2)
+                }
+                Err(TokenError::Exists) => {
+                    say.err(
+                        key!("cli-metrics-token-exists"),
+                        &[("name", (*name).into())],
+                    );
+                    ExitCode::from(1)
+                }
+                Err(TokenError::Store(e)) => fail(e),
+            }
+        }
+        ["list"] => match tokens.list() {
+            Ok(list) if list.is_empty() => {
+                say.out(key!("cli-metrics-token-none"), &[]);
+                ExitCode::SUCCESS
+            }
+            Ok(list) => {
+                for t in list {
+                    let used = if t.last_used_ms == 0 {
+                        say.text(key!("cli-metrics-token-never-used"), &[])
+                    } else {
+                        utc(t.last_used_ms)
+                    };
+                    let expires = if t.expires_ms == 0 {
+                        say.text(key!("cli-metrics-token-no-expiry"), &[])
+                    } else {
+                        utc(t.expires_ms)
+                    };
+                    let state = if t.revoked_ms > 0 {
+                        say.text(key!("cli-metrics-token-state-revoked"), &[])
+                    } else if t.expires_ms > 0 && t.expires_ms <= now {
+                        say.text(key!("cli-metrics-token-state-expired"), &[])
+                    } else {
+                        String::new()
+                    };
+                    say.out(
+                        key!("cli-metrics-token-line"),
+                        &[
+                            ("name", t.name.clone().into()),
+                            ("created", utc(t.created_ms).into()),
+                            ("used", used.into()),
+                            ("expires", expires.into()),
+                            ("state", state.into()),
+                        ],
+                    );
+                }
+                ExitCode::SUCCESS
+            }
+            Err(TokenError::Store(e)) => fail(e),
+            Err(_) => bad(),
+        },
+        ["revoke", name] => match tokens.revoke(name, now) {
+            Ok(true) => {
+                say.out(
+                    key!("cli-metrics-token-revoked"),
+                    &[("name", (*name).into())],
+                );
+                ExitCode::SUCCESS
+            }
+            Ok(false) => {
+                say.err(
+                    key!("cli-metrics-token-unknown"),
+                    &[("name", (*name).into())],
+                );
+                ExitCode::from(1)
+            }
+            Err(_) => fail("store".into()),
+        },
+        _ => bad(),
+    }
+}
+
 /// A moment as people read it in a terminal: `2026-11-13 14:02 UTC` (the hub's and the node's clocks are both UTC-agnostic).
 pub(crate) fn utc(ms: u64) -> String {
     let secs = ms / 1000;

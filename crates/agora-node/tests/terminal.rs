@@ -222,6 +222,42 @@ fn resize_and_exit_are_delivered_to_subscribers() {
     assert_eq!(exit.and_then(|e| e.code), Some(7));
 }
 
+/// A request for fewer columns than the screen keeps (F701: the screen is never narrower than two) is the size the screen has, so the
+/// process's own terminal and every subscriber agree with it, and asking again for the same narrow size reaches no one.
+#[test]
+fn a_request_below_the_minimum_width_is_the_size_everyone_has() {
+    let h = handle(&["sh"]);
+    let (_snap, sub) = h.subscribe();
+    for _ in 0..3 {
+        h.resize(Size { cols: 1, rows: 7 }).unwrap();
+    }
+    let real = Size { cols: 2, rows: 7 };
+    assert_eq!(h.snapshot().size, real);
+    // `stty size` prints rows then columns of the process's terminal.
+    let out = std::env::temp_dir().join(format!("agora-narrow-{}", std::process::id()));
+    let _ = std::fs::remove_file(&out);
+    h.send_input(format!("stty size > '{}'\n", out.display()).into_bytes())
+        .unwrap();
+    let end = Instant::now() + Duration::from_secs(10);
+    let mut said = String::new();
+    while Instant::now() < end && said.trim().is_empty() {
+        std::thread::sleep(Duration::from_millis(100));
+        said = std::fs::read_to_string(&out).unwrap_or_default();
+    }
+    let _ = std::fs::remove_file(&out);
+    assert_eq!(said.trim(), "7 2", "the process sees the screen's size");
+    // The shell's echo of the `stty` line and its prompt arrive on the same subscription: only the resizes count, and a byte frame
+    // in front of them must not end the count (it did, once, on a slow runner).
+    let mut resizes = Vec::new();
+    while let Ok(out) = sub.recv_timeout(Duration::from_millis(100)) {
+        if let Output::Resize(s) = out {
+            resizes.push(s);
+        }
+    }
+    assert_eq!(resizes, [real], "one resize, to the real size");
+    h.kill().unwrap();
+}
+
 #[test]
 fn a_resize_to_the_same_size_reaches_no_one() {
     let h = handle(&["sh"]);

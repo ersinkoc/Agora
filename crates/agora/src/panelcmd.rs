@@ -3,7 +3,7 @@
 //! The command runs the desktop app's loopback tunnel (`agora-desktop-tunnel`, ADR-0048) from the files enrolment left on this
 //! machine: the hub's address and the CA the node pinned. The browser loads `http://127.0.0.1:<port>/`; the tunnel carries the
 //! connection to the hub over TLS that trusts only that CA, and it refuses any request whose `Host` or `Origin` is not its own
-//! (DNS rebinding, threat model T23). It reads no credential, holds no session and widens nothing: the person signs in to the hub
+//! (DNS rebinding, threat model T27). It reads no credential, holds no session and widens nothing: the person signs in to the hub
 //! as from any browser, and the hub still sees an ordinary TLS client.
 //!
 //! The port is fixed per hub: the first run takes [`PREFERRED_PORT`] (or any free one when that is taken) and keeps it in

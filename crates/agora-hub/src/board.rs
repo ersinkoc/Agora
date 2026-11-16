@@ -143,6 +143,8 @@ pub fn changes_board(tool: &str) -> bool {
 pub struct Boards {
     by_project: Mutex<BTreeMap<String, Mesh>>,
     joins: Mutex<Joins>,
+    /// Nodes whose process started again while this hub runs: a board restored later still names their dead agents.
+    restarted: Mutex<BTreeSet<String>>,
 }
 
 fn tool_error(code: ErrorCode, key: &str, value: &str) -> Value {
@@ -364,6 +366,10 @@ impl Boards {
     /// A node's process started again: every agent it had is gone, even if a new one will carry the same local id (`agent-1`). Gives
     /// their tasks and leases back now, in every board in memory, and returns each project with the events that produced.
     pub fn node_restarted(&self, node: &str, now_ms: u64) -> Vec<(String, Vec<Body>)> {
+        self.restarted
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(node.to_string());
         let prefix = format!("{node}/");
         let mut g = self.by_project.lock().unwrap_or_else(|e| e.into_inner());
         let mut out = Vec::new();
@@ -478,12 +484,17 @@ impl Boards {
                     .collect()
             })
             .unwrap_or_default();
+        let restarted = self
+            .restarted
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         let mut g = self.by_project.lock().unwrap_or_else(|e| e.into_inner());
         let mesh = g
             .entry(project.to_string())
             .or_insert_with(|| Mesh::new(Limits::default()));
         mesh.import_tasks(v["next"].as_u64().unwrap_or(1), &tasks);
-        let leases: Vec<(String, AgentId, u64)> = v["leases"]
+        let (leases, ended): (Vec<(String, AgentId, u64)>, Vec<_>) = v["leases"]
             .as_array()
             .map(|a| {
                 a.iter()
@@ -494,10 +505,50 @@ impl Boards {
                             l["expires_at_ms"].as_u64()?,
                         ))
                     })
-                    .collect()
+                    .collect::<Vec<_>>()
             })
-            .unwrap_or_default();
-        mesh.import_leases(project, &leases, now_ms);
+            .unwrap_or_default()
+            .into_iter()
+            .partition(|(_, _, expires)| *expires > now_ms);
+        // A restored lease is granted again to its holder, so it belongs to a grant: when the holder ends, `sync` (or a restart of
+        // its node) frees it like any other. A holder that is not registered yet is, until the next `sync` keeps or removes it.
+        for (path, holder, expires) in leases {
+            if !mesh.agent_ids().contains(&holder) {
+                mesh.register(AgentInfo {
+                    id: holder.clone(),
+                    kind: String::new(),
+                    node: holder.as_str().split('/').next().unwrap_or("").to_string(),
+                    project: project.to_string(),
+                    label: holder.as_str().to_string(),
+                    worktree: String::new(),
+                    state: "idle".into(),
+                });
+            }
+            let _ = mesh.lease_acquire(
+                &holder,
+                std::slice::from_ref(&path),
+                expires - now_ms,
+                now_ms,
+            );
+        }
+        // Those leases were granted before the hub stopped: not news. A board is loaded once, before any call, so nothing else waits.
+        let _ = mesh.take_events();
+        mesh.import_leases(project, &ended, now_ms);
+        // A node that started again since this hub opened lost every agent it had when the board was saved: its claims and leases
+        // go back now, or a new agent with a reused id (`agent-1`) would inherit them.
+        let dead: BTreeSet<AgentId> = tasks
+            .iter()
+            .filter_map(|t| t.owner.clone())
+            .chain(mesh.agent_ids())
+            .filter(|id| {
+                id.as_str()
+                    .split_once('/')
+                    .is_some_and(|(node, _)| restarted.contains(node))
+            })
+            .collect();
+        for id in &dead {
+            mesh.unregister(id, now_ms);
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1568,6 +1619,114 @@ mod tests {
                 10_001
             )),
             ""
+        );
+    }
+
+    #[test]
+    fn a_restored_lease_is_freed_when_its_holder_ends() {
+        // A lease restored from the store belongs to a grant again: its holder's end frees it, as it frees a live one.
+        let b = Boards::new();
+        let v = view(&["alpha", "beta"]);
+        let args = json!({"paths": ["src/x.rs"], "ttl_s": 3600});
+        run(&b, &v, "alpha", "lease_acquire", args.clone(), 1_000);
+        let saved = b.snapshot("p", 1_000).unwrap();
+        let mut gone = v.clone();
+        gone.agents.get_mut("alpha/a").unwrap().running = false;
+        for seen_running_first in [true, false] {
+            let b2 = Boards::new();
+            b2.load("p", &saved, 2_000);
+            if seen_running_first {
+                let held = run(&b2, &v, "beta", "lease_acquire", args.clone(), 2_100);
+                assert_eq!(code(&held), "lease.held");
+                assert!(!held
+                    .events
+                    .iter()
+                    .any(|e| matches!(e, Body::LeaseGranted(_))));
+            }
+            let a = run(&b2, &gone, "beta", "lease_acquire", args.clone(), 3_000);
+            assert_eq!(code(&a), "", "seen_running_first={seen_running_first}");
+            assert!(a
+                .events
+                .iter()
+                .any(|e| matches!(e, Body::LeaseReleased(l) if l.agent_id == "alpha/a")));
+        }
+    }
+
+    #[test]
+    fn a_board_restored_after_its_node_restarted_does_not_hand_dead_agents_work_to_reused_ids() {
+        // The hub reopens, alpha's process starts again (its first agent is `a` again), and only then is the board restored.
+        let b = Boards::new();
+        let v = view(&["alpha", "beta"]);
+        let mut ids = Vec::new();
+        for node in ["alpha", "beta"] {
+            let made = run(&b, &v, node, "task_create", json!({"title": node}), 1);
+            let Verdict::Done { result, .. } = made.verdict else {
+                panic!()
+            };
+            let id = agora_mesh::mcp::tool_result_value(&result).unwrap()["task_id"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            run(&b, &v, node, "task_claim", json!({"task_id": id}), 2);
+            ids.push(id);
+        }
+        run(
+            &b,
+            &v,
+            "alpha",
+            "lease_acquire",
+            json!({"paths": ["src"], "ttl_s": 3600}),
+            3,
+        );
+        let saved = b.snapshot("p", 3).unwrap();
+        let b2 = Boards::new();
+        assert!(b2.node_restarted("alpha", 10).is_empty());
+        b2.load("p", &saved, 20);
+        // The new alpha/a does not own the dead one's task; it is open, and its path is free.
+        assert_eq!(
+            code(&run(
+                &b2,
+                &v,
+                "alpha",
+                "task_complete",
+                json!({"task_id": ids[0], "summary": "x"}),
+                30
+            )),
+            "task.not_owner"
+        );
+        assert_eq!(
+            code(&run(
+                &b2,
+                &v,
+                "beta",
+                "task_claim",
+                json!({"task_id": ids[0]}),
+                31
+            )),
+            "",
+        );
+        assert_eq!(
+            code(&run(
+                &b2,
+                &v,
+                "beta",
+                "lease_acquire",
+                json!({"paths": ["src/x.rs"], "ttl_s": 60}),
+                32
+            )),
+            ""
+        );
+        // beta did not restart: its claim stays.
+        assert_eq!(
+            code(&run(
+                &b2,
+                &v,
+                "alpha",
+                "task_claim",
+                json!({"task_id": ids[1]}),
+                33
+            )),
+            "task.not_open"
         );
     }
 
