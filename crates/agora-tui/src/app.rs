@@ -3183,13 +3183,10 @@ mod tests {
             took
         };
         let _ = time(1_000);
-        let small = (0..5).map(|_| time(16_000)).min().unwrap();
+        // Not a ratio between two sizes: both take a few milliseconds in a debug build and the ratio of two such times is noise (it
+        // failed once on a loaded runner). The quadratic version needs seconds for this input (about 6 s for 192 KB in a release
+        // build), the linear one a few milliseconds, so one generous absolute bound tells them apart.
         let big = (0..5).map(|_| time(32_000)).min().unwrap();
-        // Doubling the size must not quadruple the time (the quadratic one: ~4x); generous margin, plus a loose absolute bound.
-        assert!(
-            big.as_nanos() < small.as_nanos().max(1_000_000) * 3,
-            "{small:?} -> {big:?}"
-        );
         assert!(big < std::time::Duration::from_millis(500), "{big:?}");
     }
 
