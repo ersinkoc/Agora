@@ -3,6 +3,8 @@ Status: Accepted
 Date: 2026-11-15
 Accepted: 2026-11-15 (maintainer's explicit approval in chat: "accepted all", answering the list of ADRs waiting for a decision). The open questions' proposed answers stand: exec in place on Unix (supersedes only ADR-0019's `SCM_RIGHTS` step), scrollback not carried in v1, a 10 s drain that refuses rather than silently restarting, and Windows stays on restart and resume.
 
+Built so far: decision 6, the bridge reconnect (step 1; see `docs/specs/mesh-tools.md`). The exec and the handoff file are not built.
+
 Refines the live handoff of ADR-0019 (Accepted), which is not built yet. It changes only the mechanism on Unix; the rest of 0019 stands.
 
 ## Context

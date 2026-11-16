@@ -27,6 +27,7 @@ const TERMINAL_STREAM: u32 = 3;
 mod adaptercmd;
 mod frontdoor;
 mod hubcli;
+mod meshbridge;
 mod servicecmd;
 mod supervise;
 mod trustcli;
@@ -347,7 +348,13 @@ fn main() -> ExitCode {
         ["node", "stdio"] => bridge_stdio(&say, &socket_path(&opts)),
         ["mesh", "stdio"] => match &opts.socket {
             // An agent's MCP client starts this as its mesh server; the node told it which socket is its own.
-            Some(path) => bridge_stdio(&say, path),
+            Some(path) => match meshbridge::mesh_stdio(path) {
+                Ok(code) => code,
+                Err(e) => {
+                    say_unreachable(&say, path, &e);
+                    ExitCode::from(1)
+                }
+            },
             None => {
                 say.err(key!("cli-bad-arguments"), &[]);
                 ExitCode::from(2)

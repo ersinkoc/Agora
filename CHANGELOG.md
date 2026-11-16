@@ -4,6 +4,10 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+### Agents' mesh tools
+- An agent's mesh tools no longer end for good when the node restarts: the bridge the agent's client runs reconnects to the node
+  (waiting up to 2 s between tries, giving up after 15 minutes) and the agent's session stays open. A call made at that moment fails at once with
+  `mesh.unavailable` and can be repeated (ADR-0075, the first step; applies to agents started by this version).
 ### Starting agents
 - `agora agent start codex --setting model=gpt-6.1-sol --setting effort=high` starts an agent with the model and reasoning effort you
   choose (ADR-0066). Claude Code and Codex offer `model` and `effort` (low, medium, high, xhigh, max). The machine checks every value
