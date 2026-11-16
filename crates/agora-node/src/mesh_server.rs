@@ -1420,7 +1420,7 @@ mod tests {
     }
 
     /// F250: the line limit holds while bytes keep coming, not only after a pause: an agent that sends without a newline is cut off
-    /// near `MAX_LINE`, a complete line one byte over it is refused, and a line exactly at it is answered.
+    /// near `MAX_LINE` (the connection closes), a complete line one byte over it is refused, and a line exactly at it is answered.
     #[test]
     fn a_line_over_the_limit_is_cut_off_even_when_the_bytes_never_pause() {
         if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
@@ -1463,16 +1463,41 @@ mod tests {
         assert!(answered(&ping(MAX_LINE)));
         assert!(!answered(&ping(MAX_LINE + 1)));
 
-        let mut w = agora_platform::local_connect(&sock).unwrap();
-        let chunk = vec![b'x'; 64 * 1024];
-        let mut taken = 0;
-        while taken < 64 * 1024 * 1024 && w.write_all(&chunk).is_ok() {
-            taken += chunk.len();
-        }
-        assert!(
-            taken < 8 * 1024 * 1024,
-            "the node took {taken} bytes of one line"
-        );
+        // One line without a newline, sent from another thread in 64 KiB pieces with no pause as long as the node's read poll,
+        // for up to 10 s. The node must close the connection once the line passes the limit, while it is still arriving: this
+        // side then reads the end (or a reset) instead of timing out after 5 s. How many bytes a writer gets through after the
+        // close depends on the OS, so the test watches the close, not the writer. (The pacing only keeps the old behaviour from
+        // seeing a pause; the fixed node closes at the limit whatever the pace.)
+        let w = agora_platform::local_connect(&sock).unwrap();
+        let mut r = w.try_clone().unwrap();
+        let closer = w.try_clone().unwrap();
+        r.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let done = Arc::new(AtomicBool::new(false));
+        let writer = {
+            let done = Arc::clone(&done);
+            std::thread::spawn(move || {
+                let mut w = w;
+                let chunk = vec![b'x'; 64 * 1024];
+                for _ in 0..1000 {
+                    if done.load(Ordering::Acquire) || w.write_all(&chunk).is_err() {
+                        break;
+                    }
+                    std::thread::sleep(POLL / 10);
+                }
+            })
+        };
+        let mut buf = [0u8; 64];
+        let closed = match r.read(&mut buf) {
+            Ok(n) => n == 0,
+            Err(e) => !matches!(
+                e.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+            ),
+        };
+        done.store(true, Ordering::Release);
+        let _ = closer.shutdown();
+        let _ = writer.join();
+        assert!(closed, "the node kept reading a line without a newline");
         server.unregister(&id);
         drop(server);
         let _ = std::fs::remove_dir_all(dir);
