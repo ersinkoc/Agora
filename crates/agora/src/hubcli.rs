@@ -1485,6 +1485,7 @@ pub fn load_link(socket: PathBuf) -> Option<(String, HubLink)> {
             grants: None,
             mesh: None,
             devices: None,
+            state_dir: None,
         },
     ))
 }

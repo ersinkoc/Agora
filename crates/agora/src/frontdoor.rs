@@ -13,6 +13,7 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use agora_i18n::{key, Arg};
+use agora_node::link_state::{self, LinkState};
 use agora_protocol::v1::{self, command_ok::Result as Ok_, command_request::Command as Cmd};
 use agora_tui::client::{sign_in, Hub, Session, Update};
 
@@ -1137,8 +1138,56 @@ fn detail(say: &Say, id: &str, args: &[(&str, Arg)]) {
     let _ = writeln!(std::io::stdout(), "  {}", say.text(id, args));
 }
 
+/// A line already rendered, indented under its role.
+fn detail_text(line: &str) {
+    let _ = writeln!(std::io::stdout(), "  {line}");
+}
+
+/// The node's hub line in `agora status`. `link`: the hub and the id this machine is enrolled as, `None` when it is not enrolled.
+/// `state`: `None` while the node is not running (nothing is said about a link that cannot be up), `Some(None)` for a node that
+/// does not report its link (one started by an earlier version). "Connected" only for a link that is up now, never for the hub the
+/// machine is merely configured for. `macos`: the pointer to the Local Network permission is added where the system blocks the way.
+pub(crate) fn link_line(
+    say: &Say,
+    link: Option<(String, String)>,
+    state: Option<Option<LinkState>>,
+    macos: bool,
+) -> Option<String> {
+    let Some((hub, id)) = link else {
+        return Some(say.text(key!("status-node-not-linked"), &[]));
+    };
+    let args = |reason: &str| -> Vec<(&str, Arg)> {
+        vec![
+            ("hub", hub.clone().into()),
+            ("reason", reason.to_string().into()),
+        ]
+    };
+    Some(match state? {
+        None => say.text(key!("status-node-link-unknown"), &args("")),
+        Some(LinkState::Up) => say.text(
+            key!("status-node-linked"),
+            &[("hub", hub.clone().into()), ("id", id.into())],
+        ),
+        Some(LinkState::Connecting) => say.text(key!("status-node-connecting"), &args("")),
+        Some(LinkState::Down { code, param }) => {
+            let key = match (code, macos) {
+                (link_state::UNREACHABLE, true) => key!("status-node-link-unreachable-macos"),
+                (link_state::UNREACHABLE, false) => key!("status-node-link-unreachable"),
+                (link_state::NOT_PERMITTED, true) => key!("status-node-link-not-permitted-macos"),
+                (link_state::NOT_PERMITTED, false) => key!("status-node-link-not-permitted"),
+                (link_state::REFUSED, _) => key!("status-node-link-refused"),
+                (link_state::CERTIFICATE, _) => key!("status-node-link-certificate"),
+                (link_state::HUB_REFUSED, _) => key!("status-node-link-hub-refused"),
+                (link_state::CLOSED, _) => key!("status-node-link-closed"),
+                _ => key!("status-node-link-other"),
+            };
+            say.text(key, &args(&param))
+        }
+    })
+}
+
 /// `agora status`: one screen about what this machine runs.
-pub fn status(say: &Say) -> ExitCode {
+pub fn status(say: &Say, o_data: &Option<PathBuf>) -> ExitCode {
     let h = home();
     let Some(m) = load(&h) else {
         say.err(key!("frontdoor-not-set-up"), &[]);
@@ -1211,13 +1260,15 @@ pub fn status(say: &Say) -> ExitCode {
                         .ok()
                         .map(|t| t.trim().to_string())
                 };
-                match (read("url"), read("node-id")) {
-                    (Some(url), Some(id)) => detail(
-                        say,
-                        key!("status-node-linked"),
-                        &[("hub", url.into()), ("id", id.into())],
-                    ),
-                    _ => detail(say, key!("status-node-not-linked"), &[]),
+                let running = held.is_some() || answers;
+                let data = o_data.clone().unwrap_or_else(|| h.join("data"));
+                if let Some(line) = link_line(
+                    say,
+                    read("url").zip(read("node-id")),
+                    running.then(|| LinkState::read(&data)),
+                    agora_platform::SERVICES_NEED_NETWORK_PERMISSION_AFTER_UPDATE,
+                ) {
+                    detail_text(&line);
                 }
                 if let Some(n) = agents_running(&h) {
                     detail(say, key!("status-agents"), &[("count", n.into())]);
@@ -1353,6 +1404,97 @@ mod tests {
 
     fn say() -> Say {
         Say(Catalog::for_locale("en"))
+    }
+
+    fn line(state: Option<Option<LinkState>>, macos: bool) -> Option<String> {
+        link_line(
+            &say(),
+            Some(("wss://hub.example:7444".into(), "mac".into())),
+            state,
+            macos,
+        )
+    }
+
+    /// "Connected" is only for a link that is up now; every other state says not connected (the bug: it was printed for the
+    /// configured hub whatever the link did).
+    #[test]
+    fn status_says_connected_only_for_a_link_that_is_up() {
+        let up = line(Some(Some(LinkState::Up)), false).unwrap();
+        assert!(
+            up.starts_with("connected to wss://hub.example:7444 as mac"),
+            "{up}"
+        );
+        let route = LinkState::down_transport("No route to host (os error 65)");
+        for state in [
+            Some(Some(LinkState::Connecting)),
+            Some(None),
+            Some(Some(route.clone())),
+            Some(Some(LinkState::down_transport(
+                "Connection refused (os error 61)",
+            ))),
+            Some(Some(LinkState::down_transport(
+                "invalid peer certificate: UnknownIssuer",
+            ))),
+            Some(Some(LinkState::down_hub_refused("auth.unauthenticated"))),
+            Some(Some(LinkState::down(link_state::CLOSED, ""))),
+            Some(Some(LinkState::down_transport("something new"))),
+        ] {
+            let t = line(state.clone(), false).unwrap();
+            assert!(!t.starts_with("connected to"), "{state:?}: {t}");
+            assert!(
+                t.contains("not connected to") || t.contains("is not known"),
+                "{t}"
+            );
+            assert!(!t.contains(" as mac"), "{t}");
+        }
+        // A node that is not running says nothing about a link; a machine that is not enrolled says so.
+        assert_eq!(line(None, false), None);
+        assert_eq!(
+            link_line(&say(), None, Some(Some(LinkState::Up)), false).unwrap(),
+            "not connected to a hub"
+        );
+    }
+
+    #[test]
+    fn status_shows_the_reason_and_points_to_local_network_only_on_macos() {
+        let route = Some(Some(LinkState::down_transport(
+            "No route to host (os error 65)",
+        )));
+        let mac = line(route.clone(), true).unwrap();
+        assert!(mac.contains("No route to host (os error 65)"), "{mac}");
+        assert!(
+            mac.contains("Local Network") && mac.contains("restart the node once more"),
+            "{mac}"
+        );
+        let other = line(route, false).unwrap();
+        assert!(
+            other.contains("os error 65") && !other.contains("Local Network"),
+            "{other}"
+        );
+        let refused = line(
+            Some(Some(LinkState::down_transport(
+                "Connection refused (os error 61)",
+            ))),
+            true,
+        )
+        .unwrap();
+        assert!(
+            refused.contains("nothing is listening") && !refused.contains("Local Network"),
+            "{refused}"
+        );
+        let tr = link_line(
+            &Say(Catalog::for_locale("tr")),
+            Some(("wss://h:1".into(), "m".into())),
+            Some(Some(LinkState::down_transport(
+                "No route to host (os error 65)",
+            ))),
+            true,
+        )
+        .unwrap();
+        assert!(
+            tr.contains("Yerel Ağ") && tr.contains("yeniden başlatın"),
+            "{tr}"
+        );
     }
 
     #[test]

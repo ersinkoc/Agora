@@ -122,6 +122,7 @@ impl Hubside {
             grants: None,
             mesh: None,
             devices: None,
+            state_dir: None,
         }
     }
 
@@ -2603,4 +2604,38 @@ fn a_node_enrolled_again_under_another_name_links_and_keeps_the_old_log() {
         node.events_set_aside.as_ref().map(|s| s.old_id.as_str()),
         Some("mac-tm4b")
     );
+}
+
+/// The node writes its link state where `agora status` reads it: a closed port gives a refusal code and never "up"; a real hub gives
+/// "up" once the hub has taken the connection.
+#[test]
+fn the_node_reports_its_hub_link_state_for_status() {
+    use agora_node::link_state::{LinkState, REFUSED};
+    // A port nothing listens on.
+    let closed = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap()
+    };
+    let hub = hubside("laptop");
+    let dir = tmp("link-state");
+    std::fs::create_dir_all(&dir).unwrap();
+    let sink = sink_with_agent(&tmp("link-state-events"), "laptop");
+    let mut link = hub.link(closed);
+    link.state_dir = Some(dir.clone());
+    let _refused = spawn(Arc::clone(&sink), link).unwrap();
+    wait(
+        "a refusal to be recorded",
+        || matches!(LinkState::read(&dir), Some(LinkState::Down { code, .. }) if code == REFUSED),
+    );
+    assert_ne!(LinkState::read(&dir), Some(LinkState::Up));
+
+    let addr = hub.listen("127.0.0.1:0");
+    let up_dir = tmp("link-state-up");
+    std::fs::create_dir_all(&up_dir).unwrap();
+    let mut link = hub.link(addr);
+    link.state_dir = Some(up_dir.clone());
+    let _up = spawn(sink, link).unwrap();
+    wait("the link to be recorded as up", || {
+        LinkState::read(&up_dir) == Some(LinkState::Up)
+    });
 }
