@@ -1,0 +1,358 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index c2f445e5..e919ba79 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -6,7 +6,7 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
+ 
+ ### Desktop app
+ - On Windows and Linux, the desktop app shows one system notification when approvals are waiting while its window is hidden,
+-  minimized or not in front (the count only, in your language). Not on macOS yet: there it stays silent for now.
++  minimized or not in front (the count only, in your language). On macOS it asks for permission the first time.
+ 
+ ### Security
+ - macOS: a confined agent is not started when a file it may write also has another name elsewhere (a hard link made outside
+diff --git a/apps/desktop/README.md b/apps/desktop/README.md
+index 54dea876..d30756f5 100644
+--- a/apps/desktop/README.md
++++ b/apps/desktop/README.md
+@@ -38,9 +38,9 @@ is hidden, minimized or not focused, the shell shows one system notification wit
+ Clicking it does not bring the window forward yet (neither notifier reports the click back; ADR-0048 decision 5 stays open for
+ that part). It
+ uses the system's own notifier with no library (`agora_platform::desktop_notify`): Windows a toast (shown as Windows PowerShell;
+-nothing when notifications are turned off for the user), Linux `notify-send` (nothing without it). **macOS: not yet.** The script
+-notifier posts as Script Editor (shown only if Script Editor may notify, and a click opens Script Editor), so the shell posts
+-nothing there; the app's own notification is a follow-up. A silent Mac is expected for now; the hub's phone notifications
++nothing when notifications are turned off for the user), Linux `notify-send` (nothing without it), macOS the app's own
++notification (`UNUserNotificationCenter`; the first one asks for permission; only the bundled `.app` can post, a shell started from a
++terminal stays silent; the script notifier `osascript` is not used, as it posts as Script Editor). The hub's phone notifications
+ (ntfy, ADR-0051) cover a person away from the window.
+ 
+ Not done yet: signed installers and per-platform signing (needs
+diff --git a/crates/agora-platform/src/lib.rs b/crates/agora-platform/src/lib.rs
+index baeb0280..c6b348ed 100644
+--- a/crates/agora-platform/src/lib.rs
++++ b/crates/agora-platform/src/lib.rs
+@@ -25,6 +25,8 @@ use winproc as procinfo;
+ #[cfg(target_os = "linux")]
+ mod linux;
+ #[cfg(target_os = "macos")]
++mod macnotify;
++#[cfg(target_os = "macos")]
+ mod macos;
+ #[cfg(target_os = "macos")]
+ mod macservice;
+@@ -1847,11 +1849,12 @@ pub fn service_status(name: &str) -> io::Result<ServiceState> {
+ /// argument list, and the words travel as separate arguments (Linux `notify-send`) or as
+ /// environment variables (Windows PowerShell), never inside a script, so no text can change what runs. The words come from
+ /// `locales/` (the caller's). Waits for the notifier; `NotFound` where there is none (Linux without `notify-send`),
+-/// `PermissionDenied` where the user turned notifications off (Windows), `Unsupported` on macOS for now (see `macos.rs`).
++/// `PermissionDenied` where the user turned notifications off or did not allow them, `Unsupported` where it cannot post (macOS:
++/// outside an app bundle, see `macnotify.rs`).
+ pub fn desktop_notify(title: &str, body: &str) -> io::Result<()> {
+     #[cfg(target_os = "macos")]
+     {
+-        macos::desktop_notify(title, body)
++        macnotify::desktop_notify(title, body)
+     }
+     #[cfg(target_os = "linux")]
+     {
+diff --git a/crates/agora-platform/src/macnotify.rs b/crates/agora-platform/src/macnotify.rs
+new file mode 100644
+index 00000000..9442d822
+--- /dev/null
++++ b/crates/agora-platform/src/macnotify.rs
+@@ -0,0 +1,262 @@
++//! macOS half of [`crate::desktop_notify`]: the app's own notification through `UNUserNotificationCenter` (ADR-0048 decision 5), so
++//! it shows under the app's name and a click brings the app forward. Called through the Objective-C runtime: no crate.
++//!
++//! - Only inside an app bundle. `+[UNUserNotificationCenter currentNotificationCenter]` throws (and ends the process) in a program
++//!   that is not one (measured on macOS 27.2: `bundleProxyForCurrentProcess is nil`), so without a bundle identifier nothing is
++//!   called and the answer is `Unsupported`. A program run from a terminal (`cargo run`, the CLI) is never one.
++//! - Permission: the first call asks the user (the system's own question); the answer is awaited for at most 30 s. Denied, or
++//!   turned off later in System Settings > Notifications: `PermissionDenied`, nothing shown.
++//! - The callback the permission request needs is an Objective-C block. It is a *global* block built by hand (no captures, never
++//!   copied or freed by the runtime, with the layout of the Block ABI); its only effect is to store the answer in a static.
++//! - The words travel as `NSString` objects, never inside a format or a script.
++
++use std::ffi::{c_char, c_int, c_ulong, c_void};
++use std::io;
++use std::sync::atomic::{AtomicU8, Ordering};
++use std::time::{Duration, Instant};
++
++type Id = *mut c_void;
++type Sel = *mut c_void;
++
++#[link(name = "objc")]
++extern "C" {
++    fn objc_getClass(name: *const c_char) -> Id;
++    fn sel_registerName(name: *const c_char) -> Sel;
++    fn class_getClassMethod(cls: Id, sel: Sel) -> *mut c_void;
++    fn class_getInstanceMethod(cls: Id, sel: Sel) -> *mut c_void;
++    fn objc_msgSend();
++    fn objc_autoreleasePoolPush() -> *mut c_void;
++    fn objc_autoreleasePoolPop(pool: *mut c_void);
++}
++
++#[link(name = "Foundation", kind = "framework")]
++extern "C" {}
++
++#[link(name = "UserNotifications", kind = "framework")]
++extern "C" {}
++
++// The isa of every global block (libSystem's libclosure).
++extern "C" {
++    static _NSConcreteGlobalBlock: c_void;
++}
++
++/// `UNAuthorizationOptionAlert`.
++const OPTION_ALERT: c_ulong = 1 << 2;
++/// `BLOCK_IS_GLOBAL`: the runtime never copies, retains or frees it.
++const BLOCK_IS_GLOBAL: c_int = 1 << 28;
++
++/// The permission answer: 0 waiting, 1 granted, 2 denied.
++static ANSWER: AtomicU8 = AtomicU8::new(0);
++
++#[repr(C)]
++struct BlockDescriptor {
++    reserved: c_ulong,
++    size: c_ulong,
++}
++
++/// The Block ABI's literal layout for a block without captures.
++#[repr(C)]
++struct Block {
++    isa: *const c_void,
++    flags: c_int,
++    reserved: c_int,
++    invoke: unsafe extern "C" fn(*const Block, i8, Id),
++    descriptor: *const BlockDescriptor,
++}
++
++// SAFETY: the block is immutable static data; the runtime only reads it and calls `invoke`, which touches an atomic.
++unsafe impl Sync for Block {}
++
++static DESCRIPTOR: BlockDescriptor = BlockDescriptor {
++    reserved: 0,
++    size: std::mem::size_of::<Block>() as c_ulong,
++};
++
++/// `^(BOOL granted, NSError *error)`: stores the answer.
++unsafe extern "C" fn answered(_block: *const Block, granted: i8, _error: Id) {
++    ANSWER.store(if granted != 0 { 1 } else { 2 }, Ordering::SeqCst);
++}
++
++static ON_ANSWER: Block = Block {
++    // Only the address of the runtime's static is taken.
++    isa: std::ptr::addr_of!(_NSConcreteGlobalBlock),
++    flags: BLOCK_IS_GLOBAL,
++    reserved: 0,
++    invoke: answered,
++    descriptor: &DESCRIPTOR,
++};
++
++/// `objc_msgSend` as a function of the given signature.
++macro_rules! send {
++    ($ty:ty) => {
++        // SAFETY (at each use): the receiver and selector were checked to exist, and `$ty` is that method's exact C signature.
++        unsafe { std::mem::transmute::<unsafe extern "C" fn(), $ty>(objc_msgSend as unsafe extern "C" fn()) }
++    };
++}
++
++fn class(name: &std::ffi::CStr) -> Option<Id> {
++    // SAFETY: a NUL-terminated name.
++    let c = unsafe { objc_getClass(name.as_ptr()) };
++    (!c.is_null()).then_some(c)
++}
++
++fn sel(name: &std::ffi::CStr) -> Sel {
++    // SAFETY: a NUL-terminated name; selectors are interned for the life of the process.
++    unsafe { sel_registerName(name.as_ptr()) }
++}
++
++fn has_class_method(cls: Id, s: Sel) -> bool {
++    // SAFETY: `cls` is a class from `objc_getClass`.
++    !unsafe { class_getClassMethod(cls, s) }.is_null()
++}
++
++fn has_method(cls: Id, s: Sel) -> bool {
++    // SAFETY: `cls` is a class from `objc_getClass`.
++    !unsafe { class_getInstanceMethod(cls, s) }.is_null()
++}
++
++/// An autoreleased `NSString` with `text`.
++fn ns_string(text: &str) -> Option<Id> {
++    let c = std::ffi::CString::new(text).ok()?;
++    let cls = class(c"NSString")?;
++    let s = sel(c"stringWithUTF8String:");
++    if !has_class_method(cls, s) {
++        return None;
++    }
++    let f = send!(unsafe extern "C" fn(Id, Sel, *const c_char) -> Id);
++    // SAFETY: see `send!`; `c` lives for the call.
++    let out = unsafe { f(cls, s, c.as_ptr()) };
++    (!out.is_null()).then_some(out)
++}
++
++/// Whether this process runs from an app bundle (its main bundle has an identifier).
++fn in_bundle() -> bool {
++    let (Some(cls), s, id) = (
++        class(c"NSBundle"),
++        sel(c"mainBundle"),
++        sel(c"bundleIdentifier"),
++    ) else {
++        return false;
++    };
++    if !has_class_method(cls, s) || !has_method(cls, id) {
++        return false;
++    }
++    let main = send!(unsafe extern "C" fn(Id, Sel) -> Id);
++    // SAFETY: see `send!`.
++    let bundle = unsafe { main(cls, s) };
++    if bundle.is_null() {
++        return false;
++    }
++    let ident = send!(unsafe extern "C" fn(Id, Sel) -> Id);
++    // SAFETY: see `send!`; `bundle` is an NSBundle.
++    !unsafe { ident(bundle, id) }.is_null()
++}
++
++pub(crate) fn desktop_notify(title: &str, body: &str) -> io::Result<()> {
++    let unsupported = || io::Error::from(io::ErrorKind::Unsupported);
++    if !in_bundle() {
++        return Err(unsupported());
++    }
++    // SAFETY: balanced with the pop below; nothing between them unwinds (no panicking code).
++    let pool = unsafe { objc_autoreleasePoolPush() };
++    let result = post(title, body);
++    // SAFETY: the pool pushed above.
++    unsafe { objc_autoreleasePoolPop(pool) };
++    result
++}
++
++fn post(title: &str, body: &str) -> io::Result<()> {
++    let unsupported = || io::Error::from(io::ErrorKind::Unsupported);
++    let center_cls = class(c"UNUserNotificationCenter").ok_or_else(unsupported)?;
++    let content_cls = class(c"UNMutableNotificationContent").ok_or_else(unsupported)?;
++    let request_cls = class(c"UNNotificationRequest").ok_or_else(unsupported)?;
++    let current = sel(c"currentNotificationCenter");
++    let authorize = sel(c"requestAuthorizationWithOptions:completionHandler:");
++    let add = sel(c"addNotificationRequest:withCompletionHandler:");
++    let new = sel(c"new");
++    let set_title = sel(c"setTitle:");
++    let set_body = sel(c"setBody:");
++    let make = sel(c"requestWithIdentifier:content:trigger:");
++    let release = sel(c"release");
++    if !has_class_method(center_cls, current)
++        || !has_method(center_cls, authorize)
++        || !has_method(center_cls, add)
++        || !has_class_method(content_cls, new)
++        || !has_method(content_cls, set_title)
++        || !has_method(content_cls, set_body)
++        || !has_class_method(request_cls, make)
++    {
++        return Err(unsupported());
++    }
++    let get = send!(unsafe extern "C" fn(Id, Sel) -> Id);
++    // SAFETY: see `send!`; inside a bundle (checked by the caller), so this does not throw.
++    let center = unsafe { get(center_cls, current) };
++    if center.is_null() {
++        return Err(unsupported());
++    }
++    // Asked once per call; after the first answer the system answers at once without asking again.
++    ANSWER.store(0, Ordering::SeqCst);
++    let ask = send!(unsafe extern "C" fn(Id, Sel, c_ulong, *const Block));
++    // SAFETY: see `send!`; `ON_ANSWER` is a static global block.
++    unsafe { ask(center, authorize, OPTION_ALERT, &ON_ANSWER) };
++    let asked = Instant::now();
++    while ANSWER.load(Ordering::SeqCst) == 0 && asked.elapsed() < Duration::from_secs(30) {
++        std::thread::sleep(Duration::from_millis(50));
++    }
++    if ANSWER.load(Ordering::SeqCst) != 1 {
++        return Err(io::Error::from(io::ErrorKind::PermissionDenied));
++    }
++    let (Some(t), Some(b), Some(ident)) = (
++        ns_string(title),
++        ns_string(body),
++        ns_string("agora-approvals"),
++    ) else {
++        return Err(io::Error::from(io::ErrorKind::InvalidInput));
++    };
++    let make_content = send!(unsafe extern "C" fn(Id, Sel) -> Id);
++    // SAFETY: see `send!`; `new` returns an owned object, released below.
++    let content = unsafe { make_content(content_cls, new) };
++    if content.is_null() {
++        return Err(io::Error::other("UNMutableNotificationContent"));
++    }
++    let set = send!(unsafe extern "C" fn(Id, Sel, Id));
++    // SAFETY: see `send!`; `content` is a UNMutableNotificationContent, `t` and `b` NSStrings.
++    unsafe {
++        set(content, set_title, t);
++        set(content, set_body, b);
++    }
++    let request = send!(unsafe extern "C" fn(Id, Sel, Id, Id, Id) -> Id);
++    // SAFETY: see `send!`; a nil trigger means "now". The request is autoreleased.
++    let req = unsafe { request(request_cls, make, ident, content, std::ptr::null_mut()) };
++    let drop_content = send!(unsafe extern "C" fn(Id, Sel));
++    // SAFETY: `content` was made by `new` above and is no longer used here (the request keeps its own copy).
++    unsafe { drop_content(content, release) };
++    if req.is_null() {
++        return Err(io::Error::other("UNNotificationRequest"));
++    }
++    let post = send!(unsafe extern "C" fn(Id, Sel, Id, *const c_void));
++    // SAFETY: see `send!`; a nil completion handler is allowed.
++    unsafe { post(center, add, req, std::ptr::null()) };
++    Ok(())
++}
++
++#[cfg(test)]
++#[allow(clippy::unwrap_used)]
++mod tests {
++    #[test]
++    fn a_program_that_is_not_an_app_bundle_never_calls_the_notification_center() {
++        // A test binary has no bundle identifier: the call that would end the process is never made.
++        assert!(!super::in_bundle());
++        assert_eq!(
++            super::desktop_notify("Agora", "test").unwrap_err().kind(),
++            std::io::ErrorKind::Unsupported
++        );
++    }
++
++    #[test]
++    fn the_block_has_the_layout_of_the_block_abi() {
++        // isa, flags, reserved, invoke, descriptor: 8 + 4 + 4 + 8 + 8 on 64-bit macOS.
++        assert_eq!(std::mem::size_of::<super::Block>(), 32);
++        assert_eq!(super::DESCRIPTOR.size, 32);
++    }
++}
+diff --git a/crates/agora-platform/src/macos.rs b/crates/agora-platform/src/macos.rs
+index fb0ca149..124b3a4f 100644
+--- a/crates/agora-platform/src/macos.rs
++++ b/crates/agora-platform/src/macos.rs
+@@ -620,14 +620,6 @@ pub(crate) fn wrap(
+     Ok((SANDBOX_EXEC.into(), v))
+ }
+ 
+-/// See [`crate::desktop_notify`]: not yet on macOS. The system's own notifier for a script (`osascript`) posts as *Script Editor*:
+-/// it shows only when Script Editor may notify, and a click opens Script Editor instead of Agora (measured on macOS 27.2), so nothing
+-/// is posted. The app's own notification (`UNUserNotificationCenter`) is the planned way (#296 follow-up).
+-pub(crate) fn desktop_notify(title: &str, body: &str) -> io::Result<()> {
+-    let _ = (title, body);
+-    Err(io::Error::from(io::ErrorKind::Unsupported))
+-}
+-
+ /// See [`crate::opened_path`]: `F_GETPATH`, the path the kernel has for the open vnode (firmlinks shown as `/Users/...`, as
+ /// `canonicalize` shows them).
+ pub(crate) fn opened_path(file: &std::fs::File) -> io::Result<PathBuf> {
+diff --git a/docs/backlog/phase-7.md b/docs/backlog/phase-7.md
+index c8181d15..5b6d6352 100644
+--- a/docs/backlog/phase-7.md
++++ b/docs/backlog/phase-7.md
+@@ -9,7 +9,7 @@ Started with the Windows node (ADR-0045). The only machine used for development
+ | P7-03 W3: process view (tree, name, stats; no cwd) | done (W3) | `crates/agora-platform/src/winproc.rs`: `process_name` (image file name without `.exe`, `QueryFullProcessImageNameW`), `process_stats` (`GetProcessTimes`, `GetProcessMemoryInfo` working set), `process_children`/`process_tree` (toolhelp snapshot). `process_cwd` stays unsupported (the PEB is undocumented). A program started through a `.cmd` shim (most npm-installed agents) shows as the interpreter (`node`), so manifest `names` do not match it: detection there relies on screen rules and hooks. Two tests in `winproc.rs` run on `windows-latest` |
+ | P7-04 W4: supervisor, terminal and node integration tests on `windows-latest` | done (W4) | `PTY_SUPPORTED` is true on Windows; `terminal.rs` and `supervisor.rs` lost their `cfg(unix)`; the control, supervisor, terminal, CLI (`start`, `attach`, `stop` in a real pseudo-terminal), ACP, hub and usage-file tests run there against real ConPTY terminals and named pipes. Also added for this: raw console mode (`ENABLE_VIRTUAL_TERMINAL_INPUT`, no line editing or echo) and the window size on Windows, so `agora terminal attach` and `agora tui` can run there. One test stays off on Windows by design: the usage test whose "agent" is a POSIX shell writing its own `$PWD` (Git's `sh` reports `/d/a/...`, which is not the worktree's native path). Not covered: a real agent (Claude Code, Codex) on Windows, and `.cmd` shims, which show as the interpreter |
+ | P7-05 W5: docs and the install story | done (W5) | README, `architecture.md` (platform table), `development-setup.md` and `resource-limits.md` say what exists. Install story: there is no `agora hub ssh install` to a Windows host; on Windows the release binary `agora-x86_64-pc-windows-msvc.exe` is installed by hand and updated with `agora update` (the old program is moved aside to `.old`). A Windows service or Task Scheduler entry is out of scope (ADR-0045 item 6) |
+-| P7-06 Desktop app (Tauri) | in progress (ADR-0048) | D1 done: `crates/agora-desktop-tunnel` (a loopback tunnel to the hub over TLS trusting only the pinned CA; `fingerprint`; tested against a real TLS server, including a server signed by another CA) and `agora hub fingerprint`. D2: the shell is in `apps/desktop/src-tauri` (its own Cargo workspace, so Tauri never enters the main build): one local screen to enter a hub address and paste its CA, which shows the fingerprint to compare with `agora hub fingerprint`; commands `ca_fingerprint`, `saved`, `connect`, `forget` (the tunnel, a fixed loopback port per hub so the page's storage survives a restart, the choice saved in the app config folder); the hub's page is a remote origin with no capability granted (`capabilities/default.json`); its own `deny.toml` allows MPL-2.0 (Mozilla's CSS parser under Tauri's build tooling) and ignores the unmaintained build-time `proc-macro-error` (RUSTSEC-2024-0370, via gtk-rs), each with its reason. A `desktop` workflow checks it with rustfmt and clippy on the three systems (Linux installs WebKitGTK) and runs cargo-deny; it could not be built on the development machine, so CI is its first build. Native notifications for a waiting approval while the window is out of sight: Windows (toast) and Linux (`notify-send`) through the system's own notifier, no library (#296; a click does not bring the window forward yet); macOS not yet (the script notifier posts as Script Editor; the app's own notification is a follow-up). Not done: installers and per-platform signing (the maintainer's accounts), a real icon (Q1) |
++| P7-06 Desktop app (Tauri) | in progress (ADR-0048) | D1 done: `crates/agora-desktop-tunnel` (a loopback tunnel to the hub over TLS trusting only the pinned CA; `fingerprint`; tested against a real TLS server, including a server signed by another CA) and `agora hub fingerprint`. D2: the shell is in `apps/desktop/src-tauri` (its own Cargo workspace, so Tauri never enters the main build): one local screen to enter a hub address and paste its CA, which shows the fingerprint to compare with `agora hub fingerprint`; commands `ca_fingerprint`, `saved`, `connect`, `forget` (the tunnel, a fixed loopback port per hub so the page's storage survives a restart, the choice saved in the app config folder); the hub's page is a remote origin with no capability granted (`capabilities/default.json`); its own `deny.toml` allows MPL-2.0 (Mozilla's CSS parser under Tauri's build tooling) and ignores the unmaintained build-time `proc-macro-error` (RUSTSEC-2024-0370, via gtk-rs), each with its reason. A `desktop` workflow checks it with rustfmt and clippy on the three systems (Linux installs WebKitGTK) and runs cargo-deny; it could not be built on the development machine, so CI is its first build. Native notifications for a waiting approval while the window is out of sight: Windows (toast) and Linux (`notify-send`) through the system's own notifier, no library (#296; a click does not bring the window forward yet); macOS through the app's own `UNUserNotificationCenter` (only in the bundled app; #607). Not done: installers and per-platform signing (the maintainer's accounts), a real icon (Q1) |
+ | P7-08 Agent sandboxing (ADR-0047) | in progress | S1 done: `agora_platform::Sandbox`, `sandbox_supported()` and `PtyConfig.sandbox` (Linux Landlock set up before the fork and applied between fork and exec, `NO_NEW_PRIVS` set; `spawn` refuses with `Unsupported` where it cannot confine, never runs unconfined); tested with a real confined shell in `crates/agora-platform/tests/sandbox.rs` (skips on a kernel without Landlock). S2 done: `sandbox = off|worktree|worktree-offline`, `sandbox.read`, `sandbox.write` in `<data>/policy` (`agora-node::sandbox`; an unknown value is the strictest level), the profile (system folders, the program's folder, the worktree, its git folders, `/tmp`, `/dev`), `agent.sandbox_unavailable` (nothing started, no worktree made), tested with a real confined agent in `crates/agora-node/tests/sandboxed_agent.rs`. `agora doctor` says whether this machine can confine agents and what the policy asks. S3 done: adapter-hosted (L2/L3) agents are confined too (`agora_platform::confine_command` on the adapter process, which the agent it hosts inherits; also on adapter restarts), tested in `crates/agora-adapters/tests/host.rs`. S4 done: a manifest's `[sandbox] read/write` are honoured only for kinds in `sandbox.trust_manifest` (`~/` expanded, relative and `..` paths dropped); the owner's policy line stands in for the ADR's signed grant (see the ADR's note). macOS done: the command runs under `sandbox-exec -p <profile>` (writes only below the `write` folders, file contents below `/Users`, `/Volumes` and the temp folders unreadable unless listed; the system stays readable). Checked with a real node on macOS 27: the listed folders are allowed with `file-read-data` itself (a `file-read*` allow does not undo the deny, which had left agents unable to read their own worktree), and a listed parent of a private folder (`/var`, which holds the user temp folders) is left out so it cannot reopen it. A confined agent on macOS and Windows gets a temp folder of its own (`TMPDIR`, `TEMP`, `TMP`; `agora_platform::PRIVATE_TEMP`), which Python, Node, Rust and `mktemp "$TMPDIR/..."` use; on macOS plain `mktemp`, `xcrun` and `cc` use the per-user temp folder whatever `TMPDIR` says. `sandbox.read`/`sandbox.write` accept `~/` (relative and `..` paths are dropped). A real toolchain needs the owner to list: `~/.gitconfig` in `sandbox.read` (git stops on an unreadable one; not a default, a git config can hold credentials), on macOS the user temp and cache folders (`getconf DARWIN_USER_TEMP_DIR`, `DARWIN_USER_CACHE_DIR`) in `sandbox.write` for `cc`/`xcrun`, and `~/.rustup`, `~/.cargo`, the Node folder in `sandbox.read` with `~/.cargo/registry`, `~/.npm` in `sandbox.write`. Windows (ADR-0050) written but **switched off**: a restricted token with a per-agent restricting SID, folder permissions recorded in a ledger and undone on exit and by `recover_sandbox_leftovers` at node start, a narrow Git write set (`NARROW_GIT_WRITES`), a private temp folder; ConPTY agents only (adapter commands still refuse). Enable by setting `ENABLED = true` in `agora-platform/src/winconfine.rs` after a real-machine check (`AGORA_WINDOWS_CONFINEMENT=1` enables one run); real Windows CI tests in `crates/agora-platform/tests/winsandbox.rs`. `worktree-offline` on macOS: `Sandbox.offline` adds `(deny network*)`, keeps outbound connections to this machine (`localhost`, a local model) and unix sockets only below `Sandbox.sockets`, which the supervisor sets to the agent's own mesh socket and private temp folder (not `/tmp`, where a tmux server's or an SSH agent's socket is a way out, and not other agents' mesh sockets); no TCP listener (Seatbelt cannot tell a loopback-only listener from one on every interface: an inbound-localhost rule let a LAN peer in through `0.0.0.0`). `agora_platform::offline_supported()` is true on macOS only; Linux and Windows still refuse the level. Seatbelt names only `localhost` or every host, so ADR-0047's "hosts the manifest names" is not expressible there. Tested: platform (`an_offline_process_reaches_this_machine_and_its_sockets_but_nothing_else`), node (`an_offline_agent_works_in_its_worktree_but_reaches_no_other_machine`), and a real node (internet and another LAN machine refused; localhost, its mesh socket and its worktree reachable). Not done: network rules on Linux (Landlock) and Windows, manifest-named hosts, Windows adapter commands |
+ | P7-07 Mobile: the web client as a PWA (ADR-0046) | done (manifest, notification link) | the hub serves `/manifest.webmanifest` (name from `notify-title`, standalone, token colours, `icon.svg`); the page links it; no service worker. With `<hub dir>/public-url` set, an approval notice ends with `<public-url>/#/approvals/<node>%2F<id>` (an unknown hash shows the home screen, where waiting approvals are; a notice never approves). Web Push is not planned (ADR-0051); ntfy is the phone channel, with an upstream push service needed for instant iOS delivery. ADR-0067 rung 2 added the phone-sized window, the terminal key bar, PNG and maskable icons, and agent links in notices ([docs/ux/phone.md](../ux/phone.md)); screenshots at phone widths come from `scripts/e2e-phone.mjs` in emulated Chromium. Not done: a run on a real phone |
+ | P7-09 Team mode (ADR-0049) | in progress | T1a done: `users` table (schema 5), roles `owner`/`member`/`viewer`, sessions carry their person (a session with none is the owner's, so a one-person hub is unchanged), `agora hub user add NAME [--role] | list | role ID ROLE | remove ID | login ID`; the hub asks for the role on every command (a demotion or removal applies to the open connection at once) and stops a viewer's commands that change anything with `auth.forbidden` (`action` = the command's schema name), before any node hears of them (`agora_hub::users::viewer_may` lists what a viewer may still do; a new command is refused to viewers until listed). No schema or error-code change. T2a done: an append-only `audit` table (schema 6; triggers refuse deletes and any edit but the one-time outcome of a `sent` row) with who (person id, `owner` for the owner), what (the command's schema name, `sign_in`, `user.add|role|remove`), where (node) and the outcome (`ok` or the error code; `sent` while a command has no answer); every routed command is recorded when it is sent and finished when the node answers, a refused one at once, sign-ins and changes to the team too; `agora hub audit export [--since MS] [--who ID]` writes JSON lines. Terminal bytes and message bodies are not in it. T1b done: a member or viewer sees and works in only the projects they were granted (`agora hub user grant|revoke ID NODE/PROJECT`, schema 7; an owner needs none; a member with no grant sees nothing). `agora_hub::scope::Scope` follows the event stream a client gets, remembers which project each agent, worktree, terminal and approval belongs to, and decides for every event and every command whether it is theirs; a restricted client always gets a snapshot cut to its projects (whatever position it asks to replay from) and then only its own events, and the hub refuses (`auth.forbidden`) any command that does not name something in a granted project, including everything about a whole machine (`ProjectList`, `AgentList`, `NodePolicyGet`, `TerminalOpen`, grants, usage). A machine shows up only if it hosts a granted project. A change of role or grants ends the open connection and the client reconnects into what it may now see. Hidden on purpose: terminals that belong to no agent, the shared board of a project that spans machines (tasks), messages from agents the person cannot see. Tested with plain event sequences in `scope.rs` and end to end in `crates/agora-hub/tests/server.rs`. T2b done: the owner reads the trail in the web app (`#/audit`, "Activity" in the command palette): `GET /api/audit?since=&who=&limit=` with the session token, owner only (401 without a live session, 403 for a member or viewer, 400 for a query it does not understand), newest first, filterable by person; actions are named in words from `locales/{en,tr}/web.ftl` (an action this build has no words for shows as the hub named it). Screenshots in `docs/screenshots/audit-*.png`. Each row names the session that made it by a short id (schema 10, L16), the sign-in row included. T1c done (node side): `device.<id>.projects = a, b` in the node's `policy` (`agora_node::limits::DeviceLimits`): a limited trusted device can sign grants only scoped `project:X` or `agent:A` of its projects (never `node`; `auth.forbidden` `grant.create`) and can answer approvals only for agents of its projects (`auth.forbidden` `approval.resolve`, nothing consumed); an unnamed device is limited by nothing; a named one with no projects acts in none. No schema change. With limited devices and no `signed_commands` line, the node requires a grant for every command that changes something (`SignedCommands::team_default`), so the limits bind them; whole-machine commands stay the owner's. Not done: approval decisions as their own rows (they are `ApprovalResolve` commands today), devices owned by a user, Postgres (T3), the shared board for members |
