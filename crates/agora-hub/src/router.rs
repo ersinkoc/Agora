@@ -55,8 +55,8 @@ struct Link {
 /// that ended or was replaced stops counting at once, whatever it still held.
 #[derive(Debug, Default)]
 pub struct LinkLoad {
-    /// Commands queued for the node and not yet written to it (the queue is unbounded: a node that does not read its connection
-    /// grows it).
+    /// Commands queued for the node and not yet written to it. A node that does not read its connection grows it, up to
+    /// `NODE_QUEUE_MAX`: the next command is refused (`node.resource_limit`) before it is queued.
     pub queued: AtomicUsize,
     /// Commands written to the node and not answered yet.
     pub unanswered: AtomicUsize,
