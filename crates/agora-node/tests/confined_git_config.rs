@@ -342,3 +342,36 @@ fn the_nodes_own_git_variables_do_not_change_what_is_read_as_the_persons_configu
     }
     assert_eq!(name.as_deref(), Some("Ada Example"));
 }
+
+#[cfg(unix)]
+#[test]
+fn a_worktrees_folder_that_is_a_link_into_a_writable_folder_gets_no_file() {
+    let _serial = serial();
+    home();
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("gitcfg-{}-link", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let writable = dir.join("writable");
+    let real_trees = writable.join("trees");
+    std::fs::create_dir_all(real_trees.join("a")).unwrap();
+    // `worktrees` is a link to a folder below the one the agent may write.
+    let link = dir.join("worktrees");
+    std::os::unix::fs::symlink(&real_trees, &link).unwrap();
+    let policy = SandboxPolicy {
+        level: Level::Worktree,
+        ..Default::default()
+    };
+    let wt = link.join("a");
+    let by_link = gitconfig::path_for(&wt);
+    assert_eq!(
+        policy.git_config(&wt, std::slice::from_ref(&writable)),
+        None
+    );
+    assert!(!by_link.exists() && !gitconfig::path_for(&real_trees.join("a")).exists());
+    // Negative control: a grant elsewhere does not stop it (and a plain folder is not a false positive).
+    let elsewhere = dir.join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let file = policy.git_config(&wt, &[elsewhere]).unwrap();
+    assert!(file.exists());
+    let _ = std::fs::remove_dir_all(dir);
+}

@@ -208,6 +208,25 @@ pub fn agent_temp(worktree: &Path) -> PathBuf {
     std::env::temp_dir().join(format!("agora-agent-{name}"))
 }
 
+/// Whether `file` lies below any of the `write` folders, by name and by where the names lead (a folder that is a link into a writable
+/// one). Fails closed: a folder whose place cannot be resolved counts as under a grant, and a grant that cannot be resolved is compared
+/// by name only.
+fn under_a_grant(file: &Path, write: &[PathBuf]) -> bool {
+    if write.iter().any(|w| file.starts_with(w)) {
+        return true;
+    }
+    let (Some(parent), Some(name)) = (file.parent(), file.file_name()) else {
+        return true;
+    };
+    let Ok(parent) = std::fs::canonicalize(parent) else {
+        return true;
+    };
+    let real = parent.join(name);
+    write
+        .iter()
+        .any(|w| std::fs::canonicalize(w).is_ok_and(|w| real.starts_with(w)))
+}
+
 impl SandboxPolicy {
     /// Whether the owner's own `sandbox.read` already grants the global git configuration (`~/.gitconfig`): then the node does not give
     /// the agent a file of its own (ADR-0078, decision 4) and the explicit choice stands as it is.
@@ -226,7 +245,7 @@ impl SandboxPolicy {
             return None;
         }
         let file = crate::gitconfig::path_for(worktree);
-        if write.iter().any(|w| file.starts_with(w)) {
+        if under_a_grant(&file, write) {
             return None;
         }
         crate::gitconfig::write_for(worktree)

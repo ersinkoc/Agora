@@ -151,6 +151,14 @@ pub fn path_for(worktree: &Path) -> PathBuf {
         .join(format!(".{file}"))
 }
 
+/// The name the file is first written under: `.new` appended, not `with_extension`, which would cut a worktree name such as `fix.v1`
+/// and give it the name of `fix.v2`.
+fn temp_name(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(".new");
+    PathBuf::from(name)
+}
+
 /// Writes the file for the agent in `worktree` from the person's configuration, replacing the last one. Written to a new name and
 /// renamed over the old, so a link left at the old name is replaced and never followed. Returns the path, or `None` when it could not
 /// be written (git then behaves as it did before: an agent that cannot read a global configuration).
@@ -160,10 +168,7 @@ pub fn write_for(worktree: &Path) -> Option<PathBuf> {
 
 fn write_values(worktree: &Path, values: &[(String, String)]) -> Option<PathBuf> {
     let path = path_for(worktree);
-    // Appended, not `with_extension`: that would cut a worktree name such as `fix.v1` and share one name with `fix.v2`.
-    let mut tmp_name = path.as_os_str().to_owned();
-    tmp_name.push(".new");
-    let tmp = PathBuf::from(tmp_name);
+    let tmp = temp_name(&path);
     let _ = std::fs::remove_file(&tmp);
     let text = render(values);
     {
@@ -294,6 +299,14 @@ mod tests {
     fn a_dotted_worktree_name_has_a_temp_name_of_its_own() {
         let dir = std::env::temp_dir().join(format!("agora-gc-dot-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            temp_name(Path::new("/x/.agora-gitconfig-fix.v1")),
+            Path::new("/x/.agora-gitconfig-fix.v1.new")
+        );
+        assert_ne!(
+            temp_name(&path_for(Path::new("/w/fix.v1"))),
+            temp_name(&path_for(Path::new("/w/fix.v2")))
+        );
         let (a, b) = (dir.join("fix.v1"), dir.join("fix.v2"));
         std::fs::create_dir_all(&a).unwrap();
         std::fs::create_dir_all(&b).unwrap();
