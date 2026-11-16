@@ -627,7 +627,8 @@ fn details(
             let mut lines = vec![t(key!("tui-attention"), &[])];
             lines.extend(card);
             let whole = width > 0 && lines.len() <= room;
-            if !whole && room >= 2 {
+            // Cut only what does not fit: a hidden inspector (no columns, the body's height) is never whole, yet nothing is cut.
+            if lines.len() > room && room >= 2 {
                 let hidden = lines.len() - (room - 1);
                 lines.truncate(room - 1);
                 lines.push(t(
@@ -1584,6 +1585,17 @@ mod tests {
         assert_eq!(
             app_details(&s, "mac2/agent-2", 0, 0, &text).start,
             Some(("mac2/a9".into(), false))
+        );
+        // Hidden, the inspector is still as tall as the body (App::areas): never read, and nothing is cut or counted.
+        let hidden = app_details(&s, "mac2/agent-2", 0, 29, &text);
+        assert_eq!(hidden.start, Some(("mac2/a9".into(), false)));
+        assert!(
+            !hidden
+                .lines
+                .iter()
+                .any(|l| l.starts_with("tui-split-card-more")),
+            "{:#?}",
+            hidden.lines
         );
     }
 
