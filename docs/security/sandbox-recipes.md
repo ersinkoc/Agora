@@ -7,6 +7,21 @@ write the full path). A path that does not exist is skipped; `agora doctor` name
 What is never a default, and why: `~/.gitconfig` and `~/.config/git` can hold credentials (`url.*.insteadOf` with a token, credential
 helper settings), so reading them is the owner's choice, not the node's.
 
+## Git inside a confined agent (ADR-0078)
+
+You do not need to list `~/.gitconfig` for `git status`, `commit`, `branch` and `diff` to work. At every start the node writes a small
+global git file for the agent (beside its worktree on Linux, in the system temp folder on macOS and Windows), sets
+`GIT_CONFIG_GLOBAL` to it and `GIT_CONFIG_NOSYSTEM=1`, and gives the sandbox a read grant for that one file and no write grant. It holds
+only these keys, each copied if you have set it in your own global configuration: `user.name`, `user.email`, `init.defaultBranch`,
+`core.autocrlf`, `core.ignorecase`, `core.filemode`, `pull.rebase`, `push.default`, `push.autoSetupRemote`, `color.ui`. Nothing else is
+copied: no `credential.*`, `include`/`includeIf`, `url.*`, `alias.*`, `core.sshCommand`, `core.hooksPath`, `core.fsmonitor`, `core.pager`,
+`core.editor`, `http.*`, `gpg.*` or `commit.gpgsign`. The node reads the keys with `git config --global --no-includes`, so an identity that
+lives only in a file you `include` is not found; set it in the global file itself. A value that is empty, long, holds a control character
+(a newline too), or, for a key other than the two identity ones, anything but letters, digits, `_`, `-` and `.`, is dropped.
+
+If you list `~/.gitconfig` in `sandbox.read` yourself, the node does not set `GIT_CONFIG_GLOBAL` and your choice stands as before; that is also
+the way to get a key outside the list. `agora doctor` warns when a machine that confines agents has no `user.name` or `user.email`.
+
 ## macOS (Seatbelt)
 
 Checked on macOS 27.2 with a real node and a probe agent: `git status`/`commit`/`branch`, `cargo new` + `cargo build` + run, `npm init`,

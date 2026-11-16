@@ -69,6 +69,7 @@ doctor-sandbox = Bu makinede ajanlar çalışma alanına kısıtlanabilir (düğ
 doctor-sandbox-unsupported = Bu makinede ajanlar kısıtlanamaz (düğümün ilkesi: { $detail }). "off" dışındaki bir değer, ajanların burada başlamayacağı anlamına gelir.
 doctor-git = Git kullanılabilir ({ $detail }).
 doctor-git-missing = Git bulunamadı. Agora, her ajana ayrı bir çalışma alanı vermek için buna ihtiyaç duyar.
+doctor-git-identity-missing = Buradaki ajanların git kimliği yok, bu yüzden commit yapamazlar. "git config --global" ile "user.name" ve "user.email" değerlerini ayarlayın.
 doctor-data-dir = Veri klasörüne yazılabiliyor: { $detail }
 doctor-data-dir-unwritable = Veri klasörüne yazılamıyor: { $detail }
 doctor-node = { $detail } adresinde bir düğüm çalışıyor.

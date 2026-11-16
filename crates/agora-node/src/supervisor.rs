@@ -641,7 +641,10 @@ impl Supervisor {
             .kinds
             .get(kind)
             .and_then(|k| k.manifest.sandbox.as_ref());
-        self.sandbox.profile(kind, needs, worktree, program)
+        let mut profile = self.sandbox.profile(kind, needs, worktree, program)?;
+        // ADR-0078: the file of git settings the node wrote for this start, readable and not writable.
+        profile.read.extend(self.sandbox.git_config(worktree));
+        Some(profile)
     }
 
     /// With confinement on, a launch in a folder that would make the confinement meaningless is refused before anything starts.
@@ -1525,6 +1528,9 @@ impl Supervisor {
                 .collect();
         }
         cfg.env.extend(extras.env.iter().cloned());
+        if let Some(profile) = &cfg.sandbox {
+            cfg.env.extend(git_env(profile, worktree));
+        }
         if cfg.sandbox.is_some() && agora_platform::PRIVATE_TEMP {
             let temp = crate::sandbox::agent_temp(worktree).display().to_string();
             cfg.env.push(("TMPDIR".into(), temp.clone()));
@@ -2339,6 +2345,9 @@ fn launch_adapter(
     if let Some(profile) = &mut sandbox {
         offline_sockets(profile, mesh.map(|m| m.socket.as_path()), worktree);
     }
+    if let Some(profile) = &sandbox {
+        env.extend(git_env(profile, worktree));
+    }
     // A confined adapter works in its own private temporary folder, as a confined terminal agent does.
     if sandbox.is_some() && agora_platform::PRIVATE_TEMP {
         let temp = crate::sandbox::agent_temp(worktree).display().to_string();
@@ -2381,6 +2390,17 @@ fn launch_adapter(
         )
         .map_err(adapter_error)?;
     Ok((adapter, session_id, init.capabilities))
+}
+
+/// ADR-0078: points a confined agent's git at the file the node wrote, when the profile grants that file for reading (it does not when
+/// the owner grants `~/.gitconfig` themselves, or the file could not be written).
+fn git_env(profile: &agora_platform::Sandbox, worktree: &Path) -> Vec<(String, String)> {
+    let file = crate::gitconfig::path_for(worktree);
+    if profile.read.contains(&file) {
+        crate::gitconfig::env_for(&file)
+    } else {
+        Vec::new()
+    }
 }
 
 /// The unix sockets a confined agent may reach although the node's own folders are closed (its own mesh socket, #475); offline

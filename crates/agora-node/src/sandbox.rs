@@ -209,6 +209,24 @@ pub fn agent_temp(worktree: &Path) -> PathBuf {
 }
 
 impl SandboxPolicy {
+    /// Whether the owner's own `sandbox.read` already grants the global git configuration (`~/.gitconfig`): then the node does not give
+    /// the agent a file of its own (ADR-0078, decision 4) and the explicit choice stands as it is.
+    pub fn grants_gitconfig(&self) -> bool {
+        crate::usage_files::home_dir()
+            .map(|h| h.join(".gitconfig"))
+            .is_some_and(|g| self.read.contains(&g))
+    }
+
+    /// Writes the global git configuration of the confined agent that works in `worktree` (ADR-0078) and returns its path, to be
+    /// granted for reading and named in `GIT_CONFIG_GLOBAL`. `None` when agents are not confined, the owner grants `~/.gitconfig`
+    /// themselves, or the file could not be written.
+    pub fn git_config(&self, worktree: &Path) -> Option<PathBuf> {
+        if self.level == Level::Off || self.grants_gitconfig() {
+            return None;
+        }
+        crate::gitconfig::write_for(worktree)
+    }
+
     /// The paths for one agent, or `None` when agents are not confined.
     pub fn profile(
         &self,
