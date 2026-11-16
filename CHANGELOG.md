@@ -83,6 +83,9 @@ _Nothing yet._
   nor finish it, stuck until its lease ran out. It is refused (`mesh.recipient_unknown`) and stays with its owner (audit finding F601).
 
 ### Machines
+- An agent started in a folder now always keeps that folder in the machine's record. When another agent ended or reported its
+  session at the moment it started, the record lost the folder, and after a restart the agent could be neither resumed nor started
+  again there (audit finding F271).
 - A machine's control connection no longer keeps everything it receives: when a read ended in the middle of a message (the usual
   case), the part already handled stayed in memory, so a console watching a busy terminal, or the machine serving it, grew by every
   byte of output for as long as it stayed connected (4 MB streamed held 4 MB). It now holds at most one unfinished message, and
