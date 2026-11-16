@@ -20,6 +20,9 @@ _Nothing yet._
 - In the review and the file browser, the mouse wheel, a click, Page Up/Down or Ctrl+arrow closed the view and typed the rest of
   the key into the console. They are now ignored there.
 ### Terminal client
+- A terminal you watch (`agora attach`, a window through the hub) that fell behind because the agent printed a lot just
+  before it ended kept waiting forever instead of showing that the agent ended. It now always hears the end, with an unknown exit
+  code when the machine no longer has it (audit finding F251).
 - An agent a machine cannot start is named with the program the machine looked for ("WrongStack (`wstack`)"), and when this
   device is not trusted yet the hub's owner sees the folder of that machine's `agora` program when it is not in its PATH (ADR-0069).
 ### Faster answers
@@ -31,6 +34,9 @@ _Nothing yet._
   minimized or not in front (the count only, in your language). Not on macOS yet: there it stays silent for now.
 
 ### Security
+- An agent could make its machine's node take memory without limit by sending one endless line to its mesh connection
+  without a newline, and the agent then could not be stopped while it kept sending. A line over 1 MiB now closes the connection as
+  soon as it reaches that size (audit finding F250).
 - macOS: a confined agent could read and change any app's settings through `defaults` (the system's settings service did it
   on its behalf, past the file rules). Settings now follow the same rules as files; the language and locale stay readable.
 - macOS: a confined agent is not started when a file it may write also has another name elsewhere (a hard link made outside
