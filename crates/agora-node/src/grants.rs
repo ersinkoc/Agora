@@ -4,6 +4,11 @@
 //! a live grant covers them. A grant is signed by a trusted device (the devices of ADR-0028) and verified here, so a hub
 //! that forges one fails the check. Grants live in memory only: a restart ends them on purpose. Commands that arrive on the
 //! node's own control socket never pass through here (the person at the machine needs no grant).
+//!
+//! A grant lasts only as long as the trust of the device that signed it (audit F270): when the trusted devices change (a device
+//! removed, revoked, re-trusted, its limits narrowed), every live grant is checked again before the next command it would cover, and
+//! one whose signer no longer vouches for it, in the same term of trust and within its limits, ends for good. An endorsed device's
+//! grant also ends when the device's trust runs out.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -11,7 +16,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use agora_protocol::v1::{self, command_request::Command as Cmd};
 use agora_protocol::{Error, ErrorCode};
 
-use crate::approvals::NodeApprovals;
+use crate::approvals::{NodeApprovals, Term};
 use crate::control::{agent_of_terminal, command_name};
 
 /// A grant lasts at most this long after it is issued (8 hours).
@@ -92,8 +97,28 @@ impl SignedCommands {
 
 #[derive(Default)]
 struct State {
-    live: Vec<v1::GrantInfo>,
+    live: Vec<Live>,
     spent: VecDeque<String>,
+}
+
+/// A live grant, with what it takes to check again that its signer still vouches for it (audit F270).
+#[derive(Clone)]
+struct Live {
+    info: v1::GrantInfo,
+    signature: Vec<u8>,
+    /// The signer's term of trust when the grant was made: a later term (the device removed and trusted again) does not carry it.
+    since: Option<u64>,
+    /// When the signer's trust ends by itself (an endorsed device), as last checked.
+    until: Option<u64>,
+    /// The trust generation it was last checked under ([`NodeApprovals::trust_generation`]).
+    checked: u64,
+}
+
+impl Live {
+    /// Still to be checked against the trust held at `generation`: the trust changed since, or the signer's term ran out.
+    fn stale(&self, generation: u64, now_ms: u64) -> bool {
+        self.checked < generation || self.until.is_some_and(|u| now_ms >= u)
+    }
 }
 
 type Resolver = Box<dyn Fn(&str) -> Option<String> + Send + Sync>;
@@ -396,12 +421,12 @@ impl Grants {
             &g.commands,
             g.expires_at_ms,
         );
-        if !self
-            .approvals
-            .verify_device(&g.signer_device_id, &message, &g.signature)
-        {
+        let Some((checked, term)) =
+            self.approvals
+                .verify_device_term(&g.signer_device_id, &message, &g.signature)
+        else {
             return Err(bad());
-        }
+        };
         // A device the policy limits to some projects cannot grant beyond them, whatever it signed.
         if !self.limits.allows_scope(&g.signer_device_id, &g.scope) {
             return Err(Error::new(ErrorCode::AuthForbidden).with("action", "grant.create"));
@@ -415,7 +440,7 @@ impl Grants {
             return Err(invalid("expires_at_ms"));
         }
         let mut st = self.st();
-        st.live.retain(|x| x.expires_at_ms > now_ms);
+        st.live.retain(|x| x.info.expires_at_ms > now_ms);
         if st.spent.iter().any(|s| *s == g.grant_id) || st.live.len() >= MAX_LIVE {
             return Err(bad());
         }
@@ -423,25 +448,94 @@ impl Grants {
         while st.spent.len() > SPENT_MEMORY {
             st.spent.pop_front();
         }
-        st.live.push(v1::GrantInfo {
-            grant_id: g.grant_id.clone(),
-            scope: g.scope.clone(),
-            commands: g.commands.clone(),
-            expires_at_ms: g.expires_at_ms,
-            signer_device_id: g.signer_device_id.clone(),
-            kind: String::new(),
-            folder: String::new(),
-            remaining: 0,
+        st.live.push(Live {
+            info: v1::GrantInfo {
+                grant_id: g.grant_id.clone(),
+                scope: g.scope.clone(),
+                commands: g.commands.clone(),
+                expires_at_ms: g.expires_at_ms,
+                signer_device_id: g.signer_device_id.clone(),
+                kind: String::new(),
+                folder: String::new(),
+                remaining: 0,
+            },
+            signature: g.signature.clone(),
+            since: term.since,
+            until: term.until,
+            checked,
         });
         Ok(())
     }
 
+    /// Checks again every live grant made or last checked under older trust, or whose signer's term ran out, and ends each one its
+    /// signer no longer vouches for (audit F270). Returns the trust generation the live grants now stand under, or `None` when there
+    /// are none (then nothing is read). A grant that fails ends for good: trusting its signer again later does not bring it back.
+    fn recheck(&self, now_ms: u64) -> Option<u64> {
+        if self.st().live.is_empty() {
+            return None;
+        }
+        // One read of the trusted-devices file (compared with what was read last); signatures are checked only after a change.
+        let generation = self.approvals.trust_generation();
+        let stale: Vec<Live> = self
+            .st()
+            .live
+            .iter()
+            .filter(|g| g.stale(generation, now_ms))
+            .cloned()
+            .collect();
+        if stale.is_empty() {
+            return Some(generation);
+        }
+        // Checked without holding the grants: the limits may ask the supervisor for an agent's project.
+        let verdicts: Vec<(String, Option<(u64, Term)>)> = stale
+            .into_iter()
+            .map(|g| {
+                let verdict = self.still_vouched(&g, now_ms);
+                (g.info.grant_id, verdict)
+            })
+            .collect();
+        let mut st = self.st();
+        for (id, verdict) in verdicts {
+            match verdict {
+                Some((at, term)) => {
+                    if let Some(x) = st.live.iter_mut().find(|x| x.info.grant_id == id) {
+                        x.checked = x.checked.max(at);
+                        x.until = term.until;
+                    }
+                }
+                None => st.live.retain(|x| x.info.grant_id != id),
+            }
+        }
+        Some(generation)
+    }
+
+    /// Does the grant's signer still vouch for it: its signature verifies under the devices trusted now, in the term it was made in,
+    /// before that term ends, and the device may still sign its scope (ADR-0049)? A check, not a use: nothing is renewed.
+    fn still_vouched(&self, g: &Live, now_ms: u64) -> Option<(u64, Term)> {
+        let i = &g.info;
+        let message = signed_message(
+            &self.node_id,
+            &i.grant_id,
+            &i.scope,
+            &i.commands,
+            i.expires_at_ms,
+        );
+        let (at, term) = self
+            .approvals
+            .vouches(&i.signer_device_id, &message, &g.signature)?;
+        let holds = term.since == g.since
+            && term.until.is_none_or(|u| now_ms < u)
+            && self.limits.allows_scope(&i.signer_device_id, &i.scope);
+        holds.then_some((at, term))
+    }
+
     /// Live grants, then live helper grants (ADR-0057: `mesh.agent_start` for one agent, ending with it).
     pub fn list(&self, now_ms: u64) -> Vec<v1::GrantInfo> {
-        let mut out = {
+        self.recheck(now_ms);
+        let mut out: Vec<v1::GrantInfo> = {
             let mut st = self.st();
-            st.live.retain(|x| x.expires_at_ms > now_ms);
-            st.live.clone()
+            st.live.retain(|x| x.info.expires_at_ms > now_ms);
+            st.live.iter().map(|x| x.info.clone()).collect()
         };
         out.extend(
             self.approvals
@@ -464,11 +558,12 @@ impl Grants {
     /// Ends a grant, or a helper grant by its approval id. An id that is not live is not an error (ending access is always allowed
     /// and idempotent).
     pub fn revoke(&self, grant_id: &str) {
-        self.st().live.retain(|x| x.grant_id != grant_id);
+        self.st().live.retain(|x| x.info.grant_id != grant_id);
         self.approvals.revoke_helper_grant(grant_id);
     }
 
-    /// Lets a routed command through, or refuses it with `approval.grant_required`. Commands the policy does not list pass.
+    /// Lets a routed command through, or refuses it with `approval.grant_required`. Commands the policy does not list pass. A grant
+    /// covers a command only while its signer still vouches for it ([`Self::recheck`]); when that cannot be told, it does not.
     pub fn gate(&self, c: &Cmd, now_ms: u64) -> Result<(), Error> {
         let name = command_name(c);
         if !self.policy.requires(name) {
@@ -480,9 +575,12 @@ impl Grants {
             let guard = self.project_of.lock().unwrap_or_else(|e| e.into_inner());
             guard.as_ref().and_then(|f| f(agent))
         });
+        let generation = self.recheck(now_ms);
         let st = self.st();
-        let covered = st.live.iter().any(|g| {
-            g.expires_at_ms > now_ms
+        let covered = st.live.iter().any(|x| {
+            let g = &x.info;
+            generation.is_some_and(|at| !x.stale(at, now_ms))
+                && g.expires_at_ms > now_ms
                 && g.commands.iter().any(|p| matches(p, name))
                 && match g.scope.split_once(':') {
                     None => g.scope == "node",
@@ -734,6 +832,149 @@ mod tests {
         )
         .unwrap();
         assert_eq!(g.list(NOW).len(), 2);
+    }
+
+    /// Trusts exactly these devices, each in its term (signatures as [`sign`] makes them).
+    struct Trusted(Vec<(&'static str, Term)>);
+    impl Verifier for Trusted {
+        fn verify(&self, device: &str, message: &[u8], signature: &[u8]) -> bool {
+            self.0.iter().any(|(d, _)| *d == device) && sign(message) == signature
+        }
+        fn term(&self, device: &str) -> Option<Term> {
+            self.0.iter().find(|(d, _)| *d == device).map(|(_, t)| *t)
+        }
+    }
+
+    fn signed_by(device: &str, id: &str, scope: &str, cmd: &str) -> v1::GrantCreate {
+        v1::GrantCreate {
+            signer_device_id: device.into(),
+            ..grant(id, scope, &[cmd], NOW + HOUR)
+        }
+    }
+
+    const FOREVER: Term = Term {
+        since: Some(1),
+        until: None,
+    };
+
+    #[test]
+    fn a_grant_ends_when_its_signer_is_no_longer_trusted() {
+        // Audit F270: the device that signed a grant is revoked; the grant covers nothing from the next command on, and trusting
+        // the device again does not bring it back. A grant from a device that stays trusted works unchanged.
+        let approvals = Arc::new(NodeApprovals::new(
+            "node-a",
+            Box::new(Trusted(vec![("stolen", FOREVER), ("owner", FOREVER)])),
+        ));
+        let g = Grants::new(
+            "node-a",
+            Arc::clone(&approvals),
+            SignedCommands(vec!["agent.prompt".into(), "terminal.input".into()]),
+        );
+        g.create(&signed_by("stolen", "g-s", "node", "agent.prompt"), NOW)
+            .unwrap();
+        g.create(
+            &signed_by("owner", "g-o", "agent:a-1", "terminal.input"),
+            NOW,
+        )
+        .unwrap();
+        assert!(g.gate(&prompt("a-1"), NOW).is_ok());
+
+        approvals.set_verifier(Box::new(Trusted(vec![("owner", FOREVER)])));
+        assert!(refused(g.gate(&prompt("a-1"), NOW + 1)), "revoked signer");
+        assert!(g.gate(&typing("a-1"), NOW + 1).is_ok(), "the other device");
+        let live: Vec<String> = g.list(NOW + 1).into_iter().map(|x| x.grant_id).collect();
+        assert_eq!(live, ["g-o"]);
+
+        approvals.set_verifier(Box::new(Trusted(vec![
+            ("stolen", FOREVER),
+            ("owner", FOREVER),
+        ])));
+        assert!(
+            refused(g.gate(&prompt("a-1"), NOW + 2)),
+            "trusted again: the old grant stays ended"
+        );
+        assert!(g.gate(&typing("a-1"), NOW + 2).is_ok());
+    }
+
+    #[test]
+    fn a_grant_ends_with_its_signers_term() {
+        let term = Term {
+            since: Some(1),
+            until: Some(NOW + 100),
+        };
+        let approvals = Arc::new(NodeApprovals::new(
+            "node-a",
+            Box::new(Trusted(vec![("endorsed", term), ("owner", FOREVER)])),
+        ));
+        let g = Grants::new(
+            "node-a",
+            Arc::clone(&approvals),
+            SignedCommands(vec!["agent.prompt".into()]),
+        );
+        // An endorsed device's trust ends before its grant does: covered up to the last millisecond, then never again.
+        g.create(&signed_by("endorsed", "g-e", "node", "agent.prompt"), NOW)
+            .unwrap();
+        assert!(g.gate(&prompt("a-1"), NOW + 99).is_ok());
+        assert!(refused(g.gate(&prompt("a-1"), NOW + 100)));
+        assert!(refused(g.gate(&prompt("a-1"), NOW + 99)), "stays ended");
+
+        // The same device trusted afresh (removed and trusted again, unseen by this node): a new term, the old grant does not carry.
+        g.create(&signed_by("owner", "g-o", "node", "agent.prompt"), NOW)
+            .unwrap();
+        approvals.set_verifier(Box::new(Trusted(vec![(
+            "owner",
+            Term {
+                since: Some(2),
+                until: None,
+            },
+        )])));
+        assert!(refused(g.gate(&prompt("a-1"), NOW + 1)), "a later term");
+    }
+
+    #[test]
+    fn a_grant_ends_when_its_signers_limits_no_longer_allow_its_scope() {
+        // ADR-0061: a device endorsed by a limited device inherits its limit through the trusted-devices file (`projects=`).
+        let dir = std::env::temp_dir().join(format!("agora-grants-f270-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join(crate::approvals::TRUSTED_DEVICES_FILE);
+        let key = format!("04{}", "11".repeat(64));
+        let line = |projects: &str| {
+            format!("owner {key}\nmember {key} since=1 expires=99999999999999 via=owner projects={projects}\n")
+        };
+        std::fs::write(&file, line("p-1")).unwrap();
+        let limits = Arc::new(crate::limits::DeviceLimits::default());
+        limits.follow_trust_file(&file);
+        let trusted = || Box::new(Trusted(vec![("member", FOREVER), ("owner", FOREVER)]));
+        let approvals = Arc::new(NodeApprovals::new("node-a", trusted()));
+        let g = Grants::new(
+            "node-a",
+            Arc::clone(&approvals),
+            SignedCommands(vec!["agent.start".into()]),
+        )
+        .with_limits(limits);
+        let start = |p: &str| {
+            Cmd::AgentStart(v1::AgentStart {
+                project_id: p.into(),
+                ..Default::default()
+            })
+        };
+        g.create(
+            &signed_by("member", "g-m", "project:p-1", "agent.start"),
+            NOW,
+        )
+        .unwrap();
+        assert!(g.gate(&start("p-1"), NOW).is_ok());
+
+        // Narrowed to p-2. The node reads the changed file again (here: the verifier replaced, as the reload does).
+        std::fs::write(&file, line("p-2")).unwrap();
+        approvals.set_verifier(trusted());
+        assert!(refused(g.gate(&start("p-1"), NOW)));
+        // Widened back: the grant stays ended.
+        std::fs::write(&file, line("p-1")).unwrap();
+        approvals.set_verifier(trusted());
+        assert!(refused(g.gate(&start("p-1"), NOW)));
+        assert!(g.list(NOW).is_empty());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

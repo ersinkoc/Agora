@@ -117,8 +117,10 @@ impl Decoder {
     }
 
     pub fn push(&mut self, bytes: &[u8]) {
-        if self.start > 0 && self.start == self.buf.len() {
-            self.buf.clear();
+        if self.start > 0 {
+            // Drop the frames already returned, also when a read ended mid-frame: otherwise a long stream keeps every
+            // byte it was fed. What moves is at most one partial frame, so the copy stays linear in the bytes pushed.
+            self.buf.drain(..self.start);
             self.start = 0;
         }
         self.buf.extend_from_slice(bytes);
@@ -266,6 +268,34 @@ mod tests {
                 assert_eq!(e.code, ErrorCode::ProtocolInvalidMessage);
             }
         }
+    }
+
+    #[test]
+    fn a_stream_split_mid_frame_does_not_keep_consumed_bytes() {
+        // F240: reads that end mid-frame (the usual case on a socket) must not make the decoder hold everything it was fed.
+        let f = Frame {
+            stream_id: 3,
+            kind: 0,
+            seq: None,
+            payload: vec![7; 1000],
+        };
+        let one = f.encode(DEFAULT_MAX_PAYLOAD).unwrap_or_default();
+        let wire: Vec<u8> = one.iter().copied().cycle().take(one.len() * 4000).collect();
+        let mut dec = Decoder::new(DEFAULT_MAX_PAYLOAD);
+        let mut frames = 0;
+        for chunk in wire.chunks(4096) {
+            dec.push(chunk);
+            assert!(
+                dec.buf.len() <= one.len() + chunk.len(),
+                "{}",
+                dec.buf.len()
+            );
+            while let Ok(Some(got)) = dec.next_frame() {
+                assert_eq!(got, f);
+                frames += 1;
+            }
+        }
+        assert_eq!((frames, dec.buffered()), (4000, 0));
     }
 
     fn decode_one(bytes: &[u8]) -> Result<Option<Frame>, Error> {

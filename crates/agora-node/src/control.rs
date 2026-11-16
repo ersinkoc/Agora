@@ -1438,6 +1438,11 @@ fn exit_payload(st: &agora_platform::ExitStatus) -> Vec<u8> {
     code.to_le_bytes().to_vec()
 }
 
+/// The exit frame of a terminal that ended in a way this subscriber did not see.
+fn unknown_exit_payload() -> Vec<u8> {
+    i32::MIN.to_le_bytes().to_vec()
+}
+
 /// A terminal size as the resize frame carries it: columns, then rows, each a little-endian u16.
 fn size_payload(s: agora_vt::Size) -> Vec<u8> {
     let mut p = s.cols.to_le_bytes().to_vec();
@@ -1473,15 +1478,31 @@ fn pump(
                 let _ = send(writer, stream, KIND_TERM_EXIT, exit_payload(&st));
                 return;
             }
+            // What was dropped can include the exit: a terminal that has ended says so after its last snapshot, and one that is
+            // already gone (or a subscription that ends without its exit) gets the unknown exit, so the client still hears it ended.
             Ok(Output::Lagged) => {
-                let snap = ctx.sup().terminal(agent).map(|h| h.resync(sub));
+                let snap = ctx
+                    .sup()
+                    .terminal(agent)
+                    .map(|h| (h.resync(sub), h.exit_status()));
                 match snap {
-                    Some(s) => repaint(&s),
-                    None => return,
+                    Some((s, None)) => repaint(&s),
+                    Some((s, Some(st))) => {
+                        let _ = repaint(&s)
+                            .and_then(|()| send(writer, stream, KIND_TERM_EXIT, exit_payload(&st)));
+                        return;
+                    }
+                    None => {
+                        let _ = send(writer, stream, KIND_TERM_EXIT, unknown_exit_payload());
+                        return;
+                    }
                 }
             }
             Err(RecvTimeoutError::Timeout) => Ok(()),
-            Err(RecvTimeoutError::Disconnected) => return,
+            Err(RecvTimeoutError::Disconnected) => {
+                let _ = send(writer, stream, KIND_TERM_EXIT, unknown_exit_payload());
+                return;
+            }
         };
         if sent.is_err() {
             return;
