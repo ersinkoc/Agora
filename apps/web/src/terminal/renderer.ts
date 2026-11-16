@@ -3,6 +3,7 @@
 import { FitAddon } from '@xterm/addon-fit';
 import { Terminal } from '@xterm/xterm';
 import '@xterm/xterm/css/xterm.css';
+import { terminalFontFamily } from './fonts';
 import { terminalSize } from './prefs';
 
 export interface TerminalRenderer {
@@ -49,7 +50,7 @@ export class XtermRenderer implements TerminalRenderer {
   constructor() {
     // Colors come from design tokens, so the terminal follows the theme.
     this.term = new Terminal({
-      fontFamily: token('--font-mono') || 'monospace',
+      fontFamily: terminalFontFamily(token('--font-mono')),
       fontSize: terminalSize(),
       lineHeight: 1.1,
       // A program's own colour can be unreadable on this pane (dark blue on black): lift it just enough.
@@ -70,8 +71,8 @@ export class XtermRenderer implements TerminalRenderer {
 
   private repaint = () => {
     this.term.options.theme = theme();
-    const font = token('--font-mono');
-    if (font && font !== this.term.options.fontFamily) this.term.options.fontFamily = font;
+    const font = terminalFontFamily(token('--font-mono'));
+    if (font !== this.term.options.fontFamily) this.term.options.fontFamily = font;
   };
 
   setFontSize(px: number): void {
