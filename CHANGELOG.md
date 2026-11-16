@@ -30,6 +30,9 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 - macOS: a confined agent is not started when a file it may write also has another name elsewhere (a hard link made outside
   confinement), or when a save copy next to it (`state.json.tmp`) is such a link, since writing it would change that other file too; the message says to remove the link or put a copy in its place
   (#571). Such links inside a folder it may write are not looked for at each start.
+- Team mode: a machine could show its own agents and folders to a member granted only a project on another machine, by naming
+  that other machine in what it reported, and the hub then let that member's commands reach them. A member now sees an agent or
+  folder only as part of the machine that reported it (audit finding F282).
 
 ### Agents working together
 - A task's title, detail and summary are limited to the same size as a message (16 KiB). They used to take about a megabyte each,
@@ -39,6 +42,12 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
   trace: the history never showed it ending, and the shared board and the windows kept showing the path as held (audit finding F602).
 - A task can no longer be handed to an agent of another project: it used to end up claimed by someone who could neither see
   nor finish it, stuck until its lease ran out. It is refused (`mesh.recipient_unknown`) and stays with its owner (audit finding F601).
+- After the hub restarted, a file lock kept from before stayed held when the agent holding it ended or its machine restarted, so
+  the other agents of a shared project could not take that path until the lock's time ran out (up to an hour). It is now freed then,
+  like any other lock (audit finding F280).
+- When the hub and a machine both restarted (an upgrade, say), the machine's new first agent could take over the tasks and locks
+  its old first agent had held, because it got the same name: it could finish a task it never took, and others were told the task
+  was taken. They now go back to the board (audit finding F281).
 
 ### Machines
 - Asking for the changes of one file whose name contains `[`, `*` or `?` now returns that file only: the name was read as a pattern, so
