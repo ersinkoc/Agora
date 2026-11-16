@@ -391,8 +391,9 @@ fn confirm_at(file: &Path, id: &str, key: &[u8], now_ms: u64) -> Result<Vec<Stri
         since: Some(now_ms),
         projects: None,
     });
-    write_entries(file, &entries).map_err(|e| e.to_string())?;
     // ADR-0081: every revocation of it received dated at or after this trust began would otherwise remove it when sent again.
+    // The marks are written before the device is trusted: if this write fails nothing changed, and if the trust write below fails the
+    // marks name a `since` no trusted line has, so they match nothing.
     let path = file.with_file_name(REVOCATIONS_AHEAD_FILE);
     let old = read_ahead(&path);
     let mut list = old.clone();
@@ -407,6 +408,7 @@ fn confirm_at(file: &Path, id: &str, key: &[u8], now_ms: u64) -> Result<Vec<Stri
     if list != old {
         write_ahead(&path, &list).map_err(|e| e.to_string())?;
     }
+    write_entries(file, &entries).map_err(|e| e.to_string())?;
     revokers.sort();
     revokers.dedup();
     Ok(revokers)

@@ -128,7 +128,7 @@ cli-password-on = Ekran parolası ayarlı: başka makinelerden girişler bu paro
 cli-password-off = Ekran parolası ayarlı değil: giriş kodu tek başına yeterli.
 cli-trusted = { $id } cihazı artık bu makinedeki onaylara yanıt verebilir.
 cli-trust-failed = Bu cihaz güvenilir olarak kaydedilemedi: { $reason }
-cli-trust-revocation-overridden = { $id } cihazı az önce { $revoker } cihazından kaldırılmıştı. O kaldırma yeniden gönderilse de burada güvenilir kalır.
+cli-trust-revocation-overridden = { $id } cihazı { $revoker } tarafından kaldırılmıştı. O kaldırma yeniden gönderilse de burada güvenilir kalır.
 cli-devices-offer = Hub, bu makinenin henüz güvenmediği { $count ->
         [one] bir cihaz
        *[other] { $count } cihaz
