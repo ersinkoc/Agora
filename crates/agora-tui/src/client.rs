@@ -371,7 +371,16 @@ impl Session {
             .unwrap_or(("", a.approval_id.as_str()));
         // ADR-0057: a start is decided over the request as shown (one start; grants are given in the web window).
         let message = if a.action == "agent.start" {
-            crate::device::start_message(node, local, approved, 0, false, &a.detail)
+            // ADR-0066: this terminal's card does not list launch settings, so it never allows a request that has them (the
+            // answer would be signed over what the user did not see); it can still deny one, over the message that names them.
+            let settings = start_settings(&a.detail);
+            if settings.is_empty() {
+                crate::device::start_message(node, local, approved, 0, false, &a.detail)
+            } else if approved {
+                return Err("approval.needs_newer_window".to_string());
+            } else {
+                crate::device::start_message_v2(node, local, false, 0, false, &settings, &a.detail)
+            }
         } else {
             approval_message(node, local, approved)
         };
@@ -1305,4 +1314,25 @@ mod launch_option_tests {
         ]);
         assert_eq!(kept, vec![o("skip-permissions", true)]);
     }
+}
+
+/// ADR-0066: the `(id, value)` settings an `agent.start` detail lists, read as the node reads them (strings only; anything else is empty).
+fn start_settings(detail: &str) -> Vec<(String, String)> {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(detail) else {
+        return Vec::new();
+    };
+    let Some(list) = v.get("settings").and_then(serde_json::Value::as_array) else {
+        return Vec::new();
+    };
+    list.iter()
+        .map(|x| {
+            let get = |k: &str| {
+                x.get(k)
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_string()
+            };
+            (get("id"), get("value"))
+        })
+        .collect()
 }

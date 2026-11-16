@@ -219,3 +219,4 @@ tui-cleanup-keys = y unutur · r unutur ve yeniden bağlanırlarsa reddeder · b
 tui-cleanup-done = { $count } makine unutuldu.
 tui-cleanup-failed = Bir makine unutulamadı ({ $code }); öncesinde { $count } unutuldu.
 tui-app-start-read = İsteğin tamamını okudunuz. İzin vermek için y, reddetmek için n.
+tui-start-settings = Bu istek bir model veya efor seçiyor; bu terminal henüz bunları gösteremiyor. İzin vermek için web penceresini açın ya da reddetmek için n'ye basın.

@@ -1163,3 +1163,44 @@ fn a_helper_starts_with_the_settings_the_user_was_shown_and_signed() {
     e.stop(&parent, true);
     let _ = call;
 }
+
+/// ADR-0066: the node, not the card, refuses a grant (and leave to ask in turn) on a request with settings: a decision that was signed
+/// with `helper_grant` and `helpers_may_start` over such a request starts the helper and grants nothing, while one without settings
+/// still grants.
+#[test]
+fn a_request_with_settings_is_never_granted_even_when_the_decision_says_so() {
+    if !supported() {
+        return;
+    }
+    let e = Env::new("settings-grant");
+    let parent = e.launch(&e.folder, "probe");
+    let mut m = e.mcp(&parent);
+    let call = m.call(
+        "agent_start",
+        json!({"kind": "probe", "settings": {"effort": "low"}}),
+    );
+    let p = e.request_of(&parent);
+    let signed = agora_node::approvals::detail_settings(&p.detail);
+    let sig = e.sign(&agora_node::approvals::start_signed_message_v2(
+        NODE, &p.id, true, 3, true, &signed, &p.detail,
+    ));
+    e.resolve(&p, true, 3, true, sig).unwrap();
+    let (v, is_error) = m.result(call);
+    assert!(!is_error, "{v}");
+    let helper = v["agent_id"].as_str().unwrap().to_string();
+    // No grant: the next start (without settings) is asked about, and the helper may not ask in turn.
+    let call = m.call("agent_start", json!({"kind": "probe"}));
+    let p2 = e.request_of(&parent);
+    assert_ne!(p2.id, p.id);
+    let mut h = e.mcp(&helper);
+    let id = h.call("agent_start", json!({"kind": "probe"}));
+    assert_eq!(h.error_code(id), "mesh.helper_limit");
+    // A request without settings still grants, as before.
+    e.decide(&p2, true, 3, false).unwrap();
+    let (v, is_error) = m.result(call);
+    assert!(!is_error, "{v}");
+    let call = m.call("agent_start", json!({"kind": "probe"}));
+    let (v, is_error) = m.result(call);
+    assert!(!is_error, "started under the grant without asking: {v}");
+    e.stop(&parent, true);
+}

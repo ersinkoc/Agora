@@ -695,12 +695,14 @@ impl Spawner {
         let (outcome, grant, nested) = if r.approved {
             // A grant and permission to go deeper are honoured only inside the asker's own folder, and a grant never for a shell or
             // a plain terminal program (it would mean "run any N programs without asking").
-            let grant = if req.inside && req.grantable {
+            // ADR-0066: nor for a request with settings, whatever the signed decision says (a start with settings is always asked).
+            let grant = if req.inside && req.grantable && req.settings.is_empty() {
                 r.helper_grant.min(MAX_GRANT)
             } else {
                 0
             };
-            let nested = req.inside && req.grantable && r.helpers_may_start;
+            let nested =
+                req.inside && req.grantable && req.settings.is_empty() && r.helpers_may_start;
             let outcome = self.launch(&req, nested);
             if outcome.is_ok() {
                 (outcome, grant, nested)

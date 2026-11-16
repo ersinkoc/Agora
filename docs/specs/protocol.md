@@ -549,9 +549,8 @@ All additions; nothing published changed.
   with `settings` as above (read from the detail's `settings`, the pairs `(id, value)` in the order listed). A request whose detail has
   settings is decided only over v2 (a client that signs the v1 message does not name the settings and is refused with
   `approval.signature_invalid`); one without keeps `agora-approval-start-v1`. Vectors: `schema/fixtures/signing/approval-start-v2.json`
-  (node and web window). The helper starts with exactly the settings shown and signed, and never with a launch option.
-- **What is not built yet.** The TUI's `agent.start` card does not list settings, so it cannot approve a request that has them (its v1
-  signature is refused); the web window's start pickers and the TUI's offer the settings later (the machine already sends what each kind
+  (node and web window). The helper starts with exactly the settings shown and signed, and never with a launch option. The node enforces "no grant" itself: a signed `helper_grant` or `helpers_may_start` on a request with settings is ignored.
+- **What is not built yet.** The TUI's `agent.start` card does not list settings: it never allows a request that has them (it says so, `tui-start-settings`) but can deny one (signed over v2); the web window's start pickers and the TUI's offer the settings later (the machine already sends what each kind
   takes in `AgentKind.settings`); the owner's `start.models` allow-list and the price class on the card; settings are not kept across a
   node restart's resume.
 
