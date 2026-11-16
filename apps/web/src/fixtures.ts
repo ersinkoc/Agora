@@ -29,7 +29,7 @@ export const demoProjects = [
 // ADR-0057: a helper the first demo agent started, and that agent's request to start another (for the gallery).
 export const demoHelper: AgentTileModel = { id: 'a8', name: 'codex · sky', accent: '#38bdf8', machine: 'Laptop', workspace: 'login-fix', state: 'working', preview: 'Writing tests…', parentId: 'a1', parentName: 'claude · amber' };
 const demoStartDetail = JSON.stringify({ node: 'laptop', agent: 'a1', agent_kind: 'claude', kind: 'codex', folder: '/home/dev/code/login-fix', inside: true, worktree: false, depth: 1, grant_allowed: true, prompt: 'Write unit tests for src/auth.rs.\nCover the expired-token and wrong-signature cases; do not change src/.' });
-export const demoStartApproval = { id: 'demo/2', node: 'demo', localId: '2', agentId: 'a1', agentName: 'claude · amber', action: 'agent.start', detail: demoStartDetail, expiresAtMs: 0, start: { agent: 'a1', agentKind: 'claude', node: 'laptop', kind: 'codex', folder: '/home/dev/code/login-fix', prompt: 'Write unit tests for src/auth.rs.\nCover the expired-token and wrong-signature cases; do not change src/.', inside: true, worktree: false, depth: 1, grantAllowed: true } };
+export const demoStartApproval = { id: 'demo/2', node: 'demo', localId: '2', agentId: 'a1', agentName: 'claude · amber', action: 'agent.start', detail: demoStartDetail, expiresAtMs: 0, start: { agent: 'a1', agentKind: 'claude', node: 'laptop', kind: 'codex', folder: '/home/dev/code/login-fix', prompt: 'Write unit tests for src/auth.rs.\nCover the expired-token and wrong-signature cases; do not change src/.', inside: true, worktree: false, depth: 1, grantAllowed: true, settings: [] } };
 
 // The demo window's one waiting approval, for the first demo agent.
 export const demoApprovals = [{ id: 'demo/1', node: 'demo', localId: '1', agentId: 'a1', agentName: 'claude · amber', action: 'Edit src/auth.rs', detail: '+12 −3', expiresAtMs: 0 }];
@@ -45,3 +45,6 @@ export function demoList(path: string) {
   const names = demoTree[at] ?? [];
   return { path: at, parent: at === '/' ? '' : at.slice(0, at.lastIndexOf('/')) || '/', entries: names.map((name) => ({ name, isGit: ['login-fix', 'api-tests', 'website'].includes(name) })), truncated: false };
 }
+// ADR-0066: the same request asking for a model and an effort (no "more like this": a start with settings is always asked).
+const demoSettings = [{ id: 'model', label: 'setting-model', value: 'gpt-6.1-sol' }, { id: 'effort', label: 'setting-effort', value: 'high' }];
+export const demoStartSettingsApproval = { ...demoStartApproval, id: 'demo/3', localId: '3', detail: JSON.stringify({ ...JSON.parse(demoStartDetail), grant_allowed: false, settings: demoSettings }), start: { ...demoStartApproval.start, grantAllowed: false, settings: demoSettings } };

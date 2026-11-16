@@ -64,6 +64,7 @@ fn hubside(node_id: &str) -> Hubside {
                 "terminal.raw".into(),
                 "workspace.directory".into(),
                 "directory.list".into(),
+                "agent.launch_settings".into(),
             ],
             required: vec![],
         },
@@ -2044,6 +2045,321 @@ fn the_terminal_console_picks_a_folder_on_a_machine_and_starts_an_agent_there() 
     wait("the agent to appear in the hub", || {
         hub.state.hub.view().0.agents.contains_key(&agent)
     });
+    let _ = std::fs::remove_dir_all(&pick);
+}
+
+/// ADR-0066: launch settings (model, effort) through a real hub and node. A launch the user's device signed over its settings starts with
+/// exactly them; a hub that adds, changes or drops one (here: a client that sends other settings than it signed) gets
+/// `approval.signature_invalid` and nothing starts; unknown or invalid ones are refused before anything starts. An agent's `agent_start`
+/// with settings reaches the window as an approval card that lists them, is decided only over a signature that covers them, and the helper
+/// starts with exactly what the card showed.
+#[test]
+fn launch_settings_are_signed_through_the_hub_and_an_agents_start_shows_them_on_the_card() {
+    use agora_protocol::v1::{self, command_request::Command as Cmd};
+    use agora_tui::client::{Hub as ConsoleHub, Session};
+    use std::io::{BufRead, BufReader, Write};
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
+        return;
+    }
+    let hub = hubside("laptop");
+    let addr = hub.listen("127.0.0.1:0");
+    let dir = tmp("launch-settings");
+    let manifests = dir.join("manifests");
+    std::fs::create_dir_all(&manifests).unwrap();
+    // Reports its own arguments to a file named by its pid, then waits. It has an `[mcp]` section, so it is in the mesh and may ask.
+    std::fs::write(
+        manifests.join("probe.toml"),
+        r#"kind = "probe"
+display_name = "Probe"
+version = "1"
+min_engine = 3
+[process]
+launch = ["sh", "-c", "printf '%s\\n' \"$@\" > args-$$.txt; sleep 60", "sh"]
+[[launch.setting]]
+id = "model"
+label = "setting-model"
+args = ["--model", "{value}"]
+[[launch.setting]]
+id = "effort"
+label = "setting-effort"
+args = ["--effort", "{value}"]
+values = ["low", "high"]
+[mcp]
+method = "cli_flag"
+path = ".mcp.json"
+flag = ["--mcp-config", "{config_file}"]
+"#,
+    )
+    .unwrap();
+    let pick = tmp("launch-settings-pick");
+    std::fs::create_dir_all(pick.join("app")).unwrap();
+    git(&pick.join("app"), &["init", "-q", "-b", "main"]);
+    let (device, _) = agora_tui::device::Device::generate().unwrap();
+    let (stranger, _) = agora_tui::device::Device::generate().unwrap();
+    let data = dir.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    agora_node::approvals::trust_device(
+        &data.join(agora_node::approvals::TRUSTED_DEVICES_FILE),
+        &device.id,
+        &device.public_key_hex(),
+    )
+    .unwrap();
+    let cfg = agora_node::daemon::NodeConfig {
+        resume_all: false,
+        node_id: "laptop".into(),
+        socket: dir.join("c.sock"),
+        data_dir: data,
+        worktree_root: dir.join("wt"),
+        manifests_dir: manifests,
+        projects: vec![],
+        limits: Default::default(),
+    };
+    let node = agora_node::daemon::Node::start(&cfg).unwrap();
+    let mut link = hub.link(addr);
+    link.commands = Some(cfg.socket.clone());
+    link.grants = Some(Arc::clone(&node.grants));
+    let _uplink = spawn(Arc::clone(&node.events), link).unwrap();
+    wait("the node to be online in the hub", || {
+        hub.state
+            .hub
+            .view()
+            .0
+            .nodes
+            .get("laptop")
+            .is_some_and(|n| n.online)
+    });
+    let console = ConsoleHub {
+        addr: addr.to_string(),
+        ca_pem: hub.ca_pem.clone(),
+    };
+    let mut session = Session::connect(&console, "client-token").unwrap();
+    let now = || {
+        u64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .unwrap()
+    };
+    let app = pick.join("app").to_string_lossy().into_owned();
+    let inspect_auth = device
+        .authorize("laptop", "inspect", &app, "", "", false, false, now())
+        .unwrap();
+    let info = session
+        .inspect_folder("laptop", &app, inspect_auth)
+        .unwrap();
+    let pairs = |v: &[(&str, &str)]| -> Vec<(String, String)> {
+        v.iter()
+            .map(|(i, x)| ((*i).to_string(), (*x).to_string()))
+            .collect()
+    };
+    let launch =
+        |who: &agora_tui::device::Device, signed: &[(&str, &str)], sent: &[(&str, &str)]| {
+            v1::AgentLaunch {
+                path: info.path.clone(),
+                project_id: info.project_id.clone(),
+                kind: "probe".into(),
+                authorization: who.authorize_launch_with_settings(
+                    "laptop",
+                    &info.path,
+                    "probe",
+                    &info.project_id,
+                    false,
+                    false,
+                    &[],
+                    &[],
+                    &pairs(signed),
+                    now(),
+                ),
+                settings: sent
+                    .iter()
+                    .map(|(i, x)| v1::LaunchSetting {
+                        id: (*i).into(),
+                        value: (*x).into(),
+                    })
+                    .collect(),
+                ..Default::default()
+            }
+        };
+    let both = [("model", "gpt-6.1-sol"), ("effort", "high")];
+    let agents = || hub.state.hub.view().0.agents.len();
+    // Whatever a hub (or anyone between the window and the machine) does to the settings after the user signed, nothing starts.
+    for (signed, sent) in [
+        (
+            &both[..],
+            &[("model", "gpt-6.1-terra"), ("effort", "high")][..],
+        ),
+        (
+            &both[..],
+            &[("effort", "high"), ("model", "gpt-6.1-sol")][..],
+        ),
+        (&both[..], &[("model", "gpt-6.1-sol")][..]),
+        (
+            &both[..],
+            &[
+                ("model", "gpt-6.1-sol"),
+                ("effort", "high"),
+                ("mode", "plan"),
+            ][..],
+        ),
+        (&[][..], &both[..]),
+    ] {
+        assert_eq!(
+            session.launch_in("laptop", launch(&device, signed, sent)),
+            Err("approval.signature_invalid".to_string()),
+            "{sent:?}"
+        );
+    }
+    // A device the machine does not trust cannot sign settings in.
+    assert_eq!(
+        session.launch_in("laptop", launch(&stranger, &both, &both)),
+        Err("approval.signature_invalid".to_string())
+    );
+    // Signed exactly, but the machine's manifest does not declare it, or does not take the value: refused before anything starts.
+    let unknown = [("mode", "plan")];
+    assert_eq!(
+        session.launch_in("laptop", launch(&device, &unknown, &unknown)),
+        Err("agent.setting_unknown".to_string())
+    );
+    let invalid = [("effort", "max")];
+    assert_eq!(
+        session.launch_in("laptop", launch(&device, &invalid, &invalid)),
+        Err("agent.setting_invalid".to_string())
+    );
+    assert_eq!(agents(), 0, "nothing started");
+    // The launch the user signed starts with exactly its settings, applied after the manifest's own command.
+    let parent = session
+        .launch_in("laptop", launch(&device, &both, &both))
+        .unwrap();
+    wait("the agent to appear in the hub", || {
+        hub.state.hub.view().0.agents.contains_key(&parent)
+    });
+    let reported = |needle: &str| -> Option<Vec<String>> {
+        std::fs::read_dir(&info.path).ok()?.flatten().find_map(|e| {
+            let text = std::fs::read_to_string(e.path()).ok()?;
+            (e.file_name().to_string_lossy().starts_with("args-") && text.contains(needle))
+                .then(|| text.lines().map(str::to_string).collect())
+        })
+    };
+    wait("the agent to report its arguments", || {
+        reported("--model").is_some()
+    });
+    let got = reported("--model").unwrap();
+    let at = got.iter().position(|a| a == "--model").unwrap();
+    assert_eq!(
+        got[at..at + 4],
+        ["--model", "gpt-6.1-sol", "--effort", "high"]
+    );
+
+    // The agent asks for a helper with a model: the window gets a card that lists it.
+    let local_id = parent.strip_prefix("laptop/").unwrap().to_string();
+    let socket = node.mesh.socket_path(&AgentId::new(&local_id));
+    let mut conn = agora_platform::local_connect(&socket).unwrap();
+    conn.set_read_timeout(Some(Duration::from_secs(30)))
+        .unwrap();
+    let mut reader = BufReader::new(conn.try_clone().unwrap());
+    let mut say = |value: serde_json::Value| writeln!(conn, "{value}").unwrap();
+    say(serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}));
+    let mut line = String::new();
+    reader.read_line(&mut line).unwrap();
+    say(
+        serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "agent_start", "arguments": {"kind": "probe", "settings": {"effort": "low", "model": "gpt-6.1-terra"}}}}),
+    );
+    wait("the card to reach the hub", || {
+        hub.state
+            .hub
+            .view()
+            .0
+            .approvals
+            .values()
+            .any(|a| a.action == "agent.start")
+    });
+    let (key, card) = hub
+        .state
+        .hub
+        .view()
+        .0
+        .approvals
+        .iter()
+        .find(|(_, a)| a.action == "agent.start")
+        .map(|(k, a)| (k.clone(), a.detail.clone()))
+        .unwrap();
+    let local_approval = key.strip_prefix("laptop/").unwrap().to_string();
+    let shown: serde_json::Value = serde_json::from_str(&card).unwrap();
+    assert_eq!(
+        shown["settings"],
+        serde_json::json!([
+            {"id": "model", "label": "setting-model", "value": "gpt-6.1-terra"},
+            {"id": "effort", "label": "setting-effort", "value": "low"},
+        ]),
+        "in the manifest's order, with its labels"
+    );
+    let signed = agora_node::approvals::detail_settings(&card);
+    let resolve = |session: &mut Session, signature: Vec<u8>| {
+        session.command(
+            "laptop",
+            Cmd::ApprovalResolve(v1::ApprovalResolve {
+                approval_id: local_approval.clone(),
+                approved: true,
+                signer_device_id: device.id.clone(),
+                signature,
+                helper_grant: 0,
+                helpers_may_start: false,
+            }),
+            Duration::from_secs(15),
+        )
+    };
+    let sign = |m: Vec<u8>| device.sign(&m).unwrap();
+    // The v1 message does not name the settings; other settings and a changed card do not match what was shown.
+    let mut changed = signed.clone();
+    changed[0].1 = "gpt-6.1-sol".into();
+    for attempt in [
+        agora_tui::device::start_message("laptop", &local_approval, true, 0, false, &card),
+        agora_tui::device::start_message_v2(
+            "laptop",
+            &local_approval,
+            true,
+            0,
+            false,
+            &changed,
+            &card,
+        ),
+        agora_tui::device::start_message_v2("laptop", &local_approval, true, 0, false, &[], &card),
+    ] {
+        assert_eq!(
+            resolve(&mut session, sign(attempt)),
+            Err("approval.signature_invalid".to_string())
+        );
+    }
+    assert_eq!(node.approvals.pending_count(), 1, "still waiting");
+    resolve(
+        &mut session,
+        sign(agora_tui::device::start_message_v2(
+            "laptop",
+            &local_approval,
+            true,
+            0,
+            false,
+            &signed,
+            &card,
+        )),
+    )
+    .unwrap();
+    line.clear();
+    reader.read_line(&mut line).unwrap();
+    let reply: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert!(reply["result"]["isError"] != true, "{reply}");
+    wait("the helper to report its arguments", || {
+        reported("gpt-6.1-terra").is_some()
+    });
+    let got = reported("gpt-6.1-terra").unwrap();
+    let at = got.iter().position(|a| a == "--model").unwrap();
+    assert_eq!(
+        got[at..at + 4],
+        ["--model", "gpt-6.1-terra", "--effort", "low"]
+    );
+    drop(node);
     let _ = std::fs::remove_dir_all(&pick);
 }
 

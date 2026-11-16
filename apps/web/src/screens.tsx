@@ -23,7 +23,7 @@ import type { ApprovalModel, MachineModel, MessageModel, ProjectCost } from './n
 import type { Device } from './net/approval';
 import { deviceLabel } from './net/devices';
 import { money, type UsageSummary } from './net/usage';
-import { demoAgents, demoHelper, demoStartApproval } from './fixtures';
+import { demoAgents, demoHelper, demoStartApproval, demoStartSettingsApproval } from './fixtures';
 import { demoSource, type TerminalSource } from './terminal/source';
 import { Suspense, lazy, useEffect, useMemo, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { actionKey, outcomeKind, type AuditResult } from './net/audit';
@@ -114,6 +114,7 @@ function Themed({ theme, onStart }: { theme: 'dark' | 'light'; onStart?: () => v
       <div className="fleet"><AgentTile agent={demoHelper} /></div>
       <AgentAddress agent={{ ...demoHelper, machineId: 'laptop', id: 'laptop/a8' }} />
       <StartApproval approval={demoStartApproval} start={demoStartApproval.start} onResolve={() => {}} />
+      <StartApproval approval={demoStartSettingsApproval} start={demoStartSettingsApproval.start} onResolve={() => {}} />
       <HelperGrants list={async () => [{ id: 'ap-1', kind: 'codex', folder: '/home/dev/code/login-fix', remaining: 2 }]} revoke={async () => {}} refresh={0} />
       <DeviceRequest inline request={{ id: 'web-3fa9c1d24e5b6a70', name: 'Firefox · Linux', fingerprint: 'f947-3cb5-e304-81be-ecf2-64cd' }}
         machines={[{ id: 'laptop', name: 'laptop' }, { id: 'vps-1', name: 'vps-1' }]} onApprove={async () => true} onLater={() => {}} />

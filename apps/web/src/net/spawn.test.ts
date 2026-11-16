@@ -48,7 +48,7 @@ describe('agents that start agents', () => {
 
   it('reads a start request and leaves other approvals alone', () => {
     const detail = JSON.stringify({ kind: 'codex', folder: '/w', prompt: 'fix it', inside: true, worktree: false, depth: 1, grant_allowed: true });
-    expect(startRequest('agent.start', detail)).toEqual({ agent: '', agentKind: '', node: '', kind: 'codex', folder: '/w', prompt: 'fix it', inside: true, worktree: false, depth: 1, grantAllowed: true });
+    expect(startRequest('agent.start', detail)).toEqual({ agent: '', agentKind: '', node: '', kind: 'codex', folder: '/w', prompt: 'fix it', inside: true, worktree: false, depth: 1, grantAllowed: true, settings: [] });
     // A shell (or an older node) offers no grant.
     expect(startRequest('agent.start', JSON.stringify({ kind: 'shell', inside: true }))?.grantAllowed).toBe(false);
     expect(startRequest('shell', detail)).toBeUndefined();
@@ -79,5 +79,47 @@ describe('agents that start agents', () => {
     expect(await verify(m)).toBe(true);
     expect(await verify(await startSignedMessage('node-1', 'ap-1', true, 0, false, detail))).toBe(false);
     expect(await verify(await startSignedMessage('node-1', 'ap-1', true, 3, false, '{"prompt":"y"}'))).toBe(false);
+  });
+});
+
+// ADR-0066: a start request that lists settings (model, effort) is decided over `agora-approval-start-v2`.
+describe('settings on a start request', () => {
+  const vectors = JSON.parse(readFileSync('../../schema/fixtures/signing/approval-start-v2.json', 'utf8')) as { cases: { name: string; node: string; approval_id: string; approved: boolean; helper_grant: number; helpers_may_start: boolean; settings: [string, string][]; detail: string; hex: string }[] };
+
+  it('signs the vectors the node checks too', async () => {
+    for (const c of vectors.cases) {
+      const m = await startSignedMessage(c.node, c.approval_id, c.approved, c.helper_grant, c.helpers_may_start, c.detail);
+      expect(toHex(m), c.name).toBe(c.hex);
+    }
+  });
+
+  it('reads them from the detail for the card, in the order the node listed them', () => {
+    const detail = vectors.cases[0]!.detail;
+    const s = startRequest('agent.start', detail)?.settings;
+    expect(s).toEqual([{ id: 'model', label: 'setting-model', value: 'gpt-6.1-sol' }, { id: 'effort', label: 'setting-effort', value: 'high' }]);
+    expect(startRequest('agent.start', '{"kind":"codex"}')?.settings).toEqual([]);
+    // Not a list, or not strings: nothing to show and nothing to sign (the node reads them the same way).
+    expect(startRequest('agent.start', '{"settings":"x"}')?.settings).toEqual([]);
+    expect(startRequest('agent.start', '{"settings":[{"id":1,"value":{}}]}')?.settings).toEqual([{ id: '', label: '', value: '' }]);
+  });
+
+  it('is not the message of a request without settings, and changes with every setting, its order and its value', async () => {
+    const base = vectors.cases[0]!;
+    const sign = (detail: string) => startSignedMessage('n', 'ap', true, 0, false, detail).then((m) => new TextDecoder().decode(m));
+    const d = (settings: { id: string; value: string }[]) => JSON.stringify({ kind: 'codex', settings });
+    expect((await sign(d([]))).startsWith('agora-approval-start-v1')).toBe(true);
+    const one = await sign(d([{ id: 'model', value: 'a' }]));
+    expect(one.startsWith('agora-approval-start-v2')).toBe(true);
+    const all = new Set([
+      one,
+      await sign(d([{ id: 'model', value: 'b' }])),
+      await sign(d([{ id: 'model', value: 'a' }, { id: 'effort', value: 'low' }])),
+      await sign(d([{ id: 'effort', value: 'low' }, { id: 'model', value: 'a' }])),
+      await sign(d([{ id: 'modela', value: '' }])),
+    ]);
+    expect(all.size).toBe(5);
+    // Multi-byte text is counted in bytes, as the node does.
+    expect(await sign(d([{ id: 'model', value: 'é' }]))).toContain('5:model:2:é');
+    expect(base.settings.length).toBe(2);
   });
 });

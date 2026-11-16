@@ -1,0 +1,149 @@
+{
+ "about": "ADR-0066 agora-approval-start-v2: the signed bytes of a decision on an agent.start approval whose detail carries settings. `detail` is the request exactly as announced (hashed byte for byte, SHA-256, lowercase hex); `settings` are its `settings` entries (id, value), in the order the detail lists them. Checked by the node (crates/agora-node/src/approvals.rs) and the web window (apps/web/src/net/spawn.test.ts).",
+ "cases": [
+  {
+   "name": "approved",
+   "node": "laptop",
+   "approval_id": "ap-1",
+   "approved": true,
+   "helper_grant": 0,
+   "helpers_may_start": false,
+   "settings": [
+    [
+     "model",
+     "gpt-6.1-sol"
+    ],
+    [
+     "effort",
+     "high"
+    ]
+   ],
+   "detail": "{\"node\":\"laptop\",\"agent\":\"agent-1\",\"agent_kind\":\"claude\",\"kind\":\"codex\",\"folder\":\"/home/dev/code/login-fix\",\"inside\":true,\"worktree\":false,\"depth\":1,\"grant_allowed\":false,\"prompt\":\"Write tests.\",\"settings\":[{\"id\":\"model\",\"label\":\"setting-model\",\"value\":\"gpt-6.1-sol\"},{\"id\":\"effort\",\"label\":\"setting-effort\",\"value\":\"high\"}]}",
+   "hex": "61676f72612d617070726f76616c2d73746172742d7632006c6170746f700061702d3100310030003000323a353a6d6f64656c3a31313a6770742d362e312d736f6c3a363a6566666f72743a343a686967680037386439346433633335363036343966353037316438643935373764633235363665633638343665313065356338363437313135666339663931623535613233"
+  },
+  {
+   "name": "denied",
+   "node": "laptop",
+   "approval_id": "ap-1",
+   "approved": false,
+   "helper_grant": 0,
+   "helpers_may_start": false,
+   "settings": [
+    [
+     "model",
+     "gpt-6.1-sol"
+    ],
+    [
+     "effort",
+     "high"
+    ]
+   ],
+   "detail": "{\"node\":\"laptop\",\"agent\":\"agent-1\",\"agent_kind\":\"claude\",\"kind\":\"codex\",\"folder\":\"/home/dev/code/login-fix\",\"inside\":true,\"worktree\":false,\"depth\":1,\"grant_allowed\":false,\"prompt\":\"Write tests.\",\"settings\":[{\"id\":\"model\",\"label\":\"setting-model\",\"value\":\"gpt-6.1-sol\"},{\"id\":\"effort\",\"label\":\"setting-effort\",\"value\":\"high\"}]}",
+   "hex": "61676f72612d617070726f76616c2d73746172742d7632006c6170746f700061702d3100300030003000323a353a6d6f64656c3a31313a6770742d362e312d736f6c3a363a6566666f72743a343a686967680037386439346433633335363036343966353037316438643935373764633235363665633638343665313065356338363437313135666339663931623535613233"
+  },
+  {
+   "name": "approved, helpers may ask",
+   "node": "laptop",
+   "approval_id": "ap-2",
+   "approved": true,
+   "helper_grant": 0,
+   "helpers_may_start": true,
+   "settings": [
+    [
+     "model",
+     "gpt-6.1-sol"
+    ],
+    [
+     "effort",
+     "high"
+    ]
+   ],
+   "detail": "{\"node\":\"laptop\",\"agent\":\"agent-1\",\"agent_kind\":\"claude\",\"kind\":\"codex\",\"folder\":\"/home/dev/code/login-fix\",\"inside\":true,\"worktree\":false,\"depth\":1,\"grant_allowed\":false,\"prompt\":\"Write tests.\",\"settings\":[{\"id\":\"model\",\"label\":\"setting-model\",\"value\":\"gpt-6.1-sol\"},{\"id\":\"effort\",\"label\":\"setting-effort\",\"value\":\"high\"}]}",
+   "hex": "61676f72612d617070726f76616c2d73746172742d7632006c6170746f700061702d3200310030003100323a353a6d6f64656c3a31313a6770742d362e312d736f6c3a363a6566666f72743a343a686967680037386439346433633335363036343966353037316438643935373764633235363665633638343665313065356338363437313135666339663931623535613233"
+  },
+  {
+   "name": "detail with unicode NFC value",
+   "node": "laptop",
+   "approval_id": "ap-3",
+   "approved": true,
+   "helper_grant": 0,
+   "helpers_may_start": false,
+   "settings": [
+    [
+     "model",
+     "é"
+    ]
+   ],
+   "detail": "{\"kind\":\"codex\",\"prompt\":\"x\",\"settings\":[{\"id\":\"model\",\"label\":\"setting-model\",\"value\":\"é\"}]}",
+   "hex": "61676f72612d617070726f76616c2d73746172742d7632006c6170746f700061702d3300310030003000313a353a6d6f64656c3a323ac3a90037623662393934393839613030353862333836373064663731303265333537663531623230616465373537353863656637323037336438666364393962346434"
+  },
+  {
+   "name": "detail with unicode NFD value",
+   "node": "laptop",
+   "approval_id": "ap-3",
+   "approved": true,
+   "helper_grant": 0,
+   "helpers_may_start": false,
+   "settings": [
+    [
+     "model",
+     "é"
+    ]
+   ],
+   "detail": "{\"kind\":\"codex\",\"prompt\":\"x\",\"settings\":[{\"id\":\"model\",\"label\":\"setting-model\",\"value\":\"é\"}]}",
+   "hex": "61676f72612d617070726f76616c2d73746172742d7632006c6170746f700061702d3300310030003000313a353a6d6f64656c3a333a65cc810065396166383033653230633938313231663033376635323134656535306638396561326130653864356239343964623839333131393432393238336161393530"
+  },
+  {
+   "name": "detail with an empty value",
+   "node": "laptop",
+   "approval_id": "ap-3",
+   "approved": true,
+   "helper_grant": 0,
+   "helpers_may_start": false,
+   "settings": [
+    [
+     "model",
+     ""
+    ]
+   ],
+   "detail": "{\"kind\":\"codex\",\"prompt\":\"x\",\"settings\":[{\"id\":\"model\",\"label\":\"setting-model\",\"value\":\"\"}]}",
+   "hex": "61676f72612d617070726f76616c2d73746172742d7632006c6170746f700061702d3300310030003000313a353a6d6f64656c3a303a0066373766326365616166353738393535393761323232396466626265383435353339383864616234376530656133613636306338643539356563666261633962"
+  },
+  {
+   "name": "detail with a value of 129 bytes",
+   "node": "laptop",
+   "approval_id": "ap-3",
+   "approved": true,
+   "helper_grant": 0,
+   "helpers_may_start": false,
+   "settings": [
+    [
+     "model",
+     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ]
+   ],
+   "detail": "{\"kind\":\"codex\",\"prompt\":\"x\",\"settings\":[{\"id\":\"model\",\"label\":\"setting-model\",\"value\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}]}",
+   "hex": "61676f72612d617070726f76616c2d73746172742d7632006c6170746f700061702d3300310030003000313a353a6d6f64656c3a3132393a6161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161610037666631383162633737346161623732366639346637666366386335353932333233376264643734303162393966613335626162363164313832313737366165"
+  },
+  {
+   "name": "detail with the same id twice",
+   "node": "laptop",
+   "approval_id": "ap-3",
+   "approved": true,
+   "helper_grant": 0,
+   "helpers_may_start": false,
+   "settings": [
+    [
+     "model",
+     "a"
+    ],
+    [
+     "model",
+     "b"
+    ]
+   ],
+   "detail": "{\"kind\":\"codex\",\"prompt\":\"x\",\"settings\":[{\"id\":\"model\",\"label\":\"setting-model\",\"value\":\"a\"},{\"id\":\"model\",\"label\":\"setting-model\",\"value\":\"b\"}]}",
+   "hex": "61676f72612d617070726f76616c2d73746172742d7632006c6170746f700061702d3300310030003000323a353a6d6f64656c3a313a613a353a6d6f64656c3a313a620061363336616137616537616432636131326636373235613839616531306632623466316237346136613133396338303330643464393666343333303439663532"
+  }
+ ]
+}
