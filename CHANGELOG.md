@@ -30,6 +30,9 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 - macOS: a confined agent is not started when a file it may write also has another name elsewhere (a hard link made outside
   confinement), or when a save copy next to it (`state.json.tmp`) is such a link, since writing it would change that other file too; the message says to remove the link or put a copy in its place
   (#571). Such links inside a folder it may write are not looked for at each start.
+- `agora node untrust` that fails partway (for example a full disk) now leaves the device trusted, so you can run it again;
+  before, the device was removed but not remembered as revoked, and the hub could trust it again on its next reconnect.
+  `agora hub devices forget` on a device that is not revoked no longer deletes what endorses it.
 
 ### Agents working together
 - A task's title, detail and summary are limited to the same size as a message (16 KiB). They used to take about a megabyte each,
