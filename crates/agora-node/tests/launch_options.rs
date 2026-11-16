@@ -62,7 +62,10 @@ impl Env {
     /// A node whose policy file says `policy` (none: no policy file, the default).
     fn new(name: &str, policy: Option<&str>) -> Self {
         private_home::init();
-        let root = std::env::temp_dir().join(format!("launch-opt-{}-{name}", std::process::id()));
+        // Under the target folder, not the system temp folder: a confined node refuses to start an agent when its folder lies where agents
+        // may write (ADR-0082), and `/tmp` is such a place on Linux.
+        let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+            .join(format!("launch-opt-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("manifests")).unwrap();
         std::fs::create_dir_all(root.join("data")).unwrap();
