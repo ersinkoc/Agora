@@ -21,7 +21,7 @@
 //! answers tool content, only request ids.
 
 use std::collections::BTreeMap;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -42,6 +42,8 @@ pub const MAX_OUTAGE: Duration = Duration::from_secs(15 * 60);
 const HANDSHAKE_WAIT: Duration = Duration::from_secs(5);
 /// Sleeps are cut into slices of this length so the end of the client's input is noticed.
 const SLICE: Duration = Duration::from_millis(25);
+/// The most a peer may send as the answer to the replayed `initialize` before it is refused.
+const HANDSHAKE_MAX: usize = 1 << 20;
 
 /// The waits between connection attempts: doubling, capped.
 pub struct Backoff {
@@ -100,9 +102,11 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl Shared {
-    fn to_client(&self, line: &[u8]) -> bool {
+    /// Writes one line to the client. When the client's output is gone nothing is left to serve, so the bridge ends.
+    fn to_client(&self, line: &[u8]) {
         let mut out = lock(&self.out);
-        out.write_all(line)
+        let sent = out
+            .write_all(line)
             .and_then(|()| {
                 if line.ends_with(b"\n") {
                     Ok(())
@@ -111,7 +115,11 @@ impl Shared {
                 }
             })
             .and_then(|()| out.flush())
-            .is_ok()
+            .is_ok();
+        if !sent {
+            self.closed.store(true, Ordering::Release);
+            std::process::exit(0);
+        }
     }
 
     /// Answers a request the node will not: `mesh.unavailable`, a stable code the client's agent can read.
@@ -119,6 +127,24 @@ impl Shared {
         if let Message::Request { id, .. } = request {
             let err = app_error(id.clone(), &Error::new(ErrorCode::MeshUnavailable));
             self.to_client(to_line(&err).as_bytes());
+        }
+    }
+
+    /// Answers a JSON-RPC batch the node will not: a batch of one error per request in it, and nothing when it holds only
+    /// notifications (JSON-RPC 2.0, section 6).
+    fn refuse_batch(&self, items: &[serde_json::Value]) {
+        let errors: Vec<serde_json::Value> = items
+            .iter()
+            .filter_map(|item| match parse_line(&item.to_string()) {
+                Ok(Message::Request { id, .. }) => {
+                    let err = app_error(id, &Error::new(ErrorCode::MeshUnavailable));
+                    serde_json::from_str(&to_line(&err)).ok()
+                }
+                _ => None,
+            })
+            .collect();
+        if !errors.is_empty() {
+            self.to_client(serde_json::Value::Array(errors).to_string().as_bytes());
         }
     }
 
@@ -140,43 +166,78 @@ impl Shared {
     }
 }
 
-/// Connects to `path` and does what the client did at the start. `Err` is any failure: the caller waits and tries again.
-fn connect(path: &Path, hello: &Mutex<Hello>) -> std::io::Result<LocalStream> {
+/// Connects to `path` and does what the client did at the start. `Err` is any failure (or the client ending): the caller waits
+/// and tries again. The bytes the peer sent after its answer are returned with the stream, so none is lost. The answer is waited for
+/// at most [`HANDSHAKE_WAIT`] and read up to [`HANDSHAKE_MAX`], however the peer sends it, and the wait ends when the client does.
+fn connect(
+    path: &Path,
+    hello: &Mutex<Hello>,
+    closed: &AtomicBool,
+) -> std::io::Result<(LocalStream, Vec<u8>)> {
     let mut stream = agora_platform::local_connect(path)?;
     let (init, ready) = {
         let h = lock(hello);
         (h.initialize.clone(), h.initialized.clone())
     };
+    let mut rest = Vec::new();
     if let Some(init) = init {
-        stream.set_read_timeout(Some(HANDSHAKE_WAIT))?;
+        stream.set_read_timeout(Some(SLICE))?;
         stream.write_all(&init)?;
         stream.flush()?;
         // The answer belongs to a request the client already had answered: swallow it. Anything but a result means this is not
         // a node that took the handshake, so it is not trusted with the client's calls.
-        let mut answer = Vec::new();
-        let mut reader = BufReader::new(stream.try_clone()?);
-        reader.read_until(b'\n', &mut answer)?;
-        let ok = std::str::from_utf8(&answer)
+        let begun = Instant::now();
+        let mut got = Vec::new();
+        let mut chunk = [0u8; 4096];
+        let newline = loop {
+            if let Some(i) = got.iter().position(|b| *b == b'\n') {
+                break i;
+            }
+            if closed.load(Ordering::Acquire)
+                || begun.elapsed() >= HANDSHAKE_WAIT
+                || got.len() > HANDSHAKE_MAX
+            {
+                return Err(std::io::ErrorKind::TimedOut.into());
+            }
+            match stream.read(&mut chunk) {
+                Ok(0) => return Err(std::io::ErrorKind::UnexpectedEof.into()),
+                Ok(n) => got.extend_from_slice(&chunk[..n]),
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) => {}
+                Err(e) => return Err(e),
+            }
+        };
+        let ok = std::str::from_utf8(&got[..newline])
             .ok()
             .and_then(|t| parse_line(t.trim_end()).ok())
             .is_some_and(|m| matches!(m, Message::Response { .. }));
         if !ok {
             return Err(std::io::ErrorKind::InvalidData.into());
         }
+        rest = got.split_off(newline + 1);
         if let Some(ready) = ready {
             stream.write_all(&ready)?;
             stream.flush()?;
         }
         stream.set_read_timeout(None)?;
     }
-    Ok(stream)
+    Ok((stream, rest))
 }
 
 /// The reader of one bridge: lines from the node to the client, and the reconnecting when the node's end closes.
-fn read_node(shared: &Arc<Shared>, path: &Path, mut stream: LocalStream, mut generation: u64) {
+fn read_node(
+    shared: &Arc<Shared>,
+    path: &Path,
+    mut stream: LocalStream,
+    mut generation: u64,
+    mut rest: Vec<u8>,
+) {
     loop {
         if let Ok(clone) = stream.try_clone() {
-            let mut reader = BufReader::new(clone);
+            let mut reader = BufReader::new(Cursor::new(std::mem::take(&mut rest)).chain(clone));
             let mut line = Vec::new();
             loop {
                 line.clear();
@@ -194,19 +255,16 @@ fn read_node(shared: &Arc<Shared>, path: &Path, mut stream: LocalStream, mut gen
                         link.pending.remove(&id.to_string());
                     }
                 }
-                if !shared.to_client(&line) {
-                    // The client's output is gone: nothing left to serve.
-                    shared.closed.store(true, Ordering::Release);
-                    return;
-                }
+                shared.to_client(&line);
             }
         }
         shared.lost(generation);
         drop(stream);
         match reconnect(shared, path) {
-            Some((s, g)) => {
+            Some((s, g, r)) => {
                 stream = s;
                 generation = g;
+                rest = r;
             }
             None => return,
         }
@@ -214,7 +272,7 @@ fn read_node(shared: &Arc<Shared>, path: &Path, mut stream: LocalStream, mut gen
 }
 
 /// Tries until it connects, the client ends, or the outage passes its bound.
-fn reconnect(shared: &Arc<Shared>, path: &Path) -> Option<(LocalStream, u64)> {
+fn reconnect(shared: &Arc<Shared>, path: &Path) -> Option<(LocalStream, u64, Vec<u8>)> {
     let began = Instant::now();
     let mut backoff = Backoff::new(FIRST_DELAY, MAX_DELAY);
     loop {
@@ -230,15 +288,21 @@ fn reconnect(shared: &Arc<Shared>, path: &Path) -> Option<(LocalStream, u64)> {
         if shared.closed.load(Ordering::Acquire) {
             return None;
         }
-        if let Ok(stream) = connect(path, &shared.hello) {
+        if let Ok((stream, rest)) = connect(path, &shared.hello, &shared.closed) {
             let Ok(writer) = stream.try_clone() else {
                 continue;
             };
             let mut link = lock(&shared.link);
+            // The client may have ended while the handshake ran: `run` shuts the connection it finds, so one installed after that
+            // would never be shut.
+            if shared.closed.load(Ordering::Acquire) {
+                let _ = stream.shutdown();
+                return None;
+            }
             link.generation += 1;
             link.pending.clear();
             link.stream = Some(writer);
-            return Some((stream, link.generation));
+            return Some((stream, link.generation, rest));
         }
         if outage_over(began.elapsed(), MAX_OUTAGE) {
             // The client sees its server end; nothing here can serve it any more.
@@ -258,6 +322,11 @@ fn classify(line: &[u8]) -> Option<Message> {
 /// Sends the client's line to the node, or answers it with `mesh.unavailable` when there is no connection.
 fn to_node(shared: &Shared, line: &[u8]) {
     let msg = classify(line);
+    let batch: Option<Vec<serde_json::Value>> =
+        match (&msg, line.iter().find(|b| !b.is_ascii_whitespace())) {
+            (None, Some(b'[')) => serde_json::from_slice(line).ok(),
+            _ => None,
+        };
     match &msg {
         Some(Message::Request { method, .. }) if method == "initialize" => {
             lock(&shared.hello).initialize = Some(line.to_vec());
@@ -277,6 +346,7 @@ fn to_node(shared: &Shared, line: &[u8]) {
         }
         (writer, link.generation, tracked)
     };
+    let was_connected = writer.is_some();
     let sent = match writer {
         Some(mut w) => {
             let mut framed = line.to_vec();
@@ -301,9 +371,18 @@ fn to_node(shared: &Shared, line: &[u8]) {
             shared.refuse(m);
         }
     }
-    if let Some(s) = lock(&shared.link).stream.as_ref() {
-        // A failed write means this connection is finished: wake its reader so it reconnects.
-        let _ = s.shutdown();
+    if let Some(items) = &batch {
+        shared.refuse_batch(items);
+    }
+    if was_connected {
+        // A failed write means the connection written to is finished: wake its reader so it reconnects. A newer connection is not
+        // touched.
+        let link = lock(&shared.link);
+        if link.generation == generation {
+            if let Some(s) = link.stream.as_ref() {
+                let _ = s.shutdown();
+            }
+        }
     }
 }
 
@@ -329,7 +408,7 @@ fn run(
     });
     let reader = {
         let (shared, path): (Arc<Shared>, PathBuf) = (Arc::clone(&shared), path.to_path_buf());
-        std::thread::spawn(move || read_node(&shared, &path, first, 0))
+        std::thread::spawn(move || read_node(&shared, &path, first, 0, Vec::new()))
     };
     let mut input = BufReader::new(input);
     let mut line = Vec::new();
@@ -345,9 +424,12 @@ fn run(
         to_node(&shared, &line);
     }
     // The client hung up: stop reconnecting, close the connection so the reader wakes, and end.
-    shared.closed.store(true, Ordering::Release);
-    if let Some(s) = lock(&shared.link).stream.take() {
-        let _ = s.shutdown();
+    {
+        let mut link = lock(&shared.link);
+        shared.closed.store(true, Ordering::Release);
+        if let Some(s) = link.stream.take() {
+            let _ = s.shutdown();
+        }
     }
     let _ = reader.join();
     ExitCode::SUCCESS

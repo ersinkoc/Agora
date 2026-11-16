@@ -59,12 +59,12 @@ Whatever connects to a socket is that agent as far as the broker is concerned, s
 agent's process. `agora mesh stdio --socket PATH` is what an agent's MCP client runs as its server: it carries stdin/stdout to
 that socket. The bridge survives its connection ending (ADR-0075 decision 6; the node re-executing or restarting leaves the
 socket path the same): it answers each request in flight, and each request that arrives while it has no connection, at once with a
-JSON-RPC error `-32000` whose `data` is `{ "code": "mesh.unavailable", "params": {} }` (the agent may repeat the call), keeps its
+JSON-RPC error `-32000` whose `data` is `{ "code": "mesh.unavailable", "params": {} }` (the agent may repeat the call; a JSON-RPC batch gets a batch of such errors, one per request in it, and notifications get no answer), keeps its
 stdout open so the client's session stays, and reconnects to the same path with a wait that doubles from 50 ms to 2 s. A new
 connection starts uninitialized on the node, so the bridge replays the client's own `initialize` request (and its
 `notifications/initialized`) and discards the answer, exactly as at start; it carries nothing else over, and a peer that does not
 answer `initialize` with a result is not given the client's calls. It retries while its client keeps stdin open and gives up (exit 1)
-after 15 minutes without a connection. A bridge started by an older version does not do this and ends with its connection. The node
+after 15 minutes without a connection. The bridge ends when its client's output closes. A bridge started by an older version does not do this and ends with its connection. The node
 side is unchanged: the endpoint's owner-only access (and, on Windows, the per-agent identity) applies to every new connection.
 The node registers the agent on start, keeps its state current for `agents_list`, and on stop or exit
 unregisters it, which gives back its tasks, leases and open asks and closes the endpoint. Pending `ask`s are answered on the
