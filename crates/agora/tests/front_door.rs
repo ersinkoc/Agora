@@ -302,18 +302,26 @@ fn status_says_not_connected_while_the_hub_refuses_the_node() {
     let (code, out, err) = run(&home, &[]);
     assert_eq!(code, 0, "{out}{err}");
     let mut last = String::new();
+    let hub = format!("not connected to wss://127.0.0.1:{port}");
     wait_for(
-        "status to name the refusal",
+        "status to say not connected",
         Duration::from_secs(60),
         || {
             last = run(&home, &["status"]).1;
-            last.contains("The node is running (process") && last.contains("nothing is listening")
+            last.contains("The node is running (process") && last.contains(&hub)
         },
     );
-    assert!(
-        last.contains(&format!("not connected to wss://127.0.0.1:{port}")),
-        "{last}"
-    );
+    // The reason is shown once a dial has failed; Windows words a refusal differently from Unix, so only there it is not pinned.
+    if !cfg!(windows) {
+        wait_for(
+            "status to name the refusal",
+            Duration::from_secs(30),
+            || {
+                last = run(&home, &["status"]).1;
+                last.contains("nothing is listening")
+            },
+        );
+    }
     assert!(
         !last.contains("connected to wss://") || last.contains("not connected to wss://"),
         "{last}"
