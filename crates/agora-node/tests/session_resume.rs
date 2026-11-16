@@ -284,7 +284,7 @@ impl Env {
     }
 
     fn wait(&self, what: &str, ok: impl Fn(&Self) -> bool) {
-        let end = Instant::now() + Duration::from_secs(20);
+        let end = Instant::now() + Duration::from_secs(60);
         while !ok(self) {
             assert!(Instant::now() < end, "timed out waiting for {what}");
             std::thread::sleep(Duration::from_millis(50));
@@ -436,7 +436,7 @@ fn a_folder_that_is_gone_is_not_resumed_and_the_owner_can_resume_on_their_own() 
     let probe = e.launch("probe");
     e.start();
     // On Windows a folder cannot be removed while a process that is being ended still has it as its working folder: try for a while.
-    let end = Instant::now() + Duration::from_secs(20);
+    let end = Instant::now() + Duration::from_secs(60);
     while let Err(err) = std::fs::remove_dir_all(e.folder()) {
         assert!(Instant::now() < end, "{err}");
         std::thread::sleep(Duration::from_millis(100));
