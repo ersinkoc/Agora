@@ -25,7 +25,7 @@ it is.
 kind = "example-agent"          # stable id, lowercase, used in protocol and UI
 display_name = "Example Agent"  # brand name, not translated
 version = "2026.11.06.1"        # manifest version
-min_engine = 2                  # 2 when the manifest has [[launch.option]] (ADR-0059); 1 otherwise
+min_engine = 2                  # 3 with [[launch.setting]] (ADR-0066), 2 with [[launch.option]] (ADR-0059); 1 otherwise
 
 [process]
 names = ["example-agent", "exa"]        # foreground process names
@@ -38,6 +38,14 @@ id = "skip-permissions"                 # what a start names and a device signs:
 label = "option-skip-permissions"       # Fluent message id the windows show
 args = ["--dangerously-skip-permissions"]   # added to the launch command (or the ACP server command)
 skips_permissions = true                # the agent acts without asking; default false
+
+# ADR-0066: values chosen when an agent starts (see "Launch settings" below).
+[[launch.setting]]
+id = "effort"                           # same rules as an option id, and never one an option has
+label = "setting-effort"                # Fluent message id the windows show
+args = ["--effort", "{value}"]          # `{value}` is replaced by the chosen value, inside that argument
+values = ["low", "medium", "high"]      # optional: the values a start may choose; empty means any plain value
+default = "medium"                      # optional: what the tool uses when nothing is chosen (display only)
 
 [accounts]
 config_dir_env = "EXAMPLE_HOME"         # lets the node isolate multiple accounts
@@ -144,6 +152,28 @@ require (`contains` in the rule, `all` or `any`), and the top-level
 Enter on a helper's first prompt the node needs both, with the box holding exactly that prompt. The `typed.screen` fixtures are
 constructed from the captured idle screens with text in the box (a capture of that moment is not kept); the test checks that
 `[[typed]]` matches them and nothing else and that `input_box` reads exactly the typed text.
+
+## Launch settings (ADR-0066)
+
+`[[launch.setting]]` (engine 3) declares a value chosen when an agent starts: `model`, `effort`, `mode` or another id. A start gives
+`(id, value)` pairs (`AgentStart`/`AgentLaunch.settings`); the node checks each against its own manifest and adds the setting's `args`,
+with every `{value}` replaced by the value, after the options' arguments, in the manifest's order (so wherever the options go: the
+launch command, or the end of `[structured] acp.argv`). The window gets the id, the label, the listed values and the default
+(`AgentKind.settings`), never the arguments.
+
+The value is never put through a shell and can never become a flag or a second argument: it must be a plain value (an ASCII letter
+or digit first, then letters, digits and `. _ : / @ + -`, at most 128), and one of `values` when the manifest lists them; otherwise
+`agent.setting_invalid {kind, setting}` and nothing starts. A setting the manifest does not declare, or one named twice, is
+`agent.setting_unknown {kind, setting}`.
+
+Validation: at most 8 settings; ids follow the option id rules and never repeat an option's id; `label` a Fluent message id (the
+shipped manifests' labels must be in `locales/en/web.ftl` and `tui.ftl`, checked by `shipped_manifests.rs`); `args` from one to eight
+non-empty arguments without NUL, at least one with `{value}`, none a known "do not ask" spelling; at most 32 `values`, each a plain
+value and none repeated; `default` one a start could choose; unknown keys are an error. The shipped Claude Code and Codex manifests
+declare `model` and `effort`, checked against those tools' own `--help`.
+
+A setting chosen at the start lasts while the node runs (a restart after a crash keeps it). It is not in the session ledger, so an
+agent resumed after the node itself restarted (ADR-0060) starts with the tool's defaults, as its launch options do.
 
 ## Launch options (ADR-0059)
 

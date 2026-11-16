@@ -47,6 +47,7 @@ tui-no-project = (no project)
 tui-hint-answer = Press y to allow, n to deny the first request above.
 tui-allowed = Allowed.
 tui-denied = Denied.
+tui-not-trusted-at = This device is not trusted by that machine yet. On that machine, in the folder of { $binary }, run: ./agora node trust { $id } { $key }   (.\agora.exe on Windows). Or press a to ask another device of yours to approve this one (fingerprint { $fingerprint }).
 tui-not-trusted = This device is not trusted by that machine yet. On that machine run: agora node trust { $id } { $key }   (if `agora` is not found there, run it in the folder of the agora program: ./agora, or .\agora.exe on Windows). Or press a to ask another device of yours to approve this one (fingerprint { $fingerprint }).
 tui-device-name = Terminal on { $host }
 tui-device-asked = Asked. Approve this terminal ({ $fingerprint }) on another device of yours that your machines trust: in the window, or with v in its terminal client.
@@ -88,6 +89,7 @@ tui-send-failed = Could not send it ({ $code }).
 tui-start-pick = Start which agent on { $machine }? Press its number, any other key cancels.
 tui-start-item = { $n }  { $name }
 tui-start-none = No agent is installed on { $machine }.
+tui-start-missing-item = { $name } (`{ $program }`)
 tui-start-missing = Not found on this machine: { $names }. The machine cannot find their programs in its PATH. Install them there, or start the node from a terminal where they run.
 tui-start-nowhere = No machine with a project is online.
 tui-started = Started { $agent }.
@@ -151,6 +153,8 @@ tui-resume-still-running = Its process from before the restart is still running.
 
 # ADR-0059: launch options (manifest `[[launch.option]]` labels)
 option-skip-permissions = Don't ask
+setting-model = Model
+setting-effort = Effort
 option-ask = Ask before acting
 tui-start-acts = How should it act? Press its number; Enter or any other key asks before acting.
 tui-start-confirm-skip = Let the agent act without asking? With "{ $name }" it runs commands and changes files without asking you first, for as long as it runs. Press y to start without asking; any other key keeps asking.

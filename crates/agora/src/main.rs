@@ -160,6 +160,8 @@ pub(crate) struct Opts {
     ui: Option<String>,
     /// ADR-0062 item 4: `agora --resume ask|auto [--save]` and `agora node run --resume auto`.
     resume: Option<String>,
+    /// ADR-0066: `agora agent start KIND --setting id=value` (repeatable).
+    settings: Vec<String>,
     save: bool,
     positional: Vec<String>,
 }
@@ -219,6 +221,7 @@ fn parse(args: &[String]) -> Option<Opts> {
             "--replace" => o.replace = true,
             "--ui" => o.ui = Some(it.next()?.clone()),
             "--resume" => o.resume = Some(it.next()?.clone()),
+            "--setting" => o.settings.push(it.next()?.clone()),
             "--save" => o.save = true,
             s if s.starts_with("--") => return None,
             _ => o.positional.push(a.clone()),
@@ -318,6 +321,14 @@ fn main() -> ExitCode {
         ["adapter", "update"] => adaptercmd::update(&say, &opts),
         ["password", op @ ("set" | "clear" | "status")] => hubcli::password(&say, &opts, op),
         ["hub", "run"] => hubcli::hub_run(&say, &opts),
+        // A machine that does not run the hub (no hub folder) gets that said, not the database error these commands would hit.
+        // The commands that create the hub folder themselves (`code`, `login`, `user`, `prices`, `ssh`, `notify`, `backup`,
+        // `restore`) are not listed.
+        ["hub", "fingerprint" | "audit" | "devices" | "machines"]
+            if !hubcli::hub_dir(&opts).is_dir() =>
+        {
+            hubcli::not_here(&say, &opts)
+        }
         ["hub", "code"] => hubcli::hub_code(&say, &opts),
         ["hub", "fingerprint"] => hubcli::hub_fingerprint(&say, &opts),
         ["hub", "login"] => hubcli::hub_login(&say, &opts),
@@ -422,6 +433,7 @@ fn doctor(say: &Say, o: &Opts) -> ExitCode {
             ("manifests", _) => key!("doctor-manifests"),
             ("agent-installed", _) => key!("doctor-agent-installed"),
             ("agent-missing", _) => key!("doctor-agent-missing"),
+            ("manifest-older", _) => key!("doctor-manifest-older"),
             ("policy-path-dropped", _) => key!("doctor-policy-path-dropped"),
             ("policy-path-missing", _) => key!("doctor-policy-path-missing"),
             ("policy-restart", _) => key!("doctor-policy-restart"),
@@ -644,6 +656,21 @@ fn agent_start(say: &Say, o: &Opts) -> ExitCode {
         say.err(key!("cli-usage"), &[]);
         return ExitCode::from(2);
     };
+    // ADR-0066: `id=value` each; the node checks the id and the value against its manifest.
+    let Some(settings) = o
+        .settings
+        .iter()
+        .map(|s| {
+            s.split_once('=').map(|(id, value)| v1::LaunchSetting {
+                id: id.to_string(),
+                value: value.to_string(),
+            })
+        })
+        .collect::<Option<Vec<_>>>()
+    else {
+        say.err(key!("cli-bad-arguments"), &[]);
+        return ExitCode::from(2);
+    };
     let mut c = match connect(say, o) {
         Ok(c) => c,
         Err(code) => return code,
@@ -662,6 +689,7 @@ fn agent_start(say: &Say, o: &Opts) -> ExitCode {
         authorization: None,
         launch_options: Vec::new(),
         confirmed_launch_options: Vec::new(),
+        settings,
     });
     match call(say, &mut c, cmd) {
         Ok(v1::CommandOk {

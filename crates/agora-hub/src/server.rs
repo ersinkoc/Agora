@@ -245,6 +245,7 @@ where
     let verifies_devices = welcome.capabilities.iter().any(|c| c == "device.trust");
     let (registration, commands, generation) =
         hub.node_link_opened(node_id, welcome.capabilities, now_ms());
+    let load = registration.load();
     // ADR-0061: a node that verifies endorsements gets every one it may have missed while it was away, and every revocation.
     if verifies_devices {
         give_device_changes(hub, node_id);
@@ -253,7 +254,7 @@ where
     // A certificate revoked while the connection is open ends it here, inside the conversation, so the end below still records the
     // node offline (it used to be cancelled from outside, and a revoked machine stayed online in every view).
     let result = tokio::select! {
-        r = stream_events(conn, &mut session, hub, node_id, commands, silence, &mut last_heard) => r,
+        r = stream_events(conn, &mut session, hub, node_id, (commands, &load), silence, &mut last_heard) => r,
         () = still(valid) => Err(revoked()),
     };
     // However it ended, the router now knows this node is not connected (commands to it fail with `node.offline` at once), unless
@@ -288,7 +289,11 @@ async fn stream_events<S>(
     session: &mut NodeSession<'_, crate::store::SqliteStore>,
     hub: &Arc<Hub>,
     node_id: &str,
-    mut commands: tokio::sync::mpsc::UnboundedReceiver<crate::router::ToNode>,
+    // The commands queued for this node, and the connection's count of them (`GET /api/metrics`).
+    (mut commands, load): (
+        tokio::sync::mpsc::UnboundedReceiver<crate::router::ToNode>,
+        &crate::router::LinkLoad,
+    ),
     silence: Duration,
     last_heard: &mut tokio::time::Instant,
 ) -> Result<(), ServeError>
@@ -326,9 +331,11 @@ where
             Some(to_node) = commands.recv() => {
                 match to_node {
                     crate::router::ToNode::Command { request, reply, stream } => {
+                        load.queued.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                         waiting.retain(|_, s| !s.is_closed());
                         let payload = request.encode_to_vec();
                         waiting.insert(request.request_id.clone(), reply);
+                        load.unanswered.store(waiting.len(), std::sync::atomic::Ordering::Relaxed);
                         put(conn, &frame(stream, 0, payload), silence).await?;
                     }
                     crate::router::ToNode::Close { stream } => {
@@ -422,6 +429,8 @@ where
                             if let Some(reply) = waiting.remove(&resp.request_id) {
                                 let _ = reply.send(resp);
                             }
+                            load.unanswered
+                                .store(waiting.len(), std::sync::atomic::Ordering::Relaxed);
                         }
                     }
                     // Terminal frames of a relayed subscription: passed to the client, never stored or decoded.
@@ -761,6 +770,8 @@ where
                 conn.send(&frame(rf.stream, rf.kind, rf.payload)).await?;
                 continue;
             }
+            // A node answered: sent at the top of the loop, now (`answer_ready`).
+            () = an_answer(inflight) => continue,
         };
         match received {
             Ok(Ok(Some(f))) => match (f.stream_id, f.kind) {
@@ -815,9 +826,33 @@ struct Inflight {
     /// A terminal subscription: the stream on the node's connection that was reserved for it.
     relay: Option<u32>,
     reply: tokio::sync::oneshot::Receiver<v1::CommandResponse>,
+    /// The answer [`an_answer`] already took from `reply` (a oneshot gives it once), for [`answer_ready`] to send.
+    answered: Option<Result<v1::CommandResponse, tokio::sync::oneshot::error::RecvError>>,
     deadline: tokio::time::Instant,
     /// The audit row that says this command is on its way (ADR-0049); finished when the answer comes.
     audit: Option<i64>,
+}
+
+/// Resolves when a command on its way has its answer (or lost its node), keeping it in [`Inflight::answered`]: a client gets an
+/// answer as soon as the node gives it. Before, answers waited for the loop's next tick ([`PUSH`]): every command's round trip was
+/// at least 20 ms (architecture review R5 measurement, `tests/flood_latency.rs`).
+fn an_answer(inflight: &mut [Inflight]) -> impl std::future::Future<Output = ()> + '_ {
+    std::future::poll_fn(move |cx| {
+        let mut any = false;
+        for i in inflight.iter_mut().filter(|i| i.answered.is_none()) {
+            if let std::task::Poll::Ready(r) =
+                std::future::Future::poll(std::pin::Pin::new(&mut i.reply), cx)
+            {
+                i.answered = Some(r);
+                any = true;
+            }
+        }
+        if any {
+            std::task::Poll::Ready(())
+        } else {
+            std::task::Poll::Pending
+        }
+    })
 }
 
 /// Who is asking and what they may reach (ADR-0049).
@@ -848,95 +883,71 @@ where
             .await?;
         return Ok(());
     }
-    // ADR-0049: a viewer's commands stop here, before any node hears of them. (The node still decides what its devices may do.)
-    let may = req.command.as_ref().is_some_and(|c| {
-        (who.role != crate::users::Role::Viewer || crate::users::viewer_may(c))
-            && scope.is_none_or(|s| s.command_allowed(&req.target_node, c))
-    });
-    if !may {
-        let action = command_name(&req);
-        audit(hub, who, &action, &req.target_node, "auth.forbidden");
-        conn.send(&frame(
-            STREAM_COMMANDS,
-            1,
-            refuse(Error::new(ErrorCode::AuthForbidden).with("action", action.as_str()))
-                .encode_to_vec(),
-        ))
-        .await?;
-        return Ok(());
-    }
-    // ADR-0053: the hub forgets a closed agent. It names the agent by its hub-wide key, so it names no node.
-    if let Some(command_request::Command::AgentForget(f)) = &req.command {
-        let node = f.agent_id.split('/').next().unwrap_or_default().to_string();
-        let resp = if req.target_node.is_empty() {
-            match hub.forget_agent(&f.agent_id, now_ms()) {
+    // Who may do what is decided apart from the transport (R9, `dispatch.rs`); here only what the answer says is done.
+    let ok_empty = |request_id: String| v1::CommandResponse {
+        request_id,
+        result: Some(command_response::Result::Ok(v1::CommandOk {
+            result: Some(command_ok::Result::Empty(v1::Empty {})),
+        })),
+    };
+    let resp = match crate::dispatch::route(who, scope, &req) {
+        crate::dispatch::Route::Forward => None,
+        crate::dispatch::Route::Forbidden { action } => {
+            audit(hub, who, &action, &req.target_node, "auth.forbidden");
+            Some(refuse(
+                Error::new(ErrorCode::AuthForbidden).with("action", action.as_str()),
+            ))
+        }
+        crate::dispatch::Route::TargetNotAllowed => Some(refuse(
+            Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "target_node"),
+        )),
+        // ADR-0053: the hub forgets a closed agent. It names the agent by its hub-wide key, so it names no node.
+        crate::dispatch::Route::ForgetAgent { agent_id, node } => {
+            Some(match hub.forget_agent(&agent_id, now_ms()) {
                 Ok(()) => {
                     audit(hub, who, "agent.forget", &node, "ok");
-                    v1::CommandResponse {
-                        request_id: client_request_id,
-                        result: Some(command_response::Result::Ok(v1::CommandOk {
-                            result: Some(command_ok::Result::Empty(v1::Empty {})),
-                        })),
-                    }
+                    ok_empty(client_request_id.clone())
                 }
                 Err(e) => {
                     audit(hub, who, "agent.forget", &node, e.code.as_str());
                     refuse(e)
                 }
+            })
+        }
+        // ADR-0073: the hub forgets an offline machine (owner only, decided in `dispatch`).
+        crate::dispatch::Route::ForgetNodeForbidden { node_id } => {
+            audit(hub, who, "node.forget", &node_id, "auth.forbidden");
+            Some(refuse(
+                Error::new(ErrorCode::AuthForbidden).with("action", "node.forget"),
+            ))
+        }
+        crate::dispatch::Route::ForgetNode {
+            node_id,
+            refuse_return,
+        } => Some(match hub.forget_node(&node_id, refuse_return, now_ms()) {
+            Ok(()) => {
+                let outcome = if refuse_return {
+                    "ok refused_return"
+                } else {
+                    "ok"
+                };
+                audit(hub, who, "node.forget", &node_id, outcome);
+                ok_empty(client_request_id.clone())
             }
-        } else {
-            refuse(Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "target_node"))
-        };
-        conn.send(&frame(STREAM_COMMANDS, 1, resp.encode_to_vec()))
-            .await?;
-        return Ok(());
-    }
-    // ADR-0073: the hub forgets an offline machine. Owner only (machines belong to the owner, not to a project); it names the machine
-    // in the command, not as the target.
-    if let Some(command_request::Command::NodeForget(f)) = &req.command {
-        let resp = if !req.target_node.is_empty() {
-            refuse(Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "target_node"))
-        } else if who.role != crate::users::Role::Owner {
-            audit(hub, who, "node.forget", &f.node_id, "auth.forbidden");
-            refuse(Error::new(ErrorCode::AuthForbidden).with("action", "node.forget"))
-        } else {
-            match hub.forget_node(&f.node_id, f.refuse_return, now_ms()) {
-                Ok(()) => {
-                    let outcome = if f.refuse_return {
-                        "ok refused_return"
-                    } else {
-                        "ok"
-                    };
-                    audit(hub, who, "node.forget", &f.node_id, outcome);
-                    v1::CommandResponse {
-                        request_id: client_request_id,
-                        result: Some(command_response::Result::Ok(v1::CommandOk {
-                            result: Some(command_ok::Result::Empty(v1::Empty {})),
-                        })),
-                    }
-                }
-                Err(e) => {
-                    audit(hub, who, "node.forget", &f.node_id, e.code.as_str());
-                    refuse(e)
-                }
+            Err(e) => {
+                audit(hub, who, "node.forget", &node_id, e.code.as_str());
+                refuse(e)
             }
-        };
-        conn.send(&frame(STREAM_COMMANDS, 1, resp.encode_to_vec()))
-            .await?;
-        return Ok(());
-    }
-    // Answered by the hub itself from its own view and prices (ADR-0033); it names no node.
-    if matches!(req.command, Some(command_request::Command::UsageReport(_))) {
-        let resp = if req.target_node.is_empty() {
-            v1::CommandResponse {
-                request_id: client_request_id,
-                result: Some(command_response::Result::Ok(v1::CommandOk {
-                    result: Some(command_ok::Result::UsageReport(hub.usage_report())),
-                })),
-            }
-        } else {
-            refuse(Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "target_node"))
-        };
+        }),
+        // Answered by the hub itself from its own view and prices (ADR-0033); it names no node.
+        crate::dispatch::Route::UsageReport => Some(v1::CommandResponse {
+            request_id: client_request_id.clone(),
+            result: Some(command_response::Result::Ok(v1::CommandOk {
+                result: Some(command_ok::Result::UsageReport(hub.usage_report())),
+            })),
+        }),
+    };
+    if let Some(resp) = resp {
         conn.send(&frame(STREAM_COMMANDS, 1, resp.encode_to_vec()))
             .await?;
         return Ok(());
@@ -1013,6 +1024,7 @@ where
             node,
             relay,
             reply,
+            answered: None,
             deadline: tokio::time::Instant::now() + COMMAND_DEADLINE,
             audit: None,
         })
@@ -1050,7 +1062,12 @@ where
     let mut i = 0;
     while i < inflight.len() {
         let item = &mut inflight[i];
-        let resp = match item.reply.try_recv() {
+        let got = match item.answered.take() {
+            Some(Ok(r)) => Ok(r),
+            Some(Err(_)) => Err(TryRecvError::Closed),
+            None => item.reply.try_recv(),
+        };
+        let resp = match got {
             Ok(mut r) => {
                 r.request_id.clone_from(&item.client_request_id);
                 Some(r)
@@ -1622,12 +1639,7 @@ fn audit_action(req: &v1::CommandRequest) -> String {
     }
 }
 
-/// The command's schema name (`AgentStop`), for an error that names what was refused.
-fn command_name(req: &v1::CommandRequest) -> String {
-    let dbg = format!("{:?}", req.command);
-    let inner = dbg.strip_prefix("Some(").unwrap_or(&dbg);
-    inner.split('(').next().unwrap_or("").to_string()
-}
+use crate::dispatch::command_name;
 
 fn error_response(request_id: &str, e: &Error) -> v1::CommandResponse {
     v1::CommandResponse {
@@ -1893,6 +1905,7 @@ mod audit_cleanup_tests {
             relay: None,
             audit: Some(audit),
             reply,
+            answered: None,
             deadline,
         };
         // answer_ready uses swap_remove: a completed first request moves the newest one in front of an older pending request.
