@@ -2714,3 +2714,201 @@ async fn a_machines_user_name_in_its_binary_path_reaches_only_the_owner() {
         leaks.len()
     );
 }
+
+// #629 cross-review (linux Codex, P2): a history stored before the session refused cross-node records. The rebuilt view reads them
+// safely; a reconnecting client must not be handed their stored bodies, and one that applied them before reconnecting is healed.
+const SAFE_CHECKPOINT: u64 = 3;
+const LAST_FORGED: u64 = 6;
+
+fn seed_legacy(store: &SqliteStore, forged: bool) {
+    let seed = |producer: &str, seq: u64, body: Body| {
+        store
+            .append(producer, seq, seq, &event(producer, seq, body))
+            .unwrap();
+    };
+    seed("n1", 1, online("n1"));
+    seed("n1", 2, agent("n1", "a"));
+    seed("n2", 1, online("n2"));
+    if forged {
+        // Bytes the pre-fix session accepted and stored (the new one refuses them, so they go in through storage).
+        seed(
+            "n2",
+            2,
+            Body::AgentForgotten(v1::AgentForgotten {
+                agent_id: "n1/a".into(),
+            }),
+        );
+        seed(
+            "n2",
+            3,
+            Body::NodeResources(v1::NodeResources {
+                node_id: "n1".into(),
+                agents_running: 99,
+                ..Default::default()
+            }),
+        );
+        seed(
+            "n2",
+            4,
+            Body::CheckoutDiscovered(v1::CheckoutDiscovered {
+                checkout_id: "forged".into(),
+                node_id: "n1".into(),
+                project_id: "p".into(),
+                path: "/fixture".into(),
+            }),
+        );
+    } else {
+        seed("n2", 2, working("a"));
+    }
+}
+
+fn legacy_state(forged: bool, auth: Box<dyn ClientAuth + Send + Sync>) -> Arc<ServerState> {
+    let store = SqliteStore::open_in_memory().unwrap();
+    seed_legacy(&store, forged);
+    Arc::new(ServerState {
+        // Opening records the machines offline for old clients: hub-written `NodeOffline` events after the stored ones.
+        hub: Arc::new(Hub::open_at(store, 100).unwrap()),
+        support: support(),
+        ca: None,
+        lockout: Arc::new(Lockout::new()),
+        auth,
+        assets: None,
+        sessions: None,
+    })
+}
+
+async fn subscribe_after(
+    addr: std::net::SocketAddr,
+    after: Option<u64>,
+) -> (Conn<TcpStream>, Frame) {
+    let mut c = dial(addr, Some("good-token")).await;
+    c.send(&f(
+        STREAM_EVENTS,
+        kinds::SUBSCRIBE,
+        v1::Subscribe { after_pos: after }.encode_to_vec(),
+    ))
+    .await
+    .unwrap();
+    let first = recv(&mut c).await;
+    (c, first)
+}
+
+#[tokio::test]
+async fn a_reconnecting_client_is_never_replayed_a_record_the_session_would_now_refuse() {
+    let st = legacy_state(true, Box::new(Tokens));
+    let (view, end) = st.hub.view();
+    assert_eq!(end, 10, "three stored, three forged, four hub-written");
+    // The safe projection the replay must agree with.
+    assert!(!view.agents["n1/a"].forgotten);
+    assert_eq!(view.nodes["n1"].agents_running, 0);
+    assert_eq!(view.checkouts["n2/forged"].0, "n2");
+    let addr = start(Arc::clone(&st)).await;
+
+    let (_fresh, first) = subscribe_after(addr, None).await;
+    assert_eq!(first.kind, kinds::SNAPSHOT);
+    let fresh = v1::Snapshot::decode(first.payload.as_slice()).unwrap();
+    assert!(fresh
+        .agents
+        .iter()
+        .any(|a| a.agent_id == "n1/a" && a.running));
+
+    // Before the bad records, and on the last of them (a client that applied them live and reconnects with nothing missing): each
+    // gets the clean snapshot, which equals the fresh one.
+    for after in [SAFE_CHECKPOINT, LAST_FORGED] {
+        let (_c, first) = subscribe_after(addr, Some(after)).await;
+        assert_eq!(first.kind, kinds::SNAPSHOT, "resume after {after}");
+        let resumed = v1::Snapshot::decode(first.payload.as_slice()).unwrap();
+        assert_eq!(resumed, fresh, "resume after {after}");
+    }
+}
+
+#[tokio::test]
+async fn events_from_a_hub_that_opened_over_such_history_replay_once_the_client_has_its_clean_snapshot(
+) {
+    let st = legacy_state(true, Box::new(Tokens));
+    let addr = start(Arc::clone(&st)).await;
+    // The snapshot is at the end of the log; a live event after it reaches the client as an ordinary event, and a client that
+    // reconnects after it resumes by replay: the barrier is behind it.
+    let (mut node, _t) = node_conn(&st, "n1").await;
+    handshake(&mut node).await;
+    node.send(&f(
+        STREAM_EVENTS,
+        kinds::EVENT,
+        event("n1", 3, working("a")),
+    ))
+    .await
+    .unwrap();
+    next_ack(&mut node).await;
+    let (_c, first) = subscribe_after(addr, Some(LAST_FORGED)).await;
+    assert_eq!(
+        first.kind,
+        kinds::SNAPSHOT,
+        "a client at the last refused record may hold a forgery, so it is healed"
+    );
+    // Position 7 is the hub's own first record after opening: nothing a client could have had from before.
+    let (_c, first) = subscribe_after(addr, Some(LAST_FORGED + 1)).await;
+    assert!(
+        first.kind == kinds::POSITIONED_EVENT,
+        "a client past the barrier replays, got kind {}",
+        first.kind
+    );
+}
+
+#[tokio::test]
+async fn a_history_with_no_refused_records_replays_unchanged_including_the_hubs_own_events() {
+    let st = legacy_state(false, Box::new(Tokens));
+    let (_, end) = st.hub.view();
+    assert_eq!(end, 8, "four stored, four hub-written");
+    let addr = start(Arc::clone(&st)).await;
+    // A checkpoint inside the stored events and one on the hub's own `NodeOffline`: both replay, never a snapshot.
+    for after in [SAFE_CHECKPOINT, 5] {
+        let (mut c, first) = subscribe_after(addr, Some(after)).await;
+        let mut seen = Vec::new();
+        let mut fr = first;
+        loop {
+            assert_eq!(fr.kind, kinds::POSITIONED_EVENT, "resume after {after}");
+            let p = v1::PositionedEvent::decode(fr.payload.as_slice()).unwrap();
+            seen.push((p.pos, p.event.unwrap()));
+            if p.pos == end {
+                break;
+            }
+            fr = recv(&mut c).await;
+        }
+        assert_eq!(seen[0].0, after + 1);
+        let offline: Vec<_> = seen
+            .iter()
+            .filter(|(_, e)| e.producer_id == "hub" && matches!(e.body, Some(Body::NodeOffline(_))))
+            .map(|(pos, _)| *pos)
+            .collect();
+        assert!(
+            !offline.is_empty(),
+            "the hub's own NodeOffline events are delivered: {seen:?}"
+        );
+        // Same-node events arrive with the body they were stored with.
+        if after == SAFE_CHECKPOINT {
+            assert!(matches!(
+                &seen[0].1.body,
+                Some(Body::AgentStateChanged(e)) if e.agent_id == "a"
+            ));
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_scoped_client_reconnecting_over_such_history_gets_a_clean_cut_snapshot() {
+    let st = legacy_state(true, Box::new(Scoped));
+    let addr = start(Arc::clone(&st)).await;
+    for after in [Some(SAFE_CHECKPOINT), Some(LAST_FORGED), None] {
+        let (_c, first) = subscribe_after(addr, after).await;
+        assert_eq!(first.kind, kinds::SNAPSHOT, "resume after {after:?}");
+        let snap = v1::Snapshot::decode(first.payload.as_slice()).unwrap();
+        // The scoped client sees the machine's agent in its project only; nothing is forgotten or reassigned.
+        assert!(
+            snap.checkouts
+                .iter()
+                .all(|c| c.checkout_id != "n2/forged" || c.node_id == "n2"),
+            "{snap:?}"
+        );
+        assert!(snap.nodes.iter().all(|n| n.agents_running == 0), "{snap:?}");
+    }
+}

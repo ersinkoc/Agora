@@ -171,6 +171,66 @@ pub struct View {
     /// ADR-0073: the position of the latest event that brought a forgotten machine back. A client that last saw an earlier position
     /// may not hold that machine's records (it joined while they were hidden), so it is given a snapshot, not a replay.
     pub remembered_at: u64,
+    /// History stored before the session refused cross-node records holds some (T19). The view reads them safely, but a client that
+    /// was connected then may have applied one, and replaying the stored bodies would hand them to a client that did not. So a
+    /// client whose position is at or before this one (the end of the log when the hub opened over such a record; 0 when there is none, which a position never is) is
+    /// given a snapshot, not a replay. Stored events are never rewritten.
+    pub distrusted_until: u64,
+}
+
+/// What a node may say about machines (threat model T19): `Ok(Some(id))` is the node a fact names, which must be the sender;
+/// `Ok(None)` is a fact that names none; `Err(field)` is a fact only the hub writes (producer `hub`). Every body is listed, so a new
+/// one has to be decided here.
+pub(crate) fn named_node(body: &Body) -> Result<Option<&str>, &'static str> {
+    Ok(Some(match body {
+        // ADR-0070, ADR-0073, ADR-0053: presence, forgetting a machine and forgetting an agent (named by its hub-wide key, which
+        // holds its node) are the hub's own facts.
+        Body::NodeLink(_) => return Err("node_link"),
+        Body::NodeForgotten(_) => return Err("node_forgotten"),
+        Body::AgentForgotten(_) => return Err("agent_forgotten"),
+        Body::NodeOnline(e) => &e.node_id,
+        Body::NodeOffline(e) => &e.node_id,
+        Body::NodeResources(e) => &e.node_id,
+        Body::CheckoutDiscovered(e) => &e.node_id,
+        Body::AgentStarted(e) => &e.node_id,
+        Body::TerminalOpened(e) => &e.node_id,
+        Body::WorkspaceRegistered(e) => &e.node_id,
+        Body::NodeTrustedDevices(_)
+        | Body::WorktreeCreated(_)
+        | Body::WorktreeRemoved(_)
+        | Body::GitStatusChanged(_)
+        | Body::WorkspaceStatusChanged(_)
+        | Body::AgentWorkspaceBound(_)
+        | Body::AgentStateChanged(_)
+        | Body::AgentSessionReported(_)
+        | Body::AgentUsageReported(_)
+        | Body::AgentExited(_)
+        | Body::AgentSessionOptions(_)
+        | Body::AgentInterrupted(_)
+        | Body::TerminalTitleChanged(_)
+        | Body::TerminalClosed(_)
+        | Body::ApprovalRequested(_)
+        | Body::ApprovalResolved(_)
+        | Body::MessagePosted(_)
+        | Body::TaskChanged(_)
+        | Body::LeaseGranted(_)
+        | Body::LeaseReleased(_)
+        | Body::HandoffCreated(_)
+        | Body::AgentStartRefused(_)
+        | Body::FilesChanged(_) => return Ok(None),
+    }))
+}
+
+/// Whether a stored event is one the session now refuses (T19): a node's record naming another node, or one only the hub writes. The
+/// one rule for live ingestion and for history; `View::rebuild` and the replay barrier ask it, so they cannot drift. The hub's own
+/// events (producer `hub`) are never forged: they may name any node.
+pub(crate) fn is_forged(ev: &Event) -> bool {
+    ev.producer_id != RESERVED_HUB_ID
+        && match ev.body.as_ref().map(named_node) {
+            Some(Err(_)) => true,
+            Some(Ok(Some(node))) => node != ev.producer_id,
+            _ => false,
+        }
 }
 
 /// The hub-wide key of an entity a producer named with a local id.
@@ -608,15 +668,20 @@ impl View {
     pub fn rebuild(store: &impl EventStore) -> Result<(Self, u64), StoreError> {
         let mut view = Self::default();
         let mut pos = 0;
+        let mut forged = false;
         loop {
             let batch = store.events_after(pos, 1000)?;
             if batch.is_empty() {
+                if forged {
+                    view.distrusted_until = pos;
+                }
                 return Ok((view, pos));
             }
             for e in batch {
                 pos = e.pos;
                 // A payload that does not decode was stored by a newer build; skip it rather than fail.
                 if let Ok(ev) = Event::decode(e.payload.as_slice()) {
+                    forged |= is_forged(&ev);
                     if view.brings_back(&ev) {
                         view.remembered_at = pos;
                     }
@@ -1449,7 +1514,14 @@ mod tests {
         let events = [
             ev("n1", 1, started("a")),
             ev("n1", 2, state("a", AgentState::Working, true)),
-            ev("n2", 1, started("b")),
+            // The machine's own start (the shared fixture names n1): no refused record, so the barrier stays down.
+            ev("n2", 1, {
+                let Body::AgentStarted(mut s) = started("b") else {
+                    unreachable!()
+                };
+                s.node_id = "n2".into();
+                Body::AgentStarted(s)
+            }),
         ];
         for e in &events {
             store

@@ -749,7 +749,12 @@ impl Hub {
         let (tx, rx) = sync_channel(SUBSCRIBER_BUFFER);
         // Positions only grow (one per stored event), so `pos - n` bounds the number of events to replay before any is read.
         let backlog = match after {
-            Some(n) if n <= g.pos && g.pos - n <= max_events && n >= g.view.remembered_at => {
+            Some(n)
+                if n <= g.pos
+                    && g.pos - n <= max_events
+                    && n >= g.view.remembered_at
+                    && (g.view.distrusted_until == 0 || n > g.view.distrusted_until) =>
+            {
                 self.replay(n, max_bytes)?
             }
             _ => None,

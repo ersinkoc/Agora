@@ -10,7 +10,6 @@
 //! hub holds becomes the new base of this producer's numbering, once, and the skipped numbers are recorded as lost.
 
 use agora_protocol::handshake::{negotiate, Support};
-use agora_protocol::v1::event::Body;
 use agora_protocol::v1::{Event, Hello, Resume, ResumeOk, Role, Welcome};
 use agora_protocol::{Error, ErrorCode};
 use prost::Message;
@@ -59,49 +58,6 @@ fn invalid(field: &str) -> SessionError {
     Error::new(ErrorCode::ProtocolInvalidMessage)
         .with("field", field)
         .into()
-}
-
-/// What a node may say about machines (threat model T19): `Ok(Some(id))` is the node a fact names, which must be the sender;
-/// `Ok(None)` is a fact that names none; `Err(field)` is a fact only the hub writes (producer `hub`). Every body is listed, so a new
-/// one has to be decided here.
-fn named_node(body: &Body) -> Result<Option<&str>, &'static str> {
-    Ok(Some(match body {
-        // ADR-0070, ADR-0073, ADR-0053: presence, forgetting a machine and forgetting an agent (named by its hub-wide key, which
-        // holds its node) are the hub's own facts.
-        Body::NodeLink(_) => return Err("node_link"),
-        Body::NodeForgotten(_) => return Err("node_forgotten"),
-        Body::AgentForgotten(_) => return Err("agent_forgotten"),
-        Body::NodeOnline(e) => &e.node_id,
-        Body::NodeOffline(e) => &e.node_id,
-        Body::NodeResources(e) => &e.node_id,
-        Body::CheckoutDiscovered(e) => &e.node_id,
-        Body::AgentStarted(e) => &e.node_id,
-        Body::TerminalOpened(e) => &e.node_id,
-        Body::WorkspaceRegistered(e) => &e.node_id,
-        Body::NodeTrustedDevices(_)
-        | Body::WorktreeCreated(_)
-        | Body::WorktreeRemoved(_)
-        | Body::GitStatusChanged(_)
-        | Body::WorkspaceStatusChanged(_)
-        | Body::AgentWorkspaceBound(_)
-        | Body::AgentStateChanged(_)
-        | Body::AgentSessionReported(_)
-        | Body::AgentUsageReported(_)
-        | Body::AgentExited(_)
-        | Body::AgentSessionOptions(_)
-        | Body::AgentInterrupted(_)
-        | Body::TerminalTitleChanged(_)
-        | Body::TerminalClosed(_)
-        | Body::ApprovalRequested(_)
-        | Body::ApprovalResolved(_)
-        | Body::MessagePosted(_)
-        | Body::TaskChanged(_)
-        | Body::LeaseGranted(_)
-        | Body::LeaseReleased(_)
-        | Body::HandoffCreated(_)
-        | Body::AgentStartRefused(_)
-        | Body::FilesChanged(_) => return Ok(None),
-    }))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -188,7 +144,7 @@ impl<'a, S: EventStore> NodeSession<'a, S> {
         // A node speaks for itself only (threat model T19). A fact naming another node would end that node's agents, say it is
         // online or gone, overwrite its numbers, or list this node's folders, agents and terminals on it (and in its projects).
         // Presence (ADR-0070) and forgetting are the hub's own facts, written from the certificate-authenticated connection.
-        match ev.body.as_ref().map(named_node) {
+        match ev.body.as_ref().map(crate::projection::named_node) {
             Some(Err(field)) => return Err(invalid(field)),
             Some(Ok(Some(node))) if node != self.producer => return Err(invalid("node_id")),
             _ => {}
@@ -236,6 +192,7 @@ impl<'a, S: EventStore> NodeSession<'a, S> {
 pub(crate) mod tests {
     use super::*;
     use crate::store::SqliteStore;
+    use agora_protocol::v1::event::Body;
     use agora_protocol::v1::NodeOnline;
 
     fn support() -> Support {

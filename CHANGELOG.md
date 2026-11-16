@@ -39,6 +39,8 @@ _Nothing yet._
   it, or hide one of its agents from every window. The hub now refuses such a message and closes the sender's connection.
   A history written before this check is read the same way: what a machine reports (that it started or left, an agent, a terminal, a folder, its
   numbers) counts for that machine only, and only the hub can hide an agent.
+  A window that reconnects to a hub holding such an old record is given a fresh snapshot instead of the stored events, so it
+  never applies one (and one that did before is corrected).
 
 ### Agents working together
 - A task's title, detail and summary are limited to the same size as a message (16 KiB). They used to take about a megabyte each,
