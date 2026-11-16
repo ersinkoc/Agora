@@ -19,6 +19,7 @@ cli-usage =
       agora mesh stdio --socket YOL
       agora hub run [--listen ADDR] [--hub-dir DIR] [--name HOST]... [--web DIR] [--metrics]
       agora hub code [--hub-dir DIR]
+      agora hub metrics-token create NAME [--expires DAYS] | list | revoke NAME [--hub-dir DIR]
       agora hub ssh install AD [--yes] [--unsigned] [--release-url URL] [--hub-dir DIR]
       agora hub login [--hub-dir DİZİN]
       agora password set|clear|status [--hub-dir DİZİN]
@@ -348,3 +349,15 @@ cli-machines-not-asked = Hiçbir şey unutulmadı: bu terminal cevap veremiyor. 
 cli-machines-hub-unreachable = Çalışan hub'a klasöründen ulaşılamadı ({ $reason }). Makineleri çalışan hub unutur; "agora" ya da "agora hub run" ile başlatın.
 cli-machine-forgotten = { $id } unutuldu.
 cli-machine-not-forgotten = { $id } unutulamadı ({ $code }).
+
+cli-metrics-token-created = Metrik anahtarı { $name }: { $token }  Yalnızca şimdi gösterilir. Yalnızca `/api/metrics` adresini okuyabilir (hub'ı --metrics ile başlatın); `agora hub metrics-token revoke { $name }` onu sonlandırır.
+cli-metrics-token-bad-name = Anahtar adı 1 ile 64 arasında harf, rakam, nokta, tire veya alt çizgiden oluşur.
+cli-metrics-token-exists = { $name } adında bir metrik anahtarı zaten var. Önce onu iptal edin ya da başka bir ad seçin.
+cli-metrics-token-none = Henüz metrik anahtarı yok. `agora hub metrics-token create AD` ile bir tane oluşturun.
+cli-metrics-token-line = { $name } · oluşturuldu { $created } · son kullanım { $used } · bitiş { $expires }{ $state }
+cli-metrics-token-never-used = hiç
+cli-metrics-token-no-expiry = yok
+cli-metrics-token-state-revoked = {" "}· iptal edildi
+cli-metrics-token-state-expired = {" "}· süresi doldu
+cli-metrics-token-revoked = { $name } metrik anahtarı iptal edildi. Bir sonraki kullanımda reddedilir.
+cli-metrics-token-unknown = { $name } adında geçerli bir metrik anahtarı yok.

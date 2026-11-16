@@ -1322,3 +1322,47 @@ fn a_hub_command_on_a_machine_without_a_hub_says_so() {
     assert!(!String::from_utf8_lossy(&out.stderr).contains("does not run the hub"));
     let _ = std::fs::remove_dir_all(&home);
 }
+
+/// ADR-0076: a metrics token is made, listed without being shown, and revoked from the command line.
+#[test]
+fn a_metrics_token_is_made_listed_and_revoked_from_the_command_line() {
+    let root = tmp("metrics-token");
+    let hub = root.join("hub");
+    let run = |args: &[&str]| {
+        let mut full = vec!["hub", "metrics-token"];
+        full.extend_from_slice(args);
+        full.extend(["--hub-dir", hub.to_str().unwrap()]);
+        agora(&root, &full).output().unwrap()
+    };
+    // A wrong command line makes nothing, not even the hub folder.
+    assert_eq!(run(&["frob"]).status.code(), Some(2));
+    assert_eq!(run(&["list", "--expires", "3"]).status.code(), Some(2));
+    assert_eq!(
+        run(&["create", "prom", "--expires", "0"]).status.code(),
+        Some(2)
+    );
+    assert!(!hub.exists());
+    let out = run(&["create", "prom", "--expires", "30"]);
+    assert!(out.status.success());
+    let text = String::from_utf8(out.stdout).unwrap();
+    let token = text
+        .split_whitespace()
+        .find(|w| w.starts_with("agm_"))
+        .unwrap()
+        .trim_end_matches(':')
+        .to_string();
+    assert_eq!(token.len(), 4 + 64, "{text}");
+    assert_eq!(run(&["create", "prom"]).status.code(), Some(1));
+    let listed = String::from_utf8(run(&["list"]).stdout).unwrap();
+    assert!(
+        listed.contains("prom") && !listed.contains(&token[4..]),
+        "{listed}"
+    );
+    assert!(!listed.contains("expires never"), "{listed}");
+    assert!(run(&["revoke", "prom"]).status.success());
+    assert_eq!(run(&["revoke", "prom"]).status.code(), Some(1));
+    assert!(String::from_utf8(run(&["list"]).stdout)
+        .unwrap()
+        .contains("revoked"));
+    let _ = std::fs::remove_dir_all(&root);
+}
