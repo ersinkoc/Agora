@@ -19,6 +19,7 @@ cli-usage =
       agora mesh stdio --socket PATH
       agora hub run [--listen ADDR] [--hub-dir DIR] [--name HOST]... [--web DIR] [--metrics]
       agora hub code [--hub-dir DIR]
+      agora hub metrics-token create NAME [--expires DAYS] | list | revoke NAME [--hub-dir DIR]
       agora hub ssh install NAME [--yes] [--unsigned] [--release-url URL] [--hub-dir DIR]
       agora hub login [--hub-dir DIR]
       agora password set|clear|status [--hub-dir DIR]
@@ -355,3 +356,15 @@ cli-machines-not-asked = Nothing was forgotten: this terminal cannot answer. Run
 cli-machines-hub-unreachable = The running hub could not be reached from its folder ({ $reason }). Machines are forgotten by the running hub; start it with "agora" or "agora hub run".
 cli-machine-forgotten = { $id } is forgotten.
 cli-machine-not-forgotten = { $id } was not forgotten ({ $code }).
+
+cli-metrics-token-created = Metrics token { $name }: { $token }  It is shown only now. It can read `/api/metrics` and nothing else (start the hub with --metrics); `agora hub metrics-token revoke { $name }` ends it.
+cli-metrics-token-bad-name = A token name has 1 to 64 letters, digits, dots, dashes or underscores.
+cli-metrics-token-exists = A metrics token called { $name } already exists. Revoke it first, or pick another name.
+cli-metrics-token-none = No metrics tokens yet. Make one with `agora hub metrics-token create NAME`.
+cli-metrics-token-line = { $name } · made { $created } · last used { $used } · expires { $expires }{ $state }
+cli-metrics-token-never-used = never
+cli-metrics-token-no-expiry = never
+cli-metrics-token-state-revoked = {" "}· revoked
+cli-metrics-token-state-expired = {" "}· expired
+cli-metrics-token-revoked = Metrics token { $name } is revoked. It fails at its next use.
+cli-metrics-token-unknown = There is no live metrics token called { $name }.

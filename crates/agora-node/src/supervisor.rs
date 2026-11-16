@@ -132,6 +132,9 @@ pub struct Restore {
     pub branch: String,
     /// The agent's own session to continue; `None` starts a new one.
     pub session: Option<String>,
+    /// ADR-0060 Amendment A: this resume is the node's own, of an agent that was working: it carries the kind's one "carry on" message
+    /// when the kind's manifest has one (`[resume] continue_argv`).
+    pub carry_on: bool,
     /// Where its injected configuration goes when it may not be written into the folder (a directory agent in the user's own folder).
     pub private_config: Option<PathBuf>,
 }
@@ -464,6 +467,10 @@ struct Entry {
     gave_up: bool,
     extras: Extras,
     private_config: Option<PathBuf>,
+    /// ADR-0060 Amendment A: the next resume carries the kind's "carry on" message ([`Restore::carry_on`]); said by `restore`, used once.
+    carry_on: bool,
+    /// The last resume did carry it (read by [`carried_on`](Supervisor::carried_on)).
+    carried_on: bool,
     /// ADR-0059: the options it was started with (their arguments are in `extras.options`).
     launch: LaunchChoice,
 }
@@ -850,6 +857,8 @@ impl Supervisor {
                 gave_up: false,
                 extras,
                 private_config: None,
+                carry_on: false,
+                carried_on: false,
                 launch: choice,
             },
         );
@@ -1075,6 +1084,8 @@ impl Supervisor {
                     gave_up: false,
                     extras,
                     private_config,
+                    carry_on: false,
+                    carried_on: false,
                     launch: choice,
                 },
             );
@@ -1642,7 +1653,8 @@ impl Supervisor {
             entry.agent.session.clone(),
             entry.extras.clone(),
         );
-        let (argv, native, fresh) = self.argv_for_resume(&kind, session.as_deref());
+        // A restart of a process that died is never a resume by the node after its own stop: no "carry on" message here.
+        let (argv, native, fresh, _) = self.argv_for_resume(&kind, session.as_deref(), false);
         let result = self.launch(&kind, &argv, &worktree, &extras);
         let Some(entry) = self.agents.get_mut(id) else {
             return;
@@ -1690,18 +1702,33 @@ impl Supervisor {
         &self,
         kind: &str,
         session: Option<&str>,
-    ) -> (Vec<String>, bool, Option<String>) {
+        carry_on: bool,
+    ) -> (Vec<String>, bool, Option<String>, bool) {
         let Some(k) = self.kinds.get(kind) else {
-            return (Vec::new(), false, None);
+            return (Vec::new(), false, None, false);
         };
         let safe = session.filter(|s| crate::session_files::argv_safe(s));
         if let (Some(r), Some(sid)) = (&k.manifest.resume, safe) {
+            // ADR-0060 Amendment A: the node's own resume of a working agent uses the resume command that carries the kind's "carry on"
+            // sentence (from its manifest, which checked it: one plain line, no placeholder, not an option) as one argument.
+            if let (true, false, Some(text)) = (
+                carry_on,
+                r.continue_argv.is_empty(),
+                r.continue_text.as_deref(),
+            ) {
+                let argv = r
+                    .continue_argv
+                    .iter()
+                    .map(|a| a.replace("{session_id}", sid).replace("{continue}", text))
+                    .collect();
+                return (argv, true, None, true);
+            }
             let argv = r
                 .argv
                 .iter()
                 .map(|a| a.replace("{session_id}", sid))
                 .collect();
-            return (argv, true, None);
+            return (argv, true, None, false);
         }
         let mut argv = k.manifest.process.launch.clone();
         let id_args = k
@@ -1711,14 +1738,14 @@ impl Supervisor {
             .map(|s| s.id_args.clone())
             .unwrap_or_default();
         if id_args.is_empty() {
-            return (argv, false, None);
+            return (argv, false, None, false);
         }
         match new_session_id() {
             Ok(new) => {
                 argv.extend(id_args.iter().map(|a| a.replace("{session_id}", &new)));
-                (argv, false, Some(new))
+                (argv, false, Some(new), false)
             }
-            Err(_) => (argv, false, None),
+            Err(_) => (argv, false, None, false),
         }
     }
 
@@ -1840,11 +1867,18 @@ impl Supervisor {
                 gave_up: false,
                 extras: Extras::default(),
                 private_config: r.private_config,
+                carry_on: r.carry_on,
+                carried_on: false,
                 // ADR-0060: no launch option comes back with a resume.
                 launch: LaunchChoice::default(),
             },
         );
         Ok(())
+    }
+
+    /// ADR-0060 Amendment A: whether the agent's last resume carried the kind's "carry on" message.
+    pub fn carried_on(&self, id: &AgentId) -> bool {
+        self.agents.get(id).is_some_and(|e| e.carried_on)
     }
 
     /// ADR-0060: takes back a [`restore`](Self::restore) whose resume failed, so the agent stays only in the ledger.
@@ -1949,7 +1983,8 @@ impl Supervisor {
             entry.agent.session.clone(),
             entry.agent.project.to_string(),
         );
-        let (argv, native, fresh) = self.argv_for_resume(&kind, session.as_deref());
+        let carry = self.agents.get(id).is_some_and(|e| e.carry_on);
+        let (argv, native, fresh, carried) = self.argv_for_resume(&kind, session.as_deref(), carry);
         // A stopped agent left the mesh and its endpoint closed; resuming joins again with a fresh one.
         let config = self.agents.get(id).and_then(|e| e.private_config.clone());
         // ADR-0059: a resumed agent keeps the options it was started with.
@@ -1981,6 +2016,9 @@ impl Supervisor {
         entry.next_check = now;
         entry.restarts = 0;
         entry.gave_up = false;
+        // Used once: a later restart of its process (a crash) never carries the message again.
+        entry.carry_on = false;
+        entry.carried_on = carried;
         if !native {
             entry.agent.session = fresh;
         }

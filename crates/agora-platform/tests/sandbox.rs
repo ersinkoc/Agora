@@ -87,3 +87,75 @@ fn asking_for_a_sandbox_that_cannot_be_enforced_is_an_error_not_a_free_pass() {
         Some(std::io::ErrorKind::Unsupported)
     );
 }
+
+/// Landlock rights newer than its first version (F260, F261): `truncate(2)` outside `write` is refused (ABI 3), and a file moves
+/// between folders inside `write` while one from a read-only folder cannot be linked in (ABI 2). Linux only: Landlock versions.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_confined_process_cannot_truncate_outside_write_and_can_move_files_inside_it() {
+    let python = std::path::Path::new("/usr/bin/python3");
+    // SAFETY: the Landlock version query: null attribute, size 0, LANDLOCK_CREATE_RULESET_VERSION.
+    let abi = unsafe { libc::syscall(444, std::ptr::null::<u8>(), 0usize, 1u32) };
+    if !sandbox_supported() || abi < 3 || !python.exists() {
+        eprintln!("skipped: needs Landlock ABI 3 (found {abi}) and /usr/bin/python3");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("agora-sandbox-rights-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (work, ro, outside) = (dir.join("work"), dir.join("ro"), dir.join("outside"));
+    for d in [work.join("a"), work.join("b"), ro.clone(), outside.clone()] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    for f in [
+        outside.join("victim"),
+        ro.join("keep"),
+        work.join("inside"),
+        work.join("a/f"),
+    ] {
+        std::fs::write(f, "precious-data").unwrap();
+    }
+    let script = dir.join("rights.py");
+    std::fs::write(
+        &script,
+        format!(
+            "import os\n\
+             def t(tag, f):\n\
+             \x20   try:\n\
+             \x20       f(); print(tag + '=ok')\n\
+             \x20   except OSError:\n\
+             \x20       print(tag + '=refused')\n\
+             t('trunc-outside', lambda: os.truncate('{o}/victim', 0))\n\
+             t('trunc-inside', lambda: os.truncate('{w}/inside', 0))\n\
+             t('move-inside', lambda: os.rename('{w}/a/f', '{w}/b/f'))\n\
+             t('link-readonly', lambda: os.link('{r}/keep', '{w}/stolen'))\n",
+            o = outside.display(),
+            w = work.display(),
+            r = ro.display()
+        ),
+    )
+    .unwrap();
+    let mut read: Vec<std::path::PathBuf> =
+        ["/usr", "/lib", "/lib64", "/bin", "/etc", "/dev", "/proc"]
+            .map(Into::into)
+            .to_vec();
+    read.extend([ro.clone(), script.clone()]);
+    let sb = Sandbox::new(read, vec![work.clone(), "/dev".into()]);
+    let out = run(
+        Some(sb),
+        &format!("{} {}", python.display(), script.display()),
+    );
+    for want in [
+        "trunc-outside=refused",
+        "trunc-inside=ok",
+        "move-inside=ok",
+        "link-readonly=refused",
+    ] {
+        assert!(out.contains(want), "{want}: {out}");
+    }
+    assert_eq!(
+        std::fs::read_to_string(outside.join("victim")).unwrap(),
+        "precious-data"
+    );
+    assert!(work.join("b/f").exists() && !work.join("stolen").exists());
+    let _ = std::fs::remove_dir_all(dir);
+}

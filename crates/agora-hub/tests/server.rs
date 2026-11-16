@@ -76,11 +76,11 @@ fn online(node: &str) -> Body {
     })
 }
 
-fn agent(id: &str) -> Body {
+fn agent(node: &str, id: &str) -> Body {
     Body::AgentStarted(v1::AgentStarted {
         agent_id: id.into(),
         project_id: "p".into(),
-        node_id: "n".into(),
+        node_id: node.into(),
         worktree_id: "w".into(),
         kind: "shell".into(),
         level: 2,
@@ -179,7 +179,10 @@ async fn a_node_streams_events_gets_acks_and_goes_offline_when_it_leaves() {
     let st = state(None);
     let (mut c, task) = node_conn(&st, "laptop").await;
     assert_eq!(handshake(&mut c).await.from_seq, 1);
-    for (i, b) in [online("laptop"), agent("agent-1")].into_iter().enumerate() {
+    for (i, b) in [online("laptop"), agent("laptop", "agent-1")]
+        .into_iter()
+        .enumerate()
+    {
         c.send(&f(
             STREAM_EVENTS,
             kinds::EVENT,
@@ -282,7 +285,10 @@ async fn a_node_that_dials_again_is_online_again_by_itself_and_its_agents_are_un
     let st = state(None);
     let (mut old, old_task) = node_conn(&st, "laptop").await;
     let from = handshake(&mut old).await.from_seq;
-    for (i, b) in [online("laptop"), agent("agent-1")].into_iter().enumerate() {
+    for (i, b) in [online("laptop"), agent("laptop", "agent-1")]
+        .into_iter()
+        .enumerate()
+    {
         old.send(&f(
             STREAM_EVENTS,
             kinds::EVENT,
@@ -321,9 +327,13 @@ async fn a_gap_is_answered_with_where_to_resume_and_a_reconnect_starts_after_wha
     c.send(&f(STREAM_EVENTS, kinds::EVENT, event("n", 1, online("n"))))
         .await
         .unwrap();
-    c.send(&f(STREAM_EVENTS, kinds::EVENT, event("n", 3, agent("a"))))
-        .await
-        .unwrap(); // 2 is missing
+    c.send(&f(
+        STREAM_EVENTS,
+        kinds::EVENT,
+        event("n", 3, agent("n", "a")),
+    ))
+    .await
+    .unwrap(); // 2 is missing
     let mut from = None;
     while from.is_none() {
         let fr = recv(&mut c).await;
@@ -408,7 +418,7 @@ async fn a_client_needs_a_token_then_gets_a_snapshot_and_live_events_and_can_res
     node.send(&f(
         STREAM_EVENTS,
         kinds::EVENT,
-        event("n1", 2, agent("agent-1")),
+        event("n1", 2, agent("n1", "agent-1")),
     ))
     .await
     .unwrap();
@@ -1089,8 +1099,8 @@ async fn a_client_asks_the_hub_for_usage_and_gets_tokens_with_a_price_only_where
     };
     let bodies = vec![
         online("n1"),
-        agent("a1"),
-        agent("a2"),
+        agent("n1", "a1"),
+        agent("n1", "a2"),
         usage("a1", "anthropic/claude-haiku-4-5"),
         usage("a2", "no-such-model"),
     ];
@@ -1654,7 +1664,7 @@ async fn a_closed_agent_is_forgotten_for_every_client_but_its_usage_still_counts
     handshake(&mut node).await;
     let bodies = vec![
         online("n1"),
-        agent("a1"),
+        agent("n1", "a1"),
         Body::AgentUsageReported(v1::AgentUsageReported {
             agent_id: "a1".into(),
             model: "anthropic/claude-haiku-4-5".into(),
@@ -2114,7 +2124,10 @@ async fn a_node_frozen_past_the_deadline_is_disconnected_then_dials_again_and_is
     let silence = Duration::from_millis(300);
     let (mut c, task) = node_conn_within(&st, "laptop", silence).await;
     let from = handshake(&mut c).await.from_seq;
-    for (i, b) in [online("laptop"), agent("agent-1")].into_iter().enumerate() {
+    for (i, b) in [online("laptop"), agent("laptop", "agent-1")]
+        .into_iter()
+        .enumerate()
+    {
         c.send(&f(
             STREAM_EVENTS,
             kinds::EVENT,
@@ -2460,7 +2473,7 @@ async fn only_the_owner_reads_the_hubs_metrics_and_only_when_they_are_on() {
     // A machine sends three events; the owner reads them counted.
     let (mut node, _t) = node_conn(&st, "n1").await;
     handshake(&mut node).await;
-    for (i, b) in [online("n1"), agent("a1"), agent("a2")]
+    for (i, b) in [online("n1"), agent("n1", "a1"), agent("n1", "a2")]
         .into_iter()
         .enumerate()
     {
@@ -2518,6 +2531,158 @@ async fn only_the_owner_reads_the_hubs_metrics_and_only_when_they_are_on() {
     ] {
         assert!(text.contains(line), "missing {line:?} in:\n{text}");
     }
+}
+
+/// An unstarted-metrics hub (or one with them on) that checks tokens against sessions, for the metrics token tests (ADR-0076).
+async fn metrics_hub() -> (Arc<Hub>, Arc<ServerState>, std::net::SocketAddr) {
+    use agora_hub::signin::HubSessions;
+    let hub = Arc::new(Hub::open(SqliteStore::open_in_memory().unwrap()).unwrap());
+    let sessions = Arc::new(HubSessions::new(Arc::clone(&hub)));
+    let st = Arc::new(ServerState {
+        hub: Arc::clone(&hub),
+        support: support(),
+        ca: None,
+        lockout: Arc::new(Lockout::new()),
+        auth: Box::new(HubSessionsAuth(Arc::clone(&sessions))),
+        assets: None,
+        sessions: Some(sessions),
+    });
+    let addr = start(Arc::clone(&st)).await;
+    (hub, st, addr)
+}
+
+/// ADR-0076: a metrics token reads `/api/metrics` (GET and HEAD) and is refused once revoked or expired; a made-up one, a session of
+/// a viewer and no token are refused as before; the owner's session still works.
+#[tokio::test]
+async fn a_metrics_token_reads_the_numbers_until_it_is_revoked_or_expires() {
+    use agora_hub::metrics_token::MetricsTokens;
+    use agora_hub::signin::SignIn;
+    use agora_hub::users::{Role, Users};
+    let (hub, _st, addr) = metrics_hub().await;
+    hub.enable_metrics();
+    let now = server::now_ms();
+    let tokens = MetricsTokens::new(hub.store());
+    let live = tokens.create("prom", now, None).unwrap();
+    let revoked = tokens.create("old", now, None).unwrap();
+    let expired = tokens.create("short", now, Some(now + 1)).unwrap();
+    tokens.revoke("old", now).unwrap();
+    let signin = SignIn::new(hub.store(), Arc::new(Lockout::new()));
+    let owner = signin
+        .redeem(&signin.create_code(now).unwrap(), now)
+        .unwrap();
+    let eda = Users::new(hub.store())
+        .add("Eda", Role::Viewer, now)
+        .unwrap();
+    let viewer = signin
+        .redeem(&signin.create_code_for(Some(&eda.id), now).unwrap(), now)
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+    let (status, text) = get_metrics(addr, Some(&live)).await;
+    assert_eq!(status, 200, "{text}");
+    assert!(text.contains("agora_hub_events_ingested_total"));
+    assert!(raw(addr, "HEAD", "/api/metrics", Some(&live))
+        .await
+        .starts_with("HTTP/1.1 200"));
+    assert_eq!(get_metrics(addr, Some(&owner)).await.0, 200);
+    assert_eq!(get_metrics(addr, Some(&viewer)).await.0, 403);
+    // Refused as an unknown token: revoked, expired, made up (same shape), no token.
+    for t in [Some(revoked.as_str()), Some(expired.as_str())] {
+        assert_eq!(get_metrics(addr, t).await.0, 401);
+    }
+    assert_eq!(get_metrics(addr, Some("agm_0000")).await.0, 401);
+    assert_eq!(get_metrics(addr, None).await.0, 401);
+    // Revoking is immediate: the very next scrape fails.
+    assert_eq!(get_metrics(addr, Some(&live)).await.0, 200);
+    MetricsTokens::new(hub.store())
+        .revoke("prom", server::now_ms())
+        .unwrap();
+    assert_eq!(get_metrics(addr, Some(&live)).await.0, 401);
+}
+
+/// ADR-0076 item 4: with `--metrics` off, a metrics token is answered exactly as an unknown path, as any other bearer.
+#[tokio::test]
+async fn with_metrics_off_a_metrics_token_is_answered_as_an_unknown_path() {
+    let (hub, _st, addr) = metrics_hub().await;
+    let token = agora_hub::metrics_token::MetricsTokens::new(hub.store())
+        .create("prom", server::now_ms(), None)
+        .unwrap();
+    for method in ["GET", "HEAD"] {
+        assert_eq!(
+            raw(addr, method, "/api/metrics", Some(&token)).await,
+            raw(addr, method, "/api/nothing", Some(&token)).await,
+        );
+    }
+}
+
+/// ADR-0076 item 1, negative controls: the token is an unknown token everywhere but `/api/metrics`. Each route answers it as it
+/// answers a made-up one, it starts no session, and the WebSocket closes on it.
+#[tokio::test]
+async fn a_metrics_token_reaches_nothing_but_the_metrics() {
+    let (hub, _st, addr) = metrics_hub().await;
+    hub.enable_metrics();
+    let token = agora_hub::metrics_token::MetricsTokens::new(hub.store())
+        .create("prom", server::now_ms(), None)
+        .unwrap();
+    let status = |r: &str| r[9..12].to_string();
+    for (method, path) in [
+        ("GET", "/api/audit"),
+        ("GET", "/api/audit?since=0"),
+        ("DELETE", "/api/session"),
+    ] {
+        let with = raw(addr, method, path, Some(&token)).await;
+        let made_up = raw(addr, method, path, Some("agm_deadbeef")).await;
+        assert_eq!(with, made_up, "{method} {path}");
+        assert_ne!(status(&with), "200", "{method} {path}: {with}");
+    }
+    // The routes that act as a signed-in person refuse it like a made-up token.
+    for path in ["/api/password", "/api/passkey/add"] {
+        let body = serde_json::json!({});
+        let (with, _) = post_json(addr, path, Some(&token), &body).await;
+        let (made_up, _) = post_json(addr, path, Some("agm_deadbeef"), &body).await;
+        assert_eq!(with, made_up, "{path}");
+        assert!(matches!(with, 401 | 403 | 404), "{path}: {with}");
+    }
+    // It is not a session: it cannot sign anything out, and the audit trail stays closed to it.
+    assert_eq!(
+        status(&raw(addr, "GET", "/api/audit", Some(&token)).await),
+        "401"
+    );
+    // The WebSocket treats it as an unknown token.
+    let tcp = TcpStream::connect(addr).await.unwrap();
+    let mut c = ws::connect_with_subprotocol_token(tcp, &format!("ws://{addr}/"), &token)
+        .await
+        .unwrap();
+    c.send(&f(
+        STREAM_EVENTS,
+        kinds::SUBSCRIBE,
+        v1::Subscribe::default().encode_to_vec(),
+    ))
+    .await
+    .unwrap();
+    assert!(closed(&mut c).await);
+    // And a scrape did not start or renew any session.
+    assert_eq!(get_metrics(addr, Some(&token)).await.0, 200);
+    let signin = agora_hub::signin::SignIn::new(hub.store(), Arc::new(Lockout::new()));
+    assert!(!signin.check(&token, server::now_ms()));
+    assert!(signin.access(&token, server::now_ms()).is_none());
+}
+
+/// ADR-0076 item 4: a burst of wrong bearers on `/api/metrics` locks the address out (429), the lockout of the sign-in.
+#[tokio::test]
+async fn wrong_bearers_on_the_metrics_path_count_toward_the_lockout() {
+    let (hub, _st, addr) = metrics_hub().await;
+    hub.enable_metrics();
+    let mut last = 0;
+    for _ in 0..agora_hub::password::ADDRESS_FREE_FAILURES + 1 {
+        last = get_metrics(addr, Some("agm_wrong")).await.0;
+    }
+    assert_eq!(last, 429);
+    // Locked out, even a good token waits.
+    let token = agora_hub::metrics_token::MetricsTokens::new(hub.store())
+        .create("prom", server::now_ms(), None)
+        .unwrap();
+    assert_eq!(get_metrics(addr, Some(&token)).await.0, 429);
 }
 
 /// #558 review: a certificate revoked between the node's Hello and its Resume ends the connection too (the handshake is watched as
@@ -2700,4 +2865,202 @@ async fn a_machines_user_name_in_its_binary_path_reaches_only_the_owner() {
         "{} of 30 nonowner deliveries expose the fixture username: {leaks:?}",
         leaks.len()
     );
+}
+
+// #629 cross-review (linux Codex, P2): a history stored before the session refused cross-node records. The rebuilt view reads them
+// safely; a reconnecting client must not be handed their stored bodies, and one that applied them before reconnecting is healed.
+const SAFE_CHECKPOINT: u64 = 3;
+const LAST_FORGED: u64 = 6;
+
+fn seed_legacy(store: &SqliteStore, forged: bool) {
+    let seed = |producer: &str, seq: u64, body: Body| {
+        store
+            .append(producer, seq, seq, &event(producer, seq, body))
+            .unwrap();
+    };
+    seed("n1", 1, online("n1"));
+    seed("n1", 2, agent("n1", "a"));
+    seed("n2", 1, online("n2"));
+    if forged {
+        // Bytes the pre-fix session accepted and stored (the new one refuses them, so they go in through storage).
+        seed(
+            "n2",
+            2,
+            Body::AgentForgotten(v1::AgentForgotten {
+                agent_id: "n1/a".into(),
+            }),
+        );
+        seed(
+            "n2",
+            3,
+            Body::NodeResources(v1::NodeResources {
+                node_id: "n1".into(),
+                agents_running: 99,
+                ..Default::default()
+            }),
+        );
+        seed(
+            "n2",
+            4,
+            Body::CheckoutDiscovered(v1::CheckoutDiscovered {
+                checkout_id: "forged".into(),
+                node_id: "n1".into(),
+                project_id: "p".into(),
+                path: "/fixture".into(),
+            }),
+        );
+    } else {
+        seed("n2", 2, working("a"));
+    }
+}
+
+fn legacy_state(forged: bool, auth: Box<dyn ClientAuth + Send + Sync>) -> Arc<ServerState> {
+    let store = SqliteStore::open_in_memory().unwrap();
+    seed_legacy(&store, forged);
+    Arc::new(ServerState {
+        // Opening records the machines offline for old clients: hub-written `NodeOffline` events after the stored ones.
+        hub: Arc::new(Hub::open_at(store, 100).unwrap()),
+        support: support(),
+        ca: None,
+        lockout: Arc::new(Lockout::new()),
+        auth,
+        assets: None,
+        sessions: None,
+    })
+}
+
+async fn subscribe_after(
+    addr: std::net::SocketAddr,
+    after: Option<u64>,
+) -> (Conn<TcpStream>, Frame) {
+    let mut c = dial(addr, Some("good-token")).await;
+    c.send(&f(
+        STREAM_EVENTS,
+        kinds::SUBSCRIBE,
+        v1::Subscribe { after_pos: after }.encode_to_vec(),
+    ))
+    .await
+    .unwrap();
+    let first = recv(&mut c).await;
+    (c, first)
+}
+
+#[tokio::test]
+async fn a_reconnecting_client_is_never_replayed_a_record_the_session_would_now_refuse() {
+    let st = legacy_state(true, Box::new(Tokens));
+    let (view, end) = st.hub.view();
+    assert_eq!(end, 10, "three stored, three forged, four hub-written");
+    // The safe projection the replay must agree with.
+    assert!(!view.agents["n1/a"].forgotten);
+    assert_eq!(view.nodes["n1"].agents_running, 0);
+    assert_eq!(view.checkouts["n2/forged"].0, "n2");
+    let addr = start(Arc::clone(&st)).await;
+
+    let (_fresh, first) = subscribe_after(addr, None).await;
+    assert_eq!(first.kind, kinds::SNAPSHOT);
+    let fresh = v1::Snapshot::decode(first.payload.as_slice()).unwrap();
+    assert!(fresh
+        .agents
+        .iter()
+        .any(|a| a.agent_id == "n1/a" && a.running));
+
+    // Before the bad records, and on the last of them (a client that applied them live and reconnects with nothing missing): each
+    // gets the clean snapshot, which equals the fresh one.
+    for after in [SAFE_CHECKPOINT, LAST_FORGED] {
+        let (_c, first) = subscribe_after(addr, Some(after)).await;
+        assert_eq!(first.kind, kinds::SNAPSHOT, "resume after {after}");
+        let resumed = v1::Snapshot::decode(first.payload.as_slice()).unwrap();
+        assert_eq!(resumed, fresh, "resume after {after}");
+    }
+}
+
+#[tokio::test]
+async fn events_from_a_hub_that_opened_over_such_history_replay_once_the_client_has_its_clean_snapshot(
+) {
+    let st = legacy_state(true, Box::new(Tokens));
+    let addr = start(Arc::clone(&st)).await;
+    // The snapshot is at the end of the log; a live event after it reaches the client as an ordinary event, and a client that
+    // reconnects after it resumes by replay: the barrier is behind it.
+    let (mut node, _t) = node_conn(&st, "n1").await;
+    handshake(&mut node).await;
+    node.send(&f(
+        STREAM_EVENTS,
+        kinds::EVENT,
+        event("n1", 3, working("a")),
+    ))
+    .await
+    .unwrap();
+    next_ack(&mut node).await;
+    let (_c, first) = subscribe_after(addr, Some(LAST_FORGED)).await;
+    assert_eq!(
+        first.kind,
+        kinds::SNAPSHOT,
+        "a client at the last refused record may hold a forgery, so it is healed"
+    );
+    // Position 7 is the hub's own first record after opening: nothing a client could have had from before.
+    let (_c, first) = subscribe_after(addr, Some(LAST_FORGED + 1)).await;
+    assert!(
+        first.kind == kinds::POSITIONED_EVENT,
+        "a client past the barrier replays, got kind {}",
+        first.kind
+    );
+}
+
+#[tokio::test]
+async fn a_history_with_no_refused_records_replays_unchanged_including_the_hubs_own_events() {
+    let st = legacy_state(false, Box::new(Tokens));
+    let (_, end) = st.hub.view();
+    assert_eq!(end, 8, "four stored, four hub-written");
+    let addr = start(Arc::clone(&st)).await;
+    // A checkpoint inside the stored events and one on the hub's own `NodeOffline`: both replay, never a snapshot.
+    for after in [SAFE_CHECKPOINT, 5] {
+        let (mut c, first) = subscribe_after(addr, Some(after)).await;
+        let mut seen = Vec::new();
+        let mut fr = first;
+        loop {
+            assert_eq!(fr.kind, kinds::POSITIONED_EVENT, "resume after {after}");
+            let p = v1::PositionedEvent::decode(fr.payload.as_slice()).unwrap();
+            seen.push((p.pos, p.event.unwrap()));
+            if p.pos == end {
+                break;
+            }
+            fr = recv(&mut c).await;
+        }
+        assert_eq!(seen[0].0, after + 1);
+        let offline: Vec<_> = seen
+            .iter()
+            .filter(|(_, e)| e.producer_id == "hub" && matches!(e.body, Some(Body::NodeOffline(_))))
+            .map(|(pos, _)| *pos)
+            .collect();
+        assert!(
+            !offline.is_empty(),
+            "the hub's own NodeOffline events are delivered: {seen:?}"
+        );
+        // Same-node events arrive with the body they were stored with.
+        if after == SAFE_CHECKPOINT {
+            assert!(matches!(
+                &seen[0].1.body,
+                Some(Body::AgentStateChanged(e)) if e.agent_id == "a"
+            ));
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_scoped_client_reconnecting_over_such_history_gets_a_clean_cut_snapshot() {
+    let st = legacy_state(true, Box::new(Scoped));
+    let addr = start(Arc::clone(&st)).await;
+    for after in [Some(SAFE_CHECKPOINT), Some(LAST_FORGED), None] {
+        let (_c, first) = subscribe_after(addr, after).await;
+        assert_eq!(first.kind, kinds::SNAPSHOT, "resume after {after:?}");
+        let snap = v1::Snapshot::decode(first.payload.as_slice()).unwrap();
+        // The scoped client sees the machine's agent in its project only; nothing is forgotten or reassigned.
+        assert!(
+            snap.checkouts
+                .iter()
+                .all(|c| c.checkout_id != "n2/forged" || c.node_id == "n2"),
+            "{snap:?}"
+        );
+        assert!(snap.nodes.iter().all(|n| n.agents_running == 0), "{snap:?}");
+    }
 }

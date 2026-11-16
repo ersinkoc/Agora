@@ -27,6 +27,21 @@ const SPENT_MEMORY: usize = 4096;
 /// cannot tell the two apart from the outside.
 pub trait Verifier {
     fn verify(&self, device_id: &str, message: &[u8], signature: &[u8]) -> bool;
+
+    /// The term `device_id` is trusted for, asked only after [`Self::verify`] accepted its signature: what lets a node tell later
+    /// that a verdict it gave still stands (a grant, audit F270). A verifier that keeps no record of when trust began or ends (the
+    /// test verifiers) has one term without end.
+    fn term(&self, _device_id: &str) -> Option<Term> {
+        Some(Term::default())
+    }
+}
+
+/// One stretch of a device's trust on this node (audit F270): when it began (`since` in the trusted-devices file, `None` for a line
+/// without one) and when it ends by itself (an endorsed device, ADR-0061; `None`: no end). Trusting a device again starts a new term.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Term {
+    pub since: Option<u64>,
+    pub until: Option<u64>,
 }
 
 /// The exact bytes a device signs: a domain tag, then node id, approval id and verdict, NUL-separated.
@@ -120,6 +135,8 @@ pub enum ApprovalError {
 pub struct Approvals<V: Verifier> {
     node_id: String,
     verifier: V,
+    /// How many times the verifier was replaced: a verdict given under an older one must be checked again (audit F270).
+    generation: u64,
     pending: BTreeMap<String, Pending>,
     spent: VecDeque<String>,
 }
@@ -139,6 +156,7 @@ impl<V: Verifier> Approvals<V> {
         Self {
             node_id: node_id.to_string(),
             verifier,
+            generation: 0,
             pending: BTreeMap::new(),
             spent: VecDeque::new(),
         }
@@ -147,6 +165,7 @@ impl<V: Verifier> Approvals<V> {
     /// Replaces the verifier (when trusted device keys are loaded or changed).
     pub fn set_verifier(&mut self, verifier: V) {
         self.verifier = verifier;
+        self.generation = self.generation.wrapping_add(1);
     }
 
     /// Registers a request and returns its id, or `None` if no safe id could be made (the action must then be
@@ -282,6 +301,19 @@ impl<V: Verifier> Approvals<V> {
         self.verifier.verify(device_id, message, signature)
     }
 
+    /// Like [`Self::verify_with`], with the verifier's generation and the device's term when the signature verifies.
+    pub fn verify_term(
+        &self,
+        device_id: &str,
+        message: &[u8],
+        signature: &[u8],
+    ) -> Option<(u64, Term)> {
+        if !self.verifier.verify(device_id, message, signature) {
+            return None;
+        }
+        Some((self.generation, self.verifier.term(device_id)?))
+    }
+
     /// Was this id answered, expired or cancelled before? (Replays are refused as `Unknown` by `resolve`, because a
     /// spent id is no longer pending; this is for audit.)
     pub fn was_spent(&self, id: &str) -> bool {
@@ -293,6 +325,10 @@ impl Verifier for Box<dyn Verifier + Send> {
     fn verify(&self, device_id: &str, message: &[u8], signature: &[u8]) -> bool {
         (**self).verify(device_id, message, signature)
     }
+
+    fn term(&self, device_id: &str) -> Option<Term> {
+        (**self).term(device_id)
+    }
 }
 
 /// Verifies ECDSA P-256/SHA-256 signatures (ADR-0028) against the public keys of trusted devices. Keys are uncompressed
@@ -302,6 +338,8 @@ pub struct P256Verifier {
     keys: std::collections::HashMap<String, Vec<u8>>,
     /// ADR-0061: devices another device endorsed are trusted until then (milliseconds since the epoch); the others have no end.
     expires: std::collections::HashMap<String, u64>,
+    /// When each device's trust here began (`since` in the file), for [`Verifier::term`].
+    since: std::collections::HashMap<String, u64>,
 }
 
 impl P256Verifier {
@@ -321,6 +359,7 @@ impl P256Verifier {
     pub fn revoke(&mut self, device_id: &str) {
         self.keys.remove(device_id);
         self.expires.remove(device_id);
+        self.since.remove(device_id);
     }
 }
 
@@ -343,6 +382,9 @@ impl P256Verifier {
             if v.trust(&e.id, &e.key) {
                 if let Some(at) = end {
                     v.expires.insert(e.id.clone(), at);
+                }
+                if let Some(at) = e.since {
+                    v.since.insert(e.id.clone(), at);
                 }
             }
         }
@@ -373,6 +415,13 @@ impl Verifier for P256Verifier {
         ring::signature::UnparsedPublicKey::new(&ring::signature::ECDSA_P256_SHA256_FIXED, key)
             .verify(message, signature)
             .is_ok()
+    }
+
+    fn term(&self, device_id: &str) -> Option<Term> {
+        self.keys.contains_key(device_id).then(|| Term {
+            since: self.since.get(device_id).copied(),
+            until: self.expires.get(device_id).copied(),
+        })
     }
 }
 
@@ -560,12 +609,42 @@ impl NodeApprovals {
 
     /// Does `device_id` (as the trusted-devices file lists it now) vouch for `message`? Used for grants (ADR-0041).
     pub fn verify_device(&self, device_id: &str, message: &[u8], signature: &[u8]) -> bool {
+        self.verify_device_term(device_id, message, signature)
+            .is_some()
+    }
+
+    /// Like [`Self::verify_device`] (a use: an endorsed device's trust is renewed), with the trust generation the signature was
+    /// verified under and the device's term, so a verdict that lasts (a grant) can be checked again when trust changes (audit F270).
+    pub fn verify_device_term(
+        &self,
+        device_id: &str,
+        message: &[u8],
+        signature: &[u8],
+    ) -> Option<(u64, Term)> {
         self.reload_trust_if_changed();
-        let ok = self.q().verify_with(device_id, message, signature);
-        if ok {
+        let verdict = self.q().verify_term(device_id, message, signature);
+        if verdict.is_some() {
             self.used(device_id);
         }
-        ok
+        verdict
+    }
+
+    /// The trust generation now: it moves whenever the trusted devices change (the file is read again when it changed, so a device
+    /// the owner removed in another process counts at once). No signature is checked and nothing is renewed or written.
+    pub fn trust_generation(&self) -> u64 {
+        self.reload_trust_if_changed();
+        self.q().generation
+    }
+
+    /// Does `device_id` still vouch for `message` under the trust held now, and in which term? A check, not a use: unlike
+    /// [`Self::verify_device_term`] it neither reads the file (see [`Self::trust_generation`]) nor renews the device's trust.
+    pub fn vouches(
+        &self,
+        device_id: &str,
+        message: &[u8],
+        signature: &[u8],
+    ) -> Option<(u64, Term)> {
+        self.q().verify_term(device_id, message, signature)
     }
 
     /// Replaces the verifier; requests already waiting are judged by the new one.
