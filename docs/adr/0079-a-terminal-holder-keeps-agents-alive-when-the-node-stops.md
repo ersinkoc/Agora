@@ -215,4 +215,4 @@ and typed through them.
 - decision 8: the per-system outcome, members that outlive their leader, and the no-node limit;
 - the matching tests, the v1 limits, and questions 5 and 6.
 
-None of them changes a decision the maintainer accepted. The merger confirms them with the maintainer before merging.
+None of them changes a decision the maintainer accepted. **Confirmed 2026-11-16 by the maintainer's own message in the merger chat: "ADR-0079'daki inceleme eklerini onaylıyorum"** (the review additions to decisions 2, 4 and 8, the tests and limits, and the proposed answers to questions 5 and 6: later).
