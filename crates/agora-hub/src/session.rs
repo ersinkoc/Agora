@@ -593,4 +593,198 @@ pub(crate) mod tests {
             "a resync does not carry over to the next connection"
         );
     }
+
+    /// T19: the stored-form rule (`projection::is_forged`, used by `View::rebuild` and the replay barrier) and the live rule in
+    /// `NodeSession::event` must say the same about every body, or a history could hold what live ingestion would have refused (or the
+    /// reverse). A new body that names a node must be added to `named_node`, and this table says what is expected of it.
+    #[test]
+    fn the_stored_form_rule_and_the_live_ingestion_rule_agree() {
+        use agora_protocol::v1 as v;
+        let other = "n2";
+        let table: Vec<(&str, Option<Body>, bool)> = vec![
+            ("no body", None, false),
+            (
+                "own online",
+                Some(Body::NodeOnline(v::NodeOnline {
+                    node_id: "n1".into(),
+                    ..Default::default()
+                })),
+                false,
+            ),
+            (
+                "other online",
+                Some(Body::NodeOnline(v::NodeOnline {
+                    node_id: other.into(),
+                    ..Default::default()
+                })),
+                true,
+            ),
+            (
+                "own offline",
+                Some(Body::NodeOffline(v::NodeOffline {
+                    node_id: "n1".into(),
+                })),
+                false,
+            ),
+            (
+                "other offline",
+                Some(Body::NodeOffline(v::NodeOffline {
+                    node_id: other.into(),
+                })),
+                true,
+            ),
+            (
+                "own resources",
+                Some(Body::NodeResources(v::NodeResources {
+                    node_id: "n1".into(),
+                    ..Default::default()
+                })),
+                false,
+            ),
+            (
+                "other resources",
+                Some(Body::NodeResources(v::NodeResources {
+                    node_id: other.into(),
+                    ..Default::default()
+                })),
+                true,
+            ),
+            (
+                "own checkout",
+                Some(Body::CheckoutDiscovered(v::CheckoutDiscovered {
+                    node_id: "n1".into(),
+                    ..Default::default()
+                })),
+                false,
+            ),
+            (
+                "other checkout",
+                Some(Body::CheckoutDiscovered(v::CheckoutDiscovered {
+                    node_id: other.into(),
+                    ..Default::default()
+                })),
+                true,
+            ),
+            (
+                "own agent start",
+                Some(Body::AgentStarted(v::AgentStarted {
+                    node_id: "n1".into(),
+                    ..Default::default()
+                })),
+                false,
+            ),
+            (
+                "other agent start",
+                Some(Body::AgentStarted(v::AgentStarted {
+                    node_id: other.into(),
+                    ..Default::default()
+                })),
+                true,
+            ),
+            (
+                "own terminal",
+                Some(Body::TerminalOpened(v::TerminalOpened {
+                    node_id: "n1".into(),
+                    ..Default::default()
+                })),
+                false,
+            ),
+            (
+                "other terminal",
+                Some(Body::TerminalOpened(v::TerminalOpened {
+                    node_id: other.into(),
+                    ..Default::default()
+                })),
+                true,
+            ),
+            (
+                "own workspace",
+                Some(Body::WorkspaceRegistered(v::WorkspaceRegistered {
+                    node_id: "n1".into(),
+                    ..Default::default()
+                })),
+                false,
+            ),
+            (
+                "other workspace",
+                Some(Body::WorkspaceRegistered(v::WorkspaceRegistered {
+                    node_id: other.into(),
+                    ..Default::default()
+                })),
+                true,
+            ),
+            (
+                "a link (the hub's fact)",
+                Some(Body::NodeLink(v::NodeLink {
+                    node_id: "n1".into(),
+                    ..Default::default()
+                })),
+                true,
+            ),
+            (
+                "a forgotten machine (the hub's fact)",
+                Some(Body::NodeForgotten(v::NodeForgotten {
+                    node_id: "n1".into(),
+                    ..Default::default()
+                })),
+                true,
+            ),
+            (
+                "a forgotten agent (the hub's fact)",
+                Some(Body::AgentForgotten(v::AgentForgotten {
+                    agent_id: "n1/a".into(),
+                })),
+                true,
+            ),
+            (
+                "a state change names no node",
+                Some(Body::AgentStateChanged(v::AgentStateChanged::default())),
+                false,
+            ),
+        ];
+        for (what, body, forged) in table {
+            let ev = Event {
+                producer_id: "n1".into(),
+                seq: 1,
+                at_ms: 1,
+                body,
+            };
+            let payload = ev.encode_to_vec();
+            // The stored form: what `rebuild` decodes from the log.
+            let stored = Event::decode(payload.as_slice()).unwrap();
+            assert_eq!(
+                crate::projection::is_forged(&stored),
+                forged,
+                "stored rule: {what}"
+            );
+            // The live rule: a fresh session, one event.
+            let (store, sup) = (SqliteStore::open_in_memory().unwrap(), support());
+            let mut s = ready(&store, &sup, "n1");
+            match s.event(&payload) {
+                Ok(_) => assert!(
+                    !forged,
+                    "live ingestion accepted a body the stored rule calls forged: {what}"
+                ),
+                Err(e) => {
+                    assert_eq!(code(e), ErrorCode::ProtocolInvalidMessage, "{what}");
+                    assert!(
+                        forged,
+                        "live ingestion refused a body the stored rule accepts: {what}"
+                    );
+                }
+            }
+        }
+        // The hub's own events are never forged in storage, whatever node they name (a node cannot produce them live: the producer
+        // would not match its certificate).
+        let hub_event = Event {
+            producer_id: crate::ca::RESERVED_HUB_ID.into(),
+            seq: 1,
+            at_ms: 1,
+            body: Some(Body::NodeLink(agora_protocol::v1::NodeLink {
+                node_id: "n2".into(),
+                ..Default::default()
+            })),
+        };
+        assert!(!crate::projection::is_forged(&hub_event));
+    }
 }

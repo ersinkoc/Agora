@@ -264,7 +264,12 @@ impl SupervisorError {
                 Error::new(ErrorCode::AgentBlocked).with("agent_id", id.as_str())
             }
             Self::Git(e) => e.to_protocol(),
-            Self::Spawn(_) => Error::new(ErrorCode::Internal).with("incident_id", "unassigned"),
+            Self::Spawn(text) => {
+                // The client gets only the stable code; the cause (an OS error text, never a secret) goes to the node's stderr, which
+                // the supervisor's log keeps, so a start that failed is not silent. `{:?}` escapes control characters.
+                eprintln!("agent start failed: {text:?}");
+                Error::new(ErrorCode::Internal).with("incident_id", "unassigned")
+            }
             Self::Adapter { code, params } => params
                 .iter()
                 .fold(Error::new(ErrorCode::parse(code)), |e, (k, v)| {
