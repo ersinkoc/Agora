@@ -141,10 +141,13 @@ impl<'a, S: EventStore> NodeSession<'a, S> {
         if ev.seq == 0 {
             return Err(invalid("seq"));
         }
-        // ADR-0070: presence is the hub's own fact, written from the certificate-authenticated connection. A node cannot say
-        // that it, or any other node, is online.
-        if matches!(ev.body, Some(agora_protocol::v1::event::Body::NodeLink(_))) {
-            return Err(invalid("node_link"));
+        // A node speaks for itself only (threat model T19). A fact naming another node would end that node's agents, say it is
+        // online or gone, overwrite its numbers, or list this node's folders, agents and terminals on it (and in its projects).
+        // Presence (ADR-0070) and forgetting are the hub's own facts, written from the certificate-authenticated connection.
+        match ev.body.as_ref().map(crate::projection::named_node) {
+            Some(Err(field)) => return Err(invalid(field)),
+            Some(Ok(Some(node))) if node != self.producer => return Err(invalid("node_id")),
+            _ => {}
         }
         let appended = match self.resync_at_ms {
             Some(at) => self
@@ -186,9 +189,10 @@ impl<'a, S: EventStore> NodeSession<'a, S> {
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::store::SqliteStore;
+    use agora_protocol::v1::event::Body;
     use agora_protocol::v1::NodeOnline;
 
     fn support() -> Support {
@@ -214,9 +218,10 @@ mod tests {
             producer_id: producer.into(),
             seq,
             at_ms: 1,
-            body: Some(agora_protocol::v1::event::Body::NodeOnline(
-                NodeOnline::default(),
-            )),
+            body: Some(agora_protocol::v1::event::Body::NodeOnline(NodeOnline {
+                node_id: producer.into(),
+                ..NodeOnline::default()
+            })),
         }
         .encode_to_vec()
     }
@@ -283,6 +288,138 @@ mod tests {
         }
         .encode_to_vec();
         assert!(s.event(&ev).is_err());
+        assert_eq!(store.acked("n1").unwrap(), 0);
+    }
+
+    /// Every body that carries a node id, naming `node` (local ids `c`, `a`, `t`, `w`).
+    pub(crate) fn naming(node: &str) -> Vec<Body> {
+        use agora_protocol::v1;
+        let node = node.to_string();
+        vec![
+            Body::NodeOnline(v1::NodeOnline {
+                node_id: node.clone(),
+                ..Default::default()
+            }),
+            Body::NodeOffline(v1::NodeOffline {
+                node_id: node.clone(),
+            }),
+            Body::NodeResources(v1::NodeResources {
+                node_id: node.clone(),
+                agents_running: 7,
+                ..Default::default()
+            }),
+            Body::CheckoutDiscovered(v1::CheckoutDiscovered {
+                checkout_id: "c".into(),
+                node_id: node.clone(),
+                ..Default::default()
+            }),
+            Body::AgentStarted(v1::AgentStarted {
+                agent_id: "a".into(),
+                node_id: node.clone(),
+                ..Default::default()
+            }),
+            Body::TerminalOpened(v1::TerminalOpened {
+                terminal_id: "t".into(),
+                node_id: node.clone(),
+                ..Default::default()
+            }),
+            Body::WorkspaceRegistered(v1::WorkspaceRegistered {
+                workspace_id: "w".into(),
+                node_id: node,
+                ..Default::default()
+            }),
+        ]
+    }
+
+    /// Threat model T19: a node speaks for itself only. A fact that names another node, nobody, or this node spelled otherwise is
+    /// refused (`field = node_id`) and not stored; the same fact naming the sender is stored.
+    #[test]
+    fn a_fact_that_names_a_node_must_name_the_sender() {
+        let (store, sup) = (SqliteStore::open_in_memory().unwrap(), support());
+        let mut s = ready(&store, &sup, "n1");
+        let at = |seq: u64, body| {
+            Event {
+                producer_id: "n1".into(),
+                seq,
+                at_ms: 1,
+                body: Some(body),
+            }
+            .encode_to_vec()
+        };
+        let refused = Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "node_id");
+        let mut seq = 0;
+        for (i, own) in naming("n1").into_iter().enumerate() {
+            for other in ["n2", "", "N1"] {
+                match s.event(&at(seq + 1, naming(other).swap_remove(i))) {
+                    Err(SessionError::Protocol(e)) => {
+                        assert_eq!(e, refused, "{own:?} naming {other:?}")
+                    }
+                    got => panic!("{own:?} naming {other:?}: {got:?}"),
+                }
+                assert_eq!(store.acked("n1").unwrap(), seq);
+            }
+            seq += 1;
+            assert_eq!(
+                s.event(&at(seq, own)).unwrap(),
+                Ingest::Applied {
+                    acked: seq,
+                    pos: seq
+                }
+            );
+        }
+    }
+
+    /// ADR-0073, ADR-0053: forgetting a machine or an agent is the hub's own fact, like presence; a node that sends one (about another
+    /// machine or itself) is refused and nothing is stored.
+    #[test]
+    fn a_node_cannot_forget_a_machine_or_an_agent() {
+        use agora_protocol::v1::{AgentForgotten, NodeForgotten};
+        let (store, sup) = (SqliteStore::open_in_memory().unwrap(), support());
+        let mut s = ready(&store, &sup, "n1");
+        let facts = [
+            (
+                Body::NodeForgotten(NodeForgotten {
+                    node_id: "n2".into(),
+                    refused_return: true,
+                }),
+                "node_forgotten",
+            ),
+            (
+                Body::NodeForgotten(NodeForgotten {
+                    node_id: "n1".into(),
+                    refused_return: false,
+                }),
+                "node_forgotten",
+            ),
+            (
+                Body::AgentForgotten(AgentForgotten {
+                    agent_id: "n2/a".into(),
+                }),
+                "agent_forgotten",
+            ),
+            (
+                Body::AgentForgotten(AgentForgotten {
+                    agent_id: "n1/a".into(),
+                }),
+                "agent_forgotten",
+            ),
+        ];
+        for (body, field) in facts {
+            let ev = Event {
+                producer_id: "n1".into(),
+                seq: 1,
+                at_ms: 1,
+                body: Some(body.clone()),
+            }
+            .encode_to_vec();
+            match s.event(&ev) {
+                Err(SessionError::Protocol(e)) => assert_eq!(
+                    e,
+                    Error::new(ErrorCode::ProtocolInvalidMessage).with("field", field)
+                ),
+                got => panic!("{body:?}: {got:?}"),
+            }
+        }
         assert_eq!(store.acked("n1").unwrap(), 0);
     }
 
