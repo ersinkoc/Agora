@@ -4,6 +4,10 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+_Nothing yet._
+
+## 0.3.14
+
 ### Starting agents
 - `agora agent start codex --setting model=gpt-6.1-sol --setting effort=high` starts an agent with the model and reasoning effort you
   choose (ADR-0066). Claude Code and Codex offer `model` and `effort` (low, medium, high, xhigh, max). The machine checks every value
