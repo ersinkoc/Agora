@@ -34,6 +34,10 @@ _Nothing yet._
   minimized or not in front (the count only, in your language). Not on macOS yet: there it stays silent for now.
 
 ### Security
+- A permission to act on a machine for some hours (a grant) now ends as soon as the device that gave it is no longer trusted
+  there: removed with `agora node untrust`, revoked from another device, run out, or limited to other projects. It used to keep
+  letting commands through until it expired (up to 8 hours) unless it was revoked by hand (audit finding F270). Trusting the device
+  again does not bring the old grant back.
 - An agent could make its machine's node take memory without limit by sending one endless line to its mesh connection
   without a newline, and the agent then could not be stopped while it kept sending. A line over 1 MiB now closes the connection as
   soon as it reaches that size (audit finding F250).
