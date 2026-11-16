@@ -633,7 +633,11 @@ impl Session {
 
     /// What an agent changed, as a unified diff (what the web's review screen reads): its folder's (`workspace.query` "diff",
     /// ADR-0053) or its worktree's (`git.diff`). Ids are the node's own (without the `node/` prefix).
-    pub fn diff(&mut self, node: &str, target: &Place) -> Result<String, String> {
+    pub fn diff(
+        &mut self,
+        node: &str,
+        target: &Place,
+    ) -> Result<agora_protocol::v1::GitDiffResult, String> {
         let command = match target {
             Place::Folder(id) => {
                 command_request::Command::WorkspaceQuery(agora_protocol::v1::WorkspaceQuery {
@@ -649,7 +653,7 @@ impl Session {
         };
         let ok = self.command_ok(node, command, Duration::from_secs(30))?;
         match ok.result {
-            Some(command_ok::Result::GitDiff(d)) => Ok(d.diff),
+            Some(command_ok::Result::GitDiff(d)) => Ok(d),
             _ => Err("protocol.invalid_message".into()),
         }
     }

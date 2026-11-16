@@ -258,6 +258,7 @@ changes-next = Next file
 changes-keys = next and previous file
 changes-binary = This file is not text, so its changes are not shown.
 changes-no-lines = Only the name or the permissions of this file changed.
+changes-secret = Changed, content hidden
 changes-no-eol = No line break at the end of the file
 changes-gap = { $count ->
     [one] Show 1 unchanged line
@@ -300,6 +301,8 @@ files-tree = Folders and files
 files-pick = Pick a file on the left to read it.
 files-binary = This file is not text, so it is not shown.
 files-too-large = This file could not be read (it may be too large).
+files-secret = Kept private: it may hold a secret
+files-secret-row = { $name }, kept private
 files-failed = Could not list this folder.
 files-filter = Filter files by name
 files-only-changed = Show only the changed files

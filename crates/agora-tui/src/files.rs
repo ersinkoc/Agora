@@ -102,6 +102,24 @@ pub fn top_for(at: usize, top: usize, room: usize) -> usize {
     }
 }
 
+/// May this entry be opened? A secret file (ADR-0080) is listed and marked, never asked for.
+pub fn openable(e: &FileEntry) -> bool {
+    e.is_dir || !e.secret
+}
+
+/// What a failed read says: the private-file message for `files.secret` (an older listing that did not mark the file), else the
+/// general one with the code.
+pub fn read_failure(code: &str, t: Text<'_>) -> String {
+    if code == "files.secret" {
+        t(key!("tui-files-secret"), &[])
+    } else {
+        t(
+            key!("tui-files-failed"),
+            &[("code", Arg::Str(code.to_string()))],
+        )
+    }
+}
+
 /// A folder of the agent's: whose and where, its entries (folders with a trailing `/`, files with their size) with `selected`
 /// chosen, and the keys. `notice` (a failed read) is said above the keys.
 #[allow(clippy::too_many_arguments)] // one screen: what it shows
@@ -145,6 +163,9 @@ pub fn draw_listing(
                 };
                 let right = if e.is_dir {
                     String::new()
+                } else if e.secret {
+                    // A secret file (ADR-0080): marked instead of sized, and Enter does not open it.
+                    t(key!("tui-files-private"), &[])
                 } else {
                     size(e.size_bytes)
                 };
@@ -288,6 +309,47 @@ mod tests {
             Content::Binary(_) => panic!("text"),
         }
         assert!(matches!(content(b"PNG\0\x01\x02"), Content::Binary(6)));
+    }
+
+    #[test]
+    fn a_secret_entry_is_marked_and_not_openable_and_an_ordinary_one_is_both_unmarked_and_openable()
+    {
+        let mut env = entry(".env", false, 40);
+        env.secret = true;
+        let notes = entry("notes.md", false, 12);
+        assert!(!openable(&env));
+        assert!(openable(&notes), "negative control");
+        assert!(openable(&FileEntry {
+            is_dir: true,
+            secret: true,
+            ..entry("x", true, 0)
+        }));
+        let mut term = Terminal::new(TestBackend::new(40, 5)).unwrap();
+        term.draw(|f| draw_listing(f, "shell", "", &[env, notes], 0, "", "", &text))
+            .unwrap();
+        let buf = term.backend().buffer().clone();
+        let row = |y: u16| {
+            (0..40)
+                .map(|x| buf[(x, y)].symbol().to_string())
+                .collect::<String>()
+        };
+        assert!(
+            row(1).contains(".env") && row(1).contains("tui-files-private"),
+            "{}",
+            row(1)
+        );
+        assert!(
+            row(2).contains("notes.md") && !row(2).contains("tui-files-private"),
+            "{}",
+            row(2)
+        );
+        assert!(row(2).contains("12 B"), "{}", row(2));
+    }
+
+    #[test]
+    fn a_files_secret_error_from_a_stale_listing_says_the_same_as_the_marker() {
+        assert_eq!(read_failure("files.secret", &text), "tui-files-secret");
+        assert!(read_failure("files.not_found", &text).starts_with("tui-files-failed"));
     }
 
     #[test]

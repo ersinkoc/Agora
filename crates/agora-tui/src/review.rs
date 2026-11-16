@@ -21,6 +21,8 @@ pub enum Kind {
     Added,
     Removed,
     Context,
+    /// A changed secret file's content is not shown (ADR-0080): this row says so, with its counts.
+    Hidden,
 }
 
 /// The diff's lines with their kind, as plain text (an agent's file can hold control characters: they never reach the screen).
@@ -50,6 +52,48 @@ pub fn lines(diff: &str) -> Vec<(Kind, String)> {
         .collect()
 }
 
+/// The diff's lines, with a row saying "content hidden" after the header of each changed secret file (`secret_files` of `git.diff`):
+/// the node sends such a file with no hunk, and its counts, which hold no value.
+pub fn lines_with_secret(
+    diff: &str,
+    secret: &[agora_protocol::v1::SecretFileChange],
+    t: Text<'_>,
+) -> Vec<(Kind, String)> {
+    let mut out = lines(diff);
+    if secret.is_empty() {
+        return out;
+    }
+    let mut i = 0;
+    while i < out.len() {
+        if let Some((_, l)) = out.get(i).filter(|(_, l)| l.starts_with("diff ")) {
+            let hit = secret
+                .iter()
+                .find(|c| l.ends_with(&format!(" b/{}", plain(&c.path))));
+            if let Some(c) = hit {
+                // After the header lines of this file (up to the next file or hunk).
+                let mut end = i + 1;
+                while out
+                    .get(end)
+                    .is_some_and(|(k, l)| *k == Kind::File && !l.starts_with("diff "))
+                {
+                    end += 1;
+                }
+                let say = t(
+                    key!("tui-review-hidden"),
+                    &[
+                        ("added", Arg::Num(i64::from(c.added))),
+                        ("removed", Arg::Num(i64::from(c.removed))),
+                    ],
+                );
+                out.insert(end, (Kind::Hidden, say));
+                i = end;
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
 /// How many files the diff touches.
 pub fn files(lines: &[(Kind, String)]) -> usize {
     lines
@@ -73,6 +117,7 @@ fn style(kind: Kind, colors: ColorMode) -> Style {
         Kind::Added => Style::default().fg(Color::Green),
         Kind::Removed => Style::default().fg(Color::Red),
         Kind::Context => Style::default(),
+        Kind::Hidden => Style::default().add_modifier(Modifier::ITALIC),
     }
 }
 
@@ -184,6 +229,38 @@ mod tests {
         assert_eq!(files(&l), 1);
         assert!(!l.iter().any(|(_, s)| s.contains('\x1b')), "{l:?}");
         assert_eq!(l[7].1, "+new    line");
+    }
+
+    #[test]
+    fn a_changed_secret_file_shows_a_content_hidden_row_with_its_counts_and_no_content() {
+        use agora_protocol::v1::SecretFileChange;
+        let diff = "diff --git a/.env b/.env\nindex 1..2 100644\ndiff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1 +1 @@\n-old\n+new\n";
+        let text = |id: &str, a: &[(&str, Arg)]| {
+            format!(
+                "{id}{}",
+                a.iter()
+                    .map(|(k, v)| match v {
+                        Arg::Num(n) => format!(" {k}={n}"),
+                        _ => String::new(),
+                    })
+                    .collect::<String>()
+            )
+        };
+        let secret = [SecretFileChange {
+            path: ".env".into(),
+            added: 2,
+            removed: 1,
+        }];
+        let l = lines_with_secret(diff, &secret, &text);
+        assert_eq!(
+            l[2],
+            (Kind::Hidden, "tui-review-hidden added=2 removed=1".into())
+        );
+        assert_eq!(l[3].1, "diff --git a/src/a.rs b/src/a.rs");
+        assert_eq!(files(&l), 2);
+        // Negative control: with no secret file the lines are exactly the plain reading.
+        assert_eq!(lines_with_secret(diff, &[], &text), lines(diff));
+        assert_eq!(l.iter().filter(|(k, _)| *k == Kind::Hidden).count(), 1);
     }
 
     #[test]

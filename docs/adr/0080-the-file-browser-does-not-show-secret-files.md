@@ -2,6 +2,7 @@
 Status: Accepted
 Date: 2026-11-15
 Accepted: 2026-11-15 (the maintainer's explicit message in the merger chat, accepting the ADRs listed by number (#613 ADR-0060 Amendment A, #614 ADR-0078, #615 ADR-0080, #616 ADR-0079): they accepted all of them). The open questions' proposed answers stand.
+Built: the node (#636) lists, refuses and counts as described. The web window and `agora tui` (this change) mark a secret entry with a lock and the reason "Kept private: it may hold a secret" (en, tr), do not send a read for it (Enter says the reason), show a changed secret file in the review as "Changed, content hidden" with the node's counts and no body, and show the same reason for a `files.secret` answer to a read (a client with an older listing). The phone layout shares these views.
 Origin: a question the maintainer was asked while the file and review screens (#483, #487, #488, #500) were built: `.env` files and private keys show in
 full in the file browser, which is the node's old behaviour. Asked "should they be hidden?", they approved, without
 seeing details; this text is the detailed proposal and is not accepted until they read it and say so.

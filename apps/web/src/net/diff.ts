@@ -40,6 +40,29 @@ export interface DiffFile {
   hunks: DiffHunk[];
   /** The diff was cut off inside this file (the node answers at most `MAX_DIFF_BYTES`). */
   partial?: boolean;
+  /** ADR-0080: the node treats this file as secret by its name and sent no content; `added` and `removed` are its counts. */
+  secret?: boolean;
+}
+
+/** A changed secret file as `git.diff` reports it (`GitDiffResult.secret_files`): counts only, no value. */
+export interface SecretChange { path: string; added: number; removed: number }
+
+/** A diff as the views take it: the text, or the text with the secret files the node left out of it. */
+export type DiffSource = string | { diff: string; secretFiles?: readonly SecretChange[] };
+
+export const diffText = (src: DiffSource): string => (typeof src === 'string' ? src : src.diff);
+
+/** The files of a diff, a secret one marked and carrying the node's counts (its section has no hunk). */
+export function readDiff(src: DiffSource): DiffFile[] {
+  const files = parseDiff(diffText(src));
+  const secret = typeof src === 'string' ? [] : src.secretFiles ?? [];
+  if (secret.length === 0) return files;
+  const by = new Map(secret.map((c) => [c.path, c]));
+  for (const f of files) {
+    const c = by.get(f.path);
+    if (c) { f.secret = true; f.added = c.added; f.removed = c.removed; f.binary = false; f.lines = []; f.hunks = []; }
+  }
+  return files;
 }
 
 /** The most a node answers for one diff (`MAX_DIFF_BYTES` in agora-node's control.rs); it cuts at a character boundary. */

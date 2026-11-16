@@ -4,8 +4,8 @@ import { decodeText } from '../net/files';
 import { markRanges } from '../net/highlight';
 import { useHighlightedFile, useHighlightedLines } from '../highlight/useHighlight';
 import {
-  baseName, byFolder, changedSpan, lineEndingOnly, countByStatus, fileLines, gapLines, gapsOf, isTruncated, matchesFile, pairedLines, parseDiff,
-  sameChange, splitRows, type DiffFile, type DiffLine, type DiffStatus, type Gap,
+  baseName, byFolder, readDiff, changedSpan, lineEndingOnly, countByStatus, fileLines, gapLines, gapsOf, isTruncated, matchesFile, pairedLines, parseDiff,
+  sameChange, splitRows, diffText, type DiffFile, type DiffLine, type DiffSource, type DiffStatus, type Gap,
 } from '../net/diff';
 import { Rounds } from '../net/rounds';
 import { Icon } from './Icon';
@@ -42,7 +42,7 @@ function Counts({ added, removed }: { added: number; removed: number }) {
 
 export function ChangesView({ load, read, changed }: {
   /** The workspace's diff against HEAD; with a path, the diff of that one file. */
-  load: (path?: string) => Promise<string>;
+  load: (path?: string) => Promise<DiffSource>;
   /** The file as it is now, to show unchanged lines the diff leaves out. */
   read?: (path: string) => Promise<Uint8Array>;
   /** How many files the node counts as changed: says how many a diff cut at 512 KiB leaves out. */
@@ -75,8 +75,8 @@ export function ChangesView({ load, read, changed }: {
     load().then(
       (text) => {
         if (!live) return;
-        const files = parseDiff(text);
-        setDiff({ files, truncated: isTruncated(text) });
+        const files = readDiff(text);
+        setDiff({ files, truncated: isTruncated(diffText(text)) });
         setSelected((s) => (s !== undefined && files.some((f) => f.path === s) ? s : byFolder(files)[0]?.files[0]?.path));
       },
       () => { if (live) setDiff('failed'); },
@@ -141,7 +141,7 @@ export function ChangesView({ load, read, changed }: {
         const text = decodeText(bytes);
         if (text === undefined) return 'failed';
         if (f.status === 'renamed') return fileLines(text);
-        const now = parseDiff(await load(path)).find((x) => x.path === path);
+        const now = readDiff(await load(path)).find((x) => x.path === path);
         if (!now) return 'failed';
         return sameChange(f, now) ? fileLines(text) : 'stale';
       })
@@ -165,7 +165,7 @@ export function ChangesView({ load, read, changed }: {
     const put = rounds.bind((v: DiffFile | 'failed') => setSingle((s) => new Map(s).set(path, v)));
     setSingle((s) => new Map(s).set(path, 'loading'));
     load(path).then(
-      (text) => { const f = parseDiff(text).find((x) => x.path === path); put(f && !f.partial ? f : 'failed'); },
+      (text) => { const f = readDiff(text).find((x) => x.path === path); put(f && !f.partial ? f : 'failed'); },
       () => put('failed'),
     );
   };
@@ -248,6 +248,7 @@ export function ChangesView({ load, read, changed }: {
                     <StatusBadge status={f.status} />
                     <span className={`min-w-0 flex-1 truncate font-mono text-xs ${f.status === 'deleted' ? 'text-muted line-through' : ''}`} dir="ltr">{baseName(f.path)}</span>
                     {f.partial && <span className="text-[0.6875rem] text-needs-you" title={t('changes-partial')}>…</span>}
+                    {f.secret && <span className="flex-none text-muted" title={t('changes-secret')}><Icon name="lock" className="size-3" /><span className="sr-only">{t('changes-secret')}</span></span>}
                     {!f.binary && <Counts added={f.added} removed={f.removed} />}
                   </div>
                 ))}
@@ -334,7 +335,7 @@ export function segmentsOf(file: DiffFile, opened: Set<number> | 'all', text: Fi
   return out;
 }
 
-function FileBody({ file, layout, wrap, text, opened, canExpand, onOpenGap, showAll, onShowAll, single, onLoadSingle, onRetryText }: {
+export function FileBody({ file, layout, wrap, text, opened, canExpand, onOpenGap, showAll, onShowAll, single, onLoadSingle, onRetryText }: {
   file: DiffFile; layout: Layout; wrap: boolean; text: FileText | undefined; opened: Set<number> | 'all'; canExpand: boolean;
   onOpenGap: (g: Gap) => void; showAll: boolean; onShowAll: () => void; single: DiffFile | 'loading' | 'failed' | undefined;
   onLoadSingle: () => void; onRetryText: () => void;
@@ -370,6 +371,7 @@ function FileBody({ file, layout, wrap, text, opened, canExpand, onOpenGap, show
   if (text === 'stale') notices.push(<p key="stale" role="status" className="m-0 border-b border-line bg-needs-you/10 px-3 py-1.5 text-xs">{t('changes-stale')}</p>);
   if (text === 'failed') notices.push(<p key="failed" role="alert" className="m-0 flex items-center gap-2 border-b border-line px-3 py-1.5 text-xs">{t('changes-gap-failed')}<button type="button" className="button" onClick={onRetryText}>{t('changes-retry')}</button></p>);
 
+  if (file.secret) return <div role="note" className="flex items-start gap-2 p-4 text-muted"><Icon name="lock" className="mt-0.5 size-4" /><div><p className="m-0 font-semibold text-ink">{t('changes-secret')}</p><p className="m-0 text-xs">{t('files-secret')}</p></div></div>;
   if (file.binary) return <>{notices}<p className="muted p-4">{t('changes-binary')}</p></>;
   if (file.hunks.length === 0) return <>{notices}<p className="muted p-4">{t('changes-no-lines')}</p></>;
 

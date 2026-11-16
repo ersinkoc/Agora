@@ -12,6 +12,7 @@ import type { ChatSource } from '../net/chat';
 import { FilesDialog } from './FilesDialog';
 import { HistoryDialog } from './HistoryDialog';
 import type { CommitItem } from '../net/history';
+import type { DiffSource } from '../net/diff';
 import type { WorkspaceFiles } from '../net/files';
 import { AgentAddress } from './AgentAddress';
 import { NoAskBadge } from './NoAskBadge';
@@ -66,7 +67,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   chatOf?: (agent: AgentTileModel) => ChatSource | undefined;
   sendPrompt?: (agent: AgentTileModel, text: string) => Promise<boolean>;
   chooseOption?: (agentKey: string, kind: 'mode' | 'model', id: string) => Promise<boolean>;
-  loadDiff?: (agent: AgentTileModel, path?: string) => Promise<string>;
+  loadDiff?: (agent: AgentTileModel, path?: string) => Promise<DiffSource>;
   loadHistory?: (agent: AgentTileModel) => Promise<CommitItem[]>;
   filesOf?: (agent: AgentTileModel) => WorkspaceFiles | undefined;
   onOpen: (agentId: string) => void;
