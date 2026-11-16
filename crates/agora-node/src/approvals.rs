@@ -72,6 +72,61 @@ pub fn start_signed_message(
     m
 }
 
+/// ADR-0066: the launch settings an `agent.start` request's detail announces (`settings`: a list of `{id, value}`, in the order they
+/// were shown), as pairs. Empty for a detail without any, and for one that does not parse (the node wrote the detail itself, so that
+/// is not a case that happens; a start request without settings is signed as it always was).
+pub fn detail_settings(detail: &str) -> Vec<(String, String)> {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(detail) else {
+        return Vec::new();
+    };
+    let Some(list) = v.get("settings").and_then(serde_json::Value::as_array) else {
+        return Vec::new();
+    };
+    list.iter()
+        .map(|s| {
+            let get = |k: &str| {
+                s.get(k)
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_string()
+            };
+            (get("id"), get("value"))
+        })
+        .collect()
+}
+
+/// ADR-0066: what a device signs to decide an `agent.start` request that carries launch settings: the fields of
+/// [`start_signed_message`] under the domain `agora-approval-start-v2`, with the settings as a length-prefixed pair list
+/// ([`crate::directory::signed_pairs`]) before the hash of the detail. A request with settings verifies only over this message (a
+/// client that signs the v1 message, which does not name the settings, is refused), and one without keeps v1. Shared vectors:
+/// `schema/fixtures/signing/approval-start-v2.json`.
+pub fn start_signed_message_v2(
+    node_id: &str,
+    approval_id: &str,
+    approved: bool,
+    helper_grant: u32,
+    helpers_may_start: bool,
+    settings: &[(String, String)],
+    detail: &str,
+) -> Vec<u8> {
+    let digest = ring::digest::digest(&ring::digest::SHA256, detail.as_bytes());
+    let hash: String = digest.as_ref().iter().map(|b| format!("{b:02x}")).collect();
+    let mut m = b"agora-approval-start-v2".to_vec();
+    for part in [
+        node_id,
+        approval_id,
+        if approved { "1" } else { "0" },
+        &helper_grant.to_string(),
+        if helpers_may_start { "1" } else { "0" },
+        &crate::directory::signed_pairs(settings),
+        &hash,
+    ] {
+        m.push(0);
+        m.extend_from_slice(part.as_bytes());
+    }
+    m
+}
+
 /// Which actions need a person. Patterns are exact action names, or a prefix ending in `*`; `*` alone is everything.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Policy {
@@ -191,7 +246,22 @@ impl<V: Verifier> Approvals<V> {
         };
         // Verify before anything changes, and before saying whether the request expired: a peer without a trusted
         // key cannot learn the state of a request it can name (ids are 128 random bits, so it cannot guess one).
-        let msg = if p.action == START_ACTION {
+        let settings = if p.action == START_ACTION {
+            detail_settings(&p.detail)
+        } else {
+            Vec::new()
+        };
+        let msg = if p.action == START_ACTION && !settings.is_empty() {
+            start_signed_message_v2(
+                &self.node_id,
+                &r.approval_id,
+                r.approved,
+                r.helper_grant,
+                r.helpers_may_start,
+                &settings,
+                &p.detail,
+            )
+        } else if p.action == START_ACTION {
             start_signed_message(
                 &self.node_id,
                 &r.approval_id,
@@ -795,6 +865,130 @@ mod tests {
         let m = start_signed_message("node-1", "ap-1", true, 3, false, START_VECTOR_DETAIL);
         let want = format!("agora-approval-start-v1\0node-1\0ap-1\01\03\00\0{START_VECTOR_HASH}");
         assert_eq!(m, want.as_bytes());
+    }
+
+    /// The vectors the web client's test uses too (`schema/fixtures/signing/approval-start-v2.json`).
+    #[test]
+    fn the_shared_start_v2_vectors_match() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../schema/fixtures/signing/approval-start-v2.json");
+        let v: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        for c in v["cases"].as_array().unwrap() {
+            let detail = c["detail"].as_str().unwrap();
+            // The settings are read out of the detail the way the node reads them.
+            let settings = detail_settings(detail);
+            let listed: Vec<(String, String)> = c["settings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|p| {
+                    (
+                        p[0].as_str().unwrap().to_string(),
+                        p[1].as_str().unwrap().to_string(),
+                    )
+                })
+                .collect();
+            assert_eq!(settings, listed, "{}", c["name"]);
+            let m = start_signed_message_v2(
+                c["node"].as_str().unwrap(),
+                c["approval_id"].as_str().unwrap(),
+                c["approved"].as_bool().unwrap(),
+                u32::try_from(c["helper_grant"].as_u64().unwrap()).unwrap(),
+                c["helpers_may_start"].as_bool().unwrap(),
+                &settings,
+                detail,
+            );
+            let hex: String = m.iter().map(|b| format!("{b:02x}")).collect();
+            assert_eq!(hex, c["hex"].as_str().unwrap(), "{}", c["name"]);
+        }
+    }
+
+    /// ADR-0066: a start whose detail carries settings is decided only over `agora-approval-start-v2`; the v1 message (what a client
+    /// that does not know settings signs, and what an old approval without them was) does not decide it, whether the settings were
+    /// changed, added, dropped or reordered, and another device's signature does not either.
+    #[test]
+    fn a_start_with_settings_is_decided_only_over_the_settings_it_shows() {
+        let detail =
+            |settings: &str| format!(r#"{{"kind":"codex","prompt":"fix","settings":{settings}}}"#);
+        let shown = detail(
+            r#"[{"id":"model","label":"setting-model","value":"gpt-6.1-sol"},{"id":"effort","label":"setting-effort","value":"high"}]"#,
+        );
+        let signed_pairs = detail_settings(&shown);
+        assert_eq!(signed_pairs.len(), 2);
+        // `over` makes the bytes a client signs, given the request's id (which is random, so known only once it is made).
+        let decide = |over: &dyn Fn(&str) -> Vec<u8>, device: &str, secret: &str| {
+            let mut a = approvals();
+            let p = a.request("agent-1", START_ACTION, &shown, 0, 0).unwrap();
+            let mut r = resolve_msg(&p.id, true, device, secret, "node-1");
+            r.signature = sign(secret, &over(&p.id));
+            r.signer_device_id = device.into();
+            a.resolve(&r, 1).map(|(_, v)| v)
+        };
+        let v2 = |settings: &[(String, String)], detail: &str| {
+            let (settings, detail) = (settings.to_vec(), detail.to_string());
+            move |id: &str| {
+                start_signed_message_v2("node-1", id, true, 0, false, &settings, &detail)
+            }
+        };
+        assert_eq!(
+            decide(&v2(&signed_pairs, &shown), "phone", "s3cret"),
+            Ok(Verdict::Approved)
+        );
+        // A client that signs the v1 message (it does not name the settings) is refused.
+        assert_eq!(
+            decide(
+                &|id| start_signed_message("node-1", id, true, 0, false, &shown),
+                "phone",
+                "s3cret"
+            ),
+            Err(ApprovalError::BadSignature)
+        );
+        // The same request signed as if it had no settings, or other ones, or the same ones reordered or extended.
+        let mut reordered = signed_pairs.clone();
+        reordered.reverse();
+        let mut changed = signed_pairs.clone();
+        changed[0].1 = "gpt-6.1-terra".into();
+        let mut extra = signed_pairs.clone();
+        extra.push(("mode".into(), "plan".into()));
+        for pairs in [
+            Vec::new(),
+            reordered,
+            changed,
+            extra,
+            signed_pairs[..1].to_vec(),
+        ] {
+            assert_eq!(
+                decide(&v2(&pairs, &shown), "phone", "s3cret"),
+                Err(ApprovalError::BadSignature),
+                "{pairs:?}"
+            );
+        }
+        // A signature over another detail (the prompt or a setting swapped on the way) does not decide this one.
+        let other = shown.replace("gpt-6.1-sol", "gpt-6.1-terra");
+        assert_eq!(
+            decide(&v2(&signed_pairs, &other), "phone", "s3cret"),
+            Err(ApprovalError::BadSignature)
+        );
+        // Right bytes, wrong device (no such trusted key).
+        assert_eq!(
+            decide(&v2(&signed_pairs, &shown), "phone", "another-secret"),
+            Err(ApprovalError::BadSignature)
+        );
+        // A request without settings still verifies over v1, and v2 with no settings listed is not what it is signed with.
+        let plain = r#"{"kind":"codex","prompt":"fix"}"#;
+        let mut a = approvals();
+        let p = a.request("agent-1", START_ACTION, plain, 0, 0).unwrap();
+        let mut r = resolve_msg(&p.id, true, "phone", "s3cret", "node-1");
+        r.signature = sign(
+            "s3cret",
+            &start_signed_message_v2("node-1", &p.id, true, 0, false, &[], plain),
+        );
+        assert_eq!(a.resolve(&r, 1), Err(ApprovalError::BadSignature));
+        r.signature = sign(
+            "s3cret",
+            &start_signed_message("node-1", &p.id, true, 0, false, plain),
+        );
+        assert_eq!(a.resolve(&r, 1).unwrap().1, Verdict::Approved);
     }
 
     #[test]

@@ -1,0 +1,65 @@
+{
+ "about": "ADR-0066 agora-approval-start-v2: the signed bytes of a decision on an agent.start approval whose detail carries settings. `detail` is the request exactly as announced (hashed byte for byte, SHA-256, lowercase hex); `settings` are its `settings` entries (id, value), in the order the detail lists them. Checked by the node (crates/agora-node/src/approvals.rs) and the web window (apps/web/src/net/spawn.test.ts).",
+ "cases": [
+  {
+   "name": "approved",
+   "node": "laptop",
+   "approval_id": "ap-1",
+   "approved": true,
+   "helper_grant": 0,
+   "helpers_may_start": false,
+   "settings": [
+    [
+     "model",
+     "gpt-6.1-sol"
+    ],
+    [
+     "effort",
+     "high"
+    ]
+   ],
+   "detail": "{\"node\":\"laptop\",\"agent\":\"agent-1\",\"agent_kind\":\"claude\",\"kind\":\"codex\",\"folder\":\"/home/dev/code/login-fix\",\"inside\":true,\"worktree\":false,\"depth\":1,\"grant_allowed\":false,\"prompt\":\"Write tests.\",\"settings\":[{\"id\":\"model\",\"label\":\"setting-model\",\"value\":\"gpt-6.1-sol\"},{\"id\":\"effort\",\"label\":\"setting-effort\",\"value\":\"high\"}]}",
+   "hex": "61676f72612d617070726f76616c2d73746172742d7632006c6170746f700061702d3100310030003000323a353a6d6f64656c3a31313a6770742d362e312d736f6c3a363a6566666f72743a343a686967680037386439346433633335363036343966353037316438643935373764633235363665633638343665313065356338363437313135666339663931623535613233"
+  },
+  {
+   "name": "denied",
+   "node": "laptop",
+   "approval_id": "ap-1",
+   "approved": false,
+   "helper_grant": 0,
+   "helpers_may_start": false,
+   "settings": [
+    [
+     "model",
+     "gpt-6.1-sol"
+    ],
+    [
+     "effort",
+     "high"
+    ]
+   ],
+   "detail": "{\"node\":\"laptop\",\"agent\":\"agent-1\",\"agent_kind\":\"claude\",\"kind\":\"codex\",\"folder\":\"/home/dev/code/login-fix\",\"inside\":true,\"worktree\":false,\"depth\":1,\"grant_allowed\":false,\"prompt\":\"Write tests.\",\"settings\":[{\"id\":\"model\",\"label\":\"setting-model\",\"value\":\"gpt-6.1-sol\"},{\"id\":\"effort\",\"label\":\"setting-effort\",\"value\":\"high\"}]}",
+   "hex": "61676f72612d617070726f76616c2d73746172742d7632006c6170746f700061702d3100300030003000323a353a6d6f64656c3a31313a6770742d362e312d736f6c3a363a6566666f72743a343a686967680037386439346433633335363036343966353037316438643935373764633235363665633638343665313065356338363437313135666339663931623535613233"
+  },
+  {
+   "name": "approved, helpers may ask",
+   "node": "laptop",
+   "approval_id": "ap-2",
+   "approved": true,
+   "helper_grant": 0,
+   "helpers_may_start": true,
+   "settings": [
+    [
+     "model",
+     "gpt-6.1-sol"
+    ],
+    [
+     "effort",
+     "high"
+    ]
+   ],
+   "detail": "{\"node\":\"laptop\",\"agent\":\"agent-1\",\"agent_kind\":\"claude\",\"kind\":\"codex\",\"folder\":\"/home/dev/code/login-fix\",\"inside\":true,\"worktree\":false,\"depth\":1,\"grant_allowed\":false,\"prompt\":\"Write tests.\",\"settings\":[{\"id\":\"model\",\"label\":\"setting-model\",\"value\":\"gpt-6.1-sol\"},{\"id\":\"effort\",\"label\":\"setting-effort\",\"value\":\"high\"}]}",
+   "hex": "61676f72612d617070726f76616c2d73746172742d7632006c6170746f700061702d3200310030003100323a353a6d6f64656c3a31313a6770742d362e312d736f6c3a363a6566666f72743a343a686967680037386439346433633335363036343966353037316438643935373764633235363665633638343665313065356338363437313135666339663931623535613233"
+  }
+ ]
+}

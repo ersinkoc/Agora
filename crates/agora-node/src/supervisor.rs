@@ -546,6 +546,41 @@ impl Supervisor {
         )
     }
 
+    /// ADR-0066: the settings an agent's `agent_start` asks for, checked against this node's manifest for `kind` (unknown, repeated or
+    /// invalid ones are refused, so nothing is asked about nor started) and returned as `(id, label, value)` in the manifest's order,
+    /// which is the order the approval card shows, the signature covers and the launch applies. Empty in, empty out.
+    pub fn checked_settings(
+        &self,
+        kind: &str,
+        settings: &[(String, String)],
+    ) -> Result<Vec<(String, String, String)>, SupervisorError> {
+        if settings.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.launch_choice(
+            kind,
+            &Requested {
+                settings: settings.to_vec(),
+                ..Requested::default()
+            },
+        )?;
+        let k = self
+            .kinds
+            .get(kind)
+            .ok_or_else(|| SupervisorError::UnknownKind(kind.to_string()))?;
+        Ok(k.manifest
+            .launch
+            .setting
+            .iter()
+            .filter_map(|st| {
+                settings
+                    .iter()
+                    .find(|(id, _)| *id == st.id)
+                    .map(|(id, value)| (id.clone(), st.label.clone(), value.clone()))
+            })
+            .collect())
+    }
+
     /// ADR-0057: `child` was started by `parent` (an agent's `agent_start`). Carried in every view of `child`.
     pub fn set_parent(&mut self, child: &AgentId, parent: &AgentId) {
         self.parents.insert(child.clone(), parent.clone());

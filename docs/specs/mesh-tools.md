@@ -17,7 +17,7 @@ the node per MCP connection; agents cannot impersonate each other.
 | `lease_acquire` | `{ paths: [glob], ttl_s: number, reason }` | `{ lease_id, expires_at }` or `lease.held` |
 | `lease_release` | `{ lease_id }` | `{ ok }` |
 | `handoff` | `{ to, task_id?, summary, refs }` | `{ handoff_id }` |
-| `agent_start` | `{ kind, prompt?, folder?, worktree?: bool, node? }` | `{ agent_id }` after the user's decision (ADR-0057) |
+| `agent_start` | `{ kind, prompt?, folder?, worktree?: bool, node?, settings?: { id: value } }` | `{ agent_id }` after the user's decision (ADR-0057) |
 | `agent_wait` | `{ agent_id, state: "idle"\|"working"\|"blocked"\|"done"\|"exited", timeout_s?: number (default 600, at most 3600) }` | `{ agent_id, state }` or `mesh.timeout` |
 | `agent_output` | `{ agent_id, lines?: number (default 40, at most 200) }` | `{ agent_id, source: "screen"\|"transcript", lines }` |
 
@@ -122,6 +122,11 @@ the node answers them itself (`agora-node::spawn`), not the broker. The caller i
   device's signed decision has been verified on this node: `{ agent_id }`, `mesh.start_denied` (refused, or withdrawn) or
   `approval.expired`. The decision is signed over a hash of the request as announced, so a hub cannot change what starts. The call
   does not block the agent's other calls; if the connection ends first, the request is withdrawn.
+- **Settings (ADR-0066).** `settings` names launch settings the kind declares (`model`, `effort`, ...; values are strings). The node checks
+  them against its manifest before anyone is asked (`agent.setting_unknown`, `agent.setting_invalid`; nothing is announced and nothing
+  starts), the card lists every one next to the kind, folder and prompt, and the decision is signed over them (`agora-approval-start-v2`,
+  `protocol.md`), so the helper starts with exactly what the user was shown. A request with settings offers no grant (`grant_allowed:
+  false`) and a start with settings is always asked, even under a grant. A helper never gets a launch option (ADR-0059).
 - **A grant.** The decision may allow "up to N helpers of this kind in this folder" (N at most 10, this start included) and, separately,
   that the helpers it starts may ask in turn. Later starts that match the grant (same asking agent, kind, folder and `worktree`
   choice) start at once. A grant ends when the asking agent exits or is stopped, or when revoked (`GrantRevoke` with the approval id;

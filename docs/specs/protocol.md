@@ -510,7 +510,7 @@ All additions; nothing published changed.
   stops it, `auto` keeps it to the listed kinds and folders). Either way at most 16 at one start, 8 at a time (the next round 5 s
   later), and never an agent the node brought back by itself in the last 10 minutes (`auto_resumed_at_ms` in the ledger).
 
-### Launch settings (ADR-0066, first part)
+### Launch settings (ADR-0066)
 
 All additions; nothing published changed.
 - **What may be given.** `AgentKind.settings` (7) lists a kind's `[[launch.setting]]`s as `LaunchSettingSpec { id, label, values,
@@ -518,11 +518,42 @@ All additions; nothing published changed.
 - **The choice.** `AgentStart.settings` (9) and `AgentLaunch.settings` (9) carry `LaunchSetting { id, value }` pairs. The node checks
   them against its own manifest (`agent.setting_unknown {kind, setting}`, `agent.setting_invalid {kind, setting}`, nothing starts) and
   puts each value into its argument template as one argument (agent-manifest.md, "Launch settings").
-- **Only from the machine itself, for now.** `AgentLaunch`'s authorization (`directory-action-v3`) does not cover settings yet, so a
-  start with settings that came through the hub, `AgentStart` or `AgentLaunch`, is refused where the hub's commands enter the node
-  (`agent.option_forbidden {kind, option: <setting id>, policy: signature}`); a grant never covers one. A signing domain version that
-  includes them, the approval card and the `agent_start` mesh tool are ADR-0066's second part. `agora agent start KIND --setting
-  id=value` (repeatable) gives them on the node's own control socket.
+- **Through the hub: signed.** Node capability `agent.launch_settings` (offered by a node that verifies the signatures below; the hub
+  refuses a command with settings for a node without it, `protocol.capability_missing {capability: agent.launch_settings}`, instead
+  of letting an older node start the agent with the tool's own defaults). `AgentLaunch` with settings is authorized over its own
+  domain `directory-action-v4`: the `directory-action-v3` fields, then the settings, as a length-prefixed pair list (`<count>` then
+  `:<id byte length>:<id>:<value byte length>:<value>` per pair, in the order the request carries them: `[("model","x")]` is
+  `1:5:model:1:x`), before the nonce:
+
+  ```
+  directory-action-v4\0node\0launch\0path\0kind\0project_id\0option\0identity_change\0launch_options\0confirmed\0settings\0nonce\0expires_at_ms
+  ```
+
+  A launch with settings verifies only over v4; one without keeps `directory-action-v3` (options) or `-v1` exactly, so a hub can
+  neither add, change, drop nor reorder a setting, and an older signature does not carry over. At most 8 settings, each id at most 64
+  and each value at most 128 bytes, or the signature is refused. Shared vectors checked by the node, the terminal client and the web
+  window: `schema/fixtures/signing/directory-action-v4.json`. A routed `AgentStart` with settings carries no signature and is
+  refused (`agent.option_forbidden {kind, option: <setting id>, policy: signature}`); a grant never covers one. On the node's own
+  control socket (the owner) no signature is needed. The audit trail's action reads `AgentLaunch[model=x,effort=high]`.
+- **From an agent (`agent_start`, ADR-0057).** The mesh tool takes `settings: { <id>: <value> }`. The node checks them against its manifest
+  for the kind before anyone is asked (the codes above; nothing is announced and nothing starts), puts them into the request in the
+  manifest's order, and the `agent.start` approval's `detail` gains `settings`: a list of `{id, label, value}` (`label` is the
+  manifest's Fluent id, e.g. `setting-model`; present only when there are settings, so a request without them is byte for byte what it was)
+  and `grant_allowed` is `false` (a grant never covers a start with settings, and a later start with settings is always asked). The
+  decision on such a request is signed over `agora-approval-start-v2`, which names the settings before the hash of the detail:
+
+  ```
+  agora-approval-start-v2\0node_id\0approval_id\0verdict\0helper_grant\0helpers_may_start\0settings\0sha256(detail)
+  ```
+
+  with `settings` as above (read from the detail's `settings`, the pairs `(id, value)` in the order listed). A request whose detail has
+  settings is decided only over v2 (a client that signs the v1 message does not name the settings and is refused with
+  `approval.signature_invalid`); one without keeps `agora-approval-start-v1`. Vectors: `schema/fixtures/signing/approval-start-v2.json`
+  (node and web window). The helper starts with exactly the settings shown and signed, and never with a launch option.
+- **What is not built yet.** The TUI's `agent.start` card does not list settings, so it cannot approve a request that has them (its v1
+  signature is refused); the web window's start pickers and the TUI's offer the settings later (the machine already sends what each kind
+  takes in `AgentKind.settings`); the owner's `start.models` allow-list and the price class on the card; settings are not kept across a
+  node restart's resume.
 
 ### Launch options (ADR-0059)
 

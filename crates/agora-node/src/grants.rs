@@ -222,6 +222,15 @@ impl Grants {
             Cmd::AgentLaunch(a) => (&a.launch_options, &a.confirmed_launch_options),
             _ => (&[], &[]),
         };
+        // ADR-0066: the settings, in the order the request carries them (the order that was signed).
+        let settings: Vec<(String, String)> = match c {
+            Cmd::AgentLaunch(a) => a
+                .settings
+                .iter()
+                .map(|st| (st.id.clone(), st.value.clone()))
+                .collect(),
+            _ => Vec::new(),
+        };
         let (auth, op, path, kind, project, option, identity_change) = match c {
             Cmd::DirectoryInspect(d) => (
                 d.authorization.as_ref(),
@@ -273,6 +282,10 @@ impl Grants {
             || launch_options.len() > 16
             || confirmed.len() > 16
             || launch_options.iter().chain(confirmed).any(|o| o.len() > 64)
+            || settings.len() > agora_adapters::manifest::MAX_LAUNCH_SETTINGS
+            || settings
+                .iter()
+                .any(|(id, value)| id.len() > 64 || value.len() > 128)
             || a.nonce.len() != 32
             || !a.nonce.bytes().all(|b| b.is_ascii_hexdigit())
             || a.expires_at_ms <= now
@@ -281,7 +294,22 @@ impl Grants {
             return Err(bad());
         }
         // ADR-0059: chosen launch options are signed too, under their own domain (a hub can neither add nor remove one).
-        let msg = if launch_options.is_empty() && confirmed.is_empty() {
+        // ADR-0066: chosen settings too, under a domain of their own: a launch with settings verifies only over `directory-action-v4`.
+        let msg = if !settings.is_empty() {
+            crate::directory::launch_signed_message_v4(
+                &self.node_id,
+                path,
+                kind,
+                project,
+                option,
+                identity_change,
+                launch_options,
+                confirmed,
+                &settings,
+                &a.nonce,
+                a.expires_at_ms,
+            )
+        } else if launch_options.is_empty() && confirmed.is_empty() {
             crate::directory::signed_message(
                 &self.node_id,
                 op,
