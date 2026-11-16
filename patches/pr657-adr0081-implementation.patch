@@ -1,0 +1,636 @@
+From 69684e03f66e7543255b9886e8134643443fc778 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Ersin=20KO=C3=87?= <ersinkoc@gmail.com>
+Date: Mon, 16 Nov 2026 20:07:24 +0200
+Subject: [PATCH] feat(node): a replayed revocation does not undo the owner's
+ re-trust (ADR-0081)
+
+A revocation dated ahead of the node's clock (accepted up to 5 minutes) and
+received before the owner trusted the device again on the machine could be
+dated after that re-trust, so the hub sending it again removed the device
+again (audit F220).
+
+The node now keeps each verified revocation dated ahead of its clock when it
+arrives, by the fields its revoker signed, in <data>/device-revocations-ahead
+(at most 256 lines, earliest-dated dropped first; a pending line goes once the
+clock passes its date). `confirm` marks the device's lines dated at or after
+its new `since` as overridden; a revocation with that identity then removes
+nothing while the device keeps that `since`, and the log records
+`overridden`. A revocation signed later, by another device, or not received
+before the re-trust still applies. `confirm` no longer forgets the device's
+line in device-revocations, so what it signed before its revocation stays
+refused (T21). `agora node trust`, enroll and --from-hub print one line per
+overridden revoker (new key cli-trust-revocation-overridden, en and tr).
+---
+ CHANGELOG.md                          |   8 +
+ crates/agora-node/src/approvals.rs    |   9 +-
+ crates/agora-node/src/device_trust.rs | 334 ++++++++++++++++++++++++--
+ crates/agora/src/trustcli.rs          |  35 ++-
+ docs/security/threat-model.md         |   5 +-
+ docs/specs/protocol.md                |  10 +-
+ locales/en/cli.ftl                    |   1 +
+ locales/tr/cli.ftl                    |   1 +
+ 8 files changed, 368 insertions(+), 35 deletions(-)
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index e484ed08..40c6a6ec 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -10,6 +10,14 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
+   `mesh.unavailable` and can be repeated (ADR-0075, the first step; applies to agents started by this version).
+ _Nothing yet._
+ 
++### Security
++- A device you trust again on the machine (`agora node trust`, or yes at `agora node enroll` / `--from-hub`) is no longer removed
++  again when the hub sends an earlier revocation of it once more. This happened when the browser that revoked it had a clock running
++  a few minutes fast (audit finding F220). The command now says when your yes overrides such a revocation; a revocation signed after
++  your yes, or by another device, still applies (ADR-0081).
++- What a device signed before it was revoked stays refused after you trust it again on the machine. Before, trusting it again let
++  an endorsement it had signed earlier, kept by the hub, add another device.
++
+ ## 0.3.14
+ 
+ ### Starting agents
+diff --git a/crates/agora-node/src/approvals.rs b/crates/agora-node/src/approvals.rs
+index 3c74d4c2..6b35ee8d 100644
+--- a/crates/agora-node/src/approvals.rs
++++ b/crates/agora-node/src/approvals.rs
+@@ -393,8 +393,13 @@ impl P256Verifier {
+ }
+ 
+ /// Adds (or replaces) a device in the trusted-devices file. This is the node owner's act on the node itself: the
+-/// hub has no way to call it, which is what keeps approvals from being widened remotely (ADR-0020).
+-pub fn trust_device(path: &std::path::Path, device_id: &str, key_hex: &str) -> Result<(), String> {
++/// hub has no way to call it, which is what keeps approvals from being widened remotely (ADR-0020). Returns the devices whose
++/// revocations of it this overrides (ADR-0081, [`crate::device_trust::confirm`]).
++pub fn trust_device(
++    path: &std::path::Path,
++    device_id: &str,
++    key_hex: &str,
++) -> Result<Vec<String>, String> {
+     let key = crate::device_trust::from_hex(key_hex).ok_or("the key is not hexadecimal")?;
+     crate::device_trust::confirm(path, device_id, &key)
+ }
+diff --git a/crates/agora-node/src/device_trust.rs b/crates/agora-node/src/device_trust.rs
+index acef946a..8ace4b01 100644
+--- a/crates/agora-node/src/device_trust.rs
++++ b/crates/agora-node/src/device_trust.rs
+@@ -12,8 +12,11 @@
+ //! make nor change one. A revocation signed by a trusted device ([`DeviceTrust::revoke`]) and `agora node untrust` narrow it at once
+ //! (with every device the removed one endorsed), and are remembered (`<data>/device-revocations`) so an older endorsement the hub
+ //! sends again cannot bring the device back; a revocation removes only trust that began at or before it was signed, so one sent again
+-//! later cannot undo a newer decision. Every change happens under a lock file shared by every process (`<file>.lock`) and is written
+-//! beside the file and renamed over it. Every endorsement and revocation applied or refused is written to `<data>/device-trust.log`.
++//! later cannot undo a newer decision. A revocation dated ahead of this clock when it arrives is also kept by what its revoker signed
++//! (`<data>/device-revocations-ahead`, ADR-0081), so the owner trusting the device again on the machine overrides it even when the hub
++//! sends it again (its date may be later than that confirmation). Every change happens under a lock file shared by every process
++//! (`<file>.lock`) and is written beside the file and renamed over it. Every endorsement and revocation applied or refused is written to
++//! `<data>/device-trust.log`.
+ 
+ use std::path::{Path, PathBuf};
+ use std::sync::Mutex;
+@@ -36,6 +39,9 @@ pub const REVOCATION_KEPT_MS: u64 = 400 * 24 * 60 * 60 * 1000;
+ 
+ /// Remembered revocations, one `<device id> <issued ms>` per line.
+ pub const REVOCATIONS_FILE: &str = "device-revocations";
++/// Revocations dated ahead of this machine's clock when they arrived, by what their revoker signed (ADR-0081), one
++/// `<device id> <revoker id> <issued ms>` per line, with ` overridden=<since>` once the owner trusted the device again on the machine.
++pub const REVOCATIONS_AHEAD_FILE: &str = "device-revocations-ahead";
+ /// What this machine did with each endorsement and revocation, one line each, for its owner.
+ pub const AUDIT_FILE: &str = "device-trust.log";
+ 
+@@ -354,9 +360,15 @@ fn now() -> u64 {
+ }
+ 
+ /// The owner on the machine trusts `id` with `key`, with no end, from now (`agora node trust`, and a yes at enrollment or
+-/// `--from-hub`). A remembered revocation of it is forgotten: the person at the machine just decided otherwise. It replaces a key
+-/// already trusted under `id` (what `agora node trust ID KEY` has always done; the hub-fed paths ask first, see `--replace`).
+-pub fn confirm(file: &Path, id: &str, key: &[u8]) -> Result<(), String> {
++/// `--from-hub`). It replaces a key already trusted under `id` (what `agora node trust ID KEY` has always done; the hub-fed paths ask
++/// first, see `--replace`). The revocations of it this machine received dated at or after now are overridden (ADR-0081): sent
++/// again, they leave this trust alone. Returns the devices that signed them (sorted, each once); empty when there were none. A
++/// remembered revocation of it stays remembered: endorsements of it and by it signed at or before that revocation stay refused.
++pub fn confirm(file: &Path, id: &str, key: &[u8]) -> Result<Vec<String>, String> {
++    confirm_at(file, id, key, now())
++}
++
++fn confirm_at(file: &Path, id: &str, key: &[u8], now_ms: u64) -> Result<Vec<String>, String> {
+     if !valid_device_id(id) {
+         return Err("the device id may contain only letters, digits, '.', '_' and '-'".into());
+     }
+@@ -376,11 +388,28 @@ pub fn confirm(file: &Path, id: &str, key: &[u8]) -> Result<(), String> {
+         key: key.to_vec(),
+         expires_ms: None,
+         via: None,
+-        since: Some(now()),
++        since: Some(now_ms),
+         projects: None,
+     });
+     write_entries(file, &entries).map_err(|e| e.to_string())?;
+-    forget_revocation(&file.with_file_name(REVOCATIONS_FILE), id).map_err(|e| e.to_string())
++    // ADR-0081: every revocation of it received dated at or after this trust began would otherwise remove it when sent again.
++    let path = file.with_file_name(REVOCATIONS_AHEAD_FILE);
++    let old = read_ahead(&path);
++    let mut list = old.clone();
++    let mut revokers: Vec<String> = Vec::new();
++    for a in list.iter_mut().filter(|a| a.device == id) {
++        if a.issued_ms >= now_ms {
++            a.overridden = Some(now_ms);
++            revokers.push(a.revoker.clone());
++        }
++    }
++    prune_ahead(&mut list, &entries, now_ms);
++    if list != old {
++        write_ahead(&path, &list).map_err(|e| e.to_string())?;
++    }
++    revokers.sort();
++    revokers.dedup();
++    Ok(revokers)
+ }
+ 
+ /// The owner on the machine stops trusting `id` (`agora node untrust`): removed with every device it endorsed, and remembered as
+@@ -459,14 +488,79 @@ fn remember_revocation(path: &Path, id: &str, at_ms: u64, now_ms: u64) -> std::i
+     write_revocations(path, &list)
+ }
+ 
+-fn forget_revocation(path: &Path, id: &str) -> std::io::Result<()> {
+-    let mut list = read_revocations(path);
+-    let before = list.len();
+-    list.retain(|(d, _)| d != id);
+-    if list.len() == before {
+-        return Ok(());
++/// One line of [`REVOCATIONS_AHEAD_FILE`]: a revocation identified by the fields its revoker signed (never by its signature, which can be
++/// made into another valid one without the key), and the `since` of the owner's confirmation that overrode it.
++#[derive(Debug, Clone, PartialEq, Eq)]
++struct Ahead {
++    device: String,
++    revoker: String,
++    issued_ms: u64,
++    overridden: Option<u64>,
++}
++
++impl Ahead {
++    fn is(&self, r: &DeviceRevocation) -> bool {
++        self.device == r.device_id
++            && self.revoker == r.revoker_device_id
++            && self.issued_ms == r.issued_at_ms
++    }
++}
++
++/// The lines of [`REVOCATIONS_AHEAD_FILE`]; a missing file is empty, and a line that does not parse is skipped (it then overrides
++/// nothing: a replay of that revocation is judged by its date, as before ADR-0081).
++fn read_ahead(path: &Path) -> Vec<Ahead> {
++    std::fs::read_to_string(path)
++        .unwrap_or_default()
++        .lines()
++        .filter_map(|l| {
++            let mut w = l.split_whitespace();
++            let (device, revoker, issued) = (w.next()?, w.next()?, w.next()?);
++            (valid_device_id(device) && valid_device_id(revoker)).then_some(())?;
++            let overridden = match w.next() {
++                None => None,
++                Some(o) => Some(o.strip_prefix("overridden=")?.parse().ok()?),
++            };
++            w.next().is_none().then_some(())?;
++            Some(Ahead {
++                device: device.to_string(),
++                revoker: revoker.to_string(),
++                issued_ms: issued.parse().ok()?,
++                overridden,
++            })
++        })
++        .collect()
++}
++
++fn write_ahead(path: &Path, list: &[Ahead]) -> std::io::Result<()> {
++    let text: String = list
++        .iter()
++        .map(|a| match a.overridden {
++            Some(s) => format!(
++                "{} {} {} overridden={s}\n",
++                a.device, a.revoker, a.issued_ms
++            ),
++            None => format!("{} {} {}\n", a.device, a.revoker, a.issued_ms),
++        })
++        .collect();
++    agora_platform::write_private(path, text.as_bytes())
++}
++
++/// Drops what can no longer matter: a line not overridden once the clock passed its date (a confirmation made from now on begins after
++/// it, so the `since` rule handles it), and an overridden one once its device's trusted line no longer has that `since` (untrusted,
++/// revoked, replaced, or confirmed again; also a stale line left by an older node). Then at most [`MAX_REVOCATIONS`], the earliest-dated
++/// dropped first (fails closed: that revocation sent again may remove the device, as before ADR-0081).
++fn prune_ahead(list: &mut Vec<Ahead>, entries: &[Entry], now_ms: u64) {
++    list.retain(|a| match a.overridden {
++        None => a.issued_ms >= now_ms,
++        Some(s) => entries
++            .iter()
++            .any(|e| e.id == a.device && e.since == Some(s)),
++    });
++    if list.len() > MAX_REVOCATIONS {
++        list.sort_by_key(|a| a.issued_ms);
++        let over = list.len() - MAX_REVOCATIONS;
++        list.drain(..over);
+     }
+-    write_revocations(path, &list)
+ }
+ 
+ /// One line of the machine's own record (best effort: a full disk must not stop a revocation). Every value is passed through
+@@ -575,6 +669,17 @@ fn verifies(key: &[u8], message: &[u8], signature: &[u8]) -> bool {
+         .is_ok()
+ }
+ 
++/// What a verified revocation did here.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++enum Revoked {
++    /// The device was trusted from before it was signed, and is not any more.
++    Applied,
++    /// Remembered; nothing trusted here began at or before it.
++    Remembered,
++    /// The owner trusted the device again on the machine after this machine received it (ADR-0081).
++    Overridden,
++}
++
+ /// What an endorsement did.
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+ pub enum Endorsed {
+@@ -863,13 +968,14 @@ impl DeviceTrust {
+     }
+ 
+     /// Applies a revocation the hub carried. `Ok(true)`: the device was trusted here (from before the revocation was signed) and is not
+-    /// any more, nor is any device it endorsed.
++    /// any more, nor is any device it endorsed. `Ok(false)`: remembered, and nothing removed (also when the owner overrode it, ADR-0081).
+     pub fn revoke(&self, r: &DeviceRevocation, now_ms: u64) -> Result<bool, Error> {
+         let _g = self.lock.lock().unwrap_or_else(|p| p.into_inner());
+         let result = self.revoke_locked(r, now_ms);
+         let outcome = match &result {
+-            Ok(true) => "revoked".to_string(),
+-            Ok(false) => "remembered".to_string(),
++            Ok(Revoked::Applied) => "revoked".to_string(),
++            Ok(Revoked::Remembered) => "remembered".to_string(),
++            Ok(Revoked::Overridden) => "overridden".to_string(),
+             Err(err) => err.code.as_str().to_string(),
+         };
+         self.record(
+@@ -879,10 +985,10 @@ impl DeviceTrust {
+             &r.revoker_device_id,
+             &outcome,
+         );
+-        result
++        result.map(|done| done == Revoked::Applied)
+     }
+ 
+-    fn revoke_locked(&self, r: &DeviceRevocation, now_ms: u64) -> Result<bool, Error> {
++    fn revoke_locked(&self, r: &DeviceRevocation, now_ms: u64) -> Result<Revoked, Error> {
+         let invalid = |f: &str| Error::new(ErrorCode::ProtocolInvalidMessage).with("field", f);
+         if !valid_device_id(&r.device_id) {
+             return Err(invalid("device_id"));
+@@ -920,14 +1026,38 @@ impl DeviceTrust {
+         }
+         remember_revocation(&self.revocations(), &r.device_id, r.issued_at_ms, now_ms)
+             .map_err(Self::io)?;
++        // ADR-0081: one dated ahead of this clock is kept by what its revoker signed; a confirmation by the owner made after it arrived
++        // can begin before its date, and overrides it. Best effort: a line not written only means that confirmation cannot override it
++        // (fails closed, as before).
++        let path = self.file.with_file_name(REVOCATIONS_AHEAD_FILE);
++        let old = read_ahead(&path);
++        let mut ahead = old.clone();
++        prune_ahead(&mut ahead, &entries, now_ms);
++        let overridden = ahead.iter().any(|a| a.is(r) && a.overridden.is_some());
++        if r.issued_at_ms >= now_ms && !ahead.iter().any(|a| a.is(r)) {
++            ahead.push(Ahead {
++                device: r.device_id.clone(),
++                revoker: r.revoker_device_id.clone(),
++                issued_ms: r.issued_at_ms,
++                overridden: None,
++            });
++            prune_ahead(&mut ahead, &entries, now_ms);
++        }
++        if ahead != old {
++            let _ = write_ahead(&path, &ahead);
++        }
++        if overridden {
++            return Ok(Revoked::Overridden);
++        }
+         // Only trust that began at or before the revocation was signed: one the hub sends again later cannot undo a newer decision.
+         let applies = entries
+             .iter()
+             .any(|e| e.id == r.device_id && e.since.unwrap_or(0) <= r.issued_at_ms);
+         if applies {
+             write_entries(&self.file, &without(&entries, &r.device_id)).map_err(Self::io)?;
++            return Ok(Revoked::Applied);
+         }
+-        Ok(applies)
++        Ok(Revoked::Remembered)
+     }
+ 
+     /// A device endorsed here was used (its signature verified): its trust runs 90 days from now, never past its endorser's own.
+@@ -1288,7 +1418,7 @@ mod tests {
+                 .code,
+             ErrorCode::DeviceUntrusted
+         );
+-        // Trusting it again on the machine clears what was remembered.
++        // Trusting it again on the machine trusts it again (what was remembered stays: ADR-0081).
+         confirm(&file, "web-old", &old.public()).unwrap();
+         assert_eq!(t.trusted_ids(now + 9), ["web-old"]);
+         let _ = std::fs::remove_dir_all(d);
+@@ -1379,6 +1509,168 @@ mod tests {
+         let _ = std::fs::remove_dir_all(d);
+     }
+ 
++    const MIN: u64 = 60 * 1000;
++
++    /// web-old confirmed at `now - 2`, web-two at `now - 1`, web-new endorsed by web-old at `now`.
++    fn three(name: &str) -> (PathBuf, PathBuf, [Key; 3], DeviceTrust, u64) {
++        let d = dir(name);
++        let file = d.join(crate::approvals::TRUSTED_DEVICES_FILE);
++        let keys = [Key::new(), Key::new(), Key::new()];
++        let now = crate::grants::now_ms();
++        confirm_at(&file, "web-old", &keys[0].public(), now - 2).unwrap();
++        confirm_at(&file, "web-two", &keys[1].public(), now - 1).unwrap();
++        let t = DeviceTrust::new("laptop", &file);
++        t.endorse(
++            &keys[0].endorse("web-old", "web-new", &keys[2].public(), &[], now, DAY),
++            now,
++        )
++        .unwrap();
++        (d, file, keys, t, now)
++    }
++
++    #[test]
++    fn a_revocation_dated_ahead_sent_again_does_not_undo_the_owners_re_trust() {
++        // Audit F220, ADR-0081: a revoker whose clock runs 4 minutes fast; the owner trusts the device again on the machine a minute
++        // later (before the revocation's date); the hub sends the revocation again.
++        let (d, file, [old, _, new], t, now) = three("ahead-replay");
++        let r = old.revoke("web-old", "web-new", now + 4 * MIN);
++        assert!(t.revoke(&r, now).unwrap());
++        assert_eq!(
++            confirm_at(&file, "web-new", &new.public(), now + MIN).unwrap(),
++            ["web-old"]
++        );
++        assert!(!t.revoke(&r, now + 2 * MIN).unwrap(), "the replay");
++        assert!(!t.revoke(&r, now + 5 * MIN).unwrap(), "also after its date");
++        // The same decision under another signature (ES256 signatures differ each time, and can be changed without the key).
++        let resigned = old.revoke("web-old", "web-new", now + 4 * MIN);
++        assert_ne!(resigned.signature, r.signature);
++        assert!(!t.revoke(&resigned, now + 5 * MIN).unwrap());
++        assert!(t
++            .trusted_ids(now + 5 * MIN)
++            .contains(&"web-new".to_string()));
++        let log = std::fs::read_to_string(d.join(AUDIT_FILE)).unwrap();
++        assert!(
++            log.contains("revoke web-new by=web-old overridden"),
++            "{log}"
++        );
++        // A restart reads it back from the files.
++        let again = DeviceTrust::new("laptop", &file);
++        assert!(!again.revoke(&r, now + 6 * MIN).unwrap());
++        // A new revocation by the same device, signed after the re-trust, applies.
++        let newer = old.revoke("web-old", "web-new", now + 4 * MIN + 1);
++        assert!(again.revoke(&newer, now + 6 * MIN).unwrap());
++        assert!(!again
++            .trusted_ids(now + 6 * MIN)
++            .contains(&"web-new".to_string()));
++        // Once the device is gone, so is the override.
++        let _ = again.revoke(&old.revoke("web-old", "x", now), now + 6 * MIN);
++        assert!(read_ahead(&d.join(REVOCATIONS_AHEAD_FILE))
++            .iter()
++            .all(|a| a.overridden.is_none()));
++        let _ = std::fs::remove_dir_all(d);
++    }
++
++    #[test]
++    fn a_re_trust_overrides_only_the_revocations_the_machine_had_received() {
++        let (d, file, [old, two, new], t, now) = three("ahead-only-seen");
++        let r = old.revoke("web-old", "web-new", now + 4 * MIN);
++        assert!(t.revoke(&r, now).unwrap());
++        confirm_at(&file, "web-new", &new.public(), now + MIN).unwrap();
++        // Another device revokes it at the same instant: another decision.
++        assert!(t
++            .revoke(
++                &two.revoke("web-two", "web-new", now + 4 * MIN),
++                now + 2 * MIN
++            )
++            .unwrap());
++        // The owner trusts it again: both received revocations are overridden.
++        assert_eq!(
++            confirm_at(&file, "web-new", &new.public(), now + 3 * MIN).unwrap(),
++            ["web-old", "web-two"]
++        );
++        // One signed before that re-trust that reaches the machine only after it (it was offline): the owner did not override it.
++        let unseen = old.revoke("web-old", "web-new", now + 3 * MIN + 30_000);
++        assert!(t.revoke(&unseen, now + 3 * MIN + 1).unwrap());
++        // Confirming again recomputes from the new start: what is dated before it is the date rule's, and overrides nothing.
++        assert!(
++            confirm_at(&file, "web-new", &new.public(), now + 4 * MIN + 1)
++                .unwrap()
++                .is_empty()
++        );
++        assert!(!t.revoke(&unseen, now + 4 * MIN + 2).unwrap());
++        assert!(!t.revoke(&r, now + 4 * MIN + 2).unwrap());
++        assert!(read_ahead(&d.join(REVOCATIONS_AHEAD_FILE)).is_empty());
++        assert!(t
++            .trusted_ids(now + 4 * MIN + 2)
++            .contains(&"web-new".to_string()));
++        let _ = std::fs::remove_dir_all(d);
++    }
++
++    #[test]
++    fn revocations_dated_ahead_are_bounded_expire_and_old_or_stale_lines_override_nothing() {
++        let (d, file, [old, _, new], t, now) = three("ahead-bounds");
++        let path = d.join(REVOCATIONS_AHEAD_FILE);
++        // Expiry: a line nobody overrode goes once the clock passes its date.
++        assert!(!t
++            .revoke(&old.revoke("web-old", "x", now + 1000), now)
++            .unwrap());
++        assert_eq!(read_ahead(&path).len(), 1);
++        let _ = t.revoke(&old.revoke("web-old", "y", now), now + 2000);
++        assert!(read_ahead(&path).is_empty());
++        // Full: the earliest-dated goes first, and that replay may remove the device again (fails closed).
++        let r = old.revoke("web-old", "web-new", now + 4 * MIN);
++        assert!(t.revoke(&r, now).unwrap());
++        for i in 0..MAX_REVOCATIONS as u64 {
++            let filler = old.revoke("web-old", &format!("gone-{i}"), now + 4 * MIN + 1 + i);
++            assert!(!t.revoke(&filler, now).unwrap());
++        }
++        assert_eq!(read_ahead(&path).len(), MAX_REVOCATIONS);
++        assert!(confirm_at(&file, "web-new", &new.public(), now + MIN)
++            .unwrap()
++            .is_empty());
++        assert!(t.revoke(&r, now + 2 * MIN).unwrap());
++        // Stale (a downgrade and upgrade) and unreadable lines override nothing, and are dropped.
++        confirm_at(&file, "web-new", &new.public(), now + 2 * MIN).unwrap();
++        let at = now + 4 * MIN;
++        std::fs::write(
++            &path,
++            format!(
++                "web-new web-old {at} overridden=1\nweb-new web-old {at} overridden=x\nbad/id web-old {at}\nweb-new web-old {at} overridden={} extra\n",
++                now + 2 * MIN
++            ),
++        )
++        .unwrap();
++        assert!(t.revoke(&r, now + 3 * MIN).unwrap());
++        assert!(read_ahead(&path).iter().all(|a| a.overridden.is_none()));
++        assert!(!std::fs::read_to_string(&path).unwrap().contains("bad/id"));
++        let _ = std::fs::remove_dir_all(d);
++    }
++
++    #[test]
++    fn a_device_trusted_again_cannot_land_what_it_signed_before_its_revocation() {
++        // ADR-0081 point 5 (T21): confirming a device used to forget its revocation, so an endorsement it signed before it was revoked,
++        // kept and sent again by the hub, then landed.
++        let (d, file, [old, two, _], t, now) = three("ahead-t21");
++        let third = Key::new();
++        let kept = two.endorse("web-two", "web-third", &third.public(), &[], now, DAY);
++        assert!(t
++            .revoke(&old.revoke("web-old", "web-two", now + 1), now + 1)
++            .unwrap());
++        confirm_at(&file, "web-two", &two.public(), now + 2).unwrap();
++        assert_eq!(
++            t.endorse(&kept, now + 3).unwrap_err().code,
++            ErrorCode::DeviceRevoked
++        );
++        assert!(!t.trusted_ids(now + 3).contains(&"web-third".to_string()));
++        // What it signs after the re-trust lands.
++        let fresh = two.endorse("web-two", "web-third", &third.public(), &[], now + 3, DAY);
++        assert!(matches!(
++            t.endorse(&fresh, now + 3),
++            Ok(Endorsed::Trusted(_))
++        ));
++        let _ = std::fs::remove_dir_all(d);
++    }
++
+     #[test]
+     fn an_untrust_that_cannot_be_remembered_leaves_the_device_as_it_was() {
+         // Audit F221: removed first and remembered after, a failure in between let the hub's replayed endorsement bring it back.
+diff --git a/crates/agora/src/trustcli.rs b/crates/agora/src/trustcli.rs
+index 5696e223..1012b487 100644
+--- a/crates/agora/src/trustcli.rs
++++ b/crates/agora/src/trustcli.rs
+@@ -52,8 +52,9 @@ pub fn node_trust(say: &Say, o: &Opts) -> ExitCode {
+         .map_err(|e| e.to_string())
+         .and_then(|()| agora_node::approvals::trust_device(&file, id, key));
+     match result {
+-        Ok(()) => {
++        Ok(overridden) => {
+             say.out(key!("cli-trusted"), &[("id", id.clone().into())]);
++            say_overridden(say, id, &overridden);
+             ExitCode::SUCCESS
+         }
+         Err(e) => {
+@@ -86,6 +87,19 @@ pub fn node_untrust(say: &Say, o: &Opts) -> ExitCode {
+     }
+ }
+ 
++/// ADR-0081: one line per device whose revocation of `id` this machine had received and the owner's yes just overrode.
++fn say_overridden(say: &Say, id: &str, revokers: &[String]) {
++    for revoker in revokers {
++        say.out(
++            key!("cli-trust-revocation-overridden"),
++            &[
++                ("id", id.to_string().into()),
++                ("revoker", revoker.clone().into()),
++            ],
++        );
++    }
++}
++
+ fn bad(say: &Say) -> ExitCode {
+     say.err(key!("cli-bad-arguments"), &[]);
+     say.err(key!("cli-usage"), &[]);
+@@ -307,14 +321,17 @@ pub fn offer(say: &Say, o: &Opts, devices: &[DeviceInfo]) -> ExitCode {
+             continue;
+         }
+         match device_trust::confirm(&file, &d.device_id, &d.public_key) {
+-            Ok(()) => say.out(
+-                key!("cli-devices-trusted"),
+-                &[
+-                    ("name", device_trust::shown(&d.name, SHOWN).into()),
+-                    ("id", d.device_id.clone().into()),
+-                    ("fingerprint", fingerprint(&d.public_key).into()),
+-                ],
+-            ),
++            Ok(overridden) => {
++                say.out(
++                    key!("cli-devices-trusted"),
++                    &[
++                        ("name", device_trust::shown(&d.name, SHOWN).into()),
++                        ("id", d.device_id.clone().into()),
++                        ("fingerprint", fingerprint(&d.public_key).into()),
++                    ],
++                );
++                say_overridden(say, &d.device_id, &overridden);
++            }
+             Err(e) => {
+                 say.err(key!("cli-trust-failed"), &[("reason", e.into())]);
+                 code = ExitCode::from(1);
+diff --git a/docs/security/threat-model.md b/docs/security/threat-model.md
+index 5ae0f254..9f7f52da 100644
+--- a/docs/security/threat-model.md
++++ b/docs/security/threat-model.md
+@@ -51,7 +51,7 @@ phase exit.
+ | T19 | A node claims that it, or another node, is online (or hides that one went away) by sending presence facts (ADR-0070) | Presence is written by the hub only, from the certificate-authenticated connection whose node id the certificate decides: `NodeLink` is produced as `hub` (a name no node certificate can carry). A node that sends a `NodeLink` is refused (`protocol.invalid_message`) and the projection and the window ignore one from any producer but `hub`. A node speaks for itself only: its producer id is checked against its certificate, and every fact that names a node (`NodeOnline`, `NodeOffline`, `NodeResources`, `CheckoutDiscovered`, `AgentStarted`, `TerminalOpened`, `WorkspaceRegistered`) must name the sender, or it is refused (`protocol.invalid_message`, field `node_id`); `NodeLink`, `NodeForgotten` and `AgentForgotten` are the hub's own and refused from any node. Besides the refusal, the hub's view takes the node id of a start, a goodbye, an agent, a terminal, a checkout and resource numbers from the connection that sent the event, never from its body (the one exception is a `NodeOffline` the hub itself wrote for an older client, which names the node whose connection ended), and ignores `AgentForgotten` from anyone but the hub; so an event stored before this check existed cannot end, hide or move anything of another node when the history is replayed (a hub restart replays the store). The same stored record is never replayed to a window either: a hub that opens over one (the `is_forged` rule, shared with live ingestion) answers every window whose position is at or before the end of the log at that moment with a snapshot, not a replay, which also heals a window that applied it before; the stored history itself is never rewritten. Presence never touches agents: offline is not finished |
+ | T16 | **Mitigated on macOS and Windows, open on Linux** (found in the ADR-0059 review, pre-existing): a confined agent reaches the node's own control socket (`control.rs` accepts any local peer that can open it) and sends commands as the owner, e.g. an unsigned `AgentStart { launch_options }`, bypassing "helpers never inherit", the confirmation and the signature; or types into another agent's terminal (measured on macOS before the fix) | macOS (#475, #477 and its two security reviews): every confined agent's Seatbelt profile closes the node's **whole home** (data beside its worktrees or its control socket, as `agora node` lays it out, also with `--worktrees` elsewhere; else its data, control socket, mesh-socket folder and manifests; relative paths made absolute; never the user's home or a folder above it, nor one holding a project the node serves; a protected path that cannot be resolved refuses the start, `agent.sandbox_unavailable` reason `protected_path_unresolved`, rather than being left out) after everything it opens (the last matching rule wins), as an allow-list: its own worktree and its own mesh socket are opened again, nothing else. The worktree is opened again only while it is a real folder, checked at every start: an agent that replaced it with a link (into the home, to have it opened at its resume, or anywhere else) is refused (`worktree_not_folder`), and resume already refuses a folder whose path changed (ADR-0052), and no `read` or `write` entry that resolves into the home (an owner's `~/.claude` the agent made a link) is opened. Nor is any entry reached through a link the agent could have made (#545): a link below a place it may write, or at such a place in a folder this user may write, refuses the start (`writable_is_link`) instead of giving the agent where it points (measured: `ln -s ~/.zshrc ~/.claude.json` made `.zshrc` writable at the next start before the fix); an owner's own link outside what the agent may write (a dotfiles `~/.gitconfig`) and the system's (`/tmp` in `/`) are followed, while an owner's link at a place the agent may write (a stow-style `~/.claude -> ~/dotfiles/claude`) is refused, as it cannot be told apart from one the agent made. Each entry is walked one component at a time (`openat` with `O_NOFOLLOW`, links read with `readlinkat` and followed by hand, the end's path from `F_GETPATH`), so checking a link and resolving the entry are one step (measured before: another process flipping a write entry between a folder and a link to `~` got `~` into 455 of 3000 profiles; after: none), and places are compared where the kernel has them, so `/private/tmp`, `/System/Volumes/Data/...` and other case are the same place. Every rule names the kernel's path: Seatbelt matches that path, and a rule spelled through the `/System/Volumes/Data` firmlink matched nothing (measured: a deny spelled that way left the folder readable). A hard link to a file outside, made before the agent was confined (by another program, or while confinement was off), lets it write that file through the name it may write (measured; a confined agent cannot make one itself: `ln` is refused; #571). A `write` entry that is such a file (a second name, `st_nlink > 1`, read from the descriptor the walk resolved), or a save sibling it opens (`<file>.*`) that is one, refuses the start (`writable_has_links`). Accepted risk: such a link inside a *folder* the agent may write (its worktree, `~/.claude`) is not looked for, because the link must be made from outside confinement and scanning those folders at every start costs too much. Below it: no read of contents, metadata or extended attributes, no write, no unix-socket connection (Seatbelt checks a unix socket as `network-outbound`, not as a file, so a folder the agent cannot read still let it connect) and no socket bound (so an agent resumed before the node binds its control socket cannot bind it first). The folders above the home that the agent may write (a home under `/tmp`) are closed to renaming or removal, so the home cannot be moved out from under rules that name its path. Measured with real `sandbox-exec` for a home under `/tmp`: rename, writes to `publishers` and `manifests`, early bind, hard and symbolic links, a relative path, upper case, the `/System/Volumes/Data` firmlink, a copy-on-write clone (`cp -c`), a worktree or a writable folder swapped for a link into the home, and a job handed to launchd (`launchctl submit`/`bootstrap`/`load` are refused from a confined process; `launchctl asuser` stays confined) are all refused. Not measured yet: asking another unconfined program to act for the agent through Apple Events or LaunchServices (`osascript`, `open`); the profile starts from `(allow default)`, so these services are reachable unless a rule names them. Windows (measured 2026-11-14, #440; no code change was needed): the node's control pipe allows only its owner and SYSTEM (`OWNER_ONLY`, `D:P(A;;GA;;;OW)(A;;GA;;;SY)`, `agora-platform/src/windows.rs`), and a confined agent (ADR-0050) runs with a restricted token whose restricting SIDs are only its own agent SID, Everyone, Users and the logon SID, at Low integrity. Two separate checks refuse the open: the restricting-SID check finds no entry for any of them, and a Low process cannot write to the Medium pipe. Probe: an agent running `agora agent list --socket <the node's pipe>` lists the agents under `sandbox = off` and is refused under `sandbox = worktree`. Windows confinement itself is still switched off by default (`ENABLED = false`). Linux (Landlock does not restrict connecting to a pathname socket): not mitigated yet; the other idea stays: identify the peer (peer credentials / the agent's confined identity) and refuse agents |
+ | T20 | A malicious or compromised hub offers a fake candidate device (its own key under the owner's device name), or dresses one up so the owner says yes to the wrong thing (ADR-0061; findings of the adversarial review of #444-#446) | The hub's device list is only a list of candidates: a node trusts a listed device only after its owner answers `y` on the machine itself (`agora node enroll`, `agora node trust --from-hub`; a non-interactive terminal is a no, and `--yes` covers only the fingerprints given on the command line). The node prints every hub-supplied name and person with control, escape, bidi and other hidden characters removed and capped at 40 characters, and prints the fingerprint on a line of its own, computed on the node from the key bytes (96 bits, SHA-256), never a string from the hub, so a name cannot erase a line or paint a fake fingerprint before `[y/N]`. A listed id that would replace a different key the node already trusts is shown as such and refused without `--replace`. Only the hub owner's own devices are offered by default; other people's devices are listed apart and trusted only with `--include-others` and their fingerprints. Every registration carries a proof of possession (the device's own signature over its id, name, key and time), verified by the hub and again by the node, so a hub cannot list a key nobody holds; an ask is signed by the asking device. Endorsements are signed by a device the node already trusts, verified there and by the hub before it stores them, bound to the new key, the machines in scope and an expiry. Remaining risk: an owner who says yes without comparing fingerprints |
+-| T21 | A stolen or compromised trusted device endorses more devices (an attacker's browser) to keep access after the theft; a hub replays old revocations or floods the stores | Endorsements expire (at most 90 days, renewed only by use and never beyond the endorser's own remaining trust), can be limited to some machines, chains are at most two endorsements deep, and revoking a device also removes every device it endorsed (transitively). A revocation signed by any trusted device removes a device on every machine at once and refuses its earlier endorsements; `agora node untrust ID` does the same on one machine without the hub. Grants (ADR-0041) end with the trust of the device that signed them (audit F270): whenever the trusted devices change, the node checks each live grant again before it lets another routed command through (its signature under the devices trusted now, the same term of trust, since a device removed and trusted again starts a new one, and the device's current limits) and ends the ones that fail for good; a grant also ends when its endorsed signer's trust runs out. The check reads the trusted-devices file on each covered command (compared with what was read last, so a change made by another process counts at once; measured about 5 µs) and checks signatures again only after a change, and it renews nothing. If the file cannot be read, nothing is trusted and no grant covers a command. Each trusted entry records when its trust began (`since`); a revocation removes it only when signed at or after that, so the hub resending an old revocation on every reconnect cannot undo a later re-trust. Every endorsement and revocation a node applies or refuses is written to its own log (`<data>/device-trust.log`); every id is checked against `[A-Za-z0-9._-]{1,64}` before anything is logged and logged values are escaped, so a hub cannot forge log lines. The trusted-devices file is changed under a cross-process lock and replaced atomically, so a renewal cannot bring back a device the owner just removed. Bounds: 64 devices per person not revoked, 256 revocations per person on the hub (each signature stored once), revocations forgotten after 400 days (when every endorsement older than them has expired). Remaining risk: until the owner notices and revokes, the stolen device and the ones it endorsed can approve; a hub can withhold a revocation from nodes (untrust on the machine closes that) ADR-0049 limits hold through endorsements (review of #446): a device the policy limits to some projects (`device.<id>.projects`) can endorse only a device limited to the same projects; the limit is written into the new device's line (`projects=`) and read by the node's limits whenever the file changes, so it survives restarts. Inheritance was chosen over refusing endorsements from limited devices because a member can then add their own new browser without the owner, and gains nothing they did not have. A limited device can revoke only itself or a device whose limits are within its own (never the owner's unlimited devices). An endorsement's trust starts at the earlier of its signing time and the node's clock, so a revocation signed promptly always wins over one dated ahead; endorsements and revocations dated more than 5 minutes ahead are refused by the hub and the node, so nothing from the future is remembered or can evict the 256 kept revocations. A machine is offered only the devices of the people who may act on it (the owner, people with the owner role, and people with a grant on one of its projects), not every registered device Second review of #446: the policy can narrow an inherited limit but never widen it (a device's limit is the policy line and the inherited set together, so a limited device cannot escape by endorsing a key under an id the policy names more widely; ids are first come on the hub, so this needed no malicious hub); a renewal keeps the entry's endorser and limits and only that endorser may renew it, so a limited device cannot re-parent a wider device to itself and then revoke it; a project name the trusted-devices file cannot hold (spaces, commas) refuses the endorsement (`node.policy_denied`, rule `device.projects`) instead of losing the limit; endorsements are carried only to machines the device's person may act on, while revocations, which only narrow trust and carry nothing but ids, go to every machine that verifies them (so a machine still learns of a revocation for a device the hub has since forgotten) Third review: a device's limit also follows its endorser's limit as it is now, up the chain (policy line, inherited set and the endorser's current limit, intersected), so when the owner demotes or narrows a device the devices it endorsed follow at once, and a use no longer covered by its endorser's limits does not renew the endorsement (it runs out). Only a still-valid endorsed entry is protected from being endorsed by another device; an expired one, or one whose endorser is gone, can be endorsed afresh by any trusted device (taking that device's limits). Accepted: the per-machine filter on endorsements is applied when the hub sends them, so an endorsement for a person who is given a grant on a machine later reaches that machine when it next connects, not at once Fourth review: the hub keeps every unexpired endorsement and replays it on reconnect, so one refused while its device was valid could land once that device ran out. An expired (or orphaned) endorsed device is therefore endorsed afresh only by a device whose current limits cover what it could do before (an unlimited device needs an unlimited endorser), and only with an endorsement signed after it ran out; a limited device can thus neither squat an owner's device that expired nor then renew or revoke it. Another device's endorsement of a still-valid endorsed device is refused whatever expiry it asks for Fifth review, one rule (supersedes the special cases above for a device already endorsed here): its own endorser may renew it, also after it ran out and whatever its clock, while that endorser's current limit still covers what it was given; another endorser E may take it over (re-parent it) only if E's current effective limit covers both the device's current effective limit and its current endorser's current effective limit (a wider-or-equal holder wins, a narrower one never displaces a wider one), and only with an endorsement signed at or after the device's trust ran out (its effective expiry, or its own expiry when its chain is broken), so a kept and replayed older endorsement cannot land later. The timing part applies only to a different endorser than the device's own Sixth review: the "signed after it ran out" part compares the endorsement's start on the node's own clock (the earlier of its signing time and the node's clock), so a signer whose clock runs ahead cannot take over a device in its last minutes; and an endorsement is refused not only when the endorsed device was revoked at or after it was signed, but also when its endorser was (so an endorsement the hub kept from before its endorser was revoked does not land after the endorser is trusted again). A takeover gives the device the new endorser's limit, as a fresh endorsement does; a device limited to some projects can already revoke any device whose limit lies within its own (other members' devices in those projects included), which a takeover adds nothing to Note (review of #478): for a device limited to some projects, a folder the node knows for one of its projects (a launch folder it saved, a registered checkout) covers every folder below it, so a separate repository nested inside can be inspected and listed by that device; a launch there is refused, because the device can sign it only for its own project and the launch checks the folder's real identity |
++| T21 | A stolen or compromised trusted device endorses more devices (an attacker's browser) to keep access after the theft; a hub replays old revocations or floods the stores | Endorsements expire (at most 90 days, renewed only by use and never beyond the endorser's own remaining trust), can be limited to some machines, chains are at most two endorsements deep, and revoking a device also removes every device it endorsed (transitively). A revocation signed by any trusted device removes a device on every machine at once and refuses its earlier endorsements; `agora node untrust ID` does the same on one machine without the hub. Grants (ADR-0041) end with the trust of the device that signed them (audit F270): whenever the trusted devices change, the node checks each live grant again before it lets another routed command through (its signature under the devices trusted now, the same term of trust, since a device removed and trusted again starts a new one, and the device's current limits) and ends the ones that fail for good; a grant also ends when its endorsed signer's trust runs out. The check reads the trusted-devices file on each covered command (compared with what was read last, so a change made by another process counts at once; measured about 5 µs) and checks signatures again only after a change, and it renews nothing. If the file cannot be read, nothing is trusted and no grant covers a command. Each trusted entry records when its trust began (`since`); a revocation removes it only when signed at or after that, so the hub resending an old revocation on every reconnect cannot undo a later re-trust. A revocation dated ahead of the node's clock (accepted up to 5 minutes) can be dated after a re-trust it arrived before (audit F220), so the node also keeps those by what their revoker signed (`<data>/device-revocations-ahead`, ADR-0081) and the owner's re-trust on the machine overrides the ones it had received; a revocation it had not received yet, or one signed later or by another device, still applies. The store holds at most 256 lines and drops a pending one once the clock passes its date; a dropped line fails closed (the replay may remove the device again, as before). A re-trust keeps the device's remembered revocation, so what it signed before it was revoked stays refused. Every endorsement and revocation a node applies or refuses is written to its own log (`<data>/device-trust.log`); every id is checked against `[A-Za-z0-9._-]{1,64}` before anything is logged and logged values are escaped, so a hub cannot forge log lines. The trusted-devices file is changed under a cross-process lock and replaced atomically, so a renewal cannot bring back a device the owner just removed. Bounds: 64 devices per person not revoked, 256 revocations per person on the hub (each signature stored once), revocations forgotten after 400 days (when every endorsement older than them has expired). Remaining risk: until the owner notices and revokes, the stolen device and the ones it endorsed can approve; a hub can withhold a revocation from nodes (untrust on the machine closes that) ADR-0049 limits hold through endorsements (review of #446): a device the policy limits to some projects (`device.<id>.projects`) can endorse only a device limited to the same projects; the limit is written into the new device's line (`projects=`) and read by the node's limits whenever the file changes, so it survives restarts. Inheritance was chosen over refusing endorsements from limited devices because a member can then add their own new browser without the owner, and gains nothing they did not have. A limited device can revoke only itself or a device whose limits are within its own (never the owner's unlimited devices). An endorsement's trust starts at the earlier of its signing time and the node's clock, so a revocation signed promptly always wins over one dated ahead; endorsements and revocations dated more than 5 minutes ahead are refused by the hub and the node, so nothing from the future is remembered or can evict the 256 kept revocations. A machine is offered only the devices of the people who may act on it (the owner, people with the owner role, and people with a grant on one of its projects), not every registered device Second review of #446: the policy can narrow an inherited limit but never widen it (a device's limit is the policy line and the inherited set together, so a limited device cannot escape by endorsing a key under an id the policy names more widely; ids are first come on the hub, so this needed no malicious hub); a renewal keeps the entry's endorser and limits and only that endorser may renew it, so a limited device cannot re-parent a wider device to itself and then revoke it; a project name the trusted-devices file cannot hold (spaces, commas) refuses the endorsement (`node.policy_denied`, rule `device.projects`) instead of losing the limit; endorsements are carried only to machines the device's person may act on, while revocations, which only narrow trust and carry nothing but ids, go to every machine that verifies them (so a machine still learns of a revocation for a device the hub has since forgotten) Third review: a device's limit also follows its endorser's limit as it is now, up the chain (policy line, inherited set and the endorser's current limit, intersected), so when the owner demotes or narrows a device the devices it endorsed follow at once, and a use no longer covered by its endorser's limits does not renew the endorsement (it runs out). Only a still-valid endorsed entry is protected from being endorsed by another device; an expired one, or one whose endorser is gone, can be endorsed afresh by any trusted device (taking that device's limits). Accepted: the per-machine filter on endorsements is applied when the hub sends them, so an endorsement for a person who is given a grant on a machine later reaches that machine when it next connects, not at once Fourth review: the hub keeps every unexpired endorsement and replays it on reconnect, so one refused while its device was valid could land once that device ran out. An expired (or orphaned) endorsed device is therefore endorsed afresh only by a device whose current limits cover what it could do before (an unlimited device needs an unlimited endorser), and only with an endorsement signed after it ran out; a limited device can thus neither squat an owner's device that expired nor then renew or revoke it. Another device's endorsement of a still-valid endorsed device is refused whatever expiry it asks for Fifth review, one rule (supersedes the special cases above for a device already endorsed here): its own endorser may renew it, also after it ran out and whatever its clock, while that endorser's current limit still covers what it was given; another endorser E may take it over (re-parent it) only if E's current effective limit covers both the device's current effective limit and its current endorser's current effective limit (a wider-or-equal holder wins, a narrower one never displaces a wider one), and only with an endorsement signed at or after the device's trust ran out (its effective expiry, or its own expiry when its chain is broken), so a kept and replayed older endorsement cannot land later. The timing part applies only to a different endorser than the device's own Sixth review: the "signed after it ran out" part compares the endorsement's start on the node's own clock (the earlier of its signing time and the node's clock), so a signer whose clock runs ahead cannot take over a device in its last minutes; and an endorsement is refused not only when the endorsed device was revoked at or after it was signed, but also when its endorser was (so an endorsement the hub kept from before its endorser was revoked does not land after the endorser is trusted again). A takeover gives the device the new endorser's limit, as a fresh endorsement does; a device limited to some projects can already revoke any device whose limit lies within its own (other members' devices in those projects included), which a takeover adds nothing to Note (review of #478): for a device limited to some projects, a folder the node knows for one of its projects (a launch folder it saved, a registered checkout) covers every folder below it, so a separate repository nested inside can be inspected and listed by that device; a launch there is refused, because the device can sign it only for its own project and the launch checks the folder's real identity |
+ | T22 | A web page in any browser on a machine running the desktop app reaches the hub through the app's loopback tunnel (ADR-0048) by DNS rebinding: a name the page controls is pointed at 127.0.0.1, so the browser treats the tunnel's port as the page's own origin, and the tunnel has already removed the TLS whose name check would refuse it. On the hub's own machine the hub sees the tunnel as loopback, which signs in without a code (T17) | Before the tunnel opens a connection to the hub, it reads the first request's head (at most 16 KiB, within 10 s) and carries the connection only when there is exactly one `Host` field and it names the tunnel itself (`127.0.0.1:<port>` or `localhost:<port>`), and the request target is a path (an absolute `http://…` target, which a server prefers over `Host`, is refused; browsers send it only to a proxy). Anything else gets `421` with no body, and the hub is never dialed. Only the first request on a connection is checked, because a browser keeps a connection for the origin it opened it for. Remaining risk: a local program can send the right `Host`, but it could already reach the hub's loopback port directly; the hub's own loopback exemption still trusts the TCP peer (T17) |
+ | T24 | A leaked metrics token (ADR-0076): a scraper's config, a backup or a log reveals the token | It reads only `GET /api/metrics` (aggregate numbers: counts and timings, no names, paths, prompts or terminal bytes), and only while the hub runs with `--metrics`. It is a separate credential kind (`agm_`, 256 random bits), stored as a SHA-256 hash in its own table, so a leaked database holds no usable token and it can never match a session (nor a session match it); every other route and the WebSocket answer it as an unknown token; it starts and renews no session and carries no user or role. Revocable at once (`agora hub metrics-token revoke`, looked up on every scrape), optionally expiring (`--expires`), compared in constant time. Wrong bearers on the path count toward the address's sign-in lockout. Residual: until revoked or expired, the holder can read how busy the hub is |
+ | T25 | A confined agent needs a git configuration, and the person's own holds secrets and program hooks (`credential.*`, `url.*.insteadOf` with a token, `core.sshCommand`, `alias.!x`, `include`) | ADR-0078: the node writes the agent's global git file at every start from an allow-list of ten non-secret keys, each read with `git config --global --no-includes -z --get`, values written quoted and escaped (a control character, or a word key with other characters, is dropped, so a value cannot add keys or sections); the agent gets `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_NOSYSTEM=1` and a read grant, never a write grant, for that file, which is written to a new name and renamed so a link planted at the old one is replaced, not followed. Not granted when the owner already lists `~/.gitconfig`. Tested with real git and a real Landlock agent (`confined_git_config.rs`). Where the file lies is out of the agent's write grants and out of other programs' reach: beside the worktree on Linux, else in an `agora-git-config` folder the platform makes private (`agora_platform::ensure_private_dir`, checked and set through one handle of the folder itself: mode 0700 or a protected owner-and-SYSTEM-only DACL, not a link, refused when another user owns it (an existing folder is verified, not trusted); it is made before the check against the agent's write grants, which resolves it; because `%TEMP%` can give other sandboxes' SIDs Modify, found by the Windows check of #638). Not measured on macOS and real Windows tokens. The node's own `GIT_CONFIG_COUNT`/`KEY_n`/`VALUE_n` and `GIT_CONFIG_PARAMETERS` are cancelled in the agent's environment (they would apply on top of the file; tested with a negative control), and the node's own reads ignore them. A file that would lie under a folder the agent may write (a worktrees folder under `/tmp`, also reached through a link; unresolvable means not written) is not written, so git behaves as before. Residual: the agent can still run git with its own `-c` or repository config (T8b); the file is not deleted when the agent ends (one file per worktree name plus a hash of its path, rewritten at the next start; files of worktrees that no longer exist accumulate, a known limit, as there is no per-agent cleanup hook yet; a rename over the old file that fails keeps the old file and the start gets none newer). Other `GIT_*` variables the node inherited (`GIT_SSH_COMMAND`, `GIT_EXTERNAL_DIFF`, `GIT_ASKPASS`, `GIT_PAGER`, `GIT_EDITOR`, `GIT_EXEC_PATH`, `GIT_TEMPLATE_DIR`) are not scrubbed by this change. |
+@@ -73,7 +73,8 @@ lines are skipped, never trusted), and no hub or client message can edit it. The
+ terminal (a non-interactive one is a no; `--yes` covers only the fingerprints given); a device already trusted can endorse another
+ (verified on the node: trusted signer, this machine in scope, at most 90 days, not revoked since, never longer than the signer's own
+ trust; renewed by use); a revocation signed by a trusted device, or `agora node untrust`, removes a device at once and is remembered in
+-`<data>/device-revocations` so an older endorsement cannot bring it back; every endorsement and revocation applied or refused is
++`<data>/device-revocations` so an older endorsement cannot bring it back (also after the owner trusts it again); one dated ahead of the
++node's clock is also kept in `<data>/device-revocations-ahead` so the owner's re-trust overrides it when the hub sends it again (ADR-0081); every endorsement and revocation applied or refused is
+ written to `<data>/device-trust.log`. The trusted-devices file stays owner-only (written beside itself and renamed).
+ 
+ ### Signed grants for routed commands (ADR-0041)
+diff --git a/docs/specs/protocol.md b/docs/specs/protocol.md
+index 1a3bb676..057a413f 100644
+--- a/docs/specs/protocol.md
++++ b/docs/specs/protocol.md
+@@ -656,7 +656,15 @@ or when a device it already trusts signs an **endorsement** of it. The hub only
+   before). A node applies one signed by a device it trusts at once: the device is no longer trusted there if its trust there began
+   (`since`) at or before `issued_at_ms`, and neither are the devices it endorsed; endorsements of it, and endorsements it signed, at or before `issued_at_ms`
+   are refused from then on. A revocation sent again later never removes trust given after it (an endorsement signed later, or the
+-  owner trusting it again on the machine with `agora node trust ID KEY`).
++  owner trusting it again on the machine with `agora node trust ID KEY`). Because a revocation may be dated up to 5 minutes ahead of
++  the node's clock, the node keeps each verified revocation dated ahead of its clock when it arrives, identified by the fields its
++  revoker signed (`device_id`, `revoker_device_id`, `issued_at_ms`; never by the signature), in `<data>/device-revocations-ahead`
++  (node-local, at most 256 lines, the earliest-dated dropped first; a line nobody overrode is dropped once the clock passes its date).
++  The owner trusting the device on the machine overrides every such revocation of it dated at or after that trust began (ADR-0081):
++  sent again, it removes nothing (the node logs `overridden`) for as long as that trust lasts, and the command says so. A revocation
++  the node had not received before that, or one signed afterwards (another date or another revoker), applies by the date rule above.
++  Trusting a device again keeps its revocation remembered, so endorsements of it and by it signed at or before that revocation stay
++  refused.
+ - **Fingerprint.** What people compare: the first 12 bytes (96 bits) of the SHA-256 of the 65-byte key, lowercase hex in groups of 4
+   hex digits joined by `-` (`f947-3cb5-e304-81be-ecf2-64cd`). Every client shows it wherever a device is named, computed by the client
+   from the key itself, never taken from the hub.
+diff --git a/locales/en/cli.ftl b/locales/en/cli.ftl
+index 7a00b991..085b261f 100644
+--- a/locales/en/cli.ftl
++++ b/locales/en/cli.ftl
+@@ -130,6 +130,7 @@ cli-password-on = A screen password is set: sign-ins from other machines need it
+ cli-password-off = No screen password is set: a sign-in code alone is enough.
+ cli-trusted = Device { $id } can now answer approvals on this node.
+ cli-trust-failed = Could not trust that device: { $reason }
++cli-trust-revocation-overridden = Device { $id } was revoked from { $revoker } a moment ago. It stays trusted here even when that revocation is sent again.
+ cli-devices-offer = The hub lists { $count ->
+         [one] a device
+        *[other] { $count } devices
+diff --git a/locales/tr/cli.ftl b/locales/tr/cli.ftl
+index 72a51137..147e632d 100644
+--- a/locales/tr/cli.ftl
++++ b/locales/tr/cli.ftl
+@@ -127,6 +127,7 @@ cli-password-on = Ekran parolası ayarlı: başka makinelerden girişler bu paro
+ cli-password-off = Ekran parolası ayarlı değil: giriş kodu tek başına yeterli.
+ cli-trusted = { $id } cihazı artık bu makinedeki onaylara yanıt verebilir.
+ cli-trust-failed = Bu cihaz güvenilir olarak kaydedilemedi: { $reason }
++cli-trust-revocation-overridden = { $id } cihazı az önce { $revoker } cihazından kaldırılmıştı. O kaldırma yeniden gönderilse de burada güvenilir kalır.
+ cli-devices-offer = Hub, bu makinenin henüz güvenmediği { $count ->
+         [one] bir cihaz
+        *[other] { $count } cihaz
+-- 
+2.53.0
+
