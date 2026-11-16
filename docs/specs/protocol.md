@@ -294,6 +294,8 @@ of a repository, `web/a.txt` is `a.txt`; a rename across the folder's edge shows
 repository's root the names are the repository's own. `files.list` hides `.git`; `files.read` refuses
 files above 512 KiB (`files.too_large`) and paths that leave the workspace, symlinks included (`files.outside_root`), checked again on the opened file so a link swapped in after the check is still refused.
 
+Secret files (ADR-0080). The node decides by file name (case-insensitive, any folder): `.env` and `.env.*` (not `.env.example`, `.env.sample`, `.env.template`), `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.kdbx`, `id_rsa`, `id_dsa`, `id_ecdsa`, `id_ed25519` (not their `.pub`), `.npmrc`, `.pypirc`, `.netrc`, `.git-credentials`, anything inside a folder named `.ssh`, `.aws` or `.gnupg`, and `.docker/config.json`. Added to the schema (old clients ignore them, so no capability): `FileEntry.secret` (4), which `files.list` sets on such entries (it still lists them); the error `files.secret` (`path`), which `files.read` answers for the requested path or for where a link leads; `GitDiffResult.secret_files` (2, `SecretFileChange { path, added, removed }`) and, in `diff`, a changed secret file as its `diff --git` line plus mode and rename lines, with no hunk, blob id or content. The change counts of `git.status` are unchanged. The owner's policy line `files.show_secret = true` (any other value is off; the hub cannot change it) turns all of this off for the machine; `agora doctor` says when it is on.
+
 ### Selected directories (ADR-0052)
 
 Capability `workspace.directory` adds commands without changing `AgentStart`: its empty `worktree_id` still means

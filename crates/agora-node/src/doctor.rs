@@ -187,6 +187,9 @@ fn authority(data_dir: &Path, policy: &crate::daemon::Policy, now_ms: u64) -> Ve
         Status::Ok,
         policy.skip_permissions.name(),
     ));
+    if policy.show_secret {
+        out.push(check("show-secret", Status::Warn, "true"));
+    }
     if !policy.problems.is_empty() {
         out.push(check(
             "policy-problems",
@@ -609,6 +612,21 @@ mod tests {
 
     fn key(n: u8) -> String {
         format!("04{}", format!("{n:02x}").repeat(64))
+    }
+
+    #[test]
+    fn showing_secret_files_is_warned_about_only_when_on() {
+        assert!(find(&authority_of("secret-default", "", ""), "show-secret").is_empty());
+        for off in [
+            "files.show_secret = false\n",
+            "files.show_secret = yes\n",
+            "files.show_secret = TRUE\n",
+        ] {
+            let c = authority_of("secret-off", off, "");
+            assert!(find(&c, "show-secret").is_empty(), "{off}");
+        }
+        let c = authority_of("secret-on", "files.show_secret = true\n", "");
+        assert_eq!(find(&c, "show-secret")[0].status, Status::Warn);
     }
 
     #[test]

@@ -76,6 +76,8 @@ pub struct ControlContext {
     git_wake: Option<Arc<AtomicBool>>,
     /// ADR-0060: the session ledger, which holds the agents `agent.resume` can bring back. `None`: nothing can be resumed.
     ledger: Option<Arc<crate::ledger::Ledger>>,
+    /// ADR-0080: the owner's policy `files.show_secret`; off unless the policy file says `true`.
+    show_secret: bool,
     names: AtomicU64,
     seen: Mutex<IdempotencyCache>,
 }
@@ -115,6 +117,7 @@ impl ControlContext {
             spawn: None,
             git_wake: None,
             ledger: None,
+            show_secret: false,
             seen: Mutex::new(IdempotencyCache::default()),
         }
     }
@@ -138,6 +141,13 @@ impl ControlContext {
     #[must_use]
     pub fn with_ledger(mut self, ledger: Arc<crate::ledger::Ledger>) -> Self {
         self.ledger = Some(ledger);
+        self
+    }
+
+    /// ADR-0080: secret files are shown (the owner's policy `files.show_secret = true`). Set at start from the policy file only.
+    #[must_use]
+    pub fn with_show_secret(mut self, shown: bool) -> Self {
+        self.show_secret = shown;
         self
     }
 
@@ -865,7 +875,8 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
             }) {
                 return Err(invalid("path"));
             }
-            let mut diff = git::diff(&wt, path).map_err(|e| e.to_protocol())?;
+            let (mut diff, secret) =
+                git::diff_with(&wt, path, ctx.show_secret).map_err(|e| e.to_protocol())?;
             if diff.len() > MAX_DIFF_BYTES {
                 let mut end = MAX_DIFF_BYTES;
                 while !diff.is_char_boundary(end) {
@@ -874,7 +885,17 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                 diff.truncate(end);
             }
             Ok(v1::CommandOk {
-                result: Some(Ok_::GitDiff(v1::GitDiffResult { diff })),
+                result: Some(Ok_::GitDiff(v1::GitDiffResult {
+                    diff,
+                    secret_files: secret
+                        .into_iter()
+                        .map(|c| v1::SecretFileChange {
+                            path: c.path,
+                            added: c.added,
+                            removed: c.removed,
+                        })
+                        .collect(),
+                })),
             })
         }
         Cmd::FilesList(f) => {
@@ -891,6 +912,7 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                     name: e.name,
                     is_dir: e.is_dir,
                     size_bytes: e.size,
+                    secret: e.secret && !ctx.show_secret,
                 })
                 .collect();
             Ok(v1::CommandOk {
@@ -1134,7 +1156,9 @@ const MAX_READ_BYTES: u64 = 512 * 1024;
 
 fn open_files(ctx: &ControlContext, worktree_id: &str) -> Result<crate::files::Files, Error> {
     let wt = agent_worktree(ctx, worktree_id)?;
-    crate::files::Files::open(&wt, MAX_READ_BYTES).map_err(|e| e.to_protocol())
+    crate::files::Files::open(&wt, MAX_READ_BYTES)
+        .map(|f| f.with_secret_shown(ctx.show_secret))
+        .map_err(|e| e.to_protocol())
 }
 
 /// Largest diff one answer carries; a bigger one is cut (the file view is for reading, not for patching).

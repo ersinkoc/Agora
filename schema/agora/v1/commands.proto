@@ -398,6 +398,8 @@ message FileEntry {
   string name = 1;
   bool is_dir = 2;
   uint64 size_bytes = 3;
+  // ADR-0080: the node treats this file as secret by its name; `files.read` refuses it (`files.secret`).
+  bool secret = 4;
 }
 
 message FilesListResult {
@@ -469,6 +471,15 @@ message GitLogResult {
 message GitDiffResult {
   // Unified diff.
   string diff = 1;
+  // ADR-0080: files whose change is named in `diff` (a header, no hunk) and counted here, without content.
+  repeated SecretFileChange secret_files = 2;
+}
+
+// ADR-0080: a changed secret file: its path (as `diff` names it) and its line counts, which hold no value.
+message SecretFileChange {
+  string path = 1;
+  uint32 added = 2;
+  uint32 removed = 3;
 }
 
 message WorktreeCreateResult {

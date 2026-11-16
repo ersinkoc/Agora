@@ -1600,6 +1600,135 @@ fn the_node_lists_a_folders_subfolders_for_the_folder_picker() {
     let _ = std::fs::remove_dir_all(&pick);
 }
 
+fn diff_of(c: &mut Client, wt: &str) -> v1::GitDiffResult {
+    let Some(Ok_::GitDiff(d)) = ok(c.call(Cmd::GitDiff(v1::GitDiff {
+        worktree_id: wt.into(),
+        path: String::new(),
+    })))
+    .result
+    else {
+        panic!("no diff");
+    };
+    d
+}
+
+fn list_of(c: &mut Client, wt: &str) -> Vec<(String, bool)> {
+    let Some(Ok_::FilesList(l)) = ok(c.call(Cmd::FilesList(v1::FilesList {
+        worktree_id: wt.into(),
+        path: String::new(),
+    })))
+    .result
+    else {
+        panic!("no list");
+    };
+    l.entries.into_iter().map(|e| (e.name, e.secret)).collect()
+}
+
+fn read_cmd(wt: &str, path: &str) -> Cmd {
+    Cmd::FilesRead(v1::FilesRead {
+        worktree_id: wt.into(),
+        path: path.into(),
+    })
+}
+
+/// A started agent whose workspace holds a changed tracked `.env.local`, an untracked `.env` and `id_rsa`, and ordinary files.
+fn secret_workspace(name: &str, policy: Option<&str>) -> (Env, Node, String, String) {
+    let e = env(name);
+    if let Some(p) = policy {
+        std::fs::create_dir_all(e.dir.join("data")).unwrap();
+        std::fs::write(e.dir.join("data/policy"), p).unwrap();
+    }
+    let n = node(&e, NodeLimits::default());
+    let mut c = Client::connect(n.socket().unwrap()).unwrap();
+    let s = started(ok(c.call(start_cmd("shell"))));
+    let wt = PathBuf::from(&s.worktree_id);
+    std::fs::write(wt.join(".env.local"), "OLD=1\n").unwrap();
+    git(&wt, &["add", "-f", ".env.local"]);
+    git(&wt, &["commit", "-q", "-m", "add env"]);
+    std::fs::write(wt.join(".env.local"), "OLD=1\nSECRETVALUE=2\n").unwrap();
+    std::fs::write(wt.join(".env"), "TOKEN=hunter2\nB=2\n").unwrap();
+    std::fs::write(wt.join("id_rsa"), "PRIVATEKEYBYTES\n").unwrap();
+    std::fs::write(wt.join("plain.txt"), "plain line\n").unwrap();
+    (e, n, s.worktree_id, s.agent_id)
+}
+
+#[test]
+fn secret_files_are_marked_refused_and_left_out_of_the_diff() {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
+        return;
+    }
+    let (_e, n, wt, agent) = secret_workspace("secret-off", None);
+    let mut c = Client::connect(n.socket().unwrap()).unwrap();
+    let list = list_of(&mut c, &wt);
+    for (name, secret) in [
+        (".env", true),
+        (".env.local", true),
+        ("id_rsa", true),
+        ("plain.txt", false),
+        ("a.txt", false),
+    ] {
+        assert!(
+            list.contains(&(name.to_string(), secret)),
+            "{name}: {list:?}"
+        );
+    }
+    assert_eq!(err_code(c.call(read_cmd(&wt, ".env"))), "files.secret");
+    assert_eq!(err_code(c.call(read_cmd(&wt, "id_rsa"))), "files.secret");
+    // Negative control: an ordinary file still reads.
+    ok(c.call(read_cmd(&wt, "plain.txt")));
+    // A link to a secret file is refused by where it leads.
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(Path::new(&wt).join(".env"), Path::new(&wt).join("link.txt"))
+            .unwrap();
+        assert_eq!(err_code(c.call(read_cmd(&wt, "link.txt"))), "files.secret");
+    }
+
+    let d = diff_of(&mut c, &wt);
+    for leaked in ["hunter2", "SECRETVALUE", "PRIVATEKEYBYTES", "OLD=1"] {
+        assert!(!d.diff.contains(leaked), "{leaked} in {}", d.diff);
+    }
+    assert!(d.diff.contains("plain line"), "{}", d.diff);
+    let by = |p: &str| {
+        d.secret_files
+            .iter()
+            .find(|s| s.path == p)
+            .map(|s| (s.added, s.removed))
+    };
+    assert_eq!(by(".env.local"), Some((1, 0)), "{d:?}");
+    assert_eq!(by(".env"), Some((2, 0)), "{d:?}");
+    assert_eq!(by("id_rsa"), Some((1, 0)), "{d:?}");
+    assert!(by("plain.txt").is_none());
+    for p in [".env.local", ".env", "id_rsa"] {
+        assert!(d.diff.contains(&format!("diff --git a/{p} b/{p}")), "{p}");
+    }
+    ok(c.call(Cmd::AgentStop(v1::AgentStop {
+        agent_id: agent,
+        stop_helpers: false,
+    })));
+}
+
+#[test]
+fn the_owners_policy_switch_shows_secret_files() {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
+        return;
+    }
+    let (_e, n, wt, agent) = secret_workspace("secret-on", Some("files.show_secret = true\n"));
+    let mut c = Client::connect(n.socket().unwrap()).unwrap();
+    assert!(list_of(&mut c, &wt).iter().all(|(_, secret)| !secret));
+    let Some(Ok_::FilesRead(r)) = ok(c.call(read_cmd(&wt, ".env"))).result else {
+        panic!("no read");
+    };
+    assert_eq!(r.data, b"TOKEN=hunter2\nB=2\n");
+    let d = diff_of(&mut c, &wt);
+    assert!(d.secret_files.is_empty());
+    assert!(d.diff.contains("hunter2") && d.diff.contains("SECRETVALUE"));
+    ok(c.call(Cmd::AgentStop(v1::AgentStop {
+        agent_id: agent,
+        stop_helpers: false,
+    })));
+}
+
 /// F251: a subscriber that fell behind (it stopped reading while the agent printed far more than the node queues for it) still
 /// hears that the terminal ended, even though the exit was among what was dropped.
 #[test]

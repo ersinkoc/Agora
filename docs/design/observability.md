@@ -100,7 +100,7 @@
   It states who may make the machine act, as the node applies its files when it starts: which commands routed through the hub
   need a device-signed grant (the `signed_commands` line, the team default a limited device turns on, or none: a note, since a
   compromised hub could then send them, threat model T1), how many devices are trusted and how many of them may act in every
-  project, the `skip_permissions` setting, and how many policy lines the node did not understand.
+  project, the `skip_permissions` setting, a warning when `files.show_secret` is on (ADR-0080), and how many policy lines the node did not understand.
 - **Failure drills** (architecture review R8). Each one runs in CI and says which hop failed and what it recovered:
 
   | Drill | Test | What it shows |

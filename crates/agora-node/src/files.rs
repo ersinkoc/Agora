@@ -23,6 +23,8 @@ pub enum FilesError {
     },
     /// `..`, an absolute path, or a symlink leading out of the worktree.
     OutsideRoot(String),
+    /// ADR-0080: the file is secret by its name (the requested path or the one it resolves to) and secret files are hidden.
+    Secret(String),
     LeaseHeld {
         path: String,
         holder: AgentId,
@@ -43,6 +45,7 @@ impl FilesError {
             Self::OutsideRoot(p) => {
                 Error::new(ErrorCode::FilesOutsideRoot).with("path", p.as_str())
             }
+            Self::Secret(p) => Error::new(ErrorCode::FilesSecret).with("path", p.as_str()),
             Self::LeaseHeld {
                 path,
                 holder,
@@ -133,6 +136,8 @@ pub struct Entry {
     pub name: String,
     pub is_dir: bool,
     pub size: u64,
+    /// ADR-0080: secret by its name (always computed; hiding it is the caller's rule).
+    pub secret: bool,
 }
 
 /// Access to the files of one worktree.
@@ -140,6 +145,8 @@ pub struct Entry {
 pub struct Files {
     root: PathBuf,
     max_read: u64,
+    /// ADR-0080: the owner's `files.show_secret`. Off by default: a secret file is refused.
+    show_secret: bool,
 }
 
 /// Why [`visit_inside`] gave nothing.
@@ -167,7 +174,43 @@ impl Files {
     /// `root` must exist; `max_read` is the largest file `read` returns, in bytes.
     pub fn open(root: &Path, max_read: u64) -> Result<Self, FilesError> {
         let root = fs::canonicalize(root).map_err(|e| io_err(&root.display().to_string(), &e))?;
-        Ok(Self { root, max_read })
+        Ok(Self {
+            root,
+            max_read,
+            show_secret: false,
+        })
+    }
+
+    /// ADR-0080: `rel` names a secret file by itself or by where it resolves to (links followed); false when it cannot be resolved.
+    pub fn resolves_secret(&self, rel: &str) -> bool {
+        // A file's own link is not followed (it is the link a diff shows), but its folder is.
+        let Some(name) = Path::new(rel).file_name() else {
+            return false;
+        };
+        let parent = Path::new(rel)
+            .parent()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        match self.resolve(&parent) {
+            Ok(dir) => self.is_secret(rel, &dir.join(name)),
+            Err(_) => agora_core::secrets::is_secret_path(rel),
+        }
+    }
+
+    /// ADR-0080: whether secret files are read (the owner's policy `files.show_secret = true`). The default is not.
+    #[must_use]
+    pub fn with_secret_shown(mut self, shown: bool) -> Self {
+        self.show_secret = shown;
+        self
+    }
+
+    /// `rel`, the path the client asked for, or `real`, where it really is, names a secret file (ADR-0080).
+    fn is_secret(&self, rel: &str, real: &Path) -> bool {
+        use agora_core::secrets::is_secret_path;
+        is_secret_path(rel)
+            || real
+                .strip_prefix(&self.root)
+                .is_ok_and(|r| is_secret_path(&r.to_string_lossy()))
     }
 
     /// Resolve a client path to a real path inside the root.
@@ -226,8 +269,11 @@ impl Files {
         let dir = self.resolve(rel)?;
         let mut out = Vec::new();
         visit_inside(&self.root, &dir, |i| {
+            let name = i.name.to_string_lossy().into_owned();
             out.push(Entry {
-                name: i.name.to_string_lossy().into_owned(),
+                // By the path asked for and by where a link leads (a folder `.ssh` makes what is in it secret).
+                secret: self.is_secret(&format!("{rel}/{name}"), &dir.join(&name)),
+                name,
                 is_dir: i.is_dir,
                 size: if i.is_dir { 0 } else { i.len },
             });
@@ -253,6 +299,9 @@ impl Files {
     pub fn read_file(&self, rel: &str) -> Result<(Vec<u8>, bool), FilesError> {
         use std::io::Read;
         let path = self.resolve(rel)?;
+        if !self.show_secret && self.is_secret(rel, &path) {
+            return Err(FilesError::Secret(rel.to_string()));
+        }
         // Without waiting: a FIFO swapped in for the file would block the open until something writes to it.
         let file = agora_platform::open_read(&path).map_err(|e| io_err(rel, &e))?;
         let real = agora_platform::opened_path(&file).map_err(|e| io_err(rel, &e))?;
@@ -260,6 +309,10 @@ impl Files {
             return Err(FilesError::OutsideRoot(rel.to_string()));
         }
         let meta = file.metadata().map_err(|e| io_err(rel, &e))?;
+        // Where the open file really is, once more: a name swapped for a link after the check above.
+        if !self.show_secret && self.is_secret(rel, &real) {
+            return Err(FilesError::Secret(rel.to_string()));
+        }
         if !meta.is_file() {
             return Err(FilesError::NotFound(rel.to_string()));
         }
@@ -776,5 +829,94 @@ mod tests {
         fs::remove_file(root.join("README.md")).unwrap();
         assert_eq!(w.poll(), vec!["README.md", "src/a.rs", "src/b.rs"]);
         assert!(w.poll().is_empty());
+    }
+
+    fn secret_setup() -> (PathBuf, PathBuf) {
+        let d = tmp();
+        let root = d.join("wt");
+        fs::create_dir_all(root.join(".ssh")).unwrap();
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join(".env"), "TOKEN=abc\n").unwrap();
+        fs::write(root.join(".env.example"), "TOKEN=\n").unwrap();
+        fs::write(root.join("id_rsa"), "key").unwrap();
+        fs::write(root.join("id_rsa.pub"), "pub").unwrap();
+        fs::write(root.join(".ssh/config"), "Host x").unwrap();
+        fs::write(root.join("src/a.rs"), "fn a() {}").unwrap();
+        (d, root)
+    }
+
+    #[test]
+    fn a_listing_marks_secret_entries_and_does_not_hide_them() {
+        let (_d, root) = secret_setup();
+        let f = Files::open(&root, 1024).unwrap();
+        let marks: Vec<(String, bool)> = f
+            .list("")
+            .unwrap()
+            .into_iter()
+            .map(|e| (e.name, e.secret))
+            .collect();
+        for (name, secret) in [
+            (".env", true),
+            ("id_rsa", true),
+            (".env.example", false),
+            ("id_rsa.pub", false),
+            ("src", false),
+            (".ssh", false),
+        ] {
+            assert!(
+                marks.contains(&(name.to_string(), secret)),
+                "{name}: {marks:?}"
+            );
+        }
+        // What is inside a secret folder is secret, whatever its own name.
+        assert!(f.list(".ssh").unwrap().iter().all(|e| e.secret));
+        assert!(f.list("src").unwrap().iter().all(|e| !e.secret));
+    }
+
+    #[test]
+    fn reading_a_secret_file_is_refused_and_an_ordinary_one_is_not() {
+        let (_d, root) = secret_setup();
+        let f = Files::open(&root, 1024).unwrap();
+        for p in [".env", "id_rsa", ".ssh/config", "./.ENV"] {
+            assert_eq!(f.read(p), Err(FilesError::Secret(p.to_string())), "{p}");
+        }
+        assert_eq!(f.read(".env.example").unwrap(), b"TOKEN=\n");
+        assert_eq!(f.read("id_rsa.pub").unwrap(), b"pub");
+        assert_eq!(f.read("src/a.rs").unwrap(), b"fn a() {}");
+        let e = FilesError::Secret(".env".into()).to_protocol();
+        assert_eq!(e.to_string(), FilesError::Secret(".env".into()).to_string());
+    }
+
+    #[test]
+    fn the_owners_switch_allows_reading_secret_files() {
+        let (_d, root) = secret_setup();
+        let f = Files::open(&root, 1024).unwrap().with_secret_shown(true);
+        assert_eq!(f.read(".env").unwrap(), b"TOKEN=abc\n");
+        assert_eq!(f.read(".ssh/config").unwrap(), b"Host x");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_to_a_secret_file_or_folder_is_refused_by_where_it_leads() {
+        let (_d, root) = secret_setup();
+        std::os::unix::fs::symlink(root.join(".env"), root.join("notes.txt")).unwrap();
+        std::os::unix::fs::symlink(root.join(".ssh"), root.join("keys")).unwrap();
+        let f = Files::open(&root, 1024).unwrap();
+        assert_eq!(
+            f.read("notes.txt"),
+            Err(FilesError::Secret("notes.txt".into()))
+        );
+        assert_eq!(
+            f.read("keys/config"),
+            Err(FilesError::Secret("keys/config".into()))
+        );
+        assert!(f.list("keys").unwrap().iter().all(|e| e.secret));
+        // Negative control: a link to an ordinary file reads.
+        std::os::unix::fs::symlink(root.join("src/a.rs"), root.join("ok.txt")).unwrap();
+        assert_eq!(f.read("ok.txt").unwrap(), b"fn a() {}");
+        assert_eq!(
+            f.with_secret_shown(true).read("notes.txt").unwrap(),
+            b"TOKEN=abc\n"
+        );
     }
 }
