@@ -720,3 +720,89 @@ fn a_worktree_holding_a_hard_link_to_an_outside_file_is_refused_before_start() {
     assert!(!acl.contains("Mandatory Label"), "{acl}");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// A folder to read that the user may not open up (`System32`, a folder like it that grants nothing to `Users`/`Everyone`) is left out
+/// of the grants instead of failing the start: `cmd.exe` from `System32` still starts (read through `Users`), and the other folder,
+/// which the user reads, stays closed to the agent. Leaving a grant out never gives the agent more.
+#[test]
+fn a_folder_to_read_the_user_may_not_open_up_is_left_out_and_stays_closed() {
+    enable();
+    let root = scratch("unchangeable");
+    let allowed = root.join("work");
+    let locked = root.join("locked");
+    std::fs::create_dir_all(&allowed).unwrap();
+    std::fs::create_dir_all(&locked).unwrap();
+    std::fs::write(locked.join("inside.txt"), "LOCKED-CONTENT").unwrap();
+    let who = std::process::Command::new("whoami")
+        .args(["/user", "/fo", "csv", "/nh"])
+        .output()
+        .unwrap();
+    let sid = String::from_utf8_lossy(&who.stdout)
+        .trim()
+        .rsplit(',')
+        .next()
+        .unwrap()
+        .trim_matches('"')
+        .to_string();
+    // The user reads and may empty it; an `OWNER RIGHTS` entry takes the owner's implicit `WRITE_DAC` away; nothing for `Users`.
+    let ok = std::process::Command::new("icacls")
+        .arg(&locked)
+        .args(["/inheritance:r", "/grant:r"])
+        .arg(format!("*{sid}:(OI)(CI)(RX,D,DC)"))
+        .args([
+            "/grant:r",
+            "*S-1-5-18:(OI)(CI)F",
+            "/grant:r",
+            "*S-1-3-4:(OI)(CI)(RX,D,DC)",
+        ])
+        .status()
+        .unwrap()
+        .success();
+    assert!(ok);
+    // An elevated administrator (a CI runner) may still re-permission it; then the agent is given it, and only the start is checked.
+    let closed = {
+        use std::os::windows::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .access_mode(0x0004_0000) // WRITE_DAC
+            .custom_flags(0x0200_0000) // FILE_FLAG_BACKUP_SEMANTICS
+            .open(&locked)
+            .is_err()
+    };
+    if !closed {
+        eprintln!(
+            "premise does not hold here: this process may change the DACL of {}",
+            locked.display()
+        );
+    }
+    let script = allowed.join("run.cmd");
+    std::fs::write(
+        &script,
+        format!(
+            "@echo off\r\necho CMD-STARTED\r\ntype \"{}\" && echo READ-OK|| echo READ-REFUSED\r\n",
+            locked.join("inside.txt").display()
+        ),
+    )
+    .unwrap();
+    let system32 = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32");
+    let out = run(
+        Sandbox {
+            read: vec![locked.clone(), system32],
+            write: vec![allowed.clone()],
+            ..Default::default()
+        },
+        &allowed,
+        &script,
+    );
+    // The control: the user reads the folder the agent may not.
+    let own = std::fs::read_to_string(locked.join("inside.txt")).unwrap();
+    let _ = std::process::Command::new("cmd")
+        .args(["/c", "rmdir", "/s", "/q"])
+        .arg(&root)
+        .output();
+    assert_eq!(own, "LOCKED-CONTENT");
+    assert!(out.contains("CMD-STARTED"), "{out}");
+    if closed {
+        assert!(out.contains("READ-REFUSED"), "{out}");
+        assert!(!out.contains("LOCKED-CONTENT"), "{out}");
+    }
+}

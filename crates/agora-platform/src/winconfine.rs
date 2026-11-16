@@ -1056,7 +1056,22 @@ impl Confinement {
         // added so far, including a change that went half through.
         for (path, mask) in wanted {
             confinement.granted.push(path.clone());
-            change_acl(&path, confinement.sid.0, mask, true)?;
+            match change_acl(&path, confinement.sid.0, mask, true) {
+                Ok(()) => {}
+                // A folder to read whose permissions the user may not change (`System32`, where `cmd.exe` lives, or `Program Files`):
+                // it is left out instead of failing the start. That gives the agent less, never more: such a folder is read through
+                // `Users`/`Everyone` in the restricting list, as the `above` folders are, and one that does not grant them stays closed.
+                // A folder to write still fails the start.
+                // It stays in `granted`: `drop` and recovery take back only an entry that is there, so should the call ever have written
+                // part of it before failing, that part is still taken back.
+                Err(e) if mask == READ_MASK && e.kind() == io::ErrorKind::PermissionDenied => {
+                    eprintln!(
+                        "agora-platform: confinement: read grant on {} left out: {e}",
+                        path.display()
+                    );
+                }
+                Err(e) => return Err(e),
+            }
         }
         for path in above {
             // A folder whose permissions the user may not change (`C:\Users`) is left alone: `Users` in the restricting list covers it.
@@ -1860,5 +1875,146 @@ mod tests {
         assert!(!owner_alive(&format!("#owner\t{pid}\t1")));
         assert!(!owner_alive("S-1-5-21-1-2-3-4\tC:\\x"));
         assert!(!owner_alive(""));
+    }
+
+    /// A folder the user may read and empty but whose permissions they may not change (an `OWNER RIGHTS` entry takes the owner's
+    /// implicit `WRITE_DAC` away), and that grants nothing to `Users` or `Everyone`: what `System32` or `Program Files` is to a user.
+    fn unchangeable(dir: &Path) {
+        let user = format!("*{}", current_user_sid_text().unwrap());
+        icacls(&[
+            &dir.to_string_lossy(),
+            "/inheritance:r",
+            "/grant:r",
+            &format!("{user}:(OI)(CI)(RX,D,DC)"),
+            "/grant:r",
+            "*S-1-5-18:(OI)(CI)F",
+            "/grant:r",
+            "*S-1-3-4:(OI)(CI)(RX,D,DC)",
+        ]);
+    }
+
+    /// `cmd /c rmdir`: `remove_dir_all` first tries to clear attributes, which [`unchangeable`] does not allow.
+    fn remove(dir: &Path) {
+        let _ = std::process::Command::new("cmd")
+            .args(["/c", "rmdir", "/s", "/q"])
+            .arg(dir)
+            .output();
+    }
+
+    /// Whether this process may rewrite `dir`'s DACL: opening it for `WRITE_DAC` asks the same access check without changing anything.
+    /// A test that needs a folder the user may not change asks this first: an elevated administrator (a CI runner) may change more.
+    fn may_change_dacl(dir: &Path) -> bool {
+        use std::os::windows::fs::OpenOptionsExt;
+        const WRITE_DAC: u32 = 0x0004_0000;
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        std::fs::OpenOptions::new()
+            .access_mode(WRITE_DAC)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(dir)
+            .is_ok()
+    }
+
+    /// The folders of `candidates` this process may not re-permission, each said when it is not one.
+    fn unchangeable_of(candidates: &[&Path]) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        for c in candidates {
+            if may_change_dacl(c) {
+                eprintln!(
+                    "premise does not hold here: this process may change the DACL of {}",
+                    c.display()
+                );
+            } else {
+                out.push(c.to_path_buf());
+            }
+        }
+        out
+    }
+
+    /// A folder to read whose permissions the user may not change (`System32`, where `cmd.exe` is) is left out, and the start goes on;
+    /// before, `ERROR_ACCESS_DENIED` failed every confined start whose program lives there or in `Program Files`.
+    #[test]
+    fn a_read_grant_the_user_may_not_make_is_left_out_and_the_start_goes_on() {
+        let root = scratch("read-unchangeable");
+        let ledgers = root.join("ledgers");
+        let (work, locked) = (root.join("work"), root.join("locked"));
+        std::fs::create_dir_all(&work).unwrap();
+        std::fs::create_dir_all(&locked).unwrap();
+        unchangeable(&locked);
+        let system32 = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32");
+        let refused = unchangeable_of(&[&locked, &system32]);
+        if refused.is_empty() {
+            remove(&root);
+            eprintln!("skipped: no folder here that this process may not re-permission");
+            return;
+        }
+        let identity = random_sid_string().unwrap();
+        let sandbox = Sandbox {
+            read: refused.clone(),
+            write: vec![work.clone()],
+            ..Default::default()
+        };
+        let c = Confinement::in_ledger_dir(&sandbox, &ledgers, Some(&identity));
+        let started = c.as_ref().map(|_| ()).map_err(ToString::to_string);
+        let on_refused: Vec<String> = refused
+            .iter()
+            .map(|p| icacls(&[&p.to_string_lossy()]))
+            .collect();
+        let on_work = icacls(&[&work.to_string_lossy()]);
+        drop(c);
+        let ledger_files = files_in(&ledgers);
+        remove(&root);
+        if let Err(e) = started {
+            panic!("the start must go on: {e}");
+        }
+        for acl in &on_refused {
+            assert!(!acl.contains(&identity), "{acl}");
+        }
+        assert!(
+            on_work.contains(&identity),
+            "the folder to write is granted: {on_work}"
+        );
+        assert!(ledger_files.is_empty(), "ledgers left: {ledger_files:?}");
+    }
+
+    /// Only reads are left out: a folder to write whose permissions the user may not change still fails the start, with nothing left.
+    #[test]
+    fn a_write_grant_the_user_may_not_make_still_fails_the_start() {
+        let root = scratch("write-unchangeable");
+        let ledgers = root.join("ledgers");
+        let locked = root.join("locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        unchangeable(&locked);
+        let system32 = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32");
+        // The scratch folder first: only where it may be re-permissioned here is `System32` the folder asked to write.
+        let Some(target) = unchangeable_of(&[&locked, &system32]).into_iter().next() else {
+            remove(&root);
+            eprintln!("skipped: no folder here that this process may not re-permission");
+            return;
+        };
+        let identity = random_sid_string().unwrap();
+        let sandbox = Sandbox {
+            read: vec![],
+            write: vec![target.clone()],
+            ..Default::default()
+        };
+        let result = Confinement::in_ledger_dir(&sandbox, &ledgers, Some(&identity));
+        let failed = result.is_err();
+        drop(result);
+        let on_target = icacls(&[&target.to_string_lossy()]);
+        let ledger_files = files_in(&ledgers);
+        remove(&root);
+        assert!(failed, "the start must fail ({})", target.display());
+        assert!(!on_target.contains(&identity), "{on_target}");
+        assert!(ledger_files.is_empty(), "ledgers left: {ledger_files:?}");
+    }
+
+    /// The premise probe itself: the owner of a plain folder may re-permission it, and nothing is changed by asking.
+    #[test]
+    fn the_owner_may_change_a_plain_folders_dacl() {
+        let root = scratch("probe");
+        let before = icacls(&[&root.to_string_lossy()]);
+        assert!(may_change_dacl(&root));
+        assert_eq!(icacls(&[&root.to_string_lossy()]), before);
+        remove(&root);
     }
 }
