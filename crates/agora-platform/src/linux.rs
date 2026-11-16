@@ -76,8 +76,12 @@ const RULE_PATH_BENEATH: libc::c_int = 1;
 /// The first version's rights: execute, write/read file, read dir, remove, make (char, dir, reg, sock, fifo, block, sym).
 const ALL_FS: u64 = (1 << 13) - 1;
 const READ_FS: u64 = 1 | (1 << 2) | (1 << 3);
-/// What applies to a file rather than a directory: execute, write and read.
-const FILE_FS: u64 = 1 | (1 << 1) | (1 << 2);
+/// Moving or linking a file into another folder (ABI 2). Not handled, every such move is refused, even inside `write`.
+const REFER_FS: u64 = 1 << 13;
+/// `truncate(2)` and opening with `O_TRUNC` (ABI 3). Not handled, a file anywhere can be cut to nothing.
+const TRUNCATE_FS: u64 = 1 << 14;
+/// What applies to a file rather than a directory: execute, write, read and truncate.
+const FILE_FS: u64 = 1 | (1 << 1) | (1 << 2) | TRUNCATE_FS;
 
 #[repr(C)]
 struct RulesetAttr {
@@ -90,18 +94,22 @@ struct PathBeneath {
     parent_fd: i32,
 }
 
-/// True when the running kernel has Landlock switched on.
-pub(crate) fn sandbox_supported() -> bool {
+/// The kernel's Landlock version (ABI), or a value below 1 when Landlock is off.
+fn abi_version() -> libc::c_long {
     // SAFETY: the version query takes a null attribute and size 0.
-    let v = unsafe {
+    unsafe {
         libc::syscall(
             SYS_LANDLOCK_CREATE_RULESET,
             std::ptr::null::<RulesetAttr>(),
             0usize,
             CREATE_RULESET_VERSION,
         )
-    };
-    v >= 1
+    }
+}
+
+/// True when the running kernel has Landlock switched on.
+pub(crate) fn sandbox_supported() -> bool {
+    abi_version() >= 1
 }
 
 /// A ruleset made before the fork, so the child only has to apply it (two async-signal-safe calls).
@@ -109,14 +117,23 @@ pub(crate) struct Ruleset(std::os::fd::OwnedFd);
 
 pub(crate) fn ruleset(sb: &crate::Sandbox) -> io::Result<Ruleset> {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-    if !sandbox_supported() {
+    let abi = abi_version();
+    if abi < 1 {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "this kernel has no Landlock",
         ));
     }
+    // The rights later versions added are handled where the kernel knows them, so `write` alone may truncate and move files.
+    let mut all = ALL_FS;
+    if abi >= 2 {
+        all |= REFER_FS;
+    }
+    if abi >= 3 {
+        all |= TRUNCATE_FS;
+    }
     let attr = RulesetAttr {
-        handled_access_fs: ALL_FS,
+        handled_access_fs: all,
     };
     // SAFETY: a valid attribute pointer and its size; the result is a new descriptor (close-on-exec) or -1.
     let fd = unsafe {
@@ -132,7 +149,7 @@ pub(crate) fn ruleset(sb: &crate::Sandbox) -> io::Result<Ruleset> {
     }
     // SAFETY: the kernel returned a fresh descriptor that nothing else owns.
     let set = unsafe { OwnedFd::from_raw_fd(fd as i32) };
-    for (paths, rights) in [(&sb.read, READ_FS), (&sb.write, ALL_FS)] {
+    for (paths, rights) in [(&sb.read, READ_FS), (&sb.write, all)] {
         for p in paths {
             // A path that does not exist on this machine confines nothing; skip it.
             let Ok(f) = std::fs::File::open(p) else {

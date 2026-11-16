@@ -496,9 +496,15 @@ pub(crate) fn visit_dir(
     // SAFETY: a live stream.
     unsafe { libc::rewinddir(stream.0) };
     loop {
+        // `readdir` tells a failure from the end of the folder only through errno, so it is cleared first.
+        let checked = clear_errno();
         // SAFETY: a live stream; the entry stays valid until the next `readdir` on it, and is copied before that.
         let entry = unsafe { libc::readdir(stream.0) };
         if entry.is_null() {
+            let e = io::Error::last_os_error();
+            if checked && e.raw_os_error().is_some_and(|code| code != 0) {
+                return Err(e);
+            }
             break;
         }
         // SAFETY: `d_name` is a NUL-terminated name inside the entry just returned.
@@ -538,6 +544,21 @@ pub(crate) fn visit_dir(
         }
     }
     Ok(())
+}
+
+/// Sets this thread's errno to 0 (std has no setter); false where that is not known how, and errno must then not be trusted.
+fn clear_errno() -> bool {
+    #[cfg(target_os = "linux")]
+    // SAFETY: the calling thread's own errno slot, always valid.
+    unsafe {
+        *libc::__errno_location() = 0;
+    }
+    #[cfg(target_os = "macos")]
+    // SAFETY: the calling thread's own errno slot, always valid.
+    unsafe {
+        *libc::__error() = 0;
+    }
+    cfg!(any(target_os = "linux", target_os = "macos"))
 }
 
 /// Makes `cmd` start in a session of its own (`setsid` in the child before `exec`), detached from this process's terminal: see
