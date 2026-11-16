@@ -64,9 +64,10 @@ pub trait SessionApi: Send + Sync {
         (404, String::new())
     }
 
-    /// `GET /api/metrics` (architecture review R8): the hub's own numbers in the Prometheus text format, for the owner only, and only
-    /// when the hub was started with `--metrics`; 404 otherwise.
-    fn metrics(&self, _bearer: Option<&str>) -> (u16, String) {
+    /// `GET /api/metrics` (architecture review R8): the hub's own numbers in the Prometheus text format, for the owner or for a
+    /// metrics token (ADR-0076), and only when the hub was started with `--metrics`; 404 otherwise. A bearer that is neither counts
+    /// toward the address's lockout; a locked-out address gets 429.
+    fn metrics(&self, _bearer: Option<&str>, _client: &Client) -> (u16, String) {
         (404, String::new())
     }
 
@@ -450,8 +451,13 @@ where
         && path == "/api/metrics"
         && sessions.is_some_and(|api| api.metrics_on())
     {
-        let (status, out) =
-            sessions.map_or((404, String::new()), |api| api.metrics(bearer().as_deref()));
+        let (status, out) = sessions.map_or((404, String::new()), |api| {
+            api.metrics(bearer().as_deref(), &client)
+        });
+        // As for a wrong sign-in: a refusal costs the same short wait, whatever was wrong.
+        if status == 401 || status == 429 {
+            tokio::time::sleep(FAILURE_DELAY).await;
+        }
         respond(
             &mut stream,
             status,

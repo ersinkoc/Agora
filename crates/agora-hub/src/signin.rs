@@ -357,19 +357,37 @@ impl crate::web::SessionApi for HubSessions {
         self.hub.metrics_on()
     }
 
-    fn metrics(&self, bearer: Option<&str>) -> (u16, String) {
-        // The token first: nobody but the owner makes the hub count anything (#562 review).
+    fn metrics(&self, bearer: Option<&str>, client: &Client) -> (u16, String) {
+        // The token first: nobody but the owner, or a metrics token, makes the hub count anything (#562 review).
         let Some(token) = bearer else {
             return (401, String::new());
         };
-        match self.signin().access(token, crate::server::now_ms()) {
-            None => (401, String::new()),
-            Some(a) if a.role != crate::users::Role::Owner => (403, String::new()),
-            Some(_) => self
-                .hub
-                .metrics_text()
-                .map_or((404, String::new()), |text| (200, text)),
+        let now = crate::server::now_ms();
+        // A try is counted when it starts and given back when it proves itself (ADR-0076 item 4): a burst of wrong tokens from one
+        // address locks that address out of sign-in too. Per address only, so a stranger cannot lock the hub for everyone.
+        if self.guard.attempt(client, Scope::AddressOnly, now).is_err() {
+            return (429, String::new());
         }
+        // A metrics token is looked up among metrics tokens only, and anything else among sessions only.
+        let allowed = if crate::metrics_token::looks_like(token) {
+            crate::metrics_token::MetricsTokens::new(self.hub.store()).check(token, now)
+        } else {
+            match self.signin().access(token, now) {
+                None => false,
+                Some(a) if a.role != crate::users::Role::Owner => {
+                    self.guard.succeeded(client, Scope::AddressOnly);
+                    return (403, String::new());
+                }
+                Some(_) => true,
+            }
+        };
+        if !allowed {
+            return (401, String::new());
+        }
+        self.guard.succeeded(client, Scope::AddressOnly);
+        self.hub
+            .metrics_text()
+            .map_or((404, String::new()), |text| (200, text))
     }
 
     fn info(&self, client: &Client) -> serde_json::Value {

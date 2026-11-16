@@ -9,6 +9,7 @@ pub mod dispatch;
 pub mod enroll;
 pub mod hub;
 pub mod metrics;
+pub mod metrics_token;
 pub mod notifier;
 pub mod notify;
 pub mod passkey;

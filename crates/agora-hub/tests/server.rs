@@ -2533,6 +2533,158 @@ async fn only_the_owner_reads_the_hubs_metrics_and_only_when_they_are_on() {
     }
 }
 
+/// An unstarted-metrics hub (or one with them on) that checks tokens against sessions, for the metrics token tests (ADR-0076).
+async fn metrics_hub() -> (Arc<Hub>, Arc<ServerState>, std::net::SocketAddr) {
+    use agora_hub::signin::HubSessions;
+    let hub = Arc::new(Hub::open(SqliteStore::open_in_memory().unwrap()).unwrap());
+    let sessions = Arc::new(HubSessions::new(Arc::clone(&hub)));
+    let st = Arc::new(ServerState {
+        hub: Arc::clone(&hub),
+        support: support(),
+        ca: None,
+        lockout: Arc::new(Lockout::new()),
+        auth: Box::new(HubSessionsAuth(Arc::clone(&sessions))),
+        assets: None,
+        sessions: Some(sessions),
+    });
+    let addr = start(Arc::clone(&st)).await;
+    (hub, st, addr)
+}
+
+/// ADR-0076: a metrics token reads `/api/metrics` (GET and HEAD) and is refused once revoked or expired; a made-up one, a session of
+/// a viewer and no token are refused as before; the owner's session still works.
+#[tokio::test]
+async fn a_metrics_token_reads_the_numbers_until_it_is_revoked_or_expires() {
+    use agora_hub::metrics_token::MetricsTokens;
+    use agora_hub::signin::SignIn;
+    use agora_hub::users::{Role, Users};
+    let (hub, _st, addr) = metrics_hub().await;
+    hub.enable_metrics();
+    let now = server::now_ms();
+    let tokens = MetricsTokens::new(hub.store());
+    let live = tokens.create("prom", now, None).unwrap();
+    let revoked = tokens.create("old", now, None).unwrap();
+    let expired = tokens.create("short", now, Some(now + 1)).unwrap();
+    tokens.revoke("old", now).unwrap();
+    let signin = SignIn::new(hub.store(), Arc::new(Lockout::new()));
+    let owner = signin
+        .redeem(&signin.create_code(now).unwrap(), now)
+        .unwrap();
+    let eda = Users::new(hub.store())
+        .add("Eda", Role::Viewer, now)
+        .unwrap();
+    let viewer = signin
+        .redeem(&signin.create_code_for(Some(&eda.id), now).unwrap(), now)
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+    let (status, text) = get_metrics(addr, Some(&live)).await;
+    assert_eq!(status, 200, "{text}");
+    assert!(text.contains("agora_hub_events_ingested_total"));
+    assert!(raw(addr, "HEAD", "/api/metrics", Some(&live))
+        .await
+        .starts_with("HTTP/1.1 200"));
+    assert_eq!(get_metrics(addr, Some(&owner)).await.0, 200);
+    assert_eq!(get_metrics(addr, Some(&viewer)).await.0, 403);
+    // Refused as an unknown token: revoked, expired, made up (same shape), no token.
+    for t in [Some(revoked.as_str()), Some(expired.as_str())] {
+        assert_eq!(get_metrics(addr, t).await.0, 401);
+    }
+    assert_eq!(get_metrics(addr, Some("agm_0000")).await.0, 401);
+    assert_eq!(get_metrics(addr, None).await.0, 401);
+    // Revoking is immediate: the very next scrape fails.
+    assert_eq!(get_metrics(addr, Some(&live)).await.0, 200);
+    MetricsTokens::new(hub.store())
+        .revoke("prom", server::now_ms())
+        .unwrap();
+    assert_eq!(get_metrics(addr, Some(&live)).await.0, 401);
+}
+
+/// ADR-0076 item 4: with `--metrics` off, a metrics token is answered exactly as an unknown path, as any other bearer.
+#[tokio::test]
+async fn with_metrics_off_a_metrics_token_is_answered_as_an_unknown_path() {
+    let (hub, _st, addr) = metrics_hub().await;
+    let token = agora_hub::metrics_token::MetricsTokens::new(hub.store())
+        .create("prom", server::now_ms(), None)
+        .unwrap();
+    for method in ["GET", "HEAD"] {
+        assert_eq!(
+            raw(addr, method, "/api/metrics", Some(&token)).await,
+            raw(addr, method, "/api/nothing", Some(&token)).await,
+        );
+    }
+}
+
+/// ADR-0076 item 1, negative controls: the token is an unknown token everywhere but `/api/metrics`. Each route answers it as it
+/// answers a made-up one, it starts no session, and the WebSocket closes on it.
+#[tokio::test]
+async fn a_metrics_token_reaches_nothing_but_the_metrics() {
+    let (hub, _st, addr) = metrics_hub().await;
+    hub.enable_metrics();
+    let token = agora_hub::metrics_token::MetricsTokens::new(hub.store())
+        .create("prom", server::now_ms(), None)
+        .unwrap();
+    let status = |r: &str| r[9..12].to_string();
+    for (method, path) in [
+        ("GET", "/api/audit"),
+        ("GET", "/api/audit?since=0"),
+        ("DELETE", "/api/session"),
+    ] {
+        let with = raw(addr, method, path, Some(&token)).await;
+        let made_up = raw(addr, method, path, Some("agm_deadbeef")).await;
+        assert_eq!(with, made_up, "{method} {path}");
+        assert_ne!(status(&with), "200", "{method} {path}: {with}");
+    }
+    // The routes that act as a signed-in person refuse it like a made-up token.
+    for path in ["/api/password", "/api/passkey/add"] {
+        let body = serde_json::json!({});
+        let (with, _) = post_json(addr, path, Some(&token), &body).await;
+        let (made_up, _) = post_json(addr, path, Some("agm_deadbeef"), &body).await;
+        assert_eq!(with, made_up, "{path}");
+        assert!(matches!(with, 401 | 403 | 404), "{path}: {with}");
+    }
+    // It is not a session: it cannot sign anything out, and the audit trail stays closed to it.
+    assert_eq!(
+        status(&raw(addr, "GET", "/api/audit", Some(&token)).await),
+        "401"
+    );
+    // The WebSocket treats it as an unknown token.
+    let tcp = TcpStream::connect(addr).await.unwrap();
+    let mut c = ws::connect_with_subprotocol_token(tcp, &format!("ws://{addr}/"), &token)
+        .await
+        .unwrap();
+    c.send(&f(
+        STREAM_EVENTS,
+        kinds::SUBSCRIBE,
+        v1::Subscribe::default().encode_to_vec(),
+    ))
+    .await
+    .unwrap();
+    assert!(closed(&mut c).await);
+    // And a scrape did not start or renew any session.
+    assert_eq!(get_metrics(addr, Some(&token)).await.0, 200);
+    let signin = agora_hub::signin::SignIn::new(hub.store(), Arc::new(Lockout::new()));
+    assert!(!signin.check(&token, server::now_ms()));
+    assert!(signin.access(&token, server::now_ms()).is_none());
+}
+
+/// ADR-0076 item 4: a burst of wrong bearers on `/api/metrics` locks the address out (429), the lockout of the sign-in.
+#[tokio::test]
+async fn wrong_bearers_on_the_metrics_path_count_toward_the_lockout() {
+    let (hub, _st, addr) = metrics_hub().await;
+    hub.enable_metrics();
+    let mut last = 0;
+    for _ in 0..agora_hub::password::ADDRESS_FREE_FAILURES + 1 {
+        last = get_metrics(addr, Some("agm_wrong")).await.0;
+    }
+    assert_eq!(last, 429);
+    // Locked out, even a good token waits.
+    let token = agora_hub::metrics_token::MetricsTokens::new(hub.store())
+        .create("prom", server::now_ms(), None)
+        .unwrap();
+    assert_eq!(get_metrics(addr, Some(&token)).await.0, 429);
+}
+
 /// #558 review: a certificate revoked between the node's Hello and its Resume ends the connection too (the handshake is watched as
 /// the conversation is), and the node is never recorded online.
 #[tokio::test]

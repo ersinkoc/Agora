@@ -84,7 +84,7 @@ pub trait EventStore {
     fn set_setting(&self, key: &str, value: &[u8]) -> Result<(), StoreError>;
 }
 
-const SCHEMA_VERSION: i64 = 11;
+const SCHEMA_VERSION: i64 = 12;
 
 pub struct SqliteStore {
     conn: Mutex<Connection>,
@@ -322,6 +322,23 @@ impl SqliteStore {
                      payload   BLOB NOT NULL
                  );
                  PRAGMA user_version = 11;
+                 COMMIT;",
+            )?;
+        }
+        if version < 12 {
+            // ADR-0076: tokens that can only read `GET /api/metrics`. Only the SHA-256 of a token is kept, apart from sessions.
+            // `expires_ms` and `revoked_ms` are 0 for "never" and "not revoked".
+            conn.execute_batch(
+                "BEGIN;
+                 CREATE TABLE IF NOT EXISTS metrics_tokens (
+                     name         TEXT PRIMARY KEY,
+                     token_hash   BLOB NOT NULL UNIQUE,
+                     created_ms   INTEGER NOT NULL,
+                     expires_ms   INTEGER NOT NULL DEFAULT 0,
+                     last_used_ms INTEGER NOT NULL DEFAULT 0,
+                     revoked_ms   INTEGER NOT NULL DEFAULT 0
+                 );
+                 PRAGMA user_version = 12;
                  COMMIT;",
             )?;
         }
