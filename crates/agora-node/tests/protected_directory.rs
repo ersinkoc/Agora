@@ -1,6 +1,8 @@
 //! With confinement on, a launch in a folder that would make it meaningless is refused before anything starts (ADR-0052, ADR-0047).
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+#[path = "private_home/mod.rs"]
+mod private_home;
 use std::time::Instant;
 
 use agora_core::{NodeId, ProjectId};
@@ -11,6 +13,7 @@ use agora_node::supervisor::{
 use agora_node::terminal::TerminalOptions;
 
 fn supervisor(level: Level) -> Supervisor {
+    private_home::init();
     let mut sup = Supervisor::new(SupervisorConfig {
         node: NodeId::new("node-1"),
         restart: RestartPolicy::default(),

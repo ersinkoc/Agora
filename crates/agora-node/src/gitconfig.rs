@@ -134,7 +134,8 @@ pub fn identity_missing() -> bool {
 }
 
 /// The folder of the files: where the system's temp folder is out of the agent's reach (macOS, Windows) one of the node's own inside
-/// it; elsewhere (Linux, where `/tmp` is the agent's to write) one under the node's own folder in the home folder (`~/.agora`),
+/// it; elsewhere (Linux, where `/tmp` is the agent's to write) one under `~/.agora` of the home folder (the node's own folder by convention; derived from the home folder, not
+/// from the data folder the node was given),
 /// which no confinement profile grants. Either is made private by the platform ([`agora_platform::ensure_private_dir`]) before
 /// anything is written, because the temp folder's own permissions can admit other programs (on Windows, other sandboxes) that
 /// could then rewrite what the agent trusts. `None` when there is no home folder (no file is written then).

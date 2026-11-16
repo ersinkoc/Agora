@@ -3,6 +3,8 @@
 //! window lists, and the events that carry the badge.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+#[path = "private_home/mod.rs"]
+mod private_home;
 use agora_node::{
     control::Client,
     daemon::{Node, NodeConfig},
@@ -59,6 +61,7 @@ struct Env {
 impl Env {
     /// A node whose policy file says `policy` (none: no policy file, the default).
     fn new(name: &str, policy: Option<&str>) -> Self {
+        private_home::init();
         let root = std::env::temp_dir().join(format!("launch-opt-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("manifests")).unwrap();

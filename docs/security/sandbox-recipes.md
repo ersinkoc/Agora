@@ -10,7 +10,7 @@ helper settings), so reading them is the owner's choice, not the node's.
 ## Git inside a confined agent (ADR-0078)
 
 You do not need to list `~/.gitconfig` for `git status`, `commit`, `branch` and `diff` to work. At every start the node writes a small
-global git file for the agent (on Linux in a private `~/.agora/git-config` folder of the node's own folder, which no agent profile grants, so another confined agent that can write a folder around this one's worktree cannot rewrite it; on macOS and Windows in a private `agora-git-config` folder of the system temp folder on macOS and Windows (mode 0700; on Windows an ACL that gives only you and SYSTEM access and does not inherit the temp folder's, which on a machine with other sandboxes can let them rewrite it)), sets
+global git file for the agent (on Linux in a private `git-config` folder under `~/.agora` in your home folder (always there, whatever data folder the node was given; no agent profile grants it), so another confined agent that can write a folder around this one's worktree cannot rewrite it; on macOS and Windows in a private `agora-git-config` folder of the system temp folder on macOS and Windows (mode 0700; on Windows an ACL that gives only you and SYSTEM access and does not inherit the temp folder's, which on a machine with other sandboxes can let them rewrite it)), sets
 `GIT_CONFIG_GLOBAL` to it and `GIT_CONFIG_NOSYSTEM=1`, and gives the sandbox a read grant for that one file and no write grant. It holds
 only these keys, each copied if you have set it in your own global configuration: `user.name`, `user.email`, `init.defaultBranch`,
 `core.autocrlf`, `core.ignorecase`, `core.filemode`, `pull.rebase`, `push.default`, `push.autoSetupRemote`, `color.ui`. Nothing else is

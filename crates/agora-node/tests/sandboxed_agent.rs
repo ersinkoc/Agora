@@ -1,6 +1,8 @@
 //! An agent started under the node's `sandbox` policy (ADR-0047) is confined, and one that cannot be confined is not started.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+#[path = "private_home/mod.rs"]
+mod private_home;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -43,6 +45,7 @@ fn setup_with(
     script: &str,
     policy: SandboxPolicy,
 ) -> (Supervisor, StartRequest, PathBuf) {
+    private_home::init();
     let dir = std::env::temp_dir().join(format!("agora-sbx-agent-{}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let repo = dir.join("repo");

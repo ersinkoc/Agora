@@ -3,6 +3,8 @@
 //! with the repository under the user temp folder. Only where the platform grants permissions folder by folder.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+#[path = "private_home/mod.rs"]
+mod private_home;
 use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -50,6 +52,7 @@ fn git(dir: &Path, args: &[&str]) -> String {
 
 #[test]
 fn a_confined_agent_commits_in_a_checkout_under_the_user_profile() {
+    private_home::init();
     if !agora_platform::NARROW_GIT_WRITES {
         return;
     }
