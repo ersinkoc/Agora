@@ -62,7 +62,7 @@ jobs:
       # Without them the release goes out unsigned, as before. With them, a signature that is missing, invalid or not timestamped
       # fails the release. SignPath Foundation asks a person to approve every release's signing request: the job waits up to an hour.
       # Once set up, a failed signing holds back the whole release (publish needs every build). To ship a tag unsigned anyway, delete
-      # one of the four settings (for example SIGNPATH_SIGNING_POLICY_SLUG) and re-run the failed job. A test-signing policy fails the
+      # all four settings and re-run the failed job (deleting only some fails the release). A test-signing policy fails the
       # check on purpose: its root is not trusted on the runner, so Windows would not trust that signature either.
       - name: Signing set up
         id: signing
@@ -73,12 +73,17 @@ jobs:
           ORG: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
           PROJECT: ${{ vars.SIGNPATH_PROJECT_SLUG }}
           POLICY: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+        # All four set: sign. None set: unsigned, as before. Some but not all (a typo, a forgotten variable): fail, so a release the
+        # maintainer believes signed never goes out unsigned.
         run: |
-          if [ -n "$TOKEN" ] && [ -n "$ORG" ] && [ -n "$PROJECT" ] && [ -n "$POLICY" ]; then
-            echo "on=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "SignPath is not set up: agora.exe is published unsigned"
-          fi
+          n=0
+          for v in "$TOKEN" "$ORG" "$PROJECT" "$POLICY"; do if [ -n "$v" ]; then n=$((n + 1)); fi; done
+          case $n in
+            4) echo "on=true" >> "$GITHUB_OUTPUT" ;;
+            0) echo "SignPath is not set up: agora.exe is published unsigned" ;;
+            *) echo "::error::SignPath is only partly set up ($n of SIGNPATH_API_TOKEN, SIGNPATH_ORGANIZATION_ID, SIGNPATH_PROJECT_SLUG, SIGNPATH_SIGNING_POLICY_SLUG): set all four, or none to publish unsigned"
+               exit 1 ;;
+          esac
       - name: Upload unsigned agora.exe
         id: unsigned
         if: steps.signing.outputs.on == 'true'
@@ -89,6 +94,8 @@ jobs:
           path: target/${{ matrix.target }}/release/agora.exe
           if-no-files-found: error
           retention-days: 1
+          # A re-run of this job uploads it again.
+          overwrite: true
       - name: Sign agora.exe
         if: steps.signing.outputs.on == 'true'
         uses: SignPath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092 # v3.0
