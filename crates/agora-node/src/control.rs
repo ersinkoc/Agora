@@ -1234,6 +1234,14 @@ pub(crate) fn command_name(c: &Cmd) -> &'static str {
         Cmd::DeviceEndorse(_) => "device.endorse",
         Cmd::DeviceRevoke(_) => "device.revoke",
         Cmd::DeviceAskApproval(_) => "device.ask_approval",
+        // ADR-0065: the pairing messages exist in the schema; no node code handles them yet, so they are refused as unsupported.
+        Cmd::PairOpen(_) => "pair.open",
+        Cmd::PairClose(_) => "pair.close",
+        Cmd::PairStatus(_) => "pair.status",
+        Cmd::PairApprove(_) => "pair.approve",
+        Cmd::PairDeny(_) => "pair.deny",
+        Cmd::PairRequest(_) => "pair.request",
+        Cmd::PairReveal(_) => "pair.reveal",
     }
 }
 

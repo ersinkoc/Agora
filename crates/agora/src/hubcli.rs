@@ -46,6 +46,8 @@ const HUB_CAPABILITIES: &[&str] = &[
     "device.list",
     // ADR-0069: the hub keeps `NodeOnline.binary` in its snapshot (`NodeSnapshot.binary`) and passes `AgentKind.program` through.
     "kinds.program",
+    // ADR-0065: speaks the pairing messages (`pairing.v1`, docs/specs/pairing.md). Nothing sends them yet.
+    "pairing.v1",
 ];
 
 /// `<hub dir>/listen`: the address the running hub bound, written at every start.

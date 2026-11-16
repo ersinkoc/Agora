@@ -48,6 +48,8 @@ pub const CAPABILITIES: &[&str] = &[
     "device.trust",
     // ADR-0069: `AgentKind.program` and `NodeOnline.binary` are filled.
     "kinds.program",
+    // ADR-0065: speaks the pairing messages (`pairing.v1`, docs/specs/pairing.md). Nothing sends them yet.
+    "pairing.v1",
 ];
 
 /// Events sent per step; the hub acknowledges after each batch.
