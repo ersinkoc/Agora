@@ -447,6 +447,7 @@ pub fn mesh_stdio(path: &Path) -> Result<ExitCode, std::io::Error> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -467,5 +468,81 @@ mod tests {
             MAX_OUTAGE
         ));
         assert!(outage_over(MAX_OUTAGE, MAX_OUTAGE));
+    }
+
+    /// A bridge with no connection to the node, and what it wrote to the client.
+    fn disconnected() -> (Shared, Arc<Mutex<Vec<u8>>>) {
+        struct Capture(Arc<Mutex<Vec<u8>>>);
+        impl Write for Capture {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                lock(&self.0).extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let shared = Shared {
+            link: Mutex::new(Link {
+                stream: None,
+                generation: 0,
+                pending: BTreeMap::new(),
+            }),
+            hello: Mutex::new(Hello::default()),
+            out: Mutex::new(Box::new(Capture(Arc::clone(&seen)))),
+            closed: AtomicBool::new(false),
+        };
+        (shared, seen)
+    }
+
+    fn written(seen: &Arc<Mutex<Vec<u8>>>) -> String {
+        String::from_utf8(lock(seen).clone()).unwrap()
+    }
+
+    /// JSON-RPC 2.0: a notification never gets a reply, not even an error, so while the node is away only a request is answered
+    /// (`mesh.unavailable`).
+    #[test]
+    fn while_disconnected_a_request_is_answered_and_a_notification_is_not() {
+        let (shared, seen) = disconnected();
+        to_node(
+            &shared,
+            br#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":1}}"#,
+        );
+        to_node(
+            &shared,
+            br#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        );
+        assert_eq!(written(&seen), "", "a notification got a reply");
+        to_node(
+            &shared,
+            br#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{}}"#,
+        );
+        let out = written(&seen);
+        assert_eq!(out.lines().count(), 1, "{out}");
+        let reply: serde_json::Value = serde_json::from_str(out.trim_end()).unwrap();
+        assert_eq!(reply["id"], 7);
+        assert!(reply.get("error").is_some(), "{out}");
+        assert!(out.contains("mesh.unavailable"), "{out}");
+    }
+
+    /// A batch: nothing for one made only of notifications, and one error per request (none for its notifications) otherwise.
+    #[test]
+    fn while_disconnected_a_batch_of_notifications_gets_no_reply() {
+        let (shared, seen) = disconnected();
+        to_node(
+            &shared,
+            br#"[{"jsonrpc":"2.0","method":"notifications/cancelled"},{"jsonrpc":"2.0","method":"notifications/cancelled"}]"#,
+        );
+        assert_eq!(written(&seen), "");
+        to_node(
+            &shared,
+            br#"[{"jsonrpc":"2.0","method":"notifications/cancelled"},{"jsonrpc":"2.0","id":3,"method":"tools/list"}]"#,
+        );
+        let out = written(&seen);
+        let reply: serde_json::Value = serde_json::from_str(out.trim_end()).unwrap();
+        let items = reply.as_array().unwrap();
+        assert_eq!(items.len(), 1, "{out}");
+        assert_eq!(items[0]["id"], 3);
     }
 }

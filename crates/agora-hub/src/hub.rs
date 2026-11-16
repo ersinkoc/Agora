@@ -1250,6 +1250,89 @@ mod tests {
         assert!(hub.subscribe(Some(99)).unwrap().snapshot.is_some());
     }
 
+    /// Reviewer notes on #629: a second open over the same store keeps the replay barrier (it is recomputed from the stored history,
+    /// never remembered) and adds nothing; a client that resumes from beyond the log's end gets a snapshot, with or without the barrier.
+    #[test]
+    fn a_second_open_over_a_history_with_a_barrier_keeps_it_and_a_resume_beyond_the_end_is_healed()
+    {
+        use agora_protocol::v1::AgentForgotten;
+        let path =
+            std::env::temp_dir().join(format!("agora-hub-barrier-{}.db", std::process::id()));
+        for ext in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{ext}", path.display()));
+        }
+        let store = SqliteStore::open(&path).unwrap();
+        let put = |producer: &str, seq: u64, body: Body| {
+            let payload = Event {
+                producer_id: producer.into(),
+                seq,
+                at_ms: seq,
+                body: Some(body),
+            }
+            .encode_to_vec();
+            store.append(producer, seq, seq, &payload).unwrap();
+        };
+        put(
+            "n1",
+            1,
+            Body::NodeOnline(NodeOnline {
+                node_id: "n1".into(),
+                ..Default::default()
+            }),
+        );
+        put(
+            "n2",
+            1,
+            Body::NodeOnline(NodeOnline {
+                node_id: "n2".into(),
+                ..Default::default()
+            }),
+        );
+        // A record stored before sessions refused cross-node facts: n2 forgetting n1's agent. Position 3 is the barrier.
+        put(
+            "n2",
+            2,
+            Body::AgentForgotten(AgentForgotten {
+                agent_id: "n1/a".into(),
+            }),
+        );
+        let first = Hub::open_at(store, 100).unwrap();
+        let (first_view, first_end) = first.view();
+        assert_eq!(first_view.distrusted_until, 3);
+        assert!(first_end > 3, "opening recorded the machines offline");
+        drop(first);
+
+        let second = Hub::open_at(SqliteStore::open(&path).unwrap(), 200).unwrap();
+        let (view, end) = second.view();
+        assert_eq!(end, first_end, "opening again adds nothing");
+        // A rebuild that meets a stored forged record puts the barrier at the end of the log it read (here the first open's end, which
+        // includes the hub's own records of that open), so it only moves forward and never lets an older position replay.
+        assert_eq!(
+            view.distrusted_until, first_end,
+            "recomputed from the history"
+        );
+        // At or before the barrier: a snapshot, however near the end.
+        for after in [0, 1, 3, 4, end] {
+            assert!(
+                second.subscribe(Some(after)).unwrap().snapshot.is_some(),
+                "after {after}"
+            );
+        }
+        // Beyond the end: a snapshot, and the barrier does not turn that into a replay.
+        for after in [end + 1, end + 1000, u64::MAX] {
+            let sub = second.subscribe(Some(after)).unwrap();
+            assert!(
+                sub.snapshot.is_some() && sub.backlog.is_empty(),
+                "after {after}"
+            );
+            assert_eq!(sub.snapshot.map(|(_, pos)| pos), Some(end));
+        }
+        drop(second);
+        for ext in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{ext}", path.display()));
+        }
+    }
+
     #[test]
     fn a_slow_subscriber_is_dropped_and_does_not_stall_ingestion() {
         let (hub, sup) = (hub(), support());
