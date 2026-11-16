@@ -386,7 +386,7 @@ project's board; see `docs/specs/mesh-tools.md#shared-board-adr-0039`. New error
 
 `BoardJoin` (command 66, hub → node only; a client's is refused) and `BoardJoinResult` (`CommandOk` field 20, with `BoardJoinLease` and `BoardJoinTask`), ADR-0039 amendment B: when a project becomes shared, the hub asks each node with a checkout for its unfinished local work and puts it on the board. Sent only to nodes that offer the capability `board.join`.
 
-`GrantCreate` (63), `GrantList` (64), `GrantRevoke` (65) and `GrantListResult` (`CommandOk` field 17), ADR-0041: user-signed grants for the commands a node's policy lists in `signed_commands`; see `docs/security/threat-model.md`. New error code `approval.grant_required` (`command`). The node answers them itself; the local control socket refuses them.
+`GrantCreate` (63), `GrantList` (64), `GrantRevoke` (65) and `GrantListResult` (`CommandOk` field 17), ADR-0041: user-signed grants for the commands a node's policy lists in `signed_commands`; see `docs/security/threat-model.md`. New error code `approval.grant_required` (`command`). The node answers them itself; the local control socket refuses them. A grant covers commands only while the device that signed it is still trusted on the node, in the same term and within its limits: when that device is removed or revoked, its endorsement runs out, or its limits no longer allow the grant's scope, the grant ends and `GrantList` no longer shows it; trusting the device again does not bring it back.
 
 ### Agents that start agents (ADR-0057)
 

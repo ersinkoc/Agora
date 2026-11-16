@@ -27,6 +27,10 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
   minimized or not in front (the count only, in your language). Not on macOS yet: there it stays silent for now.
 
 ### Security
+- A permission to act on a machine for some hours (a grant) now ends as soon as the device that gave it is no longer trusted
+  there: removed with `agora node untrust`, revoked from another device, run out, or limited to other projects. It used to keep
+  letting commands through until it expired (up to 8 hours) unless it was revoked by hand (audit finding F270). Trusting the device
+  again does not bring the old grant back.
 - macOS: a confined agent is not started when a file it may write also has another name elsewhere (a hard link made outside
   confinement), or when a save copy next to it (`state.json.tmp`) is such a link, since writing it would change that other file too; the message says to remove the link or put a copy in its place
   (#571). Such links inside a folder it may write are not looked for at each start.
