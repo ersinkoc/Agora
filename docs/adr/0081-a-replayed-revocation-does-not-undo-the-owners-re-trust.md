@@ -1,9 +1,9 @@
 # 0081. A replayed revocation does not undo the owner's re-trust
-Status: Proposed
+Status: Accepted
 Date: 2026-11-16
+Accepted: 2026-11-16 (the maintainer's explicit message in the audit chat: "0081'i onaylıyorum, kabul vs"). The open questions' proposed answers stand.
 Origin: evidence audit finding F220 (device trust). A proof run against `main` printed `PROBLEM CONFIRMED`: a revocation dated ahead of the
-machine's clock, sent again by the hub after the owner trusted the device again on the machine, removed the device again. Not
-accepted until the maintainer reads it and says so; nothing here may be built before that.
+machine's clock, sent again by the hub after the owner trusted the device again on the machine, removed the device again.
 
 ## Context
 - ADR-0061 and "Devices" in `docs/specs/protocol.md` promise: "A revocation sent again later never removes trust given after it (an

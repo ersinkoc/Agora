@@ -97,4 +97,4 @@ Date: YYYY-MM-DD
 | 0077 | The Windows binary is code-signed | Accepted |
 | 0078 | A confined agent gets a git configuration the node wrote | Accepted |
 | 0080 | The file browser does not show secret files | Accepted |
-| 0081 | A replayed revocation does not undo the owner's re-trust | Proposed |
+| 0081 | A replayed revocation does not undo the owner's re-trust | Accepted |
