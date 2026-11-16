@@ -695,7 +695,15 @@ or when a device it already trusts signs an **endorsement** of it. The hub only 
   before). A node applies one signed by a device it trusts at once: the device is no longer trusted there if its trust there began
   (`since`) at or before `issued_at_ms`, and neither are the devices it endorsed; endorsements of it, and endorsements it signed, at or before `issued_at_ms`
   are refused from then on. A revocation sent again later never removes trust given after it (an endorsement signed later, or the
-  owner trusting it again on the machine with `agora node trust ID KEY`).
+  owner trusting it again on the machine with `agora node trust ID KEY`). Because a revocation may be dated up to 5 minutes ahead of
+  the node's clock, the node keeps each verified revocation dated ahead of its clock when it arrives, identified by the fields its
+  revoker signed (`device_id`, `revoker_device_id`, `issued_at_ms`; never by the signature), in `<data>/device-revocations-ahead`
+  (node-local, at most 256 lines, the earliest-dated dropped first; a line nobody overrode is dropped once the clock passes its date).
+  The owner trusting the device on the machine overrides every such revocation of it dated at or after that trust began (ADR-0081):
+  sent again, it removes nothing (the node logs `overridden`) for as long as that trust lasts, and the command says so. A revocation
+  the node had not received before that, or one signed afterwards (another date or another revoker), applies by the date rule above.
+  Trusting a device again keeps its revocation remembered, so endorsements of it and by it signed at or before that revocation stay
+  refused.
 - **Fingerprint.** What people compare: the first 12 bytes (96 bits) of the SHA-256 of the 65-byte key, lowercase hex in groups of 4
   hex digits joined by `-` (`f947-3cb5-e304-81be-ecf2-64cd`). Every client shows it wherever a device is named, computed by the client
   from the key itself, never taken from the hub.

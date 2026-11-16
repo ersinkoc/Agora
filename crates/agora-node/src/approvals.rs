@@ -463,8 +463,13 @@ impl P256Verifier {
 }
 
 /// Adds (or replaces) a device in the trusted-devices file. This is the node owner's act on the node itself: the
-/// hub has no way to call it, which is what keeps approvals from being widened remotely (ADR-0020).
-pub fn trust_device(path: &std::path::Path, device_id: &str, key_hex: &str) -> Result<(), String> {
+/// hub has no way to call it, which is what keeps approvals from being widened remotely (ADR-0020). Returns the devices whose
+/// revocations of it this overrides (ADR-0081, [`crate::device_trust::confirm`]).
+pub fn trust_device(
+    path: &std::path::Path,
+    device_id: &str,
+    key_hex: &str,
+) -> Result<Vec<String>, String> {
     let key = crate::device_trust::from_hex(key_hex).ok_or("the key is not hexadecimal")?;
     crate::device_trust::confirm(path, device_id, &key)
 }
