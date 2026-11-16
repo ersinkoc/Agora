@@ -1459,6 +1459,30 @@ pub fn open_append_private(path: &std::path::Path) -> io::Result<std::fs::File> 
     }
 }
 
+/// A folder only this user (and, on Windows, SYSTEM) can use, for a file the node writes and a confined agent may read but must not
+/// change (ADR-0078's git configuration). Made if missing; then, as what it is, not a link and not someone else's: Unix mode `0700`
+/// (`chmod` fails on a folder of another user), Windows a protected DACL with nothing inherited (so the temp folder's ACL, which on a
+/// machine with other sandboxes can give them Modify, does not reach it) that files made inside it inherit. An error means the folder
+/// cannot be trusted and the caller writes nothing.
+pub fn create_private_folder(path: &std::path::Path) -> io::Result<()> {
+    std::fs::create_dir_all(path)?;
+    if !std::fs::symlink_metadata(path)?.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "not a plain folder",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+    }
+    #[cfg(windows)]
+    {
+        windows::set_owner_only(path, true)
+    }
+}
+
 /// Refusals: `InvalidInput` for a link, a second name or not a plain file or folder; `PermissionDenied` for one another user owns.
 ///
 /// Opens (creating it) a lock file a process takes with `File::lock`, with every check of [`open_append_private`]: its folder opened as
@@ -2316,5 +2340,36 @@ mod secret_tests {
         assert_eq!(read(b"\x04").unwrap_err().kind(), ErrorKind::UnexpectedEof);
         assert_eq!(read(b"").unwrap_err().kind(), ErrorKind::UnexpectedEof);
         assert_eq!(read(b"\xff\r").unwrap_err().kind(), ErrorKind::InvalidData);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod private_folder_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::create_private_folder;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn a_private_folder_is_mode_0700_and_a_link_is_refused() {
+        let dir = std::env::temp_dir().join(format!("agora-pf-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let f = dir.join("a/b");
+        create_private_folder(&f).unwrap();
+        assert_eq!(
+            std::fs::metadata(&f).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        // Again is fine, and a loose folder is tightened.
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o777)).unwrap();
+        create_private_folder(&f).unwrap();
+        assert_eq!(
+            std::fs::metadata(&f).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        // A link (to a folder another program could change) is not followed.
+        let link = dir.join("link");
+        std::os::unix::fs::symlink(&f, &link).unwrap();
+        assert!(create_private_folder(&link).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -133,6 +133,22 @@ pub fn identity_missing() -> bool {
         .any(|k| read_key(k).is_none_or(|v| v.trim().is_empty()))
 }
 
+/// The folder of the files where the system's temp folder is out of the agent's reach (macOS, Windows): one of the node's own inside
+/// it, made private by the platform ([`agora_platform::create_private_folder`]) before anything is written, because the temp folder's
+/// own permissions can admit other programs (on Windows, other sandboxes) that could then rewrite what the agent trusts.
+fn private_folder() -> PathBuf {
+    std::env::temp_dir().join("agora-git-config")
+}
+
+/// A short, stable (across runs and versions, unlike `DefaultHasher`) number for a path: FNV-1a over its bytes, folded to 32 bits.
+fn place_hash(path: &Path) -> u32 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in path.to_string_lossy().bytes() {
+        h = (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    (h ^ (h >> 32)) as u32 // truncation intended: the low 32 bits of the folded hash
+}
+
 /// Where the file of the agent that works in `worktree` is written. Always outside what the agent may write: where the system's temp
 /// folder is out of its reach (`PRIVATE_TEMP`, macOS and Windows) it is there, next to, not inside, the agent's private temp folder;
 /// elsewhere (Linux, where `/tmp` is writable to the agent) beside the agent's worktree in the node's worktrees folder, of which the
@@ -141,9 +157,10 @@ pub fn path_for(worktree: &Path) -> PathBuf {
     let name = worktree
         .file_name()
         .map_or_else(|| "agent".into(), |n| n.to_string_lossy().into_owned());
-    let file = format!("agora-gitconfig-{name}");
+    // The place is part of the name: in the shared temp folder two worktrees called `a` of different projects must not share a file.
+    let file = format!("agora-gitconfig-{name}-{:08x}", place_hash(worktree));
     if agora_platform::PRIVATE_TEMP {
-        return std::env::temp_dir().join(file);
+        return private_folder().join(file);
     }
     worktree
         .parent()
@@ -163,11 +180,19 @@ fn temp_name(path: &Path) -> PathBuf {
 /// renamed over the old, so a link left at the old name is replaced and never followed. Returns the path, or `None` when it could not
 /// be written (git then behaves as it did before: an agent that cannot read a global configuration).
 pub fn write_for(worktree: &Path) -> Option<PathBuf> {
+    write_for_result(worktree).ok()
+}
+
+/// [`write_for`] with the reason it failed.
+pub fn write_for_result(worktree: &Path) -> std::io::Result<PathBuf> {
     write_values(worktree, &read_allowed())
 }
 
-fn write_values(worktree: &Path, values: &[(String, String)]) -> Option<PathBuf> {
+fn write_values(worktree: &Path, values: &[(String, String)]) -> std::io::Result<PathBuf> {
     let path = path_for(worktree);
+    if agora_platform::PRIVATE_TEMP {
+        agora_platform::create_private_folder(&private_folder())?;
+    }
     let tmp = temp_name(&path);
     let _ = std::fs::remove_file(&tmp);
     let text = render(values);
@@ -176,15 +201,24 @@ fn write_values(worktree: &Path, values: &[(String, String)]) -> Option<PathBuf>
         let mut f = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
-            .open(&tmp)
-            .ok()?;
-        f.write_all(text.as_bytes()).ok()?;
+            .open(&tmp)?;
+        f.write_all(text.as_bytes())?;
     }
-    if std::fs::rename(&tmp, &path).is_err() {
-        let _ = std::fs::remove_file(&tmp);
-        return None;
+    // Another program (a virus scanner, an indexer) may hold the old file for a moment, which makes a rename over it fail on some
+    // systems: try again briefly, then replace it by removing it first (a name that is then a link or a folder is not followed).
+    let mut last = None;
+    for attempt in 0..5 {
+        match std::fs::rename(&tmp, &path) {
+            Ok(()) => return Ok(path),
+            Err(e) => last = Some(e),
+        }
+        if attempt >= 2 {
+            let _ = std::fs::remove_file(&path);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
     }
-    Some(path)
+    let _ = std::fs::remove_file(&tmp);
+    Err(last.unwrap_or_else(|| std::io::Error::other("rename failed")))
 }
 
 /// The environment that points a confined agent's git at its file (decisions 1 and 3). The node's own environment may carry git

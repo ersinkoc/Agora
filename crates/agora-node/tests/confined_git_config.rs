@@ -105,7 +105,9 @@ fn git_with_the_agents_environment_commits_as_the_person_and_sees_no_dangerous_k
     let (dir, repo) = repo("env");
     let wt = dir.join("worktrees/a");
     std::fs::create_dir_all(&wt).unwrap();
-    let file = gitconfig::write_for(&wt).unwrap();
+    // The reason is in the message: this is the one place a CI machine of another system shows why a write failed.
+    let file = gitconfig::write_for_result(&wt)
+        .unwrap_or_else(|e| panic!("writing {}: {e}", gitconfig::path_for(&wt).display()));
     let text = std::fs::read_to_string(&file).unwrap();
     for bad in [
         "credential",
