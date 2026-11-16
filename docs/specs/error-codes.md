@@ -22,7 +22,7 @@ or a local response timeout has a localized retry message.
 | `node.online` | `node_id` | ADR-0073: the machine is connected, so it cannot be forgotten; only an offline machine can |
 | `node.timeout` | `node_id` | The node did not answer a routed command in time (ADR-0029) |
 | `node.policy_denied` | `node_id`, `rule` | Node local policy rejected the action |
-| `node.resource_limit` | `resource`, `limit` | Limit reached (agents, memory, disk) |
+| `node.resource_limit` | `resource`, `limit` | Limit reached (agents, memory, disk, requests waiting for a node) |
 | `project.not_found` | `project_id` | |
 | `worktree.dirty` | `path` | Uncommitted changes block the operation |
 | `worktree.exists` | `branch` | |

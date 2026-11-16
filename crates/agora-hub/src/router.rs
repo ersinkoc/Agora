@@ -39,6 +39,11 @@ pub struct RelayFrame {
 /// Frames a client may have queued before its relay is closed (it resubscribes and gets a fresh snapshot).
 const RELAY_QUEUE: usize = 512;
 
+/// The most commands queued for one node connection and not yet written to it (architecture review R5). The connection's loop
+/// writes them as they come, so the queue only grows while a write to the node waits (it gives up after 25 s); this bounds what
+/// every client together can pile up behind such a node. A command refused for it was never sent: retrying it is safe.
+pub const NODE_QUEUE_MAX: usize = 1024;
+
 struct Link {
     conn: u64,
     capabilities: Vec<String>,
@@ -50,8 +55,8 @@ struct Link {
 /// that ended or was replaced stops counting at once, whatever it still held.
 #[derive(Debug, Default)]
 pub struct LinkLoad {
-    /// Commands queued for the node and not yet written to it (the queue is unbounded: a node that does not read its connection
-    /// grows it).
+    /// Commands queued for the node and not yet written to it. A node that does not read its connection grows it, up to
+    /// `NODE_QUEUE_MAX`: the next command is refused (`node.resource_limit`) before it is queued.
     pub queued: AtomicUsize,
     /// Commands written to the node and not answered yet.
     pub unanswered: AtomicUsize,
@@ -701,8 +706,20 @@ impl Router {
                 Error::new(ErrorCode::ProtocolCapabilityMissing).with("capability", "board.join")
             );
         }
-        // Counted before it is queued, so the connection's loop never takes one off before it was counted.
-        link.load.queued.fetch_add(1, Ordering::Relaxed);
+        // Counted before it is queued, so the connection's loop never takes one off before it was counted; refused, without
+        // queueing it, when the node already has NODE_QUEUE_MAX waiting (R5).
+        if link
+            .load
+            .queued
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |q| {
+                (q < NODE_QUEUE_MAX).then_some(q + 1)
+            })
+            .is_err()
+        {
+            return Err(Error::new(ErrorCode::NodeResourceLimit)
+                .with("resource", "requests")
+                .with("limit", NODE_QUEUE_MAX as i64));
+        }
         if link
             .tx
             .send(ToNode::Command {
@@ -991,6 +1008,26 @@ mod tests {
         drop(rx_a);
         assert!(r.send("a", req("late")).is_err());
         assert_eq!(r.node_load(), (1, 0));
+    }
+
+    #[test]
+    fn a_node_that_does_not_take_its_commands_refuses_more_than_the_queue_holds() {
+        // R5: a node whose connection is not written to (its loop waits on a write) stops piling up commands at NODE_QUEUE_MAX;
+        // the refused one was never queued, so retrying is safe, and taking one makes room again.
+        let r = Router::new();
+        let (a, mut rx) = r.register("a");
+        let _keep: Vec<_> = (0..NODE_QUEUE_MAX)
+            .map(|i| r.send("a", req(&format!("q{i}"))).unwrap())
+            .collect();
+        let refused = r.send("a", req("one-too-many")).unwrap_err();
+        assert_eq!(refused.code, ErrorCode::NodeResourceLimit);
+        assert_eq!(r.node_load(), (NODE_QUEUE_MAX, 0));
+        assert!(matches!(rx.try_recv(), Ok(ToNode::Command { .. })));
+        a.load().queued.fetch_sub(1, Ordering::Relaxed);
+        assert!(r.send("a", req("again")).is_ok());
+        // Another node is not held up by this one.
+        let (_b, _rx_b) = r.register("b");
+        assert!(r.send("b", req("b")).is_ok());
     }
 
     #[test]

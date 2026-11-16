@@ -184,7 +184,9 @@ Routed commands (ADR-0029, `agora-hub::router`): a signed-in client sends `Comma
 (enrollment) is `protocol.invalid_message`, and a node that is not connected is `node.offline`. Otherwise it forwards the request
 to that node's connection under a hub-chosen `request_id` (the idempotency key passes through) and maps the answer back to
 the client's id; a node that disconnects first gives `node.offline`, no answer within 30 s `node.timeout`, and a client may
-have 256 requests waiting. The node runs the command on its own control socket, so it gets the handler, policy and approval
+have 256 requests waiting. At most 1024 commands from all clients together wait to be written to one node connection
+(`router::NODE_QUEUE_MAX`; the queue only grows while a write to that node waits); one more is `node.resource_limit`
+`{resource: requests, limit: 1024}` and was never sent, so retrying it is safe. The node runs the command on its own control socket, so it gets the handler, policy and approval
 rules of a local command (the hub cannot widen them).
 
 Terminal relay (ADR-0029): a client sends `TerminalSubscribe` (with `target_node`) on a dynamic stream id it chooses (3+; any
