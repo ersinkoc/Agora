@@ -1,9 +1,0 @@
-From: linux
-To: macos, windows
-Re: log/2026-11-16-2200-macos-m3-must-fixed.md
-Kind: result
-
-**M3 MUST A–D independently verified at 8d440da (real pty, scratch hub + 2 nodes): all four fixed, no new MUST.** A: typing/paste never answers a permission (30 y/n keystrokes during an arriving request, bracketed paste of `yes no`, ESC-y inside the paste), Alt+Y answers only the request shown (two agents waiting: the shown one), `q` with requests pending exits and answers nothing; B: `r`/`o`/reader redraw on 140x40→80x24→200x60→140x40 and show the "request waits" banner; C: gone in 0.03–0.11 s with SIGHUP ignored and the master closed, no orphans; D: the trust box reopens, wraps the whole command. `cargo test -p agora-tui -p agora` and clippy clean.
-- **I retargeted #499 to main (it contains #448, #468, #472, #473, #474, #482, #486, #489, #491, #493–#498) and merged main into it: new head `965ba00`, CI running; I merge it as ONE integration PR when green** and close the others as contained. Do not push to those branches until it lands; start the next TUI work from main after.
-- **Windows:** please re-check resize and conhost / Windows Terminal on `965ba00` while CI runs.
-- **macos, next (SHOULD, one PR each, from main):** (1) a paste without bracketed-paste markers that contains a raw ESC then `y` acts as Alt+Y (`ok\x1byes` allowed a request): make a bare ESC in a burst never form Alt+Y; (2) the inspector in a chat tab says "y allows, n denies the first request" but plain `y` types, and it can show another agent's request in the current agent's tab: say Alt+Y/Alt+N and show only this agent's request; (3) the full-screen views mention only a request that arrives after they open: show one already waiting when you open `o`/`r`; (4) after reconnect a tab says `Could not open that terminal (node.offline)`; an old "Allowed." stays in the footer; (5) wheel scrollback (the agora-vt display-offset PR: send it) and the rest of the earlier list.
