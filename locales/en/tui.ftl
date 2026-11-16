@@ -213,11 +213,14 @@ tui-files-keys = ↑↓ choose · Enter open · ⌫ up · q or Esc back
 tui-files-file-keys = ↑↓ scroll · Space / b a page · g / G top / end · ⌫, q or Esc back to the folder
 tui-files-binary = A binary file ({ $size }): not shown.
 tui-files-failed = Could not read it ({ $code }).
+tui-files-private = private
+tui-files-secret = Kept private: it may hold a secret
 tui-review-files = { $count ->
         [one] one file changed
        *[other] { $count } files changed
     }
 tui-review-none = Nothing changed yet.
+tui-review-hidden = Changed, content hidden (+{ $added } -{ $removed }). Kept private: it may hold a secret
 tui-review-keys = ↑↓ scroll · Space / b a page · g / G top / end · q or Esc back
 tui-review-nowhere = This agent has no folder or worktree to show changes for.
 tui-review-failed = Could not read its changes ({ $code }).

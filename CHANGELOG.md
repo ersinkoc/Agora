@@ -9,6 +9,10 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
   (waiting up to 2 s between tries, giving up after 15 minutes) and the agent's session stays open. A call made at that moment fails at once with
   `mesh.unavailable` and can be repeated (ADR-0075, the first step; applies to agents started by this version).
 ### Security
+- The file browser and the review screen of the web window and of `agora tui` now show a secret file (`.env`, a private key, ...) with a lock
+  and "Kept private: it may hold a secret" instead of opening it, and a changed secret file in the review as "Changed, content hidden" with its
+  added and removed counts and no content; an older listing that still asks for one gets the same message instead of a raw code (ADR-0080,
+  the window and terminal side; the machine's side came first).
 - A large paste made of nested terminal paste markers no longer freezes the terminal client for seconds (192 KB took about 6 s): the markers
   are now removed in one linear pass with the same result (#655).
 - A machine that stops reading its connection can no longer make the hub pile up commands for it without end: at most 1024 wait for one

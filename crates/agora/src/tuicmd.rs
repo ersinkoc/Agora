@@ -2989,7 +2989,8 @@ fn command(
                         return say.text(key!("tui-review-failed"), &[("code", Arg::Str(code))])
                     }
                 };
-                let lines = agora_tui::review::lines(&diff);
+                let lines =
+                    agora_tui::review::lines_with_secret(&diff.diff, &diff.secret_files, &text);
                 let colors = ask.c.colors;
                 let mut top = 0usize;
                 let mut view = ViewWait::new(say, ask);
@@ -3059,6 +3060,11 @@ fn command(
                             Wake::Key(b'k') => at = at.saturating_sub(1),
                             Wake::Key(b'\r' | b'\n') => {
                                 let Some(e) = entries.get(at) else { continue };
+                                // A secret file is not asked for (ADR-0080): the reason is said instead.
+                                if !files::openable(e) {
+                                    notice = say.text(key!("tui-files-secret"), &[]);
+                                    continue;
+                                }
                                 let target = files::child(&path, &e.name);
                                 if e.is_dir {
                                     path = target;
@@ -3067,10 +3073,7 @@ fn command(
                                 let content = match session.files_read(&node, &place, &target) {
                                     Ok(data) => files::content(&data),
                                     Err(code) => {
-                                        notice = say.text(
-                                            key!("tui-files-failed"),
-                                            &[("code", Arg::Str(code))],
-                                        );
+                                        notice = files::read_failure(&code, &text);
                                         continue;
                                     }
                                 };

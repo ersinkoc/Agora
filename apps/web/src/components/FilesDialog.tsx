@@ -2,6 +2,7 @@ import * as Dialog from '@radix-ui/react-dialog';
 import { useCallback, useRef } from 'react';
 import { t } from '../i18n';
 import type { AgentTileModel } from '../model';
+import type { DiffSource } from '../net/diff';
 import type { WorkspaceFiles } from '../net/files';
 import { FilesView } from './FilesView';
 import { Icon } from './Icon';
@@ -11,12 +12,12 @@ import { Icon } from './Icon';
 export function FilesDialog({ agent, files, load, onClose }: {
   agent: AgentTileModel;
   files: WorkspaceFiles;
-  load?: (a: AgentTileModel, path?: string) => Promise<string>;
+  load?: (a: AgentTileModel, path?: string) => Promise<DiffSource>;
   onClose: () => void;
 }) {
   const latest = useRef(agent);
   latest.current = agent;
-  const loadFor = useCallback((path?: string) => (load ? load(latest.current, path) : Promise.resolve('')), [load, agent.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  const loadFor = useCallback((path?: string) => (load ? load(latest.current, path) : Promise.resolve<DiffSource>('')), [load, agent.id]); // eslint-disable-line react-hooks/exhaustive-deps
   return (
     <Dialog.Root open onOpenChange={(o) => { if (!o) onClose(); }}>
       <Dialog.Portal>

@@ -4,6 +4,7 @@ import { demoAgents, demoApprovals, demoList, demoMachines, demoProjects } from 
 import { demoDiff, demoFiles } from './demoWorkspace';
 import { chooseLanguage, getLanguage, subscribeLanguage, t } from './i18n';
 import { nextNeedingMe, type AgentTileModel, type ResumeAction } from './model';
+import type { DiffSource } from './net/diff';
 import { connectLive, type CommandBody, type Live, type LinkState } from './net/live';
 import { GrantDialog } from './components/GrantDialog';
 import { grantFor, signGrant, type GrantAsk } from './net/grant';
@@ -352,10 +353,12 @@ export function App() {
     return s;
   }, [api, agents]);
 
-  const loadDiff = useCallback(async (a: AgentTileModel, path = ''): Promise<string> => {
+  const loadDiff = useCallback(async (a: AgentTileModel, path = ''): Promise<DiffSource> => {
     if (!api || !a.workspaceRef) return '';
     const ok = await api.command(a.workspaceRef.node, a.workspaceRef.directory ? { workspaceQuery: { workspaceId: a.workspaceRef.id, operation: 'diff', path } } : { gitDiff: { worktreeId: a.workspaceRef.id, path } });
-    return ok.gitDiff?.diff ?? '';
+    const diff = ok.gitDiff?.diff ?? '';
+    const secret = (ok.gitDiff?.secretFiles ?? []).map((c) => ({ path: c.path ?? '', added: Number(c.added ?? 0), removed: Number(c.removed ?? 0) }));
+    return secret.length > 0 ? { diff, secretFiles: secret } : diff;
   }, [api]);
 
   // File access per workspace, kept stable so an open file browser does not reload when the fleet updates.
@@ -370,7 +373,7 @@ export function App() {
       f = {
         list: async (path) => {
           const ok = await api.command(w.node, w.directory ? { workspaceQuery: { workspaceId: w.id, operation: 'list', path } } : { filesList: { worktreeId: w.id, path } });
-          return (ok.filesList?.entries ?? []).map((e) => ({ name: e.name ?? '', isDir: !!e.isDir, size: Number(e.sizeBytes ?? 0) }));
+          return (ok.filesList?.entries ?? []).map((e) => ({ name: e.name ?? '', isDir: !!e.isDir, size: Number(e.sizeBytes ?? 0), ...(e.secret ? { secret: true } : {}) }));
         },
         read: async (path) => (await api.command(w.node, w.directory ? { workspaceQuery: { workspaceId: w.id, operation: 'read', path } } : { filesRead: { worktreeId: w.id, path } })).filesRead?.data ?? new Uint8Array(),
       };
