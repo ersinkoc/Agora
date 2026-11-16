@@ -61,6 +61,9 @@ jobs:
       #     </artifact-configuration>
       # Without them the release goes out unsigned, as before. With them, a signature that is missing, invalid or not timestamped
       # fails the release. SignPath Foundation asks a person to approve every release's signing request: the job waits up to an hour.
+      # Once set up, a failed signing holds back the whole release (publish needs every build). To ship a tag unsigned anyway, delete
+      # one of the four settings (for example SIGNPATH_SIGNING_POLICY_SLUG) and re-run the failed job. A test-signing policy fails the
+      # check on purpose: its root is not trusted on the runner, so Windows would not trust that signature either.
       - name: Signing set up
         id: signing
         if: runner.os == 'Windows' && startsWith(github.ref, 'refs/tags/v')
