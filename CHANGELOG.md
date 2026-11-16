@@ -4,6 +4,10 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+_Nothing yet._
+
+## 0.3.15
+
 ### Agents
 - The start window and the terminal can now start an agent with a model and an effort (ADR-0066): the window lists what the machine says each
   agent takes (a list for the effort, a text box for a model the tool checks itself), starts on "the agent's own default", offers nothing the
