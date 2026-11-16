@@ -130,6 +130,7 @@ cli-password-on = A screen password is set: sign-ins from other machines need it
 cli-password-off = No screen password is set: a sign-in code alone is enough.
 cli-trusted = Device { $id } can now answer approvals on this node.
 cli-trust-failed = Could not trust that device: { $reason }
+cli-trust-revocation-overridden = Device { $id } was revoked from { $revoker } a moment ago. It stays trusted here even when that revocation is sent again.
 cli-devices-offer = The hub lists { $count ->
         [one] a device
        *[other] { $count } devices
