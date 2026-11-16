@@ -9,6 +9,14 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
   shown as empty boxes in the window and the desktop app: if a Nerd Font is installed on the machine that shows the window, the icons come
   from it. Letters keep the theme's own font, and a machine without a Nerd Font looks exactly as before.
 
+### Security
+- A device you trust again on the machine (`agora node trust`, or yes at `agora node enroll` / `--from-hub`) is no longer removed
+  again when the hub sends an earlier revocation of it once more. This happened when the browser that revoked it had a clock running
+  a few minutes fast (audit finding F220). The command now says when your yes overrides such a revocation; a revocation signed after
+  your yes, or by another device, still applies (ADR-0081).
+- What a device signed before it was revoked stays refused after you trust it again on the machine. Before, trusting it again let
+  an endorsement it had signed earlier, kept by the hub, add another device.
+
 ## 0.3.15
 
 ### Agents

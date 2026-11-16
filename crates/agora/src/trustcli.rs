@@ -52,8 +52,9 @@ pub fn node_trust(say: &Say, o: &Opts) -> ExitCode {
         .map_err(|e| e.to_string())
         .and_then(|()| agora_node::approvals::trust_device(&file, id, key));
     match result {
-        Ok(()) => {
+        Ok(overridden) => {
             say.out(key!("cli-trusted"), &[("id", id.clone().into())]);
+            say_overridden(say, id, &overridden);
             ExitCode::SUCCESS
         }
         Err(e) => {
@@ -83,6 +84,19 @@ pub fn node_untrust(say: &Say, o: &Opts) -> ExitCode {
             say.err(key!("cli-trust-failed"), &[("reason", e.into())]);
             ExitCode::from(1)
         }
+    }
+}
+
+/// ADR-0081: one line per device whose revocation of `id` this machine had received and the owner's yes just overrode.
+fn say_overridden(say: &Say, id: &str, revokers: &[String]) {
+    for revoker in revokers {
+        say.out(
+            key!("cli-trust-revocation-overridden"),
+            &[
+                ("id", id.to_string().into()),
+                ("revoker", revoker.clone().into()),
+            ],
+        );
     }
 }
 
@@ -307,14 +321,17 @@ pub fn offer(say: &Say, o: &Opts, devices: &[DeviceInfo]) -> ExitCode {
             continue;
         }
         match device_trust::confirm(&file, &d.device_id, &d.public_key) {
-            Ok(()) => say.out(
-                key!("cli-devices-trusted"),
-                &[
-                    ("name", device_trust::shown(&d.name, SHOWN).into()),
-                    ("id", d.device_id.clone().into()),
-                    ("fingerprint", fingerprint(&d.public_key).into()),
-                ],
-            ),
+            Ok(overridden) => {
+                say.out(
+                    key!("cli-devices-trusted"),
+                    &[
+                        ("name", device_trust::shown(&d.name, SHOWN).into()),
+                        ("id", d.device_id.clone().into()),
+                        ("fingerprint", fingerprint(&d.public_key).into()),
+                    ],
+                );
+                say_overridden(say, &d.device_id, &overridden);
+            }
             Err(e) => {
                 say.err(key!("cli-trust-failed"), &[("reason", e.into())]);
                 code = ExitCode::from(1);

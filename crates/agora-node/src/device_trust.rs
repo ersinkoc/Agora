@@ -12,8 +12,11 @@
 //! make nor change one. A revocation signed by a trusted device ([`DeviceTrust::revoke`]) and `agora node untrust` narrow it at once
 //! (with every device the removed one endorsed), and are remembered (`<data>/device-revocations`) so an older endorsement the hub
 //! sends again cannot bring the device back; a revocation removes only trust that began at or before it was signed, so one sent again
-//! later cannot undo a newer decision. Every change happens under a lock file shared by every process (`<file>.lock`) and is written
-//! beside the file and renamed over it. Every endorsement and revocation applied or refused is written to `<data>/device-trust.log`.
+//! later cannot undo a newer decision. A revocation dated ahead of this clock when it arrives is also kept by what its revoker signed
+//! (`<data>/device-revocations-ahead`, ADR-0081), so the owner trusting the device again on the machine overrides it even when the hub
+//! sends it again (its date may be later than that confirmation). Every change happens under a lock file shared by every process
+//! (`<file>.lock`) and is written beside the file and renamed over it. Every endorsement and revocation applied or refused is written to
+//! `<data>/device-trust.log`.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -36,6 +39,9 @@ pub const REVOCATION_KEPT_MS: u64 = 400 * 24 * 60 * 60 * 1000;
 
 /// Remembered revocations, one `<device id> <issued ms>` per line.
 pub const REVOCATIONS_FILE: &str = "device-revocations";
+/// Revocations dated ahead of this machine's clock when they arrived, by what their revoker signed (ADR-0081), one
+/// `<device id> <revoker id> <issued ms>` per line, with ` overridden=<since>` once the owner trusted the device again on the machine.
+pub const REVOCATIONS_AHEAD_FILE: &str = "device-revocations-ahead";
 /// What this machine did with each endorsement and revocation, one line each, for its owner.
 pub const AUDIT_FILE: &str = "device-trust.log";
 
@@ -354,9 +360,15 @@ fn now() -> u64 {
 }
 
 /// The owner on the machine trusts `id` with `key`, with no end, from now (`agora node trust`, and a yes at enrollment or
-/// `--from-hub`). A remembered revocation of it is forgotten: the person at the machine just decided otherwise. It replaces a key
-/// already trusted under `id` (what `agora node trust ID KEY` has always done; the hub-fed paths ask first, see `--replace`).
-pub fn confirm(file: &Path, id: &str, key: &[u8]) -> Result<(), String> {
+/// `--from-hub`). It replaces a key already trusted under `id` (what `agora node trust ID KEY` has always done; the hub-fed paths ask
+/// first, see `--replace`). The revocations of it this machine received dated at or after now are overridden (ADR-0081): sent
+/// again, they leave this trust alone. Returns the devices that signed them (sorted, each once); empty when there were none. A
+/// remembered revocation of it stays remembered: endorsements of it and by it signed at or before that revocation stay refused.
+pub fn confirm(file: &Path, id: &str, key: &[u8]) -> Result<Vec<String>, String> {
+    confirm_at(file, id, key, now())
+}
+
+fn confirm_at(file: &Path, id: &str, key: &[u8], now_ms: u64) -> Result<Vec<String>, String> {
     if !valid_device_id(id) {
         return Err("the device id may contain only letters, digits, '.', '_' and '-'".into());
     }
@@ -376,11 +388,30 @@ pub fn confirm(file: &Path, id: &str, key: &[u8]) -> Result<(), String> {
         key: key.to_vec(),
         expires_ms: None,
         via: None,
-        since: Some(now()),
+        since: Some(now_ms),
         projects: None,
     });
+    // ADR-0081: every revocation of it received dated at or after this trust began would otherwise remove it when sent again.
+    // The marks are written before the device is trusted: if this write fails nothing changed, and if the trust write below fails the
+    // marks name a `since` no trusted line has, so they match nothing.
+    let path = file.with_file_name(REVOCATIONS_AHEAD_FILE);
+    let old = read_ahead(&path);
+    let mut list = old.clone();
+    let mut revokers: Vec<String> = Vec::new();
+    for a in list.iter_mut().filter(|a| a.device == id) {
+        if a.issued_ms >= now_ms {
+            a.overridden = Some(now_ms);
+            revokers.push(a.revoker.clone());
+        }
+    }
+    prune_ahead(&mut list, &entries, now_ms);
+    if list != old {
+        write_ahead(&path, &list).map_err(|e| e.to_string())?;
+    }
     write_entries(file, &entries).map_err(|e| e.to_string())?;
-    forget_revocation(&file.with_file_name(REVOCATIONS_FILE), id).map_err(|e| e.to_string())
+    revokers.sort();
+    revokers.dedup();
+    Ok(revokers)
 }
 
 /// The owner on the machine stops trusting `id` (`agora node untrust`): removed with every device it endorsed, and remembered as
@@ -459,14 +490,79 @@ fn remember_revocation(path: &Path, id: &str, at_ms: u64, now_ms: u64) -> std::i
     write_revocations(path, &list)
 }
 
-fn forget_revocation(path: &Path, id: &str) -> std::io::Result<()> {
-    let mut list = read_revocations(path);
-    let before = list.len();
-    list.retain(|(d, _)| d != id);
-    if list.len() == before {
-        return Ok(());
+/// One line of [`REVOCATIONS_AHEAD_FILE`]: a revocation identified by the fields its revoker signed (never by its signature, which can be
+/// made into another valid one without the key), and the `since` of the owner's confirmation that overrode it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Ahead {
+    device: String,
+    revoker: String,
+    issued_ms: u64,
+    overridden: Option<u64>,
+}
+
+impl Ahead {
+    fn is(&self, r: &DeviceRevocation) -> bool {
+        self.device == r.device_id
+            && self.revoker == r.revoker_device_id
+            && self.issued_ms == r.issued_at_ms
     }
-    write_revocations(path, &list)
+}
+
+/// The lines of [`REVOCATIONS_AHEAD_FILE`]; a missing file is empty, and a line that does not parse is skipped (it then overrides
+/// nothing: a replay of that revocation is judged by its date, as before ADR-0081).
+fn read_ahead(path: &Path) -> Vec<Ahead> {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| {
+            let mut w = l.split_whitespace();
+            let (device, revoker, issued) = (w.next()?, w.next()?, w.next()?);
+            (valid_device_id(device) && valid_device_id(revoker)).then_some(())?;
+            let overridden = match w.next() {
+                None => None,
+                Some(o) => Some(o.strip_prefix("overridden=")?.parse().ok()?),
+            };
+            w.next().is_none().then_some(())?;
+            Some(Ahead {
+                device: device.to_string(),
+                revoker: revoker.to_string(),
+                issued_ms: issued.parse().ok()?,
+                overridden,
+            })
+        })
+        .collect()
+}
+
+fn write_ahead(path: &Path, list: &[Ahead]) -> std::io::Result<()> {
+    let text: String = list
+        .iter()
+        .map(|a| match a.overridden {
+            Some(s) => format!(
+                "{} {} {} overridden={s}\n",
+                a.device, a.revoker, a.issued_ms
+            ),
+            None => format!("{} {} {}\n", a.device, a.revoker, a.issued_ms),
+        })
+        .collect();
+    agora_platform::write_private(path, text.as_bytes())
+}
+
+/// Drops what can no longer matter: a line not overridden once the clock passed its date (a confirmation made from now on begins after
+/// it, so the `since` rule handles it), and an overridden one once its device's trusted line no longer has that `since` (untrusted,
+/// revoked, replaced, or confirmed again; also a stale line left by an older node). Then at most [`MAX_REVOCATIONS`], the earliest-dated
+/// dropped first (fails closed: that revocation sent again may remove the device, as before ADR-0081).
+fn prune_ahead(list: &mut Vec<Ahead>, entries: &[Entry], now_ms: u64) {
+    list.retain(|a| match a.overridden {
+        None => a.issued_ms >= now_ms,
+        Some(s) => entries
+            .iter()
+            .any(|e| e.id == a.device && e.since == Some(s)),
+    });
+    if list.len() > MAX_REVOCATIONS {
+        list.sort_by_key(|a| a.issued_ms);
+        let over = list.len() - MAX_REVOCATIONS;
+        list.drain(..over);
+    }
 }
 
 /// One line of the machine's own record (best effort: a full disk must not stop a revocation). Every value is passed through
@@ -573,6 +669,17 @@ fn verifies(key: &[u8], message: &[u8], signature: &[u8]) -> bool {
     ring::signature::UnparsedPublicKey::new(&ring::signature::ECDSA_P256_SHA256_FIXED, key)
         .verify(message, signature)
         .is_ok()
+}
+
+/// What a verified revocation did here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Revoked {
+    /// The device was trusted from before it was signed, and is not any more.
+    Applied,
+    /// Remembered; nothing trusted here began at or before it.
+    Remembered,
+    /// The owner trusted the device again on the machine after this machine received it (ADR-0081).
+    Overridden,
 }
 
 /// What an endorsement did.
@@ -863,13 +970,14 @@ impl DeviceTrust {
     }
 
     /// Applies a revocation the hub carried. `Ok(true)`: the device was trusted here (from before the revocation was signed) and is not
-    /// any more, nor is any device it endorsed.
+    /// any more, nor is any device it endorsed. `Ok(false)`: remembered, and nothing removed (also when the owner overrode it, ADR-0081).
     pub fn revoke(&self, r: &DeviceRevocation, now_ms: u64) -> Result<bool, Error> {
         let _g = self.lock.lock().unwrap_or_else(|p| p.into_inner());
         let result = self.revoke_locked(r, now_ms);
         let outcome = match &result {
-            Ok(true) => "revoked".to_string(),
-            Ok(false) => "remembered".to_string(),
+            Ok(Revoked::Applied) => "revoked".to_string(),
+            Ok(Revoked::Remembered) => "remembered".to_string(),
+            Ok(Revoked::Overridden) => "overridden".to_string(),
             Err(err) => err.code.as_str().to_string(),
         };
         self.record(
@@ -879,10 +987,10 @@ impl DeviceTrust {
             &r.revoker_device_id,
             &outcome,
         );
-        result
+        result.map(|done| done == Revoked::Applied)
     }
 
-    fn revoke_locked(&self, r: &DeviceRevocation, now_ms: u64) -> Result<bool, Error> {
+    fn revoke_locked(&self, r: &DeviceRevocation, now_ms: u64) -> Result<Revoked, Error> {
         let invalid = |f: &str| Error::new(ErrorCode::ProtocolInvalidMessage).with("field", f);
         if !valid_device_id(&r.device_id) {
             return Err(invalid("device_id"));
@@ -920,14 +1028,38 @@ impl DeviceTrust {
         }
         remember_revocation(&self.revocations(), &r.device_id, r.issued_at_ms, now_ms)
             .map_err(Self::io)?;
+        // ADR-0081: one dated ahead of this clock is kept by what its revoker signed; a confirmation by the owner made after it arrived
+        // can begin before its date, and overrides it. Best effort: a line not written only means that confirmation cannot override it
+        // (fails closed, as before).
+        let path = self.file.with_file_name(REVOCATIONS_AHEAD_FILE);
+        let old = read_ahead(&path);
+        let mut ahead = old.clone();
+        prune_ahead(&mut ahead, &entries, now_ms);
+        let overridden = ahead.iter().any(|a| a.is(r) && a.overridden.is_some());
+        if r.issued_at_ms >= now_ms && !ahead.iter().any(|a| a.is(r)) {
+            ahead.push(Ahead {
+                device: r.device_id.clone(),
+                revoker: r.revoker_device_id.clone(),
+                issued_ms: r.issued_at_ms,
+                overridden: None,
+            });
+            prune_ahead(&mut ahead, &entries, now_ms);
+        }
+        if ahead != old {
+            let _ = write_ahead(&path, &ahead);
+        }
+        if overridden {
+            return Ok(Revoked::Overridden);
+        }
         // Only trust that began at or before the revocation was signed: one the hub sends again later cannot undo a newer decision.
         let applies = entries
             .iter()
             .any(|e| e.id == r.device_id && e.since.unwrap_or(0) <= r.issued_at_ms);
         if applies {
             write_entries(&self.file, &without(&entries, &r.device_id)).map_err(Self::io)?;
+            return Ok(Revoked::Applied);
         }
-        Ok(applies)
+        Ok(Revoked::Remembered)
     }
 
     /// A device endorsed here was used (its signature verified): its trust runs 90 days from now, never past its endorser's own.
@@ -1288,7 +1420,7 @@ mod tests {
                 .code,
             ErrorCode::DeviceUntrusted
         );
-        // Trusting it again on the machine clears what was remembered.
+        // Trusting it again on the machine trusts it again (what was remembered stays: ADR-0081).
         confirm(&file, "web-old", &old.public()).unwrap();
         assert_eq!(t.trusted_ids(now + 9), ["web-old"]);
         let _ = std::fs::remove_dir_all(d);
@@ -1376,6 +1508,168 @@ mod tests {
         assert!(t
             .trusted_ids(crate::grants::now_ms())
             .contains(&"web-new".to_string()));
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    const MIN: u64 = 60 * 1000;
+
+    /// web-old confirmed at `now - 2`, web-two at `now - 1`, web-new endorsed by web-old at `now`.
+    fn three(name: &str) -> (PathBuf, PathBuf, [Key; 3], DeviceTrust, u64) {
+        let d = dir(name);
+        let file = d.join(crate::approvals::TRUSTED_DEVICES_FILE);
+        let keys = [Key::new(), Key::new(), Key::new()];
+        let now = crate::grants::now_ms();
+        confirm_at(&file, "web-old", &keys[0].public(), now - 2).unwrap();
+        confirm_at(&file, "web-two", &keys[1].public(), now - 1).unwrap();
+        let t = DeviceTrust::new("laptop", &file);
+        t.endorse(
+            &keys[0].endorse("web-old", "web-new", &keys[2].public(), &[], now, DAY),
+            now,
+        )
+        .unwrap();
+        (d, file, keys, t, now)
+    }
+
+    #[test]
+    fn a_revocation_dated_ahead_sent_again_does_not_undo_the_owners_re_trust() {
+        // Audit F220, ADR-0081: a revoker whose clock runs 4 minutes fast; the owner trusts the device again on the machine a minute
+        // later (before the revocation's date); the hub sends the revocation again.
+        let (d, file, [old, _, new], t, now) = three("ahead-replay");
+        let r = old.revoke("web-old", "web-new", now + 4 * MIN);
+        assert!(t.revoke(&r, now).unwrap());
+        assert_eq!(
+            confirm_at(&file, "web-new", &new.public(), now + MIN).unwrap(),
+            ["web-old"]
+        );
+        assert!(!t.revoke(&r, now + 2 * MIN).unwrap(), "the replay");
+        assert!(!t.revoke(&r, now + 5 * MIN).unwrap(), "also after its date");
+        // The same decision under another signature (ES256 signatures differ each time, and can be changed without the key).
+        let resigned = old.revoke("web-old", "web-new", now + 4 * MIN);
+        assert_ne!(resigned.signature, r.signature);
+        assert!(!t.revoke(&resigned, now + 5 * MIN).unwrap());
+        assert!(t
+            .trusted_ids(now + 5 * MIN)
+            .contains(&"web-new".to_string()));
+        let log = std::fs::read_to_string(d.join(AUDIT_FILE)).unwrap();
+        assert!(
+            log.contains("revoke web-new by=web-old overridden"),
+            "{log}"
+        );
+        // A restart reads it back from the files.
+        let again = DeviceTrust::new("laptop", &file);
+        assert!(!again.revoke(&r, now + 6 * MIN).unwrap());
+        // A new revocation by the same device, signed after the re-trust, applies.
+        let newer = old.revoke("web-old", "web-new", now + 4 * MIN + 1);
+        assert!(again.revoke(&newer, now + 6 * MIN).unwrap());
+        assert!(!again
+            .trusted_ids(now + 6 * MIN)
+            .contains(&"web-new".to_string()));
+        // Once the device is gone, so is the override.
+        let _ = again.revoke(&old.revoke("web-old", "x", now), now + 6 * MIN);
+        assert!(read_ahead(&d.join(REVOCATIONS_AHEAD_FILE))
+            .iter()
+            .all(|a| a.overridden.is_none()));
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn a_re_trust_overrides_only_the_revocations_the_machine_had_received() {
+        let (d, file, [old, two, new], t, now) = three("ahead-only-seen");
+        let r = old.revoke("web-old", "web-new", now + 4 * MIN);
+        assert!(t.revoke(&r, now).unwrap());
+        confirm_at(&file, "web-new", &new.public(), now + MIN).unwrap();
+        // Another device revokes it at the same instant: another decision.
+        assert!(t
+            .revoke(
+                &two.revoke("web-two", "web-new", now + 4 * MIN),
+                now + 2 * MIN
+            )
+            .unwrap());
+        // The owner trusts it again: both received revocations are overridden.
+        assert_eq!(
+            confirm_at(&file, "web-new", &new.public(), now + 3 * MIN).unwrap(),
+            ["web-old", "web-two"]
+        );
+        // One signed before that re-trust that reaches the machine only after it (it was offline): the owner did not override it.
+        let unseen = old.revoke("web-old", "web-new", now + 3 * MIN + 30_000);
+        assert!(t.revoke(&unseen, now + 3 * MIN + 1).unwrap());
+        // Confirming again recomputes from the new start: what is dated before it is the date rule's, and overrides nothing.
+        assert!(
+            confirm_at(&file, "web-new", &new.public(), now + 4 * MIN + 1)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(!t.revoke(&unseen, now + 4 * MIN + 2).unwrap());
+        assert!(!t.revoke(&r, now + 4 * MIN + 2).unwrap());
+        assert!(read_ahead(&d.join(REVOCATIONS_AHEAD_FILE)).is_empty());
+        assert!(t
+            .trusted_ids(now + 4 * MIN + 2)
+            .contains(&"web-new".to_string()));
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn revocations_dated_ahead_are_bounded_expire_and_old_or_stale_lines_override_nothing() {
+        let (d, file, [old, _, new], t, now) = three("ahead-bounds");
+        let path = d.join(REVOCATIONS_AHEAD_FILE);
+        // Expiry: a line nobody overrode goes once the clock passes its date.
+        assert!(!t
+            .revoke(&old.revoke("web-old", "x", now + 1000), now)
+            .unwrap());
+        assert_eq!(read_ahead(&path).len(), 1);
+        let _ = t.revoke(&old.revoke("web-old", "y", now), now + 2000);
+        assert!(read_ahead(&path).is_empty());
+        // Full: the earliest-dated goes first, and that replay may remove the device again (fails closed).
+        let r = old.revoke("web-old", "web-new", now + 4 * MIN);
+        assert!(t.revoke(&r, now).unwrap());
+        for i in 0..MAX_REVOCATIONS as u64 {
+            let filler = old.revoke("web-old", &format!("gone-{i}"), now + 4 * MIN + 1 + i);
+            assert!(!t.revoke(&filler, now).unwrap());
+        }
+        assert_eq!(read_ahead(&path).len(), MAX_REVOCATIONS);
+        assert!(confirm_at(&file, "web-new", &new.public(), now + MIN)
+            .unwrap()
+            .is_empty());
+        assert!(t.revoke(&r, now + 2 * MIN).unwrap());
+        // Stale (a downgrade and upgrade) and unreadable lines override nothing, and are dropped.
+        confirm_at(&file, "web-new", &new.public(), now + 2 * MIN).unwrap();
+        let at = now + 4 * MIN;
+        std::fs::write(
+            &path,
+            format!(
+                "web-new web-old {at} overridden=1\nweb-new web-old {at} overridden=x\nbad/id web-old {at}\nweb-new web-old {at} overridden={} extra\n",
+                now + 2 * MIN
+            ),
+        )
+        .unwrap();
+        assert!(t.revoke(&r, now + 3 * MIN).unwrap());
+        assert!(read_ahead(&path).iter().all(|a| a.overridden.is_none()));
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("bad/id"));
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn a_device_trusted_again_cannot_land_what_it_signed_before_its_revocation() {
+        // ADR-0081 point 5 (T21): confirming a device used to forget its revocation, so an endorsement it signed before it was revoked,
+        // kept and sent again by the hub, then landed.
+        let (d, file, [old, two, _], t, now) = three("ahead-t21");
+        let third = Key::new();
+        let kept = two.endorse("web-two", "web-third", &third.public(), &[], now, DAY);
+        assert!(t
+            .revoke(&old.revoke("web-old", "web-two", now + 1), now + 1)
+            .unwrap());
+        confirm_at(&file, "web-two", &two.public(), now + 2).unwrap();
+        assert_eq!(
+            t.endorse(&kept, now + 3).unwrap_err().code,
+            ErrorCode::DeviceRevoked
+        );
+        assert!(!t.trusted_ids(now + 3).contains(&"web-third".to_string()));
+        // What it signs after the re-trust lands.
+        let fresh = two.endorse("web-two", "web-third", &third.public(), &[], now + 3, DAY);
+        assert!(matches!(
+            t.endorse(&fresh, now + 3),
+            Ok(Endorsed::Trusted(_))
+        ));
         let _ = std::fs::remove_dir_all(d);
     }
 

@@ -101,3 +101,6 @@ the `since` rule then ignores it; that is the signer's claim as the spec defines
 1. Is (b), as above, the right trade-off against (a)'s simplicity? Proposed: yes; (a) can ignore a real revocation.
 2. Should `confirm` keep the device's line in `device-revocations` (point 5)? Proposed: yes; it is what T21 already says.
 3. Should the CLI say anything (point 8)? Proposed: yes, one line, only when a revocation was overridden.
+
+## Built
+Built in `agora-node::device_trust` (the `device-revocations-ahead` store, the overrides in `confirm` and `revoke`), `agora` (`trustcli`, one CLI line in en and tr), `docs/specs/protocol.md` and T21. `confirm` writes the overridden marks before it trusts the device, so a failed write leaves the old state. The CLI line does not say "a moment ago" (a revocation can be dated up to 5 minutes ahead). F220 is a regression test in `device_trust.rs`.
