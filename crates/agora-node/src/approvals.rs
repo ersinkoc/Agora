@@ -521,13 +521,13 @@ pub struct NodeApprovals {
     late: std::sync::Mutex<Vec<(String, agora_core::AgentId, String)>>,
     /// ADR-0057: live helper grants, kept here beside the approvals that made them so grant listing and revocation (which only
     /// have the approvals) see them too.
-    helper_grants: std::sync::Mutex<Vec<HelperGrant>>,
+    helper_grants: std::sync::Mutex<Vec<LiveHelper>>,
     /// ADR-0061: renews an endorsed device's trust each time its signature is accepted here.
     devices: std::sync::Mutex<Option<std::sync::Arc<crate::device_trust::DeviceTrust>>>,
 }
 
 /// "This agent may start up to `remaining` more helpers of `kind` in `folder`" (ADR-0057), from a signed decision. It lives in memory
-/// and ends when the asking agent exits or is stopped, or when it is revoked.
+/// and ends when the asking agent exits or is stopped, when it is revoked, or when its signer no longer vouches for it (audit F290).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HelperGrant {
     /// The approval id that carried it.
@@ -542,6 +542,16 @@ pub struct HelperGrant {
     pub signer_device_id: String,
 }
 
+/// A live helper grant, with what it takes to check again at each use that its signer still vouches for it (audit F290): the
+/// decision it came with as signed, and the signer's term of trust when it was made.
+#[derive(Clone)]
+struct LiveHelper {
+    grant: HelperGrant,
+    message: Vec<u8>,
+    signature: Vec<u8>,
+    since: Option<u64>,
+}
+
 /// A decision on a request, as [`NodeApprovals::resolve_request`] gives it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Resolution {
@@ -552,10 +562,62 @@ pub struct Resolution {
 }
 
 impl NodeApprovals {
-    /// ADR-0057: records a helper grant (made from a verified decision).
-    pub fn add_helper_grant(&self, g: HelperGrant) {
-        if g.remaining > 0 {
-            self.hg().push(g);
+    /// ADR-0057: records a helper grant made from a verified decision: `message` is what its signer signed
+    /// ([`start_signed_message`]) and `signature` the signature. A signer no longer trusted gives no grant.
+    pub fn add_helper_grant(&self, g: HelperGrant, message: Vec<u8>, signature: Vec<u8>) {
+        if g.remaining == 0 {
+            return;
+        }
+        let Some((_, term)) = self.vouches(&g.signer_device_id, &message, &signature) else {
+            return;
+        };
+        self.hg().push(LiveHelper {
+            grant: g,
+            message,
+            signature,
+            since: term.since,
+        });
+    }
+
+    /// Does a helper grant's signer still vouch for it (audit F290): its decision verifies under the devices trusted now, in the
+    /// term it was made in, before that term ends, and the device may still answer for the agent (ADR-0049)? Renews nothing.
+    fn helper_vouched(&self, h: &LiveHelper, now_ms: u64) -> bool {
+        let g = &h.grant;
+        let Some((_, term)) = self.vouches(&g.signer_device_id, &h.message, &h.signature) else {
+            return false;
+        };
+        let limits = self
+            .limits
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        term.since == h.since
+            && term.until.is_none_or(|u| now_ms < u)
+            && limits.is_none_or(|l| l.allows_agent(&g.signer_device_id, g.agent.as_str()))
+    }
+
+    /// Ends for good every helper grant `which` selects whose signer no longer vouches for it (audit F290). The trusted-devices file
+    /// is read again first when it changed, so a device removed by another process counts at once.
+    fn recheck_helper_grants(&self, which: impl Fn(&HelperGrant) -> bool) {
+        let check: Vec<LiveHelper> = self
+            .hg()
+            .iter()
+            .filter(|h| which(&h.grant))
+            .cloned()
+            .collect();
+        if check.is_empty() {
+            return;
+        }
+        self.reload_trust_if_changed();
+        let now = crate::grants::now_ms();
+        // Checked without holding the grants: the limits may ask the supervisor for an agent's project.
+        let ended: Vec<String> = check
+            .into_iter()
+            .filter(|h| !self.helper_vouched(h, now))
+            .map(|h| h.grant.id)
+            .collect();
+        if !ended.is_empty() {
+            self.hg().retain(|h| !ended.contains(&h.grant.id));
         }
     }
 
@@ -567,39 +629,42 @@ impl NodeApprovals {
         folder: &str,
         worktree: bool,
     ) -> Option<bool> {
-        let mut grants = self.hg();
-        let g = grants.iter_mut().find(|g| {
+        let covers = |g: &HelperGrant| {
             g.agent == *agent
                 && g.kind == kind
                 && g.folder == folder
                 && g.worktree == worktree
                 && g.remaining > 0
-        })?;
+        };
+        self.recheck_helper_grants(covers);
+        let mut grants = self.hg();
+        let g = &mut grants.iter_mut().find(|h| covers(&h.grant))?.grant;
         g.remaining -= 1;
         let nested = g.helpers_may_start;
-        grants.retain(|g| g.remaining > 0);
+        grants.retain(|h| h.grant.remaining > 0);
         Some(nested)
     }
 
-    /// Every live helper grant, as `GrantList` shows them.
+    /// Every live helper grant, as `GrantList` shows them (one whose signer no longer vouches for it has ended).
     pub fn helper_grants(&self) -> Vec<HelperGrant> {
-        self.hg().clone()
+        self.recheck_helper_grants(|_| true);
+        self.hg().iter().map(|h| h.grant.clone()).collect()
     }
 
     /// Ends one helper grant (`GrantRevoke`); `false` if there was none with that id.
     pub fn revoke_helper_grant(&self, id: &str) -> bool {
         let mut grants = self.hg();
         let before = grants.len();
-        grants.retain(|g| g.id != id);
+        grants.retain(|h| h.grant.id != id);
         grants.len() != before
     }
 
     /// The agent exited or was stopped: its grants end with it.
     pub fn end_helper_grants(&self, agent: &agora_core::AgentId) {
-        self.hg().retain(|g| g.agent != *agent);
+        self.hg().retain(|h| h.grant.agent != *agent);
     }
 
-    fn hg(&self) -> std::sync::MutexGuard<'_, Vec<HelperGrant>> {
+    fn hg(&self) -> std::sync::MutexGuard<'_, Vec<LiveHelper>> {
         self.helper_grants.lock().unwrap_or_else(|e| e.into_inner())
     }
 
@@ -1080,13 +1145,13 @@ mod tests {
         assert_eq!(a.pending().count(), 1);
     }
 
-    #[test]
-    fn helper_grants_are_used_up_revoked_and_end_with_their_agent() {
-        let n = NodeApprovals::new("node-1", Box::new(DenyAll));
-        let me = agora_core::AgentId::new("a");
-        let grant = |id: &str| HelperGrant {
+    /// A helper grant of agent `a` for `codex` in `/w`, and the decision it came with signed by `phone`.
+    fn helper_grant(id: &str, secret: &str) -> (HelperGrant, Vec<u8>, Vec<u8>) {
+        let message = start_signed_message("node-1", id, true, 3, false, "{}");
+        let signature = sign(secret, &message);
+        let g = HelperGrant {
             id: id.into(),
-            agent: me.clone(),
+            agent: agora_core::AgentId::new("a"),
             kind: "codex".into(),
             folder: "/w".into(),
             worktree: false,
@@ -1094,7 +1159,19 @@ mod tests {
             helpers_may_start: false,
             signer_device_id: "phone".into(),
         };
-        n.add_helper_grant(grant("g1"));
+        (g, message, signature)
+    }
+
+    fn add(n: &NodeApprovals, id: &str) {
+        let (g, m, s) = helper_grant(id, "s3cret");
+        n.add_helper_grant(g, m, s);
+    }
+
+    #[test]
+    fn helper_grants_are_used_up_revoked_and_end_with_their_agent() {
+        let n = NodeApprovals::new("node-1", Box::new(Fake(vec![("phone", "s3cret")])));
+        let me = agora_core::AgentId::new("a");
+        add(&n, "g1");
         assert_eq!(n.use_helper_grant(&me, "codex", "/other", false), None);
         assert_eq!(n.use_helper_grant(&me, "claude", "/w", false), None);
         assert_eq!(
@@ -1106,11 +1183,85 @@ mod tests {
         assert_eq!(n.use_helper_grant(&me, "codex", "/w", false), Some(false));
         assert_eq!(n.use_helper_grant(&me, "codex", "/w", false), Some(false));
         assert_eq!(n.use_helper_grant(&me, "codex", "/w", false), None);
-        n.add_helper_grant(grant("g2"));
+        add(&n, "g2");
         assert!(n.revoke_helper_grant("g2"));
         assert!(n.helper_grants().is_empty());
-        n.add_helper_grant(grant("g3"));
+        add(&n, "g3");
         n.end_helper_grants(&me);
+        assert!(n.helper_grants().is_empty());
+        // A decision that does not verify (another device's secret) gives no grant.
+        let (g, m, _) = helper_grant("g4", "s3cret");
+        n.add_helper_grant(g, m, b"forged".to_vec());
+        assert!(n.helper_grants().is_empty());
+    }
+
+    /// Trusts these devices, each in its term (signatures as [`sign`] makes them with the device's secret).
+    struct Terms(Vec<(&'static str, &'static str, Term)>);
+
+    impl Verifier for Terms {
+        fn verify(&self, device: &str, message: &[u8], signature: &[u8]) -> bool {
+            self.0
+                .iter()
+                .any(|(d, secret, _)| *d == device && sign(secret, message) == signature)
+        }
+        fn term(&self, device: &str) -> Option<Term> {
+            self.0.iter().find(|(d, _, _)| *d == device).map(|x| x.2)
+        }
+    }
+
+    /// Audit F290: a helper grant starts agents only while the device that signed it still vouches for it.
+    #[test]
+    fn a_helper_grant_ends_when_its_signer_is_no_longer_trusted() {
+        let me = agora_core::AgentId::new("a");
+        let first = Term {
+            since: Some(1),
+            until: None,
+        };
+        let phone = |term| Box::new(Terms(vec![("phone", "s3cret", term)]));
+        let n = NodeApprovals::new("node-1", phone(first));
+        add(&n, "g1");
+        assert_eq!(n.helper_grants().len(), 1);
+        // The device is removed: its grant covers nothing, ends, and does not come back when the device is trusted again.
+        n.set_verifier(Box::new(Terms(vec![])));
+        assert_eq!(n.use_helper_grant(&me, "codex", "/w", false), None);
+        n.set_verifier(phone(first));
+        assert_eq!(n.use_helper_grant(&me, "codex", "/w", false), None);
+        assert!(n.helper_grants().is_empty());
+
+        // Removed and trusted again unseen by this node (a new term): the old grant does not carry over.
+        add(&n, "g2");
+        n.set_verifier(phone(Term {
+            since: Some(2),
+            until: None,
+        }));
+        assert!(n.helper_grants().is_empty(), "a later term");
+
+        // An endorsed device whose trust ran out.
+        n.set_verifier(phone(Term {
+            since: Some(2),
+            until: Some(1),
+        }));
+        add(&n, "g3");
+        assert_eq!(
+            n.use_helper_grant(&me, "codex", "/w", false),
+            None,
+            "ran out"
+        );
+
+        // The device's limits narrowed to another project: the grant ends.
+        n.set_verifier(phone(first));
+        add(&n, "g4");
+        assert_eq!(n.use_helper_grant(&me, "codex", "/w", false), Some(false));
+        let limits = std::sync::Arc::new(crate::limits::DeviceLimits::new(
+            [("phone".to_string(), ["other".to_string()].into())].into(),
+        ));
+        limits.set_project_resolver(Box::new(|_| Some("mine".to_string())));
+        n.set_limits(limits);
+        assert_eq!(
+            n.use_helper_grant(&me, "codex", "/w", false),
+            None,
+            "narrowed"
+        );
         assert!(n.helper_grants().is_empty());
     }
 
