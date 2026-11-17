@@ -136,12 +136,14 @@ pub fn select(
     }
     let mut v4: Vec<Ipv4Addr> = Vec::new();
     let mut v6: Vec<Ipv6Addr> = Vec::new();
-    if listen.is_unspecified() {
+    // `[::ffff:0.0.0.0]` is the IPv4 wildcard: it is told apart from a named address by its canonical form, and never named.
+    let wildcard = listen.to_canonical();
+    if wildcard.is_unspecified() {
         for i in interfaces
             .iter()
             .filter(|i| i.up && !i.loopback && !i.transient)
         {
-            match (i.ip, listen) {
+            match (i.ip, wildcard) {
                 (IpAddr::V4(a), _) if usable(i.ip) => v4.push(a),
                 (IpAddr::V6(a), IpAddr::V6(_)) if usable(i.ip) => v6.push(a),
                 _ => {}
@@ -150,7 +152,14 @@ pub fn select(
     } else {
         match listen {
             IpAddr::V4(a) => v4.push(a),
-            IpAddr::V6(a) => v6.push(a),
+            IpAddr::V6(a) => {
+                // An IPv4-mapped listen address (`::ffff:a.b.c.d`) serves the IPv4 address it stands for, which is what a machine
+                // dials (F930); the form the owner typed is named too, for a machine given that literal (Codex review of F930).
+                if let Some(m) = a.to_ipv4_mapped() {
+                    v4.push(m);
+                }
+                v6.push(a);
+            }
         }
     }
     v4.sort();
@@ -368,6 +377,20 @@ mod tests {
                 .all[0],
             "2001:db8::1"
         );
+    }
+
+    #[test]
+    fn a_mapped_listen_address_names_the_ipv4_address_it_serves() {
+        // F930: `--listen [::ffff:192.168.1.5]:8443` accepts IPv4 connections to 192.168.1.5; that is what a machine dials.
+        // The form the owner typed stays named for a machine given that literal (Codex review).
+        let n = select(&[], None, ip("::ffff:192.168.1.5"), &[up("10.0.0.7")]).unwrap();
+        assert_eq!(n.all, ["localhost", "192.168.1.5", "::ffff:192.168.1.5"]);
+    }
+
+    #[test]
+    fn a_mapped_wildcard_listen_address_is_a_wildcard_and_never_named() {
+        let n = select(&[], None, ip("::ffff:0.0.0.0"), &[up("10.0.0.7")]).unwrap();
+        assert_eq!(n.all, ["localhost", "10.0.0.7"]);
     }
 
     #[test]

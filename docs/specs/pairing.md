@@ -353,7 +353,7 @@ Tests: unit tests in the first three files, `crates/agora/tests/pair_node.rs` (a
 **The leaf's names (section 5b).**
 - Which names: the `--name` values (kept first, in the order given, lower-cased, an IPv6 literal with or without brackets), `localhost`, the host name (only
   when a certificate can carry it: letters, digits, `-`, `.`, `_`), then addresses. A listen address that is a specific address names that address alone, even
-  a loopback one (the owner chose it); `0.0.0.0` names every address of every interface that is up, IPv4 only; `::` names IPv4 and IPv6 (a dual-stack socket
+  a loopback one (the owner chose it), and an IPv4-mapped one (`::ffff:a.b.c.d`) names its IPv4 address too, the one machines dial; `0.0.0.0` names every address of every interface that is up, IPv4 only; `::` names IPv4 and IPv6 (a dual-stack socket
   serves both). Always left out: loopback, unspecified, multicast, broadcast, IPv4 link-local (169.254/16), IPv6 link-local (fe80::/10, which needs a zone a
   certificate cannot carry) and IPv4-mapped IPv6. Order: owner names, `localhost`, host name, IPv4 ascending, IPv6 ascending (so the same set is the same
   list; a temporary (privacy) or deprecated IPv6 address is not named: Linux says so through `/proc/net/if_inet6`, Windows through the suffix origin and

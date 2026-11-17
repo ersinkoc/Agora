@@ -149,7 +149,7 @@ fn wanted(
     listen: IpAddr,
     interfaces: &Interfaces,
 ) -> Result<Vec<String>, NamesFailure> {
-    let ifs = if listen.is_unspecified() {
+    let ifs = if listen.to_canonical().is_unspecified() {
         interfaces().map_err(|_| NamesFailure {
             reason: "interfaces",
             names: vec![],
@@ -173,6 +173,10 @@ fn wanted(
 
 impl Provision for Leaf {
     fn provision(&self) -> Result<[u8; 32], NamesFailure> {
+        // The names are worked out under the lock, so the leaf that is issued last is the one made from the last listing: two opens at
+        // once around an address change cannot leave the older listing in place (F931). The owner's extra names are collected under the
+        // lock too, so a re-issue that races a change of the names file cannot leave the older names in place.
+        let mut cur = self.lock();
         let mut configured = self.configured.clone();
         // Names added by the owner's tools never take the leaf past its limit (the owner's own `--name` values must always fit, and a
         // refusal here would stop every `pair open`): the ones that do not fit are left out, and `agora doctor` says so.
@@ -182,7 +186,6 @@ impl Provision for Leaf {
             }
         }
         let names = wanted(&configured, &self.host, self.listen, &self.interfaces)?;
-        let mut cur = self.lock();
         if covers(&cur.names, &names) {
             return Ok(cur.hash);
         }
@@ -208,10 +211,154 @@ impl Provision for Leaf {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
+    use std::sync::{mpsc, Arc};
+
+    /// F931: two `PairOpen`s at once around an address change. Open #1 lists the old address and is held inside its listing; the
+    /// address changes; open #2 starts. #1 is let go once #2 has finished or after a bounded wait (on this code #2 waits for #1's lock,
+    /// so the wait runs out); the wait only decides when #1 is let go, the verdict is the leaf left in place: it must name the new address.
+    #[test]
+    fn two_opens_at_once_around_an_address_change_leave_the_new_address_named() {
+        let addr = Arc::new(Mutex::new("10.0.0.1"));
+        let (listed_tx, listed_rx) = mpsc::channel::<()>();
+        let (go_tx, go_rx) = mpsc::channel::<()>();
+        let gate = Arc::new(Mutex::new(Some((listed_tx, go_rx))));
+        let (a, g) = (Arc::clone(&addr), Arc::clone(&gate));
+        let (leaf, _) = Leaf::start(
+            Ca::generate("ca").unwrap(),
+            vec![],
+            "0.0.0.0".parse().unwrap(),
+            Box::new(|| None),
+            Box::new(move || {
+                let now = *a.lock().unwrap();
+                if std::thread::current().name() == Some("first") {
+                    if let Some((listed, go)) = g.lock().unwrap().take() {
+                        listed.send(()).unwrap();
+                        go.recv().unwrap();
+                    }
+                }
+                Ok(vec![Iface {
+                    ip: now.parse().unwrap(),
+                    up: true,
+                    loopback: false,
+                    transient: false,
+                }])
+            }),
+            None,
+        )
+        .unwrap();
+        let leaf = Arc::new(leaf);
+        let l1 = Arc::clone(&leaf);
+        let first = std::thread::Builder::new()
+            .name("first".into())
+            .spawn(move || l1.provision())
+            .unwrap();
+        listed_rx.recv().unwrap();
+        *addr.lock().unwrap() = "10.0.0.2";
+        let (done_tx, done_rx) = mpsc::channel();
+        let l2 = Arc::clone(&leaf);
+        let second = std::thread::spawn(move || {
+            let r = l2.provision();
+            let _ = done_tx.send(());
+            r
+        });
+        let _ = done_rx.recv_timeout(std::time::Duration::from_secs(1));
+        go_tx.send(()).unwrap();
+        assert!(first.join().unwrap().is_ok());
+        assert!(second.join().unwrap().is_ok());
+        assert!(
+            leaf.names().contains(&"10.0.0.2".to_string()),
+            "{:?}",
+            leaf.names()
+        );
+    }
+
+    /// F931 for the owner's extra names: a re-issue that races a change of the names file. Open #1 collects the old extra name and is
+    /// held there; the file changes; open #2 starts. The names are collected under the lock, so #2 waits for #1 and the leaf left in
+    /// place is the one made last, from the extras present when the lock was taken: it must name the new extra, not the old one.
+    #[test]
+    fn two_opens_around_a_names_file_change_leave_the_new_extra_name() {
+        let extra = Arc::new(Mutex::new(vec!["old.example".to_string()]));
+        let (listed_tx, listed_rx) = mpsc::channel::<()>();
+        let (go_tx, go_rx) = mpsc::channel::<()>();
+        let gate = Arc::new(Mutex::new(Some((listed_tx, go_rx))));
+        let (x, g) = (Arc::clone(&extra), Arc::clone(&gate));
+        let (leaf, _) = Leaf::start(
+            Ca::generate("ca").unwrap(),
+            vec![],
+            "127.0.0.1".parse().unwrap(),
+            Box::new(|| None),
+            Box::new(|| Ok(vec![])),
+            None,
+        )
+        .unwrap();
+        // Started with no extras: the first leaf lacks both names, so each open has something to issue.
+        let leaf = leaf.with_extra(Box::new(move || {
+            let now = x.lock().unwrap().clone();
+            if std::thread::current().name() == Some("first") {
+                if let Some((listed, go)) = g.lock().unwrap().take() {
+                    listed.send(()).unwrap();
+                    go.recv().unwrap();
+                }
+            }
+            now
+        }));
+        let leaf = Arc::new(leaf);
+        let l1 = Arc::clone(&leaf);
+        let first = std::thread::Builder::new()
+            .name("first".into())
+            .spawn(move || l1.provision())
+            .unwrap();
+        listed_rx.recv().unwrap();
+        *extra.lock().unwrap() = vec!["new.example".to_string()];
+        let (done_tx, done_rx) = mpsc::channel();
+        let l2 = Arc::clone(&leaf);
+        let second = std::thread::spawn(move || {
+            let r = l2.provision();
+            let _ = done_tx.send(());
+            r
+        });
+        let _ = done_rx.recv_timeout(std::time::Duration::from_secs(1));
+        go_tx.send(()).unwrap();
+        assert!(first.join().unwrap().is_ok());
+        assert!(second.join().unwrap().is_ok());
+        assert!(
+            leaf.names().contains(&"new.example".to_string()),
+            "{:?}",
+            leaf.names()
+        );
+    }
+
+    /// An IPv4-mapped wildcard (`[::ffff:0.0.0.0]`) is the unspecified IPv4 address: the interfaces are listed and `0.0.0.0` is never
+    /// named in the leaf.
+    #[test]
+    fn a_mapped_wildcard_listen_is_a_wildcard_and_names_no_unspecified_address() {
+        let (leaf, failure) = Leaf::start(
+            Ca::generate("ca").unwrap(),
+            vec![],
+            "::ffff:0.0.0.0".parse().unwrap(),
+            Box::new(|| None),
+            Box::new(|| {
+                Ok(vec![Iface {
+                    ip: "10.0.0.5".parse().unwrap(),
+                    up: true,
+                    loopback: false,
+                    transient: false,
+                }])
+            }),
+            None,
+        )
+        .unwrap();
+        assert!(failure.is_none());
+        let names = leaf.names();
+        assert!(names.contains(&"10.0.0.5".to_string()), "{names:?}");
+        assert!(
+            !names.iter().any(|n| n.contains("0.0.0.0") || n == "::"),
+            "{names:?}"
+        );
+    }
 
     /// Names written while the hub runs reach the certificate at the next `provision`, from the same CA, and a name that is not
     /// there any more does not force a new one.
