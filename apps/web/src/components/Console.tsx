@@ -17,6 +17,7 @@ import type { WorkspaceFiles } from '../net/files';
 import { AgentAddress } from './AgentAddress';
 import { NoAskBadge } from './NoAskBadge';
 import { Explorer } from './Explorer';
+import { FleetConsole } from './FleetConsole';
 import { Icon } from './Icon';
 import { Inspector } from './Inspector';
 import { LanguagePicker } from './LanguagePicker';
@@ -34,7 +35,7 @@ import { Details, type DetailsTab } from './Inspector';
 import { type Action, findPane, reduce, tabsOf, visiblePanes, workspaceOf } from '../layout/engine';
 import { loadWorkspace, saveWorkspace } from '../layout/store';
 import { agentOf, assignAttention } from '../layout/streams';
-import { bindOf, defaultLayout, followOf, panesOf } from '../layout/tree';
+import { LAYOUT_VERSION, bindOf, followOf, panesOf } from '../layout/tree';
 import { Workspace } from '../layout/Workspace';
 import { LayoutMenu } from '../layout/LayoutMenu';
 import { subscribePanelRequests, takePanelRequest } from '../layout/requests';
@@ -45,12 +46,14 @@ const TerminalView = lazy(() => import('../terminal/TerminalView').then((m) => (
 const MAX_AUTO_PINNED = 4;
 // The search shortcut as the keyboard spells it: ⌘ on Apple machines (the desktop app's WebKit included), Ctrl elsewhere.
 const commandKey = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent) ? '⌘' : 'Ctrl';
+const homeWorkspace = () => workspaceOf({ version: LAYOUT_VERSION, root: { type: 'pane', id: 'p1', panel: 'fleet' } });
 const wide = () => typeof window === 'undefined' || !window.matchMedia || window.matchMedia('(min-width: 1024px)').matches;
 // Below this width the panes are tabs of one group (no tiling on a phone; ADR-0068).
 const NARROW = '(max-width: 699px)';
 const subscribeNarrow = (cb: () => void) => { const m = typeof window !== 'undefined' ? window.matchMedia?.(NARROW) : undefined; m?.addEventListener?.('change', cb); return () => m?.removeEventListener?.('change', cb); };
 const isNarrow = () => typeof window !== 'undefined' && !!window.matchMedia?.(NARROW).matches;
 // The layout's global panels and the details tab that draws each.
+// The layout's first panel is Home itself: the fleet console.
 const PANEL_TAB: Record<string, DetailsTab> = { approvals: 'needs', changes: 'changes', tasks: 'board', messages: 'messages', usage: 'cost' };
 
 // The one window, laid out like an editor: the agents on the left as a tree, the terminals you are watching as tabs in the
@@ -96,7 +99,11 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   useEffect(() => { const id = setInterval(() => setNow(Date.now()), 15000); return () => clearInterval(id); }, []);
   const saved = useRef(loadLayout()).current;
   // The panes (ADR-0068): a tree of splits, tab groups and panes, kept for this visit and in this browser.
-  const [stored, setStored] = useState(() => loadWorkspace());
+  const [stored, setStored] = useState(() => {
+    // A window nobody has arranged opens on Home, the fleet console; agents opened for you wait in tabs beside it.
+    const cur = loadWorkspace();
+    return !cur.touched && panesOf(cur.ws.layout.root).every((p) => p.panel === 'empty') ? { ws: homeWorkspace(), touched: false } : cur;
+  });
   const ws = stored.ws;
   // Every layout change goes through the reducer. One the user makes (not focusing or switching tabs) marks the window as
   // arranged by them: agents stop opening on their own.
@@ -179,7 +186,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
     else dispatch({ type: 'open', agent: id });
   };
   const presetAgents = () => [...new Set([...shownAgents, ...fleet.filter((a) => !a.closed).map((a) => a.id)])];
-  const resetLayout = () => setStored({ ws: workspaceOf(defaultLayout()), touched: false });
+  const resetLayout = () => setStored({ ws: homeWorkspace(), touched: false });
 
   const attention = needsAttention(fleet);
   const changed = [...new Map(fleet.filter((a) => (a.filesChanged ?? 0) > 0 && (!projectFilter || a.projectId === projectFilter))
@@ -272,34 +279,23 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
       </div>}
     </div>
   );
-  const panel = (id: string) => PANEL_TAB[id] ? <div className="min-h-0 flex-1 overflow-y-auto p-3">
+  const panel = (id: string) => id === 'fleet' ? home : PANEL_TAB[id] ? <div className="min-h-0 flex-1 overflow-y-auto p-3">
     <Details tab={PANEL_TAB[id] as DetailsTab} attention={attention} approvals={approvals} notice={notice} changed={changed} boards={boards} messages={messages} usage={usage} projects={projects} onOpen={onOpen}
       onResolve={onResolve} onReview={loadDiff ? setReviewing : undefined} />
   </div> : id === 'theme' ? <div className="min-h-0 flex-1 overflow-y-auto"><ThemeEditor /></div> : undefined;
 
-  // Nothing open: a start button, the agents that are running, and the two shortcuts.
-  const welcome = (
-    <div className="grid min-h-0 flex-1 place-items-center overflow-y-auto p-6">
-      <div className="grid w-full max-w-md gap-5">
-        <div className="grid justify-items-start gap-1">
-          <Icon name="terminal" className="size-8 text-accent" />
-          <h2 className="m-0 mt-2 text-base normal-case tracking-normal text-ink">{t('ide-welcome-title')}</h2>
-          <p className="muted m-0">{t('console-wall-empty')}</p>
-        </div>
-        {onStart && <button type="button" className="button button--primary justify-self-start" onClick={() => onStart()}><Icon name="plus" />{t('action-start-agent')}</button>}
-        <div className="grid gap-1">
-          <h2 className="m-0">{t('ide-welcome-running')}</h2>
-          {fleet.length === 0 ? <p className="muted m-0">{t('ide-welcome-none')}</p> : <ul className="m-0 grid list-none gap-0.5 p-0">
-            {fleet.slice(0, 6).map((a) => <li key={a.id}><button type="button" className="ide-row py-1.5" onClick={() => select(a.id)}><StateMark state={a.state} failed={endedWithError(a)} /><span className="min-w-0 flex-1 truncate">{a.name}</span><span className="truncate text-xs text-muted">{a.machine}</span></button></li>)}
-          </ul>}
-        </div>
-        <dl className="m-0 grid gap-1.5 text-xs text-muted">
-          <div className="flex items-center gap-2"><dt><kbd className="ide-kbd">{commandKey} K</kbd></dt><dd className="m-0">{t('ide-welcome-search')}</dd></div>
-          <div className="flex items-center gap-2"><dt><kbd className="ide-kbd">N</kbd></dt><dd className="m-0">{t('ide-welcome-next')}</dd></div>
-        </dl>
-      </div>
+  // Home: the fleet console. It is what an empty window shows and what the Fleet tab is. A tile opens its agent like the tree does.
+  const openFromFleet = (id: string) => {
+    setSelection(id);
+    if (allPanes.some((p) => followOf(p) === 'selection')) return;
+    dispatch({ type: 'open', agent: id });
+  };
+  const home = (
+    <div className="min-h-0 flex-1 overflow-y-auto">
+      <FleetConsole fleet={fleet} machines={machines} approvals={approvals} usage={usage} link={link} now={now} onOpen={openFromFleet} onStart={onStart} onResolve={onResolve} onReview={() => setShowDetails(true)} onRetry={onRetry} />
     </div>
   );
+  const welcome = home;
 
   return (
     <div className="ide">

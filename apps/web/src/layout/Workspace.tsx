@@ -24,11 +24,11 @@ function box(r: Rect, top?: string): CSSProperties {
 
 // The panel names the user sees for each panel id (UI vocabulary, not internal terms).
 const PANEL_LABEL: Record<string, string> = {
-  terminal: 'focus-terminal', conversation: 'chat-log', agent: 'layout-panel-agent', approvals: 'attention-title', changes: 'ide-tab-changes',
+  fleet: 'fleet-panel', terminal: 'focus-terminal', conversation: 'chat-log', agent: 'layout-panel-agent', approvals: 'attention-title', changes: 'ide-tab-changes',
   files: 'console-files', tasks: 'board-title', messages: 'ide-tab-messages', usage: 'ide-tab-cost', theme: 'theme-editor-title', empty: 'layout-panel-empty',
 };
 export const panelLabel = (panel: string) => (PANEL_LABEL[panel] ? t(PANEL_LABEL[panel] as string) : t('layout-panel-unknown', { id: panel }));
-const GLOBAL_PANELS = ['approvals', 'changes', 'tasks', 'messages', 'usage', 'theme'];
+const GLOBAL_PANELS = ['fleet', 'approvals', 'changes', 'tasks', 'messages', 'usage', 'theme'];
 
 export interface WorkspaceProps {
   ws: WorkspaceState;
@@ -59,7 +59,8 @@ export function Workspace({ ws, dispatch, fleet, bindings, narrow, renderAgent, 
   const [drag, setDrag] = useState<string | undefined>();
   const [drop, setDrop] = useState<{ frame: string; place: Place } | undefined>();
   const single = all.length === 1;
-  const lone = single && all[0]?.panel === 'empty';
+  // A window with only Home (the fleet) or nothing in it shows Home without a pane bar.
+  const lone = single && (all[0]?.panel === 'empty' || all[0]?.panel === 'fleet');
   const tiled = frames.length > 1;
 
   // Choosing what a pane shows: an agent, what needs you, the selection, or a panel.

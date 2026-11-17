@@ -440,7 +440,7 @@ export function App() {
   const editTheme = useCallback(() => { if (phone) { go('#/theme'); return; } if (!['', '#/', '#/demo'].includes(hash)) go('#/'); requestPanel('theme'); }, [go, hash, phone]);
   const items: PaletteItem[] = useMemo(() => [
     { id: 'next', label: t('palette-next-attention'), run: next },
-    { id: 'home', label: t('palette-go-home'), run: () => go('#/') },
+    { id: 'home', label: t('palette-go-home'), run: () => { go('#/'); if (!phone) requestPanel('fleet'); } },
     ...(hub ? [{ id: 'start', label: t('action-start-agent'), run: () => { go('#/'); setStarting({}); } }] : []),
     { id: 'machines', label: t('palette-go-machines'), run: () => go('#/machines') },
     ...(hub ? [{ id: 'device', label: t('device-link'), run: () => go('#/device') }, { id: 'audit', label: t('audit-link'), run: () => go('#/audit') }] : []),
@@ -449,7 +449,7 @@ export function App() {
     { id: 'theme-editor', label: t('palette-theme-editor'), run: editTheme },
     ...themeStore.themes().map((x) => ({ id: `theme-${x.id}`, label: t('palette-theme', { name: themeName(x) }), run: () => themeStore.choose(x.id) })),
     ...agents.map((a) => ({ id: `agent-${a.id}`, label: t('palette-open-agent', { name: a.name }), run: () => open(a.id) })),
-  ], [agents, go, hub, next, open, language, editTheme, palette]);
+  ], [agents, go, hub, next, open, language, editTheme, palette, phone]);
 
   useEffect(() => {
     const on = (e: KeyboardEvent) => {

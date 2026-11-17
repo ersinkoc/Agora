@@ -28,11 +28,12 @@ function Mark({ state, failed }: { state: UiState; failed?: boolean }) {
 const stateClass = (state: UiState, failed?: boolean) => `state state--${failed ? 'failed' : state}`;
 const stateWord = (state: UiState, failed?: boolean) => t(failed ? 'state-failed' : `state-${state}`);
 
-export function StateBadge({ state, failed }: { state: UiState; failed?: boolean }) {
+// `word`: a shorter name for the state where the full one does not fit (the counts of the fleet console say "Failed").
+export function StateBadge({ state, failed, word }: { state: UiState; failed?: boolean; word?: string }) {
   return (
     <span className={stateClass(state, failed)}>
       <Mark state={state} failed={failed} />
-      {stateWord(state, failed)}
+      {word ?? stateWord(state, failed)}
     </span>
   );
 }

@@ -20,6 +20,8 @@ import type { WorkspaceFiles } from '../net/files';
 import { StartApproval, type StartChoice } from '../components/StartApproval';
 import { ThemeEditor } from '../themes/ThemeEditor';
 import { PHONE_QUERY, byMachine, needsYou } from './nav';
+import { type FleetFilter, emptyKind, fleetCounts, matchesFilter } from '../net/fleet';
+import { FleetEmpty, FleetSummary } from '../components/FleetConsole';
 import './phone.css';
 
 const TerminalView = lazy(() => import('../terminal/TerminalView').then((m) => ({ default: m.TerminalView })));
@@ -137,7 +139,11 @@ export function PhoneHome({ agents, machines, approvals, onResolve, untrusted, n
   const cleared = useSyncExternalStore(subscribeDismissed, dismissedIds, dismissedIds);
   const fleet = useMemo(() => agents.filter((a) => !(a.closed && cleared.has(a.id))), [agents, cleared]);
   const needs = needsYou(approvals, fleet);
-  const groups = byMachine(fleet, machines);
+  // The same five answers as the desktop's Home, as chips above the list; a press shows only those agents below.
+  const counts = useMemo(() => fleetCounts(fleet, approvals, machines), [fleet, approvals, machines]);
+  const [filter, setFilter] = useState<FleetFilter | undefined>();
+  const groups = useMemo(() => byMachine(fleet.filter((a) => matchesFilter(a, filter)), machines).filter((g) => !filter || g.agents.length > 0), [fleet, machines, filter]);
+  const empty = emptyKind(link, fleet.length + approvals.length, machines.length);
   return (
     <PhoneShell label={t('home-title')}
       top={<>
@@ -155,6 +161,9 @@ export function PhoneHome({ agents, machines, approvals, onResolve, untrusted, n
         <NavButton icon="lock" label={t('device-link')} href="#/device" />
       </>}>
       {notice && <p role="alert" className="phone-notice">{notice}</p>}
+      {!empty && <div className="phone-fleet"><FleetSummary counts={counts} filter={filter} onFilter={setFilter} /></div>}
+      {link === 'offline' && !empty && <p role="status" className="fleet-stale mx-3">{t('fleet-offline-stale')}</p>}
+      {empty && <FleetEmpty kind={empty} machines={machines} onStart={onStart ? () => onStart() : undefined} onRetry={onRetry} />}
       {needs.length > 0 && <section className="phone-section" aria-label={t('attention-title')}>
         <h2 className="phone-section__title text-needs-you">{t('phone-needs', { count: needs.length })}</h2>
         <div className="grid gap-2">
@@ -164,7 +173,7 @@ export function PhoneHome({ agents, machines, approvals, onResolve, untrusted, n
             : <ul key={n.agent.id} className="phone-list phone-card phone-card--needs p-0"><AgentRow agent={n.agent} onOpen={onOpen} /></ul>)}
         </div>
       </section>}
-      {groups.length === 0 && <p className="muted m-0 p-4">{t('ide-welcome-none')}</p>}
+      {groups.length === 0 && !empty && <p className="muted m-0 p-4">{t(filter ? 'fleet-filter-none' : 'ide-welcome-none')}</p>}
       {groups.map((g) => (
         <section key={g.id} className="phone-section" aria-label={g.name}>
           <h2 className="phone-section__title">

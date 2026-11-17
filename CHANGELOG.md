@@ -4,7 +4,8 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
-_Nothing yet._
+### The window
+- Home is now a fleet console: counts of what needs you, what is working, what finished, what failed and which machines are online (each one filters the list), then what needs you with Allow and Deny in the row for simple requests, then every agent as a tile grouped by machine or project, with a clear next step when there is no machine or no agent yet.
 
 ## 0.3.16
 

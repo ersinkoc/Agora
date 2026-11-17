@@ -105,3 +105,5 @@ and the same window with a model and an effort chosen, which then says what will
 ![](adr66-start-confirmation-dark.png) ![](adr66-start-confirmation-light.png)
 
 The eight interface quick wins, before and after, dark and light, on a desktop, a tablet with touch and a phone (`ux-quick-wins/<screen>-<theme>-{before,after}.png`): text size, review colours and first file, a failed agent, the layout menu, touch targets, approval wording.
+
+Home as a fleet console, before and after, in both themes (`fleet-console/`; see `../ux/fleet-console.md`): `before-*` is the window before, `after-*` after, for what needs you (`attention`), a calm fleet (`calm`), a fresh hub (`empty-hub`), machines but no agent (`first-run`), the hub unreachable (`offline`) and the phone (`phone`, `phone-calm`); Large text, High contrast, Turkish and 200 agents are after-only.
