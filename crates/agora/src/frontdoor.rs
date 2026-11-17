@@ -1126,7 +1126,7 @@ fn up(say: &Say, home: &Path, m: &Machine, resume: Option<bool>) -> Result<(), E
     }
     if m.has("node") {
         if m.has("hub") && !crate::hubcli::link_dir().join("node-id").exists() {
-            enroll_self(say, m)?;
+            enroll_self(say, home, m)?;
         }
         ensure(say, home, m, Role::Node, resume)?;
         if m.has("hub") {
@@ -1136,10 +1136,18 @@ fn up(say: &Say, home: &Path, m: &Machine, resume: Option<bool>) -> Result<(), E
     Ok(())
 }
 
+/// The URL this machine's node reaches its own hub at now: the running hub's port (it may differ from `hub_listen` while a
+/// `--listen` change waits for the next start), else the saved one.
+fn running_hub_url(home: &Path, m: &Machine) -> Option<String> {
+    hub_addr(home, m)
+        .and_then(|a| a.parse::<SocketAddr>().ok())
+        .map(|a| format!("wss://localhost:{}", a.port()))
+}
+
 /// Enrolls this machine's node with this machine's own hub: a one-time code made here and used at once, never shown.
-fn enroll_self(say: &Say, m: &Machine) -> Result<(), ExitCode> {
+fn enroll_self(say: &Say, home: &Path, m: &Machine) -> Result<(), ExitCode> {
     let (Some(url), Ok(ca_pem)) = (
-        m.own_hub_url(),
+        running_hub_url(home, m).or_else(|| m.own_hub_url()),
         std::fs::read_to_string(m.hub_dir.join("ca.pem")),
     ) else {
         return Err(failed(say, &m.hub_dir.join("ca.pem").display().to_string()));
@@ -1171,10 +1179,7 @@ fn wait_linked(say: &Say, home: &Path, m: &Machine) -> Result<(), ExitCode> {
     };
     // A node linked to another hub is not waited for here. This hub's own node is linked at its saved port, or at the port the
     // running hub has while a `--listen` change waits for its next start.
-    let running_url = addr
-        .parse::<SocketAddr>()
-        .ok()
-        .map(|a| format!("wss://localhost:{}", a.port()));
+    let running_url = running_hub_url(home, m);
     let url = read("url");
     if url != m.own_hub_url() && url != running_url {
         return Ok(());
