@@ -4,6 +4,9 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+### Fixes
+- `agora status` says "connected" only while the node's link to the hub is up right now (it used to say so for the hub the machine was set up for, also while every attempt failed); otherwise it says not connected and why, and on a Mac whose Local Network permission is missing it points to System Settings. After `agora update` on a Mac, the note now says to restart the node once more after allowing Local Network.
+
 ### Terminals
 - A program that draws its status lines with icon glyphs (WrongStack's Powerline arrows and folder, branch and settings icons) is no longer
   shown as empty boxes in the window and the desktop app: if a Nerd Font is installed on the machine that shows the window, the icons come

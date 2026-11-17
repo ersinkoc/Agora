@@ -294,7 +294,7 @@ fn main() -> ExitCode {
         // ADR-0062: plain `agora` brings this machine's Agora up and opens it.
         [] => frontdoor::front_door(&say, &opts),
         ["web"] => frontdoor::web(&say),
-        ["status"] => frontdoor::status(&say),
+        ["status"] => frontdoor::status(&say, &opts.data),
         ["down"] => frontdoor::down(&say),
         ["service", op @ ("install" | "remove" | "status")] => servicecmd::service(&say, op),
         ["node", "run"] => node_run(&say, &opts),
@@ -525,6 +525,8 @@ fn node_run(say: &Say, o: &Opts) -> ExitCode {
             return ExitCode::from(1);
         }
     };
+    // An earlier run's link state is never read as this run's; a node without a hub has none.
+    agora_node::link_state::LinkState::clear(&cfg.data_dir);
     for (path, reason) in &node.manifest_problems {
         eprintln!("{}: {reason}", path.display());
     }
@@ -560,6 +562,7 @@ fn node_run(say: &Say, o: &Opts) -> ExitCode {
         l.grants = Some(Arc::clone(&node.grants));
         l.mesh = Some(Arc::clone(&node.mesh));
         l.devices = Some(Arc::clone(&node.devices));
+        l.state_dir = Some(cfg.data_dir.clone());
         agora_node::uplink_client::spawn(Arc::clone(&node.events), l).ok()
     });
     // Run until the process is stopped; agents die with it and the socket file is replaced on next start.

@@ -135,6 +135,8 @@ pub struct HubLink {
     /// The machine's trusted devices (ADR-0061): the hub's `DeviceEndorse` and `DeviceRevoke` are verified and applied here, never
     /// through the control socket. `None`: both are refused.
     pub devices: Option<Arc<crate::device_trust::DeviceTrust>>,
+    /// The node's data directory: where the link's state is written for `agora status` (see [`crate::link_state`]). `None`: not written.
+    pub state_dir: Option<std::path::PathBuf>,
 }
 
 type Done = Box<dyn FnOnce(Result<Option<crate::mesh_server::BoardReply>, String>) + Send>;
@@ -281,6 +283,19 @@ pub enum LinkError {
     Suspended,
     /// The hub answered with this error code (for enrollment: a wrong, expired or used code is `auth.unauthenticated`).
     Refused(String),
+}
+
+impl LinkError {
+    /// What `agora status` shows for this error: a stable code and the detail as a parameter.
+    pub fn link_state(&self) -> crate::link_state::LinkState {
+        use crate::link_state::{LinkState, CLOSED, OTHER};
+        match self {
+            Self::Transport(t) | Self::Bad(t) => LinkState::down_transport(t),
+            Self::Refused(c) => LinkState::down_hub_refused(c),
+            Self::Closed | Self::Silent | Self::Suspended => LinkState::down(CLOSED, ""),
+            Self::Uplink(e) => LinkState::down(OTHER, &format!("{e:?}")),
+        }
+    }
 }
 
 impl From<TransportError> for LinkError {
@@ -1099,10 +1114,27 @@ pub fn spawn(sink: Arc<EventSink>, link: HubLink) -> std::io::Result<UplinkHandl
                 rt.block_on(async {
                     let mut redial = Redial::default();
                     let mut last = String::new();
+                    let note = |s: crate::link_state::LinkState| {
+                        if let Some(d) = &link.state_dir {
+                            s.write(d);
+                        }
+                    };
+                    note(crate::link_state::LinkState::Connecting);
                     while !stop.load(Ordering::Acquire) {
                         let started = std::time::Instant::now();
                         let accepted = AtomicBool::new(false);
-                        let r = run_once_noting(&link, &sink, &stop, &accepted).await;
+                        // `up` is written as soon as the hub has taken the connection, not when it ends.
+                        let r = {
+                            let run = run_once_noting(&link, &sink, &stop, &accepted);
+                            let up = async {
+                                while !accepted.load(Ordering::Acquire) {
+                                    tokio::time::sleep(Duration::from_millis(50)).await;
+                                }
+                                note(crate::link_state::LinkState::Up);
+                                std::future::pending::<()>().await;
+                            };
+                            tokio::select! { r = run => r, () = up => Ok(()) }
+                        };
                         if stop.load(Ordering::Acquire) {
                             break;
                         }
@@ -1113,6 +1145,12 @@ pub fn spawn(sink: Arc<EventSink>, link: HubLink) -> std::io::Result<UplinkHandl
                         }
                         // Why the hub could not be reached, once per change, so a node that never connects is not silent. Codes and
                         // transport detail only: this goes to the node's log, not to the user's screen.
+                        note(match &r {
+                            Err(e) => e.link_state(),
+                            Ok(()) => {
+                                crate::link_state::LinkState::down(crate::link_state::CLOSED, "")
+                            }
+                        });
                         if let Err(e) = &r {
                             let now = format!("{e:?}");
                             if now != last {
