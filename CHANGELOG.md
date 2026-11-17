@@ -4,6 +4,10 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+_Nothing yet._
+
+## 0.3.16
+
 ### The window
 - All small text in the window is now at least 12 px, and counts and times use figures of equal width so they line up from row to row.
 - In a review, a deleted line is red with a "-" and a bar on its left edge, an added line has a "+" and a green bar, and amber means only "needs you" again. The review opens on the first file you can read, and files kept private are listed last.
