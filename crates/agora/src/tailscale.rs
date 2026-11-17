@@ -97,6 +97,16 @@ fn magic_dns_name(raw: &str) -> Option<String> {
     .then_some(name)
 }
 
+/// A name or address from the names file, checked again on the way back in: a MagicDNS name under `.ts.net` or an address in the
+/// tailnet's ranges, and nothing else (the file is the owner's, but a damaged or edited one never reaches a certificate).
+pub fn saved_name(line: &str) -> Option<String> {
+    let line = line.trim();
+    match line.parse::<IpAddr>() {
+        Ok(ip) => is_tailnet_ip(ip).then(|| ip.to_string()),
+        Err(_) => magic_dns_name(line),
+    }
+}
+
 /// Reads `tailscale status --json`. Never panics, whatever the text is.
 pub fn parse_status(text: &str) -> Result<Tailnet, Problem> {
     let v: serde_json::Value = serde_json::from_str(text).map_err(|_| Problem::Garbage)?;
@@ -175,14 +185,51 @@ pub fn parse_serve(text: &str, port: u16) -> Result<ServePort, Problem> {
     })
 }
 
+/// True when `tailscale serve status --json` says anything is open to the whole internet (Tailscale Funnel): `AllowFunnel` at the top
+/// or in any `Foreground` configuration. Garbage is an error, not "no".
+pub fn parse_funnel(text: &str) -> Result<bool, Problem> {
+    let v: serde_json::Value = serde_json::from_str(text).map_err(|_| Problem::Garbage)?;
+    if !v.is_object() {
+        return Err(Problem::Garbage);
+    }
+    let open = |c: &serde_json::Value| {
+        c.get("AllowFunnel")
+            .and_then(|a| a.as_object())
+            .is_some_and(|a| a.values().any(|x| x.as_bool() == Some(true)))
+    };
+    Ok(open(&v)
+        || v.get("Foreground")
+            .and_then(|f| f.as_object())
+            .is_some_and(|f| f.values().any(open)))
+}
+
+/// Whether Tailscale Funnel is on for anything of this machine.
+pub fn funnel_on() -> Result<bool, Problem> {
+    parse_funnel(&run(&["serve", "status", "--json"], STATUS_WAIT)?)
+}
+
 /// Runs `tailscale ARGS` and returns what it printed on standard output (limited). The program's own error text is never kept.
 fn run(args: &[&str], wait: Duration) -> Result<String, Problem> {
-    let mut cmd = Command::new("tailscale");
+    run_program(std::ffi::OsStr::new("tailscale"), args, wait, MAX_OUTPUT)
+}
+
+/// Runs `program` with `args`: at most `wait` in all and `max` bytes of output, whatever the program does. The output is read on a
+/// thread that is never joined (a child of the program that keeps the pipe open would hold a join for as long as it lives): the
+/// answer is what arrived when the program ended or the time ran out. The program and everything it started are ended when it
+/// is stopped, and once it has ended.
+fn run_program(
+    program: &std::ffi::OsStr,
+    args: &[&str],
+    wait: Duration,
+    max: usize,
+) -> Result<String, Problem> {
+    let mut cmd = Command::new(program);
     cmd.args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     agora_platform::no_console_window(&mut cmd);
+    agora_platform::own_process_group(&mut cmd);
     let mut child = cmd.spawn().map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             Problem::NotInstalled
@@ -191,39 +238,58 @@ fn run(args: &[&str], wait: Duration) -> Result<String, Problem> {
         }
     })?;
     let mut out = child.stdout.take().ok_or(Problem::Failed)?;
-    // Set by the reader when the program printed more than the limit.
-    let too_big = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let flag = std::sync::Arc::clone(&too_big);
-    let reader = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        let _ = (&mut out).take(MAX_OUTPUT as u64 + 1).read_to_end(&mut buf);
-        flag.store(buf.len() > MAX_OUTPUT, std::sync::atomic::Ordering::Release);
-        buf
+    let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+    std::thread::spawn(move || {
+        let mut chunk = [0u8; 16 * 1024];
+        while let Ok(n) = out.read(&mut chunk) {
+            if n == 0 || tx.send(chunk[..n].to_vec()).is_err() {
+                break;
+            }
+        }
     });
     let started = Instant::now();
+    let mut buf: Vec<u8> = Vec::new();
+    let take = |buf: &mut Vec<u8>, chunk: Vec<u8>| {
+        buf.extend_from_slice(&chunk);
+        buf.len() > max
+    };
     let status = loop {
+        if let Ok(chunk) = rx.recv_timeout(Duration::from_millis(10)) {
+            if take(&mut buf, chunk) {
+                agora_platform::kill_process_tree(&mut child);
+                return Err(Problem::TooBig);
+            }
+            continue;
+        }
         match child.try_wait() {
             Ok(Some(s)) => break Some(s),
             Ok(None) => {}
             Err(_) => break None,
         }
-        let big = too_big.load(std::sync::atomic::Ordering::Acquire);
-        if big || started.elapsed() > wait {
-            let _ = child.kill();
-            let _ = child.wait();
-            let _ = reader.join();
-            return Err(if big {
-                Problem::TooBig
-            } else {
-                Problem::Timeout
-            });
+        if started.elapsed() > wait {
+            agora_platform::kill_process_tree(&mut child);
+            return Err(Problem::Timeout);
         }
-        std::thread::sleep(Duration::from_millis(10));
     };
-    let buf = reader.join().unwrap_or_default();
-    if buf.len() > MAX_OUTPUT {
-        return Err(Problem::TooBig);
+    // Ended: what it wrote is already in the pipe. Take it (a moment at most), then end whatever it left behind.
+    let grace = Instant::now();
+    while grace.elapsed() < Duration::from_millis(200) {
+        match rx.recv_timeout(Duration::from_millis(20)) {
+            Ok(chunk) => {
+                if take(&mut buf, chunk) {
+                    agora_platform::kill_process_tree(&mut child);
+                    return Err(Problem::TooBig);
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if grace.elapsed() > Duration::from_millis(60) {
+                    break;
+                }
+            }
+        }
     }
+    agora_platform::kill_process_tree(&mut child);
     match status {
         Some(s) if s.success() => Ok(String::from_utf8_lossy(&buf).into_owned()),
         _ => Err(Problem::Failed),
@@ -258,6 +324,71 @@ pub fn serve_off(port: u16) -> Result<(), Problem> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    /// A program (a shell script) in a folder of its own.
+    #[cfg(unix)]
+    fn script(name: &str, body: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let d = std::env::temp_dir().join(format!("agora-ts-run-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let f = d.join("prog");
+        std::fs::write(&f, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).unwrap();
+        f
+    }
+
+    /// The caps hold however the program behaves: a child that keeps the output open, a program that never ends, endless output.
+    #[cfg(unix)]
+    #[test]
+    fn the_time_and_size_caps_hold_for_a_program_that_leaves_children_or_never_ends() {
+        let two = Duration::from_secs(2);
+        // Prints its answer and ends, but a child of it keeps standard output open for 12 seconds.
+        let p = script("child", "sleep 12 &\necho ok");
+        let t = Instant::now();
+        let r = run_program(p.as_os_str(), &[], two, 1024);
+        assert_eq!(r.as_deref(), Ok("ok\n"));
+        assert!(t.elapsed() < Duration::from_secs(3), "{:?}", t.elapsed());
+        // Never ends, and prints nothing.
+        let p = script("hang", "sleep 100");
+        let t = Instant::now();
+        assert_eq!(
+            run_program(p.as_os_str(), &[], Duration::from_secs(1), 1024),
+            Err(Problem::Timeout)
+        );
+        assert!(t.elapsed() < Duration::from_secs(3), "{:?}", t.elapsed());
+        // Never ends, and keeps the output open from a child as well.
+        let p = script("hangchild", "sleep 100 &\nsleep 100");
+        let t = Instant::now();
+        assert_eq!(
+            run_program(p.as_os_str(), &[], Duration::from_secs(1), 1024),
+            Err(Problem::Timeout)
+        );
+        assert!(t.elapsed() < Duration::from_secs(3), "{:?}", t.elapsed());
+        // Endless output.
+        let p = script("endless", "yes");
+        let t = Instant::now();
+        assert_eq!(
+            run_program(p.as_os_str(), &[], Duration::from_secs(10), 4096),
+            Err(Problem::TooBig)
+        );
+        assert!(t.elapsed() < Duration::from_secs(3), "{:?}", t.elapsed());
+        // An error exit is a failure, and a missing program is its own word.
+        let p = script("bad", "exit 3");
+        assert_eq!(
+            run_program(p.as_os_str(), &[], two, 1024),
+            Err(Problem::Failed)
+        );
+        assert_eq!(
+            run_program(
+                std::ffi::OsStr::new("/nonexistent/agora-tailscale"),
+                &[],
+                two,
+                1024
+            ),
+            Err(Problem::NotInstalled)
+        );
+    }
 
     fn status_json(state: &str, dns: &str, ips: &str) -> String {
         format!(
@@ -373,6 +504,48 @@ mod tests {
             "\"100.64.0.1\",".repeat(100_000) + "\"100.64.0.2\""
         ))
         .unwrap();
+    }
+
+    #[test]
+    fn funnel_is_found_at_the_top_and_in_a_foreground_session() {
+        assert_eq!(parse_funnel("{}"), Ok(false));
+        assert_eq!(
+            parse_funnel(r#"{"AllowFunnel":{"a.ts.net:443":false}}"#),
+            Ok(false)
+        );
+        assert_eq!(
+            parse_funnel(r#"{"AllowFunnel":{"a.ts.net:443":true}}"#),
+            Ok(true)
+        );
+        assert_eq!(
+            parse_funnel(r#"{"Foreground":{"s1":{"AllowFunnel":{"a.ts.net:443":true}}}}"#),
+            Ok(true)
+        );
+        assert_eq!(parse_funnel(r#"{"Foreground":{"s1":{}}}"#), Ok(false));
+        assert_eq!(parse_funnel("[]"), Err(Problem::Garbage));
+        assert_eq!(parse_funnel("x"), Err(Problem::Garbage));
+    }
+
+    #[test]
+    fn a_saved_name_is_a_tailnet_name_or_address_and_nothing_else() {
+        assert_eq!(
+            saved_name(" Box.tail1.ts.net "),
+            Some("box.tail1.ts.net".into())
+        );
+        assert_eq!(saved_name("100.64.0.7"), Some("100.64.0.7".into()));
+        for bad in [
+            "a.ts.net..",
+            "a.b",
+            "example.com",
+            "8.8.8.8",
+            "10.0.0.1",
+            "*.ts.net",
+            "",
+            "ts.net",
+            "a\u{202e}.ts.net",
+        ] {
+            assert_eq!(saved_name(bad), None, "{bad:?}");
+        }
     }
 
     #[test]

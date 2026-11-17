@@ -543,3 +543,7 @@ doctor-remote-public-listen = The hub listens on a public address: only the scre
 doctor-remote-tailnet = Tailscale works; this machine is { $name } on your tailnet.
 doctor-remote-tailnet-unreachable = Tailscale is not reachable from here ({ $reason }), so the tailnet address will not work. Check `tailscale status`.
 doctor-remote-names-missing = The hub's certificate does not name { $names } yet. Restart the hub, or wait a few seconds if `agora remote tailscale` was just run.
+remote-password_in_use_listen = The hub listens on a public address, and the screen password protects it, so it stays. Restart the hub on a local address first (`agora --listen 127.0.0.1:7443`, then `agora down` and `agora`), then clear the password.
+remote-hub_not_running = Agora could not find the address of a running hub in { $dir }. Start the hub with `agora`, then run this again.
+remote-status-public-funnel = Public internet: reachable through Tailscale Funnel.
+doctor-remote-funnel = Tailscale Funnel is on for this machine, so something is reachable from the whole internet. Only the screen password and the sign-in code protect it. Turn it off with `tailscale funnel reset` unless you meant it.

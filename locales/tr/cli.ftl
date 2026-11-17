@@ -537,3 +537,7 @@ doctor-remote-public-listen = Hub herkese açık bir adreste dinliyor: onu yaln�
 doctor-remote-tailnet = Tailscale çalışıyor; bu makine tailnet'inizde { $name }.
 doctor-remote-tailnet-unreachable = Tailscale buradan erişilemiyor ({ $reason }), bu yüzden tailnet adresi çalışmaz. `tailscale status` komutuna bakın.
 doctor-remote-names-missing = Hub'ın sertifikası { $names } adlarını henüz içermiyor. Hub'ı yeniden başlatın veya `agora remote tailscale` az önce çalıştırıldıysa birkaç saniye bekleyin.
+remote-password_in_use_listen = Hub herkese açık bir adreste dinliyor ve ekran parolası onu koruyor, bu yüzden kalır. Önce hub'ı yerel bir adreste yeniden başlatın (`agora --listen 127.0.0.1:7443`, sonra `agora down` ve `agora`), sonra parolayı silin.
+remote-hub_not_running = Agora { $dir } içinde çalışan bir hub'ın adresini bulamadı. Hub'ı `agora` ile başlatın, sonra bunu yeniden çalıştırın.
+remote-status-public-funnel = Herkese açık internet: Tailscale Funnel üzerinden erişilebilir.
+doctor-remote-funnel = Bu makine için Tailscale Funnel açık, yani bir şey tüm internetten erişilebilir. Onu yalnızca ekran parolası ve giriş kodu korur. Bilerek açmadıysanız `tailscale funnel reset` ile kapatın.

@@ -1,8 +1,9 @@
 # Reach your hub from a phone or another city
 
 ADR-0067 rung 3. This guide puts Agora on a server (a VPS with no screen) and opens it from your phone or laptop. Two ways are
-described. **Use Tailscale if you can**: only your own devices can even find the hub. A plain public address works too, but then
-only the screen password and the certificate protect it.
+described. **Use Tailscale if you can**: only the devices of your tailnet (yours, and anyone you shared the machine or tailnet with) can reach
+the hub. A plain public address works too, but then anyone on the internet can reach it and only the screen password and the
+certificate protect it.
 
 Either way the rule is the same: **nothing is reachable from outside until you set a screen password**, and every sign-in from
 another machine needs it (plus a sign-in code). `agora remote tailscale`, a hub on a public address and the first run on a
@@ -58,11 +59,12 @@ Tailscale serve: https://myserver.tail1234.ts.net:8443/
 Public internet: not reachable.
 Screen password: set.
 ```
+If Tailscale Funnel is on (it puts something on the whole internet), `agora remote status` says `Public internet: reachable through Tailscale Funnel` and `agora doctor` warns; turn it off with `tailscale funnel reset`.
 `agora doctor` checks the same things: Tailscale answers, a password is set while a way in is on, and the hub's certificate names
 the tailnet name (a new name reaches the running hub's certificate within a few seconds).
 
 Without `--serve`, `agora remote tailscale` only adds the names (for other machines of yours that dial the hub over the tailnet,
-for example `agora join myserver.tail1234.ts.net:7443`); the hub must then listen on the tailnet address (`--listen 0.0.0.0:7443`).
+for example `agora join myserver.tail1234.ts.net:7443`); the hub must then listen on the machine's tailnet address (`agora --listen 100.x.y.z:7443`, the address `tailscale ip -4` prints; not `0.0.0.0`, which also opens the server's public address), or stay on loopback and use `--serve`.
 
 **Turn it off:** `agora remote off` removes the names from the list (the certificate drops them the next time the hub starts) and
 removes the one serve rule Agora added. A rule you changed or added yourself, on that port or any other, is left exactly as it is.
@@ -99,7 +101,7 @@ own, so a browser warns until you trust it; check the fingerprint (`agora hub fi
 4. **Open `https://SERVER-ADDRESS:7444/`**, accept the certificate warning after checking the fingerprint, and sign in with
    `agora hub login`'s code and the screen password.
 
-A hub on a public address says so, again and again: `agora remote status` and `agora doctor` both print `The hub listens on a
+A hub that is not started on a public address with no password stays that way only as long as it runs: the check is made when the hub starts, so look at `agora doctor` after a network change. A hub on a public address says so, again and again: `agora remote status` and `agora doctor` both print `The hub listens on a
 public address. Only the screen password and the certificate ... protect it ... Tailscale is the safer way`, as long as it
 does. A hub cannot be started on a public address with no password, and `agora password clear` refuses while a way in from
 outside is on.

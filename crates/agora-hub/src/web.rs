@@ -297,22 +297,35 @@ pub enum First<S> {
     Answered,
 }
 
-/// Headers a proxy adds and a browser on the hub's own machine never sends.
-const FORWARDED: [&str; 7] = [
-    "x-forwarded-for",
-    "x-forwarded-host",
-    "x-forwarded-proto",
-    "x-real-ip",
+/// Header names (lower case) that a proxy adds and a browser on the hub's own machine never sends, as whole names and as prefixes.
+const FORWARDED_NAMES: [&str; 5] = [
     "forwarded",
-    "tailscale-user-login",
-    "cf-connecting-ip",
+    "via",
+    "x-real-ip",
+    "x-client-ip",
+    "true-client-ip",
+];
+const FORWARDED_PREFIXES: [&str; 7] = [
+    "x-forwarded-",
+    "x-original-forwarded-",
+    "x-envoy-",
+    "tailscale-",
+    "cf-",
+    "fastly-",
+    "x-real-",
 ];
 
+/// True when the request head has a header that only a proxy adds. Any value counts, an empty one and a repeated one too: the
+/// name is the evidence.
 fn forwarded(head: &str) -> bool {
     head.split("\r\n")
         .skip(1)
         .filter_map(|l| l.split_once(':'))
-        .any(|(k, _)| FORWARDED.iter().any(|f| k.trim().eq_ignore_ascii_case(f)))
+        .map(|(k, _)| k.trim().to_ascii_lowercase())
+        .any(|k| {
+            FORWARDED_NAMES.contains(&k.as_str())
+                || FORWARDED_PREFIXES.iter().any(|p| k.starts_with(p))
+        })
 }
 
 /// Reads the request head. A WebSocket upgrade is handed back untouched; other requests are answered here.
@@ -793,17 +806,59 @@ mod tests {
         crate::password::ScreenPassword::with_iterations(hub.store(), 1_000)
             .set("long enough")
             .unwrap();
+        // Every header name on its own (one iteration each, so a name dropped from the list fails here), in mixed case, with an
+        // empty value, and repeated; and one name per prefix.
+        for name in [
+            "X-Forwarded-For",
+            "X-Forwarded-Host",
+            "X-Forwarded-Proto",
+            "X-Forwarded-Port",
+            "X-Forwarded-Server",
+            "X-Forwarded-Scheme",
+            "X-Original-Forwarded-For",
+            "X-Real-IP",
+            "Forwarded",
+            "Via",
+            "X-Client-IP",
+            "True-Client-IP",
+            "Tailscale-User-Login",
+            "Tailscale-User-Name",
+            "CF-Connecting-IP",
+            "CF-Connecting-IPv6",
+            "CF-Ray",
+            "Fastly-Client-IP",
+            "X-Envoy-External-Address",
+            "x-forwarded-anything-new",
+            "cf-anything-new",
+            "tailscale-anything-new",
+            "fastly-anything-new",
+            "x-envoy-anything-new",
+            "x-original-forwarded-anything",
+        ] {
+            for header in [
+                format!("{name}: 203.0.113.9"),
+                format!("{}: ", name.to_ascii_lowercase()),
+                format!("{name}: a\r\n{name}: b"),
+            ] {
+                let info = format!("GET /api/session HTTP/1.1\r\nHost: h\r\n{header}\r\n\r\n");
+                let (out, _) = ask(&api, "127.0.0.1", info).await;
+                assert!(
+                    out.contains(r#""passwordRequired":true"#),
+                    "{header:?}: {out}"
+                );
+            }
+        }
+        // Names that only look alike are not proxy headers: a browser on this machine still is the owner.
         for header in [
-            "X-Forwarded-For: 203.0.113.9",
-            "x-real-ip: 203.0.113.9",
-            "Forwarded: for=203.0.113.9",
-            "Tailscale-User-Login: someone@example.com",
-            "X-Forwarded-Proto: https",
+            "Accept: */*",
+            "X-Requested-With: x",
+            "Cache-Control: no-cache",
+            "Referer: http://localhost/",
         ] {
             let info = format!("GET /api/session HTTP/1.1\r\nHost: h\r\n{header}\r\n\r\n");
             let (out, _) = ask(&api, "127.0.0.1", info).await;
             assert!(
-                out.contains(r#""passwordRequired":true"#),
+                out.contains(r#""passwordRequired":false"#),
                 "{header}: {out}"
             );
         }

@@ -23,7 +23,7 @@ use agora_i18n::{key, Arg};
 use agora_node::doctor::{Check, Status};
 use agora_platform::InterfaceAddr;
 
-use crate::hubcli::{hub_dir, own_hub_addr, DEFAULT_LISTEN, LISTEN_FILE};
+use crate::hubcli::{hub_dir, own_hub_addr, LISTEN_FILE};
 use crate::tailscale::{self, Problem};
 use crate::{Opts, Say};
 
@@ -110,7 +110,11 @@ pub(crate) fn exposure_of(listen: IpAddr, interfaces: &[InterfaceAddr]) -> Expos
 /// [`exposure_of`] with this machine's interfaces. When the system will not list them, a wildcard is taken to be public: the check
 /// that matters (the screen password) must not pass for a reason it could not look at.
 pub(crate) fn exposure(listen: IpAddr) -> Exposure {
-    match agora_platform::interface_addresses() {
+    exposure_with(listen, agora_platform::interface_addresses())
+}
+
+fn exposure_with(listen: IpAddr, interfaces: std::io::Result<Vec<InterfaceAddr>>) -> Exposure {
+    match interfaces {
         Ok(v) => exposure_of(listen, &v),
         Err(_) if listen.is_unspecified() => Exposure {
             loopback: true,
@@ -121,13 +125,29 @@ pub(crate) fn exposure(listen: IpAddr) -> Exposure {
     }
 }
 
-/// The certificate names in the names file: checked again here, at most [`MAX_SAVED_NAMES`], no name twice. A line that is not a plain
-/// name is skipped, so a damaged or hand-edited file never stops the hub or reaches a certificate.
+/// The most bytes read from the names file (four names fit many times over).
+const MAX_NAMES_FILE: u64 = 4096;
+
+/// The certificate names in the names file: a regular file only (not a link to a device or a pipe), read up to [`MAX_NAMES_FILE`]
+/// bytes, every line checked again as a tailnet name or address, at most [`MAX_SAVED_NAMES`], no name twice. A line that does not
+/// pass is skipped, so a damaged or hand-edited file never stops the hub or reaches a certificate.
 pub(crate) fn saved_names(dir: &Path) -> Vec<String> {
-    let text = std::fs::read_to_string(dir.join(NAMES_FILE)).unwrap_or_default();
+    use std::io::Read;
+    let path = dir.join(NAMES_FILE);
+    let regular = std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_file());
+    if !regular {
+        return Vec::new();
+    }
+    let mut text = Vec::new();
+    let read =
+        std::fs::File::open(&path).and_then(|f| f.take(MAX_NAMES_FILE).read_to_end(&mut text));
+    if read.is_err() {
+        return Vec::new();
+    }
+    let text = String::from_utf8_lossy(&text);
     let mut out: Vec<String> = Vec::new();
     for line in text.lines().take(64) {
-        if let Some(n) = checked_name(line.trim()) {
+        if let Some(n) = tailscale::saved_name(line) {
             if !out.contains(&n) && out.len() < MAX_SAVED_NAMES {
                 out.push(n);
             }
@@ -273,6 +293,22 @@ fn tailscale_on(say: &Say, o: &Opts, dir: &Path) -> ExitCode {
     if !password_set(dir) {
         return password_required(say);
     }
+    // The rule must point at the port the hub really bound, never at a guess.
+    let local = if o.serve {
+        match own_hub_addr(dir) {
+            Some(a) => a,
+            None => {
+                return refuse(
+                    say,
+                    "remote.hub_not_running",
+                    key!("remote-hub_not_running"),
+                    &[("dir", dir.display().to_string().into())],
+                )
+            }
+        }
+    } else {
+        String::new()
+    };
     let net = match tailscale::status() {
         Ok(n) => n,
         Err(p) => return problem_refusal(say, p),
@@ -284,14 +320,16 @@ fn tailscale_on(say: &Say, o: &Opts, dir: &Path) -> ExitCode {
     // The serve rule is checked before anything is written: a port that is someone else's is left alone.
     let serve = if o.serve {
         let port = o.port.unwrap_or(DEFAULT_SERVE_PORT);
-        let local = own_hub_addr(dir).unwrap_or_else(|| DEFAULT_LISTEN.to_string());
         let target = format!("https+insecure://{local}");
         let state = match tailscale::serve_port(port) {
             Ok(s) => s,
             Err(p) => return problem_refusal(say, p),
         };
-        let ours = read_serve(dir).is_some_and(|r| r.port == port && r.target == target);
-        if state.used && !(ours && state.only_proxy.as_deref() == Some(target.as_str())) {
+        // Agora's own rule (recorded, and still exactly as recorded) is updated, also when the hub has moved to another port since.
+        let ours = read_serve(dir).is_some_and(|r| {
+            r.port == port && state.only_proxy.as_deref() == Some(r.target.as_str())
+        });
+        if state.used && !ours {
             return refuse(
                 say,
                 "remote.serve_port_in_use",
@@ -346,6 +384,8 @@ fn tailscale_on(say: &Say, o: &Opts, dir: &Path) -> ExitCode {
 
 /// What Agora knows about how this hub is reached.
 struct Reach {
+    /// Tailscale Funnel is on for something of this machine (asked only when Agora has a tailnet record).
+    funnel: bool,
     listen: Option<SocketAddr>,
     exposure: Exposure,
     names: Vec<String>,
@@ -356,11 +396,15 @@ struct Reach {
 impl Reach {
     fn read(dir: &Path) -> Self {
         let listen = listening(dir);
+        let (names, serve) = (saved_names(dir), read_serve(dir));
+        let funnel =
+            (serve.is_some() || !names.is_empty()) && tailscale::funnel_on().unwrap_or(false);
         Reach {
+            funnel,
             listen,
             exposure: listen.map(|l| exposure(l.ip())).unwrap_or_default(),
-            names: saved_names(dir),
-            serve: read_serve(dir),
+            names,
+            serve,
             password: password_set(dir),
         }
     }
@@ -369,9 +413,20 @@ impl Reach {
         self.exposure.tailnet || self.serve.is_some() || !self.names.is_empty()
     }
 
-    /// A path from outside this machine's own network is on.
+    /// A path from outside this machine's own network is on (the hub listens on a tailnet or public address, or Agora set one up).
     fn remote(&self) -> bool {
-        self.tailnet() || self.exposure.public
+        self.tailnet() || self.public()
+    }
+
+    /// Open to the whole internet: a public listen address, or Tailscale Funnel.
+    fn public(&self) -> bool {
+        self.exposure.public || self.funnel
+    }
+
+    /// A way in that Agora or the owner turned on on purpose: a recorded name or serve rule, or a hub bound to a public address. A hub
+    /// that only happens to listen on every address of a machine that has a tailnet interface is a warning, not one of these.
+    fn explicit(&self) -> bool {
+        self.serve.is_some() || !self.names.is_empty() || self.public()
     }
 }
 
@@ -402,10 +457,14 @@ fn status(say: &Say, dir: &Path) -> ExitCode {
             &[("url", url(&s.name, s.port).into())],
         );
     }
-    say.out(
-        key!("remote-status-public"),
-        &[("on", on(r.exposure.public))],
-    );
+    if r.funnel {
+        say.out(key!("remote-status-public-funnel"), &[]);
+    } else {
+        say.out(
+            key!("remote-status-public"),
+            &[("on", on(r.exposure.public))],
+        );
+    }
     say.out(
         if r.password {
             key!("remote-status-password-set")
@@ -417,7 +476,7 @@ fn status(say: &Say, dir: &Path) -> ExitCode {
     if r.remote() && !r.password {
         say.err(key!("remote-status-no-password"), &[]);
     }
-    if r.exposure.public {
+    if r.public() {
         say.out(key!("remote-public-warning"), &[]);
     }
     ExitCode::SUCCESS
@@ -494,8 +553,7 @@ pub(crate) fn checks(o: &Opts) -> Vec<Check> {
     };
     if r.remote() {
         // A remote path without the password is never fine; a hub that only happens to listen on a tailnet address is a warning.
-        let explicit = r.serve.is_some() || r.exposure.public || !r.names.is_empty();
-        out.push(match (r.password, explicit) {
+        out.push(match (r.password, r.explicit()) {
             (true, _) => check("remote-password-set", Status::Ok, vec![]),
             (false, true) => check("remote-password-missing", Status::Fail, vec![]),
             (false, false) => check("remote-password-missing-tailnet", Status::Warn, vec![]),
@@ -503,6 +561,9 @@ pub(crate) fn checks(o: &Opts) -> Vec<Check> {
     }
     if r.exposure.public {
         out.push(check("remote-public-listen", Status::Warn, vec![]));
+    }
+    if r.funnel {
+        out.push(check("remote-funnel", Status::Warn, vec![]));
     }
     if r.serve.is_some() || !r.names.is_empty() {
         match tailscale::status() {
@@ -539,14 +600,28 @@ pub(crate) fn checks(o: &Opts) -> Vec<Check> {
     out
 }
 
-/// `agora password clear` while a path from outside is on: the password is what protects it, so it stays until that path is off.
+/// `agora password clear` while a way in that was turned on on purpose is on: the password is what protects it, so it stays until that
+/// is off. A hub that merely listens on every address of a machine that has a tailnet interface is warned about (`status`, `doctor`)
+/// and does not stop the owner from clearing: nothing Agora set up depends on the password there.
 pub(crate) fn clear_refused(say: &Say, dir: &Path) -> Option<ExitCode> {
     let r = Reach::read(dir);
-    r.remote().then(|| {
+    if !r.explicit() {
+        return None;
+    }
+    // Which way out depends on the cause: Agora's own records are undone by `remote off`; a listen address only by restarting the hub.
+    let recorded = r.serve.is_some() || !r.names.is_empty();
+    Some(if recorded {
         refuse(
             say,
             "remote.password_in_use",
             key!("remote-password_in_use"),
+            &[],
+        )
+    } else {
+        refuse(
+            say,
+            "remote.password_in_use",
+            key!("remote-password_in_use_listen"),
             &[],
         )
     })
@@ -625,21 +700,53 @@ mod tests {
     }
 
     #[test]
+    fn a_machine_that_will_not_list_its_interfaces_is_taken_to_be_public_for_a_wildcard() {
+        let refused = || Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+        for wildcard in ["0.0.0.0", "::"] {
+            let e = exposure_with(ip(wildcard), refused());
+            assert!(e.public, "{wildcard}: fails closed");
+        }
+        // A specific address needs no listing: it is what it is.
+        let e = exposure_with(ip("127.0.0.1"), refused());
+        assert_eq!((e.loopback, e.public), (true, false));
+        let e = exposure_with(ip("192.168.1.5"), refused());
+        assert_eq!((e.lan, e.public), (true, false));
+        assert!(exposure_with(ip("203.0.113.7"), refused()).public);
+    }
+
+    #[test]
     fn the_names_file_gives_only_plain_names() {
         let d = std::env::temp_dir().join(format!("agora-remote-names-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         std::fs::write(
             d.join(NAMES_FILE),
-            "Box.tail1.ts.net\n*.ts.net\nbo\u{202e}x.ts.net\n100.64.0.7\nbox.tail1.ts.net\n\nfd7a:115c:a1e0::7\na.b\nc.d\ne.f\n",
+            "Box.tail1.ts.net\n*.ts.net\nbo\u{202e}x.ts.net\n100.64.0.7\nbox.tail1.ts.net\n\nfd7a:115c:a1e0::7\na.ts.net..\nexample.com\n8.8.8.8\nc.tail1.ts.net\ne.tail1.ts.net\n",
         )
         .unwrap();
         assert_eq!(
             saved_names(&d),
-            ["box.tail1.ts.net", "100.64.0.7", "fd7a:115c:a1e0::7", "a.b"]
+            [
+                "box.tail1.ts.net",
+                "100.64.0.7",
+                "fd7a:115c:a1e0::7",
+                "c.tail1.ts.net"
+            ]
         );
         std::fs::write(d.join(NAMES_FILE), [0xff, 0xfe, 0x00]).unwrap();
         assert!(saved_names(&d).is_empty());
+        // Only the first 4 KiB is read: a name after a huge first line is never seen, and the file is never read whole.
+        let big = format!("{}\nbox.tail1.ts.net\n", "a".repeat(10_000));
+        std::fs::write(d.join(NAMES_FILE), big).unwrap();
+        assert!(saved_names(&d).is_empty());
+        // A link (here to a folder, elsewhere to a device or a pipe) is not a names file.
+        #[cfg(unix)]
+        {
+            let _ = std::fs::remove_file(d.join(NAMES_FILE));
+            std::fs::write(d.join("real"), "box.tail1.ts.net\n").unwrap();
+            std::os::unix::fs::symlink(d.join("real"), d.join(NAMES_FILE)).unwrap();
+            assert!(saved_names(&d).is_empty());
+        }
     }
 
     #[test]

@@ -335,7 +335,7 @@ fn start_leaf(
     // The names `agora remote tailscale` added (ADR-0067 rung 3) are in the first certificate, and are read again at every issue.
     let mut all_names = names.to_vec();
     for n in crate::remotecmd::saved_names(dir) {
-        if !all_names.contains(&n) {
+        if !all_names.contains(&n) && all_names.len() < agora_hub::names::MAX_NAMES {
             all_names.push(n);
         }
     }

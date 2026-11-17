@@ -63,7 +63,7 @@ fn canonical(n: &str) -> Option<String> {
 /// `-`; no wildcard, no empty label, no space, control or direction-changing character (the check is on the bytes, so non-ASCII text
 /// never passes). An IP address is accepted in its shortest form.
 pub fn checked_name(n: &str) -> Option<String> {
-    let n = n.trim_end_matches('.');
+    let n = n.strip_suffix('.').unwrap_or(n);
     if n.is_empty() || n.len() > MAX_NAME_BYTES || !n.is_ascii() {
         return None;
     }

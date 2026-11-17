@@ -174,8 +174,10 @@ fn wanted(
 impl Provision for Leaf {
     fn provision(&self) -> Result<[u8; 32], NamesFailure> {
         let mut configured = self.configured.clone();
+        // Names added by the owner's tools never take the leaf past its limit (the owner's own `--name` values must always fit, and a
+        // refusal here would stop every `pair open`): the ones that do not fit are left out, and `agora doctor` says so.
         for n in self.extra.iter().flat_map(|f| f()) {
-            if !configured.contains(&n) {
+            if !configured.contains(&n) && configured.len() < crate::names::MAX_NAMES {
                 configured.push(n);
             }
         }
@@ -256,5 +258,26 @@ mod tests {
             second,
             "a removed name changes nothing"
         );
+    }
+
+    /// A leaf with as many owner names as it can carry still issues: names added later are left out, never an error.
+    #[test]
+    fn added_names_that_do_not_fit_are_left_out_and_never_stop_provision() {
+        let ca = Ca::generate("test ca").unwrap();
+        let owner: Vec<String> = (0..crate::names::MAX_NAMES)
+            .map(|i| format!("h{i}.example"))
+            .collect();
+        let (leaf, _) = Leaf::start(
+            ca,
+            owner.clone(),
+            "127.0.0.1".parse().unwrap(),
+            Box::new(|| None),
+            Box::new(|| Ok(vec![])),
+            None,
+        )
+        .unwrap();
+        let leaf = leaf.with_extra(Box::new(|| vec!["box.tail1.ts.net".to_string()]));
+        assert!(leaf.provision().is_ok());
+        assert_eq!(leaf.names(), owner);
     }
 }

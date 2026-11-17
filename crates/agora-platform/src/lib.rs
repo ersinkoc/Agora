@@ -1286,6 +1286,27 @@ pub fn no_console_window(cmd: &mut std::process::Command) -> &mut std::process::
     cmd
 }
 
+/// Makes `cmd` start as the leader of a process group of its own (Unix), so [`kill_process_tree`] ends it and everything it started.
+/// Windows: nothing changes.
+pub fn own_process_group(cmd: &mut std::process::Command) -> &mut std::process::Command {
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(cmd, 0);
+    cmd
+}
+
+/// Ends a child started with [`own_process_group`] and, on Unix, every process left in its group (a helper program's own
+/// background children), so none of them keeps a pipe of this process open. Also reaps the child.
+pub fn kill_process_tree(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    if let Ok(pid) = i32::try_from(child.id()) {
+        // SAFETY: a signal to the process group that `own_process_group` made for this child, whose id is `pid`; a group that is
+        // already gone answers an error that is ignored.
+        unsafe { libc::killpg(pid, libc::SIGKILL) };
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 /// Starts `cmd` detached from this process, its terminal and its session (ADR-0062): it survives the terminal closing, the SSH session
 /// ending and this process being killed. Standard input is empty; standard output and error are appended to `log` (created readable by
 /// the user only). Unix: a new session (`setsid`), so no terminal hangup or Ctrl-C reaches it; Windows: `DETACHED_PROCESS` and

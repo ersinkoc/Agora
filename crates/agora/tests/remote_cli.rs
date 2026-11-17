@@ -40,7 +40,9 @@ serve_json() {
   for f in "$D"/rules/*; do [ -e "$f" ] || continue; first_=$first; first=0
     [ "$first_" = 1 ] || printf ','
     printf '"box.tail1234.ts.net:%s":{"Handlers":{"/":{"Proxy":"%s"}}}' "$(basename "$f")" "$(cat "$f")"; done
-  printf '}}\n'
+  printf '}'
+  if [ -e "$D/funnel" ]; then printf ',"AllowFunnel":{"box.tail1234.ts.net:8443":true}'; fi
+  printf '}\n'
 }
 case "$1" in
   status)
@@ -66,6 +68,8 @@ impl Env {
         std::fs::create_dir_all(fake.join("rules")).unwrap();
         std::fs::create_dir_all(fake.join("bin")).unwrap();
         std::fs::write(fake.join("status.json"), GOOD).unwrap();
+        // A running hub on loopback (the file the hub writes at start).
+        std::fs::write(hub.join("listen"), "127.0.0.1:7443").unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -403,6 +407,7 @@ fn remote_off_without_tailscale_keeps_the_record_and_says_so() {
 #[test]
 fn status_says_what_is_reachable_how_and_whether_a_password_is_set() {
     let e = Env::new("status");
+    std::fs::remove_file(e.hub.join("listen")).unwrap();
     let (code, out) = e.run(&["remote", "status"]);
     assert_eq!(code, 0, "{out}");
     assert!(out.contains("No running hub"), "{out}");
@@ -468,6 +473,95 @@ fn the_password_is_not_cleared_while_a_way_in_is_on() {
     let (code, out) = e.run(&["password", "clear"]);
     assert_eq!(code, 0, "{out}");
     assert!(!e.password_is_set());
+}
+
+#[test]
+fn a_hub_address_that_is_not_known_is_never_guessed() {
+    let e = Env::new("nolisten");
+    e.set_password();
+    std::fs::remove_file(e.hub.join("listen")).unwrap();
+    let (code, out) = e.run(&["remote", "tailscale", "--serve"]);
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("remote.hub_not_running"), "{out}");
+    nothing_written(&e);
+    assert_eq!(e.calls(), "");
+}
+
+#[cfg(unix)]
+#[test]
+fn agoras_own_rule_is_updated_when_the_hub_moved_and_another_ones_is_not() {
+    let e = Env::new("moved");
+    e.set_password();
+    assert_eq!(e.run(&["remote", "tailscale", "--serve"]).0, 0);
+    // The hub moved to another port (a restart on a new one).
+    std::fs::write(e.hub.join("listen"), "127.0.0.1:7555").unwrap();
+    let (code, out) = e.run(&["remote", "tailscale", "--serve"]);
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(
+        std::fs::read_to_string(e.fake.join("rules").join("8443")).unwrap(),
+        "https+insecure://127.0.0.1:7555"
+    );
+    let record = std::fs::read_to_string(e.hub.join("remote-serve")).unwrap();
+    assert!(record.contains("7555"), "{record}");
+}
+
+#[cfg(unix)]
+#[test]
+fn funnel_is_called_by_its_name_and_counts_as_public() {
+    let e = Env::new("funnel");
+    e.set_password();
+    assert_eq!(e.run(&["remote", "tailscale", "--serve"]).0, 0);
+    let (_, out) = e.run(&["remote", "status"]);
+    assert!(out.contains("Public internet: not reachable"), "{out}");
+    std::fs::write(e.fake.join("funnel"), "").unwrap();
+    let (_, out) = e.run(&["remote", "status"]);
+    assert!(
+        out.contains("Public internet: reachable through Tailscale Funnel"),
+        "{out}"
+    );
+    assert!(out.contains("listens on a public address"), "{out}");
+    let (_, out) = e.run(&["doctor"]);
+    assert!(out.contains("Tailscale Funnel is on"), "{out}");
+    let (code, out) = e.run(&["password", "clear"]);
+    assert_eq!(code, 1, "{out}");
+}
+
+#[test]
+fn the_password_stays_only_for_a_way_in_that_was_turned_on_and_says_the_real_way_out() {
+    // A tailnet or wildcard listen alone is warned about, not a reason to refuse: nothing Agora set up depends on the password.
+    let e = Env::new("clearbranches");
+    e.set_password();
+    std::fs::write(e.hub.join("listen"), "100.64.0.9:7443").unwrap();
+    let (_, out) = e.run(&["remote", "status"]);
+    assert!(out.contains("Tailscale: reachable"), "{out}");
+    let (code, out) = e.run(&["password", "clear"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(!e.password_is_set());
+    // `remote status` and doctor still warn about it.
+    let (_, out) = e.run(&["remote", "status"]);
+    assert!(out.contains("no screen password is set"), "{out}");
+    let (_, out) = e.run(&["doctor"]);
+    assert!(
+        out.contains("can be reached over Tailscale and no screen password is set"),
+        "{out}"
+    );
+    // A public listen: refused, and the way out is the hub's address, not `remote off`.
+    e.set_password();
+    std::fs::write(e.hub.join("listen"), "203.0.113.7:7443").unwrap();
+    let (code, out) = e.run(&["password", "clear"]);
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("Restart the hub on a local address"), "{out}");
+    assert!(!out.contains("agora remote off"), "{out}");
+    assert!(e.password_is_set());
+    // A recorded name: refused, and `remote off` is the way out (and it works).
+    std::fs::write(e.hub.join("listen"), "127.0.0.1:7443").unwrap();
+    std::fs::write(e.hub.join("remote-names"), "box.tail1234.ts.net\n").unwrap();
+    let (code, out) = e.run(&["password", "clear"]);
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("agora remote off"), "{out}");
+    let (code, _) = e.run(&["remote", "off"]);
+    assert_eq!(code, 0);
+    assert_eq!(e.run(&["password", "clear"]).0, 0);
 }
 
 #[test]

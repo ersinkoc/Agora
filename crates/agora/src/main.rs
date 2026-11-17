@@ -499,6 +499,7 @@ fn doctor(say: &Say, o: &Opts) -> ExitCode {
                 key!("doctor-remote-password-missing-tailnet")
             }
             ("remote-public-listen", _) => key!("doctor-remote-public-listen"),
+            ("remote-funnel", _) => key!("doctor-remote-funnel"),
             ("remote-tailnet", _) => key!("doctor-remote-tailnet"),
             ("remote-tailnet-unreachable", _) => key!("doctor-remote-tailnet-unreachable"),
             ("remote-names-missing", _) => key!("doctor-remote-names-missing"),
