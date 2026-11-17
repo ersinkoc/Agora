@@ -132,9 +132,12 @@ pub(crate) struct Ruleset(std::os::fd::OwnedFd);
 
 /// `folder`: the folder a start holds (F1012). Entries at or below its path are opened through the held folder, never by the path, so
 /// they name the folder the process starts in even when the path led elsewhere for a moment while the rules were made (F1022).
+/// `spelled`: the caller's own spelling of that folder's path (the start's `cwd`), when it named the folder through a link (an alias
+/// the hold resolved): entries at or below that spelling are the held folder's too (Codex review of F1022).
 pub(crate) fn ruleset(
     sb: &crate::Sandbox,
     folder: Option<&crate::HeldFolder>,
+    spelled: Option<&std::path::Path>,
 ) -> io::Result<Ruleset> {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     let abi = abi_version();
@@ -179,7 +182,13 @@ pub(crate) fn ruleset(
     let set = unsafe { OwnedFd::from_raw_fd(fd as i32) };
     for (paths, rights) in [(&sb.read, READ_FS), (&sb.write, all)] {
         for p in paths {
-            let below = folder.and_then(|h| Some((h, p.strip_prefix(&h.path).ok()?)));
+            let below = folder.and_then(|h| {
+                let rel = [Some(h.path.as_path()), spelled]
+                    .into_iter()
+                    .flatten()
+                    .find_map(|at| p.strip_prefix(at).ok())?;
+                Some((h, rel))
+            });
             let opened = match below {
                 Some((held, rel)) => open_below(held, rel),
                 None => std::fs::File::open(p),
@@ -215,7 +224,8 @@ pub(crate) fn ruleset(
     Ok(Ruleset(set))
 }
 
-/// F1022: `rel` (empty: the folder itself) opened from the held folder's handle, as `File::open` opens a path.
+/// F1022: `rel` (empty: the folder itself) opened from the held folder's handle, as a place only (`O_PATH`, which Landlock takes and
+/// which needs no read permission on it).
 fn open_below(held: &crate::HeldFolder, rel: &std::path::Path) -> io::Result<std::fs::File> {
     use std::os::fd::{AsRawFd, FromRawFd};
     use std::os::unix::ffi::OsStrExt;
@@ -229,7 +239,7 @@ fn open_below(held: &crate::HeldFolder, rel: &std::path::Path) -> io::Result<std
         libc::openat(
             held.dir.as_raw_fd(),
             name.as_ptr(),
-            libc::O_RDONLY | libc::O_CLOEXEC,
+            libc::O_PATH | libc::O_CLOEXEC,
         )
     };
     if fd < 0 {
@@ -237,6 +247,17 @@ fn open_below(held: &crate::HeldFolder, rel: &std::path::Path) -> io::Result<std
     }
     // SAFETY: the kernel returned a fresh descriptor that nothing else owns.
     Ok(unsafe { std::fs::File::from_raw_fd(fd) })
+}
+
+/// See [`crate::HeldFolder::open`]: the folder opened as a place only (`O_PATH|O_DIRECTORY`). That needs search permission on the
+/// folders above it and none on the folder itself, so a folder the user may enter but not list can be held too (Codex review of
+/// F1021); everything a held folder is used for works on it: `fchdir`, `/proc/self/fd`, `openat` below it, and Landlock rules.
+pub(crate) fn open_held_dir(path: &std::path::Path) -> io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_PATH | libc::O_DIRECTORY)
+        .open(path)
 }
 
 impl Ruleset {
@@ -1644,13 +1665,17 @@ mod held_folder_rule_tests {
             .iter()
             .map(PathBuf::from)
             .collect();
+        // Codex review: the folder named through a link to `base` (the spelling a start was given; the hold resolved it).
+        let alias = base.join("alias");
+        std::os::unix::fs::symlink(&base, &alias).unwrap();
+        let spelled = alias.join("own/x");
         // Whether a confined `sh` may write `file`: one process per file, so nothing it did before decides.
         let writes = |write: &Path, file: &Path| {
             let held = crate::HeldFolder::open(&own).unwrap();
             std::fs::rename(&own, own.with_file_name("x.old")).unwrap();
             std::os::unix::fs::symlink(&other, &own).unwrap();
             let sb = crate::Sandbox::new(system.clone(), vec![write.to_path_buf()]);
-            let rules = super::ruleset(&sb, Some(&held)).unwrap();
+            let rules = super::ruleset(&sb, Some(&held), Some(&spelled)).unwrap();
             std::fs::remove_file(&own).unwrap();
             std::fs::rename(own.with_file_name("x.old"), &own).unwrap();
             let mut cmd = std::process::Command::new("/bin/sh");
@@ -1661,10 +1686,46 @@ mod held_folder_rule_tests {
             let _ = std::fs::remove_file(file);
             ok
         };
-        for write in [own.clone(), own.join("sub")] {
+        for write in [
+            own.clone(),
+            own.join("sub"),
+            spelled.clone(),
+            spelled.join("sub"),
+        ] {
             assert!(writes(&write, &own.join("sub/f")), "{write:?}");
             assert!(!writes(&write, &other.join("sub/f")), "{write:?}");
         }
         let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// Codex review of F1021: a folder the user may enter but not list (search permission only) can be held, is in place, and a
+    /// process started in it runs there.
+    #[test]
+    fn a_folder_that_can_be_entered_but_not_listed_can_be_held_and_started_in() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = std::env::temp_dir().join(format!("agora-held-search-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("x")).unwrap();
+        let base = std::fs::canonicalize(&base).unwrap();
+        let (dir, out) = (base.join("x"), base.join("out"));
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o300)).unwrap();
+        let held = crate::HeldFolder::open(&dir);
+        let mut ran = String::new();
+        if let Ok(held) = &held {
+            assert!(held.in_place());
+            let mut cfg = crate::PtyConfig::new(vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                format!("pwd -P > '{}'", out.display()),
+            ]);
+            cfg.cwd = Some(dir.clone());
+            let mut pty = crate::spawn_in(&cfg, held).unwrap();
+            let _ = pty.wait();
+            ran = std::fs::read_to_string(&out).unwrap_or_default();
+        }
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let _ = std::fs::remove_dir_all(&base);
+        assert!(held.is_ok(), "{held:?}");
+        assert_eq!(ran.trim(), dir.to_str().unwrap());
     }
 }

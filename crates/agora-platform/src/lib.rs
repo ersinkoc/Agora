@@ -472,7 +472,10 @@ impl HeldFolder {
     /// refused ([`folder_moved`]), never followed. On Windows the folder is held without delete sharing, so it can be neither renamed
     /// nor removed while it is held.
     pub fn open(path: &std::path::Path) -> io::Result<Self> {
-        #[cfg(unix)]
+        // Linux: held as a place only, so a folder the user may enter but not list can be held (and started in) too.
+        #[cfg(target_os = "linux")]
+        let dir = linux::open_held_dir(path)?;
+        #[cfg(all(unix, not(target_os = "linux")))]
         let dir = unix::open_dir(path)?;
         #[cfg(windows)]
         let dir = windows::open_dir_held(path)?;
@@ -1086,7 +1089,7 @@ pub fn confine_command(cmd: &mut std::process::Command, sandbox: &Sandbox) -> io
     #[cfg(target_os = "linux")]
     {
         use std::os::unix::process::CommandExt;
-        let ruleset = linux::ruleset(sandbox, None)?;
+        let ruleset = linux::ruleset(sandbox, None, None)?;
         // SAFETY: the closure only applies a ruleset made before the fork (async-signal-safe calls).
         unsafe { cmd.pre_exec(move || ruleset.enforce()) };
         Ok(())
@@ -2275,10 +2278,11 @@ pub fn spawn(config: &PtyConfig) -> io::Result<Box<dyn Pty>> {
     spawn_checked(config, None)
 }
 
-/// [`spawn`] in the folder `folder` holds; `config.cwd` is not used. Refused ([`folder_moved`]) when, with everything else made for
-/// the start (the confinement too), the path no longer names that folder. Unix: the process is moved into the held folder itself
-/// (`fchdir` on the open handle) before it runs, so a swap even after that last check is not followed. Windows: it is started by the
-/// path, which the handle keeps from being renamed or removed.
+/// [`spawn`] in the folder `folder` holds; `config.cwd` is not where it starts: when given it is the caller's spelling of that folder's
+/// path (it may name it through a link), and on Linux confinement entries at or below either spelling are made from the held folder.
+/// Refused ([`folder_moved`]) when, with everything else made for the start (the confinement too), the path no longer names that
+/// folder. Unix: the process is moved into the held folder itself (`fchdir` on the open handle) before it runs, so a swap even after
+/// that last check is not followed. Windows: it is started by the path, which the handle keeps from being renamed or removed.
 pub fn spawn_in(config: &PtyConfig, folder: &HeldFolder) -> io::Result<Box<dyn Pty>> {
     spawn_checked(config, Some(folder))
 }

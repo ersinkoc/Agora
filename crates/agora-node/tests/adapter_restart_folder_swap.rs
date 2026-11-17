@@ -91,6 +91,7 @@ fn next_report(c: &Case, seen: &mut Vec<String>) -> Option<(String, String)> {
 
 struct Run {
     sup: Supervisor,
+    id: agora_core::AgentId,
     seen: Vec<String>,
     pid: String,
     later: Instant,
@@ -100,7 +101,8 @@ impl Run {
     fn start(c: &Case) -> Run {
         let script = format!(
             "pwd -P > {r}/run-$$.tmp && mv {r}/run-$$.tmp {r}/run-$$; \
-             if [ -e {b}/swap-now ]; then rm {b}/swap-now; mv {o} {o}.old && ln -s {t} {o}; fi; exec {f} --adapter",
+             if [ -e {b}/swap-now ]; then rm {b}/swap-now; mv {o} {o}.old && ln -s {t} {o}; fi; \
+             if [ -e {b}/linger ]; then rm {b}/linger; sleep 120 & echo $! > {b}/lingering; fi; exec {f} --adapter",
             r = c.reports.display(),
             b = c.base.display(),
             o = c.own.display(),
@@ -125,19 +127,21 @@ impl Run {
             name: "a".into(),
             base: None,
         };
-        sup.start_selected(
-            &req,
-            ProjectId::directory("node-1", &c.own.to_string_lossy()),
-            Path::new(""),
-            false,
-            Instant::now(),
-        )
-        .expect("first start");
+        let id = sup
+            .start_selected(
+                &req,
+                ProjectId::directory("node-1", &c.own.to_string_lossy()),
+                Path::new(""),
+                false,
+                Instant::now(),
+            )
+            .expect("first start");
         let mut seen = Vec::new();
         let (pid, at) = next_report(c, &mut seen).expect("first report");
         assert_eq!(at, c.own.display().to_string(), "the first start");
         Run {
             sup,
+            id,
             seen,
             pid,
             later: Instant::now(),
@@ -245,4 +249,86 @@ fn an_adapter_restart_starts_in_the_folder_its_start_held_or_not_at_all() {
     );
     drop(r);
     let _ = std::fs::remove_dir_all(&c.base);
+
+    // Codex review: the same, with a process below the adapter that keeps its output open. The refused adapter is ended with
+    // everything below it, and the supervisor does not wait for that process (the restart returns at once).
+    let c = case("adapter-restart-folder-swap", "lingering");
+    let mut r = Run::start(&c);
+    std::fs::write(c.base.join("swap-now"), "").unwrap();
+    std::fs::write(c.base.join("linger"), "").unwrap();
+    let begun = Instant::now();
+    let (ran, ev) = r.crash_and_restart(&c);
+    let took = begun.elapsed();
+    assert!(ran.is_none() && !started(&ev), "{ev:?}");
+    assert!(
+        took < Duration::from_secs(60),
+        "the refused restart waited for the process below the adapter: {took:?}"
+    );
+    let lingering = std::fs::read_to_string(c.base.join("lingering")).unwrap();
+    let end = Instant::now() + Duration::from_secs(20);
+    while Command::new("kill")
+        .args(["-0", lingering.trim()])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap()
+        .success()
+    {
+        assert!(
+            Instant::now() < end,
+            "the process below the refused adapter still runs"
+        );
+        std::thread::yield_now();
+    }
+    drop(r);
+    let _ = std::fs::remove_dir_all(&c.base);
+}
+
+/// Codex review: an adapter agent's resume holds its selected folder and checks it right before the adapter is started, so a folder
+/// swapped for a link after the hold (here by the mesh hook, which runs between the hold and the start) is never started in. The
+/// control: the same resume with no swap runs in the folder.
+#[test]
+fn an_adapter_resume_starts_in_the_folder_its_start_held_or_not_at_all() {
+    let probe = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!(
+        "adapter-resume-folder-swap-link-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&probe);
+    let links = agora_platform::symlink(Path::new("."), &probe).is_ok();
+    let _ = std::fs::remove_file(&probe);
+    if !(links && Path::new("/bin/sh").exists()) {
+        return;
+    }
+    for swap in [false, true] {
+        let c = case(
+            "adapter-resume-folder-swap",
+            if swap { "swap" } else { "control" },
+        );
+        let mut r = Run::start(&c);
+        r.sup.stop(&r.id).expect("stop");
+        if swap {
+            let (own, other) = (c.own.clone(), c.other.clone());
+            r.sup.set_launch_hook(Box::new(move |_| {
+                std::fs::rename(&own, own.with_file_name("x.old")).unwrap();
+                agora_platform::symlink(&other, &own).unwrap();
+                None
+            }));
+        }
+        let resumed = r.sup.resume(&r.id, Instant::now());
+        if swap {
+            assert!(resumed.is_err(), "{resumed:?}");
+            // Nothing ran: no report at all (the adapter reports where it runs as its first act).
+            let any = std::fs::read_dir(&c.reports)
+                .unwrap()
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .find(|n| !r.seen.contains(n));
+            assert!(any.is_none(), "an adapter ran: {any:?}");
+        } else {
+            resumed.expect("resume");
+            let (_, at) = next_report(&c, &mut r.seen).expect("resumed report");
+            assert_eq!(at, c.own.display().to_string());
+        }
+        drop(r);
+        let _ = std::fs::remove_dir_all(&c.base);
+    }
 }
