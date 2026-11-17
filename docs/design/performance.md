@@ -245,3 +245,11 @@ GPU it may win on very large screens, which this headless setup cannot show, so 
 interface rather than a default. Caveats: one machine, software rendering, ghostty-web is a young package, and the figures
 say nothing about text shaping (complex scripts), where Ghostty's parser is stronger; if that matters to users the swap is one
 file (`apps/web/src/terminal/renderer.ts`).
+
+**Revisited, 2026-11-17 (`docs/ux/terminal-fidelity.md`): the graphics-card renderer is now the default.** The table above stands (32 against
+52 MB/s under software GL, one frame after a key either way, no long task) and both are far above what a terminal produces. What
+it did not measure is whether the drawing is right: with the page's own text drawing, a block of full-block characters has 7.4% of
+its area empty at row height 1.1 and 1.9% at 1.0 (rows leave gaps, cells leave coloured seams); with the addon it is 0.00% at 13, 14
+and 15 px (`scripts/terminal-fidelity/run.mjs`). A browser allows about sixteen graphics contexts per page, so the renderer goes back
+to the page's drawing when a context is lost or a canvas is sized wrongly, and "Terminal settings" turns it off. Not measured: a real
+GPU, and a scaled (high-density) screen, where the headless browser's canvas stays at 1x.

@@ -24,6 +24,7 @@ import { Inspector } from './Inspector';
 import { LanguagePicker } from './LanguagePicker';
 import { ThemePicker } from './ThemePicker';
 import { MAX_SIZE, MIN_SIZE, setTerminalSize, terminalSize } from '../terminal/prefs';
+import { TerminalSettings } from '../terminal/TerminalSettings';
 import { StateBadge, StateMark } from './StateBadge';
 import { ClosedSummary } from './ClosedSummary';
 import { dismiss, dismissedIds, subscribeDismissed } from '../net/dismissed';
@@ -259,6 +260,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
             <button type="button" className="ide-iconbtn w-6 text-xs font-semibold" onClick={() => setTerminalSize(terminalSize() - 1)} disabled={terminalSize() <= MIN_SIZE} aria-label={t('terminal-smaller')} title={t('terminal-smaller')}>A−</button>
             <button type="button" className="ide-iconbtn w-6 text-[0.8125rem] font-semibold" onClick={() => setTerminalSize(terminalSize() + 1)} disabled={terminalSize() >= MAX_SIZE} aria-label={t('terminal-larger')} title={t('terminal-larger')}>A+</button>
           </span>}
+          {a.terminal !== false && !a.closed && <TerminalSettings />}
           {loadHistory && a.git !== false && <button type="button" className="ide-iconbtn" onClick={() => setHistory(a.id)} aria-label={t('console-history')} title={t('console-history')}><Icon name="history" /></button>}
           {filesOf && <button type="button" className="ide-iconbtn" onClick={() => setBrowsing(a.id)} aria-label={t('console-files')} title={t('console-files')}><Icon name="files" /></button>}
           <button type="button" className="ide-iconbtn" onClick={() => onOpen(a.id)} aria-label={t('console-maximize')} title={t('console-maximize')}><Icon name="maximize" /></button>

@@ -5,6 +5,7 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 ## Next
 
 ### The window
+- The terminal in the window now behaves like a real terminal: the mouse reaches programs in every mouse mode, the wheel scrolls full-screen programs, a swipe scrolls on a phone, you can copy with Ctrl+Shift+C, find with Ctrl+Shift+F, jump back to the latest output, open links with Ctrl+click, emoji take two cells, Shift+Enter works in programs that ask for it, rows are as tall as the font, box and block characters join, and a program can offer text for your clipboard (you press Copy); Terminal settings in the pane's header set row height, history, colours and copy on select.
 - Home is now a fleet console: counts of what needs you, what is working, what finished, what failed and which machines are online (each one filters the list), then what needs you with Allow and Deny in the row for simple requests, then every agent as a tile grouped by machine or project, with a clear next step when there is no machine or no agent yet.
 
 ### Adding a machine

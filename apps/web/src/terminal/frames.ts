@@ -37,3 +37,10 @@ export function decodeTerminalFrame(kind: number, payload: Uint8Array): Terminal
 export function inputBytes(data: string): Uint8Array {
   return new TextEncoder().encode(data);
 }
+
+// The older mouse reports (X10 and the UTF-8 form) are bytes: each character xterm gives is one byte, not text to encode as UTF-8.
+export function binaryBytes(data: string): Uint8Array {
+  const out = new Uint8Array(data.length);
+  for (let i = 0; i < data.length; i++) out[i] = data.charCodeAt(i) & 0xff;
+  return out;
+}
