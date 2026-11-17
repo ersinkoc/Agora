@@ -192,6 +192,9 @@ fn report_rates(hub: &Hub) {
     }
 }
 
+/// The longest a machine waiting for the owner goes without looking at its session (F810).
+const RECHECK: Duration = Duration::from_secs(1);
+
 fn sleep_for(until: Option<u64>) -> Duration {
     Duration::from_millis(until.map_or(1_000, |t| t.saturating_sub(mono()).max(1)))
 }
@@ -356,7 +359,8 @@ where
         if v != Verdict::Waiting {
             break v;
         }
-        let wait = sleep_for(hub.pairing().with(|p| p.deadline_of(me.conn)));
+        // F810: the switch can close without a `wake` (the window's fifth failure, its timeout), so look again at least once a second.
+        let wait = sleep_for(hub.pairing().with(|p| p.deadline_of(me.conn))).min(RECHECK);
         tokio::select! {
             _ = changed.changed() => {}
             () = tokio::time::sleep(wait) => {}
