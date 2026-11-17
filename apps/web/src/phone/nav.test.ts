@@ -91,3 +91,20 @@ describe('the bar for what needs you', () => {
     expect(dockOf([], 0)).toEqual({ dock: undefined, count: 0 });
   });
 });
+
+describe('one ordering for what needs you', () => {
+  it('a request without an expiry never takes the bar from one that is about to lapse', () => {
+    const soon = approval('n/a', 'n/a1', 5000);
+    const never = approval('n/b', 'n/a2', 0);
+    expect(needsYou([never, soon], []).map((x) => (x.kind === 'approval' ? x.approval.id : ''))).toEqual(['n/a', 'n/b']);
+    expect(dockOf(needsYou([never, soon], [])).dock).toMatchObject({ approval: { id: 'n/a' } });
+  });
+  it('whitespace tricks are not a plain request', () => {
+    const plain = (over: Partial<ApprovalModel>) => dockOf(needsYou([{ ...approval('n/w', 'n/a1', 5), action: 'Edit a', detail: 'b', ...over }], [])).dock?.kind;
+    expect(plain({})).toBe('answer');
+    for (const ch of ['\t', '\u00a0', '\u3000', '\u200a', '\u2009', '\u202f']) {
+      expect(plain({ action: `Edit${ch}a` }), JSON.stringify(ch)).toBe('review');
+      expect(plain({ detail: `b${ch}c` }), JSON.stringify(ch)).toBe('review');
+    }
+  });
+});

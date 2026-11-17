@@ -1,6 +1,6 @@
 // ADR-0067 rung 2: where a phone-sized window is, from the address. Pure: the screens draw what this decides.
 import { type AgentTileModel, machineKey, sortFleet } from '../model';
-import { decidableInline } from '../net/fleet';
+import { attentionList, decidableInline } from '../net/fleet';
 import type { ApprovalModel, MachineModel } from '../net/view';
 
 // A phone: a narrow window, or a short one on a touch screen (a phone held sideways). A tablet and every desktop window keep the
@@ -46,13 +46,8 @@ export function approvalRedirect(screen: PhoneScreen, approvals: readonly Approv
 // request open (longest waiting first).
 export type NeedsItem = { kind: 'approval'; approval: ApprovalModel; agent?: AgentTileModel } | { kind: 'agent'; agent: AgentTileModel };
 export function needsYou(approvals: readonly ApprovalModel[], fleet: readonly AgentTileModel[]): NeedsItem[] {
-  const byId = new Map(fleet.map((a) => [a.id, a]));
-  const asks = [...approvals].sort((a, b) => a.expiresAtMs - b.expiresAtMs).map((approval): NeedsItem => ({ kind: 'approval', approval, agent: byId.get(approval.agentId) }));
-  const asking = new Set(approvals.map((x) => x.agentId));
-  const waiting = fleet.filter((a) => a.state === 'needs-you' && !a.closed && !asking.has(a.id))
-    .map((a, i) => [a, i] as const).sort(([a, i], [b, j]) => (a.since ?? Infinity) - (b.since ?? Infinity) || i - j)
-    .map(([agent]): NeedsItem => ({ kind: 'agent', agent }));
-  return [...asks, ...waiting];
+  // ONE ordering for the whole window: the fleet console's (a request with no expiry never takes over from one about to lapse).
+  return attentionList(approvals, fleet).flatMap((it): NeedsItem[] => it.kind === 'approval' ? [{ kind: 'approval', approval: it.approval, agent: it.agent }] : it.kind === 'agent' ? [{ kind: 'agent', agent: it.agent }] : []);
 }
 
 // The machines with their agents, most urgent first inside each; online machines first, then by name. A machine the fleet names but the hub has not

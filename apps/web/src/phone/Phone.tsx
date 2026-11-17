@@ -1,4 +1,4 @@
-import { Suspense, lazy, useEffect, useMemo, useState, useSyncExternalStore, type ReactNode } from 'react';
+import { Suspense, lazy, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { approvalName } from '../net/approvalText';
 import { t } from '../i18n';
 import { endedWithError, type AgentTileModel } from '../model';
@@ -112,27 +112,59 @@ function ApprovalCard({ approval: x, machine, untrusted: notTrusted, onResolve, 
 
 const bring = (id: string) => document.getElementById(id)?.scrollIntoView?.({ block: 'center', behavior: 'smooth' });
 
+// How long a newly shown request keeps Allow and Deny disabled: a tap that was meant for the request that has just gone must not land
+// on the one that replaced it, at the same place (as the pairing card's half second).
+export const DOCK_DWELL_MS = 600;
+
 // What needs you, reachable with one thumb at the bottom of the screen (above the bar on the list). A plain yes or no that is short
 // enough to be read whole here (the fleet console's rule, `decidableInline`) has Allow and Deny; anything else has one button that brings its
 // full card into view or opens the agent that asks. Disabled with its reason while the link is down; the same signing answers.
+// The state (one answer at a time, the dwell) belongs to the bar, not to the request it shows: it is not remounted when the request changes.
 function NeedsDock({ dock, count, machines, stale, onResolve, onOpen }: { dock: Dock; count: number; machines: readonly MachineModel[]; stale: boolean; onResolve?: Resolve; onOpen: (id: string) => void }) {
   const x = dock.kind === 'answer' ? dock.approval : undefined;
-  const { busy, answer } = useAnswer(x ?? ({} as ApprovalModel), onResolve, stale);
-  const who = dock.kind === 'answer' ? (dock.agent?.name ?? approvalName(dock.approval)) : dock.kind === 'agent' ? dock.agent.name : dock.kind === 'review' ? (dock.agent?.name ?? approvalName(dock.approval)) : t('pair-section', { count: dock.count });
-  const where = dock.kind === 'answer' || dock.kind === 'review' ? machineName(machines, dock.approval.node) : dock.kind === 'agent' ? dock.agent.machine : '';
+  const id = x?.id;
+  const [busy, setBusy] = useState(false);
+  // The request whose dwell has run out: derived from the request shown, so there is no frame where the new one is already ready.
+  const [readyFor, setReadyFor] = useState<string | undefined>();
+  useEffect(() => {
+    if (!id) return;
+    const h = setTimeout(() => setReadyFor(id), DOCK_DWELL_MS);
+    return () => clearTimeout(h);
+  }, [id]);
+  const shown = useRef(id);
+  shown.current = id;
+  const ready = !!id && readyFor === id;
+  const answer = (ok: boolean) => {
+    // Only the request on screen, only once its dwell is over, one at a time, never while the link is down.
+    if (!x || !onResolve || busy || stale || !ready || shown.current !== x.id) return;
+    setBusy(true);
+    void Promise.resolve(onResolve(x, ok)).finally(() => setBusy(false));
+  };
+  // A new request is announced politely (not as an alert) and takes nothing from where the user is; but a focus that was on a button
+  // of the request that went moves to the bar instead of falling to the page.
+  const box = useRef<HTMLElement>(null);
+  const had = useRef(false);
+  const first = useRef(true);
+  useEffect(() => {
+    if (first.current) { first.current = false; return; }
+    if (had.current) box.current?.focus();
+  }, [id, dock.kind]);
+  const who = dock.kind === 'answer' || dock.kind === 'review' ? (dock.agent?.name ?? approvalName(dock.approval)) : dock.kind === 'agent' ? dock.agent.name : t('pair-section', { count: dock.count });
+  const where = dock.kind === 'answer' || dock.kind === 'review' ? (dock.agent?.machine || machineName(machines, dock.approval.node)) : dock.kind === 'agent' ? dock.agent.machine : '';
   const why = 'phone-dock-why';
   return (
-    <section className="phone-dock" aria-label={t('phone-needs', { count })}>
+    <section ref={box} tabIndex={-1} role="status" aria-live="polite" aria-atomic="true" className="phone-dock" aria-label={t('phone-needs', { count })}
+      onFocus={() => { had.current = true; }} onBlur={(e) => { if (e.relatedTarget && !e.currentTarget.contains(e.relatedTarget as Node)) had.current = false; }}>
       <div className="phone-dock__head">
         <StateMark state="needs-you" />
         <strong className="text-needs-you">{t('phone-needs', { count })}</strong>
-        <span className="min-w-0 flex-1 truncate text-xs text-muted">{who}{where ? ` · ${where}` : ''}</span>
+        <span className="min-w-0 flex-1 truncate text-xs text-muted">{visible(who)}{where ? ` · ${visible(where)}` : ''}</span>
       </div>
       {dock.kind === 'answer' && <>
         <p className="phone-dock__ask m-0">{visible(askLine(dock.approval.action, dock.approval.detail))}</p>
         <div className="phone-card__actions">
-          <button type="button" className="button button--primary phone-dock__btn" disabled={busy || stale || !onResolve} aria-describedby={stale ? why : undefined} onClick={() => answer(true)}>{t('approval-allow')}</button>
-          <button type="button" className="button phone-dock__btn" disabled={busy || stale || !onResolve} aria-describedby={stale ? why : undefined} onClick={() => answer(false)}>{t('approval-deny')}</button>
+          <button type="button" className="button button--primary phone-dock__btn" disabled={busy || stale || !ready || !onResolve} aria-describedby={stale ? why : undefined} onClick={() => answer(true)}>{t('approval-allow')}</button>
+          <button type="button" className="button phone-dock__btn" disabled={busy || stale || !ready || !onResolve} aria-describedby={stale ? why : undefined} onClick={() => answer(false)}>{t('approval-deny')}</button>
         </div>
         {stale && <p id={why} className="phone-card__why m-0">{t('fleet-stale-no-answer')}</p>}
       </>}
@@ -197,7 +229,7 @@ export function PhoneHome({ agents, machines, approvals, onResolve, untrusted, n
   const stale = link !== 'live';
   return (
     <PhoneShell label={t('home-title')}
-      dock={dock && !empty && <NeedsDock key={dock.kind === 'answer' || dock.kind === 'review' ? dock.approval.id : dock.kind} dock={dock} count={count} machines={machines} stale={stale} onResolve={onResolve} onOpen={onOpen} />}
+      dock={dock && !empty && <NeedsDock dock={dock} count={count} machines={machines} stale={stale} onResolve={onResolve} onOpen={onOpen} />}
       top={<>
         <span aria-hidden className="grid size-7 flex-none place-items-center rounded-xs bg-accent text-xs font-bold text-on-accent">A</span>
         <h1 className="m-0 min-w-0 flex-1 truncate text-base font-semibold tracking-normal">{t('home-title')}</h1>
@@ -211,9 +243,8 @@ export function PhoneHome({ agents, machines, approvals, onResolve, untrusted, n
         <NavButton icon="lock" label={t('device-link')} href="#/device" />
       </>}>
       {notice && <p role="alert" className="phone-notice">{notice}</p>}
-      {/* The state of the link has a row of its own: in the title bar it pushed the buttons off a 390 px screen. */}
-      {link !== 'live' && <div role="status" className="phone-link"><span className="min-w-0 flex-1">{t(link === 'offline' ? 'link-offline' : 'link-connecting')}</span>{link === 'offline' && onRetry && <button type="button" className="phone-chipbtn" onClick={onRetry}>{t('link-retry')}</button>}</div>}
-      {link === 'offline' && !empty && <p role="status" className="fleet-stale mx-3">{t('fleet-offline-stale')}</p>}
+      {/* The state of the link has a row of its own (in the title bar it pushed the buttons off a 390 px screen): one notice, what it means and Retry. */}
+      {link !== 'live' && <div role="status" className="phone-link"><span className="min-w-0 flex-1">{t(link === 'offline' ? (empty ? 'link-offline' : 'fleet-offline-stale') : 'link-connecting')}</span>{link === 'offline' && onRetry && <button type="button" className="phone-chipbtn" onClick={onRetry}>{t('link-retry')}</button>}</div>}
       {!empty && <div className="phone-fleet"><FleetSummary counts={counts} filter={filter} onFilter={setFilter} /></div>}
       {pairing && pairing.cards.length > 0 && <section id="phone-pair" className="phone-section" aria-label={t('attention-title')}>
         <h2 className="phone-section__title text-needs-you">{t('pair-section', { count: pairing.cards.length })}</h2>
@@ -226,7 +257,7 @@ export function PhoneHome({ agents, machines, approvals, onResolve, untrusted, n
         <h2 className="phone-section__title text-needs-you">{t('phone-needs', { count: needs.length })}</h2>
         <div className="grid gap-2">
           {needs.map((n) => n.kind === 'approval'
-            ? <ApprovalCard key={n.approval.id} approval={n.approval} machine={machineName(machines, n.approval.node)} untrusted={!!untrusted?.(n.approval.node)} stale={stale} docked={dock?.kind === 'answer' && dock.approval.id === n.approval.id}
+            ? <ApprovalCard key={n.approval.id} approval={n.approval} machine={n.agent?.machine || machineName(machines, n.approval.node)} untrusted={!!untrusted?.(n.approval.node)} stale={stale} docked={dock?.kind === 'answer' && dock.approval.id === n.approval.id}
               onResolve={onResolve} onOpen={n.agent ? () => onOpen(n.approval.agentId) : undefined} />
             : <ul key={n.agent.id} className="phone-list phone-card phone-card--needs p-0"><AgentRow agent={n.agent} onOpen={onOpen} /></ul>)}
         </div>
@@ -279,7 +310,7 @@ export function PhoneAgent({ agent, agents, approvals, machines, onResolve, untr
   const stale = link !== 'live';
   return (
     <PhoneShell label={agent?.name ?? t('focus-not-found')}
-      dock={agent && dock && !agent.closed && <NeedsDock key={dock.kind === 'answer' || dock.kind === 'review' ? dock.approval.id : dock.kind} dock={dock} count={mine.length} machines={machines} stale={stale} onResolve={onResolve} onOpen={(id) => (id === agent.id ? bring(`phone-ask-${mine[0]?.id}`) : onOpen(id))} />}
+      dock={agent && dock && !agent.closed && <NeedsDock dock={dock} count={mine.length} machines={machines} stale={stale} onResolve={onResolve} onOpen={(id) => (id === agent.id ? bring(`phone-ask-${mine[0]?.id}`) : onOpen(id))} />}
       top={<>
         <button type="button" className="phone-iconbtn" onClick={onBack} aria-label={t('phone-back')} title={t('phone-back')}><Icon name="chevron" className="size-5 rotate-180 rtl:rotate-0" /></button>
         <div className="min-w-0 flex-1">
@@ -297,7 +328,7 @@ export function PhoneAgent({ agent, agents, approvals, machines, onResolve, untr
             {files && <button type="button" className="phone-chipbtn" onClick={() => setShown('files')}><Icon name="files" className="size-4" />{t('console-files')}</button>}
           </div>
         )}
-        {mine.length > 0 && <div className="phone-asks">{mine.map((x) => <ApprovalCard key={x.id} approval={x} machine={machineName(machines, x.node)} untrusted={!!untrusted?.(x.node)} stale={stale} docked={dock?.kind === 'answer' && dock.approval.id === x.id} onResolve={onResolve} />)}</div>}
+        {mine.length > 0 && <div className="phone-asks">{mine.map((x) => <ApprovalCard key={x.id} approval={x} machine={agent?.machine || machineName(machines, x.node)} untrusted={!!untrusted?.(x.node)} stale={stale} docked={dock?.kind === 'answer' && dock.approval.id === x.id} onResolve={onResolve} />)}</div>}
         {agent.closed ? <div className="min-h-0 flex-1 overflow-y-auto"><ClosedSummary agent={agent} now={now} onReview={loadDiff ? () => setShown('changes') : undefined} onFiles={files ? () => setShown('files') : undefined} onDismiss={() => { dismiss([agent.id]); onBack(); }} /></div>
           : <div className="phone-pane" aria-label={agent.terminal === false ? t('chat-log') : t('focus-terminal')}>
             {agent.terminal === false ? <PromptBox agent={agent} source={chatSource} send={sendPrompt} choose={chooseOption} /> : (

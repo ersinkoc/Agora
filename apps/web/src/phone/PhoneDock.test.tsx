@@ -10,14 +10,14 @@ import type { AgentTileModel } from '../model';
 import { demoStartApproval } from '../fixtures';
 import type { ApprovalModel } from '../net/view';
 import type { PairingUi } from '../components/Pairing';
-import { PhoneAgent, PhoneHome } from './Phone';
+import { DOCK_DWELL_MS, PhoneAgent, PhoneHome } from './Phone';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 let host: HTMLElement;
 let root: Root;
-beforeEach(() => { setLanguage('en'); host = document.createElement('div'); document.body.append(host); root = createRoot(host); });
-afterEach(() => { act(() => root.unmount()); host.remove(); });
+beforeEach(() => { setLanguage('en'); vi.useFakeTimers(); host = document.createElement('div'); document.body.append(host); root = createRoot(host); });
+afterEach(() => { act(() => root.unmount()); host.remove(); vi.useRealTimers(); });
 
 const agent: AgentTileModel = { id: 'n1/a1', name: 'claude · amber', accent: '', machine: 'laptop', machineId: 'n1', workspace: 'w', project: 'login-fix', state: 'needs-you', preview: '' };
 const ask = (id: string, over: Partial<ApprovalModel> = {}): ApprovalModel =>
@@ -30,6 +30,7 @@ const press = (scope: ParentNode, text: string) => {
   act(() => { b.click(); });
   return b;
 };
+const dwell = (ms = DOCK_DWELL_MS) => act(async () => { await vi.advanceTimersByTimeAsync(ms); });
 const home = (approvals: ApprovalModel[], over: Partial<Parameters<typeof PhoneHome>[0]> = {}) => {
   const onResolve = vi.fn(async () => undefined);
   act(() => root.render(<PhoneHome agents={[agent]} machines={machines} approvals={approvals} onResolve={onResolve} link="live" onOpen={() => undefined} {...over} />));
@@ -37,19 +38,21 @@ const home = (approvals: ApprovalModel[], over: Partial<Parameters<typeof PhoneH
 };
 
 describe('the phone bar for what needs you', () => {
-  it('answers a short plain request with one press, and the card does not repeat the buttons', () => {
+  it('answers a short plain request with one press, and the card does not repeat the buttons', async () => {
     const r = ask('p1');
     const onResolve = home([r]);
+    await dwell();
     expect(dock()?.textContent).toContain('Edit src/auth.rs · +12 -3');
     expect(host.querySelectorAll('button.button--primary').length).toBe(1);
     press(dock()!, 'Allow');
-    expect(onResolve).toHaveBeenCalledWith(r, true, undefined);
+    expect(onResolve).toHaveBeenCalledWith(r, true);
     press(dock()!, 'Deny');
   });
   it('a second press waits for the first', async () => {
     let done: () => void = () => undefined;
     const onResolve = vi.fn(() => new Promise<void>((res) => { done = res; }));
     act(() => root.render(<PhoneHome agents={[agent]} machines={machines} approvals={[ask('p1')]} onResolve={onResolve} link="live" onOpen={() => undefined} />));
+    await dwell();
     press(dock()!, 'Allow');
     press(dock()!, 'Allow');
     press(dock()!, 'Deny');
@@ -86,12 +89,99 @@ describe('the phone bar for what needs you', () => {
     press(dock()!, 'Review and decide');
     expect(answers).toEqual([]);
   });
-  it('on an agent, the bar answers its first plain request and the top card keeps no second pair of buttons', () => {
+  it('on an agent, the bar answers its first plain request and the top card keeps no second pair of buttons', async () => {
     const r = ask('p1');
     const onResolve = vi.fn(async () => undefined);
     act(() => root.render(<PhoneAgent agent={agent} agents={[agent]} approvals={[r]} machines={machines} onResolve={onResolve} onOpen={() => undefined} onBack={() => undefined} />));
     expect(host.querySelectorAll('button.button--primary').length).toBe(1);
+    await dwell();
     press(dock()!, 'Allow');
     expect(onResolve).toHaveBeenCalledTimes(1);
+  });
+
+  describe('when the request on the bar changes', () => {
+    const A = ask('A');
+    const B = ask('B', { action: 'Run sudo reboot', detail: '' });
+    const show = (approvals: ApprovalModel[], onResolve: (a: ApprovalModel, ok: boolean) => unknown) =>
+      act(() => root.render(<PhoneHome agents={[agent]} machines={machines} approvals={approvals} onResolve={onResolve} link="live" onOpen={() => undefined} />));
+    it('a tap right after the swap answers nothing, and the new request shows its buttons disabled', async () => {
+      const onResolve = vi.fn(async () => undefined);
+      show([A, B], onResolve);
+      await dwell();
+      const old = [...dock()!.querySelectorAll('button')].find((b) => b.textContent === 'Allow') as HTMLButtonElement;
+      show([B], onResolve);
+      expect(dock()!.textContent).toContain('Run sudo reboot');
+      expect((dock()!.querySelector('button.button--primary') as HTMLButtonElement).disabled).toBe(true);
+      act(() => { old.click(); });
+      press(dock()!, 'Allow');
+      expect(onResolve).not.toHaveBeenCalled();
+    });
+    it('a tap after the dwell answers the new request, with its own id', async () => {
+      const onResolve = vi.fn(async () => undefined);
+      show([A, B], onResolve);
+      await dwell();
+      show([B], onResolve);
+      await dwell(DOCK_DWELL_MS - 1);
+      press(dock()!, 'Allow');
+      expect(onResolve).not.toHaveBeenCalled();
+      await dwell(1);
+      press(dock()!, 'Allow');
+      expect(onResolve).toHaveBeenCalledTimes(1);
+      expect((onResolve.mock.calls[0] as unknown[])[0]).toBe(B);
+    });
+    it('a tap on A and a second one on B within the window answers only A', async () => {
+      let done: () => void = () => undefined;
+      const onResolve = vi.fn(() => new Promise<void>((res) => { done = res; }));
+      show([A, B], onResolve);
+      await dwell();
+      press(dock()!, 'Allow');
+      show([B], onResolve);
+      await dwell();
+      press(dock()!, 'Allow');
+      press(dock()!, 'Deny');
+      expect(onResolve).toHaveBeenCalledTimes(1);
+      expect((onResolve.mock.calls[0] as unknown[])[0]).toBe(A);
+      await act(async () => { done(); });
+    });
+  });
+  describe('what a screen reader and the keyboard get', () => {
+    it('is a polite status (never an alert), and its reason is inside it', () => {
+      home([ask('p1')], { link: 'offline' });
+      const d = dock()!;
+      expect(d.getAttribute('role')).toBe('status');
+      expect(d.getAttribute('aria-live')).toBe('polite');
+      expect(d.textContent).toContain('Cannot answer while the connection is down.');
+      expect(d.querySelector('[role=alert]')).toBeNull();
+    });
+    it('moves a focus that was on the request that went to the bar, not to the page; takes no focus otherwise', async () => {
+      const r = vi.fn(async () => undefined);
+      const show = (a: ApprovalModel[]) => act(() => root.render(<PhoneHome agents={[agent]} machines={machines} approvals={a} onResolve={r} link="live" onOpen={() => undefined} />));
+      show([ask('A'), ask('B', { action: 'Run ls' })]);
+      await dwell();
+      const allow = [...dock()!.querySelectorAll('button')].find((b) => b.textContent === 'Allow') as HTMLButtonElement;
+      act(() => { allow.focus(); });
+      expect(document.activeElement).toBe(allow);
+      show([ask('B', { action: 'Run ls' })]);
+      expect(document.activeElement).toBe(dock());
+      show([ask('C', { action: 'Run pwd' })]);
+      // Focus elsewhere: a new request does not take it.
+      const other = document.createElement('input'); document.body.append(other);
+      act(() => { other.focus(); });
+      show([ask('D', { action: 'Run id' })]);
+      expect(document.activeElement).toBe(other);
+      other.remove();
+    });
+  });
+  it('writes the agent and machine names in the bar with hidden characters visible, and the machine the agent header names', () => {
+    home([ask('p1')], { agents: [{ ...agent, name: 'claude\u202e amber', machine: 'Laptop' }] });
+    const head = dock()!.querySelector('.phone-dock__head')!.textContent!;
+    expect(head).toContain('claude\\u{202e} amber');
+    expect(head).toContain('Laptop');
+    expect(head).not.toContain('n1');
+  });
+  it('shows one notice of the offline link, not two banners', () => {
+    home([ask('p1')], { link: 'offline', onRetry: () => undefined });
+    expect(host.querySelectorAll('[role=status]:not(.phone-dock)').length).toBe(1);
+    expect(host.textContent).not.toContain('Hub unreachable');
   });
 });

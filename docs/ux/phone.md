@@ -24,8 +24,12 @@ terminals get the key bar when the screen is a touch screen.
    buttons inside the safe area, and its card above does not repeat them. Everything else (a request to start an agent, long or
    structured text, an agent that waits, a machine asking to join, which keeps its two-press card, ADR-0065) has one **Review and
    decide** button that opens the agent or brings the full card into view; nothing is answered from the bar on text that was cut.
+   A request that has just replaced another keeps Allow and Deny disabled for 600 ms (a tap meant for the one that went must not land on
+   the new one), and the bar answers one request at a time; it is announced politely (a status, not an alert) and a focus that was on its
+   button moves to the bar. It uses the fleet console's order (a request with no expiry never takes the bar from one about to lapse),
+   and a tab, no-break or wide space makes a request not plain.
    While the link is down Allow and Deny are disabled everywhere on the phone and say why. The state of the link has a row of its own
-   under the title bar (it no longer pushes the buttons off a 390 px screen).
+   under the title bar (it no longer pushes the buttons off a 390 px screen); that row is the one banner for the link, and the bar adds only the reason next to its disabled buttons.
 3. The bar at the bottom of the list: **Search** (the command palette: agents, language, pages), **Start**, **Machines**, **This
    device**. The other pages (machines, this device, activity) keep their own frame with Back. **Edit theme** (palette or This
    device) opens the theme editor ([themes.md](themes.md)) as a screen of its own (`#/theme`) with Back.
