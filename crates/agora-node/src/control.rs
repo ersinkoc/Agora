@@ -1190,14 +1190,19 @@ fn open_files(ctx: &ControlContext, worktree_id: &str) -> Result<crate::files::F
 /// swapped for a link since the start, by anything that can write beside it (another agent of the project), would lead files, diffs
 /// and history wherever the link points, and the secret-file names (ADR-0080) would be judged below the link's target.
 fn still_in_place(ctx: &ControlContext, recorded: &Path, resolved: &Path) -> bool {
-    let expected = match recorded.strip_prefix(&ctx.worktree_root) {
-        Ok(rest) => match agora_platform::canonicalize_plain(&ctx.worktree_root) {
-            Ok(root) => root.join(rest),
-            Err(_) => return false,
+    match recorded.strip_prefix(&ctx.worktree_root) {
+        // Both sides in the system's own resolved spelling: the plain one (`canonicalize_plain`) depends on a path's length on
+        // Windows, which the root and the folder below it need not share.
+        Ok(rest) => match (
+            std::fs::canonicalize(&ctx.worktree_root),
+            std::fs::canonicalize(resolved),
+        ) {
+            (Ok(root), Ok(now)) => now == root.join(rest),
+            _ => false,
         },
-        Err(_) => recorded.to_path_buf(),
-    };
-    agora_platform::canonicalize_plain(resolved).is_ok_and(|now| now == expected)
+        // Spelled as `directory::inspect` spelled it.
+        Err(_) => agora_platform::canonicalize_plain(resolved).is_ok_and(|now| now == recorded),
+    }
 }
 
 /// Largest diff one answer carries; a bigger one is cut (the file view is for reading, not for patching).
