@@ -591,7 +591,7 @@ impl Listener {
             let event = Event::new()?;
             let mut ov = Box::new(overlapped(&event));
             // SAFETY: `inst` is a live pipe instance opened for overlapped I/O; `ov` lives in `pending` until it completes.
-            let ok = unsafe { ConnectNamedPipe(inst, &mut *ov) };
+            let ok = unsafe { ConnectNamedPipe(inst, std::ptr::addr_of_mut!(*ov)) };
             if ok != 0 {
                 connected = true;
             } else {
@@ -649,12 +649,14 @@ impl Drop for Listener {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.marker);
         if let Ok(mut st) = self.state.lock() {
-            if let (Some(p), Some(inst)) = (st.pending.take(), st.instance.as_ref()) {
+            if let (Some(mut p), Some(inst)) = (st.pending.take(), st.instance.as_ref()) {
                 let mut n = 0u32;
+                // A raw pointer, never a reference: the system may still write through it until the connect is over.
+                let ovp = std::ptr::addr_of_mut!(*p.ov);
                 // SAFETY: cancel the connect and wait until it is over, so `ov` is not used after it is freed.
                 unsafe {
-                    CancelIoEx(inst.0, &*p.ov);
-                    GetOverlappedResult(inst.0, &*p.ov, &mut n, 1);
+                    CancelIoEx(inst.0, ovp);
+                    GetOverlappedResult(inst.0, ovp, &mut n, 1);
                 }
             }
         }
