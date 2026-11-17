@@ -479,6 +479,7 @@ join-done = Katıldı. Bu makine "{ $id }" adıyla kayıtlı. Hub'ın sertifika 
 join-start = Bu makineyi `agora` ile başlatın; hub'a kendiliğinden bağlanır.
 join-already = Bu makine zaten bir hub'a katılmış ({ $dir } klasörüne bakın). Başkasına katılmak için `agora join ADRES --replace` çalıştırın.
 join-kept-newer = Bu makine onay beklerken aynı hub'a aynı adla ("{ $id }") yeniden kaydedildi. O daha yeni sertifika korunuyor: bu katılımın aldığı artık geçerli değil. Hiçbir şey değiştirilmedi.
+join-kept-unsure = Bu makine onay beklerken aynı hub'a aynı adla ("{ $id }") bu katılımla aynı saniyede yeniden kaydedildi. Hub'ın hangi sertifikayı tuttuğu anlaşılamıyor; bu yüzden orada olan bağlantı korunuyor ve hiçbir şey değiştirilmedi. Bu makine bağlanmazsa katılımı yeniden çalıştırın.
 join-bad-address = Bu makinenin kullanabileceği bir adres değil. Hub'ın adresini 192.168.1.20:7443 ya da hub.example gibi verin.
 join-no-key = Bu makine anahtarını üretemedi.
 join-unreachable = { $address } adresindeki hub'a ulaşılamadı ({ $reason }). Çalışıyor mu, adres doğru mu? Hiçbir şey kaydedilmedi.

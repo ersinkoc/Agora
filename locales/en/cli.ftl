@@ -485,6 +485,7 @@ join-done = Joined. This machine is "{ $id }". The hub's certificate authority f
 join-start = Start this machine with `agora`; it connects to the hub by itself.
 join-already = This machine has already joined a hub (see { $dir }). To join another one, run `agora join ADDRESS --replace`.
 join-kept-newer = While this machine waited for approval it was enrolled with the same hub under the same name again ("{ $id }"). That newer certificate is kept: the one this join got is no longer valid. Nothing was changed.
+join-kept-unsure = While this machine waited for approval it was enrolled with the same hub under the same name again ("{ $id }"), in the same second as this join. Which certificate the hub kept cannot be told, so the link that was there is kept and nothing was changed. If this machine does not connect, run the join again.
 join-bad-address = That is not an address this machine can use. Give the hub's address like 192.168.1.20:7443 or hub.example.
 join-no-key = This machine could not make its key.
 join-unreachable = Could not reach the hub at { $address } ({ $reason }). Is it running, and is the address right? Nothing was saved.

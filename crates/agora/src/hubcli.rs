@@ -2170,7 +2170,7 @@ pub fn load_link(socket: PathBuf) -> std::io::Result<Option<(String, HubLink)>> 
 /// whole or not at all, never one link's `node-id` with another's key and certificate. The folder is resolved once and the files are
 /// read through that same folder the guard is held in (Codex review of F1031).
 ///
-/// Where the guard cannot be had at all (no folder; one this user cannot write in, a read-only one say) the files are read without it,
+/// No folder is no link. Where the guard cannot be had at all (a folder this user cannot write in, a read-only one say) the files are read without it,
 /// at once: no save of this user can take the guard there either, so none runs to be seen half. Where another holder kept it for the
 /// whole wait, nothing is read: that is `TimedOut` (Codex review of F1031: a read past a busy guard could again be half a save).
 fn load_from(
@@ -2185,8 +2185,9 @@ fn load_from(
             Err(e) if e.kind() == std::io::ErrorKind::TimedOut => return Err(e),
             Err(_) => (resolved, None),
         },
-        // No folder: there is nothing to read, and reading makes none.
-        Err(_) => (dir.to_path_buf(), None),
+        // No folder (or none this user can reach): nothing is read, and reading makes none. Never read by the path given instead: a
+        // folder made after this look could be mid-save (Codex re-review of F1031).
+        Err(_) => return Ok(None),
     };
     Ok(link_files(&dir, socket, read))
 }

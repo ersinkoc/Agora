@@ -303,6 +303,10 @@ pub(crate) fn run(
                     say.err(key!("join-kept-newer"), &[("id", id.as_str().into())]);
                     return Err(Stop::Usage);
                 }
+                Ok(Decision::Unsure) => {
+                    say.err(key!("join-kept-unsure"), &[("id", id.as_str().into())]);
+                    return Err(Stop::Failed);
+                }
                 Err(e) => {
                     say.err(
                         key!("join-store-failed"),
@@ -394,6 +398,10 @@ enum Decision {
     /// keeps one live certificate per name and revokes the earlier ones when it issues one, so the delivered certificate is the revoked
     /// one, also with `--replace` (Codex review of F1030: an `agora` or `agora node enroll` that enrolled while the owner decided).
     KeepNewer,
+    /// Keeps the link there, saying so: this same hub under this same name, with `--replace`, and a certificate that ends in the same
+    /// second as the delivered one. Which of the two the hub issued last, and so kept, cannot be told (Codex re-review of F1030);
+    /// without `--replace` it can: the hub refuses a name that is in use, so a link of that name saved meanwhile is the newer one.
+    Unsure,
 }
 
 /// See [`Decision`].
@@ -407,10 +415,11 @@ fn decide(
     if !link.join("node-id").exists() {
         Decision::Store
     } else if superseded(link, id, ca_pem) {
-        if not_older(link, cert_pem) {
-            Decision::KeepNewer
-        } else {
-            Decision::Store
+        match issued_order(link, cert_pem) {
+            Some(std::cmp::Ordering::Greater) => Decision::KeepNewer,
+            Some(std::cmp::Ordering::Equal) if !replace => Decision::KeepNewer,
+            Some(std::cmp::Ordering::Equal) => Decision::Unsure,
+            _ => Decision::Store,
         }
     } else if replace {
         Decision::Store
@@ -419,19 +428,19 @@ fn decide(
     }
 }
 
-/// Whether the certificate in `link` was issued no earlier than `cert_pem`, both by one hub. Told by when each ends: a hub gives every
-/// certificate it issues to a node the same lifetime, so the one issued later ends later. Certificates issued within the same second
-/// end in the same second and are not told apart; the one in the folder is then kept. Anything unreadable is not.
-fn not_older(link: &std::path::Path, cert_pem: &str) -> bool {
+/// How the certificate in `link` was issued against `cert_pem`, both by one hub: `Greater` when later. Told by when each ends: a hub
+/// gives every certificate it issues to a node the same lifetime, so the one issued later ends later. Certificates issued within the
+/// same second end in the same second and are not told apart (`Equal`). `None` when either cannot be read.
+fn issued_order(link: &std::path::Path, cert_pem: &str) -> Option<std::cmp::Ordering> {
     let ends = |pem: &str| agora_hub::ca::cert_not_after_secs(pem).ok();
     let kept = std::fs::read_to_string(link.join("cert.pem"))
         .ok()
-        .and_then(|pem| ends(&pem));
-    matches!((kept, ends(cert_pem)), (Some(kept), Some(got)) if kept >= got)
+        .and_then(|pem| ends(&pem))?;
+    Some(kept.cmp(&ends(cert_pem)?))
 }
 
 /// Whether the link in `link` is this machine under `id` at the hub whose CA is `ca_pem`: the one the certificate just delivered
-/// supersedes, unless that link's certificate is the newer one ([`not_older`]). Anything unreadable is not.
+/// supersedes, unless that link's certificate is the newer one ([`issued_order`]). Anything unreadable is not.
 fn superseded(link: &std::path::Path, id: &str, ca_pem: &str) -> bool {
     let read = |f: &str| std::fs::read_to_string(link.join(f)).ok();
     read("node-id").is_some_and(|n| n.trim() == id)
@@ -513,6 +522,16 @@ mod tests {
                 Decision::Store
             );
         }
+        // The same second (here: the same certificate): kept; with --replace which one the hub kept cannot be told, and it is said.
+        put("racer", &ca_pem, &newer);
+        assert_eq!(
+            decide(&dir, "racer", &ca_pem, &newer, false),
+            Decision::KeepNewer
+        );
+        assert_eq!(
+            decide(&dir, "racer", &ca_pem, &newer, true),
+            Decision::Unsure
+        );
         // Another hub or another name: kept unless --replace (audit F890).
         put("first", "OTHERCA", &newer);
         assert_eq!(
