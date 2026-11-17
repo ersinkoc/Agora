@@ -276,6 +276,15 @@ pub(crate) fn run(
     };
     match pair(&wanted, timeouts, &mut show) {
         Ok(v) => {
+            // Looked at again: the owner may have taken minutes, and this machine may have joined meanwhile (`agora` enrolling with
+            // its own hub, `agora node enroll`, another join). Without `--replace` that link is kept, never overwritten (audit F890).
+            if link.join("node-id").exists() && !replace {
+                say.err(
+                    key!("join-already"),
+                    &[("dir", link.display().to_string().into())],
+                );
+                return Err(Stop::Usage);
+            }
             let url = format!("wss://{dial}");
             if let Err(e) = store_link(&url, &id, &v.ca_pem, &v.cert_pem, &key_pem) {
                 say.err(
