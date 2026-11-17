@@ -3,13 +3,14 @@ import { readFileSync } from 'node:fs';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { setLanguage, t } from './i18n';
-import { endedWithError, sharesName, type AgentTileModel } from './model';
+import { EXIT_UNKNOWN, endedWithError, sharesName, shownExitCode, type AgentTileModel } from './model';
 import { BUILT_IN, contrast } from './themes/tokens';
 import { byFolder, firstVisible, parseDiff, type DiffFile } from './net/diff';
 import { ClosedSummary } from './components/ClosedSummary';
 import { StartApproval } from './components/StartApproval';
 import { StateBadge } from './components/StateBadge';
 import { ProjectBoard } from './components/ProjectBoard';
+import { NoAskBadge } from './components/NoAskBadge';
 import { demoStartApproval } from './fixtures';
 import { PRESETS, reduce, workspaceOf } from './layout/engine';
 import { PICTOGRAM_BOX, pictogram, presetOf } from './layout/preset';
@@ -19,12 +20,25 @@ const read = (p: string) => readFileSync(p, 'utf8').replace(/\r\n/g, '\n');
 const closed = (over: Partial<AgentTileModel>): AgentTileModel => ({ id: 'x', name: 'claude · olive', accent: '#fff', machine: 'm', workspace: 'w', state: 'finished', preview: '', closed: true, ...over });
 
 describe('quick win: a failed agent is never drawn as success', () => {
-  it('maps a closed agent with a non-zero exit code to an error, and nothing else', () => {
-    expect(endedWithError(closed({ exitCode: 1 }))).toBe(true);
+  // The values the node really reports (crates/agora-node/src/daemon.rs): the program's status, -signal, -1, and i32::MIN for a stop or
+  // an unknown status.
+  it('is a failure only for a genuine non-zero exit status or a crash', () => {
+    for (const code of [1, 2, 127, 137, 143]) expect(endedWithError(closed({ exitCode: code })), String(code)).toBe(true);
+    for (const signal of [4, 6, 7, 8, 11]) expect(endedWithError(closed({ exitCode: -signal })), `-${signal}`).toBe(true); // it crashed
+  });
+  it('is not a failure for a stop, an unknown status, a signal the node sends itself, a clean exit or a running agent', () => {
+    expect(endedWithError(closed({ exitCode: EXIT_UNKNOWN }))).toBe(false); // stopped on request, or never known
+    for (const signal of [15, 9, 1, 2]) expect(endedWithError(closed({ exitCode: -signal })), `-${signal}`).toBe(false); // TERM, KILL, HUP, INT
+    expect(endedWithError(closed({ exitCode: -1 }))).toBe(false);
     expect(endedWithError(closed({ exitCode: 0 }))).toBe(false);
     expect(endedWithError(closed({}))).toBe(false);
     expect(endedWithError({ closed: false, exitCode: 1 })).toBe(false); // still running
-    expect(endedWithError(closed({ exitCode: 143, interrupted: { resumable: true } }))).toBe(false); // stopped with its machine: its own wording
+    expect(endedWithError(closed({ exitCode: 1, interrupted: { resumable: true } }))).toBe(false); // stopped with its machine: its own wording
+    expect(endedWithError(closed({ exitCode: EXIT_UNKNOWN, interrupted: { resumable: false } }))).toBe(false);
+  });
+  it('shows an exit code only when it is the program\'s own', () => {
+    expect(shownExitCode({ exitCode: 3 })).toBe(3);
+    for (const c of [0, -1, -15, EXIT_UNKNOWN, undefined]) expect(shownExitCode({ exitCode: c }), String(c)).toBeUndefined();
   });
   const summary = (a: AgentTileModel) => renderToStaticMarkup(<ClosedSummary agent={a} now={Date.now()} onDismiss={() => {}} />);
   beforeEach(() => setLanguage('en'));
@@ -34,6 +48,17 @@ describe('quick win: a failed agent is never drawn as success', () => {
     expect(html).toContain('state--failed');
     expect(html).not.toContain('text-finished');
     expect(html).toContain('M4 4l4 4M8 4l-4 4'); // the cross
+  });
+  it('a stopped agent is Finished, with no error and no number', () => {
+    const html = summary(closed({ exitCode: EXIT_UNKNOWN }));
+    expect(html).not.toContain('Ended with an error');
+    expect(html).not.toContain('2147483648');
+    expect(html).toContain('text-finished');
+  });
+  it('a crash by signal says it ended with an error, without a negative exit code', () => {
+    const html = summary(closed({ exitCode: -11 }));
+    expect(html).toContain('Ended with an error');
+    expect(html).not.toContain('exit code');
   });
   it('negative control: a clean exit is still the Finished check', () => {
     const html = summary(closed({ exitCode: 0 }));
@@ -106,7 +131,7 @@ describe('quick win: 44px hit areas on touch', () => {
   const css = read('src/design/app.css');
   const block = /@media \(pointer: coarse\) \{([\s\S]*?)\n\}/.exec(css)?.[1] ?? '';
   it('buttons, tabs, rows, icon buttons, chips and inputs get --tap as their least height under a coarse pointer', () => {
-    for (const sel of ['.button', '.ide-iconbtn', '.ide-tab', '.ide-row', '.menu-tile', 'button.ide-chip', '.ide-bar > a', '.ide-bar > button']) expect(block, sel).toContain(sel);
+    for (const sel of ['.button', '.ide-iconbtn', '.ide-tab', '.ide-row', '.menu-tile', 'button.ide-chip', '.ide-bar > a', '.ide-bar > button', '.touch-row']) expect(block, sel).toContain(sel);
     expect(block).toMatch(/min-height: var\(--tap\)/);
     expect(block).toMatch(/\.ide-iconbtn, \.menu-tile \{ min-width: var\(--tap\)/);
     expect(read('src/design/tokens.css')).toMatch(/--tap: 44px;/);
@@ -121,9 +146,23 @@ describe('quick win: copy', () => {
   const card = () => renderToStaticMarkup(<StartApproval approval={demoStartApproval} start={demoStartApproval.start} onResolve={() => {}} />);
   it('names the asking agent by its display name, with no id, no kind in brackets and no Depth', () => {
     const html = card();
-    expect(html).toContain('claude · amber on laptop asks to start a codex agent');
+    expect(html).toContain('claude · amber on Laptop asks to start a codex agent');
     expect(html).not.toMatch(/a1 \(claude\)/);
     expect(html).not.toContain('Depth');
+  });
+  it('never shows an id when a name is missing, and says so in words', () => {
+    const bare = (over: object) => { const x = { ...demoStartApproval, ...over }; return renderToStaticMarkup(<StartApproval approval={x} start={x.start} onResolve={() => {}} />); };
+    const noMachine = bare({ machineName: '' });
+    expect(noMachine).toContain('claude · amber asks to start a codex agent');
+    expect(noMachine).not.toMatch(/laptop|\ba1\b|demo/);
+    const noAgent = bare({ agentName: '', machineName: 'Laptop' });
+    expect(noAgent).toContain('An agent on Laptop asks to start a codex agent');
+    expect(noAgent).not.toMatch(/\ba1\b/);
+    const neither = bare({ agentName: '   ', machineName: undefined });
+    expect(neither).toContain('An agent asks to start a codex agent');
+    expect(neither).not.toMatch(/laptop|\ba1\b|demo/);
+    setLanguage('tr');
+    expect(bare({ agentName: '', machineName: '' })).toContain('Bir ajan, bir codex ajanı başlatmak istiyor');
   });
   it('shows that the asker is a helper only when it is one', () => {
     expect(card()).not.toContain('itself a helper');
@@ -136,7 +175,29 @@ describe('quick win: copy', () => {
     setLanguage('tr');
     expect(t('agent-does-not-ask')).toBe('Onay istemeden çalışır');
     expect(t('interrupted-section')).toBe('Makine kapanınca durdu');
-    expect(t('start-approval-title', { name: 'claude · amber', node: 'laptop', kind: 'codex' })).toBe('laptop üzerindeki claude · amber, bir codex ajanı başlatmak istiyor');
+    expect(t('start-approval-title', { name: 'claude · amber', machine: 'laptop', kind: 'codex' })).toBe('laptop üzerindeki claude · amber, bir codex ajanı başlatmak istiyor');
+  });
+});
+
+describe('quick win: the safety badge is never cut short', () => {
+  beforeEach(() => setLanguage('en'));
+  it('is a shield with the full words as its name in a tab, and the whole words elsewhere', () => {
+    const agent = { skipsPermissions: true };
+    const icon = renderToStaticMarkup(<NoAskBadge agent={agent} icon />);
+    expect(icon).toContain('Runs without asking');
+    expect(icon).toContain('sr-only');
+    expect(icon).toContain('title="Runs without asking: ');
+    expect(icon).not.toContain('truncate');
+    const words = renderToStaticMarkup(<NoAskBadge agent={agent} compact />);
+    expect(words).toContain('>Runs without asking<');
+    expect(words).toContain('flex-none');
+    expect(words).not.toContain('truncate');
+    expect(renderToStaticMarkup(<NoAskBadge agent={{}} icon />)).toBe(''); // negative control: an agent that asks shows nothing
+  });
+  it('says the same in Turkish', () => {
+    setLanguage('tr');
+    expect(renderToStaticMarkup(<NoAskBadge agent={{ skipsPermissions: true }} icon />)).toContain('Onay istemeden çalışır');
+    setLanguage('en');
   });
 });
 

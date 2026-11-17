@@ -153,7 +153,7 @@ export function Workspace({ ws, dispatch, fleet, bindings, narrow, renderAgent, 
                   onClick={() => dispatch({ type: 'activate', pane: p.id })} onKeyDown={(e) => tabKey(e, f, i)} {...dragProps(p)}>
                   {pa ? <StateMark state={pa.state} failed={endedWithError(pa)} /> : <Icon name="layout" className="size-3.5 text-muted" />}
                   <span className="min-w-0 truncate">{label(p)}</span>
-                  {pa && <NoAskBadge agent={pa} compact />}
+                  {pa && <NoAskBadge agent={pa} icon />}
                   <button type="button" tabIndex={-1} aria-hidden className="ide-iconbtn size-5 opacity-60 group-hover:opacity-100" onClick={(e) => { e.stopPropagation(); dispatch({ type: 'close', pane: p.id }); }} title={t('ide-close-tab', { name: label(p) })}><Icon name="close" className="size-3" /></button>
                 </div>
               );
@@ -164,7 +164,7 @@ export function Workspace({ ws, dispatch, fleet, bindings, narrow, renderAgent, 
           <div className="flex min-w-0 flex-1 cursor-grab items-center gap-2 px-3 text-[0.8125rem]" title={t('layout-drag')} {...dragProps(front)}>
             {a ? <StateMark state={a.state} failed={endedWithError(a)} /> : <Icon name="layout" className="size-3.5 text-muted" />}
             <span className="min-w-0 truncate font-medium">{label(front)}</span>
-            {a && <NoAskBadge agent={a} compact />}
+            {a && <NoAskBadge agent={a} icon />}
             {a && <span className="hidden truncate text-xs text-muted sm:inline">{a.machine}</span>}
             {followOf(front) && <span className="ide-chip flex-none">{t(`layout-follows-${followOf(front)}`)}</span>}
           </div>

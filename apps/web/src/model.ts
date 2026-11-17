@@ -82,11 +82,26 @@ export function uiState(s: number | undefined): UiState {
   }
 }
 
-// A closed agent whose process ended with a non-zero exit code. An agent the machine's stop interrupted is not that: it has its own
-// wording. Interim (no state token for it yet): it is drawn with a neutral cross and the words "Ended with an error", never as finished.
+// What the node reports as an agent's exit code (crates/agora-node/src/daemon.rs, `AgentExited`):
+//   0 or more     the program's own exit status;
+//   -N            the program died of signal N (the node sends SIGTERM, SIGKILL and SIGHUP itself when it stops or restarts agents);
+//   -1            it ended and neither a status nor a signal was known;
+//   i32::MIN      stopped on request, or never known (the node re-announcing an agent it only remembers).
+export const EXIT_UNKNOWN = -2147483648;
+// Signals that mean the program itself crashed: illegal instruction, abort, bus error, arithmetic error, segmentation fault.
+const CRASH_SIGNALS = new Set([4, 6, 7, 8, 11]);
+
+// A closed agent that genuinely failed: its program exited with a non-zero status, or crashed. A stop (i32::MIN), a signal the node
+// sends itself, an unknown status and an agent interrupted with its machine are not failures. Interim (no state token for it yet): it
+// is drawn with a neutral cross and the words "Ended with an error", never as finished.
 export function endedWithError(a: { closed?: boolean; exitCode?: number; interrupted?: unknown }): boolean {
-  return !!a.closed && !a.interrupted && !!a.exitCode;
+  if (!a.closed || a.interrupted || a.exitCode === undefined) return false;
+  const code = a.exitCode;
+  return code > 0 || CRASH_SIGNALS.has(-code);
 }
+
+// The exit status worth showing: only a program's own non-zero status.
+export const shownExitCode = (a: { exitCode?: number }): number | undefined => (a.exitCode !== undefined && a.exitCode > 0 ? a.exitCode : undefined);
 
 // A machine's name, and its id as well only where two machines share that name (the id tells them apart, so it is shown when it is
 // needed and not otherwise). `others` is every machine in the list, this one included.

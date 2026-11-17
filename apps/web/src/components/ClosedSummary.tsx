@@ -1,7 +1,7 @@
 import { t } from '../i18n';
 import { forgetReasonKey } from '../net/forget';
 import { resumeReasonKey } from '../net/directory';
-import { endedWithError, type AgentTileModel, type ResumeAction } from '../model';
+import { endedWithError, shownExitCode, type AgentTileModel, type ResumeAction } from '../model';
 import { ago, duration } from '../net/time';
 import { Icon } from './Icon';
 import { StateMark } from './StateBadge';
@@ -26,7 +26,7 @@ export function ClosedSummary({ agent, cost, now, onReview, onHistory, onFiles, 
   resumeError?: string;
 }) {
   // A non-zero exit code is drawn as an error (a neutral cross and the words, never the green check); the code itself is stated too.
-  const code = agent.exitCode;
+  const code = shownExitCode(agent);
   const failed = endedWithError(agent);
   const ran = agent.startedMs && agent.endedMs ? duration(agent.endedMs - agent.startedMs) : undefined;
   const changes = agent.filesChanged ?? 0;
@@ -34,10 +34,10 @@ export function ClosedSummary({ agent, cost, now, onReview, onHistory, onFiles, 
     <div className="min-h-0 flex-1 overflow-y-auto p-6">
       <div className="mx-auto grid max-w-xl gap-4">
         <div className="flex items-start gap-3">
-          <span className={failed ? 'text-muted' : 'text-finished'}><StateMark state="finished" failed={failed} /></span>
+          <span className={failed ? undefined : 'text-finished'}><StateMark state="finished" failed={failed} /></span>
           <div className="min-w-0">
             <h2 className="m-0 text-base normal-case tracking-normal text-ink">{agent.name}</h2>
-            <p className={`m-0 ${failed ? 'text-ink' : 'text-finished'}`}>{failed ? t('closed-failed', { code: code ?? 0 }) : t('closed-ok')}</p>
+            <p className={`m-0 ${failed ? 'text-ink' : 'text-finished'}`}>{failed ? t(code === undefined ? 'closed-failed-signal' : 'closed-failed', { code: code ?? 0 }) : t('closed-ok')}</p>
           </div>
         </div>
         <p className="muted m-0">{t(agent.interrupted ? (agent.interrupted.stillRunning ? 'interrupted-note-running' : agent.interrupted.resumable ? 'interrupted-note' : 'interrupted-note-new') : 'closed-note')}</p>

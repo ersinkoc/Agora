@@ -1,5 +1,6 @@
 import { Fragment, useId, useState } from 'react';
 import { t } from '../i18n';
+import { approvalName } from '../net/approvalText';
 import { visible, type ApprovalModel, type StartRequest, type StartSetting } from '../net/view';
 import { StateMark } from './StateBadge';
 
@@ -27,7 +28,12 @@ export function StartApproval({ approval, start, busy, onResolve }: {
   // The same request can show in two places at once (its pane and the details panel): each has its own radio group.
   const group = useId();
   // The node gives a grant only when the request says it may (inside the asker's folder, not a shell); the choice is not offered otherwise.
-  const title = t('start-approval-title', { name: visible(approval.agentName || start.agent), node: visible(start.node), kind: visible(start.kind) });
+  // The machine's and the agent's names as this window knows them; where it does not know one, words, never an id (the request's own
+  // `node` and `agent` fields are ids).
+  const who = visible(approvalName(approval));
+  const title = approval.machineName?.trim()
+    ? t('start-approval-title', { name: who, machine: visible(approval.machineName), kind: visible(start.kind) })
+    : t('start-approval-title-nomachine', { name: who, kind: visible(start.kind) });
   const choice = (): StartChoice => (start.grantAllowed ? { grant: more ? GRANT_SIZE : 0, nested: nested && start.depth < 2 } : { grant: 0, nested: false });
   return (
     <article role="alert" aria-label={title}
@@ -55,9 +61,9 @@ export function StartApproval({ approval, start, busy, onResolve }: {
       {start.inside && !start.grantAllowed && <p className="m-0 text-xs text-muted">{t(start.settings.length > 0 ? 'start-approval-settings-once' : 'start-approval-no-grant')}</p>}
       {start.grantAllowed && <fieldset className="m-0 flex flex-col gap-1 border-0 p-0 text-xs">
         <legend className="sr-only">{t('start-approval-scope')}</legend>
-        <label className="flex items-center gap-2"><input type="radio" name={group} checked={!more} onChange={() => setMore(false)} />{t('start-approval-once')}</label>
-        <label className="flex items-center gap-2"><input type="radio" name={group} checked={more} onChange={() => setMore(true)} />{t('start-approval-more', { count: GRANT_SIZE, kind: visible(start.kind), name: visible(approval.agentName || start.agent) })}</label>
-        {start.depth < 2 && <label className="flex items-center gap-2"><input type="checkbox" checked={nested} onChange={(e) => setNested(e.target.checked)} />{t('start-approval-nested')}</label>}
+        <label className="touch-row flex items-center gap-2"><input type="radio" name={group} checked={!more} onChange={() => setMore(false)} /><span className="min-w-0 break-words">{t('start-approval-once')}</span></label>
+        <label className="touch-row flex items-center gap-2"><input type="radio" name={group} checked={more} onChange={() => setMore(true)} /><span className="min-w-0 break-words">{t('start-approval-more', { count: GRANT_SIZE, kind: visible(start.kind), name: who })}</span></label>
+        {start.depth < 2 && <label className="touch-row flex items-center gap-2"><input type="checkbox" checked={nested} onChange={(e) => setNested(e.target.checked)} /><span className="min-w-0 break-words">{t('start-approval-nested')}</span></label>}
       </fieldset>}
       <div className="flex gap-2">
         <button type="button" className="button button--primary px-3 py-1 text-xs" disabled={busy} onClick={() => onResolve(true, choice())}>{t('approval-allow')}</button>

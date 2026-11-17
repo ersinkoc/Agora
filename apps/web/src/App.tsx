@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { approvalName } from './net/approvalText';
 import { CommandPalette, type PaletteItem } from './components/CommandPalette';
 import { demoAgents, demoApprovals, demoList, demoMachines, demoProjects } from './fixtures';
 import { demoDiff, demoFiles } from './demoWorkspace';
@@ -288,7 +289,7 @@ export function App() {
     seenApprovals.current = new Set(list.map((a) => a.id));
     if (document.visibilityState === 'visible' || typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
     for (const a of fresh) {
-      try { new Notification(t('approval-title', { name: a.agentName }), { body: a.action, tag: a.id }); } catch { /* not allowed here */ }
+      try { new Notification(t('approval-title', { name: approvalName(a) }), { body: a.action, tag: a.id }); } catch { /* not allowed here */ }
     }
   }, [live]);
   // Browsers only ask for notification permission after a user gesture: ask at the first click once signed in.

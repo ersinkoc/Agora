@@ -77,8 +77,9 @@
   .state--finished { color: var(--state-finished); }
   .state--idle { color: var(--state-idle); }
   .state--unknown { color: var(--state-unknown); }
-  /* Interim, until a failed state has its own token (ADR needed): neutral, so a failure is never drawn as success. */
-  .state--failed { color: var(--text-muted); }
+  /* Interim, until a failed state has its own token (ADR needed): the full-strength text colour (neutral, but never quieter than the green
+     check was), so a failure is never drawn as success and never missed. */
+  .state--failed { color: var(--text); font-weight: 600; }
   .state--working .state__mark { animation: breathe 2.4s ease-in-out infinite; }
   .state--needs-you .state__mark { animation: attend 1.6s ease-in-out infinite; }
 
@@ -132,6 +133,8 @@
 @media (pointer: coarse) {
   .button, .ide-iconbtn, .ide-tab, .ide-row, .menu-tile, button.ide-chip, a.ide-chip, .ide-bar > a, .ide-bar > button, input:not([type='checkbox'], [type='radio']), select { min-height: var(--tap); }
   footer.ide-bar { height: auto; }
+  /* A row whose label holds a radio or a checkbox: the whole label is the target (the box itself stays its size). */
+  .touch-row { min-height: var(--tap); }
   .ide-iconbtn, .menu-tile { min-width: var(--tap); }
 }
 

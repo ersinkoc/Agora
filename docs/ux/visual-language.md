@@ -52,6 +52,12 @@ Users see plain words; internal terms stay in code and docs (`glossary.md` lists
   single brand accent. When everything is calm, the one agent that needs you is impossible to miss.
   Code (the file browser and the review screen) is content, not chrome: it gets muted syntax colours, derived from the
   theme's own colours mixed toward its text colour (`--syntax-*` in `app.css`, not theme tokens), never as loud as a state colour.
+  The review screen's changed lines are content too, and they are the one content colour that is not derived from the theme:
+  `--diff-removed` (red, `#f87171` on dark and `#a82117` on light, in `tokens.css`) is fixed and not a theme token, so a theme file
+  cannot set it. A deleted line is red, an added line is green (the Finished green), amber stays "needs you" and is never used
+  for a deletion. A changed line says so by shape as well as colour: a `-` or `+` glyph and a 2 px bar on its left edge. The red
+  reads at 4.5:1 or better on every built-in surface and on its own tinted row; the web tests check it. This documents a
+  content-colour exception to "colour is reserved for state"; it does not change the state-colour rule.
 - **State is color + shape + motion + text.** Never color alone (color-blind safe, WCAG 2.2 AA).
 
 ### Agent state language

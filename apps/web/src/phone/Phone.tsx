@@ -1,4 +1,5 @@
 import { Suspense, lazy, useEffect, useMemo, useState, useSyncExternalStore, type ReactNode } from 'react';
+import { approvalName } from '../net/approvalText';
 import { t } from '../i18n';
 import { endedWithError, type AgentTileModel } from '../model';
 import { visible, type ApprovalModel, type MachineModel } from '../net/view';
@@ -75,10 +76,10 @@ function ApprovalCard({ approval: x, machine, untrusted: notTrusted, onResolve, 
   const untrusted = notTrusted && <div className="phone-card__hint"><p className="m-0">{t('phone-untrusted', { machine })}</p><a className="phone-chipbtn justify-self-start" href="#/device">{t('device-link')}</a></div>;
   if (x.start) return <div className="phone-card phone-card--needs">{untrusted}<StartApproval approval={x} start={x.start} busy={busy || !onResolve} onResolve={(ok, choice) => answer(ok, choice)} /></div>;
   return (
-    <article className="phone-card phone-card--needs" aria-label={t('approval-title', { name: x.agentName })}>
+    <article className="phone-card phone-card--needs" aria-label={t('approval-title', { name: approvalName(x) })}>
       <button type="button" className="phone-card__head" onClick={onOpen} disabled={!onOpen}>
         <StateMark state="needs-you" />
-        <span className="min-w-0 flex-1"><strong className="block truncate">{t('approval-title', { name: x.agentName })}</strong><span className="block truncate text-xs text-muted">{machine}</span></span>
+        <span className="min-w-0 flex-1"><strong className="block truncate">{t('approval-title', { name: approvalName(x) })}</strong><span className="block truncate text-xs text-muted">{machine}</span></span>
         {onOpen && <Icon name="chevron" className="size-4 text-muted rtl:rotate-180" />}
       </button>
       <p className="m-0 break-words">{visible(x.action)}</p>

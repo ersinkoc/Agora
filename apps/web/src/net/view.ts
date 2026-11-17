@@ -410,7 +410,8 @@ export interface ApprovalModel {
   node: string;
   localId: string;
   agentId: string;
-  agentName: string;
+  agentName: string; // the agent's display name; empty when this window does not know the agent (never an id)
+  machineName?: string; // the machine's display name; empty or missing when unknown (never a node id)
   action: string;
   detail: string;
   expiresAtMs: number;
@@ -474,7 +475,8 @@ export function approvalList(v: View): ApprovalModel[] {
         node: at < 0 ? '' : id.slice(0, at),
         localId: at < 0 ? id : id.slice(at + 1),
         agentId: a.agentId,
-        agentName: names.get(a.agentId) ?? a.agentId,
+        agentName: names.get(a.agentId) ?? '',
+        machineName: v.nodes.get(at < 0 ? '' : id.slice(0, at))?.hostname ?? '',
         action: a.action,
         detail: a.detail,
         expiresAtMs: a.expiresAtMs,
