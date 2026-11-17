@@ -335,16 +335,15 @@ fn lan_ipv4() -> Vec<Ipv4Addr> {
     out
 }
 
-/// Whether something accepts connections on this machine's `port`.
-fn answers(port: u16) -> bool {
-    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+/// Whether something accepts connections at `addr`.
+fn answers(addr: SocketAddr) -> bool {
     TcpStream::connect_timeout(&addr, Duration::from_millis(500)).is_ok()
 }
 
 /// The first port from `from` that `ip` can listen on and nobody answers on.
 fn free_port(ip: IpAddr, from: u16) -> Option<u16> {
     (from..from.saturating_add(100)).find(|p| {
-        if answers(*p) {
+        if answers(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), *p)) {
             return false;
         }
         // One at a time: each test listener is closed before the next is tried.
@@ -639,7 +638,7 @@ pub fn front_door(say: &Say, o: &Opts) -> ExitCode {
             say.out(key!("frontdoor-autostart-later"), &[]);
         }
     }
-    open(say, &m, ui.unwrap_or(m.ui))
+    open(say, &h, &m, ui.unwrap_or(m.ui))
 }
 
 /// ADR-0062 item 4: "Bring agents back by themselves after a restart? [Y/n]". Enter or yes is yes (the default the maintainer chose),
@@ -674,7 +673,7 @@ pub fn web(say: &Say) -> ExitCode {
     if let Err(code) = up(say, &h, &m, None) {
         return code;
     }
-    open(say, &m, Ui::Web)
+    open(say, &h, &m, Ui::Web)
 }
 
 /// A failure to take or change a role's lock, said in words: a guard held too long by another process (stopped or hung) is named with
@@ -714,8 +713,8 @@ fn failed(say: &Say, reason: &str) -> ExitCode {
     ExitCode::from(1)
 }
 
-fn open(say: &Say, m: &Machine, ui: Ui) -> ExitCode {
-    let (Some(addr), true) = (m.local_addr(), m.has("hub")) else {
+fn open(say: &Say, home: &Path, m: &Machine, ui: Ui) -> ExitCode {
+    let (Some(addr), true) = (hub_addr(home, m), m.has("hub")) else {
         // A machine that joined a hub elsewhere has nothing to open here: its window is the hub's.
         say.out(key!("frontdoor-running"), &[]);
         return ExitCode::SUCCESS;
@@ -741,7 +740,7 @@ fn open(say: &Say, m: &Machine, ui: Ui) -> ExitCode {
                     return ExitCode::from(1);
                 }
             };
-            let Some(port) = m.port() else {
+            let Some(port) = addr.parse::<SocketAddr>().ok().map(|a| a.port()) else {
                 return failed(say, &m.hub_listen);
             };
             // The code is in the fragment, which the browser never sends; the page trades it for a session at once.
@@ -943,10 +942,29 @@ fn is_reparse(m: &std::fs::Metadata) -> bool {
     agora_platform::is_reparse_point(m)
 }
 
-/// Whether the role answers: the hub on its port, the node on its control socket.
+/// Where this machine reaches its own hub now. A hub that runs (its lock's holder is alive) is reached where it wrote that it listens
+/// (`<hub dir>/listen`, when written since that lock was): `agora --listen` changes `hub_listen` only from the next start on, so the
+/// running hub may still be at the address before. Otherwise, and before a new hub has written it, where `hub_listen` names.
+fn hub_addr(home: &Path, m: &Machine) -> Option<String> {
+    let modified = |p: &Path| std::fs::metadata(p).and_then(|d| d.modified()).ok();
+    let record = m.hub_dir.join(crate::hubcli::LISTEN_FILE);
+    let running =
+        holder(home, Role::Hub).is_some() && modified(&record) >= modified(&Role::Hub.lock(home));
+    // Its port, on loopback, as `local_addr` reaches it.
+    running
+        .then(|| crate::hubcli::own_hub_addr(&m.hub_dir))
+        .flatten()
+        .and_then(|a| a.parse::<SocketAddr>().ok())
+        .map(|a| format!("127.0.0.1:{}", a.port()))
+        .or_else(|| m.local_addr())
+}
+
+/// Whether the role answers: the hub at its address, the node on its control socket.
 pub(crate) fn role_answers(home: &Path, m: &Machine, role: Role) -> bool {
     match role {
-        Role::Hub => m.port().is_some_and(answers),
+        Role::Hub => hub_addr(home, m)
+            .and_then(|a| a.parse().ok())
+            .is_some_and(answers),
         Role::Node => agora_node::control::Client::connect(&home.join("node.sock")).is_ok(),
     }
 }
@@ -1144,17 +1162,23 @@ fn wait_linked(say: &Say, home: &Path, m: &Machine) -> Result<(), ExitCode> {
             .ok()
             .map(|t| t.trim().to_string())
     };
-    // A node linked to another hub is not waited for here.
-    if read("url") != m.own_hub_url() {
-        return Ok(());
-    }
     let (Some(node_id), Some(addr), Ok(ca_pem)) = (
         read("node-id"),
-        m.local_addr(),
+        hub_addr(home, m),
         std::fs::read_to_string(m.hub_dir.join("ca.pem")),
     ) else {
         return Ok(());
     };
+    // A node linked to another hub is not waited for here. This hub's own node is linked at its saved port, or at the port the
+    // running hub has while a `--listen` change waits for its next start.
+    let running_url = addr
+        .parse::<SocketAddr>()
+        .ok()
+        .map(|a| format!("wss://localhost:{}", a.port()));
+    let url = read("url");
+    if url != m.own_hub_url() && url != running_url {
+        return Ok(());
+    }
     let hub = Hub { addr, ca_pem };
     let end = Instant::now() + WAIT;
     let mut token: Option<String> = None;
@@ -1391,6 +1415,17 @@ pub(crate) fn stop_role(
     code: &mut ExitCode,
 ) -> bool {
     let lock = role.lock(h);
+    // The lock is believed only in a folder its guard accepts (this user's, not a link): one that is not is refused before the
+    // process it names is stopped, as a start refuses it, never after.
+    if let Some(dir) = lock
+        .parent()
+        .filter(|d| std::fs::symlink_metadata(d).is_ok())
+    {
+        if let Err(e) = agora_platform::ensure_private_dir(dir) {
+            *code = down_lock_failed(say, &lock, &e);
+            return false;
+        }
+    }
     let mut stopped_any = false;
     for _ in 0..DOWN_ROUNDS {
         let Some(l) = read_lock(&lock) else {
@@ -1681,6 +1716,103 @@ mod tests {
         remove_lock_of(&lock, &me).unwrap();
         assert!(!lock.exists());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// `agora down` refused a `run` folder that is a link only after it had stopped the process a lock there names: through a link
+    /// to another Agora home's `run`, it stopped that home's hub. Now it is refused first (a start refuses it too) and the process
+    /// and its lock stay; the same lock in a plain folder is stopped.
+    #[test]
+    fn down_refuses_a_linked_run_folder_before_stopping_anything() {
+        let dir = tmp("run-link");
+        let (home, elsewhere, plain) = (dir.join("home"), dir.join("elsewhere"), dir.join("plain"));
+        for d in [&home, &elsewhere, &plain.join("run")] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        // A live process for the lock to name: this test binary again, waiting in `supervise`'s child helper.
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "supervise::tests::child_helper",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("AGORA_TEST_CHILD", "60000 0")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let held = LockInfo::of(child.id()).unwrap();
+        std::fs::write(elsewhere.join("hub.lock"), held.text()).unwrap();
+        agora_platform::link_dir(&elsewhere, &home.join("run")).unwrap();
+
+        let mut code = ExitCode::SUCCESS;
+        let stopped = stop_role(&say(), &home, None, Role::Hub, &mut code);
+        let (survived, lock_kept) = (held.alive(), elsewhere.join("hub.lock").exists());
+
+        // Control: the same lock in a plain `run` folder is believed, and its process is stopped.
+        std::fs::write(plain.join("run").join("hub.lock"), held.text()).unwrap();
+        let mut plain_code = ExitCode::SUCCESS;
+        let plain_stopped = stop_role(&say(), &plain, None, Role::Hub, &mut plain_code);
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = std::fs::remove_dir_all(dir);
+
+        assert!(
+            !stopped && survived,
+            "a lock behind a linked run folder was acted on"
+        );
+        assert!(lock_kept);
+        assert!(code == ExitCode::from(1));
+        assert!(plain_stopped && plain_code == ExitCode::SUCCESS);
+    }
+
+    /// `agora --listen` changes the hub's address from its next start on, but the front door then looked for the running hub at the
+    /// new address ("did not start", exit 1). A running hub is reached where it wrote that it listens, unless that record is older
+    /// than the lock it runs under (left by the hub before); with no running hub, `hub_listen` decides.
+    #[test]
+    fn the_running_hub_is_reached_where_it_listens() {
+        let home = tmp("hub-addr");
+        let m = Machine {
+            roles: vec!["hub".into()],
+            ui: Ui::None,
+            hub_listen: "127.0.0.1:7446".into(),
+            hub_names: vec!["localhost".into()],
+            hub_dir: home.join("hub"),
+            node_projects: vec![],
+            resume: None,
+        };
+        std::fs::create_dir_all(&m.hub_dir).unwrap();
+        std::fs::create_dir_all(home.join("run")).unwrap();
+        let record = m.hub_dir.join(crate::hubcli::LISTEN_FILE);
+        let lock = Role::Hub.lock(&home);
+        let touch = |p: &Path, t: std::time::SystemTime| {
+            std::fs::File::options()
+                .write(true)
+                .open(p)
+                .unwrap()
+                .set_modified(t)
+                .unwrap();
+        };
+        let at = std::time::SystemTime::now();
+        let secs = Duration::from_secs(10);
+
+        // No running hub: where `hub_listen` names, also with a record from a hub before.
+        assert_eq!(hub_addr(&home, &m).as_deref(), Some("127.0.0.1:7446"));
+        std::fs::write(&record, "127.0.0.1:7445").unwrap();
+        assert_eq!(hub_addr(&home, &m).as_deref(), Some("127.0.0.1:7446"));
+        // Running (the lock names this live process) and the record written after the lock: the record.
+        std::fs::write(&lock, LockInfo::of(std::process::id()).unwrap().text()).unwrap();
+        touch(&lock, at);
+        touch(&record, at + secs);
+        assert_eq!(hub_addr(&home, &m).as_deref(), Some("127.0.0.1:7445"));
+        // Its port, reached on loopback, as `hub_listen`'s is.
+        std::fs::write(&record, "0.0.0.0:7447").unwrap();
+        touch(&record, at + secs);
+        assert_eq!(hub_addr(&home, &m).as_deref(), Some("127.0.0.1:7447"));
+        // A record older than the lock is a hub before's: not believed.
+        touch(&record, at - secs);
+        assert_eq!(hub_addr(&home, &m).as_deref(), Some("127.0.0.1:7446"));
+        let _ = std::fs::remove_dir_all(home);
     }
 
     fn tmp(name: &str) -> PathBuf {
