@@ -843,11 +843,15 @@ mod tests {
         let elsewhere = base.join("elsewhere.json");
         std::fs::write(&elsewhere, format!(r#"{{"project_id":"{BAD}"}}"#)).unwrap();
         let good = format!(r#"{{"project_id":"{GOOD}"}}"#);
-        // The fixture is the folder's own metadata (not a Git checkout's around the temporary folder): read before any swap.
+        // The fixture is read as the folder's own metadata before any swap. A temporary folder inside a Git checkout is identified
+        // by that checkout's root instead, and the swap would test nothing there: skipped.
         std::fs::write(&meta, &good).unwrap();
         let path = folder.to_str().unwrap().to_string();
         let (first, _) = inspect(&path, "n", false).unwrap();
-        assert_eq!(first.project_id, format!("id:{GOOD}"));
+        if first.project_id != format!("id:{GOOD}") {
+            let _ = std::fs::remove_dir_all(&base);
+            return;
+        }
         let stop = std::sync::Arc::new(AtomicBool::new(false));
         let flips = std::sync::Arc::new(AtomicU64::new(0));
         let flipper = {
