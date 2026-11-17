@@ -1418,6 +1418,18 @@ impl Node {
         });
         let mut sandbox = read_policy(&cfg.data_dir.join(POLICY_FILE)).sandbox;
         sandbox.protect = node_private_paths(cfg);
+        // ADR-0082: where a confined agent could otherwise connect to the control socket (Linux), the socket needs a token the agent's
+        // profile must not reach. Made here, written when the socket is bound.
+        let control_token = if agora_platform::CONTROL_TOKEN_REQUIRED
+            && sandbox.level != crate::sandbox::Level::Off
+        {
+            let file = std::path::absolute(crate::control_token::token_path(&cfg.socket))
+                .unwrap_or_else(|_| crate::control_token::token_path(&cfg.socket));
+            sandbox.control_token = Some(file.clone());
+            Some((crate::control_token::ControlToken::generate()?, file))
+        } else {
+            None
+        };
         sup.set_sandbox(sandbox);
         sup.reserve_ids(ledger.next_id());
         sup.set_skip_permissions(read_policy(&cfg.data_dir.join(POLICY_FILE)).skip_permissions);
@@ -1593,23 +1605,25 @@ impl Node {
             .with_git_wake(Arc::clone(&git_wake)),
         );
         mesh.set_helpers(Arc::clone(&spawner) as Arc<dyn crate::mesh_server::Helpers>);
-        let ctx = Arc::new(
-            ControlContext::new(
-                Arc::clone(&supervisor),
-                projects,
-                cfg.worktree_root.clone(),
-                cfg.node_id.clone(),
-                Some(Arc::clone(&events)),
-                Some(Arc::clone(&mesh)),
-                Some(Arc::clone(&approvals)),
-                Arc::clone(&chat),
-            )
-            .with_manifests_dir(cfg.manifests_dir.clone())
-            .with_git_wake(Arc::clone(&git_wake))
-            .with_spawner(Arc::clone(&spawner))
-            .with_ledger(Arc::clone(&ledger))
-            .with_show_secret(read_policy(&cfg.data_dir.join(POLICY_FILE)).show_secret),
-        );
+        let mut ctx = ControlContext::new(
+            Arc::clone(&supervisor),
+            projects,
+            cfg.worktree_root.clone(),
+            cfg.node_id.clone(),
+            Some(Arc::clone(&events)),
+            Some(Arc::clone(&mesh)),
+            Some(Arc::clone(&approvals)),
+            Arc::clone(&chat),
+        )
+        .with_manifests_dir(cfg.manifests_dir.clone())
+        .with_git_wake(Arc::clone(&git_wake))
+        .with_spawner(Arc::clone(&spawner))
+        .with_ledger(Arc::clone(&ledger))
+        .with_show_secret(read_policy(&cfg.data_dir.join(POLICY_FILE)).show_secret);
+        if let Some((token, file)) = control_token {
+            ctx = ctx.with_control_token(token, file);
+        }
+        let ctx = Arc::new(ctx);
         // ADR-0060: `resume = auto` brings back, without anyone asking, the interrupted agents of the kinds and folders the owner listed
         // that can continue their own session. In id order, so a helper comes after its parent (a helper whose parent did not come
         // back stays offered). A refusal leaves the agent offered as before.

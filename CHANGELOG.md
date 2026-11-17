@@ -4,6 +4,13 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+### Security
+- A confined agent on Linux can no longer use the node's control socket (ADR-0082, T16): when the node confines agents it keeps a secret
+  in its own folder (`control.token`, readable only by its owner and out of every agent's reach) and answers nothing on the socket until the
+  caller shows it, so an agent can no longer start agents with options nobody confirmed, stop agents or type into another agent's terminal
+  through it. `agora` presents the secret itself, so no command changes; a node that does not confine agents changes nothing. A node whose
+  folder lies inside a folder agents may read or write (a node under `/tmp`) refuses to start confined agents, and `agora doctor` says so.
+  `agora` also tells a node that refused it apart from no node running.
 ### Fixes
 - `agora status` says "connected" only while the node's link to the hub is up right now (it used to say so for the hub the machine was set up for, also while every attempt failed); otherwise it says not connected and why, and on a Mac whose Local Network permission is missing it points to System Settings. After `agora update` on a Mac, the note now says to restart the node once more after allowing Local Network.
 

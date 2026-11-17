@@ -1056,6 +1056,13 @@ fn run_local_on(
             Error::new(ErrorCode::ProtocolCapabilityMissing).with("capability", "terminal.relay"),
         );
     }
+    // ADR-0082: the control token is for the local socket only; the hub neither knows nor may probe it, so the command is not
+    // carried to the socket (where a wrong token would end the node's own kept connection).
+    if matches!(req.command, Some(command_request::Command::ControlAuth(_))) {
+        return fail(
+            Error::new(ErrorCode::ProtocolCapabilityMissing).with("capability", "control.auth"),
+        );
+    }
     let Some(socket) = socket else {
         return fail(
             Error::new(ErrorCode::NodePolicyDenied)

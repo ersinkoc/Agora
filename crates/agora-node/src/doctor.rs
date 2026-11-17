@@ -96,6 +96,24 @@ pub fn run(inputs: &Inputs) -> Vec<Check> {
         if crate::gitconfig::identity_missing() {
             out.push(check("git-identity-missing", Status::Warn, ""));
         }
+        // ADR-0082: where the control socket needs its token, a folder agents may read or write must not hold the token file.
+        if agora_platform::CONTROL_TOKEN_REQUIRED {
+            let file = crate::control_token::token_path(&inputs.socket);
+            let file = std::path::absolute(&file).unwrap_or(file);
+            if file.parent().is_some_and(Path::is_dir) {
+                let mut probe = sandbox.clone();
+                probe.control_token = Some(file.clone());
+                let profile =
+                    probe.profile("doctor", None, Path::new("/nonexistent-agora-doctor"), "");
+                if profile.is_some_and(|p| probe.token_reachable(&p)) {
+                    out.push(check(
+                        "control-token-reachable",
+                        Status::Fail,
+                        file.display().to_string(),
+                    ));
+                }
+            }
+        }
     }
     out.extend(authority(&inputs.data_dir, &policy, now_ms()));
 
