@@ -70,8 +70,6 @@ export interface View {
   tasks: Map<string, TaskV>; // the shared board's tasks seen since this window opened (ADR-0039)
   leases: Map<string, LeaseV>;
   withTerminal: Set<string>; // agents that have a terminal; the others (chat agents) are talked to with prompts
-  // The open terminals, `<node>/<terminal>` -> the agent's key: a `TerminalClosed` names the terminal, not the agent.
-  terminals?: Map<string, string>;
   // ADR-0053: agents forgotten while this window watched. The hub keeps them, hidden, so a later `AgentInterrupted` about one does not
   // list it again; only a new `AgentStarted` of the id does.
   forgottenAgents?: Set<string>;
@@ -128,7 +126,7 @@ export function fromSnapshot(s: agora.v1.Snapshot.$Properties): View {
       };
     }
   }
-  for (const tm of s.terminals ?? []) if (tm.agentId) { v.withTerminal.add(tm.agentId); (v.terminals ??= new Map()).set(tm.terminalId ?? '', tm.agentId); }
+  for (const tm of s.terminals ?? []) if (tm.agentId) v.withTerminal.add(tm.agentId);
   for (const t of s.tasks ?? []) {
     v.tasks.set(`${t.projectId ?? ''}/${t.taskId ?? ''}`, { projectId: t.projectId ?? '', title: t.title ?? '', ownerId: t.claimedByAgentId ?? '', done: !!t.done });
   }
@@ -145,12 +143,6 @@ export function fromSnapshot(s: agora.v1.Snapshot.$Properties): View {
 
 // Applies one event at log position `pos`. An event at or before the view's position was already folded in
 // (a resume replays the tail), so it is ignored: applying is idempotent.
-// Whether the agent still has an open terminal this window knows of.
-function hasTerminal(v: View, agent: string): boolean {
-  for (const owner of v.terminals?.values() ?? []) if (owner === agent) return true;
-  return false;
-}
-
 export function applyEvent(v: View, pos: number, ev: Ev): void {
   if (pos <= v.pos) return;
   v.pos = pos;
@@ -172,7 +164,6 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
       for (const a of v.agents.values()) if (a.nodeId === b.nodeId && a.running) { a.running = false; a.state = 4 /* done */; }
       for (const k of [...v.approvals.keys()]) if (k.startsWith(`${b.nodeId}/`)) v.approvals.delete(k);
       for (const k of [...v.withTerminal]) if (k.startsWith(`${b.nodeId}/`)) v.withTerminal.delete(k);
-      for (const k of [...(v.terminals?.keys() ?? [])]) if (k.startsWith(`${b.nodeId}/`)) v.terminals?.delete(k);
       const was = v.nodes.get(b.nodeId);
       // The start says which program it is (`build`) and, ADR-0069, where it runs from when that folder is not on the PATH. The last
       // resources it reported stay until it reports new ones, as on the hub.
@@ -318,22 +309,8 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
       break;
     }
     case 'terminalOpened':
-      if (e.terminalOpened.agentId) {
-        const key = q(e.terminalOpened.terminalId);
-        const before = v.terminals?.get(key);
-        (v.terminals ??= new Map()).set(key, q(e.terminalOpened.agentId));
-        // A terminal id opened again for another agent no longer belongs to the first one.
-        if (before !== undefined && !hasTerminal(v, before)) v.withTerminal.delete(before);
-        v.withTerminal.add(q(e.terminalOpened.agentId));
-      }
+      if (e.terminalOpened.agentId) v.withTerminal.add(q(e.terminalOpened.agentId));
       break;
-    case 'terminalClosed': {
-      const key = q(e.terminalClosed.terminalId);
-      const agent = v.terminals?.get(key);
-      v.terminals?.delete(key);
-      if (agent !== undefined && !hasTerminal(v, agent)) v.withTerminal.delete(agent);
-      break;
-    }
     case 'approvalRequested': {
       const b = e.approvalRequested;
       v.approvals.set(q(b.approvalId), { agentId: q(b.agentId), action: b.action ?? '', detail: b.detail ?? '', expiresAtMs: num(b.expiresAtMs) });

@@ -128,20 +128,6 @@ describe('view', () => {
     expect(tiles(v).map((t) => t.id)).toEqual(['n/b']);
   });
 
-  // The hub keeps a terminal until it closes, or until its id is opened for another agent.
-  it('an agent has a terminal while one of its terminals is open', () => {
-    const v = emptyView();
-    applyEvent(v, 1, ev('n', 1, { agentStarted: { agentId: 'a', nodeId: 'n', worktreeId: 'w', kind: 'claude' } }));
-    applyEvent(v, 2, ev('n', 2, { terminalOpened: { terminalId: 't1', agentId: 'a' } }));
-    applyEvent(v, 3, ev('n', 3, { terminalOpened: { terminalId: 't2', agentId: 'a' } }));
-    applyEvent(v, 5, ev('n', 5, { terminalClosed: { terminalId: 't1' } }));
-    expect(v.withTerminal.has('n/a')).toBe(true);
-    applyEvent(v, 6, ev('n', 6, { terminalOpened: { terminalId: 't2', agentId: 'b' } }));
-    expect([...v.withTerminal]).toEqual(['n/b']);
-    applyEvent(v, 7, ev('n', 7, { terminalClosed: { terminalId: 't2' } }));
-    expect(v.withTerminal.size).toBe(0);
-  });
-
   it('adds up estimated cost per project and skips agents without a price', () => {
     const v = emptyView();
     applyEvent(v, 1, ev('n', 1, { checkoutDiscovered: { checkoutId: 'c', nodeId: 'n', projectId: 'p', path: '/home/me/shop' } }));
