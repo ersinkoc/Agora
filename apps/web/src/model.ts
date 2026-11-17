@@ -87,6 +87,10 @@ export function uiState(s: number | undefined): UiState {
 //   -N            the program died of signal N (the node sends SIGTERM, SIGKILL and SIGHUP itself when it stops or restarts agents);
 //   -1            it ended and neither a status nor a signal was known;
 //   i32::MIN      stopped on request, or never known (the node re-announcing an agent it only remembers).
+// On Windows the code is `GetExitCodeProcess` (a u32) cast to i32 (crates/agora-platform/src/conpty.rs): a crash is an NTSTATUS error,
+// 0xC0000005 (access violation), 0xC0000409 (stack buffer overrun), 0xE06D7363 (an unhandled C++ exception) and so on, which arrives
+// as a large negative number. The node's own kill there is `TerminateProcess(.., 1)`, but a stop requested through the node goes through
+// the supervisor's stop path and is reported as i32::MIN, never as 1.
 export const EXIT_UNKNOWN = -2147483648;
 // Signals that mean the program itself crashed: illegal instruction, abort, bus error, arithmetic error, segmentation fault.
 const CRASH_SIGNALS = new Set([4, 6, 7, 8, 11]);
@@ -97,8 +101,15 @@ const CRASH_SIGNALS = new Set([4, 6, 7, 8, 11]);
 export function endedWithError(a: { closed?: boolean; exitCode?: number; interrupted?: unknown }): boolean {
   if (!a.closed || a.interrupted || a.exitCode === undefined) return false;
   const code = a.exitCode;
-  return code > 0 || CRASH_SIGNALS.has(-code);
+  return code > 0 || CRASH_SIGNALS.has(-code) || isWindowsCrash(code);
 }
+
+// An NTSTATUS error or an exception code as a Windows process exit status: 0xC0000000 to 0xEFFFFFFF, i.e. -0x40000000 to -0x10000001 as an
+// i32. That leaves out i32::MIN (0x80000000, a stop) and the small negatives -1 to -N (0xFFFFFFxx, which on Unix are signals and "unknown").
+// One value in the range is a normal ending and not a failure: STATUS_CONTROL_C_EXIT (0xC000013A), what a program that was interrupted
+// with Ctrl+C, or whose console was closed, exits with.
+const STATUS_CONTROL_C_EXIT = -1073741510;
+export const isWindowsCrash = (code: number): boolean => code >= -0x40000000 && code <= -0x10000001 && code !== STATUS_CONTROL_C_EXIT;
 
 // The exit status worth showing: only a program's own non-zero status.
 export const shownExitCode = (a: { exitCode?: number }): number | undefined => (a.exitCode !== undefined && a.exitCode > 0 ? a.exitCode : undefined);

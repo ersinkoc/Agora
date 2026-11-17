@@ -59,11 +59,11 @@ export function StartApproval({ approval, start, busy, onResolve }: {
           : <p className="m-0 mt-1 text-muted">{t('start-approval-no-prompt')}</p>}
       </div>
       {start.inside && !start.grantAllowed && <p className="m-0 text-xs text-muted">{t(start.settings.length > 0 ? 'start-approval-settings-once' : 'start-approval-no-grant')}</p>}
-      {start.grantAllowed && <fieldset className="m-0 flex flex-col gap-1 border-0 p-0 text-xs">
+      {start.grantAllowed && <fieldset className="m-0 flex min-w-0 flex-col gap-1 border-0 p-0 text-xs">
         <legend className="sr-only">{t('start-approval-scope')}</legend>
-        <label className="touch-row flex items-center gap-2"><input type="radio" name={group} checked={!more} onChange={() => setMore(false)} /><span className="min-w-0 break-words">{t('start-approval-once')}</span></label>
-        <label className="touch-row flex items-center gap-2"><input type="radio" name={group} checked={more} onChange={() => setMore(true)} /><span className="min-w-0 break-words">{t('start-approval-more', { count: GRANT_SIZE, kind: visible(start.kind), name: who })}</span></label>
-        {start.depth < 2 && <label className="touch-row flex items-center gap-2"><input type="checkbox" checked={nested} onChange={(e) => setNested(e.target.checked)} /><span className="min-w-0 break-words">{t('start-approval-nested')}</span></label>}
+        <label className="touch-row flex min-w-0 items-center gap-2"><input className="flex-none" type="radio" name={group} checked={!more} onChange={() => setMore(false)} /><span className="min-w-0 break-words">{t('start-approval-once')}</span></label>
+        <label className="touch-row flex min-w-0 items-center gap-2"><input className="flex-none" type="radio" name={group} checked={more} onChange={() => setMore(true)} /><span className="min-w-0 break-words">{t('start-approval-more', { count: GRANT_SIZE, kind: visible(start.kind), name: who })}</span></label>
+        {start.depth < 2 && <label className="touch-row flex min-w-0 items-center gap-2"><input className="flex-none" type="checkbox" checked={nested} onChange={(e) => setNested(e.target.checked)} /><span className="min-w-0 break-words">{t('start-approval-nested')}</span></label>}
       </fieldset>}
       <div className="flex gap-2">
         <button type="button" className="button button--primary px-3 py-1 text-xs" disabled={busy} onClick={() => onResolve(true, choice())}>{t('approval-allow')}</button>

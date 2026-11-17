@@ -26,6 +26,21 @@ describe('quick win: a failed agent is never drawn as success', () => {
     for (const code of [1, 2, 127, 137, 143]) expect(endedWithError(closed({ exitCode: code })), String(code)).toBe(true);
     for (const signal of [4, 6, 7, 8, 11]) expect(endedWithError(closed({ exitCode: -signal })), `-${signal}`).toBe(true); // it crashed
   });
+  it('is a failure for a Windows crash, which arrives as an NTSTATUS cast to i32', () => {
+    const asI32 = (u: number) => u | 0;
+    expect(asI32(0xc0000005)).toBe(-1073741819);
+    for (const status of [0xc0000005, 0xc0000409, 0xc00000fd, 0xc0000374, 0xe06d7363, 0xc0000142]) expect(endedWithError(closed({ exitCode: asI32(status) })), status.toString(16)).toBe(true);
+    expect(endedWithError(closed({ exitCode: -1073741819 }))).toBe(true);
+    expect(endedWithError(closed({ exitCode: 2147483647 }))).toBe(true);
+    expect(shownExitCode({ exitCode: asI32(0xc0000005) })).toBeUndefined(); // no negative number is shown
+  });
+  it('is not a failure for Ctrl+C on Windows (0xC000013A), nor for the edges of the range that are signals or a stop', () => {
+    expect(endedWithError(closed({ exitCode: 0xc000013a | 0 }))).toBe(false);
+    expect(endedWithError(closed({ exitCode: -1073741510 }))).toBe(false);
+    for (const code of [EXIT_UNKNOWN, -1, -15, -0x10000000, 0xfffffff1 | 0, 0x80000001 | 0]) expect(endedWithError(closed({ exitCode: code })), String(code)).toBe(false);
+    expect(endedWithError(closed({ exitCode: 0xc0000005 | 0, interrupted: { resumable: true } }))).toBe(false);
+    expect(endedWithError({ closed: false, exitCode: 0xc0000005 | 0 })).toBe(false);
+  });
   it('is not a failure for a stop, an unknown status, a signal the node sends itself, a clean exit or a running agent', () => {
     expect(endedWithError(closed({ exitCode: EXIT_UNKNOWN }))).toBe(false); // stopped on request, or never known
     for (const signal of [15, 9, 1, 2]) expect(endedWithError(closed({ exitCode: -signal })), `-${signal}`).toBe(false); // TERM, KILL, HUP, INT
