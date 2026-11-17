@@ -99,8 +99,8 @@ impl Env {
         std::fs::write(
             bin.join("git"),
             format!(
-                "#!/bin/sh\ncase \" $* \" in *\" symbolic-ref \"*) if [ -e {g}/armed ]; then rm -f {g}/armed; : > {g}/reached; \
-                 while [ ! -e {g}/release ]; do :; done; fi;; esac\nexec {} \"$@\"\n",
+                "#!/bin/sh\ncase \" $* \" in *\" symbolic-ref \"*) if [ -e '{g}/armed' ]; then rm -f '{g}/armed'; : > '{g}/reached'; \
+                 while [ ! -e '{g}/release' ]; do :; done; fi;; esac\nexec '{}' \"$@\"\n",
                 real_git.trim()
             ),
         )
