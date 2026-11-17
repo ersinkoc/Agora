@@ -353,6 +353,7 @@ Tests: unit tests in the first three files, `crates/agora/tests/pair_node.rs` (a
   list; a temporary (privacy) or deprecated IPv6 address is not named: Linux says so through `/proc/net/if_inet6`, Windows through the suffix origin and
   lifetime, macOS does not say through `getifaddrs`, so it is not filtered there). At most 16 names; an owner name is never cut (more than 16 `--name` values, or a name a certificate cannot carry, refuses with `pair.names_missing`),
   addresses past the cap are cut from the end.
+- Extra names (ADR-0067 rung 3): `agora remote tailscale` writes the machine's tailnet name and addresses to `<hub dir>/remote-names` (checked names only, at most 4). The hub reads it at start (they are then owner names) and every 3 seconds while it runs, and at every `PairOpen`; a name that is new makes it issue a new leaf from the same CA exactly as below (`Leaf::with_extra`). No message from the network supplies a name.
 - When the leaf is replaced: at start, and at every `PairOpen` (a window's or `agora pair open`'s), **only when a wanted name is not in the leaf**. An address
   that went away does not force a new leaf, and the old names stay until the next re-issue. The new leaf is made by the same CA (its fingerprint and every
   enrolled node are untouched), written to `<hub dir>/server-cert.pem` (atomically and owner-only, `agora_platform::write_private`; **before** it is switched on, so a file that cannot be written

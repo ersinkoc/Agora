@@ -23,6 +23,7 @@ cli-usage =
       agora hub ssh install NAME [--yes] [--unsigned] [--release-url URL] [--hub-dir DIR]
       agora hub login [--hub-dir DIR]
       agora password set|clear|status [--hub-dir DIR]
+      agora remote tailscale [--serve] [--port N] | status | off [--hub-dir DIR]
       agora hub notify [--ntfy URL | --webhook URL | --test] [--hub-dir DIR]
       agora hub prices update [--url URL] [--hub-dir DIR]
       agora hub ssh [add NAME DESTINATION [--port N]] [--hub-dir DIR]
@@ -495,3 +496,57 @@ join-certificate-invalid = What the hub sent did not check out ({ $what }). Noth
 join-store-failed = The result could not be saved: { $reason }
 join-settings-unsaved = This machine's settings could not be saved. Run `agora` to set it up.
 frontdoor-join-address = The hub's address (like 192.168.1.20:7443; Enter if you do not have it):
+
+# ADR-0067 rung 3: reaching the hub from outside this machine (`agora remote`).
+remote-password_required = No way in from outside is turned on without a screen password. Set one first with `agora password set`, then run this again.
+remote-password_in_use = The screen password protects a way in from outside this machine, so it stays. Turn that off first with `agora remote off` (and start the hub on a local address if it listens on a public one), then clear the password.
+remote-tailscale_missing = Tailscale is not installed on this machine (there is no `tailscale` command). Install it from tailscale.com, sign in with `tailscale up`, then run this again.
+remote-tailscale_logged_out = Tailscale is installed but this machine is not signed in to your tailnet. Run `tailscale up`, then run this again.
+remote-tailscale_timeout = Tailscale did not answer in time. If it printed a link asking you to allow HTTPS for your tailnet, open it once, then run this again.
+remote-tailscale_unreadable = Tailscale's answer could not be used ({ $reason }). Nothing was changed except what is listed above. Check that `tailscale status` works and that MagicDNS is turned on for your tailnet.
+remote-serve_port_in_use = Tailscale already serves something of yours on HTTPS port { $port }, so Agora leaves it alone. Choose another port with `--port N`.
+remote-names-added = The hub's certificate now names this machine on your tailnet: { $names }. The running hub picks them up within a few seconds; a stopped hub when it starts.
+remote-serve-on = Open Agora from a phone or laptop on your tailnet at { $url } (sign in with a code and the screen password).
+remote-tailscale-loopback-hint = The hub listens only on this machine, so other tailnet machines cannot reach it yet. Run this again with `--serve`, or start the hub with `--listen 0.0.0.0:7443`.
+remote-password-reminder = The screen password is on for every sign-in from another machine. `agora remote off` turns this off again.
+remote-status-listen = The hub listens on { $addr }.
+remote-status-not-running = No running hub was found here ({ $dir } has no address).
+remote-status-this-machine = This machine: reachable.
+remote-status-lan = Local network: { $on ->
+        [yes] reachable
+       *[no] not reachable
+    }.
+remote-status-tailnet = Tailscale: { $on ->
+        [yes] reachable
+       *[no] not reachable
+    }.
+remote-status-names = Names in the hub's certificate for it: { $names }.
+remote-status-serve = Tailscale serve: { $url }
+remote-status-public = Public internet: { $on ->
+        [yes] reachable
+       *[no] not reachable
+    }.
+remote-status-password-set = Screen password: set.
+remote-status-password-not-set = Screen password: not set.
+remote-status-no-password = A way in from outside this machine is on and no screen password is set. Set one now with `agora password set`, or turn the way in off with `agora remote off`.
+remote-public-warning = { $cause ->
+        [funnel] Tailscale Funnel is on, so something of this machine is reachable from the whole internet. Only the screen password and the sign-in code protect it. Turn it off with `tailscale funnel reset` unless you meant it.
+       *[listen] The hub listens on a public address. Only the screen password and the certificate you check on a new machine protect it; a plain address gives no other protection. Tailscale is the safer way: `agora remote tailscale --serve`.
+    }
+remote-off-names = The tailnet names are out of the hub's list; the certificate drops them the next time the hub starts.
+remote-off-serve = The Tailscale serve rule on HTTPS port { $port } is removed. Your other serve rules were not touched.
+remote-off-serve-gone = The Tailscale serve rule Agora added is already gone.
+remote-off-serve-foreign = The rule on HTTPS port { $port } is no longer the one Agora added, so it was left exactly as it is.
+remote-off-nothing = Agora has not turned on any way in from outside this machine.
+frontdoor-listen-saved = The hub will listen on { $addr } from its next start (`agora down`, then `agora`).
+doctor-remote-password-set = A way in from outside this machine is on, and a screen password protects it.
+doctor-remote-password-missing = A way in from outside this machine is on and no screen password is set. Run `agora password set` now, or `agora remote off`.
+doctor-remote-password-missing-tailnet = The hub can be reached over Tailscale and no screen password is set. Run `agora password set`.
+doctor-remote-public-listen = The hub listens on a public address: only the screen password and the certificate pin protect it. Prefer Tailscale (`agora remote tailscale --serve`) and listen on a local address.
+doctor-remote-tailnet = Tailscale works; this machine is { $name } on your tailnet.
+doctor-remote-tailnet-unreachable = Tailscale is not reachable from here ({ $reason }), so the tailnet address will not work. Check `tailscale status`.
+doctor-remote-names-missing = The hub's certificate does not name { $names } yet. Restart the hub, or wait a few seconds if `agora remote tailscale` was just run.
+remote-password_in_use_listen = The hub listens on a public address, and the screen password protects it, so it stays. Stop the hub (`agora down`), start it on a local address (`agora --listen 127.0.0.1:7443`), then clear the password.
+remote-hub_not_running = Agora could not find the address of a running hub in { $dir }. Start the hub with `agora`, then run this again.
+remote-status-public-funnel = Public internet: reachable through Tailscale Funnel.
+doctor-remote-funnel = Tailscale Funnel is on for this machine, so something is reachable from the whole internet. Only the screen password and the sign-in code protect it. Turn it off with `tailscale funnel reset` unless you meant it.

@@ -18,6 +18,12 @@ Three steps on one machine (Linux, macOS or Windows). The details are in ADR-006
    the hub, and opens the terminal client signed in; no code to copy. `agora web` opens the browser instead, signed in (the browser
    warns about the hub's own certificate until you trust it). `agora --ui web|tui|none` opens that once; add `--save` to make it what plain `agora` opens from now on.
 
+## Open it from your phone, or run it on a server
+
+`agora remote tailscale --serve` (after `agora password set`) gives the hub a Tailscale address for your phone, and a server with
+no screen runs it with `agora --ui none`. The steps, for a VPS with Tailscale or with a plain public address, are in
+[docs/guides/remote-hub.md](guides/remote-hub.md).
+
 ## Add a second machine
 
 On the machine that runs the hub, open it for new machines, then on the new machine type the hub's address and compare one number:
