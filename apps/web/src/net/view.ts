@@ -29,6 +29,7 @@ export interface AgentV {
   parentId?: string; // ADR-0057: the hub-wide key of the agent that started it
   interrupted?: InterruptedV; // ADR-0060: it was running when its machine stopped; cleared by its next start
   skipsPermissions?: boolean; // ADR-0059: started with an option that skips permissions, for its whole life
+  hidden?: boolean; // ADR-0073: still running when its machine was forgotten; shown again only if still running when it comes back
 }
 export interface InterruptedV { resumable: boolean; atMs: number; folder: string; stillRunning?: boolean }
 
@@ -70,6 +71,9 @@ export interface View {
   tasks: Map<string, TaskV>; // the shared board's tasks seen since this window opened (ADR-0039)
   leases: Map<string, LeaseV>;
   withTerminal: Set<string>; // agents that have a terminal; the others (chat agents) are talked to with prompts
+  // ADR-0053: agents forgotten while this window watched. The hub keeps them, hidden, so a later `AgentInterrupted` about one does not
+  // list it again; only a new `AgentStarted` of the id does.
+  forgottenAgents?: Set<string>;
   // ADR-0061: node id -> the devices it says it trusts (its last `NodeTrustedDevices`).
   trusted?: Map<string, string[]>;
 }
@@ -162,8 +166,9 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
       for (const k of [...v.approvals.keys()]) if (k.startsWith(`${b.nodeId}/`)) v.approvals.delete(k);
       for (const k of [...v.withTerminal]) if (k.startsWith(`${b.nodeId}/`)) v.withTerminal.delete(k);
       const was = v.nodes.get(b.nodeId);
-      // The start says which program it is (`build`) and, ADR-0069, where it runs from when that folder is not on the PATH.
-      v.nodes.set(b.nodeId, { hostname: b.hostname ?? '', os: b.os ?? '', online: true, lastEventMs: Math.max(at, was?.lastEventMs ?? 0), agentsRunning: was?.agentsRunning ?? 0, linkGen: was?.linkGen, build: b.build ?? '', binary: b.binary ?? '' });
+      // The start says which program it is (`build`) and, ADR-0069, where it runs from when that folder is not on the PATH. The last
+      // resources it reported stay until it reports new ones, as on the hub.
+      v.nodes.set(b.nodeId, { hostname: b.hostname ?? '', os: b.os ?? '', online: true, lastEventMs: Math.max(at, was?.lastEventMs ?? 0), agentsRunning: was?.agentsRunning ?? 0, memoryBytes: was?.memoryBytes ?? 0, terminalsOpen: was?.terminalsOpen ?? 0, linkGen: was?.linkGen, build: b.build ?? '', binary: b.binary ?? '' });
       break;
     }
     // ADR-0070: the hub's record of a node's connection decides whether the machine is online; it never touches what the machine runs
@@ -185,8 +190,16 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
       if (!stale) {
         n.online = !!b.up;
         if (b.up) n.linkGen = gen;
-        // ADR-0073: a forgotten machine that connects again is shown again, with what it still runs.
-        if (b.up) n.forgotten = false;
+        // ADR-0073: a forgotten machine that connects again is shown again, with what it still runs; one that stopped while it was
+        // hidden stays forgotten, as the hub's `remember_node` keeps it.
+        if (b.up && n.forgotten) {
+          n.forgotten = false;
+          for (const [key, a] of [...v.agents]) {
+            if (a.nodeId !== id || !a.hidden) continue;
+            if (a.running) a.hidden = false;
+            else { v.agents.delete(key); v.agentWorkspaces.delete(key); v.withTerminal.delete(key); (v.forgottenAgents ??= new Set()).add(key); }
+          }
+        }
       }
       break;
     }
@@ -198,7 +211,9 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
       const n = v.nodes.get(id);
       if (n) n.forgotten = true;
       for (const [key, a] of [...v.agents]) {
-        if (a.nodeId === id && !a.running) { v.agents.delete(key); v.agentWorkspaces.delete(key); v.withTerminal.delete(key); }
+        if (a.nodeId !== id) continue;
+        if (a.running) a.hidden = true;
+        else { v.agents.delete(key); v.agentWorkspaces.delete(key); v.withTerminal.delete(key); (v.forgottenAgents ??= new Set()).add(key); }
       }
       break;
     }
@@ -236,6 +251,7 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
       if (b.worktreeId) v.agentWorkspaces.delete(q(b.agentId));
       // A new run of an id: whether it has a terminal is told again by the `terminalOpened` that follows (or not at all).
       v.withTerminal.delete(q(b.agentId));
+      v.forgottenAgents?.delete(q(b.agentId));
       v.agents.set(q(b.agentId), {
         nodeId: b.nodeId ?? '', worktreeId: q(b.worktreeId), kind: b.kind ?? '', state: 3 /* idle */,
         reported: false, running: true, sinceMs: at, tokens: 0, startedMs: at,
@@ -273,12 +289,14 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
       v.agents.delete(id);
       v.agentWorkspaces.delete(id);
       v.withTerminal.delete(id);
+      (v.forgottenAgents ??= new Set()).add(id);
       break;
     }
     // ADR-0060: kept with the closed agents, offering Resume (its own session) or Start again; one never seen is listed from the event.
     case 'agentInterrupted': {
       const b = e.agentInterrupted;
       const key = q(b.agentId);
+      if (!v.agents.has(key) && v.forgottenAgents?.has(key)) break; // the hub keeps it forgotten (ADR-0053)
       const a: AgentV = v.agents.get(key) ?? {
         nodeId: producer, worktreeId: q(''), kind: b.kind ?? '', state: 4, reported: false, running: false, sinceMs: 0, tokens: 0,
         parentId: b.parentAgentId ? q(b.parentAgentId) : undefined,
