@@ -699,7 +699,7 @@ fn a_key_that_comes_too_soon_after_the_question_is_not_an_answer() {
 #[test]
 fn a_link_made_while_the_join_waited_is_kept_unless_the_person_asked_to_replace_it() {
     let root = tmp("waited");
-    let joined_meanwhile = |name: &str, extra: &[&str]| {
+    let joined_meanwhile = |name: &str, extra: &[&str], same_hub: bool| {
         let hub = hub(&root.join(format!("hub-{name}")));
         let owner_home = root.join(format!("owner-{name}"));
         std::fs::create_dir_all(&owner_home).unwrap();
@@ -711,12 +711,18 @@ fn a_link_made_while_the_join_waited_is_kept_unless_the_person_asked_to_replace_
         m.wait_for("Number ");
         let link = machine.join("link");
         std::fs::create_dir_all(&link).unwrap();
+        let hub_ca = std::fs::read_to_string(hub.dir.join("ca.pem")).unwrap();
+        let (ca, id) = if same_hub {
+            (hub_ca.as_str(), name)
+        } else {
+            ("FIRSTCA", "first")
+        };
         for (f, c) in [
             ("key.pem", "FIRSTKEY"),
-            ("ca.pem", "FIRSTCA"),
+            ("ca.pem", ca),
             ("cert.pem", "FIRSTCERT"),
             ("url", "wss://first:1"),
-            ("node-id", "first"),
+            ("node-id", id),
         ] {
             std::fs::write(link.join(f), c).unwrap();
         }
@@ -726,11 +732,16 @@ fn a_link_made_while_the_join_waited_is_kept_unless_the_person_asked_to_replace_
         let read = |f: &str| std::fs::read_to_string(link.join(f)).unwrap_or_default();
         (ok, read("node-id"), read("key.pem"), text)
     };
-    let (ok, id, key, text) = joined_meanwhile("kept", &[]);
+    let (ok, id, key, text) = joined_meanwhile("kept", &[], false);
     assert!(!ok && text.contains("already joined a hub"), "{text}");
     assert_eq!((id.as_str(), key.as_str()), ("first", "FIRSTKEY"), "{text}");
-    let (ok, id, key, text) = joined_meanwhile("replaced", &["--replace"]);
+    let (ok, id, key, text) = joined_meanwhile("replaced", &["--replace"], false);
     assert!(ok, "{text}");
     assert_eq!(id, "replaced", "{text}");
+    assert!(key.contains("PRIVATE KEY"), "{text}");
+    // The same hub under the same name (Codex review): the new certificate supersedes that link, so it is stored.
+    let (ok, id, key, text) = joined_meanwhile("same", &[], true);
+    assert!(ok, "{text}");
+    assert_eq!(id, "same", "{text}");
     assert!(key.contains("PRIVATE KEY"), "{text}");
 }
