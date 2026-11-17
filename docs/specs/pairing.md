@@ -20,11 +20,11 @@ to compare. The join string and the code stay as the fallback.
 - Request: the 12 bytes `AGORA-DISCO1`, then 16 random bytes, **padded to 128 bytes**. A request shorter than 128 bytes or with another prefix is
   ignored: the reply is never larger than the request, so the hub cannot be used to amplify traffic at a spoofed address.
 - Reply, sent unicast to the sender only: a protobuf `HubAnnouncement { name, port, ca_fingerprint, accepts_pairing: true, version }`
-  (`ca_fingerprint` = SHA-256 of the CA certificate's DER). Replies are rate limited (10 a second for the whole hub, 3 per 10 seconds per
-  source address). A request is answered once: a copy from the same source with the same 16 random bytes inside that window (the query
-  sent to both broadcast addresses, or sent again) gets no reply and costs nothing. The finder sends its query again every half second,
-  each time with new random bytes, until a hub has answered, so one search spends one reply of its address's budget and a search made
-  again at once is still answered.
+  (`ca_fingerprint` = SHA-256 of the CA certificate's DER). Replies are rate limited: 10 a second for the whole hub (every reply counts),
+  and 3 **searches** per 10 seconds per source address. A search is one set of 16 random bytes: its copies from the same source inside
+  that window (the query sent to both broadcast addresses, and the finder's repeats) are not counted again and are answered again at
+  most once a second, so a lost reply is made good and a search made again at once is still answered. The finder sends its one query
+  again every half second for its whole wait (another hub may answer later), and lists each hub once.
 - An announcement is a **candidate**, never a trust anchor: nothing is shared with the hub because it answered. The fingerprint is shown to the person
   next to the hub's name and is public information. (A rogue responder can only get itself listed; it still cannot pass section 5.)
 
