@@ -31,6 +31,7 @@ use windows_sys::Win32::System::Threading::{
     WaitForSingleObject, CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT, INFINITE,
     PROCESS_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOEXW,
 };
+use windows_sys::Win32::System::IO::CancelIoEx;
 
 use crate::winconfine::Confinement;
 use crate::{ExitStatus, Pty, PtyConfig, PtyControl, PtyControlOps};
@@ -238,6 +239,39 @@ struct ConPty {
 }
 
 pub(crate) fn spawn(config: &PtyConfig) -> io::Result<Box<dyn Pty>> {
+    let (inner, out_read) = start_terminal(config)?;
+    let (tx, output) = sync_channel::<Vec<u8>>(QUEUE);
+    let read_handle = out_read;
+    std::thread::Builder::new()
+        .name("agora-pty-reader".into())
+        .spawn(move || {
+            // Captures the whole handle (which is `Send`), not just its raw pointer field.
+            let read_handle = read_handle;
+            let mut buf = vec![0u8; CHUNK];
+            loop {
+                let mut n = 0u32;
+                // SAFETY: `buf` is valid for CHUNK bytes; a synchronous pipe handle.
+                let ok = unsafe {
+                    ReadFile(
+                        read_handle.0,
+                        buf.as_mut_ptr().cast(),
+                        CHUNK as u32,
+                        &mut n,
+                        null_mut(),
+                    )
+                };
+                if ok == 0 || n == 0 || tx.send(buf[..n as usize].to_vec()).is_err() {
+                    break;
+                }
+            }
+        })?;
+    watch_exit(&inner)?;
+    Ok(Box::new(ConPty { inner, output }))
+}
+
+/// The pseudo-console, its process and job, and the read end of its output: everything of a terminal but the reading. Shared by
+/// [`spawn`] and [`HeldTerminal::start`].
+fn start_terminal(config: &PtyConfig) -> io::Result<(Arc<Inner>, Handle)> {
     let (in_read, in_write) = pipe()?;
     let (out_read, out_write) = pipe()?;
     let size = COORD {
@@ -273,33 +307,12 @@ pub(crate) fn spawn(config: &PtyConfig) -> io::Result<Box<dyn Pty>> {
         pid,
         _confinement: confinement,
     });
-    let (tx, output) = sync_channel::<Vec<u8>>(QUEUE);
-    let read_handle = out_read;
-    std::thread::Builder::new()
-        .name("agora-pty-reader".into())
-        .spawn(move || {
-            // Captures the whole handle (which is `Send`), not just its raw pointer field.
-            let read_handle = read_handle;
-            let mut buf = vec![0u8; CHUNK];
-            loop {
-                let mut n = 0u32;
-                // SAFETY: `buf` is valid for CHUNK bytes; a synchronous pipe handle.
-                let ok = unsafe {
-                    ReadFile(
-                        read_handle.0,
-                        buf.as_mut_ptr().cast(),
-                        CHUNK as u32,
-                        &mut n,
-                        null_mut(),
-                    )
-                };
-                if ok == 0 || n == 0 || tx.send(buf[..n as usize].to_vec()).is_err() {
-                    break;
-                }
-            }
-        })?;
-    // When the process is over, close the console: that is what ends the output pipe, so the reader sees the end.
-    let waiter = Arc::clone(&inner);
+    Ok((inner, out_read))
+}
+
+/// When the process is over, close the console: that is what ends the output pipe, so the reader sees the end.
+fn watch_exit(inner: &Arc<Inner>) -> io::Result<()> {
+    let waiter = Arc::clone(inner);
     std::thread::Builder::new()
         .name("agora-pty-waiter".into())
         .spawn(move || {
@@ -307,7 +320,152 @@ pub(crate) fn spawn(config: &PtyConfig) -> io::Result<Box<dyn Pty>> {
             unsafe { WaitForSingleObject(waiter.process.0, INFINITE) };
             waiter.close_console();
         })?;
-    Ok(Box::new(ConPty { inner, output }))
+    Ok(())
+}
+
+/// ADR-0079 (decisions 1, 3, 4): a terminal the terminal holder owns. It starts like [`spawn`]'s, but its output is read by the holder
+/// only while no node is attached, into a buffer of at most `limit` bytes that drops the oldest first, so the agent never blocks on a
+/// full pipe. When a node attaches, the holder stops reading ([`Self::stop_reading`]: a read in flight is cancelled, nothing written
+/// to the pipe is lost) and hands it duplicates of the two pipe ends; the pseudo-console itself, its size and its end stay here (an
+/// `HPCON` is not a handle another process can use).
+#[allow(dead_code)] // ADR-0079 W2 calls it; until then only the tests do.
+pub(crate) struct HeldTerminal {
+    inner: Arc<Inner>,
+    output: Arc<Handle>,
+    reader: Option<std::thread::JoinHandle<()>>,
+    stop: Arc<AtomicBool>,
+    buffer: Arc<Mutex<std::collections::VecDeque<u8>>>,
+    limit: usize,
+}
+
+#[allow(dead_code)] // ADR-0079 W2 calls it; until then only the tests do.
+impl HeldTerminal {
+    /// Starts the program of `config` on a new pseudo-console, and starts reading it.
+    pub(crate) fn start(config: &PtyConfig, limit: usize) -> io::Result<Self> {
+        let (inner, output) = start_terminal(config)?;
+        watch_exit(&inner)?;
+        let mut held = Self {
+            inner,
+            output: Arc::new(output),
+            reader: None,
+            stop: Arc::new(AtomicBool::new(false)),
+            buffer: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+            limit,
+        };
+        held.start_reading()?;
+        Ok(held)
+    }
+
+    /// Reads the output into the buffer again (no node attached). Nothing when it is already reading.
+    pub(crate) fn start_reading(&mut self) -> io::Result<()> {
+        if self.reader.is_some() {
+            return Ok(());
+        }
+        self.stop.store(false, Ordering::Release);
+        let (output, stop, buffer, limit) = (
+            Arc::clone(&self.output),
+            Arc::clone(&self.stop),
+            Arc::clone(&self.buffer),
+            self.limit,
+        );
+        self.reader = Some(
+            std::thread::Builder::new()
+                .name("agora-held-reader".into())
+                .spawn(move || {
+                    let mut buf = vec![0u8; CHUNK];
+                    while !stop.load(Ordering::Acquire) {
+                        let mut n = 0u32;
+                        // SAFETY: `buf` is valid for CHUNK bytes; a synchronous pipe handle the Arc keeps open.
+                        let ok = unsafe {
+                            ReadFile(
+                                output.0,
+                                buf.as_mut_ptr().cast(),
+                                CHUNK as u32,
+                                &mut n,
+                                null_mut(),
+                            )
+                        };
+                        if ok == 0 || n == 0 {
+                            // Cancelled by `stop_reading`, or the end of the output.
+                            break;
+                        }
+                        // Kept even when the read completed as it was being cancelled: those bytes are out of the pipe now.
+                        let Ok(mut held) = buffer.lock() else { break };
+                        held.extend(&buf[..n as usize]);
+                        let over = held.len().saturating_sub(limit);
+                        held.drain(..over);
+                    }
+                })?,
+        );
+        Ok(())
+    }
+
+    /// Stops reading (a node attaches) and returns what was read since the last call. A read in flight is cancelled, so whatever the
+    /// agent writes from now on stays in the pipe for the node.
+    pub(crate) fn stop_reading(&mut self) -> Vec<u8> {
+        if let Some(reader) = self.reader.take() {
+            self.stop.store(true, Ordering::Release);
+            // The reader may be between two reads when the first cancel comes: cancel until it has ended.
+            while !reader.is_finished() {
+                // SAFETY: a live pipe handle; cancels the reads in flight on it, from any thread.
+                unsafe { CancelIoEx(self.output.0, null()) };
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            let _ = reader.join();
+        }
+        self.buffer
+            .lock()
+            .map(|mut b| b.drain(..).collect())
+            .unwrap_or_default()
+    }
+
+    /// The write end of the terminal's input, to duplicate into the node. Valid while `self` lives.
+    pub(crate) fn input_handle(&self) -> io::Result<HANDLE> {
+        self.inner
+            .input
+            .lock()
+            .map(|h| h.0)
+            .map_err(|_| io::Error::other("poisoned"))
+    }
+
+    /// The read end of the terminal's output, to duplicate into the node. Valid while `self` lives; read it only when this terminal
+    /// is not reading ([`Self::stop_reading`]).
+    pub(crate) fn output_handle(&self) -> HANDLE {
+        self.output.0
+    }
+
+    pub(crate) fn write_input(&self, bytes: &[u8]) -> io::Result<()> {
+        self.inner.write_input(bytes)
+    }
+
+    pub(crate) fn resize(&self, cols: u16, rows: u16) -> io::Result<()> {
+        self.inner.resize(cols, rows)
+    }
+
+    pub(crate) fn kill(&self) -> io::Result<()> {
+        self.inner.kill()
+    }
+
+    pub(crate) fn pid(&self) -> u32 {
+        self.inner.pid
+    }
+
+    /// `Some` with the exit code once the agent's process is over.
+    pub(crate) fn exited(&self) -> Option<i32> {
+        if self.inner.exited() {
+            self.inner.exit_code()
+        } else {
+            None
+        }
+    }
+}
+
+impl Drop for HeldTerminal {
+    /// ADR-0079 decision 8: a terminal the holder lets go of ends with it, as a dropped [`spawn`] terminal does.
+    fn drop(&mut self) {
+        let _ = self.inner.kill();
+        let _ = self.stop_reading();
+    }
 }
 
 fn start_process(config: &PtyConfig, hpc: HPCON) -> io::Result<(Handle, u32, Option<Confinement>)> {

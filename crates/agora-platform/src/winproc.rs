@@ -216,6 +216,27 @@ pub(crate) fn spawn_detached(
     cmd: &std::process::Command,
     log: &std::fs::File,
 ) -> io::Result<crate::Detached> {
+    spawn_detached_with(cmd, log, true)
+}
+
+/// ADR-0079 decision 2: [`spawn_detached`] without its fallback. A process that must outlive this one's job (the terminal holder) is
+/// never started inside it: when the job forbids leaving it (a Task Scheduler task's own job), nothing starts and the error is
+/// `PermissionDenied` (`ERROR_ACCESS_DENIED`).
+#[allow(dead_code)] // ADR-0079 W2 calls it; until then only the tests do.
+pub(crate) fn spawn_detached_strict(
+    cmd: &std::process::Command,
+    log: &std::fs::File,
+) -> io::Result<crate::Detached> {
+    spawn_detached_with(cmd, log, false)
+}
+
+/// The body of [`spawn_detached`] and [`spawn_detached_strict`]: `fallback` says whether a refused breakaway starts the process inside
+/// the job instead.
+fn spawn_detached_with(
+    cmd: &std::process::Command,
+    log: &std::fs::File,
+    fallback: bool,
+) -> io::Result<crate::Detached> {
     use std::ffi::c_void;
     use std::os::windows::ffi::OsStrExt;
     use std::os::windows::io::AsRawHandle;
@@ -339,7 +360,7 @@ pub(crate) fn spawn_detached(
         match start(base | CREATE_BREAKAWAY_FROM_JOB) {
             Ok(pid) => Ok(crate::Detached { pid, in_job: false }),
             // A job without JOB_OBJECT_LIMIT_BREAKAWAY_OK refuses with "access denied": start inside it, and say so.
-            Err(e) if e.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) => {
+            Err(e) if fallback && e.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) => {
                 start(base).map(|pid| crate::Detached { pid, in_job: true })
             }
             Err(e) => Err(e),
