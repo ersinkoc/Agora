@@ -679,6 +679,45 @@ pub fn secret_from(input: &mut impl io::Read) -> io::Result<String> {
     String::from_utf8(line).map_err(|_| io::ErrorKind::InvalidData.into())
 }
 
+/// Reads one answer line from the **terminal** on stdin, for a decision that must come from a person at the keyboard (ADR-0065: the
+/// owner comparing two numbers). It refuses what a program can feed:
+/// - stdin that is not a terminal (a pipe, a file) is `Unsupported`, never read;
+/// - the input typed, held or sent before now is discarded when the call starts (`tcflush` on Unix, `FlushConsoleInputBuffer` on
+///   Windows), so what was queued cannot answer;
+/// - if the first key arrives sooner than `min_wait` after that, the answer is `Ok(None)`: a held or scripted key, not someone who
+///   read the screen. Nothing more is read then;
+/// - the line is at most 256 bytes, so a key held without Enter cannot grow it.
+///
+/// Nothing is echoed; the terminal's settings are restored on every path.
+pub fn read_confirmation(min_wait: std::time::Duration) -> io::Result<Option<String>> {
+    use std::io::Read;
+    #[cfg(unix)]
+    let mode = unix::secret_mode(true)?;
+    #[cfg(windows)]
+    let mode = {
+        let m = windows::secret_mode()?;
+        windows::flush_input();
+        m
+    };
+    #[cfg(not(any(unix, windows)))]
+    let mode: () = return Err(unsupported_io("reading an answer"));
+    let start = std::time::Instant::now();
+    let mut stdin = io::stdin().lock();
+    let line = (|| {
+        let mut first = [0u8; 1];
+        if stdin.read(&mut first)? == 0 {
+            return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
+        }
+        if start.elapsed() < min_wait {
+            return Ok(None);
+        }
+        let mut rest = io::Cursor::new(first).chain((&mut stdin).take(255));
+        secret_from(&mut rest).map(Some)
+    })();
+    drop(mode);
+    line
+}
+
 /// Size of the terminal on stdout as `(cols, rows)`, or `None` when stdout is not a terminal.
 pub fn terminal_size() -> Option<(u16, u16)> {
     #[cfg(unix)]

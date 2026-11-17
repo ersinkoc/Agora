@@ -111,6 +111,20 @@ impl Machine {
         Some(format!("wss://localhost:{}", self.port()?))
     }
 
+    /// The settings of a machine that joined a hub elsewhere (ADR-0065): it runs a node and no hub, and offers no folder yet (any folder
+    /// is chosen later in the interface). `ui` is the system default, as for a first run.
+    pub(crate) fn joined(home: &Path) -> Machine {
+        Machine {
+            roles: vec!["node".into()],
+            ui: Ui::system_default(),
+            hub_listen: String::new(),
+            hub_names: Vec::new(),
+            hub_dir: home.join("hub"),
+            node_projects: Vec::new(),
+            resume: None,
+        }
+    }
+
     pub(crate) fn to_toml(&self) -> String {
         let list = |v: &[String]| {
             let items: Vec<String> = v.iter().map(|s| quote(s)).collect();
@@ -256,6 +270,14 @@ pub(crate) fn load(home: &Path) -> Option<Machine> {
     Machine::parse(&std::fs::read_to_string(machine_path(home)).ok()?)
 }
 
+/// Saves `m` unless the machine already has settings (a joined machine never overwrites what `agora` set up).
+pub(crate) fn save_if_absent(home: &Path, m: &Machine) -> std::io::Result<()> {
+    if machine_path(home).exists() {
+        return Ok(());
+    }
+    save(home, m)
+}
+
 fn save(home: &Path, m: &Machine) -> std::io::Result<()> {
     std::fs::create_dir_all(home)?;
     agora_platform::write_private(&machine_path(home), m.to_toml().as_bytes())
@@ -269,7 +291,7 @@ fn short_name(hostname: &str) -> String {
 
 /// The machine's short name (`mac` for `mac.lan`) as a node id: lower case letters, digits, `_` and `-` (anything else becomes
 /// `-`), at most 64 characters.
-fn node_id_from(hostname: Option<String>) -> String {
+pub(crate) fn node_id_from(hostname: Option<String>) -> String {
     let id: String = short_name(&hostname.unwrap_or_default())
         .to_lowercase()
         .chars()
@@ -333,7 +355,7 @@ fn free_port(ip: IpAddr, from: u16) -> Option<u16> {
     })
 }
 
-/// The first-run choice. `None` when the person chose to join (not built yet) or input ended.
+/// The first-run choice.
 enum Choice {
     Here,
     Alone,
@@ -354,7 +376,7 @@ fn read_answer(input: &mut dyn BufRead) -> Option<String> {
     }
 }
 
-/// Asks the first-run questions and builds the machine's settings (`None`: the person chose to join, or input ended).
+/// Asks the first-run questions and builds the machine's settings (`None`: the person chose to join and gave no address).
 fn ask(
     say: &Say,
     input: &mut dyn BufRead,
@@ -380,8 +402,32 @@ fn ask(
     };
     let lan = match choice {
         Choice::Join => {
-            let _ = writeln!(out, "{}", say.text(key!("frontdoor-join-later"), &[]));
-            return Ok(None);
+            // ADR-0065: the person types the hub's address (finding one by itself comes later); with none, they are told how to get one.
+            prompt(out, &say.text(key!("frontdoor-join-address"), &[]));
+            let typed = read_answer(input).unwrap_or_default();
+            if typed.is_empty() {
+                let _ = writeln!(out, "{}", say.text(key!("join-help"), &[]));
+                return Ok(None);
+            }
+            return match crate::joincmd::run(
+                say,
+                &typed,
+                None,
+                false,
+                &agora_node::pairing_client::Timeouts::default(),
+            ) {
+                Ok(_) => {
+                    // A machine that only runs a node: the rest of the front door starts it and keeps it running.
+                    let mut m = Machine::joined(home);
+                    m.ui = ui;
+                    m.resume = resume;
+                    if cwd.join(".git").exists() {
+                        m.node_projects = vec![cwd.to_path_buf()];
+                    }
+                    Ok(Some(m))
+                }
+                Err(stop) => Err(stop.code()),
+            };
         }
         Choice::Alone => false,
         Choice::Here => {
@@ -645,7 +691,7 @@ fn failed(say: &Say, reason: &str) -> ExitCode {
 
 fn open(say: &Say, m: &Machine, ui: Ui) -> ExitCode {
     let (Some(addr), true) = (m.local_addr(), m.has("hub")) else {
-        // A machine without a hub of its own (joining comes in a later rung) has nothing to open here yet.
+        // A machine that joined a hub elsewhere has nothing to open here: its window is the hub's.
         say.out(key!("frontdoor-running"), &[]);
         return ExitCode::SUCCESS;
     };
@@ -1730,7 +1776,7 @@ mod tests {
     }
 
     #[test]
-    fn the_first_run_asks_once_and_join_is_not_built_yet() {
+    fn the_first_run_asks_once_and_join_without_an_address_explains() {
         let home = tmp("ask");
         let repo = home.join("repo");
         std::fs::create_dir_all(repo.join(".git")).unwrap();
@@ -1811,14 +1857,32 @@ mod tests {
         assert_eq!(m.resume, Some(false));
         assert!(!String::from_utf8_lossy(&out).contains("after a restart"));
 
-        // Join: a pointer to the manual way, nothing saved.
+        // Join with no address: how to get one, nothing saved.
         let mut out = Vec::new();
-        let mut input: &[u8] = b"3\n";
+        let mut input: &[u8] = b"3\n\n";
         assert_eq!(
             ask(&say(), &mut input, &mut out, &home, &home, Ui::Tui, None).unwrap(),
             None
         );
-        assert!(String::from_utf8_lossy(&out).contains("agora node enroll"));
+        let text = String::from_utf8_lossy(&out).into_owned();
+        assert!(text.contains("agora pair open"), "{text}");
+        assert!(text.contains("agora join"), "{text}");
+
+        // Join with an address nobody listens at: said in words, nothing saved, the first run is not completed.
+        let free = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+        let mut out = Vec::new();
+        let typed = format!("3\n127.0.0.1:{free}\n");
+        let mut input: &[u8] = typed.as_bytes();
+        assert!(ask(&say(), &mut input, &mut out, &home, &home, Ui::Tui, None).is_err());
+        assert!(!home.join("link").join("node-id").exists());
+
+        // A joined machine runs a node and no hub, and its settings read back.
+        let joined = Machine::joined(&home);
+        assert_eq!(joined.roles, ["node"]);
+        assert_eq!(Machine::parse(&joined.to_toml()), Some(joined));
 
         // Input ended without an answer.
         let mut input: &[u8] = b"";

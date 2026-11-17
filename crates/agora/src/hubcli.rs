@@ -1457,20 +1457,139 @@ pub(crate) fn enroll_and_save_with_devices(
         new_device_request().map_err(|_| EnrollFailure::Other("key generation".into()))?;
     match enroll(url, ca_pem, code, id, &csr) {
         Ok(r) => {
-            let dir = link_dir();
-            let write = || -> std::io::Result<()> {
-                std::fs::create_dir_all(&dir)?;
-                std::fs::write(dir.join("url"), url)?;
-                std::fs::write(dir.join("node-id"), id)?;
-                std::fs::write(dir.join("ca.pem"), &r.ca_pem)?;
-                std::fs::write(dir.join("cert.pem"), &r.cert_pem)?;
-                agora_platform::write_private(&dir.join("key.pem"), key_pem.as_bytes())
-            };
-            write().map_err(|e| EnrollFailure::Other(e.to_string()))?;
+            let dir = store_link(url, id, &r.ca_pem, &r.cert_pem, &key_pem)
+                .map_err(|e| EnrollFailure::Other(e.to_string()))?;
             Ok((dir, r.devices))
         }
         Err(LinkError::Refused(code)) => Err(EnrollFailure::Refused(code)),
         Err(e) => Err(EnrollFailure::Other(format!("{e:?}"))),
+    }
+}
+
+/// Keeps what enrollment (or pairing) gave this machine in the link folder, and returns it: the hub's address, the node id, the CA, the
+/// certificate and the private key, which only this function and its caller ever hold (readable by this user only).
+pub(crate) fn store_link(
+    url: &str,
+    id: &str,
+    ca_pem: &str,
+    cert_pem: &str,
+    key_pem: &str,
+) -> std::io::Result<PathBuf> {
+    let dir = link_dir();
+    store_into(
+        &dir,
+        [url, id, ca_pem, cert_pem, key_pem],
+        &agora_platform::write_private,
+    )?;
+    Ok(dir)
+}
+
+/// [`store_link`] into `dir`, writing every file with `write` (the private-file helper: a temporary file made new and renamed over the
+/// target, so a link planted at the target is replaced, never followed, and a stop never leaves half a file). The order keeps the
+/// folder consistent at every point: `node-id` is what says this machine is joined, so it is removed **first** (a machine being joined
+/// again looks un-joined while the new material goes in) and written **last** (only a complete set looks joined). A failure at any step
+/// leaves a folder without `node-id`.
+fn store_into(
+    dir: &Path,
+    [url, id, ca_pem, cert_pem, key_pem]: [&str; 5],
+    write: &dyn Fn(&Path, &[u8]) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    match std::fs::remove_file(dir.join("node-id")) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    write(&dir.join("key.pem"), key_pem.as_bytes())?;
+    write(&dir.join("ca.pem"), ca_pem.as_bytes())?;
+    write(&dir.join("cert.pem"), cert_pem.as_bytes())?;
+    write(&dir.join("url"), url.as_bytes())?;
+    write(&dir.join("node-id"), id.as_bytes())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod store_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    fn tmp(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("agora-store-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        d
+    }
+
+    const NEW: [&str; 5] = ["wss://h:1", "new", "NEWCA", "NEWCERT", "NEWKEY"];
+
+    #[test]
+    fn a_complete_store_has_every_file_and_node_id_last() {
+        let dir = tmp("ok");
+        let order = std::cell::RefCell::new(Vec::new());
+        store_into(&dir, NEW, &|p, c| {
+            order
+                .borrow_mut()
+                .push(p.file_name().unwrap().to_string_lossy().into_owned());
+            agora_platform::write_private(p, c)
+        })
+        .unwrap();
+        assert_eq!(order.borrow().last().unwrap(), "node-id");
+        assert_eq!(std::fs::read_to_string(dir.join("node-id")).unwrap(), "new");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("key.pem")).unwrap(),
+            "NEWKEY"
+        );
+    }
+
+    #[test]
+    fn a_failure_between_any_two_writes_leaves_a_folder_that_does_not_look_joined() {
+        for fail_at in 0..5 {
+            let dir = tmp(&format!("fail{fail_at}"));
+            // An older join is already there (the `--replace` case).
+            std::fs::create_dir_all(&dir).unwrap();
+            for (f, c) in [
+                ("node-id", "old"),
+                ("key.pem", "OLDKEY"),
+                ("ca.pem", "OLDCA"),
+                ("cert.pem", "OLDCERT"),
+                ("url", "wss://old:1"),
+            ] {
+                std::fs::write(dir.join(f), c).unwrap();
+            }
+            let n = Cell::new(0);
+            let r = store_into(&dir, NEW, &|p, c| {
+                if n.replace(n.get() + 1) == fail_at {
+                    return Err(std::io::Error::other("injected"));
+                }
+                agora_platform::write_private(p, c)
+            });
+            assert!(r.is_err());
+            assert!(
+                !dir.join("node-id").exists(),
+                "a stop after {fail_at} writes left a machine that looks joined"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_planted_at_a_target_is_replaced_not_followed() {
+        let dir = tmp("link");
+        std::fs::create_dir_all(&dir).unwrap();
+        let victim = dir.join("victim");
+        std::fs::write(&victim, "keep").unwrap();
+        for f in ["ca.pem", "cert.pem", "url", "node-id", "key.pem"] {
+            std::os::unix::fs::symlink(&victim, dir.join(f)).unwrap();
+        }
+        store_into(&dir, NEW, &agora_platform::write_private).unwrap();
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("ca.pem")).unwrap(),
+            "NEWCA"
+        );
+        assert!(!std::fs::symlink_metadata(dir.join("url"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
     }
 }
 

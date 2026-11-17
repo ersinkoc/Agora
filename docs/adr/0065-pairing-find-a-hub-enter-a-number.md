@@ -38,3 +38,9 @@ Step 2 (hub core), 2026-11-17: the pairing state machine and the machine-pairing
 over the hub's real TLS (`crates/agora/tests/pair_hub.rs`). Not yet built: `agora pair`, provisioning the hub certificate's names, discovery, the node's
 side, the push notice and the browser path. See `docs/specs/pairing.md` section 12.
 
+Step 3 (CLI and node side), 2026-11-17: `agora pair open|close|status` on the hub and `agora join [ADDRESS]` on the new machine, the machine's pairing client
+(`agora-node`, `pairing_client.rs`: TLS 1.3 with the issuer check relaxed for this connection only, the exporter and leaf hash, the commitment and reveal, the number,
+every check of what the hub delivers before anything is kept), front door choice 3, and tests with real processes (`crates/agora/tests/pair_cli.rs`, `pair_node.rs`).
+Not yet built: trusting the owner's devices in the same step (decision 5: the result message carries no device list, so it needs a schema addition),
+provisioning the hub certificate's names, discovery (the person types the address), the window cards, the push notice and the browser path.
+See `docs/specs/pairing.md` section 13.

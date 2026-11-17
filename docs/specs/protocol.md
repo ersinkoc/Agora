@@ -730,7 +730,7 @@ Shared vectors for the four signed messages and the fingerprint, checked by the 
 ### Pairing (ADR-0065)
 
 The hub answers these messages (`schema/agora/v1/pairing.proto`, `docs/specs/pairing.md` is the design and section 12 says how the hub core
-behaves); no node sends them yet. All additions; nothing published changed. Capability `pairing.v1` is offered by both the hub and the node
+behaves); a machine sends them with `agora join` (`agora_node::pairing_client`, `docs/specs/pairing.md` section 13). All additions; nothing published changed. Capability `pairing.v1` is offered by both the hub and the node
 and means "speaks these messages"; a hub that cannot pair (it does not know its certificate's hash) answers `protocol.capability_missing`. A peer that gets a pairing command it does not handle answers
 `protocol.capability_missing`, as for any command it does not know.
 

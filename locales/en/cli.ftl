@@ -30,6 +30,8 @@ cli-usage =
       agora hub restore FILE [--hub-dir DIR]
       agora hub machines [forget NAME | forget --old] [--refuse-return] [--yes] [--hub-dir DIR]
       agora hub devices [forget DEVICE_ID] [--hub-dir DIR]
+      agora pair open [--minutes N] | close | status [--hub-dir DIR]
+      agora join [ADDRESS] [--id NAME] [--replace]
       agora node enroll --hub URL --ca FILE --code CODE --id NAME [--yes --fingerprint FP]... [--include-others] [--replace]
       agora panel
       agora node trust DEVICE_ID PUBLIC_KEY_HEX [--data DIR]
@@ -271,7 +273,6 @@ frontdoor-autostart-later = Agora will not start by itself when you log in. `ago
 frontdoor-resume-question = Bring agents back by themselves after a restart? [Y/n]
 frontdoor-resume-off = Agents will not come back by themselves after a restart; the window offers to bring each one back. `agora --resume auto --save` turns it on again.
 frontdoor-resume-saved = Saved. It applies from the next time Agora starts on this machine: a node running now keeps what it started with until `agora down`.
-frontdoor-join-later = Joining from here is not available yet. On the machine that runs Agora, run `agora hub code`; then here run `agora node enroll` and `agora node run` (see `agora --help`).
 frontdoor-get-started = Agora is not set up on this machine yet. Run `agora` in a terminal and answer one question. (Settings are kept in { $path }.)
 frontdoor-set-up-by-hand = This machine already has an Agora started by hand ({ $path }). `agora` does not take it over yet: keep using `agora hub run` and `agora node run`, or set AGORA_HOME to a new folder to let `agora` set one up there.
 frontdoor-saved = Saved in { $path }.
@@ -434,3 +435,52 @@ cli-secret-bad-name = That is not a usable name: use letters, digits and undersc
 cli-secret-bad-value = The value must be one line of at most 8192 bytes, with no control characters. Nothing was stored.
 cli-secret-failed = The secret could not be stored or read here. Check that the node's data folder is yours and can be written.
 cli-secret-name-collides = A secret whose name differs only in capital letters is already stored. Use that exact name, or remove it first.
+
+# ADR-0065: `agora pair` on the hub and `agora join` on the new machine.
+pair-no-hub = No hub is running from { $dir }. Start it with `agora` (or `agora hub run`), then run this again on the machine that runs the hub.
+pair-hub-unreachable = The hub did not answer ({ $reason }). Is it running? Start it with `agora` or `agora hub run`.
+pair-minutes-usage = --minutes takes a number from 1 to { $max }.
+pair-opened = Your hub is open for new machines for { $minutes } minutes.
+pair-open-next = On the new machine, run `agora join { $address }` (use this computer's address on your network if that name does not reach it). The new machine shows a number, and this screen shows one too: approve only if they are the same.
+pair-open-waiting = Waiting for a machine. Leave with Ctrl+C: the hub stays open until its time is up, or until you run `agora pair close`.
+pair-status-open = Open for new machines. It closes in { $minutes } minutes.
+pair-status-closed = Closed to new machines. Run `agora pair open` to let one join.
+pair-status-waiting = { $count ->
+    [one] One machine is waiting for your answer.
+   *[other] { $count } machines are waiting for your answer.
+}
+pair-closed-now = Your hub is closed to new machines.
+pair-closed-after = Your hub is closed to new machines again. Run `agora pair open` to add another.
+pair-time-up = The time you gave is up. Your hub is closed to new machines.
+pair-needs-terminal = Approving a machine needs you at a terminal: `agora pair open` reads your answer from the keyboard only, never from a pipe or a script. Run it in a terminal window. Nothing was opened.
+pair-too-fast = That key came too soon after the question to be an answer. Look at both numbers, then answer.
+pair-input-ended = No answer can be typed here, so the hub stays open for its time; a machine that asks waits for you in a window, or run `agora pair close`.
+pair-card = New machine "{ $name }" ({ $os }, { $address }) wants to join. Number { $number }.
+pair-card-ask = Is it the same number on that machine? Approve it? [y/N]
+pair-card-ended = "{ $name }" stopped asking, so there is nothing to answer.
+pair-approved = Approved. "{ $name }" is joining.
+pair-denied-now = Denied. Nothing was given to that machine.
+pair-replace-ask = A machine named "{ $name }" has already joined. Replace it? The old one loses its access. [y/N]
+pair-left-waiting = Not replaced. The request stays open on the hub until its time is up.
+
+join-help = To join an Agora that runs on another machine you need the address of its hub. On that machine run `agora pair open`: it tells you the address. Then, here, run `agora join ADDRESS`, for example `agora join 192.168.1.20:7443`. (Finding hubs by itself comes later: for now, type the hub's address.)
+join-connecting = Connecting to { $address }...
+join-number = Number { $number }. Approve this machine on the hub: the hub shows the same number. Waiting for the owner...
+join-done = Joined. This machine is "{ $id }". The hub's certificate authority fingerprint (SHA-256) is { $fingerprint }; the owner can check it with `agora hub fingerprint`.
+join-start = Start this machine with `agora`; it connects to the hub by itself.
+join-already = This machine has already joined a hub (see { $dir }). To join another one, run `agora join ADDRESS --replace`.
+join-bad-address = That is not an address this machine can use. Give the hub's address like 192.168.1.20:7443 or hub.example.
+join-no-key = This machine could not make its key.
+join-unreachable = Could not reach the hub at { $address } ({ $reason }). Is it running, and is the address right? Nothing was saved.
+join-tls13-required = The hub at { $address } only offers an old kind of secure connection, so this machine will not join it. Nothing was saved.
+join-tls-failed = The secure connection to { $address } could not be set up ({ $reason }). Nothing was saved.
+join-timeout-answer = The hub did not answer in time. Nothing was saved.
+join-timeout-decision = Nobody approved this machine in time. Nothing was saved. Ask the owner to run `agora pair open`, then try again.
+join-denied = The owner said no. Nothing was saved.
+join-closed = The hub ended the conversation before it answered. Nothing was saved.
+join-unexpected = The hub answered in a way this machine does not accept. Nothing was saved.
+join-name-hint = The hub's certificate has to name the address you typed. Ask the owner to start the hub with `--name { $name }`.
+join-certificate-invalid = What the hub sent did not check out ({ $what }). Nothing was saved.
+join-store-failed = The result could not be saved: { $reason }
+join-settings-unsaved = This machine's settings could not be saved. Run `agora` to set it up.
+frontdoor-join-address = The hub's address (like 192.168.1.20:7443; Enter if you do not have it):

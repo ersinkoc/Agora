@@ -132,11 +132,14 @@ dependencies = [
  "agora-vt",
  "getrandom",
  "prost",
+ "rcgen",
  "ring",
  "rustls",
  "serde_json",
+ "time",
  "tokio",
  "tokio-rustls",
+ "x509-parser",
 ]
 
 [[package]]

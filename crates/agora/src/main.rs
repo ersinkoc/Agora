@@ -28,7 +28,9 @@ mod adaptercmd;
 mod certs;
 mod frontdoor;
 mod hubcli;
+mod joincmd;
 mod meshbridge;
+mod paircmd;
 mod panelcmd;
 mod secretcmd;
 mod servicecmd;
@@ -142,6 +144,8 @@ pub(crate) struct Opts {
     registry: Option<String>,
     role: Option<String>,
     since: Option<u64>,
+    /// ADR-0065: `agora pair open --minutes N`.
+    minutes: Option<u64>,
     who: Option<String>,
     root_key: Option<PathBuf>,
     /// ADR-0061: `agora node trust --from-hub`, and the fingerprints `--yes` covers.
@@ -215,6 +219,7 @@ fn parse(args: &[String]) -> Option<Opts> {
             "--version" => o.version = Some(it.next()?.clone()),
             "--check" => o.check = true,
             "--registry" => o.registry = Some(it.next()?.clone()),
+            "--minutes" => o.minutes = Some(it.next()?.parse().ok()?),
             "--since" => o.since = it.next()?.parse().ok(),
             "--who" => o.who = Some(it.next()?.clone()),
             "--role" => o.role = Some(it.next()?.clone()),
@@ -300,6 +305,10 @@ fn main() -> ExitCode {
         ["down"] => frontdoor::down(&say),
         ["service", op @ ("install" | "remove" | "status")] => servicecmd::service(&say, op),
         ["node", "run"] => node_run(&say, &opts),
+        // ADR-0065: the owner's switch for new machines, and a new machine asking to join.
+        ["pair", op @ ("open" | "close" | "status")] => paircmd::pair(&say, &opts, op),
+        ["join"] => joincmd::join(&say, &opts, opts.positional.first().map(String::as_str)),
+        ["join", address] => joincmd::join(&say, &opts, Some(address)),
         // Started by the front door, not by people: not in the usage page.
         ["supervise", role] => supervise::supervise(
             &say,
