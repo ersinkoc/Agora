@@ -556,11 +556,16 @@ fn node_run(say: &Say, o: &Opts) -> ExitCode {
     // supervisor starts it again later (Codex review of F1031).
     let link = match hubcli::load_link(socket_path(o)) {
         Ok(link) => link,
-        Err(_) => {
-            say.err(
-                key!("cli-link-busy"),
-                &[("dir", hubcli::link_dir().display().to_string().into())],
-            );
+        Err(e) => {
+            let dir = ("dir", hubcli::link_dir().display().to_string().into());
+            if e.kind() == std::io::ErrorKind::TimedOut {
+                say.err(key!("cli-link-busy"), &[dir]);
+            } else {
+                say.err(
+                    key!("cli-link-unreadable"),
+                    &[dir, ("reason", e.to_string().into())],
+                );
+            }
             return ExitCode::from(1);
         }
     };

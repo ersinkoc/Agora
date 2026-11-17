@@ -113,14 +113,19 @@ fn from_hub(say: &Say, o: &Opts) -> ExitCode {
             say.err(key!("cli-devices-not-enrolled"), &[]);
             return ExitCode::from(1);
         }
-        Err(_) => {
-            say.err(
-                key!("cli-link-busy"),
-                &[(
-                    "dir",
-                    crate::hubcli::link_dir().display().to_string().into(),
-                )],
+        Err(e) => {
+            let dir = (
+                "dir",
+                crate::hubcli::link_dir().display().to_string().into(),
             );
+            if e.kind() == std::io::ErrorKind::TimedOut {
+                say.err(key!("cli-link-busy"), &[dir]);
+            } else {
+                say.err(
+                    key!("cli-link-unreadable"),
+                    &[dir, ("reason", e.to_string().into())],
+                );
+            }
             return ExitCode::from(1);
         }
     };

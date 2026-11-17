@@ -916,7 +916,12 @@ fn a_newer_certificate_of_the_same_hub_saved_while_the_join_waited_is_kept() {
     drop(guard);
     let (ok, text) = m.finish();
     let read = |d: &Path, f: &str| std::fs::read_to_string(d.join(f)).unwrap_or_default();
-    assert!(!ok && text.contains("newer certificate is kept"), "{text}");
+    // Issued a moment apart, the two often end in the same second: the join then says it cannot tell which one the hub kept. Either
+    // way the newer link stays.
+    assert!(
+        !ok && (text.contains("newer certificate is kept") || text.contains("cannot be told")),
+        "{text}"
+    );
     assert_eq!(read(&link, "cert.pem"), read(&newer, "cert.pem"), "{text}");
     assert_eq!(read(&link, "key.pem"), read(&newer, "key.pem"), "{text}");
 }

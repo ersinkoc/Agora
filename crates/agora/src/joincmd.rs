@@ -398,9 +398,9 @@ enum Decision {
     /// keeps one live certificate per name and revokes the earlier ones when it issues one, so the delivered certificate is the revoked
     /// one, also with `--replace` (Codex review of F1030: an `agora` or `agora node enroll` that enrolled while the owner decided).
     KeepNewer,
-    /// Keeps the link there, saying so: this same hub under this same name, with `--replace`, and a certificate that ends in the same
-    /// second as the delivered one. Which of the two the hub issued last, and so kept, cannot be told (Codex re-review of F1030);
-    /// without `--replace` it can: the hub refuses a name that is in use, so a link of that name saved meanwhile is the newer one.
+    /// Keeps the link there, saying so: this same hub under this same name, and a certificate that ends in the same second as the
+    /// delivered one. Which of the two the hub issued last, and so kept, cannot be told (Codex re-review of F1030), with or without
+    /// `--replace`: whether the hub replaces a name that is in use is the owner's choice when approving, not this machine's.
     Unsure,
 }
 
@@ -417,7 +417,6 @@ fn decide(
     } else if superseded(link, id, ca_pem) {
         match issued_order(link, cert_pem) {
             Some(std::cmp::Ordering::Greater) => Decision::KeepNewer,
-            Some(std::cmp::Ordering::Equal) if !replace => Decision::KeepNewer,
             Some(std::cmp::Ordering::Equal) => Decision::Unsure,
             _ => Decision::Store,
         }
@@ -522,16 +521,15 @@ mod tests {
                 Decision::Store
             );
         }
-        // The same second (here: the same certificate): kept; with --replace which one the hub kept cannot be told, and it is said.
+        // The same second (here: the same certificate): which one the hub kept cannot be told, with or without --replace (the owner
+        // chooses whether a name in use is replaced); the folder is kept and it is said.
         put("racer", &ca_pem, &newer);
-        assert_eq!(
-            decide(&dir, "racer", &ca_pem, &newer, false),
-            Decision::KeepNewer
-        );
-        assert_eq!(
-            decide(&dir, "racer", &ca_pem, &newer, true),
-            Decision::Unsure
-        );
+        for replace in [false, true] {
+            assert_eq!(
+                decide(&dir, "racer", &ca_pem, &newer, replace),
+                Decision::Unsure
+            );
+        }
         // Another hub or another name: kept unless --replace (audit F890).
         put("first", "OTHERCA", &newer);
         assert_eq!(

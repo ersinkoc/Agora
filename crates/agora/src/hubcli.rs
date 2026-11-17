@@ -2069,6 +2069,24 @@ mod store_tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// Codex re-review of F1031: a link folder that is there but cannot be resolved is an error, not "no link" (the node would start
+    /// unlinked). Here the path goes through a file, which no system resolves as a folder.
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_that_cannot_be_resolved_is_an_error_not_no_link() {
+        let base = tmp("read-unresolvable");
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(base.join("file"), "x").unwrap();
+        let got = load_from(
+            &base.join("file").join("link"),
+            LINK_GUARD_WAIT,
+            PathBuf::from("socket"),
+            &|p| std::fs::read_to_string(p),
+        );
+        assert!(got.is_err_and(|e| e.kind() != std::io::ErrorKind::TimedOut));
+        let _ = std::fs::remove_dir_all(base);
+    }
+
     /// Codex review of F1031: a read that waited out the guard used to read anyway, so a save held up past the wait could again be
     /// read half. Now nothing is read and the read says `TimedOut`.
     #[test]
@@ -2158,7 +2176,8 @@ mod store_tests {
 
 /// What enrollment left on this machine, if anything: the node id and how to dial the hub. `TimedOut` when another command held the link
 /// folder for longer than any of them holds it working ([`LINK_GUARD_WAIT`]): the folder is then not read at all (it may be half
-/// saved), and the caller fails rather than start with no link or half of one.
+/// saved), and the caller fails rather than start with no link or half of one. Any other error: the folder is there but could not be
+/// resolved, and the caller fails as well.
 pub fn load_link(socket: PathBuf) -> std::io::Result<Option<(String, HubLink)>> {
     load_from(&link_dir(), LINK_GUARD_WAIT, socket, &|p| {
         std::fs::read_to_string(p)
@@ -2185,9 +2204,11 @@ fn load_from(
             Err(e) if e.kind() == std::io::ErrorKind::TimedOut => return Err(e),
             Err(_) => (resolved, None),
         },
-        // No folder (or none this user can reach): nothing is read, and reading makes none. Never read by the path given instead: a
-        // folder made after this look could be mid-save (Codex re-review of F1031).
-        Err(_) => return Ok(None),
+        // No folder: nothing is read, and reading makes none. Never read by the path given instead: a folder made after this look could
+        // be mid-save (Codex re-review of F1031). A folder that is there but cannot be resolved is an error, not "no link": the node
+        // must not start as an unlinked one.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
     };
     Ok(link_files(&dir, socket, read))
 }
