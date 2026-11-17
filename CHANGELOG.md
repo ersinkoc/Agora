@@ -4,6 +4,10 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+_Nothing yet._
+
+## 0.3.18
+
 ### Reaching your hub from outside
 - `agora remote tailscale --serve` puts your hub on your tailnet with a real HTTPS address for your phone, `agora remote status` says what reaches it and how, and `agora remote off` takes it back (only what Agora added, never your other Tailscale rules).
 - Nothing outside your machine can reach the hub until a screen password is set: the remote commands, a hub on a public address and `agora password clear` while a way in is on all refuse and say `agora password set`.
