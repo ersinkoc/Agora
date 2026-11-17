@@ -322,12 +322,25 @@ fn split_url(url: &str) -> Result<(bool, String, String), LinkError> {
     } else {
         return Err(LinkError::Bad("url must start with wss:// or ws://".into()));
     };
-    let host_port = rest.split('/').next().unwrap_or("");
-    let host = host_port.rsplit_once(':').map_or(host_port, |(h, _)| h);
+    // The authority ends at the path, the query or the fragment.
+    let host_port = rest.split(['/', '?', '#']).next().unwrap_or("");
+    // An IPv6 address is written `[v6]` or `[v6]:port` (what `agora join` stores): the host is the address without the brackets,
+    // which is how the hub's certificate names it; the address to dial keeps them.
+    let (host, has_port) = match host_port.strip_prefix('[') {
+        Some(r) => match r.split_once(']') {
+            Some((h, "")) => (h, false),
+            Some((h, after)) if after.starts_with(':') => (h, true),
+            _ => return Err(LinkError::Bad("url has no host".into())),
+        },
+        None => (
+            host_port.rsplit_once(':').map_or(host_port, |(h, _)| h),
+            host_port.contains(':'),
+        ),
+    };
     if host.is_empty() {
         return Err(LinkError::Bad("url has no host".into()));
     }
-    let with_port = if host_port.contains(':') {
+    let with_port = if has_port {
         host_port.to_string()
     } else {
         format!("{host_port}:{}", if tls { 443 } else { 80 })
@@ -1203,21 +1216,29 @@ pub fn list_devices(link: &HubLink) -> Result<Vec<agora_protocol::v1::DeviceInfo
         .enable_all()
         .build()
         .map_err(|e| LinkError::Transport(e.to_string()))?;
-    rt.block_on(async {
+    let out = rt.block_on(async {
         let (tls, host, addr) = split_url(&link.url)?;
         if !tls {
             // Without TLS the hub cannot tell who is asking, so it would not answer.
             return Err(LinkError::Bad("asking for devices needs wss://".into()));
         }
-        let tcp = agora_protocol::dial::connect_bounded(&addr)
-            .await
-            .map_err(|e| LinkError::Transport(e.to_string()))?;
-        let name = ServerName::try_from(host).map_err(|e| LinkError::Bad(e.to_string()))?;
-        let stream = connector(link)?
-            .connect(name, tcp)
-            .await
-            .map_err(|e| LinkError::Transport(e.to_string()))?;
-        let mut conn = ws::connect(stream, &link.url).await?;
+        // Given up after the silence deadline, as the uplink's own dial is: a hub that took the connection and then says nothing
+        // must not hold the command forever.
+        let open = async {
+            let tcp = agora_protocol::dial::connect_bounded(&addr)
+                .await
+                .map_err(|e| LinkError::Transport(e.to_string()))?;
+            let name = ServerName::try_from(host).map_err(|e| LinkError::Bad(e.to_string()))?;
+            let stream = connector(link)?
+                .connect(name, tcp)
+                .await
+                .map_err(|e| LinkError::Transport(e.to_string()))?;
+            Ok::<_, LinkError>(ws::connect(stream, &link.url).await?)
+        };
+        let mut conn = match tokio::time::timeout(SILENCE_DEADLINE, open).await {
+            Ok(r) => r?,
+            Err(_) => return Err(LinkError::Silent),
+        };
         let req = CommandRequest {
             request_id: "devices".into(),
             idempotency_key: String::new(),
@@ -1242,7 +1263,10 @@ pub fn list_devices(link: &HubLink) -> Result<Vec<agora_protocol::v1::DeviceInfo
             Some(command_response::Result::Err(e)) => Err(LinkError::Refused(e.code)),
             None => Err(LinkError::Transport("empty answer".into())),
         }
-    })
+    });
+    // Past the deadline a name lookup may still run on a blocking thread: the runtime does not wait for it.
+    rt.shutdown_background();
+    out
 }
 
 /// Enrolls this node with a hub: presents the one-time `code` and a CSR over TLS that trusts only `ca_pem`, and
@@ -1263,7 +1287,7 @@ pub fn enroll(
         .enable_all()
         .build()
         .map_err(|e| LinkError::Transport(e.to_string()))?;
-    rt.block_on(async {
+    let out = rt.block_on(async {
         let (tls, host, addr) = split_url(url)?;
         if !tls {
             return Err(LinkError::Bad("enrollment needs wss://".into()));
@@ -1279,15 +1303,23 @@ pub fn enroll(
             .map_err(|e| bad(&e))?
             .with_root_certificates(roots)
             .with_no_client_auth();
-        let tcp = agora_protocol::dial::connect_bounded(&addr)
-            .await
-            .map_err(|e| LinkError::Transport(e.to_string()))?;
-        let name = ServerName::try_from(host).map_err(|e| bad(&e))?;
-        let stream = tokio_rustls::TlsConnector::from(Arc::new(cfg))
-            .connect(name, tcp)
-            .await
-            .map_err(|e| LinkError::Transport(e.to_string()))?;
-        let mut conn = ws::connect(stream, url).await?;
+        // Given up after the silence deadline, as the uplink's own dial is: a hub that took the connection and then says nothing
+        // must not hold enrollment forever.
+        let open = async {
+            let tcp = agora_protocol::dial::connect_bounded(&addr)
+                .await
+                .map_err(|e| LinkError::Transport(e.to_string()))?;
+            let name = ServerName::try_from(host).map_err(|e| bad(&e))?;
+            let stream = tokio_rustls::TlsConnector::from(Arc::new(cfg))
+                .connect(name, tcp)
+                .await
+                .map_err(|e| LinkError::Transport(e.to_string()))?;
+            Ok::<_, LinkError>(ws::connect(stream, url).await?)
+        };
+        let mut conn = match tokio::time::timeout(SILENCE_DEADLINE, open).await {
+            Ok(r) => r?,
+            Err(_) => return Err(LinkError::Silent),
+        };
         let req = CommandRequest {
             request_id: "enroll".into(),
             idempotency_key: String::new(),
@@ -1320,7 +1352,10 @@ pub fn enroll(
             Some(command_response::Result::Err(e)) => Err(LinkError::Refused(e.code)),
             None => Err(LinkError::Transport("empty answer".into())),
         }
-    })
+    });
+    // Past the deadline a name lookup may still run on a blocking thread: the runtime does not wait for it.
+    rt.shutdown_background();
+    out
 }
 
 #[cfg(test)]
@@ -1344,6 +1379,37 @@ mod tests {
         );
         assert!(split_url("http://x").is_err());
         assert!(split_url("wss://").is_err());
+        // F970: an IPv6 hub (`agora join [v6]` stores `wss://[v6]:port`): the host is the address the hub's certificate names,
+        // without brackets; the address to dial keeps them.
+        assert_eq!(
+            split_url("wss://[::1]:7443/x").unwrap(),
+            (true, "::1".into(), "[::1]:7443".into())
+        );
+        assert_eq!(
+            split_url("wss://[fd00::5]").unwrap(),
+            (true, "fd00::5".into(), "[fd00::5]:443".into())
+        );
+        let (_, host, _) = split_url("wss://[::1]:7443").unwrap();
+        assert!(matches!(
+            ServerName::try_from(host),
+            Ok(ServerName::IpAddress(_))
+        ));
+        assert_eq!(
+            split_url("wss://[::1]:7443?x=1").unwrap(),
+            (true, "::1".into(), "[::1]:7443".into())
+        );
+        assert_eq!(
+            split_url("wss://[::1]?x=1").unwrap(),
+            (true, "::1".into(), "[::1]:443".into())
+        );
+        for bad in [
+            "wss://[::1",
+            "wss://[::1]x:7443",
+            "wss://[]:7443",
+            "wss://[]",
+        ] {
+            assert!(split_url(bad).is_err(), "{bad}");
+        }
     }
 
     /// What the fake hub does once the handshake is over.
