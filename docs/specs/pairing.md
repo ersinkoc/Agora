@@ -1,6 +1,6 @@
 # Pairing: find a hub, compare a number, connected (ADR-0065, rung a)
 
-Status: design for review. Nothing here is built. ADR-0065 is accepted; this document is the protocol it asks for, written before the code
+Status: built in steps (section 10); sections 12, 13 and 14 say what each step decided. The rest of this document is the design it was built from. ADR-0065 is accepted; this document is the protocol it asks for, written before the code
 so that the part that decides who may join (a new way to authenticate) is read on its own. Rung (b), the typed number with a PAKE, is not here.
 
 ## 1. What it replaces
@@ -30,7 +30,7 @@ Owner to hub (from an owner window): `PairApprove { pair_id }`, `PairDeny { pair
 Hub to windows: `PairRequested { pair_id, kind (machine|browser), name, os, address, number, expires_ms }` and `PairDecided { pair_id, outcome }`.
 New error codes: `pair.closed`, `pair.limit`, `pair.expired`, `pair.mismatch`, `pair.denied`, `pair.unknown`, `pair.state` (a message that is not allowed in
 the session's current state, section 5a), `pair.insecure_transport` (a browser request over a transport that cannot carry the session safely, section 6)
-(stable codes with parameters; the sentences live in `locales/`). One more is machine-local, never sent: `pair.name_unverified` (section 5, step 6b).
+(stable codes with parameters; the sentences live in `locales/`). `pair.names_missing` (the hub cannot name its addresses in its certificate, section 14) is sent in answer to `PairOpen`. One more is machine-local, never sent: `pair.name_unverified` (section 5, step 6b).
 
 ## 5. The handshake for a machine
 Connection: the machine does **not** know the hub's CA yet. It dials the hub's TLS with a verifier that accepts a leaf certificate it cannot chain
@@ -111,6 +111,8 @@ is an ADR-0015/0062 matter and not decided here). Acceptance cases: a default hu
 its host name completes and the node link then connects; the same hub dialled at an address that is in no name fails closed with
 `pair.name_unverified`; a leaf from another CA with the right name fails (wrong CA); the right CA with a leaf for another name fails (wrong leaf).
 
+**Built:** provisioning, as chosen above, is section 14.
+
 ### Why this resists a machine in the middle
 A party in the middle terminates the machine's TLS with its own certificate `C_m` and relays to the hub over a second connection. The machine's
 `leaf_hash` is then `H(C_m)` and the hub's is `H(C_hub)`, and the two TLS sessions have different exporters: the two numbers differ except by
@@ -188,15 +190,16 @@ Never logged: nonces, the commitment, the exporter, the number, the CSR, the pol
 The rows are in `docs/security/threat-model.md`: **T30** (a machine or browser asks to join without the owner meaning it; was T-PAIR-1), **T31** (a
 party in the middle, or a second connection naming a `pair_id`; was T-PAIR-2), **T32** (a pairing secret leaks: the number, nonces, commitment,
 exporter or CSR; new) and **T33** (the hub's certificate does not name the address dialled; was T-PAIR-4, honest about what is not solved yet).
-The discovery row (was T-PAIR-3: a closed hub is silent, a request must be as large as the reply, replies are rate limited and unicast) gets its
-id when discovery is built.
+The discovery row (was T-PAIR-3: a closed hub is silent, a request must be as large as the reply, replies are rate limited and unicast) is **T34**; the
+re-issue of the hub's leaf while it runs is **T35**.
 
 ## 10. Order of work (each its own pull request, each security-reviewed)
 1. The messages, error codes and golden fixtures (append-only), and this document updated with the ids. (Done: schema only, capability `pairing.v1`.)
 2. The pairing core in the hub, pure and unit-tested (states, limits, SAS, commitment), audit; the owner's commands, `PairRequested` and `PairDecided` to owner windows, the machine handshake over the hub's TLS and the certificate at approval. (Done: `agora-hub` `pairing.rs` and `pairing_net.rs`; section 12 lists what was decided.)
 3. `agora pair open|close|status`, provisioning the leaf's names (section 5b), the push notice (ADR-0051) and the browser path (section 6) on the hub.
    (Done in part: `agora pair open|close|status` and the machine's client, section 13. Provisioning, the push notice and the browser path are not.)
-4. The discovery responder (hub) and the finder, `agora join`, with the trust question (node). (`agora join ADDRESS` is built; discovery and the trust question are not.)
+4. The discovery responder (hub) and the finder, `agora join`, with the trust question (node). (Built: provisioning the leaf's names, the responder and the finder, section 14;
+   the trust question is not.)
 5. The window cards wired in (web #610 and TUI #611 already have the layout), then the browser sign-in by approval (section 6).
 
 ## 11. Decisions taken after the first review, and what is still open
@@ -308,5 +311,57 @@ and `frontdoor.rs` (choice 3). Tests: `crates/agora/tests/pair_node.rs` (the cli
   `PAIR_REQUESTED` and `PAIR_DECIDED` frames it receives (at most 64) for `take_pair_notes`, and exposes `command_info` (the error parameters).
 - **Not in this step:** the owner's devices trusted in the same step (item 7 above). `PairResult` has no field for a device list, so the machine would have nothing to
   verify; it needs a schema addition and its own pull request. `agora join` says nothing about devices, and `agora node trust --from-hub` still works afterwards.
-  Also not built: provisioning the hub's certificate names (a hub started without `--name` for its LAN address is refused by the machine, visibly, section 5b, T33),
-  discovery (`agora join` without an address explains how to get one), the push notice, the window cards and the browser path.
+  Also not built here: the push notice, the window cards and the browser path. (Provisioning the certificate's names and discovery were built next: section 14.)
+
+## 14. Names and discovery, as built (choices the design left open)
+Built in `crates/agora-hub/src/names.rs` (which names), `leaf.rs` (issuing and replacing the leaf), `discovery.rs` (both halves of the UDP exchange), `tls.rs`
+(`TlsSlot`), `crates/agora-platform` (`interface_addresses`), `crates/agora/src/hubcli.rs` (wiring) and `joincmd.rs` (the finder's screen).
+Tests: unit tests in the first three files, `crates/agora/tests/pair_node.rs` (a real hub with a real listener and the machine's real client) and `pair_cli.rs`.
+
+**The leaf's names (section 5b).**
+- Which names: the `--name` values (kept first, in the order given, lower-cased, an IPv6 literal with or without brackets), `localhost`, the host name (only
+  when a certificate can carry it: letters, digits, `-`, `.`, `_`), then addresses. A listen address that is a specific address names that address alone, even
+  a loopback one (the owner chose it); `0.0.0.0` names every address of every interface that is up, IPv4 only; `::` names IPv4 and IPv6 (a dual-stack socket
+  serves both). Always left out: loopback, unspecified, multicast, broadcast, IPv4 link-local (169.254/16), IPv6 link-local (fe80::/10, which needs a zone a
+  certificate cannot carry) and IPv4-mapped IPv6. Order: owner names, `localhost`, host name, IPv4 ascending, IPv6 ascending (so the same set is the same
+  list). At most 16 names; an owner name is never cut (more than 16 `--name` values, or a name a certificate cannot carry, refuses with `pair.names_missing`),
+  addresses past the cap are cut from the end.
+- When the leaf is replaced: at start, and at every `PairOpen` (a window's or `agora pair open`'s), **only when a wanted name is not in the leaf**. An address
+  that went away does not force a new leaf, and the old names stay until the next re-issue. The new leaf is made by the same CA (its fingerprint and every
+  enrolled node are untouched), written to `<hub dir>/server-cert.pem`, and put in a `TlsSlot` that the accept loop reads for every new connection. A
+  connection that is already open keeps the certificate it started with. The slot also carries the leaf's hash, so a pairing session freezes the hash of the
+  certificate **its own connection was shown** (`Pairing::request_on`), not the hub's current one: a leaf replaced between a machine's handshake and its
+  request cannot make the two numbers differ.
+- Failure: at start a system that will not list its interfaces does not stop the hub (it carries the names it knows, and says so); at `PairOpen` it **refuses**
+  with the new error code `pair.names_missing` (`reason` is `interfaces`, `invalid`, `too_many` or `issue`; `names` is the list concerned), the switch stays
+  closed, and the sentence tells the person to start the hub with `--name ADDRESS`. Interfaces are only listed for a wildcard listen address.
+- `agora doctor` keeps reading `server-cert.pem`; the hub prints `The hub's certificate names: ...` at start.
+
+**Discovery (section 3).**
+- Port `DISCOVERY_PORT` = **7446**, UDP, IPv4 only. Not IPv6: it has no broadcast, and multicast needs a group membership per interface; a finder on an IPv6-only
+  network gets nothing and uses the address.
+- The request goes to the **limited broadcast** address (255.255.255.255) and to **each interface's directed broadcast** address, from a socket bound to that
+  interface's address, repeated every half second for three seconds. No multicast.
+- The responder (a thread of `agora hub run`) **binds `0.0.0.0:7446` only while the switch is open** and unbinds (and the thread ends) within half a second of it
+  closing or timing out; nothing listens while closed. A port another process holds is not an error: the hub stays silent.
+- It answers a datagram only if it starts with `AGORA-DISCO1` and is **at least 128 bytes**; the reply is a `HubAnnouncement` of at most 108 bytes (name cut to
+  48 bytes, version to 16), so it is never larger than the request. The reply carries the hub's host name, the port of its `wss://` listener, the SHA-256 of
+  the CA certificate and the version, and nothing else: no address list, no secret, no certificate, no node or project name.
+- **Only an address in the leaf is announced.** The announcement has no address field: the finder dials the address the reply came from. The responder finds
+  the address the system would send from toward the asker (a UDP socket "connected" to it sends nothing and only picks a route) and answers only when that
+  address is one of the leaf's IP names. A query that reaches the hub on another address (a VPN card the leaf does not name, loopback) gets silence.
+- Rate limits: **10 replies a second for the whole hub, 3 per 10 seconds per source address** (a sliding window each; the table holds 32 sources and a full table
+  drops new sources, never forgets old ones). The limits are checked before anything else is done.
+- The finder lists each hub once, even when it answers from several of its addresses (the first address that answered). It ignores anything that is not a
+  well-formed `HubAnnouncement` of at most 128 bytes with accepts-pairing, a port, a 32-byte fingerprint and a name and version of plain text (no control,
+  bidirectional or zero-width characters). Several hubs are never picked for the person: a terminal asks for a number, and with no terminal it stops (exit 2).
+  One hub is taken, with a line that says so. Nothing is sent to a hub but the query; the whole pairing exchange follows, unchanged.
+- **What discovery is not.** An announcement is a candidate address, nothing more. A party on the network can announce a hub of its own, or copy a real hub's
+  public name and fingerprint and answer first; the machine then pairs with it and shows a number, and the real owner never sees a card for it (or sees a card
+  with another number and presses Deny). It cannot make the numbers match, cannot obtain a certificate from the real hub and is limited by section 7's budget.
+  The fingerprint the finder shows is public information and is not compared with what the hub later delivers; doing so is a possible later hardening.
+- Platform: `std::net::UdpSocket` needs no platform code. `SO_REUSEADDR` and `SO_EXCLUSIVEADDRUSE` are not set (two hubs on one machine: the second stays silent).
+  Broadcast reception was measured by hand on Linux (a real hub and `agora join` on one machine, LAN and VPN cards); CI measures the same code over loopback
+  (`discovery.rs`, `pair_node.rs`) because runners may block broadcast. macOS and Windows broadcast is **not measured by hand**.
+- `agora_platform::interface_addresses` (Linux and macOS `getifaddrs`, Windows `GetAdaptersAddresses` with unicast addresses only) is exercised on all three
+  systems by `crates/agora-platform/tests/interfaces.rs`; the Windows code was written without a Windows machine and is checked by CI only: **unmeasured by hand**.

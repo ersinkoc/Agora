@@ -99,4 +99,5 @@ pair-unknown = This pairing does not exist or has ended.
 pair-state = The pairing was cancelled because it was not at that step ({ $state }).
 pair-insecure_transport = Signing in this way needs a secure connection (https) to the hub.
 pair-name_unverified = The hub at { $name } could not be verified, so nothing was saved.
+pair-names_missing = The hub could not be sure its certificate names the address a new machine will use ({ $reason }: { $names }). Nothing was opened. Start the hub with `--name ADDRESS` for each address a new machine will use, for example `--name 192.168.1.20`.
 internal = Something went wrong. Reference: { $incident_id }.

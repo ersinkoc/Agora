@@ -23,6 +23,10 @@ windows-sys = { version = "0.61", features = [
   "Win32_Security",
   "Win32_Security_Authorization",
   "Win32_Security_Cryptography",
+  # Listing the machine's own addresses (`interface_addresses`): GetAdaptersAddresses and the types it fills.
+  "Win32_NetworkManagement_IpHelper",
+  "Win32_NetworkManagement_Ndis",
+  "Win32_Networking_WinSock",
   "Win32_Storage_FileSystem",
   "Win32_System_Console",
   "Win32_System_Diagnostics_ToolHelp",

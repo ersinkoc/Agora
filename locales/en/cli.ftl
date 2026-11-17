@@ -143,6 +143,8 @@ doctor-summary-ok = Everything Agora needs is in place.
 doctor-summary-problems = Something Agora needs is missing. Fix the items marked PROBLEM.
 
 cli-hub-listening = Hub is running on { $addr }. Its data folder: { $dir }
+cli-hub-names = The hub's certificate names: { $names }.
+cli-hub-names-unlisted = This computer would not list its network addresses, so the hub's certificate does not name them yet. `agora pair open` says what to do if that is still so.
 cli-hub-notify = Notifications go to { $count } target(s) from { $file }.
 cli-hub-notify-skipped = { $count } line(s) of { $file } were not understood and are ignored. Each line is `ntfy URL` or `webhook URL`.
 cli-hub-web = Web app: https://{ $addr }/ . Sign in with the code { $code } (valid for 10 minutes; `agora hub login` makes another). The hub's certificate is signed by its own CA, so the browser warns until you trust it.
@@ -463,7 +465,16 @@ pair-denied-now = Denied. Nothing was given to that machine.
 pair-replace-ask = A machine named "{ $name }" has already joined. Replace it? The old one loses its access. [y/N]
 pair-left-waiting = Not replaced. The request stays open on the hub until its time is up.
 
-join-help = To join an Agora that runs on another machine you need the address of its hub. On that machine run `agora pair open`: it tells you the address. Then, here, run `agora join ADDRESS`, for example `agora join 192.168.1.20:7443`. (Finding hubs by itself comes later: for now, type the hub's address.)
+join-help = To join an Agora that runs on another machine, run `agora pair open` on that machine, then run `agora join` here: it finds the hub by itself. If it cannot, give the hub's address: `agora join 192.168.1.20:7443`.
+join-looking = Looking for a hub that is open for new machines...
+join-none-found = No hub that is open for new machines answered. On the machine that runs the hub, run `agora pair open` (a hub can only be found while it is open), then run `agora join` here again. Or give its address: `agora join 192.168.1.20:7443`. Some networks do not carry this kind of search; the address always works.
+join-found-one = Found "{ $name }" at { $address }, open for new machines. Its certificate authority fingerprint (SHA-256) is { $fingerprint }.
+join-found-list-head = More than one hub is open for new machines:
+join-found-item = { $n }) "{ $name }" at { $address }, fingerprint { $fingerprint }
+join-which = Which one? Type its number (1 to { $count }), or press Enter to stop:
+join-several-need-terminal = More than one hub is open for new machines and nobody can choose here. Run `agora join ADDRESS` with the address of the one you mean.
+join-found-note = This only tells this machine where to knock: nothing is trusted because a hub answered. Approve only if the number below is the same as the one on the hub's screen.
+join-nothing-chosen = Nothing was chosen. Nothing was saved.
 join-connecting = Connecting to { $address }...
 join-number = Number { $number }. Approve this machine on the hub: the hub shows the same number. Waiting for the owner...
 join-done = Joined. This machine is "{ $id }". The hub's certificate authority fingerprint (SHA-256) is { $fingerprint }; the owner can check it with `agora hub fingerprint`.

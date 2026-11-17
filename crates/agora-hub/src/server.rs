@@ -1853,13 +1853,15 @@ pub async fn handle_connection(
     tcp: tokio::net::TcpStream,
     tls: Option<tokio_rustls::TlsAcceptor>,
 ) {
-    let _ = handle(&state, tcp, tls).await;
+    let _ = handle(&state, tcp, tls, None).await;
 }
 
+/// `leaf_hash` is the hash of the certificate `tls` presents, when the caller knows it (a [`crate::tls::TlsSlot`] does).
 async fn handle(
     state: &ServerState,
     tcp: tokio::net::TcpStream,
     tls: Option<tokio_rustls::TlsAcceptor>,
+    leaf_hash: Option<[u8; 32]>,
 ) -> Result<(), ServeError> {
     // Who is on the other end: a sign-in from another machine needs the screen password (ADR-0067), the hub's own does not.
     let peer = tcp.peer_addr().ok().map(|a| a.ip());
@@ -1878,8 +1880,13 @@ async fn handle(
     let identity = crate::tls::identity(stream.get_ref().1.peer_certificates());
     // ADR-0065: a pairing machine presents no certificate; what binds its number to this TLS session is read here.
     let pairing = match (&identity, peer) {
-        (None, Some(addr)) => crate::tls::pairing_exporter(stream.get_ref().1)
-            .map(|exporter| crate::pairing_net::PairPeer { addr, exporter }),
+        (None, Some(addr)) => crate::tls::pairing_exporter(stream.get_ref().1).map(|exporter| {
+            crate::pairing_net::PairPeer {
+                addr,
+                exporter,
+                leaf_hash,
+            }
+        }),
         _ => None,
     };
     let Some(stream) = websocket_only(stream, peer, state).await? else {
@@ -1984,11 +1991,42 @@ pub async fn run(
     state: Arc<ServerState>,
     tls: Option<tokio_rustls::TlsAcceptor>,
 ) {
+    run_with(listener, state, move || tls.clone().map(|a| (a, None))).await;
+}
+
+/// Like [`run`], with a TLS acceptor that can be replaced while the hub runs (a new leaf from the same CA, spec section 5b). Each
+/// connection takes the slot's current acceptor when it is accepted and keeps it.
+pub async fn run_slot(
+    listener: tokio::net::TcpListener,
+    state: Arc<ServerState>,
+    slot: crate::tls::TlsSlot,
+) {
+    run_with(listener, state, move || {
+        let (acceptor, hash) = slot.current();
+        Some((acceptor, Some(hash)))
+    })
+    .await;
+}
+
+type Chosen = Option<(tokio_rustls::TlsAcceptor, Option<[u8; 32]>)>;
+
+async fn run_with(
+    listener: tokio::net::TcpListener,
+    state: Arc<ServerState>,
+    tls: impl Fn() -> Chosen,
+) {
     while let Ok((tcp, _)) = listener.accept().await {
         // Small frames (a keystroke, an echo) must leave at once: without this, Nagle's algorithm plus the peer's delayed
         // ACK holds one back for up to 40 ms.
         let _ = tcp.set_nodelay(true);
-        tokio::spawn(handle_connection(Arc::clone(&state), tcp, tls.clone()));
+        let (acceptor, leaf_hash) = match tls() {
+            Some((a, h)) => (Some(a), h),
+            None => (None, None),
+        };
+        let state = Arc::clone(&state);
+        tokio::spawn(async move {
+            let _ = handle(&state, tcp, acceptor, leaf_hash).await;
+        });
     }
 }
 

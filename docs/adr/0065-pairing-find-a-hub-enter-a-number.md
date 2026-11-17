@@ -44,3 +44,9 @@ every check of what the hub delivers before anything is kept), front door choice
 Not yet built: trusting the owner's devices in the same step (decision 5: the result message carries no device list, so it needs a schema addition),
 provisioning the hub certificate's names, discovery (the person types the address), the window cards, the push notice and the browser path.
 See `docs/specs/pairing.md` section 13.
+
+Step 4 (names and discovery), 2026-11-17: the hub names its own addresses in its certificate (`agora-hub` `names.rs`, `leaf.rs`; the interface list is
+`agora_platform::interface_addresses`: `getifaddrs` on Linux and macOS, `GetAdaptersAddresses` on Windows), at start and at every `agora pair open`, re-issued from
+the same CA and swapped into the listener without a restart; and the discovery responder (`discovery.rs`, std UDP, only while open for pairing) with the finder in
+`agora join` without an address. Tests: `crates/agora-hub/src/{names,discovery}.rs`, `crates/agora/tests/pair_node.rs`, `pair_cli.rs`. Not yet built: the window
+cards, the push notice, the browser path, the owner's devices trusted in the same step, and discovery over IPv6. See `docs/specs/pairing.md` section 14.

@@ -798,6 +798,75 @@ pub(crate) fn hostname() -> Option<String> {
     (!name.is_empty()).then_some(name)
 }
 
+/// See [`crate::interface_addresses`].
+pub(crate) fn interface_addresses() -> io::Result<Vec<crate::InterfaceAddr>> {
+    use std::ffi::CStr;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    let mut head: *mut libc::ifaddrs = std::ptr::null_mut();
+    // SAFETY: `head` is a valid out pointer; on success the list it receives is released with `freeifaddrs` below, after the last use.
+    if unsafe { libc::getifaddrs(&mut head) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut out = Vec::new();
+    let mut cur = head;
+    while !cur.is_null() {
+        // SAFETY: `cur` is a node of the list `getifaddrs` returned, which stays valid until `freeifaddrs`.
+        let ifa = unsafe { &*cur };
+        cur = ifa.ifa_next;
+        if ifa.ifa_addr.is_null() {
+            continue;
+        }
+        // SAFETY: `ifa_addr` is non-null and points to a `sockaddr` whose family says which larger structure it is the start of.
+        let family = i32::from(unsafe { (*ifa.ifa_addr).sa_family });
+        let ip = if family == libc::AF_INET {
+            // SAFETY: the family is AF_INET, so the address is a `sockaddr_in`.
+            let a = unsafe { &*ifa.ifa_addr.cast::<libc::sockaddr_in>() };
+            IpAddr::V4(Ipv4Addr::from(u32::from_be(a.sin_addr.s_addr)))
+        } else if family == libc::AF_INET6 {
+            // SAFETY: the family is AF_INET6, so the address is a `sockaddr_in6`.
+            let a = unsafe { &*ifa.ifa_addr.cast::<libc::sockaddr_in6>() };
+            IpAddr::V6(Ipv6Addr::from(a.sin6_addr.s6_addr))
+        } else {
+            continue;
+        };
+        let prefix_len = if ifa.ifa_netmask.is_null() {
+            0
+        } else if family == libc::AF_INET {
+            // SAFETY: the netmask of an AF_INET address is a `sockaddr_in` of the same family.
+            let m = unsafe { &*ifa.ifa_netmask.cast::<libc::sockaddr_in>() };
+            u32::from_be(m.sin_addr.s_addr).count_ones() as u8
+        } else {
+            // SAFETY: the netmask of an AF_INET6 address is a `sockaddr_in6` of the same family.
+            let m = unsafe { &*ifa.ifa_netmask.cast::<libc::sockaddr_in6>() };
+            m.sin6_addr
+                .s6_addr
+                .iter()
+                .map(|b| b.count_ones())
+                .sum::<u32>() as u8
+        };
+        let name = if ifa.ifa_name.is_null() {
+            String::new()
+        } else {
+            // SAFETY: `ifa_name` is a NUL-terminated string owned by the list.
+            unsafe { CStr::from_ptr(ifa.ifa_name) }
+                .to_string_lossy()
+                .into_owned()
+        };
+        let flags = ifa.ifa_flags as libc::c_int;
+        out.push(crate::InterfaceAddr {
+            name,
+            ip,
+            prefix_len,
+            up: flags & libc::IFF_UP != 0 && flags & libc::IFF_RUNNING != 0,
+            loopback: flags & libc::IFF_LOOPBACK != 0,
+        });
+    }
+    // SAFETY: `head` came from a successful `getifaddrs` and nothing borrowed from the list is used after this point.
+    unsafe { libc::freeifaddrs(head) };
+    Ok(out)
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used)] // expect is allowed in tests
 mod tests {

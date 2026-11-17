@@ -744,6 +744,18 @@ impl Pairing {
         exporter: [u8; 32],
         commit: Commit<'_>,
     ) -> Result<(PairId, [u8; 16]), Refusal> {
+        self.request_on(now, from, (exporter, None), commit)
+    }
+
+    /// [`Pairing::request`] for a connection that knows which certificate it was shown (`leaf_hash`): the session freezes that
+    /// one, so a leaf that was replaced a moment ago cannot make the two numbers differ (spec section 5b).
+    pub fn request_on(
+        &mut self,
+        now: u64,
+        from: Peer,
+        (exporter, seen_leaf): ([u8; 32], Option<[u8; 32]>),
+        commit: Commit<'_>,
+    ) -> Result<(PairId, [u8; 16]), Refusal> {
         let Commit {
             commitment,
             name,
@@ -751,9 +763,10 @@ impl Pairing {
             version,
         } = commit;
         self.tick(now);
-        let Some(leaf_hash) = self.leaf else {
+        let Some(current) = self.leaf else {
             return Err(Refusal::Closed);
         };
+        let leaf_hash = seen_leaf.unwrap_or(current);
         if self.open_until.is_none() {
             return Err(Refusal::Closed);
         }

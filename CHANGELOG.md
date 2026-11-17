@@ -10,6 +10,7 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 ### Adding a machine
 - You can now add a machine to your hub without copying a certificate file or a code: run `agora pair open` on the hub's machine, `agora join ADDRESS` on the new one,
   compare the number both show, and answer `y` on the hub. Choice 3 of `agora`'s first question does the same (it asks for the address).
+- `agora join` without an address now finds a hub that is open for new machines on your network, and the hub names its own network addresses in its certificate (renewed at each `agora pair open`), so joining by the hub's LAN address works without `--name`.
 
 ## 0.3.16
 

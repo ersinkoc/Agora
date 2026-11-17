@@ -56,6 +56,8 @@ use crate::users::{Access, Role};
 pub struct Shared {
     state: Mutex<Pairing>,
     decided: tokio::sync::watch::Sender<u64>,
+    /// Makes sure the hub's certificate names the addresses it is reachable at, before the switch opens (spec section 5b).
+    names: Mutex<Option<std::sync::Arc<dyn crate::leaf::Provision>>>,
 }
 
 impl Default for Shared {
@@ -69,6 +71,7 @@ impl Shared {
         Self {
             state: Mutex::new(Pairing::new()),
             decided: tokio::sync::watch::channel(0).0,
+            names: Mutex::new(None),
         }
     }
 
@@ -86,6 +89,20 @@ impl Shared {
         self.with(|p| p.enabled())
     }
 
+    /// From now on every `PairOpen` first makes sure the certificate names the hub's addresses, and is refused when it cannot.
+    pub fn provision_names(&self, p: std::sync::Arc<dyn crate::leaf::Provision>) {
+        *self.names.lock().unwrap_or_else(|e| e.into_inner()) = Some(p);
+    }
+
+    fn provisioner(&self) -> Option<std::sync::Arc<dyn crate::leaf::Provision>> {
+        self.names.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// True while the switch is open (a timeout closes it).
+    pub fn is_open(&self) -> bool {
+        self.with(|p| p.status(mono()).open)
+    }
+
     /// Tells the connections that wait that something changed (a decision, the switch closing).
     pub fn wake(&self) {
         self.decided.send_modify(|v| *v = v.wrapping_add(1));
@@ -101,6 +118,9 @@ impl Shared {
 pub struct PairPeer {
     pub addr: IpAddr,
     pub exporter: [u8; 32],
+    /// The hash of the certificate this very connection was shown, when the listener knows it (it does when the certificate can be
+    /// replaced, spec section 5b); `None` means the hub's current one.
+    pub leaf_hash: Option<[u8; 32]>,
 }
 
 static NEXT_CONN: AtomicU64 = AtomicU64::new(1);
@@ -226,10 +246,10 @@ where
 
     // 1-2. The commitment, then the challenge.
     let started = hub.pairing().with(|p| {
-        p.request(
+        p.request_on(
             mono(),
             me,
-            peer.exporter,
+            (peer.exporter, peer.leaf_hash),
             Commit {
                 commitment: &r.commitment,
                 name: &r.node_name,
@@ -477,13 +497,28 @@ pub fn owner_command(
     };
     let empty = || command_ok::Result::Empty(v1::Empty {});
     let result: Result<(command_ok::Result, String), Error> = match &req.command {
-        Some(C::PairOpen(_)) => Ok((
-            pairing.with(|p| {
-                p.open(now);
-                status(p)
-            }),
-            String::new(),
-        )),
+        Some(C::PairOpen(_)) => {
+            // Spec section 5b: the certificate must name the addresses a machine will dial before the switch opens; when it cannot,
+            // the switch stays closed and the owner is told which names are missing.
+            let leaf = pairing.provisioner().map(|p| p.provision());
+            match leaf {
+                Some(Err(f)) => Err(Error::new(ErrorCode::PairNamesMissing)
+                    .with("reason", f.reason)
+                    .with("names", f.names.join(", ").as_str())),
+                other => {
+                    if let Some(Ok(hash)) = other {
+                        pairing.with(|p| p.set_leaf(hash));
+                    }
+                    Ok((
+                        pairing.with(|p| {
+                            p.open(now);
+                            status(p)
+                        }),
+                        String::new(),
+                    ))
+                }
+            }
+        }
         Some(C::PairClose(_)) => {
             pairing.with(|p| p.close(now));
             pairing.wake();

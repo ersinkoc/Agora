@@ -98,4 +98,5 @@ pair-unknown = Bu eşleştirme yok ya da sona erdi.
 pair-state = Eşleştirme o adımda olmadığı için iptal edildi ({ $state }).
 pair-insecure_transport = Bu şekilde giriş yapmak için hub'a güvenli bir bağlantı (https) gerekir.
 pair-name_unverified = { $name } adresindeki hub doğrulanamadı, bu yüzden hiçbir şey kaydedilmedi.
+pair-names_missing = Hub, sertifikasının yeni bir makinenin kullanacağı adresi içerdiğinden emin olamadı ({ $reason }: { $names }). Hiçbir şey açılmadı. Hub'ı, yeni bir makinenin kullanacağı her adres için `--name ADRES` ile başlatın, örneğin `--name 192.168.1.20`.
 internal = Bir şeyler ters gitti. Olay numarası: { $incident_id }.

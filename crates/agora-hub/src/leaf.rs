@@ -1,0 +1,182 @@
+//! The hub's own TLS certificate and the names it carries (docs/specs/pairing.md section 5b).
+//!
+//! [`Leaf`] issues the hub's server leaf from the hub's CA with the names [`crate::names::select`] picks, at start and again at every
+//! `agora pair open`. When the names the hub is reachable at are not all in the leaf (a new address from DHCP, a second network card) it
+//! issues a new leaf from the **same CA** (so the CA fingerprint and every enrolled node stay as they are), puts it in the listener's
+//! [`TlsSlot`] and writes it to `server-cert.pem`; connections accepted from then on use it, open connections keep theirs. When that
+//! cannot be done it says which names are missing, and the hub refuses to open for pairing rather than open with a leaf a machine could
+//! not verify.
+
+use std::net::IpAddr;
+use std::path::PathBuf;
+use std::sync::{Mutex, PoisonError};
+
+use crate::ca::Ca;
+use crate::names::{covers, select, Iface, NamesError};
+use crate::tls::{acceptor_with, leaf_hash, TlsSlot};
+
+/// Why the names could not be provisioned: a stable word for the sentence, and the names concerned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamesFailure {
+    /// `interfaces` (the system would not list the network addresses), `invalid` (a `--name` a certificate cannot carry; `names` is
+    /// that name), `too_many` (more `--name` values than a leaf carries) or `issue` (the certificate could not be made; `names` is
+    /// what it should have carried).
+    pub reason: &'static str,
+    pub names: Vec<String>,
+}
+
+/// Something that can make sure the hub's certificate names the addresses it is reachable at (the hub core calls it from `PairOpen`).
+pub trait Provision: Send + Sync {
+    /// Returns the hash of the certificate that is in use afterwards.
+    fn provision(&self) -> Result<[u8; 32], NamesFailure>;
+}
+
+type Interfaces = Box<dyn Fn() -> Result<Vec<Iface>, String> + Send + Sync>;
+type HostName = Box<dyn Fn() -> Option<String> + Send + Sync>;
+
+struct Current {
+    names: Vec<String>,
+    hash: [u8; 32],
+}
+
+pub struct Leaf {
+    ca: Ca,
+    configured: Vec<String>,
+    listen: IpAddr,
+    host: HostName,
+    interfaces: Interfaces,
+    /// Where `server-cert.pem` is kept up to date (`agora doctor` reads it), when there is such a place.
+    dir: Option<PathBuf>,
+    slot: TlsSlot,
+    current: Mutex<Current>,
+}
+
+impl Leaf {
+    /// Issues the first leaf. A system that will not list its interfaces does not stop the hub: the leaf then carries what is known
+    /// (the owner's names, `localhost`, the host name) and the failure is returned for the caller to say; `provision` tries again at the
+    /// next `pair open`. An error here means no certificate could be made at all.
+    pub fn start(
+        ca: Ca,
+        configured: Vec<String>,
+        listen: IpAddr,
+        host: HostName,
+        interfaces: Interfaces,
+        dir: Option<PathBuf>,
+    ) -> Result<(Self, Option<NamesFailure>), String> {
+        let (names, failure) = match wanted(&configured, &host, listen, &interfaces) {
+            Ok(n) => (n, None),
+            Err(f) if f.reason == "interfaces" => {
+                let n = wanted(
+                    &configured,
+                    &host,
+                    listen,
+                    &(Box::new(|| Ok(vec![])) as Interfaces),
+                )
+                .map_err(|f| format!("{f:?}"))?;
+                (n, Some(f))
+            }
+            Err(f) => return Err(format!("{}: {}", f.reason, f.names.join(", "))),
+        };
+        let (cert, key) = ca.issue_server(&names).map_err(|e| e.to_string())?;
+        let hash = leaf_hash(&cert).map_err(|e| e.to_string())?;
+        let acceptor =
+            acceptor_with(&cert, &key, ca.cert_pem(), true).map_err(|e| e.to_string())?;
+        let leaf = Self {
+            ca,
+            configured,
+            listen,
+            host,
+            interfaces,
+            dir,
+            slot: TlsSlot::new(acceptor, hash),
+            current: Mutex::new(Current { names, hash }),
+        };
+        leaf.write_cert(&cert);
+        Ok((leaf, failure))
+    }
+
+    /// The slot the listener takes its acceptor from.
+    pub fn slot(&self) -> TlsSlot {
+        self.slot.clone()
+    }
+
+    /// The names in the certificate that is in use.
+    pub fn names(&self) -> Vec<String> {
+        self.lock().names.clone()
+    }
+
+    /// The addresses (not host names) in the certificate that is in use: what discovery may announce.
+    pub fn addresses(&self) -> Vec<IpAddr> {
+        self.lock()
+            .names
+            .iter()
+            .filter_map(|n| n.parse().ok())
+            .collect()
+    }
+
+    pub fn hash(&self) -> [u8; 32] {
+        self.lock().hash
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Current> {
+        self.current.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn write_cert(&self, cert: &str) {
+        if let Some(dir) = &self.dir {
+            // `agora doctor` reads this to warn before the certificate ends; the key stays in memory.
+            let _ = std::fs::write(dir.join("server-cert.pem"), cert);
+        }
+    }
+}
+
+/// The names the hub should carry now, or why they cannot be worked out. The interfaces are only listed for a wildcard listen address.
+fn wanted(
+    configured: &[String],
+    host: &HostName,
+    listen: IpAddr,
+    interfaces: &Interfaces,
+) -> Result<Vec<String>, NamesFailure> {
+    let ifs = if listen.is_unspecified() {
+        interfaces().map_err(|_| NamesFailure {
+            reason: "interfaces",
+            names: vec![],
+        })?
+    } else {
+        vec![]
+    };
+    select(configured, host().as_deref(), listen, &ifs)
+        .map(|n| n.all)
+        .map_err(|e| match e {
+            NamesError::Invalid(n) => NamesFailure {
+                reason: "invalid",
+                names: vec![n],
+            },
+            NamesError::TooMany => NamesFailure {
+                reason: "too_many",
+                names: configured.to_vec(),
+            },
+        })
+}
+
+impl Provision for Leaf {
+    fn provision(&self) -> Result<[u8; 32], NamesFailure> {
+        let names = wanted(&self.configured, &self.host, self.listen, &self.interfaces)?;
+        let mut cur = self.lock();
+        if covers(&cur.names, &names) {
+            return Ok(cur.hash);
+        }
+        let failed = || NamesFailure {
+            reason: "issue",
+            names: names.clone(),
+        };
+        let (cert, key) = self.ca.issue_server(&names).map_err(|_| failed())?;
+        let hash = leaf_hash(&cert).map_err(|_| failed())?;
+        let acceptor =
+            acceptor_with(&cert, &key, self.ca.cert_pem(), true).map_err(|_| failed())?;
+        self.slot.set(acceptor, hash);
+        self.write_cert(&cert);
+        *cur = Current { names, hash };
+        Ok(hash)
+    }
+}

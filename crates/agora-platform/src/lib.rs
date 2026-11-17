@@ -1979,6 +1979,40 @@ pub fn hostname() -> Option<String> {
     }
 }
 
+/// One address of one network interface of this machine (see [`interface_addresses`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InterfaceAddr {
+    /// The interface's name as the system gives it (`eth0`, `en0`; an adapter GUID on Windows). For messages only.
+    pub name: String,
+    pub ip: std::net::IpAddr,
+    /// The length of the network prefix (24 for 192.168.1.20/24). 0 when the system gave none.
+    pub prefix_len: u8,
+    /// The interface is up.
+    pub up: bool,
+    pub loopback: bool,
+}
+
+/// Every unicast IPv4 and IPv6 address of this machine's network interfaces, up or down (std has no way to list them). The caller
+/// decides which are worth using. An error means the system refused to list them (the caller must not guess). Linux and macOS:
+/// `getifaddrs`; Windows: `GetAdaptersAddresses`.
+pub fn interface_addresses() -> io::Result<Vec<InterfaceAddr>> {
+    #[cfg(unix)]
+    {
+        unix::interface_addresses()
+    }
+    #[cfg(windows)]
+    {
+        windows::interface_addresses()
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "listing network interfaces is not supported on this system",
+        ))
+    }
+}
+
 /// Opens `url` in the user's browser: `open` on macOS, `cmd /c start` on Windows, `xdg-open` elsewhere. An error means no browser
 /// could be asked (the caller then shows the address); a helper still running after a few seconds counts as success.
 pub fn open_url(url: &str) -> io::Result<()> {
