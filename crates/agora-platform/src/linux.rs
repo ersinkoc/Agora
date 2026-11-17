@@ -130,7 +130,12 @@ pub(crate) fn scopes_abstract_sockets() -> bool {
 /// A ruleset made before the fork, so the child only has to apply it (two async-signal-safe calls).
 pub(crate) struct Ruleset(std::os::fd::OwnedFd);
 
-pub(crate) fn ruleset(sb: &crate::Sandbox) -> io::Result<Ruleset> {
+/// `folder`: the folder a start holds (F1012). Entries at or below its path are opened through the held folder, never by the path, so
+/// they name the folder the process starts in even when the path led elsewhere for a moment while the rules were made (F1022).
+pub(crate) fn ruleset(
+    sb: &crate::Sandbox,
+    folder: Option<&crate::HeldFolder>,
+) -> io::Result<Ruleset> {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     let abi = abi_version();
     if abi < 1 {
@@ -174,8 +179,13 @@ pub(crate) fn ruleset(sb: &crate::Sandbox) -> io::Result<Ruleset> {
     let set = unsafe { OwnedFd::from_raw_fd(fd as i32) };
     for (paths, rights) in [(&sb.read, READ_FS), (&sb.write, all)] {
         for p in paths {
+            let below = folder.and_then(|h| Some((h, p.strip_prefix(&h.path).ok()?)));
+            let opened = match below {
+                Some((held, rel)) => open_below(held, rel),
+                None => std::fs::File::open(p),
+            };
             // A path that does not exist on this machine confines nothing; skip it.
-            let Ok(f) = std::fs::File::open(p) else {
+            let Ok(f) = opened else {
                 continue;
             };
             let rights = if f.metadata()?.is_dir() {
@@ -203,6 +213,30 @@ pub(crate) fn ruleset(sb: &crate::Sandbox) -> io::Result<Ruleset> {
         }
     }
     Ok(Ruleset(set))
+}
+
+/// F1022: `rel` (empty: the folder itself) opened from the held folder's handle, as `File::open` opens a path.
+fn open_below(held: &crate::HeldFolder, rel: &std::path::Path) -> io::Result<std::fs::File> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt;
+    if rel.as_os_str().is_empty() {
+        return held.dir.try_clone();
+    }
+    let name = std::ffi::CString::new(rel.as_os_str().as_bytes())
+        .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+    // SAFETY: a live directory descriptor and a NUL-terminated relative name; the result is a new descriptor or -1.
+    let fd = unsafe {
+        libc::openat(
+            held.dir.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: the kernel returned a fresh descriptor that nothing else owns.
+    Ok(unsafe { std::fs::File::from_raw_fd(fd) })
 }
 
 impl Ruleset {
@@ -1580,5 +1614,57 @@ esac
             );
         }
         assert_eq!(f.log(), "");
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod held_folder_rule_tests {
+    use std::os::unix::process::CommandExt;
+    use std::path::{Path, PathBuf};
+
+    /// F1022: a rule for the held folder, or for a path below it, names the held folder even while its path leads to another
+    /// folder (swapped for a link while the rules are made, swapped back before the start). The process is confined with those
+    /// rules and tries to write in both folders.
+    #[test]
+    fn rules_at_or_below_the_held_folder_name_it_whatever_its_path_leads_to() {
+        if !super::sandbox_supported() {
+            eprintln!("skipped: no Landlock on this machine");
+            return;
+        }
+        let base = std::env::temp_dir().join(format!("agora-held-rules-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let base = std::fs::canonicalize(&base).unwrap();
+        let (own, other) = (base.join("own/x"), base.join("other/x"));
+        for d in [&own, &other] {
+            std::fs::create_dir_all(d.join("sub")).unwrap();
+        }
+        let system: Vec<PathBuf> = ["/usr", "/bin", "/lib", "/lib64", "/etc"]
+            .iter()
+            .map(PathBuf::from)
+            .collect();
+        // Whether a confined `sh` may write `file`: one process per file, so nothing it did before decides.
+        let writes = |write: &Path, file: &Path| {
+            let held = crate::HeldFolder::open(&own).unwrap();
+            std::fs::rename(&own, own.with_file_name("x.old")).unwrap();
+            std::os::unix::fs::symlink(&other, &own).unwrap();
+            let sb = crate::Sandbox::new(system.clone(), vec![write.to_path_buf()]);
+            let rules = super::ruleset(&sb, Some(&held)).unwrap();
+            std::fs::remove_file(&own).unwrap();
+            std::fs::rename(own.with_file_name("x.old"), &own).unwrap();
+            let mut cmd = std::process::Command::new("/bin/sh");
+            cmd.args(["-c", "echo x > \"$1\"", "sh"]).arg(file);
+            // SAFETY: the closure only applies a ruleset made before the fork (async-signal-safe calls).
+            unsafe { cmd.pre_exec(move || rules.enforce()) };
+            let ok = cmd.status().unwrap().success();
+            let _ = std::fs::remove_file(file);
+            ok
+        };
+        for write in [own.clone(), own.join("sub")] {
+            assert!(writes(&write, &own.join("sub/f")), "{write:?}");
+            assert!(!writes(&write, &other.join("sub/f")), "{write:?}");
+        }
+        let _ = std::fs::remove_dir_all(base);
     }
 }

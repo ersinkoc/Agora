@@ -1086,7 +1086,7 @@ pub fn confine_command(cmd: &mut std::process::Command, sandbox: &Sandbox) -> io
     #[cfg(target_os = "linux")]
     {
         use std::os::unix::process::CommandExt;
-        let ruleset = linux::ruleset(sandbox)?;
+        let ruleset = linux::ruleset(sandbox, None)?;
         // SAFETY: the closure only applies a ruleset made before the fork (async-signal-safe calls).
         unsafe { cmd.pre_exec(move || ruleset.enforce()) };
         Ok(())

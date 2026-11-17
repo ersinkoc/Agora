@@ -332,7 +332,7 @@ pub(crate) fn spawn_in(
     let ruleset = config
         .sandbox
         .as_ref()
-        .map(crate::linux::ruleset)
+        .map(|sb| crate::linux::ruleset(sb, folder))
         .transpose()?;
     // SAFETY: runs between fork and exec and only calls async-signal-safe functions (fchdir, setsid, ioctl,
     // setrlimit). `held` is a descriptor of `folder`, which the caller keeps open until `spawn` returns.
