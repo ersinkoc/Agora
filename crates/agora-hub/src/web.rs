@@ -299,7 +299,7 @@ pub enum First<S> {
 
 /// Reads the request head. A WebSocket upgrade is handed back untouched; other requests are answered here.
 pub async fn route<S>(
-    mut stream: S,
+    stream: S,
     peer: Option<std::net::IpAddr>,
     assets: Option<&dyn Assets>,
     sessions: Option<&dyn SessionApi>,
@@ -307,6 +307,23 @@ pub async fn route<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    route_within(stream, peer, assets, sessions, crate::server::NODE_SILENCE).await
+}
+
+/// [`route`] where the request (its head, and the body of a POST) must have arrived within `read` of the first byte asked for;
+/// a peer that is slower, or says nothing, is dropped unanswered (audit F880). Only reading is timed: an answer is written at the
+/// pace the peer takes it.
+pub async fn route_within<S>(
+    mut stream: S,
+    peer: Option<std::net::IpAddr>,
+    assets: Option<&dyn Assets>,
+    sessions: Option<&dyn SessionApi>,
+    read: std::time::Duration,
+) -> io::Result<First<S>>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let until = tokio::time::Instant::now() + read;
     let mut head = Vec::with_capacity(1024);
     let mut chunk = [0u8; 1024];
     let end = loop {
@@ -317,7 +334,10 @@ where
             respond(&mut stream, 431, "text/plain", b"", false).await?;
             return Ok(First::Answered);
         }
-        let n = stream.read(&mut chunk).await?;
+        let Ok(n) = tokio::time::timeout_at(until, stream.read(&mut chunk)).await else {
+            return Ok(First::Answered);
+        };
+        let n = n?;
         if n == 0 {
             return Ok(First::Answered);
         }
@@ -385,7 +405,10 @@ where
         }
         let mut body = head[end..].to_vec();
         while body.len() < length {
-            let n = stream.read(&mut chunk).await?;
+            let Ok(n) = tokio::time::timeout_at(until, stream.read(&mut chunk)).await else {
+                return Ok(First::Answered);
+            };
+            let n = n?;
             if n == 0 {
                 return Ok(First::Answered);
             }
