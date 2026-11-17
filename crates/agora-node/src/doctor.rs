@@ -220,13 +220,14 @@ fn authority(data_dir: &Path, policy: &crate::daemon::Policy, now_ms: u64) -> Ve
     out
 }
 
-/// ADR-0083: whether this machine refuses a confined agent's connections to unix sockets it was not given (`sockets-full`, or why
+/// ADR-0083: whether this machine refuses a confined agent's connections to unix sockets it was not given (`sockets-profile` on macOS: set, not yet measured; or why
 /// not: `sockets-abstract`, `sockets-none`), which socket variables the node leaves out of an agent's environment
 /// (`env-scrubbed`) and which of them the owner let through (`env-passed`). Names only, never values.
 fn socket_checks(sandbox: &crate::sandbox::SandboxPolicy) -> Vec<Check> {
     use agora_platform::SocketConfinement as C;
     let mut out = vec![match agora_platform::socket_confinement() {
-        C::Full => check("sockets-full", Status::Ok, ""),
+        // Set in the Seatbelt profile, never run on a real Mac yet: not claimed as working.
+        C::Full => check("sockets-profile", Status::Warn, ""),
         C::AbstractOnly => check("sockets-abstract", Status::Warn, ""),
         C::None => check("sockets-none", Status::Warn, std::env::consts::OS),
     }];
@@ -501,7 +502,7 @@ mod tests {
         .unwrap();
         let got = ids(&run(&inputs));
         let restriction = match agora_platform::socket_confinement() {
-            agora_platform::SocketConfinement::Full => "sockets-full",
+            agora_platform::SocketConfinement::Full => "sockets-profile",
             agora_platform::SocketConfinement::AbstractOnly => "sockets-abstract",
             agora_platform::SocketConfinement::None => "sockets-none",
         };

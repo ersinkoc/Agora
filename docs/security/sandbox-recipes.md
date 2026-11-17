@@ -25,7 +25,7 @@ the way to get a key outside the list. `agora doctor` warns when a machine that 
 ## Unix sockets, the ssh-agent and `git push` over ssh (ADR-0083)
 
 A confined agent does not get `SSH_AUTH_SOCK`, `GPG_AGENT_INFO`, `DBUS_SESSION_BUS_ADDRESS`, `DOCKER_HOST`, `TMUX` or `TMUX_PANE` from the
-node, on every system. Where the system can refuse the connection, it also refuses unix sockets the agent was not given: on macOS all of
+node, on every system. Where the system can refuse the connection, it also refuses unix sockets the agent was not given: on macOS (set in the profile, not yet verified on a real Mac) all of
 them except its own mesh socket, its worktree, its private temp folder, the name resolver (`/var/run/mDNSResponder`) and what you list in
 `sandbox.sockets`; on Linux (Landlock ABI 6 or newer) only abstract sockets, so an agent that goes looking can still find an ssh-agent or
 docker socket in a file path there. `agora doctor` says which of these this machine does, and which variables the node scrubs and which you
@@ -41,7 +41,7 @@ If you accept that the agent can then sign with every key in your ssh-agent, the
    your own shell; the name changes at every login, so this line needs updating). On Linux nothing more is needed under Landlock today.
 3. Restart the node (`agora node run`): the policy is read only at start. `agora doctor` then lists `SSH_AUTH_SOCK` as passed.
 
-`sandbox.sockets` entries are absolute or `~/` paths (a relative path is dropped); one below the node's own folders is ignored. A socket
+`sandbox.sockets` entries are absolute or `~/` paths (a relative path is dropped); one below the node's own folders, also through a symbolic link, is ignored. A socket
 listed there is reachable by every confined agent on that node. Agents of the ACP kinds reach their client through pipes, and the mesh
 bridge (`agora mesh stdio`) reaches the agent's own mesh socket, which is always allowed; neither needs a line here. An agent hosted by an
 adapter (the ACP kinds) never inherits these variables and `sandbox.pass_env` does not change that. A dev server or a tool of
@@ -86,7 +86,7 @@ deleting a branch work (a delete warns that it could not drop the branch's confi
 ### macOS: `worktree-offline`
 
 `sandbox = worktree-offline` takes the same `sandbox.read` / `sandbox.write` lines and also cuts the network: the agent can connect only to
-this machine (a local model on `localhost`), to its own mesh socket and to unix sockets in its private temp folder; DNS, the internet, other
+this machine (a local model on `localhost`), to unix sockets in its allow-list (its own mesh socket, its worktree, its private temp folder and what you list in `sandbox.sockets`); DNS, the internet, other
 machines on the LAN, `/tmp`'s sockets (tmux, SSH agent) and other agents' mesh sockets are refused, and it cannot listen on a TCP port.
 Anything that listens on this machine is reachable, though: a local HTTP proxy or an SSH tunnel on `localhost` reopens the network. Package managers and remote model APIs therefore fail by design;
 use it for agents that work through a local model.

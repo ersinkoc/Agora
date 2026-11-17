@@ -70,6 +70,25 @@ pub const SOCKET_VARIABLES: &[&str] = &[
     "TMUX_PANE",
 ];
 
+/// `p` with its symbolic links resolved, as far as it exists: the nearest existing parent is resolved and the rest kept as written,
+/// so a socket that is not there yet (or a link to the node's folder) is judged by where it would really be.
+fn canonical(p: &Path) -> PathBuf {
+    let mut rest = Vec::new();
+    let mut at = p;
+    loop {
+        if let Ok(real) = std::fs::canonicalize(at) {
+            return rest.iter().rev().fold(real, |acc, c| acc.join(c));
+        }
+        match (at.parent(), at.file_name()) {
+            (Some(parent), Some(name)) => {
+                rest.push(name.to_os_string());
+                at = parent;
+            }
+            _ => return p.to_path_buf(),
+        }
+    }
+}
+
 /// Whether `name` can be an environment variable name the policy passes through: letters, digits and `_`, not starting with a digit.
 /// Nothing else: no `=`, no pattern, no empty name.
 fn is_env_name(name: &str) -> bool {
@@ -332,10 +351,15 @@ impl SandboxPolicy {
         if agora_platform::PRIVATE_TEMP {
             sb.sockets.push(agent_temp(worktree));
         }
+        let protect: Vec<PathBuf> = self.protect.iter().map(|p| canonical(p)).collect();
         sb.sockets.extend(
             self.sockets
                 .iter()
-                .filter(|s| !self.protect.iter().any(|p| s.starts_with(p)))
+                .filter(|s| {
+                    let real = canonical(s);
+                    !self.protect.iter().any(|p| s.starts_with(p))
+                        && !protect.iter().any(|p| real.starts_with(p))
+                })
                 .cloned(),
         );
         // ADR-0047 `worktree-offline`: as `worktree`, and no network but this machine; the supervisor adds the agent's own sockets.
@@ -627,7 +651,7 @@ mod tests {
         .profile("k", None, &wt, "/home/x/bin/agent")
         .unwrap();
         assert!(offline.offline);
-        // ADR-0083: the allow-list is the worktree and what the owner listed (not a socket below the node's own folders).
+        // ADR-0083: the allow-list is the worktree and what the owner listed (not a socket below the node's own folders, also through a link).
         assert!(sb.confine_sockets && offline.confine_sockets);
         assert!(sb.sockets.contains(&wt) && !sb.sockets.contains(&PathBuf::from("/tmp")));
         assert!(sb.sockets.contains(&PathBuf::from("/run/user/1/keep.sock")));
@@ -771,5 +795,34 @@ mod tests {
                 assert!(got.is_empty(), "{bad}: {got:?}");
             }
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_owner_socket_that_leads_into_the_nodes_folder_through_a_link_is_dropped() {
+        let dir = std::env::temp_dir().join(format!("agora-sock-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (home, wt) = (dir.join("home"), dir.join("wt"));
+        std::fs::create_dir_all(home.join("m")).unwrap();
+        std::fs::create_dir_all(&wt).unwrap();
+        std::os::unix::fs::symlink(&home, dir.join("alias")).unwrap();
+        let p = SandboxPolicy {
+            level: Level::Worktree,
+            protect: vec![home.clone()],
+            sockets: vec![
+                dir.join("alias/m/agent.1"),
+                home.join("m/agent.1"),
+                dir.join("ok.sock"),
+            ],
+            ..Default::default()
+        };
+        let sb = p.profile("k", None, &wt, "/bin/sh").unwrap();
+        assert!(sb.sockets.contains(&dir.join("ok.sock")));
+        assert!(
+            !sb.sockets.iter().any(|s| s.ends_with("agent.1")),
+            "{:?}",
+            sb.sockets
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

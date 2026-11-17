@@ -97,5 +97,5 @@ a Mac when written: the rule `(deny network-outbound (remote unix-socket (subpat
 measured); Linux Landlock scoping of abstract sockets from ABI 6 (tested here, ABI 8). The kernel headers and the `landlock` ABIs available
 when this was built have no right for pathname sockets, so on Linux those are not restricted and `agora doctor` says so (`sockets-abstract`);
 nothing pretends otherwise. Open question 3 as proposed: `worktree` still starts on such a kernel. The allow-list is the agent's mesh socket,
-its worktree, its private temp folder (macOS), the name resolver and the owner's `sandbox.sockets` (entries under the node's own folders are
-ignored); the "other system sockets measured with real agents" are not yet measured and are the first thing a Mac developer checks.
+its worktree, its private temp folder (macOS), the name resolver and the owner's `sandbox.sockets` (entries under the node's own folders, also through a link, are
+ignored; `doctor` says `sockets-profile`, a warning, on macOS until a Mac has measured it); the "other system sockets measured with real agents" are not yet measured and are the first thing a Mac developer checks.

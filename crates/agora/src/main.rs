@@ -437,7 +437,7 @@ fn doctor(say: &Say, o: &Opts) -> ExitCode {
             ("local-sockets", _) => key!("doctor-local-sockets-unsupported"),
             ("sandbox", Status::Ok) => key!("doctor-sandbox"),
             ("sandbox", _) => key!("doctor-sandbox-unsupported"),
-            ("sockets-full", _) => key!("doctor-sockets-full"),
+            ("sockets-profile", _) => key!("doctor-sockets-profile"),
             ("sockets-abstract", _) => key!("doctor-sockets-abstract"),
             ("sockets-none", _) => key!("doctor-sockets-none"),
             ("env-scrubbed", _) => key!("doctor-env-scrubbed"),
