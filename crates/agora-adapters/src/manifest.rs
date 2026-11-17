@@ -352,6 +352,20 @@ pub fn credential_name_ok(name: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
         && !name.to_ascii_uppercase().starts_with("AGORA_")
         && !RESERVED_ENV.contains(&name.to_ascii_uppercase().as_str())
+        && !windows_device_name(name)
+}
+
+/// A name Windows cannot use as a file name, with or without an extension (`CON`, `NUL`, `COM1`, ...): refused on every system, so a
+/// store (a folder of files named by the secrets) made on one system works on all.
+fn windows_device_name(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or(name).to_ascii_uppercase();
+    matches!(
+        stem.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) || ["COM", "LPT"].iter().any(|p| {
+        stem.strip_prefix(p)
+            .is_some_and(|n| n.len() == 1 && n.as_bytes()[0].is_ascii_digit() && n != "0")
+    })
 }
 
 /// A parsed, validated manifest. Sections the engine does not interpret yet (accounts, hooks,
@@ -831,6 +845,11 @@ mod launch_tests {
             "[\"PATH\"]",
             "[\"path\"]",
             "[\"AGORA_TOKEN\"]",
+            "[\"CON\"]",
+            "[\"nul\"]",
+            "[\"Com1\"]",
+            "[\"LPT9\"]",
+            "[\"AUX\"]",
             "[\"A\", \"a\"]",
             "[\"\u{00e9}\"]",
             &long,

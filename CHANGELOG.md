@@ -17,7 +17,7 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 ### Security
 - A confined Claude Code or Codex can now use a login the node keeps for it (ADR-0084, issue #546): `agora node secret set NAME` stores a token on that machine
   (never sent to the hub), a policy line `credentials.claude-code = NAME` lets that kind have it, and no other kind of agent gets it. A token in the node's
-  own environment no longer reaches every kind of agent: add the policy line if you relied on that.
+  own environment no longer reaches every kind of agent: add the policy line if you relied on that. The shipped Claude Code and Codex descriptions now need this version of Agora (`min_engine = 4`), so an older node refuses them; update the node with them.
 - A confined agent on Linux can no longer use the node's control socket (ADR-0082, T16): when the node confines agents it keeps a secret
   in its own folder (`control.token`, readable only by its owner and out of every agent's reach) and answers nothing on the socket until the
   caller shows it, so an agent can no longer start agents with options nobody confirmed, stop agents or type into another agent's terminal

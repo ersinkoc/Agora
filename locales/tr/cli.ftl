@@ -413,7 +413,7 @@ cli-metrics-token-state-revoked = {" "}· iptal edildi
 cli-metrics-token-state-expired = {" "}· süresi doldu
 cli-metrics-token-revoked = { $name } metrik anahtarı iptal edildi. Bir sonraki kullanımda reddedilir.
 cli-metrics-token-unknown = { $name } adında geçerli bir metrik anahtarı yok.
-doctor-credential = { $detail } başlarken bu düğümden { $names } alır (saklanan bir sır, yoksa düğümün kendi ortamı). Yalnızca adlar; düğüm bu girişin çalışıp çalışmadığını bilmez.
+doctor-credential = { $detail } başlarken bu düğümden { $names } alır (saklanan bir sır, yoksa bu denetimi çalıştıran komutun ortamı; düğümün kendi ortamı farklı olabilir). Yalnızca adlar; bu denetim girişin çalışıp çalışmadığını bilmez.
 doctor-credential-none = { $detail } için kimlik bilgisi bulunamadı: düğümün ona verecek bir şeyi yok. "Giriş yapılmadı" derse (kapalı modda çalışan bir ajan Anahtar Zinciri'nde duran girişi göremez), onun için bir jeton üretin ve şunu çalıştırın: agora node secret set { $name }; sonra düğümün politikasına "credentials.{ $detail } = { $name }" satırını ekleyin.
 doctor-credential-unlisted = Bu düğümde { $names } için bir değer var, ama politikada { $detail } türünün onu almasına izin veren "credentials.{ $detail }" satırı yok; bu yüzden geçirilmez. Başka ajanlar da onu hiç almaz.
 doctor-credential-refused = Politika { $detail } için { $names } adlarını listeliyor, ama türün tanımı bunları bildirmiyor: geçirilmezler.
@@ -425,5 +425,6 @@ cli-secret-not-found = Burada { $name } adlı bir sır saklı değil.
 cli-secret-none = Bu makinede saklı bir sır yok.
 cli-secret-name = { $name }
 cli-secret-bad-name = Bu ad kullanılamaz: yalnızca harf, rakam ve alt çizgi kullanın, rakamla başlamasın ve sistemin ya da Agora'nın kullandığı bir ad olmasın.
-cli-secret-bad-value = Değer en çok 8192 karakterlik tek bir satır olmalı, denetim karakteri içermemeli. Hiçbir şey saklanmadı.
+cli-secret-bad-value = Değer en çok 8192 baytlık tek bir satır olmalı, denetim karakteri içermemeli. Hiçbir şey saklanmadı.
 cli-secret-failed = Sır burada saklanamadı veya okunamadı. Düğümün veri klasörünün sizin olduğunu ve yazılabildiğini denetleyin.
+cli-secret-name-collides = Adı yalnızca büyük/küçük harfle farklı olan bir sır zaten saklı. O adı aynen kullanın ya da önce onu silin.

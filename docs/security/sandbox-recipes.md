@@ -64,6 +64,13 @@ A token already in the node's own environment (a service environment) is used wh
 policy line lists it. **This changed with ADR-0084:** a credential variable in the node's environment no longer reaches every agent: the
 names Claude Code and Codex read are removed from every agent that is not listed for them. If you relied on that, add the policy line.
 
+Three limits of the protection around the store itself. (a) With `sandbox = off` an agent is not confined and can read `<data>/secrets` like any
+file of yours; the store protects nothing from an unconfined agent. (b) The node refuses to start a confined agent whose read or write grants
+reach the secrets folder (`agent.sandbox_unavailable`, reason `secrets_reachable`), but only **at start** and only once a secret is stored:
+a secret you add while an agent with a broad grant (a read grant on your whole data folder or above) is already running is not caught, so
+restart such agents after storing a secret. (c) Names Windows cannot use as file names (`CON`, `NUL`, `COM1`, ...) and a name that differs from
+a stored one only in capitals are refused as secret names on every system.
+
 What this cannot do: it gives the agent a token, not your login. A confined agent can send the token anywhere (the `worktree` level has no
 network rules), can print it into its terminal, and a process of the same user may read another process's environment (`/proc/<pid>/environ`
 on Linux, `ps eww` on macOS: not measured). Interactive login inside a confined agent does not persist (the Keychain write is denied, which

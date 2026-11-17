@@ -55,15 +55,18 @@ impl Secret {
 #[derive(Debug)]
 pub enum CredentialError {
     NameInvalid,
+    /// Another stored name differs from this one only in letters' case (they would be one file on some systems).
+    NameCollides,
     ValueInvalid,
     Io(io::Error),
 }
 
 impl CredentialError {
-    /// Stable code: `credential.name_invalid`, `credential.value_invalid`, `credential.store_unavailable`.
+    /// Stable code: `credential.name_invalid`, `credential.name_collides`, `credential.value_invalid`, `credential.store_unavailable`.
     pub fn code(&self) -> &'static str {
         match self {
             Self::NameInvalid => "credential.name_invalid",
+            Self::NameCollides => "credential.name_collides",
             Self::ValueInvalid => "credential.value_invalid",
             Self::Io(_) => "credential.store_unavailable",
         }
@@ -107,6 +110,13 @@ impl SecretStore {
     pub fn set(&self, name: &str, value: &Secret) -> Result<(), CredentialError> {
         if !name_ok(name) {
             return Err(CredentialError::NameInvalid);
+        }
+        if self
+            .list()
+            .iter()
+            .any(|n| n != name && n.eq_ignore_ascii_case(name))
+        {
+            return Err(CredentialError::NameCollides);
         }
         agora_platform::ensure_private_dir(&self.dir).map_err(CredentialError::Io)?;
         agora_platform::write_private(&self.dir.join(name), value.expose().as_bytes())
@@ -337,6 +347,20 @@ mod tests {
             store.set("../x", &Secret::new("x").unwrap()),
             Err(CredentialError::NameInvalid)
         ));
+        // Windows device names and names that differ only in case are refused.
+        for bad in ["CON", "nul", "COM1", "lpt9", "Aux"] {
+            assert!(matches!(
+                store.set(bad, &Secret::new("x").unwrap()),
+                Err(CredentialError::NameInvalid)
+            ));
+        }
+        assert!(store.set("COM0", &Secret::new("x").unwrap()).is_ok());
+        assert!(store.remove("COM0").unwrap());
+        assert!(matches!(
+            store.set("a_token", &Secret::new("x").unwrap()),
+            Err(CredentialError::NameCollides)
+        ));
+        assert_eq!(store.list(), ["A_TOKEN", "B_KEY"]);
         assert!(store.remove("A_TOKEN").unwrap());
         assert!(!store.remove("A_TOKEN").unwrap());
         assert_eq!(store.list(), ["B_KEY"]);

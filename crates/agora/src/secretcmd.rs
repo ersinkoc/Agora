@@ -47,6 +47,7 @@ fn failed(say: &Say, e: &CredentialError) -> ExitCode {
     // The code names what went wrong; no value is anywhere near an error.
     match e {
         CredentialError::NameInvalid => say.err(key!("cli-secret-bad-name"), &[]),
+        CredentialError::NameCollides => say.err(key!("cli-secret-name-collides"), &[]),
         CredentialError::ValueInvalid => say.err(key!("cli-secret-bad-value"), &[]),
         CredentialError::Io(_) => say.err(key!("cli-secret-failed"), &[]),
     }

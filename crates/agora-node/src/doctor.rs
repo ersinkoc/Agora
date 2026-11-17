@@ -174,8 +174,10 @@ fn credential_checks(
     let creds = crate::credentials::Credentials::new(store.clone(), policy.credentials.clone());
     let (loaded, _) = crate::manifests::load(manifests_dir);
     let mut out = Vec::new();
+    // The same lookup the launch path makes: a stored file counts only when it reads back as a well-formed value.
     let has = |n: &str| {
-        store.has(n) || env(n).is_some_and(|v| crate::credentials::Secret::new(&v).is_ok())
+        store.get(n).is_some()
+            || env(n).is_some_and(|v| crate::credentials::Secret::new(&v).is_ok())
     };
     for l in loaded {
         let Some(own) = l
@@ -898,6 +900,18 @@ mod tests {
         assert!(cc
             .args
             .contains(&("name", "CLAUDE_CODE_OAUTH_TOKEN".to_string())));
+        // A stored file that does not read back as a value is no credential: the node would pass nothing.
+        std::fs::create_dir_all(store.dir()).unwrap();
+        std::fs::write(store.dir().join("CLAUDE_CODE_OAUTH_TOKEN"), "two\nlines").unwrap();
+        let c = credential_checks(
+            &d.join("m"),
+            &store,
+            &policy("credentials.claude-code = CLAUDE_CODE_OAUTH_TOKEN\n"),
+            true,
+            no_env,
+        );
+        assert!(kind(&c, "credential-none", "claude-code"), "{c:?}");
+        assert!(!kind(&c, "credential", "claude-code"));
         // A stored value with no policy line is named, not passed; with the line it is given. Names only, in every field.
         store
             .set(
