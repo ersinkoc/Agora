@@ -156,10 +156,13 @@ pub fn short_fingerprint(fp: &[u8; 32]) -> String {
 
 // ---- rate limits (pure: the caller gives the time) ----
 
+/// Per source: when each reply in the window was allowed, and the random bytes of the request it answered once it was sent.
+type Sent = VecDeque<(u64, Option<[u8; 16]>)>;
+
 #[derive(Default)]
 pub struct ReplyLimits {
     global: VecDeque<u64>,
-    sources: HashMap<IpAddr, VecDeque<u64>>,
+    sources: HashMap<IpAddr, Sent>,
 }
 
 impl ReplyLimits {
@@ -169,6 +172,14 @@ impl ReplyLimits {
 
     /// True when a reply to `source` may be sent at `now_ms`; counts it when so.
     pub fn allow(&mut self, source: IpAddr, now_ms: u64) -> bool {
+        self.allow_request(source, None, now_ms)
+    }
+
+    /// [`Self::allow`] for a request carrying the random bytes `nonce`: a request this source was already answered for in the window
+    /// (the same query sent to the limited and the directed broadcast address, or sent again) is neither answered nor counted, so one
+    /// search spends one reply of the source's budget, not all of it, and a search made again at once is still answered (audit F920).
+    /// Only a request that was answered counts as one ([`Self::answered`]): one that got silence may be asked again.
+    pub fn allow_request(&mut self, source: IpAddr, nonce: Option<[u8; 16]>, now_ms: u64) -> bool {
         while self
             .global
             .front()
@@ -182,7 +193,7 @@ impl ReplyLimits {
         if !self.sources.contains_key(&source) && self.sources.len() >= MAX_SOURCES {
             self.sources.retain(|_, q| {
                 q.back()
-                    .is_some_and(|t| now_ms.saturating_sub(*t) < PER_SOURCE_WINDOW_MS)
+                    .is_some_and(|(t, _)| now_ms.saturating_sub(*t) < PER_SOURCE_WINDOW_MS)
             });
             if self.sources.len() >= MAX_SOURCES {
                 return false;
@@ -191,16 +202,26 @@ impl ReplyLimits {
         let q = self.sources.entry(source).or_default();
         while q
             .front()
-            .is_some_and(|t| now_ms.saturating_sub(*t) >= PER_SOURCE_WINDOW_MS)
+            .is_some_and(|(t, _)| now_ms.saturating_sub(*t) >= PER_SOURCE_WINDOW_MS)
         {
             q.pop_front();
+        }
+        if nonce.is_some() && q.iter().any(|(_, n)| *n == nonce) {
+            return false;
         }
         if q.len() >= PER_SOURCE {
             return false;
         }
-        q.push_back(now_ms);
+        q.push_back((now_ms, None));
         self.global.push_back(now_ms);
         true
+    }
+
+    /// The reply [`Self::allow_request`] last allowed to `source` was sent, for the request with the random bytes `nonce`.
+    pub fn answered(&mut self, source: IpAddr, nonce: [u8; 16]) {
+        if let Some(last) = self.sources.get_mut(&source).and_then(VecDeque::back_mut) {
+            last.1 = Some(nonce);
+        }
     }
 }
 
@@ -326,11 +347,12 @@ impl Responder {
         }
         // Rate limits before any work that costs something.
         let now = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let nonce: Option<[u8; 16]> = datagram[12..28].try_into().ok();
         if !self
             .limits
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .allow(src.ip(), now)
+            .allow_request(src.ip(), nonce, now)
         {
             return None;
         }
@@ -347,7 +369,16 @@ impl Responder {
             self.cfg.version,
         );
         // The reply is never larger than the request (and the request is at least REQUEST_LEN): never an amplifier.
-        (reply.len() <= REQUEST_LEN && reply.len() <= datagram.len()).then_some(reply)
+        if reply.len() > REQUEST_LEN || reply.len() > datagram.len() {
+            return None;
+        }
+        if let Some(n) = nonce {
+            self.limits
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .answered(src.ip(), n);
+        }
+        Some(reply)
     }
 }
 
@@ -369,9 +400,10 @@ impl Drop for Responder {
 
 /// Asks from every local address (with the targets it should ask: its own network's broadcast address and the limited broadcast
 /// address) and collects answers for `wait`. A socket is bound to each local address (the port is chosen by the system) so that a
-/// query leaves from the interface it is meant for, and is allowed to broadcast. The query is sent
-/// again every half second (a datagram can be lost); a hub that answered more than once, from one address or several, is listed once. Nothing is sent to a hub
-/// except the query.
+/// query leaves from the interface it is meant for, and is allowed to broadcast. The query is sent again every half second, with
+/// new random bytes, until a hub has answered (a datagram can be lost; a hub answers one query once, so the copies and the repeats
+/// do not spend its per-source budget, audit F920); a hub that answered more than once, from one address or several, is listed once.
+/// Nothing is sent to a hub except the query.
 pub fn find(
     queries: &[(Ipv4Addr, Vec<SocketAddr>)],
     wait: Duration,
@@ -386,13 +418,17 @@ pub fn find(
             Some((s, targets.as_slice()))
         })
         .collect();
-    let q = request(random);
+    let mut round: u8 = 0;
     let deadline = Instant::now() + wait;
     let mut next_send = Instant::now();
     let mut found: Vec<Found> = Vec::new();
     let mut buf = [0u8; 2048];
     'listen: while Instant::now() < deadline {
-        if Instant::now() >= next_send {
+        if found.is_empty() && Instant::now() >= next_send {
+            let mut nonce = random;
+            nonce[15] ^= round;
+            round = round.wrapping_add(1);
+            let q = request(nonce);
             for (s, targets) in &sockets {
                 for t in *targets {
                     let _ = s.send_to(&q, t);
@@ -729,7 +765,7 @@ mod tests {
             );
         }
         for len in [128usize, 129, 600] {
-            let mut d = request([2; 16]).to_vec();
+            let mut d = request([len as u8; 16]).to_vec();
             d.resize(len, 0);
             let reply = r
                 .answer(&d, SocketAddr::from(([127, 0, 0, 1], 6000 + len as u16)))
@@ -806,8 +842,8 @@ mod tests {
         let c = UdpSocket::bind("127.0.0.1:0").unwrap();
         c.set_read_timeout(Some(Duration::from_millis(500)))
             .unwrap();
-        for _ in 0..50 {
-            c.send_to(&request([6; 16]), at).unwrap();
+        for i in 0..50u8 {
+            c.send_to(&request([i; 16]), at).unwrap();
         }
         let mut b = [0u8; 2048];
         let mut got = 0;
@@ -815,6 +851,56 @@ mod tests {
             got += 1;
         }
         assert_eq!(got, PER_SOURCE);
+        r.sync(false).unwrap();
+    }
+
+    /// Audit F920: one search must not spend a source's whole budget. A request is answered once (its copy to the other broadcast
+    /// address, or the same request again, is neither answered nor counted), the finder stops asking once a hub answered, so a person
+    /// who runs `agora join` again at once still finds the hub; the budget still holds for distinct requests.
+    #[test]
+    fn a_request_is_answered_once_and_a_search_made_again_at_once_finds_the_hub() {
+        let r = responder(0, vec![ip("127.0.0.1")]);
+        let src: SocketAddr = "127.0.0.1:5555".parse().unwrap();
+        assert!(r.answer(&request([1; 16]), src).is_some());
+        assert!(r.answer(&request([1; 16]), src).is_none(), "a copy");
+        assert!(r.answer(&request([2; 16]), src).is_some());
+        assert!(r.answer(&request([3; 16]), src).is_some());
+        assert!(
+            r.answer(&request([4; 16]), src).is_none(),
+            "the budget holds"
+        );
+        // A request that got silence (its address not in the certificate yet) is not a request answered: asked again, it is answered.
+        let names = Arc::new(Mutex::new(vec![ip("192.168.9.9")]));
+        let n = Arc::clone(&names);
+        let r2 = Responder::new(Config {
+            port: 0,
+            bind: Ipv4Addr::LOCALHOST,
+            name: Box::new(|| "testhub".into()),
+            hub_port: 7443,
+            ca_fingerprint: FP,
+            version: "9.9.9",
+            addresses: Box::new(move || n.lock().unwrap().clone()),
+        });
+        assert!(r2.answer(&request([7; 16]), src).is_none());
+        *names.lock().unwrap() = vec![ip("127.0.0.1")];
+        assert!(r2.answer(&request([7; 16]), src).is_some());
+        assert!(r2.answer(&request([7; 16]), src).is_none(), "and once only");
+        // Another source with the same bytes is its own request.
+        assert!(r
+            .answer(&request([1; 16]), "127.0.0.2:5555".parse().unwrap())
+            .is_some());
+        // On the wire: as `agora join` asks (two targets that both reach the hub), three searches in a row each find it.
+        let r = responder(0, vec![ip("127.0.0.1")]);
+        r.sync(true).unwrap();
+        let at = r.bound().unwrap();
+        for seed in 1..=3u8 {
+            let found = find(
+                &[(Ipv4Addr::LOCALHOST, vec![at, at])],
+                Duration::from_millis(700),
+                [seed; 16],
+            );
+            assert_eq!(found.len(), 1, "search {seed}: {found:?}");
+        }
         r.sync(false).unwrap();
     }
 }
