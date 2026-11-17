@@ -279,11 +279,13 @@ pub fn private_folder(
 
 /// The private temp folder of the agent that works in `worktree`; the node points `TMPDIR`, `TEMP` and `TMP` at it where
 /// [`agora_platform::PRIVATE_TEMP`] says the system's temp folder is out of the agent's reach. The place is part of the name: two
-/// worktrees called `web` of different projects must not share one.
+/// worktrees called `web` of different projects must not share one. Only the first 48 characters of the name are used (at most 192
+/// bytes; the place keeps it unique), so the folder's name stays within the 255-byte limit whatever the worktree is called.
 pub fn agent_temp(worktree: &Path) -> PathBuf {
-    let name = worktree
-        .file_name()
-        .map_or_else(|| "agent".into(), |n| n.to_string_lossy().into_owned());
+    let name: String = worktree.file_name().map_or_else(
+        || "agent".into(),
+        |n| n.to_string_lossy().chars().take(48).collect(),
+    );
     let place = crate::gitconfig::place_hash(worktree);
     std::env::temp_dir().join(format!("agora-agent-{name}-{place:08x}"))
 }
@@ -636,6 +638,16 @@ mod tests {
             .unwrap()
             .to_string_lossy()
             .starts_with("agora-agent-web-"));
+        // A name at the 255-byte limit, in ASCII and in four-byte characters, still gives a folder name within it (Codex review of
+        // F841: the place made a 240-character name too long); two such names that differ only past the cut stay apart.
+        for long in ["x".repeat(255), "𝔵".repeat(63)] {
+            assert!(t(&format!("/work/a/{long}")).file_name().unwrap().len() <= 255);
+        }
+        let (a, b) = (
+            t(&format!("/work/{}1", "y".repeat(100))),
+            t(&format!("/work/{}2", "y".repeat(100))),
+        );
+        assert_ne!(a, b);
     }
 
     #[test]
