@@ -103,3 +103,4 @@ Date: YYYY-MM-DD
 | 0083 | A confined agent reaches only the unix sockets it is given | Accepted |
 | 0084 | A confined agent gets its login from a secret the node holds | Accepted |
 | 0085 | Machine and hub certificates renew themselves | Proposed |
+| 0086 | Any machine can be the hub: one authoritative hub with takeover | Proposed |
