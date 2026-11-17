@@ -628,6 +628,28 @@ async fn closing_the_switch_ends_a_waiting_machine_and_nothing_is_issued() {
     );
 }
 
+/// F810: the switch can close without any owner command (its timeout, the fifth failure of its window), so nothing wakes the machine
+/// that is waiting. It must still learn within a few seconds, not at the end of its own five minutes. The close here goes through the
+/// state directly, as a timeout does: no command arrives, nothing calls `wake`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_waiting_machine_learns_the_switch_closed_by_itself_without_any_owner_command() {
+    let rig = rig().await;
+    let mut owner = Window::open(&rig, "owner-token").await;
+    owner.open_switch().await;
+    let mut m = Machine::dial(&rig).await;
+    let (id, _) = m.request("closing-alone").await.unwrap();
+    m.reveal(&id).await;
+    owner.card().await;
+    rig.state.hub.pairing().with(|p| p.close(1_000));
+    let told = tokio::time::timeout(Duration::from_secs(4), m.recv())
+        .await
+        .expect("the waiting machine was never told the switch closed");
+    assert_eq!(told.unwrap().unwrap_err(), ErrorCode::PairClosed);
+    assert!(!Enrollment::new(rig.state.hub.store())
+        .node_in_use("closing-alone")
+        .unwrap());
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_closed_hub_refuses_before_it_opens() {
     let rig = rig().await;

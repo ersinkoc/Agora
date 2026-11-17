@@ -105,3 +105,30 @@ export class CsiUFlags {
   reset() { this.stack = []; this.flags = 0; }
   reply(): string { return `\x1b[?${this.flags}u`; }
 }
+
+/** What a program has switched on for the keyboard: the CSI u flags and the modifyOtherKeys level. */
+export class KeyboardProtocols {
+  readonly csiU = new CsiUFlags();
+  modifyOtherKeys = 0;
+  /** A full terminal reset (RIS) switches both off. */
+  fullReset() { this.csiU.reset(); this.modifyOtherKeys = 0; }
+  get enhanced(): EnhancedKeys { return { csiU: this.csiU.flags, modifyOtherKeys: this.modifyOtherKeys }; }
+}
+
+/** The part of the terminal's escape-sequence parser that the keyboard protocols use (xterm's `parser` fits it). */
+export interface KeyParser {
+  registerCsiHandler(id: { prefix?: string; final: string }, cb: (params: (number | number[])[]) => boolean | Promise<boolean>): unknown;
+  registerEscHandler(id: { final: string }, cb: () => boolean | Promise<boolean>): unknown;
+}
+
+/** Wires the protocols' sequences to `k`; `reply` sends the answer to the program's query (`CSI ? u`). */
+export function registerKeyboardProtocols(p: KeyParser, k: KeyboardProtocols, reply: (data: string) => void): void {
+  p.registerCsiHandler({ prefix: '>', final: 'u' }, (a) => { k.csiU.push(Number(a[0] ?? 0)); return true; });
+  p.registerCsiHandler({ prefix: '<', final: 'u' }, (a) => { k.csiU.pop(Number(a[0] ?? 1)); return true; });
+  p.registerCsiHandler({ prefix: '=', final: 'u' }, (a) => { k.csiU.set(Number(a[0] ?? 0), Number(a[1] ?? 1)); return true; });
+  p.registerCsiHandler({ prefix: '?', final: 'u' }, () => { reply(k.csiU.reply()); return true; });
+  p.registerCsiHandler({ prefix: '>', final: 'm' }, (a) => { if (Number(a[0]) === 4) k.modifyOtherKeys = Number(a[1] ?? 0); return false; });
+  // A full reset (RIS, `ESC c`: what `reset` sends after a program crashed with a protocol on) switches them off too, as kitty and
+  // xterm do; xterm's own reset still runs, so the handler lets it (audit F940).
+  p.registerEscHandler({ final: 'c' }, () => { k.fullReset(); return false; });
+}

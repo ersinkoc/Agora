@@ -54,7 +54,7 @@ describe('key bar bytes (ADR-0067 rung 2)', () => {
   });
 });
 
-import { enhancedKey, CsiUFlags, shortcut } from './keys';
+import { enhancedKey, CsiUFlags, KeyboardProtocols, registerKeyboardProtocols, shortcut, type KeyParser } from './keys';
 import { binaryBytes } from './frames';
 import { DEFAULT_PREFS, parsePrefs } from './prefs';
 
@@ -129,5 +129,48 @@ describe('terminal settings', () => {
     expect(parsePrefs('not json')).toEqual(DEFAULT_PREFS);
     expect(parsePrefs(JSON.stringify({ lineHeight: 1.1, scrollback: 10000, readable: true, copyOnSelect: true, gpu: true }))).toEqual({ lineHeight: 1.1, scrollback: 10000, readable: true, copyOnSelect: true, gpu: true });
     expect(parsePrefs(JSON.stringify({ lineHeight: 3, scrollback: 7, readable: 'yes', copyOnSelect: 1, gpu: 'yes' }))).toEqual(DEFAULT_PREFS);
+  });
+});
+
+describe('keyboard protocols and a full terminal reset (audit F940)', () => {
+  type Csi = (a: (number | number[])[]) => boolean | Promise<boolean>;
+  function rig() {
+    const csi = new Map<string, Csi>();
+    const esc = new Map<string, () => boolean | Promise<boolean>>();
+    const parser: KeyParser = {
+      registerCsiHandler: (id, cb) => { csi.set(`${id.prefix ?? ''}${id.final}`, cb); },
+      registerEscHandler: (id, cb) => { esc.set(id.final, cb); },
+    };
+    const k = new KeyboardProtocols();
+    const sent: string[] = [];
+    registerKeyboardProtocols(parser, k, (d) => sent.push(d));
+    return { csi, esc, k, sent };
+  }
+  const shiftEnter = { key: 'Enter', shiftKey: true, altKey: false, ctrlKey: false, metaKey: false };
+
+  it('switches the protocols on and answers the query', () => {
+    const { csi, k, sent } = rig();
+    csi.get('>u')?.([1]);
+    csi.get('>m')?.([4, 2]);
+    expect(k.enhanced).toEqual({ csiU: 1, modifyOtherKeys: 2 });
+    csi.get('?u')?.([]);
+    expect(sent).toEqual(['\x1b[?1u']);
+    expect(enhancedKey(shiftEnter, k.enhanced)).toBe('\x1b[13;2u');
+  });
+
+  it('turns both off at ESC c (RIS), and lets the terminal run its own reset', () => {
+    const { csi, esc, k } = rig();
+    csi.get('>u')?.([1]);
+    csi.get('>u')?.([3]);
+    csi.get('>m')?.([4, 2]);
+    const ris = esc.get('c');
+    expect(ris).toBeDefined();
+    // `false`: not handled here, so xterm's own full reset still happens.
+    expect(ris?.()).toBe(false);
+    expect(k.enhanced).toEqual({ csiU: 0, modifyOtherKeys: 0 });
+    // The flag stack went too: a pop after the reset does not bring an old value back.
+    csi.get('<u')?.([2]);
+    expect(k.enhanced.csiU).toBe(0);
+    expect(enhancedKey(shiftEnter, k.enhanced)).toBeUndefined();
   });
 });
