@@ -12,7 +12,7 @@ use agora_hub::ca::{csr_der, new_device_request};
 use agora_i18n::key;
 use agora_node::pairing_client::{pair, split_address, PairError, Timeouts, Wanted};
 
-use crate::hubcli::{link_dir, store_link};
+use crate::hubcli::{hold_link, link_dir};
 use crate::{Opts, Say};
 
 /// A machine that joined: the id the hub knows it by.
@@ -279,8 +279,23 @@ pub(crate) fn run(
             // Looked at again: the owner may have taken minutes, and this machine may have joined meanwhile (`agora` enrolling with
             // its own hub, `agora node enroll`, another join). Without `--replace` that link is kept, never overwritten (audit F890),
             // unless it is this same hub under this same name: the hub issues a taken name only by replacing it, and the certificate
-            // it replaced is revoked, so keeping that link would keep one that no longer works (Codex review of F890).
-            if link.join("node-id").exists() && !replace && !superseded(&link, &id, &v.ca_pem) {
+            // it replaced is revoked, so keeping that link would keep one that no longer works (Codex review of F890). The look and
+            // the save hold the folder's guard together (audit F1032): a save that was under way when the join came here is over
+            // before the look, so its link is seen and kept.
+            let held = match hold_link(&link) {
+                Ok(h) => h,
+                Err(e) => {
+                    say.err(
+                        key!("join-store-failed"),
+                        &[("reason", e.to_string().into())],
+                    );
+                    return Err(Stop::Failed);
+                }
+            };
+            if held.dir().join("node-id").exists()
+                && !replace
+                && !superseded(held.dir(), &id, &v.ca_pem)
+            {
                 say.err(
                     key!("join-already"),
                     &[("dir", link.display().to_string().into())],
@@ -288,7 +303,7 @@ pub(crate) fn run(
                 return Err(Stop::Usage);
             }
             let url = format!("wss://{dial}");
-            if let Err(e) = store_link(&url, &id, &v.ca_pem, &v.cert_pem, &key_pem) {
+            if let Err(e) = held.store(&url, &id, &v.ca_pem, &v.cert_pem, &key_pem) {
                 say.err(
                     key!("join-store-failed"),
                     &[("reason", e.to_string().into())],
