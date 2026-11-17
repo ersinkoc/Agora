@@ -1271,6 +1271,15 @@ pub(crate) fn interface_addresses() -> io::Result<Vec<crate::InterfaceAddr>> {
     Ok(out)
 }
 
+/// See [`crate::open_read_no_follow`]: a reparse point (link, junction) at `path` is opened as itself.
+pub(crate) fn open_read_no_follow(path: &Path) -> io::Result<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -1591,13 +1600,4 @@ mod tests {
         s.write_all(b"ok").unwrap();
         assert_eq!(&client.join().unwrap(), b"ok");
     }
-}
-
-/// See [`crate::open_read_no_follow`]: a reparse point (link, junction) at `path` is opened as itself.
-pub(crate) fn open_read_no_follow(path: &Path) -> io::Result<std::fs::File> {
-    use std::os::windows::fs::OpenOptionsExt;
-    std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT)
-        .open(path)
 }

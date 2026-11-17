@@ -843,6 +843,11 @@ mod tests {
         let elsewhere = base.join("elsewhere.json");
         std::fs::write(&elsewhere, format!(r#"{{"project_id":"{BAD}"}}"#)).unwrap();
         let good = format!(r#"{{"project_id":"{GOOD}"}}"#);
+        // The fixture is the folder's own metadata (not a Git checkout's around the temporary folder): read before any swap.
+        std::fs::write(&meta, &good).unwrap();
+        let path = folder.to_str().unwrap().to_string();
+        let (first, _) = inspect(&path, "n", false).unwrap();
+        assert_eq!(first.project_id, format!("id:{GOOD}"));
         let stop = std::sync::Arc::new(AtomicBool::new(false));
         let flips = std::sync::Arc::new(AtomicU64::new(0));
         let flipper = {
@@ -867,7 +872,6 @@ mod tests {
                 }
             })
         };
-        let path = folder.to_str().unwrap().to_string();
         let (mut leaked, mut own) = (0, 0);
         // At least 1000 looks, and on until the link has been swapped in some times (bounded, for a machine that never runs the
         // swapping thread).
