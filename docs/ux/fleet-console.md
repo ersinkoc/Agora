@@ -20,6 +20,8 @@ palette's "Go home" brings it back. An empty window is the fleet console too. On
      detail, 120 characters at most in all, no structured text, no hidden character, and never a request to start an agent (it carries a
      folder, a prompt and settings). The row grows to hold such a request; it never clamps or cuts it (`scripts/e2e-fleet-rows.mjs`
      measures the longest one at 340, 420 and 820 px and in Large text). While the link is down the buttons are disabled and say why.
+   * **A machine that asks to join (ADR-0065) is a row of its own with one button, Review, and never an inline Approve**: the owner must compare the number on its screen with the
+     card first, so the row shows the name and says what to do, never the number. It counts in the first count and sorts by when it runs out. See `docs/specs/pairing.md` section 14.
    * **Six or more agents asking for exactly the same thing are one row with a count and "Review each"** (same kind of request, same action
      and detail, same machine, project and agent kind; a request to start an agent is never collapsed): no stack of identical Allow
      buttons. Each is then reviewed in the full card.

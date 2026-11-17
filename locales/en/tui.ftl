@@ -250,3 +250,34 @@ tui-cleanup-done = { $count ->
     }
 tui-cleanup-failed = Could not forget a machine ({ $code }); { $count } forgotten before it.
 tui-app-start-read = You read the whole request. Press y to allow it or n to deny it.
+
+# ADR-0065: the owner's card for a machine that asks to join (the same words as the web's pair-*).
+tui-pair-machine-title = A new machine wants to join
+tui-pair-browser-title = A browser wants to sign in
+tui-pair-name = Name
+tui-pair-system = System
+tui-pair-address = Address
+tui-pair-number = Number
+tui-pair-machine-compare = Compare with the number on the new machine. Approve only if they are the same.
+tui-pair-browser-compare = Compare with the number on that browser. Approve only if they are the same.
+tui-pair-expires = Runs out in { $time }
+tui-pair-ran-out = This request has run out. The new machine can ask again.
+tui-pair-offline = Not connected right now. You can answer once the connection is back.
+tui-pair-replace-off = Replace the existing machine: no. A machine named "{ $name }" has already joined.
+tui-pair-replace-on = Replace the existing machine: yes. "{ $name }" has already joined, and the old one loses its access.
+tui-pair-confirm = Do the two numbers match exactly?
+tui-pair-keys = a approves, d denies, Esc leaves it for later
+tui-pair-keys-taken = a approves, r changes Replace, d denies, Esc leaves it for later
+tui-pair-keys-confirm = y: yes, they match. Any other key goes back.
+tui-pair-asked = ! A machine wants to join: press p to read it
+tui-pair-asked-more = ! { $count } machines want to join: press p to read the first
+tui-pair-none = No machine is asking to join.
+tui-pair-answer-sent = Answer sent.
+tui-pair-denied = Denied. Nothing was given to that machine.
+tui-pair-gone = That request has already ended.
+tui-pair-failed = The answer could not be sent ({ $code }).
+tui-pair-result-approved = { $name } was approved and is joining.
+tui-pair-result-denied = { $name } was denied.
+tui-pair-result-expired = The request from { $name } ran out.
+tui-pair-result-closed = The request from { $name } was cancelled.
+tui-app-cmd-pair = Read a machine's request to join (p)

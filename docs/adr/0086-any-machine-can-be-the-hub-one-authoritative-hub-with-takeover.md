@@ -66,6 +66,16 @@ takeover; shorter would sign every browser out, which is acceptable but not requ
 copied; pending ones die with the takeover); `metrics_tokens` (hashes). **Not copied: `ca.key`** (section 3), the old hub's server key, terminal bytes (never in the
 store, ADR-0022).
 
+**The rule: hub state is never copied as files, and never as the folder.** The hub directory holds `hub.db`, `hub.db-wal` and `hub.db-shm` (WAL mode) next to `ca.key`,
+`ca.pem`, `server-cert.pem`, `token` and `listen`. A plain copy of `hub.db` while the hub runs is not a backup: the Windows developer measured a copy with `user_version 0`
+(the schema was still in the WAL; under write load the gap is larger). Everything that reaches a standby, an export file or any other machine is made only by `VACUUM INTO`
+or the online backup API (`SqliteStore::backup_to`), run from a second process while the hub runs (measured on Windows 11: `integrity_check` ok, `user_version` 12, 0.04 s).
+**`ca.key` and `token` are excluded by construction, not by a filter on a copied folder:** the export is assembled from named tables (the list above) into a new database
+file, so a file that is not in the list cannot enter it; there is no code path that reads the hub directory's other files for export, replication or the table feed; and a
+test lists every file and table an export, an import and a feed message can carry and fails if `ca.key`, `token`, `server-cert.pem` or any private key appears (and
+if an export from a hub directory seeded with a marker `ca.key` contains the marker). Where a standby stores the received state, `standby.db` is written through `write_private`
+(owner-only mode on Unix, owner-only ACL on Windows).
+
 Option A (recommended): **log shipping of the event log plus a small-table feed.**
 - Events: the standby asks "everything after `pos` N" (the same resume the browser and the nodes use, `hub.rs` replay); the hub streams new events as stored.
 - The other tables are small and mutable, so they are not log-shipped (that would need a change journal in every handler). A **table feed** ships a consistent
@@ -222,7 +232,7 @@ is **kept aside**, not merged (below). A node refuses a hub whose record has a l
 ## 8. Staged plan (small PRs, each useful alone)
 Prerequisite: ADR-0085 (certificate renewal) accepted and built, because section 3's rotation uses its `RenewRequest`.
 1. **State export and import.** `agora hub export` / `import`: the existing `backup_to` and `restore`, plus the small-table subset and an owner-passphrase-sealed file if secrets
-   are included (none by default: `ca.key` is excluded unless `--with-ca-key`, off by default and documented). Useful alone: a moved hub, a better backup. Tests: the restore drill
+   are included (none by default: `ca.key` and `token` are excluded by construction, section 2; the `--with-ca-key` switch is dropped, so no export can carry the key). Useful alone: a moved hub, a better backup. Tests: the restore drill
    (`store.rs` tests, `hub_link.rs`) extended with a second hub dir.
 2. **The signed hub record and following.** Schema (`schema/agora/v1/`, golden fixtures, capability `hub.record`), signing helper beside `devices.rs` messages, node storage of
    the record, multiple pinned CAs, `known_epoch` in the handshakes, the fencing behaviour (a hub told of a higher epoch demotes). No takeover yet: one hub, epoch 1.
@@ -234,12 +244,34 @@ Prerequisite: ADR-0085 (certificate renewal) accepted and built, because section
 4. **Continuous replication:** event stream, table feed, semi-synchronous revocations, replication-aware acks, detach on stall. A **takeover drill** like the restore drill, run in
    CI with real processes: measure RPO and RTO and fail the job above the numbers in section 2.
 5. **Automatic takeover (three or more hub-capable machines only):** pre-signed owner grant, hub lease, majority agreement, flapping tests (laptop sleep, Wi-Fi switch, paused process),
-   off by default.
+   off by default. **On Windows, this step ships only after ADR-0077's code signing (SignPath) is in place** (Amendment below): until then a Windows standby may be quarantined
+   by Defender, and an automatic takeover would depend on a machine that can silently lose its binary.
 - **Per OS** (each is `agora-platform` or `servicecmd.rs`, never `#[cfg(target_os)]` elsewhere): **Linux** a systemd **user** unit `agora-hub` beside `agora-node` (lingering as today);
   **macOS** a second LaunchAgent, and the **Local Network** permission prompt for the hub's listening port and for discovery (an unsigned or re-signed binary is asked again: ADR-0077 and the
-  update path must keep the identity stable); **Windows** a second logon task `agora-hub`, a Windows Firewall rule for the hub port (created with the owner's consent, per-profile, scoped to
-  the private profile), Defender behaviour for a newly listening executable (the binary is code-signed, ADR-0077), and the hub's data under `%LOCALAPPDATA%` with a private ACL for any file
-  holding a key (`write_private`). The Windows developer supplies the Windows part, as offered.
+  update path must keep the identity stable); **Windows** a second logon task `agora-hub`, the hub's data under `%LOCALAPPDATA%` with a private ACL for any file
+  holding a key (`write_private`), and the three points below (measured on a real Windows 11 machine, after this ADR was first written: `log/2026-11-17-1101-windows-hub-measurements.md`,
+  `log/2026-11-17-1137-windows-adr0086-windows-review.md` on branch `comms`). The Windows developer supplies the Windows part, as offered.
+  - **Firewall: Agora creates and removes its own rule; it never relies on the Windows Security Alert prompt.** On the first listen the firewall creates "Query User" **Block** rules for the
+    executable (TCP and UDP, any port) and waits for a person; answered "Allow" (measured: within 2 s, on a machine whose UAC elevates without prompting) they become allow-everything rules
+    (any port, Public included); on a default UAC machine the hub stays blocked until someone answers. A takeover with nobody at the machine would wait on, or widen through, that prompt.
+    So at the elevated, visible hub-capable step ("Allow this machine to take over", `agora service install`), **before the hub ever listens**, Agora creates one inbound rule scoped to
+    **the hub's TCP port and the installed `agora.exe` path**, in the profile of the network the hub actually serves. It is **not** "scoped to the private profile": on the measured
+    machine the LAN adapter is in the Public profile (common on home PCs that answered "no" to network discovery), and a Private-only rule leaves the hub unreachable there.
+    `agora doctor` reports when the serving network is Public and the rule therefore includes Public, and suggests making that network Private. Uninstall (and the removal of the
+    hub-capable grant) removes the rule; so does an update that moves the executable path, which recreates it. This is also why Agora owns the rule: answering the prompt over time left
+    12 stale allow rules (Private and Public, any port) for dev builds in deleted worktrees on the measured machine. **A machine without the rule is not offered as a takeover target.**
+  - **Defender.** The binary is **not** code-signed yet (ADR-0077 is not built). One run (0 detections in 39 minutes, one machine, non-excluded path) is not evidence that an unsigned
+    listening executable is never flagged. ADR-0077's signing is a **prerequisite of shipping step 5 (automatic takeover) on Windows**; until then a Windows standby may be quarantined,
+    and the manual takeover (steps 1 to 4) says so in `agora doctor` for Windows machines.
+  - **State** reaches a Windows standby only as section 2 says (`VACUUM INTO` / backup API, never the folder; `ca.key` and `token` never carried).
+
+## Amendment (2026-11-17, still Proposed; not accepted): the Windows measurements
+After the first text, the Windows developer measured on a real Windows 11 machine (release 0.3.16, hub started non-elevated as a logon task would, 39 minutes) and reviewed section 8.
+Four changes, applied in place above and listed here so the history is visible:
+1. The firewall rule is scoped to the hub's TCP port and the installed `agora.exe` path in the profile of the network the hub serves, not "to the private profile" (section 8, Per OS).
+2. The Windows Security Alert prompt is never relied on; Agora creates its own scoped rule before the hub first listens, removes it on uninstall, and a machine without it is not a takeover target.
+3. Hub state is never copied as files or as the folder; `ca.key` and `token` are excluded by construction (section 2; step 1 loses `--with-ca-key`).
+4. "The binary is code-signed" was not true and is removed; ADR-0077 signing is a prerequisite of step 5 on Windows.
 
 ## 9. Open questions, with the proposed answer
 1. **Automatic or manual takeover first?** Manual first (steps 1 to 4); automatic (step 5) only after the manual path has run for a release and only with three machines.

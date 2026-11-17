@@ -2,7 +2,7 @@
 //! the hub runs **only while it is open for pairing**, and the finder `agora join` runs without an address.
 //!
 //! `std::net::UdpSocket` only. IPv4 only: a directed or limited broadcast query to [`DISCOVERY_PORT`]. (IPv6 has no broadcast and
-//! would need multicast group membership per interface; not built, see section 14 of the spec.)
+//! would need multicast group membership per interface; not built, see section 15 of the spec.)
 //!
 //! What an answer is: **a candidate address, never trust.** The answer carries the hub's name, its port and the SHA-256 of its CA, all
 //! public. Nothing is sent to the hub because it answered and nothing is believed: the machine still does the whole pairing exchange

@@ -23,60 +23,60 @@ describe('pairing (ADR-0065)', () => {
   it('has one fixed title and gives the name, the system and the address a row each, leaving out a system it does not know', () => {
     expect(pairTitle(machine)).toBe('A new machine wants to join');
     expect(pairTitle(browser)).toBe('A browser wants to sign in');
-    const m = renderToStaticMarkup(<PairRequest request={machine} onAnswer={async () => true} />);
+    const m = renderToStaticMarkup(<PairRequest request={machine} onAnswer={async () => 'ok'} />);
     expect(m).toContain('<dt class="text-muted">Name</dt><dd class="m-0 min-w-0 break-words text-ink"><bdi>laptop</bdi></dd>');
     expect(m).toContain('<bdi>Windows</bdi>');
-    expect(m).toContain('>192.168.1.50</dd>');
-    expect(renderToStaticMarkup(<PairRequest request={{ ...machine, os: 'macos' }} onAnswer={async () => true} />)).toContain('<bdi>macOS</bdi>');
+    expect(m).toContain('>192.168.1.50</bdi></dd>');
+    expect(renderToStaticMarkup(<PairRequest request={{ ...machine, os: 'macos' }} onAnswer={async () => 'ok'} />)).toContain('<bdi>macOS</bdi>');
     // No system known: no System row.
     for (const os of ['', undefined]) {
-      expect(renderToStaticMarkup(<PairRequest request={{ ...machine, os }} onAnswer={async () => true} />)).not.toContain('>System<');
+      expect(renderToStaticMarkup(<PairRequest request={{ ...machine, os }} onAnswer={async () => 'ok'} />)).not.toContain('>System<');
     }
     // A system this build has no words for is shown as the machine reported it.
     expect(systemName('freebsd')).toBe('freebsd');
     // A browser has no system row.
-    expect(renderToStaticMarkup(<PairRequest request={browser} onAnswer={async () => true} />)).not.toContain('>System<');
+    expect(renderToStaticMarkup(<PairRequest request={browser} onAnswer={async () => 'ok'} />)).not.toContain('>System<');
   });
 
   it('keeps a name that imitates an address in the name row: the address is its own row, what the hub saw', () => {
     const hostile = { ...machine, name: 'x" (linux, 10.0.0.1) wants to join. New machine "y' };
-    const html = renderToStaticMarkup(<PairRequest request={hostile} onAnswer={async () => true} />);
+    const html = renderToStaticMarkup(<PairRequest request={hostile} onAnswer={async () => 'ok'} />);
     // Text, never markup, and only inside the name row.
     expect(html).toContain('<bdi>x&quot; (linux, 10.0.0.1) wants to join. New machine &quot;y</bdi>');
     expect(html.split('10.0.0.1').length - 1).toBe(1);
     // The title does not carry the name, and the real address is in the address row.
     expect(html).toContain('>A new machine wants to join</h2>');
-    expect(html).toContain('>192.168.1.50</dd>');
+    expect(html).toContain('>192.168.1.50</bdi></dd>');
     expect(pairTitle(hostile)).not.toContain('10.0.0.1');
     // Markup in a name is escaped.
-    const tag = renderToStaticMarkup(<PairRequest request={{ ...machine, name: '<img src=x onerror=alert(1)>' }} onAnswer={async () => true} />);
+    const tag = renderToStaticMarkup(<PairRequest request={{ ...machine, name: '<img src=x onerror=alert(1)>' }} onAnswer={async () => 'ok'} />);
     expect(tag).not.toContain('<img');
     expect(tag).toContain('&lt;img');
   });
 
   it('puts the number and what to compare it with on the card, with Deny and Approve', () => {
-    const m = renderToStaticMarkup(<PairRequest request={machine} onAnswer={async () => true} />);
-    expect(m).toContain('482-193');
-    expect(m).toContain('Approve only if the new machine shows the same number.');
+    const m = renderToStaticMarkup(<PairRequest request={machine} onAnswer={async () => 'ok'} />);
+    expect(m).toContain('<span>482</span><span>193</span>');
+    expect(m).toContain('Compare with the number on the new machine. Approve only if they are the same.');
     expect(m).toContain('>Deny<');
     expect(m).toContain('>Approve<');
     // The card is described by the comparison sentence, so a screen reader reads it with the title.
     expect(m).toContain('aria-describedby="pair-request-p1-compare"');
     expect(m).toContain('id="pair-request-p1-compare"');
-    const b = renderToStaticMarkup(<PairRequest request={browser} onAnswer={async () => true} />);
-    expect(b).toContain('731-004');
-    expect(b).toContain('Approve only if that browser shows the same number.');
+    const b = renderToStaticMarkup(<PairRequest request={browser} onAnswer={async () => 'ok'} />);
+    expect(b).toContain('<span>731</span><span>004</span>');
+    expect(b).toContain('Compare with the number on that browser. Approve only if they are the same.');
   });
 
   it('floats over the window unless shown in place', () => {
-    expect(renderToStaticMarkup(<PairRequest request={machine} onAnswer={async () => true} />)).toContain('fixed bottom-4');
-    expect(renderToStaticMarkup(<PairRequest inline request={machine} onAnswer={async () => true} />)).not.toContain('fixed bottom-4');
+    expect(renderToStaticMarkup(<PairRequest request={machine} onAnswer={async () => 'ok'} />)).toContain('fixed bottom-4');
+    expect(renderToStaticMarkup(<PairRequest inline request={machine} onAnswer={async () => 'ok'} />)).not.toContain('fixed bottom-4');
   });
 
   it('uses no internal word on the card or the sign-in page', () => {
     const html = [
-      renderToStaticMarkup(<PairRequest request={machine} onAnswer={async () => true} />),
-      renderToStaticMarkup(<PairRequest request={browser} onAnswer={async () => true} />),
+      renderToStaticMarkup(<PairRequest request={machine} onAnswer={async () => 'ok'} />),
+      renderToStaticMarkup(<PairRequest request={browser} onAnswer={async () => 'ok'} />),
       ...(['waiting', 'denied', 'expired'] as const).map((state) =>
         renderToStaticMarkup(<SignInWaiting approval={{ number: '731004', state }} onAskAgain={() => {}} onUseCode={() => {}} />)),
     ].join(' ');
@@ -121,7 +121,7 @@ describe('signing in by approval (ADR-0065 decision 6)', () => {
   it('speaks Turkish', () => {
     setLanguage('tr');
     expect(pairTitle(machine)).toBe('Yeni bir makine katılmak istiyor');
-    expect(renderToStaticMarkup(<PairRequest request={machine} onAnswer={async () => true} />)).toContain('<dt class="text-muted">Adres</dt>');
+    expect(renderToStaticMarkup(<PairRequest request={machine} onAnswer={async () => 'ok'} />)).toContain('<dt class="text-muted">Adres</dt>');
     expect(renderToStaticMarkup(<SignInWaiting approval={{ number: '731004', state: 'waiting' }} onAskAgain={() => {}} onUseCode={() => {}} />)).toContain('Bunun yerine kod kullan');
     setLanguage('en');
   });

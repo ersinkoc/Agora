@@ -4,6 +4,7 @@
 // about as much as drawing one row.
 import { type AgentTileModel, type UiState, endedWithError, machineKey } from '../model';
 import { detailText } from './tool';
+import type { PairCard } from './pairing';
 import { type ApprovalModel, type MachineModel, visible } from './view';
 
 // The five questions of the header strip. `needs-you`, `working`, `finished` and `failed` filter the tiles; machines link to their page.
@@ -38,11 +39,13 @@ export function sortByUrgency(list: readonly AgentTileModel[]): AgentTileModel[]
 // One request, or one agent that waits without a request open (it asks in its terminal).
 export type AttentionItem =
   | { kind: 'approval'; key: string; approval: ApprovalModel; agent?: AgentTileModel; sinceMs?: number }
-  | { kind: 'agent'; key: string; agent: AgentTileModel; sinceMs?: number };
+  | { kind: 'agent'; key: string; agent: AgentTileModel; sinceMs?: number }
+  // ADR-0065: a machine that asks to join. It is always reviewed in its full card: the owner compares the number, so it has no inline answer.
+  | { kind: 'pair'; key: string; card: PairCard };
 
 // What needs the user, most urgent first: requests that will lapse soonest, then requests without a known expiry, then agents waiting
 // in their terminals, each group the longest-waiting first. An agent with a request open is one thing that needs you, not two.
-export function attentionList(approvals: readonly ApprovalModel[], fleet: readonly AgentTileModel[]): AttentionItem[] {
+export function attentionList(approvals: readonly ApprovalModel[], fleet: readonly AgentTileModel[], pairs: readonly PairCard[] = []): AttentionItem[] {
   const byId = new Map<string, AgentTileModel>();
   for (const a of fleet) byId.set(a.id, a);
   const asking = new Set<string>();
@@ -52,6 +55,8 @@ export function attentionList(approvals: readonly ApprovalModel[], fleet: readon
     asking.add(approval.agentId);
     asks.push({ item: { kind: 'approval', key: approval.id, approval, agent, sinceMs: agent?.since }, expires: approval.expiresAtMs > 0 ? approval.expiresAtMs : Infinity, since: agent?.since ?? Infinity, i });
   });
+  // A request to join lapses in minutes and waits for a person at another screen: it sorts among the requests by when it runs out.
+  pairs.forEach((card, i) => asks.push({ item: { kind: 'pair', key: `pair:${card.id}`, card }, expires: card.expiresMs > 0 ? card.expiresMs : Infinity, since: Infinity, i: approvals.length + i }));
   asks.sort((x, y) => x.expires - y.expires || x.since - y.since || x.i - y.i);
   const waiting: { item: AttentionItem; since: number; i: number }[] = [];
   fleet.forEach((a, i) => {
@@ -85,7 +90,7 @@ const kindOf = (name: string): string => (name.split(' · ')[0] ?? name).trim();
 // project and the agent's kind. A request to start an agent is never the same as another (its folder, prompt and settings are read in the
 // full card), and neither is anything whose machine is not known (the label could not say where). `undefined`: it stands alone.
 function sameKey(it: AttentionItem): { key: string; agentKind: string; machine: string; ask: string } | undefined {
-  if (it.kind === 'approval' && it.approval.start) return undefined;
+  if (it.kind === 'pair' || (it.kind === 'approval' && it.approval.start)) return undefined;
   const agent = it.agent;
   const machine = (agent?.machine || (it.kind === 'approval' ? it.approval.machineName : '') || '').trim();
   if (!machine) return undefined;
@@ -120,12 +125,12 @@ export interface FleetCounts {
   machinesTotal: number;
 }
 
-export function fleetCounts(fleet: readonly AgentTileModel[], approvals: readonly ApprovalModel[], machines: readonly MachineModel[]): FleetCounts {
+export function fleetCounts(fleet: readonly AgentTileModel[], approvals: readonly ApprovalModel[], machines: readonly MachineModel[], pairs = 0): FleetCounts {
   const c: FleetCounts = { needs: 0, working: 0, finished: 0, failed: 0, agents: fleet.length, machinesOnline: 0, machinesTotal: machines.length };
   // One row per request, plus one per agent waiting in its terminal with no request open: the same number as the attention list.
   const asking = new Set<string>();
   for (const x of approvals) asking.add(x.agentId);
-  c.needs = approvals.length;
+  c.needs = approvals.length + pairs;
   for (const a of fleet) {
     const b = bucketOf(a);
     if (b === 'needs-you') { if (!asking.has(a.id)) c.needs++; }
@@ -201,8 +206,8 @@ export interface FleetView {
   counts: FleetCounts;
   attention: AttentionItem[];
 }
-export function fleetView(fleet: readonly AgentTileModel[], approvals: readonly ApprovalModel[], machines: readonly MachineModel[]): FleetView {
-  return { sorted: sortByUrgency(fleet), counts: fleetCounts(fleet, approvals, machines), attention: attentionList(approvals, fleet) };
+export function fleetView(fleet: readonly AgentTileModel[], approvals: readonly ApprovalModel[], machines: readonly MachineModel[], pairs: readonly PairCard[] = []): FleetView {
+  return { sorted: sortByUrgency(fleet), counts: fleetCounts(fleet, approvals, machines, pairs.length), attention: attentionList(approvals, fleet, pairs) };
 }
 
 // What the page shows when it has no fleet to draw (the choice of "teach", "wait" or "say it is down"):

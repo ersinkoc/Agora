@@ -30,7 +30,7 @@ Owner to hub (from an owner window): `PairApprove { pair_id }`, `PairDeny { pair
 Hub to windows: `PairRequested { pair_id, kind (machine|browser), name, os, address, number, expires_ms }` and `PairDecided { pair_id, outcome }`.
 New error codes: `pair.closed`, `pair.limit`, `pair.expired`, `pair.mismatch`, `pair.denied`, `pair.unknown`, `pair.state` (a message that is not allowed in
 the session's current state, section 5a), `pair.insecure_transport` (a browser request over a transport that cannot carry the session safely, section 6)
-(stable codes with parameters; the sentences live in `locales/`). `pair.names_missing` (the hub cannot name its addresses in its certificate, section 14) is sent in answer to `PairOpen`. One more is machine-local, never sent: `pair.name_unverified` (section 5, step 6b).
+(stable codes with parameters; the sentences live in `locales/`). `pair.names_missing` (the hub cannot name its addresses in its certificate, section 15) is sent in answer to `PairOpen`. One more is machine-local, never sent: `pair.name_unverified` (section 5, step 6b).
 
 ## 5. The handshake for a machine
 Connection: the machine does **not** know the hub's CA yet. It dials the hub's TLS with a verifier that accepts a leaf certificate it cannot chain
@@ -111,7 +111,7 @@ is an ADR-0015/0062 matter and not decided here). Acceptance cases: a default hu
 its host name completes and the node link then connects; the same hub dialled at an address that is in no name fails closed with
 `pair.name_unverified`; a leaf from another CA with the right name fails (wrong CA); the right CA with a leaf for another name fails (wrong leaf).
 
-**Built:** provisioning, as chosen above, is section 14.
+**Built:** provisioning, as chosen above, is section 15.
 
 ### Why this resists a machine in the middle
 A party in the middle terminates the machine's TLS with its own certificate `C_m` and relays to the hub over a second connection. The machine's
@@ -198,7 +198,7 @@ re-issue of the hub's leaf while it runs is **T35**.
 2. The pairing core in the hub, pure and unit-tested (states, limits, SAS, commitment), audit; the owner's commands, `PairRequested` and `PairDecided` to owner windows, the machine handshake over the hub's TLS and the certificate at approval. (Done: `agora-hub` `pairing.rs` and `pairing_net.rs`; section 12 lists what was decided.)
 3. `agora pair open|close|status`, provisioning the leaf's names (section 5b), the push notice (ADR-0051) and the browser path (section 6) on the hub.
    (Done in part: `agora pair open|close|status` and the machine's client, section 13. Provisioning, the push notice and the browser path are not.)
-4. The discovery responder (hub) and the finder, `agora join`, with the trust question (node). (Built: provisioning the leaf's names, the responder and the finder, section 14;
+4. The discovery responder (hub) and the finder, `agora join`, with the trust question (node). (Built: provisioning the leaf's names, the responder and the finder, section 15;
    the trust question is not.)
 5. The window cards wired in (web #610 and TUI #611 already have the layout), then the browser sign-in by approval (section 6).
 
@@ -296,7 +296,7 @@ and `frontdoor.rs` (choice 3). Tests: `crates/agora/tests/pair_node.rs` (the cli
   `Number`'s `Debug` prints `Number(..)`; the nonces and the exchange have no `Debug`. A test greps the captured output and every file of the machine (and the node's
   logs) after the flow: the number is in that one line and nowhere else.
 - **Timeouts.** Connect and handshake 10 s each; the challenge 15 s; the owner's decision 5 minutes 30 seconds (the hub's session is 5 minutes from the reveal).
-- **The owner's side has no window cards yet, so `agora pair open` is the owner's screen, and only a person at a terminal can answer it.** It opens the switch (the
+- **`agora pair open` is the owner's screen at a terminal (the window's cards are section 14), and only a person at a terminal can answer it.** It opens the switch (the
   hub's 10 minutes; `--minutes N` with N from 1 to 10 makes this command close it earlier, which only works while the command runs, because `PairOpen` carries no
   duration and the schema is append-only), stays in the foreground, and for each machine card prints the name, system, address and number and asks `y/N`.
   **The answer is read from the terminal only** (`agora_platform::read_confirmation`): when stdin is not a terminal the command refuses to start (exit 2, "needs you at a
@@ -305,15 +305,41 @@ and `frontdoor.rs` (choice 3). Tests: `crates/agora/tests/pair_node.rs` (the cli
   such tries, then the request is denied), the line is at most 256 bytes, and nothing is echoed. Only `y` (or the locale's yes word) then Enter approves; any other line,
   including an empty one, denies. A taken name (`pair.state`, `name_in_use`) asks once more whether to replace. After one approval it closes the switch and exits ("one machine
   per opening"); when the terminal goes away it leaves the switch open for its time and exits. Ctrl+C leaves the switch open for the rest of its time (run `agora pair close`).
-  Browser cards are ignored here: they wait for a window. The owner's windows are the way to answer without a terminal, later.
+  Browser cards are ignored here: they wait for a window. The owner's windows (section 14) answer without this command.
 - **How `agora pair` reaches the hub.** The switch and the cards are memory of the running hub, so these commands connect to it as the owner with the client token in
   `<hub dir>/token` (the same path as `agora tui` on the hub's machine) over the TLS the hub already serves; `agora_tui::client::Session` now keeps the
   `PAIR_REQUESTED` and `PAIR_DECIDED` frames it receives (at most 64) for `take_pair_notes`, and exposes `command_info` (the error parameters).
 - **Not in this step:** the owner's devices trusted in the same step (item 7 above). `PairResult` has no field for a device list, so the machine would have nothing to
   verify; it needs a schema addition and its own pull request. `agora join` says nothing about devices, and `agora node trust --from-hub` still works afterwards.
-  Also not built here: the push notice, the window cards and the browser path. (Provisioning the certificate's names and discovery were built next: section 14.)
+  Also not built here: the push notice and the browser path. (Provisioning the certificate's names and discovery were built next: section 15.)
 
-## 14. Names and discovery, as built (choices the design left open)
+## 14. The owner's cards in the web window and the terminal client, as built (choices the design left open)
+Web: `apps/web/src/net/pairing.ts` (pure: the notices, the state, the rules), `usePairing.ts` (the connection), `components/PairRequest.tsx` (the card),
+`Pairing.tsx` (the window switch and the recent lines). Terminal: `crates/agora-tui/src/pair.rs` and `p` in `agora tui`. Tests: `pairing.test.ts`,
+`pairingCards.test.tsx`, `pair.rs`, and `crates/agora/tests/pair_window.rs` (a real hub, the real `agora join`, an owner window using the owner commands).
+- **Memory only.** Cards live in client state (React state, `Book` in the terminal client). Nothing is written to `localStorage`, `sessionStorage`, a file or a log,
+  and the number is never in the page title or a notification (the title count and the notifications read approvals only; tests render everything with storage and
+  console spied on).
+- **Who may see a card.** The hub sends the notices to owner sessions only; a client also does not trust that. It asks `PairStatus` once its link is live (and every
+  20 seconds in the web window, which also keeps the switch's time current): `ok` means the session is the owner's, `auth.forbidden` means it is not (what was held is dropped
+  and later notices are ignored), `protocol.capability_missing` means this hub does not offer pairing. Cards are shown only after `ok`.
+- **Reconnect.** Every new connection starts with a `reset` (the web) or `Book::reset` (the terminal client): the hub sends the cards waiting at subscribe, so a card
+  that is not sent again is stale and gone. A hub that restarted has none.
+- **Where the card is.** A request is a "needs you" item: a row in the fleet console's list (it counts in the header strip and the status bar) with one button, Review.
+  The row never has Approve and never shows the number. The full card is in the right-hand Needs you list (on a phone, at the top of the list), and Review brings it into
+  view. Away from Home, the first card floats over the window. On a hub with no machine yet the row is above the empty state.
+- **Two presses to approve.** Approve asks "Do the two numbers match exactly?" and only "Yes, the numbers match" sends it; Deny is one press. The question has a place of its own, so the buttons do not move when it appears, and the yes is disabled for 500 ms (`MIN_THINK_MS`) after it appears, so a double-click on Approve cannot reach it. `pairClicks.test.tsx` presses the real buttons in a DOM (mutations of each rule fail it). Replace is shown only after the
+  hub answered `pair.state name_in_use` to an approval (the frame has no field for it, see section 12), starts unticked, and choosing it starts the two presses again.
+  While the link is down, or the hub's expiry has passed, both buttons are disabled with the reason. The countdown is the frame's `expires_ms` against the window's clock.
+- **Peer text.** Name, system and address are stripped of control, bidirectional and zero-width characters when the notice is read (`peerText`), shown isolated (`bdi`), and a name placed inside a sentence goes between Unicode isolates, because the web formats messages without Fluent's isolation.
+- **Name, system and address** have a row each; the name and the system are isolated with `bdi` and the address is left-to-right; the number is two groups of three in large type.
+- **Open the window.** On a fresh hub's empty state the owner can press "Allow a new machine to join" (`PairOpen`: 10 minutes), sees the time left, and can Close it (`PairClose`).
+- **Terminal client.** `agora tui` reads `p`: the first request as a card (name, system and address in rows, the number in two groups). `a` then `y` approves; any other key after
+  `a` goes back; `d` denies; `r` chooses Replace on a taken name; Esc leaves it for later; nothing is sent once the request has run out or a command found the link gone. Keys typed before the card was shown are discarded, and a key sooner than 500 ms after it is
+  shown is not an answer (the same rule as `agora pair open`). The footer says a machine wants to join, and counts it in "need you".
+- **Not built:** browser sign-in by approval (the HTTP path and its card text), trusting the owner's device from a card, and a push notice for a request that arrives while no window is open.
+
+## 15. Names and discovery, as built (choices the design left open)
 Built in `crates/agora-hub/src/names.rs` (which names), `leaf.rs` (issuing and replacing the leaf), `discovery.rs` (both halves of the UDP exchange), `tls.rs`
 (`TlsSlot`), `crates/agora-platform` (`interface_addresses`), `crates/agora/src/hubcli.rs` (wiring) and `joincmd.rs` (the finder's screen).
 Tests: unit tests in the first three files, `crates/agora/tests/pair_node.rs` (a real hub with a real listener and the machine's real client) and `pair_cli.rs`.

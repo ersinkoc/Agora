@@ -644,6 +644,7 @@ impl App {
             ('d', key!("tui-app-cmd-remove")),
             ('a', key!("tui-app-cmd-ask")),
             ('v', key!("tui-app-cmd-devices")),
+            ('p', key!("tui-app-cmd-pair")),
         ] {
             all.push((Command::Letter(c), t(label, &[])));
         }
