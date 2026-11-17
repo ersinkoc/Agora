@@ -24,3 +24,8 @@ After 0.3.14, for the next release: F210 and F211 (#641), F221 and F222 (#646), 
 F260 to F262 (#640), F270 (#649), F271 (#644), F280 to F282 (#647), F290 (#656), F501 (#629).
 ADR-0081 to 0084 are Accepted (2026-11-17); ADR-0081 is built (#673), 0082 to 0084 are not yet built. Next, in the maintainer's order: easy
 setup (ADR-0065), then the terminal holder (ADR-0079), the later steps of ADR-0075, and the pickers of ADR-0066.
+
+Deferred dependency updates (Dependabot is told to ignore these; revisit when the reason no longer holds):
+- tokio-tungstenite 0.24 to 0.30: the WebSocket stack is the hub/node link and needs a deliberate code migration with its own review (the Dependabot attempt failed CI with four failures).
+- GitHub Actions major versions (`actions/checkout`, `setup-node`, `upload-artifact`, `download-artifact`): `release.yml` cannot be tested without pushing a tag, and the artifact actions change behaviour (names, merging, immutability); do them in one change after a release rehearsal exists.
+- `@types/node` major versions: the types must track the Node version the project runs (22); update them when the Node baseline moves.
