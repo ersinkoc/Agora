@@ -1,3 +1,5 @@
+# Few, quiet pull requests: one weekly PR per ecosystem (and per Cargo workspace), every update type grouped.
+# Majors that are deferred on purpose are ignored below; the reasons are in docs/backlog/README.md.
 version: 2
 updates:
   - package-ecosystem: cargo
@@ -5,26 +7,39 @@ updates:
     schedule: { interval: weekly }
     open-pull-requests-limit: 5
     groups:
-      cargo-minor-patch:
-        update-types: [minor, patch]
+      cargo:
+        patterns: ["*"]
+    ignore:
+      # The hub/node WebSocket link needs a deliberate code migration with its own review (backlog).
+      - dependency-name: tokio-tungstenite
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: cargo
     directory: /apps/desktop/src-tauri
     schedule: { interval: weekly }
     open-pull-requests-limit: 5
     groups:
-      cargo-desktop-minor-patch:
-        update-types: [minor, patch]
+      cargo-desktop:
+        patterns: ["*"]
   - package-ecosystem: npm
     directory: /apps/web
     schedule: { interval: weekly }
     open-pull-requests-limit: 5
     groups:
-      npm-minor-patch:
-        update-types: [minor, patch]
+      npm:
+        patterns: ["*"]
+    ignore:
+      # The types must track the Node version the project runs (22); revisit when that baseline moves (backlog).
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: github-actions
     directory: /
     schedule: { interval: weekly }
     open-pull-requests-limit: 5
     groups:
-      actions-minor-patch:
-        update-types: [minor, patch]
+      actions:
+        patterns: ["*"]
+    ignore:
+      # release.yml cannot be tested without pushing a tag, and the artifact actions change behaviour between majors;
+      # majors wait for a release rehearsal (backlog).
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]

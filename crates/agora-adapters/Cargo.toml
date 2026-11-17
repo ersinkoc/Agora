@@ -15,7 +15,7 @@ agora-vt = { path = "../agora-vt" }
 # Confines an adapter process (ADR-0047); platform code lives there.
 agora-platform = { path = "../agora-platform" }
 # Manifests are TOML (docs/specs/agent-manifest.md); serde derives the typed structs.
-toml = "0.8"
+toml = "1.2"
 serde = { version = "1", features = ["derive"] }
 # Screen rules are regular expressions from manifests; the crate guarantees linear-time matching, so a
 # community manifest cannot hang the node with a pathological pattern.
@@ -25,7 +25,7 @@ serde_json = "1"
 
 # Registry signatures are Ed25519 (ADR-0018): ring verifies them (already in the tree through rcgen and rustls); sha2 hashes packages.
 ring = { version = "0.17", default-features = false }
-sha2 = "0.10"
+sha2 = "0.11"
 
 [dev-dependencies]
 # The host tests run the fake adapter (a test-only crate) as the adapter process.

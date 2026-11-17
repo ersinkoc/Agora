@@ -14,7 +14,7 @@ agora-protocol = { path = "../agora-protocol", features = ["ws"] }
 agora-mesh = { path = "../agora-mesh" }
 agora-i18n = { path = "../agora-i18n" }
 # Embedded SQLite for the hub store (ADR-0014); "bundled" so no system library is needed on any OS.
-rusqlite = { version = "0.41", features = ["bundled"] }
+rusqlite = { version = "0.42", features = ["bundled"] }
 prost = "0.14"
 # Networking (ADR-0013): tokio runtime, and WebSocket (ADR-0011) via tokio-tungstenite.
 tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "macros", "io-util"] }
@@ -28,7 +28,7 @@ time = "0.3"
 x509-parser = { version = "0.18", features = ["verify"] }
 # One-time enrollment codes: system randomness (already in the tree via rcgen) and a hash so codes are not stored.
 getrandom = "0.2"
-sha2 = "0.10"
+sha2 = "0.11"
 # Verifies WebAuthn ES256 assertions (ECDSA P-256, DER). Already in the tree through rustls and rcgen.
 ring = { version = "0.17", default-features = false }
 # The system's root certificates, to verify https notification targets (ntfy, webhooks).
