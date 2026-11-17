@@ -12,15 +12,31 @@ fn secs_now() -> i64 {
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(0))
 }
 
+/// The detail of a check whose file is there but cannot be read as a certificate.
+pub const UNUSABLE: &str = "unusable";
+
 /// One check for the certificate in `file`, with id `id`; nothing when the file is not there (the machine has no such role).
 fn one(id: &'static str, file: &Path, now: i64) -> Option<Check> {
-    let pem = std::fs::read_to_string(file).ok()?;
-    let (status, days) = match cert_not_after_secs(&pem).map(|end| expiry(end, now)) {
-        Ok(Expiry::Fine(d)) => (Status::Ok, d),
-        Ok(Expiry::Soon(d)) => (Status::Warn, d),
-        Ok(Expiry::Expired(d)) => (Status::Fail, d),
-        // A file that is not a certificate is as unusable as an expired one.
-        Err(_) => (Status::Fail, -1),
+    let end = match std::fs::read_to_string(file) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        // A file that is there but cannot be read as text (binary, no permission) is as unusable as one that is not a certificate.
+        Err(_) => None,
+        Ok(pem) => cert_not_after_secs(&pem).ok(),
+    };
+    let (status, days) = match end.map(|end| expiry(end, now)) {
+        Some(Expiry::Fine(d)) => (Status::Ok, d),
+        Some(Expiry::Soon(d)) => (Status::Warn, d),
+        Some(Expiry::Expired(d)) => (Status::Fail, d),
+        // A file that cannot be read, or not as a certificate, fails with its own sentence: it has not ended, it is unusable
+        // (Codex review of F851: it was told as ended, with the advice to join again).
+        None => {
+            return Some(Check {
+                id,
+                status: Status::Fail,
+                detail: UNUSABLE.to_string(),
+                args: vec![("file", file.display().to_string())],
+            })
+        }
     };
     Some(Check {
         id,
@@ -92,7 +108,20 @@ mod tests {
         let end = cert_not_after_secs(&cert).unwrap();
         let c = checks(&d, &d, end + 1);
         assert_eq!((c[0].id, c[0].status), ("cert-hub", Status::Fail));
+        assert_eq!(c[0].detail, "0");
         std::fs::write(d.join("server-cert.pem"), "not a certificate").unwrap();
-        assert_eq!(checks(&d, &d, 0)[0].status, Status::Fail);
+        let c = checks(&d, &d, 0);
+        assert_eq!(
+            (c[0].status, c[0].detail.as_str()),
+            (Status::Fail, UNUSABLE)
+        );
+        // F851: a file that is there but cannot be read as text (a DER certificate, binary garbage) fails too, as unusable, not
+        // as ended.
+        std::fs::write(d.join("server-cert.pem"), [0x30u8, 0x82, 0xff, 0xfe]).unwrap();
+        let c = checks(&d, &d, 0);
+        assert_eq!(
+            (c[0].status, c[0].detail.as_str()),
+            (Status::Fail, UNUSABLE)
+        );
     }
 }

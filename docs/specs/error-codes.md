@@ -95,3 +95,13 @@ or a local response timeout has a localized retry message.
 | `pair.discovery_unconfirmed` | — | ADR-0065 section 15: **machine-local, never sent.** `agora join` found a hub by discovery and cannot ask the person to confirm its fingerprint (no terminal), so it does not choose; nothing is stored. The person gives the address, or runs it in a terminal |
 | `pair.ca_mismatch` | — | ADR-0065 section 15: **machine-local, never sent.** The person confirmed a hub found by discovery by the fingerprint of its certificate authority, and the certificate authority the hub then delivered has another one; nothing is stored |
 | `internal` | `incident_id` | Unexpected failure; details only in logs |
+
+### Command-line codes (ADR-0067 rung 3)
+
+Printed by `agora remote` and `agora hub run` as `Error CODE: sentence`; never sent over the protocol and not in the table above, so they are not in `ErrorCode`. The sentences are in `locales/<lang>/cli.ftl` (`remote-<code>`).
+
+- `remote.password_required` (params: —): ADR-0067 rung 3: **machine-local, never sent.** A way in from outside this machine was asked for (`agora remote tailscale`, a hub on a public address) and no screen password is set; nothing was changed. The sentence names `agora password set`
+- `remote.password_in_use` (params: —): ADR-0067 rung 3: **machine-local, never sent.** `agora password clear` while a tailnet name, a serve rule or a public listen is on; the password stays
+- `remote.tailscale_missing`, `remote.tailscale_logged_out`, `remote.tailscale_timeout` (params: —): ADR-0067 rung 3: **machine-local, never sent.** There is no `tailscale` command, this machine is not signed in to a tailnet, or the command did not answer in time
+- `remote.tailscale_unreadable` (params: `reason`): ADR-0067 rung 3: **machine-local, never sent.** The answer could not be used; `reason` is `failed`, `too_big`, `garbage`, `no_name` or `bad_name` (a machine name that is not a plain `.ts.net` name, refused whole)
+- `remote.serve_port_in_use` (params: `port`): ADR-0067 rung 3: **machine-local, never sent.** `tailscale serve` already serves something on that HTTPS port that Agora did not add; it is left alone

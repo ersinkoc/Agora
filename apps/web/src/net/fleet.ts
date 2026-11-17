@@ -75,7 +75,8 @@ export const INLINE_MAX = 120;
 export const askLine = (action: string, detail: string): string => (detail ? `${action} · ${detail}` : action);
 export function decidableInline(a: ApprovalModel): boolean {
   if (a.start) return false;
-  const oneLine = (s: string) => !/[\r\n]/.test(s) && visible(s) === s;
+  // Whitespace tricks (a tab, a no-break or wide space) can lay out text differently from how it reads: not plain.
+  const oneLine = (s: string) => !/[\r\n\t\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000]/.test(s) && visible(s) === s;
   if (!a.action.trim() || !oneLine(a.action)) return false;
   if (a.detail && (!oneLine(a.detail) || detailText(a.detail) !== a.detail)) return false;
   return askLine(a.action, a.detail).length <= INLINE_MAX;
@@ -98,7 +99,9 @@ function sameKey(it: AttentionItem): { key: string; agentKind: string; machine: 
   const agentKind = kindOf(agent?.name || (it.kind === 'approval' ? it.approval.agentName : '') || '');
   const what = it.kind === 'approval' ? `request\u0001${it.approval.action}\u0001${it.approval.detail}` : 'terminal';
   const ask = it.kind === 'approval' ? askLine(it.approval.action, it.approval.detail) : '';
-  return { key: [what, machine, project, agentKind].join('\u0002'), agentKind, machine, ask };
+  // The same machine is the same enrollment, not the same name: two machines may share a host name (F860).
+  const machineId = agent?.machineId || (it.kind === 'approval' ? it.approval.node : '') || machine;
+  return { key: [what, machineId, project, agentKind].join('\u0002'), agentKind, machine, ask };
 }
 export function collapseAttention(items: readonly AttentionItem[], min = SAME_ASK_MIN): AttentionRow[] {
   const keyed = items.map((it) => ({ it, same: sameKey(it) }));
@@ -182,7 +185,8 @@ export function groupFleet(sorted: readonly AgentTileModel[], machines: readonly
     g.agents.push(a);
   }
   const list = [...groups.values()].filter((g) => !filter || g.agents.length > 0);
-  const urgency = (g: FleetGroup) => (g.agents[0] ? rankOf(g.agents[0]) : 9);
+  // Only "needs you" lifts a group; a group does not move because one of its agents started or stopped working (F861).
+  const urgency = (g: FleetGroup) => (g.agents[0] && rankOf(g.agents[0]) === 0 ? 0 : 1);
   // The project without a name comes last whatever its agents are doing: it is a leftover, not a place.
   const leftover = (g: FleetGroup) => by === 'project' && g.key === '';
   return list.sort((x, y) => Number(leftover(x)) - Number(leftover(y)) || Number(y.online) - Number(x.online) || urgency(x) - urgency(y) || x.name.localeCompare(y.name));

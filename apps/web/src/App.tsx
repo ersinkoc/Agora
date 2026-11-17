@@ -489,7 +489,7 @@ export function App() {
         : current !== undefined && phone
         ? <PhoneAgent agent={selectedAgent} agents={agents} approvals={approvalsNow} loadDiff={hub && api ? loadDiff : !hub ? demoLoadDiff : undefined} filesOf={hub && api ? filesOf : !hub ? demoFilesOf : undefined} machines={live ? machines(live) : hub ? [] : demoMachines} onResolve={resolve} untrusted={untrustedOn} notice={notice ? t(notice) : undefined}
           source={terminal} chatSource={selectedAgent?.terminal === false ? chatOf(selectedAgent) : undefined} sendPrompt={hub && api ? sendPrompt : undefined} chooseOption={hub && api ? chooseOption : undefined}
-          costMicroUsd={current ? usage?.perAgent.get(current) : undefined} onOpen={open} onBack={() => go('#/')} />
+          costMicroUsd={current ? usage?.perAgent.get(current) : undefined} link={hub ? link : 'live'} onOpen={open} onBack={() => go('#/')} />
         : current !== undefined
         ? <Focus agent={selectedAgent} approvals={live ? approvalList(live) : hub ? [] : demoApprovals} onResolve={resolve} chatSource={selectedAgent?.terminal === false ? chatOf(selectedAgent) : undefined} sendPrompt={hub && api ? sendPrompt : undefined} chooseOption={hub && api ? chooseOption : undefined} costMicroUsd={current ? usage?.perAgent.get(current) : undefined} source={terminal} onBack={() => go('#/')} />
         : phone

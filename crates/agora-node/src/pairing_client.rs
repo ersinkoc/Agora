@@ -379,7 +379,17 @@ pub fn check_delivery(d: &Delivery<'_>, now_secs: i64) -> Result<(String, String
     let bad = PairError::CertificateInvalid;
     let (roots, ca_der) = root_of(d.ca_pem)?;
     let roots = Arc::new(roots);
-    let now = UnixTime::since_unix_epoch(Duration::from_secs(u64::try_from(now_secs).unwrap_or(0)));
+    // The chain checks below enforce each certificate's start and end against the one time they are given, with no allowance. A
+    // chain passes when it holds at this clock, or at the last moment the allowance covers: a start up to `CLOCK_SLACK_SECONDS`
+    // ahead of this clock then passes there as it does in the checks of this function, and a certificate that ends within the
+    // allowance still passes at this clock (audit F820 and its Codex review). The ends are checked against `now_secs` here too.
+    let at = |secs: i64| {
+        UnixTime::since_unix_epoch(Duration::from_secs(u64::try_from(secs).unwrap_or(0)))
+    };
+    let times = [
+        at(now_secs),
+        at(now_secs.saturating_add(CLOCK_SLACK_SECONDS)),
+    ];
 
     // The CA itself: a CA, for signing certificates, in its validity.
     let (_, ca) = x509_parser::parse_x509_certificate(ca_der.as_ref()).map_err(|_| bad("ca"))?;
@@ -406,17 +416,15 @@ pub fn check_delivery(d: &Delivery<'_>, now_secs: i64) -> Result<(String, String
         name: d.host.to_string(),
     };
     let name = ServerName::try_from(d.host.to_string()).map_err(|_| unverified())?;
-    let leaf_ok = WebPkiServerVerifier::builder_with_provider(Arc::clone(&roots), provider())
+    let server = WebPkiServerVerifier::builder_with_provider(Arc::clone(&roots), provider())
         .build()
-        .map_err(|_| bad("ca"))?
-        .verify_server_cert(
-            &CertificateDer::from(d.leaf_der.to_vec()),
-            &[],
-            &name,
-            &[],
-            now,
-        )
-        .is_ok();
+        .map_err(|_| bad("ca"))?;
+    let leaf = CertificateDer::from(d.leaf_der.to_vec());
+    let leaf_ok = times.iter().any(|now| {
+        server
+            .verify_server_cert(&leaf, &[], &name, &[], *now)
+            .is_ok()
+    });
     if !leaf_ok {
         return Err(unverified());
     }
@@ -426,11 +434,15 @@ pub fn check_delivery(d: &Delivery<'_>, now_secs: i64) -> Result<(String, String
         .next()
         .ok_or(bad("certificate"))?
         .map_err(|_| bad("certificate"))?;
-    WebPkiClientVerifier::builder_with_provider(roots, provider())
+    let client = WebPkiClientVerifier::builder_with_provider(roots, provider())
         .build()
-        .map_err(|_| bad("ca"))?
-        .verify_client_cert(&der, &[], now)
-        .map_err(|_| bad("chain"))?;
+        .map_err(|_| bad("ca"))?;
+    if !times
+        .iter()
+        .any(|now| client.verify_client_cert(&der, &[], *now).is_ok())
+    {
+        return Err(bad("chain"));
+    }
     let (_, cert) =
         x509_parser::parse_x509_certificate(der.as_ref()).map_err(|_| bad("certificate"))?;
     let (from, to) = (
@@ -1055,6 +1067,10 @@ mod tests {
         }
 
         fn leaf(&self, host: &str) -> Vec<u8> {
+            self.leaf_ending(host, OffsetDateTime::now_utc() + Span::days(3650))
+        }
+
+        fn leaf_ending(&self, host: &str, end: OffsetDateTime) -> Vec<u8> {
             let key = KeyPair::generate().unwrap();
             let mut p = CertificateParams::new(vec![host.to_string()]).unwrap();
             p.distinguished_name = name(host);
@@ -1062,7 +1078,7 @@ mod tests {
             p.key_usages = vec![KeyUsagePurpose::DigitalSignature];
             p.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
             p.not_before = OffsetDateTime::now_utc() - Span::minutes(5);
-            p.not_after = OffsetDateTime::now_utc() + Span::days(3650);
+            p.not_after = end;
             p.signed_by(&key, &self.issuer()).unwrap().der().to_vec()
         }
 
@@ -1244,6 +1260,27 @@ mod tests {
         assert!(matches!(
             check(&ca.pem, &cert, &leaf, &csr, earlier).unwrap_err(),
             PairError::CertificateInvalid(_) | PairError::NameUnverified { .. }
+        ));
+    }
+
+    /// F820: a hub backdates by 5 minutes, so a machine whose clock is 7 minutes behind sees every certificate start 2 minutes ahead,
+    /// inside the allowance; the chain checks used to refuse that before the allowance was looked at.
+    #[test]
+    fn a_certificate_that_starts_within_the_clock_allowance_is_kept() {
+        let ca = good_authority();
+        let (csr_pem, csr) = request();
+        let cert = ca.node(&csr_pem, ID, |_| {});
+        let leaf = ca.leaf(HOST);
+        assert!(check(&ca.pem, &cert, &leaf, &csr, now() - 7 * 60).is_ok());
+        // The CA and leaf start 5 minutes ago too, so 5 + 10 minutes behind and a little more is past the allowance.
+        assert!(check(&ca.pem, &cert, &leaf, &csr, now() - 15 * 60 - 30).is_err());
+        // The allowance moves no end (Codex review): a hub leaf still valid for 5 minutes is kept, one that ended is not.
+        let ending = ca.leaf_ending(HOST, OffsetDateTime::now_utc() + Span::minutes(5));
+        assert!(check(&ca.pem, &cert, &ending, &csr, now()).is_ok());
+        let ended = ca.leaf_ending(HOST, OffsetDateTime::now_utc() - Span::minutes(1));
+        assert!(matches!(
+            check(&ca.pem, &cert, &ended, &csr, now()),
+            Err(PairError::NameUnverified { .. })
         ));
     }
 

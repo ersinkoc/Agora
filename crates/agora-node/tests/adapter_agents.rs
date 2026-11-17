@@ -3,6 +3,9 @@
 //! `agora-fake-agent --adapter`; never a real agent. Adapters use pipes, not terminals, so this runs on every OS.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+#[path = "private_home/mod.rs"]
+mod private_home;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -338,4 +341,79 @@ fn a_stop_cancels_a_pending_adapter_restart() {
         .iter()
         .any(|e| matches!(e, SupervisorEvent::Started { .. })));
     assert!(!s.list().iter().find(|v| v.id == id).unwrap().running);
+}
+
+/// ADR-0082 decision 4 and ADR-0084 (audit F840): an adapter agent whose confinement reaches the control token file, or the folder of
+/// stored secrets once it holds one, is refused at the start, as a terminal agent is. The adapter and the agent below it run with that
+/// profile, so starting it would hand them the token (and the node's control socket) or every stored secret.
+#[test]
+fn a_confined_adapter_that_could_read_the_control_token_or_the_secrets_is_refused() {
+    use agora_node::credentials::{Credentials, Secret, SecretStore};
+    use agora_node::sandbox::{Level, SandboxPolicy};
+    use agora_node::supervisor::SupervisorError;
+    if !agora_platform::sandbox_supported() {
+        return;
+    }
+    private_home::init();
+    // Under the target folder, not the temp folder a confined agent may write on Linux.
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("adp-reach-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let (repo, node, data) = (root.join("repo"), root.join("node"), root.join("data"));
+    for d in [&repo, &node, &data] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    git(&repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("a.txt"), "x").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "init"]);
+    let token = node.join("control.token");
+    std::fs::write(&token, "t").unwrap();
+    let e = Env {
+        dir: root.clone(),
+        repo,
+    };
+    let start_with = |read: Vec<PathBuf>, name: &str| {
+        let mut s = supervisor();
+        s.set_sandbox(SandboxPolicy {
+            level: Level::Worktree,
+            read,
+            control_token: Some(token.clone()),
+            protect: vec![node.clone(), data.clone()],
+            ..SandboxPolicy::default()
+        });
+        s.set_credentials(Credentials::new(
+            SecretStore::in_data(&data),
+            Default::default(),
+        ));
+        s.start(
+            &StartRequest {
+                kind: "fake-adapter".into(),
+                checkout: e.repo.clone(),
+                worktree_root: e.dir.join("worktrees"),
+                name: name.into(),
+                base: None,
+            },
+            Instant::now(),
+        )
+        .map(|_| ())
+    };
+    let refused = |r: Result<(), SupervisorError>, why: &str| matches!(r, Err(SupervisorError::SandboxRefused(_, _, w)) if w == why);
+    // Nothing reaches the token: the adapter starts.
+    start_with(vec![], "fine").unwrap();
+    // The owner's read grant covers the token's folder: refused, and nothing is left behind.
+    assert!(refused(
+        start_with(vec![node.clone()], "token"),
+        "control_token_reachable"
+    ));
+    assert!(!root.join("worktrees/token").exists());
+    // The data folder once it holds a secret.
+    SecretStore::in_data(&data)
+        .set("ADP_TOKEN", &Secret::new("v").unwrap())
+        .unwrap();
+    assert!(refused(
+        start_with(vec![data.clone()], "secrets"),
+        "secrets_reachable"
+    ));
+    let _ = std::fs::remove_dir_all(&root);
 }

@@ -561,6 +561,21 @@ fn a_denied_machine_stores_nothing_and_the_hubs_own_address_is_named_in_its_cert
     assert!(byip.join("link").join("node-id").exists(), "{text}");
 }
 
+/// F821: the owner's screen ends, with a failure and a sentence, when the hub it answers for goes away; it used to wait for ever
+/// and spin on the closed connection.
+#[test]
+fn the_owners_screen_ends_when_the_hub_goes_away() {
+    let root = tmp("hubgone");
+    let hub = hub(&root);
+    let owner = root.join("owner");
+    std::fs::create_dir_all(&owner).unwrap();
+    let screen = hub.open(&owner);
+    drop(hub);
+    let (ok, text) = screen.finish();
+    assert!(!ok, "{text}");
+    assert!(text.contains("The hub did not answer"), "{text}");
+}
+
 #[test]
 fn wrong_arguments_are_refused_before_anything_happens() {
     let root = tmp("args");
@@ -690,4 +705,58 @@ fn a_key_that_comes_too_soon_after_the_question_is_not_an_answer() {
     let (ok, text) = m.finish();
     assert!(!ok && text.contains("The owner said no"), "{text}");
     nothing_stored(&machine);
+}
+
+/// Audit F890: `agora join` looks at "already joined" before it waits for the owner, and again before it stores: a link this machine
+/// got meanwhile (`agora` enrolling with its own hub, `agora node enroll`, another join) is kept unless `--replace` was given. Each
+/// join has a hub of its own (a hub limits pairing attempts per address per minute); the link is planted only after the number is
+/// shown, and the owner approves after that.
+#[test]
+fn a_link_made_while_the_join_waited_is_kept_unless_the_person_asked_to_replace_it() {
+    let root = tmp("waited");
+    let joined_meanwhile = |name: &str, extra: &[&str], same_hub: bool| {
+        let hub = hub(&root.join(format!("hub-{name}")));
+        let owner_home = root.join(format!("owner-{name}"));
+        std::fs::create_dir_all(&owner_home).unwrap();
+        let machine = root.join(name);
+        let mut owner = hub.open(&owner_home);
+        let mut args = vec!["--id", name];
+        args.extend_from_slice(extra);
+        let mut m = join(&machine, &format!("localhost:{}", hub.port), &args);
+        m.wait_for("Number ");
+        let link = machine.join("link");
+        std::fs::create_dir_all(&link).unwrap();
+        let hub_ca = std::fs::read_to_string(hub.dir.join("ca.pem")).unwrap();
+        let (ca, id) = if same_hub {
+            (hub_ca.as_str(), name)
+        } else {
+            ("FIRSTCA", "first")
+        };
+        for (f, c) in [
+            ("key.pem", "FIRSTKEY"),
+            ("ca.pem", ca),
+            ("cert.pem", "FIRSTCERT"),
+            ("url", "wss://first:1"),
+            ("node-id", id),
+        ] {
+            std::fs::write(link.join(f), c).unwrap();
+        }
+        owner.wait_for("wants to join");
+        owner.answer("y\r");
+        let (ok, text) = m.finish();
+        let read = |f: &str| std::fs::read_to_string(link.join(f)).unwrap_or_default();
+        (ok, read("node-id"), read("key.pem"), text)
+    };
+    let (ok, id, key, text) = joined_meanwhile("kept", &[], false);
+    assert!(!ok && text.contains("already joined a hub"), "{text}");
+    assert_eq!((id.as_str(), key.as_str()), ("first", "FIRSTKEY"), "{text}");
+    let (ok, id, key, text) = joined_meanwhile("replaced", &["--replace"], false);
+    assert!(ok, "{text}");
+    assert_eq!(id, "replaced", "{text}");
+    assert!(key.contains("PRIVATE KEY"), "{text}");
+    // The same hub under the same name (Codex review): the new certificate supersedes that link, so it is stored.
+    let (ok, id, key, text) = joined_meanwhile("same", &[], true);
+    assert!(ok, "{text}");
+    assert_eq!(id, "same", "{text}");
+    assert!(key.contains("PRIVATE KEY"), "{text}");
 }

@@ -247,7 +247,9 @@ What this document did not say, and what the code does:
   session it cannot own) is `pair.unknown`, and a repeated commitment, exporter or nonce is `pair.mismatch`; each ends the session and counts as a failure.
 - **Approving a taken name.** If the node id belongs to an enrolled machine and `replace` is false, Approve is refused with `pair.state`
   (`state = name_in_use`) and the request stays pending, so the owner can approve again with `replace`. The same check runs again inside the
-  issuing transaction. `replace` revokes the old certificates, as enrolling again does.
+  issuing transaction. `replace` revokes the old certificates, as enrolling again does. The same refusal applies while another request for that node id is
+  already approved and not yet issued (or being issued), with or without `replace`: only one of them could get the certificate, so the
+  second stays pending until the first connection has ended.
 - **Idle.** Before the reveal the 30-second rules apply. While a request waits for the owner, the connection is held for the session's 5 minutes
   and answers pings; a machine need not send anything (the 30-second silence rule would cut a request the owner has not seen yet).
 - **How windows receive cards.** Two new frame kinds on the events stream, sent only to owner sessions: `PAIR_REQUESTED` (5) carrying `PairRequested`
@@ -284,7 +286,7 @@ and `frontdoor.rs` (choice 3). Tests: `crates/agora/tests/pair_node.rs` (the cli
   handshake signature with the provider's own check (a peer that cannot sign with the leaf's key fails: tested with a certificate and another key's signature).
   The configuration offers TLS 1.3 only; a hub that only speaks TLS 1.2 is refused with a sentence of its own, nothing stored.
 - **What is checked before anything is kept (step 6).** The delivered CA is exactly one certificate (a bundle is refused: what is pinned is the one CA the hub's
-  leaf chain used) that is a CA with the signing usage and valid now. The leaf chains to it and the dialled host is one of its leaf's names, else `pair.name_unverified`. The delivered certificate chains to that CA (client-auth verifier), is valid now, does not start in the future and lasts at most 366 days, has the client-authentication usage and is
+  leaf chain used) that is a CA with the signing usage and valid now. The leaf chains to it and the dialled host is one of its leaf's names, else `pair.name_unverified`. The delivered certificate chains to that CA (client-auth verifier), is valid now, starts no more than the 10-minute clock allowance ahead of the machine's clock and lasts at most 366 days, has the client-authentication usage and is
   not a CA, its common name is the node id, and its public key is the one in this machine's own CSR. Each check has a test against a certificate wrong in just that way
   (`pairing_client.rs`, `check_delivery`), and each test was seen to fail with its check removed. The CA's fingerprint is printed in the same format as
   `agora hub fingerprint`. The module stores nothing; `agora join` stores only what `pair()` returned.
@@ -357,6 +359,7 @@ Tests: unit tests in the first three files, `crates/agora/tests/pair_node.rs` (a
   list; a temporary (privacy) or deprecated IPv6 address is not named: Linux says so through `/proc/net/if_inet6`, Windows through the suffix origin and
   lifetime, macOS does not say through `getifaddrs`, so it is not filtered there). At most 16 names; an owner name is never cut (more than 16 `--name` values, or a name a certificate cannot carry, refuses with `pair.names_missing`),
   addresses past the cap are cut from the end.
+- Extra names (ADR-0067 rung 3): `agora remote tailscale` writes the machine's tailnet name and addresses to `<hub dir>/remote-names` (checked names only, at most 4). The hub reads it at start (they are then owner names) and every 3 seconds while it runs, and at every `PairOpen`; a name that is new makes it issue a new leaf from the same CA exactly as below (`Leaf::with_extra`). No message from the network supplies a name.
 - When the leaf is replaced: at start, and at every `PairOpen` (a window's or `agora pair open`'s), **only when a wanted name is not in the leaf**. An address
   that went away does not force a new leaf, and the old names stay until the next re-issue. The new leaf is made by the same CA (its fingerprint and every
   enrolled node are untouched), written to `<hub dir>/server-cert.pem` (atomically and owner-only, `agora_platform::write_private`; **before** it is switched on, so a file that cannot be written

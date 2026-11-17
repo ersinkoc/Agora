@@ -291,8 +291,9 @@ impl PairLimits {
         for (span, limit) in [(60_000, per_minute), (RETAIN_MS, per_ten)] {
             let w = within(span);
             if w.len() > limit {
-                // The entry that has to leave the window before one more fits.
-                let leaves = w[w.len() - limit - 1] + span;
+                // The entry that has to leave the window before one more fits: the retry is an attempt too, so only `limit - 1`
+                // of these may still be inside then (F800).
+                let leaves = w[w.len() - limit] + span;
                 let secs = seconds_until(leaves.saturating_sub(now));
                 wait = Some(wait.map_or(secs, |x| x.max(secs)));
             }
@@ -500,6 +501,8 @@ pub struct Pairing {
     last_push: Option<u64>,
     refusals: HashMap<(Kind, IpAddr), u32>,
     last_report: u64,
+    /// The node id of each approval a connection has collected and is issuing now: the name is not enrolled until that ends (F811).
+    issuing: HashMap<ConnId, String>,
     rng: Entropy,
 }
 
@@ -549,6 +552,7 @@ impl Pairing {
             last_push: None,
             refusals: HashMap::new(),
             last_report: 0,
+            issuing: HashMap::new(),
             rng,
         }
     }
@@ -936,9 +940,14 @@ impl Pairing {
     }
 
     /// A message naming a `pair_id` its connection does not own (or none at all): `pair.unknown`, no authority gained, and a failure
-    /// counted for the address it came from (and not for the window: see the body).
+    /// counted for the address it came from (and not for the window: see the body). While the switch is closed it is `pair.closed`,
+    /// counted nowhere.
     pub fn unknown(&mut self, now: u64, from: Peer) -> Refusal {
         self.tick(now);
+        // A closed switch refuses every pairing message and allocates nothing (section 2, F801).
+        if self.leaf.is_none() || self.open_until.is_none() {
+            return Refusal::Closed;
+        }
         // Counted against the address only. This message comes from a connection that was never admitted (no limit has been
         // applied to it), so letting it count toward the window's budget would let any host close the owner's window at will.
         self.limits
@@ -969,14 +978,25 @@ impl Pairing {
             Phase::Done(Outcome::Denied) => Verdict::Denied,
             Phase::Done(Outcome::Expired) => Verdict::Expired,
         };
+        if let Verdict::Approved(issue) = &v {
+            self.issuing.insert(conn, issue.node_id.clone());
+        }
         self.sessions.remove(&id);
         self.by_conn.remove(&conn);
         v
     }
 
+    /// The approval this connection collected was issued or refused: its node id is enrolled or free again, so it no longer holds
+    /// it. Called before the result is written, so a machine that stops reading cannot keep the name from every later approval
+    /// (Codex review of F811); [`Self::connection_closed`] lets it go too.
+    pub fn issued(&mut self, conn: ConnId) {
+        self.issuing.remove(&conn);
+    }
+
     /// The connection ended. An undecided session is over (an abort after the challenge is a failure); an approval nobody
     /// collected is void and no certificate is issued.
     pub fn connection_closed(&mut self, conn: ConnId, now: u64) {
+        self.issuing.remove(&conn);
         let Some(id) = self.by_conn.remove(&conn) else {
             return;
         };
@@ -1021,10 +1041,19 @@ impl Pairing {
         matches!(s.phase, Phase::Pending).then_some(s.name.as_str())
     }
 
-    /// Approve: terminal and one-shot. Only a request that is still pending and inside its time.
+    /// Approve: terminal and one-shot. Only a request that is still pending and inside its time, and not while another approval for
+    /// the same node id is waiting or being issued: only one of them could get the certificate (`name_in_use`, it stays pending, F811).
     pub fn approve(&mut self, now: u64, pair_id: &[u8], replace: bool) -> Result<(), Refusal> {
         self.tick(now);
         let id = self.decidable(pair_id)?;
+        let name = self.sessions.get(&id).map(|s| s.name.as_str());
+        let held =
+            self.sessions.values().any(|s| {
+                matches!(s.phase, Phase::Approved { .. }) && Some(s.name.as_str()) == name
+            }) || self.issuing.values().any(|n| Some(n.as_str()) == name);
+        if held {
+            return Err(Refusal::State("name_in_use"));
+        }
         if let Some(s) = self.sessions.get_mut(&id) {
             s.phase = Phase::Approved { replace };
         }
@@ -2132,6 +2161,87 @@ mod tests {
             );
         }
         assert!(q.status(2_030).open);
+    }
+
+    /// F800: the refused attempt counts too, so the stated wait must leave room for the retry itself.
+    #[test]
+    fn a_retry_after_the_stated_wait_is_admitted() {
+        let history = || {
+            let mut limits = PairLimits::new();
+            for t in [10_000, 11_000, 12_000] {
+                limits.admit(Kind::Machine, ip(1), t).unwrap();
+            }
+            let wait = limits.admit(Kind::Machine, ip(1), 13_000).unwrap_err();
+            (limits, 13_000 + wait * 1000)
+        };
+        let (mut limits, at) = history();
+        assert_eq!(limits.admit(Kind::Machine, ip(1), at), Ok(()));
+        // ...and the wait is not generous: a second earlier is still refused.
+        let (mut limits, at) = history();
+        assert!(limits.admit(Kind::Machine, ip(1), at - 1000).is_err());
+        // The hub-wide counter: the eleventh address in a minute waits, and one more at the stated time is admitted.
+        let mut limits = PairLimits::new();
+        for i in 0..10u8 {
+            limits
+                .admit(Kind::Machine, ip(100 + i), 70_000 + u64::from(i))
+                .unwrap();
+        }
+        let wait = limits.admit(Kind::Machine, ip(120), 70_100).unwrap_err();
+        assert_eq!(
+            limits.admit(Kind::Machine, ip(121), 70_100 + wait * 1000),
+            Ok(())
+        );
+    }
+
+    /// F801: a closed switch refuses a reveal-first with `pair.closed` and counts nothing, so nobody can lock an address out or fill
+    /// the counter table before the owner opens it.
+    #[test]
+    fn a_reveal_first_while_closed_is_closed_and_counted_nowhere() {
+        let mut p = Pairing::with_entropy(counter_entropy());
+        p.set_leaf(LEAF);
+        for i in 0..5u64 {
+            assert_eq!(p.unknown(1_000 + i, peer(100 + i, 10)), Refusal::Closed);
+        }
+        assert_eq!(p.limits().keys(), 0);
+        p.open(2_000);
+        assert!(start(&mut p, 2_100, peer(1, 10), &Machine::new(1)).is_ok());
+    }
+
+    /// F811: two requests for one node id. While one approval waits or is being issued, the other cannot be approved (only one can
+    /// get the certificate, and the windows would be told "approved" for both); it stays pending until that connection ends.
+    #[test]
+    fn a_second_approval_for_a_node_id_in_flight_is_name_in_use() {
+        let mut p = open_hub();
+        let a = pending(&mut p, 2_000, 1, 10, &Machine::new(1));
+        let b = pending(&mut p, 2_100, 2, 11, &Machine::new(2));
+        p.approve(2_200, &a, false).unwrap();
+        assert_eq!(
+            p.approve(2_300, &b, true),
+            Err(Refusal::State("name_in_use"))
+        );
+        assert!(matches!(p.verdict(ConnId(1), 2_400), Verdict::Approved(_)));
+        assert_eq!(
+            p.approve(2_500, &b, true),
+            Err(Refusal::State("name_in_use"))
+        );
+        assert_eq!(p.pending_node_id(&b), Some("laptop"));
+        p.connection_closed(ConnId(1), 2_600);
+        assert_eq!(p.approve(2_700, &b, true), Ok(()));
+    }
+
+    /// Codex review of F811: once the approval is issued (or refused), the name is let go even while that connection stays open, as
+    /// one whose machine stopped reading the result would; `connection_closed` afterwards changes nothing.
+    #[test]
+    fn an_issued_approval_lets_its_node_id_go_while_its_connection_stays_open() {
+        let mut p = open_hub();
+        let a = pending(&mut p, 2_000, 1, 10, &Machine::new(1));
+        let b = pending(&mut p, 2_100, 2, 11, &Machine::new(2));
+        p.approve(2_200, &a, false).unwrap();
+        assert!(matches!(p.verdict(ConnId(1), 2_300), Verdict::Approved(_)));
+        p.issued(ConnId(1));
+        assert_eq!(p.approve(2_400, &b, true), Ok(()));
+        p.connection_closed(ConnId(1), 2_500);
+        assert!(matches!(p.verdict(ConnId(2), 2_600), Verdict::Approved(_)));
     }
 
     #[test]

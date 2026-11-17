@@ -4,7 +4,15 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
-_Nothing yet._
+### Reaching your hub from outside
+- `agora remote tailscale --serve` puts your hub on your tailnet with a real HTTPS address for your phone, `agora remote status` says what reaches it and how, and `agora remote off` takes it back (only what Agora added, never your other Tailscale rules).
+- Nothing outside your machine can reach the hub until a screen password is set: the remote commands, a hub on a public address and `agora password clear` while a way in is on all refuse and say `agora password set`.
+- `agora doctor` now checks that Tailscale answers, that a password protects any way in from outside, that the certificate names your tailnet name, and warns every time that the hub listens on a public address.
+- A server with no screen can run Agora: `agora --ui none --listen ADDRESS` sets where the hub listens, and `docs/guides/remote-hub.md` walks through a VPS with Tailscale or a plain address.
+- A request that went through a proxy on the hub's machine is no longer taken for the owner at that machine, so the screen password applies to it.
+
+### The window
+- On a phone, what needs you now stays at the bottom of the screen in reach of your thumb: a plain yes or no has big Allow and Deny buttons there (greyed out, with the reason, while the connection is down), anything else has one Review button, and the title bar no longer overflows when the hub cannot be reached.
 
 ## 0.3.17
 
