@@ -2232,8 +2232,9 @@ fn load_from(
 
 /// The link folder `dir`, resolved, or `None` when there is none. Never the path given instead: a folder made after the look could be
 /// mid-save (Codex re-review of F1031). A folder that is there but cannot be resolved is an error, not "no link", so the node does not
-/// start as an unlinked one: a link to something missing (a volume that is not mounted) too. A folder that appeared between the two
-/// looks (an enrollment that just made it) is resolved again, so the read waits for that enrollment's guard.
+/// start as an unlinked one: a link to something missing (a volume that is not mounted) too. Whatever appeared between the two looks
+/// (a folder an enrollment just made, a link whose target just came back) is resolved again, a few times, so the read waits for that
+/// enrollment's guard; what still cannot be resolved then is the error.
 fn resolve_link_folder(dir: &Path) -> std::io::Result<Option<PathBuf>> {
     let mut tries = 0;
     loop {
@@ -2242,7 +2243,7 @@ fn resolve_link_folder(dir: &Path) -> std::io::Result<Option<PathBuf>> {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 match std::fs::symlink_metadata(dir) {
                     Err(_) => return Ok(None),
-                    Ok(m) if m.file_type().is_symlink() || tries >= 3 => return Err(e),
+                    Ok(_) if tries >= 3 => return Err(e),
                     Ok(_) => tries += 1,
                 }
             }
