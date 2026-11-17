@@ -286,9 +286,71 @@ impl Env {
     fn wait(&self, what: &str, ok: impl Fn(&Self) -> bool) {
         let end = Instant::now() + Duration::from_secs(60);
         while !ok(self) {
-            assert!(Instant::now() < end, "timed out waiting for {what}");
+            assert!(
+                Instant::now() < end,
+                "timed out waiting for {what}\n{}",
+                self.state()
+            );
             std::thread::sleep(Duration::from_millis(50));
         }
+    }
+
+    /// What a failed wait saw, so a failure on a runner nobody can log in to is diagnosable from its log: the supervisor's agents, the
+    /// ledger's entry for each (with the process it holds, and what the system says of that pid now), the ledger file, the probe
+    /// reports and the folder's files.
+    fn state(&self) -> String {
+        use std::fmt::Write as _;
+        let mut out = String::new();
+        let Some(node) = self.node.as_ref() else {
+            return "no node".into();
+        };
+        let views = node
+            .supervisor
+            .try_lock()
+            .map(|s| s.list())
+            .unwrap_or_default();
+        let _ = writeln!(out, "supervisor agents: {}", views.len());
+        for v in &views {
+            let _ = writeln!(out, "  {v:?}");
+        }
+        for pid in node
+            .supervisor
+            .try_lock()
+            .map(|s| s.agent_pids())
+            .unwrap_or_default()
+        {
+            let _ = writeln!(
+                out,
+                "  pid of {}: {} -> process_identity {:?}",
+                pid.0.as_str(),
+                pid.1,
+                agora_platform::process_identity(pid.1)
+            );
+        }
+        for v in &views {
+            let _ = writeln!(out, "ledger entry: {:?}", node.ledger.get(v.id.as_str()));
+        }
+        let ledger_file = self
+            .root
+            .join("data")
+            .join("sessions")
+            .join(agora_node::ledger::LEDGER_FILE);
+        let _ = writeln!(
+            out,
+            "ledger file {}: {:?}",
+            ledger_file.display(),
+            std::fs::read_to_string(&ledger_file)
+        );
+        let mut files: Vec<String> = std::fs::read_dir(&self.root)
+            .map(|d| {
+                d.flatten()
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        files.sort();
+        let _ = writeln!(out, "files in {}: {files:?}", self.root.display());
+        out
     }
 
     /// The probe reports (`<prefix>-<pid>.json`) written so far.
