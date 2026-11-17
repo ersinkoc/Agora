@@ -259,6 +259,25 @@ pub(crate) fn ask(say: &Say, question: &str) -> Answer {
     Answer::No
 }
 
+/// Like [`ask`] but returns the line that was typed (a number to choose with), under the same terminal-only discipline: typed-ahead
+/// input is discarded, a first key that comes too fast is ignored (three tries), nothing is echoed. `None` when the terminal cannot
+/// answer or the tries ran out.
+pub(crate) fn ask_line(say: &Say, question: &str) -> Option<String> {
+    for _ in 0..TOO_FAST_TRIES {
+        let mut out = std::io::stdout();
+        let _ = write!(out, "{question} ");
+        let _ = out.flush();
+        let read = agora_platform::read_confirmation(MIN_THINK);
+        let _ = writeln!(out);
+        match read {
+            Ok(Some(line)) => return Some(line),
+            Ok(None) => say.out(key!("pair-too-fast"), &[]),
+            Err(_) => return None,
+        }
+    }
+    None
+}
+
 /// The owner's screen: cards in, answers out, until a machine was approved, the time given ended, the switch closed or the terminal went.
 fn watch(say: &Say, session: &mut Session, until: Option<Instant>) -> ExitCode {
     let mut waiting: std::collections::VecDeque<v1::PairRequested> = Default::default();

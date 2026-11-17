@@ -326,8 +326,21 @@ fn the_owner_opens_a_machine_joins_the_numbers_match_and_the_node_connects() {
     let owner_home = root.join("owner");
     std::fs::create_dir_all(&owner_home).unwrap();
 
+    // The fingerprint of the hub's CA, short form: what `agora pair open` and `agora pair status` print on the hub's screen, and what a
+    // machine that finds the hub by itself shows its person to compare.
+    let fingerprint = agora_hub::discovery::short_fingerprint(
+        &agora_hub::tls::leaf_hash(&std::fs::read_to_string(hub.dir.join("ca.pem")).unwrap())
+            .unwrap(),
+    );
+    assert_eq!(fingerprint.split(' ').count(), 6);
+
     // Closed by default, and the status says how to open it.
     let out = hub.pair(&owner_home, &["status"]).output().unwrap();
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains(&fingerprint),
+        "status does not print the fingerprint {fingerprint}: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
     assert!(out.status.success());
     assert!(
         String::from_utf8_lossy(&out.stdout).contains("Closed to new machines"),
@@ -356,6 +369,11 @@ fn the_owner_opens_a_machine_joins_the_numbers_match_and_the_node_connects() {
     // The owner opens it; the screen says what to do next.
     let mut owner = hub.open(&owner_home);
     assert!(owner.seen.contains("agora join "), "{}", owner.seen);
+    assert!(
+        owner.seen.contains(&fingerprint),
+        "open does not print the fingerprint {fingerprint}: {}",
+        owner.seen
+    );
     let status = hub.pair(&owner_home, &["status"]).output().unwrap();
     assert!(
         String::from_utf8_lossy(&status.stdout).contains("Open for new machines"),

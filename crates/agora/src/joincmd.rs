@@ -138,10 +138,10 @@ fn find_hub(say: &Say) -> Result<(String, [u8; 32]), Stop> {
                 ],
             );
         }
-        say.out(key!("join-which"), &[("count", (n as i64).into())]);
-        let _ = std::io::stdout().flush();
-        let mut line = String::new();
-        std::io::stdin().read_line(&mut line).ok().map(|_| line)
+        // The same terminal-only reader as the single-hub question and the owner's approval: typed-ahead input is discarded and a
+        // number that arrives too fast is ignored.
+        let question = say.text(key!("join-which"), &[("count", (n as i64).into())]);
+        crate::paircmd::ask_line(say, &question)
     });
     match choice {
         Pick::One(i) => {

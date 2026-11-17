@@ -361,7 +361,7 @@ Tests: unit tests in the first three files, `crates/agora/tests/pair_node.rs` (a
   certificate **its own connection was shown** (`Pairing::request_on`), not the hub's current one: a leaf replaced between a machine's handshake and its
   request cannot make the two numbers differ.
 - Failure: at start a system that will not list its interfaces does not stop the hub (it carries the names it knows, and says so); at `PairOpen` it **refuses**
-  with the new error code `pair.names_missing` (`reason` is `interfaces`, `invalid`, `too_many` or `issue`; `names` is the list concerned), the switch stays
+  with the new error code `pair.names_missing` (`reason` is `interfaces`, `invalid`, `too_many`, `issue` or `write`; `names` is the list concerned), the switch stays
   closed, and the sentence tells the person to start the hub with `--name ADDRESS`. Interfaces are only listed for a wildcard listen address.
 - `agora doctor` keeps reading `server-cert.pem`; the hub prints `The hub's certificate names: ...` at start.
 
@@ -385,21 +385,26 @@ Tests: unit tests in the first three files, `crates/agora/tests/pair_node.rs` (a
   past its three seconds (tested with a flood). It ignores anything that is not a well-formed `HubAnnouncement` of at most 128 bytes with accepts-pairing, a
   port, a 32-byte fingerprint and a name and version of plain text (no control, bidirectional or zero-width characters).
 - **Discovery is never silently trusted.** `agora join` without an address always asks, at a terminal, even for exactly one hub: it shows the hub's name, its
-  address and a short fingerprint of the hub's certificate authority (the first 8 bytes of the SHA-256, 16 hex digits in 4 groups of 4, for example
-  `566A D067 41A8 B995`) and says "compare it with what `agora pair open` shows on the hub". `agora pair open` and `agora pair status` print the **same** short
-  fingerprint on the hub's screen. With one hub the person answers yes or no (the same terminal-only reader as the owner's approval: typed-ahead input is
-  discarded and an answer that comes too fast is ignored); with several the person types the number of the one whose fingerprint matches. With no terminal
-  discovery chooses nothing (`pair.discovery_unconfirmed`, exit 2, "give the address"). When the address is typed, nothing changes: no fingerprint is asked.
+  address and a short fingerprint of the hub's certificate authority (the first 12 bytes of the SHA-256, 24 hex digits in 6 groups of 4, for example
+  `566A D067 41A8 B995 CD07 C464`, one shared function) and says "compare it with what `agora pair open` shows on the hub". `agora pair open` and
+  `agora pair status` print the **same** short fingerprint on the hub's screen (tested on real processes). With one hub the person answers yes or no; with several
+  the person types the number of the one whose fingerprint matches. **Both questions use the same terminal-only reader as the owner's approval**
+  (`agora_platform::read_confirmation`): typed-ahead input is discarded, an answer that comes less than 700 ms after the question is ignored (three tries), and
+  nothing is echoed (so a chosen number is typed blind). With no terminal discovery chooses nothing (`pair.discovery_unconfirmed`, exit 2, "give the address").
+  When the address is typed, nothing changes: no fingerprint is asked.
 - **The delivered CA must be the confirmed one.** The machine keeps the full SHA-256 of the announced CA (`Wanted::expected_ca`) and, after the hub delivered its
   certificate authority and every other check passed, compares the SHA-256 of the delivered CA's DER with it; any difference is `pair.ca_mismatch` (machine-local,
-  never sent) and nothing is stored (tested, with one flipped bit). The machine compares all 32 bytes; the person compares 8.
-- **What protects, and what does not.** A party on the network can announce a hub of its own, or copy a real hub's public name, port and fingerprint. Protection:
-  (1) the person compares the announced fingerprint with the one on the real hub's screen, so a rogue that announces its own CA shows a fingerprint that is not the
-  real one; (2) the machine then refuses any CA but the one confirmed, so a rogue that copied the announced name and fingerprint but cannot present the real CA
-  (it does not hold the CA's key, so it cannot issue a leaf that chains to it) cannot complete; (3) the number (section 5) must still match the owner's screen,
-  and the real owner approves. Not protected: a person who confirms without comparing (the fingerprint is 64 bits of the CA's hash, enough to make a
-  look-alike CA a large offline search, not impossible for a patient attacker, which is why the machine compares all 256 bits and why the number still follows);
-  a rogue can make the list longer (up to 8), or hide nothing: it cannot remove a real hub's answer, only add its own. It cannot learn anything secret: the
+  never sent) and nothing is stored (tested, with one flipped bit). The machine compares all 32 bytes; the person compares 12.
+- **What protects, and what does not.** A party on the network can announce a hub of its own, or copy a real hub's public name, port and fingerprint. The number
+  (section 5) does **not** protect here: it defends against a relay between the machine and the real hub, but a rogue hub that the machine actually dials is its own
+  approver, shows a card to nobody and approves at once. Against a rogue hub the **only** protections are (1) the person comparing the announced fingerprint with
+  the one on the real hub's screen (a rogue that announces its own CA shows a fingerprint that is not the real one), and (2) the machine's check of all 256 bits: a
+  rogue that copied the announced name, port and fingerprint cannot present the real CA (it does not hold its key, so it cannot issue a leaf that chains to it) and
+  fails with `pair.ca_mismatch`. Not protected: a person who confirms without comparing, and the shortness of what a person compares (96 bits: making a look-alike
+  CA that matches is an offline search of about 2^96 attempts, out of reach today, which is why the machine still compares all 256 bits).
+- **Availability only.** The finder's list is keyed by CA fingerprint, name and port, not by address. A rogue that copies those and answers first can make the
+  finder list its address instead of the real one, which ends in a failed join (`pair.ca_mismatch`, nothing stored), or fill the 8 slots with look-alikes; it
+  cannot make a join succeed against itself and cannot remove a real hub's answer. It cannot learn anything secret: the
   announcement and the query hold only public data.
 - Platform: `std::net::UdpSocket` needs no platform code. `SO_REUSEADDR` and `SO_EXCLUSIVEADDRUSE` are not set (two hubs on one machine: the second stays silent).
   Broadcast reception was measured by hand on Linux (a real hub and `agora join` on one machine, LAN and VPN cards); CI measures the same code over loopback

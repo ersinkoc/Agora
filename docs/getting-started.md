@@ -25,12 +25,13 @@ On the machine that runs the hub, open it for new machines, then on the new mach
 1. **On the hub's machine:** `agora pair open`. It says "Your hub is open for new machines for 10 minutes" and what to type next, and stays on your screen to
    answer. Run it in a terminal: it reads your answer from the keyboard only, never from a pipe or a script. `--minutes N` (1 to 10) opens it for less.
 2. **On the new machine:** `agora join`. It listens for about three seconds for a hub that is open for new machines on your network and, when it finds one,
-   asks you, at a terminal, `Found the hub "desk" at 192.168.1.20:7443. Its fingerprint is 566A D067 41A8 B995. Compare it with what `agora pair open` shows on the hub`: answer `y` only
+   asks you, at a terminal, `Found the hub "desk" at 192.168.1.20:7443. Its fingerprint is 566A D067 41A8 B995 CD07 C464. Compare it with what `agora pair open` shows on the hub`: answer `y` only
    if it is exactly the same as the fingerprint the hub's screen shows (`agora pair open` and `agora pair status` print it). With more than one hub it lists them and asks which one matches; without a
    terminal it stops and asks for the address. If it finds none, give the address yourself: `agora join HUB-ADDRESS`, for example
    `agora join desk.lan:7443` (the hub's name or address on your network, and its port; the port defaults to 7443). Some networks (guest Wi-Fi, some VPNs) do not
    carry the search; the address always works. What is found is only an address to try: nothing is trusted because a hub answered. The machine then joins only a hub whose certificate
-   authority has the fingerprint you confirmed, and the number in the next step must still match the one on your hub's screen. Choice 3 of `agora`'s first
+   authority has the fingerprint you confirmed. That comparison is what protects you from a machine on your network that pretends to be your hub: the number in the next step
+   cannot, because such a machine would simply approve itself. Choice 3 of `agora`'s first
    question asks for the address. The new machine prints one line, for example `Number 482-193. Approve this machine on the hub...`, and waits.
 3. **Back on the hub's machine** the screen shows `New machine "laptop" (linux, 192.168.1.50) wants to join. Number 482-193.` Approve only if the two numbers are
    the same: look at both, then type `y` and Enter (a key pressed less than a second after the question is ignored). Anything else denies it. (If the hub already has a machine of that name it asks whether to replace it.)

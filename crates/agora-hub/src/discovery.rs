@@ -88,13 +88,26 @@ pub struct Found {
     pub version: String,
 }
 
-/// Text from the network is untrusted: no control characters and none of the bidirectional or zero-width marks that make one name
-/// look like another.
+/// Text from the network is untrusted: no control characters and none of the bidirectional, zero-width, invisible or tag characters
+/// that make one name look like another (U+00AD soft hyphen, U+034F, U+061C, U+200B-200F, U+202A-202E, U+2060-2064, U+2066-2069,
+/// U+3164, U+FEFF and the tag characters U+E0000-E007F).
 fn plain(s: &str) -> bool {
     !s.is_empty()
         && !s.chars().any(|c| {
             c.is_control()
-                || matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}')
+                || matches!(
+                    c,
+                    '\u{00AD}'
+                        | '\u{034F}'
+                        | '\u{061C}'
+                        | '\u{200B}'..='\u{200F}'
+                        | '\u{202A}'..='\u{202E}'
+                        | '\u{2060}'..='\u{2064}'
+                        | '\u{2066}'..='\u{2069}'
+                        | '\u{3164}'
+                        | '\u{FEFF}'
+                        | '\u{E0000}'..='\u{E007F}'
+                )
         })
 }
 
@@ -129,11 +142,12 @@ pub fn fingerprint_text(fp: &[u8; 32]) -> String {
         .join(":")
 }
 
-/// The short form a person compares: the first 8 bytes of the CA's SHA-256 as 16 hex digits in 4 groups of 4 (`566A D067 41A8 B995`).
+/// The short form a person compares: the first 12 bytes (96 bits) of the CA's SHA-256 as 24 hex digits in 6 groups of 4
+/// (`566A D067 41A8 B995 CD07 C464`).
 /// `agora pair open` and `agora pair status` print the same on the hub's screen, and `agora join` shows it for each hub it found. It is
 /// for human comparison; the machine itself compares all 32 bytes.
 pub fn short_fingerprint(fp: &[u8; 32]) -> String {
-    fp[..8]
+    fp[..12]
         .chunks(2)
         .map(|c| format!("{:02X}{:02X}", c[0], c[1]))
         .collect::<Vec<_>>()
@@ -592,10 +606,37 @@ mod tests {
     }
 
     #[test]
-    fn the_short_fingerprint_is_four_groups_of_four() {
+    fn invisible_and_look_alike_characters_are_not_plain_text() {
+        for c in [
+            '\u{2060}',
+            '\u{2061}',
+            '\u{2064}',
+            '\u{00AD}',
+            '\u{061C}',
+            '\u{034F}',
+            '\u{3164}',
+            '\u{E0000}',
+            '\u{E0041}',
+            '\u{E007F}',
+            '\u{200B}',
+            '\u{202E}',
+            '\u{FEFF}',
+            '\u{7}',
+        ] {
+            assert!(!plain(&format!("a{c}b")), "{c:?}");
+        }
+        assert!(plain("Büro-Rechner 2"));
+        assert!(plain("masaüstü"));
+    }
+
+    #[test]
+    fn the_short_fingerprint_is_six_groups_of_four() {
         let mut fp = [0u8; 32];
-        fp[..8].copy_from_slice(&[0x56, 0x6A, 0xD0, 0x67, 0x41, 0xA8, 0xB9, 0x95]);
-        assert_eq!(short_fingerprint(&fp), "566A D067 41A8 B995");
+        fp[..12].copy_from_slice(&[
+            0x56, 0x6A, 0xD0, 0x67, 0x41, 0xA8, 0xB9, 0x95, 0xCD, 0x07, 0xC4, 0x64,
+        ]);
+        fp[12] = 0xFF;
+        assert_eq!(short_fingerprint(&fp), "566A D067 41A8 B995 CD07 C464");
     }
 
     #[test]
