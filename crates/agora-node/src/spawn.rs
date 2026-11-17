@@ -485,7 +485,11 @@ impl Spawner {
         let folder = agora_platform::canonicalize_plain(&wanted)
             .map_err(|_| folder_refused(&wanted.to_string_lossy()))?;
         // The folder rules of ADR-0052 (refused folders, identity) apply as to any launch.
-        let (info, _) = crate::directory::inspect(&folder.to_string_lossy(), &self.node_id, false)?;
+        // A real path that is not UTF-8 would be spelled as another folder (F980): refused, never passed on lossily.
+        let text = folder
+            .to_str()
+            .ok_or_else(|| folder_refused(&folder.to_string_lossy()))?;
+        let (info, _) = crate::directory::inspect(text, &self.node_id, false)?;
         // The resolved path is what is shown, signed and launched: it must be as plain as the one asked for.
         if info.path.chars().any(|c| c.is_control() || invisible(c)) {
             return Err(folder_refused(&info.path));

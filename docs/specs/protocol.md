@@ -316,8 +316,10 @@ The node canonicalizes and re-inspects before launch; a path or project ID misma
 path/identity associations; changed metadata requires `accept_identity_change`. Metadata creation is explicit, uses
 create-new semantics and never commits or overwrites `.agent-project.json`. The metadata contains `{"project_id":"UUID"}`;
 portable domain IDs use `id:<uuid>`. Without metadata, Git discovery remains unchanged; standalone folders use
-`folder:<node>:<canonical path>` without a fabricated root commit. Metadata must be a normal file, at most 4096 bytes,
-with a valid UUID. An owner confirms its association; metadata is not an access grant.
+`folder:<node>:<canonical path>` without a fabricated root commit. A folder whose canonical path is not valid UTF-8 is
+refused (`directory.path`): the path travels as text, and a lossy spelling would name another folder. Metadata must be a
+normal file, at most 4096 bytes, with a valid UUID, checked again on the open file before it is read (a link swapped in after
+the check is refused). An owner confirms its association; metadata is not an access grant.
 
 `WorkspaceRegistered` (event tag 24: `workspace_id`, `node_id`, `project_id`, `path`, `git_root`, `branch`,
 `managed_worktree`, `files_changed`) and `AgentWorkspaceBound` (35: `agent_id`, `workspace_id`) precede `AgentStarted`.

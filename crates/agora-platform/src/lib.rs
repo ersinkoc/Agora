@@ -232,6 +232,28 @@ pub fn open_read(path: &std::path::Path) -> io::Result<std::fs::File> {
     }
 }
 
+/// [`open_read`], but a link at the last component is opened as itself, never followed (Unix `O_NOFOLLOW`, which refuses it; Windows
+/// `FILE_FLAG_OPEN_REPARSE_POINT`, whose handle is then not a regular file). For a file that must be the one a check just looked at:
+/// check `metadata().is_file()` on the handle.
+pub fn open_read_no_follow(path: &std::path::Path) -> io::Result<std::fs::File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_NOFOLLOW)
+            .open(path)
+    }
+    #[cfg(windows)]
+    {
+        windows::open_read_no_follow(path)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        std::fs::File::open(path)
+    }
+}
+
 /// Whether a file's owner may run it, as git records it (`100755`): the owner's execute bit on Unix; elsewhere never.
 pub fn is_executable(meta: &std::fs::Metadata) -> bool {
     #[cfg(unix)]
