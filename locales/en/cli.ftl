@@ -130,6 +130,7 @@ doctor-cert-node-soon = This machine's hub certificate ends in { $detail ->
    *[other] { $detail } days
 }. Nothing renews it yet: when it ends this machine cannot connect to the hub. Join it again before then: on the hub run "agora hub code", then here run "agora node enroll" with the new code.
 doctor-cert-node-expired = This machine's hub certificate has ended, so it cannot connect to the hub ({ $file }). Join it again: on the hub run "agora hub code", then here run "agora node enroll" with the new code.
+doctor-cert-node-unusable = This machine's hub certificate cannot be read as a certificate ({ $file }). Check that the file is whole and readable by this user; if it is damaged, join this machine again: on the hub run "agora hub code", then here run "agora node enroll" with the new code.
 doctor-cert-hub = The hub's own certificate is valid for { $detail ->
     [one] one more day
    *[other] { $detail } more days
@@ -139,6 +140,7 @@ doctor-cert-hub-soon = The hub's own certificate ends in { $detail ->
    *[other] { $detail } days
 }. Restart the hub before then ("agora hub run", or restart its service) so it gets a new one; a hub that keeps running past the end refuses new connections.
 doctor-cert-hub-expired = The hub's own certificate has ended ({ $file }): new connections to it are refused. Restart the hub ("agora hub run", or restart its service) to get a new one.
+doctor-cert-hub-unusable = The hub's own certificate cannot be read as a certificate ({ $file }). Check that the file is whole and readable by the user the hub runs as; restarting the hub ("agora hub run", or restart its service) writes a new one.
 doctor-summary-ok = Everything Agora needs is in place.
 doctor-summary-problems = Something Agora needs is missing. Fix the items marked PROBLEM.
 

@@ -127,6 +127,7 @@ doctor-cert-node-soon = Bu makinenin hub sertifikası { $detail ->
    *[other] { $detail } gün sonra
 } bitiyor. Henüz hiçbir şey onu yenilemiyor: bitince bu makine hub'a bağlanamaz. Öncesinde yeniden katıl: hub'da "agora hub code" çalıştır, sonra burada yeni kodla "agora node enroll" çalıştır.
 doctor-cert-node-expired = Bu makinenin hub sertifikasının süresi doldu, bu yüzden hub'a bağlanamıyor ({ $file }). Yeniden katıl: hub'da "agora hub code" çalıştır, sonra burada yeni kodla "agora node enroll" çalıştır.
+doctor-cert-node-unusable = Bu makinenin hub sertifikası sertifika olarak okunamıyor ({ $file }). Dosyanın tam olduğunu ve bu kullanıcının okuyabildiğini kontrol et; dosya bozulduysa makineyi yeniden katıl: hub'da "agora hub code" çalıştır, sonra burada yeni kodla "agora node enroll" çalıştır.
 doctor-cert-hub = Hub'ın kendi sertifikası { $detail ->
     [one] bir gün daha
    *[other] { $detail } gün daha
@@ -136,6 +137,7 @@ doctor-cert-hub-soon = Hub'ın kendi sertifikası { $detail ->
    *[other] { $detail } gün sonra
 } bitiyor. Öncesinde hub'ı yeniden başlat ("agora hub run" ya da servisini yeniden başlat) ki yenisini alsın; bitiminden sonra çalışmaya devam eden bir hub yeni bağlantıları reddeder.
 doctor-cert-hub-expired = Hub'ın kendi sertifikasının süresi doldu ({ $file }): ona yeni bağlantılar reddediliyor. Yenisini almak için hub'ı yeniden başlat ("agora hub run" ya da servisini yeniden başlat).
+doctor-cert-hub-unusable = Hub'ın kendi sertifikası sertifika olarak okunamıyor ({ $file }). Dosyanın tam olduğunu ve hub'ın çalıştığı kullanıcının okuyabildiğini kontrol et; hub'ı yeniden başlatmak ("agora hub run" ya da servisini yeniden başlat) yenisini yazar.
 doctor-summary-ok = Agora'nın ihtiyaç duyduğu her şey yerinde.
 doctor-summary-problems = Agora'nın ihtiyaç duyduğu bir şey eksik. SORUN olarak işaretlenenleri düzeltin.
 
