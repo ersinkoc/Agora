@@ -101,10 +101,16 @@ describe('the fleet console', () => {
     expect(down).toMatch(/<button[^>]*disabled=""[^>]*aria-label="Deny: claude · a"/);
     expect(down).toContain(t('fleet-stale-no-answer'));
   });
+  it('never writes a count with an empty agent kind', () => {
+    const many = Array.from({ length: 6 }, (_, i) => agent(`w${i}`, { name: '', state: 'needs-you' }));
+    const html = console_({ fleet: many, machines });
+    expect(html).toContain('6 agents ask for the same thing on laptop');
+    expect(html).not.toContain('6  agents');
+  });
   it('collapses many identical asks into one row with a count, without Allow', () => {
     const many = Array.from({ length: 7 }, (_, i) => agent(`w${i}`, { name: `claude · c${i}`, state: 'needs-you' }));
     const html = console_({ fleet: many, machines, approvals: many.map((a, i) => ask(`r${i}`, a.id)) });
-    expect(html).toContain('7 claude agents ask for the same thing');
+    expect(html).toContain('7 claude agents ask for the same thing on laptop');
     expect(html).toContain('Review each');
     expect(html).not.toContain('>Allow<');
     expect(html.match(/class="fleet-ask /g)).toHaveLength(1);

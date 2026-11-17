@@ -120,7 +120,7 @@ export function AttentionQueue({ items, machines, now, onOpen, onResolve, onRevi
             <li key={row.key} className="fleet-ask fleet-ask--many">
               <div className="fleet-ask__who">
                 <StateMark state="needs-you" />
-                <strong className="fleet-ask__name">{t('fleet-same-ask', { count: row.items.length, kind: row.agentKind })}</strong>
+                <strong className="fleet-ask__name">{row.agentKind ? t('fleet-same-ask', { count: row.items.length, kind: row.agentKind, machine: row.machine }) : t('fleet-same-ask-any', { count: row.items.length, machine: row.machine })}</strong>
               </div>
               <p className="fleet-ask__what fleet-ask__what--clamp" title={askOf(row.items[0] as AttentionItem)}>{askOf(row.items[0] as AttentionItem)}</p>
               <div className="fleet-ask__actions">

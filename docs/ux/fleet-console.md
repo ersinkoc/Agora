@@ -20,7 +20,8 @@ palette's "Go home" brings it back. An empty window is the fleet console too. On
      detail, 120 characters at most in all, no structured text, no hidden character, and never a request to start an agent (it carries a
      folder, a prompt and settings). The row grows to hold such a request; it never clamps or cuts it (`scripts/e2e-fleet-rows.mjs`
      measures the longest one at 340, 420 and 820 px and in Large text). While the link is down the buttons are disabled and say why.
-   * **Six or more agents of one kind asking for the same thing are one row with a count and "Review each"**: no stack of identical Allow
+   * **Six or more agents asking for exactly the same thing are one row with a count and "Review each"** (same kind of request, same action
+     and detail, same machine, project and agent kind; a request to start an agent is never collapsed): no stack of identical Allow
      buttons. Each is then reviewed in the full card.
    * How long ago it asked is on every row or on none (when the window does not know it for some, it shows it for no one). Everything else has *Review and
      decide*, which opens the agent where the whole request is shown and answered. The row's buttons are the banner's buttons: the same

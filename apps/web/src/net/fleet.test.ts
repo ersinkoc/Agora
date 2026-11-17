@@ -126,6 +126,35 @@ describe('identical asks', () => {
   });
 });
 
+describe('what may collapse', () => {
+  const mk = (n: number, over: Partial<AgentTileModel> = {}) => Array.from({ length: n }, (_, i) => agent(`a${i}`, { name: `claude · c${i}`, state: 'needs-you', ...over }));
+  const asks = (fleet: AgentTileModel[], over: (i: number) => Partial<ApprovalModel> = () => ({})) => attentionList(fleet.map((a, i) => ask(`r${i}`, a.id, over(i))), fleet);
+  it('never collapses requests to start an agent, even when they look alike', () => {
+    const fleet = mk(SAME_ASK_MIN);
+    const items = attentionList(fleet.map((a, i) => ({ ...(demoStartApproval as unknown as ApprovalModel), id: `s${i}`, agentId: a.id, start: { ...demoStartApproval.start, folder: `/code/f${i % 2}` } })), fleet);
+    expect(collapseAttention(items).every((r) => r.kind === 'one')).toBe(true);
+    const same = attentionList(fleet.map((a, i) => ({ ...(demoStartApproval as unknown as ApprovalModel), id: `t${i}`, agentId: a.id })), fleet);
+    expect(collapseAttention(same)).toHaveLength(SAME_ASK_MIN); // identical folder and prompt too: each is its own row
+  });
+  it('collapses only what is identical in action, detail, machine, project and kind', () => {
+    const fleet = mk(SAME_ASK_MIN);
+    expect(collapseAttention(asks(fleet))).toHaveLength(1);
+    expect(collapseAttention(asks(fleet, (i) => ({ detail: i === 0 ? '+1 −1' : '+12 −3' }))).filter((r) => r.kind === 'many')).toEqual([]); // 5 and 1: below the threshold
+    const other = [...mk(SAME_ASK_MIN), ...mk(1, { id: 'z', name: 'claude · z', machine: 'server', machineId: 'n2' })];
+    const rows = collapseAttention(asks(other));
+    expect(rows).toHaveLength(2);
+    expect(rows.find((r) => r.kind === 'many')).toMatchObject({ machine: 'laptop' });
+    const splitProject = [...mk(3, { project: 'api' }), ...mk(3, { project: 'web' }).map((a, i) => ({ ...a, id: `b${i}` }))];
+    expect(collapseAttention(asks(splitProject)).every((r) => r.kind === 'one')).toBe(true);
+    const splitKind = [...mk(3), ...mk(3, { name: 'codex · x' }).map((a, i) => ({ ...a, id: `k${i}` }))];
+    expect(collapseAttention(asks(splitKind)).every((r) => r.kind === 'one')).toBe(true);
+  });
+  it('does not collapse what it could not say where it is on', () => {
+    const fleet = mk(SAME_ASK_MIN, { machine: '' });
+    expect(collapseAttention(asks(fleet)).every((r) => r.kind === 'one')).toBe(true);
+  });
+});
+
 describe('grouping', () => {
   const fleet = sortByUrgency([
     agent('a', { project: 'login', projectId: 'p1' }), agent('b', { state: 'needs-you', project: 'login', projectId: 'p1' }),

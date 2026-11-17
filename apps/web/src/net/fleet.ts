@@ -79,28 +79,33 @@ export function decidableInline(a: ApprovalModel): boolean {
 // Many agents asking for the same thing are one row with a count (a stack of identical Allow buttons invites approving by reflex): each is
 // reviewed on its own. The agent's kind is the first part of its name ("claude · amber").
 export const SAME_ASK_MIN = 6;
-export type AttentionRow = { kind: 'one'; item: AttentionItem } | { kind: 'many'; key: string; items: AttentionItem[]; agentKind: string; ask: string };
-const kindOf = (name: string): string => name.split(' · ')[0] ?? name;
-function sameKey(it: AttentionItem): { key: string; agentKind: string; ask: string } {
-  if (it.kind === 'approval') {
-    const agentKind = kindOf(it.agent?.name || it.approval.agentName || '');
-    const ask = it.approval.start ? '\u0000start' : askLine(it.approval.action, it.approval.detail);
-    return { key: `${agentKind}\u0001${ask}`, agentKind, ask };
-  }
-  const agentKind = kindOf(it.agent.name);
-  return { key: `${agentKind}\u0001\u0000terminal`, agentKind, ask: '' };
+export type AttentionRow = { kind: 'one'; item: AttentionItem } | { kind: 'many'; key: string; items: AttentionItem[]; agentKind: string; machine: string; ask: string };
+const kindOf = (name: string): string => (name.split(' · ')[0] ?? name).trim();
+// What makes two rows the same: everything the row shows. The kind of request, the whole action and detail as written, the machine, the
+// project and the agent's kind. A request to start an agent is never the same as another (its folder, prompt and settings are read in the
+// full card), and neither is anything whose machine is not known (the label could not say where). `undefined`: it stands alone.
+function sameKey(it: AttentionItem): { key: string; agentKind: string; machine: string; ask: string } | undefined {
+  if (it.kind === 'approval' && it.approval.start) return undefined;
+  const agent = it.agent;
+  const machine = (agent?.machine || (it.kind === 'approval' ? it.approval.machineName : '') || '').trim();
+  if (!machine) return undefined;
+  const project = (agent ? agent.project || agent.workspace : '') || '';
+  const agentKind = kindOf(agent?.name || (it.kind === 'approval' ? it.approval.agentName : '') || '');
+  const what = it.kind === 'approval' ? `request\u0001${it.approval.action}\u0001${it.approval.detail}` : 'terminal';
+  const ask = it.kind === 'approval' ? askLine(it.approval.action, it.approval.detail) : '';
+  return { key: [what, machine, project, agentKind].join('\u0002'), agentKind, machine, ask };
 }
 export function collapseAttention(items: readonly AttentionItem[], min = SAME_ASK_MIN): AttentionRow[] {
-  const keyed = items.map((it) => ({ it, ...sameKey(it) }));
+  const keyed = items.map((it) => ({ it, same: sameKey(it) }));
   const count = new Map<string, number>();
-  for (const k of keyed) count.set(k.key, (count.get(k.key) ?? 0) + 1);
+  for (const k of keyed) if (k.same) count.set(k.same.key, (count.get(k.same.key) ?? 0) + 1);
   const out: AttentionRow[] = [];
   const seen = new Map<string, Extract<AttentionRow, { kind: 'many' }>>();
-  for (const k of keyed) {
-    if ((count.get(k.key) ?? 0) < min) { out.push({ kind: 'one', item: k.it }); continue; }
-    const g = seen.get(k.key);
-    if (g) g.items.push(k.it);
-    else { const row = { kind: 'many' as const, key: k.key, items: [k.it], agentKind: k.agentKind, ask: k.ask }; seen.set(k.key, row); out.push(row); }
+  for (const { it, same } of keyed) {
+    if (!same || (count.get(same.key) ?? 0) < min) { out.push({ kind: 'one', item: it }); continue; }
+    const g = seen.get(same.key);
+    if (g) g.items.push(it);
+    else { const row = { kind: 'many' as const, key: same.key, items: [it], agentKind: same.agentKind, machine: same.machine, ask: same.ask }; seen.set(same.key, row); out.push(row); }
   }
   return out;
 }
