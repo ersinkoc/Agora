@@ -269,7 +269,9 @@ pub(crate) fn profile(sb: &crate::Sandbox) -> io::Result<String> {
     // socket, its worktree and private temp folder, the system's name resolver, and what the owner listed in `sandbox.sockets`).
     // `subpath` of a socket file is that file, and of a folder everything in it. The node's own folders are closed again below.
     // The form `(subpath "/")` names every absolute path, so it needs no filter-less spelling of `remote unix-socket`.
-    if UNIX_SOCKET_DENY_VERIFIED && sb.confine_sockets && !sb.offline {
+    // `remote unix-socket` takes exactly one filter, and `quote` already returns one (`(subpath "...")`): nesting a second `subpath` is
+    // a profile `sandbox-exec` refuses to parse (exit 65), which the agent sees as never starting (measured on a Mac, 2026-11-17).
+    if sb.confine_sockets && !sb.offline {
         out.push_str("(deny network-outbound (remote unix-socket (subpath \"/\")))\n");
         let mut allowed: Vec<String> = SYSTEM_SOCKETS
             .iter()
@@ -283,7 +285,7 @@ pub(crate) fn profile(sb: &crate::Sandbox) -> io::Result<String> {
         );
         let to: Vec<String> = allowed
             .iter()
-            .map(|q| format!("(remote unix-socket (subpath {q}))"))
+            .map(|q| format!("(remote unix-socket {q})"))
             .collect();
         out.push_str(&format!("(allow network-outbound {})\n", to.join(" ")));
     }
@@ -618,13 +620,6 @@ fn real_or_future(p: &std::path::Path) -> Option<std::path::PathBuf> {
         Err(_) => None,
     }
 }
-
-/// Whether the Seatbelt rule that refuses every unix socket outside the allow-list (ADR-0083, step 2) is switched on. It is NOT: the rule
-/// was written from the Seatbelt documentation and never measured on a Mac. CI on a real macOS runner found it makes a confined `git
-/// commit` stall (a confined agent's whole start then produced no output within 15 s), and the cause was not isolated. Until a Mac
-/// developer measures each form (`cargo test -p agora-platform -- --ignored` with this constant set to `true`) and the allow-list is
-/// known, a confined agent on macOS gets only the environment scrub of ADR-0083 step 1, and `agora doctor` says exactly that.
-pub const UNIX_SOCKET_DENY_VERIFIED: bool = false;
 
 /// The system's unix sockets every confined agent may use under [`crate::Sandbox::confine_sockets`]: the name resolver (every network
 /// lookup goes through it; `/var/run` is `/private/var/run`, and a profile names the path the kernel resolved). A socket a real tool
@@ -1558,7 +1553,6 @@ mod sandbox_tests {
     }
 
     #[test]
-    #[ignore = "ADR-0083 step 2 is not switched on: set UNIX_SOCKET_DENY_VERIFIED = true and run on a Mac with --ignored"]
     fn confined_sockets_name_the_allow_list_and_the_nodes_closed_folders_come_after() {
         // ADR-0083. Text only; the run below measures what Seatbelt does with it.
         let sb = crate::Sandbox {
@@ -1580,15 +1574,72 @@ mod sandbox_tests {
         let resolver = p
             .find("/private/var/run/mDNSResponder")
             .unwrap_or(usize::MAX);
+        // The node's closed folder: the last such deny, after the allow-list (a `quote`d filter, one form, never nested).
         let closed = p
-            .find("(deny network-outbound (remote unix-socket \"")
+            .rfind("(deny network-outbound (remote unix-socket (subpath \"")
             .unwrap_or(usize::MAX);
-        assert!(general < resolver && resolver < closed, "{p}");
+        assert!(
+            general < resolver && resolver < closed && closed != usize::MAX,
+            "{p}"
+        );
+        assert!(!p.contains("(subpath (subpath"), "{p}");
         assert!(!p.contains("(deny network*)"), "{p}");
     }
 
+    /// Every profile shape this module can produce must PARSE: a profile `sandbox-exec` refuses (exit 65) means the agent never starts,
+    /// which text assertions cannot see (the nested `subpath` of ADR-0083's first version passed them all).
     #[test]
-    #[ignore = "ADR-0083 step 2 is not switched on: set UNIX_SOCKET_DENY_VERIFIED = true and run on a Mac with --ignored"]
+    fn every_profile_shape_parses_in_sandbox_exec() {
+        let base = std::path::PathBuf::from(format!("/tmp/agora-parse-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let home = base.join("home");
+        let tree = home.join("worktrees/w");
+        let sock = home.join("mesh/agent.sock");
+        let owner = base.join("owner.sock");
+        std::fs::create_dir_all(&tree).unwrap();
+        std::fs::create_dir_all(sock.parent().unwrap()).unwrap();
+        let mut ran = 0;
+        for offline in [false, true] {
+            for confine_sockets in [false, true] {
+                for with_owner in [false, true] {
+                    for node_folders in [false, true] {
+                        let mut sb = crate::Sandbox {
+                            read: vec!["/usr".into(), "/bin".into()],
+                            write: vec![tree.clone(), "/tmp".into()],
+                            offline,
+                            confine_sockets,
+                            sockets: vec![sock.clone()],
+                            ..Default::default()
+                        };
+                        if with_owner {
+                            sb.sockets.push(owner.clone());
+                        }
+                        if node_folders {
+                            sb.deny = vec![home.clone()];
+                            sb.reopen = vec![tree.clone()];
+                        }
+                        let p = super::profile(&sb).unwrap();
+                        let out = std::process::Command::new(super::SANDBOX_EXEC)
+                            .args(["-p", &p, "/usr/bin/true"])
+                            .output()
+                            .unwrap();
+                        assert!(
+                            out.status.success(),
+                            "offline={offline} confine_sockets={confine_sockets} owner={with_owner} node_folders={node_folders}: \
+                             {:?} {}\n{p}",
+                            out.status,
+                            String::from_utf8_lossy(&out.stderr)
+                        );
+                        ran += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(ran, 16);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
     fn a_confined_process_reaches_only_the_sockets_it_is_given() {
         use std::os::unix::net::UnixListener;
         let dir = std::path::PathBuf::from(format!("/tmp/agora-sk-{}", std::process::id()));

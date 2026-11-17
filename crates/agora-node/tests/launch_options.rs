@@ -103,10 +103,17 @@ impl Env {
             ),
         )
         .unwrap();
+        // A unix socket path must be shorter than SUN_LEN (104 bytes on macOS): under a long CARGO_TARGET_DIR the one beside the
+        // node's folders does not fit, so it goes to a short name in the system temp folder.
+        let mut socket = root.join("n.sock");
+        if socket.as_os_str().len() > 90 {
+            socket =
+                std::env::temp_dir().join(format!("agora-lo-{}-{name}.sock", std::process::id()));
+        }
         let node = Node::start(&NodeConfig {
             resume_all: false,
             node_id: "node-options".into(),
-            socket: root.join("n.sock"),
+            socket,
             data_dir: root.join("data"),
             worktree_root: root.join("worktrees"),
             manifests_dir: root.join("manifests"),

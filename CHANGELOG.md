@@ -34,8 +34,8 @@ _Nothing yet._
 - A confined agent no longer gets `SSH_AUTH_SOCK`, the session bus, docker or tmux addresses in its environment, so it cannot find your
   ssh-agent, the session bus, docker or a tmux server by itself (the owner can pass a name through with `sandbox.pass_env`). On Linux kernels
   from 6.12 it can no longer connect to abstract sockets made outside its sandbox; a socket that is a file is still reachable there. On a Mac
-  the rule that refuses every other unix socket is written but switched off until it has been measured on a real Mac: there the environment
-  is the only layer, and `agora doctor` says so.
+  it can no longer connect to a unix socket it was not given (measured on a real Mac, 2026-11-17: its own socket, another one, the name
+  resolver). Other system sockets a tool may need are not measured with real agents yet; `sandbox.sockets` adds one, and `agora doctor` says so.
 - `agora doctor` says whether this machine restricts an agent's unix sockets (and why not), which socket variables the node leaves out of an agent's environment and which the policy passes.
 
 ### Certificates
