@@ -58,7 +58,7 @@ conversation above, backed by a node-local broker, so agents on one machine coor
 Whatever connects to a socket is that agent as far as the broker is concerned, so the socket path is only given to that
 agent's process. `agora mesh stdio --socket PATH` is what an agent's MCP client runs as its server: it carries stdin/stdout to
 that socket. The bridge survives its connection ending (ADR-0075 decision 6; the node re-executing or restarting leaves the
-socket path the same): it answers each request in flight, and each request that arrives while it has no connection, at once with a
+socket path the same): it answers each request in flight (except one the client cancelled with `notifications/cancelled`, which gets no answer), and each request that arrives while it has no connection, at once with a
 JSON-RPC error `-32000` whose `data` is `{ "code": "mesh.unavailable", "params": {} }` (the agent may repeat the call; a JSON-RPC batch gets a batch of such errors, one per request in it, and notifications get no answer), keeps its
 stdout open so the client's session stays, and reconnects to the same path with a wait that doubles from 50 ms to 2 s. A new
 connection starts uninitialized on the node, so the bridge replays the client's own `initialize` request (and its
