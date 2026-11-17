@@ -9,7 +9,7 @@ ADR-0029 (the hub relays terminal bytes), ADR-0072 (a shared terminal takes the 
 ## How it was measured
 
 Every "before" below was measured on `main` at `0363f668` (xterm.js 6.0.0, DOM renderer) and every "now" on this change, in the same
-way: the real `TerminalView` on a fake source in headless Chromium (`scripts/terminal-fidelity/`, 52 checks; run it with the steps in
+way: the real `TerminalView` on a fake source in headless Chromium (`scripts/terminal-fidelity/`, its checks; run it with the steps in
 its README), plus a real program on a real PTY in the loop: `mouse-echo.py` switches on mouse reporting (modes 1000, 1002, 1006, 1004)
 and prints the bytes it receives; the page's clicks, drags, wheel notches and Shift+drag are what it printed back. Unit tests cover the
 pure parts (`wheel.test.ts`, `links.test.ts`, `keys.test.ts`).
