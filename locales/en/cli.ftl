@@ -35,6 +35,7 @@ cli-usage =
       agora node trust DEVICE_ID PUBLIC_KEY_HEX [--data DIR]
       agora node trust --from-hub [--yes --fingerprint FP]... [--include-others] [--replace] [--data DIR]
       agora node untrust DEVICE_ID [--data DIR]
+      agora node secret set NAME | list | remove NAME [--data DIR]
       agora tui [--hub HOST:PORT --ca FILE --code CODE] [--hub-dir DIR]
       agora update [--check] [--version X] [--release-url URL] [--release-key FILE] [--unsigned]
       agora adapter install NAME [--registry URL] [--root-key FILE] [--yes] | update [NAME] | list | remove NAME
@@ -418,3 +419,18 @@ cli-metrics-token-state-revoked = {" "}· revoked
 cli-metrics-token-state-expired = {" "}· expired
 cli-metrics-token-revoked = Metrics token { $name } is revoked. It fails at its next use.
 cli-metrics-token-unknown = There is no live metrics token called { $name }.
+doctor-credential = { $detail } receives { $names } from this node when it starts (a stored secret, else the environment of the command that ran this check; the node's own environment may differ). Names only; this check does not know whether that login works.
+doctor-credential-none = No credential found for { $detail }: the node has nothing to give it. If it says it is not logged in (a confined agent cannot see a login kept in a Keychain), make a token for it and run: agora node secret set { $name }, then add the line "credentials.{ $detail } = { $name }" to the node's policy.
+doctor-credential-unlisted = A value for { $names } exists on this node, but no "credentials.{ $detail }" line in the policy lets { $detail } receive it, so it is not passed. Other agents never get it either.
+doctor-credential-refused = The policy lists { $names } for { $detail }, which its description does not declare: they are not passed.
+doctor-credential-malformed = The "credentials.{ $detail }" line in the policy is malformed (plain names, separated by commas, no values): nothing is passed to { $detail }.
+cli-secret-prompt = Value of { $name } (not shown):
+cli-secret-set = Stored { $name } on this machine. The value stays here: it is never sent to the hub. To let an agent kind receive it, add a line "credentials.KIND = { $name }" to the node's policy and restart the node.
+cli-secret-removed = Removed { $name }.
+cli-secret-not-found = No secret named { $name } is stored here.
+cli-secret-none = No secret is stored on this machine.
+cli-secret-name = { $name }
+cli-secret-bad-name = That is not a usable name: use letters, digits and underscores only, not starting with a digit, and not a name the system or Agora uses.
+cli-secret-bad-value = The value must be one line of at most 8192 bytes, with no control characters. Nothing was stored.
+cli-secret-failed = The secret could not be stored or read here. Check that the node's data folder is yours and can be written.
+cli-secret-name-collides = A secret whose name differs only in capital letters is already stored. Use that exact name, or remove it first.

@@ -490,6 +490,8 @@ pub struct Supervisor {
     hook: Option<LaunchHook>,
     abort_hook: Option<AbortHook>,
     sandbox: crate::sandbox::SandboxPolicy,
+    /// ADR-0084: the secrets this node holds and which kind may receive which.
+    credentials: crate::credentials::Credentials,
     adapters: BTreeMap<AgentId, AdapterEntry>,
     /// ADR-0057: helper -> the agent that started it.
     parents: BTreeMap<AgentId, AgentId>,
@@ -508,6 +510,7 @@ impl Supervisor {
             hook: None,
             abort_hook: None,
             sandbox: Default::default(),
+            credentials: Default::default(),
             adapters: BTreeMap::new(),
             parents: BTreeMap::new(),
             skip_permissions: SkipPermissions::default(),
@@ -670,6 +673,39 @@ impl Supervisor {
     /// The node's confinement settings (ADR-0047), for checks that compare two agents' confinement.
     pub fn sandbox_policy(&self) -> &crate::sandbox::SandboxPolicy {
         &self.sandbox
+    }
+
+    /// ADR-0084: sets the secrets this node holds and the policy's `credentials.<kind>` lines.
+    pub fn set_credentials(&mut self, credentials: crate::credentials::Credentials) {
+        self.credentials = credentials;
+    }
+
+    /// ADR-0084: every kind's `credential_env`, from the manifests registered.
+    pub fn declared_credentials(&self) -> BTreeMap<String, Vec<String>> {
+        self.kinds
+            .iter()
+            .filter_map(|(k, e)| {
+                let names = &e.manifest.accounts.as_ref()?.credential_env;
+                (!names.is_empty()).then(|| (k.clone(), names.clone()))
+            })
+            .collect()
+    }
+
+    /// ADR-0084: what an agent of `kind` gets and loses in its environment.
+    fn credential_plan(&self, kind: &str) -> crate::credentials::Plan {
+        self.credentials
+            .plan(kind, &self.declared_credentials(), |n| {
+                std::env::var(n).ok()
+            })
+    }
+
+    /// ADR-0084: the variables an adapter of `kind` is given (an adapter starts from a clean environment, so nothing is scrubbed).
+    fn credential_vars(&self, kind: &str) -> Vec<(String, String)> {
+        self.credential_plan(kind)
+            .set
+            .into_iter()
+            .map(|(n, v)| (n, v.expose().to_string()))
+            .collect()
     }
 
     /// Installs the hook that gives each launching agent a mesh endpoint.
@@ -1028,6 +1064,7 @@ impl Supervisor {
                 None,
                 self.sandbox_for(&req.kind, &worktree, &spec.command[0]),
                 mesh.as_ref(),
+                self.credential_vars(&req.kind),
             );
             let (adapter, session_id, capabilities) = match launched {
                 Ok(l) => l,
@@ -1265,6 +1302,7 @@ impl Supervisor {
             None,
             self.sandbox_for(&req.kind, &worktree, &spec.command[0]),
             mesh.as_ref(),
+            self.credential_vars(&req.kind),
         );
         let (adapter, session_id, capabilities) = match result {
             Ok(started) => started,
@@ -1386,6 +1424,11 @@ impl Supervisor {
         }) else {
             return;
         };
+        let creds = self
+            .adapters
+            .get(id)
+            .map(|e| self.credential_vars(&e.agent.kind))
+            .unwrap_or_default();
         let Some(e) = self.adapters.get_mut(id) else {
             return;
         };
@@ -1399,6 +1442,7 @@ impl Supervisor {
             e.agent.session.as_deref(),
             profile,
             e.mesh.as_ref(),
+            creds,
         ) {
             Ok((adapter, session_id, capabilities)) => {
                 e.adapter = Some(adapter);
@@ -1583,6 +1627,17 @@ impl Supervisor {
                 ));
             }
         }
+        // ADR-0084: the same for the folder of stored secrets (only once it holds one): a grant that reaches it would hand a confined
+        // agent every secret in it.
+        if let (Some(profile), Some(store)) = (&cfg.sandbox, self.credentials.store()) {
+            if !store.list().is_empty() && self.sandbox.path_reachable(store.dir(), profile) {
+                return Err(SupervisorError::SandboxRefused(
+                    kind.to_string(),
+                    self.sandbox.level.name(),
+                    "secrets_reachable",
+                ));
+            }
+        }
         if let Some(k) = self.kinds.get(kind) {
             cfg.env = k
                 .manifest
@@ -1593,6 +1648,14 @@ impl Supervisor {
                 .collect();
         }
         cfg.env.extend(extras.env.iter().cloned());
+        // ADR-0084: this kind's listed secrets are set (last, so nothing else sets them), and the other kinds' credential names
+        // are left out of what the node inherited. Environment only: never an argument, never a file in the worktree.
+        let plan = self.credential_plan(kind);
+        cfg.env_remove.extend(plan.scrub);
+        for (name, value) in plan.set {
+            cfg.env.retain(|(k, _)| k != &name);
+            cfg.env.push((name, value.expose().to_string()));
+        }
         if let Some(profile) = &cfg.sandbox {
             cfg.env.extend(git_env(profile, worktree));
         }
@@ -1993,6 +2056,7 @@ impl Supervisor {
                 entry.agent.session.as_deref(),
                 profile,
                 mesh.as_ref(),
+                self.credential_vars(&entry.agent.kind),
             );
             let (adapter, session_id, capabilities) = match launched {
                 Ok(l) => l,
@@ -2419,6 +2483,7 @@ fn launch_adapter(
     resume: Option<&str>,
     mut sandbox: Option<agora_platform::Sandbox>,
     mesh: Option<&agora_adapters::inject::Endpoint>,
+    credentials: Vec<(String, String)>,
 ) -> Result<(Adapter, String, Vec<String>), SupervisorError> {
     // A real agent can be slow to answer: opencode 2.x took 2 to 5 s to initialize and 9.5 to 12 s to open a session (seen on Windows), so
     // the old 10 s ended such a start as a bare `internal` error.
@@ -2433,6 +2498,9 @@ fn launch_adapter(
         .iter()
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
+    // ADR-0084: the secrets listed for this kind (the adapter's environment is otherwise clean, so no other kind's reach it).
+    env.retain(|(k, _)| !credentials.iter().any(|(n, _)| n == k));
+    env.extend(credentials);
     // The agent's mesh server runs below the adapter, inside its confinement: offline, it may reach its own mesh socket and no other.
     if let Some(profile) = &mut sandbox {
         own_socket(profile, mesh.map(|m| m.socket.as_path()));

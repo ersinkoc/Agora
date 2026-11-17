@@ -91,3 +91,17 @@ Origin: issue #546, second half. On macOS a confined Claude Code says "Not logge
 2. Apply decision 5 (scrub other kinds' credential names) now? Proposed: yes, it removes an accidental leak.
 3. First version CLI-only on the node, with no web client entry? Proposed: yes.
 4. Which manifests get `credential_env` first? Proposed: Claude Code and Codex only, as checked above.
+
+## Built
+Built on 2026-11-17 (issue #546, second half). `[accounts] credential_env` in `agora-adapters::manifest` (`Accounts`, `credential_name_ok`; `ENGINE_VERSION` 4,
+the shipped `claude-code` and `codex` manifests say `min_engine = 4`); the store, the plan and the policy parse in `agora-node::credentials`
+(`<data>/secrets/<NAME>` through `ensure_private_dir`/`write_private`); `Policy::credentials`; the plan applied in `Supervisor::launch` (terminal agents:
+first start, helpers, restart, resume) and `launch_adapter` (adapter agents); `agora node secret` in `crates/agora/src/secretcmd.rs`; `agora doctor` checks
+`credential*`. Choices the text left open: the store is `<data>/secrets` (the node's data folder, so `--data` moves it), not `<home>/secrets`; a name is refused
+as a credential when it is one the system needs (`PATH`, `HOME`, ...) or starts with `AGORA_`, at most 8 names of 64 characters; a policy name the kind's manifest does not
+declare is not passed and `agora doctor` names it (the policy parse does not know manifests, so it is not a load-time refusal); a malformed `credentials.<kind>` line
+lists nothing for that kind and does not forbid skipping permissions (only a key that names no kind does); a value is one line of at most 8192 bytes; the node's
+environment fallback applies only to a kind whose policy line lists the name (so a kind without a line gets nothing, decision 5); a start whose profile has a grant
+reaching the secrets folder is refused once the folder holds a secret (`agent.sandbox_unavailable`, reason `secrets_reachable`); the node does not turn off core dumps. Verified by reading only: the
+owner-only file and folder on macOS and Windows (`write_private` and `ensure_private_dir` are the shared helpers); not measured: `ps eww` on macOS.
+Review follow-ups: `agora doctor` uses the same lookup as the launch path (`SecretStore::get`) and, for the environment source, its own process's environment (the node's may differ; it says so); names Windows cannot use as file names and case-only collisions are refused; the `secrets_reachable` check is at start only (restart agents after storing a secret), and with `sandbox = off` the store is readable; the output test runs the real binary and searches the node's stdout/stderr, CLI replies, an attached terminal and every file.

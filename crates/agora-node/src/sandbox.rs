@@ -455,13 +455,19 @@ impl SandboxPolicy {
         let Some(file) = &self.control_token else {
             return false;
         };
+        self.path_reachable(file, profile)
+    }
+
+    /// Whether `profile` lets the agent read or write `path` (a grant that is the path, or any folder above it, by name or by where the
+    /// names lead). Landlock cannot say "except", so such a path must lie outside every grant (ADR-0082, ADR-0084).
+    pub fn path_reachable(&self, path: &Path, profile: &agora_platform::Sandbox) -> bool {
         let grants: Vec<PathBuf> = profile
             .read
             .iter()
             .chain(profile.write.iter())
             .cloned()
             .collect();
-        under_a_grant(file, &grants)
+        under_a_grant(path, &grants)
     }
 
     /// Whether agents can be started under this policy on this machine.

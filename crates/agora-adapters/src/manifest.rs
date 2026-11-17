@@ -4,8 +4,8 @@ use std::collections::{BTreeMap, HashSet};
 
 use serde::Deserialize;
 
-/// Highest manifest `min_engine` this engine can run. 2: `[[launch.option]]` (ADR-0059). 3: `[[launch.setting]]` (ADR-0066).
-pub const ENGINE_VERSION: u32 = 3;
+/// Highest manifest `min_engine` this engine can run. 2: `[[launch.option]]` (ADR-0059). 3: `[[launch.setting]]` (ADR-0066). 4: `[accounts] credential_env` (ADR-0084).
+pub const ENGINE_VERSION: u32 = 4;
 
 /// ADR-0066: most `[[launch.setting]]`s one manifest may declare, most allowed values one may list, and most arguments one may add.
 pub const MAX_LAUNCH_SETTINGS: usize = 8;
@@ -302,6 +302,72 @@ pub struct UsageSpec {
     pub file: Option<UsageFile>,
 }
 
+/// ADR-0084: most names `[accounts] credential_env` may list, and the longest one.
+pub const MAX_CREDENTIAL_ENV: usize = 8;
+pub const MAX_CREDENTIAL_NAME: usize = 64;
+
+/// `[accounts]`: other keys (`config_dir_env`, `login`, `status`) are accepted and not read yet.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+pub struct Accounts {
+    /// ADR-0084: the environment variables the agent reads for its login, the one `agora doctor` suggests first. Only names checked on a
+    /// real version of the agent belong here.
+    #[serde(default)]
+    pub credential_env: Vec<String>,
+}
+
+/// Names a manifest may not claim as a credential: scrubbing or filling one of them would break every agent (ADR-0084).
+const RESERVED_ENV: &[&str] = &[
+    "PATH",
+    "PATHEXT",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "TERM",
+    "LANG",
+    "PWD",
+    "TMPDIR",
+    "TEMP",
+    "TMP",
+    "USERPROFILE",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "SYSTEMROOT",
+    "COMSPEC",
+    "LD_PRELOAD",
+    "LD_LIBRARY_PATH",
+    "DYLD_INSERT_LIBRARIES",
+    "DYLD_LIBRARY_PATH",
+];
+
+/// ADR-0084: a plain environment variable name that may carry a credential: an ASCII letter or `_`, then letters, digits or `_`,
+/// at most [`MAX_CREDENTIAL_NAME`] long, not one the system needs (`PATH`, `HOME`, ...) and not Agora's own (`AGORA_*`).
+pub fn credential_name_ok(name: &str) -> bool {
+    let mut chars = name.chars();
+    let first_ok = chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
+    first_ok
+        && name.len() <= MAX_CREDENTIAL_NAME
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && !name.to_ascii_uppercase().starts_with("AGORA_")
+        && !RESERVED_ENV.contains(&name.to_ascii_uppercase().as_str())
+        && !windows_device_name(name)
+}
+
+/// A name Windows cannot use as a file name, with or without an extension (`CON`, `NUL`, `COM1`, ...): refused on every system, so a
+/// store (a folder of files named by the secrets) made on one system works on all.
+fn windows_device_name(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or(name).to_ascii_uppercase();
+    matches!(
+        stem.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) || ["COM", "LPT"].iter().any(|p| {
+        stem.strip_prefix(p)
+            .is_some_and(|n| n.len() == 1 && n.as_bytes()[0].is_ascii_digit() && n != "0")
+    })
+}
+
 /// A parsed, validated manifest. Sections the engine does not interpret yet (accounts, hooks,
 /// structured) are accepted and ignored so newer manifests still load.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -339,6 +405,8 @@ pub struct Manifest {
     /// ADR-0059: `[[launch.option]]`s, in the order the start window lists them.
     #[serde(default)]
     pub launch: Launch,
+    /// ADR-0084: what the agent reads for its login (older engines ignore it).
+    pub accounts: Option<Accounts>,
 }
 
 /// Folders an agent asks to read or write when confined; `~/` stands for the home folder.
@@ -477,6 +545,16 @@ impl Manifest {
         }
         if let Some(r) = &self.resume {
             r.validate()?;
+        }
+        if let Some(a) = &self.accounts {
+            let mut seen = HashSet::new();
+            let ok = a.credential_env.len() <= MAX_CREDENTIAL_ENV
+                && a.credential_env
+                    .iter()
+                    .all(|n| credential_name_ok(n) && seen.insert(n.to_ascii_uppercase()));
+            if !ok {
+                return Err(invalid("accounts.credential_env"));
+            }
         }
         if self
             .adapter
@@ -739,13 +817,56 @@ mod launch_tests {
     }
 
     #[test]
+    fn credential_env_is_validated_and_read() {
+        let with_env = |names: &str| {
+            Manifest::parse(&format!(
+                "{}\n[accounts]\nlogin = [\"k\", \"login\"]\ncredential_env = {names}\n",
+                with("")
+            ))
+        };
+        let ok = with_env("[\"K_TOKEN\", \"_K2\"]").unwrap();
+        assert_eq!(ok.accounts.unwrap().credential_env, ["K_TOKEN", "_K2"]);
+        assert!(Manifest::parse(&with("")).unwrap().accounts.is_none());
+        let long = format!("[\"{}\"]", "A".repeat(MAX_CREDENTIAL_NAME + 1));
+        let many = format!(
+            "[{}]",
+            (0..=MAX_CREDENTIAL_ENV)
+                .map(|i| format!("\"N{i}\""))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        for bad in [
+            "[\"\"]",
+            "[\"1A\"]",
+            "[\"A=B\"]",
+            "[\"A B\"]",
+            "[\"A*\"]",
+            "[\"$A\"]",
+            "[\"PATH\"]",
+            "[\"path\"]",
+            "[\"AGORA_TOKEN\"]",
+            "[\"CON\"]",
+            "[\"nul\"]",
+            "[\"Com1\"]",
+            "[\"LPT9\"]",
+            "[\"AUX\"]",
+            "[\"A\", \"a\"]",
+            "[\"\u{00e9}\"]",
+            &long,
+            &many,
+        ] {
+            assert!(with_env(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
     fn a_manifest_newer_than_this_engine_is_refused() {
-        let src = with(SKIP).replace("min_engine = 2", "min_engine = 4");
+        let src = with(SKIP).replace("min_engine = 2", "min_engine = 5");
         assert!(matches!(
             Manifest::parse(&src),
             Err(ManifestError::EngineTooOld {
-                required: 4,
-                supported: 3
+                required: 5,
+                supported: 4
             })
         ));
     }

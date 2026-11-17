@@ -5,6 +5,7 @@ pub mod chat;
 pub mod coalesce;
 pub mod control;
 pub mod control_token;
+pub mod credentials;
 pub mod daemon;
 pub mod device_trust;
 pub mod doctor;

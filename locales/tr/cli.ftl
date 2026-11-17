@@ -35,6 +35,7 @@ cli-usage =
       agora node trust CİHAZ_ID AÇIK_ANAHTAR_HEX [--data DİZİN]
       agora node trust --from-hub [--yes --fingerprint PARMAK_İZİ]... [--include-others] [--replace] [--data DİZİN]
       agora node untrust CİHAZ_ID [--data DİZİN]
+      agora node secret set AD | list | remove AD [--data DİZİN]
       agora tui [--hub ADRES:PORT --ca DOSYA --code KOD] [--hub-dir DİZİN]
       agora update [--check] [--version X] [--release-url URL] [--release-key DOSYA] [--unsigned]
       agora adapter install AD [--registry URL] [--root-key DOSYA] [--yes] | update [AD] | list | remove AD
@@ -412,3 +413,18 @@ cli-metrics-token-state-revoked = {" "}· iptal edildi
 cli-metrics-token-state-expired = {" "}· süresi doldu
 cli-metrics-token-revoked = { $name } metrik anahtarı iptal edildi. Bir sonraki kullanımda reddedilir.
 cli-metrics-token-unknown = { $name } adında geçerli bir metrik anahtarı yok.
+doctor-credential = { $detail } başlarken bu düğümden { $names } alır (saklanan bir sır, yoksa bu denetimi çalıştıran komutun ortamı; düğümün kendi ortamı farklı olabilir). Yalnızca adlar; bu denetim girişin çalışıp çalışmadığını bilmez.
+doctor-credential-none = { $detail } için kimlik bilgisi bulunamadı: düğümün ona verecek bir şeyi yok. "Giriş yapılmadı" derse (kapalı modda çalışan bir ajan Anahtar Zinciri'nde duran girişi göremez), onun için bir jeton üretin ve şunu çalıştırın: agora node secret set { $name }; sonra düğümün politikasına "credentials.{ $detail } = { $name }" satırını ekleyin.
+doctor-credential-unlisted = Bu düğümde { $names } için bir değer var, ama politikada { $detail } türünün onu almasına izin veren "credentials.{ $detail }" satırı yok; bu yüzden geçirilmez. Başka ajanlar da onu hiç almaz.
+doctor-credential-refused = Politika { $detail } için { $names } adlarını listeliyor, ama türün tanımı bunları bildirmiyor: geçirilmezler.
+doctor-credential-malformed = Politikadaki "credentials.{ $detail }" satırı bozuk (virgülle ayrılmış düz adlar, değer yok): { $detail } türüne hiçbir şey geçirilmez.
+cli-secret-prompt = { $name } değeri (gösterilmez):
+cli-secret-set = { $name } bu makinede saklandı. Değer burada kalır: hub'a asla gönderilmez. Bir ajan türünün onu almasını istiyorsanız düğümün politikasına "credentials.TUR = { $name }" satırını ekleyin ve düğümü yeniden başlatın.
+cli-secret-removed = { $name } silindi.
+cli-secret-not-found = Burada { $name } adlı bir sır saklı değil.
+cli-secret-none = Bu makinede saklı bir sır yok.
+cli-secret-name = { $name }
+cli-secret-bad-name = Bu ad kullanılamaz: yalnızca harf, rakam ve alt çizgi kullanın, rakamla başlamasın ve sistemin ya da Agora'nın kullandığı bir ad olmasın.
+cli-secret-bad-value = Değer en çok 8192 baytlık tek bir satır olmalı, denetim karakteri içermemeli. Hiçbir şey saklanmadı.
+cli-secret-failed = Sır burada saklanamadı veya okunamadı. Düğümün veri klasörünün sizin olduğunu ve yazılabildiğini denetleyin.
+cli-secret-name-collides = Adı yalnızca büyük/küçük harfle farklı olan bir sır zaten saklı. O adı aynen kullanın ya da önce onu silin.
