@@ -93,7 +93,7 @@
   the freezes need POSIX signals, so Linux and macOS).
   `scripts/e2e-hub-restart.mjs` kills and restarts the hub many times under two nodes and a window, starts an agent on each node
   right after each start and requires the window to show it within 3 s.
-- **`agora doctor`** (implemented: `agora-node::doctor`, local checks only; the redacted bundle and hub connectivity come with the hub client): collects versions, config (redacted), connectivity checks, agent detection status,
+- **`agora doctor`** (implemented: `agora-node::doctor`, local checks only, plus the days left on this machine's hub certificate and the hub's own (`agora::certs`); the redacted bundle and hub connectivity come with the hub client): collects versions, config (redacted), connectivity checks, agent detection status,
   and recent errors into one bundle for bug reports.
   It also notes that the node reads its policy file (`<data>/policy`) only when it starts, and warns when that file changed after
   the running node started (compared with its local socket's time), since such a change waits for a restart.

@@ -113,6 +113,24 @@ doctor-policy-problems = { $detail ->
 doctor-show-secret = The file browser and the review screen show secret files (.env files, private keys, ...) in full to everyone who may look at a project (policy: files.show_secret = true).
 doctor-manifest-older = The manifests folder holds an older description of { $detail } (version { $from }; this program has { $shipped } built in) and it replaces the built-in one, so agents of this kind may not resume after a restart. Remove the file { $file } from the manifests folder: the shipped descriptions are built in.
 doctor-manifest-invalid = The agent description { $detail } could not be read.
+doctor-cert-node = This machine's hub certificate is valid for { $detail ->
+    [one] one more day
+   *[other] { $detail } more days
+}. Nothing renews it yet: join this machine again before it ends.
+doctor-cert-node-soon = This machine's hub certificate ends in { $detail ->
+    [one] one day
+   *[other] { $detail } days
+}. Nothing renews it yet: when it ends this machine cannot connect to the hub. Join it again before then: on the hub run "agora hub code", then here run "agora node enroll" with the new code.
+doctor-cert-node-expired = This machine's hub certificate has ended, so it cannot connect to the hub ({ $file }). Join it again: on the hub run "agora hub code", then here run "agora node enroll" with the new code.
+doctor-cert-hub = The hub's own certificate is valid for { $detail ->
+    [one] one more day
+   *[other] { $detail } more days
+}. It is made again each time the hub starts.
+doctor-cert-hub-soon = The hub's own certificate ends in { $detail ->
+    [one] one day
+   *[other] { $detail } days
+}. Restart the hub before then ("agora hub run", or restart its service) so it gets a new one; a hub that keeps running past the end refuses new connections.
+doctor-cert-hub-expired = The hub's own certificate has ended ({ $file }): new connections to it are refused. Restart the hub ("agora hub run", or restart its service) to get a new one.
 doctor-summary-ok = Everything Agora needs is in place.
 doctor-summary-problems = Something Agora needs is missing. Fix the items marked PROBLEM.
 
@@ -369,6 +387,12 @@ cli-machine-line = { $id } · { $state ->
     [old] old, last seen { $seen }
    *[other] offline, last seen { $seen }
 }
+cli-machine-cert-soon = { $id } · its certificate ends on { $date }{ $days ->
+    [0] , today
+    [1] , in one day
+   *[other] , in { $days } days
+}. Join it again before then (nothing renews it yet): "agora hub code" here, then "agora node enroll" on that machine.
+cli-machine-cert-expired = { $id } · its certificate ended on { $date }, so it cannot connect. Join it again: "agora hub code" here, then "agora node enroll" on that machine.
 cli-machine-unknown = The hub shows no machine named { $id }.
 cli-machines-question = Forget these machines? They leave every window; one that connects again comes back. [y/N]
 cli-machines-question-refuse = Forget these machines and refuse them if they connect again? Each would need a new join code. [y/N]
