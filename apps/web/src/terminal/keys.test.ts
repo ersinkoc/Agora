@@ -124,10 +124,10 @@ describe('older mouse reports are bytes', () => {
 
 describe('terminal settings', () => {
   it('start like a real terminal and keep only values this version knows', () => {
-    expect(DEFAULT_PREFS).toMatchObject({ lineHeight: 1, readable: false, copyOnSelect: false, gpu: true });
+    expect(DEFAULT_PREFS).toMatchObject({ lineHeight: 1, readable: false, copyOnSelect: false, gpu: false });
     expect(parsePrefs(undefined)).toEqual(DEFAULT_PREFS);
     expect(parsePrefs('not json')).toEqual(DEFAULT_PREFS);
-    expect(parsePrefs(JSON.stringify({ lineHeight: 1.1, scrollback: 10000, readable: true, copyOnSelect: true, gpu: false }))).toEqual({ lineHeight: 1.1, scrollback: 10000, readable: true, copyOnSelect: true, gpu: false });
+    expect(parsePrefs(JSON.stringify({ lineHeight: 1.1, scrollback: 10000, readable: true, copyOnSelect: true, gpu: true }))).toEqual({ lineHeight: 1.1, scrollback: 10000, readable: true, copyOnSelect: true, gpu: true });
     expect(parsePrefs(JSON.stringify({ lineHeight: 3, scrollback: 7, readable: 'yes', copyOnSelect: 1, gpu: 'yes' }))).toEqual(DEFAULT_PREFS);
   });
 });

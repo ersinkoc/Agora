@@ -9,7 +9,7 @@ import { Terminal } from '@xterm/xterm';
 import '@xterm/xterm/css/xterm.css';
 import { terminalFontFamily } from './fonts';
 import { type TerminalPrefs, terminalPrefs, terminalSize } from './prefs';
-import { clipboardOffer } from './clipboard';
+import { clipboardOffer, sanitizePaste } from './clipboard';
 import { enhancedKey, CsiUFlags, shortcut } from './keys';
 import { openLink } from './links';
 import { TouchScroll, Wheel, type WheelAction } from './wheel';
@@ -40,6 +40,8 @@ export interface TerminalRenderer {
   onClipboardOffer(cb: (text: string) => void): void;
   /** Copies the selection; false when nothing is selected. */
   copySelection(): boolean;
+  /** The pointer is over a link (its address) or left it (undefined). */
+  onLinkHover(cb: (url: string | undefined) => void): void;
   /** The program rang the bell. */
   onBell(cb: () => void): void;
   /** The find shortcut was pressed in the terminal. */
@@ -91,6 +93,7 @@ export class XtermRenderer implements TerminalRenderer {
   private findCb: (() => void) | undefined;
   private scrollCb: ((atBottom: boolean) => void) | undefined;
   private lastAtBottom = true;
+  private hoverCb: ((url: string | undefined) => void) | undefined;
 
   constructor() {
     const prefs = terminalPrefs();
@@ -115,7 +118,7 @@ export class XtermRenderer implements TerminalRenderer {
       macOptionClickForcesSelection: true,
       screenReaderMode: false,
       allowProposedApi: true,
-      linkHandler: { activate: (e, uri) => { if (e.ctrlKey || e.metaKey) openLink(uri); }, allowNonHttpProtocols: false },
+      linkHandler: { activate: (e, uri) => { if (e.ctrlKey || e.metaKey) openLink(uri); }, hover: (_e, uri) => this.hoverCb?.(uri), leave: () => this.hoverCb?.(undefined), allowNonHttpProtocols: false },
       theme: theme(),
     });
     this.term.loadAddon(this.fitAddon);
@@ -123,7 +126,7 @@ export class XtermRenderer implements TerminalRenderer {
     // Full-width and emoji characters take two cells, as they do on the node's screen (xterm's default width table is older).
     this.term.loadAddon(new Unicode11Addon());
     this.term.unicode.activeVersion = '11';
-    this.term.loadAddon(new WebLinksAddon((e, uri) => { if (e.ctrlKey || e.metaKey) openLink(uri); }));
+    this.term.loadAddon(new WebLinksAddon((e, uri) => { if (e.ctrlKey || e.metaKey) openLink(uri); }, { hover: (_e, uri) => this.hoverCb?.(uri), leave: () => this.hoverCb?.(undefined) }));
     this.term.attachCustomWheelEventHandler((e) => this.onWheel(e));
     this.term.attachCustomKeyEventHandler((e) => this.onKey(e));
     this.term.onSelectionChange(() => { if (this.copyOnSelect && this.term.hasSelection()) void this.copy(); });
@@ -228,6 +231,14 @@ export class XtermRenderer implements TerminalRenderer {
   mount(el: HTMLElement): void {
     this.term.open(el);
     this.useGpu(this.gpu);
+    // A paste from the keyboard or the menu is cleaned like the paste button's (clipboard.ts).
+    this.term.textarea?.addEventListener('paste', (e) => {
+      const text = e.clipboardData?.getData('text/plain');
+      if (text === undefined) return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      if (text) this.term.paste(sanitizePaste(text));
+    }, true);
     // A finger drags the history (the terminal's own handling does not on a touch screen).
     el.addEventListener('touchstart', (e) => { if (e.touches.length === 1) this.touch.start(e.touches[0]?.clientY ?? 0); else this.touch.end(); }, { passive: true });
     el.addEventListener('touchmove', (e) => {
@@ -257,7 +268,9 @@ export class XtermRenderer implements TerminalRenderer {
   }
 
   // A graphics-card canvas that is not as many device pixels wide as the page shows it (a browser or a driver that does not scale
-  // it for this screen) would draw nothing or a blur: the terminal then goes back to the page's drawing. Checked after layout settles.
+  // it for this screen) would draw nothing or a blur: the terminal then goes back to the page's drawing. Checked 250 ms after the
+  // renderer starts and after each resize; a browser that settles later is not caught, and the pane then shows the page's drawing only
+  // after the next resize. This is why the renderer is opt-in (prefs.ts).
   private checkGpu() {
     window.setTimeout(() => {
       const canvas = this.gl && this.term.element?.querySelector<HTMLCanvasElement>('.xterm-screen canvas:not(.xterm-link-layer)');
@@ -300,7 +313,7 @@ export class XtermRenderer implements TerminalRenderer {
   }
 
   paste(text: string): void {
-    this.term.paste(text);
+    this.term.paste(sanitizePaste(text));
   }
 
   applicationCursor(): boolean {
@@ -316,6 +329,7 @@ export class XtermRenderer implements TerminalRenderer {
   onClipboardOffer(cb: (text: string) => void): void { this.clipboardCb = cb; }
   copySelection(): boolean { if (!this.term.hasSelection()) return false; void this.copy(); return true; }
   onBell(cb: () => void): void { this.term.onBell(cb); }
+  onLinkHover(cb: (url: string | undefined) => void): void { this.hoverCb = cb; }
   onFindRequest(cb: () => void): void { this.findCb = cb; }
 
   find(text: string, backwards: boolean): boolean {

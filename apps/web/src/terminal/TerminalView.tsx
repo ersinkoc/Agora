@@ -3,6 +3,7 @@ import { binaryBytes, inputBytes } from './frames';
 import { t } from '../i18n';
 import { Icon } from '../components/Icon';
 import { FindBar } from './FindBar';
+import { OfferGate } from './clipboard';
 import { type TerminalRenderer, XtermRenderer } from './renderer';
 import type { TerminalSession, TerminalSource } from './source';
 import { terminalPrefs, terminalSize } from './prefs';
@@ -26,6 +27,10 @@ export function TerminalView({ source, label }: { source: TerminalSource; label:
   const [offer, setOffer] = useState<string | undefined>(undefined);
   const [finding, setFinding] = useState(false);
   const bell = useRef<number | undefined>(undefined);
+  const gate = useRef(new OfferGate());
+  const pendingOffer = useRef(false);
+  const [link, setLink] = useState<string | undefined>(undefined);
+  const offerRef = (v: string | undefined) => { pendingOffer.current = v !== undefined; setOffer(v); };
 
   useEffect(() => {
     const el = host.current;
@@ -35,7 +40,8 @@ export function TerminalView({ source, label }: { source: TerminalSource; label:
     r.setPrefs(terminalPrefs());
     r.mount(el);
     r.onScrollState(setAtBottom);
-    r.onClipboardOffer(setOffer);
+    r.onClipboardOffer((text) => { if (gate.current.accept(Date.now(), pendingOffer.current)) offerRef(text); });
+    r.onLinkHover(setLink);
     r.onFindRequest(() => setFinding(true));
     // The bell is a brief ring round the terminal (and nothing else: no sound, no title change).
     r.onBell(() => {
@@ -90,7 +96,7 @@ export function TerminalView({ source, label }: { source: TerminalSource; label:
       r.dispose();
       renderer.current = undefined;
       session.current = undefined;
-      setAtBottom(true); setOffer(undefined); setFinding(false);
+      setAtBottom(true); offerRef(undefined); setFinding(false); setLink(undefined);
     };
   // The translated ARIA label can change without disposing the renderer or reconnecting the terminal. A change of touch screen (a
   // tablet's keyboard attached) moves the terminal into or out of the key bar's frame, so it is mounted again.
@@ -101,21 +107,24 @@ export function TerminalView({ source, label }: { source: TerminalSource; label:
     <div className="terminal-frame">
       <div ref={host} className="terminal" role="region" aria-label={label} dir="ltr" />
       {finding && <FindBar find={(q, back) => renderer.current?.find(q, back) ?? false} onClose={closeFind} />}
-      {offer !== undefined && (
-        <div role="alert" className="terminal-offer">
-          <p className="terminal-offer__text">{t('terminal-copy-offer')}</p>
-          <p className="terminal-offer__preview" dir="auto">{offer.length > 120 ? `${offer.slice(0, 120)}…` : offer}</p>
-          <div className="flex gap-2">
-            <button type="button" className="button" onClick={() => { void navigator.clipboard?.writeText(offer).catch(() => undefined); setOffer(undefined); renderer.current?.focus(); }}>{t('terminal-copy-offer-copy')}</button>
-            <button type="button" className="button" onClick={() => { setOffer(undefined); renderer.current?.focus(); }}>{t('terminal-copy-offer-ignore')}</button>
+      {link !== undefined && <p className="terminal-link" dir="ltr">{link}</p>}
+      <div className="terminal-float">
+        {!atBottom && (
+          <button type="button" className="terminal-jump" onClick={() => renderer.current?.scrollToBottom()}>
+            <Icon name="chevron" className="size-4 rotate-90" />{t('terminal-jump-bottom')}
+          </button>
+        )}
+        {offer !== undefined && (
+          <div role="status" className="terminal-offer">
+            <p className="terminal-offer__text">{t('terminal-copy-offer')} <span className="text-muted">{t('terminal-copy-offer-length', { count: offer.length })}</span></p>
+            <pre className="terminal-offer__preview" dir="ltr" tabIndex={0}>{offer}</pre>
+            <div className="flex gap-2">
+              <button type="button" className="button" onClick={() => { void navigator.clipboard?.writeText(offer).catch(() => undefined); offerRef(undefined); renderer.current?.focus(); }}>{t('terminal-copy-offer-copy')}</button>
+              <button type="button" className="button" onClick={() => { offerRef(undefined); renderer.current?.focus(); }}>{t('terminal-copy-offer-ignore')}</button>
+            </div>
           </div>
-        </div>
-      )}
-      {!atBottom && (
-        <button type="button" className="terminal-jump" onClick={() => renderer.current?.scrollToBottom()}>
-          <Icon name="chevron" className="size-4 rotate-90" />{t('terminal-jump-bottom')}
-        </button>
-      )}
+        )}
+      </div>
     </div>
   );
   if (!touch) return view;

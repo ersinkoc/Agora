@@ -29,8 +29,8 @@ done in a web page). "Now" is the state after this change.
 | --- | --- | --- | --- | --- |
 | Mouse modes 9, 1000, 1002, 1003 | the program gets presses, releases, drags, motion as it asked | xterm.js reports all four; SGR press, drag (`<32;..M`) and any-motion (`<35;..M`) arrived intact (lab) | ok | unchanged; real program through a PTY receives click, drag, wheel (check 1-4) |
 | SGR (1006) encoding | `ESC [ < b ; x ; y M/m` | correct | ok | unchanged |
-| Default (X10) and UTF-8 (1005) encodings | `ESC [ M` and three raw bytes | **nothing was sent**: xterm.js hands these to `onBinary`, which the renderer never subscribed to (`renderer.ts:106` only `onData`; lab: click with mode 1000 and no 1006 sent no bytes) | **wrong** | `onBinary` is sent as raw bytes (`binaryBytes`, a column over 95 stays one byte); check 5 |
-| urxvt (1015) and UTF-8 (1005) | extended coordinates | xterm.js has no such encoding; they fall back to the default one | partial | unchanged (a program that knows only 1015 sees columns up to 223; programs that matter use 1006) |
+| Default (X10) encoding | `ESC [ M` and three raw bytes | **nothing was sent**: xterm.js hands these to `onBinary`, which the renderer never subscribed to (`renderer.ts:106` only `onData`; lab: click with mode 1000 and no 1006 sent no bytes) | **wrong** | `onBinary` is sent as raw bytes (`binaryBytes`, a column over 95 stays one byte); check 5. This is the X10 form only |
+| urxvt (1015) and UTF-8 (1005) encodings | extended coordinates | **not supported**: xterm.js has no such encodings; a program that asks for them gets the default (X10) bytes, which it will misread | partial | unchanged (a program that knows only 1015 sees columns up to 223; programs that matter use 1006) |
 | Wheel to a program that has the mouse on | buttons 4 and 5, once per notch | one SGR 64/65 per notch (lab) | ok | a trackpad swipe no longer floods the program: one report per row height of swipe (`wheel.ts`, tested) |
 | Wheel with no mouse mode, main screen | history scrolls, three lines a notch | three lines per 100 px notch (lab: `top line 2974 -> 2971`) | ok | unchanged (xterm.js's scroll bar does it; the history stays put when new output arrives, see below) |
 | Wheel over the alternate screen with no mouse mode (mode 1007) | arrow keys, several per notch | xterm.js sent **one** arrow per notch, so a pager or `man` crawled | partial | three arrows per notch, in the cursor-key form the program asked for (DECCKM), never more than the rows; check 2 |
@@ -51,9 +51,9 @@ done in a web page). "Now" is the state after this change.
 | Copy | Ctrl+Shift+C (Cmd+C on a Mac); Ctrl+C is the program's | **no shortcut**: Ctrl+Shift+C copied nothing (lab: clipboard empty) | **wrong** | Ctrl+Shift+C, Ctrl+Insert, Cmd+C copy the selection; Ctrl+C still interrupts; check 2 |
 | Copy on select | X11 terminals do it for the primary selection | none | partial | a setting (off by default: the browser has no primary selection, so it would replace the clipboard) |
 | Selection colour | clearly visible | `--surface-2` on `--surface-0`: nearly invisible | **wrong** | the accent at 40% (20% when the terminal is not focused); screenshots |
-| Paste, bracketed (2004) | wraps in `ESC [ 200 ~` when asked | works (lab) | ok | unchanged (check 2) |
-| OSC 52 (a program writes the clipboard) | applied silently by most | ignored | partial | **policy**: a program's output is untrusted (threat model), and clipboard text ends up in a shell, so it is never written by itself: the window shows what was offered with Copy / Ignore, and copies only on Copy. A request to read the clipboard is never answered |
-| OSC 8 links and plain addresses | click or Ctrl+click opens | OSC 8 only, through xterm.js's default handler (a confirm box, then opens whatever the scheme); plain addresses not linked | partial | OSC 8 **and** plain addresses are links; Ctrl/Cmd+click opens, a plain click never does (it may start a selection); only `http` and `https`, no credentials, no opener (`links.ts`); a `javascript:` link does nothing, not even a prompt; check 2 |
+| Paste, bracketed (2004) | wraps in `ESC [ 200 ~` when asked | works, but **pasted text was not cleaned**: `a ESC[201~ rm -rf ~ LF b` ended the bracket early and the rest reached the program as typed (found in review, reproduced) | **wrong** | every paste (keyboard, menu, the touch key bar) loses ESC and the other control characters except tab and line breaks (`sanitizePaste`, tested with that payload; check 2) |
+| OSC 52 (a program writes the clipboard) | applied silently by most | ignored | partial | **policy**: a program's output is untrusted (threat model), and clipboard text ends up in a shell, so it is never written by itself: the window shows the **whole** text (up to 8192 characters, with its length) with Copy / Ignore, and copies only on Copy. An offer with any control, line-break, bidirectional or invisible character is dropped, a new offer never replaces a pending one, and at most one is shown per 2 s. A request to read the clipboard is never answered |
+| OSC 8 links and plain addresses | click or Ctrl+click opens | OSC 8 only, through xterm.js's default handler (a confirm box, then opens whatever the scheme); plain addresses not linked | partial | OSC 8 **and** plain addresses are links; Ctrl/Cmd+click opens, a plain click never does (it may start a selection); only `http` and `https`, no credentials, opened with `noopener,noreferrer` (`links.ts`, tested); the address is shown at the terminal's bottom edge while the pointer is over a link; a `javascript:` link does nothing, not even a prompt; check 2 |
 | Title (OSC 0 / 2) | the window title | not used, `document.title` untouched | ok | unchanged (never raw into the page); check 2 |
 | Bell | a sound or a flash | nothing | partial | a brief ring round the terminal (no sound) |
 | Find in history | the terminal's find | none | **wrong** | Ctrl+Shift+F (Cmd+F on a Mac): find bar, Enter / Shift+Enter, Esc; matches are highlighted |
@@ -73,7 +73,7 @@ done in a web page). "Now" is the state after this change.
 | Feature | Real terminal | Agora before | Verdict | Now |
 | --- | --- | --- | --- | --- |
 | Row height | 1.0 of the font's height | 1.1 (`renderer.ts:55`): rows 18 px for a 17 px font | **wrong** | 1.0 by default; 1.1 and 1.2 in settings |
-| Box-drawing and block characters | join exactly, drawn to the cell | **gaps**: at 1.1 a block of full-block characters had 7.4% of its area empty (horizontal gaps and coloured vertical seams), at 1.0 still 1.9% (`blocks-page-1.1.png`) | **wrong** | the graphics-card renderer (`@xterm/addon-webgl`) draws them itself: 0.00% empty at every size measured (13, 14, 15 px); it is on by default with a setting to turn it off, and it falls back to the page's own drawing when the browser refuses a context or sizes the canvas wrongly |
+| Box-drawing and block characters | join exactly, drawn to the cell | **gaps**: at 1.1 a block of full-block characters had 7.4% of its area empty (horizontal gaps and coloured vertical seams), at 1.0 still 1.9% (`blocks-page-1.1.png`) | **wrong** | the graphics-card renderer (`@xterm/addon-webgl`), when switched on, draws them itself: 0.00% empty at every size measured (13, 14, 15 px); off, the default row height 1.0 leaves 1.6-1.9%; it is **opt-in** (Terminal settings, off by default until a person has seen it on a real scaled screen), and it falls back to the page's own drawing when the browser refuses a context or sizes the canvas wrongly |
 | Colours: true colour, 256, bright bold | exact | exact | ok | unchanged |
 | Minimum contrast | none: a program's colours are drawn as chosen | forced `minimumContrastRatio: 4` (`renderer.ts:57`) lifted any colour; `38;2;30;30;70` was drawn as `110,110,135` | **wrong** | off by default; "Make hard-to-read colours readable" in settings |
 | Wide characters and emoji | two cells, as on the node's screen | **one cell** (xterm.js' default width table is older): `A😀B` put `B` in the wrong column, so every row with an emoji was misaligned against the node | **wrong** | the Unicode 11 width table is on; an emoji is 15.6 px = two cells; check 3 |
@@ -82,7 +82,7 @@ done in a web page). "Now" is the state after this change.
 | Letter spacing | 0 | 0 | ok | unchanged |
 | Cursor shapes and blink, DECSCUSR | block, bar, underline, steady or blinking | all six forms apply (lab) | ok | unchanged |
 | Synchronized output (2026) | a frame appears whole | works (nothing painted while held) | ok | used for the repaint below |
-| Fractional zoom / high-density screens | crisp | the page's text drawing: crisp (cell 7.80 x 17.59 css px at 1.25, 21.99 device px high) | ok | the graphics-card renderer could not be shown on a scaled screen in headless Chromium (its canvas stays at 1x and draws nothing there); the window checks the canvas size and falls back, and **a person should look at it on a real scaled screen before trusting the default** |
+| Fractional zoom / high-density screens | crisp | the page's text drawing: crisp (cell 7.80 x 17.59 css px at 1.25, 21.99 device px high) | ok | the graphics-card renderer could not be shown on a scaled screen in headless Chromium (its canvas stays at 1x and draws nothing there); the window checks the canvas size and falls back, and **a person should look at it on a real scaled screen before turning it on by default** |
 | Repaint on reconnect or after falling behind | no flicker | **an empty screen was painted between the clear and the repaint**: the renderer did `reset()` and then wrote the snapshot, and a frame sampler saw 40 blank frames in 40 snapshots | **wrong** | one write wrapped in synchronized output, no reset; 0 blank frames in the same run. The window's history and modes survive a repaint |
 | Fit: columns and rows | whole cells that fit | 111 x 26 in 900 x 500: 18 px of width unused (the scrollbar strip plus the part of a cell), no off-by-one (lab) | ok | unchanged |
 | Smaller terminal in a bigger window (ADR-0072) | letterbox | top left, a hairline at its right and bottom edge, the pane's surface around it | ok | unchanged (`letterbox-{dark,light}.png`) |
@@ -95,12 +95,13 @@ Files: `apps/web/src/terminal/` (`renderer.ts`, `wheel.ts`, `links.ts`, `clipboa
 - New dependencies, all from the xterm.js project, all MIT, versions pinned like `@xterm/xterm`: `@xterm/addon-webgl` (exact box and
   block drawing), `@xterm/addon-unicode11` (character widths that match the node), `@xterm/addon-search` (find),
   `@xterm/addon-web-links` (plain addresses). They load with the terminal chunk, which is already lazy.
-- **The renderer decision in `docs/design/performance.md` is revisited**: it kept the page's drawing because the graphics-card
-  renderer was slower under software GL (32 against 52 MB/s). Those numbers stand and are far above what any terminal produces; what
-  was not measured then is whether the drawing is right, and it is not (see above). The graphics-card renderer is therefore the
-  default, with a setting to turn it off. Flip `DEFAULT_PREFS.gpu` in `prefs.ts` to revert the default.
+- **The renderer decision in `docs/design/performance.md` stands as the default**: the page's own drawing. The graphics-card renderer is
+  an opt-in setting, because it could not be confirmed on a real GPU or a scaled screen, a browser allows about sixteen graphics contexts
+  per page (with more panes the oldest lose it and go back to the page's drawing, which blanks that pane for a moment), and the
+  fallback check (250 ms after start and after each resize) cannot catch a browser that settles later. What it fixes is real (see
+  Rendering). Flip `DEFAULT_PREFS.gpu` in `prefs.ts` once it is confirmed.
 - Settings the user can change (browser-local, `agora.terminal.prefs`): row height, history, readable colours, copy on select, graphics
-  card. They sit in a "Terminal settings" menu in the pane's header, next to the text size.
+  card (off by default). They sit in a "Terminal settings" menu in the pane's header, next to the text size.
 
 ## Phase 3: what the web client cannot fix
 

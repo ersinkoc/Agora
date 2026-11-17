@@ -21,13 +21,14 @@ export interface TerminalPrefs {
   readable: boolean;
   /** Copy the selection to the clipboard as soon as it is made (a terminal on X11 does it for the primary selection). */
   copyOnSelect: boolean;
-  /** Draw with the graphics card: box-drawing and block characters are exact (the page's text drawing leaves gaps). */
+  /** Draw with the graphics card: box-drawing and block characters are exact (the page's text drawing leaves gaps). Opt-in until it is
+   confirmed on a real scaled screen; a browser allows about sixteen graphics contexts per page. */
   gpu: boolean;
 }
 
 export const LINE_HEIGHTS: readonly TerminalPrefs['lineHeight'][] = [1, 1.1, 1.2];
 export const SCROLLBACKS: readonly TerminalPrefs['scrollback'][] = [1000, 2000, 5000, 10000, 20000];
-export const DEFAULT_PREFS: TerminalPrefs = { lineHeight: 1, scrollback: 5000, readable: false, copyOnSelect: false, gpu: true };
+export const DEFAULT_PREFS: TerminalPrefs = { lineHeight: 1, scrollback: 5000, readable: false, copyOnSelect: false, gpu: false };
 
 const PREFS_KEY = 'agora.terminal.prefs';
 

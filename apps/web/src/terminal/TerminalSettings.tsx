@@ -11,15 +11,21 @@ export function TerminalSettings() {
   const p: TerminalPrefs = useSyncExternalStore(subscribe, terminalPrefs, terminalPrefs);
   const [open, setOpen] = useState(false);
   const box = useRef<HTMLSpanElement>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
+  // Closing by Esc (from anywhere while it is open) gives the focus back to the button; a press outside closes it without taking the
+  // focus from what was pressed.
+  const close = (refocus: boolean) => { setOpen(false); if (refocus) trigger.current?.focus(); };
   useEffect(() => {
     if (!open) return;
-    const away = (e: MouseEvent) => { if (!box.current?.contains(e.target as Node)) setOpen(false); };
-    document.addEventListener('mousedown', away);
-    return () => document.removeEventListener('mousedown', away);
+    const away = (e: Event) => { if (!box.current?.contains(e.target as Node)) setOpen(false); };
+    const esc = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.preventDefault(); close(true); } };
+    document.addEventListener('pointerdown', away, true);
+    document.addEventListener('keydown', esc, true);
+    return () => { document.removeEventListener('pointerdown', away, true); document.removeEventListener('keydown', esc, true); };
   }, [open]);
   return (
-    <span ref={box} className="terminal-menu" onKeyDown={(e) => { if (e.key === 'Escape') setOpen(false); }}>
-      <button type="button" className="ide-iconbtn" aria-expanded={open} aria-haspopup="true" aria-label={t('terminal-settings')} title={t('terminal-settings')} onClick={() => setOpen(!open)}><Icon name="more" /></button>
+    <span ref={box} className="terminal-menu">
+      <button ref={trigger} type="button" className="ide-iconbtn" aria-expanded={open} aria-haspopup="true" aria-label={t('terminal-settings')} title={t('terminal-settings')} onClick={() => (open ? close(true) : setOpen(true))}><Icon name="more" /></button>
       {open && (
         <div role="group" aria-label={t('terminal-settings')} className="terminal-menu__panel">
           <label className="grid gap-1">

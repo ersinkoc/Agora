@@ -13,7 +13,9 @@ export function safeLink(uri: string): string | undefined {
   return u.href;
 }
 
+export const LINK_FEATURES = 'noopener,noreferrer';
+
 export function openLink(uri: string): void {
   const href = safeLink(uri);
-  if (href) window.open(href, '_blank', 'noopener,noreferrer');
+  if (href) window.open(href, '_blank', LINK_FEATURES);
 }

