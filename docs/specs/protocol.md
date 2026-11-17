@@ -729,9 +729,9 @@ Shared vectors for the four signed messages and the fingerprint, checked by the 
 
 ### Pairing (ADR-0065)
 
-Schema only so far (`schema/agora/v1/pairing.proto`, `docs/specs/pairing.md` is the design); no hub or node sends or handles these messages
-yet. All additions; nothing published changed. Capability `pairing.v1` is offered by both the hub and the node and means "speaks these
-messages"; it gates nothing until the code exists. A peer that gets a pairing command it does not handle answers
+The hub answers these messages (`schema/agora/v1/pairing.proto`, `docs/specs/pairing.md` is the design and section 12 says how the hub core
+behaves); no node sends them yet. All additions; nothing published changed. Capability `pairing.v1` is offered by both the hub and the node
+and means "speaks these messages"; a hub that cannot pair (it does not know its certificate's hash) answers `protocol.capability_missing`. A peer that gets a pairing command it does not handle answers
 `protocol.capability_missing`, as for any command it does not know.
 
 - **Commands** (`CommandRequest` fields): `PairOpen` (94), `PairClose` (95), `PairStatus` (96), `PairApprove` (97: `pair_id`, `replace`),
@@ -745,6 +745,7 @@ messages"; it gates nothing until the code exists. A peer that gets a pairing co
   not a message. `BrowserPairRequest`, `BrowserPairCreated` (the poll token is returned once, here), `BrowserPairPoll` and
   `BrowserPairState` are proto3 JSON over HTTP; the poll token travels in a request header and the session cookie in `Set-Cookie`. A
   browser approves or denies with `PairApprove` and `PairDeny`. Enums `PairKind` (machine, browser) and `PairOutcome` (approved, denied,
-  expired, closed). How the notices reach a window is decided with the hub's code.
+  expired, closed). The hub sends the two notices to owner sessions only, on the events stream, as frame kinds `PAIR_REQUESTED` (5) and
+  `PAIR_DECIDED` (6) (`agora_protocol::frame::kinds`), memory only; other clients never receive them and clients ignore kinds they do not know.
 - **Errors**: `pair.closed`, `pair.limit` (`seconds`), `pair.expired`, `pair.mismatch`, `pair.denied`, `pair.unknown`, `pair.state`
   (`state`), `pair.insecure_transport`, and the machine-local, never-sent `pair.name_unverified` (`name`); see `error-codes.md`.

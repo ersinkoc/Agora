@@ -763,7 +763,15 @@ pub fn forwardable(req: &v1::CommandRequest) -> Result<&str, Error> {
             | command_request::Command::DeviceList(_)
             | command_request::Command::DeviceEndorse(_)
             | command_request::Command::DeviceRevoke(_)
-            | command_request::Command::DeviceAskApproval(_),
+            | command_request::Command::DeviceAskApproval(_)
+            // ADR-0065: the owner's switch and a machine's pairing messages are the hub's own, never a node's.
+            | command_request::Command::PairOpen(_)
+            | command_request::Command::PairClose(_)
+            | command_request::Command::PairStatus(_)
+            | command_request::Command::PairApprove(_)
+            | command_request::Command::PairDeny(_)
+            | command_request::Command::PairRequest(_)
+            | command_request::Command::PairReveal(_),
         ) => Err(Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "command")),
         Some(_) if req.target_node.is_empty() => {
             Err(Error::new(ErrorCode::NodeUnknown).with("node_id", ""))
@@ -783,6 +791,24 @@ mod tests {
             idempotency_key: "k".into(),
             target_node: target.into(),
             command: Some(command_request::Command::AgentList(v1::AgentList::default())),
+        }
+    }
+
+    #[test]
+    fn pairing_commands_are_the_hubs_own_and_never_forwarded_to_a_node() {
+        use command_request::Command as C;
+        for c in [
+            C::PairOpen(v1::PairOpen {}),
+            C::PairClose(v1::PairClose {}),
+            C::PairStatus(v1::PairStatus {}),
+            C::PairApprove(v1::PairApprove::default()),
+            C::PairDeny(v1::PairDeny::default()),
+            C::PairRequest(v1::PairRequest::default()),
+            C::PairReveal(v1::PairReveal::default()),
+        ] {
+            let mut r = req("laptop");
+            r.command = Some(c);
+            assert!(forwardable(&r).is_err());
         }
     }
 

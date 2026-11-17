@@ -31,3 +31,10 @@ Both are the same problem: a new party must prove to the hub's owner that it is 
 
 ## Consequences
 New `agora pair open|close|status` and the join screen (`agora join` with discovery), hub "Add a machine" card in web and TUI, a PAKE step before enrollment, a discovery responder in the hub (std UDP) and a finder in the node, (later, only for the typed number) the `spake2` dependency, tests (a hub and a node in-process, a mismatched number, a denied card, a replayed handshake, a MITM that cannot learn the CA), docs ("Connect a second machine in 30 seconds"), threat model (a LAN attacker can see that a hub is open for pairing and can try 3 numbers; the number is shown only to the owner; the pairing window closes itself).
+
+## Built
+Step 2 (hub core), 2026-11-17: the pairing state machine and the machine-pairing handlers in `agora-hub` (`pairing.rs`, `pairing_net.rs`), the owner's
+`PairOpen`, `PairClose`, `PairStatus`, `PairApprove` and `PairDeny`, the cards to owner windows, the certificate at approval, audit rows, limits and tests
+over the hub's real TLS (`crates/agora/tests/pair_hub.rs`). Not yet built: `agora pair`, provisioning the hub certificate's names, discovery, the node's
+side, the push notice and the browser path. See `docs/specs/pairing.md` section 12.
+

@@ -116,11 +116,7 @@ impl Ca {
     /// Signs a node's CSR as `node_id`, valid for client authentication only.
     pub fn issue_node(&self, node_id: &str, csr_pem: &str) -> Result<IssuedCert, CaError> {
         // "hub" is the producer id of facts the hub itself records (a node going offline); no node may use it.
-        if node_id == RESERVED_HUB_ID
-            || node_id.is_empty()
-            || node_id.len() > 64
-            || !node_id.chars().all(valid_id_char)
-        {
+        if !valid_node_id(node_id) {
             return Err(CaError("node id must be 1-64 of [A-Za-z0-9._-]".into()));
         }
         let mut csr = CertificateSigningRequestParams::from_pem(csr_pem)?;
@@ -201,6 +197,23 @@ pub fn expiry(not_after_secs: i64, now_secs: i64) -> Expiry {
     }
 }
 
+/// The rules for a node id: 1-64 of `[A-Za-z0-9._-]`, and not `hub` (the producer id of facts the hub itself records).
+pub fn valid_node_id(node_id: &str) -> bool {
+    node_id != RESERVED_HUB_ID
+        && !node_id.is_empty()
+        && node_id.len() <= 64
+        && node_id.chars().all(valid_id_char)
+}
+
+/// The DER of a CSR given as PEM, after checking its signature (the requester holds the key it asks to be certified). Pairing
+/// hashes this, so the hash is of the bytes the machine signed, not of its text.
+pub fn csr_der(csr_pem: &str) -> Result<Vec<u8>, CaError> {
+    CertificateSigningRequestParams::from_pem(csr_pem)?;
+    let (_, pem) =
+        x509_parser::pem::parse_x509_pem(csr_pem.as_bytes()).map_err(|e| CaError(e.to_string()))?;
+    Ok(pem.contents)
+}
+
 fn valid_id_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')
 }
@@ -225,6 +238,52 @@ mod tests {
             .unwrap()
             .1
             .contents
+    }
+
+    /// The identity of an issued node certificate is the hub's: a CSR may ask for any subject, any alternative names, CA powers or a
+    /// server's key usage, and none of it reaches the certificate (pairing and enrollment both issue through `issue_node`).
+    #[test]
+    fn the_certificate_carries_the_hub_chosen_identity_whatever_the_csr_asks_for() {
+        use rcgen::{
+            BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, SanType,
+        };
+        let ca = Ca::generate("hub ca").unwrap();
+        let key = KeyPair::generate().unwrap();
+        let mut p =
+            CertificateParams::new(vec!["evil.example".to_string(), "hub".to_string()]).unwrap();
+        p.subject_alt_names
+            .push(SanType::IpAddress("10.0.0.1".parse().unwrap()));
+        p.distinguished_name = DistinguishedName::new();
+        p.distinguished_name.push(DnType::CommonName, "hub");
+        p.distinguished_name
+            .push(DnType::OrganizationName, "evil corp");
+        p.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        p.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+        let csr = p.serialize_request(&key).unwrap().pem().unwrap();
+        // The CSR really carries what the attacker chose (so the test would notice if it stopped doing so).
+        let asked = CertificateSigningRequestParams::from_pem(&csr).unwrap();
+        assert_eq!(asked.params.subject_alt_names.len(), 3);
+
+        let issued = ca.issue_node("laptop", &csr).unwrap();
+        let der = parse(&issued.cert_pem);
+        let (_, cert) = X509Certificate::from_der(&der).unwrap();
+        // Subject: exactly the node id the hub chose, nothing else.
+        let cns: Vec<_> = cert
+            .subject()
+            .iter_common_name()
+            .map(|c| c.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(cns, ["laptop"]);
+        assert_eq!(cert.subject().iter_attributes().count(), 1);
+        // Alternative names: none at all (the hub sets the empty list).
+        assert!(
+            cert.subject_alternative_name().unwrap().is_none(),
+            "an alternative name from the CSR reached the certificate"
+        );
+        // Powers: client authentication only, and not a CA.
+        let eku = cert.extended_key_usage().unwrap().unwrap().value;
+        assert!(eku.client_auth && !eku.server_auth && !eku.any && !eku.code_signing);
+        assert!(!cert.is_ca());
     }
 
     #[test]

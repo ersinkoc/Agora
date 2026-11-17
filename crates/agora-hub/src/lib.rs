@@ -12,6 +12,8 @@ pub mod metrics;
 pub mod metrics_token;
 pub mod notifier;
 pub mod notify;
+pub mod pairing;
+pub mod pairing_net;
 pub mod passkey;
 pub mod password;
 pub mod projection;
