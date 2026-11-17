@@ -4,7 +4,7 @@ import { decodeText } from '../net/files';
 import { markRanges } from '../net/highlight';
 import { useHighlightedFile, useHighlightedLines } from '../highlight/useHighlight';
 import {
-  baseName, byFolder, readDiff, changedSpan, lineEndingOnly, countByStatus, fileLines, gapLines, gapsOf, isTruncated, matchesFile, pairedLines, parseDiff,
+  baseName, byFolder, firstVisible, readDiff, changedSpan, lineEndingOnly, countByStatus, fileLines, gapLines, gapsOf, isTruncated, matchesFile, pairedLines, parseDiff,
   sameChange, splitRows, diffText, type DiffFile, type DiffLine, type DiffSource, type DiffStatus, type Gap,
 } from '../net/diff';
 import { Rounds } from '../net/rounds';
@@ -30,14 +30,14 @@ const SPAN_LIMIT = 2000; // longest line whose changed part is marked
 const readLayout = (): Layout => { try { return localStorage.getItem(LAYOUT_KEY) === 'split' ? 'split' : 'unified'; } catch { return 'unified'; } };
 const saveLayout = (l: Layout) => { try { localStorage.setItem(LAYOUT_KEY, l); } catch { /* a private window keeps it for this view only */ } };
 
-const STATUS_CLASS: Record<DiffStatus, string> = { added: 'text-finished', deleted: 'text-needs-you', modified: 'text-working', renamed: 'text-accent' };
+const STATUS_CLASS: Record<DiffStatus, string> = { added: 'text-finished', deleted: 'text-removed', modified: 'text-working', renamed: 'text-accent' };
 
 export function StatusBadge({ status }: { status: DiffStatus }) {
-  return <span className={`w-4 flex-none text-center font-mono text-[0.6875rem] font-bold ${STATUS_CLASS[status]}`} title={t(`changes-status-${status}`)}>{t(`changes-badge-${status}`)}</span>;
+  return <span className={`w-4 flex-none text-center font-mono text-xs font-bold ${STATUS_CLASS[status]}`} title={t(`changes-status-${status}`)}>{t(`changes-badge-${status}`)}</span>;
 }
 
 function Counts({ added, removed }: { added: number; removed: number }) {
-  return <span className="flex-none font-mono text-[0.6875rem]"><span className="text-finished">+{added}</span> <span className="text-needs-you">−{removed}</span></span>;
+  return <span className="flex-none font-mono text-xs"><span className="text-finished">+{added}</span> <span className="text-removed">−{removed}</span></span>;
 }
 
 export function ChangesView({ load, read, changed }: {
@@ -77,7 +77,7 @@ export function ChangesView({ load, read, changed }: {
         if (!live) return;
         const files = readDiff(text);
         setDiff({ files, truncated: isTruncated(diffText(text)) });
-        setSelected((s) => (s !== undefined && files.some((f) => f.path === s) ? s : byFolder(files)[0]?.files[0]?.path));
+        setSelected((s) => (s !== undefined && files.some((f) => f.path === s) ? s : firstVisible(files)));
       },
       () => { if (live) setDiff('failed'); },
     );
@@ -247,7 +247,7 @@ export function ChangesView({ load, read, changed }: {
                     className={`ide-row cursor-pointer ${g.folder !== '' ? 'ps-7' : ''}`}>
                     <StatusBadge status={f.status} />
                     <span className={`min-w-0 flex-1 truncate font-mono text-xs ${f.status === 'deleted' ? 'text-muted line-through' : ''}`} dir="ltr">{baseName(f.path)}</span>
-                    {f.partial && <span className="text-[0.6875rem] text-needs-you" title={t('changes-partial')}>…</span>}
+                    {f.partial && <span className="text-xs text-needs-you" title={t('changes-partial')}>…</span>}
                     {f.secret && <span className="flex-none text-muted" title={t('changes-secret')}><Icon name="lock" className="size-3" /><span className="sr-only">{t('changes-secret')}</span></span>}
                     {!f.binary && <Counts added={f.added} removed={f.removed} />}
                   </div>
@@ -283,7 +283,7 @@ export function ChangesView({ load, read, changed }: {
           )}
         </div>
       </div>
-      <p className="m-0 hidden flex-none items-center gap-2 border-t border-line px-3 py-1 text-[0.6875rem] text-muted md:flex">
+      <p className="m-0 hidden flex-none items-center gap-2 border-t border-line px-3 py-1 text-xs text-muted md:flex">
         <span className="ide-kbd">j</span><span className="ide-kbd">k</span>{t('changes-keys')}
       </p>
     </div>
@@ -418,8 +418,10 @@ export function FileBody({ file, layout, wrap, text, opened, canExpand, onOpenGa
   );
 }
 
-const ROW_BG: Record<DiffLine['kind'], string> = { add: 'bg-finished/12', del: 'bg-needs-you/12', ctx: '', hunk: 'bg-surface-2 text-muted' };
-const MARK_BG: Record<'add' | 'del', string> = { add: 'bg-finished/30', del: 'bg-needs-you/30' };
+const ROW_BG: Record<DiffLine['kind'], string> = { add: 'bg-finished/12', del: 'bg-removed/12', ctx: '', hunk: 'bg-surface-2 text-muted' };
+const MARK_BG: Record<'add' | 'del', string> = { add: 'bg-finished/30', del: 'bg-removed/30' };
+// The left bar of a changed line, with the +/- glyph in it: removal is shape and red, never colour alone and never amber.
+const ROW_BAR: Record<DiffLine['kind'], string> = { add: 'diff-bar-add', del: 'diff-bar-del', ctx: '', hunk: '' };
 
 type HtmlOf = (l: DiffLine) => string | undefined;
 
@@ -513,7 +515,7 @@ function Code({ line, pairs, htmlOf }: { line: DiffLine; pairs: Map<DiffLine, Di
         : marked && span
           ? <>{line.text.slice(0, span[0])}<mark className={markCls}>{line.text.slice(span[0], span[1])}</mark>{line.text.slice(span[1])}</>
           : text}
-      {line.noEol && <span className="ms-2 select-none font-sans text-[0.6875rem] text-muted" title={t('changes-no-eol')}>⏎̸</span>}
+      {line.noEol && <span className="ms-2 select-none font-sans text-xs text-muted" title={t('changes-no-eol')}>⏎̸</span>}
     </>
   );
 }
@@ -534,9 +536,9 @@ function UnifiedRow({ line, pairs, width, htmlOf }: { line: DiffLine; pairs: Map
   if (line.kind === 'hunk') return <div className={`${ROW_BG.hunk} px-3 py-0.5`}>{line.text}</div>;
   return (
     <div className={`grid ${ROW_BG[line.kind]}`} style={{ gridTemplateColumns: `${width} ${width} 1.5rem minmax(0,1fr)` }}>
-      <span className={gutter}>{line.oldNo ?? ''}</span>
+      <span className={`${gutter} ${ROW_BAR[line.kind]}`}>{line.oldNo ?? ''}</span>
       <span className={gutter}>{line.newNo ?? ''}</span>
-      <span className={`select-none text-center ${line.kind === 'add' ? 'text-finished' : line.kind === 'del' ? 'text-needs-you' : 'text-muted'}`} aria-hidden>{line.kind === 'add' ? '+' : line.kind === 'del' ? '−' : ''}</span>
+      <span className={`select-none text-center ${line.kind === 'add' ? 'text-finished' : line.kind === 'del' ? 'text-removed' : 'text-muted'}`} aria-hidden>{line.kind === 'add' ? '+' : line.kind === 'del' ? '−' : ''}</span>
       <span className={codeCell}><Code line={line} pairs={pairs} htmlOf={htmlOf} /></span>
     </div>
   );
@@ -546,8 +548,11 @@ function SplitRowView({ row, pairs, width, htmlOf }: { row: ReturnType<typeof sp
   if (row.hunk) return <div className={`${ROW_BG.hunk} px-3 py-0.5`}>{row.hunk.text}</div>;
   const side = (l: DiffLine | undefined, no: number | undefined) => (
     <>
-      <span className={`${gutter} ${l ? ROW_BG[l.kind] : 'bg-surface-1'}`}>{no ?? ''}</span>
-      <span className={`${codeCell} border-line ${l ? ROW_BG[l.kind] : 'bg-surface-1'}`}>{l ? <Code line={l} pairs={pairs} htmlOf={htmlOf} /> : ''}</span>
+      <span className={`${gutter} ${l ? `${ROW_BG[l.kind]} ${ROW_BAR[l.kind]}` : 'bg-surface-1'}`}>{no ?? ''}</span>
+      <span className={`${codeCell} border-line ${l ? ROW_BG[l.kind] : 'bg-surface-1'}`}>
+        {l && (l.kind === 'add' || l.kind === 'del') && <span className={`me-2 select-none ${l.kind === 'add' ? 'text-finished' : 'text-removed'}`} aria-hidden>{l.kind === 'add' ? '+' : '−'}</span>}
+        {l ? <Code line={l} pairs={pairs} htmlOf={htmlOf} /> : ''}
+      </span>
     </>
   );
   return (

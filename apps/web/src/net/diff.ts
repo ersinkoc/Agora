@@ -278,7 +278,8 @@ export function changedSpan(a: string, b: string): [number, number] | undefined 
 
 export interface FolderGroup { folder: string; files: DiffFile[] }
 
-/** Files by folder: the top folder first, then folders by name; files by name inside each. */
+/** Files by folder: the top folder first, then folders by name; files by name inside each. Files kept private (secret, ADR-0080) come
+ *  last: after the others in their folder, and a folder holding only such files after every other folder. */
 export function byFolder(files: DiffFile[]): FolderGroup[] {
   const groups = new Map<string, DiffFile[]>();
   for (const f of files) {
@@ -286,9 +287,17 @@ export function byFolder(files: DiffFile[]): FolderGroup[] {
     const folder = at >= 0 ? f.path.slice(0, at) : '';
     groups.set(folder, [...(groups.get(folder) ?? []), f]);
   }
+  const hiddenOnly = (list: DiffFile[]) => list.every((f) => f.secret);
   return [...groups.entries()]
-    .sort(([a], [b]) => (a === '' ? -1 : b === '' ? 1 : a.localeCompare(b)))
-    .map(([folder, list]) => ({ folder, files: [...list].sort((x, y) => baseName(x.path).localeCompare(baseName(y.path))) }));
+    .sort(([a, la], [b, lb]) => Number(hiddenOnly(la)) - Number(hiddenOnly(lb)) || (a === '' ? -1 : b === '' ? 1 : a.localeCompare(b)))
+    .map(([folder, list]) => ({ folder, files: [...list].sort((x, y) => Number(!!x.secret) - Number(!!y.secret) || baseName(x.path).localeCompare(baseName(y.path))) }));
+}
+
+/** The file the review screen opens on: the first one in list order that is not kept private (a private file has nothing to show),
+ *  or the first of all when every file is private. */
+export function firstVisible(files: DiffFile[]): string | undefined {
+  const all = byFolder(files).flatMap((g) => g.files);
+  return (all.find((f) => !f.secret) ?? all[0])?.path;
 }
 
 export function baseName(path: string): string {

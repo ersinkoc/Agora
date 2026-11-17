@@ -39,7 +39,7 @@ function BlockView({ block }: { block: Block }) {
     case 'quote': return <blockquote className="m-0 border-s-2 border-line ps-3 whitespace-pre-wrap text-muted"><Inlines parts={block.inlines} /></blockquote>;
     case 'code': return (
       <div className="overflow-hidden rounded-s border border-line bg-surface-1">
-        <div className="flex h-7 items-center justify-between gap-2 border-b border-line ps-3 pe-1 text-[0.6875rem] text-muted"><span className="font-mono">{block.lang}</span><CopyButton text={block.text} /></div>
+        <div className="flex h-7 items-center justify-between gap-2 border-b border-line ps-3 pe-1 text-xs text-muted"><span className="font-mono">{block.lang}</span><CopyButton text={block.text} /></div>
         <pre dir="ltr" className="m-0 max-h-80 overflow-auto p-3 font-mono text-xs leading-5">{block.text}</pre>
       </div>
     );
@@ -116,7 +116,7 @@ const DiffEntry = memo(function DiffEntry({ line }: { line: ChatLine }) {
   const body = d.lines.length ? (
     <pre dir="ltr" className="m-0 max-h-80 overflow-auto font-mono text-xs leading-5">
       {d.lines.map((l, i) => (
-        <div key={i} className={l.kind === 'add' ? 'bg-finished/15' : l.kind === 'del' ? 'bg-needs-you/15' : l.kind === 'hunk' ? 'bg-surface-2 text-muted' : ''}>
+        <div key={i} className={l.kind === 'add' ? 'bg-finished/15 diff-bar-add' : l.kind === 'del' ? 'bg-removed/15 diff-bar-del' : l.kind === 'hunk' ? 'bg-surface-2 text-muted' : ''}>
           <span className="inline-block w-5 select-none text-center text-muted">{l.kind === 'add' ? '+' : l.kind === 'del' ? '−' : ''}</span>{l.text || ' '}
         </div>
       ))}
@@ -127,7 +127,7 @@ const DiffEntry = memo(function DiffEntry({ line }: { line: ChatLine }) {
       <summary className="flex min-w-0 cursor-pointer list-none items-center gap-2 bg-surface-1 px-3 py-1.5 text-[0.8125rem] hover:bg-surface-2 [&::-webkit-details-marker]:hidden" title={stamp(line.atMs)}>
         <Icon name="pencil" className="size-3.5 text-muted" />
         <span dir="ltr" className="min-w-0 flex-1 truncate font-mono text-xs"><span className="text-muted">{dir}</span><span className="font-semibold text-ink">{name}</span></span>
-        {(d.added > 0 || d.removed > 0) && <span className="flex-none font-mono text-xs"><span className="text-finished">+{d.added}</span> <span className="text-needs-you">−{d.removed}</span></span>}
+        {(d.added > 0 || d.removed > 0) && <span className="flex-none font-mono text-xs"><span className="text-finished">+{d.added}</span> <span className="text-removed">−{d.removed}</span></span>}
         <Icon name="chevron" className="size-3 text-muted transition-transform motion-reduce:transition-none rtl:rotate-180 group-open:rotate-90!" />
       </summary>
       <div className="border-t border-line">{body}</div>

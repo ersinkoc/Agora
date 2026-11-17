@@ -1,9 +1,5 @@
 /* ADR-0067 rung 2: the phone-sized window and the terminal key bar. Design tokens only (docs/ux/visual-language.md); every control a
-   finger presses is at least 44px in both directions (--tap). */
-:root {
-  --tap: 44px;
-}
-
+   finger presses is at least 44px in both directions (--tap, tokens.css). */
 /* With `viewport-fit=cover` the page reaches under a notch held sideways: the pages keep out of it (0 everywhere else). */
 body {
   padding-left: env(safe-area-inset-left);

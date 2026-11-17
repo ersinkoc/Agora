@@ -16,6 +16,7 @@
   --color-finished: var(--state-finished);
   --color-idle: var(--state-idle);
   --color-unknown: var(--state-unknown);
+  --color-removed: var(--diff-removed);
   --font-sans: var(--font-ui);
   --font-mono: var(--font-mono);
   --radius-xs: var(--radius-xs);
@@ -28,7 +29,8 @@
 
 @layer base {
   html { -webkit-text-size-adjust: 100%; font-size: calc(var(--text-scale) * 100%); }
-  body { @apply bg-surface-0 text-ink font-sans text-sm antialiased; }
+  /* Counts and times line up from one row to the next: figures are tabular. */
+  body { @apply bg-surface-0 text-ink font-sans text-sm antialiased; font-variant-numeric: tabular-nums; }
   h1 { @apply text-2xl font-semibold tracking-tight; }
   h2 { @apply text-xs font-semibold uppercase tracking-wider text-muted; }
   button { @apply cursor-pointer; }
@@ -47,11 +49,11 @@
   .ide-tab { @apply flex h-9 min-w-0 max-w-56 flex-none items-center gap-2 border-e border-line px-3 text-muted transition-colors duration-150 hover:bg-surface-2 hover:text-ink; }
   .ide-tab[aria-selected='true'] { @apply bg-surface-0 text-ink; box-shadow: inset 0 2px 0 var(--accent); }
   .ide-chip { @apply inline-flex items-center gap-1.5 rounded-xs border border-line bg-surface-2 px-2 py-0.5 text-xs text-muted; }
-  .ide-kbd { @apply rounded-xs border border-line bg-surface-2 px-1.5 py-0.5 font-mono text-[0.6875rem] text-muted; }
+  .ide-kbd { @apply rounded-xs border border-line bg-surface-2 px-1.5 py-0.5 font-mono text-xs text-muted; }
   /* Tab strips scroll sideways without drawing scroll buttons or bars (WebView2 showed arrows). */
   .quiet-scroll { scrollbar-width: none; }
   .quiet-scroll::-webkit-scrollbar { display: none; }
-  .ide-section { @apply px-3 pb-1 pt-3 text-[0.6875rem] font-semibold tracking-wider text-muted uppercase; }
+  .ide-section { @apply px-3 pb-1 pt-3 text-xs font-semibold tracking-wider text-muted uppercase; }
   .page { @apply mx-auto grid max-w-3xl gap-6 px-4 py-8; }
   .topbar { @apply flex items-center justify-between gap-4; }
   .muted { @apply text-[0.8125rem] text-muted; }
@@ -75,6 +77,9 @@
   .state--finished { color: var(--state-finished); }
   .state--idle { color: var(--state-idle); }
   .state--unknown { color: var(--state-unknown); }
+  /* Interim, until a failed state has its own token (ADR needed): the full-strength text colour (neutral, but never quieter than the green
+     check was), so a failure is never drawn as success and never missed. */
+  .state--failed { color: var(--text); font-weight: 600; }
   .state--working .state__mark { animation: breathe 2.4s ease-in-out infinite; }
   .state--needs-you .state__mark { animation: attend 1.6s ease-in-out infinite; }
 
@@ -89,6 +94,14 @@
   .tile--needs-you { border-color: var(--state-needs-you); }
   .tile__name { @apply font-semibold; }
   .tile__preview { @apply overflow-hidden rounded-s bg-surface-0 p-2 font-mono text-xs whitespace-pre text-muted; min-height: 3.2em; }
+
+  /* A changed line says so by shape as well as colour: a bar on its left edge (the +/- glyph sits in the line). Content colours, not states. */
+  .diff-bar-add { box-shadow: inset 2px 0 0 var(--state-finished); }
+  .diff-bar-del { box-shadow: inset 2px 0 0 var(--diff-removed); }
+
+  /* A picture in a menu (the layout presets): a tile with room for a finger; the chosen one is marked in the accent. */
+  .menu-tile { @apply grid min-h-11 place-items-center rounded-xs border border-transparent px-2 py-1.5 text-muted transition-colors duration-150 hover:bg-surface-2 hover:text-ink disabled:opacity-40; }
+  .menu-tile[aria-checked='true'] { @apply border-accent bg-surface-2 text-ink; }
 
   .gallery { @apply max-w-5xl; }
   .gallery__row { @apply flex flex-wrap items-center gap-4; }
@@ -113,6 +126,16 @@
   .messages { @apply m-0 grid list-none gap-2 p-0; }
   .messages li { @apply break-words; }
   .focus { @apply grid gap-4; }
+}
+
+/* A touch screen (a phone, a tablet at any width): everything a finger presses has a hit area of at least --tap, buttons, tabs, rows,
+   icon buttons, chips that act and the menu tiles. They grow on touch only; with a mouse they keep their dense size. */
+@media (pointer: coarse) {
+  .button, .ide-iconbtn, .ide-tab, .ide-row, .menu-tile, button.ide-chip, a.ide-chip, .ide-bar > a, .ide-bar > button, input:not([type='checkbox'], [type='radio']), select { min-height: var(--tap); }
+  footer.ide-bar { height: auto; }
+  /* A row whose label holds a radio or a checkbox: the whole label is the target (the box itself stays its size). */
+  .touch-row { min-height: var(--tap); }
+  .ide-iconbtn, .menu-tile { min-width: var(--tap); }
 }
 
 @keyframes flow { to { stroke-dashoffset: -24; } }

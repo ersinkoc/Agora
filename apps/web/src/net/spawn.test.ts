@@ -58,6 +58,14 @@ describe('agents that start agents', () => {
     const [a] = approvalList(v);
     expect(a?.start?.prompt).toBe('fix it');
     expect(a?.detail).toBe(detail); // kept byte for byte: the decision is signed over it
+    // No name is known for the agent or the machine: empty, never the id (the window says it in words).
+    expect(a?.agentName).toBe('');
+    expect(a?.machineName).toBe('');
+    // With the machine announced, its host name is the machine's name.
+    const w = emptyView();
+    applyEvent(w, 1, { producerId: 'n', body: 'nodeOnline', nodeOnline: { nodeId: 'n', hostname: 'Laptop', os: 'linux', build: '', binary: '' } } as never);
+    applyEvent(w, 2, { producerId: 'n', body: 'approvalRequested', approvalRequested: { approvalId: 'ap', agentId: 'a', action: 'agent.start', detail } });
+    expect(approvalList(w)[0]?.machineName).toBe('Laptop');
   });
 
   it('hashes the announced detail byte for byte (the vector the node and the TUI test too)', async () => {

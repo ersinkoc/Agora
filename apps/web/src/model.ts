@@ -82,6 +82,45 @@ export function uiState(s: number | undefined): UiState {
   }
 }
 
+// What the node reports as an agent's exit code (crates/agora-node/src/daemon.rs, `AgentExited`):
+//   0 or more     the program's own exit status;
+//   -N            the program died of signal N (the node sends SIGTERM, SIGKILL and SIGHUP itself when it stops or restarts agents);
+//   -1            it ended and neither a status nor a signal was known;
+//   i32::MIN      stopped on request, or never known (the node re-announcing an agent it only remembers).
+// On Windows the code is `GetExitCodeProcess` (a u32) cast to i32 (crates/agora-platform/src/conpty.rs): a crash is an NTSTATUS error,
+// 0xC0000005 (access violation), 0xC0000409 (stack buffer overrun), 0xE06D7363 (an unhandled C++ exception) and so on, which arrives
+// as a large negative number. The node's own kill there is `TerminateProcess(.., 1)`, but a stop requested through the node goes through
+// the supervisor's stop path and is reported as i32::MIN, never as 1.
+export const EXIT_UNKNOWN = -2147483648;
+// Signals that mean the program itself crashed: illegal instruction, abort, bus error, arithmetic error, segmentation fault.
+const CRASH_SIGNALS = new Set([4, 6, 7, 8, 11]);
+
+// A closed agent that genuinely failed: its program exited with a non-zero status, or crashed. A stop (i32::MIN), a signal the node
+// sends itself, an unknown status and an agent interrupted with its machine are not failures. Interim (no state token for it yet): it
+// is drawn with a neutral cross and the words "Ended with an error", never as finished.
+export function endedWithError(a: { closed?: boolean; exitCode?: number; interrupted?: unknown }): boolean {
+  if (!a.closed || a.interrupted || a.exitCode === undefined) return false;
+  const code = a.exitCode;
+  return code > 0 || CRASH_SIGNALS.has(-code) || isWindowsCrash(code);
+}
+
+// An NTSTATUS error or an exception code as a Windows process exit status: 0xC0000000 to 0xEFFFFFFF, i.e. -0x40000000 to -0x10000001 as an
+// i32. That leaves out i32::MIN (0x80000000, a stop) and the small negatives -1 to -N (0xFFFFFFxx, which on Unix are signals and "unknown").
+// One value in the range is a normal ending and not a failure: STATUS_CONTROL_C_EXIT (0xC000013A), what a program that was interrupted
+// with Ctrl+C, or whose console was closed, exits with.
+const STATUS_CONTROL_C_EXIT = -1073741510;
+export const isWindowsCrash = (code: number): boolean => code >= -0x40000000 && code <= -0x10000001 && code !== STATUS_CONTROL_C_EXIT;
+
+// The exit status worth showing: only a program's own non-zero status.
+export const shownExitCode = (a: { exitCode?: number }): number | undefined => (a.exitCode !== undefined && a.exitCode > 0 ? a.exitCode : undefined);
+
+// A machine's name, and its id as well only where two machines share that name (the id tells them apart, so it is shown when it is
+// needed and not otherwise). `others` is every machine in the list, this one included.
+export function sharesName(m: { id: string; name: string }, others: Iterable<{ id: string; name: string }>): boolean {
+  for (const o of others) if (o.id !== m.id && o.name === m.name) return true;
+  return false;
+}
+
 // The attention strip lists everything that needs the user.
 export function needsAttention(agents: readonly AgentTileModel[]): AgentTileModel[] {
   return agents.filter((a) => a.state === 'needs-you');

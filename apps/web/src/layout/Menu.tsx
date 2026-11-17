@@ -9,13 +9,24 @@ export interface MenuItem {
   checked?: boolean;
   disabled?: boolean;
   divider?: boolean; // a line above this item
+  tile?: ReactNode; // drawn as a tile in a grid with the neighbouring tiles (a picture; the label is its name for tooltip and screen readers)
 }
+
+const TILE_COLUMNS = 3;
+
+// The tiles that follow one another from `from`.
+const run = (items: MenuItem[], from: number): MenuItem[] => {
+  const out: MenuItem[] = [];
+  for (let i = from; i < items.length && items[i]?.tile; i++) out.push(items[i] as MenuItem);
+  return out;
+};
 
 // A menu button: arrows move, Enter or Space chooses, Right or Enter opens a submenu, Left goes back, Escape closes and
 // returns focus to the button. Submenus replace the list (one level visible at a time), which also works on a phone.
 export function Menu({ label, items, children, className = 'ide-iconbtn', align = 'end' }: { label: string; items: MenuItem[] | (() => MenuItem[]); children: ReactNode; className?: string; align?: 'start' | 'end' }) {
   const [open, setOpen] = useState(false);
   const [trail, setTrail] = useState<MenuItem[]>([]);
+  const [hint, setHint] = useState<string | undefined>(); // the name of the tile the pointer or focus is on
   const button = useRef<HTMLButtonElement>(null);
   const list = useRef<HTMLDivElement>(null);
   const root = typeof items === 'function' ? (open ? items() : []) : items;
@@ -42,6 +53,18 @@ export function Menu({ label, items, children, className = 'ide-iconbtn', align 
     const at = all.indexOf(document.activeElement as HTMLElement);
     const rtl = getComputedStyle(e.currentTarget).direction === 'rtl';
     const back = rtl ? 'ArrowRight' : 'ArrowLeft';
+    // On a grid of tiles the arrows walk it by row and column; at its edge Up and Down leave it for the list.
+    const tile = (document.activeElement as HTMLElement | null)?.closest<HTMLElement>('[data-tile]');
+    if (tile) {
+      const tiles = [...(tile.parentElement?.querySelectorAll<HTMLElement>('[data-tile]:not([disabled])') ?? [])];
+      const i = tiles.indexOf(tile);
+      const step = e.key === 'ArrowRight' ? (rtl ? -1 : 1) : e.key === 'ArrowLeft' ? (rtl ? 1 : -1) : e.key === 'ArrowDown' ? TILE_COLUMNS : e.key === 'ArrowUp' ? -TILE_COLUMNS : 0;
+      if (step !== 0 && !(trail.length && Math.abs(step) === 1 && e.key === back)) {
+        const target = tiles[i + step];
+        if (target) { e.preventDefault(); target.focus(); return; }
+        if (Math.abs(step) === 1) { e.preventDefault(); return; } // the row's end: stay
+      }
+    }
     if (e.key === 'ArrowDown') { e.preventDefault(); all[(at + 1) % all.length]?.focus(); }
     else if (e.key === 'ArrowUp') { e.preventDefault(); all[(at - 1 + all.length) % all.length]?.focus(); }
     else if (e.key === 'Home') { e.preventDefault(); all[0]?.focus(); }
@@ -67,7 +90,24 @@ export function Menu({ label, items, children, className = 'ide-iconbtn', align 
               <Icon name="chevron" className="size-3 rotate-180 rtl:rotate-0" />{t('layout-menu-back')}
             </button>
           )}
-          {page.map((item, i) => (
+          {page.map((item, i) => item.tile ? (
+            // Tiles of one run sit in a three-column grid: the first of a run draws all of them, the rest draw nothing.
+            page[i - 1]?.tile ? null : (
+              <div key={`${i}-${item.label}`} className="grid gap-1">
+                <div className="grid grid-cols-3 gap-1" data-tiles>
+                  {run(page, i).map((x, j) => (
+                    <button key={x.label} type="button" role="menuitemradio" aria-checked={!!x.checked} aria-label={x.label} title={x.label} data-index={i + j} data-tile disabled={x.disabled}
+                      tabIndex={x.checked || (j === 0 && !run(page, i).some((y) => y.checked)) ? 0 : -1}
+                      className="menu-tile" onClick={() => choose(x)} onPointerEnter={() => setHint(x.label)} onPointerLeave={() => setHint(undefined)} onFocus={() => setHint(x.label)} onBlur={() => setHint(undefined)}>
+                      {x.tile}
+                    </button>
+                  ))}
+                </div>
+                {/* The name of the tile you are on, or of the chosen one: the pictures alone are not the only way to tell them apart. */}
+                <p className="m-0 min-h-4 px-1 text-xs text-muted" aria-hidden>{hint ?? run(page, i).find((x) => x.checked)?.label ?? ''}</p>
+              </div>
+            )
+          ) : (
             <div key={`${i}-${item.label}`} className={item.divider ? 'mt-1 border-t border-line pt-1' : ''}>
               <button type="button" role={item.checked === undefined ? 'menuitem' : 'menuitemradio'} aria-checked={item.checked} aria-haspopup={item.items ? 'menu' : undefined}
                 data-index={i} disabled={item.disabled} className="ide-row justify-between disabled:opacity-40" onClick={() => choose(item)}>

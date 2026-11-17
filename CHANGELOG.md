@@ -4,6 +4,16 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+### The window
+- All small text in the window is now at least 12 px, and counts and times use figures of equal width so they line up from row to row.
+- In a review, a deleted line is red with a "-" and a bar on its left edge, an added line has a "+" and a green bar, and amber means only "needs you" again. The review opens on the first file you can read, and files kept private are listed last.
+- An agent that ended with an error is shown with a cross and "Ended with an error" in the list, its tab and its summary, and no longer with the green check of a finished one.
+- Text for states (Working, Finished, Unknown) can be read comfortably on every background in the Dark, Light and other built-in themes.
+- On a touch screen, buttons, tabs, list rows and menu items are at least 44 px tall, so tablets are easier to use; with a mouse nothing changes size.
+- The layout menu shows each layout as a small picture with the current one marked; Export and Import moved under "More".
+- A machine's id is shown next to its name only when two machines have the same name.
+- An agent's request to start another agent names it as you know it ("claude · amber on laptop asks to start a codex agent") instead of an id, and the "Depth" line is gone. "Does not ask" now reads "Runs without asking" and "Stopped with the machine" reads "Stopped when the machine shut down" (also in Turkish).
+
 ### Security
 - A confined agent on Linux can no longer use the node's control socket (ADR-0082, T16): when the node confines agents it keeps a secret
   in its own folder (`control.token`, readable only by its owner and out of every agent's reach) and answers nothing on the socket until the
