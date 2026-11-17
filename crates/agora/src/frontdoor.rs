@@ -508,11 +508,32 @@ pub fn front_door(say: &Say, o: &Opts) -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    // `--listen ADDRESS`: where the hub listens (for a machine reached from outside, ADR-0067). The supervisor reads it from
+    // `machine.toml`, so it is always saved.
+    let listen = match o.listen.as_deref().map(str::parse::<SocketAddr>) {
+        None => None,
+        Some(Ok(l)) => Some(l.to_string()),
+        Some(Err(_)) => {
+            say.err(key!("cli-bad-arguments"), &[]);
+            return ExitCode::from(2);
+        }
+    };
     let h = home();
     let mut first_run = false;
     let m = match load(&h) {
         Some(mut m) => {
             let mut changed = false;
+            if let Some(l) = listen
+                .as_ref()
+                .filter(|l| m.has("hub") && **l != m.hub_listen)
+            {
+                m.hub_listen.clone_from(l);
+                changed = true;
+                say.out(
+                    key!("frontdoor-listen-saved"),
+                    &[("addr", l.clone().into())],
+                );
+            }
             if let Some(u) = ui.filter(|u| o.save && *u != m.ui) {
                 m.ui = u;
                 changed = true;
@@ -581,7 +602,10 @@ pub fn front_door(say: &Say, o: &Opts) -> ExitCode {
                 resume,
             );
             match asked {
-                Ok(Some(m)) => {
+                Ok(Some(mut m)) => {
+                    if let Some(l) = listen.filter(|_| m.has("hub")) {
+                        m.hub_listen = l;
+                    }
                     if let Err(e) = save(&h, &m) {
                         return failed(say, &e.to_string());
                     }
@@ -1078,6 +1102,8 @@ fn up(say: &Say, home: &Path, m: &Machine, resume: Option<bool>) -> Result<(), E
         std::fs::create_dir_all(home.join(d)).map_err(|e| failed(say, &e.to_string()))?;
     }
     if m.has("hub") {
+        // ADR-0067: the hub is never started on a public address without the screen password; said here, in words, instead of in a log.
+        crate::remotecmd::check_listen(say, &m.hub_dir, &m.hub_listen)?;
         ensure(say, home, m, Role::Hub, None)?;
     }
     if m.has("node") {

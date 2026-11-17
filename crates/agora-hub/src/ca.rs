@@ -175,6 +175,37 @@ pub fn cert_not_after_secs(pem: &str) -> Result<i64, CaError> {
     Ok(cert.validity().not_after.timestamp())
 }
 
+/// The names a PEM certificate carries (its alternative names: DNS names as written, addresses in their shortest text), in the order
+/// they are in the certificate. For `agora doctor`: which names the hub's certificate has.
+pub fn cert_names(pem: &str) -> Result<Vec<String>, CaError> {
+    use x509_parser::extensions::GeneralName;
+    let der = x509_parser::pem::parse_x509_pem(pem.as_bytes())
+        .map_err(|e| CaError(e.to_string()))?
+        .1;
+    let cert = der.parse_x509().map_err(|e| CaError(e.to_string()))?;
+    let Ok(Some(san)) = cert.subject_alternative_name() else {
+        return Ok(Vec::new());
+    };
+    Ok(san
+        .value
+        .general_names
+        .iter()
+        .filter_map(|n| match n {
+            GeneralName::DNSName(d) => Some((*d).to_string()),
+            GeneralName::IPAddress(b) => match b.len() {
+                4 => <[u8; 4]>::try_from(*b)
+                    .ok()
+                    .map(|a| std::net::IpAddr::from(a).to_string()),
+                16 => <[u8; 16]>::try_from(*b)
+                    .ok()
+                    .map(|a| std::net::IpAddr::from(a).to_string()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect())
+}
+
 /// Where a certificate stands against [`EXPIRY_WARN_DAYS`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Expiry {

@@ -32,9 +32,11 @@ mod joincmd;
 mod meshbridge;
 mod paircmd;
 mod panelcmd;
+mod remotecmd;
 mod secretcmd;
 mod servicecmd;
 mod supervise;
+mod tailscale;
 mod trustcli;
 mod tuicmd;
 mod update;
@@ -144,6 +146,8 @@ pub(crate) struct Opts {
     registry: Option<String>,
     role: Option<String>,
     since: Option<u64>,
+    /// ADR-0067 rung 3: `agora remote tailscale --serve` publishes the hub with `tailscale serve` (on `--port`, 8443 unless said).
+    serve: bool,
     /// ADR-0065: `agora pair open --minutes N`.
     minutes: Option<u64>,
     who: Option<String>,
@@ -210,6 +214,7 @@ fn parse(args: &[String]) -> Option<Opts> {
             "--test" => o.test = true,
             "--yes" => o.yes = true,
             "--metrics" => o.metrics = true,
+            "--serve" => o.serve = true,
             "--expires" => o.expires = Some(it.next()?.parse().ok()?),
             "--old" => o.old = true,
             "--refuse-return" => o.refuse_return = true,
@@ -335,6 +340,7 @@ fn main() -> ExitCode {
         ["adapter", "list"] => adaptercmd::list(&say, &opts),
         ["adapter", "remove"] => adaptercmd::remove(&say, &opts),
         ["adapter", "update"] => adaptercmd::update(&say, &opts),
+        ["remote", op @ ("tailscale" | "status" | "off")] => remotecmd::remote(&say, &opts, op),
         ["password", op @ ("set" | "clear" | "status")] => hubcli::password(&say, &opts, op),
         ["hub", "run"] => hubcli::hub_run(&say, &opts),
         // A machine that does not run the hub (no hub folder) gets that said, not the database error these commands would hit.
@@ -442,6 +448,8 @@ fn doctor(say: &Say, o: &Opts) -> ExitCode {
     });
     // Certificates last 90 days and nothing renews them yet: say so before a machine stops connecting.
     checks.extend(certs::checks_now(&hubcli::link_dir(), &hubcli::hub_dir(o)));
+    // ADR-0067 rung 3: how the hub is reached from outside this machine, and whether the screen password protects it.
+    checks.extend(remotecmd::checks(o));
     for c in &checks {
         let sentence = match (c.id, c.status) {
             ("version", _) => key!("doctor-version"),
@@ -485,6 +493,16 @@ fn doctor(say: &Say, o: &Opts) -> ExitCode {
             ("devices-none", _) => key!("doctor-devices-none"),
             ("skip-permissions", _) => key!("doctor-skip-permissions"),
             ("policy-problems", _) => key!("doctor-policy-problems"),
+            ("remote-password-set", _) => key!("doctor-remote-password-set"),
+            ("remote-password-missing", _) => key!("doctor-remote-password-missing"),
+            ("remote-password-missing-tailnet", _) => {
+                key!("doctor-remote-password-missing-tailnet")
+            }
+            ("remote-public-listen", _) => key!("doctor-remote-public-listen"),
+            ("remote-funnel", _) => key!("doctor-remote-funnel"),
+            ("remote-tailnet", _) => key!("doctor-remote-tailnet"),
+            ("remote-tailnet-unreachable", _) => key!("doctor-remote-tailnet-unreachable"),
+            ("remote-names-missing", _) => key!("doctor-remote-names-missing"),
             ("credential", _) => key!("doctor-credential"),
             ("credential-none", _) => key!("doctor-credential-none"),
             ("credential-unlisted", _) => key!("doctor-credential-unlisted"),

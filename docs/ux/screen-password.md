@@ -51,3 +51,9 @@ passkey is not held by it either. Every attempt, right or wrong, is in the Activ
 
 The hub stores a salted PBKDF2-HMAC-SHA256 hash (600 000 rounds, a random salt per password), never the password; it is never
 logged or sent back. Forgot it? Run `agora password clear` or `agora password set` on the hub's machine.
+
+## Reaching the hub from outside
+
+A way in from outside the machine (`agora remote tailscale`, a hub on a public address) is never on without the password:
+those commands refuse until `agora password set` was run, and `agora password clear` refuses while one is on. See
+[the remote hub guide](../guides/remote-hub.md).

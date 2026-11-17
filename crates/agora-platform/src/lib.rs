@@ -1286,6 +1286,27 @@ pub fn no_console_window(cmd: &mut std::process::Command) -> &mut std::process::
     cmd
 }
 
+/// Makes `cmd` start as the leader of a process group of its own (Unix), so [`kill_process_tree`] ends it and everything it started.
+/// Windows: nothing changes.
+pub fn own_process_group(cmd: &mut std::process::Command) -> &mut std::process::Command {
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(cmd, 0);
+    cmd
+}
+
+/// Ends a child started with [`own_process_group`] and, on Unix, every process left in its group (a helper program's own
+/// background children), so none of them keeps a pipe of this process open. Also reaps the child.
+pub fn kill_process_tree(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    if let Ok(pid) = i32::try_from(child.id()) {
+        // SAFETY: a signal to the process group that `own_process_group` made for this child, whose id is `pid`; a group that is
+        // already gone answers an error that is ignored.
+        unsafe { libc::killpg(pid, libc::SIGKILL) };
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 /// Starts `cmd` detached from this process, its terminal and its session (ADR-0062): it survives the terminal closing, the SSH session
 /// ending and this process being killed. Standard input is empty; standard output and error are appended to `log` (created readable by
 /// the user only). Unix: a new session (`setsid`), so no terminal hangup or Ctrl-C reaches it; Windows: `DETACHED_PROCESS` and
@@ -2437,5 +2458,70 @@ mod secret_tests {
         assert_eq!(read(b"\x04").unwrap_err().kind(), ErrorKind::UnexpectedEof);
         assert_eq!(read(b"").unwrap_err().kind(), ErrorKind::UnexpectedEof);
         assert_eq!(read(b"\xff\r").unwrap_err().kind(), ErrorKind::InvalidData);
+    }
+}
+
+#[cfg(all(test, unix))]
+#[allow(clippy::unwrap_used)]
+mod process_group_tests {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    /// The state letters `ps` gives for a process, empty when there is none.
+    fn state(pid: &str) -> String {
+        let out = Command::new("ps")
+            .args(["-o", "stat=", "-p", pid])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    fn dead(pid: &str) -> bool {
+        let end = Instant::now() + Duration::from_secs(3);
+        loop {
+            let s = state(pid);
+            if s.is_empty() || s.starts_with('Z') {
+                return true;
+            }
+            if Instant::now() > end {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    #[test]
+    fn the_child_leads_a_group_of_its_own_and_killing_it_ends_what_it_started() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "sleep 60 & echo $!; wait"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped());
+        super::own_process_group(&mut cmd);
+        let mut child = cmd.spawn().unwrap();
+        let mut out = child.stdout.take().unwrap();
+        let mut pid = String::new();
+        let mut b = [0u8; 1];
+        while out.read(&mut b).unwrap() == 1 && b[0] != b'\n' {
+            pid.push(b[0] as char);
+        }
+        assert!(!dead_now(&pid), "the background process runs");
+        // The child is the leader of its own group (not ours).
+        let group = Command::new("ps")
+            .args(["-o", "pgid=", "-p", &child.id().to_string()])
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&group.stdout).trim(),
+            child.id().to_string()
+        );
+        super::kill_process_tree(&mut child);
+        assert!(dead(&pid), "the process the child started is ended with it");
+        assert!(child.try_wait().unwrap().is_some(), "the child is reaped");
+    }
+
+    fn dead_now(pid: &str) -> bool {
+        let s = state(pid);
+        s.is_empty() || s.starts_with('Z')
     }
 }
