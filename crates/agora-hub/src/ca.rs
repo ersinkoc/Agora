@@ -116,11 +116,7 @@ impl Ca {
     /// Signs a node's CSR as `node_id`, valid for client authentication only.
     pub fn issue_node(&self, node_id: &str, csr_pem: &str) -> Result<IssuedCert, CaError> {
         // "hub" is the producer id of facts the hub itself records (a node going offline); no node may use it.
-        if node_id == RESERVED_HUB_ID
-            || node_id.is_empty()
-            || node_id.len() > 64
-            || !node_id.chars().all(valid_id_char)
-        {
+        if !valid_node_id(node_id) {
             return Err(CaError("node id must be 1-64 of [A-Za-z0-9._-]".into()));
         }
         let mut csr = CertificateSigningRequestParams::from_pem(csr_pem)?;
@@ -199,6 +195,23 @@ pub fn expiry(not_after_secs: i64, now_secs: i64) -> Expiry {
     } else {
         Expiry::Fine(left / 86_400)
     }
+}
+
+/// The rules for a node id: 1-64 of `[A-Za-z0-9._-]`, and not `hub` (the producer id of facts the hub itself records).
+pub fn valid_node_id(node_id: &str) -> bool {
+    node_id != RESERVED_HUB_ID
+        && !node_id.is_empty()
+        && node_id.len() <= 64
+        && node_id.chars().all(valid_id_char)
+}
+
+/// The DER of a CSR given as PEM, after checking its signature (the requester holds the key it asks to be certified). Pairing
+/// hashes this, so the hash is of the bytes the machine signed, not of its text.
+pub fn csr_der(csr_pem: &str) -> Result<Vec<u8>, CaError> {
+    CertificateSigningRequestParams::from_pem(csr_pem)?;
+    let (_, pem) =
+        x509_parser::pem::parse_x509_pem(csr_pem.as_bytes()).map_err(|e| CaError(e.to_string()))?;
+    Ok(pem.contents)
 }
 
 fn valid_id_char(c: char) -> bool {

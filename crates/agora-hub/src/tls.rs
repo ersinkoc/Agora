@@ -76,6 +76,27 @@ pub fn acceptor_with(
     Ok(TlsAcceptor::from(Arc::new(config)))
 }
 
+/// SHA-256 of the DER of the first certificate in `server_cert_pem`: the "leaf hash" a pairing machine records for the hub's
+/// certificate (docs/specs/pairing.md section 5).
+pub fn leaf_hash(server_cert_pem: &str) -> Result<[u8; 32], TlsError> {
+    use sha2::{Digest, Sha256};
+    let der = CertificateDer::pem_slice_iter(server_cert_pem.as_bytes())
+        .next()
+        .ok_or_else(|| err("no certificate"))?
+        .map_err(err)?;
+    Ok(Sha256::digest(der.as_ref()).into())
+}
+
+/// The TLS exporter a pairing session is bound to (section 5): label `EXPORTER-agora-pair-v1`, empty context, 32 bytes. `None`
+/// unless the connection is TLS 1.3, which pairing requires.
+pub fn pairing_exporter(conn: &rustls::ServerConnection) -> Option<[u8; 32]> {
+    if conn.protocol_version() != Some(rustls::ProtocolVersion::TLSv1_3) {
+        return None;
+    }
+    conn.export_keying_material([0u8; 32], b"EXPORTER-agora-pair-v1", Some(b""))
+        .ok()
+}
+
 /// The identity in the client certificate of an established connection. `None` when the peer sent none (the
 /// verifier above already refuses that, so this is a second line of defence) or the name is unusable.
 pub fn identity(peer_certs: Option<&[CertificateDer<'_>]>) -> Option<NodeIdentity> {

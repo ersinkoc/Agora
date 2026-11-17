@@ -181,22 +181,17 @@ These apply to **every kind** of request (machine and browser) and are checked b
 Audited: the switch opened and closed (by whom); a request (name, os, address); approve or deny (the owner's device); the certificate issued (serial).
 Never logged: nonces, the commitment, the exporter, the number, the CSR, the poll token or the session cookie. Limit refusals are counted and audited as a rate (kind, address key, count a minute), not one line per attempt, so a flood cannot fill the log.
 
-## 9. Threat-model rows to add when this is built
-The ids below are **placeholders**; the real ids are assigned when the rows go into `docs/security/threat-model.md`.
-- **T-PAIR-1, a machine or browser on the network asks to join or sign in without the owner meaning it:** only while open; bounded, short-lived
-  sessions; creation, replacement and polling rates per address key and for the hub; the pending capability, not the address, owns a browser request;
-  coalesced notices; an owner decision for each; keyed failure counters kept apart from fallback enrolment.
-- **T-PAIR-2, a party in the middle of a pairing:** the commitment, the number bound to the leaf and the TLS exporter each side saw, one attempt per
-  session and at most 5 failures per open window (about 6 x 10^-6 in all), the handshake signature still verified, visible to the owner.
-- **T-PAIR-3, discovery used to find or flood hubs:** a closed hub is silent; a request must be as large as the reply; replies are rate limited and
-  unicast; the answer holds only public data.
-- **T-PAIR-4, the hub's certificate does not name the address it is dialled at:** names provisioned from the listen addresses at start and at
-  `pair open`; failure is explicit (`pair.name_unverified`, or `pair open` refusing); never a skipped check.
+## 9. Threat-model rows
+The rows are in `docs/security/threat-model.md`: **T30** (a machine or browser asks to join without the owner meaning it; was T-PAIR-1), **T31** (a
+party in the middle, or a second connection naming a `pair_id`; was T-PAIR-2), **T32** (a pairing secret leaks: the number, nonces, commitment,
+exporter or CSR; new) and **T33** (the hub's certificate does not name the address dialled; was T-PAIR-4, honest about what is not solved yet).
+The discovery row (was T-PAIR-3: a closed hub is silent, a request must be as large as the reply, replies are rate limited and unicast) gets its
+id when discovery is built.
 
 ## 10. Order of work (each its own pull request, each security-reviewed)
 1. The messages, error codes and golden fixtures (append-only), and this document updated with the ids. (Done: schema only, capability `pairing.v1`.)
-2. The pairing core in the hub, pure and unit-tested (states, limits, SAS, commitment), `agora pair open|close|status`, audit.
-3. The command path for approve/deny and `PairRequested` to windows and notifiers; the machine handshake over TLS.
+2. The pairing core in the hub, pure and unit-tested (states, limits, SAS, commitment), audit; the owner's commands, `PairRequested` and `PairDecided` to owner windows, the machine handshake over the hub's TLS and the certificate at approval. (Done: `agora-hub` `pairing.rs` and `pairing_net.rs`; section 12 lists what was decided.)
+3. `agora pair open|close|status`, provisioning the leaf's names (section 5b), the push notice (ADR-0051) and the browser path (section 6) on the hub.
 4. The discovery responder (hub) and the finder, `agora join`, with the trust question (node).
 5. The window cards wired in (web #610 and TUI #611 already have the layout), then the browser sign-in by approval (section 6).
 
@@ -225,3 +220,32 @@ churn from one address stays within the admission rates, leaves the legitimate r
 addresses fill at most 4 slots and no more; a token is single-use for the cookie, void after deny, cancel, expiry, close and restart, never appears in
 a URL or a log, and a plain-HTTP non-loopback request is `pair.insecure_transport`; pairing failures do not lock `agora node enroll`, and its failures
 do not lock pairing; a full counter table refuses new keys without resetting the others.
+
+## 12. The hub core, as built (choices the design left open)
+Built in `crates/agora-hub/src/pairing.rs` (the state machine, pure, every method takes the time) and `pairing_net.rs` (connections and the CA).
+What this document did not say, and what the code does:
+- **Who may pair.** A hub offers pairing (`pairing.v1`) once `hub.pairing().enable(leaf_hash)` was called with the SHA-256 of its own certificate's
+  DER (`hub_run` does it); until then every pairing message is `protocol.capability_missing`. The leaf hash a session freezes is the one set at that
+  moment, so a leaf that is swapped (section 5b, not built) must be set at the same time as the listener switches.
+- **`node_name` is the node id.** It is checked at the reveal by the rules enrolment uses (`ca::valid_node_id`), and at the request only for size
+  (1 to 64 bytes, no control characters; `os` and `version` the same).
+- **Results.** A deny is `PairResult { approved: false }` with empty fields (the schema says so); an expiry is `pair.expired`; the switch closing
+  is `pair.closed`. `pair.denied` is not sent by the hub core (the browser path may use it).
+- **Errors for the wrong order.** A second request on a connection is `pair.state` with `state = requested`; a second reveal, a reveal after the
+  session ended, or any other message while waiting is `pair.state` naming the state. A first message that is a reveal (a connection naming a
+  session it cannot own) is `pair.unknown`, and a repeated commitment, exporter or nonce is `pair.mismatch`; each ends the session and counts as a failure.
+- **Approving a taken name.** If the node id belongs to an enrolled machine and `replace` is false, Approve is refused with `pair.state`
+  (`state = name_in_use`) and the request stays pending, so the owner can approve again with `replace`. The same check runs again inside the
+  issuing transaction. `replace` revokes the old certificates, as enrolling again does.
+- **Idle.** Before the reveal the 30-second rules apply. While a request waits for the owner, the connection is held for the session's 5 minutes
+  and answers pings; a machine need not send anything (the 30-second silence rule would cut a request the owner has not seen yet).
+- **How windows receive cards.** Two new frame kinds on the events stream, sent only to owner sessions: `PAIR_REQUESTED` (5) carrying `PairRequested`
+  and `PAIR_DECIDED` (6) carrying `PairDecided`. A window gets the cards waiting when it subscribes, then each change, batched to at most one push
+  a second. Memory only: never an event, never stored, the number never logged. Older clients ignore frame kinds they do not know.
+- **Audit.** `pair.open`, `pair.close`, `pair.approve`, `pair.deny` (who is the owner's user), `pair.request` and `pair.issued` (who is
+  `pair:<address>`, node the machine's name, outcome `ok`, a stable code, or the certificate serial) and `pair.refused` (a rate: count since the
+  last report, once a minute). The number, nonces, commitment, exporter and CSR are never written.
+- **The number's function** lives in `agora_hub::pairing::sas` with a test vector computed outside the code; the node side will move it to a shared
+  crate or reimplement it against the same vector.
+- **Not in this step:** the push notice itself (`Pairing::take_push` decides when, nothing sends it), provisioning the leaf's names, discovery,
+  `agora pair`, the node's verifier, and the browser path.

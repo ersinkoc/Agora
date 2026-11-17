@@ -65,6 +65,8 @@ pub struct Hub {
     metrics: crate::metrics::Metrics,
     metrics_on: std::sync::atomic::AtomicBool,
     boards: crate::board::Boards,
+    /// ADR-0065: pairing sessions, in memory only.
+    pairing: crate::pairing_net::Shared,
     prices: std::sync::RwLock<(std::sync::Arc<crate::usage::Catalog>, u64)>,
     store: SqliteStore,
     router: std::sync::Arc<crate::router::Router>,
@@ -154,6 +156,7 @@ impl Hub {
             metrics: crate::metrics::Metrics::default(),
             metrics_on: std::sync::atomic::AtomicBool::new(false),
             boards: crate::board::Boards::new(),
+            pairing: crate::pairing_net::Shared::new(),
             prices: std::sync::RwLock::new((crate::usage::Catalog::bundled(), 0)),
             store,
             router: crate::router::Router::new(),
@@ -248,6 +251,11 @@ impl Hub {
             total_micro_usd: total,
             prices_at_ms,
         }
+    }
+
+    /// The pairing state (ADR-0065): the switch, the sessions, the limits. Memory only.
+    pub fn pairing(&self) -> &crate::pairing_net::Shared {
+        &self.pairing
     }
 
     /// Where connected nodes wait for commands (ADR-0029).

@@ -734,8 +734,22 @@ where
     }
     let mut checked = tokio::time::Instant::now();
     let (relays, mut relay_frames) = hub.router().client();
+    // ADR-0065: only the owner is told who is asking to join (the card carries the number); memory only, never the event log.
+    let mut pair_feed = None;
+    if owner && hub.pairing().enabled() {
+        let (feed, cards) = crate::pairing_net::WindowFeed::start(hub);
+        for f in cards {
+            conn.send(&f).await?;
+        }
+        pair_feed = Some(feed);
+    }
     loop {
         answer_ready(&mut conn, inflight, hub).await?;
+        if let Some(feed) = pair_feed.as_mut() {
+            for f in feed.poll(hub) {
+                conn.send(&f).await?;
+            }
+        }
         // Terminal frames from nodes, and streams the hub ended.
         while let Ok(rf) = relay_frames.try_recv() {
             conn.send(&frame(rf.stream, rf.kind, rf.payload)).await?;
@@ -877,6 +891,12 @@ where
     let client_request_id = req.request_id.clone();
     let refuse = |e: Error| error_response(&client_request_id, &e);
     let Caller { who, scope } = caller;
+    // ADR-0065: the owner's pairing commands are the hub's own; a machine's pairing messages are not a window's to send.
+    if let Some(resp) = crate::pairing_net::owner_command(hub, who, &req) {
+        conn.send(&frame(STREAM_COMMANDS, 1, resp.encode_to_vec()))
+            .await?;
+        return Ok(());
+    }
     // ADR-0061: a person's own devices, answered (or carried) by the hub; a node decides for itself what it trusts.
     if let Some(resp) = device_command(hub, who, &req) {
         conn.send(&frame(STREAM_COMMANDS, 1, resp.encode_to_vec()))
@@ -1681,7 +1701,7 @@ fn clip_for_audit(text: &str) -> String {
 
 use crate::dispatch::command_name;
 
-fn error_response(request_id: &str, e: &Error) -> v1::CommandResponse {
+pub(crate) fn error_response(request_id: &str, e: &Error) -> v1::CommandResponse {
     v1::CommandResponse {
         request_id: request_id.to_string(),
         result: Some(command_response::Result::Err(e.to_info())),
@@ -1759,9 +1779,23 @@ pub struct ServerState {
 /// A peer with no certificate: its first frame says what it wants, and the answer is yes only for what it proved.
 /// An enrollment needs nothing but the code; a subscription needs a bearer token the hub accepts.
 pub async fn serve_unauthenticated<S>(
+    conn: Conn<S>,
+    token: Option<&str>,
+    state: &ServerState,
+) -> Result<(), ServeError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    serve_unauthenticated_with(conn, token, state, None).await
+}
+
+/// [`serve_unauthenticated`] for a connection whose TLS layer also knows where it came from and its pairing exporter (TLS 1.3 only):
+/// only such a connection can pair (ADR-0065).
+pub async fn serve_unauthenticated_with<S>(
     mut conn: Conn<S>,
     token: Option<&str>,
     state: &ServerState,
+    pairing: Option<crate::pairing_net::PairPeer>,
 ) -> Result<(), ServeError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -1770,10 +1804,38 @@ where
         return Ok(());
     };
     match (first.stream_id, first.kind) {
-        (STREAM_COMMANDS, 0) => match &state.ca {
-            Some(ca) => serve_enroll(conn, &state.hub, ca, &state.lockout, first).await,
-            None => Err(ServeError::Refused),
-        },
+        (STREAM_COMMANDS, 0) => {
+            // A pairing request is told apart from an enrollment by its first command, nothing else.
+            let pairs = matches!(
+                v1::CommandRequest::decode(first.payload.as_slice())
+                    .ok()
+                    .and_then(|r| r.command),
+                Some(
+                    command_request::Command::PairRequest(_)
+                        | command_request::Command::PairReveal(_)
+                )
+            );
+            if pairs {
+                return match pairing {
+                    Some(peer) => {
+                        crate::pairing_net::serve_pairing(
+                            conn,
+                            &state.hub,
+                            state.ca.as_ref(),
+                            first,
+                            peer,
+                        )
+                        .await
+                    }
+                    // No TLS 1.3 binding to bring: pairing is not possible on this connection.
+                    None => Err(ServeError::Refused),
+                };
+            }
+            match &state.ca {
+                Some(ca) => serve_enroll(conn, &state.hub, ca, &state.lockout, first).await,
+                None => Err(ServeError::Refused),
+            }
+        }
         (STREAM_EVENTS, kinds::SUBSCRIBE) if token.is_some_and(|t| state.auth.check(t)) => {
             // The token was good when the connection opened; an expired or revoked session must not keep a live one.
             let token = token.unwrap_or_default();
@@ -1814,6 +1876,12 @@ async fn handle(
         .await
         .map_err(|e| ServeError::Transport(TransportError::Ws(e.to_string())))?;
     let identity = crate::tls::identity(stream.get_ref().1.peer_certificates());
+    // ADR-0065: a pairing machine presents no certificate; what binds its number to this TLS session is read here.
+    let pairing = match (&identity, peer) {
+        (None, Some(addr)) => crate::tls::pairing_exporter(stream.get_ref().1)
+            .map(|exporter| crate::pairing_net::PairPeer { addr, exporter }),
+        _ => None,
+    };
     let Some(stream) = websocket_only(stream, peer, state).await? else {
         return Ok(());
     };
@@ -1865,7 +1933,7 @@ async fn handle(
             )
             .await
         }
-        None => serve_unauthenticated(conn, token.as_deref(), state).await,
+        None => serve_unauthenticated_with(conn, token.as_deref(), state, pairing).await,
     }
 }
 

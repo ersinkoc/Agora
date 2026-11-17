@@ -27,6 +27,8 @@ const ALPHABET: &[u8; 30] = b"23456789ABCDEFGHJKMNPQRSTVWXYZ";
 pub enum EnrollError {
     /// Unknown, expired or already used code. Deliberately indistinguishable.
     BadCode,
+    /// Pairing: the node id belongs to an enrolled machine and the owner did not say "replace".
+    NameInUse,
     /// Too many wrong codes recently; try again after the lockout.
     LockedOut {
         retry_after_ms: u64,
@@ -196,6 +198,56 @@ impl<'a> Enrollment<'a> {
         tx.commit()?;
         self.lockout.succeeded();
         Ok(issued)
+    }
+
+    /// Pairing (ADR-0065): issues the certificate the owner approved, for the node id and CSR the session froze. A node id that is
+    /// enrolled and not revoked is refused unless `replace`; with it the old certificates are revoked (and a connection they still
+    /// hold is closed), exactly as enrolling again does. There is no code: the owner's approval was the authority.
+    pub fn issue_paired(
+        &self,
+        ca: &Ca,
+        node_id: &str,
+        csr_pem: &str,
+        replace: bool,
+        now_ms: u64,
+    ) -> Result<IssuedCert, EnrollError> {
+        let mut conn = self.store.lock()?;
+        let tx = conn.transaction()?;
+        let taken: bool = tx
+            .query_row(
+                "SELECT 1 FROM devices WHERE node_id = ?1 AND revoked_ms IS NULL LIMIT 1",
+                [node_id],
+                |_| Ok(true),
+            )
+            .optional()?
+            .is_some();
+        if taken && !replace {
+            return Err(EnrollError::NameInUse);
+        }
+        let issued = ca.issue_node(node_id, csr_pem)?;
+        tx.execute(
+            "UPDATE devices SET revoked_ms = ?2 WHERE node_id = ?1 AND revoked_ms IS NULL",
+            params![node_id, to_i64(now_ms)],
+        )?;
+        tx.execute(
+            "INSERT INTO devices (serial, node_id, enrolled_ms) VALUES (?1, ?2, ?3)",
+            params![issued.serial_hex, node_id, to_i64(now_ms)],
+        )?;
+        tx.commit()?;
+        Ok(issued)
+    }
+
+    /// Does an enrolled, not revoked machine already have this node id?
+    pub fn node_in_use(&self, node_id: &str) -> Result<bool, EnrollError> {
+        let conn = self.store.lock()?;
+        Ok(conn
+            .query_row(
+                "SELECT 1 FROM devices WHERE node_id = ?1 AND revoked_ms IS NULL LIMIT 1",
+                [node_id],
+                |_| Ok(true),
+            )
+            .optional()?
+            .is_some())
     }
 
     /// Revokes every certificate issued for `node_id`. Immediate: the next connection check refuses it.

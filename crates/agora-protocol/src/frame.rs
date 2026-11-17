@@ -192,6 +192,9 @@ pub mod kinds {
     pub const SUBSCRIBE: u8 = 2;
     pub const SNAPSHOT: u8 = 3;
     pub const POSITIONED_EVENT: u8 = 4;
+    /// Hub to an owner's window, memory-only (ADR-0065): an encoded `PairRequested` / `PairDecided`. Never an event in the store.
+    pub const PAIR_REQUESTED: u8 = 5;
+    pub const PAIR_DECIDED: u8 = 6;
 }
 
 #[cfg(test)]
