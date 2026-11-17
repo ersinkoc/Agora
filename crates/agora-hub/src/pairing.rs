@@ -973,6 +973,13 @@ impl Pairing {
         v
     }
 
+    /// The approval this connection collected was issued or refused: its node id is enrolled or free again, so it no longer holds
+    /// it. Called before the result is written, so a machine that stops reading cannot keep the name from every later approval
+    /// (Codex review of F811); [`Self::connection_closed`] lets it go too.
+    pub fn issued(&mut self, conn: ConnId) {
+        self.issuing.remove(&conn);
+    }
+
     /// The connection ended. An undecided session is over (an abort after the challenge is a failure); an approval nobody
     /// collected is void and no certificate is issued.
     pub fn connection_closed(&mut self, conn: ConnId, now: u64) {
@@ -2158,6 +2165,21 @@ mod tests {
         assert_eq!(p.pending_node_id(&b), Some("laptop"));
         p.connection_closed(ConnId(1), 2_600);
         assert_eq!(p.approve(2_700, &b, true), Ok(()));
+    }
+
+    /// Codex review of F811: once the approval is issued (or refused), the name is let go even while that connection stays open, as
+    /// one whose machine stopped reading the result would; `connection_closed` afterwards changes nothing.
+    #[test]
+    fn an_issued_approval_lets_its_node_id_go_while_its_connection_stays_open() {
+        let mut p = open_hub();
+        let a = pending(&mut p, 2_000, 1, 10, &Machine::new(1));
+        let b = pending(&mut p, 2_100, 2, 11, &Machine::new(2));
+        p.approve(2_200, &a, false).unwrap();
+        assert!(matches!(p.verdict(ConnId(1), 2_300), Verdict::Approved(_)));
+        p.issued(ConnId(1));
+        assert_eq!(p.approve(2_400, &b, true), Ok(()));
+        p.connection_closed(ConnId(1), 2_500);
+        assert!(matches!(p.verdict(ConnId(2), 2_600), Verdict::Approved(_)));
     }
 
     #[test]
