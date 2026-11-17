@@ -25,6 +25,7 @@ const DETACH: u8 = 0x1d;
 const TERMINAL_STREAM: u32 = 3;
 
 mod adaptercmd;
+mod certs;
 mod frontdoor;
 mod hubcli;
 mod meshbridge;
@@ -423,11 +424,13 @@ fn bridge_stdio(say: &Say, path: &std::path::Path) -> ExitCode {
 fn doctor(say: &Say, o: &Opts) -> ExitCode {
     use agora_node::doctor::{healthy, run, Inputs, Status};
     let h = home();
-    let checks = run(&Inputs {
+    let mut checks = run(&Inputs {
         data_dir: o.data.clone().unwrap_or_else(|| h.join("data")),
         socket: socket_path(o),
         manifests_dir: o.manifests.clone().unwrap_or_else(|| h.join("manifests")),
     });
+    // Certificates last 90 days and nothing renews them yet: say so before a machine stops connecting.
+    checks.extend(certs::checks_now(&hubcli::link_dir(), &hubcli::hub_dir(o)));
     for c in &checks {
         let sentence = match (c.id, c.status) {
             ("version", _) => key!("doctor-version"),
@@ -461,6 +464,12 @@ fn doctor(say: &Say, o: &Opts) -> ExitCode {
             ("signed-commands", _) => key!("doctor-signed-commands"),
             ("signed-commands-team", _) => key!("doctor-signed-commands-team"),
             ("signed-commands-none", _) => key!("doctor-signed-commands-none"),
+            ("cert-node", Status::Ok) => key!("doctor-cert-node"),
+            ("cert-node", Status::Warn) => key!("doctor-cert-node-soon"),
+            ("cert-node", _) => key!("doctor-cert-node-expired"),
+            ("cert-hub", Status::Ok) => key!("doctor-cert-hub"),
+            ("cert-hub", Status::Warn) => key!("doctor-cert-hub-soon"),
+            ("cert-hub", _) => key!("doctor-cert-hub-expired"),
             ("devices", _) => key!("doctor-devices"),
             ("devices-none", _) => key!("doctor-devices-none"),
             ("skip-permissions", _) => key!("doctor-skip-permissions"),
@@ -468,7 +477,9 @@ fn doctor(say: &Say, o: &Opts) -> ExitCode {
             _ => key!("doctor-manifest-invalid"),
         };
         let detail: Arg = match (c.id, c.detail.parse::<i64>()) {
-            ("manifests" | "devices" | "policy-problems", Ok(n)) => Arg::Num(n),
+            ("manifests" | "devices" | "policy-problems" | "cert-node" | "cert-hub", Ok(n)) => {
+                Arg::Num(n)
+            }
             _ => c.detail.as_str().into(),
         };
         let mut args = vec![("detail", detail)];

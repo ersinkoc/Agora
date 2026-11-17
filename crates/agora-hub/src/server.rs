@@ -1721,7 +1721,7 @@ where
                 result: Some(command_ok::Result::Enroll(v1::EnrollResponse {
                     cert_pem: issued.cert_pem,
                     ca_pem: ca.cert_pem().to_string(),
-                    not_after_ms: now_ms() + crate::ca::DEVICE_CERT_DAYS as u64 * 86_400_000,
+                    not_after_ms: now_ms() + ca.lifetime_ms(),
                     // ADR-0061: candidates only; the owner at the machine says which ones it trusts.
                     devices: crate::devices::Devices::new(hub.store())
                         .list_for_node(&e.node_id)

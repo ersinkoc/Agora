@@ -10,14 +10,14 @@ Closes #
 ## How to verify
 
 ## Checklist
-- [ ] `just check` passes
+- [ ] `just check` passes; tests added or changed for the behavior
 - [ ] Docs updated if behavior in `docs/` changed
-- [ ] No protocol/schema change, or an accepted ADR covers it
+- [ ] No protocol/schema change, or an accepted ADR covers it (a new ADR is `Proposed`, never claimed as accepted)
 - [ ] No user-facing text outside `locales/`
 - [ ] No OS-specific code outside `agora-platform`
 - [ ] New dependencies justified below
 - [ ] Hot path touched? Benchmark result attached (ADR-0022)
-- [ ] UI changed? Screenshots in dark and light, tokens only, UI vocabulary, fits complexity budget (ADR-0024)
+- [ ] UI changed? Screenshots in both themes (dark and light), tokens only, UI vocabulary, fits complexity budget (ADR-0024)
 
 ## New dependencies
 <!-- crate — reason — license -->

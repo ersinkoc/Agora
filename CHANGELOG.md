@@ -18,6 +18,14 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
   those in the new policy line `sandbox.sockets`), so it can no longer use your ssh-agent, the session bus, docker or a tmux server. On Linux
   kernels from 6.12 it can no longer connect to abstract sockets made outside its sandbox; a socket that is a file is still reachable there.
 - `agora doctor` says whether this machine restricts an agent's unix sockets (and why not), which socket variables the node leaves out of an agent's environment and which the policy passes.
+
+### Certificates
+- **A machine's certificate for the hub lasts 90 days, and nothing renews it yet.** A machine you joined on a given day cannot connect to the hub
+  after day 90 (its agents keep running and its events wait), and a hub that keeps running for 90 days refuses new connections until it is restarted.
+  Until renewal exists (ADR-0085, a proposal): join each machine again before day 90 (`agora hub code` on the hub, then `agora node enroll` on the
+  machine) and restart the hub now and then. `agora doctor` now tells you how many days are left on this machine's certificate and on the hub's
+  and warns 30 days before the end; `agora hub machines` says so under a machine that is close to its end.
+
 ### Fixes
 - `agora status` says "connected" only while the node's link to the hub is up right now (it used to say so for the hub the machine was set up for, also while every attempt failed); otherwise it says not connected and why, and on a Mac whose Local Network permission is missing it points to System Settings. After `agora update` on a Mac, the note now says to restart the node once more after allowing Local Network.
 
@@ -37,7 +45,7 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 ## 0.3.15
 
 ### Agents
-- The start window and the terminal can now start an agent with a model and an effort (ADR-0066): the window lists what the machine says each
+- The start window can now start an agent with a model and an effort (ADR-0066; the terminal client has no start picker yet): the window lists what the machine says each
   agent takes (a list for the effort, a text box for a model the tool checks itself), starts on "the agent's own default", offers nothing the
   machine did not list and says what it will start with before Start. The terminal's approval card shows an agent's requested model and
   effort in words and allows it over a signature that covers them; without settings nothing changes.

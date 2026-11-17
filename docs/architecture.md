@@ -189,7 +189,7 @@ Main window layout: see `ux/main-window.md`.
 | --- | --- | --- |
 | Linux | Phase 2 | PTY, /proc for process info |
 | macOS | Phase 2 | PTY, libproc for process info |
-| Windows | Phase 7 (ADR-0045, started) | ConPTY terminals with a job object per terminal, a named-pipe control channel (owner-only), toolhelp for process names, children and stats; no working directory of another process (the PEB is undocumented). Tested on CI with test agents; not yet with a real agent on a real machine |
+| Windows | Phase 7 (ADR-0045, started) | ConPTY terminals with a job object per terminal, a named-pipe control channel (owner-only), toolhelp for process names, children and stats; no working directory of another process (the PEB is undocumented). Tested on CI with test agents, and run with real Claude Code and Codex on a Windows 11 node in the [LAN run of 2026-11-11](backlog/lan-test-findings.md) |
 
 ## 9. Persistence
 

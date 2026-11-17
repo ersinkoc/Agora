@@ -22,3 +22,9 @@ allow-wildcard-paths = true
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
+
+# Recorded, not ignored: RUSTSEC-2024-0429 (`glib` 0.18.5, unsound `VariantStrIter`) reaches this lockfile through gtk-rs, which Tauri 2 uses for its
+# Linux webview. `cargo deny check` does not fail on it (cargo-deny reports unsound advisories only for workspace crates by default), so there is no
+# `ignore` entry to keep. Agora's code does not call `VariantStrIter`, and the desktop shell is built for Linux only for testing, not shipped.
+# It goes away when Tauri and wry move to gtk-rs 0.20 (glib 0.20 or newer); then `cargo update` in this directory removes it. If a future
+# cargo-deny starts failing on it, add it to `ignore` above with this same reason.

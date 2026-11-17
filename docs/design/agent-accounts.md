@@ -1,5 +1,7 @@
 # Agent accounts on nodes
 
+> **Design, not built.** Nothing below exists in the code yet: the manifest's `[accounts]` table is parsed but the node never runs a login, never raises `agent.not_authenticated`, and holds no per-account config directory or keychain entry. An agent that is not logged in shows its own login screen in the terminal. See [capabilities](../capabilities.md) and backlog P2-12.
+
 Problem: an agent on a remote VPS needs its own login (subscription or API key). Credentials must stay on the
 node (privacy, threat model T7).
 

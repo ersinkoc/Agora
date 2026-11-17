@@ -193,7 +193,7 @@ used; the node allows it only as its owner's `skip_permissions` policy says (`fo
 and refuses it for helpers an agent starts (ADR-0057). A shipped manifest declares only a flag checked on a real version of the
 agent, with that version in a comment; a flag that was not checked is not declared.
 
-Manifests in this repository: `claude-code` and `codex` (screens captured from the real agents, `manifests/agents/fixtures/`); `wrongstack` is planned and not shipped yet (it needs a machine that has it). `crates/agora-adapters/tests/shipped_manifests.rs` checks every shipped manifest against its captured screens.
+Manifests in this repository: `claude-code` and `codex` (screens captured from the real agents, `manifests/agents/fixtures/`); `wrongstack` and `wrongstack-acp` ship too (`manifests/agents/`). `crates/agora-adapters/tests/shipped_manifests.rs` checks every shipped manifest against its captured screens.
 
 ## Usage files (ADR-0042)
 The node follows the files of a running terminal agent whose kind has `[usage.file]`: a file belongs to the agent when it was touched after
