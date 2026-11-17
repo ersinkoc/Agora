@@ -297,6 +297,24 @@ pub enum First<S> {
     Answered,
 }
 
+/// Headers a proxy adds and a browser on the hub's own machine never sends.
+const FORWARDED: [&str; 7] = [
+    "x-forwarded-for",
+    "x-forwarded-host",
+    "x-forwarded-proto",
+    "x-real-ip",
+    "forwarded",
+    "tailscale-user-login",
+    "cf-connecting-ip",
+];
+
+fn forwarded(head: &str) -> bool {
+    head.split("\r\n")
+        .skip(1)
+        .filter_map(|l| l.split_once(':'))
+        .any(|(k, _)| FORWARDED.iter().any(|f| k.trim().eq_ignore_ascii_case(f)))
+}
+
 /// Reads the request head. A WebSocket upgrade is handed back untouched; other requests are answered here.
 pub async fn route<S>(
     mut stream: S,
@@ -348,6 +366,13 @@ where
     let bearer = || {
         header("authorization")
             .and_then(|v| v.strip_prefix("Bearer ").map(|t| t.trim().to_string()))
+    };
+    // A reverse proxy on this machine (`tailscale serve`, a tunnel) connects from loopback for visitors from anywhere. A request that
+    // says it was forwarded is never "the owner at the hub's own machine": its address is unknown, so the screen password applies.
+    let peer = if peer.is_some_and(|p| Client::new(Some(p), "").is_local()) && forwarded(&text) {
+        None
+    } else {
+        peer
     };
     let client = Client::new(peer, &header("user-agent").unwrap_or_default());
     if path == "/api/session" && (method == "GET" || method == "DELETE") {
@@ -755,5 +780,35 @@ mod tests {
         assert!(out.starts_with("HTTP/1.1 200"), "{out}");
         let (out, _) = ask(&api, "192.0.2.8", end).await;
         assert!(out.starts_with("HTTP/1.1 401"), "{out}");
+    }
+
+    /// A reverse proxy on the hub's machine (`tailscale serve`, a tunnel) connects from loopback: a request that says it was forwarded
+    /// is not the owner at the hub's own machine, so the screen password applies to it (ADR-0067).
+    #[tokio::test]
+    async fn a_forwarded_request_from_loopback_is_asked_for_the_password() {
+        let hub = Arc::new(
+            crate::hub::Hub::open(crate::store::SqliteStore::open_in_memory().unwrap()).unwrap(),
+        );
+        let api = crate::signin::HubSessions::new(Arc::clone(&hub)).with_password_rounds(1_000);
+        crate::password::ScreenPassword::with_iterations(hub.store(), 1_000)
+            .set("long enough")
+            .unwrap();
+        for header in [
+            "X-Forwarded-For: 203.0.113.9",
+            "x-real-ip: 203.0.113.9",
+            "Forwarded: for=203.0.113.9",
+            "Tailscale-User-Login: someone@example.com",
+            "X-Forwarded-Proto: https",
+        ] {
+            let info = format!("GET /api/session HTTP/1.1\r\nHost: h\r\n{header}\r\n\r\n");
+            let (out, _) = ask(&api, "127.0.0.1", info).await;
+            assert!(
+                out.contains(r#""passwordRequired":true"#),
+                "{header}: {out}"
+            );
+        }
+        let info = "GET /api/session HTTP/1.1\r\nHost: h\r\n\r\n".to_string();
+        let (out, _) = ask(&api, "::1", info).await;
+        assert!(out.contains(r#""passwordRequired":false"#), "{out}");
     }
 }

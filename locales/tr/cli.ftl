@@ -23,6 +23,7 @@ cli-usage =
       agora hub ssh install AD [--yes] [--unsigned] [--release-url URL] [--hub-dir DIR]
       agora hub login [--hub-dir DİZİN]
       agora password set|clear|status [--hub-dir DİZİN]
+      agora remote tailscale [--serve] [--port N] | status | off [--hub-dir DIR]
       agora hub notify [--ntfy URL | --webhook URL | --test] [--hub-dir DIR]
       agora hub prices update [--url URL] [--hub-dir DIR]
       agora hub ssh [add AD HEDEF [--port N]] [--hub-dir DIR]
@@ -489,3 +490,50 @@ join-certificate-invalid = Hub'ın gönderdiği doğrulanamadı ({ $what }). Hi�
 join-store-failed = Sonuç kaydedilemedi: { $reason }
 join-settings-unsaved = Bu makinenin ayarları kaydedilemedi. Kurmak için `agora` çalıştırın.
 frontdoor-join-address = Hub'ın adresi (192.168.1.20:7443 gibi; yoksa Enter):
+
+# ADR-0067 rung 3: hub'a bu makinenin dışından ulaşmak (`agora remote`).
+remote-password_required = Ekran parolası olmadan dışarıdan erişim açılmaz. Önce `agora password set` ile bir parola belirleyin, sonra bunu yeniden çalıştırın.
+remote-password_in_use = Ekran parolası bu makinenin dışından gelen bir erişimi koruyor, bu yüzden kalır. Önce `agora remote off` ile o erişimi kapatın (hub herkese açık bir adreste dinliyorsa yerel bir adreste başlatın), sonra parolayı silin.
+remote-tailscale_missing = Bu makinede Tailscale kurulu değil (`tailscale` komutu yok). tailscale.com'dan kurun, `tailscale up` ile oturum açın, sonra bunu yeniden çalıştırın.
+remote-tailscale_logged_out = Tailscale kurulu ama bu makine tailnet'inizde oturum açmamış. `tailscale up` çalıştırın, sonra bunu yeniden çalıştırın.
+remote-tailscale_timeout = Tailscale zamanında yanıt vermedi. Tailnet'iniz için HTTPS'e izin vermenizi isteyen bir bağlantı yazdıysa onu bir kez açın, sonra bunu yeniden çalıştırın.
+remote-tailscale_unreadable = Tailscale'in yanıtı kullanılamadı ({ $reason }). Yukarıda yazılanlar dışında hiçbir şey değiştirilmedi. `tailscale status` komutunun çalıştığını ve tailnet'inizde MagicDNS'in açık olduğunu denetleyin.
+remote-serve_port_in_use = Tailscale zaten { $port } numaralı HTTPS bağlantı noktasında sizin bir şeyinizi sunuyor, Agora ona dokunmaz. `--port N` ile başka bir bağlantı noktası seçin.
+remote-names-added = Hub'ın sertifikası artık bu makineyi tailnet'inizde şu adlarla anıyor: { $names }. Çalışan hub bunları birkaç saniye içinde alır; durmuş bir hub başlarken alır.
+remote-serve-on = Tailnet'inizdeki bir telefondan veya dizüstünden Agora'yı { $url } adresinde açın (bir kod ve ekran parolasıyla oturum açın).
+remote-tailscale-loopback-hint = Hub yalnızca bu makinede dinliyor, bu yüzden diğer tailnet makineleri ona henüz ulaşamaz. Bunu `--serve` ile yeniden çalıştırın veya hub'ı `--listen 0.0.0.0:7443` ile başlatın.
+remote-password-reminder = Ekran parolası başka makinelerden gelen her giriş için açık. `agora remote off` bunu yeniden kapatır.
+remote-status-listen = Hub { $addr } adresinde dinliyor.
+remote-status-not-running = Burada çalışan bir hub bulunamadı ({ $dir } içinde adres yok).
+remote-status-this-machine = Bu makine: erişilebilir.
+remote-status-lan = Yerel ağ: { $on ->
+        [yes] erişilebilir
+       *[no] erişilemez
+    }.
+remote-status-tailnet = Tailscale: { $on ->
+        [yes] erişilebilir
+       *[no] erişilemez
+    }.
+remote-status-names = Hub'ın sertifikasında bunun için yazılı adlar: { $names }.
+remote-status-serve = Tailscale serve: { $url }
+remote-status-public = Herkese açık internet: { $on ->
+        [yes] erişilebilir
+       *[no] erişilemez
+    }.
+remote-status-password-set = Ekran parolası: ayarlı.
+remote-status-password-not-set = Ekran parolası: ayarlı değil.
+remote-status-no-password = Bu makinenin dışından bir erişim açık ve ekran parolası ayarlı değil. Hemen `agora password set` ile bir parola belirleyin veya erişimi `agora remote off` ile kapatın.
+remote-public-warning = Hub herkese açık bir adreste dinliyor. Onu yalnızca ekran parolası ve yeni bir makinede denetlediğiniz sertifika korur; düz bir adres başka koruma vermez. Daha güvenli yol Tailscale: `agora remote tailscale --serve`.
+remote-off-names = Tailnet adları hub'ın listesinden çıktı; sertifika hub'ın bir sonraki başlangıcında bunları bırakır.
+remote-off-serve = { $port } numaralı HTTPS bağlantı noktasındaki Tailscale serve kuralı kaldırıldı. Diğer serve kurallarınıza dokunulmadı.
+remote-off-serve-gone = Agora'nın eklediği Tailscale serve kuralı zaten yok.
+remote-off-serve-foreign = { $port } numaralı HTTPS bağlantı noktasındaki kural artık Agora'nın eklediği değil, bu yüzden olduğu gibi bırakıldı.
+remote-off-nothing = Agora bu makinenin dışından hiçbir erişimi açmadı.
+frontdoor-listen-saved = Hub bir sonraki başlangıcından itibaren { $addr } adresinde dinleyecek (`agora down`, sonra `agora`).
+doctor-remote-password-set = Bu makinenin dışından bir erişim açık ve bir ekran parolası onu koruyor.
+doctor-remote-password-missing = Bu makinenin dışından bir erişim açık ve ekran parolası ayarlı değil. Hemen `agora password set` çalıştırın veya `agora remote off`.
+doctor-remote-password-missing-tailnet = Hub Tailscale üzerinden erişilebilir ve ekran parolası ayarlı değil. `agora password set` çalıştırın.
+doctor-remote-public-listen = Hub herkese açık bir adreste dinliyor: onu yalnızca ekran parolası ve sertifika parmak izi korur. Tailscale'i (`agora remote tailscale --serve`) ve yerel bir adreste dinlemeyi tercih edin.
+doctor-remote-tailnet = Tailscale çalışıyor; bu makine tailnet'inizde { $name }.
+doctor-remote-tailnet-unreachable = Tailscale buradan erişilemiyor ({ $reason }), bu yüzden tailnet adresi çalışmaz. `tailscale status` komutuna bakın.
+doctor-remote-names-missing = Hub'ın sertifikası { $names } adlarını henüz içermiyor. Hub'ı yeniden başlatın veya `agora remote tailscale` az önce çalıştırıldıysa birkaç saniye bekleyin.

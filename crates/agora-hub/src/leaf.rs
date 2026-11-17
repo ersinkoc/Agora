@@ -35,6 +35,10 @@ pub trait Provision: Send + Sync {
 pub type Persist = Box<dyn Fn(&str) -> std::io::Result<()> + Send + Sync>;
 
 type Interfaces = Box<dyn Fn() -> Result<Vec<Iface>, String> + Send + Sync>;
+/// More owner names, asked for again at every `provision` (a file the owner's tools write while the hub runs). Every name in it must
+/// already be checked ([`crate::names::checked_name`]).
+pub type Extra = Box<dyn Fn() -> Vec<String> + Send + Sync>;
+
 type HostName = Box<dyn Fn() -> Option<String> + Send + Sync>;
 
 struct Current {
@@ -50,6 +54,8 @@ pub struct Leaf {
     interfaces: Interfaces,
     /// Keeps `server-cert.pem` up to date (`agora doctor` reads it), when there is such a place.
     persist: Option<Persist>,
+    /// Names added while the hub runs (`agora remote tailscale`); read at every `provision`.
+    extra: Option<Extra>,
     slot: TlsSlot,
     current: Mutex<Current>,
 }
@@ -94,10 +100,18 @@ impl Leaf {
             host,
             interfaces,
             persist,
+            extra: None,
             slot: TlsSlot::new(acceptor, hash),
             current: Mutex::new(Current { names, hash }),
         };
         Ok((leaf, failure))
+    }
+
+    /// Makes every later `provision` also name what `extra` returns (after the `--name` values).
+    #[must_use]
+    pub fn with_extra(mut self, extra: Extra) -> Self {
+        self.extra = Some(extra);
+        self
     }
 
     /// The slot the listener takes its acceptor from.
@@ -159,7 +173,13 @@ fn wanted(
 
 impl Provision for Leaf {
     fn provision(&self) -> Result<[u8; 32], NamesFailure> {
-        let names = wanted(&self.configured, &self.host, self.listen, &self.interfaces)?;
+        let mut configured = self.configured.clone();
+        for n in self.extra.iter().flat_map(|f| f()) {
+            if !configured.contains(&n) {
+                configured.push(n);
+            }
+        }
+        let names = wanted(&configured, &self.host, self.listen, &self.interfaces)?;
         let mut cur = self.lock();
         if covers(&cur.names, &names) {
             return Ok(cur.hash);
@@ -182,5 +202,59 @@ impl Provision for Leaf {
         self.slot.set(acceptor, hash);
         *cur = Current { names, hash };
         Ok(hash)
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    /// Names written while the hub runs reach the certificate at the next `provision`, from the same CA, and a name that is not
+    /// there any more does not force a new one.
+    #[test]
+    fn extra_names_reach_the_leaf_at_the_next_provision() {
+        let ca = Ca::generate("test ca").unwrap();
+        let ca_pem = ca.cert_pem().to_string();
+        let extra: Arc<Mutex<Vec<String>>> = Arc::default();
+        let seen = Arc::clone(&extra);
+        let (leaf, failure) = Leaf::start(
+            ca,
+            vec![],
+            "127.0.0.1".parse().unwrap(),
+            Box::new(|| Some("box".to_string())),
+            Box::new(|| Ok(vec![])),
+            None,
+        )
+        .unwrap();
+        assert!(failure.is_none());
+        let leaf = leaf.with_extra(Box::new(move || seen.lock().unwrap().clone()));
+        let first = leaf.provision().unwrap();
+        assert_eq!(leaf.names(), ["localhost", "box", "127.0.0.1"]);
+        extra
+            .lock()
+            .unwrap()
+            .extend(["box.tail1234.ts.net".to_string(), "100.64.0.7".to_string()]);
+        let second = leaf.provision().unwrap();
+        assert_ne!(first, second, "a new certificate");
+        assert_eq!(
+            leaf.names(),
+            [
+                "box.tail1234.ts.net",
+                "100.64.0.7",
+                "localhost",
+                "box",
+                "127.0.0.1"
+            ]
+        );
+        // Same CA: a node that trusts it still verifies the new leaf.
+        assert!(ca_pem.contains("CERTIFICATE"));
+        extra.lock().unwrap().clear();
+        assert_eq!(
+            leaf.provision().unwrap(),
+            second,
+            "a removed name changes nothing"
+        );
     }
 }

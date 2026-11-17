@@ -170,6 +170,12 @@ fn web_assets(o: &Opts) -> Option<Arc<dyn agora_hub::web::Assets>> {
 
 pub fn hub_run(say: &Say, o: &Opts) -> ExitCode {
     let dir = hub_dir(o);
+    // ADR-0067: a hub is never opened to the internet without the screen password.
+    if let Err(code) =
+        crate::remotecmd::check_listen(say, &dir, o.listen.as_deref().unwrap_or(DEFAULT_LISTEN))
+    {
+        return code;
+    }
     let run = || -> Result<(), String> {
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         let ca = load_or_create_ca(&dir)?;
@@ -267,6 +273,7 @@ pub fn hub_run(say: &Say, o: &Opts) -> ExitCode {
             // `agora pair open` when an address is missing; the listener takes the new one for new connections.
             let leaf = start_leaf(say, &state, &dir, addr.ip(), &o.names)?;
             let acceptor_slot = leaf.slot();
+            watch_remote_names(&dir, &leaf);
             // The hub can pair once it knows the hash of the certificate machines will see; the switch is closed until the owner
             // opens it.
             state.hub.pairing().enable(leaf.hash());
@@ -290,6 +297,9 @@ pub fn hub_run(say: &Say, o: &Opts) -> ExitCode {
                 key!("cli-hub-names"),
                 &[("names", leaf.names().join(", ").into())],
             );
+            if crate::remotecmd::exposure(addr.ip()).public {
+                say.out(key!("remote-public-warning"), &[]);
+            }
             let _tunnels = start_tunnels(say, &dir, addr);
             if has_web {
                 say.out(
@@ -322,9 +332,16 @@ fn start_leaf(
     let ca = state.ca.as_ref().ok_or("no certificate authority")?;
     // The leaf signs with its own copy of the CA key, loaded from the same PEM.
     let ca = Ca::from_pem(ca.cert_pem(), &ca.key_pem()).map_err(|e| e.to_string())?;
+    // The names `agora remote tailscale` added (ADR-0067 rung 3) are in the first certificate, and are read again at every issue.
+    let mut all_names = names.to_vec();
+    for n in crate::remotecmd::saved_names(dir) {
+        if !all_names.contains(&n) {
+            all_names.push(n);
+        }
+    }
     let (leaf, failure) = agora_hub::leaf::Leaf::start(
         ca,
-        names.to_vec(),
+        all_names,
         listen,
         Box::new(agora_platform::hostname),
         Box::new(|| {
@@ -350,7 +367,31 @@ fn start_leaf(
     if failure.is_some() {
         say.err(key!("cli-hub-names-unlisted"), &[]);
     }
+    let remote_dir = dir.to_path_buf();
+    let leaf = leaf.with_extra(Box::new(move || crate::remotecmd::saved_names(&remote_dir)));
     Ok(Arc::new(leaf))
+}
+
+/// Gives the certificate the names `agora remote tailscale` writes while the hub runs: the file is looked at every few seconds, and a
+/// change makes the hub issue a new certificate from its own CA (names only ever come from that file, which checks every one). The
+/// thread lives as long as the process.
+fn watch_remote_names(dir: &Path, leaf: &Arc<agora_hub::leaf::Leaf>) {
+    use agora_hub::leaf::Provision;
+    let (file, leaf) = (dir.join(crate::remotecmd::NAMES_FILE), Arc::clone(leaf));
+    let _ = std::thread::Builder::new()
+        .name("remote-names".into())
+        .spawn(move || {
+            let read = || std::fs::read(&file).ok();
+            let mut seen = read();
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(3));
+                let now = read();
+                if now != seen {
+                    seen = now;
+                    let _ = leaf.provision();
+                }
+            }
+        });
 }
 
 /// Answers "is there a hub here?" on the local network while, and only while, the hub is open for pairing (spec section 3). The
@@ -469,22 +510,28 @@ pub fn password(say: &Say, o: &Opts, op: &str) -> ExitCode {
             );
             ExitCode::SUCCESS
         }
-        "clear" => match screen.clear() {
-            Ok(true) => {
-                let revoked = sign_out_all();
-                audit("password_clear");
-                say.out(
-                    key!("cli-password-cleared"),
-                    &[("count", (revoked as i64).into())],
-                );
-                ExitCode::SUCCESS
+        "clear" => {
+            // A path from outside is on: the password stays until `agora remote off` (ADR-0067).
+            if let Some(code) = crate::remotecmd::clear_refused(say, &dir) {
+                return code;
             }
-            Ok(false) => {
-                say.out(key!("cli-password-off"), &[]);
-                ExitCode::SUCCESS
+            match screen.clear() {
+                Ok(true) => {
+                    let revoked = sign_out_all();
+                    audit("password_clear");
+                    say.out(
+                        key!("cli-password-cleared"),
+                        &[("count", (revoked as i64).into())],
+                    );
+                    ExitCode::SUCCESS
+                }
+                Ok(false) => {
+                    say.out(key!("cli-password-off"), &[]);
+                    ExitCode::SUCCESS
+                }
+                Err(e) => fail(format!("{e:?}")),
             }
-            Err(e) => fail(format!("{e:?}")),
-        },
+        }
         "set" => {
             // The prompt appears only once echo is off: an answer typed or pasted right after it is never shown.
             let read =
