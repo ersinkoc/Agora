@@ -1,6 +1,6 @@
 //! `agora hub run|code` and `agora node enroll`: the commands that connect machines to a hub. The hub keeps its state in
-//! `<hub dir>` (default `$AGORA_HOME/hub`): the database, its certificate authority (key readable only by the user)
-//! and the client token. A node keeps what enrollment gave it in `<AGORA_HOME>/link`.
+//! `<hub dir>` (default `$AGORA_HOME/hub`, a folder only the user can enter): the database, its certificate authority (key
+//! readable only by the user) and the client token. A node keeps what enrollment gave it in `<AGORA_HOME>/link`.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -86,6 +86,15 @@ pub fn not_here(say: &Say, o: &Opts) -> ExitCode {
 
 pub fn link_dir() -> PathBuf {
     home().join("link")
+}
+
+/// Makes the hub's folder, closed to every other user (audit F1001): `hub.db` and its `-wal`/`-shm` are created with the default mode,
+/// and they hold the hashes of the live one-time codes (short enough to search for offline within their 10 minutes), of the sessions
+/// and of the screen password, and the event history. An existing folder is closed too, so a hub made by an older version is closed at
+/// its next start.
+fn private_hub_dir(dir: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    agora_platform::restrict_to_owner(dir).map_err(|e| format!("{}: {e}", dir.display()))
 }
 
 fn random_token() -> Option<String> {
@@ -177,7 +186,7 @@ pub fn hub_run(say: &Say, o: &Opts) -> ExitCode {
         return code;
     }
     let run = || -> Result<(), String> {
-        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        private_hub_dir(&dir)?;
         let ca = load_or_create_ca(&dir)?;
         let token_path = dir.join("token");
         let token = match std::fs::read_to_string(&token_path) {
@@ -423,7 +432,7 @@ fn start_discovery(
 
 /// A fresh one-time sign-in code from the hub's own store (valid 10 minutes).
 pub fn new_login_code(dir: &Path) -> Result<String, String> {
-    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    private_hub_dir(dir)?;
     let store = SqliteStore::open(&dir.join("hub.db")).map_err(|e| e.to_string())?;
     SignIn::new(&store, Arc::new(Lockout::new()))
         .create_code(server::now_ms())
@@ -1407,7 +1416,7 @@ pub fn hub_code(say: &Say, o: &Opts) -> ExitCode {
 
 /// A one-time enrollment code from the hub's own store (valid 10 minutes), creating the hub's CA the first time.
 pub(crate) fn new_enrollment_code(dir: &Path) -> Result<String, String> {
-    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    private_hub_dir(dir)?;
     let _ = load_or_create_ca(dir)?;
     let store = SqliteStore::open(&dir.join("hub.db")).map_err(|e| e.to_string())?;
     Enrollment::new(&store)
@@ -1608,13 +1617,15 @@ pub(crate) fn store_link(
 /// target, so a link planted at the target is replaced, never followed, and a stop never leaves half a file). The order keeps the
 /// folder consistent at every point: `node-id` is what says this machine is joined, so it is removed **first** (a machine being joined
 /// again looks un-joined while the new material goes in) and written **last** (only a complete set looks joined). A failure at any step
-/// leaves a folder without `node-id`.
+/// leaves a folder without `node-id`. The whole save holds the folder's guard ([`link_guard`]), so two saves that overlap (two `agora`
+/// runs enrolling at once, `agora join --replace` beside them) never mix their files: one save ends whole before the other starts.
 fn store_into(
     dir: &Path,
     [url, id, ca_pem, cert_pem, key_pem]: [&str; 5],
     write: &dyn Fn(&Path, &[u8]) -> std::io::Result<()>,
 ) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
+    let _guard = link_guard(dir, LINK_GUARD_WAIT)?;
     match std::fs::remove_file(dir.join("node-id")) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -1625,6 +1636,30 @@ fn store_into(
     write(&dir.join("cert.pem"), cert_pem.as_bytes())?;
     write(&dir.join("url"), url.as_bytes())?;
     write(&dir.join("node-id"), id.as_bytes())
+}
+
+/// How long a save of the link folder waits for another save to end (audit F1000). A save takes milliseconds, so this is reached only
+/// when the other one is stopped or hangs; the save then fails with `TimedOut` and changes nothing.
+const LINK_GUARD_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Holds `<dir>/lock` exclusively (an OS file lock, released when the returned file is dropped or the process ends), waiting at most
+/// `wait` for another holder. The lock file is opened with `agora_platform::open_lock_private`: private from its creation, never
+/// through a link, so another local user can neither hold it nor make it land on another file.
+fn link_guard(dir: &Path, wait: std::time::Duration) -> std::io::Result<std::fs::File> {
+    let file = agora_platform::open_lock_private(&dir.join("lock"))?;
+    let end = std::time::Instant::now() + wait;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < end => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(std::fs::TryLockError::WouldBlock) => {
+                return Err(std::io::Error::from(std::io::ErrorKind::TimedOut))
+            }
+            Err(std::fs::TryLockError::Error(e)) => return Err(e),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1710,6 +1745,55 @@ mod store_tests {
             .unwrap()
             .file_type()
             .is_symlink());
+    }
+
+    /// Audit F1000: a second save that starts while the first is between its key and its certificate (two `agora` runs enrolling at
+    /// once) used to run to the end and leave `node-id` over the key of one enrollment and the certificate of the other. The order is
+    /// forced: the first save's writer starts the second one. It is kept out (`TimedOut` after the guard's wait, nothing written) and
+    /// the first ends whole; the guard is free again after a save that failed.
+    #[test]
+    fn overlapping_saves_never_mix_two_enrollments() {
+        let dir = tmp("overlap");
+        let other = ["wss://o:1", "other", "OTHERCA", "OTHERCERT", "OTHERKEY"];
+        let second = std::cell::RefCell::new(None);
+        store_into(&dir, NEW, &|p, c| {
+            agora_platform::write_private(p, c)?;
+            if p.file_name().is_some_and(|n| n == "key.pem") && second.borrow().is_none() {
+                let r = store_into(&dir, other, &agora_platform::write_private);
+                *second.borrow_mut() = Some(r.map_err(|e| e.kind()));
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(*second.borrow(), Some(Err(std::io::ErrorKind::TimedOut)));
+        for (f, want) in [
+            ("node-id", "new"),
+            ("key.pem", "NEWKEY"),
+            ("cert.pem", "NEWCERT"),
+            ("ca.pem", "NEWCA"),
+            ("url", "wss://h:1"),
+        ] {
+            assert_eq!(std::fs::read_to_string(dir.join(f)).unwrap(), want, "{f}");
+        }
+
+        let failed = store_into(&dir, other, &|p, c| {
+            if p.file_name().is_some_and(|n| n == "cert.pem") {
+                return Err(std::io::Error::other("injected"));
+            }
+            agora_platform::write_private(p, c)
+        });
+        assert!(failed.is_err());
+        assert!(link_guard(&dir, std::time::Duration::ZERO).is_ok());
+        store_into(&dir, other, &agora_platform::write_private).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("key.pem")).unwrap(),
+            "OTHERKEY"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("cert.pem")).unwrap(),
+            "OTHERCERT"
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
 

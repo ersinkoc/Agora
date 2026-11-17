@@ -564,6 +564,37 @@ fn half_a_ca_is_an_error_not_a_reason_to_make_a_new_one() {
     assert!(!hub_dir.join("ca.key").exists(), "no new key either");
 }
 
+/// Audit F1001: `hub.db` is created with the default mode and holds the hashes of the live one-time codes (an 8-letter code is
+/// searched for offline within its 10 minutes), so the hub's folder itself is closed to other users: made so by `hub login`,
+/// `hub code` and `hub run`, also when an older version left it open.
+#[cfg(unix)]
+#[test]
+fn the_hubs_folder_is_closed_to_other_users() {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    let root = tmp("private-hub");
+    for (name, command) in [("login", "login"), ("code", "code"), ("old", "login")] {
+        let hub_dir = root.join(name).join("hub");
+        if name == "old" {
+            std::fs::create_dir_all(&hub_dir).unwrap();
+            std::fs::set_permissions(&hub_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let out = agora(&root, &["hub", command])
+            .arg("--hub-dir")
+            .arg(&hub_dir)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{name}: {out:?}");
+        assert!(hub_dir.join("hub.db").exists(), "{name}");
+        assert_eq!(mode(&hub_dir), 0o700, "{name}: the hub's folder is open");
+    }
+    let hub_dir = root.join("run").join("hub");
+    let (hub, _addr) = start_hub(&root.join("run"), &hub_dir, "127.0.0.1:0");
+    let _hub = Proc(hub);
+    assert_eq!(mode(&hub_dir), 0o700, "hub run: the hub's folder is open");
+    let _ = std::fs::remove_dir_all(root);
+}
+
 #[test]
 fn team_members_are_added_listed_changed_and_removed_from_the_command_line() {
     let root = tmp("users");
