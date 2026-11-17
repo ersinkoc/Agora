@@ -33,6 +33,7 @@ Bind   = { "agent": string } | { "follow": "attention" | "selection" }
 
 | id | shows |
 | --- | --- |
+| `fleet` | Home: the fleet console (`fleet-console.md`): what needs you, then every agent as a tile; added with the fleet console, an older window shows it as an unknown panel |
 | `terminal` | the bound agent's terminal |
 | `conversation` | the bound agent's chat |
 | `agent` | terminal or chat, whichever the agent has (and its summary once it has ended) |

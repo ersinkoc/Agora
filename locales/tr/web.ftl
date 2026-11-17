@@ -818,3 +818,63 @@ setting-default-is = Ajanın kendi varsayılanı ({ $value })
 start-settings-summary = { $kind } şu ayarlarla başlayacak: { $settings }.
 start-settings-unsupported = Bu makine, model veya eforla ajan başlatmak için fazla eski. Güncelleyin ya da ajanın kendi varsayılanını seçin.
 start-setting-refused = Bu makine, bu ajan için o modeli veya eforu almıyor. Başka birini ya da ajanın kendi varsayılanını seçin.
+
+# Ana sayfa bir filo konsolu olarak: kimin sizi beklediği, kimin çalıştığı, neyin bittiği, neyin hata verdiği, hangi makinelerin çevrimiçi olduğu.
+fleet-panel = Genel durum
+fleet-summary-label = Genel durum bir bakışta
+fleet-filter-hint = Yalnızca şunları göster
+fleet-failed = Hata verdi
+fleet-machines =
+    { $total ->
+        [one] { $total } makineden { $online } tanesi çevrimiçi
+       *[other] { $total } makineden { $online } tanesi çevrimiçi
+    }
+fleet-filter-active = Yalnızca “{ $name }” gösteriliyor.
+fleet-filter-clear = Hepsini göster
+fleet-filter-none = Burada gösterilecek bir şey yok.
+fleet-attention-count = { $count ->
+    [one] 1 şey sizi bekliyor
+   *[other] { $count } şey sizi bekliyor
+}
+fleet-asked = { $when } soruldu
+fleet-waiting-in-terminal = Terminalinde sizi bekliyor
+fleet-asks-start = Başka bir ajan başlatmak istiyor
+fleet-allow-for = İzin ver: { $name }
+fleet-deny-for = Reddet: { $name }
+fleet-review = İncele ve karar ver
+fleet-review-for = İncele ve karar ver: { $name }
+fleet-open-for = { $name } ajanını aç
+fleet-group-by = Gruplama
+fleet-group-machine = Makine
+fleet-group-project = Proje
+fleet-no-project = Projesiz
+fleet-offline-since = Çevrimdışı. Son görülme: { $when }.
+fleet-offline-note = Ajanlar orada çalışmaya devam eder; yaptıkları makine yeniden bağlanınca burada görünür.
+fleet-no-agents-here = Burada henüz ajan yok.
+fleet-start-on = { $machine } üzerinde ajan başlat
+fleet-tile-asks = İstediği: { $what }
+fleet-tile-stopped = Makinesiyle birlikte durdu
+fleet-tile-state-for = { $time } süredir: { $state }
+fleet-tile-ended = { $when } bitti
+fleet-empty-title = İlk makinenizi bağlayın
+fleet-empty-text = Makine ajanlarınızı çalıştırır ve katılır katılmaz burada görünür. Agora'nın başladığı makinede bir katılma kodu alın, sonra eklemek istediğiniz makinede ikinci komutu çalıştırın.
+fleet-empty-step-code = Agora'nın başladığı makinede
+fleet-empty-step-join = Eklenecek makinede
+fleet-empty-ca = ca.pem, o makinedeki ~/.agora/hub/ca.pem dosyasıdır.
+fleet-empty-machines = Makinelerinizi görün
+fleet-firstrun-title = Makineleriniz hazır. İlk ajanı başlatın.
+fleet-firstrun-text = Bir makine ve proje klasörü seçin, ajan orada başlasın. Burada görünür ve sizi gerektiğinde çağırır.
+fleet-firstrun-cli = Ya da o makinedeki bir terminalden
+fleet-firstrun-offline = Şu an tüm makineler çevrimdışı. Birinde Agora'yı başlatın, burada görünsün.
+fleet-offline-title = Agora'ya ulaşılamıyor
+fleet-offline-text = Ajanlarınız makinelerinde çalışmaya ve yaptıklarını kaydetmeye devam ediyor. Bağlantı geri gelir gelmez yeniden burada görünürler.
+fleet-offline-stale = Agora ile bağlantı kesildi. Gördükleriniz bu pencerenin bildiği son durum ve eski olabilir. Ajanlar makinelerinde çalışmaya devam ediyor.
+fleet-loading = Genel durum yükleniyor…
+fleet-exit-code = Çıkış kodu { $code }
+fleet-attention-more = { $count } tane daha göster
+fleet-attention-less = Daha az göster
+fleet-stale-no-answer = Bağlantı kesikken yanıt verilemez.
+fleet-same-ask = { $machine } üzerinde { $count } { $kind } ajanı aynı şeyi istiyor
+fleet-review-each = Tek tek incele
+fleet-collapse = Tek satır olarak göster
+fleet-same-ask-any = { $machine } üzerinde { $count } ajan aynı şeyi istiyor

@@ -225,3 +225,12 @@ body {
   header.ide-bar .ide-row { min-height: var(--tap); }
   header.ide-bar .ide-iconbtn { min-width: var(--tap); min-height: var(--tap); }
 }
+
+/* The fleet's five answers above the list (the same strip as the desktop Home): two to a row, every one a full-size touch target. */
+.phone-fleet { padding: var(--space-3) var(--space-3) 0; }
+.phone .fleet-summary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.phone .fleet-count { min-height: var(--tap); }
+.phone .fleet-count--machines { grid-column: 1 / -1; margin-inline-start: 0; }
+.phone .fleet-empty { padding: var(--space-6) var(--space-3); }
+.phone .fleet-empty .button, .phone .fleet-empty .link { min-height: var(--tap); display: inline-flex; align-items: center; }
+.phone .fleet-stale { margin: var(--space-3) var(--space-3) 0; }

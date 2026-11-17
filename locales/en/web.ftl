@@ -833,3 +833,63 @@ setting-default-is = The agent's own default ({ $value })
 start-settings-summary = { $kind } will start with { $settings }.
 start-settings-unsupported = This machine is too old to start an agent with a model or effort. Update it, or choose the agent's own default.
 start-setting-refused = This machine does not take that model or effort for this agent. Choose another, or the agent's own default.
+
+# Home as a fleet console (docs/ux/fleet-console.md): what needs you, what works, what finished, what failed, which machines are online.
+fleet-panel = Fleet
+fleet-summary-label = The fleet at a glance
+fleet-filter-hint = Show only
+fleet-failed = Failed
+fleet-machines =
+    { $total ->
+        [one] { $online } of { $total } machine online
+       *[other] { $online } of { $total } machines online
+    }
+fleet-filter-active = Showing only “{ $name }”.
+fleet-filter-clear = Show everything
+fleet-filter-none = Nothing to show here.
+fleet-attention-count = { $count ->
+    [one] 1 thing needs you
+   *[other] { $count } things need you
+}
+fleet-asked = Asked { $when }
+fleet-waiting-in-terminal = Waiting for you in its terminal
+fleet-asks-start = Asks to start another agent
+fleet-allow-for = Allow: { $name }
+fleet-deny-for = Deny: { $name }
+fleet-review = Review and decide
+fleet-review-for = Review and decide: { $name }
+fleet-open-for = Open { $name }
+fleet-group-by = Group by
+fleet-group-machine = Machine
+fleet-group-project = Project
+fleet-no-project = No project
+fleet-offline-since = Offline. Last seen { $when }.
+fleet-offline-note = Agents keep running there; what they did shows up here when it reconnects.
+fleet-no-agents-here = No agents here yet.
+fleet-start-on = Start an agent on { $machine }
+fleet-tile-asks = Asks: { $what }
+fleet-tile-stopped = Stopped with its machine
+fleet-tile-state-for = { $state } for { $time }
+fleet-tile-ended = Ended { $when }
+fleet-empty-title = Connect your first machine
+fleet-empty-text = A machine runs your agents and appears here as soon as it joins. Get a join code on the machine where Agora started, then run the second command on the machine you want to add.
+fleet-empty-step-code = On the machine where Agora started
+fleet-empty-step-join = On the machine to add
+fleet-empty-ca = ca.pem is the file ~/.agora/hub/ca.pem on that machine.
+fleet-empty-machines = See your machines
+fleet-firstrun-title = Your machines are ready. Start the first agent.
+fleet-firstrun-text = Choose a machine and a project folder, and an agent starts there. It shows up here and tells you when it needs you.
+fleet-firstrun-cli = Or from a terminal on that machine
+fleet-firstrun-offline = Every machine is offline right now. Start Agora on one of them and it appears here.
+fleet-offline-title = Cannot reach your Agora
+fleet-offline-text = Your agents keep running on their machines and keep track of what they do. They show up here again as soon as the connection is back.
+fleet-offline-stale = The connection to Agora is down. What you see is the last this window knew and may be out of date. Agents keep running on their machines.
+fleet-loading = Loading your fleet…
+fleet-exit-code = Exit code { $code }
+fleet-attention-more = Show { $count } more
+fleet-attention-less = Show fewer
+fleet-stale-no-answer = Cannot answer while the connection is down.
+fleet-same-ask = { $count } { $kind } agents ask for the same thing on { $machine }
+fleet-review-each = Review each
+fleet-collapse = Show as one
+fleet-same-ask-any = { $count } agents ask for the same thing on { $machine }
