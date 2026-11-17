@@ -26,7 +26,7 @@ jobs:
       - name: Node footprint
         continue-on-error: true
         run: cargo run -q --release -p agora-bench -- footprint --commit "${{ github.sha }}" --out footprint.json --check
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: footprint-${{ github.sha }}
@@ -59,7 +59,7 @@ jobs:
           if [ -x ./agora-bench-base ]; then
             ./agora-bench-head bestof base-1.json base-2.json base-3.json --out bench-base.json
           fi
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: bench-${{ github.sha }}
           path: bench-*.json

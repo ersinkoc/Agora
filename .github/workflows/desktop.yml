@@ -66,7 +66,7 @@ jobs:
           workspaces: apps/desktop/src-tauri
       - run: cargo install tauri-cli --version 2.12.4 --locked
       - run: cargo tauri build --bundles nsis --config '{"bundle":{"active":true}}'
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: desktop-windows-unsigned
           path: apps/desktop/src-tauri/target/release/bundle/nsis/*-setup.exe
@@ -88,7 +88,7 @@ jobs:
           workspaces: apps/desktop/src-tauri
       - run: cargo install tauri-cli --version 2.12.4 --locked
       - run: cargo tauri build --bundles dmg --config '{"bundle":{"active":true}}'
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: desktop-macos-unsigned
           path: apps/desktop/src-tauri/target/release/bundle/dmg/*.dmg
