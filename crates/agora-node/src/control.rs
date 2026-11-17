@@ -1173,23 +1173,50 @@ const MAX_READ_BYTES: u64 = 512 * 1024;
 
 fn open_files(ctx: &ControlContext, worktree_id: &str) -> Result<crate::files::Files, Error> {
     let wt = agent_worktree(ctx, worktree_id)?;
-    crate::files::Files::open(&wt, MAX_READ_BYTES)
+    let files = crate::files::Files::open(&wt, MAX_READ_BYTES)
         .map(|f| f.with_secret_shown(ctx.show_secret))
-        .map_err(|e| e.to_protocol())
+        .map_err(|e| e.to_protocol())?;
+    // Judged again on the root `Files` settled on (its own resolution, which every later read and listing is checked against): a
+    // link swapped in after the check above is refused too (audit F1011).
+    if !still_in_place(ctx, &wt, files.root()) {
+        return Err(invalid("worktree_id"));
+    }
+    Ok(files)
+}
+
+/// Whether an agent's folder, recorded as `recorded` when the agent started, is still that folder, `resolved` being where it leads
+/// now (audit F1011). A selected folder is recorded canonical (`directory::inspect`), so it must still resolve to itself; a folder
+/// below the node's worktree root must resolve to that root (the node's own, resolved) joined with the rest. Otherwise a folder
+/// swapped for a link since the start, by anything that can write beside it (another agent of the project), would lead files, diffs
+/// and history wherever the link points, and the secret-file names (ADR-0080) would be judged below the link's target.
+fn still_in_place(ctx: &ControlContext, recorded: &Path, resolved: &Path) -> bool {
+    let expected = match recorded.strip_prefix(&ctx.worktree_root) {
+        Ok(rest) => match agora_platform::canonicalize_plain(&ctx.worktree_root) {
+            Ok(root) => root.join(rest),
+            Err(_) => return false,
+        },
+        Err(_) => recorded.to_path_buf(),
+    };
+    agora_platform::canonicalize_plain(resolved).is_ok_and(|now| now == expected)
 }
 
 /// Largest diff one answer carries; a bigger one is cut (the file view is for reading, not for patching).
 const MAX_DIFF_BYTES: usize = 512 * 1024;
 
 /// The workspace of one of this node's agents, by the id the node reported it under. Only those: a client cannot
-/// point a git command at any other directory.
+/// point a git command at any other directory, nor at one a link put in the place of an agent's folder ([`still_in_place`]).
 fn agent_worktree(ctx: &ControlContext, worktree_id: &str) -> Result<PathBuf, Error> {
-    ctx.sup()
+    let wt = ctx
+        .sup()
         .list()
         .into_iter()
         .find(|v| v.worktree.to_string_lossy() == worktree_id)
         .map(|v| v.worktree)
-        .ok_or_else(|| invalid("worktree_id"))
+        .ok_or_else(|| invalid("worktree_id"))?;
+    if !still_in_place(ctx, &wt, &wt) {
+        return Err(invalid("worktree_id"));
+    }
+    Ok(wt)
 }
 
 fn with_terminal<R>(
