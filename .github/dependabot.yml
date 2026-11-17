@@ -13,6 +13,9 @@ updates:
       # The hub/node WebSocket link needs a deliberate code migration with its own review (backlog).
       - dependency-name: tokio-tungstenite
         update-types: ["version-update:semver-major"]
+      # getrandom 0.4 removed `getrandom::getrandom`; it is called where tokens, nonces, ids and pairing numbers are made (backlog).
+      - dependency-name: getrandom
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: cargo
     directory: /apps/desktop/src-tauri
     schedule: { interval: weekly }
