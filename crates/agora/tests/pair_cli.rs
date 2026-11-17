@@ -544,6 +544,21 @@ fn a_denied_machine_and_an_address_the_certificate_does_not_name_store_nothing()
     assert!(!byip.join("machine.toml").exists());
 }
 
+/// F821: the owner's screen ends, with a failure and a sentence, when the hub it answers for goes away; it used to wait for ever
+/// and spin on the closed connection.
+#[test]
+fn the_owners_screen_ends_when_the_hub_goes_away() {
+    let root = tmp("hubgone");
+    let hub = hub(&root);
+    let owner = root.join("owner");
+    std::fs::create_dir_all(&owner).unwrap();
+    let screen = hub.open(&owner);
+    drop(hub);
+    let (ok, text) = screen.finish();
+    assert!(!ok, "{text}");
+    assert!(text.contains("The hub did not answer"), "{text}");
+}
+
 #[test]
 fn wrong_arguments_are_refused_before_anything_happens() {
     let root = tmp("args");

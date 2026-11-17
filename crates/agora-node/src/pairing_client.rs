@@ -376,7 +376,12 @@ pub fn check_delivery(d: &Delivery<'_>, now_secs: i64) -> Result<(String, String
     let bad = PairError::CertificateInvalid;
     let (roots, ca_der) = root_of(d.ca_pem)?;
     let roots = Arc::new(roots);
-    let now = UnixTime::since_unix_epoch(Duration::from_secs(u64::try_from(now_secs).unwrap_or(0)));
+    // The chain checks below enforce each certificate's start against the time they are given, with no allowance. They are given
+    // the last moment the allowance covers, so a start up to `CLOCK_SLACK_SECONDS` ahead of this clock passes there as it does in
+    // the checks of this function; an end is then only checked more strictly, and the ends are checked against `now_secs` here.
+    let now = UnixTime::since_unix_epoch(Duration::from_secs(
+        u64::try_from(now_secs.saturating_add(CLOCK_SLACK_SECONDS)).unwrap_or(0),
+    ));
 
     // The CA itself: a CA, for signing certificates, in its validity.
     let (_, ca) = x509_parser::parse_x509_certificate(ca_der.as_ref()).map_err(|_| bad("ca"))?;
@@ -1223,6 +1228,19 @@ mod tests {
             check(&ca.pem, &cert, &leaf, &csr, earlier).unwrap_err(),
             PairError::CertificateInvalid(_) | PairError::NameUnverified { .. }
         ));
+    }
+
+    /// F820: a hub backdates by 5 minutes, so a machine whose clock is 7 minutes behind sees every certificate start 2 minutes ahead,
+    /// inside the allowance; the chain checks used to refuse that before the allowance was looked at.
+    #[test]
+    fn a_certificate_that_starts_within_the_clock_allowance_is_kept() {
+        let ca = good_authority();
+        let (csr_pem, csr) = request();
+        let cert = ca.node(&csr_pem, ID, |_| {});
+        let leaf = ca.leaf(HOST);
+        assert!(check(&ca.pem, &cert, &leaf, &csr, now() - 7 * 60).is_ok());
+        // The CA and leaf start 5 minutes ago too, so 5 + 10 minutes behind and a little more is past the allowance.
+        assert!(check(&ca.pem, &cert, &leaf, &csr, now() - 15 * 60 - 30).is_err());
     }
 
     #[test]
