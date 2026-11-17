@@ -124,8 +124,11 @@ session is one-shot, and the design depends on exactly those two rules (5a).
 **Aggregate bound.** 10^-6 is the figure for one constrained comparison, not for a window. The budget that turns it into a bound: every failure
 (mismatch, a Deny, an expiry nobody answered, an abort after the challenge, an invalid transition) counts; **5 failures hub-wide while the switch is
 open close the switch** (`pair.closed` until the owner opens it again), and from one address 5 failures lock that address out for a minute
-(section 7). So one open window admits at most 5 failed comparisons plus the one the owner approves: the chance that a party in the middle gets a
-matching number in a window is at most about 6 x 10^-6, and each failed attempt is a card the owner saw.
+(section 7). Up to four sessions can wait at once, and a failure only counts when it ends, so one open window can put at most about 9 cards in front of the
+owner (the 5 failures that close it, plus up to 4 waiting at that moment): the chance that a party in the middle gets a matching number in a
+window is at most about 9 x 10^-6, **under 10^-5**, and each failed attempt is a card the owner saw. (An earlier draft said 6 x 10^-6; it did
+not count the sessions that wait at the same time.) A connection that was never admitted (a first message that is a reveal) counts against its own
+address only, never against the window's 5, so a host cannot close the owner's window by sending such messages (section 12).
 
 ## 6. A browser signing in
 - A browser has no key and no TLS binding it can read, so the number here is **not** a handshake: the hub makes a random 6-digit number, shows it
@@ -247,5 +250,18 @@ What this document did not say, and what the code does:
   last report, once a minute). The number, nonces, commitment, exporter and CSR are never written.
 - **The number's function** lives in `agora_hub::pairing::sas` with a test vector computed outside the code; the node side will move it to a shared
   crate or reimplement it against the same vector.
+- **Which failures close the switch.** Only failures of an admitted session (mismatch, deny, expiry, abort, wrong order) count for the window's 5.
+  A connection whose first message is a reveal was never admitted and has no session: it is `pair.unknown`, counts for its own address's
+  lockout only, and cannot close the window. The admission counters count an attempt first against its own address and only an attempt that
+  passed it against the hub's share, so one host that hammers cannot use up everyone's share (it gets `pair.limit` from its own counter).
+- **Clock.** Every deadline (10-minute window, 5-minute session, 30-second reveal) runs on a clock that only goes forward (`Instant` from the
+  start of the process); the wall clock is used only to show a time to a window and in the audit trail, so setting it back cannot keep a
+  window or a request open.
+- **Text on the card.** `node_name` must already be a valid node id at the request (so no audit row, card or counter holds anything else);
+  `os` and `version` are at most 64 bytes with no control character and none of the bidirectional controls, zero-width characters or the byte
+  order mark (U+200B to U+200F, U+202A to U+202E, U+2066 to U+2069, U+FEFF).
 - **Not in this step:** the push notice itself (`Pairing::take_push` decides when, nothing sends it), provisioning the leaf's names, discovery,
   `agora pair`, the node's verifier, and the browser path.
+- **Follow-up (needs a schema addition, so not done here):** the card does not say that the node name already belongs to an enrolled machine; the
+  owner learns it from a refused approval (`pair.state`, `name_in_use`). A `name_in_use` field on `PairRequested` would let a window warn before
+  anyone ticks Replace, which revokes a real machine and installs the requester.

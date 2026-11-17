@@ -247,17 +247,12 @@ impl PairLimits {
     /// allocated or anyone is told. `Err(seconds)` is when to try again.
     pub fn admit(&mut self, kind: Kind, key: IpAddr, now: u64) -> Result<(), u64> {
         self.prune(now);
-        // The whole hub counts every attempt, so a flood from many addresses is still bounded.
-        let hub = &mut self.hub[kind.index()];
-        hub.push_back(now);
-        while hub.len() > HUB_PER_10_MINUTES + 1 {
-            hub.pop_front();
-        }
-        let hub_wait = Self::over(hub, now, HUB_PER_MINUTE, HUB_PER_10_MINUTES);
         let k = (kind, key);
         if !self.keys.contains_key(&k) && self.keys.len() >= MAX_KEYS {
             return Err(LOCKOUT_MS / 1000);
         }
+        // The address's own limit comes first, and every attempt from it counts, refused ones too: one host that hammers is
+        // refused by its own counter and uses up nobody else's share.
         let state = self.keys.entry(k).or_default();
         state.last_seen = now;
         state.attempts.push_back(now);
@@ -267,8 +262,17 @@ impl PairLimits {
         if state.locked_until > now {
             return Err(seconds_until(state.locked_until - now));
         }
-        let key_wait = Self::over(&state.attempts, now, KEY_PER_MINUTE, KEY_PER_10_MINUTES);
-        match key_wait.max(hub_wait) {
+        if let Some(wait) = Self::over(&state.attempts, now, KEY_PER_MINUTE, KEY_PER_10_MINUTES) {
+            return Err(wait);
+        }
+        // Only an attempt that passed its address reaches the hub-wide counter, the last guard: many addresses together are still
+        // bounded, but a single address cannot use the hub's share up.
+        let hub = &mut self.hub[kind.index()];
+        hub.push_back(now);
+        while hub.len() > HUB_PER_10_MINUTES + 1 {
+            hub.pop_front();
+        }
+        match Self::over(hub, now, HUB_PER_MINUTE, HUB_PER_10_MINUTES) {
             Some(wait) => Err(wait),
             None => Ok(()),
         }
@@ -512,8 +516,11 @@ const SEEN_COMMITMENT: u8 = 1;
 const SEEN_EXPORTER: u8 = 2;
 const SEEN_NONCE: u8 = 3;
 
+/// Text a machine supplies for the owner's card: bounded, with no control character and none of the characters that reorder or hide
+/// text (bidirectional controls, zero-width characters, the byte order mark).
 fn clean_text(s: &str) -> bool {
-    !s.is_empty() && s.len() <= TEXT_MAX && !s.chars().any(char::is_control)
+    let hides = |c: char| matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}');
+    !s.is_empty() && s.len() <= TEXT_MAX && !s.chars().any(|c| c.is_control() || hides(c))
 }
 
 impl Default for Pairing {
@@ -641,6 +648,7 @@ impl Pairing {
 
     // ---- failures and endings ----
 
+    /// A failure of an admitted session: counted for its address and for the window (5 in one window close the switch).
     fn fail(&mut self, kind: Kind, key: IpAddr, now: u64) {
         self.limits.failure(kind, key, now);
         if self.open_until.is_some() {
@@ -784,7 +792,8 @@ impl Pairing {
         if commitment.len() != 32 {
             return Err(Refusal::Invalid("commitment"));
         }
-        if !clean_text(name) {
+        // The name is the node id: it must already pass the enrolment rules before any card, audit row or limit entry holds it.
+        if !crate::ca::valid_node_id(name) {
             return Err(Refusal::Invalid("node_name"));
         }
         if !os.is_empty() && !clean_text(os) {
@@ -914,10 +923,13 @@ impl Pairing {
     }
 
     /// A message naming a `pair_id` its connection does not own (or none at all): `pair.unknown`, no authority gained, and a failure
-    /// counted for the address it came from.
+    /// counted for the address it came from (and not for the window: see the body).
     pub fn unknown(&mut self, now: u64, from: Peer) -> Refusal {
         self.tick(now);
-        self.fail(Kind::Machine, address_key(from.addr), now);
+        // Counted against the address only. This message comes from a connection that was never admitted (no limit has been
+        // applied to it), so letting it count toward the window's budget would let any host close the owner's window at will.
+        self.limits
+            .failure(Kind::Machine, address_key(from.addr), now);
         Refusal::Unknown
     }
 
@@ -1953,6 +1965,111 @@ mod tests {
             panic!()
         };
         assert!(!format!("{issue:?}").contains("CSR"));
+    }
+
+    #[test]
+    fn text_that_reorders_or_hides_is_refused_in_every_field_the_card_shows() {
+        let m = Machine::new(1);
+        for bad in [
+            "\u{202E}gnp",
+            "a\u{200B}b",
+            "a\u{200F}b",
+            "a\u{2066}b",
+            "a\u{2069}b",
+            "\u{FEFF}a",
+            "a\u{202A}b",
+        ] {
+            for (name, os, version, field) in [
+                (bad, "linux", "v", "node_name"),
+                ("ok", bad, "v", "os"),
+                ("ok", "linux", bad, "version"),
+            ] {
+                let mut p = open_hub();
+                let c = m.commit();
+                let commit = Commit {
+                    commitment: &c,
+                    name,
+                    os,
+                    version,
+                };
+                assert_eq!(
+                    p.request(2_000, peer(1, 10), m.exporter, commit)
+                        .unwrap_err(),
+                    Refusal::Invalid(field),
+                    "{bad:?} in {field}"
+                );
+            }
+        }
+        // Ordinary non-ASCII text is fine for the fields that are not the node id.
+        let mut p = open_hub();
+        let c = m.commit();
+        let commit = Commit {
+            commitment: &c,
+            name: "ok",
+            os: "Windows 11 (t\u{fc}rk\u{e7}e)",
+            version: "0.3",
+        };
+        assert!(p.request(2_000, peer(1, 10), m.exporter, commit).is_ok());
+    }
+
+    #[test]
+    fn one_host_hammering_does_not_use_up_the_hubs_share_for_everyone_else() {
+        let mut limits = PairLimits::new();
+        let mut host_ok = 0;
+        for i in 0..200u64 {
+            if limits.admit(Kind::Machine, ip(1), 5_000 + i).is_ok() {
+                host_ok += 1;
+            }
+        }
+        // The address's own limit holds: 3 a minute, whatever it sends.
+        assert_eq!(host_ok, KEY_PER_MINUTE);
+        // Different addresses are still admitted (the hub-wide cap counted only what passed an address's limit).
+        for last in 2..=8u8 {
+            assert!(
+                limits.admit(Kind::Machine, ip(last), 5_300).is_ok(),
+                "address {last} was refused after one host hammered"
+            );
+        }
+        // The hub-wide cap is still the last guard for many addresses together.
+        let ok = (20..120u8)
+            .filter(|last| limits.admit(Kind::Machine, ip(*last), 5_400).is_ok())
+            .count();
+        assert!(ok <= HUB_PER_MINUTE, "{ok}");
+    }
+
+    #[test]
+    fn a_host_that_sends_a_reveal_first_cannot_close_the_owners_window() {
+        let mut p = open_hub();
+        // Many connections, never admitted, each naming a pair id they cannot own.
+        for i in 0..50u64 {
+            let r = p.unknown(2_000 + i, peer(100 + i, 66));
+            assert_eq!(r, Refusal::Unknown);
+        }
+        assert!(p.status(2_100).open, "the window was closed by strangers");
+        // It does count against that address's own limiter, which locks it out.
+        assert!(p.limits().locked(Kind::Machine, ip(66), 2_100).is_some());
+        // And a real machine from another address still pairs.
+        let id = pending(&mut p, 3_000, 1, 10, &Machine::new(1));
+        p.approve(3_100, &id, false).unwrap();
+        // A real session's failures still count for the window (the 5-failure close is unchanged).
+        let mut q = open_hub();
+        for i in 0..4u8 {
+            let m = Machine::new(i + 1);
+            let from = peer(u64::from(i), 10 + i);
+            let (id, _) = start(&mut q, 2_000, from, &m).unwrap();
+            let _ = q.reveal(
+                2_010,
+                from,
+                Reveal {
+                    pair_id: &id,
+                    nonce_n: &[99; 16],
+                    csr_pem: "c",
+                    csr_hash: Some(m.csr_hash),
+                    node_id_ok: true,
+                },
+            );
+        }
+        assert!(q.status(2_030).open);
     }
 
     #[test]

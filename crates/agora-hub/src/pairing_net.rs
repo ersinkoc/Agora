@@ -29,6 +29,27 @@ use crate::enroll::{EnrollError, Enrollment};
 use crate::hub::Hub;
 use crate::pairing::{Commit, ConnId, Kind, Note, Pairing, Peer, Refusal, Reveal, Verdict};
 use crate::server::{error_response, now_ms, ServeError};
+
+/// The pairing state's own clock (spec section 7, T33): milliseconds that only go forward, from a fixed point in this process. Every
+/// deadline (the switch's 10 minutes, a session's 5 minutes, the 30 seconds for a reveal) is on it, so a wall clock that is set
+/// back cannot keep a window or a request open longer. Windows and the audit trail are given wall time ([`to_wall`]).
+fn base() -> &'static (std::time::Instant, u64) {
+    static BASE: std::sync::OnceLock<(std::time::Instant, u64)> = std::sync::OnceLock::new();
+    BASE.get_or_init(|| (std::time::Instant::now(), now_ms()))
+}
+
+/// Now on the pairing clock. Starts at 1000 so that no real time is 0.
+pub(crate) fn mono() -> u64 {
+    1_000 + u64::try_from(base().0.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+/// A moment on the pairing clock as hub wall-clock milliseconds, for what a window displays. 0 stays 0.
+pub(crate) fn to_wall(mono_ms: u64) -> u64 {
+    if mono_ms == 0 {
+        return 0;
+    }
+    base().1.saturating_add(mono_ms.saturating_sub(1_000))
+}
 use crate::users::{Access, Role};
 
 /// The pairing state shared by every connection of one hub, and the signal that wakes a waiting connection when the owner decided.
@@ -94,7 +115,7 @@ impl Drop for Guard<'_> {
     fn drop(&mut self) {
         self.hub
             .pairing()
-            .with(|p| p.connection_closed(self.conn, now_ms()));
+            .with(|p| p.connection_closed(self.conn, mono()));
     }
 }
 
@@ -136,7 +157,7 @@ fn audit(hub: &Hub, who: &str, action: &str, node: &str, outcome: &str) {
 
 /// The refusals of the last minute, once a minute, as a rate (section 8): a flood cannot fill the log.
 fn report_rates(hub: &Hub) {
-    for r in hub.pairing().with(|p| p.take_refusal_rates(now_ms())) {
+    for r in hub.pairing().with(|p| p.take_refusal_rates(mono())) {
         let kind = match r.kind {
             Kind::Machine => "machine",
             Kind::Browser => "browser",
@@ -152,7 +173,7 @@ fn report_rates(hub: &Hub) {
 }
 
 fn sleep_for(until: Option<u64>) -> Duration {
-    Duration::from_millis(until.map_or(1_000, |t| t.saturating_sub(now_ms()).max(1)))
+    Duration::from_millis(until.map_or(1_000, |t| t.saturating_sub(mono()).max(1)))
 }
 
 /// A machine on a pairing connection. `first` is its first frame, already read. One connection, one pairing, then it is closed.
@@ -182,7 +203,7 @@ where
                 conn: ConnId(NEXT_CONN.fetch_add(1, Ordering::Relaxed)),
                 addr: peer.addr,
             };
-            let e = hub.pairing().with(|p| p.unknown(now_ms(), me)).to_error();
+            let e = hub.pairing().with(|p| p.unknown(mono(), me)).to_error();
             return refuse(&mut conn, &req.request_id, &e).await;
         }
         _ => return Err(ServeError::Refused),
@@ -206,7 +227,7 @@ where
     // 1-2. The commitment, then the challenge.
     let started = hub.pairing().with(|p| {
         p.request(
-            now_ms(),
+            mono(),
             me,
             peer.exporter,
             Commit {
@@ -242,7 +263,7 @@ where
             Err(_) => {
                 // Nothing came in time: the state decides (and counts it).
                 if let Verdict::Expired | Verdict::Closed =
-                    hub.pairing().with(|p| p.verdict(me.conn, now_ms()))
+                    hub.pairing().with(|p| p.verdict(me.conn, mono()))
                 {
                     audit(hub, &who, "pair.reveal", &r.node_name, "pair.expired");
                     return refuse(&mut conn, &req.request_id, &Refusal::Expired.to_error()).await;
@@ -273,7 +294,7 @@ where
                 let Some((rid, v)) = revealed else {
                     let e = hub
                         .pairing()
-                        .with(|p| p.violation(me.conn, now_ms()))
+                        .with(|p| p.violation(me.conn, mono()))
                         .to_error();
                     audit(hub, &who, "pair.reveal", &r.node_name, e.code.as_str());
                     return refuse(&mut conn, &req.request_id, &e).await;
@@ -285,7 +306,7 @@ where
                     .map(|der| <[u8; 32]>::from(Sha256::digest(&der)));
                 let done = hub.pairing().with(|p| {
                     p.reveal(
-                        now_ms(),
+                        mono(),
                         me,
                         Reveal {
                             pair_id: &v.pair_id,
@@ -311,7 +332,7 @@ where
     // 4-5. The number is on the owner's card; wait for the owner's decision on this connection.
     let mut changed = hub.pairing().subscribe();
     let verdict = loop {
-        let v = hub.pairing().with(|p| p.verdict(me.conn, now_ms()));
+        let v = hub.pairing().with(|p| p.verdict(me.conn, mono()));
         if v != Verdict::Waiting {
             break v;
         }
@@ -331,7 +352,7 @@ where
                 }
                 Ok(Some(_)) => {
                     // Anything but a ping while waiting ends the session.
-                    let e = hub.pairing().with(|p| p.violation(me.conn, now_ms())).to_error();
+                    let e = hub.pairing().with(|p| p.violation(me.conn, mono())).to_error();
                     return refuse(&mut conn, &reveal_id, &e).await;
                 }
                 Ok(None) | Err(_) => return Ok(()),
@@ -444,13 +465,13 @@ pub fn owner_command(
         );
     }
     report_rates(hub);
-    let now = now_ms();
+    let now = mono();
     let pairing = hub.pairing();
     let status = |p: &mut Pairing| {
         let s = p.status(now);
         command_ok::Result::PairStatus(v1::PairStatusResult {
             open: s.open,
-            closes_at_ms: s.closes_at_ms,
+            closes_at_ms: to_wall(s.closes_at_ms),
             pending: s.pending,
         })
     };
@@ -538,7 +559,7 @@ fn card_frame(c: &crate::pairing::Card) -> Frame {
             os: c.os.clone(),
             address: c.address.clone(),
             number: c.number.clone(),
-            expires_ms: c.expires_ms,
+            expires_ms: to_wall(c.expires_ms),
         }
         .encode_to_vec(),
     }
@@ -573,7 +594,7 @@ fn note_frame(n: &Note) -> Frame {
 impl WindowFeed {
     /// A window that has just connected: the cards waiting now (one frame each) and the feed for what comes next.
     pub fn start(hub: &Hub) -> (Self, Vec<Frame>) {
-        let (cards, cursor) = hub.pairing().with(|p| p.cards(now_ms()));
+        let (cards, cursor) = hub.pairing().with(|p| p.cards(mono()));
         (
             Self {
                 cursor,
@@ -585,7 +606,7 @@ impl WindowFeed {
 
     /// What changed since the last call; empty when nothing did or when a push went out less than a second ago.
     pub fn poll(&mut self, hub: &Hub) -> Vec<Frame> {
-        let now = now_ms();
+        let now = mono();
         if now < self.not_before {
             return Vec::new();
         }
@@ -648,6 +669,18 @@ mod tests {
     }
 
     #[test]
+    fn the_pairing_clock_only_goes_forward_and_maps_to_wall_time_for_windows() {
+        let a = mono();
+        std::thread::sleep(Duration::from_millis(5));
+        let b = mono();
+        assert!(b > a && a >= 1_000);
+        // A moment on the pairing clock is shown as wall time close to now; zero stays zero.
+        let wall = to_wall(b);
+        assert!(wall.abs_diff(now_ms()) < 2_000, "{wall} vs {}", now_ms());
+        assert_eq!(to_wall(0), 0);
+    }
+
+    #[test]
     fn a_hub_that_cannot_pair_answers_capability_missing_and_other_commands_are_not_ours() {
         let h = hub(false);
         for c in all() {
@@ -684,7 +717,7 @@ mod tests {
                 ErrorCode::ProtocolInvalidMessage
             );
         }
-        assert!(!h.pairing().with(|p| p.status(now_ms())).open);
+        assert!(!h.pairing().with(|p| p.status(mono())).open);
         // The refusals are on the audit trail with the code.
         let rows = crate::audit::Audit::new(h.store())
             .list(0, None, 100)

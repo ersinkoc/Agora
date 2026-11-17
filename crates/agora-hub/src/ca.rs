@@ -240,6 +240,52 @@ mod tests {
             .contents
     }
 
+    /// The identity of an issued node certificate is the hub's: a CSR may ask for any subject, any alternative names, CA powers or a
+    /// server's key usage, and none of it reaches the certificate (pairing and enrollment both issue through `issue_node`).
+    #[test]
+    fn the_certificate_carries_the_hub_chosen_identity_whatever_the_csr_asks_for() {
+        use rcgen::{
+            BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, SanType,
+        };
+        let ca = Ca::generate("hub ca").unwrap();
+        let key = KeyPair::generate().unwrap();
+        let mut p =
+            CertificateParams::new(vec!["evil.example".to_string(), "hub".to_string()]).unwrap();
+        p.subject_alt_names
+            .push(SanType::IpAddress("10.0.0.1".parse().unwrap()));
+        p.distinguished_name = DistinguishedName::new();
+        p.distinguished_name.push(DnType::CommonName, "hub");
+        p.distinguished_name
+            .push(DnType::OrganizationName, "evil corp");
+        p.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        p.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+        let csr = p.serialize_request(&key).unwrap().pem().unwrap();
+        // The CSR really carries what the attacker chose (so the test would notice if it stopped doing so).
+        let asked = CertificateSigningRequestParams::from_pem(&csr).unwrap();
+        assert_eq!(asked.params.subject_alt_names.len(), 3);
+
+        let issued = ca.issue_node("laptop", &csr).unwrap();
+        let der = parse(&issued.cert_pem);
+        let (_, cert) = X509Certificate::from_der(&der).unwrap();
+        // Subject: exactly the node id the hub chose, nothing else.
+        let cns: Vec<_> = cert
+            .subject()
+            .iter_common_name()
+            .map(|c| c.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(cns, ["laptop"]);
+        assert_eq!(cert.subject().iter_attributes().count(), 1);
+        // Alternative names: none at all (the hub sets the empty list).
+        assert!(
+            cert.subject_alternative_name().unwrap().is_none(),
+            "an alternative name from the CSR reached the certificate"
+        );
+        // Powers: client authentication only, and not a CA.
+        let eku = cert.extended_key_usage().unwrap().unwrap().value;
+        assert!(eku.client_auth && !eku.server_auth && !eku.any && !eku.code_signing);
+        assert!(!cert.is_ca());
+    }
+
     #[test]
     fn expiry_says_expired_soon_or_fine_by_whole_days() {
         let day = 86_400;
