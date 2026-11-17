@@ -2739,10 +2739,9 @@ fn discard_adapter(adapter: Adapter) {
         .skip(1)
         .filter_map(|p| agora_platform::process_identity(p.pid).ok())
         .collect();
-    // A pid given to another process between the walk and its identity is not below the adapter in a second walk: only processes
-    // found below it again, still the same process, are ended.
-    let again: std::collections::HashSet<u32> = tree(adapter.pid()).iter().map(|p| p.pid).collect();
-    for p in below.iter().filter(|p| again.contains(&p.pid)) {
+    // Each is ended only while it is still the process found (its identity carries its start time, so a pid given to another
+    // process meanwhile is left alone); one the adapter's exit reparented in between is still ended.
+    for p in &below {
         let _ = agora_platform::kill_process_if_same(p);
     }
     // When no thread can be started the adapter is ended here, as before.
