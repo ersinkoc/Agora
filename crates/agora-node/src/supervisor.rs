@@ -1568,7 +1568,9 @@ impl Supervisor {
         cfg.env_remove = inherited_session_markers(std::env::vars_os().map(|(k, _)| k));
         if let Some(profile) = &mut cfg.sandbox {
             profile.read.extend(extras.read.iter().cloned());
-            offline_sockets(profile, extras.socket.as_deref(), worktree);
+            own_socket(profile, extras.socket.as_deref());
+            // ADR-0083: what points at a socket the user's session offers is not inherited by a confined agent.
+            cfg.env_remove.extend(self.sandbox.scrubbed_env());
         }
         // ADR-0082, decision 4: where the node requires its control token, the file must lie outside every folder the agent may read
         // or write, because Landlock cannot say "except" (`Sandbox::deny` is ignored there). Refused, never started.
@@ -2433,7 +2435,7 @@ fn launch_adapter(
         .collect();
     // The agent's mesh server runs below the adapter, inside its confinement: offline, it may reach its own mesh socket and no other.
     if let Some(profile) = &mut sandbox {
-        offline_sockets(profile, mesh.map(|m| m.socket.as_path()), worktree);
+        own_socket(profile, mesh.map(|m| m.socket.as_path()));
     }
     if let Some(profile) = &sandbox {
         env.extend(git_env(profile, worktree));
@@ -2493,14 +2495,10 @@ fn git_env(profile: &agora_platform::Sandbox, worktree: &Path) -> Vec<(String, S
     }
 }
 
-/// The unix sockets a confined agent may reach although the node's own folders are closed (its own mesh socket, #475); offline
-/// (ADR-0047 `worktree-offline`) also the ones it makes in its private temp folder, and no others: not `/tmp` (a tmux server or an SSH
-/// agent there would hand it a way out) and not other agents' sockets.
-fn offline_sockets(profile: &mut agora_platform::Sandbox, socket: Option<&Path>, worktree: &Path) {
-    profile.sockets = socket.map(Path::to_path_buf).into_iter().collect();
-    if profile.offline && agora_platform::PRIVATE_TEMP {
-        profile.sockets.push(crate::sandbox::agent_temp(worktree));
-    }
+/// The agent's own mesh socket joins the unix sockets a confined agent may reach (#475, ADR-0083): it lies in a folder of the node's,
+/// which is closed to every agent but this one's socket. Other agents' sockets and the node's are not added.
+fn own_socket(profile: &mut agora_platform::Sandbox, socket: Option<&Path>) {
+    profile.sockets.extend(socket.map(Path::to_path_buf));
 }
 
 /// After an adapter died on its own: wait out the backoff and try again, or give up for good.

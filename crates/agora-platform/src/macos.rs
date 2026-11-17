@@ -264,6 +264,29 @@ pub(crate) fn profile(sb: &crate::Sandbox) -> io::Result<String> {
             siblings.join(" ")
         ));
     }
+    // ADR-0083: unix sockets only where the agent was given them. `/tmp` holds an SSH agent's, a tmux server's and the session bus's
+    // sockets; each is a way out of the folder rules. Every unix socket is refused, then the allow-list reopened (the agent's own mesh
+    // socket, its worktree and private temp folder, the system's name resolver, and what the owner listed in `sandbox.sockets`).
+    // `subpath` of a socket file is that file, and of a folder everything in it. The node's own folders are closed again below.
+    // The form `(subpath "/")` names every absolute path, so it needs no filter-less spelling of `remote unix-socket`.
+    if sb.confine_sockets && !sb.offline {
+        out.push_str("(deny network-outbound (remote unix-socket (subpath \"/\")))\n");
+        let mut allowed: Vec<String> = SYSTEM_SOCKETS
+            .iter()
+            .map(|p| quote(std::path::Path::new(p)))
+            .collect();
+        allowed.extend(
+            sb.sockets
+                .iter()
+                .filter_map(|p| real_or_new(p))
+                .map(|p| quote(&p)),
+        );
+        let to: Vec<String> = allowed
+            .iter()
+            .map(|q| format!("(remote unix-socket (subpath {q}))"))
+            .collect();
+        out.push_str(&format!("(allow network-outbound {})\n", to.join(" ")));
+    }
     // The node's own folders, closed after everything opened above: in Seatbelt the last matching rule wins, so they stay closed below
     // an allowed folder. A unix socket is reached by `network-outbound`, which file rules do not cover (measured: a confined process
     // connected to a socket below a folder it could not read), so its sockets are closed too, then the agent's own reopened.
@@ -341,7 +364,7 @@ pub(crate) fn profile(sb: &crate::Sandbox) -> io::Result<String> {
             .sockets
             .iter()
             .filter_map(|p| real_or_new(p))
-            .map(|p| format!("(remote unix-socket {})", quote(&p)))
+            .map(|p| format!("(remote unix-socket (subpath {}))", quote(&p)))
             .collect();
         if !own.is_empty() && !sb.offline {
             out.push_str(&format!("(allow network-outbound {})\n", own.join(" ")));
@@ -595,6 +618,11 @@ fn real_or_future(p: &std::path::Path) -> Option<std::path::PathBuf> {
         Err(_) => None,
     }
 }
+
+/// The system's unix sockets every confined agent may use under [`crate::Sandbox::confine_sockets`]: the name resolver (every network
+/// lookup goes through it; `/var/run` is `/private/var/run`, and a profile names the path the kernel resolved). A socket a real tool
+/// needs that is not here is a broken tool the owner lists in `sandbox.sockets` (ADR-0083).
+const SYSTEM_SOCKETS: &[&str] = &["/private/var/run/mDNSResponder"];
 
 /// `p` where the kernel has it, or, when it does not exist yet (a socket made later), its folder where the kernel has it and its name.
 fn real_or_new(p: &std::path::Path) -> Option<std::path::PathBuf> {
@@ -889,6 +917,7 @@ mod sandbox_tests {
             sockets: vec![home.join("m/own")],
             deny: vec![home.join("data"), home.join("node.sock"), home.join("m")],
             reopen: vec![],
+            ..Default::default()
         };
         let p = super::profile(&sb).unwrap();
         let h = home.display();
@@ -934,6 +963,7 @@ mod sandbox_tests {
             sockets: vec![],
             deny: vec![home.join("node.sock"), home.join("later/data")],
             reopen: vec![],
+            ..Default::default()
         };
         let p = super::profile(&sb).unwrap();
         // Named through the resolved parent (`/tmp` is `/private/tmp`) and kept as written below it.
@@ -1057,6 +1087,7 @@ mod sandbox_tests {
             sockets: vec![home.join("m/own")],
             deny: vec![home.clone()],
             reopen: vec![home.join("worktrees/a")],
+            ..Default::default()
         };
         let mut text = run_attacks(&home, &sb);
         let h = home.display();
@@ -1517,6 +1548,73 @@ mod sandbox_tests {
             defaults(Some(&sb), &["read", "-g", "AppleLocale"]),
             defaults(None, &["read", "-g", "AppleLocale"])
         );
+    }
+
+    #[test]
+    fn confined_sockets_name_the_allow_list_and_the_nodes_closed_folders_come_after() {
+        // ADR-0083. Text only; the run below measures what Seatbelt does with it.
+        let sb = crate::Sandbox {
+            read: vec!["/usr".into()],
+            write: vec![std::env::temp_dir()],
+            sockets: vec![std::env::temp_dir().join("agora-sock-text")],
+            deny: vec![std::env::temp_dir().join("agora-sock-text-home")],
+            confine_sockets: true,
+            ..Default::default()
+        };
+        let p = super::profile(&sb).unwrap();
+        let general = p
+            .find("(deny network-outbound (remote unix-socket (subpath \"/\")))")
+            .expect("every unix socket is refused first");
+        let resolver = p.find("/private/var/run/mDNSResponder").expect(&p);
+        let closed = p
+            .find("(deny network-outbound (remote unix-socket \"")
+            .expect(&p);
+        assert!(general < resolver && resolver < closed, "{p}");
+        assert!(!p.contains("(deny network*)"), "{p}");
+    }
+
+    #[test]
+    fn a_confined_process_reaches_only_the_sockets_it_is_given() {
+        use std::os::unix::net::UnixListener;
+        let dir = std::path::PathBuf::from(format!("/tmp/agora-sk-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for d in ["own", "other"] {
+            std::fs::create_dir_all(dir.join(d)).unwrap();
+        }
+        let own = UnixListener::bind(dir.join("own/mesh")).unwrap();
+        let other = UnixListener::bind(dir.join("other/agent.1")).unwrap();
+        let mut sb = crate::Sandbox {
+            read: vec!["/usr".into(), "/bin".into()],
+            write: vec![dir.join("own"), "/tmp".into(), "/dev".into()],
+            sockets: vec![dir.join("own")],
+            confine_sockets: true,
+            ..Default::default()
+        };
+        let d = dir.display();
+        let script = format!(
+            "nc -U -w 1 {d}/own/mesh </dev/null 2>/dev/null && echo own-open || echo own-closed; \
+             nc -U -w 1 {d}/other/agent.1 </dev/null 2>/dev/null && echo other-open || echo other-closed; \
+             nc -z -G 2 127.0.0.1 1 2>/dev/null; echo tcp-not-blocked-by-sockets; \
+             /usr/bin/dscacheutil -q host -a name localhost 2>/dev/null | grep -q 127.0.0.1 && echo resolver-open || echo resolver-closed;"
+        );
+        let run = |sb: &crate::Sandbox| {
+            let p = super::profile(sb).unwrap();
+            let out = std::process::Command::new(super::SANDBOX_EXEC)
+                .args(["-p", &p, "/bin/sh", "-c", &script])
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+        let text = run(&sb);
+        for want in ["own-open", "other-closed", "resolver-open"] {
+            assert!(text.contains(want), "{want}: {text}");
+        }
+        // Negative control: the same profile without the restriction reaches the other socket.
+        sb.confine_sockets = false;
+        let text = run(&sb);
+        assert!(text.contains("other-open"), "{text}");
+        drop((own, other));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

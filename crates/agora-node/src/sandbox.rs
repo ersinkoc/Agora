@@ -49,6 +49,62 @@ pub struct SandboxPolicy {
     /// ADR-0082: the control token file, set by the node where it requires the token (Linux, confinement on). A profile whose read or
     /// write grants contain it is refused at the start (`control_token_reachable`).
     pub control_token: Option<PathBuf>,
+    /// ADR-0083: names of environment variables the owner lets through to confined agents although the node scrubs them
+    /// (`sandbox.pass_env = NAME, ...`). Names only, never values; any malformed entry empties the list.
+    pub pass_env: Vec<String>,
+    /// ADR-0083: unix sockets the owner adds to every confined agent's allow-list (`sandbox.sockets = <path>, ...`), each of which
+    /// hands the agent whatever the socket's service can do for the user.
+    pub sockets: Vec<PathBuf>,
+}
+
+/// ADR-0083: variables that point at a socket, and through it at something the user's session can do: the ssh-agent (signs with every
+/// key), gpg-agent, the session bus (starts programs outside the sandbox), the docker daemon (root on the machine), a tmux server
+/// (keystrokes into the owner's shells). A confined agent does not inherit them from the node; `sandbox.pass_env` lets one through.
+/// The scrub is the only layer where the system cannot refuse the connection itself (`agora_platform::socket_confinement`).
+pub const SOCKET_VARIABLES: &[&str] = &[
+    "SSH_AUTH_SOCK",
+    "GPG_AGENT_INFO",
+    "DBUS_SESSION_BUS_ADDRESS",
+    "DOCKER_HOST",
+    "TMUX",
+    "TMUX_PANE",
+];
+
+/// Whether `name` can be an environment variable name the policy passes through: letters, digits and `_`, not starting with a digit.
+/// Nothing else: no `=`, no pattern, no empty name.
+fn is_env_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// `sandbox.pass_env`: a comma-separated list of variable names. One entry that is not a plain name (a `*`, an `=`, a value) makes the
+/// whole list empty: a typo never widens what an agent receives, and it is never read as a value.
+pub fn parse_pass_env(v: &str) -> Vec<String> {
+    let names: Vec<&str> = v
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if names.iter().all(|n| is_env_name(n)) {
+        names.into_iter().map(str::to_string).collect()
+    } else {
+        Vec::new()
+    }
+}
+
+impl SandboxPolicy {
+    /// The inherited variables a confined agent's environment leaves out: [`SOCKET_VARIABLES`] but the ones the owner passed. Empty
+    /// when agents are not confined at all (the caller applies it only to confined starts).
+    pub fn scrubbed_env(&self) -> Vec<String> {
+        SOCKET_VARIABLES
+            .iter()
+            .filter(|n| !self.pass_env.iter().any(|p| p == *n))
+            .map(|n| (*n).to_string())
+            .collect()
+    }
 }
 
 /// The system folders every program needs to run.
@@ -269,6 +325,19 @@ impl SandboxPolicy {
             return None;
         }
         let mut sb = self.files(kind, needs, worktree, program);
+        // ADR-0083: unix sockets only where the agent was given them (what the system can refuse, `socket_confinement`): its worktree,
+        // its private temp folder and what the owner listed, outside the node's own folders; the supervisor adds its mesh socket.
+        sb.confine_sockets = true;
+        sb.sockets.push(worktree.to_path_buf());
+        if agora_platform::PRIVATE_TEMP {
+            sb.sockets.push(agent_temp(worktree));
+        }
+        sb.sockets.extend(
+            self.sockets
+                .iter()
+                .filter(|s| !self.protect.iter().any(|p| s.starts_with(p)))
+                .cloned(),
+        );
         // ADR-0047 `worktree-offline`: as `worktree`, and no network but this machine; the supervisor adds the agent's own sockets.
         if self.level == Level::WorktreeOffline {
             sb.offline = true;
@@ -543,8 +612,10 @@ mod tests {
             read: vec!["/home/x/.cfg".into()],
             write: vec!["/home/x/.cache/agent".into()],
             trusted_kinds: vec![],
-            protect: vec![],
+            protect: vec!["/node/home".into()],
             control_token: None,
+            pass_env: vec![],
+            sockets: vec!["/run/user/1/keep.sock".into(), "/node/home/m/x".into()],
         };
         let sb = p.profile("k", None, &wt, "/home/x/bin/agent").unwrap();
         // `worktree` leaves the network alone; `worktree-offline` asks for it to be cut, keeping the node's sockets.
@@ -555,7 +626,12 @@ mod tests {
         }
         .profile("k", None, &wt, "/home/x/bin/agent")
         .unwrap();
-        assert!(offline.offline && offline.sockets.is_empty());
+        assert!(offline.offline);
+        // ADR-0083: the allow-list is the worktree and what the owner listed (not a socket below the node's own folders).
+        assert!(sb.confine_sockets && offline.confine_sockets);
+        assert!(sb.sockets.contains(&wt) && !sb.sockets.contains(&PathBuf::from("/tmp")));
+        assert!(sb.sockets.contains(&PathBuf::from("/run/user/1/keep.sock")));
+        assert!(!sb.sockets.contains(&PathBuf::from("/node/home/m/x")));
         assert_eq!(offline.write, sb.write);
         assert!(sb.write.contains(&wt));
         assert!(sb.write.contains(&PathBuf::from("/home/x/.cache/agent")));
@@ -651,5 +727,49 @@ mod tests {
         let off = SandboxPolicy::default();
         assert!(!off.token_reachable(&grant(&[Path::new("/")], &[Path::new("/")])));
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn socket_variables_are_scrubbed_unless_the_owner_names_them() {
+        let mut p = SandboxPolicy::default();
+        for n in [
+            "SSH_AUTH_SOCK",
+            "GPG_AGENT_INFO",
+            "DBUS_SESSION_BUS_ADDRESS",
+            "DOCKER_HOST",
+            "TMUX",
+            "TMUX_PANE",
+        ] {
+            assert!(p.scrubbed_env().iter().any(|s| s == n), "{n}");
+        }
+        p.pass_env = parse_pass_env("SSH_AUTH_SOCK, DOCKER_HOST");
+        let left = p.scrubbed_env();
+        assert!(!left
+            .iter()
+            .any(|s| s == "SSH_AUTH_SOCK" || s == "DOCKER_HOST"));
+        assert!(left.iter().any(|s| s == "TMUX"));
+    }
+
+    #[test]
+    fn a_malformed_pass_env_passes_nothing() {
+        assert_eq!(parse_pass_env("A_B, c1"), ["A_B", "c1"]);
+        assert!(parse_pass_env("").is_empty());
+        for bad in [
+            "SSH_AUTH_SOCK=/tmp/x",
+            "SSH_*",
+            "1ABC",
+            "A B",
+            "SSH_AUTH_SOCK, ",
+            "OK, $HOME",
+            "OK,é",
+        ] {
+            let got = parse_pass_env(bad);
+            // A trailing comma is not malformed; every other bad entry empties the whole list.
+            if bad == "SSH_AUTH_SOCK, " {
+                assert_eq!(got, ["SSH_AUTH_SOCK"]);
+            } else {
+                assert!(got.is_empty(), "{bad}: {got:?}");
+            }
+        }
     }
 }

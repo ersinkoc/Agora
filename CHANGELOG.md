@@ -11,6 +11,13 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
   through it. `agora` presents the secret itself, so no command changes; a node that does not confine agents changes nothing. A node whose
   folder lies inside a folder agents may read or write (a node under `/tmp`) refuses to start confined agents, and `agora doctor` says so.
   `agora` also tells a node that refused it apart from no node running.
+- A confined agent no longer receives the node's `SSH_AUTH_SOCK`, `GPG_AGENT_INFO`, `DBUS_SESSION_BUS_ADDRESS`, `DOCKER_HOST`, `TMUX` or `TMUX_PANE`
+  (ADR-0083, T8); a policy line `sandbox.pass_env = NAME, ...` lets named ones through, so `git` over ssh in a confined agent needs it
+  (see `docs/security/sandbox-recipes.md`).
+- On a Mac a confined agent can only connect to unix sockets it was given (its own mesh socket, worktree and private temp folder, the name resolver and
+  those in the new policy line `sandbox.sockets`), so it can no longer use your ssh-agent, the session bus, docker or a tmux server. On Linux
+  kernels from 6.12 it can no longer connect to abstract sockets made outside its sandbox; a socket that is a file is still reachable there.
+- `agora doctor` says whether this machine restricts an agent's unix sockets (and why not), which socket variables the node leaves out of an agent's environment and which the policy passes.
 ### Fixes
 - `agora status` says "connected" only while the node's link to the hub is up right now (it used to say so for the hub the machine was set up for, also while every attempt failed); otherwise it says not connected and why, and on a Mac whose Local Network permission is missing it points to System Settings. After `agora update` on a Mac, the note now says to restart the node once more after allowing Local Network.
 

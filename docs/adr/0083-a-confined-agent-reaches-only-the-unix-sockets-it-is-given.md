@@ -87,3 +87,15 @@ Origin: issue #547, from the third review of #477: under `sandbox = worktree` a 
 1. Is the environment scrub (decision 1) acceptable as the first step to ship alone? Proposed: yes.
 2. Should the allow-list be the default under `worktree` on macOS, or only `worktree-offline` plus an opt-in `sandbox.sockets = restrict`? Proposed: default under `worktree`; the sandbox exists for this.
 3. On a kernel that cannot restrict pathname sockets, run `worktree` anyway with the `doctor` note? Proposed: yes (option 4 stays an owner's choice).
+
+## Built
+Built on 2026-11-17 (issue #547). Step 1 on every system: `agora-node::sandbox` (`SOCKET_VARIABLES`, `sandbox.pass_env`, parsed by `parse_pass_env`
+where one entry that is not a plain name empties the list; `sandbox.sockets` as paths), applied through `env_remove` at a confined terminal start;
+an adapter agent's environment is an allow-list that never held these names, and `pass_env` does not change that (a choice this PR made). Step 2 in `agora-platform`
+(`Sandbox::confine_sockets`, `socket_confinement()`): macOS Seatbelt refuses every unix socket outside the allow-list (`macos.rs`; not run on
+a Mac when written: the rule `(deny network-outbound (remote unix-socket (subpath "/")))` and `/private/var/run/mDNSResponder` are read, not
+measured); Linux Landlock scoping of abstract sockets from ABI 6 (tested here, ABI 8). The kernel headers and the `landlock` ABIs available
+when this was built have no right for pathname sockets, so on Linux those are not restricted and `agora doctor` says so (`sockets-abstract`);
+nothing pretends otherwise. Open question 3 as proposed: `worktree` still starts on such a kernel. The allow-list is the agent's mesh socket,
+its worktree, its private temp folder (macOS), the name resolver and the owner's `sandbox.sockets` (entries under the node's own folders are
+ignored); the "other system sockets measured with real agents" are not yet measured and are the first thing a Mac developer checks.
