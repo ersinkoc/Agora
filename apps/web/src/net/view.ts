@@ -145,6 +145,12 @@ export function fromSnapshot(s: agora.v1.Snapshot.$Properties): View {
 
 // Applies one event at log position `pos`. An event at or before the view's position was already folded in
 // (a resume replays the tail), so it is ignored: applying is idempotent.
+// Whether the agent still has an open terminal this window knows of.
+function hasTerminal(v: View, agent: string): boolean {
+  for (const owner of v.terminals?.values() ?? []) if (owner === agent) return true;
+  return false;
+}
+
 export function applyEvent(v: View, pos: number, ev: Ev): void {
   if (pos <= v.pos) return;
   v.pos = pos;
@@ -192,8 +198,14 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
       if (!stale) {
         n.online = !!b.up;
         if (b.up) n.linkGen = gen;
-        // ADR-0073: a forgotten machine that connects again is shown again, with what it still runs.
-        if (b.up) n.forgotten = false;
+        // ADR-0073: a forgotten machine that connects again is shown again, with what it still runs; one that stopped while it was
+        // hidden stays forgotten, as the hub's `remember_node` keeps it.
+        if (b.up && n.forgotten) {
+          n.forgotten = false;
+          for (const [key, a] of [...v.agents]) {
+            if (a.nodeId === id && !a.running) { v.agents.delete(key); v.agentWorkspaces.delete(key); v.withTerminal.delete(key); (v.forgottenAgents ??= new Set()).add(key); }
+          }
+        }
       }
       break;
     }
@@ -306,13 +318,20 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
       break;
     }
     case 'terminalOpened':
-      if (e.terminalOpened.agentId) { v.withTerminal.add(q(e.terminalOpened.agentId)); (v.terminals ??= new Map()).set(q(e.terminalOpened.terminalId), q(e.terminalOpened.agentId)); }
+      if (e.terminalOpened.agentId) {
+        const key = q(e.terminalOpened.terminalId);
+        const before = v.terminals?.get(key);
+        (v.terminals ??= new Map()).set(key, q(e.terminalOpened.agentId));
+        // A terminal id opened again for another agent no longer belongs to the first one.
+        if (before !== undefined && !hasTerminal(v, before)) v.withTerminal.delete(before);
+        v.withTerminal.add(q(e.terminalOpened.agentId));
+      }
       break;
     case 'terminalClosed': {
       const key = q(e.terminalClosed.terminalId);
       const agent = v.terminals?.get(key);
       v.terminals?.delete(key);
-      if (agent !== undefined && ![...(v.terminals?.values() ?? [])].includes(agent)) v.withTerminal.delete(agent);
+      if (agent !== undefined && !hasTerminal(v, agent)) v.withTerminal.delete(agent);
       break;
     }
     case 'approvalRequested': {
