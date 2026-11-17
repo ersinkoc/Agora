@@ -382,13 +382,17 @@ where
     match verdict {
         Verdict::Waiting => Ok(()),
         Verdict::Approved(issue) => {
+            // Issued or not, the name is let go before anything is written (a machine that stops reading must not hold it).
+            let let_go = || hub.pairing().with(|p| p.issued(me.conn));
             let Some(ca) = ca else {
+                let_go();
                 return refuse(&mut conn, &reveal_id, &Error::new(ErrorCode::Internal)).await;
             };
             // For the frozen tuple only: the CSR must still be the one the commitment covered.
             let same = ca::csr_der(&issue.csr_pem)
                 .is_ok_and(|der| <[u8; 32]>::from(Sha256::digest(&der)) == issue.csr_hash);
             if !same {
+                let_go();
                 return refuse(&mut conn, &reveal_id, &Refusal::Mismatch.to_error()).await;
             }
             let issued = Enrollment::new(hub.store()).issue_paired(
@@ -398,6 +402,7 @@ where
                 issue.replace,
                 now_ms(),
             );
+            let_go();
             match issued {
                 Ok(cert) => {
                     audit(hub, &who, "pair.issued", &issue.node_id, &cert.serial_hex);
