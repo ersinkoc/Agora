@@ -109,3 +109,18 @@ The eight interface quick wins, before and after, dark and light, on a desktop, 
 Home as a fleet console, before and after, in both themes (`fleet-console/`; see `../ux/fleet-console.md`): `before-*` is the window before, `after-*` after, for what needs you (`attention`), a calm fleet (`calm`), a fresh hub (`empty-hub`), machines but no agent (`first-run`), the hub unreachable (`offline`) and the phone (`phone`, `phone-calm`); Large text, High contrast, Turkish and 200 agents are after-only.
 
 The owner's cards for a machine that asks to join (ADR-0065), dark and light, from a real hub and a real `agora join` (`pairing-cards/`): the empty hub with "Allow a new machine to join" (`01`, `02`), the row in what needs you with the card (`03`), the second step (`04`), Replace (`05`), the fleet console with an agent fleet (`06`), the phone (`07`, `08`), the link down (`09`), and the states side by side (`10`, `11`, Turkish `12`).
+
+## The terminal behaves like a real terminal
+
+From `scripts/terminal-fidelity/` (`docs/ux/terminal-fidelity.md`): a realistic screen with a selection (`terminal-*`), find
+(`find-*`), a program's clipboard offer and "Jump to latest" while scrolled up (`offer-and-jump-*`), the "Terminal settings" menu
+(`settings-menu-*`), a phone with the key bar after a swipe (`phone-*`), a terminal smaller than its window (`letterbox-*`), and a
+block of full-block characters drawn by the page, at row height 1.1 and 1.0, and by the graphics card (`blocks-*`, dark only).
+
+![](terminal-fidelity/terminal-dark.png) ![](terminal-fidelity/terminal-light.png)
+![](terminal-fidelity/find-dark.png) ![](terminal-fidelity/find-light.png)
+![](terminal-fidelity/offer-and-jump-dark.png) ![](terminal-fidelity/offer-and-jump-light.png)
+![](terminal-fidelity/settings-menu-dark.png) ![](terminal-fidelity/settings-menu-light.png)
+![](terminal-fidelity/phone-dark.png) ![](terminal-fidelity/phone-light.png)
+![](terminal-fidelity/letterbox-dark.png) ![](terminal-fidelity/letterbox-light.png)
+![](terminal-fidelity/blocks-page-1.1.png) ![](terminal-fidelity/blocks-page-1.png) ![](terminal-fidelity/blocks-gpu-1.png)

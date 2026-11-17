@@ -1,8 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
-import { inputBytes } from './frames';
+import { binaryBytes, inputBytes } from './frames';
+import { t } from '../i18n';
+import { Icon } from '../components/Icon';
+import { FindBar } from './FindBar';
+import { OfferGate } from './clipboard';
 import { type TerminalRenderer, XtermRenderer } from './renderer';
 import type { TerminalSession, TerminalSource } from './source';
-import { terminalSize } from './prefs';
+import { terminalPrefs, terminalSize } from './prefs';
 import { KeyBar, useTouch } from './KeyBar';
 import { keyBytes, withCtrl, type BarKey } from './keys';
 import { TerminalSizing } from './sizing';
@@ -18,13 +22,33 @@ export function TerminalView({ source, label }: { source: TerminalSource; label:
   const [ctrl, setCtrl] = useState(false);
   const ctrlRef = useRef(false);
   const setCtrlBoth = (v: boolean) => { ctrlRef.current = v; setCtrl(v); };
+  // Scrolled up: new output is below the view, so a button takes you back. A program offered clipboard text (it needs your say-so).
+  const [atBottom, setAtBottom] = useState(true);
+  const [offer, setOffer] = useState<string | undefined>(undefined);
+  const [finding, setFinding] = useState(false);
+  const bell = useRef<number | undefined>(undefined);
+  const gate = useRef(new OfferGate());
+  const pendingOffer = useRef(false);
+  const [link, setLink] = useState<string | undefined>(undefined);
+  const offerRef = (v: string | undefined) => { pendingOffer.current = v !== undefined; setOffer(v); };
 
   useEffect(() => {
     const el = host.current;
     if (!el) return;
     const r: TerminalRenderer = new XtermRenderer();
     renderer.current = r;
+    r.setPrefs(terminalPrefs());
     r.mount(el);
+    r.onScrollState(setAtBottom);
+    r.onClipboardOffer((text) => { if (gate.current.accept(Date.now(), pendingOffer.current)) offerRef(text); });
+    r.onLinkHover(setLink);
+    r.onFindRequest(() => setFinding(true));
+    // The bell is a brief ring round the terminal (and nothing else: no sound, no title change).
+    r.onBell(() => {
+      el.dataset.bell = '';
+      window.clearTimeout(bell.current);
+      bell.current = window.setTimeout(() => delete el.dataset.bell, 300);
+    });
     // The window reports what fits it; the terminal is shown at the size the node reports, which is the smallest of the windows
     // watching it (sizing.ts). The element says which, for a bigger window's edge and for tests.
     let s: TerminalSession | undefined;
@@ -48,7 +72,8 @@ export function TerminalView({ source, label }: { source: TerminalSource; label:
     });
     const live = s;
     session.current = live;
-    r.onInput((d) => {
+    r.onInput((d, binary) => {
+      if (binary) { live.sendInput(binaryBytes(d)); return; }
       if (ctrlRef.current) { ctrlRef.current = false; setCtrl(false); d = withCtrl(d); }
       live.sendInput(inputBytes(d));
     });
@@ -59,7 +84,11 @@ export function TerminalView({ source, label }: { source: TerminalSource; label:
     window.addEventListener('agora-terminal-size', onSize);
     // A theme can change the terminal's font: the renderer has repainted by now (it listens first), so measure again.
     window.addEventListener('agora-theme', onSize);
+    const onPrefs = () => { r.setPrefs(terminalPrefs()); requestAnimationFrame(() => sizing.viewportChanged()); };
+    window.addEventListener('agora-terminal-prefs', onPrefs);
     return () => {
+      window.removeEventListener('agora-terminal-prefs', onPrefs);
+      window.clearTimeout(bell.current);
       window.removeEventListener('agora-terminal-size', onSize);
       window.removeEventListener('agora-theme', onSize);
       observer.disconnect();
@@ -67,12 +96,37 @@ export function TerminalView({ source, label }: { source: TerminalSource; label:
       r.dispose();
       renderer.current = undefined;
       session.current = undefined;
+      setAtBottom(true); offerRef(undefined); setFinding(false); setLink(undefined);
     };
   // The translated ARIA label can change without disposing the renderer or reconnecting the terminal. A change of touch screen (a
   // tablet's keyboard attached) moves the terminal into or out of the key bar's frame, so it is mounted again.
   }, [source, touch]);
 
-  const view = <div ref={host} className="terminal" role="region" aria-label={label} dir="ltr" />;
+  const closeFind = () => { setFinding(false); renderer.current?.clearFind(); renderer.current?.focus(); };
+  const view = (
+    <div className="terminal-frame">
+      <div ref={host} className="terminal" role="region" aria-label={label} dir="ltr" />
+      {finding && <FindBar find={(q, back) => renderer.current?.find(q, back) ?? false} onClose={closeFind} />}
+      {link !== undefined && <p className="terminal-link" dir="ltr">{link}</p>}
+      <div className="terminal-float">
+        {!atBottom && (
+          <button type="button" className="terminal-jump" onClick={() => renderer.current?.scrollToBottom()}>
+            <Icon name="chevron" className="size-4 rotate-90" />{t('terminal-jump-bottom')}
+          </button>
+        )}
+        {offer !== undefined && (
+          <div role="status" className="terminal-offer">
+            <p className="terminal-offer__text">{t('terminal-copy-offer')} <span className="text-muted">{t('terminal-copy-offer-length', { count: offer.length })}</span></p>
+            <pre className="terminal-offer__preview" dir="ltr" tabIndex={0}>{offer}</pre>
+            <div className="flex gap-2">
+              <button type="button" className="button" onClick={() => { void navigator.clipboard?.writeText(offer).catch(() => undefined); offerRef(undefined); renderer.current?.focus(); }}>{t('terminal-copy-offer-copy')}</button>
+              <button type="button" className="button" onClick={() => { offerRef(undefined); renderer.current?.focus(); }}>{t('terminal-copy-offer-ignore')}</button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
   if (!touch) return view;
   const press = (k: BarKey) => {
     const bytes = keyBytes(k, { ctrl: ctrlRef.current, appCursor: renderer.current?.applicationCursor() });

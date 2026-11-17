@@ -180,7 +180,7 @@ body {
 
 /* The terminal and its key bar, on a touch screen (any window size). */
 .terminal-touch { display: flex; flex-direction: column; height: 100%; min-height: 0; }
-.terminal-touch > .terminal { flex: 1; height: auto; min-height: 0; }
+.terminal-touch > .terminal-frame { flex: 1; height: auto; min-height: 0; }
 .key-bar {
   display: flex;
   flex: none;

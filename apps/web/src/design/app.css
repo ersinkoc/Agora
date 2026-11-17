@@ -179,6 +179,21 @@
   /* Smaller than this window: it sits at the top left, and a hairline marks where it ends. */
   .terminal[data-smaller] .xterm-screen { box-shadow: 1px 1px 0 0 var(--border); }
   .page .terminal { height: clamp(320px, 65vh, 720px); @apply border border-line; }
+  /* The terminal's frame carries what floats over it: find, a clipboard offer, "jump to latest". */
+  .terminal-frame { @apply relative h-full min-h-0; }
+  /* A finger dragging over the screen scrolls the history (renderer.ts); the browser must not take the drag for a page scroll. */
+  .terminal .xterm-screen { touch-action: none; }
+  .terminal[data-bell] { box-shadow: inset 0 0 0 2px var(--state-needs-you); }
+  .terminal-find { @apply absolute end-3 top-3 z-10 flex items-center gap-1 rounded-m border border-line bg-surface-1 px-2 py-1 text-ink; box-shadow: var(--shadow); }
+  .terminal-find__input { @apply w-48 rounded-xs border border-line bg-surface-0 px-2 py-1 text-sm text-ink; }
+  .terminal-float { @apply pointer-events-none absolute inset-x-3 bottom-3 z-10 flex flex-col items-end gap-2; }
+  .terminal-float > * { @apply pointer-events-auto; }
+  .terminal-offer { @apply grid w-full gap-2 rounded-m border border-line bg-surface-1 p-3 text-sm text-ink; box-shadow: var(--shadow); }
+  .terminal-offer__preview { @apply m-0 max-h-24 overflow-auto whitespace-pre-wrap break-all rounded-xs border border-line bg-surface-0 p-2 font-mono text-xs text-ink; }
+  .terminal-jump { @apply inline-flex items-center gap-1 whitespace-nowrap rounded-full border border-line bg-surface-1 px-3 py-1 text-xs text-ink hover:bg-surface-2; box-shadow: var(--shadow); }
+  .terminal-link { @apply pointer-events-none absolute bottom-0 start-0 z-10 m-0 max-w-full truncate rounded-tr-xs border border-line bg-surface-1 px-2 py-0.5 font-mono text-xs text-ink; }
+  .terminal-menu { @apply relative; }
+  .terminal-menu__panel { @apply absolute end-0 top-full z-20 mt-1 grid w-64 gap-3 rounded-m border border-line bg-surface-1 p-3 text-xs text-ink; box-shadow: var(--shadow); }
   .approvals { @apply grid gap-4; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
   .approval { @apply flex flex-col gap-2 rounded-m border border-line bg-surface-1 p-4; }
   .approval__actions { @apply flex gap-3; }
@@ -196,7 +211,7 @@
 /* A touch screen (a phone, a tablet at any width): everything a finger presses has a hit area of at least --tap, buttons, tabs, rows,
    icon buttons, chips that act and the menu tiles. They grow on touch only; with a mouse they keep their dense size. */
 @media (pointer: coarse) {
-  .button, .ide-iconbtn, .ide-tab, .ide-row, .menu-tile, .fleet-count, .fleet-seg, .tile, button.ide-chip, a.ide-chip, .ide-bar > a, .ide-bar > button, input:not([type='checkbox'], [type='radio']), select { min-height: var(--tap); }
+  .button, .terminal-jump, .ide-iconbtn, .ide-tab, .ide-row, .menu-tile, .fleet-count, .fleet-seg, .tile, button.ide-chip, a.ide-chip, .ide-bar > a, .ide-bar > button, input:not([type='checkbox'], [type='radio']), select { min-height: var(--tap); }
   footer.ide-bar { height: auto; }
   /* A row whose label holds a radio or a checkbox: the whole label is the target (the box itself stays its size). */
   .touch-row { min-height: var(--tap); }
