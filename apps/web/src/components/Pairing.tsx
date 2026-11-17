@@ -3,6 +3,7 @@ import { t } from '../i18n';
 import { span } from '../net/fleet';
 import type { PairCard, PairRecent, PairWindow } from '../net/pairing';
 import { PairRequest, type PairAnswer } from './PairRequest';
+import { isolated } from './pairChoice';
 
 // What the window gives the console and the phone list to show machines that ask to join (ADR-0065). Built from `PairState` only for an
 // owner's session, so a screen that gets one may show it as it is.
@@ -24,13 +25,14 @@ export function PairCards({ ui, inline = true }: { ui: PairingUi; inline?: boole
   return <>{ui.cards.map((c) => <PairRequest key={c.id} inline={inline} request={c} offline={ui.offline} onAnswer={(a, r) => ui.onAnswer(c, a, r)} />)}</>;
 }
 
-// "A machine named X was approved": one line each, a little while after the request ended. The name is what the machine called itself, so
-// it is isolated from the sentence around it.
+// "A machine named X was approved": one line each, a little while after the request ended. The name is what the machine called itself.
+// Messages are formatted without Fluent's own isolation, so the name goes in between Unicode isolates (`isolated`) and cannot reorder
+// the words around it.
 export function PairRecentList({ recent }: { recent: readonly PairRecent[] }) {
   if (recent.length === 0) return null;
   return (
     <ul className="pair-recent" aria-label={t('pair-recent')}>
-      {recent.map((r) => <li key={r.id + r.at} className="pair-recent__line">{t(`pair-result-${r.outcome}`, { name: r.name })}</li>)}
+      {recent.map((r) => <li key={r.id + r.at} className="pair-recent__line">{t(`pair-result-${r.outcome}`, { name: isolated(r.name) })}</li>)}
     </ul>
   );
 }

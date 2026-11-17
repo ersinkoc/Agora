@@ -79,22 +79,26 @@ describe('the card an owner answers (ADR-0065)', () => {
     expect(asking).not.toContain('>Approve<');
     // "Go back" returns to the start with nothing sent.
     expect(pairCardReducer(s, { type: 'back' }).step).toBe('idle');
-    expect(pairCardReducer(s, { type: 'send' }).step).toBe('busy');
+    // The yes does nothing until the question has been up for MIN_THINK_MS (`armed`).
+    expect(pairCardReducer(s, { type: 'send', approve: true })).toBe(s);
+    expect(pairCardReducer(pairCardReducer(s, { type: 'armed' }), { type: 'send', approve: true }).step).toBe('busy');
+    // And no approval goes out from the card itself.
+    expect(pairCardReducer(initialPairCard, { type: 'send', approve: true })).toBe(initialPairCard);
   });
 
   it('keeps Approve out of reach of a stray send and a double answer', () => {
     // A send needs a step the person went through; a second one while the first is out does nothing.
-    const busy = pairCardReducer(initialPairCard, { type: 'send' });
-    expect(pairCardReducer(busy, { type: 'send' })).toBe(busy);
+    const busy = pairCardReducer(initialPairCard, { type: 'send', approve: false });
+    expect(pairCardReducer(busy, { type: 'send', approve: false })).toBe(busy);
     expect(pairCardReducer(busy, { type: 'approve' })).toBe(busy);
     const sent = pairCardReducer(busy, { type: 'answered', answer: 'ok' });
     expect(sent.step).toBe('sent');
-    expect(pairCardReducer(sent, { type: 'send' })).toBe(sent);
+    expect(pairCardReducer(sent, { type: 'send', approve: false })).toBe(sent);
     expect(view(sent)).toContain('Answer sent.');
   });
 
   it('after "name taken" the card starts over: the owner chooses about Replace and goes through both presses again', () => {
-    let s = pairCardReducer(pairCardReducer(initialPairCard, { type: 'approve' }), { type: 'send' });
+    let s = [{ type: 'approve' }, { type: 'armed' }, { type: 'send', approve: true }].reduce((x, a) => pairCardReducer(x, a as never), initialPairCard);
     s = pairCardReducer(s, { type: 'answered', answer: 'taken' });
     expect(s).toMatchObject({ step: 'idle', failed: false, replace: false });
     // Ticking Replace is itself a choice that sends nothing and restarts the two presses.
@@ -103,7 +107,7 @@ describe('the card an owner answers (ADR-0065)', () => {
   });
 
   it('says so when the answer could not be sent, and leaves the card ready to try again', () => {
-    let s = pairCardReducer(initialPairCard, { type: 'send' });
+    let s = pairCardReducer(initialPairCard, { type: 'send', approve: false });
     s = pairCardReducer(s, { type: 'answered', answer: 'failed' });
     expect(s).toMatchObject({ step: 'idle', failed: true });
     expect(view(s)).toContain('Your answer could not be sent. Try again.');
@@ -141,7 +145,7 @@ describe('a request to join in the fleet console', () => {
     expect(fleetCounts([], [], [], 1).needs).toBe(1);
     const html = renderToStaticMarkup(<AttentionQueue items={items} machines={[]} now={NOW} onOpen={noop} onResolve={noop} pairing={ui()} />);
     expect(html).toContain('<bdi>laptop</bdi>');
-    expect(html).toContain('Review the request from laptop');
+    expect(html).toContain('Review the request from \u2068laptop\u2069');
     expect(html).toContain('Compare its number with the one on its screen before you approve.');
     expect(html).not.toContain('Approve');
     expect(html).not.toContain('Allow');
@@ -196,12 +200,12 @@ describe('a request to join in the fleet console', () => {
   it('puts the end of a request in the recent list, one line each, in both languages', () => {
     const recent = (['approved', 'denied', 'expired', 'closed'] as const).map((outcome, i) => ({ id: `r${i}`, kind: 'machine' as const, name: 'laptop', outcome, at: 1 }));
     const html = renderToStaticMarkup(<PairRecentList recent={recent} />);
-    expect(html).toContain('laptop was approved and is joining.');
-    expect(html).toContain('laptop was denied.');
-    expect(html).toContain('The request from laptop ran out.');
-    expect(html).toContain('The request from laptop was cancelled.');
+    expect(html).toContain('\u2068laptop\u2069 was approved and is joining.');
+    expect(html).toContain('\u2068laptop\u2069 was denied.');
+    expect(html).toContain('The request from \u2068laptop\u2069 ran out.');
+    expect(html).toContain('The request from \u2068laptop\u2069 was cancelled.');
     setLanguage('tr');
-    expect(renderToStaticMarkup(<PairRecentList recent={recent} />)).toContain('laptop onaylandı, katılıyor.');
+    expect(renderToStaticMarkup(<PairRecentList recent={recent} />)).toContain('\u2068laptop\u2069 onaylandı, katılıyor.');
     setLanguage('en');
     expect(renderToStaticMarkup(<PairRecentList recent={[]} />)).toBe('');
     expect(t('pair-recent')).toBe('Recent requests to join');

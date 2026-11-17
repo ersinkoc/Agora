@@ -385,3 +385,79 @@ fn a_deny_from_the_window_ends_the_request_and_gives_the_machine_nothing() {
     assert!(!machine.join("link").join("node-id").exists());
     assert_eq!(decided(&mut window, &card.pair_id), v1::PairOutcome::Denied);
 }
+
+#[test]
+fn a_session_that_is_not_the_owners_is_refused_and_is_told_no_card() {
+    let root = tmp("member");
+    let hub = hub(&root);
+    let mut owner = hub.window();
+    owner
+        .command_info("", Cmd::PairOpen(v1::PairOpen {}), WAIT)
+        .unwrap();
+
+    // A team member signs in with the code `agora hub user add` prints.
+    let out = agora(
+        &root.join("hub-home"),
+        &[
+            "hub",
+            "user",
+            "add",
+            "Ayse",
+            "--role",
+            "member",
+            "--hub-dir",
+        ],
+    )
+    .arg(&hub.dir)
+    .output()
+    .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    let code = text
+        .split_whitespace()
+        .map(|w| w.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-'))
+        .find(|w| w.len() == 9 && w.as_bytes()[4] == b'-')
+        .unwrap_or_else(|| panic!("no sign-in code in {text:?}"))
+        .to_string();
+    let addr = HubAddr {
+        addr: format!("localhost:{}", hub.port),
+        ca_pem: std::fs::read_to_string(hub.dir.join("ca.pem")).unwrap(),
+    };
+    let token = agora_tui::client::sign_in(&addr, &code).unwrap();
+    let mut member = Session::connect(&addr, &token).unwrap();
+
+    // The hub answers every owner command with `auth.forbidden`, which is how a window knows not to show cards.
+    for c in [
+        Cmd::PairStatus(v1::PairStatus {}),
+        Cmd::PairOpen(v1::PairOpen {}),
+        Cmd::PairApprove(v1::PairApprove {
+            pair_id: vec![1; 16],
+            replace: false,
+        }),
+        Cmd::PairDeny(v1::PairDeny {
+            pair_id: vec![1; 16],
+        }),
+    ] {
+        let e = member.command_info("", c, WAIT).unwrap_err();
+        assert_eq!(e.code, "auth.forbidden");
+    }
+
+    // A request arrives: the owner is told, the member is not.
+    let machine = root.join("machine");
+    let mut join = Join::start(&machine, &format!("localhost:{}", hub.port), "desk", false);
+    join.wait_for("Number ");
+    let card = card_for(&mut owner, "desk", &mut Vec::new());
+    let _ = member.next(Duration::from_millis(1500));
+    assert!(
+        member.take_pair_notes().is_empty(),
+        "a member was sent a card"
+    );
+    owner
+        .command_info(
+            "",
+            Cmd::PairDeny(v1::PairDeny {
+                pair_id: card.pair_id,
+            }),
+            WAIT,
+        )
+        .unwrap();
+}

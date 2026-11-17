@@ -199,6 +199,20 @@ pub enum Step {
     Confirm,
 }
 
+/// A key that comes sooner than this after a screen was shown is not an answer to it: a key that was held or typed ahead must not
+/// approve a machine (the same rule as `agora pair open`).
+pub const MIN_THINK: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Whether a key `elapsed` after its screen was shown came too soon to be an answer (Esc always counts: leaving is safe).
+pub fn too_soon(key: u8, elapsed: std::time::Duration) -> bool {
+    key != 0x1b && elapsed < MIN_THINK
+}
+
+/// Whether an answer can go out: the link is up and the hub's expiry has not passed.
+pub fn can_answer(card: &Card, now_ms: u64, link_up: bool) -> bool {
+    link_up && now_ms < card.expires_ms
+}
+
 /// What a key did on the card.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Outcome {
@@ -230,9 +244,13 @@ impl Default for Dialog {
 }
 
 impl Dialog {
-    pub fn key(&mut self, k: u8, taken: bool) -> Outcome {
+    pub fn key(&mut self, k: u8, taken: bool, can_answer: bool) -> Outcome {
         if k == 0x1b {
             return Outcome::Leave;
+        }
+        // Offline or run out: the card can be read and left, but no answer goes out.
+        if !can_answer && matches!(k.to_ascii_lowercase(), b'd' | b'y') {
+            return Outcome::Stay;
         }
         match (self.step, k.to_ascii_lowercase()) {
             (Step::Card, b'a') => {
@@ -511,26 +529,29 @@ mod tests {
         for k in 0u8..=255 {
             let mut d = Dialog::default();
             assert!(
-                !matches!(d.key(k, false), Outcome::Approve { .. }),
+                !matches!(d.key(k, false, true), Outcome::Approve { .. }),
                 "key {k} approved at once"
             );
         }
         let mut d = Dialog::default();
-        assert_eq!(d.key(b'y', false), Outcome::Stay);
-        assert_eq!(d.key(b'\r', false), Outcome::Stay);
+        assert_eq!(d.key(b'y', false, true), Outcome::Stay);
+        assert_eq!(d.key(b'\r', false, true), Outcome::Stay);
         assert_eq!(d.step, Step::Card);
     }
 
     #[test]
     fn approving_is_a_then_y_and_any_other_key_after_a_goes_back() {
         let mut d = Dialog::default();
-        assert_eq!(d.key(b'a', false), Outcome::Stay);
+        assert_eq!(d.key(b'a', false, true), Outcome::Stay);
         assert_eq!(d.step, Step::Confirm);
-        assert_eq!(d.key(b'y', false), Outcome::Approve { replace: false });
+        assert_eq!(
+            d.key(b'y', false, true),
+            Outcome::Approve { replace: false }
+        );
         for other in *b"na \rd" {
             let mut d = Dialog::default();
-            d.key(b'a', false);
-            assert_eq!(d.key(other, false), Outcome::Stay, "key {other}");
+            d.key(b'a', false, true);
+            assert_eq!(d.key(other, false, true), Outcome::Stay, "key {other}");
             assert_eq!(d.step, Step::Card);
         }
     }
@@ -538,18 +559,21 @@ mod tests {
     #[test]
     fn replace_is_chosen_with_r_only_on_a_taken_name_and_starts_unchosen() {
         let mut d = Dialog::default();
-        assert_eq!(d.key(b'r', false), Outcome::Stay);
+        assert_eq!(d.key(b'r', false, true), Outcome::Stay);
         assert!(!d.replace);
-        d.key(b'r', true);
+        d.key(b'r', true, true);
         assert!(d.replace);
-        d.key(b'a', true);
-        assert_eq!(d.key(b'y', true), Outcome::Approve { replace: true });
+        d.key(b'a', true, true);
+        assert_eq!(d.key(b'y', true, true), Outcome::Approve { replace: true });
         // A name that is not taken never sends replace, whatever was toggled before.
         let mut d = Dialog {
             step: Step::Confirm,
             replace: true,
         };
-        assert_eq!(d.key(b'y', false), Outcome::Approve { replace: false });
+        assert_eq!(
+            d.key(b'y', false, true),
+            Outcome::Approve { replace: false }
+        );
         // After the hub says the name is taken, the owner starts over from the card.
         let mut d = Dialog {
             step: Step::Confirm,
@@ -560,13 +584,39 @@ mod tests {
     }
 
     #[test]
+    fn nothing_is_sent_offline_or_after_the_request_ran_out_but_leaving_still_works() {
+        let mut d = Dialog {
+            step: Step::Confirm,
+            replace: false,
+        };
+        assert_eq!(d.key(b'y', false, false), Outcome::Stay);
+        let mut d = Dialog::default();
+        assert_eq!(d.key(b'd', false, false), Outcome::Stay);
+        assert_eq!(d.key(0x1b, false, false), Outcome::Leave);
+        let c = card("a");
+        assert!(can_answer(&c, c.expires_ms - 1, true));
+        assert!(!can_answer(&c, c.expires_ms, true));
+        assert!(!can_answer(&c, 0, false));
+    }
+
+    #[test]
+    fn a_key_sooner_than_half_a_second_after_the_card_is_not_an_answer() {
+        use std::time::Duration;
+        assert!(too_soon(b'a', Duration::from_millis(0)));
+        assert!(too_soon(b'y', MIN_THINK - Duration::from_millis(1)));
+        assert!(!too_soon(b'y', MIN_THINK));
+        // Esc is always taken: leaving is safe.
+        assert!(!too_soon(0x1b, Duration::from_millis(0)));
+    }
+
+    #[test]
     fn d_denies_and_esc_leaves_it_pending() {
         let mut d = Dialog::default();
-        assert_eq!(d.key(b'd', false), Outcome::Deny);
+        assert_eq!(d.key(b'd', false, true), Outcome::Deny);
         let mut d = Dialog::default();
-        assert_eq!(d.key(0x1b, false), Outcome::Leave);
-        d.key(b'a', false);
-        assert_eq!(d.key(0x1b, false), Outcome::Leave);
+        assert_eq!(d.key(0x1b, false, true), Outcome::Leave);
+        d.key(b'a', false, true);
+        assert_eq!(d.key(0x1b, false, true), Outcome::Leave);
     }
 
     #[test]

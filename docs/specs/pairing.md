@@ -326,12 +326,13 @@ Web: `apps/web/src/net/pairing.ts` (pure: the notices, the state, the rules), `u
 - **Where the card is.** A request is a "needs you" item: a row in the fleet console's list (it counts in the header strip and the status bar) with one button, Review.
   The row never has Approve and never shows the number. The full card is in the right-hand Needs you list (on a phone, at the top of the list), and Review brings it into
   view. Away from Home, the first card floats over the window. On a hub with no machine yet the row is above the empty state.
-- **Two presses to approve.** Approve asks "Do the two numbers match exactly?" and only "Yes, the numbers match" sends it; Deny is one press. Replace is shown only after the
+- **Two presses to approve.** Approve asks "Do the two numbers match exactly?" and only "Yes, the numbers match" sends it; Deny is one press. The question has a place of its own, so the buttons do not move when it appears, and the yes is disabled for 500 ms (`MIN_THINK_MS`) after it appears, so a double-click on Approve cannot reach it. `pairClicks.test.tsx` presses the real buttons in a DOM (mutations of each rule fail it). Replace is shown only after the
   hub answered `pair.state name_in_use` to an approval (the frame has no field for it, see section 12), starts unticked, and choosing it starts the two presses again.
   While the link is down, or the hub's expiry has passed, both buttons are disabled with the reason. The countdown is the frame's `expires_ms` against the window's clock.
+- **Peer text.** Name, system and address are stripped of control, bidirectional and zero-width characters when the notice is read (`peerText`), shown isolated (`bdi`), and a name placed inside a sentence goes between Unicode isolates, because the web formats messages without Fluent's isolation.
 - **Name, system and address** have a row each; the name and the system are isolated with `bdi` and the address is left-to-right; the number is two groups of three in large type.
 - **Open the window.** On a fresh hub's empty state the owner can press "Allow a new machine to join" (`PairOpen`: 10 minutes), sees the time left, and can Close it (`PairClose`).
 - **Terminal client.** `agora tui` reads `p`: the first request as a card (name, system and address in rows, the number in two groups). `a` then `y` approves; any other key after
-  `a` goes back; `d` denies; `r` chooses Replace on a taken name; Esc leaves it for later. Keys typed before the card was shown are discarded, and a key sooner than 500 ms after it is
+  `a` goes back; `d` denies; `r` chooses Replace on a taken name; Esc leaves it for later; nothing is sent once the request has run out or a command found the link gone. Keys typed before the card was shown are discarded, and a key sooner than 500 ms after it is
   shown is not an answer (the same rule as `agora pair open`). The footer says a machine wants to join, and counts it in "need you".
 - **Not built:** browser sign-in by approval (the HTTP path and its card text), trusting the owner's device from a card, and a push notice for a request that arrives while no window is open.

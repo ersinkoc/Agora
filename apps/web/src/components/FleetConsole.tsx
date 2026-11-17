@@ -14,6 +14,7 @@ import { StateBadge, StateMark } from './StateBadge';
 import type { StartChoice } from './StartApproval';
 import { PairRecentList, PairWindowControl, type PairingUi } from './Pairing';
 import { PairRequest } from './PairRequest';
+import { isolated, peerText } from './pairChoice';
 
 export const ATTENTION_SHOWN = 6;
 export type LinkState = 'connecting' | 'live' | 'offline';
@@ -102,12 +103,12 @@ export function AttentionQueue({ items, machines, now, onOpen, onResolve, onRevi
       <li key={it.key} className="fleet-ask">
         <div className="fleet-ask__who">
           <StateMark state="needs-you" />
-          <strong className="fleet-ask__name"><bdi>{card.name}</bdi></strong>
+          <strong className="fleet-ask__name"><bdi>{peerText(card.name)}</bdi></strong>
           <span className="fleet-ask__where">{t('pair-row-where')}</span>
         </div>
         <p className="fleet-ask__what">{t('pair-row-what')}</p>
         <div className="fleet-ask__actions">
-          <button type="button" className="button" aria-expanded={onReview ? undefined : open} aria-controls={onReview ? `pair-request-${card.id}` : `pair-row-${card.id}`} aria-label={t('pair-review-for', { name: card.name })} onClick={() => reviewPair(it.key, card.id)}>{open && !onReview ? t('pair-hide') : t('fleet-review')}</button>
+          <button type="button" className="button" aria-expanded={onReview ? undefined : open} aria-controls={onReview ? `pair-request-${card.id}` : `pair-row-${card.id}`} aria-label={t('pair-review-for', { name: isolated(card.name) })} onClick={() => reviewPair(it.key, card.id)}>{open && !onReview ? t('pair-hide') : t('fleet-review')}</button>
         </div>
         {open && pairing && <div id={`pair-row-${card.id}`} className="col-span-full"><PairRequest inline request={card} offline={pairing.offline} onAnswer={(a, r) => pairing.onAnswer(card, a, r)} /></div>}
       </li>

@@ -123,7 +123,7 @@ function Themed({ theme, onStart }: { theme: 'dark' | 'light'; onStart?: () => v
       {/* ADR-0065: a machine's request to join as the owner sees it, in each state. The clock is fixed so the gallery does not change by itself. */}
       <div className="gallery__row items-start">
         <PairRequest inline now={0} request={{ id: 'pair-machine', kind: 'machine', name: 'laptop', os: 'windows', address: '192.168.1.50', number: '482193', expiresMs: 272_000 }} onAnswer={async () => 'ok'} />
-        <PairCardView inline now={0} state={{ step: 'confirm', failed: false, replace: false }} request={{ id: 'pair-confirm', kind: 'machine', name: 'laptop', os: 'windows', address: '192.168.1.50', number: '482193', expiresMs: 272_000 }}
+        <PairCardView inline now={0} state={{ step: 'confirm', failed: false, replace: false, armed: true }} request={{ id: 'pair-confirm', kind: 'machine', name: 'laptop', os: 'windows', address: '192.168.1.50', number: '482193', expiresMs: 272_000 }}
           onApprove={() => {}} onBack={() => {}} onSend={() => {}} onReplace={() => {}} />
         <PairRequest inline now={0} request={{ id: 'pair-taken', kind: 'machine', name: 'laptop', os: 'macos', address: '192.168.1.51', number: '117305', expiresMs: 94_000, nameTaken: true }} onAnswer={async () => 'ok'} />
       </div>

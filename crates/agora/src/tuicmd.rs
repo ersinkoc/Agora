@@ -301,9 +301,6 @@ fn approve_device(
 
 /// How long the owner has to read a card and answer it before the box closes by itself (the request stays pending on the hub).
 const PAIR_ASK_FOR: Duration = Duration::from_secs(120);
-/// A key that comes sooner than this after a screen was shown is not an answer to it: a key that was held or typed ahead must not
-/// approve a machine (the same rule as `agora pair open`).
-const PAIR_MIN_THINK: Duration = Duration::from_millis(500);
 
 /// Asks the hub whether this session is the owner's: `PairStatus` is answered to the owner only. `None` when it could not tell (the
 /// link failed): it is asked again at the next connection.
@@ -347,12 +344,14 @@ fn pair_result_line(say: &Say, name: &str, ended: agora_tui::pair::Ended) -> Str
 /// `p`: the first machine that asks to join, as a card. `a` asks "do the two numbers match?" and only `y` after that approves; `d` denies;
 /// `r` (when the name already belongs to a machine) chooses Replace; Esc or a pause leaves it pending. Returns the line to show.
 fn answer_pair(say: &Say, session: &mut Session, ask: &mut Over<'_>) -> String {
-    use agora_tui::pair::{card_lines, Dialog, Outcome};
+    use agora_tui::pair::{can_answer, card_lines, too_soon, Dialog, Outcome};
     let fail = |code: String| say.text(key!("tui-pair-failed"), &[("code", Arg::Str(code))]);
     let Some(mut card) = ask.c.pair.first().cloned() else {
         return say.text(key!("tui-pair-none"), &[]);
     };
     let mut dialog = Dialog::default();
+    // False once a command failed because the link is gone: then no answer is offered.
+    let mut link_up = true;
     // Keys typed before the card was on screen answer nothing.
     while ask.rx().try_recv().is_ok() {}
     loop {
@@ -362,14 +361,14 @@ fn answer_pair(say: &Say, session: &mut Session, ask: &mut Over<'_>) -> String {
             dialog.step,
             dialog.replace,
             now_ms(),
-            true,
+            link_up,
             width,
             &|id, args| say.text(id, args),
         );
         let shown = Instant::now();
         let key = match ask.key(&lines, PAIR_ASK_FOR) {
             // A key that was already on its way when the screen came up is not an answer to it: the card is shown again.
-            Some(k) if k != 0x1b && shown.elapsed() < PAIR_MIN_THINK => {
+            Some(k) if too_soon(k, shown.elapsed()) => {
                 while ask.rx().try_recv().is_ok() {}
                 continue;
             }
@@ -377,21 +376,25 @@ fn answer_pair(say: &Say, session: &mut Session, ask: &mut Over<'_>) -> String {
             None => return String::new(),
             Some(k) => k,
         };
-        match dialog.key(key, card.taken) {
+        match dialog.key(key, card.taken, can_answer(&card, now_ms(), link_up)) {
             Outcome::Stay => {}
             Outcome::Leave => return String::new(),
             Outcome::Deny => {
-                return match session.command_info(
+                match session.command_info(
                     "",
                     WireCommand::PairDeny(agora_protocol::v1::PairDeny {
                         pair_id: card.pair_id.clone(),
                     }),
                     Duration::from_secs(5),
                 ) {
-                    Ok(_) => say.text(key!("tui-pair-denied"), &[]),
-                    Err(e) if e.code == "pair.unknown" => say.text(key!("tui-pair-gone"), &[]),
-                    Err(e) => fail(e.code),
-                };
+                    Ok(_) => return say.text(key!("tui-pair-denied"), &[]),
+                    Err(e) if e.code == "pair.unknown" => {
+                        return say.text(key!("tui-pair-gone"), &[])
+                    }
+                    // The link is gone: the card says so and offers no answer; leaving still works.
+                    Err(e) if e.code == "client.unreachable" => link_up = false,
+                    Err(e) => return fail(e.code),
+                }
             }
             Outcome::Approve { replace } => {
                 match session.command_info(
@@ -419,6 +422,7 @@ fn answer_pair(say: &Say, session: &mut Session, ask: &mut Over<'_>) -> String {
                     Err(e) if e.code == "pair.unknown" => {
                         return say.text(key!("tui-pair-gone"), &[])
                     }
+                    Err(e) if e.code == "client.unreachable" => link_up = false,
                     Err(e) => return fail(e.code),
                 }
             }

@@ -41,7 +41,7 @@ export function usePairing(api: Live | undefined, link: LinkState): { ui: Pairin
   const onAnswer = useCallback(async (card: PairCard, approve: boolean, replace: boolean): Promise<PairAnswer> => {
     if (!api) return 'failed';
     try {
-      await api.command('', approve ? { pairApprove: { pairId: card.pairId, replace } } : { pairDeny: { pairId: card.pairId } });
+      await api.command('', approve ? { pairApprove: { pairId: card.pairId, replace: replace && !!card.nameTaken } } : { pairDeny: { pairId: card.pairId } });
       return 'ok';
     } catch (e) {
       // The hub keeps the request open and says the name already belongs to a machine: the card then asks about Replace.

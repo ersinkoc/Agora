@@ -3,7 +3,7 @@
 // so it is never written to localStorage, never logged, and never put in a page title or a notification.
 import { agora } from '../gen/agora.js';
 import { EVENT_KIND } from './frame';
-import type { PairRequestModel } from '../components/pairChoice';
+import { peerText, type PairRequestModel } from '../components/pairChoice';
 
 /** One request waiting for the owner. `id` is the hub's pair id as lowercase hex (a lookup key, never a secret). */
 export interface PairCard extends PairRequestModel {
@@ -66,9 +66,9 @@ export function decodePairFrame(kind: number, payload: Uint8Array, at: number): 
       const m = agora.v1.PairRequested.decode(payload);
       const id = m.pairId ?? new Uint8Array();
       const k = m.kind === agora.v1.PairKind.PAIR_KIND_MACHINE ? 'machine' : m.kind === agora.v1.PairKind.PAIR_KIND_BROWSER ? 'browser' : undefined;
-      if (!k || id.length === 0 || id.length > 32 || !/^\d{6}$/.test(m.number ?? '') || !m.name) return undefined;
+      if (!k || id.length === 0 || id.length > 32 || !/^\d{6}$/.test(m.number ?? '') || !peerText(m.name)) return undefined;
       const expires = typeof m.expiresMs === 'number' ? m.expiresMs : Number(m.expiresMs?.toString() ?? 0);
-      return { type: 'requested', card: { id: hex(id), pairId: id, kind: k, name: m.name, os: m.os ?? '', address: m.address ?? '', number: m.number ?? '', expiresMs: expires } };
+      return { type: 'requested', card: { id: hex(id), pairId: id, kind: k, name: peerText(m.name), os: peerText(m.os ?? ''), address: peerText(m.address ?? ''), number: m.number ?? '', expiresMs: expires } };
     }
     if (kind === EVENT_KIND.PAIR_DECIDED) {
       const m = agora.v1.PairDecided.decode(payload);

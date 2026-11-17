@@ -2,7 +2,7 @@ import { useEffect, useReducer, useState } from 'react';
 import { t } from '../i18n';
 import { span } from '../net/fleet';
 import { Icon } from './Icon';
-import { initialPairCard, pairCardReducer, pairTitle, systemName, type PairCardState, type PairRequestModel } from './pairChoice';
+import { initialPairCard, isolated, MIN_THINK_MS, pairCardReducer, pairTitle, peerText, systemName, type PairCardState, type PairRequestModel } from './pairChoice';
 
 /** What the hub answered when the owner decided: `taken` is `pair.state name_in_use` (the name already belongs to an enrolled machine). */
 export type PairAnswer = 'ok' | 'taken' | 'failed';
@@ -32,8 +32,16 @@ export function PairRequest({ request, onAnswer, inline, offline, now: clock }: 
     const timer = setInterval(() => setTicked(Date.now()), 1000);
     return () => clearInterval(timer);
   }, [counting]);
+  // The question has been up long enough to answer: a double-click on Approve must not reach the yes.
+  useEffect(() => {
+    if (state.step !== 'confirm') return;
+    const timer = setTimeout(() => act({ type: 'armed' }), MIN_THINK_MS);
+    return () => clearTimeout(timer);
+  }, [state.step]);
   const send = async (approve: boolean) => {
-    act({ type: 'send' });
+    // Only a send the steps allow goes out (a yes only from the question once it is armed).
+    if (pairCardReducer(state, { type: 'send', approve }) === state) return;
+    act({ type: 'send', approve });
     const r = await onAnswer(approve, approve && !!request.nameTaken && state.replace).catch((): PairAnswer => 'failed');
     act({ type: 'answered', answer: r });
   };
@@ -54,6 +62,7 @@ export function PairCardView({ request, state, inline, offline, now, onApprove, 
   onReplace: (on: boolean) => void;
 }) {
   const { step, failed, replace } = state;
+  const name = peerText(request.name);
   const left = request.expiresMs === undefined ? undefined : Math.max(0, Math.ceil((request.expiresMs - now) / 1000));
   const expired = left === 0;
   // Replace is a choice only when the hub said the name is taken (`pair.state name_in_use`), and it starts unticked every time.
@@ -75,13 +84,13 @@ export function PairCardView({ request, state, inline, offline, now, onApprove, 
           cannot reorder the labels around it. */}
       <dl className="m-0 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
         <dt className="text-muted">{t('pair-name')}</dt>
-        <dd className="m-0 min-w-0 break-words text-ink"><bdi>{request.name}</bdi></dd>
+        <dd className="m-0 min-w-0 break-words text-ink"><bdi>{name}</bdi></dd>
         {request.kind === 'machine' && systemName(request.os) && (<>
           <dt className="text-muted">{t('pair-system')}</dt>
-          <dd className="m-0 min-w-0 break-words text-ink"><bdi>{systemName(request.os)}</bdi></dd>
+          <dd className="m-0 min-w-0 break-words text-ink"><bdi>{peerText(systemName(request.os))}</bdi></dd>
         </>)}
         <dt className="text-muted">{t('pair-address')}</dt>
-        <dd className="m-0 min-w-0 break-words font-mono text-ink"><bdi dir="ltr">{request.address}</bdi></dd>
+        <dd className="m-0 min-w-0 break-words font-mono text-ink"><bdi dir="ltr">{peerText(request.address)}</bdi></dd>
       </dl>
       <div className="grid gap-1">
         <span className="text-xs text-muted">{t('pair-number')}</span>
@@ -94,19 +103,19 @@ export function PairCardView({ request, state, inline, offline, now, onApprove, 
       {taken && !expired && (
         <label className="flex items-start gap-2 text-xs text-ink">
           <input type="checkbox" className="mt-0.5" checked={replace} disabled={busy || blocked} onChange={(e) => onReplace(e.target.checked)} />
-          <span><strong className="font-semibold">{t('pair-replace')}</strong><br /><span className="text-muted">{t('pair-replace-why', { name: request.name })}</span></span>
+          <span><strong className="font-semibold">{t('pair-replace')}</strong><br /><span className="text-muted">{t('pair-replace-why', { name: isolated(request.name) })}</span></span>
         </label>
       )}
       {failed && <p role="alert" className="m-0 text-needs-you">{t('pair-failed')}</p>}
       {why && <p id={`${id}-why`} className="m-0 text-xs text-muted">{t(why)}</p>}
       {step === 'sent' && <p role="status" className="m-0 text-xs text-muted">{t('pair-sent')}</p>}
+      {/* The question has a place of its own above the buttons, so the buttons never move when it appears: the yes is not under the
+          pointer that pressed Approve. */}
+      <p role={step === 'confirm' ? 'alert' : undefined} className="m-0 min-h-[1.25rem] text-xs font-semibold text-ink">{step === 'confirm' ? t('pair-confirm') : ''}</p>
       {step === 'confirm' ? (
-        <div className="grid gap-2">
-          <p role="alert" className="m-0 text-xs font-semibold text-ink">{t('pair-confirm')}</p>
-          <div className="flex justify-end gap-2">
-            <button type="button" className="button" onClick={onBack}>{t('pair-back')}</button>
-            <button type="button" className="button button--primary" disabled={blocked} aria-describedby={why ? `${id}-why` : undefined} onClick={() => onSend(true)}>{t('pair-confirm-yes')}</button>
-          </div>
+        <div className="flex justify-end gap-2">
+          <button type="button" className="button" onClick={onBack}>{t('pair-back')}</button>
+          <button type="button" className="button button--primary" disabled={blocked || !state.armed} aria-describedby={why ? `${id}-why` : undefined} onClick={() => onSend(true)}>{t('pair-confirm-yes')}</button>
         </div>
       ) : (
         <div className="flex justify-end gap-2">
