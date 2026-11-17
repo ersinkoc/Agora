@@ -10,7 +10,7 @@ import '@xterm/xterm/css/xterm.css';
 import { terminalFontFamily } from './fonts';
 import { type TerminalPrefs, terminalPrefs, terminalSize } from './prefs';
 import { clipboardOffer, sanitizePaste } from './clipboard';
-import { enhancedKey, CsiUFlags, shortcut } from './keys';
+import { enhancedKey, KeyboardProtocols, registerKeyboardProtocols, shortcut } from './keys';
 import { openLink } from './links';
 import { TouchScroll, Wheel, type WheelAction } from './wheel';
 
@@ -86,8 +86,7 @@ export class XtermRenderer implements TerminalRenderer {
   private searchAddon = new SearchAddon();
   private wheel = new Wheel();
   private touch = new TouchScroll();
-  private csiU = new CsiUFlags();
-  private modifyOtherKeys = 0;
+  private keys = new KeyboardProtocols();
   private copyOnSelect = false;
   private clipboardCb: ((text: string) => void) | undefined;
   private findCb: (() => void) | undefined;
@@ -135,14 +134,7 @@ export class XtermRenderer implements TerminalRenderer {
     this.term.onWriteParsed(() => this.scrollState());
     // The keyboard protocols a program may switch on for keys a plain terminal cannot tell apart (keys.ts).
     const p = this.term.parser;
-    p.registerCsiHandler({ prefix: '>', final: 'u' }, (a) => { this.csiU.push(Number(a[0] ?? 0)); return true; });
-    p.registerCsiHandler({ prefix: '<', final: 'u' }, (a) => { this.csiU.pop(Number(a[0] ?? 1)); return true; });
-    p.registerCsiHandler({ prefix: '=', final: 'u' }, (a) => { this.csiU.set(Number(a[0] ?? 0), Number(a[1] ?? 1)); return true; });
-    p.registerCsiHandler({ prefix: '?', final: 'u' }, () => { this.term.input(this.csiU.reply(), false); return true; });
-    p.registerCsiHandler({ prefix: '>', final: 'm' }, (a) => { if (Number(a[0]) === 4) this.modifyOtherKeys = Number(a[1] ?? 0); return false; });
-    // A full reset (RIS, `ESC c`: what `reset` sends after a program crashed with a protocol on) switches them off too, as kitty and
-    // xterm do; xterm's own reset still runs (audit F940).
-    p.registerEscHandler({ final: 'c' }, () => { this.csiU.reset(); this.modifyOtherKeys = 0; return false; });
+    registerKeyboardProtocols(p, this.keys, (data) => this.term.input(data, false));
     // OSC 52: offered to the user, never written by itself, never answered (clipboard.ts).
     p.registerOscHandler(52, (data) => { const text = clipboardOffer(data); if (text !== undefined) this.clipboardCb?.(text); return true; });
     // A theme change repaints the terminal; the tokens have changed by the time the event fires.
@@ -203,7 +195,7 @@ export class XtermRenderer implements TerminalRenderer {
       return false;
     }
     if (sc === 'find') { e.preventDefault(); this.findCb?.(); return false; }
-    const bytes = enhancedKey(e, { csiU: this.csiU.flags, modifyOtherKeys: this.modifyOtherKeys });
+    const bytes = enhancedKey(e, this.keys.enhanced);
     if (bytes !== undefined) { e.preventDefault(); this.term.input(bytes, true); return false; }
     return true;
   }
