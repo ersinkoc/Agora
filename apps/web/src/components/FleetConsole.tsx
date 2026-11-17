@@ -12,6 +12,8 @@ import { AgentTile } from './AgentTile';
 import { Icon } from './Icon';
 import { StateBadge, StateMark } from './StateBadge';
 import type { StartChoice } from './StartApproval';
+import { PairRecentList, PairWindowControl, type PairingUi } from './Pairing';
+import { PairRequest } from './PairRequest';
 
 export const ATTENTION_SHOWN = 6;
 export type LinkState = 'connecting' | 'live' | 'offline';
@@ -53,11 +55,11 @@ function askText(x: ApprovalModel): string {
   return visible(d ? `${x.action} · ${d}` : x.action);
 }
 
-const askOf = (it: AttentionItem): string => (it.kind === 'approval' ? askText(it.approval) : t('fleet-waiting-in-terminal'));
+const askOf = (it: AttentionItem): string => (it.kind === 'approval' ? askText(it.approval) : it.kind === 'pair' ? t('pair-row-what') : t('fleet-waiting-in-terminal'));
 
 // The queue: everything that needs the user, most urgent first. A plain yes or no has Allow and Deny in its row (the same answer, signed
 // the same way, as the banner above the terminal); anything with something to read opens the agent, where the whole request is.
-export function AttentionQueue({ items, machines, now, onOpen, onResolve, onReview, stale }: {
+export function AttentionQueue({ items, machines, now, onOpen, onResolve, onReview, stale, pairing }: {
   items: readonly AttentionItem[];
   machines: readonly MachineModel[];
   now: number;
@@ -67,6 +69,8 @@ export function AttentionQueue({ items, machines, now, onOpen, onResolve, onRevi
   onReview?: () => void;
   // The link is not live: an answer cannot be signed to a machine through it, so Allow and Deny wait, with the reason shown.
   stale?: boolean;
+  // ADR-0065: answers a machine's request to join, in the full card the row opens.
+  pairing?: PairingUi;
 }) {
   const machineName = (id: string) => machines.find((m) => m.id === id)?.name;
   // A glance is a few rows: the most urgent ones, and the rest one press away. Many identical asks are one row.
@@ -75,10 +79,42 @@ export function AttentionQueue({ items, machines, now, onOpen, onResolve, onRevi
   const rows = useMemo(() => collapseAttention(items), [items]);
   const shown = all ? rows : rows.slice(0, ATTENTION_SHOWN);
   // How long it has waited is shown on every row or on none: a list where some rows say it and others do not reads as if those were fresh.
-  const knownWait = items.length > 0 && items.every((x) => !!x.sinceMs);
+  const knownWait = items.length > 0 && items.every((x) => x.kind !== 'pair' && !!x.sinceMs);
   const toggleEach = (key: string) => setEach((cur) => { const next = new Set(cur); if (!next.delete(key)) next.add(key); return next; });
 
+  // A request to join is a row with one button, Review: its full card (name, system, address, number, Approve) opens under the row. It
+  // never has Approve in the row, because the owner must see the number first.
+  const [read, setRead] = useState<ReadonlySet<string>>(new Set());
+  const toggleRead = (key: string) => setRead((cur) => { const next = new Set(cur); if (!next.delete(key)) next.add(key); return next; });
+  // With a side panel (Review opens it, where the full card is) the card is brought into view there; without one it opens under its row.
+  const reviewPair = (key: string, id: string) => {
+    if (onReview) {
+      onReview();
+      if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => { const el = document.getElementById(`pair-request-${id}`); el?.scrollIntoView?.({ block: 'nearest' }); el?.focus(); });
+      return;
+    }
+    toggleRead(key);
+  };
+  const pairRow = (it: Extract<AttentionItem, { kind: 'pair' }>) => {
+    const open = read.has(it.key);
+    const card = it.card;
+    return (
+      <li key={it.key} className="fleet-ask">
+        <div className="fleet-ask__who">
+          <StateMark state="needs-you" />
+          <strong className="fleet-ask__name"><bdi>{card.name}</bdi></strong>
+          <span className="fleet-ask__where">{t('pair-row-where')}</span>
+        </div>
+        <p className="fleet-ask__what">{t('pair-row-what')}</p>
+        <div className="fleet-ask__actions">
+          <button type="button" className="button" aria-expanded={onReview ? undefined : open} aria-controls={onReview ? `pair-request-${card.id}` : `pair-row-${card.id}`} aria-label={t('pair-review-for', { name: card.name })} onClick={() => reviewPair(it.key, card.id)}>{open && !onReview ? t('pair-hide') : t('fleet-review')}</button>
+        </div>
+        {open && pairing && <div id={`pair-row-${card.id}`} className="col-span-full"><PairRequest inline request={card} offline={pairing.offline} onAnswer={(a, r) => pairing.onAnswer(card, a, r)} /></div>}
+      </li>
+    );
+  };
   const rowOf = (it: AttentionItem, inlineOk: boolean) => {
+    if (it.kind === 'pair') return pairRow(it);
     const agent = it.agent;
     const name = it.kind === 'approval' ? (agent?.name || approvalName(it.approval)) : it.agent.name;
     const machine = agent?.machine || (it.kind === 'approval' ? it.approval.machineName || machineName(it.approval.node) : undefined);
@@ -149,7 +185,7 @@ function Command({ text }: { text: string }) {
 }
 
 // What the page shows when there is no fleet yet: it says where things stand and offers the next step.
-export function FleetEmpty({ kind, machines, onStart, onRetry }: { kind: 'connecting' | 'offline' | 'empty' | 'first-run'; machines: readonly MachineModel[]; onStart?: (machine?: string) => void; onRetry?: () => void }) {
+export function FleetEmpty({ kind, machines, onStart, onRetry, pairing }: { kind: 'connecting' | 'offline' | 'empty' | 'first-run'; machines: readonly MachineModel[]; onStart?: (machine?: string) => void; onRetry?: () => void; pairing?: PairingUi }) {
   const host = typeof window !== 'undefined' && window.location?.host ? window.location.host : 'HUB:7443';
   const online = machines.filter((m) => m.online);
   if (kind === 'connecting') return <div className="fleet-empty" role="status" aria-busy="true"><p className="muted m-0">{t('fleet-loading')}</p></div>;
@@ -182,8 +218,10 @@ export function FleetEmpty({ kind, machines, onStart, onRetry }: { kind: 'connec
       <Icon name="machine" className="size-8 text-accent" />
       <h2 className="fleet-empty__title">{t('fleet-empty-title')}</h2>
       <p className="fleet-empty__text">{t('fleet-empty-text')}</p>
+      {/* ADR-0065: the owner at this window opens the 10-minute window for a new machine; `agora join` on that machine does the rest. */}
       <div className="fleet-empty__step"><span className="muted">1 · {t('fleet-empty-step-code')}</span><Command text="agora hub code" /></div>
       <div className="fleet-empty__step"><span className="muted">2 · {t('fleet-empty-step-join')}</span><Command text={`agora node enroll --hub wss://${host} --ca ca.pem --code XXXX-XXXX --id NAME`} /><span className="muted">{t('fleet-empty-ca')}</span></div>
+      {pairing && <div className="fleet-empty__step"><PairWindowControl ui={pairing} intro /></div>}
       <a className="link" href="#/machines">{t('fleet-empty-machines')}</a>
     </div>
   );
@@ -191,7 +229,7 @@ export function FleetEmpty({ kind, machines, onStart, onRetry }: { kind: 'connec
 
 // Home: the fleet as a console (docs/ux/visual-language.md, "Glance"). Everything is derived from the props (render is pure): the counts,
 // the queue of what needs you and the tiles are one memoised pass over the list; the clock only moves the times.
-export function FleetConsole({ fleet, machines, approvals, usage, link, now, onOpen, onStart, onResolve, onReview, onRetry }: {
+export function FleetConsole({ fleet, machines, approvals, usage, link, now, onOpen, onStart, onResolve, onReview, onRetry, pairing }: {
   fleet: readonly AgentTileModel[];
   machines: readonly MachineModel[];
   approvals: readonly ApprovalModel[];
@@ -203,8 +241,10 @@ export function FleetConsole({ fleet, machines, approvals, usage, link, now, onO
   onResolve?: (a: ApprovalModel, approved: boolean, choice?: StartChoice) => void;
   onReview?: () => void;
   onRetry?: () => void;
+  // ADR-0065: machines asking to join (only for an owner's session), and the switch that lets them.
+  pairing?: PairingUi;
 }) {
-  const view = useMemo(() => fleetView(fleet, approvals, machines), [fleet, approvals, machines]);
+  const view = useMemo(() => fleetView(fleet, approvals, machines, pairing?.cards), [fleet, approvals, machines, pairing?.cards]);
   const [filter, setFilter] = useState<FleetFilter | undefined>();
   const [by, setBy] = useState<GroupBy>(() => loadGroupBy());
   const chooseBy = (next: GroupBy) => { setBy(next); saveGroupBy(next); };
@@ -217,9 +257,17 @@ export function FleetConsole({ fleet, machines, approvals, usage, link, now, onO
   }, [approvals]);
   const cost = (a: AgentTileModel) => (usage?.perAgent.has(a.id) ? money(usage.perAgent.get(a.id) ?? 0) : undefined);
 
-  const body = empty ? <FleetEmpty kind={empty} machines={machines} onStart={onStart} onRetry={onRetry} /> : (
+  const body = empty ? (
     <>
-      <AttentionQueue items={view.attention} machines={machines} now={now} onOpen={onOpen} onResolve={onResolve} onReview={onReview} stale={link !== 'live'} />
+      {view.attention.length > 0 && <AttentionQueue items={view.attention} machines={machines} now={now} onOpen={onOpen} onResolve={onResolve} onReview={onReview} stale={link !== 'live'} pairing={pairing} />}
+      {pairing && <PairRecentList recent={pairing.recent} />}
+      <FleetEmpty kind={empty} machines={machines} onStart={onStart} onRetry={onRetry} pairing={pairing && empty === 'empty' && link === 'live' ? pairing : undefined} />
+    </>
+  ) : (
+    <>
+      <AttentionQueue items={view.attention} machines={machines} now={now} onOpen={onOpen} onResolve={onResolve} onReview={onReview} stale={link !== 'live'} pairing={pairing} />
+      {pairing && <PairRecentList recent={pairing.recent} />}
+      {pairing?.window?.open && <PairWindowControl ui={pairing} />}
       <section className="fleet-groups" aria-label={t('fleet-panel')}>
         <div className="fleet-tools">
           <div className="fleet-tools__by" role="group" aria-label={t('fleet-group-by')}>

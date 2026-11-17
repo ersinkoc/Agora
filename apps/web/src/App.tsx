@@ -6,6 +6,8 @@ import { demoDiff, demoFiles } from './demoWorkspace';
 import { chooseLanguage, getLanguage, subscribeLanguage, t } from './i18n';
 import { nextNeedingMe, type AgentTileModel, type ResumeAction } from './model';
 import type { DiffSource } from './net/diff';
+import { usePairing } from './net/usePairing';
+import { PairRequest } from './components/PairRequest';
 import { connectLive, type CommandBody, type Live, type LinkState } from './net/live';
 import { GrantDialog } from './components/GrantDialog';
 import { grantFor, signGrant, type GrantAsk } from './net/grant';
@@ -94,6 +96,8 @@ export function App() {
   const [live, setLive] = useState<View | undefined>();
   const [link, setLink] = useState<LinkState>('connecting');
   const [api, setApi] = useState<Live | undefined>();
+  // ADR-0065: machines asking to join (owner only, memory only).
+  const pairing = usePairing(api, link);
   // This browser's own key: what the node checks an approval against (ADR-0028).
   const [device, setDevice] = useState<Device | undefined>();
   const [usage, setUsage] = useState<UsageSummary | undefined>();
@@ -310,7 +314,7 @@ export function App() {
   }, [api, live !== undefined]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (!hub) return;
-    const c = connectLive({ url: hub.url, token: hub.token, onView: (v) => setLive(shown(v)), onState: setLink,
+    const c = connectLive({ url: hub.url, token: hub.token, onView: (v) => setLive(shown(v)), onState: setLink, onPair: pairing.dispatch,
       onRejected: () => { forgetToken(); setLive(undefined); setHub(undefined); },
       onGrantRequired: (node, body) => {
         const ask = grantFor(body as Record<string, unknown>);
@@ -318,7 +322,7 @@ export function App() {
       } });
     setApi(c);
     return () => { c.close(); setApi(undefined); };
-  }, [hub]);
+  }, [hub, pairing.dispatch]);
   // "Lock" in the title bar: this window's session ends at the hub and the sign-in screen comes back. Agents keep running.
   const lockNow = useCallback(() => {
     if (!hub) return;
@@ -438,6 +442,8 @@ export function App() {
   // The theme editor is a panel of the window: from any other page, back to the window first.
   // A phone has no panels: there the editor is a screen of its own (ADR-0067 rung 2).
   const editTheme = useCallback(() => { if (phone) { go('#/theme'); return; } if (!['', '#/', '#/demo'].includes(hash)) go('#/'); requestPanel('theme'); }, [go, hash, phone]);
+  // Home is what Console / PhoneHome draw (the chain below); any other page gets the first request as a floating card.
+  const showsHome = current === undefined && !['#/gallery', '#/machines', '#/device'].includes(hash) && !(hash === '#/audit' && hub) && !(hash === '#/theme' && phone);
   const items: PaletteItem[] = useMemo(() => [
     { id: 'next', label: t('palette-next-attention'), run: next },
     { id: 'home', label: t('palette-go-home'), run: () => { go('#/'); if (!phone) requestPanel('fleet'); } },
@@ -488,14 +494,16 @@ export function App() {
         ? <Focus agent={selectedAgent} approvals={live ? approvalList(live) : hub ? [] : demoApprovals} onResolve={resolve} chatSource={selectedAgent?.terminal === false ? chatOf(selectedAgent) : undefined} sendPrompt={hub && api ? sendPrompt : undefined} chooseOption={hub && api ? chooseOption : undefined} costMicroUsd={current ? usage?.perAgent.get(current) : undefined} source={terminal} onBack={() => go('#/')} />
         : phone
         ? <PhoneHome agents={agents} machines={live ? machines(live) : hub ? [] : demoMachines} approvals={approvalsNow} onResolve={resolve} untrusted={untrustedOn} notice={notice ? t(notice) : undefined}
-          link={hub ? link : 'live'} onRetry={api ? api.retry : undefined} onOpen={open} onCommand={() => setPalette(true)} onLock={hub ? lockNow : undefined} start={startWindow}
+          link={hub ? link : 'live'} onRetry={api ? api.retry : undefined} onOpen={open} onCommand={() => setPalette(true)} onLock={hub ? lockNow : undefined} start={startWindow} pairing={pairing.ui}
           onStart={hub && api && live ? () => setStarting({}) : (!hub && import.meta.env.DEV ? () => setStarting({}) : undefined)} />
         : <Console agents={agents} machines={live ? machines(live) : []} usage={usage} projects={live && usage ? costByProject(live, usage.perAgent) : []}
           approvals={live ? approvalList(live) : hub ? [] : demoApprovals} messages={live ? recentMessages(live) : []} boards={live ? boards(live) : []} terminalFor={terminalFor} chatOf={hub && api ? chatOf : undefined} sendPrompt={hub && api ? sendPrompt : undefined} chooseOption={hub && api ? chooseOption : undefined} loadDiff={hub && api ? loadDiff : !hub ? demoLoadDiff : undefined} loadHistory={hub && api ? loadHistory : undefined} filesOf={hub && api ? filesOf : !hub ? demoFilesOf : undefined} onOpen={open}
           onResolve={resolve} helperGrants={hub && api ? helperGrants : undefined} revokeGrant={hub && api ? revokeGrant : undefined} notice={notice ? t(notice) : undefined} link={hub ? link : 'live'} onRetry={api ? api.retry : undefined}
           onStart={hub && api && live ? (node) => setStarting({ node }) : (!hub && import.meta.env.DEV ? (node) => setStarting({ node }) : undefined)} onCommand={() => setPalette(true)} onForget={hub && api ? forgetAgent : undefined} onResume={hub && api ? resumeAgent : (!hub && import.meta.env.DEV ? async () => undefined : undefined)} onLock={hub ? lockNow : undefined}
-          start={startWindow} />}
+          start={startWindow} pairing={pairing.ui} />}
       {grantAsk && <GrantDialog machine={live?.nodes.get(grantAsk.node)?.hostname || grantAsk.node} kind={grantAsk.ask.kind} busy={grantAsk.busy} failed={grantAsk.failed} onAllow={() => void allowGrant()} onClose={() => setGrantAsk(undefined)} />}
+      {/* Away from Home (an agent, a page) a request to join still reaches the owner: the first card floats over the window. */}
+      {pairing.ui && pairing.ui.cards[0] && !showsHome && <PairRequest key={pairing.ui.cards[0].id} request={pairing.ui.cards[0]} offline={pairing.ui.offline} onAnswer={(a, r) => pairing.ui!.onAnswer(pairing.ui!.cards[0]!, a, r)} />}
       {palette && <CommandPalette items={items} onClose={() => setPalette(false)} />}
       {hub && live && waiting[0] && <DeviceRequest key={waiting[0].deviceId ?? ''}
         request={{ id: waiting[0].deviceId ?? '', name: deviceLabel(waiting[0].name, waiting[0].deviceId ?? ''), fingerprint: prints.get(waiting[0].deviceId ?? '') ?? '' }}

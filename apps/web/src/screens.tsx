@@ -1,7 +1,7 @@
 import { StartApproval, type StartChoice } from './components/StartApproval';
 import { HelperGrants } from './components/HelperGrants';
 import { DeviceRequest } from './components/DeviceRequest';
-import { PairRequest } from './components/PairRequest';
+import { PairCardView, PairRequest } from './components/PairRequest';
 import { SignInWaiting } from './components/SignInWaiting';
 import type { SignInApprovalModel } from './components/pairChoice';
 import { ApprovalBanner } from './components/ApprovalBanner';
@@ -120,9 +120,18 @@ function Themed({ theme, onStart }: { theme: 'dark' | 'light'; onStart?: () => v
       <HelperGrants list={async () => [{ id: 'ap-1', kind: 'codex', folder: '/home/dev/code/login-fix', remaining: 2 }]} revoke={async () => {}} refresh={0} />
       <DeviceRequest inline request={{ id: 'web-3fa9c1d24e5b6a70', name: 'Firefox · Linux', fingerprint: 'f947-3cb5-e304-81be-ecf2-64cd' }}
         machines={[{ id: 'laptop', name: 'laptop' }, { id: 'vps-1', name: 'vps-1' }]} onApprove={async () => true} onLater={() => {}} />
-      {/* ADR-0065: a fake pairing request until the hub sends real ones. */}
-      <PairRequest inline request={{ id: 'pair-machine', kind: 'machine', name: 'laptop', os: 'windows', address: '192.168.1.50', number: '482193' }} onAnswer={async () => true} />
-      <PairRequest inline request={{ id: 'pair-browser', kind: 'browser', name: 'Chrome · macOS', address: '192.168.1.57', number: '731004' }} onAnswer={async () => true} />
+      {/* ADR-0065: a machine's request to join as the owner sees it, in each state. The clock is fixed so the gallery does not change by itself. */}
+      <div className="gallery__row items-start">
+        <PairRequest inline now={0} request={{ id: 'pair-machine', kind: 'machine', name: 'laptop', os: 'windows', address: '192.168.1.50', number: '482193', expiresMs: 272_000 }} onAnswer={async () => 'ok'} />
+        <PairCardView inline now={0} state={{ step: 'confirm', failed: false, replace: false }} request={{ id: 'pair-confirm', kind: 'machine', name: 'laptop', os: 'windows', address: '192.168.1.50', number: '482193', expiresMs: 272_000 }}
+          onApprove={() => {}} onBack={() => {}} onSend={() => {}} onReplace={() => {}} />
+        <PairRequest inline now={0} request={{ id: 'pair-taken', kind: 'machine', name: 'laptop', os: 'macos', address: '192.168.1.51', number: '117305', expiresMs: 94_000, nameTaken: true }} onAnswer={async () => 'ok'} />
+      </div>
+      <div className="gallery__row items-start">
+        <PairRequest inline now={0} offline request={{ id: 'pair-offline', kind: 'machine', name: 'desk', os: 'linux', address: '192.168.1.52', number: '640218', expiresMs: 200_000 }} onAnswer={async () => 'ok'} />
+        <PairRequest inline now={300_000} request={{ id: 'pair-expired', kind: 'machine', name: 'desk', os: 'linux', address: '192.168.1.52', number: '640218', expiresMs: 272_000 }} onAnswer={async () => 'ok'} />
+        <PairRequest inline request={{ id: 'pair-browser', kind: 'browser', name: 'Chrome · macOS', address: '192.168.1.57', number: '731004' }} onAnswer={async () => 'ok'} />
+      </div>
       <div className="gallery__row">
         <SignInWaiting approval={{ number: '731004', state: 'waiting' }} onAskAgain={() => {}} onUseCode={() => {}} />
         <SignInWaiting approval={{ number: '731004', state: 'denied' }} onAskAgain={() => {}} onUseCode={() => {}} />

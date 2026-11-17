@@ -22,6 +22,7 @@ import { ThemeEditor } from '../themes/ThemeEditor';
 import { PHONE_QUERY, byMachine, needsYou } from './nav';
 import { type FleetFilter, emptyKind, fleetCounts, matchesFilter } from '../net/fleet';
 import { FleetEmpty, FleetSummary } from '../components/FleetConsole';
+import { PairCards, PairRecentList, PairWindowControl, type PairingUi } from '../components/Pairing';
 import './phone.css';
 
 const TerminalView = lazy(() => import('../terminal/TerminalView').then((m) => ({ default: m.TerminalView })));
@@ -126,7 +127,7 @@ export interface PhoneCommon {
 const machineName = (machines: readonly MachineModel[], id: string) => machines.find((m) => m.id === id)?.name || id;
 
 // The list: what needs you first, then every machine with its agents. Tapping an agent opens it.
-export function PhoneHome({ agents, machines, approvals, onResolve, untrusted, notice, link, onRetry, onOpen, onStart, onCommand, onLock, start }: PhoneCommon & {
+export function PhoneHome({ agents, machines, approvals, onResolve, untrusted, notice, link, onRetry, onOpen, onStart, onCommand, onLock, start, pairing }: PhoneCommon & {
   agents: readonly AgentTileModel[];
   link: 'connecting' | 'live' | 'offline';
   onRetry?: () => void;
@@ -135,12 +136,14 @@ export function PhoneHome({ agents, machines, approvals, onResolve, untrusted, n
   onCommand?: () => void;
   onLock?: () => void;
   start?: ReactNode;
+  // ADR-0065: machines asking to join, for an owner's session.
+  pairing?: PairingUi;
 }) {
   const cleared = useSyncExternalStore(subscribeDismissed, dismissedIds, dismissedIds);
   const fleet = useMemo(() => agents.filter((a) => !(a.closed && cleared.has(a.id))), [agents, cleared]);
   const needs = needsYou(approvals, fleet);
   // The same five answers as the desktop's Home, as chips above the list; a press shows only those agents below.
-  const counts = useMemo(() => fleetCounts(fleet, approvals, machines), [fleet, approvals, machines]);
+  const counts = useMemo(() => fleetCounts(fleet, approvals, machines, pairing?.cards.length ?? 0), [fleet, approvals, machines, pairing?.cards.length]);
   const [filter, setFilter] = useState<FleetFilter | undefined>();
   const groups = useMemo(() => byMachine(fleet.filter((a) => matchesFilter(a, filter)), machines).filter((g) => !filter || g.agents.length > 0), [fleet, machines, filter]);
   const empty = emptyKind(link, fleet.length + approvals.length, machines.length);
@@ -163,7 +166,13 @@ export function PhoneHome({ agents, machines, approvals, onResolve, untrusted, n
       {notice && <p role="alert" className="phone-notice">{notice}</p>}
       {!empty && <div className="phone-fleet"><FleetSummary counts={counts} filter={filter} onFilter={setFilter} /></div>}
       {link === 'offline' && !empty && <p role="status" className="fleet-stale mx-3">{t('fleet-offline-stale')}</p>}
-      {empty && <FleetEmpty kind={empty} machines={machines} onStart={onStart ? () => onStart() : undefined} onRetry={onRetry} />}
+      {pairing && pairing.cards.length > 0 && <section className="phone-section" aria-label={t('attention-title')}>
+        <h2 className="phone-section__title text-needs-you">{t('pair-section', { count: pairing.cards.length })}</h2>
+        <div className="grid gap-2"><PairCards ui={pairing} /></div>
+      </section>}
+      {empty && <FleetEmpty kind={empty} machines={machines} onStart={onStart ? () => onStart() : undefined} onRetry={onRetry} pairing={pairing && empty === 'empty' && link === 'live' ? pairing : undefined} />}
+      {pairing && <div className="px-3"><PairRecentList recent={pairing.recent} /></div>}
+      {pairing?.window?.open && !empty && <div className="px-3"><PairWindowControl ui={pairing} /></div>}
       {needs.length > 0 && <section className="phone-section" aria-label={t('attention-title')}>
         <h2 className="phone-section__title text-needs-you">{t('phone-needs', { count: needs.length })}</h2>
         <div className="grid gap-2">

@@ -41,3 +41,28 @@ export function systemName(os: string | undefined): string {
 export function pairTitle(r: PairRequestModel): string {
   return t(r.kind === 'browser' ? 'pair-browser-title' : 'pair-machine-title');
 }
+
+/** What the owner has done on one request's card. Approving takes two presses (`approve`, then `send`), so a reflex click lets nobody in. */
+export interface PairCardState { step: 'idle' | 'confirm' | 'busy' | 'sent'; failed: boolean; replace: boolean }
+export type PairCardAction =
+  | { type: 'approve' } // the first press of Approve: asks "do the numbers match?"
+  | { type: 'back' }
+  | { type: 'send' } // an answer goes out
+  | { type: 'answered'; answer: 'ok' | 'taken' | 'failed' }
+  | { type: 'replace'; on: boolean };
+export const initialPairCard: PairCardState = { step: 'idle', failed: false, replace: false };
+
+/**
+ * The card's steps. `taken` (the hub kept the request open and said the name belongs to an enrolled machine) brings the card back to its
+ * start: the owner chooses about Replace, then goes through the two presses again. Choosing Replace also starts the two presses over, so
+ * the confirmation always follows the last choice.
+ */
+export function pairCardReducer(s: PairCardState, a: PairCardAction): PairCardState {
+  switch (a.type) {
+    case 'approve': return s.step === 'idle' ? { ...s, step: 'confirm', failed: false } : s;
+    case 'back': return s.step === 'confirm' ? { ...s, step: 'idle' } : s;
+    case 'send': return s.step === 'idle' || s.step === 'confirm' ? { ...s, step: 'busy', failed: false } : s;
+    case 'answered': return s.step !== 'busy' ? s : { ...s, step: a.answer === 'ok' ? 'sent' : 'idle', failed: a.answer === 'failed' };
+    case 'replace': return s.step === 'busy' || s.step === 'sent' ? s : { ...s, replace: a.on, step: 'idle' };
+  }
+}
