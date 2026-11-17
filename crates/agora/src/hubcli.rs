@@ -1626,6 +1626,8 @@ fn store_into(
     write: &dyn Fn(&Path, &[u8]) -> std::io::Result<()>,
 ) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
+    // Resolved once: the guard and every write name the same folder, also when `link` is a link that is pointed elsewhere meanwhile.
+    let dir = &std::fs::canonicalize(dir)?;
     let _guard = link_guard(dir, LINK_GUARD_WAIT)?;
     match std::fs::remove_file(dir.join("node-id")) {
         Ok(()) => {}
