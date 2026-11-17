@@ -832,10 +832,14 @@ fn a_folder_swapped_for_a_link_after_the_start_is_not_read_through() {
         .map_err(|e| e.code)
     };
     assert_eq!(read(&mut c, "notes.md").unwrap(), b"project notes");
-    std::fs::rename(&sub, project.join("sub.old")).unwrap();
-    if agora_platform::symlink(&aws, &sub).is_err() {
+    // Only where links can be made, and where a folder a running program works in can be renamed (not Windows).
+    if agora_platform::symlink(&aws, &e.root.join("probe-link")).is_err() {
         return;
     }
+    if std::fs::rename(&sub, project.join("sub.old")).is_err() {
+        return;
+    }
+    agora_platform::symlink(&aws, &sub).unwrap();
     assert_eq!(
         read(&mut c, "credentials").unwrap_err(),
         "protocol.invalid_message"
