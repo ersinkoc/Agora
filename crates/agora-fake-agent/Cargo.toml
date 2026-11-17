@@ -10,7 +10,7 @@ workspace = true
 
 [dependencies]
 # Script parsing (TOML). Justification: the script format is TOML (like manifests); hand-rolling a parser is worse.
-toml = "0.8"
+toml = "1.2"
 serde = { version = "1", features = ["derive"] }
 # The fake adapter speaks JSON-RPC over stdio (docs/specs/adapter-protocol.md).
 serde_json = "1"
