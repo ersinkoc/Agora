@@ -6,7 +6,7 @@ use std::fmt;
 
 use rcgen::{
     BasicConstraints, CertificateParams, CertificateSigningRequestParams, DistinguishedName,
-    DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair, KeyUsagePurpose,
+    DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair, KeyUsagePurpose, SerialNumber,
 };
 use time::{Duration, OffsetDateTime};
 
@@ -128,6 +128,9 @@ impl Ca {
         p.key_usages = vec![KeyUsagePurpose::DigitalSignature];
         p.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
         p.use_authority_key_identifier_extension = true;
+        // A fresh random serial for every certificate (RFC 5280 4.1.2.2): left unset, rcgen derives it from the public key, so two
+        // certificates for one key would share a serial and the second could not be recorded (`devices.serial` is the key).
+        p.serial_number = Some(random_serial()?);
         p.not_before = OffsetDateTime::now_utc() - Duration::minutes(5);
         p.not_after = OffsetDateTime::now_utc() + self.lifetime;
         let issuer = Issuer::from_ca_cert_pem(&self.cert_pem, &self.key)?;
@@ -164,6 +167,14 @@ impl Ca {
         let cert = p.signed_by(&key, &issuer)?;
         Ok((cert.pem(), key.serialize_pem()))
     }
+}
+
+/// 126 random bits as a positive 16-byte serial: the top bit clear (positive), the next one set (no leading zero byte to drop).
+fn random_serial() -> Result<SerialNumber, CaError> {
+    let mut b = [0u8; 16];
+    getrandom::getrandom(&mut b).map_err(|e| CaError(e.to_string()))?;
+    b[0] = (b[0] & 0x7f) | 0x40;
+    Ok(SerialNumber::from_slice(&b))
 }
 
 /// When a PEM certificate stops being valid, in seconds since 1970 (the first certificate in the text).
@@ -284,6 +295,24 @@ mod tests {
         let eku = cert.extended_key_usage().unwrap().unwrap().value;
         assert!(eku.client_auth && !eku.server_auth && !eku.any && !eku.code_signing);
         assert!(!cert.is_ca());
+    }
+
+    /// F850: a serial is unique per certificate, not derived from the key: one request signed twice gets two serials, and the
+    /// hub can record a re-pairing with the same key (`devices.serial` is the table's key).
+    #[test]
+    fn every_certificate_gets_its_own_serial_even_for_one_key() {
+        let ca = Ca::generate("ca").unwrap();
+        let (_, csr) = new_device_request().unwrap();
+        let a = ca.issue_node("vps", &csr).unwrap().serial_hex;
+        let b = ca.issue_node("vps", &csr).unwrap().serial_hex;
+        assert_ne!(a, b);
+        let store = crate::store::SqliteStore::open_in_memory().unwrap();
+        let mut e = crate::enroll::Enrollment::new(&store);
+        let code = e.create_code(0).unwrap();
+        let old = e.redeem(&ca, &code, "vps", &csr, 1).unwrap();
+        let new = e.issue_paired(&ca, "vps", &csr, true, 2).unwrap();
+        assert!(!e.is_active(&old.serial_hex).unwrap());
+        assert!(e.is_active(&new.serial_hex).unwrap());
     }
 
     #[test]
