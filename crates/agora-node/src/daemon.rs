@@ -1123,6 +1123,11 @@ pub struct Policy {
     /// Whether the file browser and the review screen show secret files (`files.show_secret = true`; ADR-0080). Default: no. Only the
     /// word `true` turns it on.
     pub show_secret: bool,
+    /// ADR-0084: which stored secrets (or environment variables) of the node an agent of a kind receives
+    /// (`credentials.<kind> = NAME, ...`). Only the owner's policy file sets it; a line that is malformed lists nothing.
+    pub credentials: std::collections::BTreeMap<String, Vec<String>>,
+    /// ADR-0084: the kinds whose `credentials.<kind>` line was malformed (and so passes nothing), for `agora doctor`.
+    pub credentials_malformed: Vec<String>,
 }
 
 /// ADR-0060: `resume = ask | auto`. `ask` (the default, and any other value) offers Resume in the window and does nothing by itself;
@@ -1179,6 +1184,8 @@ impl Default for Policy {
             resume: ResumePolicy::default(),
             skip_permissions: crate::launch_options::SkipPermissions::default(),
             show_secret: false,
+            credentials: std::collections::BTreeMap::new(),
+            credentials_malformed: Vec::new(),
             problems: Vec::new(),
         }
     }
@@ -1296,6 +1303,28 @@ pub fn read_policy(path: &std::path::Path) -> Policy {
                 "sandbox.write" => p.sandbox.write = paths(v),
                 "sandbox.sockets" => p.sandbox.sockets = paths(v),
                 "sandbox.pass_env" => p.sandbox.pass_env = crate::sandbox::parse_pass_env(v),
+                key if key.starts_with("credentials.") => {
+                    // ADR-0084: a kind with a malformed line is a kind with nothing listed; a typo never widens.
+                    let kind = &key["credentials.".len()..];
+                    let kind_ok = !kind.is_empty()
+                        && kind
+                            .chars()
+                            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+                    match crate::credentials::parse_listed(v) {
+                        Some(names) if kind_ok => {
+                            p.credentials.insert(kind.to_string(), names);
+                            p.credentials_malformed.retain(|k| k != kind);
+                        }
+                        _ => {
+                            p.credentials.remove(kind);
+                            if kind_ok {
+                                p.credentials_malformed.push(kind.to_string());
+                            } else {
+                                p.problems.push(key.chars().take(80).collect());
+                            }
+                        }
+                    }
+                }
                 "sandbox.trust_manifest" => {
                     p.sandbox.trusted_kinds = v
                         .split(',')
@@ -1434,6 +1463,11 @@ impl Node {
             None
         };
         sup.set_sandbox(sandbox);
+        // ADR-0084: the secrets this node holds, and which kind may receive which (the node's own policy; the hub cannot set it).
+        sup.set_credentials(crate::credentials::Credentials::new(
+            crate::credentials::SecretStore::in_data(&cfg.data_dir),
+            read_policy(&cfg.data_dir.join(POLICY_FILE)).credentials,
+        ));
         sup.reserve_ids(ledger.next_id());
         sup.set_skip_permissions(read_policy(&cfg.data_dir.join(POLICY_FILE)).skip_permissions);
         let (found, manifest_problems) = load_manifests(&cfg.manifests_dir);

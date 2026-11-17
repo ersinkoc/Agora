@@ -145,6 +145,97 @@ pub fn run(inputs: &Inputs) -> Vec<Check> {
 
     out.extend(policy_read_at_start(&policy_file, &inputs.socket, running));
     out.extend(manifests(&inputs.manifests_dir));
+    out.extend(credential_checks(
+        &inputs.manifests_dir,
+        &crate::credentials::SecretStore::in_data(&inputs.data_dir),
+        &policy,
+        level != crate::sandbox::Level::Off,
+        |n| std::env::var(n).ok(),
+    ));
+    out
+}
+
+/// ADR-0084, per kind whose manifest declares `credential_env`. Names only, never values, and no claim about whether the agent is
+/// logged in: the node only knows whether it holds something to give.
+/// - `credential` (detail: the kind; `$names`): the policy lists names for it and a value exists for them (stored, or in this
+///   process's environment).
+/// - `credential-none` (detail: the kind; `$name`: the one to suggest, `$confined`): nothing would be passed. A warning where agents are
+///   confined (an agent may not see its own login there), a note otherwise.
+/// - `credential-unlisted` (detail: the kind; `$names`): a value exists for its declared names but no policy line lets it receive them.
+/// - `credential-refused` (detail: the kind; `$names`): the policy lists names the manifest does not declare; they are not passed.
+/// - `credential-malformed` (detail: the kind): the `credentials.<kind>` line is malformed and passes nothing.
+fn credential_checks(
+    manifests_dir: &Path,
+    store: &crate::credentials::SecretStore,
+    policy: &crate::daemon::Policy,
+    confined: bool,
+    env: impl Fn(&str) -> Option<String>,
+) -> Vec<Check> {
+    let creds = crate::credentials::Credentials::new(store.clone(), policy.credentials.clone());
+    let (loaded, _) = crate::manifests::load(manifests_dir);
+    let mut out = Vec::new();
+    let has = |n: &str| {
+        store.has(n) || env(n).is_some_and(|v| crate::credentials::Secret::new(&v).is_ok())
+    };
+    for l in loaded {
+        let Some(own) = l
+            .manifest
+            .accounts
+            .as_ref()
+            .map(|a| a.credential_env.clone())
+            .filter(|n| !n.is_empty())
+        else {
+            continue;
+        };
+        let kind = l.manifest.kind.clone();
+        let mut push = |id: &'static str, status: Status, names: String, name: &str| {
+            let mut c = check(id, status, kind.clone());
+            c.args = vec![
+                ("names", names),
+                ("name", name.to_string()),
+                ("confined", confined.to_string()),
+            ];
+            out.push(c);
+        };
+        if policy.credentials_malformed.contains(&kind) {
+            push("credential-malformed", Status::Warn, String::new(), &own[0]);
+        }
+        let refused = creds.undeclared(&kind, &own);
+        if !refused.is_empty() {
+            push(
+                "credential-refused",
+                Status::Warn,
+                refused.join(", "),
+                &own[0],
+            );
+        }
+        let given: Vec<String> = creds
+            .listed(&kind)
+            .iter()
+            .filter(|n| own.contains(n) && has(n))
+            .cloned()
+            .collect();
+        if !given.is_empty() {
+            push("credential", Status::Ok, given.join(", "), &own[0]);
+            continue;
+        }
+        let unlisted: Vec<String> = own.iter().filter(|n| has(n)).cloned().collect();
+        if !unlisted.is_empty() && creds.listed(&kind).is_empty() {
+            push(
+                "credential-unlisted",
+                Status::Warn,
+                unlisted.join(", "),
+                &own[0],
+            );
+        } else {
+            push(
+                "credential-none",
+                if confined { Status::Warn } else { Status::Ok },
+                String::new(),
+                &own[0],
+            );
+        }
+    }
     out
 }
 
@@ -782,5 +873,69 @@ mod tests {
         assert_eq!((p[0].status, p[0].detail.as_str()), (Status::Warn, "1"));
         // An unreadable line forbids skipping permissions; the doctor says what the node does.
         assert_eq!(find(&c, "skip-permissions")[0].detail, "forbid");
+    }
+    #[test]
+    fn credentials_are_reported_by_name_for_the_kinds_that_declare_them() {
+        let d = tmp("credentials");
+        let store = crate::credentials::SecretStore::in_data(&d);
+        let no_env = |_: &str| None;
+        let policy = |text: &str| {
+            std::fs::write(d.join("policy"), text).unwrap();
+            crate::daemon::read_policy(&d.join("policy"))
+        };
+        let kind =
+            |c: &[Check], id: &str, kind: &str| c.iter().any(|c| c.id == id && c.detail == kind);
+        // Nothing stored, nothing in the environment: a warning where confined, a note otherwise; only declared kinds appear.
+        let c = credential_checks(&d.join("m"), &store, &policy(""), true, no_env);
+        assert!(kind(&c, "credential-none", "claude-code") && kind(&c, "credential-none", "codex"));
+        assert!(!c.iter().any(|c| c.detail == "wrongstack"));
+        assert!(c.iter().all(|c| c.status == Status::Warn));
+        let c = credential_checks(&d.join("m"), &store, &policy(""), false, no_env);
+        assert!(c.iter().all(|c| c.status == Status::Ok));
+        // The suggestion is the first declared name.
+        let first = find(&c, "credential-none");
+        let cc = first.iter().find(|c| c.detail == "claude-code").unwrap();
+        assert!(cc
+            .args
+            .contains(&("name", "CLAUDE_CODE_OAUTH_TOKEN".to_string())));
+        // A stored value with no policy line is named, not passed; with the line it is given. Names only, in every field.
+        store
+            .set(
+                "CLAUDE_CODE_OAUTH_TOKEN",
+                &crate::credentials::Secret::new("sk-hidden-123").unwrap(),
+            )
+            .unwrap();
+        let c = credential_checks(&d.join("m"), &store, &policy(""), true, no_env);
+        assert!(kind(&c, "credential-unlisted", "claude-code"));
+        let c = credential_checks(
+            &d.join("m"),
+            &store,
+            &policy("credentials.claude-code = CLAUDE_CODE_OAUTH_TOKEN\ncredentials.codex = NOT_DECLARED\n"),
+            true,
+            no_env,
+        );
+        assert!(kind(&c, "credential", "claude-code"));
+        assert!(kind(&c, "credential-refused", "codex"));
+        let shown = format!("{c:?}");
+        assert!(!shown.contains("sk-hidden-123"), "{shown}");
+        // The node's own environment counts as a source.
+        let c = credential_checks(
+            &d.join("m"),
+            &store,
+            &policy("credentials.codex = OPENAI_API_KEY\n"),
+            true,
+            |n| (n == "OPENAI_API_KEY").then(|| "x".to_string()),
+        );
+        assert!(kind(&c, "credential", "codex"));
+        // A malformed line is named and passes nothing.
+        let c = credential_checks(
+            &d.join("m"),
+            &store,
+            &policy("credentials.codex = A=1\n"),
+            true,
+            no_env,
+        );
+        assert!(kind(&c, "credential-malformed", "codex"));
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

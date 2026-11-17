@@ -47,6 +47,28 @@ bridge (`agora mesh stdio`) reaches the agent's own mesh socket, which is always
 adapter (the ACP kinds) never inherits these variables and `sandbox.pass_env` does not change that. A dev server or a tool of
 yours that talks to a unix socket outside its worktree or temp folder will need that socket listed in `sandbox.sockets` once the macOS rule is switched on.
 
+## A confined agent's login (ADR-0084)
+
+On macOS a confined Claude Code says "Not logged in": its subscription login is in the login Keychain (`~/Library/Keychains`), and the sandbox
+rightly does not open that folder, which holds every password you have. The Keychain is not used here at all. Give the agent a token made for
+it instead, kept by the node (a file in the node's private data folder, never sent to the hub), on any system:
+
+1. Make a token for the agent. For Claude Code: run `claude setup-token` (needs a subscription; long-lived), or use an API key
+   (billed per use, not against a subscription). For Codex: an API key. Make it for this purpose, so you can revoke it on its own.
+2. On that machine: `agora node secret set CLAUDE_CODE_OAUTH_TOKEN` (or `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`). Paste the value at the
+   prompt (nothing is shown) or pipe it in; never put it in the command line. `agora node secret list` shows names only.
+3. In the node's policy file add one line per kind: `credentials.claude-code = CLAUDE_CODE_OAUTH_TOKEN` (or `credentials.codex = OPENAI_API_KEY`),
+   then restart the node (the policy is read when the node starts). `agora doctor` says what the node would give each kind, by name.
+
+A token already in the node's own environment (a service environment) is used when no stored secret has that name, but only for a kind whose
+policy line lists it. **This changed with ADR-0084:** a credential variable in the node's environment no longer reaches every agent: the
+names Claude Code and Codex read are removed from every agent that is not listed for them. If you relied on that, add the policy line.
+
+What this cannot do: it gives the agent a token, not your login. A confined agent can send the token anywhere (the `worktree` level has no
+network rules), can print it into its terminal, and a process of the same user may read another process's environment (`/proc/<pid>/environ`
+on Linux, `ps eww` on macOS: not measured). Interactive login inside a confined agent does not persist (the Keychain write is denied, which
+is the point). Two logins of one kind on one machine are not solved by this.
+
 ## macOS (Seatbelt)
 
 Checked on macOS 27.2 with a real node and a probe agent: `git status`/`commit`/`branch`, `cargo new` + `cargo build` + run, `npm init`,

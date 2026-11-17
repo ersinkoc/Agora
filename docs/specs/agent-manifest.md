@@ -25,7 +25,7 @@ it is.
 kind = "example-agent"          # stable id, lowercase, used in protocol and UI
 display_name = "Example Agent"  # brand name, not translated
 version = "2026.11.06.1"        # manifest version
-min_engine = 2                  # 3 with [[launch.setting]] (ADR-0066), 2 with [[launch.option]] (ADR-0059); 1 otherwise
+min_engine = 2                  # 4 with `[accounts] credential_env` (ADR-0084), 3 with [[launch.setting]] (ADR-0066), 2 with [[launch.option]] (ADR-0059); 1 otherwise
 
 [process]
 names = ["example-agent", "exa"]        # foreground process names
@@ -51,6 +51,10 @@ default = "medium"                      # optional: what the tool uses when noth
 config_dir_env = "EXAMPLE_HOME"         # lets the node isolate multiple accounts
 login = ["example-agent", "login"]      # run in a terminal streamed to the user
 status = ["example-agent", "whoami"]    # exit 0 = authenticated
+# ADR-0084 (min_engine 4): the environment variables the agent reads for its login, the one `agora doctor` suggests first. Only
+# names checked on a real version of the agent. Up to 8 names of at most 64 characters: a letter or `_`, then letters, digits or `_`;
+# not a name the system needs (`PATH`, `HOME`, ...) and not `AGORA_*`; no duplicates. A manifest that breaks this is refused.
+credential_env = ["EXAMPLE_API_TOKEN"]
 
 [structured]
 acp = { argv = ["example-agent", "--acp"] }   # present = L2 available (run through `agora acp-bridge`, see adapter-protocol.md)
@@ -275,3 +279,14 @@ process in the agent's own worktree, runs `initialize` and `session/start`, and 
 anything else); chat items, usage, approval requests and the native session id are passed on as supervisor events; a crash ends the
 agent as `unknown` without touching others. Prompts and verified approval decisions are relayed by the node. Adapter agents have
 no terminal, so terminal commands do not apply to them; restart with backoff is not done yet.
+
+## Login credentials (`[accounts] credential_env`, ADR-0084)
+
+`credential_env` lists the environment variables the agent reads for its login. It does nothing by itself: the owner stores a value on the
+node (`agora node secret set NAME`, value from standard input or a no-echo prompt, never an argument; `list` shows names only; `remove NAME`)
+and names it for the kind in the node's policy file, `credentials.<kind> = NAME, NAME`. When an agent of that kind starts, the node puts
+those names, valued from the store (else from the node's own environment of that name), into the agent's environment. Only names the
+manifest declares are passed, only to that kind, and never to helpers of other kinds. Every name any loaded manifest declares is removed
+from the environment the node inherited, for every agent whose kind is not listed for it. Shipped for Claude Code
+(`CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`) and Codex (`OPENAI_API_KEY`) only: names not checked on a real version are not declared.
+A fault in the field (too many or malformed names, a reserved name) refuses the manifest (`accounts.credential_env`).

@@ -30,6 +30,7 @@ mod frontdoor;
 mod hubcli;
 mod meshbridge;
 mod panelcmd;
+mod secretcmd;
 mod servicecmd;
 mod supervise;
 mod trustcli;
@@ -351,6 +352,7 @@ fn main() -> ExitCode {
         ["node", "enroll"] => hubcli::node_enroll(&say, &opts),
         ["node", "trust"] => trustcli::node_trust(&say, &opts),
         ["node", "untrust"] => trustcli::node_untrust(&say, &opts),
+        ["node", "secret"] => secretcmd::secret(&say, &opts),
         ["node", "stdio"] => bridge_stdio(&say, &socket_path(&opts)),
         ["mesh", "stdio"] => match &opts.socket {
             // An agent's MCP client starts this as its mesh server; the node told it which socket is its own.
@@ -474,6 +476,11 @@ fn doctor(say: &Say, o: &Opts) -> ExitCode {
             ("devices-none", _) => key!("doctor-devices-none"),
             ("skip-permissions", _) => key!("doctor-skip-permissions"),
             ("policy-problems", _) => key!("doctor-policy-problems"),
+            ("credential", _) => key!("doctor-credential"),
+            ("credential-none", _) => key!("doctor-credential-none"),
+            ("credential-unlisted", _) => key!("doctor-credential-unlisted"),
+            ("credential-refused", _) => key!("doctor-credential-refused"),
+            ("credential-malformed", _) => key!("doctor-credential-malformed"),
             _ => key!("doctor-manifest-invalid"),
         };
         let detail: Arg = match (c.id, c.detail.parse::<i64>()) {
