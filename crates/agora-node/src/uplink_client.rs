@@ -322,7 +322,8 @@ fn split_url(url: &str) -> Result<(bool, String, String), LinkError> {
     } else {
         return Err(LinkError::Bad("url must start with wss:// or ws://".into()));
     };
-    let host_port = rest.split('/').next().unwrap_or("");
+    // The authority ends at the path, the query or the fragment.
+    let host_port = rest.split(['/', '?', '#']).next().unwrap_or("");
     // An IPv6 address is written `[v6]` or `[v6]:port` (what `agora join` stores): the host is the address without the brackets,
     // which is how the hub's certificate names it; the address to dial keeps them.
     let (host, has_port) = match host_port.strip_prefix('[') {
@@ -1215,7 +1216,7 @@ pub fn list_devices(link: &HubLink) -> Result<Vec<agora_protocol::v1::DeviceInfo
         .enable_all()
         .build()
         .map_err(|e| LinkError::Transport(e.to_string()))?;
-    rt.block_on(async {
+    let out = rt.block_on(async {
         let (tls, host, addr) = split_url(&link.url)?;
         if !tls {
             // Without TLS the hub cannot tell who is asking, so it would not answer.
@@ -1262,7 +1263,10 @@ pub fn list_devices(link: &HubLink) -> Result<Vec<agora_protocol::v1::DeviceInfo
             Some(command_response::Result::Err(e)) => Err(LinkError::Refused(e.code)),
             None => Err(LinkError::Transport("empty answer".into())),
         }
-    })
+    });
+    // Past the deadline a name lookup may still run on a blocking thread: the runtime does not wait for it.
+    rt.shutdown_background();
+    out
 }
 
 /// Enrolls this node with a hub: presents the one-time `code` and a CSR over TLS that trusts only `ca_pem`, and
@@ -1283,7 +1287,7 @@ pub fn enroll(
         .enable_all()
         .build()
         .map_err(|e| LinkError::Transport(e.to_string()))?;
-    rt.block_on(async {
+    let out = rt.block_on(async {
         let (tls, host, addr) = split_url(url)?;
         if !tls {
             return Err(LinkError::Bad("enrollment needs wss://".into()));
@@ -1348,7 +1352,10 @@ pub fn enroll(
             Some(command_response::Result::Err(e)) => Err(LinkError::Refused(e.code)),
             None => Err(LinkError::Transport("empty answer".into())),
         }
-    })
+    });
+    // Past the deadline a name lookup may still run on a blocking thread: the runtime does not wait for it.
+    rt.shutdown_background();
+    out
 }
 
 #[cfg(test)]
@@ -1387,6 +1394,14 @@ mod tests {
             ServerName::try_from(host),
             Ok(ServerName::IpAddress(_))
         ));
+        assert_eq!(
+            split_url("wss://[::1]:7443?x=1").unwrap(),
+            (true, "::1".into(), "[::1]:7443".into())
+        );
+        assert_eq!(
+            split_url("wss://[::1]?x=1").unwrap(),
+            (true, "::1".into(), "[::1]:443".into())
+        );
         for bad in [
             "wss://[::1",
             "wss://[::1]x:7443",
