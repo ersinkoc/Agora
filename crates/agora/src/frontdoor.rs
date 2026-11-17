@@ -101,14 +101,9 @@ impl Machine {
         self.hub_listen.rsplit_once(':')?.1.parse().ok()
     }
 
-    /// Where this machine reaches its own hub: the one address it listens on (a tailnet or LAN address is not reached on loopback),
-    /// loopback when it listens on every address or `hub_listen` is not an IP address.
+    /// Where this machine reaches its own hub (loopback, whatever address the hub listens on).
     fn local_addr(&self) -> Option<String> {
-        let port = self.port()?;
-        match self.hub_listen.parse::<SocketAddr>() {
-            Ok(a) if !a.ip().is_unspecified() => Some(a.to_string()),
-            _ => Some(format!("127.0.0.1:{port}")),
-        }
+        Some(format!("127.0.0.1:{}", self.port()?))
     }
 
     /// The hub address a node enrolled with this machine's own hub keeps in its link folder.
@@ -955,9 +950,12 @@ fn hub_addr(home: &Path, m: &Machine) -> Option<String> {
     let record = m.hub_dir.join(crate::hubcli::LISTEN_FILE);
     let running =
         holder(home, Role::Hub).is_some() && modified(&record) >= modified(&Role::Hub.lock(home));
+    // Its port, on loopback, as `local_addr` reaches it.
     running
         .then(|| crate::hubcli::own_hub_addr(&m.hub_dir))
         .flatten()
+        .and_then(|a| a.parse::<SocketAddr>().ok())
+        .map(|a| format!("127.0.0.1:{}", a.port()))
         .or_else(|| m.local_addr())
 }
 
@@ -1164,10 +1162,6 @@ fn wait_linked(say: &Say, home: &Path, m: &Machine) -> Result<(), ExitCode> {
             .ok()
             .map(|t| t.trim().to_string())
     };
-    // A node linked to another hub is not waited for here.
-    if read("url") != m.own_hub_url() {
-        return Ok(());
-    }
     let (Some(node_id), Some(addr), Ok(ca_pem)) = (
         read("node-id"),
         hub_addr(home, m),
@@ -1175,6 +1169,16 @@ fn wait_linked(say: &Say, home: &Path, m: &Machine) -> Result<(), ExitCode> {
     ) else {
         return Ok(());
     };
+    // A node linked to another hub is not waited for here. This hub's own node is linked at its saved port, or at the port the
+    // running hub has while a `--listen` change waits for its next start.
+    let running_url = addr
+        .parse::<SocketAddr>()
+        .ok()
+        .map(|a| format!("wss://localhost:{}", a.port()));
+    let url = read("url");
+    if url != m.own_hub_url() && url != running_url {
+        return Ok(());
+    }
     let hub = Hub { addr, ca_pem };
     let end = Instant::now() + WAIT;
     let mut token: Option<String> = None;
@@ -1764,8 +1768,7 @@ mod tests {
 
     /// `agora --listen` changes the hub's address from its next start on, but the front door then looked for the running hub at the
     /// new address ("did not start", exit 1). A running hub is reached where it wrote that it listens, unless that record is older
-    /// than the lock it runs under (left by the hub before); with no running hub, `hub_listen` decides. A hub on one address is
-    /// reached there, not on loopback.
+    /// than the lock it runs under (left by the hub before); with no running hub, `hub_listen` decides.
     #[test]
     fn the_running_hub_is_reached_where_it_listens() {
         let home = tmp("hub-addr");
@@ -1802,25 +1805,14 @@ mod tests {
         touch(&lock, at);
         touch(&record, at + secs);
         assert_eq!(hub_addr(&home, &m).as_deref(), Some("127.0.0.1:7445"));
+        // Its port, reached on loopback, as `hub_listen`'s is.
+        std::fs::write(&record, "0.0.0.0:7447").unwrap();
+        touch(&record, at + secs);
+        assert_eq!(hub_addr(&home, &m).as_deref(), Some("127.0.0.1:7447"));
         // A record older than the lock is a hub before's: not believed.
         touch(&record, at - secs);
         assert_eq!(hub_addr(&home, &m).as_deref(), Some("127.0.0.1:7446"));
         let _ = std::fs::remove_dir_all(home);
-
-        // Where `hub_listen` alone says this machine reaches its hub.
-        let at_ = |listen: &str| {
-            Machine {
-                hub_listen: listen.into(),
-                ..m.clone()
-            }
-            .local_addr()
-        };
-        assert_eq!(at_("127.0.0.2:7445").as_deref(), Some("127.0.0.2:7445"));
-        assert_eq!(at_("100.64.1.2:7445").as_deref(), Some("100.64.1.2:7445"));
-        assert_eq!(at_("[::1]:7445").as_deref(), Some("[::1]:7445"));
-        assert_eq!(at_("0.0.0.0:7445").as_deref(), Some("127.0.0.1:7445"));
-        assert_eq!(at_("[::]:7445").as_deref(), Some("127.0.0.1:7445"));
-        assert_eq!(at_("localhost:7445").as_deref(), Some("127.0.0.1:7445"));
     }
 
     fn tmp(name: &str) -> PathBuf {
