@@ -240,7 +240,9 @@ What this document did not say, and what the code does:
   session it cannot own) is `pair.unknown`, and a repeated commitment, exporter or nonce is `pair.mismatch`; each ends the session and counts as a failure.
 - **Approving a taken name.** If the node id belongs to an enrolled machine and `replace` is false, Approve is refused with `pair.state`
   (`state = name_in_use`) and the request stays pending, so the owner can approve again with `replace`. The same check runs again inside the
-  issuing transaction. `replace` revokes the old certificates, as enrolling again does.
+  issuing transaction. `replace` revokes the old certificates, as enrolling again does. The same refusal applies while another request for that node id is
+  already approved and not yet issued (or being issued), with or without `replace`: only one of them could get the certificate, so the
+  second stays pending until the first connection has ended.
 - **Idle.** Before the reveal the 30-second rules apply. While a request waits for the owner, the connection is held for the session's 5 minutes
   and answers pings; a machine need not send anything (the 30-second silence rule would cut a request the owner has not seen yet).
 - **How windows receive cards.** Two new frame kinds on the events stream, sent only to owner sessions: `PAIR_REQUESTED` (5) carrying `PairRequested`
