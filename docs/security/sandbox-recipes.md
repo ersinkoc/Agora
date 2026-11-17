@@ -26,9 +26,10 @@ the way to get a key outside the list. `agora doctor` warns when a machine that 
 
 A confined agent does not get `SSH_AUTH_SOCK`, `GPG_AGENT_INFO`, `DBUS_SESSION_BUS_ADDRESS`, `DOCKER_HOST`, `TMUX` or `TMUX_PANE` from the
 node, on every system. Where the system can refuse the connection, it also refuses unix sockets the agent was not given: on Linux (Landlock ABI 6 or newer) only abstract
-sockets, so an agent that goes looking can still find an ssh-agent or docker socket in a file path there. **On macOS that second layer is
-written but switched off** (it has not been measured on a real Mac, and a first measurement on a macOS CI runner stalled a confined `git commit`):
-there the environment scrub is the only layer, and a confined agent that guesses a socket path can still connect to it. `agora doctor` says which of these this machine does, and which variables the node scrubs and which you
+sockets, so an agent that goes looking can still find an ssh-agent or docker socket in a file path there. **On macOS that second layer refuses every unix
+socket outside the agent's allow-list** (its mesh socket, worktree, private temp folder, `/private/var/run/mDNSResponder` and your `sandbox.sockets`). A macOS developer measured
+on a real Mac (macOS 27.2.1, 2026-11-17) that the agent's own socket connects, another one is refused and the name resolver works; a confined `git commit` runs. **Not measured yet** with real agents:
+the other system sockets a tool may need (DNS in every tool, `git` over https, `cargo`, `npm`, Claude Code, Codex under `worktree`); a tool that needs one the list does not name fails, and you add it with `sandbox.sockets`. `agora doctor` says which of these this machine does, and which variables the node scrubs and which you
 pass.
 
 **`git` over ssh (`git@host:...`, `ssh://`) does not work in a confined agent**: it reached the keys only through the ssh-agent, and a
@@ -37,8 +38,7 @@ If you accept that the agent can then sign with every key in your ssh-agent, the
 
 1. In the node's policy file add `sandbox.pass_env = SSH_AUTH_SOCK` (names only; one that is not a plain name, for example `SSH_AUTH_SOCK=/x`
    or `SSH_*`, makes the whole list empty).
-2. Nothing more is needed today on Linux or macOS (the socket rule is not enforced for file-path sockets there). When the macOS rule is switched on,
-   the socket itself will have to be listed: `sandbox.sockets = /private/tmp/com.apple.launchd.XXXX/Listeners` (the value of `SSH_AUTH_SOCK` in your own shell).
+2. On Linux nothing more is needed (the socket rule is not enforced for file-path sockets there). On macOS the socket itself has to be listed: `sandbox.sockets = /private/tmp/com.apple.launchd.XXXX/Listeners` (the value of `SSH_AUTH_SOCK` in your own shell).
 3. Restart the node (`agora node run`): the policy is read only at start. `agora doctor` then lists `SSH_AUTH_SOCK` as passed.
 
 `sandbox.sockets` entries are absolute or `~/` paths (a relative path is dropped); one below the node's own folders, also through a symbolic link, is ignored. A socket

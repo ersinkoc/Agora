@@ -313,14 +313,14 @@ fn authority(data_dir: &Path, policy: &crate::daemon::Policy, now_ms: u64) -> Ve
     out
 }
 
-/// ADR-0083: whether this machine refuses a confined agent's connections to unix sockets it was not given (`sockets-profile` on macOS: set, not yet measured; or why
+/// ADR-0083: whether this machine refuses a confined agent's connections to unix sockets it was not given (`sockets-profile` on macOS: measured on a real Mac for the agent's own socket, another one and the resolver; or why
 /// not: `sockets-abstract`, `sockets-none`), which socket variables the node leaves out of an agent's environment
 /// (`env-scrubbed`) and which of them the owner let through (`env-passed`). Names only, never values.
 fn socket_checks(sandbox: &crate::sandbox::SandboxPolicy) -> Vec<Check> {
     use agora_platform::SocketConfinement as C;
     let mut out = vec![match agora_platform::socket_confinement() {
-        // Set in the Seatbelt profile, never run on a real Mac yet: not claimed as working.
-        C::Full => check("sockets-profile", Status::Warn, ""),
+        // Measured on a real Mac (2026-11-17): own socket open, another closed, resolver open. Other system sockets are not (the text says so).
+        C::Full => check("sockets-profile", Status::Ok, ""),
         C::AbstractOnly => check("sockets-abstract", Status::Warn, ""),
         C::None => check("sockets-none", Status::Warn, std::env::consts::OS),
     }];
