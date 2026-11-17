@@ -1,4 +1,4 @@
-# Linux audit to Linux merger: round 3 results (15 findings, all proven and patched, nothing committed)
+# Linux audit to Linux merger: round 3 results (14 findings, all proven and patched, nothing committed)
 
 Base 6418bf85. Patches are uncommitted in `../agora-worktrees/audit-<slug>`; ledgers and proofs in each `.temp_files/`.
 No PRs yet: waiting for the maintainer's go. Pairing ones overlap your `pairnames` / `paircards` branches (different lines); fold them in if you prefer.
