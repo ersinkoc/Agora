@@ -8,7 +8,6 @@
 //! not verify.
 
 use std::net::IpAddr;
-use std::path::PathBuf;
 use std::sync::{Mutex, PoisonError};
 
 use crate::ca::Ca;
@@ -31,6 +30,10 @@ pub trait Provision: Send + Sync {
     fn provision(&self) -> Result<[u8; 32], NamesFailure>;
 }
 
+/// Keeps the certificate PEM where `agora doctor` reads it (`server-cert.pem`): the caller decides how (the hub binary writes it
+/// atomically and owner-only through `agora-platform`).
+pub type Persist = Box<dyn Fn(&str) -> std::io::Result<()> + Send + Sync>;
+
 type Interfaces = Box<dyn Fn() -> Result<Vec<Iface>, String> + Send + Sync>;
 type HostName = Box<dyn Fn() -> Option<String> + Send + Sync>;
 
@@ -45,8 +48,8 @@ pub struct Leaf {
     listen: IpAddr,
     host: HostName,
     interfaces: Interfaces,
-    /// Where `server-cert.pem` is kept up to date (`agora doctor` reads it), when there is such a place.
-    dir: Option<PathBuf>,
+    /// Keeps `server-cert.pem` up to date (`agora doctor` reads it), when there is such a place.
+    persist: Option<Persist>,
     slot: TlsSlot,
     current: Mutex<Current>,
 }
@@ -61,7 +64,7 @@ impl Leaf {
         listen: IpAddr,
         host: HostName,
         interfaces: Interfaces,
-        dir: Option<PathBuf>,
+        persist: Option<Persist>,
     ) -> Result<(Self, Option<NamesFailure>), String> {
         let (names, failure) = match wanted(&configured, &host, listen, &interfaces) {
             Ok(n) => (n, None),
@@ -81,17 +84,19 @@ impl Leaf {
         let hash = leaf_hash(&cert).map_err(|e| e.to_string())?;
         let acceptor =
             acceptor_with(&cert, &key, ca.cert_pem(), true).map_err(|e| e.to_string())?;
+        if let Some(save) = &persist {
+            save(&cert).map_err(|e| format!("server-cert.pem: {e}"))?;
+        }
         let leaf = Self {
             ca,
             configured,
             listen,
             host,
             interfaces,
-            dir,
+            persist,
             slot: TlsSlot::new(acceptor, hash),
             current: Mutex::new(Current { names, hash }),
         };
-        leaf.write_cert(&cert);
         Ok((leaf, failure))
     }
 
@@ -120,13 +125,6 @@ impl Leaf {
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Current> {
         self.current.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
-    fn write_cert(&self, cert: &str) {
-        if let Some(dir) = &self.dir {
-            // `agora doctor` reads this to warn before the certificate ends; the key stays in memory.
-            let _ = std::fs::write(dir.join("server-cert.pem"), cert);
-        }
     }
 }
 
@@ -174,8 +172,14 @@ impl Provision for Leaf {
         let hash = leaf_hash(&cert).map_err(|_| failed())?;
         let acceptor =
             acceptor_with(&cert, &key, self.ca.cert_pem(), true).map_err(|_| failed())?;
+        // Saved before it is switched on: when the file cannot be written nothing changes and the owner is told.
+        if let Some(save) = &self.persist {
+            save(&cert).map_err(|_| NamesFailure {
+                reason: "write",
+                names: names.clone(),
+            })?;
+        }
         self.slot.set(acceptor, hash);
-        self.write_cert(&cert);
         *cur = Current { names, hash };
         Ok(hash)
     }

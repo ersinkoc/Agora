@@ -67,32 +67,36 @@ fn queries() -> Vec<(std::net::Ipv4Addr, Vec<std::net::SocketAddr>)> {
 pub(crate) enum Pick {
     /// This one (an index into the list).
     One(usize),
-    /// Nobody to ask, or nothing chosen.
+    /// Nothing found, or nothing chosen.
     None,
-    /// Several and no terminal to choose on: never guessed.
+    /// No terminal to confirm on: a hub found by discovery is never chosen for the person, not even a single one.
     NeedsTerminal,
 }
 
-/// One hub is taken; several are never picked for the person: a terminal asks (`ask` gets the number of hubs and returns the answer
-/// typed, if any), and without one nothing is chosen.
+/// Discovery is never silently trusted: every hub found, one or several, is confirmed by a person at a terminal who compares its
+/// fingerprint with the one `agora pair open` shows on the hub. `ask(n)` shows the `n` hubs and returns what was typed (for one hub,
+/// `Some` of any text only when the person confirmed it); only a number from 1 to `n` chooses.
 pub(crate) fn pick(
     count: usize,
     terminal: bool,
     ask: impl FnOnce(usize) -> Option<String>,
 ) -> Pick {
-    match count {
-        0 => Pick::None,
-        1 => Pick::One(0),
-        _ if !terminal => Pick::NeedsTerminal,
-        n => match ask(n).and_then(|t| t.trim().parse::<usize>().ok()) {
-            Some(i) if (1..=n).contains(&i) => Pick::One(i - 1),
-            _ => Pick::None,
-        },
+    if count == 0 {
+        return Pick::None;
+    }
+    if !terminal {
+        return Pick::NeedsTerminal;
+    }
+    match ask(count).and_then(|t| t.trim().parse::<usize>().ok()) {
+        Some(i) if (1..=count).contains(&i) => Pick::One(i - 1),
+        _ => Pick::None,
     }
 }
 
-/// Listens for hubs that are open for new machines and returns the address of the one to join, or says why there is none.
-fn find_hub(say: &Say) -> Result<String, Stop> {
+/// Listens for hubs that are open for new machines, has the person confirm one, and returns its address and the SHA-256 of its CA
+/// (the machine will then refuse any other CA), or says why there is none.
+fn find_hub(say: &Say) -> Result<(String, [u8; 32]), Stop> {
+    use agora_hub::discovery::short_fingerprint;
     use std::io::IsTerminal;
     say.out(key!("join-looking"), &[]);
     let _ = std::io::stdout().flush();
@@ -104,24 +108,33 @@ fn find_hub(say: &Say) -> Result<String, Stop> {
         say.err(key!("join-none-found"), &[]);
         return Err(Stop::Failed);
     }
-    let show = |f: &agora_hub::discovery::Found| {
-        (
-            f.addr.to_string(),
-            agora_hub::discovery::fingerprint_text(&f.ca_fingerprint),
-        )
-    };
     let terminal = std::io::stdin().is_terminal();
     let choice = pick(found.len(), terminal, |n| {
+        if n == 1 {
+            let f = &found[0];
+            let question = say.text(
+                key!("join-found-ask"),
+                &[
+                    ("name", f.name.as_str().into()),
+                    ("address", f.addr.to_string().into()),
+                    ("fingerprint", short_fingerprint(&f.ca_fingerprint).into()),
+                ],
+            );
+            return matches!(
+                crate::paircmd::ask(say, &question),
+                crate::paircmd::Answer::Yes
+            )
+            .then(|| "1".to_string());
+        }
         say.out(key!("join-found-list-head"), &[]);
         for (i, f) in found.iter().enumerate() {
-            let (addr, fp) = show(f);
             say.out(
                 key!("join-found-item"),
                 &[
                     ("n", ((i + 1) as i64).into()),
                     ("name", f.name.as_str().into()),
-                    ("address", addr.into()),
-                    ("fingerprint", fp.into()),
+                    ("address", f.addr.to_string().into()),
+                    ("fingerprint", short_fingerprint(&f.ca_fingerprint).into()),
                 ],
             );
         }
@@ -132,23 +145,11 @@ fn find_hub(say: &Say) -> Result<String, Stop> {
     });
     match choice {
         Pick::One(i) => {
-            let f = &found[i];
-            let (addr, fp) = show(f);
-            if found.len() == 1 {
-                say.out(
-                    key!("join-found-one"),
-                    &[
-                        ("name", f.name.as_str().into()),
-                        ("address", addr.clone().into()),
-                        ("fingerprint", fp.into()),
-                    ],
-                );
-            }
             say.out(key!("join-found-note"), &[]);
-            Ok(addr)
+            Ok((found[i].addr.to_string(), found[i].ca_fingerprint))
         }
         Pick::NeedsTerminal => {
-            say.err(key!("join-several-need-terminal"), &[]);
+            say.err(key!("pair-discovery_unconfirmed"), &[]);
             Err(Stop::Usage)
         }
         Pick::None => {
@@ -162,6 +163,7 @@ fn find_hub(say: &Say) -> Result<String, Stop> {
 /// network (docs/specs/pairing.md section 3): what is found is only an address to try, and the whole pairing exchange follows.
 pub fn join(say: &Say, o: &Opts, address: Option<&str>) -> ExitCode {
     let found;
+    let mut expected_ca = None;
     let address = match address {
         Some(a) => a,
         None => {
@@ -174,7 +176,10 @@ pub fn join(say: &Say, o: &Opts, address: Option<&str>) -> ExitCode {
                 return ExitCode::from(2);
             }
             found = match find_hub(say) {
-                Ok(a) => a,
+                Ok((a, fp)) => {
+                    expected_ca = Some(fp);
+                    a
+                }
                 Err(stop) => return stop.code(),
             };
             &found
@@ -185,6 +190,7 @@ pub fn join(say: &Say, o: &Opts, address: Option<&str>) -> ExitCode {
         address,
         o.id.as_deref(),
         o.replace,
+        expected_ca,
         &Timeouts::default(),
     ) {
         Ok(joined) => {
@@ -215,6 +221,7 @@ pub(crate) fn run(
     address: &str,
     id: Option<&str>,
     replace: bool,
+    expected_ca: Option<[u8; 32]>,
     timeouts: &Timeouts,
 ) -> Result<Joined, Stop> {
     let link = link_dir();
@@ -254,6 +261,7 @@ pub(crate) fn run(
         version: env!("CARGO_PKG_VERSION"),
         csr_pem: &csr_pem,
         csr_der: &csr,
+        expected_ca,
     };
     // The one place the number is written: this line, on standard output, for the person in front of this screen. It is never
     // logged and never saved.
@@ -328,6 +336,7 @@ fn say_failure(say: &Say, e: &PairError, dial: &str, host: &str) {
                 &[("code", code.as_str().into()), ("message", message.into())],
             );
         }
+        PairError::CaMismatch => say.err(key!("pair-ca_mismatch"), &[]),
         PairError::Denied => say.err(key!("join-denied"), &[]),
         PairError::Closed => say.err(key!("join-closed"), &[]),
         PairError::Unexpected => say.err(key!("join-unexpected"), &[]),
@@ -352,14 +361,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn one_hub_is_taken_and_several_are_never_picked_for_the_person() {
+    fn a_hub_found_by_discovery_is_never_chosen_without_a_person_at_a_terminal() {
         let never = |_| panic!("nobody is asked");
         assert_eq!(pick(0, true, never), Pick::None);
-        assert_eq!(pick(1, false, never), Pick::One(0));
-        assert_eq!(pick(1, true, never), Pick::One(0));
-        // Several, no terminal: nothing is chosen, nobody is asked.
+        // One hub or several, no terminal: nothing is chosen and nobody is asked.
+        assert_eq!(pick(1, false, never), Pick::NeedsTerminal);
         assert_eq!(pick(3, false, never), Pick::NeedsTerminal);
-        // Several, a terminal: the person's number (one-based), and anything else chooses nothing.
+        // One hub with a terminal: only a person's confirmation chooses it.
+        assert_eq!(pick(1, true, |_| Some("1".into())), Pick::One(0));
+        assert_eq!(pick(1, true, |_| None), Pick::None);
+        // Several: the person's number (one-based), and anything else chooses nothing.
         assert_eq!(
             pick(3, true, |n| (n == 3).then(|| "2\n".into())),
             Pick::One(1)

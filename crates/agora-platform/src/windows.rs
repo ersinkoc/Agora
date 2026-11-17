@@ -1189,7 +1189,9 @@ pub(crate) fn interface_addresses() -> io::Result<Vec<crate::InterfaceAddr>> {
         GAA_FLAG_SKIP_MULTICAST, IF_TYPE_SOFTWARE_LOOPBACK, IP_ADAPTER_ADDRESSES_LH,
     };
     use windows_sys::Win32::NetworkManagement::Ndis::IfOperStatusUp;
-    use windows_sys::Win32::Networking::WinSock::{AF_INET, AF_INET6, AF_UNSPEC};
+    use windows_sys::Win32::Networking::WinSock::{
+        IpSuffixOriginRandom, AF_INET, AF_INET6, AF_UNSPEC,
+    };
 
     let flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER;
     // A u64 buffer: the structures need 8-byte alignment.
@@ -1260,6 +1262,9 @@ pub(crate) fn interface_addresses() -> io::Result<Vec<crate::InterfaceAddr>> {
                 prefix_len: u.OnLinkPrefixLength,
                 up: a.OperStatus == IfOperStatusUp,
                 loopback: a.IfType == IF_TYPE_SOFTWARE_LOOPBACK,
+                // A random suffix is a privacy (temporary) address; a preferred lifetime of zero is a deprecated one. Only IPv6.
+                transient: family == AF_INET6
+                    && (u.SuffixOrigin == IpSuffixOriginRandom || u.PreferredLifetime == 0),
             });
         }
     }

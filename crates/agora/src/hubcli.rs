@@ -335,12 +335,17 @@ fn start_leaf(
                             ip: a.ip,
                             up: a.up,
                             loopback: a.loopback,
+                            transient: a.transient,
                         })
                         .collect()
                 })
                 .map_err(|e| e.to_string())
         }),
-        Some(dir.to_path_buf()),
+        Some(Box::new({
+            let file = dir.join("server-cert.pem");
+            // Atomic and owner-only, like the other files of the hub's folder.
+            move |pem| agora_platform::write_private(&file, pem.as_bytes())
+        })),
     )?;
     if failure.is_some() {
         say.err(key!("cli-hub-names-unlisted"), &[]);
@@ -349,7 +354,7 @@ fn start_leaf(
 }
 
 /// Answers "is there a hub here?" on the local network while, and only while, the hub is open for pairing (spec section 3). The
-/// thread ends with the hub (it holds the pairing state only through the hub it was given).
+/// thread lives as long as the process: `hub_run` returns, and the process ends, only when the hub's listener ends.
 fn start_discovery(
     state: &Arc<ServerState>,
     leaf: &Arc<agora_hub::leaf::Leaf>,

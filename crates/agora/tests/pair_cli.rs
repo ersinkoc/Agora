@@ -342,7 +342,7 @@ fn the_owner_opens_a_machine_joins_the_numbers_match_and_the_node_connects() {
     nothing_stored(&machine);
 
     // No address: the machine looks for a hub that is open and, finding none (this hub is closed, and listens on loopback only), says
-    // how to get one. Nothing is stored. (A found hub is tested in `pair_names.rs`.)
+    // how to get one. Nothing is stored. (A found hub is tested in `pair_node.rs` and `discovery.rs`; the fixed discovery port keeps it out of real-process tests.)
     let out = agora(&machine, &["join"]).output().unwrap();
     assert_eq!(out.status.code(), Some(1));
     let text =
@@ -531,7 +531,7 @@ fn a_denied_machine_stores_nothing_and_the_hubs_own_address_is_named_in_its_cert
 
     // ADR-0065 section 5b: the hub listens on 127.0.0.1, so its certificate names that address, and a machine that dials the IP number
     // (not `localhost`) now completes (it used to fail closed: the leaf named `localhost` only). The address that is in no name fails
-    // closed in `pair_names.rs`.
+    // closed in `pair_node.rs`.
     let byip = root.join("byip");
     let mut owner = hub.open(&owner_home);
     let mut m = join(&byip, &format!("127.0.0.1:{}", hub.port), &[]);

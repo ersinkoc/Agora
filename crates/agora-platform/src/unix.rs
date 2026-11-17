@@ -832,18 +832,8 @@ pub(crate) fn interface_addresses() -> io::Result<Vec<crate::InterfaceAddr>> {
         };
         let prefix_len = if ifa.ifa_netmask.is_null() {
             0
-        } else if family == libc::AF_INET {
-            // SAFETY: the netmask of an AF_INET address is a `sockaddr_in` of the same family.
-            let m = unsafe { &*ifa.ifa_netmask.cast::<libc::sockaddr_in>() };
-            u32::from_be(m.sin_addr.s_addr).count_ones() as u8
         } else {
-            // SAFETY: the netmask of an AF_INET6 address is a `sockaddr_in6` of the same family.
-            let m = unsafe { &*ifa.ifa_netmask.cast::<libc::sockaddr_in6>() };
-            m.sin6_addr
-                .s6_addr
-                .iter()
-                .map(|b| b.count_ones())
-                .sum::<u32>() as u8
+            netmask_prefix(ifa.ifa_netmask, family)
         };
         let name = if ifa.ifa_name.is_null() {
             String::new()
@@ -860,11 +850,76 @@ pub(crate) fn interface_addresses() -> io::Result<Vec<crate::InterfaceAddr>> {
             prefix_len,
             up: flags & libc::IFF_UP != 0 && flags & libc::IFF_RUNNING != 0,
             loopback: flags & libc::IFF_LOOPBACK != 0,
+            transient: false,
         });
     }
     // SAFETY: `head` came from a successful `getifaddrs` and nothing borrowed from the list is used after this point.
     unsafe { libc::freeifaddrs(head) };
+    mark_transient(&mut out);
     Ok(out)
+}
+
+/// The prefix length of a netmask `sockaddr` without reading past what the system says it holds: the bytes it declares (`sa_len` on
+/// macOS and the BSDs, where a netmask can be shorter than a full `sockaddr_in`; the full structure elsewhere) are copied into a zeroed
+/// buffer and the address is read from there, so missing bytes count as zero bits.
+fn netmask_prefix(mask: *const libc::sockaddr, family: i32) -> u8 {
+    let (offset, len) = if family == libc::AF_INET {
+        (std::mem::offset_of!(libc::sockaddr_in, sin_addr), 4)
+    } else {
+        (std::mem::offset_of!(libc::sockaddr_in6, sin6_addr), 16)
+    };
+    let full = if family == libc::AF_INET {
+        std::mem::size_of::<libc::sockaddr_in>()
+    } else {
+        std::mem::size_of::<libc::sockaddr_in6>()
+    };
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd"))]
+    // SAFETY: `mask` is non-null (checked by the caller) and every `sockaddr` starts with its length byte on these systems.
+    let declared = usize::from(unsafe { (*mask).sa_len }).min(full);
+    #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "freebsd")))]
+    let declared = full;
+    let mut buf = [0u8; 32];
+    let n = declared.min(buf.len());
+    // SAFETY: `declared` bytes at `mask` belong to the structure the system gave us (the full size where it does not say otherwise);
+    // `buf` holds at least `n` bytes and does not overlap.
+    unsafe { std::ptr::copy_nonoverlapping(mask.cast::<u8>(), buf.as_mut_ptr(), n) };
+    buf.get(offset..offset + len)
+        .map_or(0, |b| b.iter().map(|x| x.count_ones()).sum::<u32>() as u8)
+}
+
+/// Marks IPv6 addresses the system flags temporary or deprecated. Linux lists them in `/proc/net/if_inet6` (address, index, prefix,
+/// scope, flags, name; `IFA_F_TEMPORARY` 0x01, `IFA_F_DEPRECATED` 0x20); other Unix systems are not asked (`getifaddrs` does not carry
+/// the flags), so nothing is marked there.
+fn mark_transient(list: &mut [crate::InterfaceAddr]) {
+    #[cfg(target_os = "linux")]
+    {
+        let Ok(text) = std::fs::read_to_string("/proc/net/if_inet6") else {
+            return;
+        };
+        for line in text.lines() {
+            let mut f = line.split_whitespace();
+            let (Some(addr), Some(_), Some(_), Some(_), Some(flags)) =
+                (f.next(), f.next(), f.next(), f.next(), f.next())
+            else {
+                continue;
+            };
+            let (Ok(addr), Ok(flags)) = (
+                u128::from_str_radix(addr, 16),
+                u32::from_str_radix(flags, 16),
+            ) else {
+                continue;
+            };
+            if flags & (0x01 | 0x20) == 0 {
+                continue;
+            }
+            let ip = std::net::IpAddr::V6(std::net::Ipv6Addr::from(addr));
+            for a in list.iter_mut().filter(|a| a.ip == ip) {
+                a.transient = true;
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = list;
 }
 
 #[cfg(test)]

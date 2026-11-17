@@ -100,4 +100,6 @@ pair-state = The pairing was cancelled because it was not at that step ({ $state
 pair-insecure_transport = Signing in this way needs a secure connection (https) to the hub.
 pair-name_unverified = The hub at { $name } could not be verified, so nothing was saved.
 pair-names_missing = The hub could not be sure its certificate names the address a new machine will use ({ $reason }: { $names }). Nothing was opened. Start the hub with `--name ADDRESS` for each address a new machine will use, for example `--name 192.168.1.20`.
+pair-discovery_unconfirmed = A hub that was found on the network is only used when you confirm it at a terminal. Nothing was saved. Run `agora join` in a terminal window, or give the hub's address: `agora join 192.168.1.20:7443`.
+pair-ca_mismatch = The hub did not present the certificate authority you confirmed (the fingerprint it announced is not the one it delivered), so this machine did not join it. Nothing was saved.
 internal = Something went wrong. Reference: { $incident_id }.

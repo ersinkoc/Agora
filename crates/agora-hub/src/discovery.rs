@@ -38,6 +38,10 @@ pub const PER_SOURCE_WINDOW_MS: u64 = 10_000;
 /// Sources remembered at once (the hub-wide rate lets at most 100 new ones into a window); a full table drops new sources instead of forgetting old ones (a flood from many spoofed addresses
 /// cannot reset anyone's count, it can only make discovery miss until the window passes).
 const MAX_SOURCES: usize = 32;
+/// The finder keeps at most this many hubs; further answers are dropped.
+pub const MAX_FOUND: usize = 8;
+/// The finder reads at most this many datagrams from one socket in one pass, so a flood cannot hold it past its deadline.
+const READS_PER_PASS: usize = 32;
 const MAX_NAME_BYTES: usize = 48;
 const MAX_VERSION_BYTES: usize = 16;
 
@@ -123,6 +127,17 @@ pub fn fingerprint_text(fp: &[u8; 32]) -> String {
         .map(|b| format!("{b:02X}"))
         .collect::<Vec<_>>()
         .join(":")
+}
+
+/// The short form a person compares: the first 8 bytes of the CA's SHA-256 as 16 hex digits in 4 groups of 4 (`566A D067 41A8 B995`).
+/// `agora pair open` and `agora pair status` print the same on the hub's screen, and `agora join` shows it for each hub it found. It is
+/// for human comparison; the machine itself compares all 32 bytes.
+pub fn short_fingerprint(fp: &[u8; 32]) -> String {
+    fp[..8]
+        .chunks(2)
+        .map(|c| format!("{:02X}{:02X}", c[0], c[1]))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 // ---- rate limits (pure: the caller gives the time) ----
@@ -362,7 +377,7 @@ pub fn find(
     let mut next_send = Instant::now();
     let mut found: Vec<Found> = Vec::new();
     let mut buf = [0u8; 2048];
-    while Instant::now() < deadline {
+    'listen: while Instant::now() < deadline {
         if Instant::now() >= next_send {
             for (s, targets) in &sockets {
                 for t in *targets {
@@ -372,13 +387,22 @@ pub fn find(
             next_send = Instant::now() + Duration::from_millis(500);
         }
         for (s, _) in &sockets {
-            while let Ok((n, src)) = s.recv_from(&mut buf) {
-                if let Some(f) = parse_announcement(&buf[..n], src.ip()) {
-                    // The same hub answers from each of its addresses (a LAN card and a VPN, say): it is one hub, listed once, at the
-                    // first address that answered.
-                    if !found.iter().any(|g| same_hub(g, &f)) {
-                        found.push(f);
-                    }
+            // A bounded number of reads per socket per pass, and the deadline is looked at inside the loop: a flood of answers can
+            // neither keep this from finishing on time nor grow the list past MAX_FOUND.
+            for _ in 0..READS_PER_PASS {
+                if Instant::now() >= deadline {
+                    break 'listen;
+                }
+                let Ok((n, src)) = s.recv_from(&mut buf) else {
+                    break;
+                };
+                let Some(f) = parse_announcement(&buf[..n], src.ip()) else {
+                    continue;
+                };
+                // The same hub answers from each of its addresses (a LAN card and a VPN, say): it is one hub, listed once, at the
+                // first address that answered.
+                if found.len() < MAX_FOUND && !found.iter().any(|g| same_hub(g, &f)) {
+                    found.push(f);
                 }
             }
         }
@@ -565,6 +589,53 @@ mod tests {
         assert!(!l.allow(first, t + 450));
         // When the window passes the table empties and new sources are served.
         assert!(l.allow(ip("10.2.0.1"), t + PER_SOURCE_WINDOW_MS + 500));
+    }
+
+    #[test]
+    fn the_short_fingerprint_is_four_groups_of_four() {
+        let mut fp = [0u8; 32];
+        fp[..8].copy_from_slice(&[0x56, 0x6A, 0xD0, 0x67, 0x41, 0xA8, 0xB9, 0x95]);
+        assert_eq!(short_fingerprint(&fp), "566A D067 41A8 B995");
+    }
+
+    #[test]
+    fn a_flood_of_answers_is_bounded_in_count_and_time() {
+        // A fake hub that, once asked, answers with thousands of different well-formed hubs as fast as it can for longer than the
+        // finder listens.
+        let hub = UdpSocket::bind("127.0.0.1:0").unwrap();
+        hub.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let at = hub.local_addr().unwrap();
+        let flooder = std::thread::spawn(move || {
+            let mut b = [0u8; 256];
+            let Ok((_, asker)) = hub.recv_from(&mut b) else {
+                return;
+            };
+            let end = Instant::now() + Duration::from_millis(1_500);
+            let mut i = 0u32;
+            while Instant::now() < end {
+                i += 1;
+                let a = announcement(&format!("rogue{i}"), 7443, [(i % 251) as u8; 32], "1");
+                let _ = hub.send_to(&a, asker);
+            }
+        });
+        let started = Instant::now();
+        let found = find(
+            &[(Ipv4Addr::LOCALHOST, vec![at])],
+            Duration::from_millis(1_000),
+            [9; 16],
+        );
+        let took = started.elapsed();
+        flooder.join().unwrap();
+        assert!(found.len() <= MAX_FOUND, "{}", found.len());
+        assert_eq!(
+            found.len(),
+            MAX_FOUND,
+            "the flood filled the list to its cap"
+        );
+        assert!(
+            took < Duration::from_millis(1_400),
+            "finished late: {took:?}"
+        );
     }
 
     #[test]

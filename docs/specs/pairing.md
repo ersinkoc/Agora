@@ -324,11 +324,13 @@ Tests: unit tests in the first three files, `crates/agora/tests/pair_node.rs` (a
   a loopback one (the owner chose it); `0.0.0.0` names every address of every interface that is up, IPv4 only; `::` names IPv4 and IPv6 (a dual-stack socket
   serves both). Always left out: loopback, unspecified, multicast, broadcast, IPv4 link-local (169.254/16), IPv6 link-local (fe80::/10, which needs a zone a
   certificate cannot carry) and IPv4-mapped IPv6. Order: owner names, `localhost`, host name, IPv4 ascending, IPv6 ascending (so the same set is the same
-  list). At most 16 names; an owner name is never cut (more than 16 `--name` values, or a name a certificate cannot carry, refuses with `pair.names_missing`),
+  list; a temporary (privacy) or deprecated IPv6 address is not named: Linux says so through `/proc/net/if_inet6`, Windows through the suffix origin and
+  lifetime, macOS does not say through `getifaddrs`, so it is not filtered there). At most 16 names; an owner name is never cut (more than 16 `--name` values, or a name a certificate cannot carry, refuses with `pair.names_missing`),
   addresses past the cap are cut from the end.
 - When the leaf is replaced: at start, and at every `PairOpen` (a window's or `agora pair open`'s), **only when a wanted name is not in the leaf**. An address
   that went away does not force a new leaf, and the old names stay until the next re-issue. The new leaf is made by the same CA (its fingerprint and every
-  enrolled node are untouched), written to `<hub dir>/server-cert.pem`, and put in a `TlsSlot` that the accept loop reads for every new connection. A
+  enrolled node are untouched), written to `<hub dir>/server-cert.pem` (atomically and owner-only, `agora_platform::write_private`; **before** it is switched on, so a file that cannot be written
+  refuses the open with `pair.names_missing` reason `write` and changes nothing), and put in a `TlsSlot` that the accept loop reads for every new connection. A
   connection that is already open keeps the certificate it started with. The slot also carries the leaf's hash, so a pairing session freezes the hash of the
   certificate **its own connection was shown** (`Pairing::request_on`), not the hub's current one: a leaf replaced between a machine's handshake and its
   request cannot make the two numbers differ.
@@ -352,14 +354,27 @@ Tests: unit tests in the first three files, `crates/agora/tests/pair_node.rs` (a
   address is one of the leaf's IP names. A query that reaches the hub on another address (a VPN card the leaf does not name, loopback) gets silence.
 - Rate limits: **10 replies a second for the whole hub, 3 per 10 seconds per source address** (a sliding window each; the table holds 32 sources and a full table
   drops new sources, never forgets old ones). The limits are checked before anything else is done.
-- The finder lists each hub once, even when it answers from several of its addresses (the first address that answered). It ignores anything that is not a
-  well-formed `HubAnnouncement` of at most 128 bytes with accepts-pairing, a port, a 32-byte fingerprint and a name and version of plain text (no control,
-  bidirectional or zero-width characters). Several hubs are never picked for the person: a terminal asks for a number, and with no terminal it stops (exit 2).
-  One hub is taken, with a line that says so. Nothing is sent to a hub but the query; the whole pairing exchange follows, unchanged.
-- **What discovery is not.** An announcement is a candidate address, nothing more. A party on the network can announce a hub of its own, or copy a real hub's
-  public name and fingerprint and answer first; the machine then pairs with it and shows a number, and the real owner never sees a card for it (or sees a card
-  with another number and presses Deny). It cannot make the numbers match, cannot obtain a certificate from the real hub and is limited by section 7's budget.
-  The fingerprint the finder shows is public information and is not compared with what the hub later delivers; doing so is a possible later hardening.
+- The finder lists each hub once, even when it answers from several of its addresses (the first address that answered), and **keeps at most 8 hubs**. It reads
+  at most 32 datagrams per socket per pass and looks at its deadline inside the receive loop, so a flood of answers can neither grow the list nor hold it
+  past its three seconds (tested with a flood). It ignores anything that is not a well-formed `HubAnnouncement` of at most 128 bytes with accepts-pairing, a
+  port, a 32-byte fingerprint and a name and version of plain text (no control, bidirectional or zero-width characters).
+- **Discovery is never silently trusted.** `agora join` without an address always asks, at a terminal, even for exactly one hub: it shows the hub's name, its
+  address and a short fingerprint of the hub's certificate authority (the first 8 bytes of the SHA-256, 16 hex digits in 4 groups of 4, for example
+  `566A D067 41A8 B995`) and says "compare it with what `agora pair open` shows on the hub". `agora pair open` and `agora pair status` print the **same** short
+  fingerprint on the hub's screen. With one hub the person answers yes or no (the same terminal-only reader as the owner's approval: typed-ahead input is
+  discarded and an answer that comes too fast is ignored); with several the person types the number of the one whose fingerprint matches. With no terminal
+  discovery chooses nothing (`pair.discovery_unconfirmed`, exit 2, "give the address"). When the address is typed, nothing changes: no fingerprint is asked.
+- **The delivered CA must be the confirmed one.** The machine keeps the full SHA-256 of the announced CA (`Wanted::expected_ca`) and, after the hub delivered its
+  certificate authority and every other check passed, compares the SHA-256 of the delivered CA's DER with it; any difference is `pair.ca_mismatch` (machine-local,
+  never sent) and nothing is stored (tested, with one flipped bit). The machine compares all 32 bytes; the person compares 8.
+- **What protects, and what does not.** A party on the network can announce a hub of its own, or copy a real hub's public name, port and fingerprint. Protection:
+  (1) the person compares the announced fingerprint with the one on the real hub's screen, so a rogue that announces its own CA shows a fingerprint that is not the
+  real one; (2) the machine then refuses any CA but the one confirmed, so a rogue that copied the announced name and fingerprint but cannot present the real CA
+  (it does not hold the CA's key, so it cannot issue a leaf that chains to it) cannot complete; (3) the number (section 5) must still match the owner's screen,
+  and the real owner approves. Not protected: a person who confirms without comparing (the fingerprint is 64 bits of the CA's hash, enough to make a
+  look-alike CA a large offline search, not impossible for a patient attacker, which is why the machine compares all 256 bits and why the number still follows);
+  a rogue can make the list longer (up to 8), or hide nothing: it cannot remove a real hub's answer, only add its own. It cannot learn anything secret: the
+  announcement and the query hold only public data.
 - Platform: `std::net::UdpSocket` needs no platform code. `SO_REUSEADDR` and `SO_EXCLUSIVEADDRUSE` are not set (two hubs on one machine: the second stays silent).
   Broadcast reception was measured by hand on Linux (a real hub and `agora join` on one machine, LAN and VPN cards); CI measures the same code over loopback
   (`discovery.rs`, `pair_node.rs`) because runners may block broadcast. macOS and Windows broadcast is **not measured by hand**.

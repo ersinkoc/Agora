@@ -1990,6 +1990,10 @@ pub struct InterfaceAddr {
     /// The interface is up.
     pub up: bool,
     pub loopback: bool,
+    /// An IPv6 address the system marks temporary (privacy address) or deprecated: it changes or goes away on its own, so it is not
+    /// an address to name in a certificate. Known on Linux (`/proc/net/if_inet6`) and Windows (suffix origin and lifetime); macOS does
+    /// not say through `getifaddrs`, so it is `false` there.
+    pub transient: bool,
 }
 
 /// Every unicast IPv4 and IPv6 address of this machine's network interfaces, up or down (std has no way to list them). The caller

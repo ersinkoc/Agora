@@ -16,6 +16,8 @@ pub struct Iface {
     pub ip: IpAddr,
     pub up: bool,
     pub loopback: bool,
+    /// A temporary (privacy) or deprecated IPv6 address: it changes or goes away by itself, so it is never named.
+    pub transient: bool,
 }
 
 /// What the hub wants in its leaf.
@@ -114,7 +116,10 @@ pub fn select(
     let mut v4: Vec<Ipv4Addr> = Vec::new();
     let mut v6: Vec<Ipv6Addr> = Vec::new();
     if listen.is_unspecified() {
-        for i in interfaces.iter().filter(|i| i.up && !i.loopback) {
+        for i in interfaces
+            .iter()
+            .filter(|i| i.up && !i.loopback && !i.transient)
+        {
             match (i.ip, listen) {
                 (IpAddr::V4(a), _) if usable(i.ip) => v4.push(a),
                 (IpAddr::V6(a), IpAddr::V6(_)) if usable(i.ip) => v6.push(a),
@@ -166,6 +171,7 @@ mod tests {
             ip: ip(s),
             up: true,
             loopback: false,
+            transient: false,
         }
     }
 
@@ -178,6 +184,7 @@ mod tests {
                 ip: ip("127.0.0.1"),
                 up: true,
                 loopback: true,
+                transient: false,
             },
             up("192.168.1.20"),
             up("fe80::1"),
@@ -206,11 +213,27 @@ mod tests {
                 ip: ip("10.0.0.9"),
                 up: false,
                 loopback: false,
+                transient: false,
             },
             up("10.0.0.7"),
         ];
         let n = select(&[], None, ip("::"), &ifs).unwrap();
         assert_eq!(n.all, ["localhost", "10.0.0.7"]);
+    }
+
+    #[test]
+    fn temporary_and_deprecated_addresses_are_not_named() {
+        let ifs = [
+            up("2001:db8::1"),
+            Iface {
+                ip: ip("2001:db8::2"),
+                up: true,
+                loopback: false,
+                transient: true,
+            },
+        ];
+        let n = select(&[], None, ip("::"), &ifs).unwrap();
+        assert_eq!(n.all, ["localhost", "2001:db8::1"]);
     }
 
     #[test]
