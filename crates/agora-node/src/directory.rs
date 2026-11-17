@@ -77,25 +77,14 @@ pub fn inspect(
             if !meta.is_file() || meta.len() > 4096 {
                 return Err(invalid("directory.metadata"));
             }
-            // Whoever works in the folder can swap the checked file for a link (to `/dev/zero`, a FIFO, a big file) before it is
-            // read, so it is opened without waiting, checked again on the open handle (a regular file within the limit, really
-            // in the folder resolved above, under this name in any letter case, as case-insensitive volumes report it), and read
-            // through that handle, never more than the limit even if it grows.
+            // Whoever works in the folder can swap the checked file for a link (to `/dev/zero`, a FIFO, a file elsewhere) before it
+            // is read, so it is opened as itself without waiting (a link there is refused, never followed), checked again on the
+            // open handle (a regular file within the limit), and read through that handle, never more than the limit even if it grows.
             use std::io::Read;
-            let file =
-                agora_platform::open_read(&metadata).map_err(|_| invalid("directory.metadata"))?;
-            let opened =
-                agora_platform::opened_path(&file).map_err(|_| invalid("directory.metadata"))?;
-            let named = opened
-                .file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n.eq_ignore_ascii_case(METADATA));
-            let within = opened
-                .parent()
-                .and_then(|p| agora_platform::canonicalize_plain(p).ok())
-                .is_some_and(|p| p == root);
+            let file = agora_platform::open_read_no_follow(&metadata)
+                .map_err(|_| invalid("directory.metadata"))?;
             let meta = file.metadata().map_err(|_| invalid("directory.metadata"))?;
-            if !named || !within || !meta.is_file() || meta.len() > 4096 {
+            if !meta.is_file() || meta.len() > 4096 {
                 return Err(invalid("directory.metadata"));
             }
             let mut bytes = Vec::new();
@@ -839,8 +828,8 @@ mod tests {
     }
 
     /// F981: whoever works in the folder can swap the checked `.agent-project.json` for a link (to a file elsewhere, `/dev/zero`, a
-    /// FIFO) before it is read. The link's target is small and valid, so only the check of where the open file really is refuses
-    /// it: whichever moment the swap hits, the answer never comes from the link.
+    /// FIFO) before it is read. The link's target is a small, valid, regular file, so only opening the name as itself (never
+    /// following a link) refuses it: whichever moment the swap hits, the answer never comes from the link.
     #[cfg(unix)]
     #[test]
     fn project_metadata_swapped_for_a_link_after_its_check_is_never_read() {
