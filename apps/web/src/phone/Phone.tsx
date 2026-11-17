@@ -124,16 +124,17 @@ function NeedsDock({ dock, count, machines, stale, onResolve, onOpen }: { dock: 
   const x = dock.kind === 'answer' ? dock.approval : undefined;
   const id = x?.id;
   const [busy, setBusy] = useState(false);
-  // The request whose dwell has run out: derived from the request shown, so there is no frame where the new one is already ready.
+  // What is shown (a request, or any other kind of item) has a dwell of its own, and every change of what is shown clears it: a request that
+  // comes back after any interlude, even a short one, waits again. Derived from what is shown, so no frame has the new one already ready.
+  const shownKey = `${dock.kind}:${id ?? ''}`;
   const [readyFor, setReadyFor] = useState<string | undefined>();
   useEffect(() => {
-    if (!id) return;
-    const h = setTimeout(() => setReadyFor(id), DOCK_DWELL_MS);
-    return () => clearTimeout(h);
-  }, [id]);
+    const h = setTimeout(() => setReadyFor(shownKey), DOCK_DWELL_MS);
+    return () => { clearTimeout(h); setReadyFor(undefined); };
+  }, [shownKey]);
   const shown = useRef(id);
   shown.current = id;
-  const ready = !!id && readyFor === id;
+  const ready = !!id && readyFor === shownKey;
   const answer = (ok: boolean) => {
     // Only the request on screen, only once its dwell is over, one at a time, never while the link is down.
     if (!x || !onResolve || busy || stale || !ready || shown.current !== x.id) return;

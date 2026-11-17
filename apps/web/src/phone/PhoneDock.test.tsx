@@ -144,6 +144,53 @@ describe('the phone bar for what needs you', () => {
       await act(async () => { done(); });
     });
   });
+  describe('the dwell starts again after any interlude', () => {
+    const A = ask('A');
+    const B = ask('B', { action: 'Run ls', detail: '' });
+    const R = ask('R', { detail: 'x'.repeat(200) });
+    const show = (approvals: ApprovalModel[], onResolve: (a: ApprovalModel, ok: boolean) => unknown) =>
+      act(() => root.render(<PhoneHome agents={[agent]} machines={machines} approvals={approvals} onResolve={onResolve} link="live" onOpen={() => undefined} />));
+    it('A ready, a review item shown for a while, then A again: a tap at once answers nothing, one after the dwell answers A', async () => {
+      const onResolve = vi.fn(async () => undefined);
+      show([A], onResolve);
+      await dwell();
+      show([R, A], onResolve);
+      await dwell(1500);
+      show([A], onResolve);
+      press(dock()!, 'Allow');
+      press(dock()!, 'Deny');
+      expect(onResolve).not.toHaveBeenCalled();
+      await dwell();
+      press(dock()!, 'Allow');
+      expect(onResolve).toHaveBeenCalledTimes(1);
+      expect((onResolve.mock.calls[0] as unknown[])[0]).toBe(A);
+    });
+    it('A, B, A within the dwell: a tap 50 ms after A came back answers nothing', async () => {
+      const onResolve = vi.fn(async () => undefined);
+      show([A], onResolve);
+      await dwell();
+      show([B], onResolve);
+      await dwell(100);
+      show([A], onResolve);
+      await dwell(50);
+      press(dock()!, 'Allow');
+      expect(onResolve).not.toHaveBeenCalled();
+      await dwell();
+      press(dock()!, 'Allow');
+      expect(onResolve).toHaveBeenCalledTimes(1);
+    });
+    it('Deny waits out the dwell too, and after it sends a deny with the id on screen', async () => {
+      const onResolve = vi.fn(async () => undefined);
+      show([A], onResolve);
+      await dwell(DOCK_DWELL_MS - 1);
+      press(dock()!, 'Deny');
+      expect(onResolve).not.toHaveBeenCalled();
+      await dwell(1);
+      press(dock()!, 'Deny');
+      expect(onResolve).toHaveBeenCalledTimes(1);
+      expect(onResolve.mock.calls[0]).toEqual([A, false]);
+    });
+  });
   describe('what a screen reader and the keyboard get', () => {
     it('is a polite status (never an alert), and its reason is inside it', () => {
       home([ask('p1')], { link: 'offline' });
