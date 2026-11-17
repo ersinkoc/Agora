@@ -17,7 +17,7 @@ use agora_node::link_state::{self, LinkState};
 use agora_protocol::v1::{self, command_ok::Result as Ok_, command_request::Command as Cmd};
 use agora_tui::client::{sign_in, Hub, Session, Update};
 
-use crate::hubcli::{enroll_and_save, new_enrollment_code, new_login_code, EnrollFailure};
+use crate::hubcli::{enroll_unless_linked, new_enrollment_code, new_login_code, EnrollFailure};
 use crate::{home, Opts, Say};
 
 pub(crate) const MACHINE_FILE: &str = "machine.toml";
@@ -1136,7 +1136,9 @@ fn up(say: &Say, home: &Path, m: &Machine, resume: Option<bool>) -> Result<(), E
     Ok(())
 }
 
-/// Enrolls this machine's node with this machine's own hub: a one-time code made here and used at once, never shown.
+/// Enrolls this machine's node with this machine's own hub: a one-time code made here and used at once, never shown. Nothing is enrolled
+/// when the link folder got a link since `up` looked (another `agora` started at the same time, audit F1030): the look is made again,
+/// and the enrollment and the save follow it, under the folder's guard.
 fn enroll_self(say: &Say, m: &Machine) -> Result<(), ExitCode> {
     let (Some(url), Ok(ca_pem)) = (
         m.own_hub_url(),
@@ -1146,7 +1148,7 @@ fn enroll_self(say: &Say, m: &Machine) -> Result<(), ExitCode> {
     };
     let code = new_enrollment_code(&m.hub_dir).map_err(|e| failed(say, &e))?;
     let id = node_id_from(agora_platform::hostname());
-    match enroll_and_save(&url, &ca_pem, &code, &id) {
+    match enroll_unless_linked(&url, &ca_pem, &code, &id) {
         Ok(_) => Ok(()),
         Err(EnrollFailure::Refused(code)) | Err(EnrollFailure::Other(code)) => {
             Err(failed(say, &code))

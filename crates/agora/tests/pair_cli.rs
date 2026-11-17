@@ -760,3 +760,69 @@ fn a_link_made_while_the_join_waited_is_kept_unless_the_person_asked_to_replace_
     assert_eq!(id, "same", "{text}");
     assert!(key.contains("PRIVATE KEY"), "{text}");
 }
+
+/// Audit F1032: the join's second look at "already joined" used to come before it took the link folder's guard, so a save that was
+/// under way then (another `agora` enrolling with its own hub, `agora node enroll`) passed it with `node-id` removed; the join waited for
+/// the guard and then overwrote the link that save had just completed, without `--replace`. The order is forced: the test is that
+/// other save. It holds `link/lock` before the owner approves, waits until the join process has the lock file open (it reached the
+/// guard), then completes its link and lets go: the join must see it and keep it. Where the system shows no open files of a process
+/// (no `/proc`), the order cannot be forced and the test has nothing to check.
+#[test]
+fn a_link_saved_while_the_join_waited_for_the_folder_is_kept() {
+    let open_files = |pid: u32| PathBuf::from(format!("/proc/{pid}/fd"));
+    if !open_files(std::process::id()).is_dir() {
+        return;
+    }
+    let root = tmp("guarded");
+    let hub = hub(&root.join("hub"));
+    let owner_home = root.join("owner");
+    std::fs::create_dir_all(&owner_home).unwrap();
+    let machine = root.join("racer");
+    let mut owner = hub.open(&owner_home);
+    let mut m = join(
+        &machine,
+        &format!("localhost:{}", hub.port),
+        &["--id", "racer"],
+    );
+    m.wait_for("Number ");
+    let link = machine.join("link");
+    std::fs::create_dir_all(&link).unwrap();
+    let lock = link.join("lock");
+    let guard = agora_platform::open_lock_private(&lock).unwrap();
+    guard.lock().unwrap();
+    let lock = std::fs::canonicalize(&lock).unwrap();
+    owner.wait_for("wants to join");
+    owner.answer("y\r");
+    let pid = m.child.0.id();
+    let reached_guard = || {
+        std::fs::read_dir(open_files(pid)).is_ok_and(|d| {
+            d.filter_map(Result::ok)
+                .any(|e| std::fs::read_link(e.path()).is_ok_and(|p| p == lock))
+        })
+    };
+    while !reached_guard() {
+        assert!(
+            m.child.0.try_wait().unwrap().is_none(),
+            "the join ended before it reached the folder's guard"
+        );
+        std::thread::yield_now();
+    }
+    for (f, c) in [
+        ("key.pem", "FIRSTKEY"),
+        ("ca.pem", "FIRSTCA"),
+        ("cert.pem", "FIRSTCERT"),
+        ("url", "wss://first:1"),
+        ("node-id", "first"),
+    ] {
+        std::fs::write(link.join(f), c).unwrap();
+    }
+    drop(guard);
+    let (ok, text) = m.finish();
+    let read = |f: &str| std::fs::read_to_string(link.join(f)).unwrap_or_default();
+    assert!(!ok && text.contains("already joined a hub"), "{text}");
+    assert_eq!(
+        (read("node-id").as_str(), read("key.pem").as_str()),
+        ("first", "FIRSTKEY"),
+        "{text}"
+    );
+}

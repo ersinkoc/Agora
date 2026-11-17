@@ -1558,7 +1558,7 @@ pub fn node_enroll(say: &Say, o: &Opts) -> ExitCode {
     }
 }
 
-/// Why [`enroll_and_save`] did not enroll this machine.
+/// Why an enrollment ([`enroll_unless_linked`], [`enroll_and_save_with_devices`]) did not enroll this machine.
 pub(crate) enum EnrollFailure {
     /// The hub refused, with this error code.
     Refused(String),
@@ -1566,17 +1566,50 @@ pub(crate) enum EnrollFailure {
 }
 
 /// Enrolls this machine with the hub at `url` (pinning `ca_pem`) under `id` with a one-time `code`, and keeps what the hub gave it in
-/// the link folder, which it returns.
-pub(crate) fn enroll_and_save(
+/// the link folder, unless the folder already holds a link: then the hub is not asked and this is `Ok(false)`. The look, the enrollment
+/// and the save hold the folder's guard together (audit F1030): two `agora` runs that start together enroll once, the second finding the
+/// link of the first. Without it both enrolled under the same node id, the hub revoked the first certificate when it issued the second,
+/// and the save that came last could keep the revoked one, which `node-id` then kept from ever being enrolled again.
+pub(crate) fn enroll_unless_linked(
     url: &str,
     ca_pem: &str,
     code: &str,
     id: &str,
-) -> Result<PathBuf, EnrollFailure> {
-    enroll_and_save_with_devices(url, ca_pem, code, id).map(|(dir, _)| dir)
+) -> Result<bool, EnrollFailure> {
+    enroll_into(&link_dir(), LINK_GUARD_WAIT, url, id, &|csr| {
+        enroll(url, ca_pem, code, id, csr)
+    })
 }
 
-/// [`enroll_and_save`], also returning the devices the hub registered (ADR-0061: candidates the owner may trust here).
+/// [`enroll_unless_linked`] into `dir`, asking the hub with `enroll` (given the certificate request) and waiting at most `wait` for the
+/// folder's guard.
+fn enroll_into(
+    dir: &Path,
+    wait: std::time::Duration,
+    url: &str,
+    id: &str,
+    enroll: &dyn Fn(&str) -> Result<agora_protocol::v1::EnrollResponse, LinkError>,
+) -> Result<bool, EnrollFailure> {
+    let held = hold_link_within(dir, wait).map_err(|e| EnrollFailure::Other(e.to_string()))?;
+    if held.dir.join("node-id").exists() {
+        return Ok(false);
+    }
+    let (key_pem, csr) =
+        new_device_request().map_err(|_| EnrollFailure::Other("key generation".into()))?;
+    match enroll(&csr) {
+        Ok(r) => {
+            held.store(url, id, &r.ca_pem, &r.cert_pem, &key_pem)
+                .map_err(|e| EnrollFailure::Other(e.to_string()))?;
+            Ok(true)
+        }
+        Err(LinkError::Refused(code)) => Err(EnrollFailure::Refused(code)),
+        Err(e) => Err(EnrollFailure::Other(format!("{e:?}"))),
+    }
+}
+
+/// Enrolls this machine with the hub at `url` (pinning `ca_pem`) under `id` with a one-time `code`, keeps what the hub gave it in the
+/// link folder (replacing any link there: `agora node enroll` is asked for by name), and returns the folder and the devices the hub
+/// registered (ADR-0061: candidates the owner may trust here).
 pub(crate) fn enroll_and_save_with_devices(
     url: &str,
     ca_pem: &str,
@@ -1622,13 +1655,19 @@ pub(crate) fn store_link(
 /// runs enrolling at once, `agora join --replace` beside them) never mix their files: one save ends whole before the other starts.
 fn store_into(
     dir: &Path,
+    files: [&str; 5],
+    write: &dyn Fn(&Path, &[u8]) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let held = hold_link_within(dir, LINK_GUARD_WAIT)?;
+    write_link(&held.dir, files, write)
+}
+
+/// The writes of [`store_into`], in its order, into `dir`, whose guard the caller holds.
+fn write_link(
+    dir: &Path,
     [url, id, ca_pem, cert_pem, key_pem]: [&str; 5],
     write: &dyn Fn(&Path, &[u8]) -> std::io::Result<()>,
 ) -> std::io::Result<()> {
-    std::fs::create_dir_all(dir)?;
-    // Resolved once: the guard and every write name the same folder, also when `link` is a link that is pointed elsewhere meanwhile.
-    let dir = &std::fs::canonicalize(dir)?;
-    let _guard = link_guard(dir, LINK_GUARD_WAIT)?;
     match std::fs::remove_file(dir.join("node-id")) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -1639,6 +1678,50 @@ fn store_into(
     write(&dir.join("cert.pem"), cert_pem.as_bytes())?;
     write(&dir.join("url"), url.as_bytes())?;
     write(&dir.join("node-id"), id.as_bytes())
+}
+
+/// The link folder, made if missing and resolved once, with its guard ([`link_guard`]) held until this is dropped: what is looked at in
+/// it and saved into it meanwhile is never changed by another save, and a look and the save it decides are one step (audit F1030,
+/// F1032). Whoever holds it saves with [`HeldLink::store`], never [`store_link`], which would wait for this same guard.
+pub(crate) struct HeldLink {
+    dir: PathBuf,
+    _guard: std::fs::File,
+}
+
+impl HeldLink {
+    /// The resolved folder.
+    pub(crate) fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    /// [`store_link`] under this guard.
+    pub(crate) fn store(
+        &self,
+        url: &str,
+        id: &str,
+        ca_pem: &str,
+        cert_pem: &str,
+        key_pem: &str,
+    ) -> std::io::Result<()> {
+        write_link(
+            &self.dir,
+            [url, id, ca_pem, cert_pem, key_pem],
+            &agora_platform::write_private,
+        )
+    }
+}
+
+/// Holds the guard of the link folder `dir` (waiting as a save does); see [`HeldLink`].
+pub(crate) fn hold_link(dir: &Path) -> std::io::Result<HeldLink> {
+    hold_link_within(dir, LINK_GUARD_WAIT)
+}
+
+fn hold_link_within(dir: &Path, wait: std::time::Duration) -> std::io::Result<HeldLink> {
+    std::fs::create_dir_all(dir)?;
+    // Resolved once: the guard and every write name the same folder, also when `link` is a link that is pointed elsewhere meanwhile.
+    let dir = std::fs::canonicalize(dir)?;
+    let guard = link_guard(&dir, wait)?;
+    Ok(HeldLink { dir, _guard: guard })
 }
 
 /// How long a save of the link folder waits for another save to end (audit F1000). A save takes milliseconds, so this is reached only
@@ -1829,12 +1912,114 @@ mod store_tests {
         );
         let _ = std::fs::remove_dir_all(dir);
     }
+
+    fn answer(cert: &str) -> agora_protocol::v1::EnrollResponse {
+        agora_protocol::v1::EnrollResponse {
+            cert_pem: cert.into(),
+            ca_pem: "CA".into(),
+            ..Default::default()
+        }
+    }
+
+    /// Audit F1030: two `agora` runs that start together on a machine with no link used to both pass `up`'s look at `node-id` and both
+    /// enroll under the same node id; the hub revokes the first certificate when it issues the second, and the save that came last
+    /// could keep the revoked one. The order is forced: a second run starts while the first is asking the hub. It is kept out by the
+    /// guard (told not to wait, it fails and asks nothing); a run after the first finds the link and asks nothing either.
+    #[test]
+    fn two_runs_enrolling_at_once_ask_the_hub_once() {
+        let dir = tmp("enroll-once");
+        let second = std::cell::RefCell::new(None);
+        let first = enroll_into(&dir, LINK_GUARD_WAIT, "wss://h:1", "me", &|_| {
+            let asked = Cell::new(false);
+            let r = enroll_into(&dir, std::time::Duration::ZERO, "wss://h:1", "me", &|_| {
+                asked.set(true);
+                Ok(answer("CERT-2"))
+            });
+            *second.borrow_mut() = Some((matches!(r, Err(EnrollFailure::Other(_))), asked.get()));
+            Ok(answer("CERT-1"))
+        });
+        assert!(matches!(first, Ok(true)));
+        assert_eq!(*second.borrow(), Some((true, false)));
+        let later = enroll_into(&dir, LINK_GUARD_WAIT, "wss://h:1", "me", &|_| {
+            panic!("a machine with a link asked the hub again")
+        });
+        assert!(matches!(later, Ok(false)));
+        assert_eq!(std::fs::read_to_string(dir.join("node-id")).unwrap(), "me");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("cert.pem")).unwrap(),
+            "CERT-1"
+        );
+        // A refusal saves nothing and leaves the guard free for the next run.
+        let refused = tmp("enroll-refused");
+        let r = enroll_into(&refused, LINK_GUARD_WAIT, "wss://h:1", "me", &|_| {
+            Err(LinkError::Refused("enroll.bad_code".into()))
+        });
+        assert!(matches!(r, Err(EnrollFailure::Refused(c)) if c == "enroll.bad_code"));
+        assert!(!refused.join("node-id").exists());
+        assert!(hold_link_within(&refused, std::time::Duration::ZERO).is_ok());
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(refused);
+    }
+
+    /// Audit F1031: the node's start read the five files one by one with no guard, so a save between two reads (`agora join
+    /// --replace` while the node starts) gave it one link's `node-id` and another's key and certificate. The order is forced: right
+    /// after `node-id` is read, a save tries to start. It is kept out until the read is over (told not to wait, it fails), and what
+    /// was read is one link.
+    #[test]
+    fn a_read_of_the_link_never_sees_half_a_save() {
+        let dir = tmp("read-whole");
+        store_into(&dir, NEW, &agora_platform::write_private).unwrap();
+        let other = ["wss://o:1", "other", "OTHERCA", "OTHERCERT", "OTHERKEY"];
+        let save = std::cell::RefCell::new(None);
+        let got = load_from(&dir, PathBuf::from("socket"), &|p| {
+            let text = std::fs::read_to_string(p);
+            if p.file_name().is_some_and(|n| n == "node-id") && save.borrow().is_none() {
+                let r = hold_link_within(&dir, std::time::Duration::ZERO)
+                    .and_then(|h| write_link(&h.dir, other, &agora_platform::write_private));
+                *save.borrow_mut() = Some(r.map_err(|e| e.kind()));
+            }
+            text
+        })
+        .unwrap();
+        assert_eq!(*save.borrow(), Some(Err(std::io::ErrorKind::TimedOut)));
+        assert_eq!(
+            (got.0.as_str(), got.1.url.as_str(), got.1.ca_pem.as_str()),
+            ("new", "wss://h:1", "NEWCA")
+        );
+        assert_eq!(
+            (got.1.cert_pem.as_str(), got.1.key_pem.as_str()),
+            ("NEWCERT", "NEWKEY")
+        );
+        // The guard is free once the read is over.
+        assert!(hold_link_within(&dir, std::time::Duration::ZERO).is_ok());
+        // No folder: nothing, and reading makes none.
+        let missing = tmp("read-missing");
+        assert!(load_from(&missing, PathBuf::from("socket"), &|p| {
+            std::fs::read_to_string(p)
+        })
+        .is_none());
+        assert!(!missing.exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
 
 /// What enrollment left on this machine, if anything: the node id and how to dial the hub.
 pub fn load_link(socket: PathBuf) -> Option<(String, HubLink)> {
-    let dir = link_dir();
-    let read = |n: &str| std::fs::read_to_string(dir.join(n)).ok();
+    load_from(&link_dir(), socket, &|p| std::fs::read_to_string(p))
+}
+
+/// [`load_link`] from `dir`, reading each file with `read`. The five files are read under the folder's guard (audit F1031): a save that
+/// runs meanwhile (`agora join --replace`, an `agora` enrolling while the node starts) is seen whole or not at all, never one link's
+/// `node-id` with another's key and certificate. Where the guard cannot be had (no folder, one this user cannot write in, a holder past
+/// the wait) the files are read as before: whoever holds the guard while it saves has removed `node-id` first, so that read finds no
+/// link.
+fn load_from(
+    dir: &Path,
+    socket: PathBuf,
+    read: &dyn Fn(&Path) -> std::io::Result<String>,
+) -> Option<(String, HubLink)> {
+    let _guard = link_guard(dir, LINK_GUARD_WAIT).ok();
+    let read = |n: &str| read(&dir.join(n)).ok();
     let id = read("node-id")?.trim().to_string();
     Some((
         id,
