@@ -1792,7 +1792,7 @@ where
 /// [`serve_unauthenticated`] for a connection whose TLS layer also knows where it came from and its pairing exporter (TLS 1.3 only):
 /// only such a connection can pair (ADR-0065).
 pub async fn serve_unauthenticated_with<S>(
-    mut conn: Conn<S>,
+    conn: Conn<S>,
     token: Option<&str>,
     state: &ServerState,
     pairing: Option<crate::pairing_net::PairPeer>,
@@ -1800,7 +1800,26 @@ pub async fn serve_unauthenticated_with<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let Some(first) = conn.recv().await? else {
+    serve_unauthenticated_within(conn, token, state, pairing, NODE_SILENCE).await
+}
+
+/// [`serve_unauthenticated_with`] where the first frame must arrive within `first_frame`: a peer that says nothing is dropped as a
+/// silent node is (ADR-0070, audit F880).
+async fn serve_unauthenticated_within<S>(
+    mut conn: Conn<S>,
+    token: Option<&str>,
+    state: &ServerState,
+    pairing: Option<crate::pairing_net::PairPeer>,
+    first_frame: Duration,
+) -> Result<(), ServeError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let first = match tokio::time::timeout(first_frame, conn.recv()).await {
+        Ok(r) => r?,
+        Err(_) => return Err(ServeError::Silent),
+    };
+    let Some(first) = first else {
         return Ok(());
     };
     match (first.stream_id, first.kind) {
@@ -1863,19 +1882,32 @@ async fn handle(
     tls: Option<tokio_rustls::TlsAcceptor>,
     leaf_hash: Option<[u8; 32]>,
 ) -> Result<(), ServeError> {
+    handle_within(state, tcp, tls, leaf_hash, NODE_SILENCE).await
+}
+
+/// [`handle`] where each step of opening a connection (the TLS handshake, the request head, the WebSocket upgrade, an
+/// unauthenticated peer's first frame) must be done within `opening`; a peer that stalls in any of them is dropped as a silent
+/// node is (ADR-0070, audit F880). The conversation after that keeps its own deadlines.
+async fn handle_within(
+    state: &ServerState,
+    tcp: tokio::net::TcpStream,
+    tls: Option<tokio_rustls::TlsAcceptor>,
+    leaf_hash: Option<[u8; 32]>,
+    opening: Duration,
+) -> Result<(), ServeError> {
     // Who is on the other end: a sign-in from another machine needs the screen password (ADR-0067), the hub's own does not.
     let peer = tcp.peer_addr().ok().map(|a| a.ip());
     let Some(acceptor) = tls else {
         // Without TLS nothing can prove it is a node: only the token path exists (development and tests).
-        let Some(tcp) = websocket_only(tcp, peer, state).await? else {
+        let Some(tcp) = websocket_only(tcp, peer, state, opening).await? else {
             return Ok(());
         };
-        let (conn, token) = agora_protocol::ws::accept_with_token(tcp).await?;
-        return serve_unauthenticated(conn, token.as_deref(), state).await;
+        let (conn, token) = upgrade(tcp, opening).await?;
+        return serve_unauthenticated_within(conn, token.as_deref(), state, None, opening).await;
     };
-    let stream = acceptor
-        .accept(tcp)
+    let stream = tokio::time::timeout(opening, acceptor.accept(tcp))
         .await
+        .map_err(|_| ServeError::Silent)?
         .map_err(|e| ServeError::Transport(TransportError::Ws(e.to_string())))?;
     let identity = crate::tls::identity(stream.get_ref().1.peer_certificates());
     // ADR-0065: a pairing machine presents no certificate; what binds its number to this TLS session is read here.
@@ -1889,10 +1921,10 @@ async fn handle(
         }),
         _ => None,
     };
-    let Some(stream) = websocket_only(stream, peer, state).await? else {
+    let Some(stream) = websocket_only(stream, peer, state, opening).await? else {
         return Ok(());
     };
-    let (conn, token) = agora_protocol::ws::accept_with_token(stream).await?;
+    let (conn, token) = upgrade(stream, opening).await?;
     match identity {
         Some(id) => {
             let active = Enrollment::new(state.hub.store())
@@ -1940,8 +1972,19 @@ async fn handle(
             )
             .await
         }
-        None => serve_unauthenticated_with(conn, token.as_deref(), state, pairing).await,
+        None => serve_unauthenticated_within(conn, token.as_deref(), state, pairing, opening).await,
     }
+}
+
+/// The WebSocket upgrade of `stream`, done within `opening` (audit F880).
+async fn upgrade<S>(stream: S, opening: Duration) -> Result<(Conn<S>, Option<String>), ServeError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    tokio::time::timeout(opening, agora_protocol::ws::accept_with_token(stream))
+        .await
+        .map_err(|_| ServeError::Silent)?
+        .map_err(ServeError::from)
 }
 
 /// How often a live connection is checked against its credential (10 s; `AGORA_RECHECK_MS` shortens it for tests).
@@ -1967,15 +2010,17 @@ async fn websocket_only<S>(
     stream: S,
     peer: Option<std::net::IpAddr>,
     state: &ServerState,
+    read: Duration,
 ) -> Result<Option<crate::web::Rewind<S>>, ServeError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    match crate::web::route(
+    match crate::web::route_within(
         stream,
         peer,
         state.assets.as_deref(),
         state.sessions.as_deref(),
+        read,
     )
     .await
     .map_err(|e| ServeError::Transport(TransportError::Ws(e.to_string())))?
@@ -2104,5 +2149,115 @@ mod audit_cleanup_tests {
         assert_eq!(audit.outcome(newer_id).as_deref(), Some("ok"));
         assert_eq!(audit.outcome(older_id).as_deref(), Some("node.timeout"));
         Ok(())
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod opening_tests {
+    use super::*;
+    use agora_protocol::frame::{kinds, STREAM_EVENTS};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+
+    const OPENING: Duration = Duration::from_millis(300);
+    const BOUND: Duration = Duration::from_secs(5);
+
+    struct Tokens;
+    impl ClientAuth for Tokens {
+        fn check(&self, token: &str) -> bool {
+            token == "good-token"
+        }
+    }
+
+    async fn serve() -> std::net::SocketAddr {
+        let state = Arc::new(ServerState {
+            hub: Arc::new(
+                crate::hub::Hub::open(crate::store::SqliteStore::open_in_memory().unwrap())
+                    .unwrap(),
+            ),
+            support: Support {
+                generations: vec![1],
+                capabilities: vec![],
+                required: vec![],
+            },
+            ca: None,
+            lockout: Arc::new(crate::enroll::Lockout::new()),
+            auth: Box::new(Tokens),
+            assets: None,
+            sessions: None,
+        });
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((tcp, _)) = l.accept().await {
+                let st = Arc::clone(&state);
+                tokio::spawn(async move {
+                    let _ = handle_within(&st, tcp, None, None, OPENING).await;
+                });
+            }
+        });
+        addr
+    }
+
+    async fn ended(mut s: TcpStream) -> bool {
+        let mut buf = [0u8; 64];
+        matches!(
+            tokio::time::timeout(BOUND, s.read(&mut buf)).await,
+            Ok(Ok(0)) | Ok(Err(_))
+        )
+    }
+
+    /// Audit F880: a peer that opens a connection and then says nothing, or drips its request head a byte at a time, was held
+    /// with no deadline; now each step of the opening has one. A client that is prompt keeps its conversation past it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_stalled_opening_is_dropped_and_a_prompt_client_is_kept() {
+        let addr = serve().await;
+        assert!(ended(TcpStream::connect(addr).await.unwrap()).await);
+        let s = TcpStream::connect(addr).await.unwrap();
+        let mut ws = agora_protocol::ws::connect(s, &format!("ws://{addr}/"))
+            .await
+            .unwrap();
+        assert!(matches!(
+            tokio::time::timeout(BOUND, ws.recv()).await,
+            Ok(Ok(None)) | Ok(Err(_))
+        ));
+        let (mut r, mut w) = TcpStream::connect(addr).await.unwrap().into_split();
+        let drip = tokio::spawn(async move {
+            for byte in
+                b"GET / HTTP/1.1\r\nHost: a-name-long-enough-to-outlast-the-deadline-xxxxxxxx"
+            {
+                if w.write_all(&[*byte]).await.is_err() {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        });
+        let mut buf = [0u8; 64];
+        assert!(matches!(
+            tokio::time::timeout(BOUND, r.read(&mut buf)).await,
+            Ok(Ok(0)) | Ok(Err(_))
+        ));
+        assert!(!drip.is_finished());
+        drip.abort();
+
+        let s = TcpStream::connect(addr).await.unwrap();
+        let mut good =
+            agora_protocol::ws::connect_with_token(s, &format!("ws://{addr}/"), "good-token")
+                .await
+                .unwrap();
+        good.send(&agora_protocol::Frame {
+            stream_id: STREAM_EVENTS,
+            kind: kinds::SUBSCRIBE,
+            seq: None,
+            payload: v1::Subscribe::default().encode_to_vec(),
+        })
+        .await
+        .unwrap();
+        let snap = tokio::time::timeout(BOUND, good.recv()).await;
+        assert!(matches!(snap, Ok(Ok(Some(f))) if f.kind == kinds::SNAPSHOT));
+        assert!(tokio::time::timeout(OPENING * 4, good.recv())
+            .await
+            .is_err());
     }
 }
