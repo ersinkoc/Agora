@@ -149,13 +149,14 @@ and on Unix starts a terminal agent in the held folder itself, so it does not st
 A later start of the same agent does not follow one either: a restart after a crash holds the folder again by the path its first
 start held it at (F1020), and a resume (ADR-0060, by a person or the node itself) holds it from before its check (F1021); a path
 that no longer leads to a folder there refuses that start. An adapter agent's restart and resume (F1023) are checked as its first
-start is: right before the adapter process starts and again once its session is open; an adapter refused after it started is
-ended with the processes below it, without the supervisor waiting on them. On Linux the confinement's rules for the folder and for
+start is: right before the adapter process is made and again once its session is open; an adapter refused after it started is
+ended with the processes found below it (Unix), without the supervisor waiting on them. On Linux the confinement's rules for the folder and for
 anything below it are made from the held folder, not from its path, whichever spelling of the folder the start was given (F1022),
 and the folder is held as a place only (`O_PATH`), so a folder the user may enter but not list can be held and started in.
 Residual: on Windows the agent is started by the path (the handle, held without delete sharing, keeps the folder from being
 renamed); an adapter agent is started, and given its folder, by path (its process is not started in the held folder, which would
-need a change in `agora-adapters`), and a separate worktree is made from the checkout by path, each checked before and after, so
+need a change in `agora-adapters`, as would a check after its confinement is made, and ending a process below it that left its
+tree or runs on Windows, where an adapter has no process group or job of its own), and a separate worktree is made from the checkout by path, each checked before and after, so
 a swap made and undone between those two checks is not detected; an adapter's confinement rules (all systems) and a terminal
 agent's on macOS and Windows are made from the path, so a swap undone within the start is not detected for them. The folder's
 project identity is read by path (`directory::inspect`), between the hold and the last check: a directory (not a link) put at the

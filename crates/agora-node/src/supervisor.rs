@@ -2733,15 +2733,16 @@ fn launch_adapter(
 fn discard_adapter(adapter: Adapter) {
     // Unix: every process found below the adapter, each only while it is still the process that was found (ADR-0060). Elsewhere the
     // adapter alone is ended, as by any stop.
-    let below: Vec<agora_platform::ProcessIdentity> = agora_platform::process_tree(adapter.pid())
-        .map(|tree| {
-            tree.iter()
-                .skip(1)
-                .filter_map(|p| agora_platform::process_identity(p.pid).ok())
-                .collect()
-        })
-        .unwrap_or_default();
-    for p in &below {
+    let tree = |root| agora_platform::process_tree(root).unwrap_or_default();
+    let below: Vec<agora_platform::ProcessIdentity> = tree(adapter.pid())
+        .iter()
+        .skip(1)
+        .filter_map(|p| agora_platform::process_identity(p.pid).ok())
+        .collect();
+    // A pid given to another process between the walk and its identity is not below the adapter in a second walk: only processes
+    // found below it again, still the same process, are ended.
+    let again: std::collections::HashSet<u32> = tree(adapter.pid()).iter().map(|p| p.pid).collect();
+    for p in below.iter().filter(|p| again.contains(&p.pid)) {
         let _ = agora_platform::kill_process_if_same(p);
     }
     // When no thread can be started the adapter is ended here, as before.

@@ -183,10 +183,13 @@ pub(crate) fn ruleset(
     for (paths, rights) in [(&sb.read, READ_FS), (&sb.write, all)] {
         for p in paths {
             let below = folder.and_then(|h| {
+                // The most specific spelling: one that lies inside the held folder (a link there) is resolved by the hold, never
+                // opened again below the folder.
                 let rel = [Some(h.path.as_path()), spelled]
                     .into_iter()
                     .flatten()
-                    .find_map(|at| p.strip_prefix(at).ok())?;
+                    .filter_map(|at| p.strip_prefix(at).ok())
+                    .min_by_key(|rel| rel.components().count())?;
                 Some((h, rel))
             });
             let opened = match below {
@@ -1695,6 +1698,24 @@ mod held_folder_rule_tests {
             assert!(writes(&write, &own.join("sub/f")), "{write:?}");
             assert!(!writes(&write, &other.join("sub/f")), "{write:?}");
         }
+        // A spelling inside the held folder (a link there to the folder itself), retargeted while the rules are made: entries below
+        // it are the held folder's, not what the link leads to by then.
+        let inner = own.join("self");
+        std::os::unix::fs::symlink(&own, &inner).unwrap();
+        let held = crate::HeldFolder::open(&own).unwrap();
+        std::fs::remove_file(&inner).unwrap();
+        std::os::unix::fs::symlink(&other, &inner).unwrap();
+        let sb = crate::Sandbox::new(system.clone(), vec![inner.join("sub")]);
+        let rules = super::ruleset(&sb, Some(&held), Some(&inner)).unwrap();
+        let mut cmd = std::process::Command::new("/bin/sh");
+        cmd.args(["-c", "echo x > \"$1\" && echo x > \"$2\"", "sh"])
+            .arg(own.join("sub/f"))
+            .arg(other.join("sub/f"));
+        // SAFETY: the closure only applies a ruleset made before the fork (async-signal-safe calls).
+        unsafe { cmd.pre_exec(move || rules.enforce()) };
+        assert!(!cmd.status().unwrap().success());
+        assert!(own.join("sub/f").exists(), "the held folder's own rule");
+        assert!(!other.join("sub/f").exists(), "the retargeted link's rule");
         let _ = std::fs::remove_dir_all(base);
     }
 
