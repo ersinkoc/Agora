@@ -2069,8 +2069,8 @@ mod store_tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    /// Codex re-review of F1031: a link folder that is there but cannot be resolved is an error, not "no link" (the node would start
-    /// unlinked). Here the path goes through a file, which no system resolves as a folder.
+    /// Codex re-review of F1031: a link folder that is there but cannot be resolved or entered is an error, not "no link" (the node would
+    /// start unlinked). Here: a path through a file, a link to a missing folder, and a folder this user may not enter.
     #[cfg(unix)]
     #[test]
     fn a_folder_that_cannot_be_resolved_is_an_error_not_no_link() {
@@ -2084,6 +2084,26 @@ mod store_tests {
             &|p| std::fs::read_to_string(p),
         );
         assert!(got.is_err_and(|e| e.kind() != std::io::ErrorKind::TimedOut));
+        // A link folder that is a link to something missing (a volume not mounted): an error too.
+        let dangling = base.join("dangling");
+        std::os::unix::fs::symlink(base.join("unmounted"), &dangling).unwrap();
+        let got = load_from(&dangling, LINK_GUARD_WAIT, PathBuf::from("socket"), &|p| {
+            std::fs::read_to_string(p)
+        });
+        assert!(got.is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound));
+        // A link folder this user may not enter: an error, not "no link" (unless the system lets this user in anyway, as for root).
+        let shut = base.join("shut");
+        store_into(&shut, LINK_GUARD_WAIT, NEW, &agora_platform::write_private).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let entered = std::fs::read_to_string(shut.join("node-id")).is_ok();
+        let got = load_from(&shut, LINK_GUARD_WAIT, PathBuf::from("socket"), &|p| {
+            std::fs::read_to_string(p)
+        });
+        std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o700)).unwrap();
+        if !entered {
+            assert!(got.is_err_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied));
+        }
         let _ = std::fs::remove_dir_all(base);
     }
 
@@ -2207,27 +2227,50 @@ fn load_from(
         // No folder: nothing is read, and reading makes none. Never read by the path given instead: a folder made after this look could
         // be mid-save (Codex re-review of F1031). A folder that is there but cannot be resolved is an error, not "no link": the node
         // must not start as an unlinked one.
+        // A link folder that is itself a link to something missing (a volume that is not mounted) is there: an error too.
+        Err(e)
+            if e.kind() == std::io::ErrorKind::NotFound
+                && std::fs::symlink_metadata(dir).is_ok() =>
+        {
+            return Err(e)
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e),
     };
-    Ok(link_files(&dir, socket, read))
+    link_files(&dir, socket, read)
 }
 
-/// The five files of the link folder `dir`, if `node-id` and the others are all there.
+/// The five files of the link folder `dir`, if `node-id` and the others are all there. A file that is not there is no link (a save
+/// that stopped part way leaves no `node-id`, audit F1000); any other failure to read one (a folder this user may not enter) is an
+/// error, not "no link" (Codex re-review of F1031).
 fn link_files(
     dir: &Path,
     socket: PathBuf,
     read: &dyn Fn(&Path) -> std::io::Result<String>,
-) -> Option<(String, HubLink)> {
-    let read = |n: &str| read(&dir.join(n)).ok();
-    let id = read("node-id")?.trim().to_string();
-    Some((
-        id,
+) -> std::io::Result<Option<(String, HubLink)>> {
+    let read = |n: &str| match read(&dir.join(n)) {
+        Ok(text) => Ok(Some(text)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    };
+    let Some(id) = read("node-id")? else {
+        return Ok(None);
+    };
+    let (Some(url), Some(ca_pem), Some(cert_pem), Some(key_pem)) = (
+        read("url")?,
+        read("ca.pem")?,
+        read("cert.pem")?,
+        read("key.pem")?,
+    ) else {
+        return Ok(None);
+    };
+    Ok(Some((
+        id.trim().to_string(),
         HubLink {
-            url: read("url")?.trim().to_string(),
-            ca_pem: read("ca.pem")?,
-            cert_pem: read("cert.pem")?,
-            key_pem: read("key.pem")?,
+            url: url.trim().to_string(),
+            ca_pem,
+            cert_pem,
+            key_pem,
             commands: Some(socket),
             mesh_out: None,
             grants: None,
@@ -2235,7 +2278,7 @@ fn link_files(
             devices: None,
             state_dir: None,
         },
-    ))
+    )))
 }
 
 #[cfg(test)]
