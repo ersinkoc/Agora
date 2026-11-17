@@ -53,6 +53,9 @@ pub enum Outcome {
         ask_id: String,
         deadline_ms: u64,
     },
+    /// The client gave up on its request `request_id` (`notifications/cancelled`) and will not read an answer. Nothing is sent:
+    /// a call of it still waiting (an `ask`, or the node's `agent_start` or `agent_wait`) is discarded as when the transport ends.
+    Cancelled { request_id: Value },
 }
 
 pub struct McpConnection {
@@ -314,7 +317,18 @@ impl McpConnection {
             return Outcome::Silent;
         };
         let Message::Request { id, method, params } = msg else {
-            // Notifications (`notifications/initialized`, `notifications/cancelled`) and stray responses.
+            if let Message::Notification { method, params } = &msg {
+                if let Some(id) = (method == "notifications/cancelled")
+                    .then(|| params.get("requestId"))
+                    .flatten()
+                    .filter(|id| id.is_string() || id.is_number())
+                {
+                    return Outcome::Cancelled {
+                        request_id: id.clone(),
+                    };
+                }
+            }
+            // Other notifications (`notifications/initialized`) and stray responses.
             return Outcome::Silent;
         };
         match method.as_str() {
@@ -1000,5 +1014,35 @@ mod tests {
         let all = format!("{rows}{st}");
         assert!(!all.contains("SECRET"), "{all}");
         assert!(!all.contains('\u{202e}') && !all.contains('\u{7}'));
+    }
+
+    /// F1040: `notifications/cancelled` names the request the client gave up on, so the transport can drop a waiting call;
+    /// one without a usable `requestId` is an ordinary notification.
+    #[test]
+    fn a_cancellation_names_the_request_it_cancels() {
+        let (mut m, mut c, _) = setup();
+        for (id, line) in [
+            (
+                json!(7),
+                r#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":7,"reason":"x"}}"#,
+            ),
+            (
+                json!("r-1"),
+                r#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"r-1"}}"#,
+            ),
+        ] {
+            assert_eq!(
+                c.handle(line, &mut m, 0),
+                Outcome::Cancelled { request_id: id }
+            );
+        }
+        for line in [
+            r#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{}}"#,
+            r#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":null}}"#,
+            r#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":[1]}}"#,
+            r#"{"jsonrpc":"2.0","method":"notifications/progress","params":{"requestId":7}}"#,
+        ] {
+            assert_eq!(c.handle(line, &mut m, 0), Outcome::Silent, "{line}");
+        }
     }
 }
