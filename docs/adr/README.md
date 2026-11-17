@@ -104,3 +104,4 @@ Date: YYYY-MM-DD
 | 0084 | A confined agent gets its login from a secret the node holds | Accepted |
 | 0085 | Machine and hub certificates renew themselves | Proposed |
 | 0086 | Any machine can be the hub: one authoritative hub with takeover | Proposed |
+| 0087 | Install and update coding agents on a machine from the window | Proposed |
