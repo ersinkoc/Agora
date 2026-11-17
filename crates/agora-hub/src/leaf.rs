@@ -159,8 +159,10 @@ fn wanted(
 
 impl Provision for Leaf {
     fn provision(&self) -> Result<[u8; 32], NamesFailure> {
-        let names = wanted(&self.configured, &self.host, self.listen, &self.interfaces)?;
+        // The names are worked out under the lock, so the leaf that is issued last is the one made from the last listing: two opens at
+        // once around an address change cannot leave the older listing in place (F931).
         let mut cur = self.lock();
+        let names = wanted(&self.configured, &self.host, self.listen, &self.interfaces)?;
         if covers(&cur.names, &names) {
             return Ok(cur.hash);
         }
@@ -182,5 +184,71 @@ impl Provision for Leaf {
         self.slot.set(acceptor, hash);
         *cur = Current { names, hash };
         Ok(hash)
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use std::sync::{mpsc, Arc};
+
+    /// F931: two `PairOpen`s at once around an address change. Open #1 lists the old address and is held inside its listing; the
+    /// address changes; open #2 starts. #1 is let go once #2 has finished or after a bounded wait (on this code #2 waits for #1's lock,
+    /// so the wait runs out); the wait only decides when #1 is let go, the verdict is the leaf left in place: it must name the new address.
+    #[test]
+    fn two_opens_at_once_around_an_address_change_leave_the_new_address_named() {
+        let addr = Arc::new(Mutex::new("10.0.0.1"));
+        let (listed_tx, listed_rx) = mpsc::channel::<()>();
+        let (go_tx, go_rx) = mpsc::channel::<()>();
+        let gate = Arc::new(Mutex::new(Some((listed_tx, go_rx))));
+        let (a, g) = (Arc::clone(&addr), Arc::clone(&gate));
+        let (leaf, _) = Leaf::start(
+            Ca::generate("ca").unwrap(),
+            vec![],
+            "0.0.0.0".parse().unwrap(),
+            Box::new(|| None),
+            Box::new(move || {
+                let now = *a.lock().unwrap();
+                if std::thread::current().name() == Some("first") {
+                    if let Some((listed, go)) = g.lock().unwrap().take() {
+                        listed.send(()).unwrap();
+                        go.recv().unwrap();
+                    }
+                }
+                Ok(vec![Iface {
+                    ip: now.parse().unwrap(),
+                    up: true,
+                    loopback: false,
+                    transient: false,
+                }])
+            }),
+            None,
+        )
+        .unwrap();
+        let leaf = Arc::new(leaf);
+        let l1 = Arc::clone(&leaf);
+        let first = std::thread::Builder::new()
+            .name("first".into())
+            .spawn(move || l1.provision())
+            .unwrap();
+        listed_rx.recv().unwrap();
+        *addr.lock().unwrap() = "10.0.0.2";
+        let (done_tx, done_rx) = mpsc::channel();
+        let l2 = Arc::clone(&leaf);
+        let second = std::thread::spawn(move || {
+            let r = l2.provision();
+            let _ = done_tx.send(());
+            r
+        });
+        let _ = done_rx.recv_timeout(std::time::Duration::from_secs(1));
+        go_tx.send(()).unwrap();
+        assert!(first.join().unwrap().is_ok());
+        assert!(second.join().unwrap().is_ok());
+        assert!(
+            leaf.names().contains(&"10.0.0.2".to_string()),
+            "{:?}",
+            leaf.names()
+        );
     }
 }

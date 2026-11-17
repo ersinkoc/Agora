@@ -96,6 +96,8 @@ pub fn select(
     listen: IpAddr,
     interfaces: &[Iface],
 ) -> Result<Names, NamesError> {
+    // An IPv4-mapped listen address (`::ffff:a.b.c.d`) serves the IPv4 address it stands for, and that is what a machine dials (F930).
+    let listen = listen.to_canonical();
     let mut owner: Vec<String> = Vec::new();
     for n in configured {
         let c = canonical(n).ok_or_else(|| NamesError::Invalid(n.clone()))?;
@@ -316,6 +318,13 @@ mod tests {
                 .all[0],
             "2001:db8::1"
         );
+    }
+
+    #[test]
+    fn a_mapped_listen_address_names_the_ipv4_address_it_serves() {
+        // F930: `--listen [::ffff:192.168.1.5]:8443` accepts IPv4 connections to 192.168.1.5; that is what a machine dials.
+        let n = select(&[], None, ip("::ffff:192.168.1.5"), &[up("10.0.0.7")]).unwrap();
+        assert_eq!(n.all, ["localhost", "192.168.1.5"]);
     }
 
     #[test]
