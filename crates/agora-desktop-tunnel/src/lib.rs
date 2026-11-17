@@ -30,6 +30,10 @@ const MAX_HEAD: usize = 16 * 1024;
 const MISDIRECTED: &[u8] =
     b"HTTP/1.1 421 Misdirected Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
 
+/// How long the tunnel waits after a failed accept before it accepts again. The wait keeps a listener that stays ready (a
+/// connection still queued while no file handle is free) from turning the loop into a busy one.
+const ACCEPT_RETRY: Duration = Duration::from_millis(100);
+
 /// Reads from `s` until the end of the first request's head (the blank line), at most [`MAX_HEAD`] bytes. Returns everything read,
 /// which can run past the head (the start of a body, a pipelined request), and the head's length; `None` when the connection
 /// closes, fails, or sends no head within the limit.
@@ -149,12 +153,19 @@ pub enum TunnelError {
     Untrusted,
 }
 
+/// The one certificate in the CA text. A hub's CA is a single certificate (ADR-0015); text with more than one is refused, since the
+/// fingerprint the user compares names one certificate, and the tunnel must trust exactly the one it names.
+fn the_ca(ca_pem: &str) -> Result<CertificateDer<'static>, TunnelError> {
+    let mut certs = CertificateDer::pem_slice_iter(ca_pem.as_bytes());
+    match (certs.next(), certs.next()) {
+        (Some(Ok(der)), None) => Ok(der),
+        _ => Err(TunnelError::BadCa),
+    }
+}
+
 /// The SHA-256 of the CA's certificate, as upper-case hex pairs separated by colons: what the user compares on first use.
 pub fn fingerprint(ca_pem: &str) -> Result<String, TunnelError> {
-    let der = CertificateDer::pem_slice_iter(ca_pem.as_bytes())
-        .next()
-        .ok_or(TunnelError::BadCa)?
-        .map_err(|_| TunnelError::BadCa)?;
+    let der = the_ca(ca_pem)?;
     let d = ring::digest::digest(&ring::digest::SHA256, der.as_ref());
     Ok(d.as_ref()
         .iter()
@@ -228,15 +239,9 @@ impl rustls::client::danger::ServerCertVerifier for PinnedVerifier {
 }
 
 fn connector(ca_pem: &str) -> Result<TlsConnector, TunnelError> {
+    // Exactly the certificate the fingerprint names, never a second one carried along in the same text.
     let mut roots = rustls::RootCertStore::empty();
-    for c in CertificateDer::pem_slice_iter(ca_pem.as_bytes()) {
-        roots
-            .add(c.map_err(|_| TunnelError::BadCa)?)
-            .map_err(|_| TunnelError::BadCa)?;
-    }
-    if roots.is_empty() {
-        return Err(TunnelError::BadCa);
-    }
+    roots.add(the_ca(ca_pem)?).map_err(|_| TunnelError::BadCa)?;
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let verifier = rustls::client::WebPkiServerVerifier::builder_with_provider(
         Arc::new(roots),
@@ -279,8 +284,15 @@ pub async fn open(hub: &str, ca_pem: &str, port: u16) -> Result<Tunnel, TunnelEr
     let hub = hub.to_string();
     let task = tokio::spawn(async move {
         loop {
-            let Ok((mut inbound, _)) = listener.accept().await else {
-                break;
+            // A failed accept passes (no free file handle while other connections hold them, a connection reset before it was
+            // taken), so it ends neither the loop nor the port: the shell still holds the tunnel as open, and a closed port would
+            // turn every later page load away and leave the fixed port free for another program to take (threat model T27).
+            let mut inbound = match listener.accept().await {
+                Ok((s, _)) => s,
+                Err(_) => {
+                    tokio::time::sleep(ACCEPT_RETRY).await;
+                    continue;
+                }
             };
             let (hub, name, tls) = (hub.clone(), name.clone(), tls.clone());
             tokio::spawn(async move {
@@ -674,6 +686,36 @@ mod tests {
         let other = hub_named(&ca, "hub.example.com").await.to_string();
         assert_eq!(
             check(&other, ca.cert_pem()).await,
+            Err(TunnelError::Untrusted)
+        );
+    }
+
+    /// Audit F1051: the fingerprint the user confirms names one certificate, so a CA text carrying a second one (the real CA first,
+    /// another after it, which shows the real fingerprint) is refused everywhere instead of trusting both.
+    #[tokio::test]
+    async fn a_ca_text_with_a_second_certificate_is_refused_since_the_fingerprint_names_one() {
+        let real = Ca::generate("hub CA").unwrap();
+        let other = Ca::generate("other CA").unwrap();
+        let other_hub = hub(&other).await;
+        for pasted in [
+            format!("{}{}", real.cert_pem(), other.cert_pem()),
+            format!("{}{}", other.cert_pem(), real.cert_pem()),
+        ] {
+            assert_eq!(fingerprint(&pasted), Err(TunnelError::BadCa));
+            assert_eq!(
+                check(&other_hub.to_string(), &pasted).await,
+                Err(TunnelError::BadCa)
+            );
+            assert_eq!(
+                open(&other_hub.to_string(), &pasted, 0).await.err(),
+                Some(TunnelError::BadCa)
+            );
+        }
+        // The real CA alone still trusts the real CA only.
+        let real_hub = hub(&real).await;
+        assert_eq!(check(&real_hub.to_string(), real.cert_pem()).await, Ok(()));
+        assert_eq!(
+            check(&other_hub.to_string(), real.cert_pem()).await,
             Err(TunnelError::Untrusted)
         );
     }
