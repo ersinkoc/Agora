@@ -754,6 +754,12 @@ pub struct Sandbox {
     /// The agent's own unix sockets (its mesh socket; offline, also its private temp folder): reachable even below `deny`, and the
     /// only ones reachable when `offline`.
     pub sockets: Vec<PathBuf>,
+    /// ADR-0083: the confined process may connect to unix sockets only below `sockets` (and the system's name resolver where the OS
+    /// has one), not to an ssh-agent, a session bus, a docker daemon or a tmux server of the user. Where [`socket_confinement`] says
+    /// `Full` (macOS) every other pathname and abstract socket is refused; `AbstractOnly` (Linux with Landlock ABI 6 or newer) refuses
+    /// abstract sockets made outside the agent's own domain and leaves pathname sockets as they are; `None` (older kernels, Windows)
+    /// enforces nothing, and the caller must not pretend it does.
+    pub confine_sockets: bool,
     /// The node's own folders and files (its data, identity, logs, control socket, other agents' mesh sockets): never read or written,
     /// and no unix socket below them connected to, even when they sit below an allowed folder (a node home under `/tmp`), except
     /// `sockets`, including paths that do not exist yet when the agent starts. Enforced on macOS only (Seatbelt can say "except");
@@ -832,6 +838,36 @@ pub fn offline_supported() -> bool {
     {
         false
     }
+}
+
+/// What [`Sandbox::confine_sockets`] does on this machine (ADR-0083).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SocketConfinement {
+    /// Every unix socket outside the allow-list is refused (macOS, Seatbelt).
+    Full,
+    /// Only abstract unix sockets made outside the agent's own sandbox are refused (Linux, Landlock ABI 6 or newer): the X11 abstract
+    /// socket, `unix:abstract=` D-Bus. Pathname sockets (an ssh-agent, the session bus, docker, tmux) stay reachable.
+    AbstractOnly,
+    /// Nothing is refused (older kernels, Windows, other systems).
+    None,
+}
+
+/// What [`Sandbox::confine_sockets`] can do here. `agora doctor` says it; the caller may not claim more.
+pub fn socket_confinement() -> SocketConfinement {
+    #[cfg(target_os = "macos")]
+    {
+        // The Seatbelt rule is written but not switched on until a Mac has measured it (`macos::UNIX_SOCKET_DENY_VERIFIED`).
+        if macos::UNIX_SOCKET_DENY_VERIFIED && macos::sandbox_supported() {
+            return SocketConfinement::Full;
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if linux::scopes_abstract_sockets() {
+            return SocketConfinement::AbstractOnly;
+        }
+    }
+    SocketConfinement::None
 }
 
 /// Whether `sb` can be enforced here as asked: confinement at all, and the network part when it asks for it.

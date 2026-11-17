@@ -159,3 +159,66 @@ fn a_confined_process_cannot_truncate_outside_write_and_can_move_files_inside_it
     assert!(work.join("b/f").exists() && !work.join("stolen").exists());
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// ADR-0083 on Linux: with `confine_sockets`, a confined process cannot connect to an abstract unix socket made outside its sandbox
+/// (Landlock ABI 6, Linux 6.12), the same process without it can, and what the kernel cannot restrict (pathname sockets) is not
+/// claimed: `socket_confinement` says `AbstractOnly` and a pathname socket stays reachable.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_confined_process_cannot_connect_to_an_abstract_socket_outside_its_sandbox() {
+    use agora_platform::{socket_confinement, SocketConfinement};
+    use std::os::linux::net::SocketAddrExt;
+    use std::os::unix::net::{SocketAddr, UnixListener};
+    let python = std::path::Path::new("/usr/bin/python3");
+    if !sandbox_supported() || !python.exists() {
+        eprintln!("skipped: needs Landlock and /usr/bin/python3");
+        return;
+    }
+    if socket_confinement() != SocketConfinement::AbstractOnly {
+        eprintln!("skipped: this kernel has no Landlock scopes (needs ABI 6)");
+        return;
+    }
+    let name = format!("agora-abstract-{}", std::process::id());
+    let abstract_listener =
+        UnixListener::bind_addr(&SocketAddr::from_abstract_name(name.as_bytes()).unwrap()).unwrap();
+    let dir = std::env::temp_dir().join(format!("agora-sock-scope-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path_listener = UnixListener::bind(dir.join("agent.1")).unwrap();
+    let script = format!(
+        "import socket\n\
+         def go(a):\n\
+        \x20   s = socket.socket(socket.AF_UNIX)\n\
+        \x20   try:\n\
+        \x20       s.connect(a); return 'open'\n\
+        \x20   except OSError:\n\
+        \x20       return 'closed'\n\
+         print('abstract-' + go('\\0{name}'))\n\
+         print('pathname-' + go('{path}'))\n",
+        path = dir.join("agent.1").display()
+    );
+    let file = dir.join("probe.py");
+    std::fs::write(&file, script).unwrap();
+    let read: Vec<std::path::PathBuf> = ["/usr", "/lib", "/lib64", "/bin", "/etc", "/dev", "/proc"]
+        .map(Into::into)
+        .into_iter()
+        .chain([dir.clone()])
+        .collect();
+    let mut sb = Sandbox {
+        read,
+        write: vec!["/dev".into()],
+        confine_sockets: true,
+        ..Default::default()
+    };
+    let probe = format!("/usr/bin/python3 {}", file.display());
+    let out = run(Some(sb.clone()), &probe);
+    assert!(out.contains("abstract-closed"), "{out}");
+    // Honest about the limit: the pathname socket is still there for the confined process.
+    assert!(out.contains("pathname-open"), "{out}");
+    // Negative control: without the restriction the abstract socket is reachable too.
+    sb.confine_sockets = false;
+    let out = run(Some(sb), &probe);
+    assert!(out.contains("abstract-open"), "{out}");
+    drop((abstract_listener, path_listener));
+    let _ = std::fs::remove_dir_all(dir);
+}

@@ -1202,6 +1202,7 @@ pub fn policy_sandbox_entries(path: &std::path::Path) -> Vec<(&'static str, Stri
         let key = match k.trim() {
             "sandbox.read" => "sandbox.read",
             "sandbox.write" => "sandbox.write",
+            "sandbox.sockets" => "sandbox.sockets",
             _ => continue,
         };
         out.extend(
@@ -1293,6 +1294,8 @@ pub fn read_policy(path: &std::path::Path) -> Policy {
                 }
                 "sandbox.read" => p.sandbox.read = paths(v),
                 "sandbox.write" => p.sandbox.write = paths(v),
+                "sandbox.sockets" => p.sandbox.sockets = paths(v),
+                "sandbox.pass_env" => p.sandbox.pass_env = crate::sandbox::parse_pass_env(v),
                 "sandbox.trust_manifest" => {
                     p.sandbox.trusted_kinds = v
                         .split(',')

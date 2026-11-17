@@ -83,9 +83,18 @@ const TRUNCATE_FS: u64 = 1 << 14;
 /// What applies to a file rather than a directory: execute, write, read and truncate.
 const FILE_FS: u64 = 1 | (1 << 1) | (1 << 2) | TRUNCATE_FS;
 
+/// `LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET` (ABI 6): no connecting to an abstract unix socket made outside the domain.
+const SCOPE_ABSTRACT_UNIX_SOCKET: u64 = 1;
+/// The first Landlock version that has scopes.
+const ABI_SCOPES: libc::c_long = 6;
+
+/// The kernel's attribute: file rights, network rights (ABI 4, never handled here) and scopes (ABI 6). The kernel takes a shorter
+/// struct from an older program, so on a kernel below ABI 6 only the first field's size is passed.
 #[repr(C)]
 struct RulesetAttr {
     handled_access_fs: u64,
+    handled_access_net: u64,
+    scoped: u64,
 }
 
 #[repr(C, packed)]
@@ -112,6 +121,12 @@ pub(crate) fn sandbox_supported() -> bool {
     abi_version() >= 1
 }
 
+/// True when the kernel can refuse connecting to an abstract unix socket made outside a sandbox (Landlock ABI 6, Linux 6.12). There
+/// is no Landlock right for pathname sockets in the kernel headers this was built against, so those cannot be refused here.
+pub(crate) fn scopes_abstract_sockets() -> bool {
+    abi_version() >= ABI_SCOPES
+}
+
 /// A ruleset made before the fork, so the child only has to apply it (two async-signal-safe calls).
 pub(crate) struct Ruleset(std::os::fd::OwnedFd);
 
@@ -132,15 +147,23 @@ pub(crate) fn ruleset(sb: &crate::Sandbox) -> io::Result<Ruleset> {
     if abi >= 3 {
         all |= TRUNCATE_FS;
     }
+    let scope = sb.confine_sockets && abi >= ABI_SCOPES;
     let attr = RulesetAttr {
         handled_access_fs: all,
+        handled_access_net: 0,
+        scoped: if scope { SCOPE_ABSTRACT_UNIX_SOCKET } else { 0 },
+    };
+    let attr_size = if abi >= ABI_SCOPES {
+        std::mem::size_of::<RulesetAttr>()
+    } else {
+        std::mem::size_of::<u64>()
     };
     // SAFETY: a valid attribute pointer and its size; the result is a new descriptor (close-on-exec) or -1.
     let fd = unsafe {
         libc::syscall(
             SYS_LANDLOCK_CREATE_RULESET,
             &attr as *const RulesetAttr,
-            std::mem::size_of::<RulesetAttr>(),
+            attr_size,
             0 as libc::c_ulong,
         )
     };

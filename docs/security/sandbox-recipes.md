@@ -22,6 +22,31 @@ lives only in a file you `include` is not found; set it in the global file itsel
 If you list `~/.gitconfig` in `sandbox.read` yourself, the node does not set `GIT_CONFIG_GLOBAL` and your choice stands as before; that is also
 the way to get a key outside the list. `agora doctor` warns when a machine that confines agents has no `user.name` or `user.email` that the node can copy (one found only through an `include` or the system file counts as missing, because the agent would not get it).
 
+## Unix sockets, the ssh-agent and `git push` over ssh (ADR-0083)
+
+A confined agent does not get `SSH_AUTH_SOCK`, `GPG_AGENT_INFO`, `DBUS_SESSION_BUS_ADDRESS`, `DOCKER_HOST`, `TMUX` or `TMUX_PANE` from the
+node, on every system. Where the system can refuse the connection, it also refuses unix sockets the agent was not given: on Linux (Landlock ABI 6 or newer) only abstract
+sockets, so an agent that goes looking can still find an ssh-agent or docker socket in a file path there. **On macOS that second layer is
+written but switched off** (it has not been measured on a real Mac, and a first measurement on a macOS CI runner stalled a confined `git commit`):
+there the environment scrub is the only layer, and a confined agent that guesses a socket path can still connect to it. `agora doctor` says which of these this machine does, and which variables the node scrubs and which you
+pass.
+
+**`git` over ssh (`git@host:...`, `ssh://`) does not work in a confined agent**: it reached the keys only through the ssh-agent, and a
+confined agent cannot read `~/.ssh`. Push from your own checkout, or use an https remote with a credential you give that agent on purpose.
+If you accept that the agent can then sign with every key in your ssh-agent, the steps are:
+
+1. In the node's policy file add `sandbox.pass_env = SSH_AUTH_SOCK` (names only; one that is not a plain name, for example `SSH_AUTH_SOCK=/x`
+   or `SSH_*`, makes the whole list empty).
+2. Nothing more is needed today on Linux or macOS (the socket rule is not enforced for file-path sockets there). When the macOS rule is switched on,
+   the socket itself will have to be listed: `sandbox.sockets = /private/tmp/com.apple.launchd.XXXX/Listeners` (the value of `SSH_AUTH_SOCK` in your own shell).
+3. Restart the node (`agora node run`): the policy is read only at start. `agora doctor` then lists `SSH_AUTH_SOCK` as passed.
+
+`sandbox.sockets` entries are absolute or `~/` paths (a relative path is dropped); one below the node's own folders, also through a symbolic link, is ignored. A socket
+listed there is reachable by every confined agent on that node. Agents of the ACP kinds reach their client through pipes, and the mesh
+bridge (`agora mesh stdio`) reaches the agent's own mesh socket, which is always allowed; neither needs a line here. An agent hosted by an
+adapter (the ACP kinds) never inherits these variables and `sandbox.pass_env` does not change that. A dev server or a tool of
+yours that talks to a unix socket outside its worktree or temp folder will need that socket listed in `sandbox.sockets` once the macOS rule is switched on.
+
 ## macOS (Seatbelt)
 
 Checked on macOS 27.2 with a real node and a probe agent: `git status`/`commit`/`branch`, `cargo new` + `cargo build` + run, `npm init`,
@@ -61,7 +86,7 @@ deleting a branch work (a delete warns that it could not drop the branch's confi
 ### macOS: `worktree-offline`
 
 `sandbox = worktree-offline` takes the same `sandbox.read` / `sandbox.write` lines and also cuts the network: the agent can connect only to
-this machine (a local model on `localhost`), to its own mesh socket and to unix sockets in its private temp folder; DNS, the internet, other
+this machine (a local model on `localhost`), to unix sockets in its allow-list (its own mesh socket, its worktree, its private temp folder and what you list in `sandbox.sockets`); DNS, the internet, other
 machines on the LAN, `/tmp`'s sockets (tmux, SSH agent) and other agents' mesh sockets are refused, and it cannot listen on a TCP port.
 Anything that listens on this machine is reachable, though: a local HTTP proxy or an SSH tunnel on `localhost` reopens the network. Package managers and remote model APIs therefore fail by design;
 use it for agents that work through a local model.

@@ -67,6 +67,31 @@ fn the_sandbox_lines_are_read_and_a_typo_is_the_strictest_level() {
 }
 
 #[test]
+fn the_socket_lines_are_read_and_a_malformed_pass_env_passes_nothing() {
+    let dir = tmp("sockets");
+    let file = dir.join("policy");
+    let a = dir.join("agent.sock");
+    std::fs::write(
+        &file,
+        format!(
+            "sandbox = worktree\nsandbox.sockets = {}, relative/s.sock\nsandbox.pass_env = SSH_AUTH_SOCK, TMUX\n",
+            a.display()
+        ),
+    )
+    .unwrap();
+    let p = read_policy(&file);
+    assert_eq!(p.sandbox.sockets, vec![a]);
+    assert_eq!(p.sandbox.pass_env, ["SSH_AUTH_SOCK", "TMUX"]);
+    // Known keys: no problem is recorded for them.
+    assert!(p.problems.is_empty(), "{:?}", p.problems);
+    for bad in ["SSH_AUTH_SOCK=/tmp/x", "SSH_*, TMUX", "$SSH_AUTH_SOCK"] {
+        std::fs::write(&file, format!("sandbox.pass_env = {bad}\n")).unwrap();
+        assert!(read_policy(&file).sandbox.pass_env.is_empty(), "{bad}");
+    }
+    assert!(read_policy(&dir.join("none")).sandbox.pass_env.is_empty());
+}
+
+#[test]
 fn sandbox_paths_may_start_at_the_home_folder_and_relative_or_parent_paths_are_dropped() {
     let dir = tmp("sandbox-home");
     let file = dir.join("policy");

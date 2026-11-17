@@ -92,6 +92,8 @@ pub fn run(inputs: &Inputs) -> Vec<Check> {
     ));
     if level != crate::sandbox::Level::Off {
         out.extend(policy_paths(&policy_file));
+        // ADR-0083: what keeps a confined agent off the user's other sockets here, and which variables the node leaves out.
+        out.extend(socket_checks(&sandbox));
         // ADR-0078: a confined agent commits with the identity the node copies from the person's git configuration.
         if crate::gitconfig::identity_missing() {
             out.push(check("git-identity-missing", Status::Warn, ""));
@@ -213,6 +215,32 @@ fn authority(data_dir: &Path, policy: &crate::daemon::Policy, now_ms: u64) -> Ve
             "policy-problems",
             Status::Warn,
             policy.problems.len().to_string(),
+        ));
+    }
+    out
+}
+
+/// ADR-0083: whether this machine refuses a confined agent's connections to unix sockets it was not given (`sockets-profile` on macOS: set, not yet measured; or why
+/// not: `sockets-abstract`, `sockets-none`), which socket variables the node leaves out of an agent's environment
+/// (`env-scrubbed`) and which of them the owner let through (`env-passed`). Names only, never values.
+fn socket_checks(sandbox: &crate::sandbox::SandboxPolicy) -> Vec<Check> {
+    use agora_platform::SocketConfinement as C;
+    let mut out = vec![match agora_platform::socket_confinement() {
+        // Set in the Seatbelt profile, never run on a real Mac yet: not claimed as working.
+        C::Full => check("sockets-profile", Status::Warn, ""),
+        C::AbstractOnly => check("sockets-abstract", Status::Warn, ""),
+        C::None => check("sockets-none", Status::Warn, std::env::consts::OS),
+    }];
+    out.push(check(
+        "env-scrubbed",
+        Status::Ok,
+        sandbox.scrubbed_env().join(", "),
+    ));
+    if !sandbox.pass_env.is_empty() {
+        out.push(check(
+            "env-passed",
+            Status::Warn,
+            sandbox.pass_env.join(", "),
         ));
     }
     out
@@ -445,6 +473,48 @@ mod tests {
         });
         assert_eq!(find(&checks, "policy-restart").len(), 1);
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn doctor_says_what_restricts_unix_sockets_and_which_variables_are_scrubbed_or_passed() {
+        let dir = tmp("sockets");
+        let data = dir.join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let inputs = Inputs {
+            data_dir: data.clone(),
+            socket: dir.join("none.sock"),
+            manifests_dir: dir.join("manifests"),
+        };
+        let ids = |checks: &[Check]| -> Vec<(&'static str, String)> {
+            checks
+                .iter()
+                .filter(|c| c.id.starts_with("sockets-") || c.id.starts_with("env-"))
+                .map(|c| (c.id, c.detail.clone()))
+                .collect()
+        };
+        // Not confined: nothing is said about what confinement does.
+        std::fs::write(data.join(crate::daemon::POLICY_FILE), "sandbox = off\n").unwrap();
+        assert!(ids(&run(&inputs)).is_empty());
+        std::fs::write(
+            data.join(crate::daemon::POLICY_FILE),
+            "sandbox = worktree\nsandbox.pass_env = DOCKER_HOST\n",
+        )
+        .unwrap();
+        let got = ids(&run(&inputs));
+        let restriction = match agora_platform::socket_confinement() {
+            agora_platform::SocketConfinement::Full => "sockets-profile",
+            agora_platform::SocketConfinement::AbstractOnly => "sockets-abstract",
+            agora_platform::SocketConfinement::None => "sockets-none",
+        };
+        assert_eq!(got[0].0, restriction, "{got:?}");
+        let scrubbed = &got.iter().find(|c| c.0 == "env-scrubbed").unwrap().1;
+        assert!(scrubbed.contains("SSH_AUTH_SOCK") && !scrubbed.contains("DOCKER_HOST"));
+        assert_eq!(
+            got.iter()
+                .find(|c| c.0 == "env-passed")
+                .map(|c| c.1.as_str()),
+            Some("DOCKER_HOST")
+        );
     }
 
     #[test]
