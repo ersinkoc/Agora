@@ -78,15 +78,24 @@ pub fn inspect(
                 return Err(invalid("directory.metadata"));
             }
             // Whoever works in the folder can swap the checked file for a link (to `/dev/zero`, a FIFO, a big file) before it is
-            // read, so it is opened without waiting, checked again on the open handle (still this file, a regular one within the
-            // limit), and read through that handle, never more than the limit even if it grows.
+            // read, so it is opened without waiting, checked again on the open handle (a regular file within the limit, really
+            // in the folder resolved above, under this name in any letter case, as case-insensitive volumes report it), and read
+            // through that handle, never more than the limit even if it grows.
             use std::io::Read;
             let file =
                 agora_platform::open_read(&metadata).map_err(|_| invalid("directory.metadata"))?;
-            let opened = agora_platform::opened_path(&file).ok();
-            let expected = std::fs::canonicalize(root).ok().map(|r| r.join(METADATA));
+            let opened =
+                agora_platform::opened_path(&file).map_err(|_| invalid("directory.metadata"))?;
+            let named = opened
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.eq_ignore_ascii_case(METADATA));
+            let within = opened
+                .parent()
+                .and_then(|p| agora_platform::canonicalize_plain(p).ok())
+                .is_some_and(|p| p == root);
             let meta = file.metadata().map_err(|_| invalid("directory.metadata"))?;
-            if opened.is_none() || opened != expected || !meta.is_file() || meta.len() > 4096 {
+            if !named || !within || !meta.is_file() || meta.len() > 4096 {
                 return Err(invalid("directory.metadata"));
             }
             let mut bytes = Vec::new();
@@ -805,7 +814,11 @@ mod tests {
         let base = std::fs::canonicalize(temp("lossy")).unwrap();
         let raw = base.join(std::ffi::OsStr::from_bytes(b"a\xff"));
         let literal = base.join("a\u{FFFD}");
-        std::fs::create_dir_all(raw.join("sub")).unwrap();
+        // A file system that refuses names that are not UTF-8 (APFS) cannot hold such a folder at all.
+        if std::fs::create_dir_all(raw.join("sub")).is_err() {
+            let _ = std::fs::remove_dir_all(base);
+            return;
+        }
         std::fs::create_dir_all(&literal).unwrap();
         std::os::unix::fs::symlink(&raw, base.join("link")).unwrap();
         std::os::unix::fs::symlink(raw.join("sub"), base.join("link-sub")).unwrap();
@@ -825,49 +838,54 @@ mod tests {
         let _ = std::fs::remove_dir_all(base);
     }
 
-    /// F981: whoever works in the folder can swap the checked `.agent-project.json` for a link (to a big file, `/dev/zero`, a FIFO)
-    /// before it is read. Whichever moment the swap hits, the answer never comes from the link.
+    /// F981: whoever works in the folder can swap the checked `.agent-project.json` for a link (to a file elsewhere, `/dev/zero`, a
+    /// FIFO) before it is read. The link's target is small and valid, so only the check of where the open file really is refuses
+    /// it: whichever moment the swap hits, the answer never comes from the link.
     #[cfg(unix)]
     #[test]
     fn project_metadata_swapped_for_a_link_after_its_check_is_never_read() {
-        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
         const GOOD: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
         const BAD: &str = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
         let base = std::fs::canonicalize(temp("metadata-swap")).unwrap();
         let folder = base.join("work");
         std::fs::create_dir_all(&folder).unwrap();
         let meta = folder.join(METADATA);
-        let big = base.join("big.json");
-        let pad = "x".repeat(6000);
-        std::fs::write(&big, format!(r#"{{"project_id":"{BAD}","pad":"{pad}"}}"#)).unwrap();
+        let elsewhere = base.join("elsewhere.json");
+        std::fs::write(&elsewhere, format!(r#"{{"project_id":"{BAD}"}}"#)).unwrap();
         let good = format!(r#"{{"project_id":"{GOOD}"}}"#);
         let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let flips = std::sync::Arc::new(AtomicU64::new(0));
         let flipper = {
-            let (stop, meta, big, good, folder) = (
+            let (stop, flips, meta, elsewhere, good, folder) = (
                 stop.clone(),
+                flips.clone(),
                 meta.clone(),
-                big.clone(),
+                elsewhere.clone(),
                 good.clone(),
                 folder.clone(),
             );
             std::thread::spawn(move || {
                 let (tmp_file, tmp_link) = (folder.join("tmp-file"), folder.join("tmp-link"));
-                let mut flips = 0u64;
                 while !stop.load(Ordering::Relaxed) {
                     let _ = std::fs::write(&tmp_file, &good);
                     let _ = std::fs::rename(&tmp_file, &meta);
                     let _ = std::fs::remove_file(&tmp_link);
-                    let _ = std::os::unix::fs::symlink(&big, &tmp_link);
+                    let _ = std::os::unix::fs::symlink(&elsewhere, &tmp_link);
                     if std::fs::rename(&tmp_link, &meta).is_ok() {
-                        flips += 1;
+                        flips.fetch_add(1, Ordering::Relaxed);
                     }
                 }
-                flips
             })
         };
         let path = folder.to_str().unwrap().to_string();
         let (mut leaked, mut own) = (0, 0);
-        for _ in 0..1000 {
+        // At least 1000 looks, and on until the link has been swapped in some times (bounded, for a machine that never runs the
+        // swapping thread).
+        for n in 0..200_000 {
+            if n >= 1000 && flips.load(Ordering::Relaxed) >= 100 {
+                break;
+            }
             match inspect(&path, "n", false) {
                 Ok((i, _)) if i.project_id == format!("id:{BAD}") => leaked += 1,
                 Ok(_) => own += 1,
@@ -875,7 +893,8 @@ mod tests {
             }
         }
         stop.store(true, Ordering::Relaxed);
-        let flips = flipper.join().unwrap();
+        flipper.join().unwrap();
+        let flips = flips.load(Ordering::Relaxed);
         let _ = std::fs::remove_dir_all(&base);
         assert!(flips > 0, "the file was never swapped for the link");
         // How often the file of its own wins the race depends on the machine; only an answer from the link is a failure.
