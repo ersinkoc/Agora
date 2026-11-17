@@ -543,6 +543,11 @@ fn doctor(say: &Say, o: &Opts) -> ExitCode {
     }
 }
 
+/// How long a node's start tries again to read a link folder that is there but cannot be read (a volume still being mounted) before it
+/// ends: longer than `agora_core::restart::RestartRule::default().refusal_ms`, so its supervisor takes the end for a crash and starts it
+/// again later instead of giving up.
+const LINK_UNREADABLE_RETRY: std::time::Duration = std::time::Duration::from_secs(15);
+
 fn node_run(say: &Say, o: &Opts) -> ExitCode {
     // A crash can leave folder permissions for a confined agent behind (Windows); nothing is running yet, so undo them.
     agora_platform::recover_sandbox_leftovers();
@@ -553,8 +558,21 @@ fn node_run(say: &Say, o: &Opts) -> ExitCode {
     let h = home();
     // A machine enrolled with a hub reports under the id the hub's certificate names. A link folder another command held past every
     // working hold is not read (it may be half saved) and the node does not start with no link or half of one: it ends, and its
-    // supervisor starts it again later (Codex review of F1031).
-    let link = match hubcli::load_link(socket_path(o)) {
+    // supervisor starts it again later (Codex review of F1031). A folder that cannot be read yet (a volume still being mounted) is tried
+    // again for a while first: an end that soon after the start would be taken for a refusal, and the supervisor would not try again.
+    let started = std::time::Instant::now();
+    let link = loop {
+        match hubcli::load_link(socket_path(o)) {
+            Err(e)
+                if e.kind() != std::io::ErrorKind::TimedOut
+                    && started.elapsed() < LINK_UNREADABLE_RETRY =>
+            {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+            r => break r,
+        }
+    };
+    let link = match link {
         Ok(link) => link,
         Err(e) => {
             let dir = ("dir", hubcli::link_dir().display().to_string().into());
@@ -1072,6 +1090,14 @@ mod unreachable_tests {
             let t = c.render("cli-node-refused", &[("socket", "S".into())]);
             assert!(t.as_deref().is_some_and(|t| t.contains('S')), "{t:?}");
         }
+    }
+
+    /// Codex re-review of F1031: a node that ends because its link folder cannot be read yet (a volume still being mounted) must not
+    /// end so soon that its supervisor takes it for a refusal and stops trying.
+    #[test]
+    fn a_node_waits_for_an_unreadable_link_folder_longer_than_a_refusal() {
+        let refusal = agora_core::restart::RestartRule::default().refusal_ms;
+        assert!(LINK_UNREADABLE_RETRY.as_millis() > u128::from(refusal));
     }
 }
 
