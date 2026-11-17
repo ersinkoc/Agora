@@ -193,6 +193,9 @@ fn agora_brings_the_machine_up_and_killing_the_interface_leaves_agents_running()
             && s.contains("The node is running (process")
             && s.contains(&linked)
     });
+    // Negative control: a link that is up is never reported as down, and the old wording for the configured hub is not used.
+    let (_, s, _) = run(&home, &["status"]);
+    assert!(!s.contains("not connected"), "{s}");
     // The client opened the terminal client once the node showed up at the hub: it connected without any code typed.
     wait_for("the interface", Duration::from_secs(30), || {
         std::fs::read_to_string(home.join("client.out"))
@@ -267,6 +270,64 @@ fn agora_brings_the_machine_up_and_killing_the_interface_leaves_agents_running()
     );
     let (_, out, _) = run(&home, &["down"]);
     assert!(out.contains("Nothing to stop"), "{out}");
+    let _ = std::fs::remove_dir_all(home);
+}
+
+/// `agora status` said "connected to <hub>" for the hub a machine was configured for while every dial failed (found on a Mac whose
+/// local network permission was gone). The node here is enrolled with a hub address that refuses connections: status must say it is
+/// not connected, with the reason, and never use the "connected to" wording.
+#[test]
+fn status_says_not_connected_while_the_hub_refuses_the_node() {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+        return;
+    }
+    let home = tmp("closed-hub");
+    let port = free_port(18900);
+    std::fs::write(
+        home.join("machine.toml"),
+        "roles = [\"node\"]\nui = \"none\"\nnode_projects = []\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(home.join("link")).unwrap();
+    for (name, text) in [
+        ("url", format!("wss://127.0.0.1:{port}")),
+        ("node-id", "mac".to_string()),
+        ("ca.pem", String::new()),
+        ("cert.pem", String::new()),
+        ("key.pem", String::new()),
+    ] {
+        std::fs::write(home.join("link").join(name), text).unwrap();
+    }
+    let _down = Down(home.clone());
+    let (code, out, err) = run(&home, &[]);
+    assert_eq!(code, 0, "{out}{err}");
+    let mut last = String::new();
+    let hub = format!("not connected to wss://127.0.0.1:{port}");
+    wait_for(
+        "status to say not connected",
+        Duration::from_secs(60),
+        || {
+            last = run(&home, &["status"]).1;
+            last.contains("The node is running (process") && last.contains(&hub)
+        },
+    );
+    // The reason is shown once a dial has failed; Windows words a refusal differently from Unix, so only there it is not pinned.
+    if !cfg!(windows) {
+        wait_for(
+            "status to name the refusal",
+            Duration::from_secs(30),
+            || {
+                last = run(&home, &["status"]).1;
+                last.contains("nothing is listening")
+            },
+        );
+    }
+    assert!(
+        !last.contains("connected to wss://") || last.contains("not connected to wss://"),
+        "{last}"
+    );
+    assert!(!last.contains(" as mac"), "{last}");
+    let _ = run(&home, &["down"]);
     let _ = std::fs::remove_dir_all(home);
 }
 

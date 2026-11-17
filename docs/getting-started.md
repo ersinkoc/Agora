@@ -57,8 +57,9 @@ window again.
   on again there; one turned off with `launchctl disable` is turned on again by `install`. A LaunchAgent of the same name that you
   wrote yourself is left exactly as it is. A node that connects to a hub on another machine needs macOS's Local Network permission:
   started by launchd it does not get Terminal's, so allow `agora` when macOS asks, or in System Settings > Privacy & Security > Local
-  Network; until then its log says `No route to host`. macOS asks again after every `agora update` (the new program is another
-  binary to it; measured with unsigned builds), and `agora update` says so when a login service is set up. Removing it ends the supervisor and the node, but not your agents: each runs in its own
+  Network; until then its log says `No route to host` and `agora status` says the node is not connected (and why), not "connected". macOS asks
+  again after every `agora update` (the new program is another binary to it; measured with unsigned builds), and `agora update` says so
+  when a login service is set up; after you allow it, restart the node once more (the running process keeps failing until then). Removing it ends the supervisor and the node, but not your agents: each runs in its own
   terminal session, which launchd does not end (as when the node is started by `agora`). On every system a service already set up is
   not rewritten by `install` (after moving Agora, or for another `PATH`): run `agora service remove`, then `install`.
 - Logs: `~/.agora/logs/hub.log` and `node.log` (renamed to `.1` when over 5 MiB at a start).

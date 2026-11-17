@@ -11,11 +11,21 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
   through it. `agora` presents the secret itself, so no command changes; a node that does not confine agents changes nothing. A node whose
   folder lies inside a folder agents may read or write (a node under `/tmp`) refuses to start confined agents, and `agora doctor` says so.
   `agora` also tells a node that refused it apart from no node running.
+### Fixes
+- `agora status` says "connected" only while the node's link to the hub is up right now (it used to say so for the hub the machine was set up for, also while every attempt failed); otherwise it says not connected and why, and on a Mac whose Local Network permission is missing it points to System Settings. After `agora update` on a Mac, the note now says to restart the node once more after allowing Local Network.
 
 ### Terminals
 - A program that draws its status lines with icon glyphs (WrongStack's Powerline arrows and folder, branch and settings icons) is no longer
   shown as empty boxes in the window and the desktop app: if a Nerd Font is installed on the machine that shows the window, the icons come
   from it. Letters keep the theme's own font, and a machine without a Nerd Font looks exactly as before.
+
+### Security
+- A device you trust again on the machine (`agora node trust`, or yes at `agora node enroll` / `--from-hub`) is no longer removed
+  again when the hub sends an earlier revocation of it once more. This happened when the browser that revoked it had a clock running
+  a few minutes fast (audit finding F220). The command now says when your yes overrides such a revocation; a revocation signed after
+  your yes, or by another device, still applies (ADR-0081).
+- What a device signed before it was revoked stays refused after you trust it again on the machine. Before, trusting it again let
+  an endorsement it had signed earlier, kept by the hub, add another device.
 
 ## 0.3.15
 

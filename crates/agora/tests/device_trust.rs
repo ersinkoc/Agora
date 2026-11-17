@@ -413,6 +413,7 @@ fn the_hub_offers_devices_the_owner_decides_and_endorsements_and_revocations_are
         grants: Some(Arc::clone(&node.grants)),
         mesh: None,
         devices: None,
+        state_dir: None,
     };
     link.devices = Some(Arc::clone(&node.devices));
     let _uplink = spawn(Arc::clone(&node.events), link).unwrap();
