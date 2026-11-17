@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { t } from '../i18n';
 import type { AgentTileModel } from '../model';
-import { type AttentionItem, type FleetFilter, type GroupBy, FLEET_FILTERS, type FleetCounts, decidableInline, emptyKind, fleetView, groupFleet } from '../net/fleet';
+import { type AttentionItem, type FleetFilter, type GroupBy, FLEET_FILTERS, type FleetCounts, collapseAttention, decidableInline, emptyKind, fleetView, groupFleet } from '../net/fleet';
 import { loadGroupBy, saveGroupBy } from '../net/fleetPrefs';
 import { ago } from '../net/time';
 import { money, type UsageSummary } from '../net/usage';
@@ -53,9 +53,11 @@ function askText(x: ApprovalModel): string {
   return visible(d ? `${x.action} · ${d}` : x.action);
 }
 
+const askOf = (it: AttentionItem): string => (it.kind === 'approval' ? askText(it.approval) : t('fleet-waiting-in-terminal'));
+
 // The queue: everything that needs the user, most urgent first. A plain yes or no has Allow and Deny in its row (the same answer, signed
 // the same way, as the banner above the terminal); anything with something to read opens the agent, where the whole request is.
-export function AttentionQueue({ items, machines, now, onOpen, onResolve, onReview }: {
+export function AttentionQueue({ items, machines, now, onOpen, onResolve, onReview, stale }: {
   items: readonly AttentionItem[];
   machines: readonly MachineModel[];
   now: number;
@@ -63,11 +65,49 @@ export function AttentionQueue({ items, machines, now, onOpen, onResolve, onRevi
   onResolve?: (a: ApprovalModel, approved: boolean, choice?: StartChoice) => void;
   // Where a request is read in full when this window does not list its agent (so there is no agent to open).
   onReview?: () => void;
+  // The link is not live: an answer cannot be signed to a machine through it, so Allow and Deny wait, with the reason shown.
+  stale?: boolean;
 }) {
   const machineName = (id: string) => machines.find((m) => m.id === id)?.name;
-  // A glance is a few rows: the most urgent ones, and the rest one press away.
+  // A glance is a few rows: the most urgent ones, and the rest one press away. Many identical asks are one row.
   const [all, setAll] = useState(false);
-  const shown = all ? items : items.slice(0, ATTENTION_SHOWN);
+  const [each, setEach] = useState<ReadonlySet<string>>(new Set());
+  const rows = useMemo(() => collapseAttention(items), [items]);
+  const shown = all ? rows : rows.slice(0, ATTENTION_SHOWN);
+  // How long it has waited is shown on every row or on none: a list where some rows say it and others do not reads as if those were fresh.
+  const knownWait = items.length > 0 && items.every((x) => !!x.sinceMs);
+  const toggleEach = (key: string) => setEach((cur) => { const next = new Set(cur); if (!next.delete(key)) next.add(key); return next; });
+
+  const rowOf = (it: AttentionItem, inlineOk: boolean) => {
+    const agent = it.agent;
+    const name = it.kind === 'approval' ? (agent?.name || approvalName(it.approval)) : it.agent.name;
+    const machine = agent?.machine || (it.kind === 'approval' ? it.approval.machineName || machineName(it.approval.node) : undefined);
+    const project = agent ? agent.project || agent.workspace : undefined;
+    const inline = inlineOk && it.kind === 'approval' && !!onResolve && decidableInline(it.approval);
+    const ask = askOf(it);
+    const why = `fleet-stale-why-${it.key}`;
+    return (
+      <li key={it.key} className="fleet-ask">
+        <div className="fleet-ask__who">
+          <StateMark state="needs-you" />
+          <strong className="fleet-ask__name">{name}</strong>
+          <span className="fleet-ask__where">{[machine, project].filter(Boolean).join(' · ')}</span>
+          {knownWait && it.sinceMs ? <time className="fleet-ask__time" dateTime={new Date(it.sinceMs).toISOString()}>{t('fleet-asked', { when: ago(it.sinceMs, now) })}</time> : null}
+        </div>
+        {/* A request that can be answered here is shown whole, never cut; the others may be cut because they are read in the full card. */}
+        <p className={`fleet-ask__what${inline ? '' : ' fleet-ask__what--clamp'}`} title={ask}>{ask}</p>
+        <div className="fleet-ask__actions">
+          {inline && it.kind === 'approval' ? <>
+            <button type="button" className="button button--primary" disabled={stale} aria-describedby={stale ? why : undefined} aria-label={t('fleet-allow-for', { name })} onClick={() => onResolve?.(it.approval, true)}>{t('approval-allow')}</button>
+            <button type="button" className="button" disabled={stale} aria-describedby={stale ? why : undefined} aria-label={t('fleet-deny-for', { name })} onClick={() => onResolve?.(it.approval, false)}>{t('approval-deny')}</button>
+            {stale && <span id={why} className="fleet-ask__why">{t('fleet-stale-no-answer')}</span>}
+          </> : agent ? <button type="button" className="button" aria-label={t(it.kind === 'approval' ? 'fleet-review-for' : 'fleet-open-for', { name })} onClick={() => onOpen(agent.id)}>{t(it.kind === 'approval' ? 'fleet-review' : 'action-open')}</button>
+            : onReview ? <button type="button" className="button" aria-label={t('fleet-review-for', { name })} onClick={onReview}>{t('fleet-review')}</button> : null}
+        </div>
+      </li>
+    );
+  };
+
   return (
     <section className="fleet-attention" aria-labelledby="fleet-attention-h">
       <div className="fleet-section__head">
@@ -76,35 +116,22 @@ export function AttentionQueue({ items, machines, now, onOpen, onResolve, onRevi
       </div>
       {items.length === 0 ? <p className="fleet-calm muted m-0">{t('attention-empty')}</p> : (
         <ul className="fleet-queue">
-          {shown.map((it) => {
-            const agent = it.agent;
-            const name = it.kind === 'approval' ? (agent?.name || approvalName(it.approval)) : it.agent.name;
-            const machine = agent?.machine || (it.kind === 'approval' ? it.approval.machineName || machineName(it.approval.node) : undefined);
-            const project = agent ? agent.project || agent.workspace : undefined;
-            const inline = it.kind === 'approval' && !!onResolve && decidableInline(it.approval);
-            const ask = it.kind === 'approval' ? askText(it.approval) : t('fleet-waiting-in-terminal');
-            return (
-              <li key={it.key} className="fleet-ask">
-                <div className="fleet-ask__who">
-                  <StateMark state="needs-you" />
-                  <strong className="fleet-ask__name">{name}</strong>
-                  <span className="fleet-ask__where">{[machine, project].filter(Boolean).join(' · ')}</span>
-                  {it.sinceMs ? <time className="fleet-ask__time" dateTime={new Date(it.sinceMs).toISOString()}>{t('fleet-asked', { when: ago(it.sinceMs, now) })}</time> : null}
-                </div>
-                <p className="fleet-ask__what" title={ask}>{ask}</p>
-                <div className="fleet-ask__actions">
-                  {inline && it.kind === 'approval' ? <>
-                    <button type="button" className="button button--primary" aria-label={t('fleet-allow-for', { name })} onClick={() => onResolve?.(it.approval, true)}>{t('approval-allow')}</button>
-                    <button type="button" className="button" aria-label={t('fleet-deny-for', { name })} onClick={() => onResolve?.(it.approval, false)}>{t('approval-deny')}</button>
-                  </> : agent ? <button type="button" className="button" aria-label={t(it.kind === 'approval' ? 'fleet-review-for' : 'fleet-open-for', { name })} onClick={() => onOpen(agent.id)}>{t(it.kind === 'approval' ? 'fleet-review' : 'action-open')}</button>
-                    : onReview ? <button type="button" className="button" aria-label={t('fleet-review-for', { name })} onClick={onReview}>{t('fleet-review')}</button> : null}
-                </div>
-              </li>
-            );
-          })}
+          {shown.map((row) => row.kind === 'one' ? rowOf(row.item, true) : (
+            <li key={row.key} className="fleet-ask fleet-ask--many">
+              <div className="fleet-ask__who">
+                <StateMark state="needs-you" />
+                <strong className="fleet-ask__name">{t('fleet-same-ask', { count: row.items.length, kind: row.agentKind })}</strong>
+              </div>
+              <p className="fleet-ask__what fleet-ask__what--clamp" title={askOf(row.items[0] as AttentionItem)}>{askOf(row.items[0] as AttentionItem)}</p>
+              <div className="fleet-ask__actions">
+                <button type="button" className="button" aria-expanded={each.has(row.key)} onClick={() => toggleEach(row.key)}>{each.has(row.key) ? t('fleet-collapse') : t('fleet-review-each')}</button>
+              </div>
+              {each.has(row.key) && <ul className="fleet-queue fleet-ask__each">{row.items.map((it) => rowOf(it, false))}</ul>}
+            </li>
+          ))}
         </ul>
       )}
-      {items.length > ATTENTION_SHOWN && <button type="button" className="button fleet-more" aria-expanded={all} onClick={() => setAll((v) => !v)}>{all ? t('fleet-attention-less') : t('fleet-attention-more', { count: items.length - ATTENTION_SHOWN })}</button>}
+      {rows.length > ATTENTION_SHOWN && <button type="button" className="button fleet-more" aria-expanded={all} onClick={() => setAll((v) => !v)}>{all ? t('fleet-attention-less') : t('fleet-attention-more', { count: rows.length - ATTENTION_SHOWN })}</button>}
     </section>
   );
 }
@@ -192,7 +219,7 @@ export function FleetConsole({ fleet, machines, approvals, usage, link, now, onO
 
   const body = empty ? <FleetEmpty kind={empty} machines={machines} onStart={onStart} onRetry={onRetry} /> : (
     <>
-      <AttentionQueue items={view.attention} machines={machines} now={now} onOpen={onOpen} onResolve={onResolve} onReview={onReview} />
+      <AttentionQueue items={view.attention} machines={machines} now={now} onOpen={onOpen} onResolve={onResolve} onReview={onReview} stale={link !== 'live'} />
       <section className="fleet-groups" aria-label={t('fleet-panel')}>
         <div className="fleet-tools">
           <div className="fleet-tools__by" role="group" aria-label={t('fleet-group-by')}>

@@ -121,7 +121,11 @@
   .fleet-ask__who { @apply flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5; }
   .fleet-ask__name { @apply min-w-0 break-words; }
   .fleet-ask__where, .fleet-ask__time { @apply min-w-0 text-xs text-muted; }
-  .fleet-ask__what { @apply m-0 min-w-0 break-words text-ink sm:col-start-1; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .fleet-ask__what { @apply m-0 min-w-0 break-words text-ink sm:col-start-1; }
+  .fleet-ask__what--clamp { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .fleet-ask__why { @apply self-center text-xs text-muted; }
+  .fleet-ask--many { @apply sm:grid-cols-[minmax(0,1fr)_auto]; }
+  .fleet-ask__each { @apply col-span-full mt-1 ps-3; }
   .fleet-ask__actions { @apply flex flex-wrap gap-2 sm:col-start-2 sm:row-span-2 sm:row-start-1; }
 
   .fleet-more { @apply justify-self-start; }

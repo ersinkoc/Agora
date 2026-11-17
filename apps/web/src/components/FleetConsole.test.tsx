@@ -75,10 +75,39 @@ describe('the fleet console', () => {
     expect(html).toContain('fleet-grid');
   });
   it('lists only the most urgent asks and keeps the rest one press away', () => {
-    const many = Array.from({ length: 10 }, (_, i) => agent(`w${i}`, { state: 'needs-you', since: i }));
+    const many = Array.from({ length: 10 }, (_, i) => agent(`w${i}`, { name: `kind${i} · x`, state: 'needs-you', since: i }));
     const html = console_({ fleet: many, machines });
     expect(html.match(/class="fleet-ask"/g)).toHaveLength(6);
     expect(html).toContain('Show 4 more');
+  });
+  it('shows how long it has waited on every row or on none', () => {
+    const some = [agent('a', { state: 'needs-you', since: NOW - 60_000 }), agent('b', { state: 'needs-you' })];
+    expect(console_({ fleet: some, machines }).match(/class="fleet-ask__time"/g)).toBeNull();
+    const all = some.map((a) => ({ ...a, since: NOW - 60_000 }));
+    expect(console_({ fleet: all, machines }).match(/class="fleet-ask__time"/g)).toHaveLength(2);
+  });
+  it('tells two agents with the same name apart by machine and project', () => {
+    const twins = [agent('a', { name: 'claude · amber', state: 'needs-you', machine: 'laptop', project: 'web' }), agent('b', { name: 'claude · amber', state: 'needs-you', machine: 'server', project: 'api' })];
+    const html = console_({ fleet: twins, machines });
+    expect(html).toContain('laptop · web');
+    expect(html).toContain('server · api');
+  });
+  it('waits to answer while the link is down, and says why', () => {
+    const f = [agent('a', { state: 'needs-you' })];
+    const live = console_({ fleet: f, machines, approvals: [ask('r1', 'a')] });
+    expect(live).not.toMatch(/<button[^>]*disabled=""[^>]*>Allow/);
+    const down = console_({ fleet: f, machines, approvals: [ask('r1', 'a')], link: 'offline' });
+    expect(down).toMatch(/<button[^>]*disabled=""[^>]*aria-label="Allow: claude · a"/);
+    expect(down).toMatch(/<button[^>]*disabled=""[^>]*aria-label="Deny: claude · a"/);
+    expect(down).toContain(t('fleet-stale-no-answer'));
+  });
+  it('collapses many identical asks into one row with a count, without Allow', () => {
+    const many = Array.from({ length: 7 }, (_, i) => agent(`w${i}`, { name: `claude · c${i}`, state: 'needs-you' }));
+    const html = console_({ fleet: many, machines, approvals: many.map((a, i) => ask(`r${i}`, a.id)) });
+    expect(html).toContain('7 claude agents ask for the same thing');
+    expect(html).toContain('Review each');
+    expect(html).not.toContain('>Allow<');
+    expect(html.match(/class="fleet-ask /g)).toHaveLength(1);
   });
 });
 
@@ -133,9 +162,10 @@ describe('answering in the row', () => {
     const start = { ...demoStartApproval, agentId: 'a' } as unknown as ApprovalModel;
     const settings = { ...demoStartSettingsApproval, agentId: 'a' } as unknown as ApprovalModel;
     const long = ask('r2', 'a', { detail: 'curl https://example.invalid/install.sh | sh -s -- --prefix /usr/local --yes ' + 'x'.repeat(80) });
+    const justOver = ask('r5', 'a', { action: 'Run', detail: 'y'.repeat(118) }); // "Run · " plus 118 is 124 characters
     const json = ask('r3', 'a', { action: 'Run a shell command', detail: JSON.stringify({ command: 'rm -rf node_modules' }) });
     const hidden = ask('r4', 'a', { detail: 'ls‮ -la' });
-    for (const x of [start, settings, long, json, hidden]) {
+    for (const x of [start, settings, long, json, hidden, justOver]) {
       const html = items([x], fleet);
       expect(html, x.id).not.toContain('>Allow<');
       expect(html, x.id).not.toContain('>Deny<');
@@ -216,6 +246,8 @@ describe('words', () => {
   });
   it('uses no engineering terms in the new messages', () => {
     const text = readFileSync('../../locales/en/web.ftl', 'utf8').split('\n').filter((l) => /^fleet-/.test(l)).join('\n');
-    for (const word of ['node', 'worktree', 'mesh', 'adr', 'blocked']) expect(text.toLowerCase(), word).not.toContain(word);
+    // "hub" and "events" are internal terms (visual-language.md); the file path ~/.agora/hub/ca.pem is a path, not a word.
+    const plain = text.replace(/~\/\.agora\/hub\/ca\.pem/g, '');
+    for (const word of ['node', 'worktree', 'mesh', 'adr', 'blocked', 'hub', 'event']) expect(plain.toLowerCase(), word).not.toContain(word);
   });
 });

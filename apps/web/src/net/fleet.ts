@@ -61,17 +61,48 @@ export function attentionList(approvals: readonly ApprovalModel[], fleet: readon
   return [...asks.map((x) => x.item), ...waiting.map((x) => x.item)];
 }
 
-// Approve or Deny in the row only where the request is a plain yes or no that needs no reading: no start request (it carries a folder,
-// a prompt and settings), no settings, nothing longer than one short line, nothing the agent wrote as structured text, and no
-// character that is invisible or changes how the text looks. Anything else is opened in the full card, where it is read in full before
-// it is answered: a decision is never taken on text that was cut or hidden.
-export const INLINE_MAX = 80;
+// Approve or Deny in the row only where the request is a plain yes or no that needs no reading, and the row shows ALL of it: no start
+// request (it carries a folder, a prompt and settings), no settings, one line each of action and detail, no structured text the agent wrote,
+// no character that is invisible or changes how the text looks, and no more than INLINE_MAX characters in all (the text as the row writes
+// it, "action · detail"). The row never cuts or clamps what it shows for such a request, it grows to hold it. Anything else is opened in
+// the full card, where it is read in full before it is answered: a decision is never taken on text that was cut or hidden.
+export const INLINE_MAX = 120;
+export const askLine = (action: string, detail: string): string => (detail ? `${action} · ${detail}` : action);
 export function decidableInline(a: ApprovalModel): boolean {
   if (a.start) return false;
-  const oneLine = (s: string) => s.length <= INLINE_MAX && !/[\r\n]/.test(s) && visible(s) === s;
+  const oneLine = (s: string) => !/[\r\n]/.test(s) && visible(s) === s;
   if (!a.action.trim() || !oneLine(a.action)) return false;
-  if (!a.detail) return true;
-  return oneLine(a.detail) && detailText(a.detail) === a.detail;
+  if (a.detail && (!oneLine(a.detail) || detailText(a.detail) !== a.detail)) return false;
+  return askLine(a.action, a.detail).length <= INLINE_MAX;
+}
+
+// Many agents asking for the same thing are one row with a count (a stack of identical Allow buttons invites approving by reflex): each is
+// reviewed on its own. The agent's kind is the first part of its name ("claude · amber").
+export const SAME_ASK_MIN = 6;
+export type AttentionRow = { kind: 'one'; item: AttentionItem } | { kind: 'many'; key: string; items: AttentionItem[]; agentKind: string; ask: string };
+const kindOf = (name: string): string => name.split(' · ')[0] ?? name;
+function sameKey(it: AttentionItem): { key: string; agentKind: string; ask: string } {
+  if (it.kind === 'approval') {
+    const agentKind = kindOf(it.agent?.name || it.approval.agentName || '');
+    const ask = it.approval.start ? '\u0000start' : askLine(it.approval.action, it.approval.detail);
+    return { key: `${agentKind}\u0001${ask}`, agentKind, ask };
+  }
+  const agentKind = kindOf(it.agent.name);
+  return { key: `${agentKind}\u0001\u0000terminal`, agentKind, ask: '' };
+}
+export function collapseAttention(items: readonly AttentionItem[], min = SAME_ASK_MIN): AttentionRow[] {
+  const keyed = items.map((it) => ({ it, ...sameKey(it) }));
+  const count = new Map<string, number>();
+  for (const k of keyed) count.set(k.key, (count.get(k.key) ?? 0) + 1);
+  const out: AttentionRow[] = [];
+  const seen = new Map<string, Extract<AttentionRow, { kind: 'many' }>>();
+  for (const k of keyed) {
+    if ((count.get(k.key) ?? 0) < min) { out.push({ kind: 'one', item: k.it }); continue; }
+    const g = seen.get(k.key);
+    if (g) g.items.push(k.it);
+    else { const row = { kind: 'many' as const, key: k.key, items: [k.it], agentKind: k.agentKind, ask: k.ask }; seen.set(k.key, row); out.push(row); }
+  }
+  return out;
 }
 
 export interface FleetCounts {

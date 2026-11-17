@@ -16,8 +16,13 @@ palette's "Go home" brings it back. An empty window is the fleet console too. On
 2. **What needs you**, most urgent first: requests that expire soonest, then requests of unknown expiry, then agents waiting in their
    terminals, the longest-waiting first. Each row names the agent, its machine and project, says in one line what it asks and how long ago it
    asked. Six rows are shown; the rest are one press away.
-   * **Allow and Deny are in the row only for a plain yes or no that needs no reading**: a short single line, no structured text, no
-     hidden character, and never a request to start an agent (it carries a folder, a prompt and settings). Everything else has *Review and
+   * **Allow and Deny are in the row only for a plain yes or no that needs no reading and is shown whole**: one line each of action and
+     detail, 120 characters at most in all, no structured text, no hidden character, and never a request to start an agent (it carries a
+     folder, a prompt and settings). The row grows to hold such a request; it never clamps or cuts it (`scripts/e2e-fleet-rows.mjs`
+     measures the longest one at 340, 420 and 820 px and in Large text). While the link is down the buttons are disabled and say why.
+   * **Six or more agents of one kind asking for the same thing are one row with a count and "Review each"**: no stack of identical Allow
+     buttons. Each is then reviewed in the full card.
+   * How long ago it asked is on every row or on none (when the window does not know it for some, it shows it for no one). Everything else has *Review and
      decide*, which opens the agent where the whole request is shown and answered. The row's buttons are the banner's buttons: the same
      function answers, the same signing runs (ADR-0020); nothing is decided on text that was cut.
 3. **Tiles**, grouped by machine or by project (the viewer's choice, remembered in this browser only). A tile shows the agent's state,
