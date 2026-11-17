@@ -551,8 +551,19 @@ fn node_run(say: &Say, o: &Opts) -> ExitCode {
         return ExitCode::from(2);
     }
     let h = home();
-    // A machine enrolled with a hub reports under the id the hub's certificate names.
-    let link = hubcli::load_link(socket_path(o));
+    // A machine enrolled with a hub reports under the id the hub's certificate names. A link folder another command held past every
+    // working hold is not read (it may be half saved) and the node does not start with no link or half of one: it ends, and its
+    // supervisor starts it again later (Codex review of F1031).
+    let link = match hubcli::load_link(socket_path(o)) {
+        Ok(link) => link,
+        Err(_) => {
+            say.err(
+                key!("cli-link-busy"),
+                &[("dir", hubcli::link_dir().display().to_string().into())],
+            );
+            return ExitCode::from(1);
+        }
+    };
     let cfg = NodeConfig {
         // `agora` passes `--resume auto` unless the owner said no (ADR-0062 item 4).
         resume_all: o.resume.as_deref() == Some("auto"),

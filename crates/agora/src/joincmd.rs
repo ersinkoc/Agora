@@ -281,9 +281,28 @@ pub(crate) fn run(
             // unless it is this same hub under this same name: the hub issues a taken name only by replacing it, and the certificate
             // it replaced is revoked, so keeping that link would keep one that no longer works (Codex review of F890). The look and
             // the save hold the folder's guard together (audit F1032): a save that was under way when the join came here is over
-            // before the look, so its link is seen and kept.
-            let held = match hold_link(&link) {
-                Ok(h) => h,
+            // before the look, so its link is seen and kept. The guard is let go before anything is printed (Codex review of F1032).
+            let url = format!("wss://{dial}");
+            let saved = hold_link(&link).and_then(|held| {
+                let d = decide(held.dir(), &id, &v.ca_pem, &v.cert_pem, replace);
+                if d == Decision::Store {
+                    held.store(&url, &id, &v.ca_pem, &v.cert_pem, &key_pem)?;
+                }
+                Ok(d)
+            });
+            match saved {
+                Ok(Decision::Store) => {}
+                Ok(Decision::Already) => {
+                    say.err(
+                        key!("join-already"),
+                        &[("dir", link.display().to_string().into())],
+                    );
+                    return Err(Stop::Usage);
+                }
+                Ok(Decision::KeepNewer) => {
+                    say.err(key!("join-kept-newer"), &[("id", id.as_str().into())]);
+                    return Err(Stop::Usage);
+                }
                 Err(e) => {
                     say.err(
                         key!("join-store-failed"),
@@ -291,24 +310,6 @@ pub(crate) fn run(
                     );
                     return Err(Stop::Failed);
                 }
-            };
-            if held.dir().join("node-id").exists()
-                && !replace
-                && !superseded(held.dir(), &id, &v.ca_pem)
-            {
-                say.err(
-                    key!("join-already"),
-                    &[("dir", link.display().to_string().into())],
-                );
-                return Err(Stop::Usage);
-            }
-            let url = format!("wss://{dial}");
-            if let Err(e) = held.store(&url, &id, &v.ca_pem, &v.cert_pem, &key_pem) {
-                say.err(
-                    key!("join-store-failed"),
-                    &[("reason", e.to_string().into())],
-                );
-                return Err(Stop::Failed);
             }
             let fingerprint = agora_desktop_tunnel::fingerprint(&v.ca_pem).unwrap_or_default();
             say.out(
@@ -382,8 +383,55 @@ fn say_failure(say: &Say, e: &PairError, dial: &str, host: &str) {
     }
 }
 
+/// What an approved join does with the link folder `link`, whose guard it holds, given what the hub delivered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Decision {
+    /// Saves the delivered certificate.
+    Store,
+    /// Keeps the link there: another hub or another name, and no `--replace` (audit F890).
+    Already,
+    /// Keeps the link there: this same hub under this same name, with a certificate issued no earlier than the delivered one. The hub
+    /// keeps one live certificate per name and revokes the earlier ones when it issues one, so the delivered certificate is the revoked
+    /// one, also with `--replace` (Codex review of F1030: an `agora` or `agora node enroll` that enrolled while the owner decided).
+    KeepNewer,
+}
+
+/// See [`Decision`].
+fn decide(
+    link: &std::path::Path,
+    id: &str,
+    ca_pem: &str,
+    cert_pem: &str,
+    replace: bool,
+) -> Decision {
+    if !link.join("node-id").exists() {
+        Decision::Store
+    } else if superseded(link, id, ca_pem) {
+        if not_older(link, cert_pem) {
+            Decision::KeepNewer
+        } else {
+            Decision::Store
+        }
+    } else if replace {
+        Decision::Store
+    } else {
+        Decision::Already
+    }
+}
+
+/// Whether the certificate in `link` was issued no earlier than `cert_pem`, both by one hub. Told by when each ends: a hub gives every
+/// certificate it issues to a node the same lifetime, so the one issued later ends later. Certificates issued within the same second
+/// end in the same second and are not told apart; the one in the folder is then kept. Anything unreadable is not.
+fn not_older(link: &std::path::Path, cert_pem: &str) -> bool {
+    let ends = |pem: &str| agora_hub::ca::cert_not_after_secs(pem).ok();
+    let kept = std::fs::read_to_string(link.join("cert.pem"))
+        .ok()
+        .and_then(|pem| ends(&pem));
+    matches!((kept, ends(cert_pem)), (Some(kept), Some(got)) if kept >= got)
+}
+
 /// Whether the link in `link` is this machine under `id` at the hub whose CA is `ca_pem`: the one the certificate just delivered
-/// supersedes. Anything unreadable is not.
+/// supersedes, unless that link's certificate is the newer one ([`not_older`]). Anything unreadable is not.
 fn superseded(link: &std::path::Path, id: &str, ca_pem: &str) -> bool {
     let read = |f: &str| std::fs::read_to_string(link.join(f)).ok();
     read("node-id").is_some_and(|n| n.trim() == id)
@@ -417,5 +465,64 @@ mod tests {
             );
         }
         assert_eq!(pick(3, true, |_| None), Pick::None);
+    }
+
+    /// Codex review of F1030: an approved join got its certificate when the owner approved, then waited for the link folder; if `agora`
+    /// or `agora node enroll` enrolled this machine with the same hub under the same name meanwhile, the hub revoked the join's
+    /// certificate, and the join (a matching CA and name let it, even without `--replace`) saved the revoked one over the newer one.
+    /// Certificates of one hub: the newer one ends later.
+    #[test]
+    #[allow(clippy::unwrap_used, clippy::expect_used)]
+    fn a_join_keeps_a_newer_certificate_of_the_same_hub_and_name_and_replaces_an_older_one() {
+        let ca = agora_hub::ca::Ca::generate("test hub").unwrap();
+        let (_, csr) = new_device_request().unwrap();
+        let newer = ca.issue_node("racer", &csr).unwrap().cert_pem;
+        let ca = ca.with_lifetime_for_tests(std::time::Duration::from_secs(3600));
+        let older = ca.issue_node("racer", &csr).unwrap().cert_pem;
+        let ca_pem = ca.cert_pem().to_string();
+        let dir = std::env::temp_dir().join(format!("agora-join-decide-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let put = |id: &str, ca: &str, cert: &str| {
+            for (f, c) in [("node-id", id), ("ca.pem", ca), ("cert.pem", cert)] {
+                std::fs::write(dir.join(f), c).unwrap();
+            }
+        };
+        // Nothing there: stored.
+        assert_eq!(
+            decide(&dir, "racer", &ca_pem, &older, false),
+            Decision::Store
+        );
+        for replace in [false, true] {
+            // Saved meanwhile, newer: kept, with or without --replace.
+            put("racer", &ca_pem, &newer);
+            assert_eq!(
+                decide(&dir, "racer", &ca_pem, &older, replace),
+                Decision::KeepNewer
+            );
+            // An older one of the same hub and name: the delivered one supersedes it.
+            put("racer", &ca_pem, &older);
+            assert_eq!(
+                decide(&dir, "racer", &ca_pem, &newer, replace),
+                Decision::Store
+            );
+            // One that cannot be read as a certificate: superseded as before.
+            put("racer", &ca_pem, "NOT A CERTIFICATE");
+            assert_eq!(
+                decide(&dir, "racer", &ca_pem, &newer, replace),
+                Decision::Store
+            );
+        }
+        // Another hub or another name: kept unless --replace (audit F890).
+        put("first", "OTHERCA", &newer);
+        assert_eq!(
+            decide(&dir, "racer", &ca_pem, &older, false),
+            Decision::Already
+        );
+        assert_eq!(
+            decide(&dir, "racer", &ca_pem, &older, true),
+            Decision::Store
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -107,9 +107,22 @@ fn bad(say: &Say) -> ExitCode {
 }
 
 fn from_hub(say: &Say, o: &Opts) -> ExitCode {
-    let Some((_, link)) = crate::hubcli::load_link(crate::socket_path(o)) else {
-        say.err(key!("cli-devices-not-enrolled"), &[]);
-        return ExitCode::from(1);
+    let link = match crate::hubcli::load_link(crate::socket_path(o)) {
+        Ok(Some((_, link))) => link,
+        Ok(None) => {
+            say.err(key!("cli-devices-not-enrolled"), &[]);
+            return ExitCode::from(1);
+        }
+        Err(_) => {
+            say.err(
+                key!("cli-link-busy"),
+                &[(
+                    "dir",
+                    crate::hubcli::link_dir().display().to_string().into(),
+                )],
+            );
+            return ExitCode::from(1);
+        }
     };
     match agora_node::uplink_client::list_devices(&link) {
         Ok(devices) => offer(say, o, &devices),
