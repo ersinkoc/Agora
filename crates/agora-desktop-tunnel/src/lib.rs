@@ -157,10 +157,17 @@ pub enum TunnelError {
 /// fingerprint the user compares names one certificate, and the tunnel must trust exactly the one it names.
 fn the_ca(ca_pem: &str) -> Result<CertificateDer<'static>, TunnelError> {
     let mut certs = CertificateDer::pem_slice_iter(ca_pem.as_bytes());
-    match (certs.next(), certs.next()) {
-        (Some(Ok(der)), None) => Ok(der),
-        _ => Err(TunnelError::BadCa),
+    let Some(Ok(der)) = certs.next() else {
+        return Err(TunnelError::BadCa);
+    };
+    // The same certificate again (a file saved twice over) still names one CA; another one, or an unreadable one, is refused.
+    for other in certs {
+        match other {
+            Ok(o) if o == der => {}
+            _ => return Err(TunnelError::BadCa),
+        }
     }
+    Ok(der)
 }
 
 /// The SHA-256 of the CA's certificate, as upper-case hex pairs separated by colons: what the user compares on first use.
@@ -711,6 +718,9 @@ mod tests {
                 Some(TunnelError::BadCa)
             );
         }
+        // The same CA twice is still one CA.
+        let twice = format!("{}{}", real.cert_pem(), real.cert_pem());
+        assert_eq!(fingerprint(&twice), fingerprint(real.cert_pem()));
         // The real CA alone still trusts the real CA only.
         let real_hub = hub(&real).await;
         assert_eq!(check(&real_hub.to_string(), real.cert_pem()).await, Ok(()));
