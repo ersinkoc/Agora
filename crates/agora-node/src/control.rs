@@ -1034,6 +1034,11 @@ pub(crate) fn resume_agent(
     }
     // The folder must still be the one the agent worked in: there, a directory, with the same project identity (ADR-0052), and for a
     // selected folder the same canonical path and no unconfirmed change of its identity.
+    // F1021: a selected folder is held from before it is checked, and the agent is resumed in the held folder: one that the path no
+    // longer leads to after the check (it, or a folder above it, moved or swapped for a link) is refused.
+    let held = entry
+        .directory
+        .then(|| agora_platform::HeldFolder::open(&folder));
     let project = if entry.directory {
         let (info, project) = crate::directory::inspect(&entry.folder, &ctx.node_id, false)
             .map_err(|_| folder_changed())?;
@@ -1054,6 +1059,13 @@ pub(crate) fn resume_agent(
         }
         checkout.project
     };
+    let checked = held
+        .map(|h| {
+            h.ok()
+                .filter(agora_platform::HeldFolder::in_place)
+                .ok_or_else(folder_changed)
+        })
+        .transpose()?;
     let restore = crate::supervisor::Restore {
         id: id.clone(),
         kind: entry.kind.clone(),
@@ -1086,7 +1098,7 @@ pub(crate) fn resume_agent(
         if let Some(p) = &parent {
             sup.set_parent(&id, p);
         }
-        match sup.resume(&id, Instant::now()) {
+        match sup.resume_in(&id, Instant::now(), checked) {
             Ok(events) => (
                 events,
                 sup.list(),

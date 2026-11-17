@@ -146,10 +146,14 @@ impact is bounded: for `list`, the names of the sub-folders of that other folder
 branch. A launch does not follow such a swap (F1012): it holds the folder open from before its check until the start, refuses
 the launch when the path no longer leads to the held folder (after the check, and again with everything for the start made),
 and on Unix starts a terminal agent in the held folder itself, so it does not start an agent in another project's folder.
+A later start of the same agent does not follow one either: a restart after a crash holds the folder again by the path its first
+start held it at (F1020; an adapter's, checked before and after, F1023), and a resume (ADR-0060, by a person or the node itself)
+holds it from before its check (F1021); a path that no longer leads to a folder there refuses that start. On Linux the
+confinement's rules for the folder and for anything below it are made from the held folder, not from its path (F1022).
 Residual: on Windows the agent is started by the path (the handle, held without delete sharing, keeps the folder from being
 renamed); an adapter agent is given its folder by path and a separate worktree is made from the checkout by path, each checked
-before and after; and the confinement rules are made from the path, so a swap undone within the start is not detected for them.
-The local owner-only socket keeps its authority.
+before and after (an adapter's resume only before); and on macOS and Windows the confinement rules are made from the path, so a
+swap undone within the start is not detected for them. The local owner-only socket keeps its authority.
 
 
 Folder listing (ADR-0053 `directory.list`) discloses **folder names only** (and whether each holds a `.git`), one folder per

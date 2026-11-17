@@ -463,6 +463,9 @@ struct AdapterEntry {
     mesh: Option<agora_adapters::inject::Endpoint>,
     /// ADR-0059: the options it was started with (their arguments are already in `spec.command`).
     launch: LaunchChoice,
+    /// A selected folder (ADR-0052): its path as its start held it; a restart after a crash holds it again (F1023). `None` for a
+    /// worktree the node made.
+    folder: Option<PathBuf>,
 }
 
 struct Entry {
@@ -484,6 +487,9 @@ struct Entry {
     carried_on: bool,
     /// ADR-0059: the options it was started with (their arguments are in `extras.options`).
     launch: LaunchChoice,
+    /// A selected folder (ADR-0052): its path as its start held it. A restart or resume holds it again and starts in it, or not at all
+    /// when the path no longer leads to a folder there (F1020, F1021). `None` for a worktree the node made.
+    folder: Option<PathBuf>,
 }
 
 pub struct Supervisor {
@@ -984,6 +990,7 @@ impl Supervisor {
                 carry_on: false,
                 carried_on: false,
                 launch: choice,
+                folder: None,
             },
         );
         Ok(id)
@@ -1183,6 +1190,7 @@ impl Supervisor {
                     options: SessionOptions::default(),
                     mesh,
                     launch: choice,
+                    folder: folder.map(|f| f.path().to_path_buf()),
                 },
             );
         } else {
@@ -1246,6 +1254,7 @@ impl Supervisor {
                     carry_on: false,
                     carried_on: false,
                     launch: choice,
+                    folder: folder.map(|f| f.path().to_path_buf()),
                 },
             );
         }
@@ -1423,6 +1432,7 @@ impl Supervisor {
                 options: SessionOptions::default(),
                 mesh,
                 launch,
+                folder: None,
             },
         );
         Ok(id)
@@ -1505,6 +1515,16 @@ impl Supervisor {
     /// counts and backs off like a crash.
     fn restart_adapter(&mut self, id: &AgentId, now: Instant, events: &mut Vec<SupervisorEvent>) {
         let policy = self.cfg.restart;
+        // F1023: a selected folder is held again; an adapter is started, and given its folder, by path, so the folder must be where
+        // it was held before and after (as at its first start, F1012).
+        let held = self
+            .adapters
+            .get(id)
+            .and_then(|e| e.folder.as_deref())
+            .map(|p| held_again(None, p))
+            .transpose();
+        let moved =
+            |h: &Option<agora_platform::HeldFolder>| h.as_ref().is_some_and(|f| !f.in_place());
         let Some(profile) = self.adapters.get(id).and_then(|e| {
             Some(self.adapter_sandbox(&e.agent.kind, &e.worktree, e.spec.command.first()?))
         }) else {
@@ -1521,17 +1541,26 @@ impl Supervisor {
         e.restart_at = None;
         e.restarts += 1;
         // A crash keeps the agent in the mesh: the restarted session gets the same endpoint.
-        match profile.and_then(|profile| {
-            launch_adapter(
-                &e.spec,
-                &e.checkout_root,
-                &e.worktree,
-                e.agent.session.as_deref(),
-                profile,
-                e.mesh.as_ref(),
-                creds,
-            )
-        }) {
+        let launched = held.and_then(|held| {
+            let l = profile.and_then(|profile| {
+                launch_adapter(
+                    &e.spec,
+                    &e.checkout_root,
+                    &e.worktree,
+                    e.agent.session.as_deref(),
+                    profile,
+                    e.mesh.as_ref(),
+                    creds,
+                )
+            })?;
+            if moved(&held) {
+                // Dropping the adapter stops it and everything below it.
+                drop(l);
+                return Err(SupervisorError::FolderMoved);
+            }
+            Ok(l)
+        });
+        match launched {
             Ok((adapter, session_id, capabilities)) => {
                 e.adapter = Some(adapter);
                 e.session_id = session_id;
@@ -1683,17 +1712,7 @@ impl Supervisor {
             .collect()
     }
 
-    fn launch(
-        &self,
-        kind: &str,
-        argv: &[String],
-        worktree: &std::path::Path,
-        extras: &Extras,
-    ) -> Result<TerminalHandle, SupervisorError> {
-        self.launch_in(kind, argv, worktree, extras, None)
-    }
-
-    /// [`Self::launch`], in `folder` when it is given (F1012): `worktree` is that folder's path.
+    /// Starts a terminal agent's process, in `folder` when it is given (F1012): `worktree` is that folder's path.
     fn launch_in(
         &self,
         kind: &str,
@@ -1856,15 +1875,21 @@ impl Supervisor {
         let Some(entry) = self.agents.get(id) else {
             return;
         };
-        let (kind, worktree, session, extras) = (
+        let (kind, worktree, session, extras, folder) = (
             entry.agent.kind.clone(),
             entry.worktree.clone(),
             entry.agent.session.clone(),
             entry.extras.clone(),
+            entry.folder.clone(),
         );
         // A restart of a process that died is never a resume by the node after its own stop: no "carry on" message here.
         let (argv, native, fresh, _) = self.argv_for_resume(&kind, session.as_deref(), false);
-        let result = self.launch(&kind, &argv, &worktree, &extras);
+        // F1020: a selected folder is held again, so a restart never follows a link swapped in for it since the agent started.
+        let result = folder
+            .as_deref()
+            .map(|p| held_again(None, p))
+            .transpose()
+            .and_then(|f| self.launch_in(&kind, &argv, &worktree, &extras, f.as_ref()));
         let Some(entry) = self.agents.get_mut(id) else {
             return;
         };
@@ -2031,6 +2056,7 @@ impl Supervisor {
                 r.id,
                 AdapterEntry {
                     agent,
+                    folder: r.directory.then(|| r.folder.clone()),
                     adapter: None,
                     session_id: String::new(),
                     worktree: r.folder,
@@ -2065,6 +2091,7 @@ impl Supervisor {
             r.id,
             Entry {
                 agent,
+                folder: r.directory.then(|| r.folder.clone()),
                 worktree: r.folder,
                 branch: r.branch,
                 terminal: None,
@@ -2106,6 +2133,17 @@ impl Supervisor {
         &mut self,
         id: &AgentId,
         now: Instant,
+    ) -> Result<Vec<SupervisorEvent>, SupervisorError> {
+        self.resume_in(id, now, None)
+    }
+
+    /// [`Self::resume`]; `checked` is the agent's selected folder, held by the caller from before it checked that folder (F1021). A
+    /// selected folder is held here when not given. A terminal agent starts in that folder, never in whatever the path names by then.
+    pub fn resume_in(
+        &mut self,
+        id: &AgentId,
+        now: Instant,
+        checked: Option<agora_platform::HeldFolder>,
     ) -> Result<Vec<SupervisorEvent>, SupervisorError> {
         if let Some(entry) = self.adapters.get(id) {
             if entry.running || entry.restart_at.is_some() {
@@ -2192,6 +2230,12 @@ impl Supervisor {
             entry.agent.session.clone(),
             entry.agent.project.to_string(),
         );
+        // F1021: held before anything is started for it (the mesh endpoint included).
+        let folder = entry
+            .folder
+            .as_deref()
+            .map(|p| held_again(checked, p))
+            .transpose()?;
         let carry = self.agents.get(id).is_some_and(|e| e.carry_on);
         let (argv, native, fresh, carried) = self.argv_for_resume(&kind, session.as_deref(), carry);
         // A stopped agent left the mesh and its endpoint closed; resuming joins again with a fresh one.
@@ -2206,7 +2250,10 @@ impl Supervisor {
         let launched = self
             .inject(id, &kind, &project, &worktree, config.as_deref())
             .map(|extras| Extras { options, ..extras })
-            .and_then(|extras| Ok((self.launch(&kind, &argv, &worktree, &extras)?, extras)));
+            .and_then(|extras| {
+                let t = self.launch_in(&kind, &argv, &worktree, &extras, folder.as_ref())?;
+                Ok((t, extras))
+            });
         let (terminal, extras) = match launched {
             Ok(t) => t,
             Err(e) => {
@@ -2594,6 +2641,32 @@ fn held(
                 SupervisorError::Spawn(e.to_string())
             }
         })
+}
+
+/// F1020, F1021: a started agent's selected folder held again by the path its start held it at (`checked`, when the caller held it
+/// for its check). Never resolved first: a path that no longer leads to a folder there (one swapped for a link) is refused.
+fn held_again(
+    checked: Option<agora_platform::HeldFolder>,
+    path: &Path,
+) -> Result<agora_platform::HeldFolder, SupervisorError> {
+    if let Some(folder) = checked {
+        return if folder.path() == path {
+            Ok(folder)
+        } else {
+            Err(SupervisorError::FolderMoved)
+        };
+    }
+    agora_platform::HeldFolder::open(path).map_err(|e| {
+        let gone = matches!(
+            e.kind(),
+            std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+        );
+        if gone || agora_platform::folder_moved(&e) {
+            SupervisorError::FolderMoved
+        } else {
+            SupervisorError::Spawn(e.to_string())
+        }
+    })
 }
 
 /// Spawns an adapter process, initializes it and starts (or resumes) a session. Returns it with the session id and the capabilities
