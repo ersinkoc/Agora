@@ -1696,20 +1696,13 @@ impl Node {
                         };
                         // ADR-0060: a new process (a start, a restart, a resume) is written to the ledger with its start time, so one
                         // that outlives a crashed node is recognised at the next start. Read only when the pid changed.
-                        for (agent, pid) in &pids {
-                            if processes.get(agent) != Some(pid) {
-                                // A read that failed (a process just starting) is tried again on the next tick.
-                                if let Ok(identity) = agora_platform::process_identity(*pid) {
-                                    processes.insert(agent.clone(), *pid);
-                                    ledger_tick.set_process(
-                                        agent.as_str(),
-                                        Some(identity),
-                                        now_ms(),
-                                    );
-                                }
-                            }
-                        }
-                        processes.retain(|a, _| pids.iter().any(|(p, _)| p == a));
+                        record_new_processes(
+                            &ledger_tick,
+                            &mut processes,
+                            &pids,
+                            agora_platform::process_identity,
+                            now_ms(),
+                        );
                         // ADR-0060: the session ids terminal agents write to their own files (`[session.file]`), read outside the lock.
                         if !session_targets.is_empty() {
                             let known = sup
@@ -2113,6 +2106,30 @@ pub fn load_manifests(dir: &Path) -> (Vec<Manifest>, Vec<(PathBuf, String)>) {
     (loaded.into_iter().map(|l| l.manifest).collect(), problems)
 }
 
+/// ADR-0060: writes the process of every agent whose pid is new to `recorded` into the ledger, and remembers it only once the ledger
+/// has taken it. Two things make a write not happen yet, and both are tried again on the next tick: the process cannot be read (it
+/// is just starting), and the ledger has no entry for the agent (the supervisor starts the process and releases its lock before the
+/// node records `AgentStarted`, which makes the entry: a tick between the two used to remember the pid as written, so the ledger
+/// never got it and a survivor of a crashed node was not recognised; seen on slow macOS runners).
+fn record_new_processes(
+    ledger: &crate::ledger::Ledger,
+    recorded: &mut std::collections::HashMap<AgentId, u32>,
+    pids: &[(AgentId, u32)],
+    identity: impl Fn(u32) -> io::Result<agora_platform::ProcessIdentity>,
+    now_ms: u64,
+) {
+    for (agent, pid) in pids {
+        if recorded.get(agent) != Some(pid) {
+            if let Ok(identity) = identity(*pid) {
+                if ledger.set_process(agent.as_str(), Some(identity), now_ms) {
+                    recorded.insert(agent.clone(), *pid);
+                }
+            }
+        }
+    }
+    recorded.retain(|a, _| pids.iter().any(|(p, _)| p == a));
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used)] // expect is allowed in tests
 mod memory_tests {
@@ -2464,6 +2481,88 @@ mod announce_tests {
             (p.skip_permissions, p.problems),
             (S::Forbid, vec!["unreadable".to_string()])
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod process_record_tests {
+    use super::record_new_processes;
+    use agora_core::AgentId;
+    use agora_protocol::v1::{self, event::Body};
+    use std::collections::HashMap;
+
+    fn identity(pid: u32) -> std::io::Result<agora_platform::ProcessIdentity> {
+        Ok(agora_platform::ProcessIdentity {
+            pid,
+            group: pid,
+            started: 1_700_000_000_000_000,
+            boot: String::new(),
+            name: "fake".into(),
+        })
+    }
+
+    /// The supervisor starts a process before the node records `AgentStarted` (which makes the ledger entry). A tick in between must
+    /// not remember the pid as written: the next tick has to write it once the entry exists.
+    #[test]
+    fn a_tick_before_the_agent_is_in_the_ledger_is_tried_again() {
+        let dir = std::env::temp_dir().join(format!("agora-procrec-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let ledger = crate::ledger::Ledger::open(&dir, 1).unwrap();
+        let agent = AgentId::new("agent-1");
+        let pids = vec![(agent.clone(), 4242)];
+        let mut recorded = HashMap::new();
+
+        record_new_processes(&ledger, &mut recorded, &pids, identity, 2);
+        assert!(ledger.get("agent-1").is_none());
+        assert!(
+            recorded.is_empty(),
+            "a pid the ledger did not take was remembered"
+        );
+
+        ledger.observe(
+            &Body::AgentStarted(v1::AgentStarted {
+                agent_id: "agent-1".into(),
+                project_id: "p".into(),
+                node_id: "n".into(),
+                worktree_id: "w".into(),
+                kind: "fake".into(),
+                level: 2,
+                ..Default::default()
+            }),
+            3,
+        );
+        record_new_processes(&ledger, &mut recorded, &pids, identity, 4);
+        assert_eq!(ledger.get("agent-1").unwrap().process().unwrap().pid, 4242);
+        assert_eq!(recorded.get(&agent), Some(&4242));
+
+        // Written once: a later tick with the same pid reads nothing again.
+        record_new_processes(&ledger, &mut recorded, &pids, |_| panic!("read again"), 5);
+        // An agent that is gone is forgotten, so a new process of it is written.
+        record_new_processes(&ledger, &mut recorded, &[], identity, 6);
+        assert!(recorded.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A process that cannot be read yet (it is just starting) is tried again too.
+    #[test]
+    fn a_process_that_cannot_be_read_yet_is_tried_again() {
+        let dir = std::env::temp_dir().join(format!("agora-procrec2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let ledger = crate::ledger::Ledger::open(&dir, 1).unwrap();
+        let pids = vec![(AgentId::new("agent-1"), 7)];
+        let mut recorded = HashMap::new();
+        record_new_processes(
+            &ledger,
+            &mut recorded,
+            &pids,
+            |_| Err(std::io::Error::from(std::io::ErrorKind::NotFound)),
+            2,
+        );
+        assert!(recorded.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

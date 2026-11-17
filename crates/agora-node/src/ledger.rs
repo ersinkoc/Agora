@@ -377,16 +377,18 @@ impl Ledger {
         v
     }
 
-    /// The process an agent runs as now (`None`: it has none any more). Written when it changed.
+    /// The process an agent runs as now (`None`: it has none any more). Written when it changed. `false` when the ledger does not hold
+    /// the agent (yet): nothing was written, and the caller must ask again later (the entry is made by `AgentStarted`, which the
+    /// node records just after the supervisor has started the process).
     pub fn set_process(
         &self,
         agent_id: &str,
         p: Option<agora_platform::ProcessIdentity>,
         now_ms: u64,
-    ) {
+    ) -> bool {
         let mut st = self.st();
         let Some(e) = st.entries.get_mut(agent_id) else {
-            return;
+            return false;
         };
         let (pid, group, started, boot, name) =
             p.map_or((0, 0, 0, String::new(), String::new()), |p| {
@@ -407,7 +409,7 @@ impl Ledger {
             e.process_name.clone(),
         );
         if was == now {
-            return;
+            return true;
         }
         (
             e.pid,
@@ -420,6 +422,7 @@ impl Ledger {
         st.dirty = true;
         drop(st);
         let _ = self.flush();
+        true
     }
 
     /// ADR-0062 item 4: the node brought this agent back by itself now.
