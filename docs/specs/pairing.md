@@ -282,7 +282,7 @@ and `frontdoor.rs` (choice 3). Tests: `crates/agora/tests/pair_node.rs` (the cli
   handshake signature with the provider's own check (a peer that cannot sign with the leaf's key fails: tested with a certificate and another key's signature).
   The configuration offers TLS 1.3 only; a hub that only speaks TLS 1.2 is refused with a sentence of its own, nothing stored.
 - **What is checked before anything is kept (step 6).** The delivered CA is exactly one certificate (a bundle is refused: what is pinned is the one CA the hub's
-  leaf chain used) that is a CA with the signing usage and valid now. The leaf chains to it and the dialled host is one of its leaf's names, else `pair.name_unverified`. The delivered certificate chains to that CA (client-auth verifier), is valid now, does not start in the future and lasts at most 366 days, has the client-authentication usage and is
+  leaf chain used) that is a CA with the signing usage and valid now. The leaf chains to it and the dialled host is one of its leaf's names, else `pair.name_unverified`. The delivered certificate chains to that CA (client-auth verifier), is valid now, starts no more than the 10-minute clock allowance ahead of the machine's clock and lasts at most 366 days, has the client-authentication usage and is
   not a CA, its common name is the node id, and its public key is the one in this machine's own CSR. Each check has a test against a certificate wrong in just that way
   (`pairing_client.rs`, `check_delivery`), and each test was seen to fail with its check removed. The CA's fingerprint is printed in the same format as
   `agora hub fingerprint`. The module stores nothing; `agora join` stores only what `pair()` returned.

@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use agora_i18n::key;
 use agora_protocol::v1::{self, command_ok, command_request::Command};
-use agora_tui::client::{Hub, PairNote, Session};
+use agora_tui::client::{Hub, PairNote, Session, Update};
 
 use crate::hubcli::{hub_dir, own_hub_addr, DEFAULT_LISTEN};
 use crate::{Opts, Say};
@@ -284,7 +284,10 @@ fn watch(say: &Say, session: &mut Session, until: Option<Instant>) -> ExitCode {
     let mut ended: std::collections::HashSet<Vec<u8>> = Default::default();
     let mut last_status = Instant::now();
     loop {
-        let _ = session.next(Duration::from_millis(250));
+        // A connection that ended answers at once, so carrying on would spin and wait for a hub that is gone.
+        if let Update::Closed = session.next(Duration::from_millis(250)) {
+            return fail_hub(say, "client.unreachable");
+        }
         for note in session.take_pair_notes() {
             match note {
                 PairNote::Requested(c) if c.kind == v1::PairKind::Machine as i32 => {
