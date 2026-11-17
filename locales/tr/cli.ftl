@@ -30,6 +30,8 @@ cli-usage =
       agora hub restore DOSYA [--hub-dir DİZİN]
       agora hub machines [forget AD | forget --old] [--refuse-return] [--yes] [--hub-dir DİZİN]
       agora hub devices [forget CİHAZ_ID] [--hub-dir DİZİN]
+      agora pair open [--minutes N] | close | status [--hub-dir DIR]
+      agora join [ADDRESS] [--id NAME] [--replace]
       agora node enroll --hub URL --ca FILE --code CODE --id NAME [--yes --fingerprint PARMAK_İZİ]... [--include-others] [--replace]
       agora panel
       agora node trust CİHAZ_ID AÇIK_ANAHTAR_HEX [--data DİZİN]
@@ -268,7 +270,6 @@ frontdoor-autostart-later = Agora oturum açtığınızda kendiliğinden başlam
 frontdoor-resume-question = Yeniden başlatmadan sonra ajanlar kendiliğinden geri gelsin mi? [E/h]
 frontdoor-resume-off = Ajanlar yeniden başlatmadan sonra kendiliğinden geri gelmeyecek; pencere her birini geri getirmeyi önerir. `agora --resume auto --save` bunu yeniden açar.
 frontdoor-resume-saved = Kaydedildi. Bu makinede Agora bir sonraki başladığında geçerli olur: şu an çalışan node, `agora down` yapılana kadar başladığı ayarla devam eder.
-frontdoor-join-later = Buradan katılmak henüz yok. Agora'nın çalıştığı makinede `agora hub code` çalıştırın; sonra burada `agora node enroll` ve `agora node run` çalıştırın (bkz. `agora --help`).
 frontdoor-get-started = Agora bu makinede henüz kurulmadı. Bir terminalde `agora` çalıştırıp tek bir soruyu yanıtlayın. (Ayarlar { $path } dosyasında tutulur.)
 frontdoor-set-up-by-hand = Bu makinede elle başlatılmış bir Agora zaten var ({ $path }). `agora` onu henüz devralmıyor: `agora hub run` ve `agora node run` ile devam edin ya da `agora` yeni bir kurulum yapsın diye AGORA_HOME değişkenini yeni bir klasöre yöneltin.
 frontdoor-saved = { $path } dosyasına kaydedildi.
@@ -428,3 +429,50 @@ cli-secret-bad-name = Bu ad kullanılamaz: yalnızca harf, rakam ve alt çizgi k
 cli-secret-bad-value = Değer en çok 8192 baytlık tek bir satır olmalı, denetim karakteri içermemeli. Hiçbir şey saklanmadı.
 cli-secret-failed = Sır burada saklanamadı veya okunamadı. Düğümün veri klasörünün sizin olduğunu ve yazılabildiğini denetleyin.
 cli-secret-name-collides = Adı yalnızca büyük/küçük harfle farklı olan bir sır zaten saklı. O adı aynen kullanın ya da önce onu silin.
+
+# ADR-0065: hub'da `agora pair`, yeni makinede `agora join`.
+pair-no-hub = { $dir } klasöründen çalışan bir hub yok. `agora` (ya da `agora hub run`) ile başlatın, sonra bunu hub'ı çalıştıran makinede yeniden çalıştırın.
+pair-hub-unreachable = Hub yanıt vermedi ({ $reason }). Çalışıyor mu? `agora` ya da `agora hub run` ile başlatın.
+pair-minutes-usage = --minutes 1 ile { $max } arasında bir sayı alır.
+pair-opened = Hub'ınız { $minutes } dakika boyunca yeni makinelere açık.
+pair-open-next = Yeni makinede `agora join { $address }` çalıştırın (bu ad ulaşmıyorsa bu bilgisayarın ağınızdaki adresini kullanın). Yeni makine bir sayı gösterir, bu ekran da bir sayı gösterir: yalnızca aynıysa onaylayın.
+pair-open-waiting = Bir makine bekleniyor. Ctrl+C ile çıkabilirsiniz: hub, süresi dolana ya da `agora pair close` çalıştırana kadar açık kalır.
+pair-status-open = Yeni makinelere açık. { $minutes } dakika sonra kapanır.
+pair-status-closed = Yeni makinelere kapalı. Birinin katılması için `agora pair open` çalıştırın.
+pair-status-waiting = { $count ->
+    [one] Bir makine yanıtınızı bekliyor.
+   *[other] { $count } makine yanıtınızı bekliyor.
+}
+pair-closed-now = Hub'ınız yeni makinelere kapalı.
+pair-closed-after = Hub'ınız yeni makinelere yeniden kapalı. Bir tane daha eklemek için `agora pair open` çalıştırın.
+pair-time-up = Verdiğiniz süre doldu. Hub'ınız yeni makinelere kapalı.
+pair-input-ended = Buradan yanıt yazılamıyor, bu yüzden hub süresi boyunca açık kalır; isteyen makine bir pencerede sizi bekler, ya da `agora pair close` çalıştırın.
+pair-card = Yeni makine "{ $name }" ({ $os }, { $address }) katılmak istiyor. Sayı { $number }.
+pair-card-ask = O makinedeki sayı aynı mı? Onaylansın mı? [e/H]
+pair-card-ended = "{ $name }" istemekten vazgeçti, yanıtlanacak bir şey kalmadı.
+pair-approved = Onaylandı. "{ $name }" katılıyor.
+pair-denied-now = Reddedildi. O makineye hiçbir şey verilmedi.
+pair-replace-ask = "{ $name }" adlı bir makine zaten katılmış. Yenisiyle değiştirilsin mi? Eskisi erişimini kaybeder. [e/H]
+pair-left-waiting = Değiştirilmedi. İstek, süresi dolana kadar hub'da açık kalır.
+
+join-help = Başka bir makinede çalışan bir Agora'ya katılmak için hub'ının adresi gerekir. O makinede `agora pair open` çalıştırın: adresi söyler. Sonra burada `agora join ADRES` çalıştırın, örneğin `agora join 192.168.1.20:7443`. (Hub'ları kendiliğinden bulmak sonra gelecek: şimdilik hub'ın adresini yazın.)
+join-connecting = { $address } adresine bağlanılıyor...
+join-number = Sayı { $number }. Bu makineyi hub'da onaylayın: hub aynı sayıyı gösterir. Sahibinin onayı bekleniyor...
+join-done = Katıldı. Bu makine "{ $id }" adıyla kayıtlı. Hub'ın sertifika yetkilisinin (CA) parmak izi (SHA-256) { $fingerprint }; sahibi `agora hub fingerprint` ile karşılaştırabilir.
+join-start = Bu makineyi `agora` ile başlatın; hub'a kendiliğinden bağlanır.
+join-already = Bu makine zaten bir hub'a katılmış ({ $dir } klasörüne bakın). Başkasına katılmak için `agora join ADRES --replace` çalıştırın.
+join-bad-address = Bu makinenin kullanabileceği bir adres değil. Hub'ın adresini 192.168.1.20:7443 ya da hub.example gibi verin.
+join-no-key = Bu makine anahtarını üretemedi.
+join-unreachable = { $address } adresindeki hub'a ulaşılamadı ({ $reason }). Çalışıyor mu, adres doğru mu? Hiçbir şey kaydedilmedi.
+join-tls13-required = { $address } adresindeki hub yalnızca eski türden güvenli bağlantı sunuyor, bu yüzden bu makine ona katılmaz. Hiçbir şey kaydedilmedi.
+join-tls-failed = { $address } adresiyle güvenli bağlantı kurulamadı ({ $reason }). Hiçbir şey kaydedilmedi.
+join-timeout-answer = Hub zamanında yanıt vermedi. Hiçbir şey kaydedilmedi.
+join-timeout-decision = Kimse bu makineyi zamanında onaylamadı. Hiçbir şey kaydedilmedi. Sahibinden `agora pair open` çalıştırmasını isteyip yeniden deneyin.
+join-denied = Sahibi hayır dedi. Hiçbir şey kaydedilmedi.
+join-closed = Hub yanıt vermeden konuşmayı bitirdi. Hiçbir şey kaydedilmedi.
+join-unexpected = Hub, bu makinenin kabul etmediği bir biçimde yanıt verdi. Hiçbir şey kaydedilmedi.
+join-name-hint = Hub'ın sertifikası yazdığınız adresi içermeli. Sahibinden hub'ı `--name { $name }` ile başlatmasını isteyin.
+join-certificate-invalid = Hub'ın gönderdiği doğrulanamadı ({ $what }). Hiçbir şey kaydedilmedi.
+join-store-failed = Sonuç kaydedilemedi: { $reason }
+join-settings-unsaved = Bu makinenin ayarları kaydedilemedi. Kurmak için `agora` çalıştırın.
+frontdoor-join-address = Hub'ın adresi (192.168.1.20:7443 gibi; yoksa Enter):

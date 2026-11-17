@@ -7,6 +7,10 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 ### The window
 - Home is now a fleet console: counts of what needs you, what is working, what finished, what failed and which machines are online (each one filters the list), then what needs you with Allow and Deny in the row for simple requests, then every agent as a tile grouped by machine or project, with a clear next step when there is no machine or no agent yet.
 
+### Adding a machine
+- You can now add a machine to your hub without copying a certificate file or a code: run `agora pair open` on the hub's machine, `agora join ADDRESS` on the new one,
+  compare the number both show, and answer `y` on the hub. Choice 3 of `agora`'s first question does the same (it asks for the address).
+
 ## 0.3.16
 
 ### The window

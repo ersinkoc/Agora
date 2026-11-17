@@ -159,6 +159,15 @@ pub struct Kind {
     pub program: String,
 }
 
+/// ADR-0065: what the hub tells an owner's window about pairing.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PairNote {
+    /// A machine (or browser) is waiting for the owner's answer.
+    Requested(agora_protocol::v1::PairRequested),
+    /// A request was decided, expired or ended.
+    Decided(agora_protocol::v1::PairDecided),
+}
+
 /// What the hub sent next.
 pub enum Update {
     Snapshot(Box<Snapshot>),
@@ -241,10 +250,37 @@ impl Session {
                     }
                     Update::Changed
                 }
+                Ok(Ok(Some(f))) if f.stream_id == STREAM_EVENTS && is_pair_frame(&f) => {
+                    keep_pair_frame(f, queue);
+                    Update::Quiet
+                }
                 Ok(Ok(Some(_))) => Update::Quiet,
                 Ok(_) => Update::Closed,
             }
         })
+    }
+
+    /// ADR-0065: the pairing notices an owner's window got since the last call, in order (cards waiting and decisions). Empty for
+    /// anyone but an owner. The hub sends a card once, so a caller that wants cards reads this after every [`Session::next`] and
+    /// [`Session::command_ok`].
+    pub fn take_pair_notes(&mut self) -> Vec<PairNote> {
+        let mut notes = Vec::new();
+        let mut rest = std::collections::VecDeque::new();
+        for f in self.term_frames.drain(..) {
+            if f.stream_id == STREAM_EVENTS && f.kind == kinds::PAIR_REQUESTED {
+                if let Ok(c) = agora_protocol::v1::PairRequested::decode(f.payload.as_slice()) {
+                    notes.push(PairNote::Requested(c));
+                }
+            } else if f.stream_id == STREAM_EVENTS && f.kind == kinds::PAIR_DECIDED {
+                if let Ok(d) = agora_protocol::v1::PairDecided::decode(f.payload.as_slice()) {
+                    notes.push(PairNote::Decided(d));
+                }
+            } else {
+                rest.push_back(f);
+            }
+        }
+        self.term_frames = rest;
+        notes
     }
 
     /// Whether a request for the user's answer arrived since the last call (then cleared).
@@ -274,7 +310,7 @@ impl Session {
     }
 
     /// Keeps the peer's error parameters for actions that render the localized reason.
-    fn command_info(
+    pub fn command_info(
         &mut self,
         node: &str,
         command: command_request::Command,
@@ -1200,8 +1236,30 @@ fn set_aside(
             // The snapshot is newer than any event before it.
             *changed = false;
         }
+    } else if f.stream_id == STREAM_EVENTS && is_pair_frame(&f) {
+        keep_pair_frame(f, queue);
     } else if f.stream_id >= agora_protocol::frame::FIRST_DYNAMIC_STREAM {
         queue.push_back(f);
+    }
+}
+
+/// ADR-0065: the hub's pairing notices to an owner's window (`PAIR_REQUESTED`, `PAIR_DECIDED`).
+fn is_pair_frame(f: &Frame) -> bool {
+    f.kind == kinds::PAIR_REQUESTED || f.kind == kinds::PAIR_DECIDED
+}
+
+/// How many pairing notices a session keeps for a caller that reads them: the hub shows at most 4 cards and batches its pushes, so
+/// this is generous; a session whose caller never reads them does not grow.
+const KEPT_PAIR_FRAMES: usize = 64;
+
+/// Keeps a pairing notice in the queue (they are not terminal frames: their stream is the events stream, which no terminal reader
+/// takes), dropping the oldest notice when too many are waiting.
+fn keep_pair_frame(f: Frame, queue: &mut std::collections::VecDeque<Frame>) {
+    queue.push_back(f);
+    while queue.iter().filter(|q| is_pair_frame(q)).count() > KEPT_PAIR_FRAMES {
+        if let Some(pos) = queue.iter().position(is_pair_frame) {
+            queue.remove(pos);
+        }
     }
 }
 

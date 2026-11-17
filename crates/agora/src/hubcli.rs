@@ -1457,21 +1457,33 @@ pub(crate) fn enroll_and_save_with_devices(
         new_device_request().map_err(|_| EnrollFailure::Other("key generation".into()))?;
     match enroll(url, ca_pem, code, id, &csr) {
         Ok(r) => {
-            let dir = link_dir();
-            let write = || -> std::io::Result<()> {
-                std::fs::create_dir_all(&dir)?;
-                std::fs::write(dir.join("url"), url)?;
-                std::fs::write(dir.join("node-id"), id)?;
-                std::fs::write(dir.join("ca.pem"), &r.ca_pem)?;
-                std::fs::write(dir.join("cert.pem"), &r.cert_pem)?;
-                agora_platform::write_private(&dir.join("key.pem"), key_pem.as_bytes())
-            };
-            write().map_err(|e| EnrollFailure::Other(e.to_string()))?;
+            let dir = store_link(url, id, &r.ca_pem, &r.cert_pem, &key_pem)
+                .map_err(|e| EnrollFailure::Other(e.to_string()))?;
             Ok((dir, r.devices))
         }
         Err(LinkError::Refused(code)) => Err(EnrollFailure::Refused(code)),
         Err(e) => Err(EnrollFailure::Other(format!("{e:?}"))),
     }
+}
+
+/// Keeps what enrollment (or pairing) gave this machine in the link folder, and returns it: the hub's address, the node id, the CA, the
+/// certificate and the private key, which only this function and its caller ever hold (readable by this user only).
+pub(crate) fn store_link(
+    url: &str,
+    id: &str,
+    ca_pem: &str,
+    cert_pem: &str,
+    key_pem: &str,
+) -> std::io::Result<PathBuf> {
+    let dir = link_dir();
+    std::fs::create_dir_all(&dir)?;
+    // `node-id` last: it is what says this machine joined, so a write that stops half way does not look like a joined machine.
+    agora_platform::write_private(&dir.join("key.pem"), key_pem.as_bytes())?;
+    std::fs::write(dir.join("ca.pem"), ca_pem)?;
+    std::fs::write(dir.join("cert.pem"), cert_pem)?;
+    std::fs::write(dir.join("url"), url)?;
+    std::fs::write(dir.join("node-id"), id)?;
+    Ok(dir)
 }
 
 /// What enrollment left on this machine, if anything: the node id and how to dial the hub.
