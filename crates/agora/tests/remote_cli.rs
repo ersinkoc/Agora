@@ -3,6 +3,7 @@
 //! and writes every call it gets to a log. The shell-script tests run on Linux and macOS; the checks that need no `tailscale` run
 //! everywhere.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
+#![cfg_attr(not(unix), allow(unused_imports, dead_code))]
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
@@ -27,6 +28,7 @@ struct Env {
     path: std::ffi::OsString,
 }
 
+#[cfg(unix)]
 const FAKE: &str = r#"#!/bin/sh
 D="$FAKE_TS_DIR"
 echo "$@" >> "$D/calls"
@@ -475,8 +477,10 @@ fn a_listen_address_that_is_not_an_address_is_a_usage_error() {
     assert_eq!(code, 2);
 }
 
+#[cfg(unix)]
 struct Proc(Child);
 
+#[cfg(unix)]
 impl Drop for Proc {
     fn drop(&mut self) {
         let _ = self.0.kill();
@@ -484,6 +488,7 @@ impl Drop for Proc {
     }
 }
 
+#[cfg(unix)]
 fn wait_until(what: &str, mut ok: impl FnMut() -> bool) {
     let end = Instant::now() + Duration::from_secs(30);
     while !ok() {
@@ -492,6 +497,7 @@ fn wait_until(what: &str, mut ok: impl FnMut() -> bool) {
     }
 }
 
+#[cfg(unix)]
 fn cert_names(hub: &Path) -> Vec<String> {
     std::fs::read_to_string(hub.join("server-cert.pem"))
         .ok()
