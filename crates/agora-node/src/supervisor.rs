@@ -1627,9 +1627,10 @@ impl Supervisor {
                 ));
             }
         }
-        // ADR-0084: the same for the folder of stored secrets: a grant that reaches it would hand a confined agent every secret.
+        // ADR-0084: the same for the folder of stored secrets (only once it holds one): a grant that reaches it would hand a confined
+        // agent every secret in it.
         if let (Some(profile), Some(store)) = (&cfg.sandbox, self.credentials.store()) {
-            if self.sandbox.path_reachable(store.dir(), profile) {
+            if !store.list().is_empty() && self.sandbox.path_reachable(store.dir(), profile) {
                 return Err(SupervisorError::SandboxRefused(
                     kind.to_string(),
                     self.sandbox.level.name(),

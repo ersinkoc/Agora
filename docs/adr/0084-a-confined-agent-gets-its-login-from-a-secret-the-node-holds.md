@@ -102,5 +102,5 @@ as a credential when it is one the system needs (`PATH`, `HOME`, ...) or starts 
 declare is not passed and `agora doctor` names it (the policy parse does not know manifests, so it is not a load-time refusal); a malformed `credentials.<kind>` line
 lists nothing for that kind and does not forbid skipping permissions (only a key that names no kind does); a value is one line of at most 8192 bytes; the node's
 environment fallback applies only to a kind whose policy line lists the name (so a kind without a line gets nothing, decision 5); a start whose profile has a grant
-reaching the secrets folder is refused (`agent.sandbox_unavailable`, reason `secrets_reachable`); the node does not turn off core dumps. Verified by reading only: the
+reaching the secrets folder is refused once the folder holds a secret (`agent.sandbox_unavailable`, reason `secrets_reachable`); the node does not turn off core dumps. Verified by reading only: the
 owner-only file and folder on macOS and Windows (`write_private` and `ensure_private_dir` are the shared helpers); not measured: `ps eww` on macOS.
