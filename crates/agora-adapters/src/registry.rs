@@ -199,6 +199,18 @@ mod tests {
         hex(&Sha256::digest(b))
     }
 
+    #[test]
+    fn sha256_known_answers_do_not_change_across_the_sha2_crate_versions() {
+        assert_eq!(
+            sha(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(
+            sha(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
+
     fn signed_index(
         root: &Key,
         version: u64,

@@ -214,6 +214,18 @@ impl<'a> MetricsTokens<'a> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+
+    #[test]
+    fn token_hash_known_answer_does_not_change_across_the_sha2_crate_versions() {
+        let hex: String = super::hash("abc")
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert_eq!(
+            hex,
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
     use super::*;
 
     const DAY: u64 = 86_400_000;
