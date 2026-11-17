@@ -18,7 +18,7 @@ rusqlite = { version = "0.41", features = ["bundled"] }
 prost = "0.14"
 # Networking (ADR-0013): tokio runtime, and WebSocket (ADR-0011) via tokio-tungstenite.
 tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "macros", "io-util"] }
-tokio-tungstenite = "0.24"
+tokio-tungstenite = "0.30"
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 # Device certificates (ADR-0015): rcgen issues and signs X.509 certificates.
 rcgen = { version = "0.14", features = ["pem", "x509-parser"] }
