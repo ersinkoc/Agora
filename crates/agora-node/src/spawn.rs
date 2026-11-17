@@ -569,12 +569,15 @@ impl Spawner {
         if Self::running_children(&self.st(), &views, &r.caller) >= MAX_HELPERS {
             return Err(helper_limit("helpers", MAX_HELPERS));
         }
+        // F1012: held from before the check until the start, which goes into the held folder.
+        let held = agora_platform::HeldFolder::open(Path::new(&r.folder));
         let (info, project) = crate::directory::inspect(&r.folder, &self.node_id, false)?;
         // The folder that was shown is the folder used: a path that now resolves elsewhere is not followed.
-        if info.path != r.folder {
+        let folder = held.ok().filter(agora_platform::HeldFolder::in_place);
+        let Some(folder) = folder.filter(|_| info.path == r.folder) else {
             return Err(Error::new(ErrorCode::MeshFolderNotAllowed)
                 .with("folder", cut(&r.folder, MAX_FIELD)));
-        }
+        };
         let n = self.names.fetch_add(1, Ordering::SeqCst);
         let stamp = crate::grants::now_ms();
         let req = StartRequest {
@@ -603,6 +606,7 @@ impl Spawner {
                 r.worktree,
                 &chosen,
                 Instant::now(),
+                Some(folder),
             )
             .map_err(|e| e.to_protocol())?;
         sup.set_parent(&id, &r.caller);

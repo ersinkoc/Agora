@@ -1031,6 +1031,24 @@ pub(crate) fn open_dir(path: &Path) -> io::Result<std::fs::File> {
     Ok(dir)
 }
 
+/// See [`crate::HeldFolder::open`]: as [`open_dir`], but without delete sharing, so while the handle is open the folder can be neither
+/// renamed nor removed (a rename needs delete access, which this handle does not share).
+pub(crate) fn open_dir_held(path: &Path) -> io::Result<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+    let dir = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)?;
+    if !dir.metadata()?.is_dir() {
+        return Err(io::ErrorKind::NotADirectory.into());
+    }
+    Ok(dir)
+}
+
 /// See [`crate::visit_dir`]: a fresh synchronous handle to the same object, then one directory entry per query.
 /// No path is reopened, no reparse target is traversed for entry metadata, and no later entry is requested after Break.
 pub(crate) fn visit_dir(

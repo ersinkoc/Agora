@@ -143,8 +143,13 @@ named in the request is resolved as the action resolves it (an id before a name;
 Accepted (review of #478): the path is resolved for the check and again by the action, so anything that can write inside the
 project, including the limited device's own agent, can swap a subfolder for a link to a folder elsewhere between the two. The
 impact is bounded: for `list`, the names of the sub-folders of that other folder; for `inspect`, its project id, Git root and
-branch; a launch still lands only in a folder whose identity is the project the device signed for (the launch checks it), so it
-never starts an agent in another project. The local owner-only socket keeps its authority.
+branch. A launch does not follow such a swap (F1012): it holds the folder open from before its check until the start, refuses
+the launch when the path no longer leads to the held folder (after the check, and again with everything for the start made),
+and on Unix starts a terminal agent in the held folder itself, so it does not start an agent in another project's folder.
+Residual: on Windows the agent is started by the path (the handle, held without delete sharing, keeps the folder from being
+renamed); an adapter agent is given its folder by path and a separate worktree is made from the checkout by path, each checked
+before and after; and the confinement rules are made from the path, so a swap undone within the start is not detected for them.
+The local owner-only socket keeps its authority.
 
 
 Folder listing (ADR-0053 `directory.list`) discloses **folder names only** (and whether each holds a `.git`), one folder per
