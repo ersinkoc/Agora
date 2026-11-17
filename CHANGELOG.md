@@ -14,9 +14,11 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 - A confined agent no longer receives the node's `SSH_AUTH_SOCK`, `GPG_AGENT_INFO`, `DBUS_SESSION_BUS_ADDRESS`, `DOCKER_HOST`, `TMUX` or `TMUX_PANE`
   (ADR-0083, T8); a policy line `sandbox.pass_env = NAME, ...` lets named ones through, so `git` over ssh in a confined agent needs it
   (see `docs/security/sandbox-recipes.md`).
-- On a Mac a confined agent can only connect to unix sockets it was given (its own mesh socket, worktree and private temp folder, the name resolver and
-  those in the new policy line `sandbox.sockets`), so it can no longer use your ssh-agent, the session bus, docker or a tmux server. On Linux
-  kernels from 6.12 it can no longer connect to abstract sockets made outside its sandbox; a socket that is a file is still reachable there.
+- A confined agent no longer gets `SSH_AUTH_SOCK`, the session bus, docker or tmux addresses in its environment, so it cannot find your
+  ssh-agent, the session bus, docker or a tmux server by itself (the owner can pass a name through with `sandbox.pass_env`). On Linux kernels
+  from 6.12 it can no longer connect to abstract sockets made outside its sandbox; a socket that is a file is still reachable there. On a Mac
+  the rule that refuses every other unix socket is written but switched off until it has been measured on a real Mac: there the environment
+  is the only layer, and `agora doctor` says so.
 - `agora doctor` says whether this machine restricts an agent's unix sockets (and why not), which socket variables the node leaves out of an agent's environment and which the policy passes.
 
 ### Certificates

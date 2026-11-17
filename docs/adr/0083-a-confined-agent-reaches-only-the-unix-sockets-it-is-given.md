@@ -91,11 +91,10 @@ Origin: issue #547, from the third review of #477: under `sandbox = worktree` a 
 ## Built
 Built on 2026-11-17 (issue #547). Step 1 on every system: `agora-node::sandbox` (`SOCKET_VARIABLES`, `sandbox.pass_env`, parsed by `parse_pass_env`
 where one entry that is not a plain name empties the list; `sandbox.sockets` as paths), applied through `env_remove` at a confined terminal start;
-an adapter agent's environment is an allow-list that never held these names, and `pass_env` does not change that (a choice this PR made). Step 2 in `agora-platform`
-(`Sandbox::confine_sockets`, `socket_confinement()`): macOS Seatbelt refuses every unix socket outside the allow-list (`macos.rs`; not run on
-a Mac when written: the rule `(deny network-outbound (remote unix-socket (subpath "/")))` and `/private/var/run/mDNSResponder` are read, not
-measured); Linux Landlock scoping of abstract sockets from ABI 6 (tested here, ABI 8). The kernel headers and the `landlock` ABIs available
-when this was built have no right for pathname sockets, so on Linux those are not restricted and `agora doctor` says so (`sockets-abstract`);
-nothing pretends otherwise. Open question 3 as proposed: `worktree` still starts on such a kernel. The allow-list is the agent's mesh socket,
+an adapter agent's environment is an allow-list that never held these names, and `pass_env` does not change that (a choice this PR made). Step 2 in `agora-platform` (`Sandbox::confine_sockets`, `socket_confinement()`): Linux Landlock scoping of abstract sockets from ABI 6 (tested here, ABI 8). The kernel headers and the `landlock` ABIs available when this was built have no right for pathname sockets, so on Linux those are not restricted and `agora doctor` says so (`sockets-abstract`); nothing pretends otherwise. Open question 3 as proposed: `worktree` still starts on such a kernel. The allow-list is the agent's mesh socket,
 its worktree, its private temp folder (macOS), the name resolver and the owner's `sandbox.sockets` (entries under the node's own folders, also through a link, are
-ignored; `doctor` says `sockets-profile`, a warning, on macOS until a Mac has measured it); the "other system sockets measured with real agents" are not yet measured and are the first thing a Mac developer checks.
+ignored). **macOS step 2 is written but NOT switched on** (`agora_platform::macos::UNIX_SOCKET_DENY_VERIFIED = false`): on a real macOS CI runner the rule
+`(deny network-outbound (remote unix-socket (subpath "/")))` with the allow-list made a confined `git commit` produce no output within 15 s, and the cause was not isolated;
+a security rule that is not measured is not shipped. On a Mac a confined agent gets step 1 only and `agora doctor` says so. The two Seatbelt tests
+are `#[ignore]`d: a Mac developer sets the constant to `true`, runs `cargo test -p agora-platform -- --ignored`, measures each rule form and the allow-list
+(DNS, git, the agent's own mesh socket and bridge reconnect, other agents' sockets, the ADR-0082 control socket) and only then switches it on.

@@ -856,7 +856,8 @@ pub enum SocketConfinement {
 pub fn socket_confinement() -> SocketConfinement {
     #[cfg(target_os = "macos")]
     {
-        if macos::sandbox_supported() {
+        // The Seatbelt rule is written but not switched on until a Mac has measured it (`macos::UNIX_SOCKET_DENY_VERIFIED`).
+        if macos::UNIX_SOCKET_DENY_VERIFIED && macos::sandbox_supported() {
             return SocketConfinement::Full;
         }
     }

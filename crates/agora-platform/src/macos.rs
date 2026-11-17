@@ -269,7 +269,7 @@ pub(crate) fn profile(sb: &crate::Sandbox) -> io::Result<String> {
     // socket, its worktree and private temp folder, the system's name resolver, and what the owner listed in `sandbox.sockets`).
     // `subpath` of a socket file is that file, and of a folder everything in it. The node's own folders are closed again below.
     // The form `(subpath "/")` names every absolute path, so it needs no filter-less spelling of `remote unix-socket`.
-    if sb.confine_sockets && !sb.offline {
+    if UNIX_SOCKET_DENY_VERIFIED && sb.confine_sockets && !sb.offline {
         out.push_str("(deny network-outbound (remote unix-socket (subpath \"/\")))\n");
         let mut allowed: Vec<String> = SYSTEM_SOCKETS
             .iter()
@@ -364,7 +364,7 @@ pub(crate) fn profile(sb: &crate::Sandbox) -> io::Result<String> {
             .sockets
             .iter()
             .filter_map(|p| real_or_new(p))
-            .map(|p| format!("(remote unix-socket (subpath {}))", quote(&p)))
+            .map(|p| format!("(remote unix-socket {})", quote(&p)))
             .collect();
         if !own.is_empty() && !sb.offline {
             out.push_str(&format!("(allow network-outbound {})\n", own.join(" ")));
@@ -618,6 +618,13 @@ fn real_or_future(p: &std::path::Path) -> Option<std::path::PathBuf> {
         Err(_) => None,
     }
 }
+
+/// Whether the Seatbelt rule that refuses every unix socket outside the allow-list (ADR-0083, step 2) is switched on. It is NOT: the rule
+/// was written from the Seatbelt documentation and never measured on a Mac. CI on a real macOS runner found it makes a confined `git
+/// commit` stall (a confined agent's whole start then produced no output within 15 s), and the cause was not isolated. Until a Mac
+/// developer measures each form (`cargo test -p agora-platform -- --ignored` with this constant set to `true`) and the allow-list is
+/// known, a confined agent on macOS gets only the environment scrub of ADR-0083 step 1, and `agora doctor` says exactly that.
+pub const UNIX_SOCKET_DENY_VERIFIED: bool = false;
 
 /// The system's unix sockets every confined agent may use under [`crate::Sandbox::confine_sockets`]: the name resolver (every network
 /// lookup goes through it; `/var/run` is `/private/var/run`, and a profile names the path the kernel resolved). A socket a real tool
@@ -1551,6 +1558,7 @@ mod sandbox_tests {
     }
 
     #[test]
+    #[ignore = "ADR-0083 step 2 is not switched on: set UNIX_SOCKET_DENY_VERIFIED = true and run on a Mac with --ignored"]
     fn confined_sockets_name_the_allow_list_and_the_nodes_closed_folders_come_after() {
         // ADR-0083. Text only; the run below measures what Seatbelt does with it.
         let sb = crate::Sandbox {
@@ -1580,6 +1588,7 @@ mod sandbox_tests {
     }
 
     #[test]
+    #[ignore = "ADR-0083 step 2 is not switched on: set UNIX_SOCKET_DENY_VERIFIED = true and run on a Mac with --ignored"]
     fn a_confined_process_reaches_only_the_sockets_it_is_given() {
         use std::os::unix::net::UnixListener;
         let dir = std::path::PathBuf::from(format!("/tmp/agora-sk-{}", std::process::id()));
