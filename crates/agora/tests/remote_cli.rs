@@ -519,7 +519,11 @@ fn funnel_is_called_by_its_name_and_counts_as_public() {
         out.contains("Public internet: reachable through Tailscale Funnel"),
         "{out}"
     );
-    assert!(out.contains("listens on a public address"), "{out}");
+    assert!(
+        out.contains("Tailscale Funnel is on, so something"),
+        "{out}"
+    );
+    assert!(!out.contains("listens on a public address"), "{out}");
     let (_, out) = e.run(&["doctor"]);
     assert!(out.contains("Tailscale Funnel is on"), "{out}");
     let (code, out) = e.run(&["password", "clear"]);
@@ -550,7 +554,7 @@ fn the_password_stays_only_for_a_way_in_that_was_turned_on_and_says_the_real_way
     std::fs::write(e.hub.join("listen"), "203.0.113.7:7443").unwrap();
     let (code, out) = e.run(&["password", "clear"]);
     assert_eq!(code, 1, "{out}");
-    assert!(out.contains("Restart the hub on a local address"), "{out}");
+    assert!(out.contains("start it on a local address"), "{out}");
     assert!(!out.contains("agora remote off"), "{out}");
     assert!(e.password_is_set());
     // A recorded name: refused, and `remote off` is the way out (and it works).

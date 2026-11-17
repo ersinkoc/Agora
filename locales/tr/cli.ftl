@@ -523,7 +523,10 @@ remote-status-public = Herkese açık internet: { $on ->
 remote-status-password-set = Ekran parolası: ayarlı.
 remote-status-password-not-set = Ekran parolası: ayarlı değil.
 remote-status-no-password = Bu makinenin dışından bir erişim açık ve ekran parolası ayarlı değil. Hemen `agora password set` ile bir parola belirleyin veya erişimi `agora remote off` ile kapatın.
-remote-public-warning = Hub herkese açık bir adreste dinliyor. Onu yalnızca ekran parolası ve yeni bir makinede denetlediğiniz sertifika korur; düz bir adres başka koruma vermez. Daha güvenli yol Tailscale: `agora remote tailscale --serve`.
+remote-public-warning = { $cause ->
+        [funnel] Tailscale Funnel açık, yani bu makinenin bir şeyi tüm internetten erişilebilir. Onu yalnızca ekran parolası ve giriş kodu korur. Bilerek açmadıysanız `tailscale funnel reset` ile kapatın.
+       *[listen] Hub herkese açık bir adreste dinliyor. Onu yalnızca ekran parolası ve yeni bir makinede denetlediğiniz sertifika korur; düz bir adres başka koruma vermez. Daha güvenli yol Tailscale: `agora remote tailscale --serve`.
+    }
 remote-off-names = Tailnet adları hub'ın listesinden çıktı; sertifika hub'ın bir sonraki başlangıcında bunları bırakır.
 remote-off-serve = { $port } numaralı HTTPS bağlantı noktasındaki Tailscale serve kuralı kaldırıldı. Diğer serve kurallarınıza dokunulmadı.
 remote-off-serve-gone = Agora'nın eklediği Tailscale serve kuralı zaten yok.
@@ -537,7 +540,7 @@ doctor-remote-public-listen = Hub herkese açık bir adreste dinliyor: onu yaln�
 doctor-remote-tailnet = Tailscale çalışıyor; bu makine tailnet'inizde { $name }.
 doctor-remote-tailnet-unreachable = Tailscale buradan erişilemiyor ({ $reason }), bu yüzden tailnet adresi çalışmaz. `tailscale status` komutuna bakın.
 doctor-remote-names-missing = Hub'ın sertifikası { $names } adlarını henüz içermiyor. Hub'ı yeniden başlatın veya `agora remote tailscale` az önce çalıştırıldıysa birkaç saniye bekleyin.
-remote-password_in_use_listen = Hub herkese açık bir adreste dinliyor ve ekran parolası onu koruyor, bu yüzden kalır. Önce hub'ı yerel bir adreste yeniden başlatın (`agora --listen 127.0.0.1:7443`, sonra `agora down` ve `agora`), sonra parolayı silin.
+remote-password_in_use_listen = Hub herkese açık bir adreste dinliyor ve ekran parolası onu koruyor, bu yüzden kalır. Hub'ı durdurun (`agora down`), yerel bir adreste başlatın (`agora --listen 127.0.0.1:7443`), sonra parolayı silin.
 remote-hub_not_running = Agora { $dir } içinde çalışan bir hub'ın adresini bulamadı. Hub'ı `agora` ile başlatın, sonra bunu yeniden çalıştırın.
 remote-status-public-funnel = Herkese açık internet: Tailscale Funnel üzerinden erişilebilir.
 doctor-remote-funnel = Bu makine için Tailscale Funnel açık, yani bir şey tüm internetten erişilebilir. Onu yalnızca ekran parolası ve giriş kodu korur. Bilerek açmadıysanız `tailscale funnel reset` ile kapatın.

@@ -208,6 +208,10 @@ pub fn funnel_on() -> Result<bool, Problem> {
     parse_funnel(&run(&["serve", "status", "--json"], STATUS_WAIT)?)
 }
 
+/// Turns of the wait loop of [`run_program`] (tests count them to see that it never spins).
+#[cfg(test)]
+static LOOPS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 /// Runs `tailscale ARGS` and returns what it printed on standard output (limited). The program's own error text is never kept.
 fn run(args: &[&str], wait: Duration) -> Result<String, Problem> {
     run_program(std::ffi::OsStr::new("tailscale"), args, wait, MAX_OUTPUT)
@@ -254,12 +258,21 @@ fn run_program(
         buf.len() > max
     };
     let status = loop {
-        if let Ok(chunk) = rx.recv_timeout(Duration::from_millis(10)) {
-            if take(&mut buf, chunk) {
-                agora_platform::kill_process_tree(&mut child);
-                return Err(Problem::TooBig);
+        #[cfg(test)]
+        LOOPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        match rx.recv_timeout(Duration::from_millis(10)) {
+            Ok(chunk) => {
+                if take(&mut buf, chunk) {
+                    agora_platform::kill_process_tree(&mut child);
+                    return Err(Problem::TooBig);
+                }
+                continue;
             }
-            continue;
+            // The program closed its output and keeps running: `recv_timeout` answers at once now, so wait here instead of spinning.
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
         }
         match child.try_wait() {
             Ok(Some(s)) => break Some(s),
@@ -349,6 +362,48 @@ mod tests {
         let r = run_program(p.as_os_str(), &[], two, 1024);
         assert_eq!(r.as_deref(), Ok("ok\n"));
         assert!(t.elapsed() < Duration::from_secs(3), "{:?}", t.elapsed());
+        // Whatever a program leaves behind is dead afterwards: on the normal path and on the timeout path.
+        for (name, body, wait) in [
+            (
+                "killnormal",
+                "sleep 60 &\necho $! > \"$0.pid\"\necho ok",
+                Duration::from_secs(2),
+            ),
+            (
+                "killtimeout",
+                "sleep 60 &\necho $! > \"$0.pid\"\nsleep 100",
+                Duration::from_secs(1),
+            ),
+        ] {
+            let p = script(name, body);
+            let _ = run_program(p.as_os_str(), &[], wait, 1024);
+            let pid = std::fs::read_to_string(format!("{}.pid", p.display())).unwrap();
+            let pid = pid.trim();
+            let end = Instant::now() + Duration::from_secs(3);
+            loop {
+                let out = Command::new("ps")
+                    .args(["-o", "stat=", "-p", pid])
+                    .output()
+                    .unwrap();
+                let st = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if st.is_empty() || st.starts_with('Z') {
+                    break;
+                }
+                assert!(
+                    Instant::now() < end,
+                    "{name}: process {pid} is still alive ({st})"
+                );
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+        // A program that closes its output and keeps running does not make the wait loop spin.
+        let p = script("closed", "exec >&-\nsleep 2");
+        LOOPS.store(0, std::sync::atomic::Ordering::Relaxed);
+        let t = Instant::now();
+        let _ = run_program(p.as_os_str(), &[], Duration::from_secs(5), 1024);
+        let turns = LOOPS.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(t.elapsed() >= Duration::from_secs(1));
+        assert!(turns < 600, "{turns} turns in {:?}", t.elapsed());
         // Never ends, and prints nothing.
         let p = script("hang", "sleep 100");
         let t = Instant::now();

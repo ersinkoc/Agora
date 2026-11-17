@@ -298,7 +298,7 @@ pub fn hub_run(say: &Say, o: &Opts) -> ExitCode {
                 &[("names", leaf.names().join(", ").into())],
             );
             if crate::remotecmd::exposure(addr.ip()).public {
-                say.out(key!("remote-public-warning"), &[]);
+                say.out(key!("remote-public-warning"), &[("cause", "listen".into())]);
             }
             let _tunnels = start_tunnels(say, &dir, addr);
             if has_web {

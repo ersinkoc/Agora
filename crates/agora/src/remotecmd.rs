@@ -477,7 +477,12 @@ fn status(say: &Say, dir: &Path) -> ExitCode {
         say.err(key!("remote-status-no-password"), &[]);
     }
     if r.public() {
-        say.out(key!("remote-public-warning"), &[]);
+        let cause = if r.funnel && !r.exposure.public {
+            "funnel"
+        } else {
+            "listen"
+        };
+        say.out(key!("remote-public-warning"), &[("cause", cause.into())]);
     }
     ExitCode::SUCCESS
 }
