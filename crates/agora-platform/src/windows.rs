@@ -749,10 +749,11 @@ impl Stream {
     }
 
     /// Waits for the operation `ov` started on this handle, up to `limit`, or until `shutdown`; `None` when the time ran out and
-    /// `Some(0)` after a shutdown (the operation is then cancelled and finished before this returns).
+    /// `Some(0)` after a shutdown (the operation is then cancelled and finished before this returns). `ov` is the very pointer the
+    /// operation was started with, never a reference: the system writes through it until the operation ends.
     fn finish(
         &self,
-        ov: &OVERLAPPED,
+        ov: *mut OVERLAPPED,
         event: &Event,
         limit: Option<Duration>,
     ) -> io::Result<Option<u32>> {
@@ -808,10 +809,12 @@ impl Stream {
         }
         let event = Event::new()?;
         let mut ov = overlapped(&event);
+        // Only this pointer is used from here on, while the system may write through it.
+        let ovp = std::ptr::addr_of_mut!(ov);
         let mut n = 0u32;
         let len = u32::try_from(buf.len()).unwrap_or(u32::MAX);
         // SAFETY: `buf` and `ov` stay alive until `finish` has seen the operation end.
-        let ok = unsafe { ReadFile(self.handle.0, buf.as_mut_ptr().cast(), len, &mut n, &mut ov) };
+        let ok = unsafe { ReadFile(self.handle.0, buf.as_mut_ptr().cast(), len, &mut n, ovp) };
         if ok != 0 {
             return Ok(n as usize);
         }
@@ -824,7 +827,7 @@ impl Stream {
             .timeout
             .lock()
             .map_err(|_| io::Error::other("poisoned"))?;
-        match self.finish(&ov, &event, limit)? {
+        match self.finish(ovp, &event, limit)? {
             Some(n) => Ok(n as usize),
             None => Err(io::Error::from(io::ErrorKind::TimedOut)),
         }
@@ -844,10 +847,12 @@ impl Stream {
         }
         let event = Event::new()?;
         let mut ov = overlapped(&event);
+        // Only this pointer is used from here on, while the system may write through it.
+        let ovp = std::ptr::addr_of_mut!(ov);
         let mut n = 0u32;
         let len = u32::try_from(buf.len()).unwrap_or(u32::MAX);
         // SAFETY: `buf` and `ov` stay alive until `finish` has seen the operation end.
-        let ok = unsafe { WriteFile(self.handle.0, buf.as_ptr().cast(), len, &mut n, &mut ov) };
+        let ok = unsafe { WriteFile(self.handle.0, buf.as_ptr().cast(), len, &mut n, ovp) };
         if ok != 0 {
             return Ok(n as usize);
         }
@@ -858,7 +863,7 @@ impl Stream {
             }
             e => return Err(os_error(e)),
         }
-        match self.finish(&ov, &event, None)? {
+        match self.finish(ovp, &event, None)? {
             Some(0) => Err(io::Error::from(io::ErrorKind::BrokenPipe)),
             Some(n) => Ok(n as usize),
             None => Err(io::Error::from(io::ErrorKind::TimedOut)),
