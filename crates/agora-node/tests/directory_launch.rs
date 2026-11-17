@@ -798,3 +798,66 @@ fn a_resync_announces_the_nodes_present() {
         at(&|b| matches!(b, Body::ApprovalRequested(a) if a.agent_id == talker.agent_id)).is_some()
     );
 }
+
+/// Audit F1011: an agent's folder swapped for a link after the start (by anything that can write beside it, such as another agent of
+/// the project) is not read through: files, the workspace view and git refuse it, so neither another folder's files nor a secret the
+/// link leads to (here a stand-in for `~/.aws`, whose `credentials` the secret-file names catch only below `.aws`) leave the node.
+/// The folder put back is read again.
+#[test]
+fn a_folder_swapped_for_a_link_after_the_start_is_not_read_through() {
+    if !supported() {
+        return;
+    }
+    let e = Env::new("swapped-root");
+    let project = e.root.join("project");
+    let sub = project.join("sub");
+    std::fs::create_dir_all(&sub).unwrap();
+    std::fs::write(sub.join("notes.md"), "project notes").unwrap();
+    let aws = e.root.join("user/.aws");
+    std::fs::create_dir_all(&aws).unwrap();
+    std::fs::write(aws.join("credentials"), "aws_secret_access_key = x").unwrap();
+    let mut c = e.client();
+    let info = inspect(&mut c, &sub, false);
+    let wt = launch(&mut c, &info, "probe", false).path;
+    let read = |c: &mut Client, path: &str| {
+        c.call(Cmd::FilesRead(v1::FilesRead {
+            worktree_id: wt.clone(),
+            path: path.into(),
+        }))
+        .unwrap()
+        .map(|ok| match ok.result {
+            Some(Ok_::FilesRead(r)) => r.data,
+            other => panic!("{other:?}"),
+        })
+        .map_err(|e| e.code)
+    };
+    assert_eq!(read(&mut c, "notes.md").unwrap(), b"project notes");
+    // Only where links can be made, and where a folder a running program works in can be renamed (not Windows).
+    if agora_platform::symlink(&aws, &e.root.join("probe-link")).is_err() {
+        return;
+    }
+    if std::fs::rename(&sub, project.join("sub.old")).is_err() {
+        return;
+    }
+    agora_platform::symlink(&aws, &sub).unwrap();
+    assert_eq!(
+        read(&mut c, "credentials").unwrap_err(),
+        "protocol.invalid_message"
+    );
+    let listed = c
+        .call(Cmd::FilesList(v1::FilesList {
+            worktree_id: wt.clone(),
+            path: String::new(),
+        }))
+        .unwrap();
+    assert!(listed.is_err_and(|e| e.code == "protocol.invalid_message"));
+    let status = c
+        .call(Cmd::GitStatus(v1::GitStatus {
+            worktree_id: wt.clone(),
+        }))
+        .unwrap();
+    assert!(status.is_err_and(|e| e.code == "protocol.invalid_message"));
+    std::fs::remove_file(&sub).unwrap();
+    std::fs::rename(project.join("sub.old"), &sub).unwrap();
+    assert_eq!(read(&mut c, "notes.md").unwrap(), b"project notes");
+}

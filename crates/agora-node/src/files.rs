@@ -181,6 +181,12 @@ impl Files {
         })
     }
 
+    /// The folder this access is bound to: where `root` led when it was opened (canonical). Every listing and read is checked to be
+    /// below it on the open handle, so a caller that must know the folder is still where it was compares this (audit F1011).
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
     /// ADR-0080: `rel` names a secret file by itself or by where it resolves to (links followed); false when it cannot be resolved.
     pub fn resolves_secret(&self, rel: &str) -> bool {
         // A file's own link is not followed (it is the link a diff shows), but its folder is.
