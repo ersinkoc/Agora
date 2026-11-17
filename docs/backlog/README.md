@@ -22,5 +22,5 @@ Follow-up #257 closes reproduced launch, diff-root, resume and filtered-pane fin
 Evidence-audit fixes, in 0.3.14: F401 (#633), F402 (#634), F601 to F603 (#625, #626, #627), F702 to F704 (#623, #624, #630), F202 (#628).
 After 0.3.14, for the next release: F210 and F211 (#641), F221 and F222 (#646), F232 (#645), F240 (#642), F250 and F251 (#643),
 F260 to F262 (#640), F270 (#649), F271 (#644), F280 to F282 (#647), F290 (#656), F501 (#629).
-Waiting on the maintainer: ADR-0081 to 0084 are Proposed (accepted only when the maintainer names them). Next, in the maintainer's order: easy
+ADR-0081 to 0084 are Accepted (2026-11-17); ADR-0081 is built (#673), 0082 to 0084 are not yet built. Next, in the maintainer's order: easy
 setup (ADR-0065), then the terminal holder (ADR-0079), the later steps of ADR-0075, and the pickers of ADR-0066.

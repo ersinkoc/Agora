@@ -35,7 +35,8 @@ L1 is an agent in a terminal read from its screen (a manifest); L2/L3 are struct
 | L3: adapter processes, installed from the signed registry | ADR-0004 Accepted, ADR-0044 Accepted | yes | adapter host tests and the conformance transcript | none recorded here |
 | Agents run in the selected folder; worktrees optional | ADR-0052 Accepted | yes | node and web tests | none recorded here |
 | Launch options, including "do not ask" modes | ADR-0059 Accepted | yes | node and web tests | none recorded here |
-| Start with model, effort and mode | ADR-0066 Accepted | node and hub yes (a start with settings is signed; the approval card lists them); the start window's and the terminal client's pickers not built | node and hub tests | none recorded here |
+| Start with model, effort and mode | ADR-0066 Accepted | node and hub yes (a start with settings is signed; the approval card lists them); the start window's picker yes (`LaunchSettings.tsx`); the terminal client's start picker not built | node, hub and web tests | none recorded here |
+| Agent login and accounts on a node ([design](design/agent-accounts.md)) | no ADR (design only) | not built (the manifest table is parsed; nothing runs a login) | — | — |
 | A missing agent kind says why | ADR-0069 Accepted | yes (protocol, web start window, terminal client) | protocol fixtures; web and terminal-client tests | none recorded here |
 | Resume after the node restarts (session ledger) | ADR-0060 Accepted | yes | node tests | none recorded here |
 | An agent starts helpers, with the user's signed approval | ADR-0057 Accepted | yes | node, hub and web tests | none recorded here |
@@ -52,6 +53,21 @@ L1 is an agent in a terminal read from its screen (a manifest); L2/L3 are struct
 | Agents message each other across machines (mesh) | ADR-0008 Accepted, ADR-0031 Accepted | yes; a reply's link across machines not built | mesh tests | LAN run 2026-11-11: cross-node messages |
 | A reply keeps its link across machines | ADR-0074 Accepted | not built | — | — |
 | Shared project board (tasks, leases) | ADR-0039 Accepted, ADR-0040 Accepted | yes; a change is answered only once stored | board and hub tests, fault tests | LAN run 2026-11-11: shared-board behavior |
+
+## Updates, secrets and confinement (ADR-0075 to ADR-0084)
+
+| Capability | Decision | Built on `main` | Automated evidence | Real machines |
+| --- | --- | --- | --- | --- |
+| The node updates in place without stopping agents | ADR-0075 Accepted | partly: step 1 only (the mesh bridge reconnects, #639); the later steps are not built | mesh bridge tests | none recorded here |
+| A read-only metrics token | ADR-0076 Accepted | yes (#637) | hub tests | none recorded here |
+| The Windows binary is code-signed | ADR-0077 Accepted | partly: the release workflow signs through SignPath once it is set up (#652); no signed release recorded here | none (the workflow is not run without the account) | none recorded here |
+| A confined agent gets a git configuration the node wrote | ADR-0078 Accepted | yes (#638) | node tests | none recorded here |
+| A terminal holder keeps agents alive when the node stops | ADR-0079 Accepted | not built | — | — |
+| The file browser does not show secret files | ADR-0080 Accepted | yes (node and review #636; web and terminal client #665) | node, web and terminal-client tests | none recorded here |
+| A replayed revocation does not undo the owner's re-trust | ADR-0081 Accepted | yes (#673) | node tests | none recorded here |
+| A confined agent cannot use the node's control socket | ADR-0082 Accepted | not built on `main` (in review: #674) | — | — |
+| A confined agent reaches only the unix sockets it is given | ADR-0083 Accepted | not built | — | — |
+| A confined agent gets its login from a secret the node holds | ADR-0084 Accepted | not built | — | — |
 
 ## The window
 
