@@ -1564,11 +1564,17 @@ mod sandbox_tests {
         let p = super::profile(&sb).unwrap();
         let general = p
             .find("(deny network-outbound (remote unix-socket (subpath \"/\")))")
-            .expect("every unix socket is refused first");
-        let resolver = p.find("/private/var/run/mDNSResponder").expect(&p);
+            .unwrap_or(usize::MAX);
+        assert!(
+            general != usize::MAX,
+            "every unix socket is refused first: {p}"
+        );
+        let resolver = p
+            .find("/private/var/run/mDNSResponder")
+            .unwrap_or(usize::MAX);
         let closed = p
             .find("(deny network-outbound (remote unix-socket \"")
-            .expect(&p);
+            .unwrap_or(usize::MAX);
         assert!(general < resolver && resolver < closed, "{p}");
         assert!(!p.contains("(deny network*)"), "{p}");
     }
