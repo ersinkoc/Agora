@@ -159,7 +159,7 @@ pub fn prepare_folder() -> std::io::Result<()> {
 }
 
 /// A short, stable (across runs and versions, unlike `DefaultHasher`) number for a path: FNV-1a over its bytes, folded to 32 bits.
-fn place_hash(path: &Path) -> u32 {
+pub(crate) fn place_hash(path: &Path) -> u32 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in path.to_string_lossy().bytes() {
         h = (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3);

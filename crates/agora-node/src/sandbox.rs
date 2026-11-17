@@ -278,12 +278,14 @@ pub fn private_folder(
 }
 
 /// The private temp folder of the agent that works in `worktree`; the node points `TMPDIR`, `TEMP` and `TMP` at it where
-/// [`agora_platform::PRIVATE_TEMP`] says the system's temp folder is out of the agent's reach.
+/// [`agora_platform::PRIVATE_TEMP`] says the system's temp folder is out of the agent's reach. The place is part of the name: two
+/// worktrees called `web` of different projects must not share one.
 pub fn agent_temp(worktree: &Path) -> PathBuf {
     let name = worktree
         .file_name()
         .map_or_else(|| "agent".into(), |n| n.to_string_lossy().into_owned());
-    std::env::temp_dir().join(format!("agora-agent-{name}"))
+    let place = crate::gitconfig::place_hash(worktree);
+    std::env::temp_dir().join(format!("agora-agent-{name}-{place:08x}"))
 }
 
 /// Whether `file` lies below any of the `write` folders, by name and by where the names lead (a folder that is a link into a writable
@@ -619,6 +621,21 @@ mod tests {
         assert!(!no("/home/u/code/app") && !no("/home/u/code/app/src"));
         assert!(!no("/home/u/.agora/worktrees/shell-1"));
         assert!(!no("/srv/shop"));
+    }
+
+    #[test]
+    fn two_worktrees_of_the_same_name_never_share_a_private_temp_folder() {
+        // Audit F841: two projects' `web` folders (a directory launch uses the folder itself as the worktree).
+        let t = |p: &str| agent_temp(Path::new(p));
+        assert_ne!(t("/work/client-a/web"), t("/work/client-b/web"));
+        // The same worktree keeps its folder across restarts, still named after it.
+        assert_eq!(t("/work/client-a/web"), t("/work/client-a/web"));
+        let name = t("/work/client-a/web");
+        assert!(name
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("agora-agent-web-"));
     }
 
     #[test]
