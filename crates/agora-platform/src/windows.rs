@@ -27,10 +27,10 @@ use windows_sys::Win32::Storage::FileSystem::{
     OPEN_EXISTING, PIPE_ACCESS_DUPLEX,
 };
 use windows_sys::Win32::System::Console::{
-    GetConsoleMode, GetConsoleScreenBufferInfo, GetStdHandle, SetConsoleMode,
-    CONSOLE_SCREEN_BUFFER_INFO, ENABLE_ECHO_INPUT, ENABLE_LINE_INPUT, ENABLE_PROCESSED_INPUT,
-    ENABLE_PROCESSED_OUTPUT, ENABLE_VIRTUAL_TERMINAL_INPUT, ENABLE_VIRTUAL_TERMINAL_PROCESSING,
-    STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+    FlushConsoleInputBuffer, GetConsoleMode, GetConsoleScreenBufferInfo, GetStdHandle,
+    SetConsoleMode, CONSOLE_SCREEN_BUFFER_INFO, ENABLE_ECHO_INPUT, ENABLE_LINE_INPUT,
+    ENABLE_PROCESSED_INPUT, ENABLE_PROCESSED_OUTPUT, ENABLE_VIRTUAL_TERMINAL_INPUT,
+    ENABLE_VIRTUAL_TERMINAL_PROCESSING, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
 };
 use windows_sys::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeClientProcessId,
@@ -909,6 +909,14 @@ pub(crate) fn secret_mode() -> io::Result<SecretMode> {
         }
     }
     Ok(SecretMode(saved))
+}
+
+/// Discards the keys typed (or held, or sent) before now.
+pub(crate) fn flush_input() {
+    // SAFETY: a plain call on the process's standard input handle.
+    unsafe {
+        FlushConsoleInputBuffer(GetStdHandle(STD_INPUT_HANDLE));
+    }
 }
 
 /// Size of the console window on stdout.

@@ -92,12 +92,6 @@ impl Live {
         }
     }
 
-    fn say(&mut self, line: &str) {
-        let s = self.stdin.as_mut().unwrap();
-        writeln!(s, "{line}").unwrap();
-        s.flush().unwrap();
-    }
-
     /// Waits for the process to end and returns its status and everything it printed.
     fn finish(mut self) -> (bool, String) {
         self.stdin = None;
@@ -113,6 +107,112 @@ impl Live {
             self.seen.push(l);
         }
         (ok, self.seen.join("\n"))
+    }
+}
+
+/// The owner's screen, on a pseudo-terminal: `agora pair open` reads its answer from a terminal only, so this is the one honest way to
+/// answer it. Output is searched as text (a Windows console adds control sequences around it, never inside a word).
+struct Screen {
+    pty: Box<dyn agora_platform::Pty>,
+    seen: String,
+    from: usize,
+}
+
+impl Screen {
+    fn start(home: &Path, args: &[String]) -> Self {
+        let mut argv = vec![AGORA.to_string(), "pair".to_string()];
+        argv.extend(args.iter().cloned());
+        let pty = agora_platform::spawn(&agora_platform::PtyConfig {
+            argv,
+            cwd: None,
+            env: vec![
+                ("AGORA_HOME".into(), home.display().to_string()),
+                ("AGORA_LANG".into(), "en".into()),
+            ],
+            cols: 200,
+            rows: 40,
+            limits: agora_platform::ProcessLimits::default(),
+            sandbox: None,
+            identity: None,
+            env_remove: Vec::new(),
+        })
+        .unwrap();
+        Self {
+            pty,
+            seen: String::new(),
+            from: 0,
+        }
+    }
+
+    fn pump(&mut self) {
+        if let Ok(b) = self.pty.output().recv_timeout(Duration::from_millis(100)) {
+            self.seen.push_str(&String::from_utf8_lossy(&b));
+        }
+    }
+
+    /// Waits for `needle` in what was printed since the last wait, and moves past it. Returns what was printed up to and including it.
+    fn wait_for(&mut self, needle: &str) -> String {
+        let end = Instant::now() + Duration::from_secs(60);
+        loop {
+            if let Some(i) = self.seen[self.from..].find(needle) {
+                let upto = self.from + i + needle.len();
+                let got = self.seen[self.from..upto].to_string();
+                self.from = upto;
+                return got;
+            }
+            assert!(
+                Instant::now() < end,
+                "never saw {needle:?} in {:?}",
+                &self.seen[self.from..]
+            );
+            self.pump();
+        }
+    }
+
+    /// The number on the card, `482-193`.
+    fn card_number(&mut self) -> String {
+        self.wait_for(". Number ");
+        let end = Instant::now() + Duration::from_secs(10);
+        loop {
+            let rest = &self.seen[self.from..];
+            let n: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_digit() || *c == '-')
+                .collect();
+            if n.len() == 7 {
+                return n;
+            }
+            assert!(Instant::now() < end, "no number on the card: {rest:?}");
+            self.pump();
+        }
+    }
+
+    /// Types `keys` after the question was shown and the owner had time to read it (longer than the screen's minimum wait).
+    fn answer(&mut self, keys: &str) {
+        self.wait_for("[y/N]");
+        std::thread::sleep(Duration::from_millis(1500));
+        self.pty.write_input(keys.as_bytes()).unwrap();
+    }
+
+    fn finish(mut self) -> (bool, String) {
+        let end = Instant::now() + Duration::from_secs(30);
+        let ok = loop {
+            if let Some(s) = self.pty.try_wait().unwrap() {
+                break s.success();
+            }
+            assert!(Instant::now() < end, "did not end: {}", self.seen);
+            self.pump();
+        };
+        while let Ok(b) = self.pty.output().recv_timeout(Duration::from_millis(300)) {
+            self.seen.push_str(&String::from_utf8_lossy(&b));
+        }
+        (ok, std::mem::take(&mut self.seen))
+    }
+}
+
+impl Drop for Screen {
+    fn drop(&mut self) {
+        let _ = self.pty.kill();
     }
 }
 
@@ -170,8 +270,15 @@ impl Hub {
     }
 
     /// The owner's screen, open and waiting for a machine.
-    fn open(&self, home: &Path) -> Live {
-        let mut o = Live::start(self.pair(home, &["open"]));
+    fn open(&self, home: &Path) -> Screen {
+        let mut o = Screen::start(
+            home,
+            &[
+                "open".to_string(),
+                "--hub-dir".to_string(),
+                self.dir.display().to_string(),
+            ],
+        );
         o.wait_for("Waiting for a machine");
         o
     }
@@ -245,7 +352,7 @@ fn the_owner_opens_a_machine_joins_the_numbers_match_and_the_node_connects() {
 
     // The owner opens it; the screen says what to do next.
     let mut owner = hub.open(&owner_home);
-    assert!(owner.seen.iter().any(|l| l.contains("agora join ")));
+    assert!(owner.seen.contains("agora join "), "{}", owner.seen);
     let status = hub.pair(&owner_home, &["status"]).output().unwrap();
     assert!(
         String::from_utf8_lossy(&status.stdout).contains("Open for new machines"),
@@ -262,12 +369,11 @@ fn the_owner_opens_a_machine_joins_the_numbers_match_and_the_node_connects() {
     let on_machine = number_in(&m.wait_for("Number "));
     let card = owner.wait_for("wants to join");
     assert!(card.contains("\"laptop\""), "{card}");
-    assert_eq!(number_in(&card), on_machine);
+    assert_eq!(owner.card_number(), on_machine);
     assert_eq!(on_machine.len(), 7, "{on_machine}");
 
-    // The owner compares and approves. (The card line is printed after anything typed ahead was dropped, so an answer sent now is
-    // for this card.)
-    owner.say("y");
+    // The owner compares and approves, at the keyboard of a terminal, after reading the question.
+    owner.answer("y\r");
     let (ok, joined) = m.finish();
     assert!(ok, "{joined}");
     assert!(
@@ -386,7 +492,7 @@ fn the_machine_prints_the_number_once_and_only_on_standard_output() {
     let mut m = join(&machine, &format!("localhost:{}", hub.port), &[]);
     let on_machine = number_in(&m.wait_for("Number "));
     owner.wait_for("wants to join");
-    owner.say("y");
+    owner.answer("y\r");
     let (ok, all) = m.finish();
     assert!(ok, "{all}");
     assert_eq!(all.matches(&on_machine).count(), 1, "{all}");
@@ -411,7 +517,7 @@ fn a_denied_machine_and_an_address_the_certificate_does_not_name_store_nothing()
     let mut m = join(&denied, &format!("localhost:{}", hub.port), &[]);
     m.wait_for("Number ");
     owner.wait_for("wants to join");
-    owner.say("n");
+    owner.answer("n\r");
     let (ok, text) = m.finish();
     assert!(
         !ok && text.contains("The owner said no. Nothing was saved."),
@@ -426,7 +532,7 @@ fn a_denied_machine_and_an_address_the_certificate_does_not_name_store_nothing()
     let mut m = join(&byip, &format!("127.0.0.1:{}", hub.port), &[]);
     m.wait_for("Number ");
     owner.wait_for("wants to join");
-    owner.say("y");
+    owner.answer("y\r");
     let (ok, text) = m.finish();
     assert!(!ok, "{text}");
     assert!(
@@ -477,4 +583,94 @@ fn wrong_arguments_are_refused_before_anything_happens() {
         .unwrap();
     assert_eq!(out.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&out.stderr).contains("No hub is running"));
+}
+
+/// Feeds `y` lines into `c`'s standard input for as long as it listens: what a script (`yes | agora pair open`) does.
+fn feed_yes(c: &mut Child) -> std::thread::JoinHandle<()> {
+    let mut stdin = c.stdin.take().unwrap();
+    std::thread::spawn(move || {
+        while stdin.write_all(b"y\n").is_ok() && stdin.flush().is_ok() {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    })
+}
+
+#[test]
+fn a_script_feeding_yes_through_a_pipe_never_approves_a_machine() {
+    let root = tmp("pipe");
+    let hub = hub(&root);
+    let (owner_home, machine) = (root.join("owner"), root.join("machine"));
+    std::fs::create_dir_all(&owner_home).unwrap();
+
+    // The feed against a closed hub: the command refuses to start, so nothing is opened and nothing can be approved.
+    let mut feed = hub
+        .pair(&owner_home, &["open"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let feeder = feed_yes(&mut feed);
+    let out = feed.wait_with_output().unwrap();
+    let _ = feeder.join();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("at a terminal"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let status = hub.pair(&owner_home, &["status"]).output().unwrap();
+    assert!(String::from_utf8_lossy(&status.stdout).contains("Closed"));
+
+    // The feed against a hub that is open (a person opened it at a terminal): the same refusal, and the machine stays pending until the
+    // person answers.
+    let mut screen = hub.open(&owner_home);
+    let mut m = join(&machine, &format!("localhost:{}", hub.port), &[]);
+    m.wait_for("Number ");
+    screen.wait_for("wants to join");
+    let mut feed = hub
+        .pair(&owner_home, &["open"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let feeder = feed_yes(&mut feed);
+    let out = feed.wait_with_output().unwrap();
+    let _ = feeder.join();
+    assert_eq!(out.status.code(), Some(2));
+    // Several seconds with the feed gone: the machine has not been approved and nothing is stored.
+    std::thread::sleep(Duration::from_secs(3));
+    assert!(
+        m.child.0.try_wait().unwrap().is_none(),
+        "the machine was answered without a person"
+    );
+    nothing_stored(&machine);
+    // The person at the terminal says no.
+    screen.answer("n\r");
+    let (ok, text) = m.finish();
+    assert!(!ok && text.contains("The owner said no"), "{text}");
+    nothing_stored(&machine);
+}
+
+#[test]
+fn a_key_that_comes_too_soon_after_the_question_is_not_an_answer() {
+    let root = tmp("soon");
+    let hub = hub(&root);
+    let (owner_home, machine) = (root.join("owner"), root.join("machine"));
+    std::fs::create_dir_all(&owner_home).unwrap();
+    let mut screen = hub.open(&owner_home);
+    let mut m = join(&machine, &format!("localhost:{}", hub.port), &[]);
+    m.wait_for("Number ");
+    screen.wait_for("wants to join");
+    screen.wait_for("[y/N]");
+    // Past the point where what was typed before the question is thrown away, but well within the time a person needs to read it.
+    std::thread::sleep(Duration::from_millis(150));
+    screen.pty.write_input(b"y\r").unwrap();
+    screen.wait_for("came too soon");
+    // It was not taken as a yes: the person then answers no, and that is what the machine gets.
+    screen.answer("n\r");
+    let (ok, text) = m.finish();
+    assert!(!ok && text.contains("The owner said no"), "{text}");
+    nothing_stored(&machine);
 }

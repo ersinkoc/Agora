@@ -314,21 +314,18 @@ fn provider() -> Arc<rustls::crypto::CryptoProvider> {
     Arc::new(rustls::crypto::ring::default_provider())
 }
 
-fn roots_of(ca_pem: &str) -> Result<rustls::RootCertStore, PairError> {
-    let mut roots = rustls::RootCertStore::empty();
-    let mut count = 0;
-    for c in CertificateDer::pem_slice_iter(ca_pem.as_bytes()) {
-        let c = c.map_err(|_| PairError::CertificateInvalid("ca"))?;
-        roots
-            .add(c)
-            .map_err(|_| PairError::CertificateInvalid("ca"))?;
-        count += 1;
-    }
-    // One CA, perhaps with its previous generation; never a bundle the hub could use to widen what this machine trusts.
-    if count == 0 || count > 2 {
+/// The one CA a hub delivers. Exactly one certificate: a bundle is refused, so the hub cannot widen what this machine trusts for good,
+/// and what is pinned is the CA the hub's leaf chain used (checked next), not whichever one of several happens to fit.
+fn root_of(ca_pem: &str) -> Result<(rustls::RootCertStore, CertificateDer<'static>), PairError> {
+    let mut certs = CertificateDer::pem_slice_iter(ca_pem.as_bytes());
+    let (Some(Ok(one)), None) = (certs.next(), certs.next()) else {
         return Err(PairError::CertificateInvalid("ca"));
-    }
-    Ok(roots)
+    };
+    let mut roots = rustls::RootCertStore::empty();
+    roots
+        .add(one.clone())
+        .map_err(|_| PairError::CertificateInvalid("ca"))?;
+    Ok((roots, one))
 }
 
 /// The lower-case hex of the first certificate's SHA-256 in `ca_pem`: the fingerprint the person can compare with the hub's.
@@ -344,33 +341,73 @@ pub fn ca_fingerprint(ca_pem: &str) -> Option<String> {
     )
 }
 
+/// The longest a certificate this machine will keep may last: the hub issues 90 days (`DEVICE_CERT_DAYS`); a year and a day leaves room for
+/// a hub that changes it and refuses one that lasts for decades.
+const MAX_CERT_SECONDS: i64 = 366 * 86_400;
+
+/// How far ahead a certificate's start may be (clock differences between two machines).
+const CLOCK_SLACK_SECONDS: i64 = 600;
+
+/// What the hub delivered, and what this machine knows to check it against.
+pub struct Delivery<'a> {
+    pub ca_pem: &'a str,
+    pub cert_pem: &'a str,
+    /// The hub's leaf as the handshake showed it.
+    pub leaf_der: &'a [u8],
+    /// The name that was dialled.
+    pub host: &'a str,
+    /// The node id this machine asked to be.
+    pub node_id: &'a str,
+    /// The CSR this machine sent (its own key's request).
+    pub csr_der: &'a [u8],
+}
+
 /// Everything section 5 step 6 asks before a machine keeps a certificate. All of it must hold, or nothing is kept:
-/// (b) the leaf the handshake showed chains to `ca_pem` (the only root) and `host` is one of its names (`pair.name_unverified`
-/// otherwise); (a) the certificate chains to the same CA, is not expired, names `node_id`, and carries the public key of this machine's
-/// own CSR (the private key never left, so a certificate for any other key is of no use and means the hub is not what it says).
-pub fn check_delivery(
-    ca_pem: &str,
-    cert_pem: &str,
-    leaf_der: &[u8],
-    host: &str,
-    node_id: &str,
-    csr_der: &[u8],
-) -> Result<String, PairError> {
+/// - the delivered CA is exactly one certificate, is a CA (basic constraints) allowed to sign certificates (key usage) and is valid now;
+/// - the leaf the handshake showed chains to that CA and `host` is one of its names (`pair.name_unverified` otherwise);
+/// - the delivered certificate chains to the same CA (and is valid now, not starting in the future, lasting at most a year), may be
+///   used to authenticate a client and is not itself a CA, names `node_id`, and carries the public key of this machine's own CSR (the
+///   private key never left, so a certificate for any other key is of no use and means the hub is not what it says).
+///
+/// Returns the pinned CA's PEM (the one delivered) and its fingerprint.
+pub fn check_delivery(d: &Delivery<'_>, now_secs: i64) -> Result<(String, String), PairError> {
     use rustls::client::WebPkiServerVerifier;
     use rustls::server::WebPkiClientVerifier;
-    let roots = Arc::new(roots_of(ca_pem)?);
-    let now = UnixTime::now();
+    let bad = PairError::CertificateInvalid;
+    let (roots, ca_der) = root_of(d.ca_pem)?;
+    let roots = Arc::new(roots);
+    let now = UnixTime::since_unix_epoch(Duration::from_secs(u64::try_from(now_secs).unwrap_or(0)));
 
-    // (b) The hub's own leaf, as the handshake showed it, against the CA the hub just delivered and the name that was dialled.
+    // The CA itself: a CA, for signing certificates, in its validity.
+    let (_, ca) = x509_parser::parse_x509_certificate(ca_der.as_ref()).map_err(|_| bad("ca"))?;
+    let is_ca = ca
+        .basic_constraints()
+        .ok()
+        .flatten()
+        .is_some_and(|b| b.value.ca);
+    let may_sign = ca
+        .key_usage()
+        .ok()
+        .flatten()
+        .is_some_and(|k| k.value.key_cert_sign());
+    let (from, to) = (
+        ca.validity().not_before.timestamp(),
+        ca.validity().not_after.timestamp(),
+    );
+    if !is_ca || !may_sign || now_secs < from - CLOCK_SLACK_SECONDS || now_secs >= to {
+        return Err(bad("ca"));
+    }
+
+    // The hub's own leaf, as the handshake showed it, against that CA and the name that was dialled.
     let unverified = || PairError::NameUnverified {
-        name: host.to_string(),
+        name: d.host.to_string(),
     };
-    let name = ServerName::try_from(host.to_string()).map_err(|_| unverified())?;
+    let name = ServerName::try_from(d.host.to_string()).map_err(|_| unverified())?;
     let leaf_ok = WebPkiServerVerifier::builder_with_provider(Arc::clone(&roots), provider())
         .build()
-        .map_err(|_| PairError::CertificateInvalid("ca"))?
+        .map_err(|_| bad("ca"))?
         .verify_server_cert(
-            &CertificateDer::from(leaf_der.to_vec()),
+            &CertificateDer::from(d.leaf_der.to_vec()),
             &[],
             &name,
             &[],
@@ -381,32 +418,54 @@ pub fn check_delivery(
         return Err(unverified());
     }
 
-    // (a) The certificate this machine will use.
-    let der = CertificateDer::pem_slice_iter(cert_pem.as_bytes())
+    // The certificate this machine will use.
+    let der = CertificateDer::pem_slice_iter(d.cert_pem.as_bytes())
         .next()
-        .ok_or(PairError::CertificateInvalid("certificate"))?
-        .map_err(|_| PairError::CertificateInvalid("certificate"))?;
+        .ok_or(bad("certificate"))?
+        .map_err(|_| bad("certificate"))?;
     WebPkiClientVerifier::builder_with_provider(roots, provider())
         .build()
-        .map_err(|_| PairError::CertificateInvalid("ca"))?
+        .map_err(|_| bad("ca"))?
         .verify_client_cert(&der, &[], now)
-        .map_err(|_| PairError::CertificateInvalid("chain"))?;
-    let (_, cert) = x509_parser::parse_x509_certificate(der.as_ref())
-        .map_err(|_| PairError::CertificateInvalid("certificate"))?;
+        .map_err(|_| bad("chain"))?;
+    let (_, cert) =
+        x509_parser::parse_x509_certificate(der.as_ref()).map_err(|_| bad("certificate"))?;
+    let (from, to) = (
+        cert.validity().not_before.timestamp(),
+        cert.validity().not_after.timestamp(),
+    );
+    if now_secs < from - CLOCK_SLACK_SECONDS || now_secs >= to || to - from > MAX_CERT_SECONDS {
+        return Err(bad("validity"));
+    }
+    let for_clients = cert
+        .extended_key_usage()
+        .ok()
+        .flatten()
+        .is_some_and(|e| e.value.client_auth);
+    let is_ca_cert = cert
+        .basic_constraints()
+        .ok()
+        .flatten()
+        .is_some_and(|b| b.value.ca);
+    if !for_clients || is_ca_cert {
+        return Err(bad("usage"));
+    }
     let subject = cert
         .subject()
         .iter_common_name()
         .next()
         .and_then(|cn| cn.as_str().ok());
-    if subject != Some(node_id) {
-        return Err(PairError::CertificateInvalid("subject"));
+    if subject != Some(d.node_id) {
+        return Err(bad("subject"));
     }
-    let (_, csr) = x509_parser::certification_request::X509CertificationRequest::from_der(csr_der)
-        .map_err(|_| PairError::CertificateInvalid("request"))?;
+    let (_, csr) =
+        x509_parser::certification_request::X509CertificationRequest::from_der(d.csr_der)
+            .map_err(|_| bad("request"))?;
     if csr.certification_request_info.subject_pki.raw != cert.tbs_certificate.subject_pki.raw {
-        return Err(PairError::CertificateInvalid("key"));
+        return Err(bad("key"));
     }
-    ca_fingerprint(ca_pem).ok_or(PairError::CertificateInvalid("ca"))
+    let fingerprint = ca_fingerprint(d.ca_pem).ok_or(bad("ca"))?;
+    Ok((d.ca_pem.to_string(), fingerprint))
 }
 
 // ---- the connection ----
@@ -666,8 +725,18 @@ async fn run(
         _ => return Err(PairError::Unexpected),
     };
     let (cert_pem, ca_pem) = ex.result(&result)?;
-    let ca_fingerprint =
-        check_delivery(&ca_pem, &cert_pem, &leaf_der, &host, w.node_name, w.csr_der)?;
+    let now = i64::try_from(UnixTime::now().as_secs()).unwrap_or(i64::MAX);
+    let (ca_pem, ca_fingerprint) = check_delivery(
+        &Delivery {
+            ca_pem: &ca_pem,
+            cert_pem: &cert_pem,
+            leaf_der: &leaf_der,
+            host: &host,
+            node_id: w.node_name,
+            csr_der: w.csr_der,
+        },
+        now,
+    )?;
     conn.close().await;
     Ok(Verified {
         cert_pem,
@@ -916,5 +985,307 @@ mod tests {
     fn the_ca_fingerprint_is_the_hash_of_the_first_certificate() {
         assert_eq!(ca_fingerprint(""), None);
         assert_eq!(ca_fingerprint("not a certificate"), None);
+    }
+
+    // ---- the checks on what the hub delivers (section 5 step 6), each against a certificate that is wrong in exactly one way ----
+
+    use rcgen::{
+        BasicConstraints, CertificateParams, CertificateSigningRequestParams, DistinguishedName,
+        DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair, KeyUsagePurpose,
+    };
+    use time::{Duration as Span, OffsetDateTime};
+
+    struct Authority {
+        pem: String,
+        key: KeyPair,
+    }
+
+    fn authority(is_ca: IsCa, usages: Vec<KeyUsagePurpose>, days: i64) -> Authority {
+        let key = KeyPair::generate().unwrap();
+        let mut p = CertificateParams::default();
+        p.distinguished_name = name("test ca");
+        p.is_ca = is_ca;
+        p.key_usages = usages;
+        p.not_before = OffsetDateTime::now_utc() - Span::minutes(5);
+        p.not_after = OffsetDateTime::now_utc() + Span::days(days);
+        let pem = p.self_signed(&key).unwrap().pem();
+        Authority { pem, key }
+    }
+
+    fn good_authority() -> Authority {
+        authority(
+            IsCa::Ca(BasicConstraints::Constrained(0)),
+            vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign],
+            3650,
+        )
+    }
+
+    fn name(cn: &str) -> DistinguishedName {
+        let mut dn = DistinguishedName::new();
+        dn.push(DnType::CommonName, cn);
+        dn
+    }
+
+    impl Authority {
+        fn issuer(&self) -> Issuer<'static, KeyPair> {
+            let key = KeyPair::from_pem(&self.key.serialize_pem()).unwrap();
+            Issuer::from_ca_cert_pem(&self.pem, key).unwrap()
+        }
+
+        fn leaf(&self, host: &str) -> Vec<u8> {
+            let key = KeyPair::generate().unwrap();
+            let mut p = CertificateParams::new(vec![host.to_string()]).unwrap();
+            p.distinguished_name = name(host);
+            p.is_ca = IsCa::ExplicitNoCa;
+            p.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+            p.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+            p.not_before = OffsetDateTime::now_utc() - Span::minutes(5);
+            p.not_after = OffsetDateTime::now_utc() + Span::days(3650);
+            p.signed_by(&key, &self.issuer()).unwrap().der().to_vec()
+        }
+
+        /// A certificate for the request `csr_pem`, as a hub would issue it, with `tweak` changing exactly one thing.
+        fn node(
+            &self,
+            csr_pem: &str,
+            cn: &str,
+            tweak: impl FnOnce(&mut CertificateParams),
+        ) -> String {
+            let mut csr = CertificateSigningRequestParams::from_pem(csr_pem).unwrap();
+            let p = &mut csr.params;
+            p.distinguished_name = name(cn);
+            p.subject_alt_names = Vec::new();
+            p.is_ca = IsCa::ExplicitNoCa;
+            p.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+            p.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+            p.not_before = OffsetDateTime::now_utc() - Span::minutes(5);
+            p.not_after = OffsetDateTime::now_utc() + Span::days(90);
+            tweak(p);
+            csr.signed_by(&self.issuer()).unwrap().pem()
+        }
+    }
+
+    /// A machine's own request: the key it keeps, the CSR it sends.
+    fn request() -> (String, Vec<u8>) {
+        let key = KeyPair::generate().unwrap();
+        let mut p = CertificateParams::default();
+        p.distinguished_name = name("device");
+        let csr = p.serialize_request(&key).unwrap();
+        (csr.pem().unwrap(), csr.der().to_vec())
+    }
+
+    fn now() -> i64 {
+        i64::try_from(UnixTime::now().as_secs()).unwrap()
+    }
+
+    const HOST: &str = "hub.test";
+    const ID: &str = "laptop";
+
+    /// Runs the checks on a delivery of `cert_pem` and `ca_pem` against the hub's `leaf` and this machine's `csr_der`.
+    fn check(
+        ca_pem: &str,
+        cert_pem: &str,
+        leaf: &[u8],
+        csr_der: &[u8],
+        at: i64,
+    ) -> Result<(String, String), PairError> {
+        check_delivery(
+            &Delivery {
+                ca_pem,
+                cert_pem,
+                leaf_der: leaf,
+                host: HOST,
+                node_id: ID,
+                csr_der,
+            },
+            at,
+        )
+    }
+
+    fn invalid(what: &'static str) -> PairError {
+        PairError::CertificateInvalid(what)
+    }
+
+    #[test]
+    fn a_correct_delivery_passes_and_the_fingerprint_is_the_pinned_cas() {
+        let ca = good_authority();
+        let (csr_pem, csr) = request();
+        let cert = ca.node(&csr_pem, ID, |_| {});
+        let (pinned, fp) = check(&ca.pem, &cert, &ca.leaf(HOST), &csr, now()).unwrap();
+        assert_eq!(pinned, ca.pem);
+        assert_eq!(Some(fp), ca_fingerprint(&ca.pem));
+    }
+
+    #[test]
+    fn a_certificate_from_another_ca_than_the_one_delivered_is_refused() {
+        let (ca, other) = (good_authority(), good_authority());
+        let (csr_pem, csr) = request();
+        // Everything else is right: the subject, the key, the usage. Only the issuer is not the delivered CA.
+        let cert = other.node(&csr_pem, ID, |_| {});
+        assert_eq!(
+            check(&ca.pem, &cert, &ca.leaf(HOST), &csr, now()).unwrap_err(),
+            invalid("chain")
+        );
+    }
+
+    #[test]
+    fn a_certificate_for_another_node_id_is_refused() {
+        let ca = good_authority();
+        let (csr_pem, csr) = request();
+        let cert = ca.node(&csr_pem, "somebody-else", |_| {});
+        assert_eq!(
+            check(&ca.pem, &cert, &ca.leaf(HOST), &csr, now()).unwrap_err(),
+            invalid("subject")
+        );
+    }
+
+    #[test]
+    fn a_certificate_for_another_key_than_this_machines_is_refused() {
+        let ca = good_authority();
+        let (_mine_pem, mine) = request();
+        let (theirs_pem, _) = request();
+        let cert = ca.node(&theirs_pem, ID, |_| {});
+        assert_eq!(
+            check(&ca.pem, &cert, &ca.leaf(HOST), &mine, now()).unwrap_err(),
+            invalid("key")
+        );
+    }
+
+    #[test]
+    fn a_ca_bundle_is_refused_and_only_one_ca_is_ever_pinned() {
+        let (ca, other) = (good_authority(), good_authority());
+        let (csr_pem, csr) = request();
+        let cert = ca.node(&csr_pem, ID, |_| {});
+        let bundle = format!("{}{}", ca.pem, other.pem);
+        assert_eq!(
+            check(&bundle, &cert, &ca.leaf(HOST), &csr, now()).unwrap_err(),
+            invalid("ca")
+        );
+        assert_eq!(
+            check("", &cert, &ca.leaf(HOST), &csr, now()).unwrap_err(),
+            invalid("ca")
+        );
+    }
+
+    #[test]
+    fn a_ca_that_is_not_a_ca_or_may_not_sign_is_refused() {
+        let (csr_pem, csr) = request();
+        // The leaf and the certificate are issued by an authority that is not marked as a CA, or has no signing usage.
+        for ca in [
+            authority(IsCa::ExplicitNoCa, vec![KeyUsagePurpose::KeyCertSign], 3650),
+            authority(
+                IsCa::Ca(BasicConstraints::Constrained(0)),
+                vec![KeyUsagePurpose::CrlSign],
+                3650,
+            ),
+            authority(IsCa::Ca(BasicConstraints::Constrained(0)), vec![], 3650),
+        ] {
+            let issuer_ok = std::panic::catch_unwind(|| ());
+            assert!(issuer_ok.is_ok());
+            let key = KeyPair::from_pem(&ca.key.serialize_pem()).unwrap();
+            // rcgen refuses to sign with some of these; a hub that is not rcgen could. Sign the way that works for each.
+            let Ok(issuer) = Issuer::from_ca_cert_pem(&ca.pem, key) else {
+                continue;
+            };
+            let mut p = CertificateParams::new(vec![HOST.to_string()]).unwrap();
+            p.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+            let leaf = p
+                .signed_by(&KeyPair::generate().unwrap(), &issuer)
+                .unwrap()
+                .der()
+                .to_vec();
+            let mut csr_params = CertificateSigningRequestParams::from_pem(&csr_pem).unwrap();
+            csr_params.params.distinguished_name = name(ID);
+            csr_params.params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+            let cert = csr_params.signed_by(&issuer).unwrap().pem();
+            assert_eq!(
+                check(&ca.pem, &cert, &leaf, &csr, now()).unwrap_err(),
+                invalid("ca")
+            );
+        }
+    }
+
+    #[test]
+    fn a_certificate_that_has_ended_or_has_not_begun_is_refused() {
+        let ca = good_authority();
+        let (csr_pem, csr) = request();
+        let cert = ca.node(&csr_pem, ID, |_| {});
+        let leaf = ca.leaf(HOST);
+        // 100 days from now the 90-day certificate has ended.
+        let later = now() + 100 * 86_400;
+        assert!(matches!(
+            check(&ca.pem, &cert, &leaf, &csr, later).unwrap_err(),
+            PairError::CertificateInvalid(_)
+        ));
+        // And a clock far behind says it has not begun.
+        let earlier = now() - 3 * 86_400;
+        assert!(matches!(
+            check(&ca.pem, &cert, &leaf, &csr, earlier).unwrap_err(),
+            PairError::CertificateInvalid(_) | PairError::NameUnverified { .. }
+        ));
+    }
+
+    #[test]
+    fn a_certificate_that_lasts_for_years_is_refused() {
+        let ca = good_authority();
+        let (csr_pem, csr) = request();
+        let long = ca.node(&csr_pem, ID, |p| {
+            p.not_after = OffsetDateTime::now_utc() + Span::days(400)
+        });
+        assert_eq!(
+            check(&ca.pem, &long, &ca.leaf(HOST), &csr, now()).unwrap_err(),
+            invalid("validity")
+        );
+        let year = ca.node(&csr_pem, ID, |p| {
+            p.not_after = OffsetDateTime::now_utc() + Span::days(300)
+        });
+        assert!(check(&ca.pem, &year, &ca.leaf(HOST), &csr, now()).is_ok());
+    }
+
+    #[test]
+    fn a_certificate_that_is_not_for_clients_or_is_itself_a_ca_is_refused() {
+        let ca = good_authority();
+        let (csr_pem, csr) = request();
+        let leaf = ca.leaf(HOST);
+        // No extended key usage at all: any use. Not a client certificate.
+        let none = ca.node(&csr_pem, ID, |p| p.extended_key_usages = vec![]);
+        assert_eq!(
+            check(&ca.pem, &none, &leaf, &csr, now()).unwrap_err(),
+            invalid("usage")
+        );
+        // For servers only.
+        let server = ca.node(&csr_pem, ID, |p| {
+            p.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth]
+        });
+        assert!(matches!(
+            check(&ca.pem, &server, &leaf, &csr, now()).unwrap_err(),
+            PairError::CertificateInvalid(_)
+        ));
+        // A CA, even with the client usage: this machine would hold a certificate that can sign others. (The chain check refuses it as an
+        // end certificate before the explicit check is reached; the explicit one stays as a second line.)
+        let sub_ca = ca.node(&csr_pem, ID, |p| {
+            p.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
+            p.key_usages = vec![KeyUsagePurpose::KeyCertSign];
+        });
+        assert!(matches!(
+            check(&ca.pem, &sub_ca, &leaf, &csr, now()).unwrap_err(),
+            PairError::CertificateInvalid(_)
+        ));
+    }
+
+    #[test]
+    fn a_leaf_for_another_name_or_from_another_ca_is_name_unverified() {
+        let (ca, other) = (good_authority(), good_authority());
+        let (csr_pem, csr) = request();
+        let cert = ca.node(&csr_pem, ID, |_| {});
+        let unverified = PairError::NameUnverified { name: HOST.into() };
+        assert_eq!(
+            check(&ca.pem, &cert, &ca.leaf("elsewhere.test"), &csr, now()).unwrap_err(),
+            unverified
+        );
+        assert_eq!(
+            check(&ca.pem, &cert, &other.leaf(HOST), &csr, now()).unwrap_err(),
+            unverified
+        );
     }
 }

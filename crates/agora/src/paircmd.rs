@@ -6,9 +6,8 @@
 //! number, and asks whether the number on that machine is the same. The window cards (web, terminal) are a later step; until then
 //! this is where the owner compares and answers. After one machine was approved it closes the switch again.
 
-use std::io::{BufRead, Write};
+use std::io::{IsTerminal, Write};
 use std::process::ExitCode;
-use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use agora_i18n::key;
@@ -26,6 +25,13 @@ const STATUS_EVERY: Duration = Duration::from_secs(10);
 
 /// The most minutes the switch stays open (the hub's own window, section 2).
 const MAX_MINUTES: u64 = 10;
+
+/// The first key of an answer must come at least this long after the question was shown (ADR-0065 review): a key that was held, typed
+/// ahead or sent by a program arrives sooner than someone can read two numbers.
+const MIN_THINK: Duration = Duration::from_millis(700);
+
+/// How many answers that came too fast are ignored (and asked again) before the request is denied.
+const TOO_FAST_TRIES: u32 = 3;
 
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
@@ -120,6 +126,12 @@ pub fn pair(say: &Say, o: &Opts, op: &str) -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    // Approving is for a person at a terminal: a pipe, a file or a script can feed any answer, so with no terminal on stdin this
+    // refuses to start (the owner's windows are the other way to answer, later). Checked before anything is opened.
+    if op == "open" && !std::io::stdin().is_terminal() {
+        say.err(key!("pair-needs-terminal"), &[]);
+        return ExitCode::from(2);
+    }
     let (mut session, addr) = match connect(say, o) {
         Ok(c) => c,
         Err(code) => return code,
@@ -185,32 +197,48 @@ fn open(say: &Say, mut session: Session, addr: &str, minutes: Option<u64>) -> Ex
         key!("pair-open-next"),
         &[("address", join_address(addr).into())],
     );
-    // The answers come from this terminal, one line each; a reader thread keeps the loop from ever blocking on it. When input ends
-    // (nobody is typing: a script, a closed terminal) the switch is left open for its time and the requests wait for a window.
-    let (tx, answers) = mpsc::channel::<String>();
-    std::thread::spawn(move || {
-        let stdin = std::io::stdin();
-        let mut line = String::new();
-        while stdin.lock().read_line(&mut line).is_ok_and(|n| n > 0) {
-            if tx.send(std::mem::take(&mut line)).is_err() {
-                break;
-            }
-        }
-    });
     say.out(key!("pair-open-waiting"), &[]);
     let _ = std::io::stdout().flush();
     let until = minutes.map(|m| Instant::now() + Duration::from_secs(m * 60));
-    watch(say, &mut session, &answers, until)
+    watch(say, &mut session, until)
 }
 
-/// The owner's screen: cards in, answers out, until a machine was approved, the time given ended, the switch closed or the input did.
-fn watch(
-    say: &Say,
-    session: &mut Session,
-    answers: &mpsc::Receiver<String>,
-    until: Option<Instant>,
-) -> ExitCode {
+/// What the owner answered to a question.
+enum Answer {
+    Yes,
+    No,
+    /// The terminal cannot answer (it went away, or Ctrl-C).
+    Gone,
+}
+
+/// Asks `question` and reads the answer from the terminal only (`agora_platform::read_confirmation`): what was typed or sent before
+/// the question is discarded, and a first key that comes sooner than [`MIN_THINK`] is ignored; after [`TOO_FAST_TRIES`] of those the
+/// answer is no. Only `y` (or the locale's yes word) then Enter is yes.
+fn ask(say: &Say, question: &str) -> Answer {
     let yes = say.text(key!("cli-devices-yes"), &[]);
+    for _ in 0..TOO_FAST_TRIES {
+        let mut out = std::io::stdout();
+        let _ = write!(out, "{question} ");
+        let _ = out.flush();
+        let read = agora_platform::read_confirmation(MIN_THINK);
+        let _ = writeln!(out);
+        match read {
+            Ok(Some(line)) => {
+                return if crate::trustcli::is_yes(&line, &yes) {
+                    Answer::Yes
+                } else {
+                    Answer::No
+                }
+            }
+            Ok(None) => say.out(key!("pair-too-fast"), &[]),
+            Err(_) => return Answer::Gone,
+        }
+    }
+    Answer::No
+}
+
+/// The owner's screen: cards in, answers out, until a machine was approved, the time given ended, the switch closed or the terminal went.
+fn watch(say: &Say, session: &mut Session, until: Option<Instant>) -> ExitCode {
     let mut waiting: std::collections::VecDeque<v1::PairRequested> = Default::default();
     let mut ended: std::collections::HashSet<Vec<u8>> = Default::default();
     let mut last_status = Instant::now();
@@ -246,25 +274,10 @@ fn watch(
                 return ExitCode::SUCCESS;
             }
         }
-        // Lines typed while no card was shown answer nothing (a "y" typed ahead must never approve a machine that comes later);
-        // and when the input is over with nothing waiting, there is nobody to ask.
-        if waiting.is_empty() {
-            loop {
-                match answers.try_recv() {
-                    Ok(_) => {}
-                    Err(mpsc::TryRecvError::Empty) => break,
-                    Err(mpsc::TryRecvError::Disconnected) => {
-                        say.out(key!("pair-input-ended"), &[]);
-                        return ExitCode::SUCCESS;
-                    }
-                }
-            }
-        }
         while let Some(card) = waiting.pop_front() {
             if ended.contains(&card.pair_id) {
                 continue;
             }
-            while answers.try_recv().is_ok() {}
             let number = grouped(&card.number);
             say.out(
                 key!("pair-card"),
@@ -275,72 +288,36 @@ fn watch(
                     ("number", number.as_str().into()),
                 ],
             );
-            let mut out = std::io::stdout();
-            let _ = write!(out, "{} ", say.text(key!("pair-card-ask"), &[]));
-            let _ = out.flush();
-            let Some(answer) = wait_for_answer(session, answers, &card, &mut ended) else {
-                // No answer can come (the input ended) or the machine gave up: say which.
-                if ended.contains(&card.pair_id) {
-                    say.out(
-                        key!("pair-card-ended"),
-                        &[("name", card.name.as_str().into())],
-                    );
-                    continue;
+            match ask(say, &say.text(key!("pair-card-ask"), &[])) {
+                Answer::Gone => {
+                    say.out(key!("pair-input-ended"), &[]);
+                    return ExitCode::SUCCESS;
                 }
-                say.out(key!("pair-input-ended"), &[]);
-                return ExitCode::SUCCESS;
-            };
-            if !crate::trustcli::is_yes(&answer, &yes) {
-                match session.command_info(
-                    "",
-                    Command::PairDeny(v1::PairDeny {
-                        pair_id: card.pair_id.clone(),
-                    }),
-                    WAIT,
-                ) {
-                    Ok(_) => say.out(key!("pair-denied-now"), &[]),
-                    Err(e) => refusal(say, &e),
+                Answer::No => {
+                    match session.command_info(
+                        "",
+                        Command::PairDeny(v1::PairDeny {
+                            pair_id: card.pair_id.clone(),
+                        }),
+                        WAIT,
+                    ) {
+                        Ok(_) => say.out(key!("pair-denied-now"), &[]),
+                        Err(e) => refusal(say, &e),
+                    }
                 }
-                continue;
+                Answer::Yes => match approve(say, session, &card) {
+                    Approval::Done => {
+                        // One machine per opening: close the switch again, which is the safer thing to forget.
+                        say.out(
+                            key!("pair-approved"),
+                            &[("name", card.name.as_str().into())],
+                        );
+                        return close_and_say(say, session, key!("pair-closed-after"));
+                    }
+                    Approval::Refused => {}
+                    Approval::Stop => return ExitCode::SUCCESS,
+                },
             }
-            match approve(say, session, answers, &card, &yes) {
-                Approval::Done => {
-                    // One machine per opening: close the switch again, which is the safer thing to forget.
-                    say.out(
-                        key!("pair-approved"),
-                        &[("name", card.name.as_str().into())],
-                    );
-                    return close_and_say(say, session, key!("pair-closed-after"));
-                }
-                Approval::Refused => {}
-                Approval::Stop => return ExitCode::SUCCESS,
-            }
-        }
-    }
-}
-
-/// Waits for the owner's line, while the hub's notes keep being read (a machine that gives up ends its card). `None` when the
-/// input ended or the card ended before an answer came.
-fn wait_for_answer(
-    session: &mut Session,
-    answers: &mpsc::Receiver<String>,
-    card: &v1::PairRequested,
-    ended: &mut std::collections::HashSet<Vec<u8>>,
-) -> Option<String> {
-    loop {
-        match answers.recv_timeout(Duration::from_millis(200)) {
-            Ok(line) => return Some(line),
-            Err(mpsc::RecvTimeoutError::Disconnected) => return None,
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-        }
-        let _ = session.next(Duration::from_millis(50));
-        for note in session.take_pair_notes() {
-            if let PairNote::Decided(d) = note {
-                ended.insert(d.pair_id);
-            }
-        }
-        if ended.contains(&card.pair_id) {
-            return None;
         }
     }
 }
@@ -352,13 +329,7 @@ enum Approval {
 }
 
 /// Approves the card; if the name belongs to a machine that already joined, asks once more whether to replace it.
-fn approve(
-    say: &Say,
-    session: &mut Session,
-    answers: &mpsc::Receiver<String>,
-    card: &v1::PairRequested,
-    yes: &str,
-) -> Approval {
+fn approve(say: &Say, session: &mut Session, card: &v1::PairRequested) -> Approval {
     let send = |s: &mut Session, replace: bool| {
         s.command_info(
             "",
@@ -372,31 +343,27 @@ fn approve(
     match send(session, false) {
         Ok(_) => Approval::Done,
         Err(e) if e.code == "pair.state" && state_is(&e, "name_in_use") => {
-            let mut out = std::io::stdout();
-            let _ = write!(
-                out,
-                "{} ",
-                say.text(
-                    key!("pair-replace-ask"),
-                    &[("name", card.name.as_str().into())]
-                )
+            let question = say.text(
+                key!("pair-replace-ask"),
+                &[("name", card.name.as_str().into())],
             );
-            let _ = out.flush();
-            let Ok(line) = answers.recv() else {
-                say.out(key!("pair-input-ended"), &[]);
-                return Approval::Stop;
-            };
-            if !crate::trustcli::is_yes(&line, yes) {
-                // The request stays pending on the hub; this screen leaves it to its own time.
-                say.out(key!("pair-left-waiting"), &[]);
-                return Approval::Refused;
-            }
-            match send(session, true) {
-                Ok(_) => Approval::Done,
-                Err(e) => {
-                    refusal(say, &e);
+            match ask(say, &question) {
+                Answer::Gone => {
+                    say.out(key!("pair-input-ended"), &[]);
+                    Approval::Stop
+                }
+                Answer::No => {
+                    // The request stays pending on the hub; this screen leaves it to its own time.
+                    say.out(key!("pair-left-waiting"), &[]);
                     Approval::Refused
                 }
+                Answer::Yes => match send(session, true) {
+                    Ok(_) => Approval::Done,
+                    Err(e) => {
+                        refusal(say, &e);
+                        Approval::Refused
+                    }
+                },
             }
         }
         Err(e) => {

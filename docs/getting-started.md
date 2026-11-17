@@ -23,12 +23,12 @@ Three steps on one machine (Linux, macOS or Windows). The details are in ADR-006
 On the machine that runs the hub, open it for new machines, then on the new machine type the hub's address and compare one number:
 
 1. **On the hub's machine:** `agora pair open`. It says "Your hub is open for new machines for 10 minutes" and what to type next, and stays on your screen to
-   answer. `--minutes N` (1 to 10) opens it for less.
+   answer. Run it in a terminal: it reads your answer from the keyboard only, never from a pipe or a script. `--minutes N` (1 to 10) opens it for less.
 2. **On the new machine:** `agora join HUB-ADDRESS`, for example `agora join desk.lan:7443` (the hub's name or address on your network, and its port; the port
    defaults to 7443). `agora join` alone, or choice 3 of `agora`'s first question, explains this; finding the hub by itself comes later, for now you type its
    address. The new machine prints one line, for example `Number 482-193. Approve this machine on the hub...`, and waits.
 3. **Back on the hub's machine** the screen shows `New machine "laptop" (linux, 192.168.1.50) wants to join. Number 482-193.` Approve only if the two numbers are
-   the same: type `y`. Anything else denies it. (If the hub already has a machine of that name it asks whether to replace it.)
+   the same: look at both, then type `y` and Enter (a key pressed less than a second after the question is ignored). Anything else denies it. (If the hub already has a machine of that name it asks whether to replace it.)
 4. The new machine says `Joined. This machine is "laptop"` with the fingerprint of the hub's certificate authority (the one `agora hub fingerprint` shows),
    and keeps its certificate in `~/.agora/link`, as `agora node enroll` does; its private key is made on that machine and never sent. Start it with `agora`.
    After one machine is approved the hub closes itself to new machines again; run `agora pair open` for the next one.
