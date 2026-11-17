@@ -33,8 +33,9 @@ use windows_sys::Win32::System::Console::{
     STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
 };
 use windows_sys::Win32::System::Pipes::{
-    ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, WaitNamedPipeW, PIPE_READMODE_BYTE,
-    PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
+    ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeClientProcessId,
+    WaitNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE,
+    PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
 };
 use windows_sys::Win32::System::Threading::{CreateEventW, WaitForSingleObject, INFINITE};
 use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
@@ -704,6 +705,18 @@ impl Stream {
             timeout: Arc::new(Mutex::new(None)),
             closed: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// ADR-0079 decision 5: on a connection a [`Listener`] accepted, the process id of the client at the other end (which cannot be
+    /// reused while it is connected). The terminal holder checks it against the node that holds the role lock.
+    #[allow(dead_code)] // ADR-0079 W2 calls it; until then only the tests do.
+    pub(crate) fn client_pid(&self) -> io::Result<u32> {
+        let mut pid = 0u32;
+        // SAFETY: a live pipe handle and a valid out pointer.
+        if unsafe { GetNamedPipeClientProcessId(self.handle.0, &mut pid) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(pid)
     }
 
     pub fn try_clone(&self) -> io::Result<Self> {

@@ -16,6 +16,8 @@ mod winconfine;
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
+mod winhold;
+#[cfg(windows)]
 mod winproc;
 #[cfg(windows)]
 mod winservice;
