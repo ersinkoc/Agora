@@ -8,7 +8,9 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use agora_i18n::{key, Arg};
-use agora_protocol::v1::{param_value::Value, ChatEntry, ErrorInfo, Snapshot};
+use agora_protocol::v1::{
+    command_request::Command as WireCommand, param_value::Value, ChatEntry, ErrorInfo, Snapshot,
+};
 use agora_tui::app::{Action, App, Area, Ctx, Event as AppEvent, Row, Screen as AppScreen};
 use agora_tui::client::{sign_in, ChatEvent, ClientError, Hub, Session, TermEvent, Update};
 use agora_tui::device::Device;
@@ -294,6 +296,137 @@ fn approve_device(
     match session.endorse_device(&device, &waiting) {
         Ok(()) => say.text(key!("tui-device-approved"), &[("name", Arg::Str(name))]),
         Err(code) => fail(code),
+    }
+}
+
+/// How long the owner has to read a card and answer it before the box closes by itself (the request stays pending on the hub).
+const PAIR_ASK_FOR: Duration = Duration::from_secs(120);
+
+/// Asks the hub whether this session is the owner's: `PairStatus` is answered to the owner only. `None` when it could not tell (the
+/// link failed): it is asked again at the next connection.
+fn pair_owner(session: &mut Session) -> Option<agora_tui::pair::Owner> {
+    use agora_tui::pair::Owner;
+    match session.command_info(
+        "",
+        WireCommand::PairStatus(agora_protocol::v1::PairStatus {}),
+        Duration::from_secs(3),
+    ) {
+        Ok(_) => Some(Owner::Yes),
+        Err(e) if e.code == "auth.forbidden" || e.code == "protocol.capability_missing" => {
+            Some(Owner::No)
+        }
+        Err(_) => None,
+    }
+}
+
+fn pair_asked_line(say: &Say, count: usize) -> String {
+    if count > 1 {
+        say.text(
+            key!("tui-pair-asked-more"),
+            &[("count", Arg::Num(count as i64))],
+        )
+    } else {
+        say.text(key!("tui-pair-asked"), &[])
+    }
+}
+
+fn pair_result_line(say: &Say, name: &str, ended: agora_tui::pair::Ended) -> String {
+    use agora_tui::pair::Ended;
+    let id = match ended {
+        Ended::Approved => key!("tui-pair-result-approved"),
+        Ended::Denied => key!("tui-pair-result-denied"),
+        Ended::Expired => key!("tui-pair-result-expired"),
+        Ended::Closed => key!("tui-pair-result-closed"),
+    };
+    say.text(id, &[("name", Arg::Str(agora_tui::pair::field(name)))])
+}
+
+/// `p`: the first machine that asks to join, as a card. `a` asks "do the two numbers match?" and only `y` after that approves; `d` denies;
+/// `r` (when the name already belongs to a machine) chooses Replace; Esc or a pause leaves it pending. Returns the line to show.
+fn answer_pair(say: &Say, session: &mut Session, ask: &mut Over<'_>) -> String {
+    use agora_tui::pair::{can_answer, card_lines, too_soon, Dialog, Outcome};
+    let fail = |code: String| say.text(key!("tui-pair-failed"), &[("code", Arg::Str(code))]);
+    let Some(mut card) = ask.c.pair.first().cloned() else {
+        return say.text(key!("tui-pair-none"), &[]);
+    };
+    let mut dialog = Dialog::default();
+    // False once a command failed because the link is gone: then no answer is offered.
+    let mut link_up = true;
+    // Keys typed before the card was on screen answer nothing.
+    while ask.rx().try_recv().is_ok() {}
+    loop {
+        let width = usize::from(window_area().width).saturating_sub(6).max(20);
+        let lines = card_lines(
+            &card,
+            dialog.step,
+            dialog.replace,
+            now_ms(),
+            link_up,
+            width,
+            &|id, args| say.text(id, args),
+        );
+        let shown = Instant::now();
+        let key = match ask.key(&lines, PAIR_ASK_FOR) {
+            // A key that was already on its way when the screen came up is not an answer to it: the card is shown again.
+            Some(k) if too_soon(k, shown.elapsed()) => {
+                while ask.rx().try_recv().is_ok() {}
+                continue;
+            }
+            // A pause leaves the request pending on the hub.
+            None => return String::new(),
+            Some(k) => k,
+        };
+        match dialog.key(key, card.taken, can_answer(&card, now_ms(), link_up)) {
+            Outcome::Stay => {}
+            Outcome::Leave => return String::new(),
+            Outcome::Deny => {
+                match session.command_info(
+                    "",
+                    WireCommand::PairDeny(agora_protocol::v1::PairDeny {
+                        pair_id: card.pair_id.clone(),
+                    }),
+                    Duration::from_secs(5),
+                ) {
+                    Ok(_) => return say.text(key!("tui-pair-denied"), &[]),
+                    Err(e) if e.code == "pair.unknown" => {
+                        return say.text(key!("tui-pair-gone"), &[])
+                    }
+                    // The link is gone: the card says so and offers no answer; leaving still works.
+                    Err(e) if e.code == "client.unreachable" => link_up = false,
+                    Err(e) => return fail(e.code),
+                }
+            }
+            Outcome::Approve { replace } => {
+                match session.command_info(
+                    "",
+                    WireCommand::PairApprove(agora_protocol::v1::PairApprove {
+                        pair_id: card.pair_id.clone(),
+                        replace,
+                    }),
+                    Duration::from_secs(5),
+                ) {
+                    Ok(_) => return say.text(key!("tui-pair-answer-sent"), &[]),
+                    // The hub kept the request open and said the name belongs to a machine: the card now offers Replace, and
+                    // approving takes both keys again.
+                    Err(e)
+                        if e.code == "pair.state"
+                            && matches!(
+                                e.params.get("state").and_then(|v| v.value.as_ref()),
+                                Some(Value::Str(s)) if s == "name_in_use"
+                            ) =>
+                    {
+                        card.taken = true;
+                        ask.c.pair.mark_taken(&card.pair_id);
+                        dialog.name_taken();
+                    }
+                    Err(e) if e.code == "pair.unknown" => {
+                        return say.text(key!("tui-pair-gone"), &[])
+                    }
+                    Err(e) if e.code == "client.unreachable" => link_up = false,
+                    Err(e) => return fail(e.code),
+                }
+            }
+        }
     }
 }
 
@@ -1296,6 +1429,7 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                 open_failed_notice: None,
                 notice_at: Instant::now(),
                 note: Note::default(),
+                pair: agora_tui::pair::Book::default(),
                 colors: if color {
                     ColorMode::from_env(
                         None,
@@ -1409,6 +1543,8 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
             {
                 c.notice.clear();
             }
+            // A new connection: the cards held from the last one are stale until the hub sends the ones waiting now.
+            c.pair.reset();
             match console(say, &mut session, &rx, &hub_arg, color, c) {
                 Next::Quit => return ExitCode::SUCCESS,
                 Next::Reconnect => continue,
@@ -1817,6 +1953,8 @@ struct Console {
     /// A request shown whole outside the inspector (the chat tab's pane shows its agent's): y / n may answer it without asking again.
     shown_request: Option<String>,
     note: Note,
+    /// ADR-0065: the machines that ask to join, for an owner's session. Memory only.
+    pair: agora_tui::pair::Book,
     colors: ColorMode,
 }
 
@@ -1889,6 +2027,13 @@ fn console(
     mouse_mode(c.app.mouse);
     let mut fresh = true;
     let mut typed_at: Option<Instant> = None;
+    // ADR-0065: only the hub knows whether this session is the owner's (it answers `PairStatus` to the owner only).
+    if c.pair.owner == agora_tui::pair::Owner::Unknown {
+        if let Some(owner) = pair_owner(session) {
+            c.pair.set_owner(owner);
+        }
+    }
+    let mut pair_seen = c.pair.shown().len();
     loop {
         // Watching a terminal: wake often, so typing echoes and output looks live; with a frame waiting to be drawn, wake when it may
         // be (any frame from the hub wakes this at once anyway).
@@ -1920,6 +2065,20 @@ fn console(
                 std::thread::sleep(Duration::from_secs(2));
                 return Next::Reconnect;
             }
+        }
+        // ADR-0065: the cards the hub sent an owner's window, and what became of the ones it ended.
+        for note in session.take_pair_notes() {
+            c.pair.apply(note);
+        }
+        let waiting_cards = c.pair.shown().len();
+        if waiting_cards > pair_seen && !c.note.open {
+            c.notice = pair_asked_line(say, waiting_cards);
+            redraw = true;
+        }
+        pair_seen = waiting_cards;
+        if let Some((name, ended)) = c.pair.take_end() {
+            c.notice = pair_result_line(say, &name, ended);
+            redraw = true;
         }
         let rows = c
             .snapshot
@@ -2305,7 +2464,7 @@ fn draw_console(
     // The footer's notice: the last thing done, or the hub's counts (machines, agents, what needs the user).
     let notice = if c.notice.is_empty() {
         c.snapshot.as_ref().map_or_else(String::new, |s| {
-            let waiting = needs_you_count(s);
+            let waiting = needs_you_count(s) + c.pair.shown().len();
             say.text(
                 key!("tui-split-status"),
                 &[
@@ -2892,6 +3051,13 @@ fn command(
         'a' => {
             c.notice = ask_approval(say, session);
             false
+        }
+        // ADR-0065: the first machine that asks to join, read whole and answered with two deliberate keys.
+        'p' => {
+            c.notice = over_console(say, c, session, preview, None, rx, |session, ask| {
+                answer_pair(say, session, ask)
+            });
+            true
         }
         'v' => {
             let snapshot = c.snapshot.clone();

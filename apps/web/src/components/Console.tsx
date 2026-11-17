@@ -18,6 +18,7 @@ import { AgentAddress } from './AgentAddress';
 import { NoAskBadge } from './NoAskBadge';
 import { Explorer } from './Explorer';
 import { FleetConsole } from './FleetConsole';
+import type { PairingUi } from './Pairing';
 import { Icon } from './Icon';
 import { Inspector } from './Inspector';
 import { LanguagePicker } from './LanguagePicker';
@@ -58,7 +59,7 @@ const PANEL_TAB: Record<string, DetailsTab> = { approvals: 'needs', changes: 'ch
 
 // The one window, laid out like an editor: the agents on the left as a tree, the terminals you are watching as tabs in the
 // middle (or side by side), details on the right, and a status bar. Everything is derived from props.
-export function Console({ agents, machines, usage, projects = [], approvals, messages, boards = [], terminalFor, chatOf, sendPrompt, chooseOption, loadDiff, loadHistory, filesOf, onOpen, onStart, onCommand, onForget, onResume, start, onResolve, helperGrants, revokeGrant, notice, link, onLock, onRetry }: {
+export function Console({ agents, machines, usage, projects = [], approvals, messages, boards = [], terminalFor, chatOf, sendPrompt, chooseOption, loadDiff, loadHistory, filesOf, onOpen, onStart, onCommand, onForget, onResume, start, onResolve, helperGrants, revokeGrant, notice, link, onLock, onRetry, pairing }: {
   agents: readonly AgentTileModel[];
   machines: readonly MachineModel[];
   usage?: UsageSummary;
@@ -91,6 +92,8 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   onLock?: () => void;
   // Try the hub now instead of after the wait, offered while it is unreachable.
   onRetry?: () => void;
+  // ADR-0065: machines asking to join, for an owner's session.
+  pairing?: PairingUi;
 }) {
   const cleared = useSyncExternalStore(subscribeDismissed, dismissedIds, dismissedIds);
   // What was cleared stays hidden only while the agent is closed: one that runs again (a new run under the same id) is back in the list.
@@ -193,7 +196,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
     .map((a) => [a.workspaceRef ? `${a.workspaceRef.node}/${a.workspaceRef.id}` : a.id, a])).values()]
     .sort((a, b) => (b.filesChanged ?? 0) - (a.filesChanged ?? 0));
   // An agent that is waiting and has an approval open is one thing that needs you, not two.
-  const needs = attention.length + approvals.filter((x) => !attention.some((a) => a.id === x.agentId)).length;
+  const needs = attention.length + approvals.filter((x) => !attention.some((a) => a.id === x.agentId)).length + (pairing?.cards.length ?? 0);
   // Panel widths are what the user dragged them to; on a phone the panels stack and the widths do not apply.
   const cols = `${showAgents ? `${leftWidth}px ` : ''}minmax(0,1fr)${showDetails ? ` ${rightWidth}px` : ''}`
   const find = (id?: string) => fleet.find((a) => a.id === id);
@@ -280,7 +283,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
     </div>
   );
   const panel = (id: string) => id === 'fleet' ? home : PANEL_TAB[id] ? <div className="min-h-0 flex-1 overflow-y-auto p-3">
-    <Details tab={PANEL_TAB[id] as DetailsTab} attention={attention} approvals={approvals} notice={notice} changed={changed} boards={boards} messages={messages} usage={usage} projects={projects} onOpen={onOpen}
+    <Details tab={PANEL_TAB[id] as DetailsTab} pairing={pairing} attention={attention} approvals={approvals} notice={notice} changed={changed} boards={boards} messages={messages} usage={usage} projects={projects} onOpen={onOpen}
       onResolve={onResolve} onReview={loadDiff ? setReviewing : undefined} />
   </div> : id === 'theme' ? <div className="min-h-0 flex-1 overflow-y-auto"><ThemeEditor /></div> : undefined;
 
@@ -292,7 +295,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   };
   const home = (
     <div className="min-h-0 flex-1 overflow-y-auto">
-      <FleetConsole fleet={fleet} machines={machines} approvals={approvals} usage={usage} link={link} now={now} onOpen={openFromFleet} onStart={onStart} onResolve={onResolve} onReview={() => setShowDetails(true)} onRetry={onRetry} />
+      <FleetConsole fleet={fleet} machines={machines} approvals={approvals} usage={usage} link={link} now={now} onOpen={openFromFleet} onStart={onStart} onResolve={onResolve} onReview={() => setShowDetails(true)} onRetry={onRetry} pairing={pairing} />
     </div>
   );
   const welcome = home;
@@ -326,7 +329,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
             onFiles={filesOf ? (a) => setBrowsing(a.id) : undefined} renderFiles={filesOf ? (a) => { const f = filesOf(a); return f ? <FilesView files={f} load={loadDiff && a.git !== false ? (path) => loadDiff(a, path) : undefined} changed={a.filesChanged} compact /> : undefined; } : undefined} onStart={onStart ? () => onStart() : undefined} welcome={welcome} />
         </main>
 
-        {showDetails && <Inspector attention={attention} approvals={approvals} notice={notice} changed={changed} boards={boards} messages={messages} usage={usage} projects={projects} onOpen={onOpen}
+        {showDetails && <Inspector pairing={pairing} attention={attention} approvals={approvals} notice={notice} changed={changed} boards={boards} messages={messages} usage={usage} projects={projects} onOpen={onOpen}
           onResolve={onResolve} onReview={loadDiff ? setReviewing : undefined} onCollapse={() => setShowDetails(false)} />}
       </div>
 

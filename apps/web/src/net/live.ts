@@ -8,6 +8,7 @@ const CHAT_KIND = { SNAPSHOT: 10, ENTRY: 11 } as const;
 import { decodeTerminalFrame, type TerminalEvent } from '../terminal/frames';
 import type { TerminalSource } from '../terminal/source';
 import { CONTROL_KIND, decodeFrame, encodeFrame, EVENT_KIND, STREAM_COMMANDS, STREAM_CLOSE, STREAM_CONTROL, STREAM_EVENTS } from './frame';
+import { decodePairFrame, type PairNote } from './pairing';
 import { applyEvent, emptyView, fromSnapshot, num, type View } from './view';
 
 export type LinkState = 'connecting' | 'live' | 'offline';
@@ -32,6 +33,9 @@ export interface LiveOptions {
   onRejected?: () => void;
   // A machine refused a command until the owner grants it (ADR-0041): what was asked, so the window can ask the owner.
   onGrantRequired?: (node: string, body: CommandBody) => void;
+  // ADR-0065: what the hub tells an owner's window about machines asking to join. `reset` comes first on every new connection (the cards
+  // held from the last one are stale until the hub sends the ones waiting now). Memory only: the caller must never store a note.
+  onPair?: (n: PairNote) => void;
   socket?: SocketFactory;
   // Waits before reconnect attempt n (0-based); capped exponential with jitter by default (`defaultBackoff`).
   backoffMs?: (attempt: number) => number;
@@ -227,6 +231,7 @@ export function connectLive(o: LiveOptions): Live {
       opening = undefined;
       isOpen = true;
       heard = false;
+      o.onPair?.({ type: 'reset' });
       quiet();
       pinger = setInterval(() => probe(s), PING_EVERY_MS);
       const sub = agora.v1.Subscribe.encode(synced ? { afterPos: view.pos } : {}).finish();
@@ -286,6 +291,11 @@ export function connectLive(o: LiveOptions): Live {
         return;
       }
       if (f.streamId !== STREAM_EVENTS) return;
+      if (f.kind === EVENT_KIND.PAIR_REQUESTED || f.kind === EVENT_KIND.PAIR_DECIDED) {
+        const n = decodePairFrame(f.kind, f.payload, Date.now());
+        if (n) o.onPair?.(n);
+        return;
+      }
       try {
         if (f.kind === EVENT_KIND.SNAPSHOT) {
           view = fromSnapshot(agora.v1.Snapshot.decode(f.payload));
