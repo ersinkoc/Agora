@@ -47,7 +47,7 @@ Origin: issue #440 (T16), found in the ADR-0059 security review; its Windows hal
 5. **A secret the confined agent cannot read** (chosen, below). It uses the guarantee the sandbox already gives: the node's home
    (device keys, trust file) is not readable by a confined agent. The same guarantee protects a token kept in it.
 
-## Decision (proposed)
+## Decision
 1. **A control token.** At start the node makes 32 random bytes and writes them hex-encoded to `<home>/control.token` (for `--socket
    <path>` without a home: `<path>.token`) through the existing `write_private` (0600 from creation, an owner-only ACL on Windows),
    replacing the file at every start. It is compared in constant time, never logged, never in an event, never in an environment variable,
