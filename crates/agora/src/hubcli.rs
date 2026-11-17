@@ -2218,26 +2218,37 @@ fn load_from(
     socket: PathBuf,
     read: &dyn Fn(&Path) -> std::io::Result<String>,
 ) -> std::io::Result<Option<(String, HubLink)>> {
-    let (dir, _guard) = match std::fs::canonicalize(dir) {
-        Ok(resolved) => match link_guard(&resolved, wait) {
-            Ok(g) => (resolved, Some(g)),
-            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => return Err(e),
-            Err(_) => (resolved, None),
-        },
-        // No folder: nothing is read, and reading makes none. Never read by the path given instead: a folder made after this look could
-        // be mid-save (Codex re-review of F1031). A folder that is there but cannot be resolved is an error, not "no link": the node
-        // must not start as an unlinked one.
-        // A link folder that is itself a link to something missing (a volume that is not mounted) is there: an error too.
-        Err(e)
-            if e.kind() == std::io::ErrorKind::NotFound
-                && std::fs::symlink_metadata(dir).is_ok() =>
-        {
-            return Err(e)
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e),
+    let resolved = resolve_link_folder(dir)?;
+    let Some(dir) = resolved else {
+        return Ok(None);
+    };
+    let _guard = match link_guard(&dir, wait) {
+        Ok(g) => Some(g),
+        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => return Err(e),
+        Err(_) => None,
     };
     link_files(&dir, socket, read)
+}
+
+/// The link folder `dir`, resolved, or `None` when there is none. Never the path given instead: a folder made after the look could be
+/// mid-save (Codex re-review of F1031). A folder that is there but cannot be resolved is an error, not "no link", so the node does not
+/// start as an unlinked one: a link to something missing (a volume that is not mounted) too. A folder that appeared between the two
+/// looks (an enrollment that just made it) is resolved again, so the read waits for that enrollment's guard.
+fn resolve_link_folder(dir: &Path) -> std::io::Result<Option<PathBuf>> {
+    let mut tries = 0;
+    loop {
+        match std::fs::canonicalize(dir) {
+            Ok(resolved) => return Ok(Some(resolved)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                match std::fs::symlink_metadata(dir) {
+                    Err(_) => return Ok(None),
+                    Ok(m) if m.file_type().is_symlink() || tries >= 3 => return Err(e),
+                    Ok(_) => tries += 1,
+                }
+            }
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 /// The five files of the link folder `dir`, if `node-id` and the others are all there. A file that is not there is no link (a save
