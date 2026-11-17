@@ -75,7 +75,8 @@ export const INLINE_MAX = 120;
 export const askLine = (action: string, detail: string): string => (detail ? `${action} · ${detail}` : action);
 export function decidableInline(a: ApprovalModel): boolean {
   if (a.start) return false;
-  const oneLine = (s: string) => !/[\r\n]/.test(s) && visible(s) === s;
+  // Whitespace tricks (a tab, a no-break or wide space) can lay out text differently from how it reads: not plain.
+  const oneLine = (s: string) => !/[\r\n\t\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000]/.test(s) && visible(s) === s;
   if (!a.action.trim() || !oneLine(a.action)) return false;
   if (a.detail && (!oneLine(a.detail) || detailText(a.detail) !== a.detail)) return false;
   return askLine(a.action, a.detail).length <= INLINE_MAX;

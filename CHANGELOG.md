@@ -11,6 +11,9 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 - A server with no screen can run Agora: `agora --ui none --listen ADDRESS` sets where the hub listens, and `docs/guides/remote-hub.md` walks through a VPS with Tailscale or a plain address.
 - A request that went through a proxy on the hub's machine is no longer taken for the owner at that machine, so the screen password applies to it.
 
+### The window
+- On a phone, what needs you now stays at the bottom of the screen in reach of your thumb: a plain yes or no has big Allow and Deny buttons there (greyed out, with the reason, while the connection is down), anything else has one Review button, and the title bar no longer overflows when the hub cannot be reached.
+
 ## 0.3.17
 
 ### The window
