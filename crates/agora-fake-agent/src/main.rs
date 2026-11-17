@@ -12,7 +12,11 @@ fn main() -> ExitCode {
             .unwrap_or_default()
             .replace("{pid}", &std::process::id().to_string());
         let value = serde_json::json!({"cwd": std::env::current_dir().ok(), "args": std::env::args().collect::<Vec<_>>()});
-        if std::fs::write(report, value.to_string()).is_err() {
+        // Written whole or not at all: a test reading the folder must never see half a report (it did, on Windows).
+        let tmp = format!("{report}.tmp");
+        if std::fs::write(&tmp, value.to_string()).is_err()
+            || std::fs::rename(&tmp, &report).is_err()
+        {
             return ExitCode::from(1);
         }
         let mut line = String::new();
