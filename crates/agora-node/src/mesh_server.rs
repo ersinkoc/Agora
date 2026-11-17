@@ -659,10 +659,13 @@ impl MeshServer {
             std::thread::Builder::new()
                 .name("agora-mesh-agent".into())
                 .spawn(move || {
-                    let mut conns: Vec<JoinHandle<()>> = Vec::new();
+                    // Each connection with a handle to close it (F1041): a client that stops reading parks its thread in a write,
+                    // where the stop flag is never looked at; closing the stream ends that write, so leaving never waits on a client.
+                    let mut conns: Vec<(JoinHandle<()>, Option<LocalStream>)> = Vec::new();
                     while !stop.load(Ordering::Acquire) {
                         match listener.accept() {
                             Ok(stream) => {
+                                let closer = stream.try_clone().ok();
                                 let (mesh, stop, agent, remote, allowed, shares) = (
                                     Arc::clone(&mesh),
                                     Arc::clone(&stop),
@@ -690,14 +693,17 @@ impl MeshServer {
                                         )
                                     })
                                 {
-                                    conns.push(h);
+                                    conns.push((h, closer));
                                 }
                             }
                             Err(_) => std::thread::sleep(POLL),
                         }
-                        conns.retain(|h| !h.is_finished());
+                        conns.retain(|(h, _)| !h.is_finished());
                     }
-                    for h in conns {
+                    for (h, closer) in conns {
+                        if let Some(c) = closer {
+                            let _ = c.shutdown();
+                        }
                         let _ = h.join();
                     }
                 })?
@@ -1076,6 +1082,46 @@ fn spawn_call(
     }
 }
 
+/// `notifications/cancelled` (F1040): the client will not read an answer to `request_id`, so a call of it still waiting is dropped as
+/// when the connection ends: its ask is discarded, its wait ends and its start request is withdrawn. Nothing is sent for it.
+fn cancel_request(
+    request_id: &Value,
+    waiting: &mut Vec<WaitingAsk>,
+    owned: &mut ConnectionAsks<'_>,
+    waits: &mut Vec<SpawnWait>,
+    starts: &mut ConnectionStarts,
+) {
+    waiting.retain(|(rid, ask_id, _)| {
+        if rid != request_id {
+            return true;
+        }
+        owned
+            .mesh
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .cancel_ask(owned.agent, ask_id);
+        owned.ids.remove(ask_id);
+        false
+    });
+    waits.retain(|w| match w {
+        SpawnWait::Start {
+            request_id: rid,
+            ticket,
+        } if rid == request_id => {
+            if starts.tickets.remove(ticket) {
+                if let Some(h) = &starts.helpers {
+                    h.abandon(*ticket);
+                }
+            }
+            false
+        }
+        SpawnWait::State {
+            request_id: rid, ..
+        } => rid != request_id,
+        SpawnWait::Start { .. } => true,
+    });
+}
+
 /// Answers spawn calls whose start was decided, whose helper reached the state, or whose time ran out.
 fn poll_spawn(
     waits: &mut Vec<SpawnWait>,
@@ -1248,6 +1294,13 @@ fn serve(
                     } => {
                         waiting.push((request_id, ask_id, deadline_ms));
                     }
+                    Outcome::Cancelled { request_id } => cancel_request(
+                        &request_id,
+                        &mut waiting,
+                        &mut owned,
+                        &mut spawn_waits,
+                        &mut starts,
+                    ),
                 }
             }
             // A partial line (the read timed out mid-line): keep what arrived and wait for the rest.
@@ -1518,6 +1571,92 @@ mod tests {
         let _ = writer.join();
         assert!(closed, "the node kept reading a line without a newline");
         server.unregister(&id);
+        drop(server);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// F1041: a client that keeps its connection open but stops reading parks the connection's thread in a write; the agent leaving
+    /// (the node's main loop calls `unregister` when it exits) must still return instead of waiting for that client for ever.
+    #[test]
+    fn leaving_does_not_wait_for_a_client_that_stopped_reading() {
+        if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("agora-ur-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let server = Arc::new(MeshServer::new(&dir, Limits::default()).unwrap());
+        let id = AgentId::new("a1");
+        let sock = server
+            .register(AgentInfo {
+                id: id.clone(),
+                kind: "fixture".into(),
+                node: "n".into(),
+                project: "p".into(),
+                label: "a1".into(),
+                worktree: String::new(),
+                state: "idle".into(),
+            })
+            .unwrap();
+        let mut w = agora_platform::local_connect(&sock).unwrap();
+        let r = w.try_clone().unwrap();
+        r.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        writeln!(
+            w,
+            r#"{{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{}}}}"#
+        )
+        .unwrap();
+        let mut line = String::new();
+        BufReader::new(r).read_line(&mut line).unwrap();
+        // Several MiB of answers nobody reads, asked for from another thread (this side's writes block too once the node stops).
+        let keep = w.try_clone().unwrap();
+        let writer = std::thread::spawn(move || {
+            let mut batch = String::new();
+            for i in 0..1000 {
+                batch += &format!(
+                    "{{\"jsonrpc\":\"2.0\",\"id\":{},\"method\":\"tools/list\"}}\n",
+                    i + 2
+                );
+            }
+            let _ = w.write_all(batch.as_bytes());
+        });
+        // Where the system shows it (Linux /proc), wait until a connection thread sits in a write; elsewhere give it a moment.
+        let in_write = || {
+            std::fs::read_dir("/proc/self/task")
+                .into_iter()
+                .flatten()
+                .flatten()
+                .any(|t| {
+                    let comm = std::fs::read_to_string(t.path().join("comm")).unwrap_or_default();
+                    let call =
+                        std::fs::read_to_string(t.path().join("syscall")).unwrap_or_default();
+                    comm.trim() == "agora-mesh-conn"
+                        && matches!(call.split_whitespace().next(), Some("1" | "44" | "46"))
+                })
+        };
+        if std::path::Path::new("/proc/self/task").exists() {
+            let mut streak = 0;
+            for _ in 0..400 {
+                streak = if in_write() { streak + 1 } else { 0 };
+                if streak >= 5 {
+                    break;
+                }
+                std::thread::sleep(POLL / 2);
+            }
+        } else {
+            std::thread::sleep(POLL * 10);
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        {
+            let (server, id) = (Arc::clone(&server), id.clone());
+            std::thread::spawn(move || {
+                server.unregister(&id);
+                let _ = tx.send(());
+            });
+        }
+        let left = rx.recv_timeout(Duration::from_secs(15)).is_ok();
+        let _ = keep.shutdown();
+        let _ = writer.join();
+        assert!(left, "unregister waited for a client that does not read");
         drop(server);
         let _ = std::fs::remove_dir_all(dir);
     }

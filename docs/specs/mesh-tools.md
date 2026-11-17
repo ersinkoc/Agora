@@ -67,10 +67,13 @@ answer `initialize` with a result is not given the client's calls. It retries wh
 after 15 minutes without a connection. The bridge ends when its client's output closes. A bridge started by an older version does not do this and ends with its connection. The node
 side is unchanged: the endpoint's owner-only access (and, on Windows, the per-agent identity) applies to every new connection.
 The node registers the agent on start, keeps its state current for `agents_list`, and on stop or exit
-unregisters it, which gives back its tasks, leases and open asks and closes the endpoint. Pending `ask`s are answered on the
+unregisters it, which gives back its tasks, leases and open asks and closes the endpoint (its open connections are closed too, so
+a client that stopped reading cannot hold the node up). Pending `ask`s are answered on the
 same connection without blocking the agent's other calls. The connection owns its outstanding ask IDs independently
 of its polling queue. On EOF, input/output failure or shutdown it discards those asks (including already answered ones)
-without unregistering the agent or affecting another connection's requests. A live connection still receives a completed
+without unregistering the agent or affecting another connection's requests. A `notifications/cancelled` from the client for a
+waiting `ask`, `agent_wait` or `agent_start` drops that call alone, as the connection ending would: the ask is discarded, the wait
+ends, the start request is withdrawn, and nothing is sent for it. A live connection still receives a completed
 answer even if it starts another ask before polling that answer. Mesh activity is written to the node's event log.
 The socket reaches a terminal agent through its manifest's `[mcp]` section (see `agent-manifest.md`). A structured agent (an L3
 adapter, or an ACP agent through `agora acp-bridge`) joins the mesh the same way and gets the same server in `session/start`
@@ -130,7 +133,7 @@ the node answers them itself (`agora-node::spawn`), not the broker. The caller i
   shows the asking agent and machine, the kind, the folder and the whole prompt (see `protocol.md`), and answers only once a trusted
   device's signed decision has been verified on this node: `{ agent_id }`, `mesh.start_denied` (refused, or withdrawn) or
   `approval.expired`. The decision is signed over a hash of the request as announced, so a hub cannot change what starts. The call
-  does not block the agent's other calls; if the connection ends first, the request is withdrawn.
+  does not block the agent's other calls; if the connection ends first, or the client cancels the call, the request is withdrawn.
 - **Settings (ADR-0066).** `settings` names launch settings the kind declares (`model`, `effort`, ...; values are strings). The node checks
   them against its manifest before anyone is asked (`agent.setting_unknown`, `agent.setting_invalid`; nothing is announced and nothing
   starts), the card lists every one next to the kind, folder and prompt, and the decision is signed over them (`agora-approval-start-v2`,

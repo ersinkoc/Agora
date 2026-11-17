@@ -174,3 +174,51 @@ fn closing_one_mcp_connection_cancels_its_asks_and_preserves_the_other_connectio
     drop(server);
     drop(directory);
 }
+
+/// F1040: a client that cancels an `ask` (`notifications/cancelled`, sent when the user interrupts the tool call) gets its slot back
+/// at once and no answer for it; before, each cancelled ask held one of the five slots until its deadline.
+#[test]
+fn a_cancelled_ask_frees_its_slot_and_gets_no_answer() {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+        return;
+    }
+    let directory = Directory::new();
+    let server = MeshServer::new(&directory.0.join("m"), Limits::default()).unwrap();
+    let path = server.register(agent("a")).unwrap();
+    server.mesh().lock().unwrap().register(agent("b"));
+    let mut client = Client::connect(&path);
+    let call = |id: u64, question: &str, timeout_s: u64| {
+        json!({"jsonrpc":"2.0", "id":id, "method":"tools/call", "params":{
+            "name":"ask", "arguments":{"to":"b", "question":question, "timeout_s":timeout_s}
+        }})
+    };
+    for id in 10..15 {
+        client.send(call(id, &format!("q{id}"), 600));
+    }
+    for id in 10..15 {
+        client.send(
+            json!({"jsonrpc":"2.0", "method":"notifications/cancelled", "params":{"requestId":id}}),
+        );
+    }
+    // A sixth ask is accepted (it times out at once instead of being refused for too many open asks).
+    client.send(call(20, "sixth", 0));
+    let reply = client.reply();
+    assert_eq!(
+        reply["id"], 20,
+        "an answer came for a cancelled request: {reply}"
+    );
+    let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(text).unwrap()["error"]["code"],
+        "mesh.timeout"
+    );
+    // The cancelled asks are gone from the broker: an answer to one is an ordinary message.
+    let first = received(&server, "q10");
+    assert_eq!(
+        server.mesh().lock().unwrap().ask_status(&first, 0),
+        AskStatus::TimedOut
+    );
+    drop(client);
+    drop(server);
+    drop(directory);
+}
