@@ -19,7 +19,7 @@ agora-i18n = { path = "../agora-i18n" }
 # Encode and decode the protocol messages the control socket carries.
 prost = "0.14"
 # Unguessable approval ids (a signed decision must not be replayable against a later request); already in the tree.
-getrandom = "0.2"
+getrandom = "0.4"
 # The uplink dials the hub (ADR-0011, ADR-0013): a small tokio runtime on its own thread, TLS with the node's client certificate.
 tokio = { version = "1", features = ["rt", "net", "time", "macros", "sync"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }

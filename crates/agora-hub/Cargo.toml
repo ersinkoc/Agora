@@ -27,7 +27,7 @@ time = "0.3"
 # Reads the serial number back from an issued certificate (and verifies chains in tests).
 x509-parser = { version = "0.18", features = ["verify"] }
 # One-time enrollment codes: system randomness (already in the tree via rcgen) and a hash so codes are not stored.
-getrandom = "0.2"
+getrandom = "0.4"
 sha2 = "0.11"
 # Verifies WebAuthn ES256 assertions (ECDSA P-256, DER). Already in the tree through rustls and rcgen.
 ring = { version = "0.17", default-features = false }
