@@ -90,7 +90,7 @@ permanent section. Labels below use internal terms; the UI uses the vocabulary i
   - When the changes are larger than 512 KiB, the files after the cut carry no mark, and the tree says so with the machine's count.
   - In a narrow pane the tree sits above the file.
   - Syntax colours (highlight.js, loaded on demand) for files up to 128 KiB in about 25 languages, chosen by file name.
-  - Not built yet: lease locks, editing.
+  - Not built yet: a lock mark on a file in the file browser (the task board lists the leases an agent holds), editing.
 - **Changes**: workspace diff summary (+/−); shared folders appear once and have a shared-folder label. No per-agent attribution is implied. Opens the review screen (`review.md`).
 - **Mesh**: project channels with unread counts; task board progress (`task-board.md`).
 - **Usage**: tokens and estimated cost for the selected agent and project (`../design/usage-and-cost.md`).
