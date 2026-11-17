@@ -110,6 +110,24 @@ doctor-policy-problems = Düğümün politika dosyasındaki { $detail } satır a
 doctor-show-secret = Dosya tarayıcısı ve inceleme ekranı, bir projeye bakabilen herkese gizli dosyaları (.env dosyaları, özel anahtarlar, ...) olduğu gibi gösteriyor (politika: files.show_secret = true).
 doctor-manifest-older = Manifestler klasöründe { $detail } için daha eski bir tanım var (sürüm { $from }; bu programda { $shipped } yerleşik) ve yerleşik olanın yerine geçiyor; bu yüzden bu türden ajanlar yeniden başlatmadan sonra geri gelmeyebilir. { $file } dosyasını manifestler klasöründen kaldırın: gönderilen tanımlar zaten yerleşik.
 doctor-manifest-invalid = { $detail } ajan tanımı okunamadı.
+doctor-cert-node = Bu makinenin hub sertifikası { $detail ->
+    [one] bir gün daha
+   *[other] { $detail } gün daha
+} geçerli. Henüz hiçbir şey onu yenilemiyor: bitmeden bu makineyi yeniden katıl.
+doctor-cert-node-soon = Bu makinenin hub sertifikası { $detail ->
+    [one] bir gün sonra
+   *[other] { $detail } gün sonra
+} bitiyor. Henüz hiçbir şey onu yenilemiyor: bitince bu makine hub'a bağlanamaz. Öncesinde yeniden katıl: hub'da "agora hub code" çalıştır, sonra burada yeni kodla "agora node enroll" çalıştır.
+doctor-cert-node-expired = Bu makinenin hub sertifikasının süresi doldu, bu yüzden hub'a bağlanamıyor ({ $file }). Yeniden katıl: hub'da "agora hub code" çalıştır, sonra burada yeni kodla "agora node enroll" çalıştır.
+doctor-cert-hub = Hub'ın kendi sertifikası { $detail ->
+    [one] bir gün daha
+   *[other] { $detail } gün daha
+} geçerli. Hub her başladığında yeniden üretilir.
+doctor-cert-hub-soon = Hub'ın kendi sertifikası { $detail ->
+    [one] bir gün sonra
+   *[other] { $detail } gün sonra
+} bitiyor. Öncesinde hub'ı yeniden başlat ("agora hub run" ya da servisini yeniden başlat) ki yenisini alsın; bitiminden sonra çalışmaya devam eden bir hub yeni bağlantıları reddeder.
+doctor-cert-hub-expired = Hub'ın kendi sertifikasının süresi doldu ({ $file }): ona yeni bağlantılar reddediliyor. Yenisini almak için hub'ı yeniden başlat ("agora hub run" ya da servisini yeniden başlat).
 doctor-summary-ok = Agora'nın ihtiyaç duyduğu her şey yerinde.
 doctor-summary-problems = Agora'nın ihtiyaç duyduğu bir şey eksik. SORUN olarak işaretlenenleri düzeltin.
 
@@ -363,6 +381,12 @@ cli-machine-line = { $id } · { $state ->
     [old] eski, son görülme { $seen }
    *[other] çevrimdışı, son görülme { $seen }
 }
+cli-machine-cert-soon = { $id } · sertifikası { $date } tarihinde bitiyor{ $days ->
+    [0] , bugün
+    [1] , bir gün sonra
+   *[other] , { $days } gün sonra
+}. Öncesinde yeniden katıl (henüz hiçbir şey onu yenilemiyor): burada "agora hub code", o makinede "agora node enroll".
+cli-machine-cert-expired = { $id } · sertifikası { $date } tarihinde bitti, bu yüzden bağlanamıyor. Yeniden katıl: burada "agora hub code", o makinede "agora node enroll".
 cli-machine-unknown = Hub { $id } adında bir makine göstermiyor.
 cli-machines-question = Bu makineler unutulsun mu? Her pencereden kalkarlar; yeniden bağlanan geri gelir. [e/H]
 cli-machines-question-refuse = Bu makineler unutulsun ve yeniden bağlanırlarsa reddedilsin mi? Her biri yeni bir katılım kodu ister. [e/H]

@@ -27,8 +27,11 @@ impl From<rcgen::Error> for CaError {
     }
 }
 
-/// Validity of an issued device certificate. Short-lived on purpose; renewal is automatic while enrolled.
+/// Validity of an issued device certificate. Short-lived on purpose. Nothing renews it yet: a machine must be enrolled again
+/// before this many days pass (docs/adr/0085-machine-and-hub-certificates-renew-themselves.md is the proposed fix, not built).
 pub const DEVICE_CERT_DAYS: i64 = 90;
+/// `agora doctor` and `agora hub machines` warn when a certificate has fewer days than this left.
+pub const EXPIRY_WARN_DAYS: i64 = 30;
 const CA_DAYS: i64 = 3650;
 /// Producer id of events the hub records itself.
 pub const RESERVED_HUB_ID: &str = "hub";
@@ -36,6 +39,8 @@ pub const RESERVED_HUB_ID: &str = "hub";
 pub struct Ca {
     cert_pem: String,
     key: KeyPair,
+    /// How long node and server certificates last. [`DEVICE_CERT_DAYS`] unless a test shortens it.
+    lifetime: Duration,
 }
 
 /// What the hub hands back to an enrolled device.
@@ -63,6 +68,7 @@ impl Ca {
         Ok(Self {
             cert_pem: cert.pem(),
             key,
+            lifetime: Duration::days(DEVICE_CERT_DAYS),
         })
     }
 
@@ -81,7 +87,21 @@ impl Ca {
         Ok(Self {
             cert_pem: cert_pem.to_string(),
             key,
+            lifetime: Duration::days(DEVICE_CERT_DAYS),
         })
+    }
+
+    /// For tests only: the certificates this CA issues from now on last `lifetime` instead of [`DEVICE_CERT_DAYS`]. Nothing in
+    /// the product calls it, so production behaviour is unchanged.
+    #[must_use]
+    pub fn with_lifetime_for_tests(mut self, lifetime: std::time::Duration) -> Self {
+        self.lifetime = Duration::try_from(lifetime).unwrap_or(Duration::days(DEVICE_CERT_DAYS));
+        self
+    }
+
+    /// How long the certificates this CA issues are valid, in milliseconds.
+    pub fn lifetime_ms(&self) -> u64 {
+        u64::try_from(self.lifetime.whole_milliseconds()).unwrap_or(0)
     }
 
     pub fn cert_pem(&self) -> &str {
@@ -113,7 +133,7 @@ impl Ca {
         p.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
         p.use_authority_key_identifier_extension = true;
         p.not_before = OffsetDateTime::now_utc() - Duration::minutes(5);
-        p.not_after = OffsetDateTime::now_utc() + Duration::days(DEVICE_CERT_DAYS);
+        p.not_after = OffsetDateTime::now_utc() + self.lifetime;
         let issuer = Issuer::from_ca_cert_pem(&self.cert_pem, &self.key)?;
         let cert = csr.signed_by(&issuer)?;
         let serial_hex = x509_parser::parse_x509_certificate(cert.der())
@@ -143,10 +163,41 @@ impl Ca {
         p.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
         p.use_authority_key_identifier_extension = true;
         p.not_before = OffsetDateTime::now_utc() - Duration::minutes(5);
-        p.not_after = OffsetDateTime::now_utc() + Duration::days(DEVICE_CERT_DAYS);
+        p.not_after = OffsetDateTime::now_utc() + self.lifetime;
         let issuer = Issuer::from_ca_cert_pem(&self.cert_pem, &self.key)?;
         let cert = p.signed_by(&key, &issuer)?;
         Ok((cert.pem(), key.serialize_pem()))
+    }
+}
+
+/// When a PEM certificate stops being valid, in seconds since 1970 (the first certificate in the text).
+pub fn cert_not_after_secs(pem: &str) -> Result<i64, CaError> {
+    let der = x509_parser::pem::parse_x509_pem(pem.as_bytes())
+        .map_err(|e| CaError(e.to_string()))?
+        .1;
+    let cert = der.parse_x509().map_err(|e| CaError(e.to_string()))?;
+    Ok(cert.validity().not_after.timestamp())
+}
+
+/// Where a certificate stands against [`EXPIRY_WARN_DAYS`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Expiry {
+    /// Already past its end, by this many whole days (0 means today).
+    Expired(i64),
+    /// Valid, with fewer than [`EXPIRY_WARN_DAYS`] whole days left.
+    Soon(i64),
+    /// Valid, with this many whole days left.
+    Fine(i64),
+}
+
+pub fn expiry(not_after_secs: i64, now_secs: i64) -> Expiry {
+    let left = not_after_secs - now_secs;
+    if left <= 0 {
+        Expiry::Expired((-left) / 86_400)
+    } else if left < EXPIRY_WARN_DAYS * 86_400 {
+        Expiry::Soon(left / 86_400)
+    } else {
+        Expiry::Fine(left / 86_400)
     }
 }
 
@@ -174,6 +225,29 @@ mod tests {
             .unwrap()
             .1
             .contents
+    }
+
+    #[test]
+    fn expiry_says_expired_soon_or_fine_by_whole_days() {
+        let day = 86_400;
+        assert_eq!(expiry(1000, 1000), Expiry::Expired(0));
+        assert_eq!(expiry(1000, 1000 + 3 * day), Expiry::Expired(3));
+        assert_eq!(expiry(10 * day, 0), Expiry::Soon(10));
+        assert_eq!(expiry(30 * day, 0), Expiry::Fine(30));
+        assert_eq!(expiry(30 * day - 1, 0), Expiry::Soon(29));
+    }
+
+    #[test]
+    fn the_certificate_end_is_readable_and_the_test_lifetime_shortens_it() {
+        let (_, csr) = new_device_request().unwrap();
+        let ca = Ca::generate("ca").unwrap();
+        let now = OffsetDateTime::now_utc().unix_timestamp();
+        let normal = cert_not_after_secs(&ca.issue_node("n", &csr).unwrap().cert_pem).unwrap();
+        assert!((normal - now - DEVICE_CERT_DAYS * 86_400).abs() < 10);
+        let ca = ca.with_lifetime_for_tests(std::time::Duration::from_secs(60));
+        let short = cert_not_after_secs(&ca.issue_node("n", &csr).unwrap().cert_pem).unwrap();
+        assert!((short - now - 60).abs() < 10);
+        assert_eq!(ca.lifetime_ms(), 60_000);
     }
 
     #[test]

@@ -179,6 +179,8 @@ pub fn hub_run(say: &Say, o: &Opts) -> ExitCode {
             o.names.clone()
         };
         let (cert, key) = ca.issue_server(&names).map_err(|e| e.to_string())?;
+        // `agora doctor` reads this to warn before the certificate ends; the key stays in memory.
+        let _ = std::fs::write(dir.join("server-cert.pem"), &cert);
         let acceptor =
             tls::acceptor_with(&cert, &key, ca.cert_pem(), true).map_err(|e| e.to_string())?;
         let token_path = dir.join("token");
@@ -1571,6 +1573,39 @@ pub(crate) fn machine_state(online: bool, last_seen_ms: u64, now_ms: u64) -> &'s
     }
 }
 
+/// Says so under a machine's line when its certificate ends within 30 days or has ended. The hub does not store a certificate's end:
+/// it is when the machine's current certificate was issued plus the 90 days every certificate lasts. Nothing renews it yet.
+fn certificate_note(say: &Say, dir: &Path, id: &str, now_ms: u64) {
+    use agora_hub::ca::{expiry, Expiry, DEVICE_CERT_DAYS};
+    let Ok(store) = SqliteStore::open(&dir.join("hub.db")) else {
+        return;
+    };
+    let Ok(issued) = agora_hub::enroll::Enrollment::new(&store).issued_ms_by_node() else {
+        return;
+    };
+    let Some(&at) = issued.get(id) else {
+        return;
+    };
+    let end = i64::try_from(at / 1000).unwrap_or(0) + DEVICE_CERT_DAYS * 86_400;
+    let date = utc(u64::try_from(end).unwrap_or(0) * 1000);
+    let date = date.split(' ').next().unwrap_or("").to_string();
+    match expiry(end, i64::try_from(now_ms / 1000).unwrap_or(0)) {
+        Expiry::Fine(_) => {}
+        Expiry::Soon(days) => say.out(
+            key!("cli-machine-cert-soon"),
+            &[
+                ("id", id.to_string().into()),
+                ("date", date.into()),
+                ("days", days.into()),
+            ],
+        ),
+        Expiry::Expired(_) => say.out(
+            key!("cli-machine-cert-expired"),
+            &[("id", id.to_string().into()), ("date", date.into())],
+        ),
+    }
+}
+
 /// `agora hub machines`: every machine the hub shows, with its state and when it was last seen. `forget NAME` and `forget --old`
 /// (every old machine) ask the running hub to forget them (ADR-0073), after the owner's yes on this terminal (`--yes` for a
 /// script); `--refuse-return` also revokes their certificates. The list is read from the hub's file; forgetting goes through the
@@ -1609,6 +1644,7 @@ pub fn hub_machines(say: &Say, o: &Opts) -> ExitCode {
                         ("seen", utc(n.last_event_ms).into()),
                     ],
                 );
+                certificate_note(say, &dir, id, now);
             }
             return ExitCode::SUCCESS;
         }

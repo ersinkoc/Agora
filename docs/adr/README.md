@@ -102,3 +102,4 @@ Date: YYYY-MM-DD
 | 0082 | A confined agent cannot use the node's control socket | Accepted |
 | 0083 | A confined agent reaches only the unix sockets it is given | Accepted |
 | 0084 | A confined agent gets its login from a secret the node holds | Accepted |
+| 0085 | Machine and hub certificates renew themselves | Proposed |

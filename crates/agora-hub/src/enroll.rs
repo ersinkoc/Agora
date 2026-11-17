@@ -208,6 +208,22 @@ impl<'a> Enrollment<'a> {
         Ok(n)
     }
 
+    /// When each machine's current certificate was issued (milliseconds), for the machines that have one. The hub does not store
+    /// a certificate's end; it is this plus the CA's lifetime.
+    pub fn issued_ms_by_node(&self) -> Result<std::collections::HashMap<String, u64>, EnrollError> {
+        let conn = self.store.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT node_id, MAX(enrolled_ms) FROM devices WHERE revoked_ms IS NULL GROUP BY node_id",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+        let mut out = std::collections::HashMap::new();
+        for row in rows {
+            let (node, ms) = row?;
+            out.insert(node, u64::try_from(ms).unwrap_or(0));
+        }
+        Ok(out)
+    }
+
     /// Is this certificate serial enrolled and not revoked? Unknown serials are not active.
     pub fn is_active(&self, serial_hex: &str) -> Result<bool, EnrollError> {
         let conn = self.store.lock()?;
@@ -250,6 +266,25 @@ mod tests {
             Ca::generate("ca").unwrap(),
             csr,
         )
+    }
+
+    #[test]
+    fn the_hub_knows_when_each_machines_current_certificate_was_issued() {
+        let (store, ca, _) = setup();
+        let mut e = Enrollment::new(&store);
+        let c1 = e.create_code(1000).unwrap();
+        e.redeem(&ca, &c1, "a", &new_device_request().unwrap().1, 2000)
+            .unwrap();
+        let c2 = e.create_code(1000).unwrap();
+        e.redeem(&ca, &c2, "a", &new_device_request().unwrap().1, 3000)
+            .unwrap();
+        let c3 = e.create_code(1000).unwrap();
+        e.redeem(&ca, &c3, "b", &new_device_request().unwrap().1, 4000)
+            .unwrap();
+        let m = e.issued_ms_by_node().unwrap();
+        assert_eq!((m["a"], m["b"], m.len()), (3000, 4000, 2));
+        e.revoke("b", 5000).unwrap();
+        assert!(!e.issued_ms_by_node().unwrap().contains_key("b"));
     }
 
     #[test]

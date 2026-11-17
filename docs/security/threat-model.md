@@ -163,6 +163,15 @@ even for an empty requested path, keeping parent-checkout changes outside the wo
 place a selected subdirectory outside the shared system temp folder and prove inside writes succeed while parent
 checkout writes fail, in both directory and explicit-worktree modes. Explicit policy write allowances still apply.
 
+## Known limit: certificates are not renewed (ADR-0085, Proposed)
+
+Machine certificates and the hub's server certificate last 90 days (`DEVICE_CERT_DAYS`) and nothing renews them. A machine whose certificate
+has ended is refused at its next connection (an open connection is not cut), and a hub that keeps running past the end of its own server
+certificate is refused by every machine that dials it (it issues one at start). Both are proven with a few-second lifetime in
+`crates/agora/tests/cert_lifetime.rs`. This is an availability limit, not a way in: an expired certificate is never accepted. Until renewal
+is built the owner joins each machine again before day 90 and restarts the hub now and then; `agora doctor` (node `cert.pem`, hub
+`server-cert.pem`) warns 30 days before and fails after the end, and `agora hub machines` notes a machine close to its end.
+
 ## Open gap: unix sockets under confinement
 
 A confined agent (`sandbox = worktree`) can connect to any unix socket it can name. A tmux server socket or `SSH_AUTH_SOCK` lets it run a command or use
