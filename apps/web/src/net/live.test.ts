@@ -98,6 +98,23 @@ describe('view', () => {
     expect(v.withTerminal.size).toBe(0);
   });
 
+  // The hub keeps a forgotten agent, hidden, and a node says its interrupted agents again on every start (ADR-0053, ADR-0060).
+  it('a forgotten agent stays forgotten when its machine says again that it was interrupted', () => {
+    const v = fromSnapshot(v1.Snapshot.create({
+      pos: 10,
+      agents: [{ agentId: 'n/a', nodeId: 'n', kind: 'claude', state: 4, running: false, interrupted: true, resumable: true, interruptedAtMs: 500 }],
+    }));
+    const interrupted = { agentInterrupted: { agentId: 'a', kind: 'claude', resumable: true, interruptedAtMs: 500 } };
+    applyEvent(v, 11, ev('hub', 1, { agentForgotten: { agentId: 'n/a' } }));
+    applyEvent(v, 12, ev('n', 1, { nodeOnline: { nodeId: 'n', hostname: 'N' } }));
+    applyEvent(v, 13, ev('n', 2, interrupted));
+    expect(tiles(v)).toEqual([]);
+    // One never forgotten is listed from the event; a new start of the forgotten id lists it again.
+    applyEvent(v, 14, ev('n', 3, { agentInterrupted: { agentId: 'b', kind: 'codex' } }));
+    applyEvent(v, 15, ev('n', 4, { agentStarted: { agentId: 'a', nodeId: 'n', worktreeId: 'w', kind: 'claude' } }));
+    expect(tiles(v).map((t) => t.id).sort()).toEqual(['n/a', 'n/b']);
+  });
+
   it('adds up estimated cost per project and skips agents without a price', () => {
     const v = emptyView();
     applyEvent(v, 1, ev('n', 1, { checkoutDiscovered: { checkoutId: 'c', nodeId: 'n', projectId: 'p', path: '/home/me/shop' } }));
