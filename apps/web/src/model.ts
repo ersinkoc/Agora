@@ -82,6 +82,19 @@ export function uiState(s: number | undefined): UiState {
   }
 }
 
+// A closed agent whose process ended with a non-zero exit code. An agent the machine's stop interrupted is not that: it has its own
+// wording. Interim (no state token for it yet): it is drawn with a neutral cross and the words "Ended with an error", never as finished.
+export function endedWithError(a: { closed?: boolean; exitCode?: number; interrupted?: unknown }): boolean {
+  return !!a.closed && !a.interrupted && !!a.exitCode;
+}
+
+// A machine's name, and its id as well only where two machines share that name (the id tells them apart, so it is shown when it is
+// needed and not otherwise). `others` is every machine in the list, this one included.
+export function sharesName(m: { id: string; name: string }, others: Iterable<{ id: string; name: string }>): boolean {
+  for (const o of others) if (o.id !== m.id && o.name === m.name) return true;
+  return false;
+}
+
 // The attention strip lists everything that needs the user.
 export function needsAttention(agents: readonly AgentTileModel[]): AgentTileModel[] {
   return agents.filter((a) => a.state === 'needs-you');

@@ -273,7 +273,7 @@ export function FilesView({ files, load, changed, compact = false }: {
           <div className="grid flex-1 place-items-center p-6 text-center">
             <div className="grid gap-2">
               <p className="muted m-0">{t('files-pick')}</p>
-              {!compact && <p className="m-0 flex items-center justify-center gap-1.5 text-[0.6875rem] text-muted"><span className="ide-kbd">/</span>{t('files-key-filter')}<span className="ide-kbd ms-2">Ctrl F</span>{t('files-key-find')}</p>}
+              {!compact && <p className="m-0 flex items-center justify-center gap-1.5 text-xs text-muted"><span className="ide-kbd">/</span>{t('files-key-filter')}<span className="ide-kbd ms-2">Ctrl F</span>{t('files-key-find')}</p>}
             </div>
           </div>
         ) : (
@@ -302,7 +302,7 @@ export function FilesView({ files, load, changed, compact = false }: {
                     </span>
                   ))}
                 </nav>
-                <span className="hidden flex-none text-[0.6875rem] text-muted @lg:inline">
+                <span className="hidden flex-none text-xs text-muted @lg:inline">
                   {lines ? t('files-lines', { count: lines.length }) : ''}{activeTab && typeof content === 'object' ? ` · ${formatSize(content.bytes)}` : ''}
                   {activeStatus && marks.size > 0 ? ` · ${t('files-changed-lines', { count: [...marks.values()].filter((m) => m !== 'del').length })}` : ''}
                 </span>
@@ -320,7 +320,7 @@ export function FilesView({ files, load, changed, compact = false }: {
                     if (e.key === 'Enter' && matches.length > 0) { e.preventDefault(); setHit((h) => (e.shiftKey ? (h - 1 + matches.length) % matches.length : (h + 1) % matches.length)); }
                   }}
                   className="w-56 min-w-0 rounded-xs bg-surface-0 px-2 py-1 font-mono text-xs" />
-                <span className="text-[0.6875rem] text-muted" aria-live="polite">{needle ? (matches.length === 0 ? t('files-find-none') : t('files-find-at', { used: Math.min(hit, matches.length - 1) + 1, total: matches.length })) : ''}</span>
+                <span className="text-xs text-muted" aria-live="polite">{needle ? (matches.length === 0 ? t('files-find-none') : t('files-find-at', { used: Math.min(hit, matches.length - 1) + 1, total: matches.length })) : ''}</span>
                 <button type="button" className="ide-iconbtn" disabled={matches.length === 0} onClick={() => setHit((h) => (h - 1 + matches.length) % matches.length)} aria-label={t('files-find-prev')}><Icon name="chevron" className="-rotate-90" /></button>
                 <button type="button" className="ide-iconbtn" disabled={matches.length === 0} onClick={() => setHit((h) => (h + 1) % matches.length)} aria-label={t('files-find-next')}><Icon name="chevron" className="rotate-90" /></button>
                 <span className="flex-1" />
@@ -335,7 +335,7 @@ export function FilesView({ files, load, changed, compact = false }: {
                 : <CodeView key={active} label={active ?? ''} lines={content.lines} html={html} marks={marks} matches={finding ? matches : []} current={current} />}
             </div>
             {active !== undefined && changeOf(active) && marks.size === 0 && activeStatus === 'renamed' && (
-              <p className="m-0 flex-none border-t border-line px-3 py-1 text-[0.6875rem] text-muted">{t('changes-renamed-from', { name: changeOf(active)?.oldPath ?? '' })}</p>
+              <p className="m-0 flex-none border-t border-line px-3 py-1 text-xs text-muted">{t('changes-renamed-from', { name: changeOf(active)?.oldPath ?? '' })}</p>
             )}
           </>
         )}

@@ -1,6 +1,6 @@
 import { Suspense, lazy, useEffect, useMemo, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { t } from '../i18n';
-import type { AgentTileModel } from '../model';
+import { endedWithError, type AgentTileModel } from '../model';
 import { visible, type ApprovalModel, type MachineModel } from '../net/view';
 import { demoSource, type TerminalSource } from '../terminal/source';
 import type { ChatSource } from '../net/chat';
@@ -97,13 +97,13 @@ function AgentRow({ agent: a, onOpen }: { agent: AgentTileModel; onOpen: (id: st
   return (
     <li>
       <button type="button" className={`phone-row${a.closed ? ' phone-row--closed' : ''}`} onClick={() => onOpen(a.id)}>
-        <StateMark state={a.state} />
+        <StateMark state={a.state} failed={endedWithError(a)} />
         <span className="min-w-0 flex-1">
           <span className="block truncate font-medium text-ink">{a.name}</span>
           <span className="block truncate text-xs text-muted">{a.project || a.workspace}{a.branch ? ` · ${a.branch}` : ''}</span>
         </span>
         <NoAskBadge agent={a} />
-        <span className="flex-none text-xs"><StateBadge state={a.state} /></span>
+        <span className="flex-none text-xs"><StateBadge state={a.state} failed={endedWithError(a)} /></span>
         <Icon name="chevron" className="size-4 text-muted rtl:rotate-180" />
       </button>
     </li>

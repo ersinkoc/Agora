@@ -1,4 +1,5 @@
-/* Design tokens (docs/ux/visual-language.md §3). Components use only these variables, never raw values; the Tailwind theme in
+/* Design tokens (docs/ux/visual-language.md §3). `--diff-removed` is a content colour (like syntax colours), not a state and not a theme
+   token: amber stays "needs you", so a deleted line is red. Components use only these variables, never raw values; the Tailwind theme in
    app.css maps onto them (ADR-0036). Dark-first, light-equal. Color is reserved for agent state and one brand accent.
    A theme (docs/ux/themes.md) sets these same variables on the page; the values here are the Dark and Light themes, shown until
    the script has applied the chosen one (src/themes/tokens.ts holds the same values; a test keeps them equal). */
@@ -24,6 +25,7 @@
   --radius-s: 8px;
   --radius-m: 12px;
   --radius-l: 18px;
+  --tap: 44px; /* the smallest hit area of anything a finger presses (WCAG 2.2 target size, 2.5.5) */
   --motion-fast: 150ms;
   --motion-base: 250ms;
   --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
@@ -43,7 +45,8 @@
   --state-needs-you: #fbbf24;
   --state-finished: #4ade80;
   --state-idle: #8b8b96;
-  --state-unknown: #71717a;
+  --state-unknown: #8f8f9b;
+  --diff-removed: #f87171;
   --shadow: 0 1px 2px rgb(0 0 0 / 0.5), 0 8px 24px rgb(0 0 0 / 0.35);
   color-scheme: dark;
 }
@@ -57,11 +60,12 @@
   --text-muted: #5b5b68;
   --accent: #4f46e5;
   --on-accent: #ffffff;
-  --state-working: #1d6fd1;
+  --state-working: #175fb5;
   --state-needs-you: #a35a00;
-  --state-finished: #15803d;
+  --state-finished: #146c36;
   --state-idle: #5b5b68;
-  --state-unknown: #71717a;
+  --state-unknown: #6a6a76;
+  --diff-removed: #a82117;
   --shadow: 0 1px 2px rgb(20 20 40 / 0.06), 0 8px 24px rgb(20 20 40 / 0.08);
   color-scheme: light;
 }
@@ -77,11 +81,12 @@
     --text-muted: #5b5b68;
     --accent: #4f46e5;
     --on-accent: #ffffff;
-    --state-working: #1d6fd1;
+    --state-working: #175fb5;
     --state-needs-you: #a35a00;
-    --state-finished: #15803d;
+    --state-finished: #146c36;
     --state-idle: #5b5b68;
-    --state-unknown: #71717a;
+    --state-unknown: #6a6a76;
+    --diff-removed: #a82117;
     --shadow: 0 1px 2px rgb(20 20 40 / 0.06), 0 8px 24px rgb(20 20 40 / 0.08);
     color-scheme: light;
   }

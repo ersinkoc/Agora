@@ -45,7 +45,7 @@ export function Inspector({ attention, approvals, notice, changed, boards, messa
       <div role="tablist" aria-label={t('ide-details')} className="flex min-w-0 flex-1 overflow-x-auto quiet-scroll">
         {tabs.map(x => <button key={x.id} type="button" role="tab" aria-selected={active === x.id} onClick={() => setTab(x.id)}
           className="ide-tab max-w-none border-e-0 px-2.5 text-xs whitespace-nowrap">
-          {x.label}{!!x.badge && <span className={`rounded-full px-1.5 text-[0.6875rem] ${x.id === 'needs' ? 'bg-needs-you text-on-accent' : 'bg-surface-2 text-muted'}`}>{x.badge}</span>}
+          {x.label}{!!x.badge && <span className={`rounded-full px-1.5 text-xs ${x.id === 'needs' ? 'bg-needs-you text-on-accent' : 'bg-surface-2 text-muted'}`}>{x.badge}</span>}
         </button>)}
       </div>
       <button type="button" className="ide-iconbtn m-1" onClick={onCollapse} aria-label={t('ide-hide-panel')} title={t('ide-hide-panel')}><Icon name="panelRight" /></button>
@@ -72,6 +72,8 @@ export function Details({ tab, attention, approvals, notice, changed, boards, me
   onResolve: (a: ApprovalModel, approved: boolean, choice?: StartChoice) => void;
   onReview?: (id: string) => void;
 }) {
+  // Every machine that has a folder on a board: a name is followed by its id only when two of them share it.
+  const boardMachines = [...new Map(boards.flatMap((b) => b.folders).map((f) => [f.nodeId, { id: f.nodeId, name: f.machine }] as const)).values()];
   const needs = attention.length + approvals.filter((x) => !attention.some((a) => a.id === x.agentId)).length;
   return <>
     {tab === 'needs' && <div className="grid gap-2">
@@ -88,7 +90,7 @@ export function Details({ tab, attention, approvals, notice, changed, boards, me
           </button>
         </li>)}
       </ul>)}
-    {tab === 'board' && <div className="grid gap-2">{boards.map(b => <ProjectBoard key={b.projectId} board={b} />)}</div>}
+    {tab === 'board' && <div className="grid gap-2">{boards.map(b => <ProjectBoard key={b.projectId} board={b} machines={boardMachines} />)}</div>}
     {tab === 'messages' && (messages.length === 0 ? <p className="muted">{t('console-no-messages')}</p> : <ul className="m-0 grid list-none gap-2 p-0">
         {messages.map((m, i) => <li key={`${m.atMs}-${i}`} className="rounded-xs border border-line bg-surface-0 p-2.5">
           <div className="text-xs"><strong>{m.from}</strong> <span className="inline-block rtl:-scale-x-100" aria-hidden="true">→</span> <strong>{m.to}</strong>{m.crossMachine ? <span className="ide-chip ms-1.5">{t('message-cross')}</span> : null}</div>

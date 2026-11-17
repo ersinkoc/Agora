@@ -3,7 +3,7 @@ import { t } from '../i18n';
 import { NoAskBadge } from './NoAskBadge';
 import { forgetReasonKey } from '../net/forget';
 import { resumeReasonKey } from '../net/directory';
-import { helperTree, machineKey, type AgentTileModel, type ResumeAction } from '../model';
+import { endedWithError, helperTree, machineKey, sharesName, type AgentTileModel, type ResumeAction } from '../model';
 import { bytesLabel, type MachineModel } from '../net/view';
 import { ago } from '../net/time';
 import { Icon } from './Icon';
@@ -69,7 +69,7 @@ export function Explorer({ fleet, machines, open, current, projects, project, on
 
   return <aside className="flex min-h-0 flex-col border-line bg-surface-1 lg:border-e" aria-label={t('console-agents')}>
     <div className="flex h-9 flex-none items-center gap-1 border-b border-line ps-3 pe-1">
-      <h2 className="m-0 flex-1 text-[0.6875rem]">{t('console-agents')}</h2>
+      <h2 className="m-0 flex-1 text-xs">{t('console-agents')}</h2>
       <button type="button" className="ide-iconbtn" disabled={!onStart} onClick={() => onStart?.()} aria-label={t('action-start-agent')} title={t('action-start-agent')}><Icon name="plus" /></button>
       <button type="button" className="ide-iconbtn" onClick={onCollapse} aria-label={t('ide-hide-panel')} title={t('ide-hide-panel')}><Icon name="panelLeft" /></button>
     </div>
@@ -99,29 +99,29 @@ export function Explorer({ fleet, machines, open, current, projects, project, on
               <Icon name="chevron" className={`size-3.5 text-muted transition-transform duration-150 ${closed ? 'rtl:rotate-180' : 'rotate-90'}`} />
               <span aria-hidden className={`size-2 flex-none rounded-full ${m?.online ? 'bg-finished' : 'bg-unknown'}`} />
               <span className="sr-only">{t(m?.online ? 'machine-online' : 'machine-offline')}</span>
-              <span className="min-w-0 flex-1 truncate">{name}{m && m.id !== m.name && <code className="ms-1.5 text-[0.6875rem] font-normal text-muted">{m.id}</code>}</span>
-              {seen && <span className="flex-none truncate text-[0.6875rem] font-normal text-muted" data-last-seen>{seen}</span>}
-              {!!m?.memoryBytes && <span className="font-mono text-[0.6875rem] font-normal text-muted" title={t('ide-memory')}>{bytesLabel(m.memoryBytes)}</span>}
-              <span className="text-[0.6875rem] font-normal text-muted">{count}</span>
+              <span className="min-w-0 flex-1 truncate">{name}{m && sharesName(m, machines) && <code className="ms-1.5 text-xs font-normal text-muted">{m.id}</code>}</span>
+              {seen && <span className="flex-none truncate text-xs font-normal text-muted" data-last-seen>{seen}</span>}
+              {!!m?.memoryBytes && <span className="font-mono text-xs font-normal text-muted" title={t('ide-memory')}>{bytesLabel(m.memoryBytes)}</span>}
+              <span className="text-xs font-normal text-muted">{count}</span>
             </button>
             {onStart && m?.online && <button type="button" className="ide-iconbtn size-6 opacity-0 focus-visible:opacity-100 group-hover:opacity-100 [@media(hover:none)]:opacity-100" onClick={() => onStart(machine)} aria-label={t('ide-add-here', { machine: name })} title={t('ide-add-here', { machine: name })}><Icon name="plus" className="size-3.5" /></button>}
           </div>
           {!closed && [...folders.entries()].map(([folder, list]) => <div key={folder} className="ms-3 border-s border-line ps-1">
-            <div className="flex items-center gap-1.5 px-2 pt-1.5 pb-0.5 text-[0.6875rem] text-muted"><Icon name="folder" className="size-3.5" /><span className="truncate">{list[0]?.project || folder}</span></div>
+            <div className="flex items-center gap-1.5 px-2 pt-1.5 pb-0.5 text-xs text-muted"><Icon name="folder" className="size-3.5" /><span className="truncate">{list[0]?.project || folder}</span></div>
             <ul className="m-0 list-none p-0">
               {helperTree(list).map(({ agent: a, depth }) => <li key={a.id} className={depth === 0 ? undefined : depth === 1 ? 'ms-3' : 'ms-6'}>
                 <button type="button" className="ide-row" aria-current={current === a.id ? 'true' : undefined} aria-pressed={open.includes(a.id)} onClick={() => onToggle(a.id)} title={`${a.machine} · ${a.workspace}${a.branch ? ` · ${a.branch}` : ''}${a.parentName ? ` · ${t('helper-started-by', { name: a.parentName })}` : ''}`}>
                   <StateMark state={a.state} />
-                  <span className="min-w-0 flex-1 truncate">{a.name}{a.parentName && <span className="ms-1.5 text-[0.6875rem] text-muted">{t('helper-started-by', { name: a.parentName })}</span>}</span>
+                  <span className="min-w-0 flex-1 truncate">{a.name}{a.parentName && <span className="ms-1.5 text-xs text-muted">{t('helper-started-by', { name: a.parentName })}</span>}</span>
                   <NoAskBadge agent={a} compact />
-                  {a.shared && <span className="flex-none text-[0.6875rem] text-muted" title={t('workspace-shared')}>{t('ide-shared')}</span>}
-                  {(a.filesChanged ?? 0) > 0 && <span className="font-mono text-[0.6875rem] text-needs-you">{a.filesChanged}</span>}
+                  {a.shared && <span className="flex-none text-xs text-muted" title={t('workspace-shared')}>{t('ide-shared')}</span>}
+                  {(a.filesChanged ?? 0) > 0 && <span className="font-mono text-xs text-needs-you">{a.filesChanged}</span>}
                 </button>
               </li>)}
             </ul>
           </div>)}
           {!closed && stopped.length > 0 && <div className="ms-3 border-s border-line ps-1" role="group" aria-label={t('interrupted-section')}>
-            <div className="px-2 pt-1.5 pb-0.5 text-[0.6875rem] text-muted" title={t('interrupted-hint')}>{t('interrupted-section')}</div>
+            <div className="px-2 pt-1.5 pb-0.5 text-xs text-muted" title={t('interrupted-hint')}>{t('interrupted-section')}</div>
             <ul className="m-0 list-none p-0">
               {stopped.map((a) => <li key={a.id}>
                 <div className="flex items-center">
@@ -143,7 +143,7 @@ export function Explorer({ fleet, machines, open, current, projects, project, on
         <div className="flex items-center">
           <button type="button" className="ide-row flex-1 font-medium" aria-expanded={!folded.has('~closed')} onClick={() => fold('~closed')}>
             <Icon name="chevron" className={`size-3.5 text-muted transition-transform duration-150 ${folded.has('~closed') ? 'rtl:rotate-180' : 'rotate-90'}`} />
-            <span className="min-w-0 flex-1 truncate">{t('closed-section')}</span><span className="text-[0.6875rem] font-normal text-muted">{closed.length}</span>
+            <span className="min-w-0 flex-1 truncate">{t('closed-section')}</span><span className="text-xs font-normal text-muted">{closed.length}</span>
           </button>
           <button type="button" className="ide-chip me-1 hover:text-ink" onClick={() => onDismiss(closed.map((a) => a.id))} title={everyone ? t('closed-clear-everyone') : undefined}>{t('closed-clear')}</button>
         </div>
@@ -151,9 +151,9 @@ export function Explorer({ fleet, machines, open, current, projects, project, on
         {!folded.has('~closed') && <ul className="m-0 list-none p-0">
           {closed.map((a) => <li key={a.id} className="group flex items-center">
             <button type="button" className="ide-row flex-1 opacity-80" aria-current={current === a.id ? 'true' : undefined} aria-pressed={open.includes(a.id)} onClick={() => onToggle(a.id)} title={`${a.machine} · ${a.workspace}`}>
-              <span className="[&_.state__mark]:!animate-none"><StateMark state="finished" /></span>
+              <span className="[&_.state__mark]:!animate-none"><StateMark state="finished" failed={endedWithError(a)} /></span>
               <span className="min-w-0 flex-1 truncate">{a.name}</span>
-              <span className="flex-none text-[0.6875rem] text-muted">{a.endedMs ? ago(a.endedMs, now) : ''}</span>
+              <span className="flex-none text-xs text-muted">{a.endedMs ? ago(a.endedMs, now) : ''}</span>
             </button>
             <button type="button" className="ide-iconbtn size-6 opacity-0 focus-visible:opacity-100 group-hover:opacity-100" onClick={() => onDismiss([a.id])} aria-label={t(everyone ? 'closed-forget' : 'closed-dismiss')} title={t(everyone ? 'closed-forget' : 'closed-dismiss')}><Icon name="close" className="size-3.5" /></button>
           </li>)}

@@ -9,7 +9,15 @@ export interface MenuItem {
   checked?: boolean;
   disabled?: boolean;
   divider?: boolean; // a line above this item
+  tile?: ReactNode; // drawn as a tile in a grid with the neighbouring tiles (a picture; the label is its name for tooltip and screen readers)
 }
+
+// The tiles that follow one another from `from`.
+const run = (items: MenuItem[], from: number): MenuItem[] => {
+  const out: MenuItem[] = [];
+  for (let i = from; i < items.length && items[i]?.tile; i++) out.push(items[i] as MenuItem);
+  return out;
+};
 
 // A menu button: arrows move, Enter or Space chooses, Right or Enter opens a submenu, Left goes back, Escape closes and
 // returns focus to the button. Submenus replace the list (one level visible at a time), which also works on a phone.
@@ -67,7 +75,19 @@ export function Menu({ label, items, children, className = 'ide-iconbtn', align 
               <Icon name="chevron" className="size-3 rotate-180 rtl:rotate-0" />{t('layout-menu-back')}
             </button>
           )}
-          {page.map((item, i) => (
+          {page.map((item, i) => item.tile ? (
+            // Tiles of one run sit in a three-column grid: the first of a run draws all of them, the rest draw nothing.
+            page[i - 1]?.tile ? null : (
+              <div key={`${i}-${item.label}`} className="grid grid-cols-3 gap-1" data-tiles>
+                {run(page, i).map((x, j) => (
+                  <button key={x.label} type="button" role="menuitemradio" aria-checked={!!x.checked} aria-label={x.label} title={x.label} data-index={i + j} disabled={x.disabled}
+                    className="menu-tile" onClick={() => choose(x)}>
+                    {x.tile}
+                  </button>
+                ))}
+              </div>
+            )
+          ) : (
             <div key={`${i}-${item.label}`} className={item.divider ? 'mt-1 border-t border-line pt-1' : ''}>
               <button type="button" role={item.checked === undefined ? 'menuitem' : 'menuitemradio'} aria-checked={item.checked} aria-haspopup={item.items ? 'menu' : undefined}
                 data-index={i} disabled={item.disabled} className="ide-row justify-between disabled:opacity-40" onClick={() => choose(item)}>

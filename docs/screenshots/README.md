@@ -103,3 +103,5 @@ and the same window with a model and an effort chosen, which then says what will
 
 ![](adr66-start-pickers-dark.png) ![](adr66-start-pickers-light.png)
 ![](adr66-start-confirmation-dark.png) ![](adr66-start-confirmation-light.png)
+
+The eight interface quick wins, before and after, dark and light, on a desktop, a tablet with touch and a phone (`ux-quick-wins/<screen>-<theme>-{before,after}.png`): text size, review colours and first file, a failed agent, the layout menu, touch targets, approval wording.

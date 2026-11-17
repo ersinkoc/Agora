@@ -63,12 +63,12 @@ const SHAPE = { 'font-ui': FONT_UI, 'font-mono': FONT_MONO, 'text-16': '16px', '
 const DARK: Tokens = {
   'surface-0': '#09090b', 'surface-1': '#111114', 'surface-2': '#1b1b20', border: '#26262c', text: '#f4f4f5', 'text-muted': '#a1a1aa',
   accent: '#8b93ff', 'on-accent': '#0b0b14', 'state-working': '#60a5fa', 'state-needs-you': '#fbbf24', 'state-finished': '#4ade80',
-  'state-idle': '#8b8b96', 'state-unknown': '#71717a', ...SHAPE,
+  'state-idle': '#8b8b96', 'state-unknown': '#8f8f9b', ...SHAPE,
 };
 const LIGHT: Tokens = {
   'surface-0': '#f6f6f8', 'surface-1': '#ffffff', 'surface-2': '#efeff3', border: '#e1e1e8', text: '#17171c', 'text-muted': '#5b5b68',
-  accent: '#4f46e5', 'on-accent': '#ffffff', 'state-working': '#1d6fd1', 'state-needs-you': '#a35a00', 'state-finished': '#15803d',
-  'state-idle': '#5b5b68', 'state-unknown': '#71717a', ...SHAPE,
+  accent: '#4f46e5', 'on-accent': '#ffffff', 'state-working': '#175fb5', 'state-needs-you': '#a35a00', 'state-finished': '#146c36',
+  'state-idle': '#5b5b68', 'state-unknown': '#6a6a76', ...SHAPE,
 };
 export const baseTokens = (scheme: Scheme): Tokens => (scheme === 'light' ? LIGHT : DARK);
 
@@ -90,7 +90,7 @@ export const BUILT_IN: readonly Theme[] = [
   builtIn('slate', 'dark', {
     'surface-0': '#0f1419', 'surface-1': '#151c24', 'surface-2': '#1e2732', border: '#2a3541', text: '#e6edf3', 'text-muted': '#9fb0c0',
     accent: '#5cc8c2', 'on-accent': '#062320', 'state-working': '#7aa2f7', 'state-needs-you': '#e0af68', 'state-finished': '#9ece6a',
-    'state-idle': '#8b98a5', 'state-unknown': '#738190',
+    'state-idle': '#8b98a5', 'state-unknown': '#8593a1',
   }),
   // A warm paper-like light with a terracotta accent and softer corners.
   builtIn('sand', 'light', {

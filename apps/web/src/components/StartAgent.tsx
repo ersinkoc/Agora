@@ -1,6 +1,7 @@
 import * as Dialog from '@radix-ui/react-dialog';
 import { useEffect, useRef, useState } from 'react';
 import { t } from '../i18n';
+import { sharesName } from '../model';
 import type { MachineModel, ProjectChoice } from '../net/view';
 import { childPath, directoryReasonKey, type DirectoryInfo, type DirectoryListing } from '../net/directory';
 import { Icon } from './Icon';
@@ -137,7 +138,7 @@ export function StartAgent({ projects, machines, initialNode, trust, askApproval
   const sameFolder = (path: string) => path.replace(/^\\\\\?\\/, '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
   const seen = new Set<string>();
   const known = projects.flatMap(p => (p.node === node && p.path && !seen.has(sameFolder(p.path)) && seen.add(sameFolder(p.path)) ? [{ ...p, path: p.path }] : []));
-  const machineName = (m: MachineModel) => (m.name === m.id ? m.name : t('machine-name-id', { name: m.name, id: m.id }));
+  const machineName = (m: MachineModel) => (sharesName(m, machines) ? t('machine-name-id', { name: m.name, id: m.id }) : m.name);
 
   return <Dialog.Root open onOpenChange={open => { if (!open && !busy) onClose(); }}>
     <Dialog.Portal>
@@ -192,10 +193,10 @@ export function StartAgent({ projects, machines, initialNode, trust, askApproval
                 {browse.listing?.truncated && <p className="muted m-0 text-xs">{t('start-browse-more')}</p>}
               </div>}
               {known.length > 0 && !browse && <div className="grid gap-0.5">
-                <span className="text-[0.6875rem] text-muted">{t('ide-folder-known')}</span>
+                <span className="text-xs text-muted">{t('ide-folder-known')}</span>
                 <ul className="m-0 grid max-h-44 list-none gap-0.5 overflow-y-auto p-0">
                   {known.map(p => <li key={p.path}><button type="button" className="ide-row py-1.5" disabled={busy} aria-current={p.path === path ? 'true' : undefined} onClick={() => { changePath(p.path); void choose(p.path); }}>
-                    <Icon name="folder" className="size-4 text-muted" /><span className="min-w-0 flex-1"><span className="block truncate">{p.label}</span><span className="block truncate font-mono text-[0.6875rem] text-muted">{p.path}</span></span>
+                    <Icon name="folder" className="size-4 text-muted" /><span className="min-w-0 flex-1"><span className="block truncate">{p.label}</span><span className="block truncate font-mono text-xs text-muted">{p.path}</span></span>
                   </button></li>)}
                 </ul>
               </div>}
@@ -209,7 +210,7 @@ export function StartAgent({ projects, machines, initialNode, trust, askApproval
               {kinds === 'loading' ? <p className="muted m-0">{t('start-loading')}</p> : kinds === 'failed' ? <p role="alert" className="m-0">{t('start-kinds-failed')}</p> : kinds.length === 0 ? <p className="muted m-0">{t('start-no-kinds')}</p> :
                 <div className="flex flex-wrap gap-1.5" role="radiogroup" aria-label={t('start-which')}>
                   {kinds.map(k => <button key={k.kind} type="button" role="radio" aria-checked={kind === k.kind} disabled={busy || !k.installed} className={`${chip} ${kind === k.kind ? chipOn : chipOff}`} onClick={() => setKind(k.kind)}>
-                    {k.name}{!k.installed && <span className="text-[0.6875rem]">— {t('start-not-installed')}</span>}
+                    {k.name}{!k.installed && <span className="text-xs">— {t('start-not-installed')}</span>}
                   </button>)}
                 </div>}
               {Array.isArray(kinds) && kinds.some(k => !k.installed) && (() => {

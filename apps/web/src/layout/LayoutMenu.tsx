@@ -3,6 +3,7 @@ import { useState, type ReactNode } from 'react';
 import { t } from '../i18n';
 import { Icon } from '../components/Icon';
 import { type Action, type Preset, type Workspace, PRESETS } from './engine';
+import { PICTOGRAM_BOX, pictogram, presetOf } from './preset';
 import { Menu, type MenuItem } from './Menu';
 import { MAX_NAME, type Named, deleteNamed, renameNamed, saveNamed, savedLayouts } from './store';
 import { type LayoutError, MAX_DEPTH, MAX_PANES, deserialiseLayout, serialiseLayout } from './tree';
@@ -18,14 +19,17 @@ export function LayoutMenu({ ws, dispatch, agents, onReset, narrow }: {
   narrow: boolean;
 }) {
   const [dialog, setDialog] = useState<'save' | 'list' | 'import' | undefined>();
+  const current = presetOf(ws.layout.root);
   const items = (): MenuItem[] => [
-    ...PRESETS.map((p: Preset) => ({ label: t(`layout-preset-${p}`), disabled: narrow && p !== '1x1', run: () => dispatch({ type: 'preset', preset: p, agents: agents() }) })),
+    ...PRESETS.map((p: Preset) => ({ label: t(`layout-preset-${p}`), tile: <Pictogram preset={p} />, checked: current === p, disabled: narrow && p !== '1x1', run: () => dispatch({ type: 'preset', preset: p, agents: agents() }) })),
     ws.zoom ? { label: t('layout-restore'), divider: true, run: () => dispatch({ type: 'restore' }) }
       : { label: t('layout-maximize'), divider: true, disabled: !ws.focus, run: () => ws.focus && dispatch({ type: 'maximize', pane: ws.focus }) },
     { label: t('layout-save-as'), divider: true, run: () => setDialog('save') },
     { label: t('layout-saved'), run: () => setDialog('list') },
-    { label: t('layout-export'), run: () => download(serialiseLayout(ws.layout)) },
-    { label: t('layout-import'), run: () => setDialog('import') },
+    { label: t('layout-more'), items: [
+      { label: t('layout-export'), run: () => download(serialiseLayout(ws.layout)) },
+      { label: t('layout-import'), run: () => setDialog('import') },
+    ] },
     { label: t('layout-reset'), divider: true, run: onReset },
   ];
   return (
@@ -35,6 +39,15 @@ export function LayoutMenu({ ws, dispatch, agents, onReset, narrow }: {
       {dialog === 'list' && <ListDialog onApply={(l) => { dispatch({ type: 'replace', layout: l.layout }); setDialog(undefined); }} onClose={() => setDialog(undefined)} />}
       {dialog === 'import' && <ImportDialog onImport={(layout) => { dispatch({ type: 'replace', layout }); setDialog(undefined); }} onClose={() => setDialog(undefined)} />}
     </>
+  );
+}
+
+// What a preset looks like: its panes as rectangles, drawn in the text colour (the chosen one is marked by the menu, not here).
+function Pictogram({ preset }: { preset: Preset }) {
+  return (
+    <svg className="h-7 w-10" viewBox={`0 0 ${PICTOGRAM_BOX.width} ${PICTOGRAM_BOX.height}`} aria-hidden fill="none">
+      {pictogram(preset).map(([x, y, w, h], i) => <rect key={i} x={x} y={y} width={w} height={h} rx={2} fill="currentColor" fillOpacity={0.22} stroke="currentColor" strokeWidth={1.5} />)}
+    </svg>
   );
 }
 

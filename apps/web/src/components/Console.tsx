@@ -1,7 +1,7 @@
 import { ApprovalBanner } from './ApprovalBanner';
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { t } from '../i18n';
-import { type AgentTileModel, machineKey, needsAttention, sortFleet, type ResumeAction } from '../model';
+import { type AgentTileModel, endedWithError, machineKey, needsAttention, sortFleet, type ResumeAction } from '../model';
 import { money, type UsageSummary } from '../net/usage';
 import type { ApprovalModel, BoardModel, MachineModel, MessageModel, ProjectCost } from '../net/view';
 import type { TerminalSource } from '../terminal/source';
@@ -244,9 +244,9 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
             ? <button type="button" className="ide-chip text-needs-you hover:brightness-125" onClick={() => setReviewing(a.id)}>{t('changes-files', { count: a.filesChanged ?? 0 })}</button>
             : <span className="ide-chip text-needs-you">{t('changes-files', { count: a.filesChanged ?? 0 })}</span>)}
           {usage?.perAgent.has(a.id) && <span className="ide-chip">{t('agent-cost', { amount: money(usage.perAgent.get(a.id) ?? 0) })}</span>}
-          <StateBadge state={a.state} />
+          <StateBadge state={a.state} failed={endedWithError(a)} />
           {a.terminal !== false && !a.closed && <span className="flex items-center" role="group" aria-label={t('terminal-size')}>
-            <button type="button" className="ide-iconbtn w-6 text-[0.6875rem] font-semibold" onClick={() => setTerminalSize(terminalSize() - 1)} disabled={terminalSize() <= MIN_SIZE} aria-label={t('terminal-smaller')} title={t('terminal-smaller')}>A−</button>
+            <button type="button" className="ide-iconbtn w-6 text-xs font-semibold" onClick={() => setTerminalSize(terminalSize() - 1)} disabled={terminalSize() <= MIN_SIZE} aria-label={t('terminal-smaller')} title={t('terminal-smaller')}>A−</button>
             <button type="button" className="ide-iconbtn w-6 text-[0.8125rem] font-semibold" onClick={() => setTerminalSize(terminalSize() + 1)} disabled={terminalSize() >= MAX_SIZE} aria-label={t('terminal-larger')} title={t('terminal-larger')}>A+</button>
           </span>}
           {loadHistory && a.git !== false && <button type="button" className="ide-iconbtn" onClick={() => setHistory(a.id)} aria-label={t('console-history')} title={t('console-history')}><Icon name="history" /></button>}
@@ -290,7 +290,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
         <div className="grid gap-1">
           <h2 className="m-0">{t('ide-welcome-running')}</h2>
           {fleet.length === 0 ? <p className="muted m-0">{t('ide-welcome-none')}</p> : <ul className="m-0 grid list-none gap-0.5 p-0">
-            {fleet.slice(0, 6).map((a) => <li key={a.id}><button type="button" className="ide-row py-1.5" onClick={() => select(a.id)}><StateMark state={a.state} /><span className="min-w-0 flex-1 truncate">{a.name}</span><span className="truncate text-xs text-muted">{a.machine}</span></button></li>)}
+            {fleet.slice(0, 6).map((a) => <li key={a.id}><button type="button" className="ide-row py-1.5" onClick={() => select(a.id)}><StateMark state={a.state} failed={endedWithError(a)} /><span className="min-w-0 flex-1 truncate">{a.name}</span><span className="truncate text-xs text-muted">{a.machine}</span></button></li>)}
           </ul>}
         </div>
         <dl className="m-0 grid gap-1.5 text-xs text-muted">
@@ -334,7 +334,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
           onResolve={onResolve} onReview={loadDiff ? setReviewing : undefined} onCollapse={() => setShowDetails(false)} />}
       </div>
 
-      <footer className="ide-bar h-6 flex-wrap border-t text-[0.6875rem] text-muted" aria-label={t('console-activity')}>
+      <footer className="ide-bar h-6 flex-wrap border-t text-xs text-muted" aria-label={t('console-activity')}>
         <a className="inline-flex items-center gap-1.5 hover:text-ink" href="#/machines"><span aria-hidden className={`size-1.5 rounded-full ${link === 'live' ? 'bg-finished' : 'bg-needs-you'}`} />{t('machines-online', { count: machines.filter((m) => m.online).length })}</a>
         <span>{t('ide-status-agents', { count: fleet.filter((a) => !a.closed).length })}</span>
         {needs > 0 && <button type="button" className="text-needs-you hover:underline" onClick={() => setShowDetails(true)}>{t('ide-status-needs', { count: needs })}</button>}
