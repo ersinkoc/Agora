@@ -2579,17 +2579,21 @@ fn held(
             Err(SupervisorError::FolderMoved)
         };
     }
-    agora_platform::HeldFolder::open(checkout).map_err(|e| {
-        let gone = matches!(
-            e.kind(),
-            std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
-        );
-        if gone || agora_platform::folder_moved(&e) {
-            SupervisorError::FolderMoved
-        } else {
-            SupervisorError::Spawn(e.to_string())
-        }
-    })
+    // Held where the path leads now, in the spelling a check would record (a caller that gave none need not have spelled it so: a
+    // temporary folder under `/var` on macOS, a short name on Windows).
+    agora_platform::canonicalize_plain(checkout)
+        .and_then(|plain| agora_platform::HeldFolder::open(&plain))
+        .map_err(|e| {
+            let gone = matches!(
+                e.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            );
+            if gone || agora_platform::folder_moved(&e) {
+                SupervisorError::FolderMoved
+            } else {
+                SupervisorError::Spawn(e.to_string())
+            }
+        })
 }
 
 /// Spawns an adapter process, initializes it and starts (or resumes) a session. Returns it with the session id and the capabilities
