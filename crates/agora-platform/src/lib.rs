@@ -439,6 +439,70 @@ pub fn open_dir(path: &std::path::Path) -> io::Result<std::fs::File> {
     }
 }
 
+/// A folder held open from the moment a start checked it (ADR-0052): [`spawn_in`] starts the process in exactly this folder, never in
+/// what its path names by then. Between the check and the start, whoever can write beside the folder (another agent of the project)
+/// could swap it, or a folder above it, for a link to another project's folder, and a start by path would follow that link (F1012).
+#[derive(Debug)]
+pub struct HeldFolder {
+    dir: std::fs::File,
+    path: PathBuf,
+}
+
+/// The error inside an [`io::Error`] from [`HeldFolder::open`] or [`spawn_in`]: the path no longer names the held folder (it was moved,
+/// replaced by a link, or a folder above it was), so nothing was started.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FolderMoved;
+
+impl std::fmt::Display for FolderMoved {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("folder_moved")
+    }
+}
+
+impl std::error::Error for FolderMoved {}
+
+/// Whether `e` (from [`HeldFolder::open`] or [`spawn_in`]) says the folder was no longer at its path.
+pub fn folder_moved(e: &io::Error) -> bool {
+    e.get_ref().is_some_and(|inner| inner.is::<FolderMoved>())
+}
+
+impl HeldFolder {
+    /// Opens the folder at `path`, an absolute path spelled as [`canonicalize_plain`] spells it (the spelling a check records), and
+    /// keeps it only when the opened folder is at exactly that path: a link swapped in anywhere along it leads elsewhere, so it is
+    /// refused ([`folder_moved`]), never followed. On Windows the folder is held without delete sharing, so it can be neither renamed
+    /// nor removed while it is held.
+    pub fn open(path: &std::path::Path) -> io::Result<Self> {
+        #[cfg(unix)]
+        let dir = unix::open_dir(path)?;
+        #[cfg(windows)]
+        let dir = windows::open_dir_held(path)?;
+        let held = Self {
+            dir,
+            path: path.to_path_buf(),
+        };
+        if !held.in_place() {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, FolderMoved));
+        }
+        Ok(held)
+    }
+
+    /// The path the folder was held at.
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
+    /// Whether the path still names the held folder: it was not moved or removed, and neither it nor a folder above it was swapped for
+    /// a link (where the open handle really is, as the kernel knows it now, is compared with the path).
+    pub fn in_place(&self) -> bool {
+        let Ok(now) = opened_path(&self.dir) else {
+            return false;
+        };
+        #[cfg(windows)]
+        let now = windows::plain_path(now);
+        now == self.path
+    }
+}
+
 /// The entries of the folder `dir` holds open (from [`open_dir`]), read through that handle: `std::fs::read_dir` takes a path and
 /// opens it again, so a folder swapped for a link after its handle was checked would be listed instead. `.` and `..` are left out.
 pub fn list_dir(dir: &std::fs::File) -> io::Result<Vec<DirItem>> {
@@ -2208,6 +2272,18 @@ mod walk_tree_tests {
 
 /// Start a process in a new PTY.
 pub fn spawn(config: &PtyConfig) -> io::Result<Box<dyn Pty>> {
+    spawn_checked(config, None)
+}
+
+/// [`spawn`] in the folder `folder` holds; `config.cwd` is not used. Refused ([`folder_moved`]) when, with everything else made for
+/// the start (the confinement too), the path no longer names that folder. Unix: the process is moved into the held folder itself
+/// (`fchdir` on the open handle) before it runs, so a swap even after that last check is not followed. Windows: it is started by the
+/// path, which the handle keeps from being renamed or removed.
+pub fn spawn_in(config: &PtyConfig, folder: &HeldFolder) -> io::Result<Box<dyn Pty>> {
+    spawn_checked(config, Some(folder))
+}
+
+fn spawn_checked(config: &PtyConfig, folder: Option<&HeldFolder>) -> io::Result<Box<dyn Pty>> {
     if config.argv.is_empty() {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "argv is empty"));
     }
@@ -2219,11 +2295,21 @@ pub fn spawn(config: &PtyConfig) -> io::Result<Box<dyn Pty>> {
     }
     #[cfg(unix)]
     {
-        unix::spawn(config)
+        unix::spawn_in(config, folder)
     }
     #[cfg(windows)]
     {
-        conpty::spawn(config)
+        match folder {
+            Some(f) => {
+                let mut config = config.clone();
+                config.cwd = Some(f.path.clone());
+                if !f.in_place() {
+                    return Err(io::Error::new(io::ErrorKind::InvalidInput, FolderMoved));
+                }
+                conpty::spawn(&config)
+            }
+            None => conpty::spawn(config),
+        }
     }
 }
 

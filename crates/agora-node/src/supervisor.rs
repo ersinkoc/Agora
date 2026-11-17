@@ -201,6 +201,9 @@ pub enum SupervisorError {
     /// The node confines agents and the selected folder is one they may never be launched in (a root, the home folder, a secret
     /// folder, the node's own folder).
     ProtectedDirectory,
+    /// F1012: the selected folder is no longer at the path that was checked (it, or a folder above it, was moved or swapped for a link
+    /// between the check and the start). Nothing was started.
+    FolderMoved,
     NotFound(AgentId),
     /// The agent is still running (resume applies to stopped agents).
     StillRunning(AgentId),
@@ -256,6 +259,9 @@ impl SupervisorError {
                 .with("reason", *r),
             Self::ProtectedDirectory => {
                 Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "directory.protected")
+            }
+            Self::FolderMoved => {
+                Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "directory.path")
             }
             Self::NotFound(id) => {
                 Error::new(ErrorCode::AgentNotFound).with("agent_id", id.as_str())
@@ -950,7 +956,7 @@ impl Supervisor {
             req.kind.clone(),
             IntegrationLevel::L1Manifest,
         );
-        let terminal = match self.first_launch(&req.kind, &argv, &worktree, &extras) {
+        let terminal = match self.first_launch(&req.kind, &argv, &worktree, &extras, None) {
             Ok((t, session)) => {
                 agent.session = session;
                 t
@@ -999,10 +1005,14 @@ impl Supervisor {
             separate,
             &Requested::default(),
             now,
+            None,
         )
     }
 
-    /// [`Self::start_selected`] with the launch options a person chose (ADR-0059); see [`Self::start_with_options`].
+    /// [`Self::start_selected`] with the launch options a person chose (ADR-0059); see [`Self::start_with_options`]. `checked` is
+    /// the folder `req.checkout` names, held by the caller from before it checked that folder until after (F1012); it is held here
+    /// when not given. The agent starts in that folder, never in whatever the path names by then.
+    #[allow(clippy::too_many_arguments)] // each is one part of the launch the caller checked
     pub fn start_selected_with_options(
         &mut self,
         req: &StartRequest,
@@ -1011,12 +1021,14 @@ impl Supervisor {
         separate: bool,
         options: &Requested,
         now: Instant,
+        checked: Option<agora_platform::HeldFolder>,
     ) -> Result<AgentId, SupervisorError> {
         // Refused before anything is created.
         self.launch_choice(&req.kind, options)?;
         if !separate {
             self.refuse_protected(&req.checkout, &req.worktree_root)?;
-            return self.start_directory_impl(req, project, now, true, options);
+            let folder = held(checked, &req.checkout)?;
+            return self.start_directory_impl(req, project, now, true, options, Some(&folder));
         }
         self.check_limits()?;
         if !self.sandbox.enforceable() {
@@ -1031,14 +1043,23 @@ impl Supervisor {
             .strip_prefix(git_root)
             .map_err(|e| SupervisorError::Spawn(e.to_string()))?;
         let branch = format!("agent/{}", req.name);
+        let folder = held(checked, &req.checkout)?;
+        if !folder.in_place() {
+            return Err(SupervisorError::FolderMoved);
+        }
         let created = git::create_start_worktree(git_root, &target, &branch, None)?;
         let mut direct = req.clone();
-        let result = selected_worktree_directory(&target, relative)
-            .map_err(|e| SupervisorError::Spawn(e.to_string()))
-            .and_then(|cwd| {
-                direct.checkout = cwd;
-                self.start_directory_impl(&direct, project, now, false, options)
-            });
+        // F1012: the new worktree is made from the checkout by its path; one that moved meanwhile may have been another project's.
+        let result = (if folder.in_place() {
+            selected_worktree_directory(&target, relative)
+                .map_err(|e| SupervisorError::Spawn(e.to_string()))
+        } else {
+            Err(SupervisorError::FolderMoved)
+        })
+        .and_then(|cwd| {
+            direct.checkout = cwd;
+            self.start_directory_impl(&direct, project, now, false, options, None)
+        });
         match result {
             Ok(id) => Ok(id),
             Err(e) => {
@@ -1055,9 +1076,10 @@ impl Supervisor {
         project: agora_core::ProjectId,
         now: Instant,
     ) -> Result<AgentId, SupervisorError> {
-        self.start_directory_impl(req, project, now, true, &Requested::default())
+        self.start_directory_impl(req, project, now, true, &Requested::default(), None)
     }
 
+    /// `folder`: the selected folder, held since it was checked (F1012); the agent is started in it.
     fn start_directory_impl(
         &mut self,
         req: &StartRequest,
@@ -1065,6 +1087,7 @@ impl Supervisor {
         now: Instant,
         private: bool,
         options: &Requested,
+        folder: Option<&agora_platform::HeldFolder>,
     ) -> Result<AgentId, SupervisorError> {
         self.check_limits()?;
         let choice = self.launch_choice(&req.kind, options)?;
@@ -1099,9 +1122,14 @@ impl Supervisor {
             let root =
                 git::discover_checkout(&worktree).map_or_else(|_| worktree.clone(), |c| c.root);
             let mesh = self.adapter_mesh(&id, &req.kind, &project.to_string(), &worktree);
+            // F1012: an adapter is started, and given its folder, by path; the folder must be where it was held before and after.
+            let moved = || folder.is_some_and(|f| !f.in_place());
             let launched = self
                 .adapter_sandbox(&req.kind, &worktree, &spec.command[0])
                 .and_then(|profile| {
+                    if moved() {
+                        return Err(SupervisorError::FolderMoved);
+                    }
                     launch_adapter(
                         &spec,
                         &root,
@@ -1111,6 +1139,14 @@ impl Supervisor {
                         mesh.as_ref(),
                         self.credential_vars(&req.kind),
                     )
+                })
+                .and_then(|l| {
+                    if moved() {
+                        // Dropping the adapter stops it and everything below it.
+                        drop(l);
+                        return Err(SupervisorError::FolderMoved);
+                    }
+                    Ok(l)
                 });
             let (adapter, session_id, capabilities) = match launched {
                 Ok(l) => l,
@@ -1173,16 +1209,16 @@ impl Supervisor {
                     return Err(e);
                 }
             };
-            let (terminal, session) = match self.first_launch(&req.kind, &argv, &worktree, &extras)
-            {
-                Ok(t) => t,
-                Err(e) => {
-                    if let Some(hook) = &self.abort_hook {
-                        hook(&id);
+            let (terminal, session) =
+                match self.first_launch(&req.kind, &argv, &worktree, &extras, folder) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        if let Some(hook) = &self.abort_hook {
+                            hook(&id);
+                        }
+                        return Err(e);
                     }
-                    return Err(e);
-                }
-            };
+                };
             let mut agent = Agent::new(
                 id.clone(),
                 project,
@@ -1587,6 +1623,7 @@ impl Supervisor {
         argv: &[String],
         worktree: &Path,
         extras: &Extras,
+        folder: Option<&agora_platform::HeldFolder>,
     ) -> Result<(TerminalHandle, Option<String>), SupervisorError> {
         let id_args = self
             .kinds
@@ -1595,12 +1632,15 @@ impl Supervisor {
             .map(|s| s.id_args.clone())
             .unwrap_or_default();
         if id_args.is_empty() {
-            return Ok((self.launch(kind, argv, worktree, extras)?, None));
+            return Ok((self.launch_in(kind, argv, worktree, extras, folder)?, None));
         }
         let session = new_session_id().map_err(|e| SupervisorError::Spawn(e.to_string()))?;
         let mut argv = argv.to_vec();
         argv.extend(id_args.iter().map(|a| a.replace("{session_id}", &session)));
-        Ok((self.launch(kind, &argv, worktree, extras)?, Some(session)))
+        Ok((
+            self.launch_in(kind, &argv, worktree, extras, folder)?,
+            Some(session),
+        ))
     }
 
     /// A terminal agent's own session id, as chosen at its launch or reported (ADR-0060). `None` for an adapter agent: what it holds
@@ -1649,6 +1689,18 @@ impl Supervisor {
         argv: &[String],
         worktree: &std::path::Path,
         extras: &Extras,
+    ) -> Result<TerminalHandle, SupervisorError> {
+        self.launch_in(kind, argv, worktree, extras, None)
+    }
+
+    /// [`Self::launch`], in `folder` when it is given (F1012): `worktree` is that folder's path.
+    fn launch_in(
+        &self,
+        kind: &str,
+        argv: &[String],
+        worktree: &std::path::Path,
+        extras: &Extras,
+        folder: Option<&agora_platform::HeldFolder>,
     ) -> Result<TerminalHandle, SupervisorError> {
         let mut argv = argv.to_vec();
         argv.extend(extras.options.iter().cloned());
@@ -1699,7 +1751,14 @@ impl Supervisor {
             cfg.env.push(("TEMP".into(), temp.clone()));
             cfg.env.push(("TMP".into(), temp));
         }
-        let pty = spawn(&cfg).map_err(|e| {
+        let started = match folder {
+            Some(f) => agora_platform::spawn_in(&cfg, f),
+            None => spawn(&cfg),
+        };
+        let pty = started.map_err(|e| {
+            if agora_platform::folder_moved(&e) {
+                return SupervisorError::FolderMoved;
+            }
             // A folder the confinement cannot keep closed (a broad write grant, ADR-0050 Amendment B, 4) or whose label cannot be set
             // (2) is refused before the agent starts: `agent.sandbox_unavailable` with the reason, not an internal error.
             match agora_platform::sandbox_refusal(&e) {
@@ -2505,6 +2564,36 @@ fn adapter_error(e: HostError) -> SupervisorError {
         }
     }
     SupervisorError::Spawn(e.to_string())
+}
+
+/// F1012: the folder a launch checked (`checkout`, as the check spelled it): the one the caller held, or held now when it gave none.
+/// A path that no longer leads to it (a link swapped in since the check) is refused.
+fn held(
+    checked: Option<agora_platform::HeldFolder>,
+    checkout: &Path,
+) -> Result<agora_platform::HeldFolder, SupervisorError> {
+    if let Some(folder) = checked {
+        return if folder.path() == checkout {
+            Ok(folder)
+        } else {
+            Err(SupervisorError::FolderMoved)
+        };
+    }
+    // Held where the path leads now, in the spelling a check would record (a caller that gave none need not have spelled it so: a
+    // temporary folder under `/var` on macOS, a short name on Windows).
+    agora_platform::canonicalize_plain(checkout)
+        .and_then(|plain| agora_platform::HeldFolder::open(&plain))
+        .map_err(|e| {
+            let gone = matches!(
+                e.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            );
+            if gone || agora_platform::folder_moved(&e) {
+                SupervisorError::FolderMoved
+            } else {
+                SupervisorError::Spawn(e.to_string())
+            }
+        })
 }
 
 /// Spawns an adapter process, initializes it and starts (or resumes) a session. Returns it with the session id and the capabilities

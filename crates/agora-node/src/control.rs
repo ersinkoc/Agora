@@ -491,10 +491,17 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
             })
         }
         Cmd::AgentLaunch(a) => {
+            // F1012: the folder is held from before it is checked, the start goes into the held folder, and a path that leads to
+            // another folder after the check (the folder, or one above it, moved or swapped for a link) is refused.
+            let held = agora_platform::HeldFolder::open(Path::new(&a.path));
             let (info, project) = crate::directory::inspect(&a.path, &ctx.node_id, false)?;
             if info.path != a.path || info.project_id != a.project_id {
                 return Err(invalid("directory.project_id"));
             }
+            let folder = held
+                .ok()
+                .filter(agora_platform::HeldFolder::in_place)
+                .ok_or_else(|| invalid("directory.path"))?;
             if a.separate_worktree && info.git_root.is_empty() {
                 return Err(invalid("directory.git_root"));
             }
@@ -533,6 +540,7 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                             .collect(),
                     },
                     Instant::now(),
+                    Some(folder),
                 )
                 .map_err(sup_err)?;
             let view = sup

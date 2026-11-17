@@ -254,7 +254,16 @@ fn status(s: std::process::ExitStatus) -> ExitStatus {
 /// open forever (its output would never reach end-of-file). Other spawns in this process wait here.
 static SPAWN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+#[cfg(test)]
 pub(crate) fn spawn(config: &PtyConfig) -> io::Result<Box<dyn Pty>> {
+    spawn_in(config, None)
+}
+
+/// See [`crate::spawn`] (no `folder`) and [`crate::spawn_in`].
+pub(crate) fn spawn_in(
+    config: &PtyConfig,
+    folder: Option<&crate::HeldFolder>,
+) -> io::Result<Box<dyn Pty>> {
     let _guard = SPAWN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut ws = winsize(config.cols, config.rows);
     let (mut master, mut slave) = (-1, -1);
@@ -300,7 +309,9 @@ pub(crate) fn spawn(config: &PtyConfig) -> io::Result<Box<dyn Pty>> {
     };
     let mut cmd = Command::new(program);
     cmd.args(args);
-    if let Some(cwd) = &config.cwd {
+    // F1012: in a held folder the child moves into the folder the handle holds (below), never by its path.
+    let held = folder.map(|f| f.dir.as_raw_fd());
+    if let (Some(cwd), None) = (&config.cwd, held) {
         cmd.current_dir(cwd);
     }
     for (name, _) in std::env::vars_os() {
@@ -323,10 +334,13 @@ pub(crate) fn spawn(config: &PtyConfig) -> io::Result<Box<dyn Pty>> {
         .as_ref()
         .map(crate::linux::ruleset)
         .transpose()?;
-    // SAFETY: runs between fork and exec and only calls async-signal-safe functions (setsid, ioctl,
-    // setrlimit).
+    // SAFETY: runs between fork and exec and only calls async-signal-safe functions (fchdir, setsid, ioctl,
+    // setrlimit). `held` is a descriptor of `folder`, which the caller keeps open until `spawn` returns.
     unsafe {
         cmd.pre_exec(move || {
+            if let Some(fd) = held {
+                cvt(libc::fchdir(fd))?;
+            }
             // New session so the child leads its own process group, then make the PTY its controlling terminal.
             cvt(libc::setsid())?;
             cvt(libc::ioctl(0, libc::TIOCSCTTY as _, 0))?;
@@ -343,6 +357,13 @@ pub(crate) fn spawn(config: &PtyConfig) -> io::Result<Box<dyn Pty>> {
             }
             Ok(())
         });
+    }
+    // F1012: checked last, with the confinement already made from the paths, so a folder swapped since it was held is not started in.
+    if folder.is_some_and(|f| !f.in_place()) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            crate::FolderMoved,
+        ));
     }
     let child = cmd.spawn()?;
     drop(cmd); // closes the parent's copies of the slave side, so EOF/EIO reaches the reader on exit
@@ -1335,6 +1356,43 @@ zz10db8000000000000000000000005 02 40 00 01 eth0
         let seen = read_until(&*p, "]");
         assert!(seen.contains("[gone|kept|set]"), "{seen:?}");
         let _ = p.wait();
+    }
+
+    /// F1012: the held folder decides where the process starts (moved into through its handle, whatever `cwd` says), a folder
+    /// swapped for a link after it was held is refused rather than followed, and a folder is never held through a link.
+    #[test]
+    fn a_held_folder_is_where_the_process_starts_and_a_swapped_one_is_refused() {
+        let base = std::env::temp_dir().join(format!("agora-plat-held-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).expect("io");
+        let base = std::fs::canonicalize(&base).expect("io");
+        let (held_dir, elsewhere) = (base.join("held"), base.join("elsewhere"));
+        std::fs::create_dir_all(&held_dir).expect("io");
+        std::fs::create_dir_all(&elsewhere).expect("io");
+        let pwd = |folder: &crate::HeldFolder| {
+            let mut cfg = PtyConfig::new(vec!["sh".into(), "-c".into(), "pwd -P".into()]);
+            cfg.cwd = Some(elsewhere.clone());
+            crate::spawn_in(&cfg, folder).map(|mut p| {
+                let seen = read_until(&*p, &held_dir.display().to_string());
+                let _ = p.wait();
+                seen
+            })
+        };
+        let folder = crate::HeldFolder::open(&held_dir).expect("held");
+        let seen = pwd(&folder).expect("spawn_in");
+        assert!(seen.contains(&held_dir.display().to_string()), "{seen:?}");
+        std::fs::rename(&held_dir, base.join("held.old")).expect("io");
+        std::os::unix::fs::symlink(&elsewhere, &held_dir).expect("io");
+        let refused = pwd(&folder)
+            .map(|_| ())
+            .expect_err("a swapped folder is not started in");
+        assert!(crate::folder_moved(&refused), "{refused:?}");
+        let through_link = crate::HeldFolder::open(&held_dir).map(|_| ());
+        assert!(
+            matches!(&through_link, Err(e) if crate::folder_moved(e)),
+            "{through_link:?}"
+        );
+        let _ = std::fs::remove_dir_all(base);
     }
 
     #[test]
