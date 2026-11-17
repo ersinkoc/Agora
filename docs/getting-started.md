@@ -24,9 +24,15 @@ On the machine that runs the hub, open it for new machines, then on the new mach
 
 1. **On the hub's machine:** `agora pair open`. It says "Your hub is open for new machines for 10 minutes" and what to type next, and stays on your screen to
    answer. Run it in a terminal: it reads your answer from the keyboard only, never from a pipe or a script. `--minutes N` (1 to 10) opens it for less.
-2. **On the new machine:** `agora join HUB-ADDRESS`, for example `agora join desk.lan:7443` (the hub's name or address on your network, and its port; the port
-   defaults to 7443). `agora join` alone, or choice 3 of `agora`'s first question, explains this; finding the hub by itself comes later, for now you type its
-   address. The new machine prints one line, for example `Number 482-193. Approve this machine on the hub...`, and waits.
+2. **On the new machine:** `agora join`. It listens for about three seconds for a hub that is open for new machines on your network and, when it finds one,
+   asks you, at a terminal, `Found the hub "desk" at 192.168.1.20:7443. Its fingerprint is 566A D067 41A8 B995 CD07 C464. Compare it with what `agora pair open` shows on the hub`: answer `y` only
+   if it is exactly the same as the fingerprint the hub's screen shows (`agora pair open` and `agora pair status` print it). With more than one hub it lists them and asks which one matches; without a
+   terminal it stops and asks for the address. If it finds none, give the address yourself: `agora join HUB-ADDRESS`, for example
+   `agora join desk.lan:7443` (the hub's name or address on your network, and its port; the port defaults to 7443). Some networks (guest Wi-Fi, some VPNs) do not
+   carry the search; the address always works. What is found is only an address to try: nothing is trusted because a hub answered. The machine then joins only a hub whose certificate
+   authority has the fingerprint you confirmed. That comparison is what protects you from a machine on your network that pretends to be your hub: the number in the next step
+   cannot, because such a machine would simply approve itself. Choice 3 of `agora`'s first
+   question asks for the address. The new machine prints one line, for example `Number 482-193. Approve this machine on the hub...`, and waits.
 3. **Back on the hub's machine** the screen shows `New machine "laptop" (linux, 192.168.1.50) wants to join. Number 482-193.` Approve only if the two numbers are
    the same: look at both, then type `y` and Enter (a key pressed less than a second after the question is ignored). Anything else denies it. (If the hub already has a machine of that name it asks whether to replace it.)
 4. The new machine says `Joined. This machine is "laptop"` with the fingerprint of the hub's certificate authority (the one `agora hub fingerprint` shows),
@@ -35,9 +41,10 @@ On the machine that runs the hub, open it for new machines, then on the new mach
 
 `agora pair status` says whether the hub is open and how many machines wait; `agora pair close` closes it. Nothing is stored on the new machine unless every
 check passed: a request nobody approved, a hub that is closed, one that only offers TLS 1.2, or a hub whose certificate does not name the address you typed all
-end with "Nothing was saved". The last one needs the hub to be started with that name (`agora hub run --name ADDRESS`, or the front door's "other machines may
-connect" answer, which puts this machine's name and addresses in the certificate). The way with a code and a CA file (`agora hub code`, `agora node enroll`)
-still works.
+end with "Nothing was saved". The hub puts its own addresses in its certificate (its `--name` values, `localhost`, its host name and the addresses of its network
+cards) when it starts and again each time you run `agora pair open`, so a new address (a DHCP change) is picked up without a restart. If it cannot (the system will
+not list the addresses), `agora pair open` says so and stays closed: start the hub with `--name ADDRESS` for the address the new machine will use. A hub that listens
+on `127.0.0.1` only (the default) names only that. The way with a code and a CA file (`agora hub code`, `agora node enroll`) still works.
 
 Closing or killing the window changes nothing: the hub, the node and your agents keep running. Next time, `agora` only opens the
 window again.

@@ -36,22 +36,161 @@ impl Stop {
     }
 }
 
-/// Explains, in the person's words, how to find an address to join (discovery by itself comes later).
-pub(crate) fn explain(say: &Say) {
-    say.out(key!("join-help"), &[]);
+/// How long `agora join` listens for hubs that are open for new machines.
+const SEARCH: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// The queries this machine sends: from each IPv4 address of each interface that is up (not loopback, not link-local), to that
+/// network's broadcast address and to the limited broadcast address, on the discovery port.
+fn queries() -> Vec<(std::net::Ipv4Addr, Vec<std::net::SocketAddr>)> {
+    use agora_hub::discovery::{directed_broadcast, DISCOVERY_PORT};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    let Ok(list) = agora_platform::interface_addresses() else {
+        return Vec::new();
+    };
+    let mut out: Vec<(Ipv4Addr, Vec<SocketAddr>)> = Vec::new();
+    for a in list.iter().filter(|a| a.up && !a.loopback) {
+        let IpAddr::V4(ip) = a.ip else { continue };
+        if ip.is_link_local() || ip.is_unspecified() || out.iter().any(|(i, _)| *i == ip) {
+            continue;
+        }
+        let mut targets = vec![SocketAddr::from((Ipv4Addr::BROADCAST, DISCOVERY_PORT))];
+        if let Some(b) = directed_broadcast(ip, a.prefix_len) {
+            targets.push(SocketAddr::from((b, DISCOVERY_PORT)));
+        }
+        out.push((ip, targets));
+    }
+    out
 }
 
-/// `agora join [ADDRESS] [--id NAME] [--replace]`.
+/// What the person decided from the list of hubs found.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Pick {
+    /// This one (an index into the list).
+    One(usize),
+    /// Nothing found, or nothing chosen.
+    None,
+    /// No terminal to confirm on: a hub found by discovery is never chosen for the person, not even a single one.
+    NeedsTerminal,
+}
+
+/// Discovery is never silently trusted: every hub found, one or several, is confirmed by a person at a terminal who compares its
+/// fingerprint with the one `agora pair open` shows on the hub. `ask(n)` shows the `n` hubs and returns what was typed (for one hub,
+/// `Some` of any text only when the person confirmed it); only a number from 1 to `n` chooses.
+pub(crate) fn pick(
+    count: usize,
+    terminal: bool,
+    ask: impl FnOnce(usize) -> Option<String>,
+) -> Pick {
+    if count == 0 {
+        return Pick::None;
+    }
+    if !terminal {
+        return Pick::NeedsTerminal;
+    }
+    match ask(count).and_then(|t| t.trim().parse::<usize>().ok()) {
+        Some(i) if (1..=count).contains(&i) => Pick::One(i - 1),
+        _ => Pick::None,
+    }
+}
+
+/// Listens for hubs that are open for new machines, has the person confirm one, and returns its address and the SHA-256 of its CA
+/// (the machine will then refuse any other CA), or says why there is none.
+fn find_hub(say: &Say) -> Result<(String, [u8; 32]), Stop> {
+    use agora_hub::discovery::short_fingerprint;
+    use std::io::IsTerminal;
+    say.out(key!("join-looking"), &[]);
+    let _ = std::io::stdout().flush();
+    let mut random = [0u8; 16];
+    let _ = getrandom::getrandom(&mut random);
+    let mut found = agora_hub::discovery::find(&queries(), SEARCH, random);
+    found.sort_by(|a, b| (&a.name, a.addr).cmp(&(&b.name, b.addr)));
+    if found.is_empty() {
+        say.err(key!("join-none-found"), &[]);
+        return Err(Stop::Failed);
+    }
+    let terminal = std::io::stdin().is_terminal();
+    let choice = pick(found.len(), terminal, |n| {
+        if n == 1 {
+            let f = &found[0];
+            let question = say.text(
+                key!("join-found-ask"),
+                &[
+                    ("name", f.name.as_str().into()),
+                    ("address", f.addr.to_string().into()),
+                    ("fingerprint", short_fingerprint(&f.ca_fingerprint).into()),
+                ],
+            );
+            return matches!(
+                crate::paircmd::ask(say, &question),
+                crate::paircmd::Answer::Yes
+            )
+            .then(|| "1".to_string());
+        }
+        say.out(key!("join-found-list-head"), &[]);
+        for (i, f) in found.iter().enumerate() {
+            say.out(
+                key!("join-found-item"),
+                &[
+                    ("n", ((i + 1) as i64).into()),
+                    ("name", f.name.as_str().into()),
+                    ("address", f.addr.to_string().into()),
+                    ("fingerprint", short_fingerprint(&f.ca_fingerprint).into()),
+                ],
+            );
+        }
+        // The same terminal-only reader as the single-hub question and the owner's approval: typed-ahead input is discarded and a
+        // number that arrives too fast is ignored.
+        let question = say.text(key!("join-which"), &[("count", (n as i64).into())]);
+        crate::paircmd::ask_line(say, &question)
+    });
+    match choice {
+        Pick::One(i) => {
+            say.out(key!("join-found-note"), &[]);
+            Ok((found[i].addr.to_string(), found[i].ca_fingerprint))
+        }
+        Pick::NeedsTerminal => {
+            say.err(key!("pair-discovery_unconfirmed"), &[]);
+            Err(Stop::Usage)
+        }
+        Pick::None => {
+            say.err(key!("join-nothing-chosen"), &[]);
+            Err(Stop::Usage)
+        }
+    }
+}
+
+/// `agora join [ADDRESS] [--id NAME] [--replace]`. Without an address, hubs that are open for new machines are looked for on the local
+/// network (docs/specs/pairing.md section 3): what is found is only an address to try, and the whole pairing exchange follows.
 pub fn join(say: &Say, o: &Opts, address: Option<&str>) -> ExitCode {
-    let Some(address) = address else {
-        explain(say);
-        return ExitCode::from(2);
+    let found;
+    let mut expected_ca = None;
+    let address = match address {
+        Some(a) => a,
+        None => {
+            // Nothing is searched for when this machine could not join anyway.
+            if link_dir().join("node-id").exists() && !o.replace {
+                say.err(
+                    key!("join-already"),
+                    &[("dir", link_dir().display().to_string().into())],
+                );
+                return ExitCode::from(2);
+            }
+            found = match find_hub(say) {
+                Ok((a, fp)) => {
+                    expected_ca = Some(fp);
+                    a
+                }
+                Err(stop) => return stop.code(),
+            };
+            &found
+        }
     };
     match run(
         say,
         address,
         o.id.as_deref(),
         o.replace,
+        expected_ca,
         &Timeouts::default(),
     ) {
         Ok(joined) => {
@@ -82,6 +221,7 @@ pub(crate) fn run(
     address: &str,
     id: Option<&str>,
     replace: bool,
+    expected_ca: Option<[u8; 32]>,
     timeouts: &Timeouts,
 ) -> Result<Joined, Stop> {
     let link = link_dir();
@@ -121,6 +261,7 @@ pub(crate) fn run(
         version: env!("CARGO_PKG_VERSION"),
         csr_pem: &csr_pem,
         csr_der: &csr,
+        expected_ca,
     };
     // The one place the number is written: this line, on standard output, for the person in front of this screen. It is never
     // logged and never saved.
@@ -195,6 +336,7 @@ fn say_failure(say: &Say, e: &PairError, dial: &str, host: &str) {
                 &[("code", code.as_str().into()), ("message", message.into())],
             );
         }
+        PairError::CaMismatch => say.err(key!("pair-ca_mismatch"), &[]),
         PairError::Denied => say.err(key!("join-denied"), &[]),
         PairError::Closed => say.err(key!("join-closed"), &[]),
         PairError::Unexpected => say.err(key!("join-unexpected"), &[]),
@@ -211,5 +353,35 @@ fn say_failure(say: &Say, e: &PairError, dial: &str, host: &str) {
                 &[("what", (*what).into())],
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_hub_found_by_discovery_is_never_chosen_without_a_person_at_a_terminal() {
+        let never = |_| panic!("nobody is asked");
+        assert_eq!(pick(0, true, never), Pick::None);
+        // One hub or several, no terminal: nothing is chosen and nobody is asked.
+        assert_eq!(pick(1, false, never), Pick::NeedsTerminal);
+        assert_eq!(pick(3, false, never), Pick::NeedsTerminal);
+        // One hub with a terminal: only a person's confirmation chooses it.
+        assert_eq!(pick(1, true, |_| Some("1".into())), Pick::One(0));
+        assert_eq!(pick(1, true, |_| None), Pick::None);
+        // Several: the person's number (one-based), and anything else chooses nothing.
+        assert_eq!(
+            pick(3, true, |n| (n == 3).then(|| "2\n".into())),
+            Pick::One(1)
+        );
+        for typed in ["", "\n", "0", "4", "-1", "x", "1 2", "99999999999999999999"] {
+            assert_eq!(
+                pick(3, true, |_| Some(typed.to_string())),
+                Pick::None,
+                "{typed:?}"
+            );
+        }
+        assert_eq!(pick(3, true, |_| None), Pick::None);
     }
 }

@@ -76,6 +76,29 @@ pub fn acceptor_with(
     Ok(TlsAcceptor::from(Arc::new(config)))
 }
 
+/// The hub's TLS acceptor, replaceable while the hub runs (docs/specs/pairing.md section 5b): a new leaf for the same CA is put in
+/// with [`TlsSlot::set`], every connection accepted after that uses it, and a connection that is already open keeps the acceptor (and
+/// so the certificate) it started with. The leaf's hash travels with the acceptor, so a pairing session freezes the hash of the
+/// certificate its own connection was shown, not whatever is current later.
+#[derive(Clone)]
+pub struct TlsSlot(Arc<std::sync::RwLock<(TlsAcceptor, [u8; 32])>>);
+
+impl TlsSlot {
+    pub fn new(acceptor: TlsAcceptor, leaf_hash: [u8; 32]) -> Self {
+        Self(Arc::new(std::sync::RwLock::new((acceptor, leaf_hash))))
+    }
+
+    /// What the next accepted connection uses.
+    pub fn current(&self) -> (TlsAcceptor, [u8; 32]) {
+        self.0.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// From now on new connections are served with this acceptor.
+    pub fn set(&self, acceptor: TlsAcceptor, leaf_hash: [u8; 32]) {
+        *self.0.write().unwrap_or_else(|e| e.into_inner()) = (acceptor, leaf_hash);
+    }
+}
+
 /// SHA-256 of the DER of the first certificate in `server_cert_pem`: the "leaf hash" a pairing machine records for the hub's
 /// certificate (docs/specs/pairing.md section 5).
 pub fn leaf_hash(server_cert_pem: &str) -> Result<[u8; 32], TlsError> {

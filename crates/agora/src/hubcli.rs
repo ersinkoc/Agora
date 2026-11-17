@@ -173,16 +173,6 @@ pub fn hub_run(say: &Say, o: &Opts) -> ExitCode {
     let run = || -> Result<(), String> {
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         let ca = load_or_create_ca(&dir)?;
-        let names = if o.names.is_empty() {
-            vec!["localhost".to_string()]
-        } else {
-            o.names.clone()
-        };
-        let (cert, key) = ca.issue_server(&names).map_err(|e| e.to_string())?;
-        // `agora doctor` reads this to warn before the certificate ends; the key stays in memory.
-        let _ = std::fs::write(dir.join("server-cert.pem"), &cert);
-        let acceptor =
-            tls::acceptor_with(&cert, &key, ca.cert_pem(), true).map_err(|e| e.to_string())?;
         let token_path = dir.join("token");
         let token = match std::fs::read_to_string(&token_path) {
             Ok(t) if !t.trim().is_empty() => t.trim().to_string(),
@@ -196,10 +186,6 @@ pub fn hub_run(say: &Say, o: &Opts) -> ExitCode {
         let has_web = web_assets(o).is_some();
         let store = SqliteStore::open(&dir.join("hub.db")).map_err(|e| e.to_string())?;
         let hub = Arc::new(Hub::open(store).map_err(|e| e.to_string())?);
-        // ADR-0065: the hub can pair once it knows the hash of the certificate machines will see; the switch itself is closed until the
-        // owner opens it.
-        hub.pairing()
-            .enable(tls::leaf_hash(&cert).map_err(|e| e.to_string())?);
         // R8: `GET /api/metrics` answers (owner only) when asked for at start.
         if o.metrics {
             hub.enable_metrics();
@@ -276,6 +262,19 @@ pub fn hub_run(say: &Say, o: &Opts) -> ExitCode {
                     .await
                     .map_err(|e| e.to_string())?;
             let addr = listener.local_addr().map_err(|e| e.to_string())?;
+            // ADR-0065, spec section 5b: the hub's certificate names the addresses the hub is reachable at (the `--name` values,
+            // `localhost`, the host name, the addresses of its interfaces), from the same CA. It is made again at every
+            // `agora pair open` when an address is missing; the listener takes the new one for new connections.
+            let leaf = start_leaf(say, &state, &dir, addr.ip(), &o.names)?;
+            let acceptor_slot = leaf.slot();
+            // The hub can pair once it knows the hash of the certificate machines will see; the switch is closed until the owner
+            // opens it.
+            state.hub.pairing().enable(leaf.hash());
+            state
+                .hub
+                .pairing()
+                .provision_names(Arc::clone(&leaf) as Arc<dyn agora_hub::leaf::Provision>);
+            let _discovery = start_discovery(&state, &leaf, addr.port());
             // Where this hub really listens (a port of its own, or `:0`), for a client on this machine that only has the folder
             // (`agora tui --hub-dir`). Best effort: a client without it falls back to the default address, as before.
             let _ =
@@ -287,6 +286,10 @@ pub fn hub_run(say: &Say, o: &Opts) -> ExitCode {
                     ("dir", dir.display().to_string().into()),
                 ],
             );
+            say.out(
+                key!("cli-hub-names"),
+                &[("names", leaf.names().join(", ").into())],
+            );
             let _tunnels = start_tunnels(say, &dir, addr);
             if has_web {
                 say.out(
@@ -294,7 +297,7 @@ pub fn hub_run(say: &Say, o: &Opts) -> ExitCode {
                     &[("addr", addr.to_string().into()), ("code", web_code.into())],
                 );
             }
-            server::run(listener, state, Some(acceptor)).await;
+            server::run_slot(listener, state, acceptor_slot).await;
             Ok(())
         })
     };
@@ -305,6 +308,76 @@ pub fn hub_run(say: &Say, o: &Opts) -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+/// The hub's server certificate and the means to make it again with other names (docs/specs/pairing.md section 5b).
+fn start_leaf(
+    say: &Say,
+    state: &ServerState,
+    dir: &Path,
+    listen: std::net::IpAddr,
+    names: &[String],
+) -> Result<Arc<agora_hub::leaf::Leaf>, String> {
+    use agora_hub::names::Iface;
+    let ca = state.ca.as_ref().ok_or("no certificate authority")?;
+    // The leaf signs with its own copy of the CA key, loaded from the same PEM.
+    let ca = Ca::from_pem(ca.cert_pem(), &ca.key_pem()).map_err(|e| e.to_string())?;
+    let (leaf, failure) = agora_hub::leaf::Leaf::start(
+        ca,
+        names.to_vec(),
+        listen,
+        Box::new(agora_platform::hostname),
+        Box::new(|| {
+            agora_platform::interface_addresses()
+                .map(|v| {
+                    v.into_iter()
+                        .map(|a| Iface {
+                            ip: a.ip,
+                            up: a.up,
+                            loopback: a.loopback,
+                            transient: a.transient,
+                        })
+                        .collect()
+                })
+                .map_err(|e| e.to_string())
+        }),
+        Some(Box::new({
+            let file = dir.join("server-cert.pem");
+            // Atomic and owner-only, like the other files of the hub's folder.
+            move |pem| agora_platform::write_private(&file, pem.as_bytes())
+        })),
+    )?;
+    if failure.is_some() {
+        say.err(key!("cli-hub-names-unlisted"), &[]);
+    }
+    Ok(Arc::new(leaf))
+}
+
+/// Answers "is there a hub here?" on the local network while, and only while, the hub is open for pairing (spec section 3). The
+/// thread lives as long as the process: `hub_run` returns, and the process ends, only when the hub's listener ends.
+fn start_discovery(
+    state: &Arc<ServerState>,
+    leaf: &Arc<agora_hub::leaf::Leaf>,
+    hub_port: u16,
+) -> Option<std::thread::JoinHandle<()>> {
+    use agora_hub::discovery::{Config, Responder, DISCOVERY_PORT};
+    let fingerprint = tls::leaf_hash(state.ca.as_ref()?.cert_pem()).ok()?;
+    let leaf = Arc::clone(leaf);
+    let responder = Responder::new(Config {
+        port: DISCOVERY_PORT,
+        bind: std::net::Ipv4Addr::UNSPECIFIED,
+        name: Box::new(|| agora_platform::hostname().unwrap_or_else(|| "agora".to_string())),
+        hub_port,
+        ca_fingerprint: fingerprint,
+        version: env!("CARGO_PKG_VERSION"),
+        addresses: Box::new(move || leaf.addresses()),
+    });
+    let state = Arc::clone(state);
+    Some(std::thread::spawn(move || loop {
+        // A port another hub on this machine holds is not an error worth stopping for: this one stays silent and tries again.
+        let _ = responder.sync(state.hub.pairing().is_open());
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }))
 }
 
 /// A fresh one-time sign-in code from the hub's own store (valid 10 minutes).

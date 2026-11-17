@@ -88,6 +88,9 @@ pub enum PairError {
     /// `pair.name_unverified` (machine-local, section 5 step 6b): the address that was dialled is not a name in the hub's certificate,
     /// or that certificate does not chain to the CA the hub delivered. Nothing is kept.
     NameUnverified { name: String },
+    /// `pair.ca_mismatch` (machine-local): the person confirmed a hub found by discovery by the SHA-256 of its certificate authority and
+    /// the one it delivered is another. Nothing is kept.
+    CaMismatch,
     /// The certificate the hub delivered is not for this machine's key and node id, or does not chain to the CA it delivered.
     CertificateInvalid(&'static str),
 }
@@ -564,6 +567,9 @@ pub struct Wanted<'a> {
     pub csr_pem: &'a str,
     /// The CSR's DER (the bytes whose hash is committed to).
     pub csr_der: &'a [u8],
+    /// SHA-256 of the DER of the certificate authority the person confirmed (a hub found by discovery and confirmed by its fingerprint).
+    /// When set, a delivered CA with any other hash is refused with nothing kept. `None` when the person typed the address.
+    pub expected_ca: Option<[u8; 32]>,
 }
 
 fn tls_failure(e: &std::io::Error) -> PairError {
@@ -737,6 +743,10 @@ async fn run(
         },
         now,
     )?;
+    // A hub found by discovery was confirmed by the fingerprint of its CA: the CA it delivers must be that one.
+    if !ca_matches(w.expected_ca, &ca_pem) {
+        return Err(PairError::CaMismatch);
+    }
     conn.close().await;
     Ok(Verified {
         cert_pem,
@@ -744,6 +754,17 @@ async fn run(
         ca_fingerprint,
         host,
     })
+}
+
+/// True when no CA was confirmed, or the first certificate in `ca_pem` has exactly the confirmed SHA-256.
+pub fn ca_matches(expected: Option<[u8; 32]>, ca_pem: &str) -> bool {
+    let Some(expected) = expected else {
+        return true;
+    };
+    CertificateDer::pem_slice_iter(ca_pem.as_bytes())
+        .next()
+        .and_then(Result::ok)
+        .is_some_and(|der| sha256(&[der.as_ref()]) == expected)
 }
 
 async fn ask_reveal<S>(
@@ -791,6 +812,7 @@ impl PairError {
             Self::Hub { code, .. } => Some(ErrorCode::parse(code)),
             Self::Denied => Some(ErrorCode::PairDenied),
             Self::NameUnverified { .. } => Some(ErrorCode::PairNameUnverified),
+            Self::CaMismatch => Some(ErrorCode::PairCaMismatch),
             _ => None,
         }
     }

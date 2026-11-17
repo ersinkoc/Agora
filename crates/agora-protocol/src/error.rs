@@ -95,6 +95,9 @@ pub enum ErrorCode {
     PairState,
     PairInsecureTransport,
     PairNameUnverified,
+    PairNamesMissing,
+    PairDiscoveryUnconfirmed,
+    PairCaMismatch,
     Internal,
     /// A code this build does not know (sent by a newer peer).
     Unknown(String),
@@ -184,6 +187,9 @@ impl ErrorCode {
         ErrorCode::PairState,
         ErrorCode::PairInsecureTransport,
         ErrorCode::PairNameUnverified,
+        ErrorCode::PairNamesMissing,
+        ErrorCode::PairDiscoveryUnconfirmed,
+        ErrorCode::PairCaMismatch,
         ErrorCode::Internal,
     ];
 
@@ -270,6 +276,9 @@ impl ErrorCode {
             ErrorCode::PairState => "pair.state",
             ErrorCode::PairInsecureTransport => "pair.insecure_transport",
             ErrorCode::PairNameUnverified => "pair.name_unverified",
+            ErrorCode::PairNamesMissing => "pair.names_missing",
+            ErrorCode::PairDiscoveryUnconfirmed => "pair.discovery_unconfirmed",
+            ErrorCode::PairCaMismatch => "pair.ca_mismatch",
             ErrorCode::Internal => "internal",
             ErrorCode::Unknown(s) => s,
         }
@@ -368,6 +377,9 @@ impl ErrorCode {
             ErrorCode::PairState => &["state"],
             ErrorCode::PairInsecureTransport => &[],
             ErrorCode::PairNameUnverified => &["name"],
+            ErrorCode::PairNamesMissing => &["reason", "names"],
+            ErrorCode::PairDiscoveryUnconfirmed => &[],
+            ErrorCode::PairCaMismatch => &[],
             ErrorCode::Internal => &["incident_id"],
             ErrorCode::Unknown(_) => &[],
         }

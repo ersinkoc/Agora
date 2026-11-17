@@ -798,9 +798,215 @@ pub(crate) fn hostname() -> Option<String> {
     (!name.is_empty()).then_some(name)
 }
 
+/// See [`crate::interface_addresses`].
+pub(crate) fn interface_addresses() -> io::Result<Vec<crate::InterfaceAddr>> {
+    use std::ffi::CStr;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    let mut head: *mut libc::ifaddrs = std::ptr::null_mut();
+    // SAFETY: `head` is a valid out pointer; on success the list it receives is released with `freeifaddrs` below, after the last use.
+    if unsafe { libc::getifaddrs(&mut head) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut out = Vec::new();
+    let mut cur = head;
+    while !cur.is_null() {
+        // SAFETY: `cur` is a node of the list `getifaddrs` returned, which stays valid until `freeifaddrs`.
+        let ifa = unsafe { &*cur };
+        cur = ifa.ifa_next;
+        if ifa.ifa_addr.is_null() {
+            continue;
+        }
+        // SAFETY: `ifa_addr` is non-null and points to a `sockaddr` whose family says which larger structure it is the start of.
+        let family = i32::from(unsafe { (*ifa.ifa_addr).sa_family });
+        let ip = if family == libc::AF_INET {
+            // SAFETY: the family is AF_INET, so the address is a `sockaddr_in`.
+            let a = unsafe { &*ifa.ifa_addr.cast::<libc::sockaddr_in>() };
+            IpAddr::V4(Ipv4Addr::from(u32::from_be(a.sin_addr.s_addr)))
+        } else if family == libc::AF_INET6 {
+            // SAFETY: the family is AF_INET6, so the address is a `sockaddr_in6`.
+            let a = unsafe { &*ifa.ifa_addr.cast::<libc::sockaddr_in6>() };
+            IpAddr::V6(Ipv6Addr::from(a.sin6_addr.s6_addr))
+        } else {
+            continue;
+        };
+        let prefix_len = if ifa.ifa_netmask.is_null() {
+            0
+        } else {
+            netmask_prefix(ifa.ifa_netmask, family)
+        };
+        let name = if ifa.ifa_name.is_null() {
+            String::new()
+        } else {
+            // SAFETY: `ifa_name` is a NUL-terminated string owned by the list.
+            unsafe { CStr::from_ptr(ifa.ifa_name) }
+                .to_string_lossy()
+                .into_owned()
+        };
+        let flags = ifa.ifa_flags as libc::c_int;
+        out.push(crate::InterfaceAddr {
+            name,
+            ip,
+            prefix_len,
+            up: flags & libc::IFF_UP != 0 && flags & libc::IFF_RUNNING != 0,
+            loopback: flags & libc::IFF_LOOPBACK != 0,
+            transient: false,
+        });
+    }
+    // SAFETY: `head` came from a successful `getifaddrs` and nothing borrowed from the list is used after this point.
+    unsafe { libc::freeifaddrs(head) };
+    mark_transient(&mut out);
+    Ok(out)
+}
+
+/// The prefix length of a netmask `sockaddr` without reading past what the system says it holds: the bytes it declares (`sa_len` on
+/// macOS and the BSDs, where a netmask can be shorter than a full `sockaddr_in`; the full structure elsewhere) are copied into a zeroed
+/// buffer and the address is read from there, so missing bytes count as zero bits.
+fn netmask_prefix(mask: *const libc::sockaddr, family: i32) -> u8 {
+    let (offset, len) = if family == libc::AF_INET {
+        (std::mem::offset_of!(libc::sockaddr_in, sin_addr), 4)
+    } else {
+        (std::mem::offset_of!(libc::sockaddr_in6, sin6_addr), 16)
+    };
+    let full = if family == libc::AF_INET {
+        std::mem::size_of::<libc::sockaddr_in>()
+    } else {
+        std::mem::size_of::<libc::sockaddr_in6>()
+    };
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd"))]
+    // SAFETY: `mask` is non-null (checked by the caller) and every `sockaddr` starts with its length byte on these systems.
+    let declared = usize::from(unsafe { (*mask).sa_len }).min(full);
+    #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "freebsd")))]
+    let declared = full;
+    let mut buf = [0u8; 32];
+    let n = declared.min(buf.len());
+    // SAFETY: `declared` bytes at `mask` belong to the structure the system gave us (the full size where it does not say otherwise);
+    // `buf` holds at least `n` bytes and does not overlap.
+    unsafe { std::ptr::copy_nonoverlapping(mask.cast::<u8>(), buf.as_mut_ptr(), n) };
+    buf.get(offset..offset + len)
+        .map_or(0, |b| b.iter().map(|x| x.count_ones()).sum::<u32>() as u8)
+}
+
+/// Marks IPv6 addresses the system flags temporary or deprecated. Linux lists them in `/proc/net/if_inet6` (address, index, prefix,
+/// scope, flags, name; `IFA_F_TEMPORARY` 0x01, `IFA_F_DEPRECATED` 0x20); other Unix systems are not asked (`getifaddrs` does not carry
+/// the flags), so nothing is marked there.
+fn mark_transient(list: &mut [crate::InterfaceAddr]) {
+    #[cfg(target_os = "linux")]
+    {
+        let Ok(text) = std::fs::read_to_string("/proc/net/if_inet6") else {
+            return;
+        };
+        for v6 in transient_addrs(&text) {
+            let ip = std::net::IpAddr::V6(v6);
+            for a in list.iter_mut().filter(|a| a.ip == ip) {
+                a.transient = true;
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = list;
+}
+
+/// The addresses `/proc/net/if_inet6` flags temporary (0x01) or deprecated (0x20).
+#[cfg(target_os = "linux")]
+fn transient_addrs(text: &str) -> Vec<std::net::Ipv6Addr> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let mut f = line.split_whitespace();
+        let (Some(addr), Some(_), Some(_), Some(_), Some(flags)) =
+            (f.next(), f.next(), f.next(), f.next(), f.next())
+        else {
+            continue;
+        };
+        let (Ok(addr), Ok(flags)) = (
+            u128::from_str_radix(addr, 16),
+            u32::from_str_radix(flags, 16),
+        ) else {
+            continue;
+        };
+        if flags & (0x01 | 0x20) != 0 {
+            out.push(std::net::Ipv6Addr::from(addr));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used)] // expect is allowed in tests
 mod tests {
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn if_inet6_lines_flag_temporary_and_deprecated_addresses_only() {
+        let text = "\
+20010db8000000000000000000000001 02 40 00 80 eth0
+20010db8000000000000000000000002 02 40 00 01 eth0
+20010db8000000000000000000000003 02 40 00 20 eth0
+20010db8000000000000000000000004 02 40 00 81 eth0
+fe800000000000000000000000000001 02 40 20 80 eth0
+short line
+zz10db8000000000000000000000005 02 40 00 01 eth0
+20010db8000000000000000000000006 02 40 00 xx eth0
+";
+        let got = transient_addrs(text);
+        let v6 = |s: &str| s.parse::<std::net::Ipv6Addr>().expect("address");
+        // 0x01 temporary, 0x20 deprecated, 0x81 (permanent + temporary) all count; 0x80 (permanent) does not; bad lines are skipped.
+        assert_eq!(
+            got,
+            [v6("2001:db8::2"), v6("2001:db8::3"), v6("2001:db8::4")]
+        );
+    }
+
+    fn v4_mask(octets: [u8; 4], declared_len: Option<u8>) -> libc::sockaddr_in {
+        // SAFETY: an all-zero `sockaddr_in` is a valid value.
+        let mut m: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+        m.sin_family = libc::AF_INET as libc::sa_family_t;
+        m.sin_addr.s_addr = u32::from_ne_bytes(octets);
+        #[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd"))]
+        {
+            m.sin_len = declared_len.unwrap_or(std::mem::size_of::<libc::sockaddr_in>() as u8);
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "freebsd")))]
+        let _ = declared_len;
+        m
+    }
+
+    #[test]
+    fn a_netmask_becomes_its_prefix_length() {
+        let p = |m: &libc::sockaddr_in| {
+            netmask_prefix((m as *const libc::sockaddr_in).cast(), libc::AF_INET)
+        };
+        assert_eq!(p(&v4_mask([255, 255, 255, 0], None)), 24);
+        assert_eq!(p(&v4_mask([255, 255, 255, 255], None)), 32);
+        assert_eq!(p(&v4_mask([255, 255, 128, 0], None)), 17);
+        assert_eq!(p(&v4_mask([0, 0, 0, 0], None)), 0);
+        // IPv6.
+        // SAFETY: an all-zero `sockaddr_in6` is a valid value.
+        let mut m6: libc::sockaddr_in6 = unsafe { std::mem::zeroed() };
+        m6.sin6_family = libc::AF_INET6 as libc::sa_family_t;
+        m6.sin6_addr.s6_addr[..8].fill(0xff);
+        #[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd"))]
+        {
+            m6.sin6_len = std::mem::size_of::<libc::sockaddr_in6>() as u8;
+        }
+        assert_eq!(
+            netmask_prefix((&m6 as *const libc::sockaddr_in6).cast(), libc::AF_INET6),
+            64
+        );
+    }
+
+    /// Where the system says how long the netmask is (`sa_len`), nothing past that is read: a trimmed mask counts the missing bytes as
+    /// zero bits, whatever lies after it in memory.
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd"))]
+    #[test]
+    fn a_trimmed_netmask_is_read_only_as_far_as_it_declares() {
+        // Declared length 0: no address bytes at all, so no bits, although the memory holds 255s.
+        let m = v4_mask([255, 255, 255, 255], Some(0));
+        assert_eq!(
+            netmask_prefix((&m as *const libc::sockaddr_in).cast(), libc::AF_INET),
+            0
+        );
+    }
+
     use std::time::{Duration, Instant};
 
     use super::*;

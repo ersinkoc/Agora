@@ -75,6 +75,20 @@ fn connect(say: &Say, o: &Opts) -> Result<(Session, String), ExitCode> {
         .map_err(|e| fail_hub(say, &format!("{e:?}")))
 }
 
+/// The short fingerprint of this hub's certificate authority, the same a machine that found the hub by itself shows its person
+/// (`agora join`): the person compares the two. From `<hub dir>/ca.pem`.
+fn fingerprint_of(o: &Opts) -> Option<String> {
+    let pem = std::fs::read_to_string(hub_dir(o).join("ca.pem")).ok()?;
+    let fp = agora_hub::tls::leaf_hash(&pem).ok()?;
+    Some(agora_hub::discovery::short_fingerprint(&fp))
+}
+
+fn say_fingerprint(say: &Say, fp: Option<&str>) {
+    if let Some(fp) = fp {
+        say.out(key!("pair-fingerprint"), &[("fingerprint", fp.into())]);
+    }
+}
+
 /// What the hub answers to `PairOpen` and `PairStatus`.
 fn status_of(r: Result<v1::CommandOk, String>) -> Result<v1::PairStatusResult, String> {
     match r?.result {
@@ -142,6 +156,7 @@ pub fn pair(say: &Say, o: &Opts, op: &str) -> ExitCode {
             Ok(ok) => match status_of(Ok(ok)) {
                 Ok(s) => {
                     say_status(say, &s);
+                    say_fingerprint(say, fingerprint_of(o).as_deref());
                     ExitCode::SUCCESS
                 }
                 Err(e) => fail_hub(say, &e),
@@ -161,7 +176,7 @@ pub fn pair(say: &Say, o: &Opts, op: &str) -> ExitCode {
                 ExitCode::from(1)
             }
         },
-        _ => open(say, session, &addr, minutes),
+        _ => open(say, session, &addr, minutes, fingerprint_of(o)),
     }
 }
 
@@ -177,7 +192,13 @@ fn join_address(addr: &str) -> String {
     }
 }
 
-fn open(say: &Say, mut session: Session, addr: &str, minutes: Option<u64>) -> ExitCode {
+fn open(
+    say: &Say,
+    mut session: Session,
+    addr: &str,
+    minutes: Option<u64>,
+    fingerprint: Option<String>,
+) -> ExitCode {
     let status = match session.command_info("", Command::PairOpen(v1::PairOpen {}), WAIT) {
         Ok(ok) => match status_of(Ok(ok)) {
             Ok(s) => s,
@@ -197,6 +218,7 @@ fn open(say: &Say, mut session: Session, addr: &str, minutes: Option<u64>) -> Ex
         key!("pair-open-next"),
         &[("address", join_address(addr).into())],
     );
+    say_fingerprint(say, fingerprint.as_deref());
     say.out(key!("pair-open-waiting"), &[]);
     let _ = std::io::stdout().flush();
     let until = minutes.map(|m| Instant::now() + Duration::from_secs(m * 60));
@@ -204,7 +226,7 @@ fn open(say: &Say, mut session: Session, addr: &str, minutes: Option<u64>) -> Ex
 }
 
 /// What the owner answered to a question.
-enum Answer {
+pub(crate) enum Answer {
     Yes,
     No,
     /// The terminal cannot answer (it went away, or Ctrl-C).
@@ -214,7 +236,7 @@ enum Answer {
 /// Asks `question` and reads the answer from the terminal only (`agora_platform::read_confirmation`): what was typed or sent before
 /// the question is discarded, and a first key that comes sooner than [`MIN_THINK`] is ignored; after [`TOO_FAST_TRIES`] of those the
 /// answer is no. Only `y` (or the locale's yes word) then Enter is yes.
-fn ask(say: &Say, question: &str) -> Answer {
+pub(crate) fn ask(say: &Say, question: &str) -> Answer {
     let yes = say.text(key!("cli-devices-yes"), &[]);
     for _ in 0..TOO_FAST_TRIES {
         let mut out = std::io::stdout();
@@ -235,6 +257,25 @@ fn ask(say: &Say, question: &str) -> Answer {
         }
     }
     Answer::No
+}
+
+/// Like [`ask`] but returns the line that was typed (a number to choose with), under the same terminal-only discipline: typed-ahead
+/// input is discarded, a first key that comes too fast is ignored (three tries), nothing is echoed. `None` when the terminal cannot
+/// answer or the tries ran out.
+pub(crate) fn ask_line(say: &Say, question: &str) -> Option<String> {
+    for _ in 0..TOO_FAST_TRIES {
+        let mut out = std::io::stdout();
+        let _ = write!(out, "{question} ");
+        let _ = out.flush();
+        let read = agora_platform::read_confirmation(MIN_THINK);
+        let _ = writeln!(out);
+        match read {
+            Ok(Some(line)) => return Some(line),
+            Ok(None) => say.out(key!("pair-too-fast"), &[]),
+            Err(_) => return None,
+        }
+    }
+    None
 }
 
 /// The owner's screen: cards in, answers out, until a machine was approved, the time given ended, the switch closed or the terminal went.

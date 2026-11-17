@@ -1180,6 +1180,97 @@ fn directory_time(ticks: i64) -> std::time::SystemTime {
     .unwrap_or(epoch)
 }
 
+/// See [`crate::interface_addresses`]: `GetAdaptersAddresses`, unicast addresses only, read into plain values before the buffer is freed.
+pub(crate) fn interface_addresses() -> io::Result<Vec<crate::InterfaceAddr>> {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    use windows_sys::Win32::Foundation::{ERROR_BUFFER_OVERFLOW, ERROR_SUCCESS};
+    use windows_sys::Win32::NetworkManagement::IpHelper::{
+        GetAdaptersAddresses, GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_DNS_SERVER,
+        GAA_FLAG_SKIP_MULTICAST, IF_TYPE_SOFTWARE_LOOPBACK, IP_ADAPTER_ADDRESSES_LH,
+    };
+    use windows_sys::Win32::NetworkManagement::Ndis::IfOperStatusUp;
+    use windows_sys::Win32::Networking::WinSock::{
+        IpSuffixOriginRandom, AF_INET, AF_INET6, AF_UNSPEC,
+    };
+
+    let flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER;
+    // A u64 buffer: the structures need 8-byte alignment.
+    let mut size: u32 = 16 * 1024;
+    let mut buf: Vec<u64> = Vec::new();
+    let mut attempts = 0;
+    loop {
+        buf.clear();
+        buf.resize((size as usize).div_ceil(8), 0);
+        // SAFETY: `buf` is writable for at least `size` bytes and 8-byte aligned; `size` is the length the call may write.
+        let rc = unsafe {
+            GetAdaptersAddresses(
+                u32::from(AF_UNSPEC),
+                flags,
+                null(),
+                buf.as_mut_ptr().cast::<IP_ADAPTER_ADDRESSES_LH>(),
+                &mut size,
+            )
+        };
+        if rc == ERROR_SUCCESS {
+            break;
+        }
+        attempts += 1;
+        // The list grew between the two calls: `size` now holds the length needed; try again a few times.
+        if rc != ERROR_BUFFER_OVERFLOW || attempts >= 5 {
+            return Err(io::Error::from_raw_os_error(rc as i32));
+        }
+    }
+    let mut out = Vec::new();
+    let mut adapter = buf.as_ptr().cast::<IP_ADAPTER_ADDRESSES_LH>();
+    while !adapter.is_null() {
+        // SAFETY: `adapter` is a node of the list the call wrote into `buf`, which outlives this loop.
+        let a = unsafe { &*adapter };
+        adapter = a.Next;
+        let name = if a.AdapterName.is_null() {
+            String::new()
+        } else {
+            // SAFETY: `AdapterName` is a NUL-terminated ASCII string inside `buf`.
+            unsafe { std::ffi::CStr::from_ptr(a.AdapterName.cast()) }
+                .to_string_lossy()
+                .into_owned()
+        };
+        let mut unicast = a.FirstUnicastAddress;
+        while !unicast.is_null() {
+            // SAFETY: a node of the unicast list inside `buf`.
+            let u = unsafe { &*unicast };
+            unicast = u.Next;
+            let (sockaddr, len) = (u.Address.lpSockaddr, u.Address.iSockaddrLength);
+            if sockaddr.is_null() || len < 2 {
+                continue;
+            }
+            // SAFETY: the system says `len` bytes at `lpSockaddr` are the address, inside `buf`.
+            let bytes = unsafe { std::slice::from_raw_parts(sockaddr.cast::<u8>(), len as usize) };
+            let family = u16::from_ne_bytes([bytes[0], bytes[1]]);
+            // `sockaddr_in`: family 2 bytes, port 2, address 4. `sockaddr_in6`: family 2, port 2, flow info 4, address 16.
+            let ip = if family == AF_INET && bytes.len() >= 8 {
+                IpAddr::V4(Ipv4Addr::new(bytes[4], bytes[5], bytes[6], bytes[7]))
+            } else if family == AF_INET6 && bytes.len() >= 24 {
+                let mut o = [0u8; 16];
+                o.copy_from_slice(&bytes[8..24]);
+                IpAddr::V6(Ipv6Addr::from(o))
+            } else {
+                continue;
+            };
+            out.push(crate::InterfaceAddr {
+                name: name.clone(),
+                ip,
+                prefix_len: u.OnLinkPrefixLength,
+                up: a.OperStatus == IfOperStatusUp,
+                loopback: a.IfType == IF_TYPE_SOFTWARE_LOOPBACK,
+                // A random suffix is a privacy (temporary) address; a preferred lifetime of zero is a deprecated one. Only IPv6.
+                transient: family == AF_INET6
+                    && (u.SuffixOrigin == IpSuffixOriginRandom || u.PreferredLifetime == 0),
+            });
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {

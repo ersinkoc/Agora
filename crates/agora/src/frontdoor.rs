@@ -402,7 +402,7 @@ fn ask(
     };
     let lan = match choice {
         Choice::Join => {
-            // ADR-0065: the person types the hub's address (finding one by itself comes later); with none, they are told how to get one.
+            // ADR-0065: the person types the hub's address; with none, they are told that `agora join` finds hubs by itself.
             prompt(out, &say.text(key!("frontdoor-join-address"), &[]));
             let typed = read_answer(input).unwrap_or_default();
             if typed.is_empty() {
@@ -414,6 +414,7 @@ fn ask(
                 &typed,
                 None,
                 false,
+                None,
                 &agora_node::pairing_client::Timeouts::default(),
             ) {
                 Ok(_) => {

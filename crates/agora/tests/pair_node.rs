@@ -233,6 +233,16 @@ struct Machine {
 }
 
 fn machine(address: &str, name: &str, timeouts: Timeouts) -> Machine {
+    machine_expecting(address, name, timeouts, None)
+}
+
+/// A machine that found the hub by discovery and confirmed the fingerprint of its CA.
+fn machine_expecting(
+    address: &str,
+    name: &str,
+    timeouts: Timeouts,
+    expected_ca: Option<[u8; 32]>,
+) -> Machine {
     let (address, name) = (address.to_string(), name.to_string());
     let (tx, number) = mpsc::channel();
     let done = std::thread::spawn(move || {
@@ -245,6 +255,7 @@ fn machine(address: &str, name: &str, timeouts: Timeouts) -> Machine {
             version: "0.0",
             csr_pem: &csr_pem,
             csr_der: &csr,
+            expected_ca,
         };
         let r = pair(&wanted, &timeouts, &mut |n| {
             tx.send(n.digits().to_string()).unwrap();
@@ -713,4 +724,458 @@ async fn a_party_in_the_middle_makes_the_machine_show_a_number_the_owner_does_no
     owner.deny(&card.pair_id).await;
     let (r, _, _) = m.finish().await;
     assert_eq!(r.unwrap_err(), PairError::Denied);
+}
+
+// ---- ADR-0065 step 4: the hub names its own addresses in its certificate (spec section 5b) ----
+
+use agora_hub::leaf::Leaf;
+use agora_hub::names::Iface;
+use std::sync::Mutex;
+
+type Listing = Arc<Mutex<Result<Vec<Iface>, String>>>;
+
+/// A hub on a wildcard address whose leaf is made by [`Leaf`], as `agora hub run` does it, with the machine's interfaces given by the
+/// test (`listing`) so that an address can appear, or the listing fail, while the hub runs.
+async fn rig_leaf(
+    configured: &[&str],
+    listing: &Listing,
+    dir: Option<std::path::PathBuf>,
+) -> (Rig, Arc<Leaf>) {
+    let persist = dir.map(|d| -> agora_hub::leaf::Persist {
+        Box::new(move |pem| {
+            agora_platform::write_private(&d.join("server-cert.pem"), pem.as_bytes())
+        })
+    });
+    let ca = Ca::generate("hub ca").unwrap();
+    let copy = Ca::from_pem(ca.cert_pem(), &ca.key_pem()).unwrap();
+    let ca_pem = ca.cert_pem().to_string();
+    let listener = TcpListener::bind("0.0.0.0:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let l = Arc::clone(listing);
+    let (leaf, _) = Leaf::start(
+        copy,
+        configured.iter().map(|n| (*n).to_string()).collect(),
+        "0.0.0.0".parse().unwrap(),
+        Box::new(|| Some("pairbox".to_string())),
+        Box::new(move || l.lock().unwrap().clone()),
+        persist,
+    )
+    .unwrap();
+    let leaf = Arc::new(leaf);
+    let hub = Arc::new(Hub::open(SqliteStore::open_in_memory().unwrap()).unwrap());
+    hub.pairing().enable(leaf.hash());
+    hub.pairing()
+        .provision_names(Arc::clone(&leaf) as Arc<dyn agora_hub::leaf::Provision>);
+    let state = Arc::new(ServerState {
+        hub,
+        support: Support {
+            generations: vec![1],
+            capabilities: vec!["pairing.v1".into()],
+            required: vec![],
+        },
+        ca: Some(ca),
+        lockout: Arc::new(Lockout::new()),
+        auth: Box::new(Owner),
+        assets: None,
+        sessions: None,
+    });
+    tokio::spawn(server::run_slot(listener, Arc::clone(&state), leaf.slot()));
+    let rig = Rig {
+        addr: std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+        state,
+        leaf_ca_pem: ca_pem.clone(),
+        ca_pem,
+    };
+    (rig, leaf)
+}
+
+fn up(ip: &str) -> Iface {
+    Iface {
+        ip: ip.parse().unwrap(),
+        up: true,
+        loopback: false,
+        transient: false,
+    }
+}
+
+/// The hash of the certificate a new connection to the hub is shown (the connection is verified against the hub's CA for `localhost`).
+async fn served_hash(rig: &Rig) -> [u8; 32] {
+    let mut roots = rustls::RootCertStore::empty();
+    for c in CertificateDer::pem_slice_iter(rig.ca_pem.as_bytes()) {
+        roots.add(c.unwrap()).unwrap();
+    }
+    let cfg = rustls::ClientConfig::builder_with_provider(provider())
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    let tcp = TcpStream::connect(rig.addr).await.unwrap();
+    let tls = tokio_rustls::TlsConnector::from(Arc::new(cfg))
+        .connect(ServerName::try_from("localhost").unwrap(), tcp)
+        .await
+        .unwrap();
+    let der = tls.get_ref().1.peer_certificates().unwrap()[0].clone();
+    ring::digest::digest(&ring::digest::SHA256, der.as_ref())
+        .as_ref()
+        .try_into()
+        .unwrap()
+}
+
+fn temp(name: &str) -> std::path::PathBuf {
+    let d = std::env::temp_dir().join(format!("agora-pairnames-{}-{name}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    d
+}
+
+/// One whole pairing by `address` against the rig: the machine, the owner's card, approval. Returns the machine's result.
+async fn pair_by(
+    owner: &mut Window,
+    address: &str,
+    name: &str,
+) -> (Result<Verified, PairError>, String) {
+    let m = machine(address, name, fast());
+    m.shown().await;
+    let card = owner.card().await;
+    owner.approve(&card.pair_id).await;
+    let (r, key, _) = m.finish().await;
+    (r, key)
+}
+
+/// The machine's real, non-loopback, usable IPv4 address, when it has one (CI runners and laptops do; a sandbox may not).
+fn lan_address() -> Option<std::net::Ipv4Addr> {
+    agora_platform::interface_addresses()
+        .ok()?
+        .into_iter()
+        .filter(|a| a.up && !a.loopback)
+        .find_map(|a| match a.ip {
+            std::net::IpAddr::V4(v) if !v.is_link_local() && !v.is_unspecified() => Some(v),
+            _ => None,
+        })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_default_hub_is_paired_by_its_real_lan_address_and_the_node_then_connects() {
+    let Some(lan) = lan_address() else {
+        println!(
+            "skipped: this machine has no up, non-loopback, non-link-local IPv4 address to dial"
+        );
+        return;
+    };
+    // The hub has no `--name` and the real interface list: it must name `lan` by itself.
+    let listing: Listing = Arc::new(Mutex::new(
+        agora_platform::interface_addresses()
+            .map(|v| {
+                v.into_iter()
+                    .map(|a| Iface {
+                        ip: a.ip,
+                        up: a.up,
+                        loopback: a.loopback,
+                        transient: a.transient,
+                    })
+                    .collect()
+            })
+            .map_err(|e| e.to_string()),
+    ));
+    let (rig, leaf) = rig_leaf(&[], &listing, None).await;
+    assert!(
+        leaf.names().contains(&lan.to_string()),
+        "{:?}",
+        leaf.names()
+    );
+    let mut owner = Window::open(&rig).await;
+    owner.open_switch().await;
+    let port = rig.addr.port();
+    let (v, key_pem) = pair_by(&mut owner, &format!("{lan}:{port}"), "lanbox").await;
+    let v = v.expect("a machine dialling the hub's LAN address pairs");
+    assert_eq!(v.ca_pem, rig.ca_pem);
+
+    // The node link then connects to that address too: it verifies the same name against the CA it pinned.
+    let dir = temp("lanlink");
+    let sink = Arc::new(agora_node::daemon::EventSink::open(&dir, "lanbox").unwrap());
+    sink.node_online("lanbox");
+    let _link = agora_node::uplink_client::spawn(
+        Arc::clone(&sink),
+        agora_node::uplink_client::HubLink {
+            mesh_out: None,
+            url: format!("wss://{lan}:{port}"),
+            ca_pem: v.ca_pem.clone(),
+            cert_pem: v.cert_pem.clone(),
+            key_pem,
+            commands: None,
+            grants: None,
+            mesh: None,
+            devices: None,
+            state_dir: None,
+        },
+    )
+    .unwrap();
+    let end = std::time::Instant::now() + Duration::from_secs(20);
+    while !rig
+        .state
+        .hub
+        .view()
+        .0
+        .nodes
+        .get("lanbox")
+        .is_some_and(|n| n.online)
+    {
+        assert!(
+            std::time::Instant::now() < end,
+            "the node never connected by the LAN address"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_address_that_is_in_no_name_of_a_provisioned_leaf_fails_closed_and_stores_nothing() {
+    // Loopback is not a name the hub provisions for a wildcard listener (the interfaces' own addresses are).
+    let listing: Listing = Arc::new(Mutex::new(Ok(vec![up("192.0.2.7")])));
+    let (rig, leaf) = rig_leaf(&[], &listing, None).await;
+    assert_eq!(leaf.names(), ["localhost", "pairbox", "192.0.2.7"]);
+    let mut owner = Window::open(&rig).await;
+    owner.open_switch().await;
+    let (r, _) = pair_by(
+        &mut owner,
+        &format!("127.0.0.1:{}", rig.addr.port()),
+        "nameless",
+    )
+    .await;
+    assert_eq!(
+        r.unwrap_err(),
+        PairError::NameUnverified {
+            name: "127.0.0.1".into()
+        }
+    );
+    // The hub issued nothing that a machine could keep: the card was approved but the machine refused what it got, and nothing else
+    // came out of it (the machine's own check is what stores nothing; `agora join` stores only a successful result).
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_new_address_is_named_at_the_next_open_without_a_restart_and_open_connections_are_undisturbed(
+) {
+    // The address that "appears": this machine's real one when it has one (so a machine can dial it), else a documentation address.
+    let (fresh, dialable) = match lan_address() {
+        Some(a) => (a.to_string(), true),
+        None => {
+            println!("no real LAN address here: the final dial is skipped, the hot reload is still checked");
+            ("192.0.2.8".to_string(), false)
+        }
+    };
+    let dir = temp("hot");
+    let listing: Listing = Arc::new(Mutex::new(Ok(vec![up("192.0.2.7")])));
+    let (rig, leaf) = rig_leaf(&["hub.example"], &listing, Some(dir.clone())).await;
+    assert_eq!(
+        leaf.names(),
+        ["hub.example", "localhost", "pairbox", "192.0.2.7"]
+    );
+    let before = served_hash(&rig).await;
+    assert_eq!(before, leaf.hash());
+    let written = |d: &std::path::Path| {
+        let pem = std::fs::read_to_string(d.join("server-cert.pem")).unwrap();
+        tls::leaf_hash(&pem).unwrap()
+    };
+    assert_eq!(written(&dir), before);
+
+    // A window that is already connected, and a first pairing attempt by an address the leaf does not name yet.
+    let mut owner = Window::open(&rig).await;
+    owner.open_switch().await;
+    assert_eq!(leaf.hash(), before, "nothing changed, so the leaf is kept");
+    let port = rig.addr.port();
+    if dialable {
+        let (r, _) = pair_by(&mut owner, &format!("{fresh}:{port}"), "early").await;
+        assert!(matches!(r.unwrap_err(), PairError::NameUnverified { .. }));
+    }
+
+    // The address appears (a DHCP lease, a second card). Nothing is restarted: the next `PairOpen` re-issues the leaf from the same CA.
+    *listing.lock().unwrap() = Ok(vec![up("192.0.2.7"), up(&fresh)]);
+    owner.open_switch().await;
+    assert_ne!(leaf.hash(), before);
+    assert!(leaf.names().contains(&fresh));
+    // New connections are shown the new leaf (verified against the same CA), the file is current, and the connection that was open
+    // before the change still works.
+    assert_eq!(served_hash(&rig).await, leaf.hash());
+    assert_eq!(written(&dir), leaf.hash());
+    let status = owner
+        .command(command_request::Command::PairStatus(v1::PairStatus {}))
+        .await
+        .unwrap();
+    assert!(matches!(status, command_ok::Result::PairStatus(s) if s.open));
+
+    // And a machine dialling that address now completes, and the number on both sides still matches (the session froze the hash of the
+    // certificate its own connection was shown).
+    if dialable {
+        let m = machine(&format!("{fresh}:{port}"), "late", fast());
+        let shown = m.shown().await;
+        let card = owner.card().await;
+        assert_eq!(card.number, shown);
+        owner.approve(&card.pair_id).await;
+        let v = m
+            .finish()
+            .await
+            .0
+            .expect("paired after the leaf was reissued");
+        assert_eq!(v.ca_pem, rig.ca_pem, "the CA did not change");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn when_the_names_cannot_be_provisioned_the_switch_stays_closed_and_the_refusal_says_what_to_do(
+) {
+    // The hub starts although the system will not list its interfaces (it carries what it knows)...
+    let listing: Listing = Arc::new(Mutex::new(Err("no listing".into())));
+    let (rig, leaf) = rig_leaf(&[], &listing, None).await;
+    assert_eq!(leaf.names(), ["localhost", "pairbox"]);
+    let mut owner = Window::open(&rig).await;
+    // ... but it does not open for pairing with a leaf it cannot vouch for.
+    let r = owner
+        .command(command_request::Command::PairOpen(v1::PairOpen {}))
+        .await;
+    assert_eq!(r.unwrap_err(), ErrorCode::PairNamesMissing);
+    let status = owner
+        .command(command_request::Command::PairStatus(v1::PairStatus {}))
+        .await
+        .unwrap();
+    assert!(matches!(status, command_ok::Result::PairStatus(s) if !s.open));
+    // A machine is refused with the hub's own `pair.closed`.
+    let m = machine(&format!("localhost:{}", rig.addr.port()), "refused", fast());
+    let (r, _, _) = m.finish().await;
+    assert!(r.is_err());
+    // The system recovers: the next open works, and names the interface.
+    *listing.lock().unwrap() = Ok(vec![up("192.0.2.9")]);
+    owner.open_switch().await;
+    assert!(leaf.names().contains(&"192.0.2.9".to_string()));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_responder_announces_only_addresses_in_the_leaf_and_follows_the_leaf() {
+    use agora_hub::discovery::{request, Config, Responder};
+    let listing: Listing = Arc::new(Mutex::new(Ok(vec![up("192.0.2.7")])));
+    let (rig, leaf) = rig_leaf(&[], &listing, None).await;
+    let l = Arc::clone(&leaf);
+    let responder = Responder::new(Config {
+        port: 0,
+        bind: std::net::Ipv4Addr::LOCALHOST,
+        name: Box::new(|| "pairbox".into()),
+        hub_port: rig.addr.port(),
+        ca_fingerprint: tls::leaf_hash(&rig.ca_pem).unwrap(),
+        version: "0",
+        addresses: Box::new(move || l.addresses()),
+    });
+    let Some(lan) = lan_address() else {
+        println!("skipped: no real LAN address to send the query from");
+        return;
+    };
+    let src = std::net::SocketAddr::from((lan, 50001));
+    // The system would send from `lan` toward `lan`; it is not in the leaf yet: silence. After the leaf names it, the same query is
+    // answered.
+    assert!(responder.answer(&request([1; 16]), src).is_none());
+    let mut owner = Window::open(&rig).await;
+    *listing.lock().unwrap() = Ok(vec![up("192.0.2.7"), up(&lan.to_string())]);
+    owner.open_switch().await;
+    let reply = responder.answer(&request([1; 16]), src).expect("named now");
+    let f = agora_hub::discovery::parse_announcement(&reply, src.ip()).unwrap();
+    assert_eq!(f.addr.port(), rig.addr.port());
+    assert_eq!(f.ca_fingerprint, tls::leaf_hash(&rig.ca_pem).unwrap());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_certificate_file_that_cannot_be_written_is_reported_and_nothing_is_switched() {
+    let dir = temp("write");
+    let listing: Listing = Arc::new(Mutex::new(Ok(vec![up("192.0.2.7")])));
+    let (rig, leaf) = rig_leaf(&[], &listing, Some(dir.clone())).await;
+    let before = leaf.hash();
+    // The file is written whole and nothing else is left beside it.
+    let left: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(left, ["server-cert.pem"]);
+
+    // The folder goes away and an address appears: the re-issue cannot be saved, so `PairOpen` is refused, the switch stays closed and
+    // the certificate that is served is the one that was there.
+    let mut owner = Window::open(&rig).await;
+    std::fs::remove_dir_all(&dir).unwrap();
+    *listing.lock().unwrap() = Ok(vec![up("192.0.2.7"), up("192.0.2.8")]);
+    let r = owner
+        .command(command_request::Command::PairOpen(v1::PairOpen {}))
+        .await;
+    assert_eq!(r.unwrap_err(), ErrorCode::PairNamesMissing);
+    assert_eq!(leaf.hash(), before);
+    assert_eq!(served_hash(&rig).await, before);
+    let status = owner
+        .command(command_request::Command::PairStatus(v1::PairStatus {}))
+        .await
+        .unwrap();
+    assert!(matches!(status, command_ok::Result::PairStatus(s) if !s.open));
+
+    // The folder is back: the next open re-issues, saves and opens.
+    std::fs::create_dir_all(&dir).unwrap();
+    owner.open_switch().await;
+    assert_ne!(leaf.hash(), before);
+    assert_eq!(
+        tls::leaf_hash(&std::fs::read_to_string(dir.join("server-cert.pem")).unwrap()).unwrap(),
+        leaf.hash()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // At start an unwritable place is an error, not a hub with a file that is not there.
+    let gone = std::env::temp_dir().join(format!("agora-pairnames-{}-nodir/x", std::process::id()));
+    let ca = Ca::generate("c").unwrap();
+    let started = Leaf::start(
+        ca,
+        vec![],
+        "127.0.0.1".parse().unwrap(),
+        Box::new(|| None),
+        Box::new(|| Ok(vec![])),
+        Some(Box::new(move |pem| {
+            agora_platform::write_private(&gone.join("server-cert.pem"), pem.as_bytes())
+        })),
+    );
+    assert!(started.is_err());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_hub_found_by_discovery_must_deliver_the_ca_the_person_confirmed() {
+    // The fingerprint the person compared (all 32 bytes are compared by the machine).
+    let first = rig().await;
+    let confirmed = tls::leaf_hash(&first.ca_pem).unwrap();
+    let mut owner = Window::open(&first).await;
+    owner.open_switch().await;
+    let m = machine_expecting(&dial(&first), "found", fast(), Some(confirmed));
+    m.shown().await;
+    let card = owner.card().await;
+    owner.approve(&card.pair_id).await;
+    let (r, _, _) = m.finish().await;
+    assert_eq!(
+        r.expect("the confirmed CA was delivered").ca_pem,
+        first.ca_pem
+    );
+
+    // A hub that delivers another CA than the confirmed one (a rogue that announced the real hub's name, or a hub whose CA changed) is
+    // refused after the owner approved, and the machine keeps nothing.
+    let other = Ca::generate("another hub ca").unwrap();
+    let wrong = tls::leaf_hash(other.cert_pem()).unwrap();
+    let rig = rig().await;
+    let mut owner = Window::open(&rig).await;
+    owner.open_switch().await;
+    let m = machine_expecting(&dial(&rig), "rogue", fast(), Some(wrong));
+    m.shown().await;
+    let card = owner.card().await;
+    owner.approve(&card.pair_id).await;
+    let (r, _, _) = m.finish().await;
+    assert_eq!(r.unwrap_err(), PairError::CaMismatch);
+    // One flipped bit is enough to refuse.
+    let mut flipped = confirmed;
+    flipped[31] ^= 1;
+    let mut owner2 = Window::open(&rig).await;
+    owner2.open_switch().await;
+    let m = machine_expecting(&dial(&rig), "flipped", fast(), Some(flipped));
+    m.shown().await;
+    let card = owner2.card().await;
+    owner2.approve(&card.pair_id).await;
+    assert_eq!(m.finish().await.0.unwrap_err(), PairError::CaMismatch);
 }

@@ -326,8 +326,21 @@ fn the_owner_opens_a_machine_joins_the_numbers_match_and_the_node_connects() {
     let owner_home = root.join("owner");
     std::fs::create_dir_all(&owner_home).unwrap();
 
+    // The fingerprint of the hub's CA, short form: what `agora pair open` and `agora pair status` print on the hub's screen, and what a
+    // machine that finds the hub by itself shows its person to compare.
+    let fingerprint = agora_hub::discovery::short_fingerprint(
+        &agora_hub::tls::leaf_hash(&std::fs::read_to_string(hub.dir.join("ca.pem")).unwrap())
+            .unwrap(),
+    );
+    assert_eq!(fingerprint.split(' ').count(), 6);
+
     // Closed by default, and the status says how to open it.
     let out = hub.pair(&owner_home, &["status"]).output().unwrap();
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains(&fingerprint),
+        "status does not print the fingerprint {fingerprint}: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
     assert!(out.status.success());
     assert!(
         String::from_utf8_lossy(&out.stdout).contains("Closed to new machines"),
@@ -341,18 +354,26 @@ fn the_owner_opens_a_machine_joins_the_numbers_match_and_the_node_connects() {
     assert!(!ok && text.contains("not open for new machines"), "{text}");
     nothing_stored(&machine);
 
-    // No address: how to get one, no network.
+    // No address: the machine looks for a hub that is open and, finding none (this hub is closed, and listens on loopback only), says
+    // how to get one. Nothing is stored. (A found hub is tested in `pair_node.rs` and `discovery.rs`; the fixed discovery port keeps it out of real-process tests.)
     let out = agora(&machine, &["join"]).output().unwrap();
-    assert_eq!(out.status.code(), Some(2));
-    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert_eq!(out.status.code(), Some(1));
+    let text =
+        String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
     assert!(
-        text.contains("agora pair open") && text.contains("type the hub's address"),
+        text.contains("agora pair open") && text.contains("agora join 192.168"),
         "{text}"
     );
+    nothing_stored(&machine);
 
     // The owner opens it; the screen says what to do next.
     let mut owner = hub.open(&owner_home);
     assert!(owner.seen.contains("agora join "), "{}", owner.seen);
+    assert!(
+        owner.seen.contains(&fingerprint),
+        "open does not print the fingerprint {fingerprint}: {}",
+        owner.seen
+    );
     let status = hub.pair(&owner_home, &["status"]).output().unwrap();
     assert!(
         String::from_utf8_lossy(&status.stdout).contains("Open for new machines"),
@@ -505,7 +526,7 @@ fn the_machine_prints_the_number_once_and_only_on_standard_output() {
 }
 
 #[test]
-fn a_denied_machine_and_an_address_the_certificate_does_not_name_store_nothing() {
+fn a_denied_machine_stores_nothing_and_the_hubs_own_address_is_named_in_its_certificate() {
     let root = tmp("refuse");
     let hub = hub(&root);
     let owner_home = root.join("owner");
@@ -526,7 +547,9 @@ fn a_denied_machine_and_an_address_the_certificate_does_not_name_store_nothing()
     nothing_stored(&denied);
     drop(owner);
 
-    // The machine dials the IP number: the hub's certificate names `localhost` only, so even an approved machine keeps nothing.
+    // ADR-0065 section 5b: the hub listens on 127.0.0.1, so its certificate names that address, and a machine that dials the IP number
+    // (not `localhost`) now completes (it used to fail closed: the leaf named `localhost` only). The address that is in no name fails
+    // closed in `pair_node.rs`.
     let byip = root.join("byip");
     let mut owner = hub.open(&owner_home);
     let mut m = join(&byip, &format!("127.0.0.1:{}", hub.port), &[]);
@@ -534,14 +557,8 @@ fn a_denied_machine_and_an_address_the_certificate_does_not_name_store_nothing()
     owner.wait_for("wants to join");
     owner.answer("y\r");
     let (ok, text) = m.finish();
-    assert!(!ok, "{text}");
-    assert!(
-        text.contains("could not be verified, so nothing was saved"),
-        "{text}"
-    );
-    assert!(text.contains("--name 127.0.0.1"), "{text}");
-    nothing_stored(&byip);
-    assert!(!byip.join("machine.toml").exists());
+    assert!(ok, "{text}");
+    assert!(byip.join("link").join("node-id").exists(), "{text}");
 }
 
 #[test]

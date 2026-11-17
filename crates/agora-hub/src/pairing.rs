@@ -744,6 +744,18 @@ impl Pairing {
         exporter: [u8; 32],
         commit: Commit<'_>,
     ) -> Result<(PairId, [u8; 16]), Refusal> {
+        self.request_on(now, from, (exporter, None), commit)
+    }
+
+    /// [`Pairing::request`] for a connection that knows which certificate it was shown (`leaf_hash`): the session freezes that
+    /// one, so a leaf that was replaced a moment ago cannot make the two numbers differ (spec section 5b).
+    pub fn request_on(
+        &mut self,
+        now: u64,
+        from: Peer,
+        (exporter, seen_leaf): ([u8; 32], Option<[u8; 32]>),
+        commit: Commit<'_>,
+    ) -> Result<(PairId, [u8; 16]), Refusal> {
         let Commit {
             commitment,
             name,
@@ -751,9 +763,10 @@ impl Pairing {
             version,
         } = commit;
         self.tick(now);
-        let Some(leaf_hash) = self.leaf else {
+        let Some(current) = self.leaf else {
             return Err(Refusal::Closed);
         };
+        let leaf_hash = seen_leaf.unwrap_or(current);
         if self.open_until.is_none() {
             return Err(Refusal::Closed);
         }
@@ -1250,6 +1263,55 @@ mod tests {
         let mut q = open_hub();
         let b = pending(&mut q, 2_000, 1, 10, &m2);
         assert_ne!(p.number_of(&a), q.number_of(&b));
+    }
+
+    /// Spec section 5b: a machine's connection was shown leaf A; the hub re-issued to leaf B (`set_leaf`) before the request landed. The
+    /// session must freeze A, the certificate the machine's own connection saw, or the two numbers would differ.
+    #[test]
+    fn a_session_keeps_the_leaf_its_own_connection_was_shown_when_the_leaf_is_replaced_before_the_request(
+    ) {
+        const A: [u8; 32] = [0xA1; 32];
+        const B: [u8; 32] = [0xB2; 32];
+        let mut p = Pairing::with_entropy(counter_entropy());
+        p.set_leaf(A);
+        p.open(1_000);
+        // The connection is accepted with leaf A; then the hub switches to leaf B.
+        p.set_leaf(B);
+        let m = Machine::new(1);
+        let from = peer(1, 10);
+        let (id, nonce_h) = p
+            .request_on(
+                2_000,
+                from,
+                (m.exporter, Some(A)),
+                Commit {
+                    commitment: &m.commit(),
+                    name: "laptop",
+                    os: "linux",
+                    version: "0.3",
+                },
+            )
+            .unwrap();
+        reveal(&mut p, 2_010, from, &id, &m).unwrap();
+        let with_a = digits(sas(&m.exporter, &A, &m.csr_hash, &m.nonce_n, &nonce_h));
+        let with_b = digits(sas(&m.exporter, &B, &m.csr_hash, &m.nonce_n, &nonce_h));
+        assert_ne!(with_a, with_b);
+        assert_eq!(p.number_of(&id), Some(with_a));
+        // A connection that did not say which leaf it saw gets the hub's current one.
+        let m2 = Machine::new(2);
+        let from2 = peer(2, 11);
+        let (id2, nonce_h2) = start(&mut p, 2_100, from2, &m2).unwrap();
+        reveal(&mut p, 2_110, from2, &id2, &m2).unwrap();
+        assert_eq!(
+            p.number_of(&id2),
+            Some(digits(sas(
+                &m2.exporter,
+                &B,
+                &m2.csr_hash,
+                &m2.nonce_n,
+                &nonce_h2
+            )))
+        );
     }
 
     #[test]

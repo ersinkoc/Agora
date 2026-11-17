@@ -140,6 +140,8 @@ doctor-summary-ok = Agora'nın ihtiyaç duyduğu her şey yerinde.
 doctor-summary-problems = Agora'nın ihtiyaç duyduğu bir şey eksik. SORUN olarak işaretlenenleri düzeltin.
 
 cli-hub-listening = Hub { $addr } adresinde çalışıyor. Veri klasörü: { $dir }
+cli-hub-names = Hub'ın sertifikasındaki adlar: { $names }.
+cli-hub-names-unlisted = Bu bilgisayar ağ adreslerini listelemedi, bu yüzden hub'ın sertifikası onları henüz içermiyor. Hâlâ öyleyse `agora pair open` ne yapılacağını söyler.
 cli-hub-notify = Bildirimler { $file } dosyasındaki { $count } hedefe gidiyor.
 cli-hub-notify-skipped = { $file } dosyasının { $count } satırı anlaşılamadı ve yok sayılıyor. Her satır `ntfy URL` ya da `webhook URL` olmalı.
 cli-hub-web = Web uygulaması: https://{ $addr }/ . { $code } koduyla giriş yapın (10 dakika geçerli; yenisi için `agora hub login`). Hub sertifikasını kendi sertifika yetkilisi (CA) imzaladığı için bu yetkiliye güvenene kadar tarayıcı uyarı verir.
@@ -457,7 +459,16 @@ pair-denied-now = Reddedildi. O makineye hiçbir şey verilmedi.
 pair-replace-ask = "{ $name }" adlı bir makine zaten katılmış. Yenisiyle değiştirilsin mi? Eskisi erişimini kaybeder. [e/H]
 pair-left-waiting = Değiştirilmedi. İstek, süresi dolana kadar hub'da açık kalır.
 
-join-help = Başka bir makinede çalışan bir Agora'ya katılmak için hub'ının adresi gerekir. O makinede `agora pair open` çalıştırın: adresi söyler. Sonra burada `agora join ADRES` çalıştırın, örneğin `agora join 192.168.1.20:7443`. (Hub'ları kendiliğinden bulmak sonra gelecek: şimdilik hub'ın adresini yazın.)
+join-help = Başka bir makinede çalışan bir Agora'ya katılmak için o makinede `agora pair open`, sonra burada `agora join` çalıştırın: hub'ı kendisi bulur. Bulamazsa hub'ın adresini verin: `agora join 192.168.1.20:7443`.
+join-looking = Yeni makinelere açık bir hub aranıyor...
+join-found-ask = "{ $name }" hub'ı { $address } adresinde bulundu. Parmak izi { $fingerprint }. Bunu hub'da `agora pair open` komutunun gösterdiğiyle karşılaştırın: tam olarak aynı değilse hayır deyin. Aynı mı?  [e/H]
+pair-fingerprint = Bu hub'ın parmak izi { $fingerprint }. Bu hub'ı kendiliğinden bulan bir makine bunu gösterir ve kişiden karşılaştırmasını ister.
+join-none-found = Yeni makinelere açık hiçbir hub yanıt vermedi. Hub'ı çalıştıran makinede `agora pair open` çalıştırın (bir hub yalnızca açıkken bulunabilir), sonra burada `agora join` komutunu yeniden çalıştırın. Ya da adresini verin: `agora join 192.168.1.20:7443`. Bazı ağlar bu tür aramayı taşımaz; adres her zaman çalışır.
+join-found-list-head = Yeni makinelere açık birden çok hub var. Bu parmak izlerini, kastettiğiniz hub'da `agora pair open` komutunun gösterdiğiyle karşılaştırın:
+join-found-item = { $n }) "{ $name }", adresi { $address }, parmak izi { $fingerprint }
+join-which = Hangisinin parmak izi aynı? Numarasını yazın (1 ile { $count } arası) ya da durmak için Enter'a basın:
+join-found-note = Aramak yalnızca bir adres bulmanın yoluydu. Bu makine yalnızca sertifika otoritesinin parmak izi onayladığınızla aynı olan bir hub'a katılır; aşağıdaki numara da onaylamadan önce hub'ın ekranındakiyle aynı olmalı.
+join-nothing-chosen = Hiçbir şey seçilmedi. Hiçbir şey kaydedilmedi.
 join-connecting = { $address } adresine bağlanılıyor...
 join-number = Sayı { $number }. Bu makineyi hub'da onaylayın: hub aynı sayıyı gösterir. Sahibinin onayı bekleniyor...
 join-done = Katıldı. Bu makine "{ $id }" adıyla kayıtlı. Hub'ın sertifika yetkilisinin (CA) parmak izi (SHA-256) { $fingerprint }; sahibi `agora hub fingerprint` ile karşılaştırabilir.
