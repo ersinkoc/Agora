@@ -4,7 +4,8 @@
 //! ADR-0075 decision 6: the node can re-execute or restart while the agent keeps running, so this bridge outlives its connection.
 //! When the connection to the agent's socket ends, the bridge
 //! - answers every request in flight with `mesh.unavailable` (a JSON-RPC error whose `data` is `{code, params}`), so the agent's
-//!   client never waits for an answer that will not come;
+//!   client never waits for an answer that will not come; a request the client cancelled (`notifications/cancelled`) is forgotten
+//!   when the cancellation goes out, and gets no answer;
 //! - answers requests that arrive while disconnected the same way, at once;
 //! - reconnects to the SAME socket path with bounded exponential backoff, without closing its stdout or exiting, so the client's
 //!   session stays open;
@@ -344,6 +345,17 @@ fn to_node(shared: &Shared, line: &[u8]) {
             link.pending.insert(id.to_string(), m.clone());
             tracked = true;
         }
+        // The client gave up on that call: the node sends nothing for it (`docs/specs/mesh-tools.md`), and neither does the
+        // connection's ending. Forgotten before the line goes out, so an ending in between cannot answer it.
+        if let Some(Message::Notification { method, params }) = &msg {
+            if let Some(id) = (method == "notifications/cancelled")
+                .then(|| params.get("requestId"))
+                .flatten()
+                .filter(|id| id.is_string() || id.is_number())
+            {
+                link.pending.remove(&id.to_string());
+            }
+        }
         (writer, link.generation, tracked)
     };
     let was_connected = writer.is_some();
@@ -524,6 +536,46 @@ mod tests {
         assert_eq!(reply["id"], 7);
         assert!(reply.get("error").is_some(), "{out}");
         assert!(out.contains("mesh.unavailable"), "{out}");
+    }
+
+    /// A cancelled call is the client's to forget (MCP): the node sends nothing for it, and when the connection ends the bridge
+    /// must not answer it either. Only the calls still waiting get `mesh.unavailable`.
+    #[test]
+    fn a_cancelled_call_gets_no_answer_when_the_connection_ends() {
+        let path =
+            std::env::temp_dir().join(format!("agora-bridge-cancel-{}.sock", std::process::id()));
+        let listener = agora_platform::local_listen(&path).unwrap();
+        let client = agora_platform::local_connect(&path).unwrap();
+        let node = listener.accept().unwrap();
+        let (shared, seen) = disconnected();
+        lock(&shared.link).stream = Some(client.try_clone().unwrap());
+        for line in [
+            &br#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"ask"}}"#[..],
+            br#"{"jsonrpc":"2.0","id":"s","method":"tools/call","params":{"name":"agent_wait"}}"#,
+            br#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"ask"}}"#,
+            br#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":5}}"#,
+            br#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"s"}}"#,
+            // Not a call it sent with this id (a number, not the string "6"): nothing is forgotten.
+            br#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"6"}}"#,
+        ] {
+            to_node(&shared, line);
+        }
+        // The node got all six lines, the cancellations included.
+        let mut got = BufReader::new(node);
+        for _ in 0..6 {
+            let mut l = String::new();
+            got.read_line(&mut l).unwrap();
+            assert!(l.ends_with('\n'), "{l:?}");
+        }
+        assert_eq!(lock(&shared.link).pending.len(), 1);
+        shared.lost(0);
+        let out = written(&seen);
+        assert_eq!(out.lines().count(), 1, "{out}");
+        let reply: serde_json::Value = serde_json::from_str(out.trim_end()).unwrap();
+        assert_eq!(reply["id"], 6, "{out}");
+        assert!(out.contains("mesh.unavailable"), "{out}");
+        drop(listener);
+        let _ = std::fs::remove_file(&path);
     }
 
     /// A batch: nothing for one made only of notifications, and one error per request (none for its notifications) otherwise.
