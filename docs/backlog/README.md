@@ -25,8 +25,11 @@ F260 to F262 (#640), F270 (#649), F271 (#644), F280 to F282 (#647), F290 (#656),
 ADR-0081 to 0084 are Accepted (2026-11-17); ADR-0081 is built (#673), 0082 to 0084 are not yet built. Next, in the maintainer's order: easy
 setup (ADR-0065), then the terminal holder (ADR-0079), the later steps of ADR-0075, and the pickers of ADR-0066.
 
+Blocked on acceptance: ADR-0087 (install and update coding agents on a machine from the window) is Proposed; nothing is built until the maintainer names it.
+
 Deferred dependency updates (Dependabot is told to ignore these; revisit when the reason no longer holds):
 - tokio-tungstenite 0.24 to 0.30: the WebSocket stack is the hub/node link and needs a deliberate code migration with its own review (the Dependabot attempt failed CI with four failures).
 - getrandom 0.2 to 0.4: `getrandom::getrandom` was removed (renamed `fill`) and is called in 12 places that make tokens, nonces, ids and the pairing numbers (`agora`, `agora-hub`, `agora-node`): a deliberate migration of the randomness source with its own review, one small helper in one place first (Dependabot attempt: the closed PR 695).
 - GitHub Actions major versions (`actions/checkout`, `setup-node`, `upload-artifact`, `download-artifact`): `release.yml` cannot be tested without pushing a tag, and the artifact actions change behaviour (names, merging, immutability); do them in one change after a release rehearsal exists.
 - `@types/node` major versions: the types must track the Node version the project runs (22); update them when the Node baseline moves.
+- Desktop app glib advisory: Dependabot alert #1 (glib < 0.20.0, medium, transitive of the GTK3 bindings under Tauri); fixed by moving Tauri to a GTK4/glib 0.20 line, so it is not bumpable alone.
