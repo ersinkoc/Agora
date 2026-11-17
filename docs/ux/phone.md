@@ -18,6 +18,14 @@ terminals get the key bar when the screen is a touch screen.
    Allow and Deny; then its terminal, or its conversation for a chat agent. **Next · N** in the top bar opens the next thing that
    needs you. Above the terminal, **N files changed** opens the review screen ([review.md](review.md)) and **Files** the file
    browser, each full-screen with Close; a closed agent's summary offers **Review the changes** and **Files** the same way.
+   **What needs you stays in reach of the thumb**: a bar above the bottom bar (alone at the bottom of an agent) shows the first thing that
+   needs you and how many there are. A plain yes or no that can be read whole there (the fleet console's rule, `decidableInline`: one
+   short line each of action and detail, no hidden character, never a request to start an agent) has **Allow** and **Deny** as 52 px
+   buttons inside the safe area, and its card above does not repeat them. Everything else (a request to start an agent, long or
+   structured text, an agent that waits, a machine asking to join, which keeps its two-press card, ADR-0065) has one **Review and
+   decide** button that opens the agent or brings the full card into view; nothing is answered from the bar on text that was cut.
+   While the link is down Allow and Deny are disabled everywhere on the phone and say why. The state of the link has a row of its own
+   under the title bar (it no longer pushes the buttons off a 390 px screen).
 3. The bar at the bottom of the list: **Search** (the command palette: agents, language, pages), **Start**, **Machines**, **This
    device**. The other pages (machines, this device, activity) keep their own frame with Back. **Edit theme** (palette or This
    device) opens the theme editor ([themes.md](themes.md)) as a screen of its own (`#/theme`) with Back.
@@ -73,8 +81,8 @@ approvals do.
 
 `scripts/e2e-phone.mjs` at 360 × 740, 390 × 844, 844 × 390 and 768 × 1024 on an emulated touch screen, and with the High
 contrast and Large text themes at 360 and 390 px (44 px targets, the key bar fits); screenshots in both themes
-in `docs/screenshots/phone/`. `scripts/e2e-phone-changes.mjs` opens the review screen and the file browser at 390 × 844 and the
-review screen again at 360 × 740 (fits, no sideways scroll). Unit tests: `apps/web/src/terminal/keys.test.ts`, `apps/web/src/phone/nav.test.ts`.
+in `docs/screenshots/phone/`; the needs-you bar in `docs/screenshots/phone-needs-bar/` (390 × 844, both themes; 360 px and Turkish too). `scripts/e2e-phone-changes.mjs` opens the review screen and the file browser at 390 × 844 and the
+review screen again at 360 × 740 (fits, no sideways scroll). Unit tests: `apps/web/src/terminal/keys.test.ts`, `apps/web/src/phone/nav.test.ts`, `apps/web/src/phone/PhoneDock.test.tsx` (presses the real buttons: never Allow for a start request or a pairing request, disabled while the link is down, one answer at a time).
 
 ## Not in this rung
 

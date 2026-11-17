@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import type { AgentTileModel } from '../model';
 import type { ApprovalModel, MachineModel } from '../net/view';
-import { approvalRedirect, backOf, byMachine, needsYou, phoneScreen } from './nav';
+import { approvalRedirect, backOf, byMachine, dockOf, needsYou, phoneScreen } from './nav';
 
 const agent = (id: string, over: Partial<AgentTileModel> = {}): AgentTileModel =>
   ({ id, name: id, accent: '', machine: id.split('/')[0] ?? '', machineId: id.split('/')[0], workspace: 'w', state: 'working', preview: '', ...over });
@@ -70,5 +70,24 @@ describe('install icons', () => {
     expect(size('apple-touch-icon.png')).toEqual([180, 180]);
     expect(readFileSync('index.html', 'utf8')).toContain('href="/apple-touch-icon.png"');
     expect(readFileSync('../../crates/agora-hub/src/web.rs', 'utf8')).toContain('/icon-maskable-512.png');
+  });
+});
+
+describe('the bar for what needs you', () => {
+  const plain = (id: string, over: Partial<ApprovalModel> = {}): ApprovalModel => ({ ...approval(id, 'n/a1', 5), action: 'Edit src/auth.rs', detail: '+12 -3', ...over });
+  const dockFor = (a: ApprovalModel, pairs = 0) => dockOf(needsYou([a], [agent('n/a1')]), pairs);
+  it('answers a short plain request in place', () => {
+    expect(dockFor(plain('n/1')).dock?.kind).toBe('answer');
+  });
+  it('only reviews a request to start an agent, long, multi-line or hidden-character text', () => {
+    expect(dockFor({ ...plain('n/2'), start: { agent: 'a1' } as ApprovalModel['start'] }).dock?.kind).toBe('review');
+    expect(dockFor(plain('n/3', { detail: 'x'.repeat(200) })).dock?.kind).toBe('review');
+    expect(dockFor(plain('n/4', { detail: 'one\ntwo' })).dock?.kind).toBe('review');
+    expect(dockFor(plain('n/5', { action: 'rm‮ -rf' })).dock?.kind).toBe('review');
+  });
+  it('an agent that waits is opened, a machine that asks to join is reviewed (never answered), and the count is all of them', () => {
+    expect(dockOf(needsYou([], [agent('n/a1', { state: 'needs-you' })]), 1)).toMatchObject({ dock: { kind: 'agent' }, count: 2 });
+    expect(dockOf([], 2)).toEqual({ dock: { kind: 'pair', count: 2 }, count: 2 });
+    expect(dockOf([], 0)).toEqual({ dock: undefined, count: 0 });
   });
 });

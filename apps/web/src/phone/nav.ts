@@ -1,5 +1,6 @@
 // ADR-0067 rung 2: where a phone-sized window is, from the address. Pure: the screens draw what this decides.
 import { type AgentTileModel, machineKey, sortFleet } from '../model';
+import { decidableInline } from '../net/fleet';
 import type { ApprovalModel, MachineModel } from '../net/view';
 
 // A phone: a narrow window, or a short one on a touch screen (a phone held sideways). A tablet and every desktop window keep the
@@ -67,4 +68,20 @@ export function byMachine(fleet: readonly AgentTileModel[], machines: readonly M
     g.agents.push(a);
   }
   return [...groups.values()].sort((a, b) => Number(b.online) - Number(a.online) || a.name.localeCompare(b.name));
+}
+
+// What the bar at the bottom of the screen offers for the first thing that needs you. A plain yes or no that can be read whole there
+// (the fleet console's rule, `decidableInline`: never a request to start an agent, never long or structured text) is answered in
+// place; every other request, an agent that waits and a machine that asks to join (always its full card, ADR-0065) is only reviewed.
+export type Dock =
+  | { kind: 'answer'; approval: ApprovalModel; agent?: AgentTileModel }
+  | { kind: 'review'; approval: ApprovalModel; agent?: AgentTileModel }
+  | { kind: 'agent'; agent: AgentTileModel }
+  | { kind: 'pair'; count: number };
+export function dockOf(needs: readonly NeedsItem[], pairs = 0): { dock?: Dock; count: number } {
+  const count = needs.length + pairs;
+  const first = needs[0];
+  if (!first) return { dock: pairs > 0 ? { kind: 'pair', count: pairs } : undefined, count };
+  if (first.kind === 'agent') return { dock: first, count };
+  return { dock: { kind: decidableInline(first.approval) ? 'answer' : 'review', approval: first.approval, agent: first.agent }, count };
 }
