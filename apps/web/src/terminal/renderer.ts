@@ -140,6 +140,9 @@ export class XtermRenderer implements TerminalRenderer {
     p.registerCsiHandler({ prefix: '=', final: 'u' }, (a) => { this.csiU.set(Number(a[0] ?? 0), Number(a[1] ?? 1)); return true; });
     p.registerCsiHandler({ prefix: '?', final: 'u' }, () => { this.term.input(this.csiU.reply(), false); return true; });
     p.registerCsiHandler({ prefix: '>', final: 'm' }, (a) => { if (Number(a[0]) === 4) this.modifyOtherKeys = Number(a[1] ?? 0); return false; });
+    // A full reset (RIS, `ESC c`: what `reset` sends after a program crashed with a protocol on) switches them off too, as kitty and
+    // xterm do; xterm's own reset still runs (audit F940).
+    p.registerEscHandler({ final: 'c' }, () => { this.csiU.reset(); this.modifyOtherKeys = 0; return false; });
     // OSC 52: offered to the user, never written by itself, never answered (clipboard.ts).
     p.registerOscHandler(52, (data) => { const text = clipboardOffer(data); if (text !== undefined) this.clipboardCb?.(text); return true; });
     // A theme change repaints the terminal; the tokens have changed by the time the event fires.

@@ -832,6 +832,7 @@ phone-back = Back to the list
 phone-offline = offline
 phone-no-agents = No agents on this machine.
 phone-needs = Needs you · { $count }
+phone-answer-below = Answer with the buttons at the bottom of the screen.
 phone-next = Next · { $count }
 phone-untrusted = { $machine } does not trust this device yet, so it will refuse an answer from here.
 key-bar = Terminal keys

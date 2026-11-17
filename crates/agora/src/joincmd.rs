@@ -276,6 +276,17 @@ pub(crate) fn run(
     };
     match pair(&wanted, timeouts, &mut show) {
         Ok(v) => {
+            // Looked at again: the owner may have taken minutes, and this machine may have joined meanwhile (`agora` enrolling with
+            // its own hub, `agora node enroll`, another join). Without `--replace` that link is kept, never overwritten (audit F890),
+            // unless it is this same hub under this same name: the hub issues a taken name only by replacing it, and the certificate
+            // it replaced is revoked, so keeping that link would keep one that no longer works (Codex review of F890).
+            if link.join("node-id").exists() && !replace && !superseded(&link, &id, &v.ca_pem) {
+                say.err(
+                    key!("join-already"),
+                    &[("dir", link.display().to_string().into())],
+                );
+                return Err(Stop::Usage);
+            }
             let url = format!("wss://{dial}");
             if let Err(e) = store_link(&url, &id, &v.ca_pem, &v.cert_pem, &key_pem) {
                 say.err(
@@ -354,6 +365,14 @@ fn say_failure(say: &Say, e: &PairError, dial: &str, host: &str) {
             );
         }
     }
+}
+
+/// Whether the link in `link` is this machine under `id` at the hub whose CA is `ca_pem`: the one the certificate just delivered
+/// supersedes. Anything unreadable is not.
+fn superseded(link: &std::path::Path, id: &str, ca_pem: &str) -> bool {
+    let read = |f: &str| std::fs::read_to_string(link.join(f)).ok();
+    read("node-id").is_some_and(|n| n.trim() == id)
+        && read("ca.pem").is_some_and(|c| c.trim() == ca_pem.trim())
 }
 
 #[cfg(test)]

@@ -731,6 +731,48 @@ impl Supervisor {
         Some(profile)
     }
 
+    /// The confinement of one adapter agent of `kind` ([`Self::sandbox_for`]), refused as a terminal agent's is
+    /// ([`Self::refuse_reachable`]): an adapter and the agent below it run with exactly this profile.
+    fn adapter_sandbox(
+        &self,
+        kind: &str,
+        worktree: &Path,
+        program: &str,
+    ) -> Result<Option<agora_platform::Sandbox>, SupervisorError> {
+        let profile = self.sandbox_for(kind, worktree, program);
+        if let Some(p) = &profile {
+            self.refuse_reachable(kind, p)?;
+        }
+        Ok(profile)
+    }
+
+    /// ADR-0082, decision 4: where the node requires its control token, the file must lie outside every folder the agent may read or
+    /// write, because Landlock cannot say "except" (`Sandbox::deny` is ignored there). ADR-0084: the same for the folder of stored
+    /// secrets (only once it holds one): a grant that reaches it would hand a confined agent every secret in it. Refused, never started.
+    fn refuse_reachable(
+        &self,
+        kind: &str,
+        profile: &agora_platform::Sandbox,
+    ) -> Result<(), SupervisorError> {
+        if self.sandbox.token_reachable(profile) {
+            return Err(SupervisorError::SandboxRefused(
+                kind.to_string(),
+                self.sandbox.level.name(),
+                "control_token_reachable",
+            ));
+        }
+        if let Some(store) = self.credentials.store() {
+            if !store.list().is_empty() && self.sandbox.path_reachable(store.dir(), profile) {
+                return Err(SupervisorError::SandboxRefused(
+                    kind.to_string(),
+                    self.sandbox.level.name(),
+                    "secrets_reachable",
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// With confinement on, a launch in a folder that would make the confinement meaningless is refused before anything starts.
     pub(crate) fn refuse_protected(
         &self,
@@ -1057,15 +1099,19 @@ impl Supervisor {
             let root =
                 git::discover_checkout(&worktree).map_or_else(|_| worktree.clone(), |c| c.root);
             let mesh = self.adapter_mesh(&id, &req.kind, &project.to_string(), &worktree);
-            let launched = launch_adapter(
-                &spec,
-                &root,
-                &worktree,
-                None,
-                self.sandbox_for(&req.kind, &worktree, &spec.command[0]),
-                mesh.as_ref(),
-                self.credential_vars(&req.kind),
-            );
+            let launched = self
+                .adapter_sandbox(&req.kind, &worktree, &spec.command[0])
+                .and_then(|profile| {
+                    launch_adapter(
+                        &spec,
+                        &root,
+                        &worktree,
+                        None,
+                        profile,
+                        mesh.as_ref(),
+                        self.credential_vars(&req.kind),
+                    )
+                });
             let (adapter, session_id, capabilities) = match launched {
                 Ok(l) => l,
                 Err(e) => {
@@ -1295,15 +1341,19 @@ impl Supervisor {
         let id = AgentId::new(format!("agent-{}", self.next_id));
         self.next_id += 1;
         let mesh = self.adapter_mesh(&id, &req.kind, &checkout.project.to_string(), &worktree);
-        let result = launch_adapter(
-            spec,
-            &checkout.root,
-            &worktree,
-            None,
-            self.sandbox_for(&req.kind, &worktree, &spec.command[0]),
-            mesh.as_ref(),
-            self.credential_vars(&req.kind),
-        );
+        let result = self
+            .adapter_sandbox(&req.kind, &worktree, &spec.command[0])
+            .and_then(|profile| {
+                launch_adapter(
+                    spec,
+                    &checkout.root,
+                    &worktree,
+                    None,
+                    profile,
+                    mesh.as_ref(),
+                    self.credential_vars(&req.kind),
+                )
+            });
         let (adapter, session_id, capabilities) = match result {
             Ok(started) => started,
             Err(error) => {
@@ -1420,7 +1470,7 @@ impl Supervisor {
     fn restart_adapter(&mut self, id: &AgentId, now: Instant, events: &mut Vec<SupervisorEvent>) {
         let policy = self.cfg.restart;
         let Some(profile) = self.adapters.get(id).and_then(|e| {
-            Some(self.sandbox_for(&e.agent.kind, &e.worktree, e.spec.command.first()?))
+            Some(self.adapter_sandbox(&e.agent.kind, &e.worktree, e.spec.command.first()?))
         }) else {
             return;
         };
@@ -1435,15 +1485,17 @@ impl Supervisor {
         e.restart_at = None;
         e.restarts += 1;
         // A crash keeps the agent in the mesh: the restarted session gets the same endpoint.
-        match launch_adapter(
-            &e.spec,
-            &e.checkout_root,
-            &e.worktree,
-            e.agent.session.as_deref(),
-            profile,
-            e.mesh.as_ref(),
-            creds,
-        ) {
+        match profile.and_then(|profile| {
+            launch_adapter(
+                &e.spec,
+                &e.checkout_root,
+                &e.worktree,
+                e.agent.session.as_deref(),
+                profile,
+                e.mesh.as_ref(),
+                creds,
+            )
+        }) {
             Ok((adapter, session_id, capabilities)) => {
                 e.adapter = Some(adapter);
                 e.session_id = session_id;
@@ -1616,27 +1668,9 @@ impl Supervisor {
             // ADR-0083: what points at a socket the user's session offers is not inherited by a confined agent.
             cfg.env_remove.extend(self.sandbox.scrubbed_env());
         }
-        // ADR-0082, decision 4: where the node requires its control token, the file must lie outside every folder the agent may read
-        // or write, because Landlock cannot say "except" (`Sandbox::deny` is ignored there). Refused, never started.
+        // ADR-0082 and ADR-0084: checked with the final read grants (the private configuration folder included).
         if let Some(profile) = &cfg.sandbox {
-            if self.sandbox.token_reachable(profile) {
-                return Err(SupervisorError::SandboxRefused(
-                    kind.to_string(),
-                    self.sandbox.level.name(),
-                    "control_token_reachable",
-                ));
-            }
-        }
-        // ADR-0084: the same for the folder of stored secrets (only once it holds one): a grant that reaches it would hand a confined
-        // agent every secret in it.
-        if let (Some(profile), Some(store)) = (&cfg.sandbox, self.credentials.store()) {
-            if !store.list().is_empty() && self.sandbox.path_reachable(store.dir(), profile) {
-                return Err(SupervisorError::SandboxRefused(
-                    kind.to_string(),
-                    self.sandbox.level.name(),
-                    "secrets_reachable",
-                ));
-            }
+            self.refuse_reachable(kind, profile)?;
         }
         if let Some(k) = self.kinds.get(kind) {
             cfg.env = k
@@ -2036,11 +2070,10 @@ impl Supervisor {
                     p,
                 ));
             }
-            let profile = entry
-                .spec
-                .command
-                .first()
-                .and_then(|p| self.sandbox_for(&entry.agent.kind, &entry.worktree, p));
+            let profile = match entry.spec.command.first() {
+                Some(p) => self.adapter_sandbox(&entry.agent.kind, &entry.worktree, p)?,
+                None => None,
+            };
             let native = entry.agent.session.is_some();
             // A stopped (or given-up) agent left the mesh; resuming joins again with a fresh endpoint, given back if the start fails.
             let mesh = self.adapter_mesh(

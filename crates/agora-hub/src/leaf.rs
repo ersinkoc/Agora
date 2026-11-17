@@ -35,6 +35,10 @@ pub trait Provision: Send + Sync {
 pub type Persist = Box<dyn Fn(&str) -> std::io::Result<()> + Send + Sync>;
 
 type Interfaces = Box<dyn Fn() -> Result<Vec<Iface>, String> + Send + Sync>;
+/// More owner names, asked for again at every `provision` (a file the owner's tools write while the hub runs). Every name in it must
+/// already be checked ([`crate::names::checked_name`]).
+pub type Extra = Box<dyn Fn() -> Vec<String> + Send + Sync>;
+
 type HostName = Box<dyn Fn() -> Option<String> + Send + Sync>;
 
 struct Current {
@@ -50,6 +54,8 @@ pub struct Leaf {
     interfaces: Interfaces,
     /// Keeps `server-cert.pem` up to date (`agora doctor` reads it), when there is such a place.
     persist: Option<Persist>,
+    /// Names added while the hub runs (`agora remote tailscale`); read at every `provision`.
+    extra: Option<Extra>,
     slot: TlsSlot,
     current: Mutex<Current>,
 }
@@ -94,10 +100,18 @@ impl Leaf {
             host,
             interfaces,
             persist,
+            extra: None,
             slot: TlsSlot::new(acceptor, hash),
             current: Mutex::new(Current { names, hash }),
         };
         Ok((leaf, failure))
+    }
+
+    /// Makes every later `provision` also name what `extra` returns (after the `--name` values).
+    #[must_use]
+    pub fn with_extra(mut self, extra: Extra) -> Self {
+        self.extra = Some(extra);
+        self
     }
 
     /// The slot the listener takes its acceptor from.
@@ -135,7 +149,7 @@ fn wanted(
     listen: IpAddr,
     interfaces: &Interfaces,
 ) -> Result<Vec<String>, NamesFailure> {
-    let ifs = if listen.is_unspecified() {
+    let ifs = if listen.to_canonical().is_unspecified() {
         interfaces().map_err(|_| NamesFailure {
             reason: "interfaces",
             names: vec![],
@@ -160,9 +174,18 @@ fn wanted(
 impl Provision for Leaf {
     fn provision(&self) -> Result<[u8; 32], NamesFailure> {
         // The names are worked out under the lock, so the leaf that is issued last is the one made from the last listing: two opens at
-        // once around an address change cannot leave the older listing in place (F931).
+        // once around an address change cannot leave the older listing in place (F931). The owner's extra names are collected under the
+        // lock too, so a re-issue that races a change of the names file cannot leave the older names in place.
         let mut cur = self.lock();
-        let names = wanted(&self.configured, &self.host, self.listen, &self.interfaces)?;
+        let mut configured = self.configured.clone();
+        // Names added by the owner's tools never take the leaf past its limit (the owner's own `--name` values must always fit, and a
+        // refusal here would stop every `pair open`): the ones that do not fit are left out, and `agora doctor` says so.
+        for n in self.extra.iter().flat_map(|f| f()) {
+            if !configured.contains(&n) && configured.len() < crate::names::MAX_NAMES {
+                configured.push(n);
+            }
+        }
+        let names = wanted(&configured, &self.host, self.listen, &self.interfaces)?;
         if covers(&cur.names, &names) {
             return Ok(cur.hash);
         }
@@ -250,5 +273,158 @@ mod tests {
             "{:?}",
             leaf.names()
         );
+    }
+
+    /// F931 for the owner's extra names: a re-issue that races a change of the names file. Open #1 collects the old extra name and is
+    /// held there; the file changes; open #2 starts. The names are collected under the lock, so #2 waits for #1 and the leaf left in
+    /// place is the one made last, from the extras present when the lock was taken: it must name the new extra, not the old one.
+    #[test]
+    fn two_opens_around_a_names_file_change_leave_the_new_extra_name() {
+        let extra = Arc::new(Mutex::new(vec!["old.example".to_string()]));
+        let (listed_tx, listed_rx) = mpsc::channel::<()>();
+        let (go_tx, go_rx) = mpsc::channel::<()>();
+        let gate = Arc::new(Mutex::new(Some((listed_tx, go_rx))));
+        let (x, g) = (Arc::clone(&extra), Arc::clone(&gate));
+        let (leaf, _) = Leaf::start(
+            Ca::generate("ca").unwrap(),
+            vec![],
+            "127.0.0.1".parse().unwrap(),
+            Box::new(|| None),
+            Box::new(|| Ok(vec![])),
+            None,
+        )
+        .unwrap();
+        // Started with no extras: the first leaf lacks both names, so each open has something to issue.
+        let leaf = leaf.with_extra(Box::new(move || {
+            let now = x.lock().unwrap().clone();
+            if std::thread::current().name() == Some("first") {
+                if let Some((listed, go)) = g.lock().unwrap().take() {
+                    listed.send(()).unwrap();
+                    go.recv().unwrap();
+                }
+            }
+            now
+        }));
+        let leaf = Arc::new(leaf);
+        let l1 = Arc::clone(&leaf);
+        let first = std::thread::Builder::new()
+            .name("first".into())
+            .spawn(move || l1.provision())
+            .unwrap();
+        listed_rx.recv().unwrap();
+        *extra.lock().unwrap() = vec!["new.example".to_string()];
+        let (done_tx, done_rx) = mpsc::channel();
+        let l2 = Arc::clone(&leaf);
+        let second = std::thread::spawn(move || {
+            let r = l2.provision();
+            let _ = done_tx.send(());
+            r
+        });
+        let _ = done_rx.recv_timeout(std::time::Duration::from_secs(1));
+        go_tx.send(()).unwrap();
+        assert!(first.join().unwrap().is_ok());
+        assert!(second.join().unwrap().is_ok());
+        assert!(
+            leaf.names().contains(&"new.example".to_string()),
+            "{:?}",
+            leaf.names()
+        );
+    }
+
+    /// An IPv4-mapped wildcard (`[::ffff:0.0.0.0]`) is the unspecified IPv4 address: the interfaces are listed and `0.0.0.0` is never
+    /// named in the leaf.
+    #[test]
+    fn a_mapped_wildcard_listen_is_a_wildcard_and_names_no_unspecified_address() {
+        let (leaf, failure) = Leaf::start(
+            Ca::generate("ca").unwrap(),
+            vec![],
+            "::ffff:0.0.0.0".parse().unwrap(),
+            Box::new(|| None),
+            Box::new(|| {
+                Ok(vec![Iface {
+                    ip: "10.0.0.5".parse().unwrap(),
+                    up: true,
+                    loopback: false,
+                    transient: false,
+                }])
+            }),
+            None,
+        )
+        .unwrap();
+        assert!(failure.is_none());
+        let names = leaf.names();
+        assert!(names.contains(&"10.0.0.5".to_string()), "{names:?}");
+        assert!(
+            !names.iter().any(|n| n.contains("0.0.0.0") || n == "::"),
+            "{names:?}"
+        );
+    }
+
+    /// Names written while the hub runs reach the certificate at the next `provision`, from the same CA, and a name that is not
+    /// there any more does not force a new one.
+    #[test]
+    fn extra_names_reach_the_leaf_at_the_next_provision() {
+        let ca = Ca::generate("test ca").unwrap();
+        let ca_pem = ca.cert_pem().to_string();
+        let extra: Arc<Mutex<Vec<String>>> = Arc::default();
+        let seen = Arc::clone(&extra);
+        let (leaf, failure) = Leaf::start(
+            ca,
+            vec![],
+            "127.0.0.1".parse().unwrap(),
+            Box::new(|| Some("box".to_string())),
+            Box::new(|| Ok(vec![])),
+            None,
+        )
+        .unwrap();
+        assert!(failure.is_none());
+        let leaf = leaf.with_extra(Box::new(move || seen.lock().unwrap().clone()));
+        let first = leaf.provision().unwrap();
+        assert_eq!(leaf.names(), ["localhost", "box", "127.0.0.1"]);
+        extra
+            .lock()
+            .unwrap()
+            .extend(["box.tail1234.ts.net".to_string(), "100.64.0.7".to_string()]);
+        let second = leaf.provision().unwrap();
+        assert_ne!(first, second, "a new certificate");
+        assert_eq!(
+            leaf.names(),
+            [
+                "box.tail1234.ts.net",
+                "100.64.0.7",
+                "localhost",
+                "box",
+                "127.0.0.1"
+            ]
+        );
+        // Same CA: a node that trusts it still verifies the new leaf.
+        assert!(ca_pem.contains("CERTIFICATE"));
+        extra.lock().unwrap().clear();
+        assert_eq!(
+            leaf.provision().unwrap(),
+            second,
+            "a removed name changes nothing"
+        );
+    }
+
+    /// A leaf with as many owner names as it can carry still issues: names added later are left out, never an error.
+    #[test]
+    fn added_names_that_do_not_fit_are_left_out_and_never_stop_provision() {
+        let ca = Ca::generate("test ca").unwrap();
+        let owner: Vec<String> = (0..crate::names::MAX_NAMES)
+            .map(|i| format!("h{i}.example"))
+            .collect();
+        let (leaf, _) = Leaf::start(
+            ca,
+            owner.clone(),
+            "127.0.0.1".parse().unwrap(),
+            Box::new(|| None),
+            Box::new(|| Ok(vec![])),
+            None,
+        )
+        .unwrap();
+        let leaf = leaf.with_extra(Box::new(|| vec!["box.tail1.ts.net".to_string()]));
+        assert!(leaf.provision().is_ok());
+        assert_eq!(leaf.names(), owner);
     }
 }

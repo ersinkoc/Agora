@@ -58,6 +58,27 @@ fn canonical(n: &str) -> Option<String> {
     dns_name_ok(n).then(|| n.to_ascii_lowercase())
 }
 
+/// A name the owner's tools may put in the certificate on their own (not typed by the owner as `--name`): the canonical form, or
+/// `None`. Stricter than a `--name`: letters, digits, `-` and `.` only; labels of 1 to 63 characters that do not start or end with
+/// `-`; no wildcard, no empty label, no space, control or direction-changing character (the check is on the bytes, so non-ASCII text
+/// never passes). An IP address is accepted in its shortest form.
+pub fn checked_name(n: &str) -> Option<String> {
+    let n = n.strip_suffix('.').unwrap_or(n);
+    if n.is_empty() || n.len() > MAX_NAME_BYTES || !n.is_ascii() {
+        return None;
+    }
+    if let Ok(ip) = n.parse::<IpAddr>() {
+        return Some(ip.to_string());
+    }
+    let ok = n.split('.').all(|l| {
+        (1..=63).contains(&l.len())
+            && !l.starts_with('-')
+            && !l.ends_with('-')
+            && l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    });
+    ok.then(|| n.to_ascii_lowercase())
+}
+
 fn v4_link_local(a: Ipv4Addr) -> bool {
     a.octets()[0] == 169 && a.octets()[1] == 254
 }
@@ -115,12 +136,14 @@ pub fn select(
     }
     let mut v4: Vec<Ipv4Addr> = Vec::new();
     let mut v6: Vec<Ipv6Addr> = Vec::new();
-    if listen.is_unspecified() {
+    // `[::ffff:0.0.0.0]` is the IPv4 wildcard: it is told apart from a named address by its canonical form, and never named.
+    let wildcard = listen.to_canonical();
+    if wildcard.is_unspecified() {
         for i in interfaces
             .iter()
             .filter(|i| i.up && !i.loopback && !i.transient)
         {
-            match (i.ip, listen) {
+            match (i.ip, wildcard) {
                 (IpAddr::V4(a), _) if usable(i.ip) => v4.push(a),
                 (IpAddr::V6(a), IpAddr::V6(_)) if usable(i.ip) => v6.push(a),
                 _ => {}
@@ -183,6 +206,37 @@ mod tests {
     }
 
     const ANY4: &str = "0.0.0.0";
+
+    #[test]
+    fn a_checked_name_is_plain_letters_digits_hyphens_and_dots() {
+        assert_eq!(
+            checked_name("Box.Tail-1.ts.net."),
+            Some("box.tail-1.ts.net".into())
+        );
+        assert_eq!(
+            checked_name("100.101.102.103"),
+            Some("100.101.102.103".into())
+        );
+        for bad in [
+            "",
+            ".",
+            "*.ts.net",
+            "a..b",
+            "-a.ts.net",
+            "a-.ts.net",
+            "a b.ts.net",
+            "a\u{202e}b.ts.net",
+            "a\nb.ts.net",
+            "caf\u{e9}.ts.net",
+            "a_b.ts.net",
+            "a/b",
+            "a:b",
+        ] {
+            assert_eq!(checked_name(bad), None, "{bad:?}");
+        }
+        assert_eq!(checked_name(&format!("{}.ts.net", "a".repeat(64))), None);
+        assert_eq!(checked_name(&format!("{}.ts.net", "a.".repeat(130))), None);
+    }
 
     #[test]
     fn a_default_hub_names_localhost_its_host_and_every_lan_address() {
@@ -331,6 +385,12 @@ mod tests {
         // The form the owner typed stays named for a machine given that literal (Codex review).
         let n = select(&[], None, ip("::ffff:192.168.1.5"), &[up("10.0.0.7")]).unwrap();
         assert_eq!(n.all, ["localhost", "192.168.1.5", "::ffff:192.168.1.5"]);
+    }
+
+    #[test]
+    fn a_mapped_wildcard_listen_address_is_a_wildcard_and_never_named() {
+        let n = select(&[], None, ip("::ffff:0.0.0.0"), &[up("10.0.0.7")]).unwrap();
+        assert_eq!(n.all, ["localhost", "10.0.0.7"]);
     }
 
     #[test]

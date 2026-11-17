@@ -192,6 +192,9 @@ fn report_rates(hub: &Hub) {
     }
 }
 
+/// The longest a machine waiting for the owner goes without looking at its session (F810).
+const RECHECK: Duration = Duration::from_secs(1);
+
 fn sleep_for(until: Option<u64>) -> Duration {
     Duration::from_millis(until.map_or(1_000, |t| t.saturating_sub(mono()).max(1)))
 }
@@ -356,7 +359,8 @@ where
         if v != Verdict::Waiting {
             break v;
         }
-        let wait = sleep_for(hub.pairing().with(|p| p.deadline_of(me.conn)));
+        // F810: the switch can close without a `wake` (the window's fifth failure, its timeout), so look again at least once a second.
+        let wait = sleep_for(hub.pairing().with(|p| p.deadline_of(me.conn))).min(RECHECK);
         tokio::select! {
             _ = changed.changed() => {}
             () = tokio::time::sleep(wait) => {}
@@ -382,13 +386,17 @@ where
     match verdict {
         Verdict::Waiting => Ok(()),
         Verdict::Approved(issue) => {
+            // Issued or not, the name is let go before anything is written (a machine that stops reading must not hold it).
+            let let_go = || hub.pairing().with(|p| p.issued(me.conn));
             let Some(ca) = ca else {
+                let_go();
                 return refuse(&mut conn, &reveal_id, &Error::new(ErrorCode::Internal)).await;
             };
             // For the frozen tuple only: the CSR must still be the one the commitment covered.
             let same = ca::csr_der(&issue.csr_pem)
                 .is_ok_and(|der| <[u8; 32]>::from(Sha256::digest(&der)) == issue.csr_hash);
             if !same {
+                let_go();
                 return refuse(&mut conn, &reveal_id, &Refusal::Mismatch.to_error()).await;
             }
             let issued = Enrollment::new(hub.store()).issue_paired(
@@ -398,6 +406,7 @@ where
                 issue.replace,
                 now_ms(),
             );
+            let_go();
             match issued {
                 Ok(cert) => {
                     audit(hub, &who, "pair.issued", &issue.node_id, &cert.serial_hex);

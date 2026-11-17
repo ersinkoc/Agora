@@ -814,6 +814,7 @@ phone-back = Listeye dön
 phone-offline = çevrim dışı
 phone-no-agents = Bu makinede ajan yok.
 phone-needs = Sizi bekleyenler · { $count }
+phone-answer-below = Yanıtı ekranın altındaki düğmelerle verin.
 phone-next = Sıradaki · { $count }
 phone-untrusted = { $machine } bu cihaza henüz güvenmiyor; buradan verilen yanıtı reddeder.
 key-bar = Terminal tuşları

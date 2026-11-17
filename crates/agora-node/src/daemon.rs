@@ -391,18 +391,18 @@ impl EventSink {
             .unwrap_or_else(|e| e.into_inner())
             .clone();
         for w in known.workspaces.values() {
-            self.record(Body::WorkspaceRegistered(w.clone()));
+            self.restate(Body::WorkspaceRegistered(w.clone()));
         }
         for v in views {
             let id = v.id.as_str();
             if !v.running {
                 if how == Announce::Present {
-                    self.record(Body::AgentExited(v1::AgentExited {
+                    self.restate(Body::AgentExited(v1::AgentExited {
                         agent_id: id.to_string(),
                         exit_code: known.exits.get(id).copied().unwrap_or(i32::MIN),
                     }));
                     if known.terminals.contains(id) {
-                        self.record(Body::TerminalClosed(v1::TerminalClosed {
+                        self.restate(Body::TerminalClosed(v1::TerminalClosed {
                             terminal_id: crate::control::terminal_id_of(&v.id),
                         }));
                     }
@@ -411,17 +411,17 @@ impl EventSink {
             }
             if v.directory {
                 if let Some(ws) = known.bound.get(id) {
-                    self.record(Body::AgentWorkspaceBound(v1::AgentWorkspaceBound {
+                    self.restate(Body::AgentWorkspaceBound(v1::AgentWorkspaceBound {
                         agent_id: id.to_string(),
                         workspace_id: ws.clone(),
                     }));
                 }
             }
-            self.agent_up(v, known.sessions.get(id));
+            self.agent_up(v, known.sessions.get(id), false);
         }
         if how == Announce::Present {
             for r in known.resolved {
-                self.record(Body::ApprovalResolved(r));
+                self.restate(Body::ApprovalResolved(r));
             }
         }
         for p in waiting {
@@ -429,10 +429,12 @@ impl EventSink {
         }
     }
 
-    /// An agent in `view` is up: started, its state, its session if known, and its terminal if it has one.
-    fn agent_up(&self, view: &AgentView, session: Option<&String>) {
+    /// An agent in `view` is up: started, its state, its session if known, and its terminal if it has one. `learn` false: an
+    /// announcement re-stating it from a copy of the supervisor's list (see [`restate`](Self::restate)).
+    fn agent_up(&self, view: &AgentView, session: Option<&String>, learn: bool) {
         let agent = view.id.as_str();
-        self.record(Body::AgentStarted(v1::AgentStarted {
+        let record = |body| self.record_as(body, learn);
+        record(Body::AgentStarted(v1::AgentStarted {
             agent_id: agent.into(),
             project_id: view.project.clone(),
             node_id: self.producer.clone(),
@@ -456,19 +458,19 @@ impl EventSink {
             launch_options: view.launch_options.clone(),
             skips_permissions: view.skips_permissions,
         }));
-        self.record(Body::AgentStateChanged(v1::AgentStateChanged {
+        record(Body::AgentStateChanged(v1::AgentStateChanged {
             agent_id: agent.into(),
             state: proto_state(view.state) as i32,
             reported: false,
         }));
         if let Some(session) = session {
-            self.record(Body::AgentSessionReported(v1::AgentSessionReported {
+            record(Body::AgentSessionReported(v1::AgentSessionReported {
                 agent_id: agent.into(),
                 session_id: session.clone(),
             }));
         }
         if view.terminal {
-            self.record(Body::TerminalOpened(v1::TerminalOpened {
+            record(Body::TerminalOpened(v1::TerminalOpened {
                 terminal_id: crate::control::terminal_id_of(&view.id),
                 node_id: self.producer.clone(),
                 purpose: v1::TerminalPurpose::Agent as i32,
@@ -478,6 +480,17 @@ impl EventSink {
     }
 
     fn record(&self, body: Body) {
+        self.record_as(body, true);
+    }
+
+    /// F870: an announcement re-states what this node recorded before, from a copy of the supervisor's list taken before it records
+    /// (the supervision tick records meanwhile). It goes to the log for the hub, but the session ledger, which learned every fact it
+    /// re-states when it happened, does not learn from it: a stale copy would end a restarted agent there, or bring back a finished one.
+    fn restate(&self, body: Body) {
+        self.record_as(body, false);
+    }
+
+    fn record_as(&self, body: Body, learn: bool) {
         let ended = match &body {
             // Gathered for a few seconds and logged as one (see `crate::usage_merge`).
             Body::AgentUsageReported(u) => {
@@ -506,7 +519,7 @@ impl EventSink {
                 self.write(Body::AgentUsageReported(u));
             }
         }
-        self.write(body);
+        self.write_as(body, learn);
     }
 
     /// Logs the usage reports whose gathering window has passed. Called on every supervision tick.
@@ -522,7 +535,11 @@ impl EventSink {
     }
 
     fn write(&self, body: Body) {
-        if let Some(ledger) = self.ledger.get() {
+        self.write_as(body, true);
+    }
+
+    fn write_as(&self, body: Body, learn: bool) {
+        if let Some(ledger) = self.ledger.get().filter(|_| learn) {
             ledger.observe(&body, now_ms());
         }
         // Only the few kinds a resync announcement repeats take this lock; every other event goes straight to the log.
@@ -602,7 +619,7 @@ impl EventSink {
             match e {
                 SupervisorEvent::Started { agent } | SupervisorEvent::Resumed { agent, .. } => {
                     if let Some(view) = views.iter().find(|v| v.id == *agent) {
-                        self.agent_up(view, None);
+                        self.agent_up(view, None, true);
                     }
                 }
                 SupervisorEvent::SessionReported { agent, session } => {
@@ -2598,5 +2615,95 @@ mod process_record_tests {
         );
         assert!(recorded.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// F870: an announcement re-states agents from a copy of the supervisor's list taken before the tick recorded their end or their
+    /// restart. That stale copy must not change the ledger: a finished agent is not brought back (offered, and by policy resumed with a
+    /// "carry on" message, after the node restarts), and a restarted one is not ended (its survivor recognised after a crash).
+    #[test]
+    fn a_stale_announcement_does_not_change_the_ledger() {
+        use super::{Announce, EventSink};
+        use crate::supervisor::{AgentView, SupervisorEvent};
+        use agora_core::AgentState;
+        let view = |running: bool, state: AgentState| AgentView {
+            directory: false,
+            terminal: true,
+            level: agora_core::IntegrationLevel::L1Manifest,
+            id: AgentId::new("agent-1"),
+            kind: "fake".into(),
+            state,
+            worktree: std::path::PathBuf::from("/wt/agent-1"),
+            branch: "main".into(),
+            project: "p".into(),
+            running,
+            restarts: 0,
+            parent: None,
+            launch_options: Vec::new(),
+            skips_permissions: false,
+        };
+        let exited = |code| SupervisorEvent::Exited {
+            agent: AgentId::new("agent-1"),
+            status: agora_platform::ExitStatus {
+                code: Some(code),
+                signal: None,
+            },
+        };
+        let started = SupervisorEvent::Started {
+            agent: AgentId::new("agent-1"),
+        };
+        for restarted in [false, true] {
+            let dir = std::env::temp_dir().join(format!(
+                "agora-procrec-stale-{restarted}-{}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let ledger = std::sync::Arc::new(crate::ledger::Ledger::open(&dir, 1).unwrap());
+            let sink = EventSink::open(&dir.join("events"), "n1").unwrap();
+            sink.set_ledger(std::sync::Arc::clone(&ledger));
+            let up = [view(true, AgentState::Working)];
+            sink.supervisor_events(std::slice::from_ref(&started), &up);
+            // The tick writes each new process the way it does in the node (#696).
+            let mut recorded = HashMap::new();
+            let pid = |p: u32| [(AgentId::new("agent-1"), p)];
+            record_new_processes(&ledger, &mut recorded, &pid(4242), identity, 2);
+            let copy = if restarted {
+                // Crashed, restart pending: copied now; the tick then restarts it with a new process.
+                let down = [view(false, AgentState::Unknown)];
+                sink.supervisor_events(&[exited(1)], &down);
+                record_new_processes(&ledger, &mut recorded, &pid(5151), identity, 3);
+                sink.supervisor_events(std::slice::from_ref(&started), &up);
+                down.to_vec()
+            } else {
+                // Copied while it runs; the tick then records that it finished.
+                let done = SupervisorEvent::StateChanged {
+                    agent: AgentId::new("agent-1"),
+                    state: AgentState::Done,
+                };
+                sink.supervisor_events(&[exited(0), done], &[view(false, AgentState::Done)]);
+                up.to_vec()
+            };
+            sink.announce_present(&copy, &[], Announce::Present);
+            ledger.flush().unwrap();
+            drop((sink, ledger));
+            let e = crate::ledger::Ledger::open(&dir, 10)
+                .unwrap()
+                .get("agent-1")
+                .unwrap();
+            if restarted {
+                assert_eq!(e.process().map(|p| p.pid), Some(5151));
+                assert!(
+                    e.interrupted(),
+                    "a restarted agent was ended by a stale copy"
+                );
+            } else {
+                assert!(
+                    !e.interrupted(),
+                    "a finished agent was brought back by a stale copy"
+                );
+                assert_eq!(e.last_state, "done");
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 }
