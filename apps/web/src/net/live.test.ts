@@ -126,6 +126,11 @@ describe('view', () => {
     applyEvent(v, 6, ev('hub', 2, { nodeLink: { nodeId: 'n', up: true, generation: 1 } }));
     applyEvent(v, 7, ev('n', 5, { agentInterrupted: { agentId: 'a', kind: 'claude' } }));
     expect(tiles(v).map((t) => t.id)).toEqual(['n/b']);
+    // One first heard of while the machine was hidden was never forgotten: the hub lists it when the machine comes back.
+    applyEvent(v, 8, ev('hub', 3, { nodeForgotten: { nodeId: 'n' } }));
+    applyEvent(v, 9, ev('n', 6, { agentInterrupted: { agentId: 'c', kind: 'codex' } }));
+    applyEvent(v, 10, ev('hub', 4, { nodeLink: { nodeId: 'n', up: true, generation: 2 } }));
+    expect(tiles(v).map((t) => t.id).sort()).toEqual(['n/b', 'n/c']);
   });
 
   it('adds up estimated cost per project and skips agents without a price', () => {

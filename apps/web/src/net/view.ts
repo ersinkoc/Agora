@@ -29,6 +29,7 @@ export interface AgentV {
   parentId?: string; // ADR-0057: the hub-wide key of the agent that started it
   interrupted?: InterruptedV; // ADR-0060: it was running when its machine stopped; cleared by its next start
   skipsPermissions?: boolean; // ADR-0059: started with an option that skips permissions, for its whole life
+  hidden?: boolean; // ADR-0073: still running when its machine was forgotten; shown again only if still running when it comes back
 }
 export interface InterruptedV { resumable: boolean; atMs: number; folder: string; stillRunning?: boolean }
 
@@ -194,7 +195,9 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
         if (b.up && n.forgotten) {
           n.forgotten = false;
           for (const [key, a] of [...v.agents]) {
-            if (a.nodeId === id && !a.running) { v.agents.delete(key); v.agentWorkspaces.delete(key); v.withTerminal.delete(key); (v.forgottenAgents ??= new Set()).add(key); }
+            if (a.nodeId !== id || !a.hidden) continue;
+            if (a.running) a.hidden = false;
+            else { v.agents.delete(key); v.agentWorkspaces.delete(key); v.withTerminal.delete(key); (v.forgottenAgents ??= new Set()).add(key); }
           }
         }
       }
@@ -208,7 +211,9 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
       const n = v.nodes.get(id);
       if (n) n.forgotten = true;
       for (const [key, a] of [...v.agents]) {
-        if (a.nodeId === id && !a.running) { v.agents.delete(key); v.agentWorkspaces.delete(key); v.withTerminal.delete(key); (v.forgottenAgents ??= new Set()).add(key); }
+        if (a.nodeId !== id) continue;
+        if (a.running) a.hidden = true;
+        else { v.agents.delete(key); v.agentWorkspaces.delete(key); v.withTerminal.delete(key); (v.forgottenAgents ??= new Set()).add(key); }
       }
       break;
     }
