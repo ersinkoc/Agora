@@ -38,7 +38,7 @@ fn manifest(kind: &str, declares: &[&str], secrets: &Path) -> Manifest {
     let script = format!(
         "env > probe.tmp && mv probe.tmp probe.txt; \
          tr '\\0' ' ' < /proc/$$/cmdline > cmdline.txt 2>/dev/null; \
-         cat {}/* > read.txt 2> read.err; echo $? > read.rc; sleep 60",
+         cat {}/* > read.tmp 2> read.err; echo $? > read.rc; mv read.tmp read.txt; sleep 60",
         secrets.display()
     );
     let launch = serde_json::to_string(&["/bin/sh", "-c", &script]).unwrap();
@@ -475,4 +475,75 @@ fn the_policy_file_lists_names_per_kind_and_a_bad_line_lists_none() {
     let p = read("credentials. = A_TOKEN\ncredentials.Bad_Kind = A_TOKEN\n");
     assert!(p.credentials.is_empty());
     assert_eq!(p.problems.len(), 2);
+}
+
+/// `agora-fake-agent --adapter`, built once per test binary.
+fn fake_agent() -> String {
+    let mut p = std::env::current_exe().expect("exe");
+    p.pop();
+    p.pop();
+    p.push(format!("agora-fake-agent{}", std::env::consts::EXE_SUFFIX));
+    static FRESH: std::sync::Once = std::sync::Once::new();
+    FRESH.call_once(|| {
+        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+        assert!(Command::new(cargo)
+            .args(["build", "-q", "-p", "agora-fake-agent"])
+            .status()
+            .expect("run cargo")
+            .success());
+    });
+    p.to_string_lossy().into_owned()
+}
+
+/// Audit F830: the refusal holds for an adapter (L2/L3) kind too, at its first start and when it is resumed after a secret was stored.
+/// The adapter copies what it can read of the store into its folder before it becomes the fake adapter.
+#[test]
+fn a_grant_that_reaches_the_secrets_folder_refuses_an_adapter_start_and_resume() {
+    if !agora_platform::sandbox_supported() {
+        return;
+    }
+    let s = Setup::new("reach-adapter");
+    let fake = fake_agent();
+    let policy = format!(
+        "sandbox = worktree\nsandbox.read = {}, {}\ncredentials.cra = CRA_TOKEN\n",
+        s.data().display(),
+        Path::new(&fake).parent().unwrap().display()
+    );
+    std::fs::write(s.data().join("policy"), &policy).unwrap();
+    let mut sup = s.supervisor(&policy, &[]);
+    let command = serde_json::to_string(&[
+        "/bin/sh",
+        "-c",
+        &format!(
+            "cat {}/* > read.txt 2> /dev/null; exec {fake} --adapter",
+            s.store().dir().display()
+        ),
+    ])
+    .unwrap();
+    sup.register(
+        Manifest::parse(&format!(
+            "kind = \"cra\"\ndisplay_name = \"cra\"\nversion = \"1\"\nmin_engine = 4\n[adapter]\ncommand = {command}\n[accounts]\ncredential_env = [\"CRA_TOKEN\"]\n"
+        ))
+        .unwrap(),
+    );
+    // An empty store does not refuse: the adapter starts, then is stopped.
+    let id = sup.start(&s.request("cra", "a1"), Instant::now()).unwrap();
+    sup.stop(&id).unwrap();
+    let _ = std::fs::remove_file(s.worktree("a1").join("read.txt"));
+    s.put("CRA_OTHER", "a-secret-the-adapter-must-not-read");
+    let refused = |e: SupervisorError| {
+        matches!(
+            e,
+            SupervisorError::SandboxRefused(_, _, "secrets_reachable")
+        )
+    };
+    // Resumed once the store holds a secret: refused, nothing read.
+    assert!(refused(sup.resume(&id, Instant::now()).unwrap_err()));
+    assert!(!s.worktree("a1").join("read.txt").exists());
+    // A first start: refused, nothing read.
+    assert!(refused(
+        sup.start(&s.request("cra", "a2"), Instant::now())
+            .unwrap_err()
+    ));
+    assert!(!s.worktree("a2").join("read.txt").exists());
 }

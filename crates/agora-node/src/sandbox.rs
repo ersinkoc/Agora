@@ -278,12 +278,16 @@ pub fn private_folder(
 }
 
 /// The private temp folder of the agent that works in `worktree`; the node points `TMPDIR`, `TEMP` and `TMP` at it where
-/// [`agora_platform::PRIVATE_TEMP`] says the system's temp folder is out of the agent's reach.
+/// [`agora_platform::PRIVATE_TEMP`] says the system's temp folder is out of the agent's reach. The place is part of the name: two
+/// worktrees called `web` of different projects must not share one. Only the first 48 characters of the name are used (at most 192
+/// bytes; the place keeps it unique), so the folder's name stays within the 255-byte limit whatever the worktree is called.
 pub fn agent_temp(worktree: &Path) -> PathBuf {
-    let name = worktree
-        .file_name()
-        .map_or_else(|| "agent".into(), |n| n.to_string_lossy().into_owned());
-    std::env::temp_dir().join(format!("agora-agent-{name}"))
+    let name: String = worktree.file_name().map_or_else(
+        || "agent".into(),
+        |n| n.to_string_lossy().chars().take(48).collect(),
+    );
+    let place = crate::gitconfig::place_hash(worktree);
+    std::env::temp_dir().join(format!("agora-agent-{name}-{place:08x}"))
 }
 
 /// Whether `file` lies below any of the `write` folders, by name and by where the names lead (a folder that is a link into a writable
@@ -619,6 +623,31 @@ mod tests {
         assert!(!no("/home/u/code/app") && !no("/home/u/code/app/src"));
         assert!(!no("/home/u/.agora/worktrees/shell-1"));
         assert!(!no("/srv/shop"));
+    }
+
+    #[test]
+    fn two_worktrees_of_the_same_name_never_share_a_private_temp_folder() {
+        // Audit F841: two projects' `web` folders (a directory launch uses the folder itself as the worktree).
+        let t = |p: &str| agent_temp(Path::new(p));
+        assert_ne!(t("/work/client-a/web"), t("/work/client-b/web"));
+        // The same worktree keeps its folder across restarts, still named after it.
+        assert_eq!(t("/work/client-a/web"), t("/work/client-a/web"));
+        let name = t("/work/client-a/web");
+        assert!(name
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("agora-agent-web-"));
+        // A name at the 255-byte limit, in ASCII and in four-byte characters, still gives a folder name within it (Codex review of
+        // F841: the place made a 240-character name too long); two such names that differ only past the cut stay apart.
+        for long in ["x".repeat(255), "𝔵".repeat(63)] {
+            assert!(t(&format!("/work/a/{long}")).file_name().unwrap().len() <= 255);
+        }
+        let (a, b) = (
+            t(&format!("/work/{}1", "y".repeat(100))),
+            t(&format!("/work/{}2", "y".repeat(100))),
+        );
+        assert_ne!(a, b);
     }
 
     #[test]
