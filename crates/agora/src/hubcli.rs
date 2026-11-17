@@ -488,7 +488,7 @@ pub fn password(say: &Say, o: &Opts, op: &str) -> ExitCode {
         say.err(key!("cli-password-needs-terminal"), &[]);
         return ExitCode::from(2);
     }
-    if std::fs::create_dir_all(&dir).is_err() {
+    if private_hub_dir(&dir).is_err() {
         return fail(dir.display().to_string());
     }
     let store = match SqliteStore::open(&dir.join("hub.db")) {
@@ -612,7 +612,7 @@ pub fn hub_user(say: &Say, o: &Opts) -> ExitCode {
         ExitCode::from(2)
     };
     let dir = hub_dir(o);
-    if std::fs::create_dir_all(&dir).is_err() {
+    if private_hub_dir(&dir).is_err() {
         return fail(dir.display().to_string());
     }
     let store = match SqliteStore::open(&dir.join("hub.db")) {
@@ -755,7 +755,7 @@ pub fn hub_metrics_token(say: &Say, o: &Opts) -> ExitCode {
         return bad();
     }
     let dir = hub_dir(o);
-    if std::fs::create_dir_all(&dir).is_err() {
+    if private_hub_dir(&dir).is_err() {
         return fail(dir.display().to_string());
     }
     let store = match SqliteStore::open(&dir.join("hub.db")) {
@@ -1032,7 +1032,7 @@ pub fn hub_prices(say: &Say, o: &Opts) -> ExitCode {
         if count == 0 {
             return Err("no prices in the answer".into());
         }
-        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        private_hub_dir(&dir)?;
         std::fs::write(dir.join("prices-catalog.json"), text).map_err(|e| e.to_string())?;
         Ok(count)
     })();
@@ -1149,7 +1149,7 @@ pub fn hub_ssh(say: &Say, o: &Opts) -> ExitCode {
                 return ExitCode::from(2);
             }
             let result = (|| -> Result<String, String> {
-                std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+                private_hub_dir(&dir)?;
                 let _ = load_or_create_ca(&dir)?;
                 let store = SqliteStore::open(&dir.join("hub.db")).map_err(|e| e.to_string())?;
                 let code = Enrollment::new(&store)
@@ -1330,7 +1330,8 @@ pub fn hub_notify(say: &Say, o: &Opts) -> ExitCode {
         text.push_str(&line);
         text.push('\n');
         // The URL of a topic is the only secret ntfy has, so the file is private to the owner.
-        if let Err(e) = std::fs::create_dir_all(hub_dir(o))
+        if let Err(e) = private_hub_dir(&hub_dir(o))
+            .map_err(std::io::Error::other)
             .and_then(|()| agora_platform::write_private(&file, text.as_bytes()))
         {
             return fail(e.to_string());
@@ -1646,14 +1647,25 @@ const LINK_GUARD_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 /// `wait` for another holder. The lock file is opened with `agora_platform::open_lock_private`: private from its creation, never
 /// through a link, so another local user can neither hold it nor make it land on another file.
 fn link_guard(dir: &Path, wait: std::time::Duration) -> std::io::Result<std::fs::File> {
-    let file = agora_platform::open_lock_private(&dir.join("lock"))?;
+    // The folder is resolved first: a link folder that is itself a link (to another disk, say) works as before; only the lock file
+    // itself is never reached through a link.
+    let lock = std::fs::canonicalize(dir)?.join("lock");
     let end = std::time::Instant::now() + wait;
+    let pause = || std::thread::sleep(std::time::Duration::from_millis(20));
     loop {
+        // On Windows a first save creates the file unshared for a moment (a sharing violation for anyone opening it then), so an open
+        // that fails is tried again within the wait; one that still fails at its end is the answer.
+        let file = match agora_platform::open_lock_private(&lock) {
+            Ok(f) => f,
+            Err(_) if std::time::Instant::now() < end => {
+                pause();
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
         match file.try_lock() {
             Ok(()) => return Ok(file),
-            Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < end => {
-                std::thread::sleep(std::time::Duration::from_millis(20));
-            }
+            Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < end => pause(),
             Err(std::fs::TryLockError::WouldBlock) => {
                 return Err(std::io::Error::from(std::io::ErrorKind::TimedOut))
             }
@@ -1745,6 +1757,26 @@ mod store_tests {
             .unwrap()
             .file_type()
             .is_symlink());
+    }
+
+    /// A link folder that is itself a link (to another disk, say) is saved into as before; only the lock file is never reached
+    /// through a link (review of the F1000 guard).
+    #[test]
+    fn a_link_folder_that_is_itself_a_link_is_still_saved_into() {
+        let base = tmp("linked-folder");
+        let real = base.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let dir = base.join("link");
+        // Only where the platform makes links without privileges.
+        if agora_platform::symlink(&real, &dir).is_err() {
+            return;
+        }
+        store_into(&dir, NEW, &agora_platform::write_private).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(real.join("node-id")).unwrap(),
+            "new"
+        );
+        let _ = std::fs::remove_dir_all(base);
     }
 
     /// Audit F1000: a second save that starts while the first is between its key and its certificate (two `agora` runs enrolling at
