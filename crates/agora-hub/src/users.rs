@@ -95,11 +95,18 @@ impl<'a> Users<'a> {
         let conn = self.store.lock()?;
         // The ids the hub itself writes (`owner` for the owner's sessions and audit rows, `hub` for the shared board) are never a person's.
         let reserved = |id: &str| matches!(id, "owner" | "hub");
+        // The devices a removed person registered stay listed under their id (the owner may still revoke them, ADR-0061), so that id
+        // is never given to someone else: the new person would get them as theirs, and machines would be offered them (audit F910).
         let mut id = base.clone();
         let mut n = 1;
         while reserved(&id)
             || conn
-                .query_row("SELECT 1 FROM users WHERE id = ?1", [&id], |_| Ok(()))
+                .query_row(
+                    "SELECT 1 FROM users WHERE id = ?1
+                     UNION ALL SELECT 1 FROM user_devices WHERE user_id = ?1 LIMIT 1",
+                    [&id],
+                    |_| Ok(()),
+                )
                 .optional()
                 .map_err(db)?
                 .is_some()
@@ -363,6 +370,33 @@ mod tests {
         assert!(!users.set_role("nobody", Role::Member).unwrap());
         assert!(users.remove(&a.id).unwrap() && !users.remove(&a.id).unwrap());
         assert_eq!(users.list().unwrap().len(), 3);
+    }
+
+    /// Audit F910: the devices a removed person registered stay under their id, so someone added later under the same name gets an
+    /// id of their own and never those devices (as theirs, or offered to a machine they work on).
+    #[test]
+    fn a_new_person_never_gets_the_devices_of_a_removed_person_of_the_same_name() {
+        use crate::devices::{tests::Key, Devices};
+        let store = SqliteStore::open_in_memory().unwrap();
+        let (users, devices) = (Users::new(&store), Devices::new(&store));
+        let ids = |v: Vec<agora_protocol::v1::DeviceInfo>| -> Vec<String> {
+            v.into_iter().map(|d| d.device_id).collect()
+        };
+        let first = users.add("Eda", Role::Member, 1).unwrap();
+        devices
+            .register(&first.id, &Key::new().register("old-phone", "x", 1), 1)
+            .unwrap();
+        assert!(users.remove(&first.id).unwrap());
+        let second = users.add("Eda", Role::Member, 2).unwrap();
+        users.grant(&second.id, "laptop", "web").unwrap();
+        assert_ne!(second.id, first.id);
+        assert!(devices.list_for(&second.id).unwrap().is_empty());
+        assert!(ids(devices.list_for_node("laptop").unwrap()).is_empty());
+        assert_eq!(ids(devices.list_for(&first.id).unwrap()), ["old-phone"]);
+        // A removed person without devices leaves nothing behind: the id may be given again.
+        let lone = users.add("Ali", Role::Member, 3).unwrap();
+        assert!(users.remove(&lone.id).unwrap());
+        assert_eq!(users.add("Ali", Role::Member, 4).unwrap().id, lone.id);
     }
 
     #[test]
