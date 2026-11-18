@@ -10,6 +10,9 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 - Ctrl+click on a web address shows it in the footer; Ctrl+click it again to open it. The program's title shows after the tabs, with control and look-alike characters made visible.
 - Known limit: a program that was already running when you opened its tab is not known to have the mouse on until it switches it on again.
 
+### Windows
+- An argument given to an agent that is a `.bat` or `.cmd` file can no longer run a second command on Windows (the "BatBadBut" flaw, CVE-2024-24576): quotes and `%` in it reach the script as plain text, and an argument with a line break is refused before anything starts. A bare `claude` or `codex` that Windows finds as an `.exe` was never affected.
+
 ## 0.3.19
 
 ### Reaching your hub through a tunnel or a reverse proxy

@@ -169,7 +169,7 @@ decision, so each needs an ADR first.
    `agora-vt`'s cells into ratatui and `agora-vt` interprets and drops what it does not model:
    - **cursor shape** (DECSCUSR) and blink are ignored (the client draws its own cursor, `pane.rs`); **hyperlinks** (OSC 8) and
      **clipboard** (OSC 52 from a program) are interpreted and dropped by the emulator, so only plain addresses are links and a program
-     cannot write the clipboard (which is also the safe policy, see the threat model, T45);
+     cannot write the clipboard (which is also the safe policy, see the threat model, T46);
    - **graphics** (sixel, image protocols) cannot exist, and the keyboard protocols (Shift+Enter) are not passed on;
    - **a program already running when the client starts watching** is not known to have the mouse (or focus reporting) on until it
      switches the mode on again: the client learns the modes from the bytes it receives (`termio::ModeScanner`), and the repaint a
