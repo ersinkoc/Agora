@@ -4,10 +4,20 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+_Nothing yet._
+
+## 0.3.19
+
 ### Reaching your hub through a tunnel or a reverse proxy
 - `agora remote proxy --trust-header NAME --host YOUR.NAME` lets the hub sit behind a tunnel provider's connector or a reverse proxy you run: it answers only the names you gave, takes a visitor's real address only from the one header you named (and only from a proxy on this machine or an address you listed), and `agora remote off` takes it back. It is off until you run it, and it refuses without a screen password.
 - Through the proxy nobody is ever taken for the owner at the hub's machine, each visitor now has their own sign-in lockout instead of sharing one, and a request for another host name or from a web page of another site (Host and Origin, also on the live connection) is refused.
 - `agora remote status` and `agora doctor` say every time that the hub is reachable from the internet through the proxy, and recommend an access layer with single sign-on in front of the hostname. `docs/guides/remote-hub.md` has the steps and says plainly what was not tried against a real tunnel.
+
+### The window
+- When an agent is blocked on a request, a card opens over the window with the full request, if the window is in front and you are not typing; otherwise a small banner counts what waits, and the Needs you list stays visible everywhere. A plain request offers Allow and Deny (dead for a moment after the card appears, after anything shown changes and when you come back to the window); Esc, a click outside and Later never allow. Start, settings, pairing and long requests only offer Review. In This device you can choose the card, a small banner only, or nothing extra.
+- When the window is in the background, a browser notification says "An agent needs you" (never the request itself, a command or a path), after you turn notifications on in This device; the tab title and the app badge show the count. Naming the agent and machine in it is optional.
+- The command palette can now jump to a machine or a project, show where a new machine is allowed to join, lock the window (when a screen password is set) and open Settings.
+- In the terminal, "Jump to latest", the link address and the clipboard offer no longer cover each other.
 
 ## 0.3.18
 
