@@ -13,3 +13,17 @@ export function takePanelRequest(): string | undefined {
   return p;
 }
 export const subscribePanelRequests = (l: () => void) => { listeners.add(l); return () => { listeners.delete(l); }; };
+
+// The same for the project the window shows (the command palette's "Project: ...").
+let pendingProject: string | undefined;
+const projectListeners = new Set<() => void>();
+export function requestProject(id: string) {
+  pendingProject = id;
+  projectListeners.forEach((l) => l());
+}
+export function takeProjectRequest(): string | undefined {
+  const p = pendingProject;
+  pendingProject = undefined;
+  return p;
+}
+export const subscribeProjectRequests = (l: () => void) => { projectListeners.add(l); return () => { projectListeners.delete(l); }; };
