@@ -246,7 +246,18 @@ pub fn hub_run(say: &Say, o: &Opts) -> ExitCode {
                 &[("count", (bad_overrides as i64).into())],
             );
         }
-        let sessions = Arc::new(HubSessions::new(Arc::clone(&hub)));
+        // ADR-0067 rung 4: a reverse proxy is trusted only while `<hub dir>/remote-proxy` says so (read again every few seconds).
+        let sessions = Arc::new(HubSessions::new(Arc::clone(&hub)).with_proxy(Arc::new(
+            agora_hub::proxy::ProxyHandle::watch(dir.join(agora_hub::proxy::FILE)),
+        )));
+        if let agora_hub::proxy::Stored::On(t) =
+            agora_hub::proxy::read_file(&dir.join(agora_hub::proxy::FILE))
+        {
+            say.out(
+                key!("cli-hub-proxy-on"),
+                &[("hosts", t.hosts().join(", ").into())],
+            );
+        }
         // A fresh one-time code for the first sign-in; `agora hub login` makes more.
         let web_code = SignIn::new(hub.store(), Arc::new(Lockout::new()))
             .create_code(server::now_ms())

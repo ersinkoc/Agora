@@ -692,3 +692,291 @@ fn doctor_fails_a_way_in_without_a_password_and_warns_about_a_public_listen() {
     assert!(!out.contains("screen password"), "{out}");
     assert!(!out.contains("Tailscale"), "{out}");
 }
+
+// ---- ADR-0067 rung 4: a trusted reverse proxy (`agora remote proxy`). No `tailscale` and no real tunnel is involved. ----
+
+const PROXY: [&str; 6] = [
+    "remote",
+    "proxy",
+    "--trust-header",
+    "CF-Connecting-IP",
+    "--host",
+    "agora.example.com",
+];
+
+#[test]
+fn a_proxy_is_not_trusted_without_a_screen_password() {
+    let e = Env::new("proxynopw");
+    let (code, out) = e.run(&PROXY);
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("remote.password_required"), "{out}");
+    assert!(out.contains("agora password set"), "{out}");
+    assert!(!e.hub.join("remote-proxy").exists(), "a file was written");
+    // A hub folder with a database and still no password is the same.
+    drop(SqliteStore::open(&e.hub.join("hub.db")).unwrap());
+    let (code, out) = e.run(&PROXY);
+    assert_eq!(
+        (code, out.contains("remote.password_required")),
+        (1, true),
+        "{out}"
+    );
+    assert!(!e.hub.join("remote-proxy").exists());
+}
+
+#[test]
+fn a_proxy_needs_a_header_and_a_name_that_are_plain() {
+    let e = Env::new("proxybad");
+    e.set_password();
+    // Missing parts are a usage error.
+    for args in [
+        &["remote", "proxy"][..],
+        &["remote", "proxy", "--host", "agora.example.com"],
+        &["remote", "proxy", "--trust-header", "CF-Connecting-IP"],
+    ] {
+        assert_eq!(e.run(args).0, 2, "{args:?}");
+    }
+    let with = |header: &str, host: &str| {
+        e.run(&["remote", "proxy", "--trust-header", header, "--host", host])
+    };
+    for header in ["Host", "origin", "x y", "a:b"] {
+        let (code, out) = with(header, "agora.example.com");
+        assert_eq!(code, 1, "{header}: {out}");
+        assert!(
+            out.contains("remote.proxy_header_invalid"),
+            "{header}: {out}"
+        );
+    }
+    for host in [
+        "localhost",
+        "127.0.0.1",
+        "*.example.com",
+        "agora",
+        "agora.example.com:443",
+        "a b.example.com",
+    ] {
+        let (code, out) = with("CF-Connecting-IP", host);
+        assert_eq!(code, 1, "{host}: {out}");
+        assert!(out.contains("remote.proxy_host_invalid"), "{host}: {out}");
+    }
+    let (code, out) = e.run(&[
+        "remote",
+        "proxy",
+        "--trust-header",
+        "CF-Connecting-IP",
+        "--host",
+        "agora.example.com",
+        "--proxy-addr",
+        "not-an-address",
+    ]);
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("remote.proxy_addr_invalid"), "{out}");
+    let (code, out) = e.run(&[
+        "remote",
+        "proxy",
+        "--trust-header",
+        "CF-Connecting-IP",
+        "--host",
+        "a.example.com",
+        "--host",
+        "b.example.com",
+        "--host",
+        "c.example.com",
+        "--host",
+        "d.example.com",
+        "--host",
+        "e.example.com",
+    ]);
+    assert_eq!(code, 1, "at most four names: {out}");
+    assert!(
+        !e.hub.join("remote-proxy").exists(),
+        "nothing was written by a refusal"
+    );
+}
+
+#[test]
+fn turning_the_proxy_on_is_visible_everywhere_and_off_takes_it_back() {
+    let e = Env::new("proxyon");
+    e.set_password();
+    // Nothing on: no proxy lines.
+    let (_, out) = e.run(&["remote", "status"]);
+    assert!(!out.contains("Trusted proxy"), "{out}");
+    let (_, out) = e.run(&["doctor"]);
+    assert!(!out.contains("trusted proxy"), "{out}");
+
+    let (code, out) = e.run(&PROXY);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("agora.example.com"), "{out}");
+    assert!(
+        out.contains("single sign-on"),
+        "the Access recommendation: {out}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(e.hub.join("remote-proxy")).unwrap(),
+        "header=cf-connecting-ip\nhost=agora.example.com\n"
+    );
+    // Visible in status and in doctor, every time, as a warning that is not a failure while the password is set.
+    for _ in 0..2 {
+        let (_, out) = e.run(&["remote", "status"]);
+        assert!(
+            out.contains("Trusted proxy: on, answers agora.example.com"),
+            "{out}"
+        );
+        assert!(out.contains("Reachable from the internet"), "{out}");
+        let (code, out) = e.run(&["doctor"]);
+        assert!(
+            out.contains("reachable from the internet through a trusted proxy"),
+            "{out}"
+        );
+        assert!(out.contains("a screen password protects it"), "{out}");
+        assert!(!out.contains("fail"), "{out}");
+        let _ = code;
+    }
+    // The password stays while the proxy is on, and the way out is named.
+    let (code, out) = e.run(&["password", "clear"]);
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("remote.password_in_use"), "{out}");
+    assert!(e.password_is_set());
+
+    // The hub also listening beyond this machine is warned about.
+    std::fs::write(e.hub.join("listen"), "203.0.113.7:7443").unwrap();
+    let (_, out) = e.run(&["doctor"]);
+    assert!(out.contains("beyond this machine"), "{out}");
+    std::fs::write(e.hub.join("listen"), "127.0.0.1:7443").unwrap();
+    let (_, out) = e.run(&["doctor"]);
+    assert!(!out.contains("beyond this machine"), "{out}");
+
+    // Without a password (removed by hand) doctor fails it.
+    let nopw = Env::new("proxyon-nopw");
+    std::fs::write(
+        nopw.hub.join("remote-proxy"),
+        "header=x-ip\nhost=a.example.com\n",
+    )
+    .unwrap();
+    let (code, out) = nopw.run(&["doctor"]);
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("no screen password is set"), "{out}");
+
+    // Off removes it.
+    let (code, out) = e.run(&["remote", "off"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("no longer trusts a reverse proxy"), "{out}");
+    assert!(!e.hub.join("remote-proxy").exists());
+    let (_, out) = e.run(&["remote", "status"]);
+    assert!(!out.contains("Trusted proxy"), "{out}");
+    let (_, out) = e.run(&["remote", "off"]);
+    assert!(out.contains("has not turned on any way in"), "{out}");
+}
+
+#[test]
+fn a_damaged_proxy_file_trusts_nothing_and_says_so() {
+    let e = Env::new("proxydamaged");
+    e.set_password();
+    std::fs::write(
+        e.hub.join("remote-proxy"),
+        "header=x-ip\nhost=*.example.com\n",
+    )
+    .unwrap();
+    let (_, out) = e.run(&["remote", "status"]);
+    assert!(
+        out.contains("file that turns on the trusted proxy is damaged"),
+        "{out}"
+    );
+    let (_, out) = e.run(&["doctor"]);
+    assert!(
+        out.contains("file that turns on the trusted proxy is damaged"),
+        "{out}"
+    );
+    let (code, out) = e.run(&["remote", "off"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(!e.hub.join("remote-proxy").exists());
+}
+
+#[test]
+fn the_proxy_text_is_in_both_languages() {
+    let e = Env::new("proxylang");
+    e.set_password();
+    let mut c = e.agora(&PROXY);
+    c.env("AGORA_LANG", "tr");
+    let o = c.output().unwrap();
+    let out = String::from_utf8_lossy(&o.stdout);
+    assert_eq!(o.status.code(), Some(0), "{out}");
+    assert!(out.contains("ters vekile güveniyor"), "{out}");
+    assert!(!out.contains("reverse proxy"), "{out}");
+}
+
+/// A real hub process, a real TLS connection and fake proxy headers: the file `agora remote proxy` writes reaches the running hub, a
+/// foreign Host is refused while it is on, a request that names the owner's own address is still not the owner, and `remote off`
+/// is followed without a restart. This is the only test that proves the hub command wires the proxy in.
+#[cfg(unix)]
+#[test]
+fn a_real_hub_follows_remote_proxy_and_remote_off() {
+    use rustls::pki_types::pem::PemObject;
+    use rustls::pki_types::{CertificateDer, ServerName};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let e = Env::new("proxylive");
+    e.set_password();
+    let mut hub = e.agora(&["hub", "run", "--listen", "127.0.0.1:0"]);
+    hub.stdout(Stdio::null()).stderr(Stdio::null());
+    let _hub = Proc(hub.spawn().unwrap());
+    wait_until("the hub is listening", || {
+        e.hub.join("listen").exists() && !cert_names(&e.hub).is_empty()
+    });
+    let addr: std::net::SocketAddr = std::fs::read_to_string(e.hub.join("listen"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let ca = std::fs::read_to_string(e.hub.join("ca.pem")).unwrap();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let ask = |headers: &[&str]| -> String {
+        let request = format!(
+            "GET /api/session HTTP/1.1\r\n{}\r\n\r\n",
+            headers.join("\r\n")
+        );
+        rt.block_on(async {
+            let mut roots = rustls::RootCertStore::empty();
+            for c in CertificateDer::pem_slice_iter(ca.as_bytes()) {
+                roots.add(c.unwrap()).unwrap();
+            }
+            let cfg = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
+                rustls::crypto::ring::default_provider(),
+            ))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+            let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+            let mut tls = tokio_rustls::TlsConnector::from(std::sync::Arc::new(cfg))
+                .connect(ServerName::try_from("localhost").unwrap(), tcp)
+                .await
+                .unwrap();
+            tls.write_all(request.as_bytes()).await.unwrap();
+            let mut out = Vec::new();
+            let _ = tokio::time::timeout(Duration::from_secs(5), tls.read_to_end(&mut out)).await;
+            String::from_utf8_lossy(&out).to_string()
+        })
+    };
+    let status = |out: &str| out.get(9..12).unwrap_or("").to_string();
+
+    assert_eq!(status(&ask(&["Host: evil.example.org"])), "200");
+    let (code, out) = e.run(&PROXY);
+    assert_eq!(code, 0, "{out}");
+    wait_until("the hub took the proxy file", || {
+        status(&ask(&["Host: evil.example.org"])) == "421"
+    });
+    for value in ["203.0.113.9", "127.0.0.1"] {
+        let out = ask(&[
+            "Host: agora.example.com",
+            &format!("CF-Connecting-IP: {value}"),
+        ]);
+        assert!(out.contains(r#""passwordRequired":true"#), "{value}: {out}");
+    }
+    let out = ask(&["Host: localhost"]);
+    assert!(out.contains(r#""passwordRequired":false"#), "{out}");
+    let (code, out) = e.run(&["remote", "off"]);
+    assert_eq!(code, 0, "{out}");
+    wait_until("the hub dropped the proxy", || {
+        status(&ask(&["Host: evil.example.org"])) == "200"
+    });
+}

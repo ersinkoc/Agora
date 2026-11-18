@@ -546,3 +546,19 @@ remote-password_in_use_listen = Hub herkese açık bir adreste dinliyor ve ekran
 remote-hub_not_running = Agora { $dir } içinde çalışan bir hub'ın adresini bulamadı. Hub'ı `agora` ile başlatın, sonra bunu yeniden çalıştırın.
 remote-status-public-funnel = Herkese açık internet: Tailscale Funnel üzerinden erişilebilir.
 doctor-remote-funnel = Bu makine için Tailscale Funnel açık, yani bir şey tüm internetten erişilebilir. Onu yalnızca ekran parolası ve giriş kodu korur. Bilerek açmadıysanız `tailscale funnel reset` ile kapatın.
+
+# ADR-0067 rung 4: hub'ın önündeki güvenilen ters vekil veya tünel (`agora remote proxy`).
+remote-proxy_header_invalid = "{ $header }" istemci adresini taşıyan başlık olamaz: vekilin her zaman kendisinin koyduğu, sade bir başlık adı kullanın (harf, rakam ve tire); tünel sağlayıcınızın belgelediği başlık gibi. Hiçbir şey değiştirilmedi.
+remote-proxy_host_invalid = "{ $host }" hub'ın yanıtlayabileceği bir ad değil: `agora.example.com` gibi sade, herkese açık bir ana makine adı kullanın (adres, joker karakter ve port olmaz; en çok 4). Hiçbir şey değiştirilmedi.
+remote-proxy_addr_invalid = "{ $addr }" bir vekilin bağlanabileceği bir adres değil (en çok 4). Bu makinedeki bir vekil için adres gerekmez. Hiçbir şey değiştirilmedi.
+remote-proxy-on = Hub artık bu makinedeki bir ters vekile güveniyor: yalnızca { $hosts } adlarını (ve bu makinenin kendi adlarını) yanıtlar ve ziyaretçinin gerçek adresini yalnızca "{ $header }" başlığından alır. Çalışan hub bunu birkaç saniye içinde alır.
+remote-proxy-access-hint = Hub artık bu vekil üzerinden internetten erişilebilir. Şiddetle önerilir: ana makine adının önüne tek oturum açma (SSO) sağlayan bir erişim katmanı koyun (Cloudflare Tunnel için Cloudflare Access); böylece giriş sayfasına yalnızca belirlediğiniz kişiler ulaşır. Ekran parolası ve giriş kodu ikinci kilittir, birincisi değil.
+remote-proxy-listen-hint = Hub bu makinenin ötesinde de dinliyor, yani vekil olmadan da erişilebilir. Vekilin tek yol olması için yerel bir adreste başlatın (`agora --listen 127.0.0.1:7443`).
+remote-status-proxy = Güvenilen vekil: açık, { $hosts } adlarını yanıtlar, gerçek adres "{ $header }" başlığından.
+remote-proxy-warning = Güvenilen vekil üzerinden internetten erişilebilir. Onu yalnızca vekilin kendi erişim kuralları, ekran parolası ve giriş kodu korur. `agora remote off` ile kapatın.
+remote-status-proxy-damaged = Güvenilen vekili açan dosya bozuk, bu yüzden hub hiçbir vekile güvenmiyor. `agora remote off` çalıştırın, sonra `agora remote proxy` komutunu yeniden verin.
+remote-off-proxy = Hub artık ters vekile güvenmiyor (çalışan hub bunu birkaç saniye içinde fark eder).
+doctor-remote-proxy-on = Hub, güvenilen bir vekil üzerinden internetten erişilebilir ({ $hosts }, adres "{ $header }" başlığından). O ana makine adının önüne tek oturum açma sağlayan bir erişim katmanı koyun; bilerek açmadıysanız `agora remote off` ile kapatın.
+doctor-remote-proxy-listen = Güvenilen bir vekil açık, ama hub bu makinenin ötesinde { $addr } adresinde dinliyor. Vekilin tek yol olması için hub'ı yerel bir adreste başlatın.
+doctor-remote-proxy-damaged = Güvenilen vekili açan dosya bozuk, bu yüzden hub hiçbir vekile güvenmiyor. `agora remote off` çalıştırın, sonra `agora remote proxy` komutunu yeniden verin.
+cli-hub-proxy-on = Güvenilen vekil: açık. Hub { $hosts } adlarını yanıtlar ve onun üzerinden internetten erişilebilir.

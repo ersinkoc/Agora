@@ -20,6 +20,7 @@ pub mod pairing_net;
 pub mod passkey;
 pub mod password;
 pub mod projection;
+pub mod proxy;
 pub mod router;
 pub mod scope;
 pub mod server;

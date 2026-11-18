@@ -54,6 +54,6 @@ logged or sent back. Forgot it? Run `agora password clear` or `agora password se
 
 ## Reaching the hub from outside
 
-A way in from outside the machine (`agora remote tailscale`, a hub on a public address) is never on without the password:
+A way in from outside the machine (`agora remote tailscale`, `agora remote proxy` for a tunnel or reverse proxy, a hub on a public address) is never on without the password:
 those commands refuse until `agora password set` was run, and `agora password clear` refuses while one is on. See
 [the remote hub guide](../guides/remote-hub.md).

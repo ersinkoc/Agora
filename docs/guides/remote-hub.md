@@ -1,7 +1,7 @@
 # Reach your hub from a phone or another city
 
-ADR-0067 rung 3. This guide puts Agora on a server (a VPS with no screen) and opens it from your phone or laptop. Two ways are
-described. **Use Tailscale if you can**: only the devices of your tailnet (yours, and anyone you shared the machine or tailnet with) can reach
+ADR-0067 rungs 3 and 4. This guide puts Agora on a server (a VPS with no screen) and opens it from your phone or laptop. Three ways are
+described (the third, a tunnel, is section C). **Use Tailscale if you can**: only the devices of your tailnet (yours, and anyone you shared the machine or tailnet with) can reach
 the hub. A plain public address works too, but then anyone on the internet can reach it and only the screen password and the
 certificate protect it.
 
@@ -106,7 +106,76 @@ public address. Only the screen password and the certificate ... protect it ... 
 does. A hub cannot be started on a public address with no password, and `agora password clear` refuses while a way in from
 outside is on.
 
-Not covered here: a Cloudflare Tunnel (a later step of ADR-0067), and installing coding agents from the window (ADR-0087).
+## C. Server and a tunnel or reverse proxy (Cloudflare Tunnel, or any proxy you run)
+
+ADR-0067 rung 4. Use this when the phone or laptop cannot be on your tailnet and you do not want to open the hub's port to the
+internet: a connector on the server (for a Cloudflare Tunnel, `cloudflared`) dials out to the provider, and the provider serves
+your own host name with a real certificate. **The hub is then reachable from the whole internet at that name.** Read the next
+paragraph before you turn it on.
+
+**Put an access layer with single sign-on in front of the host name first. This is strongly recommended.** With Cloudflare, that
+is Cloudflare Access: in the Zero Trust dashboard add a "self-hosted" application for the host name and a policy that allows only
+your own account. Then only people you named even reach the Agora sign-in page, and the screen password and the sign-in code are
+a second lock instead of the only one. Without it, anyone on the internet can try codes and passwords at the hub, held back only
+by the lockouts of rung 1. Agora cannot check that you did this; it only says so, every time (`agora remote status`, `agora doctor`).
+
+What the hub does when you turn it on (`agora remote proxy`), and only then:
+
+- It trusts **one** header for a visitor's real address, the one you name, and only on a connection from this machine (the
+  connector) or from a proxy address you list. Anyone else's copy of that header is ignored. The proxy must set the header itself
+  on every request and overwrite what a visitor sent; never name `X-Forwarded-For`, which proxies append to.
+- A proxied visitor is never "the owner at the machine": the screen password and the sign-in code apply to everyone who comes
+  through it, and each visitor address has its own lockout (without this, they would all share one).
+- It answers only the host names you give (and the machine's own loopback names). Another `Host`, or a browser `Origin` of another
+  site, is refused (`421` / `403`), the live connection (WebSocket) included.
+
+Steps, on the server (the hub must already run on loopback with a screen password; see A above):
+
+1. **Set the screen password** if you have not: `agora password set`.
+2. **Create the tunnel with the provider's own tools** (Agora holds no Cloudflare credentials and does not run `cloudflared`).
+   For `cloudflared`, a configuration along these lines points the host name at the hub on loopback. The hub speaks HTTPS with
+   its own certificate, which `cloudflared` cannot check, so it is told not to:
+   ```
+   tunnel: YOUR-TUNNEL-ID
+   credentials-file: /home/you/.cloudflared/YOUR-TUNNEL-ID.json
+   ingress:
+     - hostname: agora.example.com
+       service: https://127.0.0.1:7443
+       originRequest:
+         noTLSVerify: true
+     - service: http_status:404
+   ```
+   Use the port `agora remote status` prints for "The hub listens on". Start the Cloudflare Access application for the same host
+   name now (above).
+3. **Tell the hub to trust it:**
+   ```
+   agora remote proxy --trust-header CF-Connecting-IP --host agora.example.com
+   ```
+   The header name `CF-Connecting-IP` is the one Cloudflare documents for the visitor's address. Use your provider's, or your
+   proxy's own, if you do not use Cloudflare, and `--proxy-addr IP` (up to 4) when the proxy connects from another machine
+   instead of from this one. It prints the names and the header and repeats the Access recommendation. The running hub takes it
+   within a few seconds; no restart.
+4. **Open `https://agora.example.com/`**, pass the access layer, then sign in with `agora hub login`'s code and the screen password.
+
+`agora remote status` shows `Trusted proxy: on, answers agora.example.com, real address from the "cf-connecting-ip" header` and
+the internet warning; `agora doctor` warns every time, fails if the password is missing, and warns if the hub also listens beyond
+this machine (start it on `127.0.0.1` so that the proxy is the only way in). **Turn it off:** `agora remote off` removes the trust
+(the connector keeps running until you stop it; stop it and delete the Access application too).
+
+**What this does not do.** The nodes of your other machines connect to the hub directly with their own certificates; they do not
+go through this tunnel, and this guide does not set that up. The window does not yet show a banner while the proxy is on (the
+warnings are in the terminal commands). `agora remote proxy` does not start or stop the connector.
+
+**What was not tested against a real tunnel.** All of the above was tested with a fake proxy: a real `agora` hub process and
+real sockets on this machine, with the headers a proxy would send written by hand. Nobody has yet run it behind a real
+Cloudflare Tunnel, or behind another real proxy. In particular these are taken from the provider's documentation and not
+confirmed: that `CF-Connecting-IP` is set on every request and overwrites a visitor's own copy, that the `Host` that reaches the hub
+is the public name (the connector's default), that `noTLSVerify` is accepted for the hub's certificate, and that WebSocket
+upgrades and `Origin` pass through as a browser sends them. If your `Host` or `Origin` arrives as something else, the hub answers
+`421`/`403` and nothing works, which is the safe failure; capture what arrives before you loosen anything. A phone on a real
+mobile network was not tried either.
+
+Not covered here: installing coding agents from the window (ADR-0087).
 
 ## If something goes wrong
 
@@ -117,4 +186,7 @@ Not covered here: a Cloudflare Tunnel (a later step of ADR-0067), and installing
 | `remote.tailscale_unreadable (bad_name)` | the machine name Tailscale reports is not a plain `.ts.net` name; Agora does not use it. Rename the machine in Tailscale |
 | `remote.serve_port_in_use` | choose another port: `agora remote tailscale --serve --port 9443` |
 | `remote.password_in_use` | `agora remote off` first, then `agora password clear` |
+| `remote.proxy_header_invalid` / `remote.proxy_host_invalid` / `remote.proxy_addr_invalid` | give a plain header name, plain public host names (no address, wildcard or port) and IP addresses |
+| The browser shows `421` / `403` (`proxy.host_not_allowed`, `proxy.origin_not_allowed`) | the name in the address bar is not one you gave `--host`, or the proxy changes `Host`/`Origin`; run `agora remote proxy` again with the right name |
+| `agora remote status` says the proxy file is damaged | `agora remote off`, then `agora remote proxy` again |
 | A way in is on but you forgot the password | on the server: `agora remote off`, then `agora password set` |

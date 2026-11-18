@@ -3089,3 +3089,143 @@ async fn a_scoped_client_reconnecting_over_such_history_gets_a_clean_cut_snapsho
         assert!(snap.nodes.iter().all(|n| n.agents_running == 0), "{snap:?}");
     }
 }
+
+// ---- ADR-0067 rung 4: a trusted reverse proxy, over real sockets and the real server loop ----
+
+/// One raw request to a real hub over loopback; the whole answer (the hub closes the connection after it).
+async fn raw_request(addr: std::net::SocketAddr, request: &str) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut s = TcpStream::connect(addr).await.unwrap();
+    s.write_all(request.as_bytes()).await.unwrap();
+    let mut out = String::new();
+    let _ = tokio::time::timeout(Duration::from_secs(5), s.read_to_string(&mut out)).await;
+    out
+}
+
+fn get_info(headers: &[&str]) -> String {
+    format!(
+        "GET /api/session HTTP/1.1\r\n{}\r\n\r\n",
+        headers.join("\r\n")
+    )
+}
+
+fn upgrade_request(headers: &[&str]) -> String {
+    format!(
+        "GET / HTTP/1.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\n\
+         Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n{}\r\n\r\n",
+        headers.join("\r\n")
+    )
+}
+
+/// The file that turns the proxy on is followed by a running hub (on and off, no restart); while it is on, a request from the
+/// proxy (loopback here) with a foreign Host is refused, one with the real address header is never the owner, and a WebSocket
+/// upgrade is checked like any request. Fake proxy headers only: no tunnel, no network service.
+#[tokio::test]
+async fn a_running_hub_follows_the_proxy_file_and_checks_what_comes_through_it() {
+    use agora_hub::proxy::{ProxyHandle, ProxyTrust, FILE};
+    use agora_hub::signin::HubSessions;
+    let dir = std::env::temp_dir().join(format!("agora-proxy-server-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join(FILE);
+
+    let hub = Arc::new(Hub::open(SqliteStore::open_in_memory().unwrap()).unwrap());
+    agora_hub::password::ScreenPassword::with_iterations(hub.store(), 1_000)
+        .set("long enough")
+        .unwrap();
+    let sessions = Arc::new(
+        HubSessions::new(Arc::clone(&hub)).with_proxy(Arc::new(ProxyHandle::watch(file.clone()))),
+    );
+    let st = Arc::new(ServerState {
+        hub: Arc::clone(&hub),
+        support: support(),
+        ca: None,
+        lockout: Arc::new(Lockout::new()),
+        auth: Box::new(HubSessionsAuth(Arc::clone(&sessions))),
+        assets: None,
+        sessions: Some(sessions),
+    });
+    let addr = start(st).await;
+    let status = |out: &str| out.get(9..12).unwrap_or("").to_string();
+
+    // Off by default: nothing is checked, and the owner's browser is the owner.
+    let out = raw_request(addr, &get_info(&["Host: evil.example.org"])).await;
+    assert_eq!(status(&out), "200", "{out}");
+    assert!(out.contains(r#""passwordRequired":false"#), "{out}");
+
+    // The owner turns it on.
+    let trust =
+        ProxyTrust::new("CF-Connecting-IP", &["agora.example.com".to_string()], &[]).unwrap();
+    std::fs::write(&file, trust.render()).unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let out = raw_request(addr, &get_info(&["Host: evil.example.org"])).await;
+        if status(&out) == "421" {
+            assert!(out.contains("proxy.host_not_allowed"), "{out}");
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the hub never took the file: {out}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    // Through the proxy: the real address comes from the header, and the visitor is not the owner whatever the header says.
+    for ip in ["203.0.113.9", "127.0.0.1", "::1"] {
+        let out = raw_request(
+            addr,
+            &get_info(&[
+                "Host: agora.example.com",
+                &format!("CF-Connecting-IP: {ip}"),
+            ]),
+        )
+        .await;
+        assert_eq!(status(&out), "200", "{out}");
+        assert!(out.contains(r#""passwordRequired":true"#), "{ip}: {out}");
+    }
+    // The owner's browser by a loopback name still is the owner.
+    let out = raw_request(addr, &get_info(&[&format!("Host: {addr}")])).await;
+    assert!(out.contains(r#""passwordRequired":false"#), "{out}");
+    // A cross-site page.
+    let out = raw_request(
+        addr,
+        &get_info(&[
+            "Host: agora.example.com",
+            "Origin: https://evil.example.org",
+            "CF-Connecting-IP: 203.0.113.9",
+        ]),
+    )
+    .await;
+    assert_eq!(status(&out), "403", "{out}");
+    // A WebSocket upgrade: a foreign Host or Origin never reaches the upgrade.
+    let out = raw_request(addr, &upgrade_request(&["Host: evil.example.org"])).await;
+    assert_eq!(status(&out), "421", "{out}");
+    let out = raw_request(
+        addr,
+        &upgrade_request(&[
+            "Host: agora.example.com",
+            "Origin: https://evil.example.org",
+            "CF-Connecting-IP: 203.0.113.9",
+        ]),
+    )
+    .await;
+    assert_eq!(status(&out), "403", "{out}");
+    // A dial from this machine (a node or a test) still connects: its Host is the address it dialed.
+    let _ok = dial(addr, None).await;
+
+    // The owner turns it off: the hub follows without a restart.
+    std::fs::remove_file(&file).unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let out = raw_request(addr, &get_info(&["Host: evil.example.org"])).await;
+        if status(&out) == "200" {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the hub kept trusting the proxy: {out}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}

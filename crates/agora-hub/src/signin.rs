@@ -267,6 +267,7 @@ pub struct HubSessions {
     guard: Guard,
     challenges: crate::passkey::Challenges,
     password_rounds: u32,
+    proxy: Option<Arc<crate::proxy::ProxyHandle>>,
 }
 
 /// What a failed sign-in step leaves in the audit trail (the owner sees why; the client never does).
@@ -282,7 +283,14 @@ impl HubSessions {
             guard: Guard::new(),
             challenges: crate::passkey::Challenges::new(),
             password_rounds: crate::password::ITERATIONS,
+            proxy: None,
         }
+    }
+
+    /// ADR-0067 rung 4: consults `proxy` for a trusted reverse proxy (off unless the owner turned it on).
+    pub fn with_proxy(mut self, proxy: Arc<crate::proxy::ProxyHandle>) -> Self {
+        self.proxy = Some(proxy);
+        self
     }
 
     /// Hashes passwords set from the window with `rounds` PBKDF2 rounds instead of [`crate::password::ITERATIONS`]. For tests only.
@@ -312,6 +320,10 @@ impl HubSessions {
 }
 
 impl crate::web::SessionApi for HubSessions {
+    fn proxy(&self) -> Option<Arc<crate::proxy::ProxyTrust>> {
+        self.proxy.as_ref().and_then(|p| p.current())
+    }
+
     fn passkey(
         &self,
         op: &str,
