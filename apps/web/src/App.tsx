@@ -15,7 +15,6 @@ import type { TerminalSource } from './terminal/source';
 import { signDirectory, type DirectoryInfo, type DirectoryListing } from './net/directory';
 import { StartAgent, type KindChoice } from './components/StartAgent';
 import { approvalList, boards, costByProject, projectChoices, recentMessages, machines, machinesOnline, shown, tiles, type ApprovalModel, type View } from './net/view';
-import { freshApprovals, titleWithCount } from './net/alert';
 import { approvalFailureKey, indexedDbStore, signApproval, signStart, thisDevice, type Device } from './net/approval';
 import type { StartChoice } from './components/StartApproval';
 import type { HelperGrant } from './components/HelperGrants';
@@ -40,6 +39,8 @@ import { launchSettingsField } from './components/launchSettings';
 import { PhoneAgent, PhoneHome, PhoneTheme, usePhone } from './phone/Phone';
 import { approvalRedirect, phoneScreen } from './phone/nav';
 import { requestPanel } from './layout/requests';
+import { AttentionLayer } from './components/AttentionLayer';
+import { attentionList } from './net/fleet';
 import { themeStore } from './themes/store';
 import { themeName } from './themes/messages';
 
@@ -282,27 +283,6 @@ export function App() {
     trustedOn: trustedBy(live?.trusted, d.deviceId ?? ''), waiting: num(d.approvalAskedMs) > 0, removed: num(d.revokedMs) > 0,
   }));
   const asked = num(mine.find((d) => d.deviceId === device?.id)?.approvalAskedMs) > 0;
-  // Approvals waiting while the tab is hidden: a count in the title, and a notification if the user allowed it.
-  const seenApprovals = useRef<Set<string>>(new Set());
-  const baseTitle = useRef(document.title);
-  useEffect(() => {
-    if (!live) return;
-    const list = approvalList(live);
-    document.title = titleWithCount(baseTitle.current, list.length);
-    const fresh = freshApprovals(seenApprovals.current, list);
-    seenApprovals.current = new Set(list.map((a) => a.id));
-    if (document.visibilityState === 'visible' || typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
-    for (const a of fresh) {
-      try { new Notification(t('approval-title', { name: approvalName(a) }), { body: a.action, tag: a.id }); } catch { /* not allowed here */ }
-    }
-  }, [live]);
-  // Browsers only ask for notification permission after a user gesture: ask at the first click once signed in.
-  useEffect(() => {
-    if (!hub || typeof Notification === 'undefined' || Notification.permission !== 'default') return;
-    const ask = () => { try { void Notification.requestPermission(); } catch { /* unsupported */ } };
-    window.addEventListener('pointerdown', ask, { once: true });
-    return () => window.removeEventListener('pointerdown', ask);
-  }, [hub]);
   // What the agents cost so far, estimated by the hub from its price table; asked for again every half minute.
   useEffect(() => {
     if (!api || !live) return;
@@ -439,6 +419,14 @@ export function App() {
     if (n) open(n.id);
   }, [agents, current, open]);
 
+  // What needs the person (the one list the console, the panel and the phone bar show), for the attention layer's card, banner and notice.
+  const attention = useMemo(() => attentionList(approvalsNow, agents, pairing.ui?.cards ?? []), [approvalsNow, agents, pairing.ui?.cards]);
+  const reviewAttention = useCallback((it: (typeof attention)[number]) => {
+    const agent = it.kind === 'pair' ? undefined : it.agent;
+    if (agent) { open(agent.id); return; }
+    go('#/');
+    if (!phone) requestPanel('fleet');
+  }, [go, open, phone]);
   // The theme editor is a panel of the window: from any other page, back to the window first.
   // A phone has no panels: there the editor is a screen of its own (ADR-0067 rung 2).
   const editTheme = useCallback(() => { if (phone) { go('#/theme'); return; } if (!['', '#/', '#/demo'].includes(hash)) go('#/'); requestPanel('theme'); }, [go, hash, phone]);
@@ -504,6 +492,7 @@ export function App() {
       {grantAsk && <GrantDialog machine={live?.nodes.get(grantAsk.node)?.hostname || grantAsk.node} kind={grantAsk.ask.kind} busy={grantAsk.busy} failed={grantAsk.failed} onAllow={() => void allowGrant()} onClose={() => setGrantAsk(undefined)} />}
       {/* Away from Home (an agent, a page) a request to join still reaches the owner: the first card floats over the window. */}
       {pairing.ui && pairing.ui.cards[0] && !showsHome && <PairRequest key={pairing.ui.cards[0].id} request={pairing.ui.cards[0]} offline={pairing.ui.offline} onAnswer={(a, r) => pairing.ui!.onAnswer(pairing.ui!.cards[0]!, a, r)} />}
+      <AttentionLayer items={attention} stale={hub ? link !== 'live' : false} phone={phone} onResolve={resolve} onReview={reviewAttention} />
       {palette && <CommandPalette items={items} onClose={() => setPalette(false)} />}
       {hub && live && waiting[0] && <DeviceRequest key={waiting[0].deviceId ?? ''}
         request={{ id: waiting[0].deviceId ?? '', name: deviceLabel(waiting[0].name, waiting[0].deviceId ?? ''), fingerprint: prints.get(waiting[0].deviceId ?? '') ?? '' }}

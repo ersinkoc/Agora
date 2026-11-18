@@ -28,6 +28,7 @@ terminals get the key bar when the screen is a touch screen.
    the new one), and the bar answers one request at a time; it is announced politely (a status, not an alert) and a focus that was on its
    button moves to the bar. It uses the fleet console's order (a request with no expiry never takes the bar from one about to lapse),
    and a tab, no-break or wide space makes a request not plain.
+   A phone has no card over the window (that is the desktop's, [main-window.md](main-window.md#needs-you-loudly)); this bar is its way of keeping Needs you in reach.
    While the link is down Allow and Deny are disabled everywhere on the phone and say why. The state of the link has a row of its own
    under the title bar (it no longer pushes the buttons off a 390 px screen); that row is the one banner for the link, and the bar adds only the reason next to its disabled buttons.
 3. The bar at the bottom of the list: **Search** (the command palette: agents, language, pages), **Start**, **Machines**, **This

@@ -940,3 +940,39 @@ fleet-same-ask = { $count } { $kind } agents ask for the same thing on { $machin
 fleet-review-each = Review each
 fleet-collapse = Show as one
 fleet-same-ask-any = { $count } agents ask for the same thing on { $machine }
+attention-title = Needs you
+attention-who = { $name } on { $machine }
+attention-who-only = { $name }
+attention-ask-review = This needs to be read in full before you answer. Review it to decide.
+attention-start = { $name } wants to start another agent. Its folder, prompt and settings are read in the full card.
+attention-pair = Compare its number with the one on its screen in the full card before you approve.
+attention-later = Later
+attention-review = Review
+attention-more = { $count ->
+    [one] 1 more needs you after this
+   *[other] { $count } more need you after this
+}
+attention-banner = { $count ->
+    [one] 1 thing needs you
+   *[other] { $count } things need you
+}
+attention-settings-title = Needs you
+attention-settings-intro = How this window gets your attention when an agent is blocked. The Needs you list and its counts always stay in view. Kept in this browser only.
+attention-mode-modal = A card over the window
+attention-mode-banner = A small banner only
+attention-mode-off = Nothing extra
+attention-mode-hint = A card opens only while this window is focused and you are not typing in a terminal or a field; otherwise it waits and a banner shows it. It never answers for you.
+attention-notify-title = Notifications while the window is in the background
+attention-notify-enable = Turn on notifications
+attention-notify-off = Turn off notifications
+attention-notify-on = Notifications are on. They only say that an agent needs you.
+attention-notify-names = Include the agent and machine name
+attention-notify-blocked = This browser blocks notifications for this page. Allow them in the browser's site settings to turn them on.
+attention-notify-unsupported = This browser cannot show notifications.
+notify-title = Needs you
+notify-body = { $count ->
+    [one] An agent needs you
+   *[other] { $count } agents need you
+}
+notify-body-named = { $name } needs you
+notify-body-named-on = { $name } on { $machine } needs you

@@ -124,3 +124,12 @@ block of full-block characters drawn by the page, at row height 1.1 and 1.0, and
 ![](terminal-fidelity/phone-dark.png) ![](terminal-fidelity/phone-light.png)
 ![](terminal-fidelity/letterbox-dark.png) ![](terminal-fidelity/letterbox-light.png)
 ![](terminal-fidelity/blocks-page-1.1.png) ![](terminal-fidelity/blocks-page-1.png) ![](terminal-fidelity/blocks-gpu-1.png)
+
+## Needs you, loudly
+The card for a plain request (Allow, Deny, Later), the card for one that is only reviewed, the banner after Later, and the settings in This device
+(`needs-you-modal/`, `scripts/screenshots-needs-you-modal.mjs`):
+
+![](needs-you-modal/card-answer-dark.png) ![](needs-you-modal/card-answer-light.png)
+![](needs-you-modal/card-review-dark.png) ![](needs-you-modal/card-review-light.png)
+![](needs-you-modal/banner-dark.png) ![](needs-you-modal/banner-light.png)
+![](needs-you-modal/this-device-dark.png) ![](needs-you-modal/this-device-light.png)

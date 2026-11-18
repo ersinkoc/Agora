@@ -1,3 +1,4 @@
+import { AttentionSettings } from './components/AttentionSettings';
 import { StartApproval, type StartChoice } from './components/StartApproval';
 import { HelperGrants } from './components/HelperGrants';
 import { DeviceRequest } from './components/DeviceRequest';
@@ -325,6 +326,7 @@ export function DevicePage({ device, onBack, onTheme, onAddPasskey, passkeyNeeds
           {passkey && <p role="status">{t(passkey === 'added' ? 'device-passkey-added' : 'device-passkey-failed')}</p>}
         </section>
       )}
+      <AttentionSettings />
       {security}
       {onTheme && (
         <section className="stack">
