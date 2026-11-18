@@ -103,7 +103,7 @@ pub fn checked_host(name: &str) -> Option<String> {
 
 /// An IPv4 address that arrived mapped into IPv6 (`::ffff:a.b.c.d`) is that IPv4 address: one spelling, so a listed proxy matches a
 /// peer however the socket reports it.
-fn canon(ip: IpAddr) -> IpAddr {
+pub fn canon(ip: IpAddr) -> IpAddr {
     match ip {
         IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(ip, IpAddr::V4),
         IpAddr::V4(_) => ip,
@@ -278,15 +278,16 @@ impl ProxyTrust {
         };
         // Origin (a browser sends it on cross-site requests and on every WebSocket): its host must be one of ours as well. `null`,
         // a repeated one and anything malformed are refused. A client that sends none is not a browser.
+        let mut origin_host: Option<String> = None;
         match values("origin").as_slice() {
             [] => {}
             [one] => {
-                let ok = one
+                origin_host = one
                     .split_once("://")
                     .filter(|(scheme, _)| matches!(*scheme, "http" | "https"))
                     .and_then(|(_, rest)| authority_host(rest))
-                    .is_some_and(|h| self.host_allowed(&h));
-                if !ok {
+                    .filter(|h| self.host_allowed(h));
+                if origin_host.is_none() {
                     return Verdict::Refuse {
                         status: 403,
                         code: "proxy.origin_not_allowed",
@@ -305,6 +306,12 @@ impl ProxyTrust {
             [one] => Verdict::Proxied(real_address(one)),
             [] if !loopback_name(&host) => {
                 // The proxy answers to a public name but sent no address: that is a proxy that is set up wrong, not the owner.
+                Verdict::Proxied(None)
+            }
+            // A loopback `Host` with a public `Origin` is not the owner's own browser (that one's Origin is a loopback name): a proxy
+            // that kept the target's Host and forgot the header, for a POST or a WebSocket. A bare navigation (GET) has no Origin and
+            // stays the gap that T40 names.
+            [] if origin_host.as_deref().is_some_and(|o| !loopback_name(o)) => {
                 Verdict::Proxied(None)
             }
             [] => Verdict::Direct,
@@ -348,8 +355,12 @@ pub fn read_file(path: &Path) -> Stored {
 /// opened handle must itself be a regular file (so a link or a FIFO swapped in between is refused, never waited on).
 pub fn read_from(path: &Path, open: Opener) -> Stored {
     use std::io::Read;
-    let Ok(meta) = std::fs::symlink_metadata(path) else {
-        return Stored::Off;
+    // Only a file that is not there is off. Any other failure (a path component that is not a folder, no permission, ...) is a file
+    // that cannot be read: damaged, so a running hub keeps its last good settings and a starting one trusts nothing.
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Stored::Off,
+        Err(_) => return Stored::Damaged,
     };
     if !meta.file_type().is_file() {
         return Stored::Damaged;
@@ -579,6 +590,42 @@ mod tests {
                 "{host}"
             );
         }
+    }
+
+    /// A loopback `Host` with a public `Origin` is a proxy that kept the target's Host (a POST or a WebSocket from the page of the
+    /// public name); the owner's own browser sends a loopback Origin or none.
+    #[test]
+    fn a_loopback_host_with_a_public_origin_is_not_the_owners_browser() {
+        let t = trust();
+        for origin in [
+            "https://agora.example.com",
+            "https://agora.example.com:8443",
+        ] {
+            let h = head(&["Host: 127.0.0.1:7443", &format!("Origin: {origin}")]);
+            assert_eq!(t.judge(&h), Verdict::Proxied(None), "{origin}");
+        }
+        for origin in [
+            "http://127.0.0.1:7443",
+            "http://localhost:7443",
+            "http://[::1]:7443",
+        ] {
+            let h = head(&["Host: 127.0.0.1:7443", &format!("Origin: {origin}")]);
+            assert_eq!(t.judge(&h), Verdict::Direct, "{origin}");
+        }
+        // A bare navigation has no Origin: the documented gap.
+        assert_eq!(t.judge(&head(&["Host: 127.0.0.1:7443"])), Verdict::Direct);
+    }
+
+    /// Only a file that is not there is off; a path that cannot be read is damaged. Unix: a path under a regular file is
+    /// `NotADirectory`, which is not `NotFound` there (other platforms map it differently, so this test is Unix only).
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_path_is_damaged_and_only_a_missing_file_is_off() {
+        let dir = tmp("notfound");
+        std::fs::write(dir.join("plain"), "x").unwrap();
+        assert_eq!(read_file(&dir.join("absent")), Stored::Off);
+        assert_eq!(read_file(&dir.join("plain").join(FILE)), Stored::Damaged);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

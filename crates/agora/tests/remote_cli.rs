@@ -989,7 +989,14 @@ fn a_real_hub_follows_remote_proxy_and_remote_off() {
 fn an_address_nothing_connects_from_is_not_a_proxy() {
     let e = Env::new("proxyaddr");
     e.set_password();
-    for addr in ["0.0.0.0", "::", "224.0.0.1", "ff02::1"] {
+    for addr in [
+        "0.0.0.0",
+        "::",
+        "224.0.0.1",
+        "ff02::1",
+        "::ffff:0.0.0.0",
+        "::ffff:224.0.0.1",
+    ] {
         let mut args = PROXY.to_vec();
         args.extend(["--proxy-addr", addr]);
         let (code, out) = e.run(&args);

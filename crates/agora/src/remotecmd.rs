@@ -338,8 +338,8 @@ fn proxy_on(say: &Say, o: &Opts, dir: &Path) -> ExitCode {
         match a.parse::<IpAddr>() {
             Ok(ip)
                 if addrs.len() < proxy::MAX_PROXIES
-                    && !ip.is_unspecified()
-                    && !ip.is_multicast() =>
+                    && !proxy::canon(ip).is_unspecified()
+                    && !proxy::canon(ip).is_multicast() =>
             {
                 addrs.push(ip)
             }
