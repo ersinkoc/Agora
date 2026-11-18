@@ -13,8 +13,10 @@ const ROW = 104;
 // The hub in the middle, every machine it knows around it: who is connected right now, what runs there, when it was last heard.
 // ADR-0073: machines not seen for a day are listed apart, as old, folded; an offline machine can be forgotten, and the old ones cleaned
 // up in one go (`onForget` absent: no such actions, as in the demo).
-export function NetworkView({ machines: all, agents, usage, hubName, onForget }: { machines: readonly MachineModel[]; agents: readonly AgentTileModel[]; usage?: UsageSummary; hubName: string; onForget?: (ids: string[], refuseReturn: boolean) => Promise<Map<string, string | undefined>> }) {
+export function NetworkView({ machines: all, agents, usage, hubName, onForget, focus }: { focus?: string; machines: readonly MachineModel[]; agents: readonly AgentTileModel[]; usage?: UsageSummary; hubName: string; onForget?: (ids: string[], refuseReturn: boolean) => Promise<Map<string, string | undefined>> }) {
   const [now, setNow] = useState(Date.now());
+  // Arriving from the command palette: the machine asked for is brought into view and focused.
+  useEffect(() => { if (focus) { const el = document.getElementById(`machine-${focus}`); el?.scrollIntoView?.({ block: 'center' }); el?.focus({ preventScroll: true }); } }, [focus, all.length]);
   useEffect(() => { const id = setInterval(() => setNow(Date.now()), 5000); return () => clearInterval(id); }, []);
   const machines = all.filter((m) => !isOld(m, now));
   const old = all.filter((m) => isOld(m, now));
@@ -66,7 +68,7 @@ export function NetworkView({ machines: all, agents, usage, hubName, onForget }:
       {machines.length === 0 && <li className="muted">{t('machines-empty')}</li>}
       {machines.map(m => {
         const mine = agents.filter(a => machineKey(a) === m.id);
-        return <li key={m.id} className={`grid gap-2 rounded-m border bg-surface-1 p-3 ${m.online ? 'border-line' : 'border-dashed border-line opacity-80'}`} style={{ minHeight: ROW }}>
+        return <li key={m.id} id={`machine-${m.id}`} tabIndex={-1} aria-current={focus === m.id ? 'true' : undefined} className={`grid gap-2 rounded-m border bg-surface-1 p-3 ${focus === m.id ? 'ring-2 ring-accent ' : ''}${m.online ? 'border-line' : 'border-dashed border-line opacity-80'}`} style={{ minHeight: ROW }}>
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
             <Icon name="machine" className="size-4 text-muted" />
             <strong className="min-w-0 truncate">{m.name}</strong>

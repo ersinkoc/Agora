@@ -33,14 +33,14 @@ import { forgetReasonKey } from '../net/forget';
 import { Resizer } from './Resizer';
 import type { StartChoice } from './StartApproval';
 import { HelperGrants, type HelperGrant } from './HelperGrants';
-import { Details, type DetailsTab } from './Inspector';
+import { Details, type DetailsTab, needsBeyondHome } from './Inspector';
 import { type Action, findPane, reduce, tabsOf, visiblePanes, workspaceOf } from '../layout/engine';
 import { loadWorkspace, saveWorkspace } from '../layout/store';
 import { agentOf, assignAttention } from '../layout/streams';
 import { LAYOUT_VERSION, bindOf, followOf, panesOf } from '../layout/tree';
 import { Workspace } from '../layout/Workspace';
 import { LayoutMenu } from '../layout/LayoutMenu';
-import { subscribePanelRequests, takePanelRequest } from '../layout/requests';
+import { subscribePanelRequests, subscribeProjectRequests, takePanelRequest, takeProjectRequest } from '../layout/requests';
 import { ThemeEditor } from '../themes/ThemeEditor';
 
 const TerminalView = lazy(() => import('../terminal/TerminalView').then((m) => ({ default: m.TerminalView })));
@@ -141,6 +141,12 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
       for (const a of fleet.filter((x) => x.projectId === id).slice(0, MAX_AUTO_PINNED)) dispatch({ type: 'open', agent: a.id, background: true });
     }
   };
+  // A project asked for from outside (the command palette): its agents are shown, as when it is chosen in the list.
+  useEffect(() => {
+    const take = () => { const id = takeProjectRequest(); if (id) { setShowAgents(true); chooseProject(id); } };
+    take();
+    return subscribeProjectRequests(take);
+  });
   const [, textSize] = useState(0); // the size buttons follow the stored choice
   useEffect(() => { const on = () => textSize((n) => n + 1); window.addEventListener('agora-terminal-size', on); return () => window.removeEventListener('agora-terminal-size', on); }, []);
   const [showAgents, setShowAgents] = useState(saved?.showAgents ?? wide());
@@ -200,6 +206,9 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   const needs = attention.length + approvals.filter((x) => !attention.some((a) => a.id === x.agentId)).length + (pairing?.cards.length ?? 0);
   // Panel widths are what the user dragged them to; on a phone the panels stack and the widths do not apply.
   const cols = `${showAgents ? `${leftWidth}px ` : ''}minmax(0,1fr)${showDetails ? ` ${rightWidth}px` : ''}`
+  // One list of what needs you: on Home it is the console's; the side panel keeps its tab only for what the console sends there.
+  const homeShown = visiblePanes(ws, narrow).some((p) => p.panel === 'fleet');
+  const needsTab = !homeShown || needsBeyondHome(approvals, fleet, pairing, notice);
   const find = (id?: string) => fleet.find((a) => a.id === id);
 
   // Editor habits: Alt+1…9 picks a tab of the group in focus (or a pane, when it has no tabs), Ctrl/⌘+B hides or shows the agent list.
@@ -331,14 +340,15 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
             onFiles={filesOf ? (a) => setBrowsing(a.id) : undefined} renderFiles={filesOf ? (a) => { const f = filesOf(a); return f ? <FilesView files={f} load={loadDiff && a.git !== false ? (path) => loadDiff(a, path) : undefined} changed={a.filesChanged} compact /> : undefined; } : undefined} onStart={onStart ? () => onStart() : undefined} welcome={welcome} />
         </main>
 
-        {showDetails && <Inspector pairing={pairing} attention={attention} approvals={approvals} notice={notice} changed={changed} boards={boards} messages={messages} usage={usage} projects={projects} onOpen={onOpen}
+        {showDetails && <Inspector hideNeeds={!needsTab} pairing={pairing} attention={attention} approvals={approvals} notice={notice} changed={changed} boards={boards} messages={messages} usage={usage} projects={projects} onOpen={onOpen}
           onResolve={onResolve} onReview={loadDiff ? setReviewing : undefined} onCollapse={() => setShowDetails(false)} />}
       </div>
 
       <footer className="ide-bar h-6 flex-wrap border-t text-xs text-muted" aria-label={t('console-activity')}>
         <a className="inline-flex items-center gap-1.5 hover:text-ink" href="#/machines"><span aria-hidden className={`size-1.5 rounded-full ${link === 'live' ? 'bg-finished' : 'bg-needs-you'}`} />{t('machines-online', { count: machines.filter((m) => m.online).length })}</a>
         <span>{t('ide-status-agents', { count: fleet.filter((a) => !a.closed).length })}</span>
-        {needs > 0 && <button type="button" className="text-needs-you hover:underline" onClick={() => setShowDetails(true)}>{t('ide-status-needs', { count: needs })}</button>}
+        {needs > 0 && (needsTab ? <button type="button" className="text-needs-you hover:underline" onClick={() => setShowDetails(true)}>{t('ide-status-needs', { count: needs })}</button>
+          : <button type="button" className="text-needs-you hover:underline" onClick={() => dispatch({ type: 'show', panel: 'fleet' })}>{t('ide-status-needs', { count: needs })}</button>)}
         {forgetError && <span role="alert" className="truncate text-needs-you">{t('closed-forget-failed', { reason: t(forgetReasonKey(forgetError)) })}</span>}
         <span className="flex-1" />
         {usage && usage.totalMicroUsd > 0 && <span>{money(usage.totalMicroUsd)}</span>}

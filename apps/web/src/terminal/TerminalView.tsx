@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { binaryBytes, inputBytes } from './frames';
-import { t } from '../i18n';
-import { Icon } from '../components/Icon';
+import { TerminalFloat } from './TerminalFloat';
 import { FindBar } from './FindBar';
 import { OfferGate } from './clipboard';
 import { type TerminalRenderer, XtermRenderer } from './renderer';
@@ -107,24 +106,9 @@ export function TerminalView({ source, label }: { source: TerminalSource; label:
     <div className="terminal-frame">
       <div ref={host} className="terminal" role="region" aria-label={label} dir="ltr" />
       {finding && <FindBar find={(q, back) => renderer.current?.find(q, back) ?? false} onClose={closeFind} />}
-      {link !== undefined && <p className="terminal-link" dir="ltr">{link}</p>}
-      <div className="terminal-float">
-        {!atBottom && (
-          <button type="button" className="terminal-jump" onClick={() => renderer.current?.scrollToBottom()}>
-            <Icon name="chevron" className="size-4 rotate-90" />{t('terminal-jump-bottom')}
-          </button>
-        )}
-        {offer !== undefined && (
-          <div role="status" className="terminal-offer">
-            <p className="terminal-offer__text">{t('terminal-copy-offer')} <span className="text-muted">{t('terminal-copy-offer-length', { count: offer.length })}</span></p>
-            <pre className="terminal-offer__preview" dir="ltr" tabIndex={0}>{offer}</pre>
-            <div className="flex gap-2">
-              <button type="button" className="button" onClick={() => { void navigator.clipboard?.writeText(offer).catch(() => undefined); offerRef(undefined); renderer.current?.focus(); }}>{t('terminal-copy-offer-copy')}</button>
-              <button type="button" className="button" onClick={() => { offerRef(undefined); renderer.current?.focus(); }}>{t('terminal-copy-offer-ignore')}</button>
-            </div>
-          </div>
-        )}
-      </div>
+      <TerminalFloat atBottom={atBottom} onJump={() => renderer.current?.scrollToBottom()} link={link} offer={offer}
+        onCopy={() => { if (offer !== undefined) void navigator.clipboard?.writeText(offer).catch(() => undefined); offerRef(undefined); renderer.current?.focus(); }}
+        onIgnore={() => { offerRef(undefined); renderer.current?.focus(); }} />
     </div>
   );
   if (!touch) return view;

@@ -124,3 +124,11 @@ block of full-block characters drawn by the page, at row height 1.1 and 1.0, and
 ![](terminal-fidelity/phone-dark.png) ![](terminal-fidelity/phone-light.png)
 ![](terminal-fidelity/letterbox-dark.png) ![](terminal-fidelity/letterbox-light.png)
 ![](terminal-fidelity/blocks-page-1.1.png) ![](terminal-fidelity/blocks-page-1.png) ![](terminal-fidelity/blocks-gpu-1.png)
+
+## Home, terminal and command palette
+
+One list of what needs you on Home, "Jump to latest" with a link address under it (the link address is added to the page for the shot, as the demo terminal has no history or link), and the new command palette entries. The demo has no hub, so it shows no Lock, no join entry and no project entries.
+
+![](home-terminal-palette/home-one-list-dark.png) ![](home-terminal-palette/home-one-list-light.png)
+![](home-terminal-palette/terminal-jump-and-link-dark.png) ![](home-terminal-palette/terminal-jump-and-link-light.png)
+![](home-terminal-palette/palette-machines-dark.png) ![](home-terminal-palette/palette-machines-light.png)
