@@ -188,10 +188,11 @@
   .terminal-find__input { @apply w-48 rounded-xs border border-line bg-surface-0 px-2 py-1 text-sm text-ink; }
   .terminal-float { @apply pointer-events-none absolute inset-x-3 bottom-3 z-10 flex flex-col items-end gap-2; }
   .terminal-float > * { @apply pointer-events-auto; }
+  .terminal-float > .terminal-link { @apply pointer-events-none; }
   .terminal-offer { @apply grid w-full gap-2 rounded-m border border-line bg-surface-1 p-3 text-sm text-ink; box-shadow: var(--shadow); }
   .terminal-offer__preview { @apply m-0 max-h-24 overflow-auto whitespace-pre-wrap break-all rounded-xs border border-line bg-surface-0 p-2 font-mono text-xs text-ink; }
   .terminal-jump { @apply inline-flex items-center gap-1 whitespace-nowrap rounded-full border border-line bg-surface-1 px-3 py-1 text-xs text-ink hover:bg-surface-2; box-shadow: var(--shadow); }
-  .terminal-link { @apply pointer-events-none absolute bottom-0 start-0 z-10 m-0 max-w-full truncate rounded-tr-xs border border-line bg-surface-1 px-2 py-0.5 font-mono text-xs text-ink; }
+  .terminal-link { @apply pointer-events-none m-0 max-w-full self-start truncate rounded-xs border border-line bg-surface-1 px-2 py-0.5 font-mono text-xs text-ink; }
   .terminal-menu { @apply relative; }
   .terminal-menu__panel { @apply absolute end-0 top-full z-20 mt-1 grid w-64 gap-3 rounded-m border border-line bg-surface-1 p-3 text-xs text-ink; box-shadow: var(--shadow); }
   .approvals { @apply grid gap-4; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }

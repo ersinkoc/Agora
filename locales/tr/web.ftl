@@ -802,6 +802,9 @@ theme-error-contrast = { $bg } üzerinde { $fg } { $ratio }:1; okunabilir olmas�
 theme-error-full = { $max } temanız var; önce birini silin.
 palette-theme-editor = Temayı düzenle
 palette-theme = Tema: { $name }
+palette-open-machine = Makine: { $name }
+palette-open-project = Proje: { $name }
+palette-settings = Ayarlar
 device-appearance = Görünüm
 device-appearance-intro = Bu tarayıcı { $name } temasını gösteriyor. Temalar yalnızca bu tarayıcıda saklanır.
 

@@ -40,7 +40,7 @@ import { agentOf, assignAttention } from '../layout/streams';
 import { LAYOUT_VERSION, bindOf, followOf, panesOf } from '../layout/tree';
 import { Workspace } from '../layout/Workspace';
 import { LayoutMenu } from '../layout/LayoutMenu';
-import { subscribePanelRequests, takePanelRequest } from '../layout/requests';
+import { subscribePanelRequests, subscribeProjectRequests, takePanelRequest, takeProjectRequest } from '../layout/requests';
 import { ThemeEditor } from '../themes/ThemeEditor';
 
 const TerminalView = lazy(() => import('../terminal/TerminalView').then((m) => ({ default: m.TerminalView })));
@@ -141,6 +141,12 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
       for (const a of fleet.filter((x) => x.projectId === id).slice(0, MAX_AUTO_PINNED)) dispatch({ type: 'open', agent: a.id, background: true });
     }
   };
+  // A project asked for from outside (the command palette): its agents are shown, as when it is chosen in the list.
+  useEffect(() => {
+    const take = () => { const id = takeProjectRequest(); if (id) { setShowAgents(true); chooseProject(id); } };
+    take();
+    return subscribeProjectRequests(take);
+  });
   const [, textSize] = useState(0); // the size buttons follow the stored choice
   useEffect(() => { const on = () => textSize((n) => n + 1); window.addEventListener('agora-terminal-size', on); return () => window.removeEventListener('agora-terminal-size', on); }, []);
   const [showAgents, setShowAgents] = useState(saved?.showAgents ?? wide());

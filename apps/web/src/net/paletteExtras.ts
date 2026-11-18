@@ -1,0 +1,44 @@
+import { t } from '../i18n';
+import type { PaletteItem } from '../components/CommandPalette';
+import type { AgentTileModel } from '../model';
+
+// The route of the machines page, and of one machine on it.
+export const machinesHash = (id?: string) => (id ? `#/machines/${encodeURIComponent(id)}` : '#/machines');
+export const isMachinesHash = (hash: string) => hash === '#/machines' || hash.startsWith('#/machines/');
+export const machineOfHash = (hash: string): string | undefined => (hash.startsWith('#/machines/') ? decodeURIComponent(hash.slice('#/machines/'.length)) || undefined : undefined);
+
+// The projects the fleet has agents in, once each, by name.
+export function projectsOf(agents: readonly AgentTileModel[]): { id: string; name: string }[] {
+  const out = new Map<string, string>();
+  for (const a of agents) if (a.projectId && !out.has(a.projectId)) out.set(a.projectId, a.project || a.projectId);
+  return [...out].map(([id, name]) => ({ id, name }));
+}
+
+export interface PaletteExtras {
+  machines: readonly { id: string; name: string }[];
+  projects: readonly { id: string; name: string }[];
+  /** Signed in to a hub (the demo window has no session to lock and no machines to allow). */
+  hub: boolean;
+  /** A phone has no project list to jump in. */
+  phone: boolean;
+  /** A screen password is set: only then does Lock mean something (without one, anyone can sign in again). */
+  passwordSet: boolean;
+  /** This session may open the window for new machines. */
+  canPair: boolean;
+  go: (hash: string) => void;
+  showProject: (id: string) => void;
+  showPairing: () => void;
+  lock?: () => void;
+}
+
+// Jump targets and a few actions. Entries are names and navigation only: nothing here carries a code, token or key, and none answers a
+// request or opens the window for new machines by itself: "Allow a new machine to join" shows where that is done, and that screen asks.
+export function paletteExtras(x: PaletteExtras): PaletteItem[] {
+  return [
+    ...x.machines.map((m) => ({ id: `machine-${m.id}`, label: t('palette-open-machine', { name: m.name }), run: () => x.go(machinesHash(m.id)) })),
+    ...(x.phone ? [] : x.projects.map((p) => ({ id: `project-${p.id}`, label: t('palette-open-project', { name: p.name }), run: () => x.showProject(p.id) }))),
+    ...(x.hub && x.canPair ? [{ id: 'pair', label: t('pair-window-allow'), run: x.showPairing }] : []),
+    ...(x.hub && x.passwordSet && x.lock ? [{ id: 'lock', label: t('lock-now'), run: x.lock }] : []),
+    { id: 'settings', label: t('palette-settings'), run: () => x.go('#/device') },
+  ];
+}

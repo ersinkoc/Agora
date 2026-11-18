@@ -820,6 +820,9 @@ theme-error-contrast = { $fg } on { $bg } is { $ratio }:1; it needs at least { $
 theme-error-full = You have { $max } themes; delete one first.
 palette-theme-editor = Edit theme
 palette-theme = Theme: { $name }
+palette-open-machine = Machine: { $name }
+palette-open-project = Project: { $name }
+palette-settings = Settings
 device-appearance = Appearance
 device-appearance-intro = This browser shows the { $name } theme. Themes are kept in this browser only.
 
