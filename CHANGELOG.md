@@ -4,7 +4,8 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
-_Nothing yet._
+### Links in the console
+- Web addresses with a query string (`?a=1&b=2`) can now be opened with Ctrl+click twice. A `%` still blocks a link (the Windows opener could expand `%NAME%` into the address).
 
 ## 0.3.20
 
