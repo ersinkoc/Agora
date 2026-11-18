@@ -314,13 +314,13 @@ pub fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
 /// The longest address that is offered.
 const MAX_LINK: usize = 2048;
 
-/// The bytes an address may hold: the RFC 3986 unreserved and reserved characters minus `& % ^ " ( ) ! < > |` (`cmd.exe` and shells act
-/// on those; `%` goes with them, so a percent-encoded `%41` is not a link here), that is letters, digits and `-._~:/?#[]@$'*+,;=`.
+/// The bytes an address may hold: the RFC 3986 unreserved and reserved characters minus `% ^ " ( ) ! < > |` (`cmd.exe` and shells act
+/// on those; `%` goes with them, because the Windows opener may expand `%NAME%` into the address, so a percent-encoded `%41` is not a link here; `&` is allowed, no shell reads the address), that is letters, digits and `-._~:/?#[]@$'*+,;=&`.
 /// Nothing else: no space, control character, backtick, brace, backslash or non-ASCII byte. A link that is not made of these is not
 /// offered, so the footer never shows one that cannot be opened safely (`agora_platform::is_openable_url` refuses the same set; the
 /// opener is the last line of defence, this is the first).
 fn url_byte_ok(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b"-._~:/?#[]@$'*+,;=".contains(&b)
+    b.is_ascii_alphanumeric() || b"-._~:/?#[]@$'*+,;=&".contains(&b)
 }
 
 /// The address when it is a plain web address that is safe to show and open as it is written: `http` or `https`, only the bytes of
@@ -808,7 +808,6 @@ mod tests {
             "https://a.test/ x",
             "https://a.test/\x1b[31m",
             "https://а.test/",
-            "https://a.test/?x=1&calc.exe",
             "https://a.test/%GITHUB_TOKEN%",
             "https://a.test/%41",
             "https://a.test/^x",
@@ -847,7 +846,10 @@ mod tests {
         assert_eq!(at(row, 43), None);
         // An address with a character that cannot be opened safely is no link at all, not a shorter one.
         assert_eq!(at("go to http://x.test/a_(b) now", 10), None);
-        assert_eq!(at("go to https://a.test/?x=1&calc.exe now", 10), None);
+        assert_eq!(
+            at("go to https://a.test/?x=1&y=2 now", 10).as_deref(),
+            Some("https://a.test/?x=1&y=2")
+        );
         assert_eq!(
             at("(https://a.test/p)", 5).as_deref(),
             Some("https://a.test/p")

@@ -130,7 +130,7 @@ mouse reports, now with button, Shift/Alt/Ctrl and motion), `preview.rs` (reads 
   keyboard in the pane, or the keyboard goes to the tree, the inspector or the palette), only if the program asked.
 - **Paste**: bracketed only when the program asked (the emulator's own flag); every paste loses ESC and every other control
   character except tab and line breaks, C1 included, so it cannot end its own bracket.
-- **Links**: plain `http` and `https` addresses on one drawn row, printable ASCII only, none of `& % ^ " ( ) ! < > |`, no credentials,
+- **Links**: plain `http` and `https` addresses on one drawn row, printable ASCII only, none of `% ^ " ( ) ! < > |` (`&` is allowed: no shell reads the address; `%` is not, because the Windows opener may expand `%NAME%` from the environment), no credentials,
   at most 2048 characters. Only the RFC 3986 characters minus those are accepted (letters, digits, `-._~:/?#[]@$'*+,;=`; no space,
   backtick, brace, backslash or non-ASCII byte). `%` is refused whole, so a percent-encoded address is not offered as a link (it can still be copied).
   An address with any such character is no link at all, never a shorter one. Ctrl+click shows the whole address in the footer; a
