@@ -204,6 +204,8 @@ pub enum SupervisorError {
     /// F1012: the selected folder is no longer at the path that was checked (it, or a folder above it, was moved or swapped for a link
     /// between the check and the start). Nothing was started.
     FolderMoved,
+    /// Windows: an argument to a `.bat`/`.cmd` agent holds a line break or NUL, which `cmd.exe` cannot carry safely. Nothing was started.
+    BatchArgumentRefused,
     NotFound(AgentId),
     /// The agent is still running (resume applies to stopped agents).
     StillRunning(AgentId),
@@ -262,6 +264,9 @@ impl SupervisorError {
             }
             Self::FolderMoved => {
                 Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "directory.path")
+            }
+            Self::BatchArgumentRefused => {
+                Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "argv")
             }
             Self::NotFound(id) => {
                 Error::new(ErrorCode::AgentNotFound).with("agent_id", id.as_str())
@@ -1758,6 +1763,9 @@ impl Supervisor {
         let pty = started.map_err(|e| {
             if agora_platform::folder_moved(&e) {
                 return SupervisorError::FolderMoved;
+            }
+            if agora_platform::batch_argument_refused(&e) {
+                return SupervisorError::BatchArgumentRefused;
             }
             // A folder the confinement cannot keep closed (a broad write grant, ADR-0050 Amendment B, 4) or whose label cannot be set
             // (2) is refused before the agent starts: `agent.sandbox_unavailable` with the reason, not an internal error.

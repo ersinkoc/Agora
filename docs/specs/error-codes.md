@@ -15,7 +15,7 @@ or a local response timeout has a localized retry message.
 | `auth.device_revoked` | `device_id` | Device certificate revoked |
 | `protocol.unsupported_generation` | `offered`, `supported` | No common protocol generation |
 | `protocol.capability_missing` | `capability` | Peer lacks a required capability |
-| `protocol.invalid_message` | `field` | Message failed validation |
+| `protocol.invalid_message` | `field` | Message failed validation (`field = argv`: a Windows node was asked to start a `.bat`/`.cmd` agent with an argument holding a line break or NUL, which `cmd.exe` cannot carry; nothing was started) |
 | `protocol.producer_mismatch` | `node_id`, `producer_id` | A node sent an event that names another producer (`producer_id`) than its certificate (`node_id`); the hub ends the connection with this code as the WebSocket close reason (protocol.md section 3) |
 | `node.offline` | `node_id` | Target node not connected |
 | `node.unknown` | `node_id` | The hub has never seen this node, or the request named none (ADR-0029) |

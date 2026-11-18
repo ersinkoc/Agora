@@ -461,6 +461,25 @@ impl std::fmt::Display for FolderMoved {
 
 impl std::error::Error for FolderMoved {}
 
+/// The error inside an [`io::Error`] from [`spawn`] on Windows: an argument to a batch file (`.bat`, `.cmd`) holds a line break or a NUL,
+/// which `cmd.exe` cannot carry without ending the command, so nothing was started.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BatchArgumentRefused;
+
+impl std::fmt::Display for BatchArgumentRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("batch_argument_refused")
+    }
+}
+
+impl std::error::Error for BatchArgumentRefused {}
+
+/// Whether `e` (from [`spawn`]) says an argument to a batch file could not be carried to it.
+pub fn batch_argument_refused(e: &io::Error) -> bool {
+    e.get_ref()
+        .is_some_and(|inner| inner.is::<BatchArgumentRefused>())
+}
+
 /// Whether `e` (from [`HeldFolder::open`] or [`spawn_in`]) says the folder was no longer at its path.
 pub fn folder_moved(e: &io::Error) -> bool {
     e.get_ref().is_some_and(|inner| inner.is::<FolderMoved>())
