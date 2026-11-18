@@ -37,7 +37,9 @@ use windows_sys::Win32::System::Pipes::{
     WaitNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE,
     PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
 };
-use windows_sys::Win32::System::Threading::{CreateEventW, WaitForSingleObject, INFINITE};
+use windows_sys::Win32::System::Threading::{
+    CreateEventW, SetEvent, WaitForMultipleObjects, WaitForSingleObject, INFINITE,
+};
 use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 
 /// Only the owner of the pipe and the system may open it; nobody else on the machine, and nobody over the network.
@@ -589,7 +591,7 @@ impl Listener {
             let event = Event::new()?;
             let mut ov = Box::new(overlapped(&event));
             // SAFETY: `inst` is a live pipe instance opened for overlapped I/O; `ov` lives in `pending` until it completes.
-            let ok = unsafe { ConnectNamedPipe(inst, &mut *ov) };
+            let ok = unsafe { ConnectNamedPipe(inst, std::ptr::addr_of_mut!(*ov)) };
             if ok != 0 {
                 connected = true;
             } else {
@@ -638,8 +640,8 @@ impl Listener {
         // A fresh instance is ready before the connected one is handed out, so the next client finds one.
         let next = create_instance(&self.name, &self.sd, false)?;
         let conn = st.instance.replace(next);
-        conn.map(|h| Some(Stream::from_handle(h)))
-            .ok_or_else(|| io::Error::other("no instance"))
+        let conn = conn.ok_or_else(|| io::Error::other("no instance"))?;
+        Stream::from_handle(conn).map(Some)
     }
 }
 
@@ -647,12 +649,14 @@ impl Drop for Listener {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.marker);
         if let Ok(mut st) = self.state.lock() {
-            if let (Some(p), Some(inst)) = (st.pending.take(), st.instance.as_ref()) {
+            if let (Some(mut p), Some(inst)) = (st.pending.take(), st.instance.as_ref()) {
                 let mut n = 0u32;
+                // A raw pointer, never a reference: the system may still write through it until the connect is over.
+                let ovp = std::ptr::addr_of_mut!(*p.ov);
                 // SAFETY: cancel the connect and wait until it is over, so `ov` is not used after it is freed.
                 unsafe {
-                    CancelIoEx(inst.0, &*p.ov);
-                    GetOverlappedResult(inst.0, &*p.ov, &mut n, 1);
+                    CancelIoEx(inst.0, ovp);
+                    GetOverlappedResult(inst.0, ovp, &mut n, 1);
                 }
             }
         }
@@ -676,7 +680,7 @@ pub fn connect(path: &Path) -> io::Result<Stream> {
             )
         };
         if h != INVALID_HANDLE_VALUE {
-            return Ok(Stream::from_handle(Handle(h)));
+            return Stream::from_handle(Handle(h));
         }
         match unsafe { GetLastError() } {
             // Every instance is serving someone: wait (once) for a free one.
@@ -696,15 +700,19 @@ pub struct Stream {
     handle: Arc<Handle>,
     timeout: Arc<Mutex<Option<Duration>>>,
     closed: Arc<AtomicBool>,
+    /// Set for good by `shutdown`. Every read and write also waits on it, so one submitted after `shutdown` already cancelled the
+    /// handle's I/O (it passed the `closed` check just before) still cannot wait for ever on a peer that stopped reading.
+    stop: Arc<Event>,
 }
 
 impl Stream {
-    fn from_handle(h: Handle) -> Self {
-        Self {
+    fn from_handle(h: Handle) -> io::Result<Self> {
+        Ok(Self {
             handle: Arc::new(h),
             timeout: Arc::new(Mutex::new(None)),
             closed: Arc::new(AtomicBool::new(false)),
-        }
+            stop: Arc::new(Event::new()?),
+        })
     }
 
     /// ADR-0079 decision 5: on a connection a [`Listener`] accepted, the process id of the client at the other end (which cannot be
@@ -731,19 +739,23 @@ impl Stream {
         Ok(())
     }
 
-    /// Wakes a thread waiting in `read` (it then sees the end of the stream) and makes later reads and writes fail.
+    /// Wakes a thread waiting in `read` (it then sees the end of the stream) or `write` (it fails), on every clone, and makes later
+    /// reads and writes fail. An operation already past the `closed` check when this runs is ended too: its wait sees `stop`.
     pub fn shutdown(&self) -> io::Result<()> {
         self.closed.store(true, Ordering::Release);
+        // SAFETY: a live event handle.
+        unsafe { SetEvent(self.stop.0 .0) };
         // SAFETY: cancels every pending operation on the handle; a null `OVERLAPPED` means all of them.
         unsafe { CancelIoEx(self.handle.0, null()) };
         Ok(())
     }
 
-    /// Waits for the operation `ov` started on this handle, up to `limit`; `None` when the time ran out (the operation is then cancelled
-    /// and finished before this returns).
+    /// Waits for the operation `ov` started on this handle, up to `limit`, or until `shutdown`; `None` when the time ran out and
+    /// `Some(0)` after a shutdown (the operation is then cancelled and finished before this returns). `ov` is the very pointer the
+    /// operation was started with, never a reference: the system writes through it until the operation ends.
     fn finish(
         &self,
-        ov: &OVERLAPPED,
+        ov: *mut OVERLAPPED,
         event: &Event,
         limit: Option<Duration>,
     ) -> io::Result<Option<u32>> {
@@ -752,10 +764,15 @@ impl Stream {
                 .unwrap_or(INFINITE - 1)
                 .min(INFINITE - 1)
         });
-        // SAFETY: a live event handle.
-        let w = unsafe { WaitForSingleObject(event.0 .0, ms) };
+        let events = [event.0 .0, self.stop.0 .0];
+        // SAFETY: two live event handles; wait for either.
+        let w = unsafe { WaitForMultipleObjects(2, events.as_ptr(), 0, ms) };
         let mut n = 0u32;
-        if w == WAIT_TIMEOUT {
+        if w != WAIT_OBJECT_0 {
+            // Timed out, shut down, or the wait failed: the operation may still be running, so cancel it and wait for it to end
+            // before the buffer and `ov` are given back.
+            let failed =
+                (w != WAIT_TIMEOUT && w != WAIT_OBJECT_0 + 1).then(|| unsafe { GetLastError() });
             // SAFETY: cancel, then wait for the cancellation so the buffer is free again.
             unsafe {
                 CancelIoEx(self.handle.0, ov);
@@ -763,7 +780,11 @@ impl Stream {
                     return Ok(Some(n));
                 }
             }
-            return Ok(None);
+            return match failed {
+                Some(e) => Err(os_error(e)),
+                None if w == WAIT_TIMEOUT => Ok(None),
+                None => Ok(Some(0)),
+            };
         }
         // SAFETY: the operation completed; `ov` is the one it was started with.
         if unsafe { GetOverlappedResult(self.handle.0, ov, &mut n, 0) } != 0 {
@@ -777,15 +798,25 @@ impl Stream {
     }
 
     pub fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
-        if self.closed.load(Ordering::Acquire) || buf.is_empty() {
+        if self.closed.load(Ordering::Acquire) {
+            return Ok(0);
+        }
+        self.read_unchecked(buf)
+    }
+
+    /// `read` after its `closed` check: what a reader that passed the check just before `shutdown` runs.
+    fn read_unchecked(&self, buf: &mut [u8]) -> io::Result<usize> {
+        if buf.is_empty() {
             return Ok(0);
         }
         let event = Event::new()?;
         let mut ov = overlapped(&event);
+        // Only this pointer is used from here on, while the system may write through it.
+        let ovp = std::ptr::addr_of_mut!(ov);
         let mut n = 0u32;
         let len = u32::try_from(buf.len()).unwrap_or(u32::MAX);
         // SAFETY: `buf` and `ov` stay alive until `finish` has seen the operation end.
-        let ok = unsafe { ReadFile(self.handle.0, buf.as_mut_ptr().cast(), len, &mut n, &mut ov) };
+        let ok = unsafe { ReadFile(self.handle.0, buf.as_mut_ptr().cast(), len, &mut n, ovp) };
         if ok != 0 {
             return Ok(n as usize);
         }
@@ -798,7 +829,7 @@ impl Stream {
             .timeout
             .lock()
             .map_err(|_| io::Error::other("poisoned"))?;
-        match self.finish(&ov, &event, limit)? {
+        match self.finish(ovp, &event, limit)? {
             Some(n) => Ok(n as usize),
             None => Err(io::Error::from(io::ErrorKind::TimedOut)),
         }
@@ -808,15 +839,22 @@ impl Stream {
         if self.closed.load(Ordering::Acquire) {
             return Err(io::Error::from(io::ErrorKind::BrokenPipe));
         }
+        self.write_unchecked(buf)
+    }
+
+    /// `write` after its `closed` check: what a writer that passed the check just before `shutdown` runs.
+    fn write_unchecked(&self, buf: &[u8]) -> io::Result<usize> {
         if buf.is_empty() {
             return Ok(0);
         }
         let event = Event::new()?;
         let mut ov = overlapped(&event);
+        // Only this pointer is used from here on, while the system may write through it.
+        let ovp = std::ptr::addr_of_mut!(ov);
         let mut n = 0u32;
         let len = u32::try_from(buf.len()).unwrap_or(u32::MAX);
         // SAFETY: `buf` and `ov` stay alive until `finish` has seen the operation end.
-        let ok = unsafe { WriteFile(self.handle.0, buf.as_ptr().cast(), len, &mut n, &mut ov) };
+        let ok = unsafe { WriteFile(self.handle.0, buf.as_ptr().cast(), len, &mut n, ovp) };
         if ok != 0 {
             return Ok(n as usize);
         }
@@ -827,7 +865,7 @@ impl Stream {
             }
             e => return Err(os_error(e)),
         }
-        match self.finish(&ov, &event, None)? {
+        match self.finish(ovp, &event, None)? {
             Some(0) => Err(io::Error::from(io::ErrorKind::BrokenPipe)),
             Some(n) => Ok(n as usize),
             None => Err(io::Error::from(io::ErrorKind::TimedOut)),
@@ -1582,6 +1620,66 @@ mod tests {
         assert_eq!(&got, b"ping");
         s.shutdown().unwrap();
         assert_eq!(t.join().unwrap(), 0);
+    }
+
+    /// A peer that never reads: the server's write cannot finish, so only `shutdown` can end it (F1041, Codex review).
+    fn unread_pair(name: &str) -> (Listener, Stream, Stream) {
+        let p = path(name);
+        let l = listen(&p).unwrap();
+        let c = connect(&p).unwrap();
+        let s = l.accept().unwrap();
+        (l, c, s)
+    }
+
+    /// Runs `f` on its own thread and gives its result, or `None` when it has not returned after 10 s (it would wait for ever).
+    fn within_10s<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Option<T> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(f());
+        });
+        rx.recv_timeout(Duration::from_secs(10)).ok()
+    }
+
+    #[test]
+    fn shutdown_ends_a_write_the_peer_never_reads() {
+        let (_l, _c, s) = unread_pair("unread-write");
+        let writer = s.try_clone().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            // Far more than the pipe's 64 KiB buffer: this write waits for a reader that never comes.
+            let _ = tx.send(writer.write(&vec![0u8; 4 << 20]));
+        });
+        assert!(
+            rx.recv_timeout(Duration::from_millis(300)).is_err(),
+            "the write did not wait"
+        );
+        s.shutdown().unwrap();
+        let got = rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("shutdown did not end the write");
+        assert!(!matches!(got, Ok(n) if n == 4 << 20), "{got:?}");
+    }
+
+    #[test]
+    fn a_write_or_read_submitted_just_after_shutdown_does_not_wait_for_ever() {
+        // The race: the writer passed the `closed` check, `shutdown` cancelled the handle's I/O (nothing was pending yet), and only
+        // then is the write submitted. Calling the part after the check, after `shutdown`, is that order made certain.
+        let (_l, _c, s) = unread_pair("late-write");
+        s.shutdown().unwrap();
+        let writer = s.try_clone().unwrap();
+        let got = within_10s(move || writer.write_unchecked(&vec![0u8; 4 << 20]))
+            .expect("a write submitted after shutdown waited for ever");
+        assert!(!matches!(got, Ok(n) if n == 4 << 20), "{got:?}");
+        // The same for a read with no timeout on a peer that never writes.
+        let (_l2, _c2, s2) = unread_pair("late-read");
+        s2.shutdown().unwrap();
+        let reader = s2.try_clone().unwrap();
+        let got = within_10s(move || {
+            let mut b = [0u8; 4];
+            reader.read_unchecked(&mut b)
+        })
+        .expect("a read submitted after shutdown waited for ever");
+        assert_eq!(got.unwrap(), 0);
     }
 
     #[test]

@@ -661,11 +661,20 @@ impl MeshServer {
                 .spawn(move || {
                     // Each connection with a handle to close it (F1041): a client that stops reading parks its thread in a write,
                     // where the stop flag is never looked at; closing the stream ends that write, so leaving never waits on a client.
-                    let mut conns: Vec<(JoinHandle<()>, Option<LocalStream>)> = Vec::new();
+                    let mut conns: Vec<(JoinHandle<()>, LocalStream)> = Vec::new();
                     while !stop.load(Ordering::Acquire) {
+                        // Finished connections first, on every pass (a refused one too): their closers are descriptors, and
+                        // giving them back before the next accept and clone is what lets those succeed when descriptors are short.
+                        conns.retain(|(h, _)| !h.is_finished());
                         match listener.accept() {
                             Ok(stream) => {
-                                let closer = stream.try_clone().ok();
+                                // No worker without a way to close it: when the handle cannot be had (no descriptors left), the
+                                // connection is refused (closed at once) rather than served by a thread leaving could wait on.
+                                let Ok(closer) = stream.try_clone() else {
+                                    let _ = stream.shutdown();
+                                    std::thread::sleep(POLL);
+                                    continue;
+                                };
                                 let (mesh, stop, agent, remote, allowed, shares) = (
                                     Arc::clone(&mesh),
                                     Arc::clone(&stop),
@@ -698,12 +707,9 @@ impl MeshServer {
                             }
                             Err(_) => std::thread::sleep(POLL),
                         }
-                        conns.retain(|(h, _)| !h.is_finished());
                     }
                     for (h, closer) in conns {
-                        if let Some(c) = closer {
-                            let _ = c.shutdown();
-                        }
+                        let _ = closer.shutdown();
                         let _ = h.join();
                     }
                 })?
