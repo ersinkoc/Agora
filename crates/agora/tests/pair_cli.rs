@@ -826,3 +826,102 @@ fn a_link_saved_while_the_join_waited_for_the_folder_is_kept() {
         "{text}"
     );
 }
+
+/// Codex review of F1030: an approved join gets its certificate when the owner approves, then waits for the link folder. If this
+/// machine was enrolled with the same hub under the same name in that time (`agora node enroll`, or `agora` enrolling with its own hub),
+/// the hub revoked the join's certificate when it issued the newer one, and the join, finding the same hub and name, saved its revoked
+/// certificate over the newer one. The order is forced as for F1032: the test holds `link/lock` before the owner approves and waits
+/// until the join reached the guard; then this machine is enrolled by name with the same hub (into a folder of its own, copied in as
+/// that other save) and the guard is let go. The join must keep the newer certificate. Where the system shows no open files of a
+/// process (no `/proc`), the order cannot be forced and the test has nothing to check.
+#[test]
+fn a_newer_certificate_of_the_same_hub_saved_while_the_join_waited_is_kept() {
+    let open_files = |pid: u32| PathBuf::from(format!("/proc/{pid}/fd"));
+    if !open_files(std::process::id()).is_dir() {
+        return;
+    }
+    let root = tmp("newer");
+    let hub = hub(&root.join("hub"));
+    let owner_home = root.join("owner");
+    std::fs::create_dir_all(&owner_home).unwrap();
+    let machine = root.join("racer");
+    let mut owner = hub.open(&owner_home);
+    let mut m = join(
+        &machine,
+        &format!("localhost:{}", hub.port),
+        &["--id", "racer"],
+    );
+    m.wait_for("Number ");
+    let link = machine.join("link");
+    std::fs::create_dir_all(&link).unwrap();
+    let lock = link.join("lock");
+    let guard = agora_platform::open_lock_private(&lock).unwrap();
+    guard.lock().unwrap();
+    let lock = std::fs::canonicalize(&lock).unwrap();
+    owner.wait_for("wants to join");
+    owner.answer("y\r");
+    let pid = m.child.0.id();
+    let reached_guard = || {
+        std::fs::read_dir(open_files(pid)).is_ok_and(|d| {
+            d.filter_map(Result::ok)
+                .any(|e| std::fs::read_link(e.path()).is_ok_and(|p| p == lock))
+        })
+    };
+    while !reached_guard() {
+        assert!(
+            m.child.0.try_wait().unwrap().is_none(),
+            "the join ended before it reached the folder's guard"
+        );
+        std::thread::yield_now();
+    }
+    // The join holds its certificate now. The same machine is enrolled again with the same hub under the same name.
+    let other = root.join("enrolled");
+    std::fs::create_dir_all(&other).unwrap();
+    let out = agora(&other, &["hub", "code", "--hub-dir"])
+        .arg(&hub.dir)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    let code = text
+        .split("Enrollment code: ")
+        .nth(1)
+        .and_then(|r| r.split(' ').next())
+        .expect(&text)
+        .to_string();
+    let out = agora(
+        &other,
+        &[
+            "node",
+            "enroll",
+            "--hub",
+            &format!("wss://localhost:{}", hub.port),
+            "--ca",
+        ],
+    )
+    .arg(hub.dir.join("ca.pem"))
+    .args(["--code", &code, "--id", "racer"])
+    .stdin(Stdio::null())
+    .output()
+    .unwrap();
+    assert!(
+        out.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let newer = other.join("link");
+    for f in ["key.pem", "ca.pem", "cert.pem", "url", "node-id"] {
+        std::fs::copy(newer.join(f), link.join(f)).unwrap();
+    }
+    drop(guard);
+    let (ok, text) = m.finish();
+    let read = |d: &Path, f: &str| std::fs::read_to_string(d.join(f)).unwrap_or_default();
+    // Issued a moment apart, the two often end in the same second: the join then says it cannot tell which one the hub kept. Either
+    // way the newer link stays.
+    assert!(
+        !ok && (text.contains("newer certificate is kept") || text.contains("cannot be told")),
+        "{text}"
+    );
+    assert_eq!(read(&link, "cert.pem"), read(&newer, "cert.pem"), "{text}");
+    assert_eq!(read(&link, "key.pem"), read(&newer, "key.pem"), "{text}");
+}
