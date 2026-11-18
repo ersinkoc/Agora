@@ -4,7 +4,8 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
-_Nothing yet._
+### Windows
+- An argument given to an agent that is a `.bat` or `.cmd` file can no longer run a second command on Windows (the "BatBadBut" flaw, CVE-2024-24576): quotes and `%` in it reach the script as plain text, and an argument with a line break is refused before anything starts. A bare `claude` or `codex` that Windows finds as an `.exe` was never affected.
 
 ## 0.3.19
 

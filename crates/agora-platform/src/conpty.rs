@@ -154,7 +154,7 @@ fn resolve_batch(program: &str, env: &[(String, String)]) -> io::Result<std::pat
 /// or `|` after it would run another command (CVE-2024-24576). Built as the standard library builds it since Rust 1.77.2: the script
 /// (a full path, from [`resolve_batch`]) run by `cmd.exe /e:ON /v:OFF /d /c "..."`, any argument with an ASCII symbol or a control
 /// character quoted, `"` doubled, `%` broken up so no variable expands, in the script's path too. `InvalidInput` for a line break or
-/// NUL in an argument, or a script path `cmd.exe` cannot carry.
+/// NUL in an argument ([`crate::batch_argument_refused`]), or a script path `cmd.exe` cannot carry.
 fn batch_command_line(script: &std::path::Path, args: &[String]) -> io::Result<String> {
     let invalid = || io::Error::from(io::ErrorKind::InvalidInput);
     let script = script.to_str().ok_or_else(invalid)?;
@@ -173,7 +173,10 @@ fn batch_command_line(script: &std::path::Path, args: &[String]) -> io::Result<S
     );
     for arg in args {
         if arg.contains(['\r', '\n', '\0']) {
-            return Err(invalid());
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                crate::BatchArgumentRefused,
+            ));
         }
         line.push(' ');
         let quote = arg.is_empty()
@@ -836,13 +839,28 @@ mod tests {
         let mut p = spawn(&cfg).unwrap();
         assert_eq!(p.wait().unwrap().code, Some(5));
         assert!(!dir.join("injected.txt").exists());
+        // A `%VAR%` in an argument is not expanded either, even where the variable holds `"&type nul>x&"`: the script receives the
+        // literal text (exit 8) and no second command ran.
+        let literal = dir.join("literal.cmd");
+        std::fs::write(
+            &literal,
+            "@if \"%~1\"==\"%%AGORA_CONPTY_T%%\" (exit /b 8)\r\n@exit /b 9\r\n",
+        )
+        .unwrap();
+        let mut cfg = PtyConfig::new(vec![
+            literal.display().to_string(),
+            "%AGORA_CONPTY_T%".into(),
+        ]);
+        cfg.env = vec![("AGORA_CONPTY_T".into(), "\"&type nul>x&\"".into())];
+        cfg.cwd = Some(dir.clone());
+        assert_eq!(spawn(&cfg).unwrap().wait().unwrap().code, Some(8));
+        assert!(!dir.join("x").exists());
         // A line break cannot be carried to a batch file: refused, nothing started.
         let mut cfg = PtyConfig::new(vec![script.display().to_string(), "a\r\nb".into()]);
         cfg.cwd = Some(dir.clone());
-        assert_eq!(
-            spawn(&cfg).err().map(|e| e.kind()),
-            Some(io::ErrorKind::InvalidInput)
-        );
+        let refused = spawn(&cfg).err().unwrap();
+        assert_eq!(refused.kind(), io::ErrorKind::InvalidInput);
+        assert!(crate::batch_argument_refused(&refused));
         // Nor a NUL in the script's name.
         let cfg = PtyConfig::new(vec!["a\0b.cmd".into()]);
         assert_eq!(
