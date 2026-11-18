@@ -194,6 +194,46 @@ pub(crate) fn enable_raw_mode() -> io::Result<crate::RawMode> {
     Ok(crate::RawMode { saved })
 }
 
+/// What a stop signal puts back: the settings the terminal had before raw mode, and the bytes to write first (see
+/// [`restore_terminal_on_stop`]). Read by the signal handler, so both are lock-free: a `OnceLock` read is one atomic load.
+static STOP_SAVED: std::sync::OnceLock<libc::termios> = std::sync::OnceLock::new();
+static STOP_RESET: std::sync::OnceLock<&'static [u8]> = std::sync::OnceLock::new();
+
+extern "C" fn on_stop_restore(sig: libc::c_int) {
+    // Only async-signal-safe calls: `write`, `tcsetattr`, `raise`. The disposition went back to the default when the handler was
+    // entered (`SA_RESETHAND`), so the `raise` below, delivered when the handler returns, ends the process by this signal as before.
+    if let Some(reset) = STOP_RESET.get() {
+        // SAFETY: a valid buffer; fd 1 is stdout; a short or failed write cannot be helped here.
+        unsafe { libc::write(1, reset.as_ptr().cast(), reset.len()) };
+    }
+    if let Some(saved) = STOP_SAVED.get() {
+        // SAFETY: restoring settings previously read from fd 0.
+        unsafe { libc::tcsetattr(0, libc::TCSANOW, saved) };
+    }
+    // SAFETY: plain system call.
+    unsafe { libc::raise(sig) };
+}
+
+/// See [`crate::restore_terminal_on_stop`].
+pub(crate) fn restore_terminal_on_stop(
+    saved: &libc::termios,
+    reset: &'static [u8],
+) -> io::Result<()> {
+    let _ = STOP_SAVED.set(*saved);
+    let _ = STOP_RESET.set(reset);
+    for sig in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
+        // SAFETY: an all-zero sigaction is valid; the handler only calls async-signal-safe functions.
+        let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+        action.sa_sigaction = on_stop_restore as extern "C" fn(libc::c_int) as libc::sighandler_t;
+        action.sa_flags = libc::SA_RESETHAND;
+        // SAFETY: valid pointers to a filled action; the old action is not wanted.
+        unsafe { libc::sigemptyset(&mut action.sa_mask) };
+        // SAFETY: as above.
+        cvt(unsafe { libc::sigaction(sig, &action, std::ptr::null_mut()) })?;
+    }
+    Ok(())
+}
+
 pub(crate) fn restore_mode(saved: &libc::termios) {
     // SAFETY: restoring settings previously read from the same fd.
     unsafe { libc::tcsetattr(0, libc::TCSANOW, saved) };

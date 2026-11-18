@@ -119,8 +119,11 @@ mouse reports, now with button, Shift/Alt/Ctrl and motion), `preview.rs` (reads 
   motion (1003) and the wheel go to the program; drags and releases only of a press the program got. **Shift** keeps everything local
   (selection and the OSC 52 copy the client already had, wheel scrolls the history) and a Shift-held event is never sent: while the
   program has a press, a Shift- or Ctrl-held drag goes nowhere and a Shift- or Ctrl-held release is sent as a plain release (the
-  modifiers cut off) so the program's button does not stay down. A press the program has is forgotten when it switches the mouse off
-  or the tab changes. **Ctrl+click** is the link gesture and is never sent. With no mouse mode: the wheel on the alternate screen is
+  modifiers cut off) so the program's button does not stay down. A press the program has never loses its release: the wheel in the
+  middle of it is the program's and does not end it; when the pane stops being under the pointer's hand (the palette opens, a box
+  covers the pane, the mouse is given back to the terminal, another tab comes to the front) the program gets one release (no
+  modifiers, where it last was) in the encoding it had, in the pane that had the press, even if that tab is no longer in front.
+  Nothing is sent when the program itself switched the mouse off. **Ctrl+click** is the link gesture and is never sent. With no mouse mode: the wheel on the alternate screen is
   arrow keys, three a notch, in the cursor-key form the program asked (DECCKM); on the normal screen it scrolls the client's history,
   as before. Middle and right buttons do nothing in the client itself.
 - **Focus events** (1004): `ESC [ I` / `ESC [ O` when the pane gains or loses the keyboard (the tab comes to the front with the
@@ -128,18 +131,23 @@ mouse reports, now with button, Shift/Alt/Ctrl and motion), `preview.rs` (reads 
 - **Paste**: bracketed only when the program asked (the emulator's own flag); every paste loses ESC and every other control
   character except tab and line breaks, C1 included, so it cannot end its own bracket.
 - **Links**: plain `http` and `https` addresses on one drawn row, printable ASCII only, none of `& % ^ " ( ) ! < > |`, no credentials,
-  at most 2048 characters. `%` is refused whole, so a percent-encoded address is not offered as a link (it can still be copied).
+  at most 2048 characters. Only the RFC 3986 characters minus those are accepted (letters, digits, `-._~:/?#[]@$'*+,;=`; no space,
+  backtick, brace, backslash or non-ASCII byte). `%` is refused whole, so a percent-encoded address is not offered as a link (it can still be copied).
   An address with any such character is no link at all, never a shorter one. Ctrl+click shows the whole address in the footer; a
   second Ctrl+click on the same address opens it only if nothing happened in between (a key, another pointer event, a tab switch,
-  a different footer text, or 10 seconds forget it; `LinkConfirm`). The opener (`agora_platform::open_url`) refuses anything else
-  and, on Windows, uses `rundll32 url.dll,FileProtocolHandler` (one argument, never `cmd.exe`; before, `cmd /c start` let `&` and
-  `%VAR%` through). A plain click never opens or asks; nothing opens by itself. An address broken over two rows is not joined.
+  a different footer text, or 10 seconds forget it) and the footer with the address has been drawn (clicks in the same batch of
+  events cannot open it; clicking the same address again shows it again and restarts the 10 seconds; `LinkConfirm`). The opener (`agora_platform::open_url`) refuses anything else
+  and, on Windows, runs `%SystemRoot%\System32\rundll32.exe url.dll,FileProtocolHandler` (the address is one argument, never `cmd.exe` and never
+  found through `PATH`; before, `cmd /c start` let `&` and `%VAR%` through). A plain click never opens or asks; nothing opens by itself. An address broken over two rows is not joined.
 - **Title** (OSC 0 / 2): drawn after the tabs; control, bidirectional, zero-width and other invisible characters (including
   U+206A-206F, tag characters, U+3164, U+2800, U+00AD, U+FE0F, U+180E) as visible escapes, cut to 60 characters and to the room by
   display width. The count of agents waiting is drawn first, in a place of its own; the title gets what is left.
 - **Leaving**: one reset sequence (`backend::RESET`: mouse 1000/1002/1003/1006, paste 2004, focus 1004, cursor, alternate screen) is
-  written when the screen is dropped: a quit, an early return, a panic (a hook writes it before the message), and on Unix a SIGTERM,
-  SIGHUP or SIGINT (caught, the console ends in order). Not covered: SIGKILL, and closing a Windows console window.
+  written when the screen is dropped: a quit, an early return (the sign-in-failed message is printed after the screen is left), a panic
+  on the thread that made the screen (a hook writes it before the message; a panic on another thread leaves the screen as it is), and on
+  Unix a SIGTERM, SIGHUP or SIGINT first writes it and puts the terminal's settings back, then ends the process by that signal as
+  before (`agora_platform::restore_terminal_on_stop`; it needs no loop to poll for it, so no wait can miss it; tested with a real pty and
+  real signals). Not covered: SIGKILL, and closing a Windows console window or Ctrl+Break.
 
 How it was checked: unit tests on encoders, the scanner (split chunks, strings, resets), paste, links, titles, and the pane's pointer
 rules against a fake program's byte stream; a mutation run (each guard reverted alone: paste cleaning, bracket only when asked, mouse off,

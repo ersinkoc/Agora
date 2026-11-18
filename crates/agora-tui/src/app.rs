@@ -115,6 +115,11 @@ pub enum Event {
 pub enum Action {
     /// Bytes for the active agent's terminal: send them before drawing.
     Input(Vec<u8>),
+    /// Bytes for the terminal of this agent, which may not be the one in front (the release of a press that ended with its pane).
+    InputFor {
+        agent: String,
+        bytes: Vec<u8>,
+    },
     /// Start showing this agent's terminal (it was opened in a new tab).
     Open(String),
     /// Stop showing this agent's terminal (its tab was closed).
@@ -172,6 +177,8 @@ pub struct Ctx<'a> {
     pub modes: Modes,
     /// The mouse and focus modes the running program switched on (`termio::ModeScanner`); the defaults for an agent without one.
     pub prog: ProgramModes,
+    /// Something is drawn over the pane (a box that closes with this event): no pointer event reaches the program meanwhile.
+    pub covered: bool,
     pub t: Text<'a>,
 }
 
@@ -248,6 +255,16 @@ pub enum Panel {
     Hidden,
 }
 
+/// A press the program has: whose pane, which button, where it last was (the pane's cells), and the modes the program had.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Press {
+    agent: String,
+    button: u8,
+    col: u16,
+    row: u16,
+    prog: ProgramModes,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct App {
     pub focus: Focus,
@@ -271,9 +288,9 @@ pub struct App {
     pub scroll: usize,
     drag: Option<Divider>,
     pane: Option<(u16, u16)>,
-    /// A press went to the program (not kept for a local selection): the button, so its drags and its release go there too even if
-    /// the program switched the mouse off meanwhile.
-    forwarding: Option<u8>,
+    /// A press went to the program (not kept for a local selection), so its drags and its release go there too. It never ends
+    /// without the program getting a release (see [`App::release_press`]), unless the program itself switched the mouse off.
+    forwarding: Option<Press>,
     /// The agent whose pane has the keyboard now, and the changes not yet taken (see [`App::take_pane_focus`]).
     pane_focus: Option<String>,
     focus_changes: Vec<(String, bool)>,
@@ -416,7 +433,7 @@ impl App {
             self.selected.min(cx.rows.len().saturating_sub(1)),
             true,
         );
-        // A press the program has is forgotten when it switched the mouse off.
+        // A press the program has is forgotten, with no release, when the program itself switched the mouse off.
         if cx.prog.track == Track::Off {
             self.forwarding = None;
         }
@@ -443,8 +460,14 @@ impl App {
         self.track_pane_focus();
         // The tree (and so the inspector) follows the tab brought to the front.
         let tab_now = self.active_agent().map(str::to_string);
+        // A press the program has ends here when its pane is no longer under the pointer's hand: the palette opened, a box covers it,
+        // the mouse was given back to the terminal, or another tab came to the front. The program gets its release.
+        if self.forwarding.is_some()
+            && (self.palette.is_some() || cx.covered || !self.mouse || tab_now != tab_before)
+        {
+            self.release_press(&mut out);
+        }
         if tab_now != tab_before {
-            self.forwarding = None;
             self.selection = None;
             self.scroll = 0;
             if let Some(i) = tab_now
@@ -777,14 +800,15 @@ impl App {
             MouseKind::ScrollUp => Phase::WheelUp,
             MouseKind::ScrollDown => Phase::WheelDown,
         };
-        // Nothing goes to the pane under the palette.
-        if self.palette.is_some() {
-            self.forwarding = None;
+        // Nothing goes to the pane under the palette or a box (a press the program has ends in `handle`, with its release).
+        if self.palette.is_some() || cx.covered {
             return false;
         }
+        let wheel = matches!(m.kind, MouseKind::ScrollUp | MouseKind::ScrollDown);
         // The rest of a press the program has. A Shift- or Ctrl-held drag or move is dropped, never sent; a Shift- or Ctrl-held
-        // release is sent as a plain release (the modifiers cut off), so the program's button does not stay down.
-        if let Some(button) = self.forwarding {
+        // release is sent as a plain release (the modifiers cut off), so the program's button does not stay down. The wheel in the
+        // middle of a press is the program's too and does not end it; another press ends it with a release first.
+        if let Some(press) = self.forwarding.clone() {
             if matches!(m.kind, MouseKind::Drag | MouseKind::Up | MouseKind::Move)
                 && !a.terminal.is_empty()
             {
@@ -795,7 +819,7 @@ impl App {
                 let (col, row) = local(m.col, m.row);
                 let r = Report {
                     phase,
-                    button,
+                    button: press.button,
                     mods: if held { 0 } else { m.mods },
                     col,
                     row,
@@ -805,15 +829,20 @@ impl App {
                 }
                 if m.kind == MouseKind::Up {
                     self.forwarding = None;
+                } else if let Some(p) = self.forwarding.as_mut() {
+                    p.col = col;
+                    p.row = row;
+                    p.prog = cx.prog;
                 }
                 return true;
             }
-            self.forwarding = None;
+            if !wheel {
+                self.release_press(out);
+            }
         }
         if !in_pane {
             return false;
         }
-        let wheel = matches!(m.kind, MouseKind::ScrollUp | MouseKind::ScrollDown);
         if m.mods & CTRL != 0 && !wheel {
             if m.kind == MouseKind::Down && m.button == 0 {
                 self.focus = Focus::Terminal;
@@ -844,7 +873,14 @@ impl App {
                 self.focus = Focus::Terminal;
                 self.selection = None;
                 self.selecting = false;
-                self.forwarding = Some(m.button);
+                let agent = self.active_agent().map(str::to_string);
+                self.forwarding = agent.map(|agent| Press {
+                    agent,
+                    button: m.button,
+                    col,
+                    row,
+                    prog: cx.prog,
+                });
             }
             if let Some(bytes) = encode_mouse(&cx.prog, &r) {
                 out.push(Action::Input(bytes));
@@ -859,6 +895,28 @@ impl App {
             return true;
         }
         false
+    }
+
+    /// Ends the press the program has by telling it the button went up (no modifiers, where it last was), to the pane that has the
+    /// press, in the encoding it had then. Nothing is sent when the program had switched the mouse off, or the position does not fit
+    /// its encoding.
+    fn release_press(&mut self, out: &mut Vec<Action>) {
+        let Some(p) = self.forwarding.take() else {
+            return;
+        };
+        let r = Report {
+            phase: Phase::Release,
+            button: p.button,
+            mods: 0,
+            col: p.col,
+            row: p.row,
+        };
+        if let Some(bytes) = encode_mouse(&p.prog, &r) {
+            out.push(Action::InputFor {
+                agent: p.agent,
+                bytes,
+            });
+        }
     }
 
     /// Notes which agent's pane has the keyboard now; a change is kept for [`App::take_pane_focus`].
@@ -1339,6 +1397,7 @@ impl App {
                 area: f.area(),
                 modes: Modes::default(),
                 prog: ProgramModes::default(),
+                covered: false,
                 t: s.t,
             };
             let items = self.commands(&cx);
@@ -1997,6 +2056,7 @@ mod tests {
             area: AREA,
             modes: Modes::default(),
             prog: ProgramModes::default(),
+            covered: false,
             t: &text,
         }
     }
@@ -3902,6 +3962,169 @@ mod tests {
             let cut = bar.find('\u{2026}').expect(&bar);
             assert!(cut < note, "{bar}");
         }
+    }
+
+    /// An event with the program's modes and whether a box covers the pane.
+    fn handle_with(app: &mut App, ev: Event, prog: ProgramModes, covered: bool) -> Vec<Action> {
+        let rows = rows();
+        app.handle(
+            ev,
+            &Ctx {
+                prog,
+                covered,
+                ..cx(&rows)
+            },
+        )
+    }
+
+    fn release_for(agent: &str, bytes: &[u8]) -> Vec<Action> {
+        vec![Action::InputFor {
+            agent: agent.to_string(),
+            bytes: bytes.to_vec(),
+        }]
+    }
+
+    #[test]
+    fn the_wheel_in_the_middle_of_a_press_does_not_lose_the_release() {
+        let mut app = open_one();
+        let on = program(&[b"\x1b[?1002h\x1b[?1006h"]);
+        let m = Modes::default();
+        point(&mut app, on, m, (MouseKind::Down, 0, 0), (1, 1));
+        assert_eq!(
+            point(&mut app, on, m, (MouseKind::ScrollUp, 0, 0), (1, 1)),
+            input(b"\x1b[<64;2;2M")
+        );
+        assert_eq!(
+            point(&mut app, on, m, (MouseKind::Up, 0, 0), (1, 1)),
+            input(b"\x1b[<0;2;2m")
+        );
+    }
+
+    #[test]
+    fn a_press_the_program_has_gets_its_release_when_the_palette_opens() {
+        let mut app = open_one();
+        let on = program(&[b"\x1b[?1002h\x1b[?1006h"]);
+        point(
+            &mut app,
+            on,
+            Modes::default(),
+            (MouseKind::Down, 0, 0),
+            (1, 1),
+        );
+        point(
+            &mut app,
+            on,
+            Modes::default(),
+            (MouseKind::Drag, 0, 0),
+            (4, 2),
+        );
+        let acts = handle_with(&mut app, Event::Key(Key::Alt('k')), on, false);
+        assert!(app.palette.is_some());
+        // Where it last was, no modifiers, for the pane that had the press.
+        assert_eq!(acts, release_for("mac/agent-1", b"\x1b[<0;5;3m"));
+        // Only once.
+        let again = handle_with(&mut app, Event::Key(Key::Char('x')), on, false);
+        assert!(!again.iter().any(|a| matches!(a, Action::InputFor { .. })));
+    }
+
+    #[test]
+    fn a_press_the_program_has_gets_its_release_when_another_tab_comes_to_the_front() {
+        let rows = rows();
+        let mut app = App::default();
+        key(&mut app, &rows, Key::Enter);
+        key(&mut app, &rows, Key::Ctrl(']'));
+        key(&mut app, &rows, Key::Down);
+        key(&mut app, &rows, Key::Enter);
+        let on = program(&[b"\x1b[?1000h\x1b[?1006h"]);
+        point(
+            &mut app,
+            on,
+            Modes::default(),
+            (MouseKind::Down, 0, 0),
+            (2, 1),
+        );
+        let acts = handle_with(&mut app, Event::Key(Key::Alt('1')), on, false);
+        assert_eq!(app.active_agent(), Some("mac/agent-1"));
+        // To the pane that had the press (the second tab), not the one now in front.
+        assert_eq!(acts, release_for("mac/agent-2", b"\x1b[<0;3;2m"));
+    }
+
+    #[test]
+    fn a_press_the_program_has_gets_its_release_when_a_box_covers_the_pane() {
+        let mut app = open_one();
+        let on = program(&[b"\x1b[?1002h"]);
+        point(
+            &mut app,
+            on,
+            Modes::default(),
+            (MouseKind::Down, 0, 0),
+            (1, 1),
+        );
+        let pane = app.areas(AREA).terminal;
+        let click = Event::Mouse(Mouse {
+            kind: MouseKind::Drag,
+            col: pane.x + 3,
+            row: pane.y + 3,
+            ..Default::default()
+        });
+        let acts = handle_with(&mut app, click, on, true);
+        // Default encoding: ESC [ M, button 3 + 32, column 2 + 32, row 2 + 32.
+        assert_eq!(acts, release_for("mac/agent-1", b"\x1b[M#\"\""));
+        // The box's own event is not the program's: with the press gone, a drag under it sends nothing.
+        let acts = handle_with(
+            &mut app,
+            Event::Mouse(Mouse {
+                kind: MouseKind::Down,
+                col: pane.x + 1,
+                row: pane.y + 1,
+                ..Default::default()
+            }),
+            on,
+            true,
+        );
+        assert!(
+            !acts.iter().any(|a| matches!(a, Action::Input(_))),
+            "{acts:?}"
+        );
+    }
+
+    #[test]
+    fn a_press_the_program_has_gets_its_release_when_the_mouse_is_given_back() {
+        let mut app = open_one();
+        let on = program(&[b"\x1b[?1000h\x1b[?1006h"]);
+        point(
+            &mut app,
+            on,
+            Modes::default(),
+            (MouseKind::Down, 0, 0),
+            (1, 1),
+        );
+        let acts = handle_with(&mut app, Event::Key(Key::Alt('m')), on, false);
+        assert!(!app.mouse);
+        assert_eq!(
+            acts.last(),
+            release_for("mac/agent-1", b"\x1b[<0;2;2m").first()
+        );
+    }
+
+    #[test]
+    fn no_release_is_sent_to_a_program_that_switched_the_mouse_off() {
+        let mut app = open_one();
+        let on = program(&[b"\x1b[?1000h\x1b[?1006h"]);
+        point(
+            &mut app,
+            on,
+            Modes::default(),
+            (MouseKind::Down, 0, 0),
+            (1, 1),
+        );
+        // The program switched it off; then the palette opens.
+        let off = ProgramModes::default();
+        let acts = handle_with(&mut app, Event::Key(Key::Alt('k')), off, false);
+        assert!(
+            !acts.iter().any(|a| matches!(a, Action::InputFor { .. })),
+            "{acts:?}"
+        );
     }
 
     #[test]

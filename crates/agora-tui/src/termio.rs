@@ -314,21 +314,19 @@ pub fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
 /// The longest address that is offered.
 const MAX_LINK: usize = 2048;
 
-/// Characters `cmd.exe` and shells act on: an address with one is not offered, so the footer never shows a link that cannot be
-/// opened safely (`agora_platform::is_openable_url` refuses the same set; the opener is the last line of defence, this is the first).
-/// `%` is refused whole, so a percent-encoded address (`%41`) is not a link here.
-const FORBIDDEN: &[u8] = b"&%^\"()!<>|";
+/// The bytes an address may hold: the RFC 3986 unreserved and reserved characters minus `& % ^ " ( ) ! < > |` (`cmd.exe` and shells act
+/// on those; `%` goes with them, so a percent-encoded `%41` is not a link here), that is letters, digits and `-._~:/?#[]@$'*+,;=`.
+/// Nothing else: no space, control character, backtick, brace, backslash or non-ASCII byte. A link that is not made of these is not
+/// offered, so the footer never shows one that cannot be opened safely (`agora_platform::is_openable_url` refuses the same set; the
+/// opener is the last line of defence, this is the first).
+fn url_byte_ok(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b"-._~:/?#[]@$'*+,;=".contains(&b)
+}
 
-/// The address when it is a plain web address that is safe to show and open as it is written: `http` or `https`, printable ASCII
-/// only (no space, no control character, so what the user reads is what is opened, no look-alike letters), none of
-/// `& % ^ " ( ) ! < > |`, a host, no credentials.
+/// The address when it is a plain web address that is safe to show and open as it is written: `http` or `https`, only the bytes of
+/// [`url_byte_ok`], a host, no credentials, at most 2048 bytes.
 pub fn safe_link(uri: &str) -> Option<&str> {
-    if uri.is_empty()
-        || uri.len() > MAX_LINK
-        || !uri
-            .bytes()
-            .all(|b| b.is_ascii_graphic() && !FORBIDDEN.contains(&b))
-    {
+    if uri.is_empty() || uri.len() > MAX_LINK || !uri.bytes().all(url_byte_ok) {
         return None;
     }
     let lower = uri.to_ascii_lowercase();
@@ -336,7 +334,7 @@ pub fn safe_link(uri: &str) -> Option<&str> {
         .strip_prefix("https://")
         .or_else(|| lower.strip_prefix("http://"))?;
     let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
-    if authority.is_empty() || authority.contains(['@', '\\']) || authority.starts_with(':') {
+    if authority.is_empty() || authority.contains('@') || authority.starts_with(':') {
         return None;
     }
     Some(uri)
@@ -399,6 +397,8 @@ struct Armed {
     notice: String,
     /// The release of the click that armed it is still to come, and is not "something else".
     release_due: bool,
+    /// The footer with the address has been drawn: until then a second click cannot open it (the person has not seen it).
+    drawn: bool,
 }
 
 /// The two-click rule for opening an address, as a state machine with no terminal in it. An address is opened only by a second
@@ -422,7 +422,7 @@ impl LinkConfirm {
         let same = self
             .armed
             .as_ref()
-            .is_some_and(|a| a.url == url && now.saturating_duration_since(a.at) < life);
+            .is_some_and(|a| a.drawn && a.url == url && now.saturating_duration_since(a.at) < life);
         if same {
             self.armed = None;
             return LinkStep::Open;
@@ -432,8 +432,16 @@ impl LinkConfirm {
             at: now,
             notice: notice.to_string(),
             release_due: true,
+            drawn: false,
         });
         LinkStep::Confirm
+    }
+
+    /// The footer was drawn with the address in it: from now on a second Ctrl+click can open it.
+    pub fn drawn(&mut self) {
+        if let Some(a) = self.armed.as_mut() {
+            a.drawn = true;
+        }
     }
 
     /// A mouse release: the first one after the click that armed is that click's own and changes nothing; any later one is "something
@@ -809,6 +817,10 @@ mod tests {
             "https://a.test/!x",
             "https://a.test/<x>",
             "https://a.test/a|b",
+            "https://a.test/`x`",
+            "https://a.test/{x}",
+            "https://a.test/\\x",
+            "https://a.test/\u{7f}",
             "https://a.test/é",
             "//a.test",
         ] {
@@ -876,6 +888,7 @@ mod tests {
         assert!(l.is_armed());
         l.release();
         l.check(t0, shown, life);
+        l.drawn();
         assert_eq!(l.click(url, shown, t0, life), LinkStep::Open);
         assert!(!l.is_armed());
         assert_eq!(
@@ -883,6 +896,18 @@ mod tests {
             LinkStep::Confirm,
             "once only"
         );
+        // Clicks that arrive before the footer was drawn (one batch of events) cannot open it, and the same address clicked again
+        // is shown again with the clock restarted.
+        let mut l = LinkConfirm::default();
+        arm(&mut l);
+        l.release();
+        assert_eq!(l.click(url, shown, t0, life), LinkStep::Confirm);
+        let later = t0 + life - Duration::from_secs(1);
+        assert_eq!(l.click(url, shown, later, life), LinkStep::Confirm);
+        l.release();
+        l.drawn();
+        let after_first = t0 + life + Duration::from_secs(5);
+        assert_eq!(l.click(url, shown, after_first, life), LinkStep::Open);
         // Another address is a first click.
         let mut l = LinkConfirm::default();
         arm(&mut l);

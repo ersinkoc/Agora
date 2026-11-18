@@ -21,6 +21,17 @@ pub const RESET: &[u8] =
 /// Whether a [`Screen`] is up (the panic hook writes [`RESET`] only then).
 static ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// The thread that made the screen: the only one whose panic puts the terminal back (a worker's panic leaves the UI as it is).
+static OWNER: std::sync::Mutex<Option<std::thread::ThreadId>> = std::sync::Mutex::new(None);
+
+/// Whether a panic on the calling thread must put the terminal back now: a screen is up and this is the thread that made it.
+fn panic_resets_here() -> bool {
+    ACTIVE.load(std::sync::atomic::Ordering::Acquire)
+        && OWNER
+            .try_lock()
+            .is_ok_and(|o| *o == Some(std::thread::current().id()))
+}
+
 /// Makes a panic put the terminal back before its message is printed (on the alternate screen the message would be lost, and the
 /// shell would get mouse reports), then lets the earlier hook print it.
 fn install_panic_hook() {
@@ -28,7 +39,7 @@ fn install_panic_hook() {
     ONCE.call_once(|| {
         let previous = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
-            if ACTIVE.load(std::sync::atomic::Ordering::Acquire) {
+            if panic_resets_here() {
                 let mut out = io::stdout();
                 let _ = out.write_all(RESET);
                 let _ = out.flush();
@@ -63,6 +74,9 @@ impl Screen<CrosstermBackend<Stdout>> {
         match entered {
             Ok(term) => {
                 install_panic_hook();
+                if let Ok(mut owner) = OWNER.lock() {
+                    *owner = Some(std::thread::current().id());
+                }
                 ACTIVE.store(true, std::sync::atomic::Ordering::Release);
                 Ok(Self {
                     term,
@@ -150,7 +164,10 @@ impl<B: Backend> Screen<B> {
 impl<B: Backend> Drop for Screen<B> {
     fn drop(&mut self) {
         if self.restore {
-            ACTIVE.store(false, std::sync::atomic::Ordering::Release);
+            // (A screen with a fake sink is a test's: it does not own the real terminal's flag.)
+            if self.sink.is_none() {
+                ACTIVE.store(false, std::sync::atomic::Ordering::Release);
+            }
             match self.sink.as_mut() {
                 Some(sink) => {
                     let _ = sink.write_all(RESET);
@@ -210,6 +227,23 @@ mod tests {
         fn flush(&mut self) -> io::Result<()> {
             Ok(())
         }
+    }
+
+    #[test]
+    fn only_a_panic_on_the_thread_that_made_the_screen_puts_the_terminal_back() {
+        // One test owns the shared flags: nothing else in this crate's tests makes a real screen.
+        ACTIVE.store(false, std::sync::atomic::Ordering::Release);
+        *OWNER.lock().unwrap() = Some(std::thread::current().id());
+        assert!(!panic_resets_here(), "no screen is up");
+        ACTIVE.store(true, std::sync::atomic::Ordering::Release);
+        assert!(panic_resets_here(), "the owner's panic");
+        let elsewhere = std::thread::spawn(panic_resets_here).join().unwrap();
+        assert!(
+            !elsewhere,
+            "a worker thread's panic leaves the screen as it is"
+        );
+        ACTIVE.store(false, std::sync::atomic::Ordering::Release);
+        *OWNER.lock().unwrap() = None;
     }
 
     #[test]
