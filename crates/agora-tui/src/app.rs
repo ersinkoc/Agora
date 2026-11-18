@@ -416,6 +416,10 @@ impl App {
             self.selected.min(cx.rows.len().saturating_sub(1)),
             true,
         );
+        // A press the program has is forgotten when it switched the mouse off.
+        if cx.prog.track == Track::Off {
+            self.forwarding = None;
+        }
         let mut area = cx.area;
         match event {
             Event::Resize { cols, rows } => {
@@ -440,6 +444,7 @@ impl App {
         // The tree (and so the inspector) follows the tab brought to the front.
         let tab_now = self.active_agent().map(str::to_string);
         if tab_now != tab_before {
+            self.forwarding = None;
             self.selection = None;
             self.scroll = 0;
             if let Some(i) = tab_now
@@ -772,16 +777,26 @@ impl App {
             MouseKind::ScrollUp => Phase::WheelUp,
             MouseKind::ScrollDown => Phase::WheelDown,
         };
-        // The rest of a press the program has.
+        // Nothing goes to the pane under the palette.
+        if self.palette.is_some() {
+            self.forwarding = None;
+            return false;
+        }
+        // The rest of a press the program has. A Shift- or Ctrl-held drag or move is dropped, never sent; a Shift- or Ctrl-held
+        // release is sent as a plain release (the modifiers cut off), so the program's button does not stay down.
         if let Some(button) = self.forwarding {
             if matches!(m.kind, MouseKind::Drag | MouseKind::Up | MouseKind::Move)
                 && !a.terminal.is_empty()
             {
+                let held = m.mods & (SHIFT | CTRL) != 0;
+                if held && m.kind != MouseKind::Up {
+                    return true;
+                }
                 let (col, row) = local(m.col, m.row);
                 let r = Report {
                     phase,
                     button,
-                    mods: m.mods,
+                    mods: if held { 0 } else { m.mods },
                     col,
                     row,
                 };
@@ -809,7 +824,7 @@ impl App {
             }
             return true;
         }
-        if m.mods & SHIFT != 0 || (self.scroll > 0 && m.kind != MouseKind::Move) {
+        if m.mods & SHIFT != 0 || self.scroll > 0 {
             return false;
         }
         let (col, row) = local(m.col, m.row);
@@ -820,6 +835,10 @@ impl App {
             col,
             row,
         };
+        // A drag or a release with no press of the program's in progress (it began elsewhere) is not the program's.
+        if matches!(m.kind, MouseKind::Drag | MouseKind::Up) {
+            return false;
+        }
         if cx.prog.track != Track::Off {
             if m.kind == MouseKind::Down {
                 self.focus = Focus::Terminal;
@@ -1117,38 +1136,18 @@ impl App {
             ));
             spans.push(Span::raw(" "));
         }
-        // The program's own title (OSC 0 / 2) after the tabs, escaped and cut: it is the program's text, never drawn raw.
-        if let Some(title) = s
-            .terminal
-            .filter(|_| s.conversation.is_none())
-            .and_then(|t| t.title())
-            .map(|t| safe_title(&t))
-            .filter(|t| !t.is_empty())
-        {
-            let used: usize = spans.iter().map(Span::width).sum();
-            // Room is kept at the right end for the count of waiting agents.
-            let room = usize::from(a.tabs.width).saturating_sub(used + 14);
-            let fit = room.saturating_sub(2);
-            let mut shown: String = title.chars().take(fit).collect();
-            if title.chars().count() > fit && !shown.is_empty() {
-                shown.pop();
-                shown.push('…');
-            }
-            if room > 4 && !shown.is_empty() {
-                spans.push(Span::styled(
-                    format!("\u{2014} {shown}"),
-                    Style::default().add_modifier(Modifier::DIM),
-                ));
-            }
-        }
-        // At the bar's right end: how many agents not in front need the user, so a wait is never missed inside a tab.
+        // At the bar's right end: how many agents not in front need the user, so a wait is never missed inside a tab. It has priority
+        // over the program's title: it is drawn in a place of its own, and the title takes what is left.
         let waiting = s
             .rows
             .iter()
             .filter(|r| !r.header && r.needs_you && Some(r.id.as_str()) != self.active_agent())
             .count();
+        let used: usize = spans.iter().map(Span::width).sum();
+        let mut note_width = 0;
+        let mut note_text = None;
         if waiting > 0 && !self.tabs.is_empty() {
-            let note = format!(
+            let full = format!(
                 "! {}",
                 (s.t)(
                     key!("tui-app-tabs-waiting"),
@@ -1158,21 +1157,52 @@ impl App {
                     )]
                 )
             );
-            let used: usize = spans.iter().map(Span::width).sum();
+            // The whole note where it fits after the tabs, else just the count.
             let free = usize::from(a.tabs.width).saturating_sub(used);
-            // The whole note where it fits, else just the count.
-            let short = format!("! {waiting}");
-            let note = if text_width(&note) < free {
-                note
+            let note = if text_width(&full) < free {
+                full
             } else {
-                short
+                format!("! {waiting}")
             };
-            if text_width(&note) < free {
-                spans.push(Span::raw(" ".repeat(free - text_width(&note))));
-                spans.push(Span::styled(note, attention));
+            note_width = text_width(&note).min(usize::from(a.tabs.width));
+            note_text = Some(note);
+        }
+        // The program's own title (OSC 0 / 2) after the tabs, escaped and cut to the room by display width: it is the program's
+        // text, never drawn raw.
+        if let Some(title) = s
+            .terminal
+            .filter(|_| s.conversation.is_none())
+            .and_then(|t| t.title())
+            .map(|t| safe_title(&t))
+            .filter(|t| !t.is_empty())
+        {
+            let gap = usize::from(note_width > 0);
+            let room = usize::from(a.tabs.width).saturating_sub(used + note_width + gap);
+            // The dash and its space come first, then at least a few characters of the title.
+            if room > 2 + 3 {
+                spans.push(Span::styled(
+                    format!("\u{2014} {}", fit_width(&title, room - 2)),
+                    Style::default().add_modifier(Modifier::DIM),
+                ));
             }
         }
-        Line::from(spans).render(a.tabs, buf);
+        let bar = Rect {
+            width: a
+                .tabs
+                .width
+                .saturating_sub(u16::try_from(note_width).unwrap_or(0)),
+            ..a.tabs
+        };
+        Line::from(spans).render(bar, buf);
+        if let Some(note) = note_text {
+            let w = u16::try_from(note_width).unwrap_or(0);
+            let at = Rect {
+                x: a.tabs.right().saturating_sub(w),
+                width: w,
+                ..a.tabs
+            };
+            Span::styled(note, attention).render(at, buf);
+        }
 
         // The terminal, or the conversation of an agent that has none.
         if let (Some(_), Some(lines)) = (self.active_agent(), s.conversation) {
@@ -1590,6 +1620,25 @@ pub fn dialog_layout(area: Rect, lines: &[String]) -> (Rect, Vec<String>) {
 
 fn text_width(s: &str) -> usize {
     Span::raw(s).width()
+}
+
+/// `s` cut to at most `max` display columns (wide characters count two), with an ellipsis when something was cut.
+fn fit_width(s: &str, max: usize) -> String {
+    if text_width(s) <= max {
+        return s.to_string();
+    }
+    let mut out = String::new();
+    let mut used = 0;
+    for c in s.chars() {
+        let w = text_width(c.encode_utf8(&mut [0; 4]));
+        if used + w + 1 > max {
+            break;
+        }
+        out.push(c);
+        used += w;
+    }
+    out.push('…');
+    out
 }
 
 /// One line broken at spaces into lines at most `width` columns wide; a word longer than that is broken where it reaches the edge.
@@ -3711,6 +3760,148 @@ mod tests {
             paste(&mut app, asked),
             input(b"\x1b[200~a[201~b\r\x1b[201~")
         );
+    }
+
+    #[test]
+    fn a_shift_or_ctrl_held_drag_is_never_sent_and_a_held_release_is_sent_plain() {
+        let mut app = open_one();
+        let on = program(&[b"\x1b[?1002h\x1b[?1006h"]);
+        let m = Modes::default();
+        point(&mut app, on, m, (MouseKind::Down, 0, 0), (1, 1));
+        for held in [
+            crate::termio::SHIFT,
+            crate::termio::CTRL,
+            crate::termio::SHIFT | crate::termio::ALT,
+        ] {
+            assert_eq!(
+                point(&mut app, on, m, (MouseKind::Drag, 0, held), (3, 1)),
+                vec![],
+                "{held}"
+            );
+        }
+        // The release is sent without the modifier, so the program's button does not stay down; it ends the forwarding.
+        assert_eq!(
+            point(
+                &mut app,
+                on,
+                m,
+                (MouseKind::Up, 0, crate::termio::SHIFT),
+                (3, 1)
+            ),
+            input(b"\x1b[<0;4;2m")
+        );
+        assert_eq!(
+            point(&mut app, on, m, (MouseKind::Drag, 0, 0), (3, 1)),
+            vec![],
+            "a drag with no press in progress is not the program's"
+        );
+    }
+
+    #[test]
+    fn a_press_the_program_got_is_forgotten_when_it_switches_the_mouse_off() {
+        let mut app = open_one();
+        let on = program(&[b"\x1b[?1002h"]);
+        let m = Modes::default();
+        point(&mut app, on, m, (MouseKind::Down, 0, 0), (1, 1));
+        // The program turned the mouse off, then on again: the old press is not carried over.
+        point(
+            &mut app,
+            ProgramModes::default(),
+            m,
+            (MouseKind::Move, 0, 0),
+            (1, 1),
+        );
+        assert_eq!(
+            point(&mut app, on, m, (MouseKind::Drag, 0, 0), (3, 1)),
+            vec![]
+        );
+    }
+
+    #[test]
+    fn a_press_the_program_got_is_forgotten_on_a_tab_switch() {
+        let rows = rows();
+        let mut app = App::default();
+        key(&mut app, &rows, Key::Enter);
+        key(&mut app, &rows, Key::Ctrl(']'));
+        key(&mut app, &rows, Key::Down);
+        key(&mut app, &rows, Key::Enter);
+        let on = program(&[b"\x1b[?1002h"]);
+        let m = Modes::default();
+        point(&mut app, on, m, (MouseKind::Down, 0, 0), (1, 1));
+        // The program still has the mouse on (so only the tab switch can end the press).
+        app.handle(
+            Event::Key(Key::Alt('1')),
+            &Ctx {
+                prog: on,
+                ..cx(&rows)
+            },
+        );
+        assert_eq!(
+            point(&mut app, on, m, (MouseKind::Drag, 0, 0), (3, 1)),
+            vec![]
+        );
+    }
+
+    #[test]
+    fn no_motion_is_sent_while_scrolled_back_or_under_the_palette() {
+        let mut app = open_one();
+        let any = program(&[b"\x1b[?1003h\x1b[?1006h"]);
+        let m = Modes::default();
+        assert_eq!(
+            point(&mut app, any, m, (MouseKind::Move, 0, 0), (2, 2)),
+            input(b"\x1b[<35;3;3M")
+        );
+        app.scroll = 4;
+        assert_eq!(
+            point(&mut app, any, m, (MouseKind::Move, 0, 0), (2, 2)),
+            vec![]
+        );
+        app.scroll = 0;
+        key(&mut app, &rows(), Key::Alt('k'));
+        assert!(app.palette.is_some());
+        for kind in [MouseKind::Down, MouseKind::Move, MouseKind::ScrollUp] {
+            let acts = point(&mut app, any, m, (kind, 0, 0), (2, 2));
+            assert!(
+                !acts.iter().any(|a| matches!(a, Action::Input(_))),
+                "{kind:?}: {acts:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_the_left_button_with_ctrl_asks_for_a_link() {
+        let mut app = open_one();
+        let on = program(&[b"\x1b[?1000h"]);
+        for button in [1, 2] {
+            let acts = point(
+                &mut app,
+                on,
+                Modes::default(),
+                (MouseKind::Down, button, crate::termio::CTRL),
+                (3, 3),
+            );
+            assert_eq!(acts, vec![], "button {button}");
+        }
+    }
+
+    #[test]
+    fn a_wide_title_never_pushes_the_waiting_count_off_the_bar() {
+        let rows = rows();
+        let mut app = App::default();
+        key(&mut app, &rows, Key::Enter);
+        for title in [
+            "\u{6f22}".repeat(60),
+            "w".repeat(200),
+            "\u{1f600}".repeat(40),
+        ] {
+            let mut vt = AlacrittyTerminal::new(Size { cols: 58, rows: 28 });
+            vt.feed(format!("\x1b]0;{title}\x07").as_bytes());
+            let bar = draw(&app, &rows, Some(&vt), ColorMode::Mono)[0].clone();
+            // The count of agents that wait is always there, at the bar's end, and the title is cut by display width to leave room.
+            let note = bar.find("! tui-app-tabs-waiting count=1").expect(&bar);
+            let cut = bar.find('\u{2026}').expect(&bar);
+            assert!(cut < note, "{bar}");
+        }
     }
 
     #[test]

@@ -12,10 +12,39 @@ use crossterm::ExecutableCommand;
 use ratatui::backend::{Backend, CrosstermBackend, TestBackend};
 use ratatui::{Frame, Terminal};
 
-/// The user's terminal while the client runs: the alternate screen, restored when this is dropped (also on a panic unwind).
+/// Everything the client switches on in the user's terminal, switched off again, then the cursor shown and the alternate screen left:
+/// mouse reporting (1000, 1002, 1003, 1006), bracketed paste (2004), focus reports (1004). One sequence for every way out (quit, an
+/// early exit, a panic, a stop request), so a terminal is never left reporting the mouse into the shell.
+pub const RESET: &[u8] =
+    b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?2004l\x1b[?1004l\x1b[?25h\x1b[?1049l";
+
+/// Whether a [`Screen`] is up (the panic hook writes [`RESET`] only then).
+static ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Makes a panic put the terminal back before its message is printed (on the alternate screen the message would be lost, and the
+/// shell would get mouse reports), then lets the earlier hook print it.
+fn install_panic_hook() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            if ACTIVE.load(std::sync::atomic::Ordering::Acquire) {
+                let mut out = io::stdout();
+                let _ = out.write_all(RESET);
+                let _ = out.flush();
+            }
+            previous(info);
+        }));
+    });
+}
+
+/// The user's terminal while the client runs: the alternate screen, restored ([`RESET`]) when this is dropped: on a quit, on any early
+/// return and on a panic unwind.
 pub struct Screen<B: Backend> {
     term: Terminal<B>,
     restore: bool,
+    /// Where [`RESET`] goes on drop; the real standard output when `None` (a fake in tests).
+    sink: Option<Box<dyn Write + Send>>,
 }
 
 /// The user's real terminal as a [`Screen`].
@@ -32,10 +61,15 @@ impl Screen<CrosstermBackend<Stdout>> {
             .map(|_| ())
             .and_then(|()| Terminal::new(CrosstermBackend::new(io::stdout())));
         match entered {
-            Ok(term) => Ok(Self {
-                term,
-                restore: true,
-            }),
+            Ok(term) => {
+                install_panic_hook();
+                ACTIVE.store(true, std::sync::atomic::Ordering::Release);
+                Ok(Self {
+                    term,
+                    restore: true,
+                    sink: None,
+                })
+            }
             Err(e) => {
                 let _ = io::stdout()
                     .execute(Show)
@@ -53,7 +87,17 @@ impl Screen<TestBackend> {
             term: Terminal::new(TestBackend::new(cols, rows))
                 .map_err(|e| io::Error::other(e.to_string()))?,
             restore: false,
+            sink: None,
         })
+    }
+
+    /// A test screen that behaves like the real one on drop, writing [`RESET`] to `sink`.
+    #[cfg(test)]
+    fn test_with_sink(cols: u16, rows: u16, sink: Box<dyn Write + Send>) -> io::Result<Self> {
+        let mut s = Self::test(cols, rows)?;
+        s.restore = true;
+        s.sink = Some(sink);
+        Ok(s)
     }
 
     /// What is on the test screen, one string per row, trailing blanks removed.
@@ -106,10 +150,18 @@ impl<B: Backend> Screen<B> {
 impl<B: Backend> Drop for Screen<B> {
     fn drop(&mut self) {
         if self.restore {
-            let mut out = io::stdout();
-            let _ = out.execute(Show);
-            let _ = out.execute(LeaveAlternateScreen);
-            let _ = out.flush();
+            ACTIVE.store(false, std::sync::atomic::Ordering::Release);
+            match self.sink.as_mut() {
+                Some(sink) => {
+                    let _ = sink.write_all(RESET);
+                    let _ = sink.flush();
+                }
+                None => {
+                    let mut out = io::stdout();
+                    let _ = out.write_all(RESET);
+                    let _ = out.flush();
+                }
+            }
         }
     }
 }
@@ -136,6 +188,55 @@ mod tests {
             })
             .unwrap();
         assert_eq!(screen.lines(), ["$ echo hi", "hi", "$"]);
+    }
+
+    #[test]
+    fn the_reset_switches_off_everything_the_client_switches_on() {
+        let text = std::str::from_utf8(RESET).unwrap();
+        for mode in ["1000", "1002", "1003", "1006", "2004", "1004"] {
+            assert!(text.contains(&format!("\x1b[?{mode}l")), "{mode}");
+        }
+        // The cursor is shown and the alternate screen left, last.
+        assert!(text.ends_with("\x1b[?25h\x1b[?1049l"));
+    }
+
+    #[derive(Clone, Default)]
+    struct Sink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    impl Write for Sink {
+        fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn dropping_the_screen_writes_the_reset_once_and_only_then() {
+        let sink = Sink::default();
+        let s = Screen::test_with_sink(10, 2, Box::new(sink.clone())).unwrap();
+        assert!(sink.0.lock().unwrap().is_empty());
+        drop(s);
+        assert_eq!(*sink.0.lock().unwrap(), RESET);
+        // A screen that was never the real one writes nothing.
+        let quiet = Sink::default();
+        let mut s = Screen::test_with_sink(10, 2, Box::new(quiet.clone())).unwrap();
+        s.restore = false;
+        drop(s);
+        assert!(quiet.0.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn dropping_during_a_panic_unwind_writes_the_reset() {
+        let sink = Sink::default();
+        let inner = sink.clone();
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _s = Screen::test_with_sink(10, 2, Box::new(inner)).unwrap();
+            panic!("boom");
+        }));
+        assert!(r.is_err());
+        assert_eq!(*sink.0.lock().unwrap(), RESET);
     }
 
     #[test]

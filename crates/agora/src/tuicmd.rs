@@ -1398,6 +1398,10 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
         .then(agora_platform::RawMode::enable)
         .and_then(Result::ok);
     let keys = raw.is_some();
+    if keys {
+        // Not killed with the terminal in the console's state: a stop request is caught and ends the console in order.
+        let _ = agora_platform::catch_stop_requests();
+    }
     // The console takes the whole window while it runs (the alternate screen) and gives the old one back when it ends.
     struct FullScreen(bool);
     impl Drop for FullScreen {
@@ -1923,7 +1927,8 @@ enum Next {
 static STDIN_GONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn terminal_gone() -> bool {
-    STDIN_GONE.load(std::sync::atomic::Ordering::Acquire)
+    // A stop request (SIGTERM, SIGHUP, SIGINT; Unix) ends the loops the same way, so the screen is dropped and the terminal put back.
+    STDIN_GONE.load(std::sync::atomic::Ordering::Acquire) || agora_platform::stop_requested()
 }
 
 /// The console's state that outlives one hub session.
@@ -2042,8 +2047,8 @@ fn console(
     mouse_mode(c.app.mouse);
     let mut fresh = true;
     let mut typed_at: Option<Instant> = None;
-    // The web address a Ctrl+click showed and waits for a second click on.
-    let mut pending_link: Option<String> = None;
+    // The two-click rule for opening an address (see `LinkConfirm`).
+    let mut links = agora_tui::termio::LinkConfirm::default();
     // ADR-0065: only the hub knows whether this session is the owner's (it answers `PairStatus` to the owner only).
     if c.pair.owner == agora_tui::pair::Owner::Unknown {
         if let Some(owner) = pair_owner(session) {
@@ -2153,8 +2158,11 @@ fn console(
             }
             return Next::Quit;
         }
-        // Any key or click closes the box of a long notice (and still does what it does).
-        if c.note.open && c.note.drawn && !events.is_empty() {
+        // The footer's question about an address goes when the footer says something else or runs out.
+        links.check(Instant::now(), &c.notice, NOTICE_FOR);
+        // Any key or click closes the box of a long notice (and still does what it does); nothing reaches the program under it.
+        let overlay = c.note.open && c.note.drawn && !events.is_empty();
+        if overlay {
             c.note.open = false;
             redraw = true;
         }
@@ -2162,23 +2170,31 @@ fn console(
             // A key that only goes to the agent changes nothing on screen until the agent answers: drawing for it would hold the
             // echo back by up to a frame (ADR-0022). Anything else is drawn.
             let before = c.app.clone();
-            let modes = preview
+            let mut modes = preview
                 .as_ref()
                 .map(|p| p.screen().modes())
                 .unwrap_or_default();
-            // The program's mouse and focus modes, only of the agent in front (never the one a tab switch just left).
-            let prog = preview
+            // The program's mouse and focus modes, only of the agent in front (never the one a tab switch just left), and none
+            // while a box is over the pane.
+            let mut prog = preview
                 .as_ref()
                 .filter(|p| Some(p.agent.as_str()) == c.app.active_agent())
                 .map(Preview::program_modes)
                 .unwrap_or_default();
-            // The release that ends the Ctrl+click does not forget the address it showed; anything else does.
-            let was_link = if matches!(&ev, AppEvent::Mouse(m) if matches!(m.kind, agora_tui::app::MouseKind::Up | agora_tui::app::MouseKind::Move))
-            {
-                pending_link.clone()
-            } else {
-                pending_link.take()
-            };
+            if overlay {
+                prog = Default::default();
+                modes.alt_screen = false;
+            }
+            // The release of the Ctrl+click that showed an address is that click's own; anything else but a Ctrl+click forgets it.
+            let ctrl_click = matches!(&ev, AppEvent::Mouse(m)
+                if m.kind == agora_tui::app::MouseKind::Down
+                    && m.button == 0
+                    && m.mods & agora_tui::termio::CTRL != 0);
+            match &ev {
+                AppEvent::Mouse(m) if m.kind == agora_tui::app::MouseKind::Up => links.release(),
+                _ if ctrl_click => {}
+                _ => links.other(),
+            }
             let acts = c.app.handle(
                 ev,
                 &Ctx {
@@ -2189,6 +2205,9 @@ fn console(
                     t: &text,
                 },
             );
+            if ctrl_click && !acts.iter().any(|a| matches!(a, Action::OpenLink { .. })) {
+                links.other();
+            }
             // The panes that gained or lost the keyboard: a program that asked for focus events (1004) is told.
             for (agent, gained) in c.app.take_pane_focus() {
                 let asked = preview
@@ -2245,21 +2264,31 @@ fn console(
                             .and_then(|p| {
                                 agora_tui::pane::link_at(p.screen(), height, c.app.scroll, row, col)
                             });
-                        if let Some(url) = link {
-                            if was_link.as_deref() == Some(url.as_str()) {
-                                c.notice = if agora_platform::open_url(&url).is_ok() {
-                                    say.text(key!("tui-link-opened"), &[("url", Arg::Str(url))])
-                                } else {
-                                    say.text(key!("tui-link-failed"), &[("url", Arg::Str(url))])
-                                };
-                            } else {
-                                c.notice = say.text(
+                        match link {
+                            Some(url) => {
+                                let asked = say.text(
                                     key!("tui-link-confirm"),
                                     &[("url", Arg::Str(url.clone()))],
                                 );
-                                pending_link = Some(url);
+                                match links.click(&url, &asked, Instant::now(), NOTICE_FOR) {
+                                    agora_tui::termio::LinkStep::Confirm => c.notice = asked,
+                                    agora_tui::termio::LinkStep::Open => {
+                                        c.notice = if agora_platform::open_url(&url).is_ok() {
+                                            say.text(
+                                                key!("tui-link-opened"),
+                                                &[("url", Arg::Str(url))],
+                                            )
+                                        } else {
+                                            say.text(
+                                                key!("tui-link-failed"),
+                                                &[("url", Arg::Str(url))],
+                                            )
+                                        };
+                                    }
+                                }
+                                redraw = true;
                             }
-                            redraw = true;
+                            None => links.other(),
                         }
                     }
                     // Closing a tab only closes the view: the agent keeps running, and the footer says so.

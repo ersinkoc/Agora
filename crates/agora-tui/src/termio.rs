@@ -50,6 +50,8 @@ enum St {
     #[default]
     Ground,
     Esc,
+    /// After an intermediate (`ESC SP`, `ESC (`): the next final byte ends the sequence and is not a reset.
+    EscI,
     Csi,
 }
 
@@ -88,7 +90,13 @@ impl ModeScanner {
                         self.st = St::Ground;
                     }
                     0x1b => {}
-                    0x20..=0x2f => {}
+                    0x00..=0x17 | 0x19 | 0x1c..=0x1f | 0x7f | 0x80..=0xff => {}
+                    0x20..=0x2f => self.st = St::EscI,
+                    _ => self.st = St::Ground,
+                },
+                St::EscI => match b {
+                    0x1b => self.st = St::Esc,
+                    0x20..=0x2f | 0x00..=0x17 | 0x19 | 0x1c..=0x1f | 0x7f | 0x80..=0xff => {}
                     _ => self.st = St::Ground,
                 },
                 St::Csi => match b {
@@ -306,10 +314,21 @@ pub fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
 /// The longest address that is offered.
 const MAX_LINK: usize = 2048;
 
-/// The address when it is a plain web address that is safe to show and open as it is written: `http` or `https`, ASCII only with no
-/// space or control character (so what the user reads is what is opened, no look-alike letters), a host, no credentials.
+/// Characters `cmd.exe` and shells act on: an address with one is not offered, so the footer never shows a link that cannot be
+/// opened safely (`agora_platform::is_openable_url` refuses the same set; the opener is the last line of defence, this is the first).
+/// `%` is refused whole, so a percent-encoded address (`%41`) is not a link here.
+const FORBIDDEN: &[u8] = b"&%^\"()!<>|";
+
+/// The address when it is a plain web address that is safe to show and open as it is written: `http` or `https`, printable ASCII
+/// only (no space, no control character, so what the user reads is what is opened, no look-alike letters), none of
+/// `& % ^ " ( ) ! < > |`, a host, no credentials.
 pub fn safe_link(uri: &str) -> Option<&str> {
-    if uri.is_empty() || uri.len() > MAX_LINK || !uri.bytes().all(|b| b.is_ascii_graphic()) {
+    if uri.is_empty()
+        || uri.len() > MAX_LINK
+        || !uri
+            .bytes()
+            .all(|b| b.is_ascii_graphic() && !FORBIDDEN.contains(&b))
+    {
         return None;
     }
     let lower = uri.to_ascii_lowercase();
@@ -323,60 +342,147 @@ pub fn safe_link(uri: &str) -> Option<&str> {
     Some(uri)
 }
 
-/// The web address in `chars` (one screen row, one char per column) under column `at`, if there is one.
+/// The web address in `chars` (one screen row, one char per column) under column `at`, if there is one. The address is the whole
+/// run of non-blank characters from its `http://` or `https://` (the last one at or before the column) to the end of the run, minus
+/// the punctuation that ends a sentence; if that is not a [`safe_link`] there is no link (it is never cut down to a part that is).
 pub fn link_in_row(chars: &[char], at: usize) -> Option<String> {
-    let is_url = |c: char| {
-        c.is_ascii_graphic() && !matches!(c, '<' | '>' | '"' | '`' | '{' | '}' | '|' | '\\' | '^')
-    };
-    if !chars.get(at).copied().is_some_and(is_url) {
+    let blank = |c: char| c.is_whitespace() || c.is_control();
+    if chars.get(at).copied().is_none_or(blank) {
         return None;
     }
     let mut start = at;
-    while start > 0 && is_url(chars[start - 1]) {
+    while start > 0 && !blank(chars[start - 1]) {
         start -= 1;
     }
     let mut end = at + 1;
-    while end < chars.len() && is_url(chars[end]) {
+    while end < chars.len() && !blank(chars[end]) {
         end += 1;
     }
-    let run: String = chars[start..end].iter().collect();
-    let lower = run.to_ascii_lowercase();
-    // The click may be on any part of the address, and a run may hold more than one (`a,http://b`): the one that covers the column.
-    let mut from = 0;
-    while let Some(i) = ["http://", "https://"]
-        .iter()
-        .filter_map(|p| lower[from..].find(p).map(|i| i + from))
-        .min()
+    let run = &chars[start..end];
+    let lower: Vec<char> = run.iter().map(char::to_ascii_lowercase).collect();
+    let starts = |i: usize, p: &str| {
+        lower.len() >= i + p.len() && lower[i..i + p.len()].iter().copied().eq(p.chars())
+    };
+    let first = (0..=at - start)
+        .rev()
+        .find(|&i| starts(i, "http://") || starts(i, "https://"))?;
+    let mut last = run.len();
+    while last > first
+        && matches!(
+            run[last - 1],
+            '.' | ',' | ';' | ':' | '!' | '?' | '\'' | '*' | ')' | ']' | '}' | '>' | '"'
+        )
     {
-        let mut tail = &run[i..];
-        // Punctuation that ends a sentence is not part of the address; a closing bracket only when it has no opener.
-        loop {
-            let last = tail.chars().last();
-            let drop = match last {
-                Some('.' | ',' | ';' | ':' | '!' | '?' | '\'' | '*') => true,
-                Some(')') => tail.matches('(').count() < tail.matches(')').count(),
-                Some(']') => tail.matches('[').count() < tail.matches(']').count(),
-                _ => false,
-            };
-            if !drop {
-                break;
-            }
-            tail = &tail[..tail.len() - 1];
-        }
-        let (a, b) = (start + i, start + i + tail.len());
-        if (a..b).contains(&at) {
-            return safe_link(tail).map(str::to_string);
-        }
-        from = i + 1;
+        last -= 1;
     }
-    None
+    if start + last <= at {
+        return None;
+    }
+    let text: String = run[first..last].iter().collect();
+    safe_link(&text).map(str::to_string)
+}
+
+/// What a Ctrl+click on an address does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LinkStep {
+    /// Show the address (in the footer) and wait for a second click on it.
+    Confirm,
+    /// Open it: the same address was shown, and nothing has happened since.
+    Open,
+}
+
+#[derive(Clone, Debug)]
+struct Armed {
+    url: String,
+    at: std::time::Instant,
+    /// The footer's text while it asked: when the footer says anything else the question is gone.
+    notice: String,
+    /// The release of the click that armed it is still to come, and is not "something else".
+    release_due: bool,
+}
+
+/// The two-click rule for opening an address, as a state machine with no terminal in it. An address is opened only by a second
+/// Ctrl+click on the very address the first one showed, with nothing in between: the footer still says it (and has not run out),
+/// no key, no other pointer event, no tab switch. The caller feeds it what happens ([`LinkConfirm::release`], [`LinkConfirm::other`],
+/// [`LinkConfirm::check`]) and acts on [`LinkStep`].
+#[derive(Clone, Debug, Default)]
+pub struct LinkConfirm {
+    armed: Option<Armed>,
+}
+
+impl LinkConfirm {
+    /// A Ctrl+click on `url`; `notice` is the footer text that shows it, `life` how long that stays up.
+    pub fn click(
+        &mut self,
+        url: &str,
+        notice: &str,
+        now: std::time::Instant,
+        life: std::time::Duration,
+    ) -> LinkStep {
+        let same = self
+            .armed
+            .as_ref()
+            .is_some_and(|a| a.url == url && now.saturating_duration_since(a.at) < life);
+        if same {
+            self.armed = None;
+            return LinkStep::Open;
+        }
+        self.armed = Some(Armed {
+            url: url.to_string(),
+            at: now,
+            notice: notice.to_string(),
+            release_due: true,
+        });
+        LinkStep::Confirm
+    }
+
+    /// A mouse release: the first one after the click that armed is that click's own and changes nothing; any later one is "something
+    /// else".
+    pub fn release(&mut self) {
+        match self.armed.as_mut() {
+            Some(a) if a.release_due => a.release_due = false,
+            _ => self.armed = None,
+        }
+    }
+
+    /// Anything else happened (a key, a move, a click elsewhere, a tab switch, a Ctrl+click that is on no address): forget.
+    pub fn other(&mut self) {
+        self.armed = None;
+    }
+
+    /// Looked at every turn: forget when the footer shows something other than what asked, or it ran out.
+    pub fn check(&mut self, now: std::time::Instant, notice: &str, life: std::time::Duration) {
+        if self
+            .armed
+            .as_ref()
+            .is_some_and(|a| a.notice != notice || now.saturating_duration_since(a.at) >= life)
+        {
+            self.armed = None;
+        }
+    }
+
+    pub fn is_armed(&self) -> bool {
+        self.armed.is_some()
+    }
 }
 
 /// The longest title shown, in characters.
 pub const MAX_TITLE: usize = 60;
 
+/// Characters that draw as nothing, as something else, or that reorder text, besides the control characters: written as escapes.
+fn hidden(c: char) -> bool {
+    c.is_control()
+        || matches!(c,
+            '\u{200b}'..='\u{200f}'
+            | '\u{2028}'..='\u{202e}'
+            | '\u{2060}'..='\u{206f}'
+            | '\u{e0000}'..='\u{e007f}'
+            | '\u{061c}' | '\u{feff}' | '\u{3164}' | '\u{2800}' | '\u{00ad}' | '\u{fe0f}' | '\u{180e}')
+}
+
 /// A program's title made safe to draw: control, bidirectional and invisible characters become visible escapes (`\x1b`, `\u{202e}`),
-/// so a title can neither move the cursor nor reorder the text around it; cut to [`MAX_TITLE`] characters.
+/// so a title can neither move the cursor nor reorder the text around it; cut to [`MAX_TITLE`] characters (the caller also cuts it to
+/// the width it has, by display width).
 pub fn safe_title(title: &str) -> String {
     let mut out = String::new();
     let mut n = 0;
@@ -385,10 +491,7 @@ pub fn safe_title(title: &str) -> String {
             out.push('…');
             break;
         }
-        let bad = c.is_control()
-            || matches!(c,
-                '\u{200b}'..='\u{200f}' | '\u{2028}'..='\u{202e}' | '\u{2060}'..='\u{2069}' | '\u{061c}' | '\u{feff}');
-        if bad {
+        if hidden(c) {
             let esc = if u32::from(c) < 0x100 {
                 format!("\\x{:02x}", u32::from(c))
             } else {
@@ -489,6 +592,45 @@ mod tests {
         // After a string ends, a switch counts again.
         assert_eq!(scan(&[b"\x1b]0;t\x07\x1b[?1000h"]).track, Track::Normal);
         assert_eq!(scan(&[b"\x1b]0;t\x1b\\\x1b[?1000h"]).track, Track::Normal);
+    }
+
+    #[test]
+    fn the_scanner_resets_exactly_when_the_emulator_does() {
+        use agora_vt::{AlacrittyTerminal, Size, Terminal};
+        // `ESC <byte> c` between the escape and the final: a reset or not, decided by the emulator the screen is drawn by.
+        let mids: Vec<Option<u8>> = std::iter::once(None)
+            .chain((0u8..=0xff).filter(|b| !matches!(b, b'c' | b'[')).map(Some))
+            .collect();
+        let both = [&b""[..], b"("]
+            .into_iter()
+            .flat_map(|pre| mids.iter().map(move |m| (pre, *m)));
+        for (pre, mid) in both {
+            let mut seq = b"x\x1b[?1000h\x1b".to_vec();
+            seq.extend_from_slice(pre);
+            seq.extend(mid);
+            seq.push(b'c');
+            let mut vt = AlacrittyTerminal::new(Size { cols: 10, rows: 2 });
+            vt.feed(&seq);
+            let cleared = (0..2)
+                .flat_map(|r| (0..10).map(move |c| (r, c)))
+                .all(|(r, c)| vt.cell(r, c).is_none_or(|c| c.ch == ' '));
+            let mut s = ModeScanner::default();
+            s.feed(&seq);
+            assert_eq!(s.modes().track == Track::Off, cleared, "byte {mid:?}");
+        }
+    }
+
+    #[test]
+    fn the_scanner_never_buffers_more_than_a_short_parameter_list() {
+        let mut s = ModeScanner::default();
+        s.feed(b"\x1b[?");
+        for _ in 0..10_000 {
+            s.feed(b"1111111111");
+            assert!(s.params.len() <= 64, "{}", s.params.len());
+        }
+        // The sequence that ended an over-long list changes nothing.
+        s.feed(b"h");
+        assert_eq!(s.modes(), ProgramModes::default());
     }
 
     #[test]
@@ -646,6 +788,7 @@ mod tests {
         for bad in [
             "",
             "javascript:alert(1)",
+            "javascript:a.test/x",
             "file:///etc/passwd",
             "data:text/html,x",
             "ftp://a.test",
@@ -657,6 +800,15 @@ mod tests {
             "https://a.test/ x",
             "https://a.test/\x1b[31m",
             "https://а.test/",
+            "https://a.test/?x=1&calc.exe",
+            "https://a.test/%GITHUB_TOKEN%",
+            "https://a.test/%41",
+            "https://a.test/^x",
+            "https://a.test/\"x",
+            "https://a.test/a(b)",
+            "https://a.test/!x",
+            "https://a.test/<x>",
+            "https://a.test/a|b",
             "https://a.test/é",
             "//a.test",
         ] {
@@ -681,10 +833,23 @@ mod tests {
         assert_eq!(at(row, 0), None);
         assert_eq!(at(row, 28).as_deref(), Some("https://b.test/y"));
         assert_eq!(at(row, 43), None);
+        // An address with a character that cannot be opened safely is no link at all, not a shorter one.
+        assert_eq!(at("go to http://x.test/a_(b) now", 10), None);
+        assert_eq!(at("go to https://a.test/?x=1&calc.exe now", 10), None);
         assert_eq!(
-            at("go to http://x.test/a_(b) now", 10).as_deref(),
-            Some("http://x.test/a_(b)")
+            at("(https://a.test/p)", 5).as_deref(),
+            Some("https://a.test/p")
         );
+        assert_eq!(
+            at("<https://a.test/p>", 5).as_deref(),
+            Some("https://a.test/p")
+        );
+        // The click on the second of two addresses in one run gets the second.
+        assert_eq!(
+            at("http://a.test/1,https://b.test/2", 25).as_deref(),
+            Some("https://b.test/2")
+        );
+        assert_eq!(at("https://a.test/\u{e9}x", 3), None);
         // Not a web address: nothing, even under the pointer.
         assert_eq!(at("open javascript:alert(1) now", 10), None);
         assert_eq!(at("file:///etc/passwd", 3), None);
@@ -697,6 +862,61 @@ mod tests {
     }
 
     #[test]
+    fn a_second_ctrl_click_on_the_same_address_opens_it_and_nothing_else_does() {
+        use std::time::{Duration, Instant};
+        let life = Duration::from_secs(10);
+        let t0 = Instant::now();
+        let url = "https://a.test/x";
+        let shown = "Link: https://a.test/x";
+        let arm =
+            |l: &mut LinkConfirm| assert_eq!(l.click(url, shown, t0, life), LinkStep::Confirm);
+        // The first click only shows; the second one, after the first one's own release, opens, once.
+        let mut l = LinkConfirm::default();
+        arm(&mut l);
+        assert!(l.is_armed());
+        l.release();
+        l.check(t0, shown, life);
+        assert_eq!(l.click(url, shown, t0, life), LinkStep::Open);
+        assert!(!l.is_armed());
+        assert_eq!(
+            l.click(url, shown, t0, life),
+            LinkStep::Confirm,
+            "once only"
+        );
+        // Another address is a first click.
+        let mut l = LinkConfirm::default();
+        arm(&mut l);
+        assert_eq!(
+            l.click("https://b.test/", shown, t0, life),
+            LinkStep::Confirm
+        );
+        // A key, a move, a click elsewhere, a tab switch (all `other`) forget it.
+        let mut l = LinkConfirm::default();
+        arm(&mut l);
+        l.other();
+        assert_eq!(l.click(url, shown, t0, life), LinkStep::Confirm);
+        // A second release (not the arming click's own) forgets it.
+        let mut l = LinkConfirm::default();
+        arm(&mut l);
+        l.release();
+        l.release();
+        assert!(!l.is_armed());
+        // A different footer text forgets it; so does running out; a still-valid one does not.
+        let mut l = LinkConfirm::default();
+        arm(&mut l);
+        l.check(t0 + life / 2, shown, life);
+        assert!(l.is_armed());
+        l.check(t0 + life / 2, "Copied.", life);
+        assert!(!l.is_armed());
+        arm(&mut l);
+        l.check(t0 + life, shown, life);
+        assert!(!l.is_armed());
+        // A second click after the first one ran out is a first click again.
+        arm(&mut l);
+        assert_eq!(l.click(url, shown, t0 + life, life), LinkStep::Confirm);
+    }
+
+    #[test]
     fn a_title_is_drawn_without_control_or_reordering_characters() {
         assert_eq!(safe_title("vim - main.rs"), "vim - main.rs");
         assert_eq!(safe_title("a\x1b[2Jb\x07"), "a\\x1b[2Jb\\x07");
@@ -706,6 +926,27 @@ mod tests {
             "a\\u{200b}b\\u{2066}c\\u{feff}"
         );
         assert_eq!(safe_title("a\u{9b}b\x7f"), "a\\x9bb\\x7f");
+        // More characters that draw as nothing or as something else.
+        for c in [
+            '\u{206a}',
+            '\u{206f}',
+            '\u{e0001}',
+            '\u{e007f}',
+            '\u{3164}',
+            '\u{2800}',
+            '\u{ad}',
+            '\u{fe0f}',
+            '\u{180e}',
+        ] {
+            let got = safe_title(&format!("a{c}b"));
+            let n = u32::from(c);
+            let want = if n < 0x100 {
+                format!("a\\x{n:02x}b")
+            } else {
+                format!("a\\u{{{n:x}}}b")
+            };
+            assert_eq!(got, want, "{c:?}");
+        }
         assert_eq!(safe_title("漢字 ok 😀"), "漢字 ok 😀");
         let long = "x".repeat(500);
         let cut = safe_title(&long);

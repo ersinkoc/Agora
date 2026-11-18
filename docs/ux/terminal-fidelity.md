@@ -111,33 +111,46 @@ mouse reports, now with button, Shift/Alt/Ctrl and motion), `preview.rs` (reads 
 
 - **Mouse modes** 9, 1000, 1002, 1003 with the encodings default (X10), UTF-8 (1005), SGR (1006) and urxvt (1015). The modes come from
   the program's own output: `ModeScanner` reads `CSI ? Pm h/l` (also `ESC c`, `CSI ! p`) across chunk boundaries, in the same
-  bytes the client feeds its emulator, because the emulator and the repaint do not carry them (Phase 3, item 1). The client keeps
+  bytes the client feeds its emulator, because the emulator and the repaint do not carry them (Phase 3, item 1). It is tested against
+  the emulator for every byte that can sit inside an escape (`ESC <byte> c` resets only where the emulator resets). The client keeps
   asking its own terminal for presses, drags and the wheel; it asks for motion with no button (1003) only while the program in front
   asked for it. A coordinate that does not fit the form (column over 223 in the classic one) is dropped, never wrapped.
-- **Who gets the pointer.** With a mouse mode on and the pane not scrolled back, presses, drags, releases and the wheel go to the
-  program; a press that went there keeps its drags and release there. **Shift** keeps everything local (selection and the OSC 52
-  copy the client already had, wheel scrolls the history) and a Shift-held event is never sent. **Ctrl+click** is the link gesture
-  and is never sent. With no mouse mode: the wheel on the alternate screen is arrow keys, three a notch, in the cursor-key form the
-  program asked (DECCKM); on the normal screen it scrolls the client's history, as before. Middle and right buttons do nothing in the
-  client itself.
+- **Who gets the pointer.** With a mouse mode on, the pane not scrolled back, and no palette or box over the pane, presses, releases,
+  motion (1003) and the wheel go to the program; drags and releases only of a press the program got. **Shift** keeps everything local
+  (selection and the OSC 52 copy the client already had, wheel scrolls the history) and a Shift-held event is never sent: while the
+  program has a press, a Shift- or Ctrl-held drag goes nowhere and a Shift- or Ctrl-held release is sent as a plain release (the
+  modifiers cut off) so the program's button does not stay down. A press the program has is forgotten when it switches the mouse off
+  or the tab changes. **Ctrl+click** is the link gesture and is never sent. With no mouse mode: the wheel on the alternate screen is
+  arrow keys, three a notch, in the cursor-key form the program asked (DECCKM); on the normal screen it scrolls the client's history,
+  as before. Middle and right buttons do nothing in the client itself.
 - **Focus events** (1004): `ESC [ I` / `ESC [ O` when the pane gains or loses the keyboard (the tab comes to the front with the
   keyboard in the pane, or the keyboard goes to the tree, the inspector or the palette), only if the program asked.
 - **Paste**: bracketed only when the program asked (the emulator's own flag); every paste loses ESC and every other control
-  character except tab and line breaks, C1 included, so it cannot end its own bracket (the quadratic marker remover is gone: with no
-  ESC left there is nothing to piece together).
-- **Links**: plain `http` and `https` addresses on one drawn row, ASCII only, no credentials, at most 2048 characters. Ctrl+click
-  shows the whole address in the footer and asks for a second Ctrl+click on it as the very next action; only then is it opened
-  (`agora_platform::open_url`). A plain click never opens or asks; nothing opens by itself. An address broken over two rows is not
-  joined.
-- **Title** (OSC 0 / 2): drawn after the tabs, control, bidirectional and invisible characters as visible escapes, cut to 60 characters.
+  character except tab and line breaks, C1 included, so it cannot end its own bracket.
+- **Links**: plain `http` and `https` addresses on one drawn row, printable ASCII only, none of `& % ^ " ( ) ! < > |`, no credentials,
+  at most 2048 characters. `%` is refused whole, so a percent-encoded address is not offered as a link (it can still be copied).
+  An address with any such character is no link at all, never a shorter one. Ctrl+click shows the whole address in the footer; a
+  second Ctrl+click on the same address opens it only if nothing happened in between (a key, another pointer event, a tab switch,
+  a different footer text, or 10 seconds forget it; `LinkConfirm`). The opener (`agora_platform::open_url`) refuses anything else
+  and, on Windows, uses `rundll32 url.dll,FileProtocolHandler` (one argument, never `cmd.exe`; before, `cmd /c start` let `&` and
+  `%VAR%` through). A plain click never opens or asks; nothing opens by itself. An address broken over two rows is not joined.
+- **Title** (OSC 0 / 2): drawn after the tabs; control, bidirectional, zero-width and other invisible characters (including
+  U+206A-206F, tag characters, U+3164, U+2800, U+00AD, U+FE0F, U+180E) as visible escapes, cut to 60 characters and to the room by
+  display width. The count of agents waiting is drawn first, in a place of its own; the title gets what is left.
+- **Leaving**: one reset sequence (`backend::RESET`: mouse 1000/1002/1003/1006, paste 2004, focus 1004, cursor, alternate screen) is
+  written when the screen is dropped: a quit, an early return, a panic (a hook writes it before the message), and on Unix a SIGTERM,
+  SIGHUP or SIGINT (caught, the console ends in order). Not covered: SIGKILL, and closing a Windows console window.
 
 How it was checked: unit tests on encoders, the scanner (split chunks, strings, resets), paste, links, titles, and the pane's pointer
 rules against a fake program's byte stream; a mutation run (each guard reverted alone: paste cleaning, bracket only when asked, mouse off,
-Shift, Ctrl, scrolled-back, release kept, wheel arrows only on the alternate screen, DECCKM, X10 modifiers, classic column limit, SGR
-release button, reset, focus only when asked, link scheme, credentials, ASCII, title escape, title cap) made a test fail every time.
+Shift, Ctrl, scrolled-back, palette, release and press forgotten, wheel arrows only on the alternate screen, DECCKM, X10 modifiers, classic
+column limit, SGR release button, reset and what resets, focus only when asked, link scheme, credentials, forbidden characters, ASCII,
+the two-click rule, title escape, cap and width, the waiting count's priority, the reset sequence and its drop, the opener's refusal)
+made a test fail every time.
 **Not** checked: a real vim, tmux or htop in a real terminal emulator, any host terminal's own handling of Shift+drag, Windows or macOS
-consoles, a real `xdg-open` from the TUI; the glue in `tuicmd.rs` (sending the focus bytes, the second-click rule, switching 1003 on and
-off) has no automated test.
+consoles, a real `xdg-open` or `rundll32` from the TUI (the Windows opener compiles for Windows, `cargo check --target x86_64-pc-windows-gnu`,
+but only Windows CI can run it); the glue in `tuicmd.rs` (sending the focus bytes, passing the pure rules the events, the box over the
+pane, polling for a stop request, switching 1003 on and off) has no automated test.
 
 ## Phase 3: what the web client cannot fix
 
