@@ -80,7 +80,7 @@ L1 is an agent in a terminal read from its screen (a manifest); L2/L3 are struct
 | Phone-sized window | ADR-0046 Accepted, ADR-0067 Accepted | yes | `scripts/e2e-phone.mjs` in emulated Chromium | not run on a real phone |
 | Screen password for remote sign-in | ADR-0067 Accepted | yes (rung 1) | hub tests | none recorded here |
 | Tailscale (rung 3): `agora remote tailscale\|status\|off`, public-address rule, doctor checks | ADR-0067 Accepted | yes (rung 3) | `crates/agora/tests/remote_cli.rs` (fake `tailscale`), hub unit tests | never run against a real tailnet or a real VPS |
-| Cloudflare Tunnel | ADR-0067 Accepted | not built (rung 4) | — | — |
+| Trusted reverse proxy or tunnel (rung 4): `agora remote proxy`, Host/Origin checks, real client address | ADR-0067 Accepted | yes (rung 4), without a window banner and without starting the connector | `crates/agora/tests/remote_cli.rs` (a real hub process, fake proxy headers), `crates/agora-hub/tests/server.rs`, hub unit tests | never run against a real tunnel |
 | Layouts and themes | ADR-0068 Accepted | layouts and themes yes; panel registry, keybindings and the terminal client not built | web tests; visual baselines | none recorded here |
 | Terminal client (TUI) | ADR-0043 Accepted, ADR-0063 Accepted | yes | terminal-client tests | [macOS 2026-11-14](reviews/2026-11-14-macos-confinement-and-terminal-client.md): list, tabs, readers, a real Claude Code agent |
 | Desktop app | ADR-0048 Accepted | partly ([phase 7](backlog/phase-7.md) P7-06 in progress) | builds on three systems | none recorded here |

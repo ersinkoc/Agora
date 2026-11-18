@@ -148,6 +148,10 @@ pub(crate) struct Opts {
     since: Option<u64>,
     /// ADR-0067 rung 3: `agora remote tailscale --serve` publishes the hub with `tailscale serve` (on `--port`, 8443 unless said).
     serve: bool,
+    /// ADR-0067 rung 4: `agora remote proxy --trust-header NAME --host PUBLIC.NAME [--host ...] [--proxy-addr IP ...]`.
+    trust_header: Option<String>,
+    hosts: Vec<String>,
+    proxy_addrs: Vec<String>,
     /// ADR-0065: `agora pair open --minutes N`.
     minutes: Option<u64>,
     who: Option<String>,
@@ -215,6 +219,9 @@ fn parse(args: &[String]) -> Option<Opts> {
             "--yes" => o.yes = true,
             "--metrics" => o.metrics = true,
             "--serve" => o.serve = true,
+            "--trust-header" => o.trust_header = Some(it.next()?.clone()),
+            "--host" => o.hosts.push(it.next()?.clone()),
+            "--proxy-addr" => o.proxy_addrs.push(it.next()?.clone()),
             "--expires" => o.expires = Some(it.next()?.parse().ok()?),
             "--old" => o.old = true,
             "--refuse-return" => o.refuse_return = true,
@@ -340,7 +347,9 @@ fn main() -> ExitCode {
         ["adapter", "list"] => adaptercmd::list(&say, &opts),
         ["adapter", "remove"] => adaptercmd::remove(&say, &opts),
         ["adapter", "update"] => adaptercmd::update(&say, &opts),
-        ["remote", op @ ("tailscale" | "status" | "off")] => remotecmd::remote(&say, &opts, op),
+        ["remote", op @ ("tailscale" | "proxy" | "status" | "off")] => {
+            remotecmd::remote(&say, &opts, op)
+        }
         ["password", op @ ("set" | "clear" | "status")] => hubcli::password(&say, &opts, op),
         ["hub", "run"] => hubcli::hub_run(&say, &opts),
         // A machine that does not run the hub (no hub folder) gets that said, not the database error these commands would hit.
@@ -505,6 +514,9 @@ fn doctor(say: &Say, o: &Opts) -> ExitCode {
             ("remote-tailnet", _) => key!("doctor-remote-tailnet"),
             ("remote-tailnet-unreachable", _) => key!("doctor-remote-tailnet-unreachable"),
             ("remote-names-missing", _) => key!("doctor-remote-names-missing"),
+            ("remote-proxy-on", _) => key!("doctor-remote-proxy-on"),
+            ("remote-proxy-listen", _) => key!("doctor-remote-proxy-listen"),
+            ("remote-proxy-damaged", _) => key!("doctor-remote-proxy-damaged"),
             ("credential", _) => key!("doctor-credential"),
             ("credential-none", _) => key!("doctor-credential-none"),
             ("credential-unlisted", _) => key!("doctor-credential-unlisted"),

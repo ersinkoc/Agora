@@ -18,6 +18,7 @@ use std::process::ExitCode;
 
 use agora_hub::names::checked_name;
 use agora_hub::password::ScreenPassword;
+use agora_hub::proxy::{self, ProxyTrust, Stored};
 use agora_hub::store::SqliteStore;
 use agora_i18n::{key, Arg};
 use agora_node::doctor::{Check, Status};
@@ -279,9 +280,110 @@ pub fn remote(say: &Say, o: &Opts, op: &str) -> ExitCode {
     let dir = hub_dir(o);
     match op {
         "tailscale" => tailscale_on(say, o, &dir),
+        "proxy" => proxy_on(say, o, &dir),
         "status" => status(say, &dir),
         _ => off(say, &dir),
     }
+}
+
+/// The proxy file, read without following a link and without waiting on a FIFO (the platform opener).
+pub(crate) fn read_proxy(dir: &Path) -> Stored {
+    proxy::read_from(&dir.join(proxy::FILE), agora_platform::open_read_no_follow)
+}
+
+/// A name the person typed, made safe to print in a sentence: no control characters, at most 80 of them.
+fn shown(text: &str) -> Arg {
+    text.chars()
+        .filter(|c| !c.is_control())
+        .take(80)
+        .collect::<String>()
+        .into()
+}
+
+/// `agora remote proxy --trust-header NAME --host PUBLIC.NAME [--host ...] [--proxy-addr IP ...]` (ADR-0067 rung 4): the hub trusts one
+/// reverse proxy (a tunnel provider's connector or any proxy the owner runs) for the real client address, and answers only the names
+/// given. Off until this is run; `agora remote off` takes it back. The screen password comes first, as for every way in.
+fn proxy_on(say: &Say, o: &Opts, dir: &Path) -> ExitCode {
+    let Some(header) = o.trust_header.as_deref().filter(|_| !o.hosts.is_empty()) else {
+        say.err(key!("cli-bad-arguments"), &[]);
+        return ExitCode::from(2);
+    };
+    if !password_set(dir) {
+        return password_required(say);
+    }
+    if !proxy::valid_header(header) {
+        return refuse(
+            say,
+            "remote.proxy_header_invalid",
+            key!("remote-proxy_header_invalid"),
+            &[("header", shown(header))],
+        );
+    }
+    let mut hosts = Vec::new();
+    for h in &o.hosts {
+        match proxy::checked_host(h) {
+            Some(n) if hosts.len() < proxy::MAX_HOSTS => hosts.push(n),
+            _ => {
+                return refuse(
+                    say,
+                    "remote.proxy_host_invalid",
+                    key!("remote-proxy_host_invalid"),
+                    &[("host", shown(h))],
+                )
+            }
+        }
+    }
+    let mut addrs = Vec::new();
+    for a in &o.proxy_addrs {
+        match a.parse::<IpAddr>() {
+            Ok(ip)
+                if addrs.len() < proxy::MAX_PROXIES
+                    && !proxy::canon(ip).is_unspecified()
+                    && !proxy::canon(ip).is_multicast() =>
+            {
+                addrs.push(ip)
+            }
+            _ => {
+                return refuse(
+                    say,
+                    "remote.proxy_addr_invalid",
+                    key!("remote-proxy_addr_invalid"),
+                    &[("addr", shown(a))],
+                )
+            }
+        }
+    }
+    let Some(trust) = ProxyTrust::new(header, &hosts, &addrs) else {
+        return refuse(
+            say,
+            "remote.proxy_host_invalid",
+            key!("remote-proxy_host_invalid"),
+            &[("host", shown(&o.hosts.join(" ")))],
+        );
+    };
+    let written = std::fs::create_dir_all(dir).and_then(|()| {
+        agora_platform::write_private(&dir.join(proxy::FILE), trust.render().as_bytes())
+    });
+    if let Err(e) = written {
+        say.err(key!("cli-hub-failed"), &[("reason", e.to_string().into())]);
+        return ExitCode::from(1);
+    }
+    say.out(
+        key!("remote-proxy-on"),
+        &[
+            ("hosts", trust.hosts().join(", ").into()),
+            ("header", trust.header().into()),
+        ],
+    );
+    say.out(key!("remote-proxy-access-hint"), &[]);
+    if listening(dir).is_some_and(|l| {
+        let e = exposure(l.ip());
+        e.lan || e.tailnet || e.public
+    }) {
+        say.out(key!("remote-proxy-listen-hint"), &[]);
+    }
+    say.out(key!("remote-password-reminder"), &[]);
+    ExitCode::SUCCESS
 }
 
 fn tailscale_on(say: &Say, o: &Opts, dir: &Path) -> ExitCode {
@@ -391,6 +493,8 @@ struct Reach {
     names: Vec<String>,
     serve: Option<ServeRecord>,
     password: bool,
+    /// ADR-0067 rung 4: a trusted reverse proxy is on (or its file is damaged).
+    proxy: Stored,
 }
 
 impl Reach {
@@ -406,7 +510,20 @@ impl Reach {
             names,
             serve,
             password: password_set(dir),
+            proxy: read_proxy(dir),
         }
+    }
+
+    fn proxy_on(&self) -> bool {
+        matches!(self.proxy, Stored::On(_))
+    }
+
+    /// The hub listens on more than this machine, so the proxy is not the only way to reach it.
+    fn listens_beyond_loopback(&self) -> bool {
+        self.listen.is_some_and(|l| {
+            let e = exposure(l.ip());
+            e.lan || e.tailnet || e.public
+        })
     }
 
     fn tailnet(&self) -> bool {
@@ -415,7 +532,7 @@ impl Reach {
 
     /// A path from outside this machine's own network is on (the hub listens on a tailnet or public address, or Agora set one up).
     fn remote(&self) -> bool {
-        self.tailnet() || self.public()
+        self.tailnet() || self.public() || self.proxy_on()
     }
 
     /// Open to the whole internet: a public listen address, or Tailscale Funnel.
@@ -426,7 +543,7 @@ impl Reach {
     /// A way in that Agora or the owner turned on on purpose: a recorded name or serve rule, or a hub bound to a public address. A hub
     /// that only happens to listen on every address of a machine that has a tailnet interface is a warning, not one of these.
     fn explicit(&self) -> bool {
-        self.serve.is_some() || !self.names.is_empty() || self.public()
+        self.serve.is_some() || !self.names.is_empty() || self.public() || self.proxy_on()
     }
 }
 
@@ -473,6 +590,20 @@ fn status(say: &Say, dir: &Path) -> ExitCode {
         },
         &[],
     );
+    match &r.proxy {
+        Stored::On(t) => {
+            say.out(
+                key!("remote-status-proxy"),
+                &[
+                    ("hosts", t.hosts().join(", ").into()),
+                    ("header", t.header().into()),
+                ],
+            );
+            say.out(key!("remote-proxy-warning"), &[]);
+        }
+        Stored::Damaged => say.err(key!("remote-status-proxy-damaged"), &[]),
+        Stored::Off => {}
+    }
     if r.remote() && !r.password {
         say.err(key!("remote-status-no-password"), &[]);
     }
@@ -539,6 +670,16 @@ fn off(say: &Say, dir: &Path) -> ExitCode {
             }
         }
     }
+    if std::fs::symlink_metadata(dir.join(proxy::FILE)).is_ok() {
+        did = true;
+        match std::fs::remove_file(dir.join(proxy::FILE)) {
+            Ok(()) => say.out(key!("remote-off-proxy"), &[]),
+            Err(e) => {
+                say.err(key!("cli-hub-failed"), &[("reason", e.to_string().into())]);
+                code = ExitCode::from(1);
+            }
+        }
+    }
     if !did {
         say.out(key!("remote-off-nothing"), &[]);
     }
@@ -566,6 +707,28 @@ pub(crate) fn checks(o: &Opts) -> Vec<Check> {
     }
     if r.exposure.public {
         out.push(check("remote-public-listen", Status::Warn, vec![]));
+    }
+    match &r.proxy {
+        Stored::On(t) => {
+            // Every time: the hub is reachable from the internet through the proxy, and the proxy is what decides who gets that far.
+            out.push(check(
+                "remote-proxy-on",
+                Status::Warn,
+                vec![
+                    ("hosts", t.hosts().join(", ")),
+                    ("header", t.header().to_string()),
+                ],
+            ));
+            if let (true, Some(l)) = (r.listens_beyond_loopback(), r.listen) {
+                out.push(check(
+                    "remote-proxy-listen",
+                    Status::Warn,
+                    vec![("addr", l.to_string())],
+                ));
+            }
+        }
+        Stored::Damaged => out.push(check("remote-proxy-damaged", Status::Warn, vec![])),
+        Stored::Off => {}
     }
     if r.funnel {
         out.push(check("remote-funnel", Status::Warn, vec![]));
@@ -614,7 +777,7 @@ pub(crate) fn clear_refused(say: &Say, dir: &Path) -> Option<ExitCode> {
         return None;
     }
     // Which way out depends on the cause: Agora's own records are undone by `remote off`; a listen address only by restarting the hub.
-    let recorded = r.serve.is_some() || !r.names.is_empty();
+    let recorded = r.serve.is_some() || !r.names.is_empty() || r.proxy_on();
     Some(if recorded {
         refuse(
             say,

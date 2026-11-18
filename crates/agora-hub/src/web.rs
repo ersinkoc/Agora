@@ -29,6 +29,11 @@ pub trait SessionApi: Send + Sync {
         serde_json::json!({})
     }
 
+    /// ADR-0067 rung 4: the reverse proxy the owner trusts, if any. Read for every request; `None` (the default) trusts no header.
+    fn proxy(&self) -> Option<std::sync::Arc<crate::proxy::ProxyTrust>> {
+        None
+    }
+
     /// `DELETE /api/session`: ends the session `bearer` (sign out, "Lock"). Returns the status.
     fn end(&self, _bearer: &str) -> u16 {
         404
@@ -375,6 +380,30 @@ where
         head.extend_from_slice(&chunk[..n]);
     };
     let text = String::from_utf8_lossy(&head[..end]).to_string();
+    // ADR-0067 rung 4: a request from a trusted proxy (loopback, or an address the owner named) is judged before anything else, a
+    // WebSocket upgrade included: its Host and Origin must be ours, and its client address is the one the owner's header carries
+    // (or unknown). A peer that is not the proxy is an ordinary client: no header it sends counts.
+    let mut peer = peer;
+    if let (Some(ip), Some(trust)) = (peer, sessions.and_then(|s| s.proxy())) {
+        if trust.trusts_peer(ip) {
+            match trust.judge(&text) {
+                crate::proxy::Verdict::Refuse { status, code } => {
+                    let body = format!(r#"{{"error":"{code}"}}"#);
+                    respond(
+                        &mut stream,
+                        status,
+                        "application/json",
+                        body.as_bytes(),
+                        false,
+                    )
+                    .await?;
+                    return Ok(First::Answered);
+                }
+                crate::proxy::Verdict::Proxied(real) => peer = real,
+                crate::proxy::Verdict::Direct => {}
+            }
+        }
+    }
     let mut lines = text.split("\r\n");
     let request_line = lines.next().unwrap_or("");
     let upgrade = lines.any(|l| {
@@ -578,6 +607,7 @@ async fn respond<S: AsyncWrite + Unpin>(
         500 => "Internal Server Error",
         404 => "Not Found",
         405 => "Method Not Allowed",
+        421 => "Misdirected Request",
         413 => "Payload Too Large",
         429 => "Too Many Requests",
         _ => "Request Header Fields Too Large",
@@ -888,5 +918,318 @@ mod tests {
         let info = "GET /api/session HTTP/1.1\r\nHost: h\r\n\r\n".to_string();
         let (out, _) = ask(&api, "::1", info).await;
         assert!(out.contains(r#""passwordRequired":false"#), "{out}");
+    }
+
+    // ---- ADR-0067 rung 4: a trusted reverse proxy ----
+
+    const PUBLIC: &str = "agora.example.com";
+
+    /// A hub with a screen password and the proxy trusted as the owner would turn it on (`None`: never turned on).
+    fn proxied(on: bool) -> (Arc<crate::hub::Hub>, crate::signin::HubSessions) {
+        let hub = Arc::new(
+            crate::hub::Hub::open(crate::store::SqliteStore::open_in_memory().unwrap()).unwrap(),
+        );
+        crate::password::ScreenPassword::with_iterations(hub.store(), 1_000)
+            .set("long enough")
+            .unwrap();
+        let mut api = crate::signin::HubSessions::new(Arc::clone(&hub)).with_password_rounds(1_000);
+        if on {
+            let trust = crate::proxy::ProxyTrust::new(
+                "CF-Connecting-IP",
+                &[PUBLIC.to_string()],
+                &["10.1.2.3".parse().unwrap()],
+            )
+            .unwrap();
+            api = api.with_proxy(Arc::new(crate::proxy::ProxyHandle::fixed(Some(trust))));
+        }
+        (hub, api)
+    }
+
+    fn info(headers: &[&str]) -> String {
+        format!(
+            "GET /api/session HTTP/1.1\r\n{}\r\n\r\n",
+            headers.join("\r\n")
+        )
+    }
+
+    fn required(out: &str) -> bool {
+        assert!(out.starts_with("HTTP/1.1 200"), "{out}");
+        out.contains(r#""passwordRequired":true"#)
+    }
+
+    /// Sign-in with a wrong password; true when the answer is the lockout (429) and not an ordinary refusal (401).
+    async fn locked(api: &dyn SessionApi, peer: &str, headers: &[&str]) -> bool {
+        let body = serde_json::json!({ "code": "AAAA-AAAA", "password": "wrong one!" }).to_string();
+        let request = format!(
+            "POST /api/session HTTP/1.1\r\n{}\r\nContent-Length: {}\r\n\r\n{body}",
+            headers.join("\r\n"),
+            body.len()
+        );
+        let (out, _) = ask(api, peer, request).await;
+        assert!(
+            out.starts_with("HTTP/1.1 401") || out.starts_with("HTTP/1.1 429"),
+            "{out}"
+        );
+        out.starts_with("HTTP/1.1 429")
+    }
+
+    #[tokio::test]
+    async fn off_by_default_a_header_and_a_host_change_nothing() {
+        let (_hub, api) = proxied(false);
+        // The same request that is judged with the proxy on: from loopback, a foreign Host and an Origin, no proxy header. Nothing is
+        // refused and the owner at the machine stays the owner.
+        let (out, _) = ask(
+            &api,
+            "127.0.0.1",
+            info(&["Host: evil.example.org", "Origin: https://evil.example.org"]),
+        )
+        .await;
+        assert!(!required(&out), "{out}");
+        // A forged header from a remote peer is no address.
+        let (out, _) = ask(
+            &api,
+            "192.0.2.8",
+            info(&[&format!("Host: {PUBLIC}"), "CF-Connecting-IP: 127.0.0.1"]),
+        )
+        .await;
+        assert!(required(&out), "{out}");
+    }
+
+    #[tokio::test]
+    async fn a_proxied_request_is_never_the_owner_at_the_machine() {
+        let (_hub, api) = proxied(true);
+        let host = format!("Host: {PUBLIC}");
+        for header in [
+            "CF-Connecting-IP: 203.0.113.9",
+            "CF-Connecting-IP: 127.0.0.1",
+            "CF-Connecting-IP: ::1",
+            "CF-Connecting-IP: ::ffff:127.0.0.1",
+            "CF-Connecting-IP: ",
+            "CF-Connecting-IP: 203.0.113.9, 127.0.0.1",
+            "CF-Connecting-IP: 1.1.1.1\r\ncf-connecting-ip: 127.0.0.1",
+            "X-Forwarded-For: 203.0.113.9",
+            "Accept: */*",
+        ] {
+            let (out, _) = ask(&api, "127.0.0.1", info(&[&host, header])).await;
+            assert!(required(&out), "{header:?}: {out}");
+        }
+        // The configured proxy address (not loopback) is the same.
+        let (out, _) = ask(
+            &api,
+            "10.1.2.3",
+            info(&[&host, "CF-Connecting-IP: 203.0.113.9"]),
+        )
+        .await;
+        assert!(required(&out), "{out}");
+        // The owner's own browser by a loopback name is still the owner.
+        for h in [
+            "Host: 127.0.0.1:7443",
+            "Host: localhost",
+            "Host: [::1]:7443",
+        ] {
+            let (out, _) = ask(&api, "127.0.0.1", info(&[h])).await;
+            assert!(!required(&out), "{h}: {out}");
+        }
+    }
+
+    /// The guard that matters most: a header counts only from the proxy. A remote peer that sends the header (or one with a
+    /// loopback address in it) is not believed, so it cannot pick its own rate-limit bucket or become the owner.
+    #[tokio::test]
+    async fn the_header_counts_only_from_the_proxy_and_not_from_anyone_else() {
+        let (_hub, api) = proxied(true);
+        // From a stranger, a header naming loopback does not make it local, and different values do not make different buckets: it
+        // stays one address, so five wrong tries lock it whatever it claims.
+        let (out, _) = ask(
+            &api,
+            "192.0.2.8",
+            info(&[&format!("Host: {PUBLIC}"), "CF-Connecting-IP: 127.0.0.1"]),
+        )
+        .await;
+        assert!(required(&out), "{out}");
+        let mut tripped = false;
+        for i in 0..8 {
+            let claim = format!("CF-Connecting-IP: 198.51.100.{i}");
+            tripped |= locked(&api, "192.0.2.8", &["Host: h", &claim]).await;
+        }
+        assert!(tripped, "a remote peer picked a new bucket with a header");
+        // Its own address is what the lockout holds; a different remote peer is untouched.
+        assert!(!locked(&api, "192.0.2.77", &["Host: h"]).await);
+        // And a stranger's Host is not checked (only the proxy path is): the LAN keeps working by its own address.
+        let (out, _) = ask(&api, "192.0.2.9", info(&["Host: 192.0.2.1:7443"])).await;
+        assert!(required(&out), "{out}");
+    }
+
+    /// A proxy that forwards to loopback with the default `Host` of its target and forgot the address header: with no other sign of a
+    /// proxy the request is the owner's own browser (the one case the hub cannot tell apart, stated in T40); with any other proxy
+    /// header it is not.
+    #[tokio::test]
+    async fn a_forgotten_address_header_with_other_proxy_headers_is_never_the_owner() {
+        let (_hub, api) = proxied(true);
+        for header in [
+            "X-Forwarded-For: 203.0.113.9",
+            "X-Forwarded-Proto: https",
+            "Via: 1.1 proxy",
+            "Forwarded: for=203.0.113.9",
+            "X-Real-IP: 203.0.113.9",
+            "CF-Ray: abc",
+        ] {
+            let (out, _) = ask(&api, "127.0.0.1", info(&["Host: 127.0.0.1:7443", header])).await;
+            assert!(required(&out), "{header}: {out}");
+        }
+        let (out, _) = ask(&api, "127.0.0.1", info(&["Host: 127.0.0.1:7443"])).await;
+        assert!(!required(&out), "the owner's own browser: {out}");
+    }
+
+    /// A header name that the generic proxy-header list (T36) does not know: only the configured guard stands between a loopback
+    /// "client address" and the owner's rights.
+    #[tokio::test]
+    async fn a_loopback_client_address_in_a_custom_header_is_never_the_owner() {
+        let hub = Arc::new(
+            crate::hub::Hub::open(crate::store::SqliteStore::open_in_memory().unwrap()).unwrap(),
+        );
+        crate::password::ScreenPassword::with_iterations(hub.store(), 1_000)
+            .set("long enough")
+            .unwrap();
+        let trust =
+            crate::proxy::ProxyTrust::new("X-Edge-Addr", &[PUBLIC.to_string()], &[]).unwrap();
+        let api = crate::signin::HubSessions::new(Arc::clone(&hub))
+            .with_proxy(Arc::new(crate::proxy::ProxyHandle::fixed(Some(trust))));
+        for value in ["127.0.0.1", "::1", "::ffff:127.0.0.1", "203.0.113.9", ""] {
+            let (out, _) = ask(
+                &api,
+                "127.0.0.1",
+                info(&[&format!("Host: {PUBLIC}"), &format!("X-Edge-Addr: {value}")]),
+            )
+            .await;
+            assert!(required(&out), "{value:?}: {out}");
+        }
+    }
+
+    #[tokio::test]
+    async fn each_real_client_address_has_its_own_rate_limit_bucket() {
+        let (_hub, api) = proxied(true);
+        let host = format!("Host: {PUBLIC}");
+        let from = |ip: &str| format!("CF-Connecting-IP: {ip}");
+        let mut tripped = false;
+        for _ in 0..8 {
+            tripped |= locked(&api, "127.0.0.1", &[&host, &from("203.0.113.1")]).await;
+        }
+        assert!(tripped, "five wrong passwords lock an address");
+        assert!(locked(&api, "127.0.0.1", &[&host, &from("203.0.113.1")]).await);
+        // Another visitor of the same proxy is not locked by it (the T36 limit is gone for a configured header).
+        assert!(!locked(&api, "127.0.0.1", &[&host, &from("203.0.113.2")]).await);
+        // Visitors whose address is unknown still share one bucket.
+        let mut shared = false;
+        for _ in 0..8 {
+            shared |= locked(&api, "127.0.0.1", &[&host]).await;
+        }
+        assert!(shared);
+        assert!(locked(&api, "127.0.0.1", &[&host, "CF-Connecting-IP: junk"]).await);
+    }
+
+    #[tokio::test]
+    async fn a_foreign_host_or_origin_is_refused_with_a_code() {
+        let (_hub, api) = proxied(true);
+        let ip = "CF-Connecting-IP: 203.0.113.9";
+        for peer in ["127.0.0.1", "10.1.2.3"] {
+            let (out, _) = ask(&api, peer, info(&["Host: evil.example.org", ip])).await;
+            assert!(out.starts_with("HTTP/1.1 421"), "{out}");
+            assert!(
+                out.ends_with(r#"{"error":"proxy.host_not_allowed"}"#),
+                "{out}"
+            );
+            let (out, _) = ask(&api, peer, info(&["Accept: */*", ip])).await;
+            assert!(out.starts_with("HTTP/1.1 421"), "no Host: {out}");
+            let (out, _) = ask(
+                &api,
+                peer,
+                info(&[
+                    &format!("Host: {PUBLIC}"),
+                    "Origin: https://evil.example.org",
+                    ip,
+                ]),
+            )
+            .await;
+            assert!(out.starts_with("HTTP/1.1 403"), "{out}");
+            assert!(
+                out.ends_with(r#"{"error":"proxy.origin_not_allowed"}"#),
+                "{out}"
+            );
+        }
+        // A POST is judged before its body is read: nothing is signed in by a rebinding page.
+        let (hub, api) = proxied(true);
+        let c = crate::signin::SignIn::new(hub.store(), Arc::new(crate::enroll::Lockout::new()))
+            .create_code(crate::server::now_ms())
+            .unwrap();
+        let body = serde_json::json!({ "code": c, "password": "long enough" }).to_string();
+        let request = format!(
+            "POST /api/session HTTP/1.1\r\nHost: evil.example.org\r\n{ip}\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let (out, _) = ask(&api, "127.0.0.1", request).await;
+        assert!(out.starts_with("HTTP/1.1 421"), "{out}");
+        // The right names pass, with an Origin of the public name too.
+        let good = info(&[
+            &format!("Host: {PUBLIC}"),
+            &format!("Origin: https://{PUBLIC}"),
+            ip,
+        ]);
+        let (out, _) = ask(&api, "127.0.0.1", good).await;
+        assert!(required(&out), "{out}");
+    }
+
+    #[tokio::test]
+    async fn a_websocket_upgrade_through_the_proxy_has_its_host_and_origin_checked() {
+        let (_hub, api) = proxied(true);
+        let upgrade = |headers: &[&str]| {
+            format!(
+                "GET /ws HTTP/1.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n{}\r\n\r\n",
+                headers.join("\r\n")
+            )
+        };
+        let run = |request: String| {
+            let api = &api;
+            async move {
+                let (mut c, s) = tokio::io::duplex(4096);
+                c.write_all(request.as_bytes()).await.unwrap();
+                match route(s, Some("127.0.0.1".parse().unwrap()), None, Some(api))
+                    .await
+                    .unwrap()
+                {
+                    First::WebSocket(_) => "upgrade".to_string(),
+                    First::Answered => {
+                        let mut out = String::new();
+                        c.read_to_string(&mut out).await.unwrap();
+                        out
+                    }
+                }
+            }
+        };
+        let ip = "CF-Connecting-IP: 203.0.113.9";
+        assert_eq!(
+            run(upgrade(&[
+                &format!("Host: {PUBLIC}"),
+                &format!("Origin: https://{PUBLIC}"),
+                ip
+            ]))
+            .await,
+            "upgrade"
+        );
+        let out = run(upgrade(&["Host: evil.example.org", ip])).await;
+        assert!(out.starts_with("HTTP/1.1 421"), "{out}");
+        let out = run(upgrade(&[
+            &format!("Host: {PUBLIC}"),
+            "Origin: https://evil.example.org",
+            ip,
+        ]))
+        .await;
+        assert!(out.starts_with("HTTP/1.1 403"), "{out}");
+        // A page of another site opening a socket to the hub by its loopback name from the owner's own browser is refused too.
+        let out = run(upgrade(&[
+            "Host: 127.0.0.1:7443",
+            "Origin: https://evil.example.org",
+        ]))
+        .await;
+        assert!(out.starts_with("HTTP/1.1 403"), "{out}");
     }
 }
