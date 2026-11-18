@@ -834,7 +834,11 @@ fn turning_the_proxy_on_is_visible_everywhere_and_off_takes_it_back() {
     // The password stays while the proxy is on, and the way out is named.
     let (code, out) = e.run(&["password", "clear"]);
     assert_eq!(code, 1, "{out}");
-    assert!(out.contains("remote.password_in_use"), "{out}");
+    assert!(out.contains("Error remote.password_in_use"), "{out}");
+    assert!(
+        out.contains("Turn that off first with `agora remote off`"),
+        "the way out is named: {out}"
+    );
     assert!(e.password_is_set());
 
     // The hub also listening beyond this machine is warned about.
@@ -979,4 +983,57 @@ fn a_real_hub_follows_remote_proxy_and_remote_off() {
     wait_until("the hub dropped the proxy", || {
         status(&ask(&["Host: evil.example.org"])) == "200"
     });
+}
+
+#[test]
+fn an_address_nothing_connects_from_is_not_a_proxy() {
+    let e = Env::new("proxyaddr");
+    e.set_password();
+    for addr in ["0.0.0.0", "::", "224.0.0.1", "ff02::1"] {
+        let mut args = PROXY.to_vec();
+        args.extend(["--proxy-addr", addr]);
+        let (code, out) = e.run(&args);
+        assert_eq!(code, 1, "{addr}: {out}");
+        assert!(out.contains("remote.proxy_addr_invalid"), "{addr}: {out}");
+    }
+    assert!(!e.hub.join("remote-proxy").exists());
+    let mut args = PROXY.to_vec();
+    args.extend(["--proxy-addr", "::ffff:10.1.2.3"]);
+    let (code, out) = e.run(&args);
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(
+        std::fs::read_to_string(e.hub.join("remote-proxy")).unwrap(),
+        "header=cf-connecting-ip\nhost=agora.example.com\nproxy=10.1.2.3\n",
+        "one spelling"
+    );
+}
+
+/// A link, a FIFO and an over-long file in place of the proxy file are damaged, say so, and never hang the command.
+#[cfg(unix)]
+#[test]
+fn a_link_a_fifo_or_a_long_file_is_a_damaged_proxy_file() {
+    let e = Env::new("proxyshapes");
+    e.set_password();
+    let file = e.hub.join("remote-proxy");
+    let good = "header=x-ip\nhost=a.example.com\n";
+    let damaged = |e: &Env| {
+        let (_, out) = e.run(&["remote", "status"]);
+        out.contains("file that turns on the trusted proxy is damaged")
+    };
+    std::fs::write(e.hub.join("real"), good).unwrap();
+    std::os::unix::fs::symlink(e.hub.join("real"), &file).unwrap();
+    assert!(damaged(&e), "a link");
+    std::fs::remove_file(&file).unwrap();
+    let made = Command::new("mkfifo")
+        .arg(&file)
+        .status()
+        .map(|s| s.success());
+    if made.unwrap_or(false) {
+        assert!(damaged(&e), "a fifo");
+        std::fs::remove_file(&file).unwrap();
+    }
+    std::fs::write(&file, format!("{good}{}", "\n".repeat(40))).unwrap();
+    assert!(damaged(&e), "more than 32 lines");
+    std::fs::write(&file, good).unwrap();
+    assert!(!damaged(&e), "the good one is fine");
 }

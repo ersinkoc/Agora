@@ -3133,9 +3133,9 @@ async fn a_running_hub_follows_the_proxy_file_and_checks_what_comes_through_it()
     agora_hub::password::ScreenPassword::with_iterations(hub.store(), 1_000)
         .set("long enough")
         .unwrap();
-    let sessions = Arc::new(
-        HubSessions::new(Arc::clone(&hub)).with_proxy(Arc::new(ProxyHandle::watch(file.clone()))),
-    );
+    let sessions = Arc::new(HubSessions::new(Arc::clone(&hub)).with_proxy(Arc::new(
+        ProxyHandle::watch(file.clone(), |p| std::fs::File::open(p)),
+    )));
     let st = Arc::new(ServerState {
         hub: Arc::clone(&hub),
         support: support(),

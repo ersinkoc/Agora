@@ -248,11 +248,12 @@ pub fn hub_run(say: &Say, o: &Opts) -> ExitCode {
         }
         // ADR-0067 rung 4: a reverse proxy is trusted only while `<hub dir>/remote-proxy` says so (read again every few seconds).
         let sessions = Arc::new(HubSessions::new(Arc::clone(&hub)).with_proxy(Arc::new(
-            agora_hub::proxy::ProxyHandle::watch(dir.join(agora_hub::proxy::FILE)),
+            agora_hub::proxy::ProxyHandle::watch(
+                dir.join(agora_hub::proxy::FILE),
+                agora_platform::open_read_no_follow,
+            ),
         )));
-        if let agora_hub::proxy::Stored::On(t) =
-            agora_hub::proxy::read_file(&dir.join(agora_hub::proxy::FILE))
-        {
+        if let agora_hub::proxy::Stored::On(t) = crate::remotecmd::read_proxy(&dir) {
             say.out(
                 key!("cli-hub-proxy-on"),
                 &[("hosts", t.hosts().join(", ").into())],

@@ -1059,6 +1059,27 @@ mod tests {
         assert!(required(&out), "{out}");
     }
 
+    /// A proxy that forwards to loopback with the default `Host` of its target and forgot the address header: with no other sign of a
+    /// proxy the request is the owner's own browser (the one case the hub cannot tell apart, stated in T40); with any other proxy
+    /// header it is not.
+    #[tokio::test]
+    async fn a_forgotten_address_header_with_other_proxy_headers_is_never_the_owner() {
+        let (_hub, api) = proxied(true);
+        for header in [
+            "X-Forwarded-For: 203.0.113.9",
+            "X-Forwarded-Proto: https",
+            "Via: 1.1 proxy",
+            "Forwarded: for=203.0.113.9",
+            "X-Real-IP: 203.0.113.9",
+            "CF-Ray: abc",
+        ] {
+            let (out, _) = ask(&api, "127.0.0.1", info(&["Host: 127.0.0.1:7443", header])).await;
+            assert!(required(&out), "{header}: {out}");
+        }
+        let (out, _) = ask(&api, "127.0.0.1", info(&["Host: 127.0.0.1:7443"])).await;
+        assert!(!required(&out), "the owner's own browser: {out}");
+    }
+
     /// A header name that the generic proxy-header list (T36) does not know: only the configured guard stands between a loopback
     /// "client address" and the owner's rights.
     #[tokio::test]

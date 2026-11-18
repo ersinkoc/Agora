@@ -101,6 +101,15 @@ pub fn checked_host(name: &str) -> Option<String> {
     Some(lower)
 }
 
+/// An IPv4 address that arrived mapped into IPv6 (`::ffff:a.b.c.d`) is that IPv4 address: one spelling, so a listed proxy matches a
+/// peer however the socket reports it.
+fn canon(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(ip, IpAddr::V4),
+        IpAddr::V4(_) => ip,
+    }
+}
+
 fn is_loopback(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => v4.is_loopback(),
@@ -164,8 +173,13 @@ impl ProxyTrust {
         }
         let mut addrs: Vec<IpAddr> = Vec::new();
         for p in proxies {
-            if !addrs.contains(p) {
-                addrs.push(*p);
+            let p = canon(*p);
+            // An address that nothing connects from cannot be a proxy.
+            if p.is_unspecified() || p.is_multicast() {
+                return None;
+            }
+            if !addrs.contains(&p) {
+                addrs.push(p);
             }
         }
         if addrs.len() > MAX_PROXIES {
@@ -206,7 +220,11 @@ impl ProxyTrust {
     /// that is not `header=`, `host=` or `proxy=` makes the whole file damaged (`None`), never half used.
     pub fn parse(text: &str) -> Option<Self> {
         let (mut header, mut hosts, mut proxies) = (None, Vec::new(), Vec::new());
-        for line in text.lines().take(32) {
+        // A file this long is not one the command wrote: damaged, never half read.
+        if text.lines().count() > 32 {
+            return None;
+        }
+        for line in text.lines() {
             let line = line.trim();
             if line.is_empty() {
                 continue;
@@ -225,7 +243,7 @@ impl ProxyTrust {
     /// Whether a TCP peer may speak for others: loopback (a proxy on this machine) or an address the owner named. Any other peer is
     /// an ordinary client, and a header it sends means nothing.
     pub fn trusts_peer(&self, peer: IpAddr) -> bool {
-        is_loopback(peer) || self.proxies.contains(&peer)
+        is_loopback(peer) || self.proxies.contains(&canon(peer))
     }
 
     fn host_allowed(&self, host: &str) -> bool {
@@ -317,8 +335,18 @@ pub enum Stored {
     Damaged,
 }
 
-/// Reads the file: a regular file only (not a link), at most 4 KiB.
+/// How the file is opened. The hub's command passes `agora_platform::open_read_no_follow` (never follows a link, never waits on a
+/// FIFO); this crate has no platform code of its own.
+pub type Opener = fn(&Path) -> std::io::Result<std::fs::File>;
+
+/// [`read_from`] with a plain open (tests). A running hub uses [`read_from`] with the platform opener.
 pub fn read_file(path: &Path) -> Stored {
+    read_from(path, |p| std::fs::File::open(p))
+}
+
+/// Reads the file: a regular file only, at most 4 KiB. It is looked at without following a link first, opened with `open`, and the
+/// opened handle must itself be a regular file (so a link or a FIFO swapped in between is refused, never waited on).
+pub fn read_from(path: &Path, open: Opener) -> Stored {
     use std::io::Read;
     let Ok(meta) = std::fs::symlink_metadata(path) else {
         return Stored::Off;
@@ -326,12 +354,14 @@ pub fn read_file(path: &Path) -> Stored {
     if !meta.file_type().is_file() {
         return Stored::Damaged;
     }
+    let Ok(file) = open(path) else {
+        return Stored::Damaged;
+    };
+    if !file.metadata().is_ok_and(|m| m.is_file()) {
+        return Stored::Damaged;
+    }
     let mut bytes = Vec::new();
-    if std::fs::File::open(path)
-        .and_then(|f| f.take(MAX_FILE + 1).read_to_end(&mut bytes))
-        .is_err()
-        || bytes.len() as u64 > MAX_FILE
-    {
+    if file.take(MAX_FILE + 1).read_to_end(&mut bytes).is_err() || bytes.len() as u64 > MAX_FILE {
         return Stored::Damaged;
     }
     match ProxyTrust::parse(&String::from_utf8_lossy(&bytes)) {
@@ -343,17 +373,26 @@ pub fn read_file(path: &Path) -> Stored {
 /// What a running hub consults for each request: the file, looked at again every few seconds, so `agora remote proxy` and
 /// `agora remote off` take effect without a restart.
 pub struct ProxyHandle {
-    file: Option<PathBuf>,
+    file: Option<(PathBuf, Opener)>,
     cache: Mutex<(Option<Instant>, Option<Arc<ProxyTrust>>)>,
+    reload: Duration,
 }
 
 impl ProxyHandle {
-    /// Follows `file`.
-    pub fn watch(file: PathBuf) -> Self {
+    /// Follows `file`, opened with `open`.
+    pub fn watch(file: PathBuf, open: Opener) -> Self {
         Self {
-            file: Some(file),
+            file: Some((file, open)),
             cache: Mutex::new((None, None)),
+            reload: RELOAD,
         }
+    }
+
+    /// Looks at the file at every call (tests).
+    #[cfg(test)]
+    fn always_fresh(mut self) -> Self {
+        self.reload = Duration::ZERO;
+        self
     }
 
     /// A fixed answer (tests).
@@ -361,18 +400,21 @@ impl ProxyHandle {
         Self {
             file: None,
             cache: Mutex::new((Some(Instant::now()), trust.map(Arc::new))),
+            reload: RELOAD,
         }
     }
 
-    /// The proxy that is trusted now, if any. A damaged file trusts nothing.
+    /// The proxy that is trusted now, if any. A file that turns damaged while the hub runs keeps the last good settings (so the Host
+    /// and Origin checks do not switch off); a hub that starts with a damaged file trusts nothing. A removed file is off.
     pub fn current(&self) -> Option<Arc<ProxyTrust>> {
         let mut c = self.cache.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(file) = &self.file {
-            if c.0.is_none_or(|t| t.elapsed() >= RELOAD) {
-                c.1 = match read_file(file) {
-                    Stored::On(t) => Some(Arc::new(t)),
-                    _ => None,
-                };
+            if c.0.is_none_or(|t| t.elapsed() >= self.reload) {
+                match read_from(&file.0, file.1) {
+                    Stored::On(t) => c.1 = Some(Arc::new(t)),
+                    Stored::Off => c.1 = None,
+                    Stored::Damaged => {}
+                }
                 c.0 = Some(Instant::now());
             }
         }
@@ -515,14 +557,21 @@ mod tests {
         assert_eq!(t.judge(&twice), Verdict::Proxied(None));
     }
 
+    /// What `judge` alone can say when the trusted header is missing: a public name is a proxy set up wrong (never the owner); a
+    /// loopback name is the owner's own browser **or** a proxy that forwards to loopback with its default `Host` and forgot the
+    /// header, and those two cannot be told apart from the request (the web layer still refuses the owner's rights to a request
+    /// that carries any other proxy header, see `web.rs`). T40 and the guide say this plainly.
     #[test]
-    fn a_public_name_without_the_header_is_a_proxy_set_up_wrong_never_the_owner() {
+    fn without_the_header_a_public_name_is_never_the_owner_and_a_loopback_name_is_the_machines_own_browser(
+    ) {
         let t = trust();
-        assert_eq!(
-            t.judge(&head(&["Host: agora.example.com:443"])),
-            Verdict::Proxied(None)
-        );
-        // The owner's own browser, by a loopback name, is direct.
+        for host in ["agora.example.com:443", "agora.example.com"] {
+            assert_eq!(
+                t.judge(&head(&[&format!("Host: {host}")])),
+                Verdict::Proxied(None),
+                "{host}"
+            );
+        }
         for host in ["127.0.0.1:7443", "localhost", "[::1]:7443", "LOCALHOST."] {
             assert_eq!(
                 t.judge(&head(&[&format!("Host: {host}")])),
@@ -530,6 +579,48 @@ mod tests {
                 "{host}"
             );
         }
+    }
+
+    #[test]
+    fn a_listed_proxy_matches_however_the_socket_spells_it_and_nothing_unusable_is_listed() {
+        let t = ProxyTrust::new(
+            "x-ip",
+            &["a.example.com".into()],
+            &["::ffff:10.1.2.3".parse().unwrap()],
+        )
+        .unwrap();
+        assert_eq!(t.proxies(), ["10.1.2.3".parse::<IpAddr>().unwrap()]);
+        assert!(t.trusts_peer("10.1.2.3".parse().unwrap()));
+        assert!(t.trusts_peer("::ffff:10.1.2.3".parse().unwrap()));
+        assert!(!t.trusts_peer("::ffff:10.1.2.4".parse().unwrap()));
+        let listed_v4 = ProxyTrust::new(
+            "x-ip",
+            &["a.example.com".into()],
+            &["10.1.2.3".parse().unwrap()],
+        )
+        .unwrap();
+        assert!(listed_v4.trusts_peer("::ffff:10.1.2.3".parse().unwrap()));
+        for bad in ["0.0.0.0", "::", "224.0.0.1", "ff02::1", "::ffff:0.0.0.0"] {
+            assert!(
+                ProxyTrust::new("x-ip", &["a.example.com".into()], &[bad.parse().unwrap()])
+                    .is_none(),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_file_of_more_than_32_lines_is_damaged_whole() {
+        let mut text = String::from("header=x-ip\nhost=a.example.com\n");
+        for _ in 0..30 {
+            text.push('\n');
+        }
+        assert!(ProxyTrust::parse(&text).is_some(), "32 lines are fine");
+        text.push('\n');
+        assert!(ProxyTrust::parse(&text).is_none(), "33 are not");
+        // Not even when the extra lines are ones that would be valid.
+        let many = format!("header=x-ip\n{}", "host=a.example.com\n".repeat(40));
+        assert!(ProxyTrust::parse(&many).is_none());
     }
 
     #[test]
@@ -611,21 +702,80 @@ mod tests {
         }
     }
 
-    #[test]
-    fn the_handle_follows_the_file_and_a_damaged_file_trusts_nothing() {
-        let dir = std::env::temp_dir().join(format!("agora-proxy-handle-{}", std::process::id()));
+    fn tmp(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("agora-proxy-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn the_file_is_read_as_a_small_regular_file_only() {
+        let dir = tmp("read");
         let file = dir.join(FILE);
         assert_eq!(read_file(&file), Stored::Off);
         std::fs::write(&file, trust().render()).unwrap();
         assert_eq!(read_file(&file), Stored::On(trust()));
         std::fs::write(&file, "header=x\nbogus\n").unwrap();
         assert_eq!(read_file(&file), Stored::Damaged);
+        // Big and not valid.
         std::fs::write(&file, vec![b'a'; 5000]).unwrap();
         assert_eq!(read_file(&file), Stored::Damaged);
-        let handle = ProxyHandle::watch(file.clone());
+        // Big and otherwise valid: the size cap alone refuses it (a long run of spaces after a good line).
+        let padded = format!("{}{}\n", trust().render(), " ".repeat(4096));
+        assert!(
+            ProxyTrust::parse(&padded).is_some(),
+            "valid but for its size"
+        );
+        std::fs::write(&file, &padded).unwrap();
+        assert_eq!(read_file(&file), Stored::Damaged);
+        // Exactly at the cap is read.
+        let at_cap = format!(
+            "{}{}",
+            trust().render(),
+            " ".repeat(4096 - trust().render().len())
+        );
+        assert_eq!(at_cap.len(), 4096);
+        std::fs::write(&file, &at_cap).unwrap();
+        assert_eq!(read_file(&file), Stored::On(trust()));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_in_place_of_the_file_is_refused_even_when_it_points_at_a_good_one() {
+        let dir = tmp("link");
+        std::fs::write(dir.join("real"), trust().render()).unwrap();
+        std::os::unix::fs::symlink(dir.join("real"), dir.join(FILE)).unwrap();
+        assert_eq!(read_file(&dir.join(FILE)), Stored::Damaged);
+        let handle = ProxyHandle::watch(dir.join(FILE), |p| std::fs::File::open(p)).always_fresh();
+        assert!(handle.current().is_none(), "a link trusts nothing");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_running_handle_follows_the_file_and_keeps_the_last_good_settings_when_it_turns_damaged() {
+        let dir = tmp("handle");
+        let file = dir.join(FILE);
+        let handle = ProxyHandle::watch(file.clone(), |p| std::fs::File::open(p)).always_fresh();
+        assert!(handle.current().is_none(), "no file: off");
+        std::fs::write(&file, trust().render()).unwrap();
+        assert_eq!(handle.current().as_deref(), Some(&trust()));
+        // Damaged while running: the Host and Origin checks do not switch off.
+        std::fs::write(&file, "header=x\nbogus\n").unwrap();
+        assert_eq!(handle.current().as_deref(), Some(&trust()));
+        std::fs::write(&file, vec![b'a'; 5000]).unwrap();
+        assert_eq!(handle.current().as_deref(), Some(&trust()));
+        // A new good file replaces it; a removed file is off.
+        let other = ProxyTrust::new("x-ip", &["b.example.com".into()], &[]).unwrap();
+        std::fs::write(&file, other.render()).unwrap();
+        assert_eq!(handle.current().as_deref(), Some(&other));
+        std::fs::remove_file(&file).unwrap();
         assert!(handle.current().is_none());
+        // A hub that starts with a damaged file trusts nothing.
+        std::fs::write(&file, "bogus\n").unwrap();
+        let fresh = ProxyHandle::watch(file, |p| std::fs::File::open(p)).always_fresh();
+        assert!(fresh.current().is_none());
         std::fs::remove_dir_all(&dir).unwrap();
         assert!(ProxyHandle::fixed(Some(trust())).current().is_some());
         assert!(ProxyHandle::fixed(None).current().is_none());

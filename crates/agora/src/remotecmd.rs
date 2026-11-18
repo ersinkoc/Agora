@@ -286,6 +286,11 @@ pub fn remote(say: &Say, o: &Opts, op: &str) -> ExitCode {
     }
 }
 
+/// The proxy file, read without following a link and without waiting on a FIFO (the platform opener).
+pub(crate) fn read_proxy(dir: &Path) -> Stored {
+    proxy::read_from(&dir.join(proxy::FILE), agora_platform::open_read_no_follow)
+}
+
 /// A name the person typed, made safe to print in a sentence: no control characters, at most 80 of them.
 fn shown(text: &str) -> Arg {
     text.chars()
@@ -331,7 +336,13 @@ fn proxy_on(say: &Say, o: &Opts, dir: &Path) -> ExitCode {
     let mut addrs = Vec::new();
     for a in &o.proxy_addrs {
         match a.parse::<IpAddr>() {
-            Ok(ip) if addrs.len() < proxy::MAX_PROXIES => addrs.push(ip),
+            Ok(ip)
+                if addrs.len() < proxy::MAX_PROXIES
+                    && !ip.is_unspecified()
+                    && !ip.is_multicast() =>
+            {
+                addrs.push(ip)
+            }
             _ => {
                 return refuse(
                     say,
@@ -499,7 +510,7 @@ impl Reach {
             names,
             serve,
             password: password_set(dir),
-            proxy: proxy::read_file(&dir.join(proxy::FILE)),
+            proxy: read_proxy(dir),
         }
     }
 

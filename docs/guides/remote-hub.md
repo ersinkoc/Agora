@@ -162,6 +162,12 @@ the internet warning; `agora doctor` warns every time, fails if the password is 
 this machine (start it on `127.0.0.1` so that the proxy is the only way in). **Turn it off:** `agora remote off` removes the trust
 (the connector keeps running until you stop it; stop it and delete the Access application too).
 
+**Check it from outside, and know the one gap.** The hub cannot tell the owner's own browser at the machine from a proxy that forwards to `127.0.0.1` with that `Host`, sends no address header and adds no other proxy header (nginx's `proxy_pass` does exactly this unless you set `Host` and `proxy_set_header`): such a request is taken for the owner and is not asked for the screen password. A tunnel connector sends the public host name, which is refused the owner's rights, but with any other proxy set the public `Host` and the address header, and after turning it on open the host name from a phone on mobile data to see the sign-in ask for the password.
+
+**With Tailscale serve at the same time.** `tailscale serve` visitors also arrive from loopback, with the machine's `.ts.net` name as `Host`. While the proxy is on, that name must be one of your `--host` names or they get `421`; and since `tailscale serve` sets no address header they all share one unknown-address sign-in bucket, as before.
+
+**A damaged settings file.** If `<hub dir>/remote-proxy` is damaged, a running hub keeps the last good settings, including the Host and Origin checks, until the file is good or removed; a hub that starts with it damaged trusts no proxy and checks no Host or Origin. `agora remote status` and `agora doctor` say so; fix it with `agora remote off` and `agora remote proxy` again.
+
 **What this does not do.** The nodes of your other machines connect to the hub directly with their own certificates; they do not
 go through this tunnel, and this guide does not set that up. The window does not yet show a banner while the proxy is on (the
 warnings are in the terminal commands). `agora remote proxy` does not start or stop the connector.
