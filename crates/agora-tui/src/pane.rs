@@ -194,6 +194,27 @@ pub fn selected_text(term: &dyn Terminal, height: u16, back: usize, sel: Selecti
     lines.join("\n")
 }
 
+/// The web address under the pane's row `row`, column `col` (a pane `height` rows tall, scrolled `back` lines), as drawn: `None` unless
+/// it is a plain `http` or `https` address ([`crate::termio::safe_link`]). A program's own hyperlinks (OSC 8) are not kept by the
+/// emulator, and an address broken over two rows is not joined: only what is written on the one row.
+pub fn link_at(
+    term: &dyn Terminal,
+    height: u16,
+    back: usize,
+    row: u16,
+    col: u16,
+) -> Option<String> {
+    let cols = term.size().cols;
+    // One char per column; a wide character's right half and anything that is not printable break an address.
+    let chars: Vec<char> = (0..cols)
+        .map(|c| match shown_cell(term, height, back, row, c) {
+            Some(cell) if !cell.spacer && !cell.ch.is_control() => cell.ch,
+            _ => ' ',
+        })
+        .collect();
+    crate::termio::link_in_row(&chars, usize::from(col))
+}
+
 impl Widget for TerminalPane<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let area = area.intersection(buf.area);
@@ -734,5 +755,22 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_link_is_read_from_the_cells_as_drawn() {
+        let t = term(
+            40,
+            3,
+            "go https://a.test/x. now\r\n\x1b[8mhttps://hidden.test\x1b[0m \u{6f22}\u{5b57} javascript:x\r\nhttp://u:p@a.test"
+                .as_bytes(),
+        );
+        assert_eq!(link_at(&t, 3, 0, 0, 5).as_deref(), Some("https://a.test/x"));
+        assert_eq!(link_at(&t, 3, 0, 0, 1), None);
+        assert_eq!(link_at(&t, 3, 0, 0, 20), None);
+        // Credentials, other schemes and a click off the text are not links.
+        assert_eq!(link_at(&t, 3, 0, 2, 5), None);
+        assert_eq!(link_at(&t, 3, 0, 1, 30), None);
+        assert_eq!(link_at(&t, 3, 0, 9, 0), None);
     }
 }

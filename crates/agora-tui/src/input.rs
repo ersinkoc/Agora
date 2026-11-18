@@ -242,23 +242,34 @@ fn csi(b: &[u8]) -> Step {
     Step::Done(ev, used)
 }
 
-/// An SGR mouse report: `b;x;y` with `M` for press/drag, `m` for release; x and y count from 1.
+/// An SGR mouse report: `b;x;y` with `M` for press/drag/motion, `m` for release; x and y count from 1. `b` holds the button (the
+/// low two bits), Shift/Alt/Ctrl (4, 8, 16), 32 for motion and 64 for the wheel.
 fn mouse(params: &[u8], fin: u8) -> Option<Event> {
     let text = std::str::from_utf8(params).ok()?;
     let mut it = text.split(';').map(|n| n.parse::<u16>().ok());
     let (b, x, y) = (it.next()??, it.next()??, it.next()??);
-    let kind = match (b & !0b0001_1100, fin) {
+    let mods = u8::try_from(b & 0b1_1100).ok()?;
+    // The wheel's two low bits say up or down, and a move's say no button: neither is a button.
+    let button = if b & 64 != 0 || b & 32 != 0 && b & 3 == 3 {
+        0
+    } else {
+        u8::try_from(b & 0b11).ok()?
+    };
+    let kind = match (b & !0b1_1100, fin) {
         (64, b'M') => MouseKind::ScrollUp,
         (65, b'M') => MouseKind::ScrollDown,
-        (0, b'M') => MouseKind::Down,
-        (32, b'M') => MouseKind::Drag,
-        (0, b'm') => MouseKind::Up,
+        (0..=2, b'M') => MouseKind::Down,
+        (32..=34, b'M') => MouseKind::Drag,
+        (35, b'M') => MouseKind::Move,
+        (0..=2, b'm') => MouseKind::Up,
         _ => return None,
     };
     Some(Event::Mouse(Mouse {
         kind,
         col: x.saturating_sub(1),
         row: y.saturating_sub(1),
+        button,
+        mods,
     }))
 }
 
@@ -406,7 +417,14 @@ mod tests {
 
     #[test]
     fn sgr_mouse_reports() {
-        let m = |kind, col, row| Event::Mouse(Mouse { kind, col, row });
+        let m = |kind, col, row| {
+            Event::Mouse(Mouse {
+                kind,
+                col,
+                row,
+                ..Default::default()
+            })
+        };
         assert_eq!(
             keys(b"\x1b[<0;29;6M\x1b[<32;41;6M\x1b[<0;41;6m"),
             vec![
@@ -419,8 +437,27 @@ mod tests {
             keys(b"\x1b[<64;10;3M\x1b[<65;10;3M"),
             vec![m(MouseKind::ScrollUp, 9, 2), m(MouseKind::ScrollDown, 9, 2)]
         );
-        // A right click and a move without a button are not the shell's.
-        assert_eq!(keys(b"\x1b[<2;1;1M\x1b[<35;1;1M"), vec![]);
+        // The button, the modifiers and a move without a button are kept (the program may want them; the shell ignores them).
+        let full = |kind, button, mods, col, row| {
+            Event::Mouse(Mouse {
+                kind,
+                col,
+                row,
+                button,
+                mods,
+            })
+        };
+        assert_eq!(
+            keys(b"\x1b[<2;1;1M\x1b[<35;4;2M\x1b[<20;3;3M\x1b[<68;1;1M\x1b[<34;2;2M\x1b[<1;5;5m"),
+            vec![
+                full(MouseKind::Down, 2, 0, 0, 0),
+                full(MouseKind::Move, 0, 0, 3, 1),
+                full(MouseKind::Down, 0, 16 | 4, 2, 2),
+                full(MouseKind::ScrollUp, 0, 4, 0, 0),
+                full(MouseKind::Drag, 2, 0, 1, 1),
+                full(MouseKind::Up, 1, 0, 4, 4),
+            ]
+        );
     }
 
     #[test]

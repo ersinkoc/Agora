@@ -20,6 +20,10 @@ use ratatui::Frame;
 use crate::pane::{ColorMode, Selection, TerminalPane};
 
 use crate::render::Text;
+use crate::termio::{
+    encode_mouse, paste_bytes, safe_title, wheel_arrows, Phase, ProgramModes, Report, Track, CTRL,
+    SHIFT,
+};
 /// The window's area type, for callers that do not depend on ratatui themselves.
 pub use ratatui::layout::Rect as Area;
 
@@ -69,21 +73,28 @@ pub enum Key {
     F(u8),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum MouseKind {
+    #[default]
     Down,
     Drag,
     Up,
     ScrollUp,
     ScrollDown,
+    /// Motion with no button down (only reported while the window asks for it).
+    Move,
 }
 
 /// A mouse event at a cell of the whole window.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct Mouse {
     pub kind: MouseKind,
     pub col: u16,
     pub row: u16,
+    /// 0 left, 1 middle, 2 right (for a press, a drag and a release).
+    pub button: u8,
+    /// Shift, Alt and Ctrl held, as the mouse protocol adds them (`termio::SHIFT`, `ALT`, `CTRL`).
+    pub mods: u8,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -104,6 +115,11 @@ pub enum Event {
 pub enum Action {
     /// Bytes for the active agent's terminal: send them before drawing.
     Input(Vec<u8>),
+    /// Bytes for the terminal of this agent, which may not be the one in front (the release of a press that ended with its pane).
+    InputFor {
+        agent: String,
+        bytes: Vec<u8>,
+    },
     /// Start showing this agent's terminal (it was opened in a new tab).
     Open(String),
     /// Stop showing this agent's terminal (its tab was closed).
@@ -125,6 +141,12 @@ pub enum Action {
     Copy(Selection),
     /// ADR-0073: forget the old machines (not seen for a day); the caller asks first.
     CleanUpOld,
+    /// Ctrl+click in the active pane at this cell (the pane's rows and columns): the caller looks for a web address there and, if it
+    /// finds one, shows it and asks to click again before opening it (never opened by a plain click).
+    OpenLink {
+        row: u16,
+        col: u16,
+    },
     Quit,
 }
 
@@ -153,6 +175,10 @@ pub struct Ctx<'a> {
     pub rows: &'a [Row],
     pub area: Rect,
     pub modes: Modes,
+    /// The mouse and focus modes the running program switched on (`termio::ModeScanner`); the defaults for an agent without one.
+    pub prog: ProgramModes,
+    /// Something is drawn over the pane (a box that closes with this event): no pointer event reaches the program meanwhile.
+    pub covered: bool,
     pub t: Text<'a>,
 }
 
@@ -229,6 +255,16 @@ pub enum Panel {
     Hidden,
 }
 
+/// A press the program has: whose pane, which button, where it last was (the pane's cells), and the modes the program had.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Press {
+    agent: String,
+    button: u8,
+    col: u16,
+    row: u16,
+    prog: ProgramModes,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct App {
     pub focus: Focus,
@@ -252,6 +288,12 @@ pub struct App {
     pub scroll: usize,
     drag: Option<Divider>,
     pane: Option<(u16, u16)>,
+    /// A press went to the program (not kept for a local selection), so its drags and its release go there too. It never ends
+    /// without the program getting a release (see [`App::release_press`]), unless the program itself switched the mouse off.
+    forwarding: Option<Press>,
+    /// The agent whose pane has the keyboard now, and the changes not yet taken (see [`App::take_pane_focus`]).
+    pane_focus: Option<String>,
+    focus_changes: Vec<(String, bool)>,
 }
 
 impl Default for App {
@@ -271,6 +313,9 @@ impl Default for App {
             scroll: 0,
             drag: None,
             pane: None,
+            forwarding: None,
+            pane_focus: None,
+            focus_changes: Vec::new(),
         }
     }
 }
@@ -388,6 +433,10 @@ impl App {
             self.selected.min(cx.rows.len().saturating_sub(1)),
             true,
         );
+        // A press the program has is forgotten, with no release, when the program itself switched the mouse off.
+        if cx.prog.track == Track::Off {
+            self.forwarding = None;
+        }
         let mut area = cx.area;
         match event {
             Event::Resize { cols, rows } => {
@@ -402,14 +451,22 @@ impl App {
                     self.palette_type(&text, cx);
                 } else if self.focus == Focus::Terminal && self.active_agent().is_some() {
                     self.scroll = 0;
-                    out.push(Action::Input(paste_bytes(&text, cx.modes)));
+                    out.push(Action::Input(paste_bytes(&text, cx.modes.bracketed_paste)));
                 }
             }
             Event::Key(k) => self.key(k, cx, &mut out),
             Event::Mouse(m) => self.mouse(m, cx, area, &mut out),
         }
+        self.track_pane_focus();
         // The tree (and so the inspector) follows the tab brought to the front.
         let tab_now = self.active_agent().map(str::to_string);
+        // A press the program has ends here when its pane is no longer under the pointer's hand: the palette opened, a box covers it,
+        // the mouse was given back to the terminal, or another tab came to the front. The program gets its release.
+        if self.forwarding.is_some()
+            && (self.palette.is_some() || cx.covered || !self.mouse || tab_now != tab_before)
+        {
+            self.release_press(&mut out);
+        }
         if tab_now != tab_before {
             self.selection = None;
             self.scroll = 0;
@@ -720,13 +777,185 @@ impl App {
         }
     }
 
+    /// The pointer in the terminal pane and the program's side of it. Returns true when the event is dealt with here:
+    /// - Ctrl+click is the link gesture and is never sent to the program;
+    /// - Shift keeps the pointer local (selecting, scrolling the history): a program never sees a Shift-held event;
+    /// - when the program switched a mouse mode on and the pane is not scrolled back, presses, drags, releases and the wheel go to it
+    ///   in the encoding it asked for; a press that went there keeps its drags and its release going there;
+    /// - on the alternate screen with no mouse mode, the wheel is arrow keys (three a notch, in the cursor-key form it asked for).
+    fn pane_mouse(&mut self, m: Mouse, cx: &Ctx<'_>, a: &Areas, out: &mut Vec<Action>) -> bool {
+        let at = Position { x: m.col, y: m.row };
+        let in_pane = a.terminal.contains(at) && self.active_agent().is_some();
+        let local = |col: u16, row: u16| {
+            (
+                col.clamp(a.terminal.x, a.terminal.right().saturating_sub(1)) - a.terminal.x,
+                row.clamp(a.terminal.y, a.terminal.bottom().saturating_sub(1)) - a.terminal.y,
+            )
+        };
+        let phase = match m.kind {
+            MouseKind::Down => Phase::Press,
+            MouseKind::Drag => Phase::Drag,
+            MouseKind::Up => Phase::Release,
+            MouseKind::Move => Phase::Move,
+            MouseKind::ScrollUp => Phase::WheelUp,
+            MouseKind::ScrollDown => Phase::WheelDown,
+        };
+        // Nothing goes to the pane under the palette or a box (a press the program has ends in `handle`, with its release).
+        if self.palette.is_some() || cx.covered {
+            return false;
+        }
+        let wheel = matches!(m.kind, MouseKind::ScrollUp | MouseKind::ScrollDown);
+        // The rest of a press the program has. A Shift- or Ctrl-held drag or move is dropped, never sent; a Shift- or Ctrl-held
+        // release is sent as a plain release (the modifiers cut off), so the program's button does not stay down. The wheel in the
+        // middle of a press is the program's too and does not end it; another press ends it with a release first.
+        if let Some(press) = self.forwarding.clone() {
+            if matches!(m.kind, MouseKind::Drag | MouseKind::Up | MouseKind::Move)
+                && !a.terminal.is_empty()
+            {
+                let held = m.mods & (SHIFT | CTRL) != 0;
+                if held && m.kind != MouseKind::Up {
+                    return true;
+                }
+                let (col, row) = local(m.col, m.row);
+                let r = Report {
+                    phase,
+                    button: press.button,
+                    mods: if held { 0 } else { m.mods },
+                    col,
+                    row,
+                };
+                if let Some(bytes) = encode_mouse(&cx.prog, &r) {
+                    out.push(Action::Input(bytes));
+                }
+                if m.kind == MouseKind::Up {
+                    self.forwarding = None;
+                } else if let Some(p) = self.forwarding.as_mut() {
+                    p.col = col;
+                    p.row = row;
+                    p.prog = cx.prog;
+                }
+                return true;
+            }
+            if !wheel {
+                self.release_press(out);
+            }
+        }
+        if !in_pane {
+            return false;
+        }
+        if m.mods & CTRL != 0 && !wheel {
+            if m.kind == MouseKind::Down && m.button == 0 {
+                self.focus = Focus::Terminal;
+                out.push(Action::OpenLink {
+                    row: m.row - a.terminal.y,
+                    col: m.col - a.terminal.x,
+                });
+            }
+            return true;
+        }
+        if m.mods & SHIFT != 0 || self.scroll > 0 {
+            return false;
+        }
+        let (col, row) = local(m.col, m.row);
+        let r = Report {
+            phase,
+            button: m.button,
+            mods: m.mods,
+            col,
+            row,
+        };
+        // A drag or a release with no press of the program's in progress (it began elsewhere) is not the program's.
+        if matches!(m.kind, MouseKind::Drag | MouseKind::Up) {
+            return false;
+        }
+        if cx.prog.track != Track::Off {
+            if m.kind == MouseKind::Down {
+                self.focus = Focus::Terminal;
+                self.selection = None;
+                self.selecting = false;
+                let agent = self.active_agent().map(str::to_string);
+                self.forwarding = agent.map(|agent| Press {
+                    agent,
+                    button: m.button,
+                    col,
+                    row,
+                    prog: cx.prog,
+                });
+            }
+            if let Some(bytes) = encode_mouse(&cx.prog, &r) {
+                out.push(Action::Input(bytes));
+            }
+            return true;
+        }
+        if wheel && cx.modes.alt_screen {
+            out.push(Action::Input(wheel_arrows(
+                m.kind == MouseKind::ScrollUp,
+                cx.modes,
+            )));
+            return true;
+        }
+        false
+    }
+
+    /// Ends the press the program has by telling it the button went up (no modifiers, where it last was), to the pane that has the
+    /// press, in the encoding it had then. Nothing is sent when the program had switched the mouse off, or the position does not fit
+    /// its encoding.
+    fn release_press(&mut self, out: &mut Vec<Action>) {
+        let Some(p) = self.forwarding.take() else {
+            return;
+        };
+        let r = Report {
+            phase: Phase::Release,
+            button: p.button,
+            mods: 0,
+            col: p.col,
+            row: p.row,
+        };
+        if let Some(bytes) = encode_mouse(&p.prog, &r) {
+            out.push(Action::InputFor {
+                agent: p.agent,
+                bytes,
+            });
+        }
+    }
+
+    /// Notes which agent's pane has the keyboard now; a change is kept for [`App::take_pane_focus`].
+    fn track_pane_focus(&mut self) {
+        let now = if self.focus == Focus::Terminal && self.palette.is_none() {
+            self.active_agent().map(str::to_string)
+        } else {
+            None
+        };
+        if now != self.pane_focus {
+            if let Some(old) = self.pane_focus.take() {
+                self.focus_changes.push((old, false));
+            }
+            if let Some(new) = now.clone() {
+                self.focus_changes.push((new, true));
+            }
+            self.pane_focus = now;
+        }
+    }
+
+    /// The panes that gained (`true`) or lost the keyboard since the last call, in order, as agent ids. The caller tells the program of
+    /// each one that asked for it (`termio::focus_bytes`).
+    pub fn take_pane_focus(&mut self) -> Vec<(String, bool)> {
+        std::mem::take(&mut self.focus_changes)
+    }
+
     fn mouse(&mut self, m: Mouse, cx: &Ctx<'_>, area: Rect, out: &mut Vec<Action>) {
         if !self.mouse {
             return;
         }
         let a = self.areas(area);
         let at = Position { x: m.col, y: m.row };
+        if self.pane_mouse(m, cx, &a, out) {
+            return;
+        }
         match m.kind {
+            // Only the left button selects and clicks in this window; the rest goes to a program that asked for it (above).
+            MouseKind::Move => {}
+            MouseKind::Down | MouseKind::Drag | MouseKind::Up if m.button != 0 => {}
             MouseKind::Down => {
                 self.selection = None;
                 self.selecting = false;
@@ -965,14 +1194,18 @@ impl App {
             ));
             spans.push(Span::raw(" "));
         }
-        // At the bar's right end: how many agents not in front need the user, so a wait is never missed inside a tab.
+        // At the bar's right end: how many agents not in front need the user, so a wait is never missed inside a tab. It has priority
+        // over the program's title: it is drawn in a place of its own, and the title takes what is left.
         let waiting = s
             .rows
             .iter()
             .filter(|r| !r.header && r.needs_you && Some(r.id.as_str()) != self.active_agent())
             .count();
+        let used: usize = spans.iter().map(Span::width).sum();
+        let mut note_width = 0;
+        let mut note_text = None;
         if waiting > 0 && !self.tabs.is_empty() {
-            let note = format!(
+            let full = format!(
                 "! {}",
                 (s.t)(
                     key!("tui-app-tabs-waiting"),
@@ -982,21 +1215,52 @@ impl App {
                     )]
                 )
             );
-            let used: usize = spans.iter().map(Span::width).sum();
+            // The whole note where it fits after the tabs, else just the count.
             let free = usize::from(a.tabs.width).saturating_sub(used);
-            // The whole note where it fits, else just the count.
-            let short = format!("! {waiting}");
-            let note = if text_width(&note) < free {
-                note
+            let note = if text_width(&full) < free {
+                full
             } else {
-                short
+                format!("! {waiting}")
             };
-            if text_width(&note) < free {
-                spans.push(Span::raw(" ".repeat(free - text_width(&note))));
-                spans.push(Span::styled(note, attention));
+            note_width = text_width(&note).min(usize::from(a.tabs.width));
+            note_text = Some(note);
+        }
+        // The program's own title (OSC 0 / 2) after the tabs, escaped and cut to the room by display width: it is the program's
+        // text, never drawn raw.
+        if let Some(title) = s
+            .terminal
+            .filter(|_| s.conversation.is_none())
+            .and_then(|t| t.title())
+            .map(|t| safe_title(&t))
+            .filter(|t| !t.is_empty())
+        {
+            let gap = usize::from(note_width > 0);
+            let room = usize::from(a.tabs.width).saturating_sub(used + note_width + gap);
+            // The dash and its space come first, then at least a few characters of the title.
+            if room > 2 + 3 {
+                spans.push(Span::styled(
+                    format!("\u{2014} {}", fit_width(&title, room - 2)),
+                    Style::default().add_modifier(Modifier::DIM),
+                ));
             }
         }
-        Line::from(spans).render(a.tabs, buf);
+        let bar = Rect {
+            width: a
+                .tabs
+                .width
+                .saturating_sub(u16::try_from(note_width).unwrap_or(0)),
+            ..a.tabs
+        };
+        Line::from(spans).render(bar, buf);
+        if let Some(note) = note_text {
+            let w = u16::try_from(note_width).unwrap_or(0);
+            let at = Rect {
+                x: a.tabs.right().saturating_sub(w),
+                width: w,
+                ..a.tabs
+            };
+            Span::styled(note, attention).render(at, buf);
+        }
 
         // The terminal, or the conversation of an agent that has none.
         if let (Some(_), Some(lines)) = (self.active_agent(), s.conversation) {
@@ -1132,6 +1396,8 @@ impl App {
                 rows: s.rows,
                 area: f.area(),
                 modes: Modes::default(),
+                prog: ProgramModes::default(),
+                covered: false,
                 t: s.t,
             };
             let items = self.commands(&cx);
@@ -1415,6 +1681,25 @@ fn text_width(s: &str) -> usize {
     Span::raw(s).width()
 }
 
+/// `s` cut to at most `max` display columns (wide characters count two), with an ellipsis when something was cut.
+fn fit_width(s: &str, max: usize) -> String {
+    if text_width(s) <= max {
+        return s.to_string();
+    }
+    let mut out = String::new();
+    let mut used = 0;
+    for c in s.chars() {
+        let w = text_width(c.encode_utf8(&mut [0; 4]));
+        if used + w + 1 > max {
+            break;
+        }
+        out.push(c);
+        used += w;
+    }
+    out.push('…');
+    out
+}
+
 /// One line broken at spaces into lines at most `width` columns wide; a word longer than that is broken where it reaches the edge.
 fn wrap(line: &str, width: usize) -> Vec<String> {
     let mut out = Vec::new();
@@ -1481,6 +1766,7 @@ pub fn dialog_key(event: &Event, area: Rect, lines: &[String]) -> Option<u8> {
             kind: MouseKind::Down,
             col,
             row,
+            ..
         }) => match dialog_line_at(area, lines, *col, *row) {
             None => Some(0x1b),
             Some(Some(i)) => {
@@ -1563,6 +1849,7 @@ pub fn event_from(ev: &crossterm::event::Event) -> Option<Event> {
                 kind,
                 col: m.column,
                 row: m.row,
+                ..Default::default()
             })
         }
         E::Paste(text) => Event::Paste(text.clone()),
@@ -1712,32 +1999,6 @@ fn key_bytes(k: &Key, modes: Modes) -> Option<Vec<u8>> {
     })
 }
 
-/// `text` without any bracketed-paste marker, including one that only appears once the bytes around a removed marker join
-/// (`ESC[201` `ESC[200~` `~`). One pass in linear time: each char goes onto the output, and when the output then ends in a marker, that
-/// marker is cut off again. The check runs on the output, so a marker that a deletion put together is caught as well.
-fn strip_paste_markers(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for c in text.chars() {
-        out.push(c);
-        // Both markers are ASCII, so the cut is always on a char boundary.
-        if c == '~' && (out.ends_with("\x1b[200~") || out.ends_with("\x1b[201~")) {
-            out.truncate(out.len() - 6);
-        }
-    }
-    out
-}
-
-/// Pasted text as the agent should get it: inside bracketed-paste markers when it asked for them, with any marker in the text removed
-/// so a paste cannot end the bracket early and type the rest as keys.
-fn paste_bytes(text: &str, modes: Modes) -> Vec<u8> {
-    if modes.bracketed_paste {
-        let body = strip_paste_markers(text);
-        format!("\x1b[200~{body}\x1b[201~").into_bytes()
-    } else {
-        text.as_bytes().to_vec()
-    }
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -1794,6 +2055,8 @@ mod tests {
             rows,
             area: AREA,
             modes: Modes::default(),
+            prog: ProgramModes::default(),
+            covered: false,
             t: &text,
         }
     }
@@ -1803,7 +2066,15 @@ mod tests {
     }
 
     fn click(app: &mut App, rows: &[Row], kind: MouseKind, col: u16, row: u16) -> Vec<Action> {
-        app.handle(Event::Mouse(Mouse { kind, col, row }), &cx(rows))
+        app.handle(
+            Event::Mouse(Mouse {
+                kind,
+                col,
+                row,
+                ..Default::default()
+            }),
+            &cx(rows),
+        )
     }
 
     fn draw(
@@ -2014,15 +2285,11 @@ mod tests {
             Some(b"\x1bx".to_vec())
         );
         assert_eq!(key_bytes(&Key::Ctrl('é'), Modes::default()), None);
-        assert_eq!(paste_bytes("a\nb", Modes::default()), b"a\nb".to_vec());
-        let bracketed = Modes {
-            bracketed_paste: true,
-            ..Modes::default()
-        };
-        // A paste that carries the end marker cannot close the bracket and have the rest typed as keys.
+        assert_eq!(paste_bytes("a\nb", false), b"a\nb".to_vec());
+        // A paste that carries the end marker cannot close the bracket and have the rest typed as keys: no escape is left in it.
         assert_eq!(
-            paste_bytes("x\x1b[201~rm -rf ~\r", bracketed),
-            b"\x1b[200~xrm -rf ~\r\x1b[201~".to_vec()
+            paste_bytes("x\x1b[201~rm -rf ~\r", true),
+            b"\x1b[200~x[201~rm -rf ~\r\x1b[201~".to_vec()
         );
     }
 
@@ -2420,7 +2687,8 @@ mod tests {
             Some(Event::Mouse(Mouse {
                 kind: MouseKind::Drag,
                 col: 4,
-                row: 2
+                row: 2,
+                ..Default::default()
             }))
         );
         let moved = E::Mouse(MouseEvent {
@@ -2594,6 +2862,7 @@ mod tests {
                     kind: MouseKind::Down,
                     col,
                     row,
+                    ..Default::default()
                 }),
                 area,
                 &question,
@@ -2613,6 +2882,7 @@ mod tests {
             kind: MouseKind::Up,
             col: x,
             row: codex,
+            ..Default::default()
         });
         assert_eq!(dialog_key(&up, area, &question), None);
         // Keys read as the questions read them.
@@ -2936,6 +3206,7 @@ mod tests {
                 kind: MouseKind::Down,
                 col: 2,
                 row: 0,
+                ..Default::default()
             }),
             &cx,
         );
@@ -2945,6 +3216,7 @@ mod tests {
                 kind: MouseKind::Down,
                 col: 2,
                 row: 1,
+                ..Default::default()
             }),
             &cx,
         );
@@ -3084,36 +3356,22 @@ mod tests {
         assert_eq!((cursor.x, cursor.y), (29 + 5, 3));
     }
 
-    /// The quadratic sanitizer #618 shipped, kept as the reference the linear one must agree with.
-    fn strip_reference(text: &str) -> String {
-        let mut body = text.to_string();
-        while body.contains("\x1b[201~") || body.contains("\x1b[200~") {
-            body = body.replace("\x1b[201~", "").replace("\x1b[200~", "");
-        }
-        body
-    }
-
-    fn no_marker(s: &str) -> bool {
-        !s.contains("\x1b[201~") && !s.contains("\x1b[200~")
-    }
-
     #[test]
-    fn the_linear_paste_sanitizer_agrees_with_the_reference_on_random_marker_fragments() {
-        const PARTS: [&str; 14] = [
+    fn a_bracketed_paste_ends_only_where_the_client_ends_it_whatever_is_pasted() {
+        // Fragments that build markers, control characters and wide text, glued at random.
+        const PARTS: [&str; 12] = [
             "\x1b",
             "[",
             "2",
             "0",
             "1",
             "~",
-            "0",
-            "a",
             "\r",
             "é",
             "日",
-            "😀",
             "\x1b[200~",
             "\x1b[201~",
+            "\u{9b}201~",
         ];
         let mut state = 0x9e37_79b9_7f4a_7c15_u64;
         let mut next = move || {
@@ -3126,82 +3384,747 @@ mod tests {
             let len = usize::try_from(next() % 40).unwrap();
             let mut text = String::new();
             for _ in 0..len {
-                text.push_str(PARTS[usize::try_from(next() % 14).unwrap()]);
+                text.push_str(PARTS[usize::try_from(next() % 12).unwrap()]);
             }
-            let got = strip_paste_markers(&text);
-            assert!(no_marker(&got), "marker left from {text:?}");
-            assert_eq!(got, strip_reference(&text), "input {text:?}");
+            let got = paste_bytes(&text, true);
+            let body = &got[6..got.len() - 6];
+            assert!(got.starts_with(b"\x1b[200~") && got.ends_with(b"\x1b[201~"));
+            assert!(!body.contains(&0x1b), "an escape is left from {text:?}");
+            assert!(std::str::from_utf8(body).is_ok());
         }
     }
 
-    #[test]
-    fn the_linear_paste_sanitizer_agrees_with_the_reference_on_nested_and_split_cases() {
-        for text in [
-            "\x1b[201\x1b[200~~touch x\r",
-            "\x1b[20\x1b[20\x1b[201~1~1~",
-            "\x1b[200\x1b[201~~",
-            "\x1b[2\x1b[200~01~",
-            "\x1b[é\x1b[200~201~",
-            "日\x1b[20\x1b[201~0~本\x1b[201~",
-            "\x1b[201~\x1b[200~",
-            "",
-        ] {
-            let got = strip_paste_markers(text);
-            assert!(no_marker(&got));
-            assert_eq!(got, strip_reference(text), "input {text:?}");
+    // The pane and the program (termio.rs): a fake program's output is read by the mode scanner, as `Preview` does, and the pointer
+    // events that follow are what the program is sent.
+
+    /// What a program that wrote `output` has switched on.
+    fn program(output: &[&[u8]]) -> ProgramModes {
+        let mut s = crate::termio::ModeScanner::default();
+        for chunk in output {
+            s.feed(chunk);
         }
+        s.modes()
+    }
+
+    /// A pointer event in the open pane of a one-tab window, at the pane's column `x`, row `y`, with the program's modes.
+    fn point(
+        app: &mut App,
+        prog: ProgramModes,
+        modes: Modes,
+        (kind, button, mods): (MouseKind, u8, u8),
+        (x, y): (u16, u16),
+    ) -> Vec<Action> {
+        let pane = app.areas(AREA).terminal;
+        let rows = rows();
+        app.handle(
+            Event::Mouse(Mouse {
+                kind,
+                col: pane.x + x,
+                row: pane.y + y,
+                button,
+                mods,
+            }),
+            &Ctx {
+                prog,
+                modes,
+                ..cx(&rows)
+            },
+        )
+    }
+
+    fn open_one() -> App {
+        let mut app = App::default();
+        key(&mut app, &rows(), Key::Enter);
+        assert_eq!(app.focus, Focus::Terminal);
+        app
+    }
+
+    fn input(bytes: &[u8]) -> Vec<Action> {
+        vec![Action::Input(bytes.to_vec())]
     }
 
     #[test]
-    fn text_without_a_marker_is_not_changed_and_stays_valid_utf8() {
-        for text in [
-            "",
-            "plain",
-            "é日😀 ~ [200~ \x1b[ 201",
-            "\x1b[200 ~",
-            "line\r\nline",
-        ] {
-            assert_eq!(strip_paste_markers(text), text);
-        }
+    fn a_program_with_the_mouse_on_gets_clicks_drags_and_releases_in_its_encoding() {
+        let mut app = open_one();
+        let on = program(&[b"\x1b[?10", b"02h\x1b[?1006", b"h"]);
+        let left = |k| (k, 0, 0);
+        assert_eq!(
+            point(
+                &mut app,
+                on,
+                Modes::default(),
+                left(MouseKind::Down),
+                (2, 1)
+            ),
+            input(b"\x1b[<0;3;2M")
+        );
+        assert_eq!(
+            app.selection, None,
+            "a forwarded press selects nothing here"
+        );
+        assert_eq!(
+            point(
+                &mut app,
+                on,
+                Modes::default(),
+                left(MouseKind::Drag),
+                (5, 1)
+            ),
+            input(b"\x1b[<32;6;2M")
+        );
+        assert_eq!(
+            point(&mut app, on, Modes::default(), left(MouseKind::Up), (5, 1)),
+            input(b"\x1b[<0;6;2m")
+        );
+        // Right button: the program's own business.
+        assert_eq!(
+            point(
+                &mut app,
+                on,
+                Modes::default(),
+                (MouseKind::Down, 2, 0),
+                (0, 0)
+            ),
+            input(b"\x1b[<2;1;1M")
+        );
+        // A drag outside the pane stays on the pane's edge, never another cell.
+        let pane = app.areas(AREA).terminal;
+        let outside = app.handle(
+            Event::Mouse(Mouse {
+                kind: MouseKind::Drag,
+                col: AREA.width - 1,
+                row: AREA.height - 1,
+                button: 2,
+                mods: 0,
+            }),
+            &Ctx {
+                prog: on,
+                ..cx(&rows())
+            },
+        );
+        let want = format!("\x1b[<34;{};{}M", pane.width, pane.height);
+        assert_eq!(outside, input(want.as_bytes()));
     }
 
     #[test]
-    fn nested_markers_are_stripped_in_time_that_grows_linearly() {
-        fn nested(levels: usize) -> String {
-            // `levels` unfinished starts, then the closers that complete each one from the inside out.
-            format!(
-                "{}\x1b[201~{}",
-                "\x1b[20".repeat(levels),
-                "1~".repeat(levels)
-            )
-        }
-        let time = |levels: usize| {
-            let text = nested(levels);
-            let start = std::time::Instant::now();
-            let got = strip_paste_markers(&text);
-            let took = start.elapsed();
-            assert!(no_marker(&got));
-            took
+    fn a_program_with_no_mouse_mode_gets_no_pointer_event_and_the_window_selects() {
+        let mut app = open_one();
+        let off = program(&[b"plain output\r\n"]);
+        let down = point(
+            &mut app,
+            off,
+            Modes::default(),
+            (MouseKind::Down, 0, 0),
+            (2, 1),
+        );
+        assert_eq!(down, vec![]);
+        assert!(
+            app.selection.is_some(),
+            "the press started a local selection"
+        );
+        let up = point(
+            &mut app,
+            off,
+            Modes::default(),
+            (MouseKind::Drag, 0, 0),
+            (6, 1),
+        );
+        assert_eq!(up, vec![]);
+        // Mouse mode switched on, then off again: the same.
+        let was_on = program(&[b"\x1b[?1000h\x1b[?1006h\x1b[?1000l"]);
+        assert_eq!(was_on.track, Track::Off);
+        // Middle and right buttons do nothing in the window itself.
+        let mut app = open_one();
+        assert_eq!(
+            point(
+                &mut app,
+                off,
+                Modes::default(),
+                (MouseKind::Down, 1, 0),
+                (2, 1)
+            ),
+            vec![]
+        );
+        assert_eq!(app.selection, None);
+    }
+
+    #[test]
+    fn a_held_shift_keeps_the_pointer_local_and_is_never_forwarded() {
+        let mut app = open_one();
+        let on = program(&[b"\x1b[?1003h\x1b[?1006h"]);
+        // Shift+press: local selection.
+        let down = point(
+            &mut app,
+            on,
+            Modes::default(),
+            (MouseKind::Down, 0, crate::termio::SHIFT),
+            (2, 1),
+        );
+        assert_eq!(down, vec![]);
+        assert!(app.selection.is_some());
+        let up = point(
+            &mut app,
+            on,
+            Modes::default(),
+            (MouseKind::Up, 0, crate::termio::SHIFT),
+            (6, 1),
+        );
+        assert!(matches!(up.as_slice(), [] | [Action::Copy(_)]), "{up:?}");
+        // Shift+wheel scrolls the window's history and sends nothing, even on the alternate screen.
+        let alt = Modes {
+            alt_screen: true,
+            ..Modes::default()
         };
-        let _ = time(1_000);
-        // Not a ratio between two sizes: both take a few milliseconds in a debug build and the ratio of two such times is noise (it
-        // failed once on a loaded runner). The quadratic version needs seconds for this input (about 6 s for 192 KB in a release
-        // build), the linear one a few milliseconds, so one generous absolute bound tells them apart.
-        let big = (0..5).map(|_| time(32_000)).min().unwrap();
-        assert!(big < std::time::Duration::from_millis(500), "{big:?}");
+        let wheel = point(
+            &mut app,
+            on,
+            alt,
+            (MouseKind::ScrollUp, 0, crate::termio::SHIFT),
+            (2, 1),
+        );
+        assert_eq!(wheel, vec![Action::Scroll(-3)]);
     }
 
     #[test]
-    fn a_paste_cannot_put_an_end_marker_together_from_the_bytes_around_a_removed_one() {
-        let bracketed = Modes {
+    fn a_press_the_program_got_keeps_its_release_with_the_program() {
+        let mut app = open_one();
+        let on = program(&[b"\x1b[?1000h"]);
+        point(
+            &mut app,
+            on,
+            Modes::default(),
+            (MouseKind::Down, 0, 0),
+            (1, 1),
+        );
+        // The program switched the mouse off meanwhile: the release is not turned into a selection or a copy.
+        let off = ProgramModes::default();
+        let rel = point(
+            &mut app,
+            off,
+            Modes::default(),
+            (MouseKind::Up, 0, 0),
+            (3, 1),
+        );
+        assert_eq!(rel, vec![]);
+        assert_eq!(app.selection, None);
+        // And the next press is local again.
+        point(
+            &mut app,
+            off,
+            Modes::default(),
+            (MouseKind::Down, 0, 0),
+            (3, 1),
+        );
+        assert!(app.selection.is_some());
+    }
+
+    #[test]
+    fn the_wheel_goes_to_a_program_with_the_mouse_on_one_report_a_notch() {
+        let mut app = open_one();
+        let on = program(&[b"\x1b[?1000h\x1b[?1006h"]);
+        assert_eq!(
+            point(
+                &mut app,
+                on,
+                Modes::default(),
+                (MouseKind::ScrollUp, 0, 0),
+                (4, 4)
+            ),
+            input(b"\x1b[<64;5;5M")
+        );
+        assert_eq!(
+            point(
+                &mut app,
+                on,
+                Modes::default(),
+                (MouseKind::ScrollDown, 0, 0),
+                (4, 4)
+            ),
+            input(b"\x1b[<65;5;5M")
+        );
+        assert_eq!(app.scroll, 0, "the window's own history did not move");
+    }
+
+    #[test]
+    fn the_wheel_on_a_full_screen_program_without_the_mouse_is_three_arrows() {
+        let mut app = open_one();
+        let off = ProgramModes::default();
+        let alt = Modes {
+            alt_screen: true,
+            ..Modes::default()
+        };
+        assert_eq!(
+            point(&mut app, off, alt, (MouseKind::ScrollUp, 0, 0), (4, 4)),
+            input(b"\x1b[A\x1b[A\x1b[A")
+        );
+        let alt_app = Modes {
+            application_cursor: true,
+            ..alt
+        };
+        assert_eq!(
+            point(
+                &mut app,
+                off,
+                alt_app,
+                (MouseKind::ScrollDown, 0, 0),
+                (4, 4)
+            ),
+            input(b"\x1bOB\x1bOB\x1bOB")
+        );
+        // On the normal screen the window's own history moves instead.
+        assert_eq!(
+            point(
+                &mut app,
+                off,
+                Modes::default(),
+                (MouseKind::ScrollUp, 0, 0),
+                (4, 4)
+            ),
+            vec![Action::Scroll(-3)]
+        );
+    }
+
+    #[test]
+    fn a_scrolled_back_pane_keeps_the_pointer_local() {
+        let mut app = open_one();
+        let on = program(&[b"\x1b[?1000h"]);
+        app.scroll = 5;
+        let down = point(
+            &mut app,
+            on,
+            Modes::default(),
+            (MouseKind::Down, 0, 0),
+            (2, 1),
+        );
+        assert_eq!(down, vec![]);
+        assert!(app.selection.is_some());
+    }
+
+    #[test]
+    fn ctrl_click_asks_for_the_link_and_is_never_a_plain_click_or_a_report() {
+        let mut app = open_one();
+        let on = program(&[b"\x1b[?1000h\x1b[?1006h"]);
+        let ctrl = crate::termio::CTRL;
+        assert_eq!(
+            point(
+                &mut app,
+                on,
+                Modes::default(),
+                (MouseKind::Down, 0, ctrl),
+                (7, 3)
+            ),
+            vec![Action::OpenLink { row: 3, col: 7 }]
+        );
+        // Its release and drag are swallowed too: nothing reaches the program.
+        assert_eq!(
+            point(
+                &mut app,
+                on,
+                Modes::default(),
+                (MouseKind::Up, 0, ctrl),
+                (7, 3)
+            ),
+            vec![]
+        );
+        // A plain click never asks for a link, with the mouse on or off.
+        for prog in [on, ProgramModes::default()] {
+            let acts = point(
+                &mut app,
+                prog,
+                Modes::default(),
+                (MouseKind::Down, 0, 0),
+                (7, 3),
+            );
+            assert!(
+                !acts.iter().any(|a| matches!(a, Action::OpenLink { .. })),
+                "{acts:?}"
+            );
+            point(
+                &mut app,
+                prog,
+                Modes::default(),
+                (MouseKind::Up, 0, 0),
+                (7, 3),
+            );
+        }
+    }
+
+    #[test]
+    fn the_pane_tells_which_agent_gained_or_lost_the_keyboard() {
+        let rows = rows();
+        let mut app = App::default();
+        assert_eq!(app.take_pane_focus(), vec![]);
+        key(&mut app, &rows, Key::Enter);
+        assert_eq!(
+            app.take_pane_focus(),
+            vec![("mac/agent-1".to_string(), true)]
+        );
+        assert_eq!(app.take_pane_focus(), vec![]);
+        // Back to the tree: lost.
+        key(&mut app, &rows, Key::Ctrl(']'));
+        assert_eq!(
+            app.take_pane_focus(),
+            vec![("mac/agent-1".to_string(), false)]
+        );
+        // A second tab in front while the pane has the keyboard: the first lost it, the second gained it.
+        key(&mut app, &rows, Key::Enter);
+        key(&mut app, &rows, Key::Ctrl(']'));
+        key(&mut app, &rows, Key::Down);
+        key(&mut app, &rows, Key::Enter);
+        app.take_pane_focus();
+        key(&mut app, &rows, Key::Alt('1'));
+        assert_eq!(
+            app.take_pane_focus(),
+            vec![
+                ("mac/agent-2".to_string(), false),
+                ("mac/agent-1".to_string(), true)
+            ]
+        );
+    }
+
+    #[test]
+    fn the_programs_title_is_drawn_after_the_tabs_escaped_and_cut() {
+        let rows = rows();
+        let mut app = App::default();
+        key(&mut app, &rows, Key::Enter);
+        let mut vt = AlacrittyTerminal::new(Size { cols: 58, rows: 28 });
+        vt.feed("\x1b]0;vim \u{202e}gpj\x07".as_bytes());
+        let lines = draw(&app, &rows, Some(&vt), ColorMode::Mono);
+        let bar = &lines[0];
+        assert!(bar.contains("\u{2014} vim \\u{202e}gpj"), "{bar}");
+        assert!(!bar.contains('\u{202e}') && !bar.contains('\x1b'));
+        // A long title is cut and says so; the bar keeps its tab.
+        let mut vt = AlacrittyTerminal::new(Size { cols: 58, rows: 28 });
+        vt.feed(format!("\x1b]2;{}\x07", "w".repeat(300)).as_bytes());
+        let bar = draw(&app, &rows, Some(&vt), ColorMode::Mono)[0].clone();
+        assert!(bar.contains("claude") && bar.contains('…'), "{bar}");
+        assert!(bar.chars().filter(|&c| c == 'w').count() <= crate::termio::MAX_TITLE);
+    }
+
+    #[test]
+    fn a_paste_is_bracketed_only_for_a_program_that_asked_and_always_cleaned() {
+        let rows = rows();
+        let mut app = open_one();
+        let paste = |app: &mut App, modes: Modes| {
+            app.handle(
+                Event::Paste("a\x1b[201~b\x07\r".into()),
+                &Ctx { modes, ..cx(&rows) },
+            )
+        };
+        assert_eq!(paste(&mut app, Modes::default()), input(b"a[201~b\r"));
+        let asked = Modes {
             bracketed_paste: true,
             ..Modes::default()
         };
-        // Removing the start marker would join `ESC[201` and `~` into an end marker: the agent would get the rest as keys.
-        let got = paste_bytes("\x1b[201\x1b[200~~touch x\r", bracketed);
-        assert_eq!(got, b"\x1b[200~touch x\r\x1b[201~".to_vec());
-        let nested = paste_bytes("\x1b[20\x1b[20\x1b[201~1~1~", bracketed);
-        assert_eq!(nested, b"\x1b[200~\x1b[201~".to_vec());
+        assert_eq!(
+            paste(&mut app, asked),
+            input(b"\x1b[200~a[201~b\r\x1b[201~")
+        );
+    }
+
+    #[test]
+    fn a_shift_or_ctrl_held_drag_is_never_sent_and_a_held_release_is_sent_plain() {
+        let mut app = open_one();
+        let on = program(&[b"\x1b[?1002h\x1b[?1006h"]);
+        let m = Modes::default();
+        point(&mut app, on, m, (MouseKind::Down, 0, 0), (1, 1));
+        for held in [
+            crate::termio::SHIFT,
+            crate::termio::CTRL,
+            crate::termio::SHIFT | crate::termio::ALT,
+        ] {
+            assert_eq!(
+                point(&mut app, on, m, (MouseKind::Drag, 0, held), (3, 1)),
+                vec![],
+                "{held}"
+            );
+        }
+        // The release is sent without the modifier, so the program's button does not stay down; it ends the forwarding.
+        assert_eq!(
+            point(
+                &mut app,
+                on,
+                m,
+                (MouseKind::Up, 0, crate::termio::SHIFT),
+                (3, 1)
+            ),
+            input(b"\x1b[<0;4;2m")
+        );
+        assert_eq!(
+            point(&mut app, on, m, (MouseKind::Drag, 0, 0), (3, 1)),
+            vec![],
+            "a drag with no press in progress is not the program's"
+        );
+    }
+
+    #[test]
+    fn a_press_the_program_got_is_forgotten_when_it_switches_the_mouse_off() {
+        let mut app = open_one();
+        let on = program(&[b"\x1b[?1002h"]);
+        let m = Modes::default();
+        point(&mut app, on, m, (MouseKind::Down, 0, 0), (1, 1));
+        // The program turned the mouse off, then on again: the old press is not carried over.
+        point(
+            &mut app,
+            ProgramModes::default(),
+            m,
+            (MouseKind::Move, 0, 0),
+            (1, 1),
+        );
+        assert_eq!(
+            point(&mut app, on, m, (MouseKind::Drag, 0, 0), (3, 1)),
+            vec![]
+        );
+    }
+
+    #[test]
+    fn a_press_the_program_got_is_forgotten_on_a_tab_switch() {
+        let rows = rows();
+        let mut app = App::default();
+        key(&mut app, &rows, Key::Enter);
+        key(&mut app, &rows, Key::Ctrl(']'));
+        key(&mut app, &rows, Key::Down);
+        key(&mut app, &rows, Key::Enter);
+        let on = program(&[b"\x1b[?1002h"]);
+        let m = Modes::default();
+        point(&mut app, on, m, (MouseKind::Down, 0, 0), (1, 1));
+        // The program still has the mouse on (so only the tab switch can end the press).
+        app.handle(
+            Event::Key(Key::Alt('1')),
+            &Ctx {
+                prog: on,
+                ..cx(&rows)
+            },
+        );
+        assert_eq!(
+            point(&mut app, on, m, (MouseKind::Drag, 0, 0), (3, 1)),
+            vec![]
+        );
+    }
+
+    #[test]
+    fn no_motion_is_sent_while_scrolled_back_or_under_the_palette() {
+        let mut app = open_one();
+        let any = program(&[b"\x1b[?1003h\x1b[?1006h"]);
+        let m = Modes::default();
+        assert_eq!(
+            point(&mut app, any, m, (MouseKind::Move, 0, 0), (2, 2)),
+            input(b"\x1b[<35;3;3M")
+        );
+        app.scroll = 4;
+        assert_eq!(
+            point(&mut app, any, m, (MouseKind::Move, 0, 0), (2, 2)),
+            vec![]
+        );
+        app.scroll = 0;
+        key(&mut app, &rows(), Key::Alt('k'));
+        assert!(app.palette.is_some());
+        for kind in [MouseKind::Down, MouseKind::Move, MouseKind::ScrollUp] {
+            let acts = point(&mut app, any, m, (kind, 0, 0), (2, 2));
+            assert!(
+                !acts.iter().any(|a| matches!(a, Action::Input(_))),
+                "{kind:?}: {acts:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_the_left_button_with_ctrl_asks_for_a_link() {
+        let mut app = open_one();
+        let on = program(&[b"\x1b[?1000h"]);
+        for button in [1, 2] {
+            let acts = point(
+                &mut app,
+                on,
+                Modes::default(),
+                (MouseKind::Down, button, crate::termio::CTRL),
+                (3, 3),
+            );
+            assert_eq!(acts, vec![], "button {button}");
+        }
+    }
+
+    #[test]
+    fn a_wide_title_never_pushes_the_waiting_count_off_the_bar() {
+        let rows = rows();
+        let mut app = App::default();
+        key(&mut app, &rows, Key::Enter);
+        for title in [
+            "\u{6f22}".repeat(60),
+            "w".repeat(200),
+            "\u{1f600}".repeat(40),
+        ] {
+            let mut vt = AlacrittyTerminal::new(Size { cols: 58, rows: 28 });
+            vt.feed(format!("\x1b]0;{title}\x07").as_bytes());
+            let bar = draw(&app, &rows, Some(&vt), ColorMode::Mono)[0].clone();
+            // The count of agents that wait is always there, at the bar's end, and the title is cut by display width to leave room.
+            let note = bar.find("! tui-app-tabs-waiting count=1").expect(&bar);
+            let cut = bar.find('\u{2026}').expect(&bar);
+            assert!(cut < note, "{bar}");
+        }
+    }
+
+    /// An event with the program's modes and whether a box covers the pane.
+    fn handle_with(app: &mut App, ev: Event, prog: ProgramModes, covered: bool) -> Vec<Action> {
+        let rows = rows();
+        app.handle(
+            ev,
+            &Ctx {
+                prog,
+                covered,
+                ..cx(&rows)
+            },
+        )
+    }
+
+    fn release_for(agent: &str, bytes: &[u8]) -> Vec<Action> {
+        vec![Action::InputFor {
+            agent: agent.to_string(),
+            bytes: bytes.to_vec(),
+        }]
+    }
+
+    #[test]
+    fn the_wheel_in_the_middle_of_a_press_does_not_lose_the_release() {
+        let mut app = open_one();
+        let on = program(&[b"\x1b[?1002h\x1b[?1006h"]);
+        let m = Modes::default();
+        point(&mut app, on, m, (MouseKind::Down, 0, 0), (1, 1));
+        assert_eq!(
+            point(&mut app, on, m, (MouseKind::ScrollUp, 0, 0), (1, 1)),
+            input(b"\x1b[<64;2;2M")
+        );
+        assert_eq!(
+            point(&mut app, on, m, (MouseKind::Up, 0, 0), (1, 1)),
+            input(b"\x1b[<0;2;2m")
+        );
+    }
+
+    #[test]
+    fn a_press_the_program_has_gets_its_release_when_the_palette_opens() {
+        let mut app = open_one();
+        let on = program(&[b"\x1b[?1002h\x1b[?1006h"]);
+        point(
+            &mut app,
+            on,
+            Modes::default(),
+            (MouseKind::Down, 0, 0),
+            (1, 1),
+        );
+        point(
+            &mut app,
+            on,
+            Modes::default(),
+            (MouseKind::Drag, 0, 0),
+            (4, 2),
+        );
+        let acts = handle_with(&mut app, Event::Key(Key::Alt('k')), on, false);
+        assert!(app.palette.is_some());
+        // Where it last was, no modifiers, for the pane that had the press.
+        assert_eq!(acts, release_for("mac/agent-1", b"\x1b[<0;5;3m"));
+        // Only once.
+        let again = handle_with(&mut app, Event::Key(Key::Char('x')), on, false);
+        assert!(!again.iter().any(|a| matches!(a, Action::InputFor { .. })));
+    }
+
+    #[test]
+    fn a_press_the_program_has_gets_its_release_when_another_tab_comes_to_the_front() {
+        let rows = rows();
+        let mut app = App::default();
+        key(&mut app, &rows, Key::Enter);
+        key(&mut app, &rows, Key::Ctrl(']'));
+        key(&mut app, &rows, Key::Down);
+        key(&mut app, &rows, Key::Enter);
+        let on = program(&[b"\x1b[?1000h\x1b[?1006h"]);
+        point(
+            &mut app,
+            on,
+            Modes::default(),
+            (MouseKind::Down, 0, 0),
+            (2, 1),
+        );
+        let acts = handle_with(&mut app, Event::Key(Key::Alt('1')), on, false);
+        assert_eq!(app.active_agent(), Some("mac/agent-1"));
+        // To the pane that had the press (the second tab), not the one now in front.
+        assert_eq!(acts, release_for("mac/agent-2", b"\x1b[<0;3;2m"));
+    }
+
+    #[test]
+    fn a_press_the_program_has_gets_its_release_when_a_box_covers_the_pane() {
+        let mut app = open_one();
+        let on = program(&[b"\x1b[?1002h"]);
+        point(
+            &mut app,
+            on,
+            Modes::default(),
+            (MouseKind::Down, 0, 0),
+            (1, 1),
+        );
+        let pane = app.areas(AREA).terminal;
+        let click = Event::Mouse(Mouse {
+            kind: MouseKind::Drag,
+            col: pane.x + 3,
+            row: pane.y + 3,
+            ..Default::default()
+        });
+        let acts = handle_with(&mut app, click, on, true);
+        // Default encoding: ESC [ M, button 3 + 32, column 2 + 32, row 2 + 32.
+        assert_eq!(acts, release_for("mac/agent-1", b"\x1b[M#\"\""));
+        // The box's own event is not the program's: with the press gone, a drag under it sends nothing.
+        let acts = handle_with(
+            &mut app,
+            Event::Mouse(Mouse {
+                kind: MouseKind::Down,
+                col: pane.x + 1,
+                row: pane.y + 1,
+                ..Default::default()
+            }),
+            on,
+            true,
+        );
+        assert!(
+            !acts.iter().any(|a| matches!(a, Action::Input(_))),
+            "{acts:?}"
+        );
+    }
+
+    #[test]
+    fn a_press_the_program_has_gets_its_release_when_the_mouse_is_given_back() {
+        let mut app = open_one();
+        let on = program(&[b"\x1b[?1000h\x1b[?1006h"]);
+        point(
+            &mut app,
+            on,
+            Modes::default(),
+            (MouseKind::Down, 0, 0),
+            (1, 1),
+        );
+        let acts = handle_with(&mut app, Event::Key(Key::Alt('m')), on, false);
+        assert!(!app.mouse);
+        assert_eq!(
+            acts.last(),
+            release_for("mac/agent-1", b"\x1b[<0;2;2m").first()
+        );
+    }
+
+    #[test]
+    fn no_release_is_sent_to_a_program_that_switched_the_mouse_off() {
+        let mut app = open_one();
+        let on = program(&[b"\x1b[?1000h\x1b[?1006h"]);
+        point(
+            &mut app,
+            on,
+            Modes::default(),
+            (MouseKind::Down, 0, 0),
+            (1, 1),
+        );
+        // The program switched it off; then the palette opens.
+        let off = ProgramModes::default();
+        let acts = handle_with(&mut app, Event::Key(Key::Alt('k')), off, false);
+        assert!(
+            !acts.iter().any(|a| matches!(a, Action::InputFor { .. })),
+            "{acts:?}"
+        );
     }
 
     #[test]
@@ -3224,12 +4147,14 @@ mod tests {
             kind: MouseKind::Drag,
             col: 1,
             row: 1,
+            ..Default::default()
         });
         app.handle(drag, &small);
         let up = Event::Mouse(Mouse {
             kind: MouseKind::Up,
             col: 1,
             row: 1,
+            ..Default::default()
         });
         assert_eq!(app.handle(up, &small), vec![], "nothing was dragged over");
     }

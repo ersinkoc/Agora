@@ -7,6 +7,7 @@ use std::time::Duration;
 use agora_vt::{AlacrittyTerminal, Size, Terminal};
 
 use crate::client::{Session, TermEvent};
+use crate::termio::{ModeScanner, ProgramModes};
 
 /// Columns assumed until the machine says the terminal's size (a node that does not send it after the snapshot).
 const GUESS_COLS: u16 = 120;
@@ -21,6 +22,9 @@ pub struct Preview {
     /// The last full repaint, applied again when the size it was meant for arrives after it.
     screen: Vec<u8>,
     output_since_screen: bool,
+    /// The mouse and focus modes the program switched on, read from the bytes that arrive (see `termio`). A repaint does not carry
+    /// them, so a program that switched a mode on before this view opened is not known to have it until it switches it on again.
+    scanner: ModeScanner,
     /// When to ask the machine for a fresh repaint: after its terminal was resized while output had come since the last repaint.
     /// Reflowing that output here, size after size, mangled it until the tab was opened again (TUI review); the machine's own
     /// screen at the new size is the truth.
@@ -80,6 +84,7 @@ impl Preview {
             }),
             screen: Vec::new(),
             output_since_screen: false,
+            scanner: ModeScanner::default(),
             repaint_at: None,
         })
     }
@@ -105,6 +110,7 @@ impl Preview {
             match session.terminal_next(self.stream, Duration::ZERO) {
                 TermEvent::Quiet => break,
                 TermEvent::Data(b) => {
+                    self.scanner.feed(&b);
                     self.term.feed(&b);
                     self.output_since_screen = true;
                     seen = Pumped::Changed;
@@ -117,6 +123,7 @@ impl Preview {
                             rows,
                         });
                     }
+                    self.scanner.feed(&b);
                     self.term.feed(&b);
                     self.screen = b;
                     self.output_since_screen = false;
@@ -139,6 +146,11 @@ impl Preview {
             }
         }
         seen
+    }
+
+    /// The mouse and focus modes the program has switched on, as far as this view has seen.
+    pub fn program_modes(&self) -> ProgramModes {
+        self.scanner.modes()
     }
 
     pub fn screen(&self) -> &dyn Terminal {

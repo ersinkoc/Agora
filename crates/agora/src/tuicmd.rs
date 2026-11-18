@@ -1398,6 +1398,11 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
         .then(agora_platform::RawMode::enable)
         .and_then(Result::ok);
     let keys = raw.is_some();
+    if let Some(raw) = raw.as_ref() {
+        // A stop signal (SIGTERM, SIGHUP, SIGINT) puts the terminal back and then ends the process as it always did, wherever the
+        // program is waiting: no loop of this console has to look for it.
+        let _ = agora_platform::restore_terminal_on_stop(raw, agora_tui::backend::RESET);
+    }
     // The console takes the whole window while it runs (the alternate screen) and gives the old one back when it ends.
     struct FullScreen(bool);
     impl Drop for FullScreen {
@@ -1428,6 +1433,7 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                 drafts: std::collections::HashMap::new(),
                 open_failed_notice: None,
                 notice_at: Instant::now(),
+                links: agora_tui::termio::LinkConfirm::default(),
                 note: Note::default(),
                 pair: agora_tui::pair::Book::default(),
                 colors: if color {
@@ -1515,11 +1521,20 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                 token = None;
                 if first || !local {
                     // On the hub's machine nobody is asked for a code: the client makes its own.
-                    if local {
-                        say.err(key!("tui-signin-failed-local"), &[]);
+                    let message = if local {
+                        say.text(key!("tui-signin-failed-local"), &[])
                     } else {
-                        say.err(key!("tui-signin-failed"), &[]);
+                        say.text(key!("tui-signin-failed"), &[])
+                    };
+                    // The message is for the screen the person came from: the console's screen is left first (it would not be seen
+                    // on the alternate screen), and a line ends with CR LF while the keyboard is still in raw mode.
+                    drop(console_state.take());
+                    if keys {
+                        let mut out = std::io::stdout();
+                        let _ = out.write_all(agora_tui::backend::RESET);
+                        let _ = out.flush();
                     }
+                    eprint!("{message}{eol}");
                     return ExitCode::from(1);
                 }
                 std::thread::sleep(Duration::from_secs(2));
@@ -1950,6 +1965,8 @@ struct Console {
     open_failed_notice: Option<String>,
     /// When the footer's notice was put up: it gives way to the summary after NOTICE_FOR.
     notice_at: Instant,
+    /// The two-click rule for opening an address (see `LinkConfirm`); told when the footer was drawn.
+    links: agora_tui::termio::LinkConfirm,
     /// A request shown whole outside the inspector (the chat tab's pane shows its agent's): y / n may answer it without asking again.
     shown_request: Option<String>,
     note: Note,
@@ -1980,12 +1997,27 @@ fn trust_command() -> Option<String> {
 /// bracketed; both are switched off while a question is asked, which reads plain bytes.
 fn mouse_mode(on: bool) {
     let mut out = std::io::stdout();
+    // Motion with no button (1003) is only switched on while the open program asked for it (`mouse_motion`): never by this.
+    HOST_MOTION.store(false, std::sync::atomic::Ordering::Relaxed);
     let _ = out.write_all(if on {
-        b"\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?2004h"
+        b"\x1b[?1003l\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?2004h"
     } else {
-        b"\x1b[?1000l\x1b[?1002l\x1b[?1006l\x1b[?2004l"
+        b"\x1b[?1003l\x1b[?1000l\x1b[?1002l\x1b[?1006l\x1b[?2004l"
     });
     let _ = out.flush();
+}
+
+/// Whether this terminal is reporting motion with no button (DECSET 1003) right now.
+static HOST_MOTION: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Asks this terminal for motion with no button while `on` (the open program switched on "any motion" mouse reporting and the
+/// mouse is held), and stops asking when it is not: a terminal that reports every movement is a load nobody wants for nothing.
+fn mouse_motion(on: bool) {
+    if HOST_MOTION.swap(on, std::sync::atomic::Ordering::Relaxed) != on {
+        let mut out = std::io::stdout();
+        let _ = out.write_all(if on { b"\x1b[?1003h" } else { b"\x1b[?1003l" });
+        let _ = out.flush();
+    }
 }
 
 fn window_area() -> Area {
@@ -2093,6 +2125,14 @@ fn console(
             c.selected = id.to_string();
             redraw = true;
         }
+        // Motion with no button is asked of this terminal only while the program in front asked for it.
+        mouse_motion(
+            c.app.mouse
+                && preview
+                    .as_ref()
+                    .filter(|p| Some(p.agent.as_str()) == c.app.active_agent())
+                    .is_some_and(|p| p.program_modes().track == agora_tui::termio::Track::Any),
+        );
         let mut events = Vec::new();
         let now = window_area();
         if now != area {
@@ -2128,12 +2168,15 @@ fn console(
             }
             return Next::Quit;
         }
-        // Any key or click closes the box of a long notice (and still does what it does).
-        if c.note.open && c.note.drawn && !events.is_empty() {
+        // The footer's question about an address goes when the footer says something else or runs out.
+        c.links.check(Instant::now(), &c.notice, NOTICE_FOR);
+        // Any key or click closes the box of a long notice (and still does what it does); nothing reaches the program under it.
+        let overlay = c.note.open && c.note.drawn && !events.is_empty();
+        if overlay {
             c.note.open = false;
             redraw = true;
         }
-        for ev in events {
+        for (index, ev) in events.into_iter().enumerate() {
             // A key that only goes to the agent changes nothing on screen until the agent answers: drawing for it would hold the
             // echo back by up to a frame (ADR-0022). Anything else is drawn.
             let before = c.app.clone();
@@ -2141,15 +2184,48 @@ fn console(
                 .as_ref()
                 .map(|p| p.screen().modes())
                 .unwrap_or_default();
+            // The program's mouse and focus modes, only of the agent in front (never the one a tab switch just left). The event that
+            // closes a box over the pane is not the program's (`covered`: the app also ends a press the program has, with a release).
+            let prog = preview
+                .as_ref()
+                .filter(|p| Some(p.agent.as_str()) == c.app.active_agent())
+                .map(Preview::program_modes)
+                .unwrap_or_default();
+            let covered = overlay && index == 0;
+            // The release of the Ctrl+click that showed an address is that click's own; anything else but a Ctrl+click forgets it.
+            let ctrl_click = matches!(&ev, AppEvent::Mouse(m)
+                if m.kind == agora_tui::app::MouseKind::Down
+                    && m.button == 0
+                    && m.mods & agora_tui::termio::CTRL != 0);
+            match &ev {
+                AppEvent::Mouse(m) if m.kind == agora_tui::app::MouseKind::Up => c.links.release(),
+                _ if ctrl_click => {}
+                _ => c.links.other(),
+            }
             let acts = c.app.handle(
                 ev,
                 &Ctx {
                     rows: &rows,
                     area,
                     modes,
+                    prog,
+                    covered,
                     t: &text,
                 },
             );
+            if ctrl_click && !acts.iter().any(|a| matches!(a, Action::OpenLink { .. })) {
+                c.links.other();
+            }
+            // The panes that gained or lost the keyboard: a program that asked for focus events (1004) is told.
+            for (agent, gained) in c.app.take_pane_focus() {
+                let asked = preview
+                    .as_ref()
+                    .filter(|p| p.agent == agent)
+                    .and_then(|p| agora_tui::termio::focus_bytes(&p.program_modes(), gained));
+                if let (Some(bytes), Some((node, local))) = (asked, agent.split_once('/')) {
+                    session.terminal_input(node, &format!("t-{local}"), bytes);
+                }
+            }
             if c.app != before || acts.iter().any(|a| !matches!(a, Action::Input(_))) {
                 redraw = true;
             }
@@ -2184,8 +2260,55 @@ fn console(
                             }
                         }
                     }
+                    // The release of a press that ended with its pane: it goes to that agent's terminal, in front or not.
+                    Action::InputFor { agent, bytes } => {
+                        if let Some((node, local)) = agent.split_once('/') {
+                            session.terminal_input(node, &format!("t-{local}"), &bytes);
+                        }
+                    }
                     Action::PaneSize { .. } => sized = None,
                     Action::MouseCapture(on) => mouse_mode(on),
+                    // Ctrl+click on a web address: the first click shows exactly what would open, the second one on the same
+                    // address opens it. Never a plain click, never without showing it.
+                    Action::OpenLink { row, col } => {
+                        let height = c.app.areas(area).terminal.height;
+                        let link = preview
+                            .as_ref()
+                            .filter(|p| Some(p.agent.as_str()) == c.app.active_agent())
+                            .and_then(|p| {
+                                agora_tui::pane::link_at(p.screen(), height, c.app.scroll, row, col)
+                            });
+                        match link {
+                            Some(url) => {
+                                let asked = say.text(
+                                    key!("tui-link-confirm"),
+                                    &[("url", Arg::Str(url.clone()))],
+                                );
+                                match c.links.click(&url, &asked, Instant::now(), NOTICE_FOR) {
+                                    agora_tui::termio::LinkStep::Confirm => {
+                                        c.notice = asked;
+                                        // Shown again: the footer's clock starts over.
+                                        c.notice_at = Instant::now();
+                                    }
+                                    agora_tui::termio::LinkStep::Open => {
+                                        c.notice = if agora_platform::open_url(&url).is_ok() {
+                                            say.text(
+                                                key!("tui-link-opened"),
+                                                &[("url", Arg::Str(url))],
+                                            )
+                                        } else {
+                                            say.text(
+                                                key!("tui-link-failed"),
+                                                &[("url", Arg::Str(url))],
+                                            )
+                                        };
+                                    }
+                                }
+                                redraw = true;
+                            }
+                            None => c.links.other(),
+                        }
+                    }
                     // Closing a tab only closes the view: the agent keeps running, and the footer says so.
                     Action::Close(id) => {
                         let name = c
@@ -2580,7 +2703,7 @@ fn draw_console(
         c.note.drawn = true;
     }
     let (app, colors) = (&c.app, c.colors);
-    let _ = c.window.draw(|f| {
+    let drawn = c.window.draw(|f| {
         app.draw(
             f,
             &AppScreen {
@@ -2597,6 +2720,10 @@ fn draw_console(
             },
         );
     });
+    // The footer with the question about an address is on screen now: a second Ctrl+click may open it.
+    if drawn.is_ok() && !c.notice.is_empty() {
+        c.links.drawn();
+    }
 }
 
 /// How many things need the user: each agent that waits (blocked, or with a request) once, however many ways it waits, and each
@@ -3895,6 +4022,7 @@ mod read_keys_tests {
             kind: MouseKind::Down,
             col: 9,
             row: 4,
+            ..Default::default()
         });
         check(vec![
             (
@@ -3986,6 +4114,7 @@ mod read_keys_tests {
                     kind: MouseKind::Up,
                     col: 9,
                     row: 4,
+                    ..Default::default()
                 })],
                 Keys::new().turns(&[
                     (0, b"\x1b"),

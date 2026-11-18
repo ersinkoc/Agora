@@ -722,6 +722,21 @@ impl Drop for RawMode {
     }
 }
 
+/// For a full-screen program that has put the terminal into `raw` mode: from now on `SIGTERM`, `SIGINT` and `SIGHUP` first write
+/// `reset` to standard output and put the terminal's settings back, and then end the process by that signal, as they did before (so
+/// no loop of the program has to poll for them). On Windows there is no such signal for a console program and this does nothing.
+pub fn restore_terminal_on_stop(raw: &RawMode, reset: &'static [u8]) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        unix::restore_terminal_on_stop(&raw.saved, reset)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (raw, reset);
+        Ok(())
+    }
+}
+
 /// Reads one line from the terminal on stdin without showing what is typed (a password), without its line ending. Fails with
 /// `Unsupported` when stdin is not a terminal (a secret is never read from a pipe or a file by accident) and with `Interrupted` on
 /// Ctrl-C; the terminal's settings are restored on every path, Ctrl-C included. A caller that shows a prompt should use
@@ -2146,17 +2161,61 @@ pub fn interface_addresses() -> io::Result<Vec<InterfaceAddr>> {
     }
 }
 
-/// Opens `url` in the user's browser: `open` on macOS, `cmd /c start` on Windows, `xdg-open` elsewhere. An error means no browser
-/// could be asked (the caller then shows the address); a helper still running after a few seconds counts as success.
+/// Whether `url` may be handed to the system's opener: `http://` or `https://` (any case), a host, no `@` in the host part (no
+/// credentials), at most 2048 bytes, and only the bytes of `url_byte_ok` (RFC 3986 characters minus `& % ^ " ( ) ! < > |`). Platform-neutral
+/// so it is tested everywhere.
+pub fn is_openable_url(url: &str) -> bool {
+    if url.is_empty() || url.len() > 2048 {
+        return false;
+    }
+    if !url.bytes().all(url_byte_ok) {
+        return false;
+    }
+    let lower = url.to_ascii_lowercase();
+    let Some(rest) = lower
+        .strip_prefix("https://")
+        .or_else(|| lower.strip_prefix("http://"))
+    else {
+        return false;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    !authority.is_empty() && !authority.contains('@') && !authority.starts_with(':')
+}
+
+/// The bytes an address may hold: the RFC 3986 unreserved and reserved characters, minus `& % ^ " ( ) ! < > |` (`cmd.exe` and shells
+/// act on those; `%` goes with them, so a percent-encoded `%41` is refused on purpose). Letters and digits, and `-._~:/?#[]@$'*+,;=`.
+/// Nothing else: no space, control character, backtick, brace, backslash or non-ASCII byte.
+fn url_byte_ok(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b"-._~:/?#[]@$'*+,;=".contains(&b)
+}
+
+/// Where `rundll32.exe` is: under `system_root` (the `SystemRoot` of the environment this process was started in) `\System32`, or
+/// the default Windows folder when there is none; never found through `PATH`.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn rundll32_path(system_root: Option<&str>) -> String {
+    let root = system_root
+        .map(|r| r.trim_end_matches(['\\', '/']))
+        .filter(|r| !r.is_empty())
+        .unwrap_or("C:\\Windows");
+    format!("{root}\\System32\\rundll32.exe")
+}
+
+/// Opens `url` in the user's browser: `open` on macOS, `rundll32 url.dll,FileProtocolHandler` on Windows (the address is one argument
+/// of a program, never read by `cmd.exe`), `xdg-open` elsewhere. A `url` that [`is_openable_url`] refuses is not passed to anything
+/// (`InvalidInput`). An error means no browser could be asked (the caller then shows the address); a helper still running after a few
+/// seconds counts as success.
 pub fn open_url(url: &str) -> io::Result<()> {
     use std::process::{Command, Stdio};
+    if !is_openable_url(url) {
+        return Err(io::Error::from(io::ErrorKind::InvalidInput));
+    }
     #[cfg(target_os = "macos")]
     let mut cmd = Command::new("open");
     #[cfg(windows)]
     let mut cmd = {
-        let mut c = Command::new("cmd");
-        // The empty argument is the window title `start` takes first; without it a quoted URL would become the title.
-        c.args(["/c", "start", ""]);
+        let root = std::env::var("SystemRoot").ok();
+        let mut c = Command::new(rundll32_path(root.as_deref()));
+        c.arg("url.dll,FileProtocolHandler");
         c
     };
     #[cfg(not(any(target_os = "macos", windows)))]
@@ -2184,6 +2243,81 @@ pub fn open_url(url: &str) -> io::Result<()> {
             return Ok(());
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod open_url_tests {
+    use super::{is_openable_url, open_url, rundll32_path};
+
+    #[test]
+    fn rundll32_is_found_under_the_system_root_never_through_the_path() {
+        assert_eq!(
+            rundll32_path(Some("D:\\WINNT")),
+            "D:\\WINNT\\System32\\rundll32.exe"
+        );
+        assert_eq!(
+            rundll32_path(Some("C:\\Windows\\")),
+            "C:\\Windows\\System32\\rundll32.exe"
+        );
+        assert_eq!(rundll32_path(None), "C:\\Windows\\System32\\rundll32.exe");
+        assert_eq!(
+            rundll32_path(Some("")),
+            "C:\\Windows\\System32\\rundll32.exe"
+        );
+    }
+
+    #[test]
+    fn only_plain_web_addresses_may_be_opened() {
+        for ok in [
+            "http://a.test",
+            "https://a.test/x?y=1#z",
+            "HTTPS://A.TEST/",
+            "https://localhost:8443/#code=abc123",
+            "http://127.0.0.1:8080/p",
+        ] {
+            assert!(is_openable_url(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            "javascript:alert(1)",
+            "javascript:a.test/x",
+            "file:///etc/passwd",
+            "ftp://a.test",
+            "calc.exe",
+            "https://",
+            "https://user:pw@a.test/",
+            "https://a.test/?x=1&calc.exe",
+            "https://a.test/%GITHUB_TOKEN%",
+            "https://a.test/%41",
+            "https://a.test/^x",
+            "https://a.test/\"x",
+            "https://a.test/a(b)",
+            "https://a.test/!x",
+            "https://a.test/<x>",
+            "https://a.test/a|b",
+            "https://a.test/a b",
+            "https://a.test/a\tb",
+            "https://a.test/a\nb",
+            "https://a.test/\u{e9}",
+            "https://a.test/`x`",
+            "https://a.test/{x}",
+            "https://a.test/\\x",
+            "https://a.test/\u{7f}",
+        ] {
+            assert!(!is_openable_url(bad), "{bad:?}");
+        }
+        assert!(!is_openable_url(&format!(
+            "https://a.test/{}",
+            "x".repeat(2048)
+        )));
+    }
+
+    #[test]
+    fn a_refused_address_is_never_handed_to_a_program() {
+        let e = open_url("https://a.test/?x=1&calc.exe").unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput);
     }
 }
 

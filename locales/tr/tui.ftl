@@ -254,3 +254,6 @@ tui-pair-result-denied = { $name } reddedildi.
 tui-pair-result-expired = { $name } isteğinin süresi doldu.
 tui-pair-result-closed = { $name } isteği iptal edildi.
 tui-app-cmd-pair = Bir makinenin katılma isteğini oku (p)
+tui-link-confirm = Bağlantı: { $url } (açmak için Ctrl+tıklamayı tekrarlayın)
+tui-link-opened = { $url } açıldı
+tui-link-failed = { $url } açılamadı. Bunun yerine terminalden kopyalayın.
