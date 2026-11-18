@@ -37,8 +37,8 @@ fn a_stop_signal_restores_the_terminal_and_still_ends_the_process_by_that_signal
                 &mut master,
                 &mut slave,
                 std::ptr::null_mut(),
-                std::ptr::null(),
-                std::ptr::null(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
             )
         };
         assert_eq!(rc, 0);
