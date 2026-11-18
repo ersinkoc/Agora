@@ -11,16 +11,10 @@ import { StateBadge } from './StateBadge';
 
 import { PairCards, type PairingUi } from './Pairing';
 
-// Home (the fleet console) already lists what needs the user, so the side panel repeats it only for what the console sends here to be
-// read in full: a machine asking to join (its card has the number to compare), and a request whose agent this window does not list, and a notice (an answer that failed).
-export function needsBeyondHome(approvals: readonly ApprovalModel[], fleet: readonly AgentTileModel[], pairing?: PairingUi, notice?: string): boolean {
-  return !!notice || (pairing?.cards.length ?? 0) > 0 || approvals.some((x) => !fleet.some((a) => a.id === x.agentId));
-}
-
 type Tab = 'needs' | 'changes' | 'board' | 'messages' | 'cost';
 
 // The right panel: one subject at a time, in tabs (at most two panels are ever visible, visual-language.md).
-export function Inspector({ attention, approvals, notice, changed, boards, messages, usage, projects, onOpen, onResolve, onReview, onCollapse, pairing, hideNeeds = false }: {
+export function Inspector({ attention, approvals, notice, changed, boards, messages, usage, projects, onOpen, onResolve, onReview, onCollapse, pairing }: {
   attention: readonly AgentTileModel[];
   approvals: readonly ApprovalModel[];
   notice?: string;
@@ -35,12 +29,10 @@ export function Inspector({ attention, approvals, notice, changed, boards, messa
   onCollapse: () => void;
   // ADR-0065: machines asking to join, answered in their full cards here.
   pairing?: PairingUi;
-  // Home is in view and lists what needs the user: one list, not two.
-  hideNeeds?: boolean;
 }) {
   const needs = attention.length + approvals.filter((x) => !attention.some((a) => a.id === x.agentId)).length + (pairing?.cards.length ?? 0);
   const tabs: { id: Tab; label: string; badge?: number }[] = [
-    ...(hideNeeds ? [] : [{ id: 'needs' as const, label: t('attention-title'), badge: needs }]),
+    { id: 'needs', label: t('attention-title'), badge: needs },
     { id: 'changes', label: t('ide-tab-changes'), badge: changed.length },
     ...(boards.length > 0 ? [{ id: 'board' as const, label: t('board-title') }] : []),
     { id: 'messages', label: t('ide-tab-messages'), badge: messages.length },
@@ -49,8 +41,8 @@ export function Inspector({ attention, approvals, notice, changed, boards, messa
   const [tab, setTab] = useState<Tab>('needs');
   // Something new that needs the user wins over a tab that is quietly open; one that goes away does not pull the user back.
   const seen = useRef(0);
-  useEffect(() => { if (needs > seen.current && !hideNeeds) setTab('needs'); seen.current = needs; }, [needs, hideNeeds]);
-  const active = tabs.some(x => x.id === tab) ? tab : (tabs[0]?.id ?? 'changes');
+  useEffect(() => { if (needs > seen.current) setTab('needs'); seen.current = needs; }, [needs]);
+  const active = tabs.some(x => x.id === tab) ? tab : 'needs';
 
   return <aside className="flex min-h-0 flex-col border-line bg-surface-1 lg:border-s" aria-label={t('console-activity')}>
     <div className="flex h-9 flex-none items-stretch border-b border-line">

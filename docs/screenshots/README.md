@@ -127,8 +127,8 @@ block of full-block characters drawn by the page, at row height 1.1 and 1.0, and
 
 ## Home, terminal and command palette
 
-One list of what needs you on Home, "Jump to latest" with a link address under it (the link address is added to the page for the shot, as the demo terminal has no history or link), and the new command palette entries. The demo has no hub, so it shows no Lock, no join entry and no project entries.
+Home with the Needs you panel kept beside the console list, "Jump to latest" with a link address under it (the link address is added to the page for the shot, as the demo terminal has no history or link), and the new command palette entries. The demo has no hub, so it shows no Lock, no join entry and no project entries.
 
-![](home-terminal-palette/home-one-list-dark.png) ![](home-terminal-palette/home-one-list-light.png)
+![](home-terminal-palette/home-needs-you-panel-dark.png) ![](home-terminal-palette/home-needs-you-panel-light.png)
 ![](home-terminal-palette/terminal-jump-and-link-dark.png) ![](home-terminal-palette/terminal-jump-and-link-light.png)
 ![](home-terminal-palette/palette-machines-dark.png) ![](home-terminal-palette/palette-machines-light.png)

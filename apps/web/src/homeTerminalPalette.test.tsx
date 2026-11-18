@@ -5,8 +5,6 @@ import { setLanguage, t } from './i18n';
 import type { AgentTileModel } from './model';
 import type { ApprovalModel } from './net/view';
 import { Console } from './components/Console';
-import { Inspector, needsBeyondHome } from './components/Inspector';
-import type { PairingUi } from './components/Pairing';
 import { TerminalFloat } from './terminal/TerminalFloat';
 import { isMachinesHash, machineOfHash, machinesHash, paletteExtras, projectsOf, type PaletteExtras } from './net/paletteExtras';
 import { demoSource } from './terminal/source';
@@ -18,32 +16,20 @@ const agent = (id: string, over: Partial<AgentTileModel> = {}): AgentTileModel =
 const ask = (agentId: string): ApprovalModel => ({ id: `r-${agentId}`, node: 'n1', localId: 'r', agentId, agentName: '', action: 'Edit src/auth.rs', detail: '', expiresAtMs: 0 });
 const noop = () => undefined;
 
-describe('one list of what needs you', () => {
+describe('"Needs you" is never hidden', () => {
   const props = { agents: [agent('a')], machines: [], approvals: [ask('a')], messages: [], terminalFor: () => demoSource('x'), onOpen: noop, onResolve: noop, link: 'live' as const };
   const panel = (html: string) => html.slice(html.lastIndexOf('<aside'), html.lastIndexOf('</aside>'));
 
-  it('on Home the side panel does not repeat the console list', () => {
+  it('on Home the console lists it and the right panel keeps its Needs you tab and list too', () => {
     const html = renderToStaticMarkup(<Console {...props} />);
-    expect(html).toContain('fleet-attention'); // the console's own list is there
+    expect(html).toContain('fleet-attention');
     const aside = panel(html);
     expect(aside).toContain('role="tablist"');
-    expect(aside).not.toContain('>Needs you'); // no Needs you tab, no second list
-    expect(aside).not.toContain('Edit src/auth.rs');
+    expect(aside).toContain('>Needs you');
+    expect(aside).toContain('Edit src/auth.rs');
   });
-  it('the side panel keeps the tab when it adds something: a machine asking to join, or a request of an agent this window does not list', () => {
-    const pairing = { cards: [{ id: 'c1' }], recent: [], offline: false, onAnswer: async () => 'ok' } as unknown as PairingUi;
-    expect(needsBeyondHome([ask('a')], [agent('a')])).toBe(false);
-    expect(needsBeyondHome([ask('gone')], [agent('a')])).toBe(true);
-    expect(needsBeyondHome([], [agent('a')], pairing)).toBe(true);
-    expect(needsBeyondHome([], [agent('a')], undefined, 'closed-forget-failed')).toBe(true);
-    expect(panel(renderToStaticMarkup(<Console {...props} approvals={[ask('gone')]} />))).toContain('>Needs you');
-  });
-  it('other screens (no Home in view) keep the Needs you tab', () => {
-    const base = { attention: [agent('a')], approvals: [], changed: [], boards: [], messages: [], projects: [], onOpen: noop, onResolve: noop, onCollapse: noop };
-    expect(renderToStaticMarkup(<Inspector {...base} />)).toContain('>Needs you');
-    const hidden = renderToStaticMarkup(<Inspector {...base} hideNeeds />);
-    expect(hidden).not.toContain('>Needs you');
-    expect(hidden).toContain('Changes'); // another tab is in front instead
+  it('the status bar count opens that panel', () => {
+    expect(renderToStaticMarkup(<Console {...props} />)).toContain('1 needs you');
   });
 });
 
