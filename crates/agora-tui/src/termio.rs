@@ -314,8 +314,8 @@ pub fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
 /// The longest address that is offered.
 const MAX_LINK: usize = 2048;
 
-/// The bytes an address may hold: the RFC 3986 unreserved and reserved characters minus `% ^ " ( ) ! < > |` (`cmd.exe` and shells act
-/// on those; `%` goes with them, because the Windows opener may expand `%NAME%` into the address, so a percent-encoded `%41` is not a link here; `&` is allowed, no shell reads the address), that is letters, digits and `-._~:/?#[]@$'*+,;=&`.
+/// The bytes an address may hold: the RFC 3986 unreserved and reserved characters minus `^ " ( ) ! < > |` (`cmd.exe` and shells act
+/// on those; `%` is allowed only as a percent-encoding (`%` and two hex digits), a `%NAME%` shape is not a link; `&` is allowed, no shell reads the address), that is letters, digits and `-._~:/?#[]@$'*+,;=&`.
 /// Nothing else: no space, control character, backtick, brace, backslash or non-ASCII byte. A link that is not made of these is not
 /// offered, so the footer never shows one that cannot be opened safely (`agora_platform::is_openable_url` refuses the same set; the
 /// opener is the last line of defence, this is the first).
@@ -323,10 +323,24 @@ fn url_byte_ok(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b"-._~:/?#[]@$'*+,;=&".contains(&b)
 }
 
+/// Whether every byte of `url` is allowed: the bytes of `url_byte_ok`, and a `%` only as the start of a percent-encoding (`%` and two hex
+/// digits). So `%20` passes, while `%NAME%`, `%1` and a lone `%` do not.
+fn url_bytes_ok(url: &str) -> bool {
+    let b = url.as_bytes();
+    b.iter().enumerate().all(|(i, &c)| {
+        if c == b'%' {
+            b.get(i + 1).is_some_and(u8::is_ascii_hexdigit)
+                && b.get(i + 2).is_some_and(u8::is_ascii_hexdigit)
+        } else {
+            url_byte_ok(c)
+        }
+    })
+}
+
 /// The address when it is a plain web address that is safe to show and open as it is written: `http` or `https`, only the bytes of
 /// [`url_byte_ok`], a host, no credentials, at most 2048 bytes.
 pub fn safe_link(uri: &str) -> Option<&str> {
-    if uri.is_empty() || uri.len() > MAX_LINK || !uri.bytes().all(url_byte_ok) {
+    if uri.is_empty() || uri.len() > MAX_LINK || !url_bytes_ok(uri) {
         return None;
     }
     let lower = uri.to_ascii_lowercase();
@@ -790,6 +804,7 @@ mod tests {
             "HTTPS://A.TEST",
             "http://127.0.0.1:8080/p",
             "https://a.test/a@b",
+            "https://a.test/a%20b%E2%80%93",
         ] {
             assert_eq!(safe_link(ok), Some(ok), "{ok}");
         }
@@ -809,7 +824,8 @@ mod tests {
             "https://a.test/\x1b[31m",
             "https://а.test/",
             "https://a.test/%GITHUB_TOKEN%",
-            "https://a.test/%41",
+            "https://a.test/%4",
+            "https://a.test/%41%",
             "https://a.test/^x",
             "https://a.test/\"x",
             "https://a.test/a(b)",

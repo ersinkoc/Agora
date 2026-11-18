@@ -2162,13 +2162,13 @@ pub fn interface_addresses() -> io::Result<Vec<InterfaceAddr>> {
 }
 
 /// Whether `url` may be handed to the system's opener: `http://` or `https://` (any case), a host, no `@` in the host part (no
-/// credentials), at most 2048 bytes, and only the bytes of `url_byte_ok` (RFC 3986 characters minus `% ^ " ( ) ! < > |`). Platform-neutral
+/// credentials), at most 2048 bytes, and only the bytes of `url_byte_ok` (RFC 3986 characters minus `^ " ( ) ! < > |`, with `%` only before two hex digits). Platform-neutral
 /// so it is tested everywhere.
 pub fn is_openable_url(url: &str) -> bool {
     if url.is_empty() || url.len() > 2048 {
         return false;
     }
-    if !url.bytes().all(url_byte_ok) {
+    if !url_bytes_ok(url) {
         return false;
     }
     let lower = url.to_ascii_lowercase();
@@ -2183,10 +2183,24 @@ pub fn is_openable_url(url: &str) -> bool {
 }
 
 /// The bytes an address may hold: the RFC 3986 unreserved and reserved characters, minus `% ^ " ( ) ! < > |` (`cmd.exe` and shells
-/// act on those; `%` goes with them, because the Windows opener may expand `%NAME%` from the environment into the address, so a percent-encoded `%41` is refused on purpose; `&` is allowed: no shell and no `cmd.exe` reads the address, it is one argument to `rundll32` on Windows and `open` and `xdg-open` are exec'd directly, and links with a query string need it). Letters and digits, and `-._~:/?#[]@$'*+,;=&`.
+/// act on those; `%` is allowed only as a percent-encoding (`%` and two hex digits, see `url_bytes_ok`); the Windows developer measured that `rundll32` leaves `%NAME%` literal, but a `%NAME%` shape is still refused as defence in depth; `&` is allowed: no shell and no `cmd.exe` reads the address, it is one argument to `rundll32` on Windows and `open` and `xdg-open` are exec'd directly, and links with a query string need it). Letters and digits, and `-._~:/?#[]@$'*+,;=&`.
 /// Nothing else: no space, control character, backtick, brace, backslash or non-ASCII byte.
 fn url_byte_ok(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b"-._~:/?#[]@$'*+,;=&".contains(&b)
+}
+
+/// Whether every byte of `url` is allowed: the bytes of `url_byte_ok`, and a `%` only as the start of a percent-encoding (`%` and two hex
+/// digits). So `%20` passes, while `%NAME%`, `%1` and a lone `%` do not.
+fn url_bytes_ok(url: &str) -> bool {
+    let b = url.as_bytes();
+    b.iter().enumerate().all(|(i, &c)| {
+        if c == b'%' {
+            b.get(i + 1).is_some_and(u8::is_ascii_hexdigit)
+                && b.get(i + 2).is_some_and(u8::is_ascii_hexdigit)
+        } else {
+            url_byte_ok(c)
+        }
+    })
 }
 
 /// Where `rundll32.exe` is: under `system_root` (the `SystemRoot` of the environment this process was started in) `\System32`, or
@@ -2277,6 +2291,7 @@ mod open_url_tests {
             "https://localhost:8443/#code=abc123",
             "http://127.0.0.1:8080/p",
             "https://a.test/?x=1&y=2&calc.exe",
+            "https://a.test/a%20b%E2%80%93c",
         ] {
             assert!(is_openable_url(ok), "{ok}");
         }
@@ -2290,7 +2305,9 @@ mod open_url_tests {
             "https://",
             "https://user:pw@a.test/",
             "https://a.test/%GITHUB_TOKEN%",
-            "https://a.test/%41",
+            "https://a.test/%4",
+            "https://a.test/%41%",
+            "https://a.test/%zz",
             "https://a.test/^x",
             "https://a.test/\"x",
             "https://a.test/a(b)",
