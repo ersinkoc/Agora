@@ -595,6 +595,16 @@ fn wait_until(what: &str, mut ok: impl FnMut() -> bool) {
     }
 }
 
+/// The address in `<hub dir>/listen`, once it parses as one (an empty or partial file is not yet an address).
+#[cfg(unix)]
+fn hub_listening(hub: &Path) -> Option<std::net::SocketAddr> {
+    std::fs::read_to_string(hub.join("listen"))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
 #[cfg(unix)]
 fn cert_names(hub: &Path) -> Vec<String> {
     std::fs::read_to_string(hub.join("server-cert.pem"))
@@ -610,11 +620,14 @@ fn cert_names(hub: &Path) -> Vec<String> {
 fn the_tailnet_names_reach_the_running_hubs_certificate_and_doctor_sees_them() {
     let e = Env::new("leaf");
     e.set_password();
+    // `Env::new` seeds a stale `listen` (a hub that is not running); this test starts a real one, so the only `listen` file
+    // that can exist is the one the hub writes. Otherwise `exists()` is true at once and `remote` could read the seed.
+    std::fs::remove_file(e.hub.join("listen")).unwrap();
     let mut hub = e.agora(&["hub", "run", "--listen", "127.0.0.1:0"]);
     hub.stdout(Stdio::null()).stderr(Stdio::null());
     let _hub = Proc(hub.spawn().unwrap());
     wait_until("the hub wrote its certificate", || {
-        !cert_names(&e.hub).is_empty() && e.hub.join("listen").exists()
+        !cert_names(&e.hub).is_empty() && hub_listening(&e.hub).is_some()
     });
     assert!(!cert_names(&e.hub).contains(&"box.tail1234.ts.net".to_string()));
     let ca_before = std::fs::read(e.hub.join("ca.pem")).unwrap();
@@ -622,10 +635,9 @@ fn the_tailnet_names_reach_the_running_hubs_certificate_and_doctor_sees_them() {
     let (code, out) = e.run(&["remote", "tailscale", "--serve"]);
     assert_eq!(code, 0, "{out}");
     // The hub listens on a random loopback port: the rule points at the port it really bound.
-    let bound = std::fs::read_to_string(e.hub.join("listen")).unwrap();
+    let bound = hub_listening(&e.hub).unwrap();
     assert!(
-        e.calls()
-            .contains(&format!("https+insecure://{}", bound.trim())),
+        e.calls().contains(&format!("https+insecure://{bound}")),
         "{}",
         e.calls()
     );
