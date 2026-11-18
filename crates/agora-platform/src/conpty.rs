@@ -107,16 +107,62 @@ fn is_batch(program: &str) -> bool {
     p.ends_with(".bat") || p.ends_with(".cmd")
 }
 
+/// The full path of the batch file `program` names, found before `cmd.exe` is started: given a bare name, `cmd.exe` would look in its
+/// own current folder first, which is the agent's project folder, so a `.cmd` planted there would run instead. As the standard
+/// library resolves a program: a path with a folder in it is taken relative to this process's folder (as `CreateProcess` took it), a
+/// bare name is looked up in the child's `PATH` when `env` sets one, then this program's folder, the system folders and this process's
+/// `PATH`, never in a current folder. `InvalidInput` for a NUL in the name, `NotFound` when no such file exists.
+fn resolve_batch(program: &str, env: &[(String, String)]) -> io::Result<std::path::PathBuf> {
+    use std::path::{Path, PathBuf};
+    if program.contains('\0') {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    if program.contains(['\\', '/', ':']) {
+        let p = std::path::absolute(Path::new(program))?;
+        return if p.is_file() {
+            Ok(p)
+        } else {
+            Err(io::ErrorKind::NotFound.into())
+        };
+    }
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    if let Some((_, path)) = env.iter().find(|(k, _)| k.eq_ignore_ascii_case("PATH")) {
+        dirs.extend(std::env::split_paths(path));
+    }
+    if let Some(own) = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(Path::to_path_buf))
+    {
+        dirs.push(own);
+    }
+    let root = PathBuf::from(
+        std::env::var_os("SystemRoot").unwrap_or_else(|| OsString::from(r"C:\Windows")),
+    );
+    dirs.push(root.join("System32"));
+    dirs.push(root);
+    if let Some(path) = std::env::var_os("PATH") {
+        dirs.extend(std::env::split_paths(&path));
+    }
+    dirs.into_iter()
+        .filter(|d| d.is_absolute())
+        .map(|d| d.join(program))
+        .find(|p| p.is_file())
+        .ok_or_else(|| io::ErrorKind::NotFound.into())
+}
+
 /// The command line for a batch file. `cmd.exe` reads it, not the C runtime, so [`quote_arg`]'s `\"` would end the quoting and a `&`
 /// or `|` after it would run another command (CVE-2024-24576). Built as the standard library builds it since Rust 1.77.2: the script
-/// run by `cmd.exe /e:ON /v:OFF /d /c "..."`, any argument with an ASCII symbol or a control character quoted, `"` doubled, `%` broken
-/// up so no variable expands. `InvalidInput` for a line break or NUL in an argument, or a script name `cmd.exe` cannot carry.
-fn batch_command_line(argv: &[String]) -> io::Result<String> {
+/// (a full path, from [`resolve_batch`]) run by `cmd.exe /e:ON /v:OFF /d /c "..."`, any argument with an ASCII symbol or a control
+/// character quoted, `"` doubled, `%` broken up so no variable expands, in the script's path too. `InvalidInput` for a line break or
+/// NUL in an argument, or a script path `cmd.exe` cannot carry.
+fn batch_command_line(script: &std::path::Path, args: &[String]) -> io::Result<String> {
     let invalid = || io::Error::from(io::ErrorKind::InvalidInput);
-    let (script, args) = argv.split_first().ok_or_else(invalid)?;
-    if script.contains('"') || script.ends_with('\\') {
+    let script = script.to_str().ok_or_else(invalid)?;
+    if script.contains(['"', '\0']) || script.ends_with('\\') {
         return Err(invalid());
     }
+    // `%cd:~,%` is an empty piece of the built-in `cd`: it splits `%VAR%` so `cmd.exe` expands nothing (see the arguments below).
+    let script = script.replace('%', "%%cd:~,%");
     let cmd = std::path::PathBuf::from(
         std::env::var_os("SystemRoot").unwrap_or_else(|| OsString::from(r"C:\Windows")),
     )
@@ -533,7 +579,9 @@ impl Drop for HeldTerminal {
 
 fn start_process(config: &PtyConfig, hpc: HPCON) -> io::Result<(Handle, u32, Option<Confinement>)> {
     let mut cmdline = wide(&match config.argv.first() {
-        Some(program) if is_batch(program) => batch_command_line(&config.argv)?,
+        Some(program) if is_batch(program) => {
+            batch_command_line(&resolve_batch(program, &config.env)?, &config.argv[1..])?
+        }
         _ => config
             .argv
             .iter()
@@ -769,7 +817,13 @@ mod tests {
         // CVE-2024-24576: `cmd.exe` reads a batch file's command line, where the C runtime's `\"` ends the quoting.
         assert!(is_batch(r"C:\tools\Run.CMD. "));
         assert!(!is_batch("cmd.exe"));
-        let dir = std::env::temp_dir().join(format!("agora-conpty-bat-{}", std::process::id()));
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("agora-conpty-bat-{}-{nanos}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let script = dir.join("run.cmd");
         std::fs::write(&script, "@exit /b 5\r\n").unwrap();
@@ -788,6 +842,41 @@ mod tests {
         assert_eq!(
             spawn(&cfg).err().map(|e| e.kind()),
             Some(io::ErrorKind::InvalidInput)
+        );
+        // Nor a NUL in the script's name.
+        let cfg = PtyConfig::new(vec!["a\0b.cmd".into()]);
+        assert_eq!(
+            spawn(&cfg).err().map(|e| e.kind()),
+            Some(io::ErrorKind::InvalidInput)
+        );
+        // A `%VAR%` in the script's folder is not expanded: the script at that literal path runs.
+        let pct = dir.join("p%AGORA_CONPTY_T%q");
+        std::fs::create_dir_all(&pct).unwrap();
+        std::fs::write(pct.join("run.cmd"), "@exit /b 6\r\n").unwrap();
+        let mut cfg = PtyConfig::new(vec![pct.join("run.cmd").display().to_string()]);
+        cfg.env = vec![("AGORA_CONPTY_T".into(), "x".into())];
+        cfg.cwd = Some(dir.clone());
+        assert_eq!(spawn(&cfg).unwrap().wait().unwrap().code, Some(6));
+        // A bare name is looked up on PATH, never in the agent's folder, where a planted script of that name sits.
+        let tools = dir.join("tools");
+        let project = dir.join("project");
+        std::fs::create_dir_all(&tools).unwrap();
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(tools.join("agora-conpty-tool.cmd"), "@exit /b 7\r\n").unwrap();
+        std::fs::write(project.join("agora-conpty-tool.cmd"), "@exit /b 9\r\n").unwrap();
+        let mut cfg = PtyConfig::new(vec!["agora-conpty-tool.cmd".into()]);
+        cfg.env = vec![("PATH".into(), tools.display().to_string())];
+        // `cmd.exe` skips its current folder only when this is set, as it may be in the environment the tests run in.
+        cfg.env_remove = vec!["NoDefaultCurrentDirectoryInExePath".into()];
+        cfg.cwd = Some(project.clone());
+        assert_eq!(spawn(&cfg).unwrap().wait().unwrap().code, Some(7));
+        // Found nowhere on PATH: not started from the agent's folder either.
+        let mut cfg = PtyConfig::new(vec!["agora-conpty-tool.cmd".into()]);
+        cfg.env = vec![("PATH".into(), dir.join("empty").display().to_string())];
+        cfg.cwd = Some(project);
+        assert_eq!(
+            spawn(&cfg).err().map(|e| e.kind()),
+            Some(io::ErrorKind::NotFound)
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
