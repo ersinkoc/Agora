@@ -37,6 +37,7 @@ export function AttentionSettings() {
           <input type="checkbox" checked={notify === 'named'} onChange={(e) => attentionPrefs.setNotify(e.target.checked ? 'named' : 'generic')} />
           <span>{t('attention-notify-names')}</span>
         </label>
+        <p className="muted m-0">{t('attention-notify-names-warn')}</p>
         <p className="m-0"><button type="button" className="button" onClick={() => attentionPrefs.setNotify('off')}>{t('attention-notify-off')}</button></p>
       </>}
     </section>

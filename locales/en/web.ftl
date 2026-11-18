@@ -943,7 +943,6 @@ fleet-same-ask = { $count } { $kind } agents ask for the same thing on { $machin
 fleet-review-each = Review each
 fleet-collapse = Show as one
 fleet-same-ask-any = { $count } agents ask for the same thing on { $machine }
-attention-title = Needs you
 attention-who = { $name } on { $machine }
 attention-who-only = { $name }
 attention-ask-review = This needs to be read in full before you answer. Review it to decide.
@@ -979,3 +978,5 @@ notify-body = { $count ->
 }
 notify-body-named = { $name } needs you
 notify-body-named-on = { $name } on { $machine } needs you
+attention-sent = Answer sent. If this card stays, open it with Review.
+attention-notify-names-warn = These names come from the agents and machines themselves, and a notification may show them on a locked screen. A name that is not plain text is left out.

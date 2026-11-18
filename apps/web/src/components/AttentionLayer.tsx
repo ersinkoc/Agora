@@ -1,11 +1,11 @@
 import * as Dialog from '@radix-ui/react-dialog';
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { t } from '../i18n';
-import { ATTENTION_DWELL_MS, type AttentionMode, attentionPrefs, isTypingTarget, mayInterrupt, modalKind, notifyDelay, notifyText, shownKey, type NotifyMode, type Presence } from '../net/attention';
+import { ATTENTION_DWELL_MS, type AttentionMode, attentionPrefs, isTypingTarget, mayInterrupt, modalKind, notifyDelay, notifyText, shorten, shownKey, WHO_MAX, whoOf, type NotifyMode, type Presence } from '../net/attention';
 import { titleWithCount } from '../net/alert';
 import { type AttentionItem, askLine } from '../net/fleet';
 import { approvalName } from '../net/approvalText';
-import { peerText, pairTitle } from './pairChoice';
+import { pairTitle } from './pairChoice';
 import { type ApprovalModel, visible } from '../net/view';
 
 // "Needs you" must never be invisible (docs/ux/main-window.md): the list, the counts and the tab stay where they are; this layer adds, by
@@ -95,26 +95,31 @@ export function AttentionLayer({ items, stale = false, phone = false, onResolve,
   };
 
   // A notification while the window is in the background, once per burst, only when the person turned it on here.
-  const seen = useRef<Set<string>>(new Set());
+  // A request counts as told about only once a notification went out for it (or it was answered and left the list): one that arrived while the
+  // window was in front, and is still unanswered when the window goes to the background, is told about then.
+  const notified = useRef<Set<string>>(new Set());
   const lastSent = useRef<number | undefined>(undefined);
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const live = useRef({ items, notifyMode });
   live.current = { items, notifyMode };
   useEffect(() => {
-    const fresh = items.filter((i) => !seen.current.has(i.key));
-    seen.current = new Set(items.map((i) => i.key));
+    const here = new Set(items.map((i) => i.key));
+    notified.current = new Set([...notified.current].filter((k) => here.has(k)));
+    const fresh = items.filter((i) => !notified.current.has(i.key));
     if (fresh.length === 0 || mode === 'off' || notifyMode === 'off' || !canNotify() || timer.current !== undefined) return;
     const send = () => {
       timer.current = undefined;
       const now = live.current;
       if (now.items.length === 0 || inFront() || !canNotify()) return;
       lastSent.current = Date.now();
+      notified.current = new Set(now.items.map((i) => i.key));
       show(now.items, now.notifyMode, () => { window.focus(); reveal(); });
     };
+    // `send` goes out only while the window is in the background; when it is in front, the next change of focus looks again.
     const wait = notifyDelay(lastSent.current, Date.now());
     if (wait === 0) send(); else timer.current = setTimeout(send, wait);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [items, mode, notifyMode]);
+  }, [items, mode, notifyMode, tick]);
   useEffect(() => () => { if (timer.current !== undefined) clearTimeout(timer.current); }, []);
 
   const putOff = (key: string) => { setLater((l) => new Set(l).add(key)); setOpenKey(undefined); };
@@ -157,42 +162,54 @@ function AttentionCard({ item, more, stale, onResolve, onReview, onLater }: {
 }) {
   const kind = modalKind(item);
   const x = item.kind === 'approval' ? item.approval : undefined;
-  const [busy, setBusy] = useState(false);
-  // What is displayed has a dwell of its own, and every change of it (another request, or the same one with other words) starts it again.
-  // Derived from what is shown, so no frame has a new request already ready.
+  // What is displayed has a dwell of its own, and every change of it (another request, the same one with other words, another agent or
+  // machine) starts it again, and so does the person coming back to the window (focus, or the tab shown again) and the link coming back:
+  // a click that was aimed at something else must not land on Allow. Derived from what is shown, so no frame has a new request ready.
   const key = shownKey(item);
+  const [epoch, setEpoch] = useState(0);
   const [readyFor, setReadyFor] = useState<string | undefined>();
+  useEffect(() => {
+    const again = () => setEpoch((n) => n + 1);
+    window.addEventListener('focus', again);
+    const seen = () => { if (document.visibilityState === 'visible') again(); };
+    document.addEventListener('visibilitychange', seen);
+    return () => { window.removeEventListener('focus', again); document.removeEventListener('visibilitychange', seen); };
+  }, []);
   useEffect(() => {
     const h = setTimeout(() => setReadyFor(key), ATTENTION_DWELL_MS);
     return () => { clearTimeout(h); setReadyFor(undefined); };
-  }, [key]);
-  const shown = useRef(key);
-  shown.current = key;
-  // The single rule for Allow and Deny: a plain request, whole on screen, past its dwell, one at a time, the link up.
-  const canAnswer = kind === 'answer' && !!x && !!onResolve && readyFor === key && !busy && !stale;
+  }, [key, epoch, stale]);
+  // A request is answered once: after one answer its buttons stay dead until it leaves the list or what it shows changes.
+  const [answered, setAnswered] = useState<string | undefined>();
+  // The single rule for Allow and Deny: a plain request, whole on screen, past its dwell, not answered yet, the link up.
+  const canAnswer = !!x && !!onResolve && readyFor === key && answered !== key && !stale;
   const answer = (ok: boolean) => {
-    if (!canAnswer || !x || !onResolve || shown.current !== key) return;
-    setBusy(true);
-    void Promise.resolve(onResolve(x, ok)).finally(() => setBusy(false));
+    if (!canAnswer || !x || !onResolve) return;
+    setAnswered(key);
+    void Promise.resolve(onResolve(x, ok));
   };
   const content = useRef<HTMLDivElement>(null);
-  const agent = item.kind === 'pair' ? undefined : item.agent;
-  const name = item.kind === 'pair' ? peerText(item.card.name) : agent?.name || (x ? approvalName(x) : '');
-  const machine = item.kind === 'pair' ? '' : agent?.machine || x?.machineName || '';
-  const who = machine ? t('attention-who', { name: visible(name), machine: visible(machine) }) : t('attention-who-only', { name: visible(name) });
+  // Said to a screen reader when the card opens (the card is an alert dialog; this is the short version of why).
+  const [announce, setAnnounce] = useState('');
+  useEffect(() => { setAnnounce(t('notify-body', { count: 1 })); }, []);
+  const w = whoOf(item);
+  const name = shorten(w.name || (x ? approvalName(x) : ''), WHO_MAX);
+  const machine = shorten(w.machine, WHO_MAX);
+  const who = machine ? t('attention-who', { name, machine }) : t('attention-who-only', { name });
   const dead = 'aria-disabled:cursor-not-allowed aria-disabled:opacity-50';
   const why = 'attention-why';
   return (
     <Dialog.Root open onOpenChange={(o) => { if (!o) onLater(); }}>
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 z-40 bg-surface-0/70 backdrop-blur-sm" />
-        <Dialog.Content ref={content} tabIndex={-1} aria-describedby="attention-what" onOpenAutoFocus={(e) => { e.preventDefault(); content.current?.focus(); }}
+        <Dialog.Content ref={content} role="alertdialog" tabIndex={-1} aria-describedby="attention-what" onOpenAutoFocus={(e) => { e.preventDefault(); content.current?.focus(); }}
           className="attention-card fixed left-1/2 top-1/2 z-50 flex max-h-[calc(100vh-2rem)] w-[min(32rem,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2 flex-col gap-3 rounded-l border border-line bg-surface-1 p-5 shadow-card outline-none">
           <Dialog.Title className="m-0 text-base font-semibold tracking-normal text-needs-you normal-case">{item.kind === 'pair' ? pairTitle(item.card) : t('attention-title')}</Dialog.Title>
-          <p className="m-0 text-sm text-muted">{who}</p>
+          <p aria-live="assertive" className="attention-announce sr-only">{announce}</p>
+          <p className="attention-who m-0 min-w-0 flex-none break-words text-sm text-muted">{who}</p>
           <div id="attention-what" className="min-h-0 overflow-auto">
             {kind === 'answer' && x && <p className="attention-ask m-0 whitespace-pre-wrap break-words font-mono text-sm text-ink">{visible(askLine(x.action, x.detail))}</p>}
-            {kind === 'review' && x && x.start && <p className="m-0 text-sm text-ink">{t('attention-start', { name: visible(name) })}</p>}
+            {kind === 'review' && x && x.start && <p className="m-0 text-sm text-ink">{t('attention-start', { name })}</p>}
             {kind === 'review' && x && !x.start && <>
               <p className="m-0 mb-2 text-sm text-ink">{t('attention-ask-review')}</p>
               <pre className="attention-ask m-0 whitespace-pre-wrap break-words font-mono text-sm text-ink">{visible(askLine(x.action, x.detail))}</pre>
@@ -200,6 +217,7 @@ function AttentionCard({ item, more, stale, onResolve, onReview, onLater }: {
             {item.kind === 'pair' && <p className="m-0 text-sm text-ink">{t('attention-pair')}</p>}
           </div>
           {more > 0 && <p className="m-0 text-xs text-muted">{t('attention-more', { count: more })}</p>}
+          {kind === 'answer' && answered === key && <p role="status" className="attention-sent m-0 text-sm text-muted">{t('attention-sent')}</p>}
           {stale && kind === 'answer' && <p id={why} className="m-0 text-sm text-muted">{t('fleet-stale-no-answer')}</p>}
           <div className="flex flex-wrap justify-end gap-2">
             <button type="button" className="button" onClick={onLater}>{t('attention-later')}</button>
@@ -207,7 +225,7 @@ function AttentionCard({ item, more, stale, onResolve, onReview, onLater }: {
               <button type="button" className={`button ${dead}`} aria-disabled={!canAnswer} aria-describedby={stale ? why : undefined} onClick={() => answer(false)}>{t('approval-deny')}</button>
               <button type="button" className={`button button--primary ${dead}`} aria-disabled={!canAnswer} aria-describedby={stale ? why : undefined} onClick={() => answer(true)}>{t('approval-allow')}</button>
             </>}
-            {kind === 'review' && <button type="button" className="button button--primary" onClick={() => onReview(item)}>{t('attention-review')}</button>}
+            {(kind === 'review' || (kind === 'answer' && answered === key)) && <button type="button" className="button button--primary" onClick={() => onReview(item)}>{t('attention-review')}</button>}
           </div>
         </Dialog.Content>
       </Dialog.Portal>

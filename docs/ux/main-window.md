@@ -72,12 +72,18 @@ only, default **A card over the window**): a card, a small banner only, or nothi
   a field or a terminal, and not within 1.5 s of the last key typed into one. Otherwise it waits, the banner (bottom right, not modal)
   shows how many wait, and it opens when the person stops. A card that is open stays what it is; a newer request waits behind it
   ("1 more needs you after this").
-- **It cannot be clicked by accident.** Allow and Deny do nothing for 600 ms after the card appeared or what it shows changed (the same
-  dwell as the phone bar, restarted by every change), nothing is focused when it opens (Enter answers nothing), and the link must be up.
+- **It cannot be clicked by accident.** Allow and Deny do nothing for 600 ms after the card appeared or anything it shows changed (the
+  request, the agent's name, the machine's name; the same dwell as the phone bar, restarted by every change), after the person comes
+  back to the window (focus, or the tab shown again) and after the link comes back. Nothing is focused when it opens (Enter answers
+  nothing), and the link must be up. A request is answered once: after Allow or Deny its buttons stay dead (the card says the answer was
+  sent and offers Review). The card is an alert dialog and says "An agent needs you" in an assertive live region when it opens; a long
+  name is cut and wraps, so the buttons are never pushed out of view.
   **Esc, a click outside the card and Later all mean Later**: nothing is sent, and it comes back only through the banner. Nothing about a
   request is stored anywhere; only the two choices of This device are.
 - **Notifications** (only after the person presses **Turn on notifications** in This device; the window never asks on its own): while the
-  window is in the background, one system notification says "An agent needs you"; an option adds the agent's and the machine's name. It
+  window is in the background, one system notification says "An agent needs you"; an option adds the agent's and the machine's name, only when it is a plain name
+  (letters, digits, spaces, `. _ - @`, at most 24 characters, one request) and otherwise the generic text. A request that arrived while the
+  window was in front and is still waiting when it goes to the background is told about then. It
   never carries what is asked (a request's text, a command, a path, a prompt). A burst is one notification, plus one more with the final
   count when 15 s have passed; a new one replaces the old. Pressing it brings the window forward and opens the card (or, with Banner
   only, the list). **Nothing extra** sends none. The tab title shows `(n)` and the app badge the count, whatever the choice.

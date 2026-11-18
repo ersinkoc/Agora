@@ -925,7 +925,6 @@ fleet-same-ask = { $machine } üzerinde { $count } { $kind } ajanı aynı şeyi 
 fleet-review-each = Tek tek incele
 fleet-collapse = Tek satır olarak göster
 fleet-same-ask-any = { $machine } üzerinde { $count } ajan aynı şeyi istiyor
-attention-title = Sana ihtiyaç var
 attention-who = { $machine } üzerinde { $name }
 attention-who-only = { $name }
 attention-ask-review = Yanıtlamadan önce bunun tamamı okunmalı. Karar vermek için incele.
@@ -961,3 +960,5 @@ notify-body = { $count ->
 }
 notify-body-named = { $name } sana ihtiyaç duyuyor
 notify-body-named-on = { $machine } üzerinde { $name } sana ihtiyaç duyuyor
+attention-sent = Yanıt gönderildi. Bu kart kalırsa İncele ile aç.
+attention-notify-names-warn = Bu adlar ajanlardan ve makinelerden gelir; bildirim kilitli ekranda görünebilir. Düz metin olmayan bir ad bildirime konmaz.

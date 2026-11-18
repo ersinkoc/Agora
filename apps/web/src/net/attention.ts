@@ -59,11 +59,24 @@ export const TYPING_QUIET_MS = 1500;
 // One notification per burst: a second one waits at least this long after the first.
 export const NOTIFY_WINDOW_MS = 15_000;
 
-// A key for what the modal displays: the request and every word shown of it. A change of it restarts the dwell.
+// Who asks, as the card's "who" line shows it: the agent's (or the asking machine's) name and the machine's name, as written.
+export function whoOf(it: AttentionItem): { name: string; machine: string } {
+  if (it.kind === 'pair') return { name: it.card.name, machine: '' };
+  if (it.kind === 'approval') return { name: it.agent?.name || it.approval.agentName, machine: it.agent?.machine || it.approval.machineName || '' };
+  return { name: it.agent.name, machine: it.agent.machine };
+}
+// A cut for a name placed in the card's "who" line, so a very long one never pushes the buttons out of view.
+export const WHO_MAX = 60;
+export const shorten = (s: string, max: number): string => { const v = visible(s.replace(/\s+/g, ' ').trim()); return v.length > max ? `${v.slice(0, max)}…` : v; };
+
+// A key for everything the card displays: the request and every word shown of it, and who asks (the agent, the machine, the kind of
+// request to join). A change of any of it restarts the dwell.
 export function shownKey(it: AttentionItem): string {
-  if (it.kind === 'approval') return `${it.key}\u0001${it.approval.action}\u0001${it.approval.detail}\u0001${it.approval.start ? 's' : ''}`;
-  if (it.kind === 'pair') return `${it.key}\u0001${it.card.name}\u0001${it.card.number}`;
-  return it.key;
+  const who = whoOf(it);
+  const parts = [it.key, who.name, who.machine];
+  if (it.kind === 'approval') parts.push(it.approval.action, it.approval.detail, it.approval.start ? 's' : '');
+  if (it.kind === 'pair') parts.push(it.card.kind, it.card.number);
+  return parts.join('\u0001');
 }
 
 // Whether an element takes typed text: a field, a select, anything editable, a terminal (xterm keeps a hidden textarea).
@@ -85,17 +98,23 @@ export const mayInterrupt = (p: Presence): boolean => p.focused && !p.typing && 
 export const notifyDelay = (lastMs: number | undefined, nowMs: number): number => (lastMs === undefined ? 0 : Math.max(0, lastMs + NOTIFY_WINDOW_MS - nowMs));
 
 // What a notification says: message ids and parameters only, never anything the agent wrote. `named` adds the agent's and machine's display
-// names (cut and made visible); it never adds a request's action, detail, folder, prompt, command or path.
+// names, and only when each is a plain name (letters, digits, spaces, . _ - @ and the middle dot of "claude · amber", at most NAME_MAX
+// characters); anything else, and any burst of more than one, gets the generic text. It never adds a request's action, detail, folder,
+// prompt, command or path.
 export interface NotifyText { title: { id: string }; body: { id: string; params: Record<string, string | number> }; tag: string }
-const NAME_MAX = 40;
-const name = (s: string | undefined): string => { const v = visible((s ?? '').replace(/\s+/g, ' ').trim()); return v.length > NAME_MAX ? `${v.slice(0, NAME_MAX)}…` : v; };
+export const NAME_MAX = 24;
+export function plainName(s: string | undefined): string | undefined {
+  const v = (s ?? '').replace(/\s+/g, ' ').trim();
+  return v.length > 0 && v.length <= NAME_MAX && /^[\p{L}\p{N} ._@·-]+$/u.test(v) ? v : undefined;
+}
 export function notifyText(items: readonly AttentionItem[], how: NotifyMode): NotifyText {
-  const first = items[0];
-  const agent = first && first.kind !== 'pair' ? first.agent?.name || (first.kind === 'approval' ? first.approval.agentName : '') : '';
-  const machine = first && first.kind !== 'pair' ? first.agent?.machine || (first.kind === 'approval' ? first.approval.machineName : '') : '';
   const tag = 'agora-needs-you'; // one at a time: a newer one replaces the older
-  if (how === 'named' && items.length === 1 && agent) {
-    return { title: { id: 'notify-title' }, body: { id: machine ? 'notify-body-named-on' : 'notify-body-named', params: { name: name(agent), machine: name(machine) } }, tag };
-  }
-  return { title: { id: 'notify-title' }, body: { id: 'notify-body', params: { count: items.length } }, tag };
+  const generic: NotifyText = { title: { id: 'notify-title' }, body: { id: 'notify-body', params: { count: items.length } }, tag };
+  const first = items[0];
+  if (how !== 'named' || items.length !== 1 || !first || first.kind === 'pair') return generic;
+  const who = whoOf(first);
+  const name = plainName(who.name);
+  if (!name) return generic;
+  const machine = plainName(who.machine);
+  return { title: { id: 'notify-title' }, body: { id: machine ? 'notify-body-named-on' : 'notify-body-named', params: { name, machine: machine ?? '' } }, tag };
 }
