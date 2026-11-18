@@ -281,3 +281,6 @@ tui-pair-result-denied = { $name } was denied.
 tui-pair-result-expired = The request from { $name } ran out.
 tui-pair-result-closed = The request from { $name } was cancelled.
 tui-app-cmd-pair = Read a machine's request to join (p)
+tui-link-confirm = Link: { $url } (Ctrl+click it again to open)
+tui-link-opened = Opened { $url }
+tui-link-failed = Could not open { $url }. Copy it from the terminal instead.

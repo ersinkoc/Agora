@@ -14,4 +14,5 @@ pub mod preview;
 pub mod render;
 pub mod review;
 pub mod split;
+pub mod termio;
 pub mod tool;

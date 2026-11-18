@@ -4,7 +4,11 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
-_Nothing yet._
+### The terminal in the console (TUI)
+- A program that turned on mouse reporting (an editor, a monitor, an agent's own screen) now gets clicks, drags, releases and the wheel from the console, in the form it asked for; hold Shift to select and scroll the console's own history instead. With no mouse mode, the wheel on a full-screen program sends arrow keys (three a notch).
+- A program that asked for focus events is told when its pane gains or loses the keyboard. Pastes are bracketed only for programs that asked, and a paste can no longer carry escape sequences or other control characters.
+- Ctrl+click on a web address shows it in the footer; Ctrl+click it again to open it. The program's title shows after the tabs, with control and look-alike characters made visible.
+- Known limit: a program that was already running when you opened its tab is not known to have the mouse on until it switches it on again.
 
 ## 0.3.19
 

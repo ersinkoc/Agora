@@ -137,11 +137,13 @@ fn run(
                     rows,
                     area,
                     modes,
+                    prog: Default::default(),
                     t: &text,
                 },
             ) {
                 match action {
                     Action::Quit => return Ok(()),
+                    Action::OpenLink { .. } => {}
                     Action::Open(id) => {
                         let mut t = AlacrittyTerminal::new(Size { cols: 80, rows: 24 });
                         t.feed(

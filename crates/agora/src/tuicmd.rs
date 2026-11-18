@@ -1980,12 +1980,27 @@ fn trust_command() -> Option<String> {
 /// bracketed; both are switched off while a question is asked, which reads plain bytes.
 fn mouse_mode(on: bool) {
     let mut out = std::io::stdout();
+    // Motion with no button (1003) is only switched on while the open program asked for it (`mouse_motion`): never by this.
+    HOST_MOTION.store(false, std::sync::atomic::Ordering::Relaxed);
     let _ = out.write_all(if on {
-        b"\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?2004h"
+        b"\x1b[?1003l\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?2004h"
     } else {
-        b"\x1b[?1000l\x1b[?1002l\x1b[?1006l\x1b[?2004l"
+        b"\x1b[?1003l\x1b[?1000l\x1b[?1002l\x1b[?1006l\x1b[?2004l"
     });
     let _ = out.flush();
+}
+
+/// Whether this terminal is reporting motion with no button (DECSET 1003) right now.
+static HOST_MOTION: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Asks this terminal for motion with no button while `on` (the open program switched on "any motion" mouse reporting and the
+/// mouse is held), and stops asking when it is not: a terminal that reports every movement is a load nobody wants for nothing.
+fn mouse_motion(on: bool) {
+    if HOST_MOTION.swap(on, std::sync::atomic::Ordering::Relaxed) != on {
+        let mut out = std::io::stdout();
+        let _ = out.write_all(if on { b"\x1b[?1003h" } else { b"\x1b[?1003l" });
+        let _ = out.flush();
+    }
 }
 
 fn window_area() -> Area {
@@ -2027,6 +2042,8 @@ fn console(
     mouse_mode(c.app.mouse);
     let mut fresh = true;
     let mut typed_at: Option<Instant> = None;
+    // The web address a Ctrl+click showed and waits for a second click on.
+    let mut pending_link: Option<String> = None;
     // ADR-0065: only the hub knows whether this session is the owner's (it answers `PairStatus` to the owner only).
     if c.pair.owner == agora_tui::pair::Owner::Unknown {
         if let Some(owner) = pair_owner(session) {
@@ -2093,6 +2110,14 @@ fn console(
             c.selected = id.to_string();
             redraw = true;
         }
+        // Motion with no button is asked of this terminal only while the program in front asked for it.
+        mouse_motion(
+            c.app.mouse
+                && preview
+                    .as_ref()
+                    .filter(|p| Some(p.agent.as_str()) == c.app.active_agent())
+                    .is_some_and(|p| p.program_modes().track == agora_tui::termio::Track::Any),
+        );
         let mut events = Vec::new();
         let now = window_area();
         if now != area {
@@ -2141,15 +2166,39 @@ fn console(
                 .as_ref()
                 .map(|p| p.screen().modes())
                 .unwrap_or_default();
+            // The program's mouse and focus modes, only of the agent in front (never the one a tab switch just left).
+            let prog = preview
+                .as_ref()
+                .filter(|p| Some(p.agent.as_str()) == c.app.active_agent())
+                .map(Preview::program_modes)
+                .unwrap_or_default();
+            // The release that ends the Ctrl+click does not forget the address it showed; anything else does.
+            let was_link = if matches!(&ev, AppEvent::Mouse(m) if matches!(m.kind, agora_tui::app::MouseKind::Up | agora_tui::app::MouseKind::Move))
+            {
+                pending_link.clone()
+            } else {
+                pending_link.take()
+            };
             let acts = c.app.handle(
                 ev,
                 &Ctx {
                     rows: &rows,
                     area,
                     modes,
+                    prog,
                     t: &text,
                 },
             );
+            // The panes that gained or lost the keyboard: a program that asked for focus events (1004) is told.
+            for (agent, gained) in c.app.take_pane_focus() {
+                let asked = preview
+                    .as_ref()
+                    .filter(|p| p.agent == agent)
+                    .and_then(|p| agora_tui::termio::focus_bytes(&p.program_modes(), gained));
+                if let (Some(bytes), Some((node, local))) = (asked, agent.split_once('/')) {
+                    session.terminal_input(node, &format!("t-{local}"), bytes);
+                }
+            }
             if c.app != before || acts.iter().any(|a| !matches!(a, Action::Input(_))) {
                 redraw = true;
             }
@@ -2186,6 +2235,33 @@ fn console(
                     }
                     Action::PaneSize { .. } => sized = None,
                     Action::MouseCapture(on) => mouse_mode(on),
+                    // Ctrl+click on a web address: the first click shows exactly what would open, the second one on the same
+                    // address opens it. Never a plain click, never without showing it.
+                    Action::OpenLink { row, col } => {
+                        let height = c.app.areas(area).terminal.height;
+                        let link = preview
+                            .as_ref()
+                            .filter(|p| Some(p.agent.as_str()) == c.app.active_agent())
+                            .and_then(|p| {
+                                agora_tui::pane::link_at(p.screen(), height, c.app.scroll, row, col)
+                            });
+                        if let Some(url) = link {
+                            if was_link.as_deref() == Some(url.as_str()) {
+                                c.notice = if agora_platform::open_url(&url).is_ok() {
+                                    say.text(key!("tui-link-opened"), &[("url", Arg::Str(url))])
+                                } else {
+                                    say.text(key!("tui-link-failed"), &[("url", Arg::Str(url))])
+                                };
+                            } else {
+                                c.notice = say.text(
+                                    key!("tui-link-confirm"),
+                                    &[("url", Arg::Str(url.clone()))],
+                                );
+                                pending_link = Some(url);
+                            }
+                            redraw = true;
+                        }
+                    }
                     // Closing a tab only closes the view: the agent keeps running, and the footer says so.
                     Action::Close(id) => {
                         let name = c
@@ -3895,6 +3971,7 @@ mod read_keys_tests {
             kind: MouseKind::Down,
             col: 9,
             row: 4,
+            ..Default::default()
         });
         check(vec![
             (
@@ -3986,6 +4063,7 @@ mod read_keys_tests {
                     kind: MouseKind::Up,
                     col: 9,
                     row: 4,
+                    ..Default::default()
                 })],
                 Keys::new().turns(&[
                     (0, b"\x1b"),
