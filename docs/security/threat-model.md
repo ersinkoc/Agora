@@ -147,13 +147,24 @@ branch. A launch does not follow such a swap (F1012): it holds the folder open f
 the launch when the path no longer leads to the held folder (after the check, and again with everything for the start made),
 and on Unix starts a terminal agent in the held folder itself, so it does not start an agent in another project's folder.
 A later start of the same agent does not follow one either: a restart after a crash holds the folder again by the path its first
-start held it at (F1020; an adapter's, checked before and after, F1023), and a resume (ADR-0060, by a person or the node itself)
-holds it from before its check (F1021); a path that no longer leads to a folder there refuses that start. On Linux the
-confinement's rules for the folder and for anything below it are made from the held folder, not from its path (F1022).
+start held it at (F1020), and a resume (ADR-0060, by a person or the node itself) holds it from before its check (F1021); a path
+that no longer leads to a folder there refuses that start. An adapter agent's restart and resume (F1023) are checked as its first
+start is: right before the adapter process is made and again once its session is open; an adapter refused after it started is
+ended with the processes found below it (Unix), without the supervisor waiting on them. On Linux the confinement's rules for the folder and for
+anything below it are made from the held folder, not from its path, whichever spelling of the folder the start was given (F1022),
+and the folder is held as a place only (`O_PATH`), so a folder the user may enter but not list can be held and started in.
 Residual: on Windows the agent is started by the path (the handle, held without delete sharing, keeps the folder from being
-renamed); an adapter agent is given its folder by path and a separate worktree is made from the checkout by path, each checked
-before and after (an adapter's resume only before); and on macOS and Windows the confinement rules are made from the path, so a
-swap undone within the start is not detected for them. The local owner-only socket keeps its authority.
+renamed); an adapter agent is started, and given its folder, by path (its process is not started in the held folder, which would
+need a change in `agora-adapters`, as would a check after its confinement is made, and ending a process below it that left its
+tree or runs on Windows, where an adapter has no process group or job of its own), and a separate worktree is made from the checkout by path, each checked before and after, so
+a swap made and undone between those two checks is not detected; an adapter's confinement rules (all systems) and a terminal
+agent's on macOS and Windows are made from the path, so a swap undone within the start is not detected for them. The folder's
+project identity is read by path (`directory::inspect`), between the hold and the last check: a directory (not a link) put at the
+path for the check only and moved away before that check passes the identity check for the folder that is then held. This gives
+nothing an agent of the project cannot do without it (the identity file can be copied into any folder, and a folder of another
+project cannot be moved into place without write access to that project's parent folder). On macOS the folder is held open for
+reading, so a folder the user may enter but not list cannot be launched in or resumed. The local owner-only socket keeps its
+authority.
 
 
 Folder listing (ADR-0053 `directory.list`) discloses **folder names only** (and whether each holds a `.git`), one folder per

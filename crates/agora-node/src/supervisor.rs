@@ -1130,13 +1130,9 @@ impl Supervisor {
                 git::discover_checkout(&worktree).map_or_else(|_| worktree.clone(), |c| c.root);
             let mesh = self.adapter_mesh(&id, &req.kind, &project.to_string(), &worktree);
             // F1012: an adapter is started, and given its folder, by path; the folder must be where it was held before and after.
-            let moved = || folder.is_some_and(|f| !f.in_place());
             let launched = self
                 .adapter_sandbox(&req.kind, &worktree, &spec.command[0])
                 .and_then(|profile| {
-                    if moved() {
-                        return Err(SupervisorError::FolderMoved);
-                    }
                     launch_adapter(
                         &spec,
                         &root,
@@ -1145,15 +1141,8 @@ impl Supervisor {
                         profile,
                         mesh.as_ref(),
                         self.credential_vars(&req.kind),
+                        folder,
                     )
-                })
-                .and_then(|l| {
-                    if moved() {
-                        // Dropping the adapter stops it and everything below it.
-                        drop(l);
-                        return Err(SupervisorError::FolderMoved);
-                    }
-                    Ok(l)
                 });
             let (adapter, session_id, capabilities) = match launched {
                 Ok(l) => l,
@@ -1397,6 +1386,7 @@ impl Supervisor {
                     profile,
                     mesh.as_ref(),
                     self.credential_vars(&req.kind),
+                    None,
                 )
             });
         let (adapter, session_id, capabilities) = match result {
@@ -1516,15 +1506,13 @@ impl Supervisor {
     fn restart_adapter(&mut self, id: &AgentId, now: Instant, events: &mut Vec<SupervisorEvent>) {
         let policy = self.cfg.restart;
         // F1023: a selected folder is held again; an adapter is started, and given its folder, by path, so the folder must be where
-        // it was held before and after (as at its first start, F1012).
+        // it was held right before the start and after it (as at its first start, F1012; `launch_adapter`).
         let held = self
             .adapters
             .get(id)
             .and_then(|e| e.folder.as_deref())
             .map(|p| held_again(None, p))
             .transpose();
-        let moved =
-            |h: &Option<agora_platform::HeldFolder>| h.as_ref().is_some_and(|f| !f.in_place());
         let Some(profile) = self.adapters.get(id).and_then(|e| {
             Some(self.adapter_sandbox(&e.agent.kind, &e.worktree, e.spec.command.first()?))
         }) else {
@@ -1542,23 +1530,16 @@ impl Supervisor {
         e.restarts += 1;
         // A crash keeps the agent in the mesh: the restarted session gets the same endpoint.
         let launched = held.and_then(|held| {
-            let l = profile.and_then(|profile| {
-                launch_adapter(
-                    &e.spec,
-                    &e.checkout_root,
-                    &e.worktree,
-                    e.agent.session.as_deref(),
-                    profile,
-                    e.mesh.as_ref(),
-                    creds,
-                )
-            })?;
-            if moved(&held) {
-                // Dropping the adapter stops it and everything below it.
-                drop(l);
-                return Err(SupervisorError::FolderMoved);
-            }
-            Ok(l)
+            launch_adapter(
+                &e.spec,
+                &e.checkout_root,
+                &e.worktree,
+                e.agent.session.as_deref(),
+                profile?,
+                e.mesh.as_ref(),
+                creds,
+                held.as_ref(),
+            )
         });
         match launched {
             Ok((adapter, session_id, capabilities)) => {
@@ -2167,6 +2148,13 @@ impl Supervisor {
                     p,
                 ));
             }
+            // F1021 for adapters (Codex review): a selected folder is held before anything is started for it (the mesh endpoint
+            // included) and must be where it was held right before the adapter starts and after (`launch_adapter`).
+            let folder = entry
+                .folder
+                .as_deref()
+                .map(|p| held_again(checked, p))
+                .transpose()?;
             let profile = match entry.spec.command.first() {
                 Some(p) => self.adapter_sandbox(&entry.agent.kind, &entry.worktree, p)?,
                 None => None,
@@ -2187,6 +2175,7 @@ impl Supervisor {
                 profile,
                 mesh.as_ref(),
                 self.credential_vars(&entry.agent.kind),
+                folder.as_ref(),
             );
             let (adapter, session_id, capabilities) = match launched {
                 Ok(l) => l,
@@ -2671,6 +2660,11 @@ fn held_again(
 
 /// Spawns an adapter process, initializes it and starts (or resumes) a session. Returns it with the session id and the capabilities
 /// it declared. An adapter's stable reason for failing (ADR-0058) becomes [`SupervisorError::Adapter`].
+///
+/// `folder`: the selected folder the start holds (F1012, F1023). An adapter is started, and given its folder, by path, so the path
+/// must lead to the held folder right before the adapter is started and again once its session is open; otherwise nothing is started,
+/// or the adapter is ended ([`discard_adapter`]), and the start is refused ([`SupervisorError::FolderMoved`]).
+#[allow(clippy::too_many_arguments)] // each is one part of the start the caller made
 fn launch_adapter(
     spec: &agora_adapters::manifest::AdapterSpec,
     checkout_root: &Path,
@@ -2679,11 +2673,8 @@ fn launch_adapter(
     mut sandbox: Option<agora_platform::Sandbox>,
     mesh: Option<&agora_adapters::inject::Endpoint>,
     credentials: Vec<(String, String)>,
+    folder: Option<&agora_platform::HeldFolder>,
 ) -> Result<(Adapter, String, Vec<String>), SupervisorError> {
-    // A real agent can be slow to answer: opencode 2.x took 2 to 5 s to initialize and 9.5 to 12 s to open a session (seen on Windows), so
-    // the old 10 s ended such a start as a bare `internal` error.
-    const INIT: Duration = Duration::from_secs(30);
-    const SESSION: Duration = Duration::from_secs(60);
     let (program, args) = spec
         .command
         .split_first()
@@ -2710,6 +2701,11 @@ fn launch_adapter(
         env.push(("TEMP".into(), temp.clone()));
         env.push(("TMP".into(), temp));
     }
+    let moved = || folder.is_some_and(|f| !f.in_place());
+    // Codex review of F1023: checked last before the start, with everything for it made.
+    if moved() {
+        return Err(SupervisorError::FolderMoved);
+    }
     let adapter = Adapter::spawn(&AdapterConfig {
         program: program.into(),
         args: args.to_vec(),
@@ -2718,6 +2714,54 @@ fn launch_adapter(
         sandbox,
     })
     .map_err(|e| SupervisorError::Spawn(e.to_string()))?;
+    match open_session(&adapter, checkout_root, worktree, resume, mesh) {
+        Ok(_) if moved() => {
+            discard_adapter(adapter);
+            Err(SupervisorError::FolderMoved)
+        }
+        Ok((session_id, capabilities)) => Ok((adapter, session_id, capabilities)),
+        Err(e) => {
+            discard_adapter(adapter);
+            Err(e)
+        }
+    }
+}
+
+/// Ends an adapter that is not kept (its start failed or was refused after the process began): the processes below it first, then the
+/// adapter itself, whose last wait (for its output to close) runs on a thread of its own. A process below it that outlived the kill
+/// would keep that output open, and the caller (which holds the supervisor) must not wait for it (Codex review of F1023).
+fn discard_adapter(adapter: Adapter) {
+    // Unix: every process found below the adapter, each only while it is still the process that was found (ADR-0060). Elsewhere the
+    // adapter alone is ended, as by any stop.
+    let tree = |root| agora_platform::process_tree(root).unwrap_or_default();
+    let below: Vec<agora_platform::ProcessIdentity> = tree(adapter.pid())
+        .iter()
+        .skip(1)
+        .filter_map(|p| agora_platform::process_identity(p.pid).ok())
+        .collect();
+    // Each is ended only while it is still the process found (its identity carries its start time, so a pid given to another
+    // process meanwhile is left alone); one the adapter's exit reparented in between is still ended.
+    for p in &below {
+        let _ = agora_platform::kill_process_if_same(p);
+    }
+    // When no thread can be started the adapter is ended here, as before.
+    let _ = std::thread::Builder::new()
+        .name("agora-adapter-end".into())
+        .spawn(move || drop(adapter));
+}
+
+/// The adapter's `initialize` and its session's start (or resume): the session id and the capabilities it declared.
+fn open_session(
+    adapter: &Adapter,
+    checkout_root: &Path,
+    worktree: &Path,
+    resume: Option<&str>,
+    mesh: Option<&agora_adapters::inject::Endpoint>,
+) -> Result<(String, Vec<String>), SupervisorError> {
+    // A real agent can be slow to answer: opencode 2.x took 2 to 5 s to initialize and 9.5 to 12 s to open a session (seen on Windows), so
+    // the old 10 s ended such a start as a bare `internal` error.
+    const INIT: Duration = Duration::from_secs(30);
+    const SESSION: Duration = Duration::from_secs(60);
     let init = adapter
         .initialize(&["chat"], "en", INIT)
         .map_err(adapter_error)?;
@@ -2744,7 +2788,7 @@ fn launch_adapter(
             SESSION,
         )
         .map_err(adapter_error)?;
-    Ok((adapter, session_id, init.capabilities))
+    Ok((session_id, init.capabilities))
 }
 
 /// ADR-0078: points a confined agent's git at the file the node wrote, when the profile grants that file for reading (it does not when

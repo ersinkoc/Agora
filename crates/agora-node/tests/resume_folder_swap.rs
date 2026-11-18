@@ -70,6 +70,9 @@ fn repo(x: &Path, id: &str) {
 
 struct Env {
     base: PathBuf,
+    /// The node's socket, in the temporary folder as spelled (not under the long target path, and not resolved: a socket path
+    /// has a short length limit).
+    socket: PathBuf,
     gate: PathBuf,
     reports: PathBuf,
     node: Option<Node>,
@@ -132,8 +135,11 @@ impl Env {
             ),
         )
         .unwrap();
+        let socket = std::env::temp_dir().join(format!("rfs-{}-{name}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&socket);
         let mut e = Self {
             base,
+            socket,
             gate,
             reports,
             node: None,
@@ -149,7 +155,7 @@ impl Env {
             Node::start(&NodeConfig {
                 resume_all: false,
                 node_id: "node-resume-folder-swap".into(),
-                socket: self.base.join("n.sock"),
+                socket: self.socket.clone(),
                 data_dir: self.base.join("data"),
                 worktree_root: self.base.join("worktrees"),
                 manifests_dir: self.base.join("manifests"),
@@ -262,6 +268,7 @@ impl Env {
 impl Drop for Env {
     fn drop(&mut self) {
         self.node.take();
+        let _ = std::fs::remove_file(&self.socket);
         let _ = std::fs::remove_dir_all(&self.base);
     }
 }
