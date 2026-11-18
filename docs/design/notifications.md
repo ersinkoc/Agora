@@ -25,3 +25,4 @@ Phone delivery uses the ntfy app. For instant delivery on iOS, even a self-hoste
 without that upstream, delivery can take hours. The upstream receives poll requests, including timing and a message identifier;
 the phone fetches the notification content from the ntfy server. Self-hosting alone therefore does not promise instant iOS
 notifications without third parties. See [ntfy's configuration](https://docs.ntfy.sh/config/#ios-instant-notifications).
+- The web window's own notification while it is in the background (a `Notification` of the browser, turned on by a click in This device) is generic and never carries a request's text ([main-window.md](../ux/main-window.md#needs-you-loudly), T44).

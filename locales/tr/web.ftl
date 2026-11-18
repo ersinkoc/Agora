@@ -925,3 +925,40 @@ fleet-same-ask = { $machine } üzerinde { $count } { $kind } ajanı aynı şeyi 
 fleet-review-each = Tek tek incele
 fleet-collapse = Tek satır olarak göster
 fleet-same-ask-any = { $machine } üzerinde { $count } ajan aynı şeyi istiyor
+attention-who = { $machine } üzerinde { $name }
+attention-who-only = { $name }
+attention-ask-review = Yanıtlamadan önce bunun tamamı okunmalı. Karar vermek için incele.
+attention-start = { $name } başka bir ajan başlatmak istiyor. Klasörü, istemi ve ayarları tam kartta okunur.
+attention-pair = Onaylamadan önce, tam kartta numarasını ekranındaki numarayla karşılaştır.
+attention-later = Sonra
+attention-review = İncele
+attention-more = { $count ->
+    [one] Bundan sonra 1 şey daha sana ihtiyaç duyuyor
+   *[other] Bundan sonra { $count } şey daha sana ihtiyaç duyuyor
+}
+attention-banner = { $count ->
+    [one] 1 şey sana ihtiyaç duyuyor
+   *[other] { $count } şey sana ihtiyaç duyuyor
+}
+attention-settings-title = Sana ihtiyaç var
+attention-settings-intro = Bir ajan takıldığında bu pencerenin dikkatini nasıl çektiği. Sana ihtiyaç var listesi ve sayıları her zaman görünür kalır. Yalnızca bu tarayıcıda saklanır.
+attention-mode-modal = Pencerenin üstünde bir kart
+attention-mode-banner = Yalnızca küçük bir şerit
+attention-mode-off = Ek bir şey yok
+attention-mode-hint = Kart yalnızca bu pencere odaktayken ve bir terminalde ya da alanda yazmıyorken açılır; aksi halde bekler ve bir şerit onu gösterir. Senin yerine asla yanıt vermez.
+attention-notify-title = Pencere arka plandayken bildirimler
+attention-notify-enable = Bildirimleri aç
+attention-notify-off = Bildirimleri kapat
+attention-notify-on = Bildirimler açık. Yalnızca bir ajanın sana ihtiyaç duyduğunu söylerler.
+attention-notify-names = Ajanın ve makinenin adını ekle
+attention-notify-blocked = Bu tarayıcı bu sayfa için bildirimleri engelliyor. Açmak için tarayıcının site ayarlarından izin ver.
+attention-notify-unsupported = Bu tarayıcı bildirim gösteremiyor.
+notify-title = Sana ihtiyaç var
+notify-body = { $count ->
+    [one] Bir ajanın sana ihtiyacı var
+   *[other] { $count } ajanın sana ihtiyacı var
+}
+notify-body-named = { $name } sana ihtiyaç duyuyor
+notify-body-named-on = { $machine } üzerinde { $name } sana ihtiyaç duyuyor
+attention-sent = Yanıt gönderildi. Bu kart kalırsa İncele ile aç.
+attention-notify-names-warn = Bu adlar ajanlardan ve makinelerden gelir; bildirim kilitli ekranda görünebilir. Düz metin olmayan bir ad bildirime konmaz.

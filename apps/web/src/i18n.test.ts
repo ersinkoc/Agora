@@ -20,6 +20,15 @@ describe('i18n', () => {
     expect(keys.size).toBeGreaterThan(5);
     for (const k of keys) expect(t(k, { machine: 'm', id: 'i', name: 'n', count: 1, online: 1, total: 1, when: 'w', code: 1, reason: 'r', amount: '$1', date: 'd', kind: 'k', agentKind: 'a', node: 'n', percent: 1, used: 'u', size: 's', stderr_tail: 't', detail: 'd', rpc_code: 'r', stage: 's', minutes: 5, min: 8, fingerprint: 'f', machines: 'm', max: 1, field: 'f', token: 't', base: 'b', label: 'l', fg: 'f', bg: 'b', ratio: 1, scheme: 's', program: 'p', value: 'v', settings: 's', where: 'w', file: 'f', address: 'a', os: 'o', what: 'w', state: 's', time: 't' }), k).not.toBe(k);
   });
+  it('has no message id twice in a locale file (the second would silently win or lose)', () => {
+    for (const lang of readdirSync('../../locales')) {
+      for (const file of readdirSync(`../../locales/${lang}`).filter((f) => f.endsWith('.ftl'))) {
+        const ids = [...readFileSync(`../../locales/${lang}/${file}`, 'utf8').matchAll(/^([a-z][a-z0-9_-]*) =/gm)].map((m) => m[1] as string);
+        const twice = ids.filter((id, i) => ids.indexOf(id) !== i);
+        expect(twice, `${lang}/${file}`).toEqual([]);
+      }
+    }
+  });
   it('has the dynamic state and theme keys', () => {
     for (const s of ['working', 'needs-you', 'finished', 'idle', 'unknown']) expect(t(`state-${s}`)).not.toBe(`state-${s}`);
     for (const s of ['dark', 'light']) expect(t(`theme-${s}`)).not.toBe(`theme-${s}`);
