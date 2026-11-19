@@ -632,7 +632,17 @@ impl View {
             Body::AgentCommands(e) => {
                 if let Some(a) = self.agents.get_mut(&q(&e.agent_id)) {
                     let fits = e.commands.len() <= MAX_COMMANDS && e.encoded_len() <= MAX_CONFIG_BYTES;
-                    a.session.commands = fits.then(|| e.clone());
+                    // A name that repeats (ignoring a leading "/" and case) is one command: the first wins, so a window never gets two
+                    // rows that would act as one.
+                    a.session.commands = fits.then(|| {
+                        let mut seen = BTreeSet::new();
+                        let mut kept = e.clone();
+                        kept.commands.retain(|c| {
+                            let n = c.name.trim_start_matches('/').to_lowercase();
+                            !n.is_empty() && seen.insert(n)
+                        });
+                        kept
+                    });
                 }
             }
             Body::AgentExited(e) => {
@@ -1424,6 +1434,31 @@ mod tests {
         v.apply(&ev("n1", 7, cmds(101)));
         assert!(v.session_replay().is_empty());
         v.apply(&ev("n1", 8, cfg(1)));
+        // A repeated name (or one with a leading slash and another case) is kept once, the first.
+        v.apply(&ev(
+            "n1",
+            9,
+            Body::AgentCommands(AgentCommands {
+                agent_id: "a".into(),
+                commands: ["Dup", "/dup", "dup", "other"]
+                    .iter()
+                    .map(|n| AgentCommand {
+                        name: (*n).into(),
+                        ..AgentCommand::default()
+                    })
+                    .collect(),
+            }),
+        ));
+        match v.session_replay().last().and_then(|e| e.body.as_ref()) {
+            Some(Body::AgentCommands(c)) => assert_eq!(
+                c.commands
+                    .iter()
+                    .map(|x| x.name.as_str())
+                    .collect::<Vec<_>>(),
+                ["Dup", "other"]
+            ),
+            other => panic!("{other:?}"),
+        }
         v.apply(&ev("n1", 9, cmds(1)));
         assert_eq!(v.session_replay().len(), 2);
         v.apply(&ev(
