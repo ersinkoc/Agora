@@ -342,6 +342,7 @@ service-unsupported = Starting Agora when you log in is not available on this sy
 service-registering = Registering "{ $name }" to start the { $role } when you log in. It runs: { $command }
 service-installed = The { $role } now starts when you log in ("{ $name }"), and it was started now.
 service-already = The { $role } already starts when you log in ("{ $name }"); nothing changed. To register it anew, run `agora service remove` first.
+service-updated = The { $role }'s service ("{ $name }") was set up with older settings; its file is updated. The running service keeps the old settings until you restart it: `systemctl --user restart { $name }`.
 service-installed-running = The { $role } now starts when you log in ("{ $name }"). It runs already (process { $pid }), so it was not started again.
 service-installed-not-started = The { $role } now starts when you log in ("{ $name }"), but it could not be started now: { $reason }. `agora` starts it.
 service-bad-path = "{ $path }" cannot go into the login entry: it contains `%` (the system would read it as a variable) or characters it cannot carry. Move Agora or its folder to a plain path.

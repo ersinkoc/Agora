@@ -333,6 +333,7 @@ service-unsupported = Oturum açınca Agora'yı başlatma bu sistemde henüz yok
 service-registering = { $role } oturum açtığınızda başlasın diye "{ $name }" kaydediliyor. Çalıştırdığı komut: { $command }
 service-installed = { $role } artık oturum açtığınızda başlıyor ("{ $name }") ve şimdi de başlatıldı.
 service-already = { $role } zaten oturum açtığınızda başlıyor ("{ $name }"); hiçbir şey değişmedi. Yeniden kaydetmek için önce `agora service remove` çalıştırın.
+service-updated = { $role } hizmeti ("{ $name }") eski ayarlarla kurulmuştu; dosyası güncellendi. Çalışan hizmet, siz yeniden başlatana kadar eski ayarlarla sürer: `systemctl --user restart { $name }`.
 service-installed-running = { $role } artık oturum açtığınızda başlıyor ("{ $name }"). Zaten çalışıyor (süreç { $pid }), bu yüzden yeniden başlatılmadı.
 service-installed-not-started = { $role } artık oturum açtığınızda başlıyor ("{ $name }"), ama şimdi başlatılamadı: { $reason }. `agora` onu başlatır.
 service-bad-path = "{ $path }" oturum açılış kaydına konamıyor: `%` içeriyor (sistem bunu bir değişken sanar) ya da taşıyamadığı karakterler var. Agora'yı ya da klasörünü sade bir yola taşıyın.

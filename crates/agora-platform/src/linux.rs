@@ -478,6 +478,31 @@ impl Systemd {
         Ok(others)
     }
 
+    /// See [`crate::service_unit_differs`]: the text Agora would write now is not the text in its unit file.
+    fn differs(&self, spec: &crate::ServiceSpec) -> io::Result<bool> {
+        use std::io::Read;
+        use std::os::unix::fs::OpenOptionsExt;
+        check_name(&spec.name)?;
+        let mut spec = spec.clone();
+        if let Ok(real) = fs::canonicalize(&spec.work_dir) {
+            spec.work_dir = real;
+        }
+        let text = unit_text(&spec)?;
+        let path = self.unit_path(&spec.name);
+        let mut f = match fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&path)
+        {
+            Ok(f) => f,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(true),
+            Err(e) => return Err(e),
+        };
+        let mut was = Vec::new();
+        f.read_to_end(&mut was)?;
+        Ok(was != text.as_bytes())
+    }
+
     fn unit_path(&self, name: &str) -> PathBuf {
         self.unit_dir.join(unit_name(name))
     }
@@ -679,6 +704,10 @@ fn split_drop_ins(v: &str) -> Vec<PathBuf> {
 
 pub(crate) fn service_precheck() -> io::Result<()> {
     Systemd::from_env().map(|_| ())
+}
+
+pub(crate) fn service_unit_differs(spec: &crate::ServiceSpec) -> io::Result<bool> {
+    Systemd::from_env()?.differs(spec)
 }
 
 pub(crate) fn service_drop_ins(name: &str) -> io::Result<Vec<PathBuf>> {
@@ -1227,6 +1256,41 @@ esac
         assert!(!text.contains("SECRET") && !text.contains("/elsewhere"));
         s.env = vec![("PATH".into(), ":relative:".into())];
         assert!(!unit_text(&s).unwrap().contains("Environment="));
+    }
+
+    #[test]
+    fn a_unit_agora_wrote_is_rewritten_when_its_text_changed_and_one_it_did_not_write_never() {
+        let f = Fake::new("rewrite");
+        let mut s = spec(&f.dir);
+        f.systemd.install(&s).unwrap();
+        let unit = f.unit();
+        // Same text: nothing differs and the file is not rewritten.
+        assert!(!f.systemd.differs(&s).unwrap());
+        let inode = fs::metadata(&unit).unwrap().ino();
+        f.systemd.install(&s).unwrap();
+        assert_eq!(fs::metadata(&unit).unwrap().ino(), inode);
+        // A newer setting: the file Agora wrote is replaced (owner-only) and systemd reloaded, never restarted.
+        s.keep_children_on_stop = true;
+        assert!(f.systemd.differs(&s).unwrap());
+        f.systemd.install(&s).unwrap();
+        let text = fs::read_to_string(&unit).unwrap();
+        assert!(text.contains("KillMode=process\n"), "{text}");
+        assert_eq!(fs::metadata(&unit).unwrap().mode() & 0o777, 0o600);
+        assert!(!f.systemd.differs(&s).unwrap());
+        assert!(f.log().ends_with("--user enable agora-node.service\n"));
+        assert!(!f.log().contains("restart"));
+        // A file without Agora's first line is refused and left as it is.
+        fs::write(&unit, "[Service]\nExecStart=/bin/true\n").unwrap();
+        s.keep_children_on_stop = false;
+        let e = f.systemd.install(&s).unwrap_err();
+        assert_eq!(
+            crate::service_problem(&e),
+            Some(&ServiceProblem::NotOurs(unit.clone()))
+        );
+        assert_eq!(
+            fs::read_to_string(&unit).unwrap(),
+            "[Service]\nExecStart=/bin/true\n"
+        );
     }
 
     #[test]

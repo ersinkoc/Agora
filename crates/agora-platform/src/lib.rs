@@ -2030,6 +2030,20 @@ pub fn service_drop_ins(name: &str) -> io::Result<Vec<PathBuf>> {
     }
 }
 
+/// Whether the service's file differs from what [`service_install`] would write now (Linux: the unit text; a changed setting of a newer
+/// Agora). [`service_install`] then rewrites a file Agora wrote, and refuses one it did not. `false` elsewhere.
+pub fn service_unit_differs(spec: &ServiceSpec) -> io::Result<bool> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::service_unit_differs(spec)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = spec;
+        Ok(false)
+    }
+}
+
 /// `Some(file)` when the service `name` is registered but was not written by Agora (Linux: a user unit of the same name made by hand
 /// or by another tool): the caller leaves it alone, neither stopping, replacing nor removing it. `None` when it is Agora's own or not
 /// registered (Windows: a task of the name without Agora's marker, named by its place in Task Scheduler, `\<name>`; macOS: a file at
