@@ -188,6 +188,16 @@ Everything is additive (ADR-0006): new enum values, new fields and new messages 
   skipping, so the window asks and a node policy of `forbid` refuses it); `AgentSetConfig` is held to the node's `skip_permissions`
   policy like `AgentSetMode`; a restarted adapter's reports are forgotten. The four capabilities are advertised and passed by the hub.
   Answers to the open questions are as proposed (1: 16 KiB kept in the ring; 4: queue of 8; 6: context and cost only).
+- Review of #779 fixed in the same PR: a mode or config option that skips permissions is also refused with `agent.option_unconfirmed`
+  (it needs the user's confirmation as a launch option does; the schema has no field for it on `AgentSetMode` / `AgentSetConfig`, so these
+  are refused always until a signed `confirmed` field is added by an ADR); the classifier also reads descriptions, word order, `mode` /
+  `allow` / `execution` options, full-width text, and a boolean's protective value is never refused; the prompt queue is an explicit
+  `Idle` / `Busy` state machine (failed send, `done` / `unknown`, stray `idle`, cancel timeout); no blocking adapter call is made under
+  the supervisor's lock; control characters and escape sequences are stripped from entries; repeated final updates are rate limited and
+  followers are bounded; adapters cannot forge the node's notices; a decision that cannot be delivered cancels its entry; a queued prompt
+  is at most 64 KiB.
+- **Known gap (not fixed here, `docs/backlog/phase-2.md` P2-16):** the node never checks an adapter's CURRENT mode or config value
+  against the `skip_permissions` policy at start: an adapter that starts in a bypass mode is not refused.
 - Step 5 (hub: its own snapshot of `AgentSessionConfig` and `AgentCommands`), 6 (web) and 7 (TUI): not started. Step 1 (real-agent
   fixtures) is still the maintainer's: nothing here was run against a real agent, and what real agents send (thinking, config options,
   `usage_update`) is unverified.

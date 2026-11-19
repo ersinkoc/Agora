@@ -40,7 +40,8 @@ that sees it may declare: `thought` (it sends `chat/append` `thought` items), `t
 status, locations and output, and later items update the same call), `plan_status` (plan items carry `entries` with status and
 priority), `config` (it sends `session/config` and takes `session/set_config`), `commands` (it sends `session/commands`), and `turns`
 (it reports `working` or `blocked` when a turn begins and `idle` when it ends, which is what lets the node queue a prompt behind a
-turn: an adapter without `turns` is sent every prompt at once, as before). An adapter, or a node, without these keeps the behaviour
+turn: an adapter without `turns` is sent every prompt at once, as before; see "Turn state" in `docs/specs/protocol.md`: the node counts an
+`idle` only after a `working` or `blocked`, so a stray or repeated one is ignored, and reads `done` or `unknown` as the end of the turn too). An adapter, or a node, without these keeps the behaviour
 described before ADR-0090, byte for byte: the ACP bridge sends the new items only to a node that said `chat.rich`.
 
 ## Methods
