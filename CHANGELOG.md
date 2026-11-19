@@ -8,7 +8,7 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 - An agent now keeps running when Agora's node stops or restarts. Agents are started through a small keeper process (`agora hold`) that outlives the node; the next `agora` attaches to them again, with their screens and whatever they printed meanwhile.
 - `agora down` stops the node and the hub and leaves the agents running (it says how many); `agora down --agents` stops them too. `agora status` shows agents that run without a node.
 - Agents that are confined (a sandbox policy), and every agent on Windows, still run inside the node and end with it, as before; a keeper that cannot start changes nothing.
-- Not yet: under `agora service` on Linux, stopping the login service ends the keeper with the rest of the service.
+- With the login service installed on Linux, restarting or stopping the node's service no longer ends the agents that run through the keeper. For a service installed earlier, run `agora service install` again (it updates the unit and reloads systemd) and then `systemctl --user restart agora-node`; that one restart still ends the agents of the old keeper.
 
 ## 0.3.23
 

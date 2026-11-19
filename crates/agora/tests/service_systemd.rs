@@ -231,6 +231,11 @@ fn service_install_status_remove_drive_a_user_unit_through_systemctl() {
         "{unit}"
     );
     assert!(unit.contains("Restart=on-failure\n") && unit.contains("TimeoutStopSec=25\n"));
+    // The node's unit ends only the supervisor on stop, so the holder and its agents survive (ADR-0079).
+    assert!(
+        unit.contains("KillMode=process\n") && !unit.contains("control-group"),
+        "{unit}"
+    );
     assert_eq!(
         s.log(),
         "--user is-enabled agora-node.service\n--user is-enabled agora-node.service\n\

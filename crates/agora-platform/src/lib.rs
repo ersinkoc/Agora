@@ -2030,6 +2030,20 @@ pub fn service_drop_ins(name: &str) -> io::Result<Vec<PathBuf>> {
     }
 }
 
+/// Whether the service's file differs from what [`service_install`] would write now (Linux: the unit text; a changed setting of a newer
+/// Agora). [`service_install`] then rewrites a file Agora wrote, and refuses one it did not. `false` elsewhere.
+pub fn service_unit_differs(spec: &ServiceSpec) -> io::Result<bool> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::service_unit_differs(spec)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = spec;
+        Ok(false)
+    }
+}
+
 /// `Some(file)` when the service `name` is registered but was not written by Agora (Linux: a user unit of the same name made by hand
 /// or by another tool): the caller leaves it alone, neither stopping, replacing nor removing it. `None` when it is Agora's own or not
 /// registered (Windows: a task of the name without Agora's marker, named by its place in Task Scheduler, `\<name>`; macOS: a file at
@@ -2102,6 +2116,11 @@ pub struct ServiceSpec {
     /// `KeepAlive = { SuccessfulExit = false }`). The supervisor exits 0 for every end it decided itself under a service (a give-up, a
     /// refusal, a clean stop), so only a crash of the supervisor itself is restarted. Windows has no such setting: ignored.
     pub restart_supervisor_on_failure: bool,
+    /// Stopping or restarting the service ends only its supervisor (and, through it, the role); processes the role started in a session
+    /// of their own (the terminal holder and its agents, ADR-0079) keep running. systemd: `KillMode=process` instead of
+    /// `control-group`. macOS already leaves them (`AbandonProcessGroup` false, and each agent is in its own session, measured) and
+    /// Windows has no holder yet: both ignore it.
+    pub keep_children_on_stop: bool,
 }
 
 /// Whether a service is registered (see [`ServiceSpec`]).

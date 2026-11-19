@@ -645,6 +645,7 @@ mod tests {
             ],
             work_dir: "/Users/a&b <c>/.agora".into(),
             restart_supervisor_on_failure: true,
+            keep_children_on_stop: false,
         }
     }
 
@@ -907,6 +908,7 @@ mod tests {
             env: vec![("PATH".into(), "/usr/bin:/bin".into())],
             work_dir: d.clone(),
             restart_supervisor_on_failure: true,
+            keep_children_on_stop: false,
         };
         let pids = || -> Vec<i32> {
             fs::read_to_string(&starts)

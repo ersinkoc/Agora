@@ -340,8 +340,8 @@ pub(crate) fn end_with(supervisor: u32) {
 
 // `agora service` on Linux (ADR-0062 item 6): a systemd user unit, for this user only and never with root, sudo or `loginctl`.
 //
-// - The unit runs the supervisor in the foreground (`Type=simple`); systemd's default `KillMode=control-group` ends everything the
-//   role started when the unit stops, after `TimeoutStopSec=25`. `Restart=on-failure` (when the spec asks for a restart) starts again
+// - The unit runs the supervisor in the foreground (`Type=simple`); `KillMode=control-group` ends everything the role started when the
+//   unit stops, after `TimeoutStopSec=25`; the node's unit has `KillMode=process` (see `unit_text`) so its holder and agents stay. `Restart=on-failure` (when the spec asks for a restart) starts again
 //   a supervisor that crashed, was killed by a signal (an OOM kill) or timed out. Under a service (`--log`) its planned ends (give-up,
 //   refusal, lost lock, clean stop) exit 0 and are never restarted (decision `2026-11-18-1100-linux-563`). Nothing else restarts.
 // - The unit file is written owner-only (0600) and atomically into `$XDG_CONFIG_HOME/systemd/user` (`~/.config/systemd/user`),
@@ -476,6 +476,31 @@ impl Systemd {
             }
         }
         Ok(others)
+    }
+
+    /// See [`crate::service_unit_differs`]: the text Agora would write now is not the text in its unit file.
+    fn differs(&self, spec: &crate::ServiceSpec) -> io::Result<bool> {
+        use std::io::Read;
+        use std::os::unix::fs::OpenOptionsExt;
+        check_name(&spec.name)?;
+        let mut spec = spec.clone();
+        if let Ok(real) = fs::canonicalize(&spec.work_dir) {
+            spec.work_dir = real;
+        }
+        let text = unit_text(&spec)?;
+        let path = self.unit_path(&spec.name);
+        let mut f = match fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&path)
+        {
+            Ok(f) => f,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(true),
+            Err(e) => return Err(e),
+        };
+        let mut was = Vec::new();
+        f.read_to_end(&mut was)?;
+        Ok(was != text.as_bytes())
     }
 
     fn unit_path(&self, name: &str) -> PathBuf {
@@ -679,6 +704,10 @@ fn split_drop_ins(v: &str) -> Vec<PathBuf> {
 
 pub(crate) fn service_precheck() -> io::Result<()> {
     Systemd::from_env().map(|_| ())
+}
+
+pub(crate) fn service_unit_differs(spec: &crate::ServiceSpec) -> io::Result<bool> {
+    Systemd::from_env()?.differs(spec)
 }
 
 pub(crate) fn service_drop_ins(name: &str) -> io::Result<Vec<PathBuf>> {
@@ -921,7 +950,19 @@ fn unit_text(spec: &crate::ServiceSpec) -> io::Result<String> {
             env_word(&format!("PATH={path}"))
         ));
     }
-    unit.push_str("KillMode=control-group\nTimeoutStopSec=25\n");
+    // `control-group` (systemd's default) signals every process in the unit's cgroup when it stops, which would end the terminal holder
+    // and the agents it keeps (ADR-0079). `process` signals only the main process, the supervisor. That is enough: the supervisor
+    // catches `SIGTERM` and passes it on to the node (the path `agora down` uses); a supervisor killed outright (`SIGKILL` after
+    // `TimeoutStopSec`) still ends the node, which sets `PR_SET_PDEATHSIG` (`end_with`). The holder and the agents are each in a
+    // session of their own (`setsid`) and are not the supervisor's children, so nothing signals them and they keep running. The next
+    // start is a new supervisor and node, which attach to the holder that is still there. systemd logs "left-over process" for them:
+    // expected. The hub keeps `control-group`: it has no such children.
+    let kill_mode = if spec.keep_children_on_stop {
+        "process"
+    } else {
+        "control-group"
+    };
+    unit.push_str(&format!("KillMode={kill_mode}\nTimeoutStopSec=25\n"));
     if spec.restart_supervisor_on_failure {
         unit.push_str("Restart=on-failure\n");
     }
@@ -1098,6 +1139,7 @@ esac
             env: vec![("PATH".into(), "/usr/local/bin:/usr/bin".into())],
             work_dir: home.to_path_buf(),
             restart_supervisor_on_failure: true,
+            keep_children_on_stop: false,
         }
     }
 
@@ -1115,6 +1157,23 @@ esac
         let mut s = spec(Path::new("/home/u/.agora"));
         s.restart_supervisor_on_failure = false;
         assert!(!unit_text(&s).unwrap().contains("Restart="));
+    }
+
+    #[test]
+    fn only_a_unit_that_keeps_its_children_uses_kill_mode_process() {
+        let mut s = spec(Path::new("/home/u/.agora"));
+        let hub = unit_text(&s).unwrap();
+        assert!(hub.contains("KillMode=control-group\nTimeoutStopSec=25\n"));
+        assert!(!hub.contains("KillMode=process"));
+        s.keep_children_on_stop = true;
+        let node = unit_text(&s).unwrap();
+        assert!(node.contains("KillMode=process\nTimeoutStopSec=25\n"));
+        assert!(!node.contains("control-group"));
+        // Only that line differs: the quoting and the rest are the same.
+        assert_eq!(
+            node.replace("KillMode=process", "KillMode=control-group"),
+            hub
+        );
     }
 
     #[test]
@@ -1197,6 +1256,41 @@ esac
         assert!(!text.contains("SECRET") && !text.contains("/elsewhere"));
         s.env = vec![("PATH".into(), ":relative:".into())];
         assert!(!unit_text(&s).unwrap().contains("Environment="));
+    }
+
+    #[test]
+    fn a_unit_agora_wrote_is_rewritten_when_its_text_changed_and_one_it_did_not_write_never() {
+        let f = Fake::new("rewrite");
+        let mut s = spec(&f.dir);
+        f.systemd.install(&s).unwrap();
+        let unit = f.unit();
+        // Same text: nothing differs and the file is not rewritten.
+        assert!(!f.systemd.differs(&s).unwrap());
+        let inode = fs::metadata(&unit).unwrap().ino();
+        f.systemd.install(&s).unwrap();
+        assert_eq!(fs::metadata(&unit).unwrap().ino(), inode);
+        // A newer setting: the file Agora wrote is replaced (owner-only) and systemd reloaded, never restarted.
+        s.keep_children_on_stop = true;
+        assert!(f.systemd.differs(&s).unwrap());
+        f.systemd.install(&s).unwrap();
+        let text = fs::read_to_string(&unit).unwrap();
+        assert!(text.contains("KillMode=process\n"), "{text}");
+        assert_eq!(fs::metadata(&unit).unwrap().mode() & 0o777, 0o600);
+        assert!(!f.systemd.differs(&s).unwrap());
+        assert!(f.log().ends_with("--user enable agora-node.service\n"));
+        assert!(!f.log().contains("restart"));
+        // A file without Agora's first line is refused and left as it is.
+        fs::write(&unit, "[Service]\nExecStart=/bin/true\n").unwrap();
+        s.keep_children_on_stop = false;
+        let e = f.systemd.install(&s).unwrap_err();
+        assert_eq!(
+            crate::service_problem(&e),
+            Some(&ServiceProblem::NotOurs(unit.clone()))
+        );
+        assert_eq!(
+            fs::read_to_string(&unit).unwrap(),
+            "[Service]\nExecStart=/bin/true\n"
+        );
     }
 
     #[test]
