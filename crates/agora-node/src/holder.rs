@@ -20,8 +20,13 @@ use agora_platform::{ExitStatus, HeldControl, HeldSignal, ProcessWatch, Terminal
 pub use crate::holder_link::StartRequest;
 use crate::holder_link::{socket_path, AgentInfo, AgentState, Client, Held, LinkError, Refusal};
 
-/// How long a start waits for a holder to listen, and a connection for an answer other than `Busy`.
-const START_WAIT: Duration = Duration::from_secs(5);
+/// How long a start waits for a holder it started to listen. Together with [`BUSY_WAIT`] this bounds what a start can hold the
+/// supervisor for, once per [`BACKOFF`] when the holder cannot be had.
+const START_WAIT: Duration = Duration::from_secs(3);
+/// How long a connection retries `Busy` (the holder has not noticed that the node before this one is gone).
+const BUSY_WAIT: Duration = Duration::from_secs(1);
+/// How long ending an agent through the holder waits for it to be collected.
+const END_WAIT: Duration = Duration::from_secs(3);
 /// After a holder could not be started or reached, new agents run in the node for this long before it is tried again.
 const BACKOFF: Duration = Duration::from_secs(30);
 
@@ -39,6 +44,8 @@ pub struct HolderSession {
     client: Mutex<Client>,
     watch: ProcessWatch,
     broken: AtomicBool,
+    /// Test hook ([`HolderHub::lose_next_start_reply`]): the next start is made but its answer is lost.
+    lose_reply: Arc<AtomicBool>,
     /// The holder's process, as the ledger records it (ADR-0079 decision 9).
     pub pid: u32,
     pub start: u64,
@@ -77,7 +84,44 @@ impl HolderSession {
 
     /// Starts an agent in the holder: its pid and its terminal, ready to read (the master is close-on-exec).
     pub fn start(&self, request: &StartRequest) -> Result<(u32, TerminalHandle), LinkError> {
-        self.call(|c| c.start(request))
+        let started = self.call(|c| c.start(request));
+        if started.is_ok() && self.lose_reply.swap(false, Ordering::AcqRel) {
+            // The agent runs in the holder; the node never learns it (what a link that fails after the start looks like).
+            return Err(LinkError::Io(io::Error::from(io::ErrorKind::TimedOut)));
+        }
+        started
+    }
+
+    /// Ends `agent` for good: stops its group, waits until the holder reports it ended, and releases it (so the holder forgets it,
+    /// and ends when that was its last). `Ok` also when the holder does not know it. `Err` when that could not be settled (the link
+    /// failed, or it did not end in time): nothing is known of it then.
+    pub fn end_agent(&self, agent: &str) -> io::Result<()> {
+        let end = Instant::now() + END_WAIT;
+        let mut stopped = false;
+        loop {
+            let list = self.call(|c| c.list()).map_err(to_io)?;
+            match list.into_iter().find(|a| a.agent == agent) {
+                None => return Ok(()),
+                Some(AgentInfo {
+                    state: AgentState::Exited { .. },
+                    ..
+                }) => return self.release(agent).map_err(to_io),
+                Some(_) => {}
+            }
+            if !stopped {
+                self.stop(agent, true).map_err(to_io)?;
+                stopped = true;
+            }
+            if Instant::now() >= end {
+                return Err(io::Error::from(io::ErrorKind::TimedOut));
+            }
+            std::thread::sleep(Duration::from_millis(30));
+        }
+    }
+
+    /// Whether the holder's process has ended (not only the link): an agent it started is then not running on its account.
+    pub fn holder_ended(&self) -> bool {
+        self.watch.ended()
     }
 
     /// Stops an agent's process group through the holder (`SIGKILL` when `force`).
@@ -137,9 +181,12 @@ enum Why {
     Other,
 }
 
-fn open(setup: &HolderSetup) -> Result<(Arc<HolderSession>, Vec<Held>), Why> {
+fn open(
+    setup: &HolderSetup,
+    lose_reply: &Arc<AtomicBool>,
+) -> Result<(Arc<HolderSession>, Vec<Held>), Why> {
     let socket = socket_path(&setup.home);
-    let end = Instant::now() + START_WAIT;
+    let end = Instant::now() + BUSY_WAIT;
     // `Busy` is "try again" (the holder has not noticed that the node before this one is gone yet), never "a second node exists".
     let mut client = loop {
         match Client::connect(&socket) {
@@ -166,6 +213,7 @@ fn open(setup: &HolderSetup) -> Result<(Arc<HolderSession>, Vec<Held>), Why> {
         client: Mutex::new(client),
         watch,
         broken: AtomicBool::new(false),
+        lose_reply: Arc::clone(lose_reply),
         pid,
         start,
     });
@@ -193,6 +241,9 @@ struct HubState {
 pub struct HolderHub {
     setup: HolderSetup,
     state: Mutex<HubState>,
+    /// The session in use, readable without waiting for a start in progress (the supervision tick asks which holder agents are in).
+    current: Mutex<Option<Arc<HolderSession>>>,
+    lose_reply: Arc<AtomicBool>,
 }
 
 impl HolderHub {
@@ -200,7 +251,44 @@ impl HolderHub {
         Self {
             setup,
             state: Mutex::new(HubState::default()),
+            current: Mutex::new(None),
+            lose_reply: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// The session is not to be used any more (an agent it handed over could not be settled): the next start tries again after
+    /// [`BACKOFF`], ending whatever the holder still holds that this node does not track.
+    pub fn retire_session(&self) {
+        let mut st = self.st();
+        st.session = None;
+        st.unavailable_until = Some(Instant::now() + BACKOFF);
+        self.set_current(None);
+    }
+
+    /// Test hook: the next agent the holder starts for this node is started but its answer is lost.
+    #[doc(hidden)]
+    pub fn lose_next_start_reply(&self) {
+        self.lose_reply.store(true, Ordering::Release);
+    }
+
+    fn set_current(&self, s: Option<Arc<HolderSession>>) {
+        *self.current.lock().unwrap_or_else(|e| e.into_inner()) = s;
+    }
+
+    /// Ends every agent a new attach handed over that this node does not track (ending a running one, releasing an ended one), so none
+    /// is left attached and unread: the holder stopped reading it at the attach, and the node drops the master. `false` when one could
+    /// not be settled; the session is then not to be used.
+    pub fn end_unadopted(session: &HolderSession, held: Vec<Held>) -> bool {
+        let mut all = true;
+        for h in held {
+            let id = h.info.info.agent.clone();
+            let settled = match h.info.info.state {
+                AgentState::Running => session.end_agent(&id),
+                AgentState::Exited { .. } => session.release(&id).map_err(to_io),
+            };
+            all &= settled.is_ok();
+        }
+        all
     }
 
     fn st(&self) -> MutexGuard<'_, HubState> {
@@ -214,9 +302,10 @@ impl HolderHub {
             return None;
         }
         let mut st = self.st();
-        match open(&self.setup) {
+        match open(&self.setup, &self.lose_reply) {
             Ok((session, held)) => {
                 st.session = Some(Arc::clone(&session));
+                self.set_current(Some(Arc::clone(&session)));
                 Some((session, held))
             }
             Err(_) => None,
@@ -234,20 +323,28 @@ impl HolderHub {
             return Some(Arc::clone(s));
         }
         st.session = None;
+        self.set_current(None);
         if st.unavailable_until.is_some_and(|t| Instant::now() < t) {
             return None;
         }
-        let session = match open(&self.setup) {
-            Ok((s, held)) if held.is_empty() => Some(s),
-            // A holder that still holds agents this node never attached (its own link broke while the holder lived) is not used: its
-            // agents' terminals cannot be taken up here, and starting more in it would hide them. They stay as the holder keeps them.
-            Ok(_) | Err(Why::Other) => None,
+        let session = match open(&self.setup, &self.lose_reply) {
+            Ok((s, held)) => {
+                // A holder that still holds agents this node does not track (its own link broke while the holder lived: the node
+                // already counts them ended): they are ended, not left attached and unread, and the session is used only if all were.
+                if Self::end_unadopted(&s, held) {
+                    Some(s)
+                } else {
+                    None
+                }
+            }
+            Err(Why::Other) => None,
             Err(Why::NoHolder) => self.start_and_open(),
         };
         match session {
             Some(s) => {
                 st.unavailable_until = None;
                 st.session = Some(Arc::clone(&s));
+                self.set_current(Some(Arc::clone(&s)));
                 Some(s)
             }
             None => {
@@ -261,7 +358,7 @@ impl HolderHub {
         let pid = start_holder(&self.setup).ok()?;
         let end = Instant::now() + START_WAIT;
         loop {
-            match open(&self.setup) {
+            match open(&self.setup, &self.lose_reply) {
                 Ok((s, held)) if held.is_empty() => return Some(s),
                 Err(Why::NoHolder) if Instant::now() < end => {
                     std::thread::sleep(Duration::from_millis(50));
@@ -277,8 +374,9 @@ impl HolderHub {
 
     /// The holder's process, as the ledger records it, while a live session exists.
     pub fn identity(&self) -> Option<(u32, u64)> {
-        self.st()
-            .session
+        self.current
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
             .as_ref()
             .filter(|s| !s.gone())
             .map(|s| (s.pid, s.start))

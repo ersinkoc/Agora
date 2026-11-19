@@ -2189,8 +2189,11 @@ pub fn load_manifests(dir: &Path) -> (Vec<Manifest>, Vec<(PathBuf, String)>) {
 }
 
 /// ADR-0079 decisions 4 and 9: attaches to the node's holder if one runs, and puts back every agent it kept running that the ledger
-/// says it holds (the same holder, by pid and start time). An agent that ended while no node was there is taken (the holder forgets it)
-/// and stays interrupted, offered for resume. One the ledger does not know, or whose folder is gone, is left as the holder keeps it.
+/// says it holds (the same holder, by pid and start time). Whatever is not put back is **ended through the holder**, never left
+/// attached and unread: the attach made the holder stop reading each terminal and forget its buffer, and the node drops what it does
+/// not take, so a running agent left like that would block on a full terminal for good. That is an agent that ended while no node was
+/// there (released; its entry stays interrupted, offered for resume), one the ledger does not know or names another holder, one whose
+/// folder or project is gone, and one that could not be taken up. When one cannot be ended the holder is not used for new agents.
 fn take_up_held(
     hub: &crate::holder::HolderHub,
     sup: &mut Supervisor,
@@ -2201,59 +2204,75 @@ fn take_up_held(
     let Some((session, held)) = hub.attach_existing() else {
         return;
     };
+    let mut ended = Vec::new();
     for h in held {
         let id = h.info.info.agent.clone();
-        let Some(entry) = ledger.get(&id) else {
+        let running = matches!(h.info.info.state, Held::Running);
+        let entry = ledger.get(&id);
+        let theirs = entry
+            .as_ref()
+            .is_some_and(|e| (e.holder_pid, e.holder_started) == (session.pid, session.start));
+        let adoptable = entry.filter(|e| running && theirs && e.interrupted());
+        let Some(entry) = adoptable else {
+            ended.push(h);
             continue;
         };
-        let theirs = (entry.holder_pid, entry.holder_started) == (session.pid, session.start);
-        match h.info.info.state {
-            Held::Exited { .. } => {
-                if theirs {
-                    let _ = session.release(&id);
-                }
-            }
-            Held::Running if theirs && entry.interrupted() => {
-                let folder = PathBuf::from(&entry.folder);
-                let project = if entry.directory {
-                    crate::directory::inspect(&entry.folder, &cfg.node_id, false)
-                        .ok()
-                        .map(|(_, p)| p)
-                } else {
-                    git::discover_checkout(&folder).ok().map(|c| c.project)
-                };
-                let Some(project) = project else { continue };
-                let restore = crate::supervisor::Restore {
-                    id: AgentId::new(id.clone()),
-                    kind: entry.kind.clone(),
-                    project,
-                    folder,
-                    directory: entry.directory,
-                    branch: entry.branch.clone(),
-                    session: (!entry.session_id.is_empty()).then(|| entry.session_id.clone()),
-                    carry_on: false,
-                    private_config: (entry.directory && !entry.managed_worktree).then(|| {
-                        cfg.worktree_root
-                            .join(".sessions")
-                            .join(format!("resume-{id}"))
-                    }),
-                };
-                if sup
-                    .adopt_held(restore, h, &session, Instant::now())
-                    .is_err()
-                {
-                    continue;
-                }
-                if !entry.parent_agent_id.is_empty() {
-                    sup.set_parent(
-                        &AgentId::new(id.clone()),
-                        &AgentId::new(entry.parent_agent_id.clone()),
-                    );
-                }
-                ledger.reclaim(&id, (session.pid, session.start), now_ms());
-            }
-            Held::Running => {}
+        let folder = PathBuf::from(&entry.folder);
+        let project = if entry.directory {
+            crate::directory::inspect(&entry.folder, &cfg.node_id, false)
+                .ok()
+                .map(|(_, p)| p)
+        } else {
+            git::discover_checkout(&folder).ok().map(|c| c.project)
+        };
+        let Some(project) = project else {
+            ended.push(h);
+            continue;
+        };
+        let restore = crate::supervisor::Restore {
+            id: AgentId::new(id.clone()),
+            kind: entry.kind.clone(),
+            project,
+            folder,
+            directory: entry.directory,
+            branch: entry.branch.clone(),
+            session: (!entry.session_id.is_empty()).then(|| entry.session_id.clone()),
+            carry_on: false,
+            private_config: (entry.directory && !entry.managed_worktree).then(|| {
+                cfg.worktree_root
+                    .join(".sessions")
+                    .join(format!("resume-{id}"))
+            }),
+        };
+        // A failed take-up consumes the terminal: the agent is ended by name below, like the others.
+        if sup
+            .adopt_held(restore, h, &session, Instant::now())
+            .is_err()
+        {
+            ended.push(crate::holder_link::Held {
+                info: crate::holder_link::TerminalInfo {
+                    info: crate::holder_link::AgentInfo {
+                        agent: id,
+                        pid: 0,
+                        state: Held::Running,
+                    },
+                    buffer_dropped: false,
+                    buffer: Vec::new(),
+                },
+                terminal: None,
+            });
+            continue;
         }
+        if !entry.parent_agent_id.is_empty() {
+            sup.set_parent(
+                &AgentId::new(id.clone()),
+                &AgentId::new(entry.parent_agent_id.clone()),
+            );
+        }
+        ledger.reclaim(&id, (session.pid, session.start), now_ms());
+    }
+    if !crate::holder::HolderHub::end_unadopted(&session, ended) {
+        hub.retire_session();
     }
 }
 

@@ -549,6 +549,12 @@ impl Supervisor {
         self.holder = Some(holder);
     }
 
+    /// The holder this node uses, if any (tests).
+    #[doc(hidden)]
+    pub fn holder_hub(&self) -> Option<std::sync::Arc<HolderHub>> {
+        self.holder.clone()
+    }
+
     /// ADR-0079 decision 9: the agents whose process is the holder's, and the holder's process (pid and start time), for the ledger.
     pub fn held_agents(&self) -> (Vec<AgentId>, Option<(u32, u64)>) {
         let ids = self
@@ -1892,10 +1898,15 @@ impl Supervisor {
         if folder.is_some_and(|f| !f.in_place()) {
             return None;
         }
-        let mut env: Vec<(String, String)> = std::env::vars_os()
-            .filter(|(k, _)| !agora_platform::env_removed(k, &cfg.env_remove))
-            .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
-            .collect();
+        // The link carries text. A variable that is not UTF-8 cannot travel, and leaving it out would start the agent with a smaller
+        // environment than the node's own start gives it: such an agent is run by the node (`None`).
+        let mut env: Vec<(String, String)> = Vec::new();
+        for (k, v) in std::env::vars_os() {
+            if agora_platform::env_removed(&k, &cfg.env_remove) {
+                continue;
+            }
+            env.push((k.into_string().ok()?, v.into_string().ok()?));
+        }
         for (k, v) in &cfg.env {
             env.retain(|(a, _)| a != k);
             env.push((k.clone(), v.clone()));
@@ -1920,7 +1931,17 @@ impl Supervisor {
                 Err(LinkError::Refused(HolderRefusal::Failed | HolderRefusal::AgentExists, _)) => {
                     return None
                 }
-                Err(_) => continue,
+                // Refused for another reason: nothing was started.
+                Err(LinkError::Refused(..)) => continue,
+                // The link failed: the holder may have started the agent all the same. Ask before anything else is done: an agent it
+                // has is ended (the node never got its terminal) and only then is another start made, so two copies never run. When
+                // that cannot be settled the start fails rather than run a second copy, unless the holder itself is gone.
+                Err(_) => {
+                    if session.end_agent(id.as_str()).is_ok() || session.holder_ended() {
+                        continue;
+                    }
+                    return Some(Err(SupervisorError::Spawn("holder link failed".into())));
+                }
             };
             let made = agora_platform::held_pty(master, pid, session.control_of(id.as_str()))
                 .and_then(|pty| TerminalHandle::start(pty, self.cfg.terminal))

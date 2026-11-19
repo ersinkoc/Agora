@@ -20,6 +20,12 @@ use agora_protocol::v1::{self, command_ok::Result as Ok_, command_request::Comma
 
 const AGORA: &str = env!("CARGO_BIN_EXE_agora");
 
+/// The tests share this process (its environment, the role lock it stands for): one at a time.
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn alive(pid: u32) -> bool {
     agora_platform::process_start_time(pid).is_some()
 }
@@ -188,6 +194,7 @@ fn sh(script: &str) -> Vec<String> {
 
 #[test]
 fn an_agent_outlives_its_node_and_the_next_node_takes_it_up_with_the_output_written_meanwhile() {
+    let _serial = serial();
     let rig = Rig::new(
         "outlive",
         &sh("echo ready; read a; echo got-$a; sleep 2; echo written-meanwhile; read b; echo got-$b; sleep 600"),
@@ -249,6 +256,7 @@ fn an_agent_outlives_its_node_and_the_next_node_takes_it_up_with_the_output_writ
 
 #[test]
 fn an_agent_started_by_a_node_without_a_holder_is_the_nodes_own_and_ends_with_it() {
+    let _serial = serial();
     let rig = Rig::new("fallback", &sh("echo up; sleep 600"));
     // A holder that cannot start: the node runs its agents itself, exactly as it did before.
     let node = Node::start_with_holder(
@@ -273,6 +281,7 @@ fn an_agent_started_by_a_node_without_a_holder_is_the_nodes_own_and_ends_with_it
 
 #[test]
 fn the_agent_gets_the_whole_environment_the_node_sent_and_none_of_the_holders_own() {
+    let _serial = serial();
     let rig = Rig::new(
         "env",
         &sh("echo VAR=[$AGORA_HOLD_NODE_TEST_VAR] STALE=[$AGORA_HOLD_STALE_VAR]; sleep 600"),
@@ -300,6 +309,7 @@ fn the_agent_gets_the_whole_environment_the_node_sent_and_none_of_the_holders_ow
 
 #[test]
 fn an_agent_that_ends_while_the_node_is_attached_is_collected_and_the_holder_ends_with_its_last() {
+    let _serial = serial();
     let rig = Rig::new("ends", &sh("echo done-here; sleep 1; exit 0"));
     let node = rig.node();
     let id = rig.launch(&node);
@@ -318,6 +328,7 @@ fn an_agent_that_ends_while_the_node_is_attached_is_collected_and_the_holder_end
 
 #[test]
 fn stopping_a_held_agent_ends_its_process() {
+    let _serial = serial();
     let rig = Rig::new("stop", &sh("echo up; sleep 600"));
     let node = rig.node();
     let id = rig.launch(&node);
@@ -351,6 +362,7 @@ fn agora(rig: &Rig, args: &[&str]) -> (bool, String) {
 
 #[test]
 fn down_keeps_the_agents_and_down_agents_stops_them() {
+    let _serial = serial();
     let rig = Rig::new("down", &sh("echo up; sleep 600"));
     let node = rig.node();
     let id = rig.launch(&node);
@@ -373,4 +385,102 @@ fn down_keeps_the_agents_and_down_agents_stops_them() {
     assert!(text.contains("Stopped 1 agent"), "{text}");
     wait_for("the agent to end", || !alive(pid));
     assert!(!rig.hold_pid_file().exists(), "the holder was left running");
+}
+
+/// A node that started, ran an agent and stopped; then `change` is done to what the next node will find; then a node starts. Returns the
+/// agent's pid.
+fn next_node_finds(tag: &str, change: impl FnOnce(&Rig)) -> (Rig, Node, u32) {
+    let rig = Rig::new(tag, &sh("echo up; sleep 600"));
+    let node = rig.node();
+    let id = rig.launch(&node);
+    wait_for("the agent", || screen(&node, &id).contains("up"));
+    let pid = pid_of(&node, &id);
+    wait_for("the holder in the ledger", || {
+        node.ledger.get(&id).is_some_and(|e| e.holder_pid != 0)
+    });
+    drop(node);
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(alive(pid));
+    change(&rig);
+    let node = rig.node();
+    (rig, node, pid)
+}
+
+/// An agent the holder kept that the next node does not take up (nothing in the ledger knows it, or its folder is gone) must not be
+/// left attached and unread: the attach made the holder stop reading it, so it would block on a full terminal for good. It is ended.
+#[test]
+fn a_held_agent_the_ledger_does_not_know_is_ended_not_left_unread() {
+    let _serial = serial();
+    let (rig, node, pid) = next_node_finds("unknown", |rig| {
+        std::fs::remove_file(rig.root.join("data/sessions/ledger.json")).expect("ledger");
+    });
+    wait_for("the unknown agent to be ended", || !alive(pid));
+    wait_for("the holder to end", || !rig.hold_pid_file().exists());
+    // The holder is usable for the next agent.
+    let id = rig.launch(&node);
+    assert!(held(&node, &id));
+}
+
+#[test]
+fn a_held_agent_whose_folder_is_gone_is_ended_not_left_unread() {
+    let _serial = serial();
+    let (rig, node, pid) = next_node_finds("nofolder", |rig| {
+        std::fs::remove_dir_all(&rig.folder).expect("folder");
+    });
+    wait_for("the agent to be ended", || !alive(pid));
+    wait_for("the holder to end", || !rig.hold_pid_file().exists());
+    assert!(node.supervisor.lock().unwrap().list().is_empty());
+}
+
+/// The holder starts the agent but the answer never reaches the node: the node must find that agent and end it before it starts again,
+/// never run a second copy.
+#[test]
+fn a_start_whose_answer_is_lost_leaves_one_agent_not_two() {
+    let _serial = serial();
+    let rig = Rig::new("lost", &sh("echo $$ >> ../pids; echo up; sleep 600"));
+    let node = rig.node();
+    // The first agent starts the holder; the second one's answer is lost.
+    let first = rig.launch(&node);
+    wait_for("the first agent", || screen(&node, &first).contains("up"));
+    node.supervisor
+        .lock()
+        .unwrap()
+        .holder_hub()
+        .expect("a holder")
+        .lose_next_start_reply();
+    let second = rig.launch(&node);
+    wait_for("the second agent", || screen(&node, &second).contains("up"));
+    let pids: Vec<u32> = std::fs::read_to_string(rig.root.join("pids"))
+        .expect("pids")
+        .lines()
+        .map(|l| l.trim().parse().expect("a pid"))
+        .collect();
+    assert_eq!(pids.len(), 3, "{pids:?}");
+    // The first agent's, the lost one's and the one that was started again: the lost one is ended and the other two run.
+    let running: Vec<&u32> = pids.iter().filter(|p| alive(**p)).collect();
+    assert_eq!(running.len(), 2, "{pids:?}");
+    assert!(
+        !alive(pids[1]),
+        "the agent whose answer was lost still runs"
+    );
+    assert!(held(&node, &second));
+}
+
+#[test]
+fn an_environment_that_cannot_be_sent_makes_the_node_run_the_agent_itself() {
+    let _serial = serial();
+    use std::os::unix::ffi::OsStrExt;
+    let rig = Rig::new("badenv", &sh("echo up; sleep 600"));
+    let node = rig.node();
+    std::env::set_var(
+        "AGORA_HOLD_NOT_UTF8",
+        std::ffi::OsStr::from_bytes(b"caf\xe9"),
+    );
+    let id = rig.launch(&node);
+    std::env::remove_var("AGORA_HOLD_NOT_UTF8");
+    assert!(
+        !held(&node, &id),
+        "started through the holder with a smaller environment than the node's own"
+    );
+    wait_for("the agent", || screen(&node, &id).contains("up"));
 }

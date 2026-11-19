@@ -80,6 +80,9 @@ next frame's.
 - **Where:** `agora_node::holder` (`HolderHub`, `HolderSession`), `Supervisor::launch_held`, `Supervisor::adopt_held`, and
   `agora_platform::held_pty` (the terminal of a held agent as a `Pty`). Unix only (`agora_platform::HOLDER_BUILT`); elsewhere nothing
   here runs and the node runs its agents itself.
+- **Waiting:** a start that needs the holder holds the supervisor while it connects (`Busy` for at most 1 s) and while a holder it
+  started comes up (at most 3 s); when it cannot be had the node does not try again for 30 seconds. The supervision tick reads the
+  holder's identity without waiting for a start.
 - **Starting the holder:** by the first agent that needs one, never at the node's start (a node that starts nothing leaves no idle
   holder): `agora hold --home <home>` through `spawn_detached`, whose child calls `setsid` before `exec` (a start where `setsid` fails
   is an error and means "no holder here"; never `spawn_bound`). The node connects (retrying `Busy` for a few seconds, never reading it
@@ -91,7 +94,12 @@ next frame's.
   started by the node as before: the holder does not carry a confinement yet, and `Start` is unchanged. A start the holder refuses
   (`Failed`: the program is not there; `AgentExists`) is the node's own start's to report.
 - **Environment:** the node sends the complete environment `spawn` would have given the agent (its own, minus the removed names,
-  plus the kind's and the node's additions). Variables that are not UTF-8 cannot travel and are left out.
+  plus the kind's and the node's additions). The link carries text: when a variable is not UTF-8 the agent is **not** started through
+  the holder (the node runs it itself), never with a smaller environment than the node's own start gives it.
+- **An ambiguous start:** when the link fails after a `Start` was sent, the holder may have started the agent. The node asks the holder
+  (`List`) before anything else: an agent it has under that id is ended (stop, wait for the exit, `Release`) and only then is another
+  start made, so two copies never run. If that cannot be settled and the holder's process is alive, the start fails; if the holder's
+  process is gone the node starts again.
 - **After the start:** the node reads and writes the master it received itself; nothing passes through the holder per byte. Its copies
   of the master and of the link are close-on-exec. Resize and the foreground process use the master directly; a signal and the agent's
   end go over the link (`Signal`/`Stop`, `List` then `Release`). A terminal's exit is polled (the actor looks about once a second
@@ -103,8 +111,12 @@ next frame's.
   ledger entry names this holder (pid and start time, written by the node's tick, `Entry::holder_pid`/`holder_started`) it restores the
   agent, builds its terminal from the master, feeds it what the holder buffered, nudges its size (two resizes) so full-screen programs
   redraw, registers its mesh endpoint again at the same path, and clears the interruption (`Ledger::reclaim`). An agent that ended while
-  no node was attached is released and stays interrupted (offered for resume); its status and output are not replayed. An agent the
-  ledger does not know, or whose folder is gone, is left as the holder keeps it.
+  no node was attached is released and stays interrupted (offered for resume); its status and output are not replayed.
+  **Nothing is left attached and unread:** `Attach` made the holder stop reading each terminal and forget its buffer, and the node drops
+  a master it does not take, so a running agent left like that would block on a full terminal for good. Every held agent the node does
+  not take up (the ledger does not know it or names another holder, its folder or project is gone, or taking it up failed) is ended
+  through the holder (stop, wait for the exit, `Release`). If one cannot be settled the holder is not used for new agents for 30
+  seconds, and the next attempt ends it first. The same happens when a new session finds agents its own broken link left behind.
 - **When the holder dies:** a terminal whose holder cannot be asked reports the agent's end with no status; the supervisor's
   restart rule then applies (a new holder is started on the next start, or the node runs it). The group-member listing of decision 8
   (`SIGTERM` then `SIGKILL` to every recorded member) is **not built**: the node closes its copies of the masters (the kernel's hangup)
@@ -118,8 +130,8 @@ next frame's.
   possible, and the agent is ended at once if the check after fails; carrying the folder handle needs a new tag. (2) Under `agora
   service` on Linux the unit's `KillMode=control-group` ends the holder (and so its agents) when the unit stops: the unit needs
   `KillMode=process` (or the holder its own scope) before agents survive a service restart. (3) macOS is compile-checked only; Windows
-  has no holder yet. (4) A node whose holder link breaks while the holder lives does not take up the agents it still holds until
-  the next node start. (5) A different holder version is refused and the node runs its agents itself; the "agents running in an older
+  has no holder yet. (4) A node whose holder link breaks while the holder lives counts the agents ended (it can no longer reach
+  them) and ends them in the holder when it next connects. (5) A different holder version is refused and the node runs its agents itself; the "agents running in an older
   holder" report of decision 5 is not built.
 
 ## REQUIRED of step 2 (the node's side; found in the independent review of #760): done in step 2, as described above
