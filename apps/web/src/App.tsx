@@ -34,6 +34,8 @@ import { DeviceRequest } from './components/DeviceRequest';
 import { num } from './net/view';
 import { loadAudit } from './net/audit';
 import { agentTarget } from './components/sessionChoice';
+import { ChatActionsContext, type ChatActions, type PromptResult } from './components/chatActions';
+import type { ActionResult } from './net/refusal';
 import { usableId } from './components/launchChoice';
 import { launchSettingsField } from './components/launchSettings';
 import { rememberStarted } from './components/launchMemory';
@@ -380,13 +382,32 @@ export function App() {
     return f;
   }, [api]);
 
-  const sendPrompt = useCallback(async (a: AgentTileModel, text: string): Promise<boolean> => {
-    if (!api || !a.workspaceRef) return false;
+  // ADR-0090: an agent whose node answered a prompt in the rich form (`AgentPromptResult`, capability `chat.rich`) is remembered, so the
+  // window offers Stop turn for it. A node without the capability answers with nothing and adds none.
+  const [rich, setRich] = useState<ReadonlySet<string>>(() => new Set());
+  const sendPrompt = useCallback(async (a: AgentTileModel, text: string): Promise<PromptResult> => {
+    if (!api || !a.workspaceRef) return { ok: false };
     try {
-      await api.command(a.workspaceRef.node, { agentPrompt: { agentId: a.id.slice(a.id.indexOf('/') + 1), text } });
-      return true;
-    } catch { return false; }
+      const ok = await api.command(a.workspaceRef.node, { agentPrompt: { agentId: a.id.slice(a.id.indexOf('/') + 1), text } });
+      const r = ok.agentPrompt;
+      if (r) setRich((s) => (s.has(a.id) ? s : new Set(s).add(a.id)));
+      return { ok: true, queued: !!r?.queued };
+    } catch (e) { return { ok: false, code: (e as { code?: string }).code }; }
   }, [api]);
+
+  // ADR-0090: the agent's own settings (model, mode, effort, ...) and ending its turn. Both are the user's own commands, addressed by the
+  // hub-wide key the choice was made for; a node without the capability answers `protocol.capability_missing`, which reads as "no".
+  const setConfig = useCallback(async (agentKey: string, configId: string, value: string): Promise<ActionResult> => {
+    const to = agentTarget(agentKey);
+    if (!api || !to) return false;
+    try { await api.command(to.node, { agentSetConfig: { agentId: to.agentId, configId, value } }); return true; } catch (e) { return (e as { code?: string }).code ?? false; }
+  }, [api]);
+  const cancelTurn = useCallback(async (agentKey: string, dropQueue: boolean): Promise<ActionResult> => {
+    const to = agentTarget(agentKey);
+    if (!api || !to) return false;
+    try { await api.command(to.node, { agentCancelTurn: { agentId: to.agentId, dropQueue } }); return true; } catch (e) { return (e as { code?: string }).code ?? false; }
+  }, [api]);
+  const chatActions = useMemo<ChatActions>(() => (hub && api ? { setConfig, cancelTurn, rich } : {}), [hub, api, setConfig, cancelTurn, rich]);
 
   // ADR-0058: the user's own switch of a chat agent's mode or model, among what the agent offered.
   // ADR-0058: the user's own switch of a chat agent's mode or model, among what the agent offered. Addressed by the hub-wide key the
@@ -491,7 +512,7 @@ export function App() {
   }
 
   return (
-    <>
+    <ChatActionsContext.Provider value={chatActions}>
       {hash === '#/gallery' ? <Gallery /> : isMachinesHash(hash) ? <MachinesPage focus={machineOfHash(hash)} machines={live ? machines(live) : hub ? [] : demoMachines} agents={agents} usage={usage} projects={live && usage ? costByProject(live, usage.perAgent) : []} onBack={() => go('#/')} onForget={hub ? forgetMachines : undefined} /> : hash === '#/audit' && hub ? <AuditPage load={(who) => loadAudit(hub.token, who)} onBack={() => go('#/')} /> : hash === '#/device' ? <DevicePage device={device} onBack={() => go('#/')} onTheme={editTheme} onAddPasskey={hub && passkeysSupported() ? async (password) => (await addPasskey(hub.token, undefined, password)).ok : undefined} passkeyNeedsPassword={info.passwordRequired}
           fingerprint={device ? prints.get(device.id) : undefined} machines={live ? machines(live) : undefined} trustedOn={trustedOn} others={hub ? others : undefined}
           asked={asked} onAsk={hub && api ? askApproval : undefined} onRemove={hub && api ? removeDevice : undefined}
@@ -522,7 +543,7 @@ export function App() {
         machines={machines(live).filter((m) => trustedOn.includes(m.id)).map((m) => ({ id: m.id, name: m.name }))}
         onApprove={(nodes) => approveDevice(waiting[0]!, nodes)}
         onLater={() => setLater((l) => new Set(l).add(waiting[0]?.deviceId ?? ''))} />}
-    </>
+    </ChatActionsContext.Provider>
   );
 }
 

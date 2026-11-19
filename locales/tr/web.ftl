@@ -1099,3 +1099,53 @@ fm-kind-archive = Arşiv
 fm-kind-config = Ayar
 fm-kind-file = Dosya
 fm-kind-private = Gizli dosya
+tool-status-pending = Başlamayı bekliyor
+tool-status-running = Çalışıyor
+tool-status-done = Bitti
+tool-status-failed = Başarısız
+tool-output-cut = Çıktı kısaltıldı.
+chat-thinking = Düşünüyor…
+chat-steps-call-failed = { $count ->
+    [one] Bir adım başarısız oldu
+   *[other] { $count } adım başarısız oldu
+}
+permission-pending = İzin istendi
+permission-approved = İzin verildi
+permission-denied = İzin verilmedi
+permission-cancelled = Yanıtlanmadı
+permission-show = İsteği göster
+chat-queued-mark = Bekliyor
+chat-not-sent-mark = Gönderilmedi
+session-effort = Çaba
+session-on = Açık
+session-off = Kapalı
+session-more = Diğer ayarlar
+session-config-unavailable = Ajanın sormadan işlem yapmasına yol açan seçenekler buradan henüz seçilemez. Ajanı o şekilde başlatın.
+prompt-queued = Bu turun bitmesi bekleniyor.
+prompt-queue-full = Çok fazla mesaj bekliyor. Ajanı bekleyin ya da turunu durdurun.
+prompt-placeholder-commands = Ne yapmalı? Komutlar için / yazın.
+queue-count = { $count ->
+    [one] 1 sırada
+   *[other] { $count } sırada
+}
+queue-note = Bu tur bitince gönderilir
+queue-drop = Sırayı boşalt
+queue-drop-title = Bekleyen mesajlar silinsin mi?
+queue-drop-body = { $count ->
+    [one] Bu işlem ajanın o anki turunu da durdurur ve bekleyen mesaj gönderilmez. Ajanın kendisi çalışmaya devam eder.
+   *[other] Bu işlem ajanın o anki turunu da durdurur ve bekleyen { $count } mesaj gönderilmez. Ajanın kendisi çalışmaya devam eder.
+}
+queue-drop-yes = Sırayı boşalt ve turu durdur
+queue-drop-no = Kalsınlar
+slash-menu = Ajanın sunduğu komutlar
+turn-stop = Turu durdur
+turn-stop-hint = Yalnızca bu turu bitirir. Ajan çalışmaya devam eder ve ona başka bir mesaj gönderebilirsiniz.
+turn-stop-failed = Tur durmadı.
+chat-trimmed = { $count ->
+    [one] 1 eski kayıt yüklenmedi.
+   *[other] { $count } eski kayıt yüklenmedi.
+}
+refusal-unsupported = Bu ajanın makinesi bunu henüz desteklemiyor.
+refusal-unconfirmed = Bu seçim ajanın sormadan işlem yapmasına izin verir ve bu pencerenin henüz veremediği bir onay gerektirir. Ajanı o şekilde başlatın.
+refusal-forbidden = Bu makinenin ayarları ajanın sormadan işlem yapmasına izin vermiyor.
+refusal-unknown-option = Ajan bu ayarı ya da değeri artık sunmuyor.

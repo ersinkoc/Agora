@@ -202,4 +202,9 @@ Everything is additive (ADR-0006): new enum values, new fields and new messages 
 - Step 5 (hub): done: the hub keeps the last `AgentSessionConfig` and `AgentCommands` per agent (bounded, dropped with the agent) and sends them after a snapshot, since `AgentSnapshot` has no field for them. Steps 6 (web) and 7 (TUI): not done in that PR. Step 1 (real-agent
   fixtures) is still the maintainer's: nothing here was run against a real agent, and what real agents send (thinking, config options,
   `usage_update`) is unverified.
+- Step 6 (web): done in a separate PR: tool calls as one row that changes in place (status mark, duration, files, output tail), thinking, the
+  plan with step status, permission records, Stop turn, the queue with Drop the queue, the agent's own settings as menus (a choice that skips
+  permissions is shown disabled and never sent), the `/` menu. The window cannot read a node's capabilities (`NodeSnapshot` has no field for
+  them; adding one is a schema change and needs an ADR), so it goes by what the node sent (rich entries, settings or commands, or an
+  `AgentPromptResult`); a node's capabilities in the snapshot would make this exact. Step 7 (TUI): not started.
 

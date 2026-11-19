@@ -1,12 +1,15 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { t } from '../i18n';
 import type { AgentTileModel, SessionModel } from '../model';
-import { mergeLines, noticeText, type ChatLine, type ChatSource } from '../net/chat';
+import { isRich, mergeLines, noticeText, queueState, trimLines, type ChatLine, type ChatSource } from '../net/chat';
 import { groupTurns, pairDiffs, type TurnItem } from '../net/chatView';
 import { atBottom, grew, jumped, keepPosition, scrolled, start, type Follow } from '../net/follow';
-import { groupFlag, transcript, windowed } from '../net/transcript';
+import { refusalKey } from '../net/refusal';
+import { applyCommand, filterCommands, slashQuery, stepIndex, uniqueCommands } from '../net/slash';
+import { flagOf, transcript, windowed } from '../net/transcript';
 import { FilesChanged, Item, Turn } from './ChatEntry';
-import { sendsOnEnter } from './composer';
+import { ChatActionsContext, type PromptResult, type PromptSend } from './chatActions';
+import { IME_GRACE_MS, sendsOnEnter } from './composer';
 import { Icon } from './Icon';
 import { NoAskBadge } from './NoAskBadge';
 import { SessionBar } from './SessionBar';
@@ -29,14 +32,28 @@ const PAGE = 120;
 
 // A chat agent has no terminal: you talk to it with requests and read its answers, as a conversation the node keeps (ADR-0038).
 // `approvals`: what this agent waits on, pinned above the composer (the caller draws them). `onReview`: the way into the review screen.
-export function PromptBox({ agent, send, source, choose, approvals, onReview }: { agent: AgentTileModel; send?: (a: AgentTileModel, text: string) => Promise<boolean>; source?: ChatSource; choose?: (agentKey: string, kind: OptionKind, id: string) => Promise<boolean>; approvals?: ReactNode; onReview?: () => void }) {
+export function PromptBox({ agent, send, source, choose, approvals, onReview }: { agent: AgentTileModel; send?: PromptSend; source?: ChatSource; choose?: (agentKey: string, kind: OptionKind, id: string) => Promise<boolean>; approvals?: ReactNode; onReview?: () => void }) {
+  const actions = useContext(ChatActionsContext);
   const [text, setText] = useState('');
-  const [sent, setSent] = useState<'ok' | 'failed' | undefined>();
+  const [sent, setSent] = useState<'ok' | 'queued' | 'full' | 'failed' | undefined>();
   const [busy, setBusy] = useState(false);
-  const [lines, setLines] = useState<ChatLine[]>([]);
+  // At most MAX_LINES entries are held; older ones are dropped and counted, so a stream of new ids cannot grow memory or the per-chunk work.
+  const [held, setHeld] = useState<{ lines: ChatLine[]; trimmed: number }>({ lines: [], trimmed: 0 });
+  const lines = held.lines;
   const [shown, setShown] = useState(PAGE);
   const [follow, setFollow] = useState<Follow>(start);
+  // The "/" menu: where the caret is, which command is highlighted, and whether Escape closed it for what is typed now.
+  const [caret, setCaret] = useState(0);
+  const [slashAt, setSlashAt] = useState(0);
+  const [slashOff, setSlashOff] = useState(false);
+  // Stopping the turn, and dropping the queue (which asks first, because it also stops the turn).
+  const [stopping, setStopping] = useState<'busy' | undefined>();
+  const [stopFailed, setStopFailed] = useState<string | undefined>(); // the locale key of why the turn did not stop
+  const [dropAsk, setDropAsk] = useState(false);
   const log = useRef<HTMLDivElement>(null);
+  const field = useRef<HTMLTextAreaElement>(null);
+  const pinned = useRef<HTMLDivElement>(null);
+  const caretTo = useRef<number | undefined>(undefined);
   const seen = useRef(0);
   // Older entries are being drawn above the reader: the height before, and the diff to scroll to once they are in.
   const before = useRef<number | undefined>(undefined);
@@ -47,13 +64,20 @@ export function PromptBox({ agent, send, source, choose, approvals, onReview }: 
   const last = view.items.length ? view.items[view.items.length - 1] : undefined;
   const newestSteps = [...view.items].reverse().find((i) => i.kind === 'steps');
   const rows = useMemo(() => groupTurns(view.items).map((row) => ({ row, paired: row.kind === 'turn' ? pairDiffs(row.items) : undefined })), [view.items]);
+  const queue = useMemo(() => queueState(lines), [lines]);
   const modelId = agent.session?.currentModel;
   const model = agent.session?.models.find((m) => m.id === modelId)?.name || undefined;
+  const offered = agent.session?.commands;
+  const commands = useMemo(() => uniqueCommands(offered ?? []), [offered]);
 
   useEffect(() => {
     if (!source) return;
-    setLines([]); setShown(PAGE); setFollow(start); seen.current = 0;
-    const sub = source.connect((incoming, replace) => setLines((held) => (replace ? incoming : mergeLines(held, incoming))));
+    setHeld({ lines: [], trimmed: 0 }); setShown(PAGE); setFollow(start); seen.current = 0;
+    const sub = source.connect((incoming, replace) => setHeld((h) => {
+      const t = trimLines(replace ? [...incoming] : mergeLines(h.lines, incoming));
+      if (t.lines === h.lines) return h; // nothing new: nothing redraws
+      return { lines: t.lines, trimmed: (replace ? 0 : h.trimmed) + t.dropped };
+    }));
     return () => sub.close();
   }, [source]);
 
@@ -69,11 +93,13 @@ export function PromptBox({ agent, send, source, choose, approvals, onReview }: 
   }, [shown]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // The reader is at the bottom: new entries keep them there (one jump, never smooth: a smooth scroll fights the next chunk). Otherwise
-  // nothing moves and the pill counts what arrived.
+  // nothing moves and the pill counts what arrived. An entry that only changed in place (a call that finished) adds none to the count and
+  // moves nothing: `lines.length` is the same.
   useLayoutEffect(() => {
     const el = log.current;
-    const added = lines.length - seen.current;
-    seen.current = lines.length;
+    const total = held.trimmed + lines.length;
+    const added = total - seen.current;
+    seen.current = total;
     if (!el) return;
     if (follow.following) el.scrollTop = el.scrollHeight;
     else if (added > 0) setFollow((f) => grew(f, added));
@@ -91,20 +117,58 @@ export function PromptBox({ agent, send, source, choose, approvals, onReview }: 
   };
   // A file whose change is older than what is drawn: draw earlier entries (keeping the position), then go to it.
   const goTo = (path: string) => { if (!reveal(path) && view.hidden > 0) { goAfter.current = path; earlier(); } };
+  // A permission record points at the pinned request below the conversation: take the reader there (the request stays where it is answered).
+  const showRequest = approvals ? () => { const el = pinned.current; if (el) { el.scrollIntoView?.({ block: 'nearest' }); el.focus(); } } : undefined;
 
   const go = async () => {
     const body = text.trim();
     if (!body || !send || busy || agent.closed) return;
     setBusy(true);
-    const ok = await send(agent, body);
+    const r = await send(agent, body);
     setBusy(false);
-    setSent(ok ? 'ok' : 'failed');
+    const res: PromptResult = typeof r === 'boolean' ? { ok: r } : r;
+    setSent(res.ok ? (res.queued ? 'queued' : 'ok') : res.code === 'agent.queue_full' ? 'full' : 'failed');
     // Only what was sent is cleared: text typed while the send was in flight stays.
-    if (ok) { setText((now) => (now.trim() === body ? '' : now)); toLatest(); }
+    if (res.ok) { setText((now) => (now.trim() === body ? '' : now)); toLatest(); }
   };
   // The composer grows with what is typed, up to a limit, then scrolls.
   const rowCount = Math.min(8, Math.max(2, text.split('\n').length));
   const working = agent.state === 'working' && !agent.closed;
+
+  // ADR-0090. The window cannot read a node's capabilities, so "this node speaks the rich form" is what it has seen: rich entries, the
+  // agent's settings or commands, or a prompt answered in the rich form. Stop turn is offered only then, while the agent works.
+  const rich = isRich(lines) || !!actions.rich?.has(agent.id) || !!agent.session?.config?.length || commands.length > 0;
+  const canStop = !!actions.cancelTurn && rich && working;
+  const stopTurn = async (dropQueue: boolean) => {
+    if (!actions.cancelTurn) return;
+    setStopping('busy');
+    setStopFailed(undefined);
+    const r = await actions.cancelTurn(agent.id, dropQueue);
+    setStopping(undefined);
+    if (r !== true) setStopFailed(refusalKey(typeof r === 'string' ? r : '') ?? 'turn-stop-failed');
+    if (r === true) setDropAsk(false);
+  };
+
+  // The "/" menu: open while the first word starts with "/" and the agent offers commands that fit; never in a closed agent.
+  const query = slashQuery(text, caret);
+  const matches = useMemo(() => (query === undefined || commands.length === 0 ? [] : filterCommands(commands, query)), [query, commands]);
+  const menuOpen = matches.length > 0 && !slashOff && !agent.closed;
+  const at = Math.min(slashAt, Math.max(0, matches.length - 1));
+  const take = (i: number) => {
+    const c = matches[i];
+    if (!c) return;
+    const next = applyCommand(text, caret, c);
+    caretTo.current = next.caret;
+    setText(next.text); setCaret(next.caret); setSlashAt(0);
+    field.current?.focus();
+  };
+  useEffect(() => {
+    if (caretTo.current === undefined || !field.current) return;
+    field.current.setSelectionRange(caretTo.current, caretTo.current);
+    caretTo.current = undefined;
+  }, [text]);
+  const sentText = sent && t({ ok: 'prompt-sent', queued: 'prompt-queued', full: 'prompt-queue-full', failed: 'prompt-failed' }[sent]);
+
   return (
     <div className="flex h-full min-h-0 flex-col bg-surface-0">
       {/* Keyed by the agent: another agent on screen gets a fresh bar, so nothing left open carries over; usage updates keep it. */}
@@ -115,11 +179,14 @@ export function PromptBox({ agent, send, source, choose, approvals, onReview }: 
         <div ref={log} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto px-4 pt-6 pb-4 max-md:pt-4" aria-live="polite" aria-label={t('chat-log')} role="log" tabIndex={0}>
           <div className="mx-auto flex max-w-195 flex-col gap-5 [&>*]:shrink-0">
             {lines.length === 0 && <p className="muted m-0">{t(source ? 'chat-empty' : 'prompt-intro')}</p>}
+            {held.trimmed > 0 && <p role="note" className="muted m-0 self-center text-xs" data-trimmed>{t('chat-trimmed', { count: held.trimmed })}</p>}
             {view.hidden > 0 && <button type="button" className="button justify-self-center self-center px-3 py-1 text-xs" onClick={earlier}>{t('chat-earlier-items', { count: view.hidden })}</button>}
             {rows.map(({ row, paired }) => {
-              if (row.kind !== 'turn' || !paired) return row.kind === 'turn' ? null : <Item key={row.id} item={row} notice={notice} />;
-              // An edit and the diff it made are one row; every other item is drawn as it is.
-              const draw = (item: TurnItem) => <Item key={item.id} item={item} running={working && item === last} open={item === newestSteps} diffs={paired.attached} flag={item === newestSteps ? groupFlag(agent, true) : undefined} notice={notice} />;
+              if (row.kind !== 'turn' || !paired) return row.kind === 'turn' ? null : <Item key={row.id} item={row} notice={notice} queued={row.kind === 'user' ? (queue.notSent.has(row.line.id) ? 'not-sent' : row.line.queued ? 'waiting' : undefined) : undefined} />;
+              // An edit and the diff it made are one row; every other item is drawn as it is. A group with a failed call, or right before a
+              // request that waits for you, opens and says so, wherever it is.
+              const draw = (item: TurnItem, i: number) => <Item key={item.id} item={item} running={working && item === last} open={item === newestSteps} diffs={paired.attached}
+                flag={item.kind === 'steps' ? flagOf(agent, item === newestSteps, item.lines, paired.items[i + 1]) : undefined} onShowRequest={showRequest} notice={notice} />;
               return <Turn key={row.id} name={agent.name} model={model} atMs={row.atMs}>{paired.items.map(draw)}</Turn>;
             })}
             {working && lines.length > 0 && <div role="status" className="flex items-center gap-2 text-xs text-muted"><StateMark state="working" />{t('chat-working')}</div>}
@@ -133,23 +200,70 @@ export function PromptBox({ agent, send, source, choose, approvals, onReview }: 
         )}
       </div>
       <div className="flex flex-none flex-col gap-2 px-4 pt-2 pb-3.5">
-      {approvals && <div className="mx-auto max-h-[40vh] w-full max-w-195 overflow-y-auto" data-pinned-approvals>{approvals}</div>}
-      <form className="mx-auto flex w-full max-w-195 flex-none flex-col gap-2 rounded-l border border-line bg-surface-1 p-2.5 shadow-card transition-colors focus-within:border-accent" onSubmit={(e) => { e.preventDefault(); void go(); }}>
-        <textarea value={text} onChange={(e) => setText(e.target.value)} aria-label={t('prompt-label')} placeholder={t('prompt-label')} rows={rowCount}
+      {approvals && <div ref={pinned} tabIndex={-1} className="mx-auto max-h-[40vh] w-full max-w-195 overflow-y-auto outline-none" data-pinned-approvals>{approvals}</div>}
+      {queue.waiting.length > 0 && !agent.closed && (
+        <div className="mx-auto flex w-full max-w-195 flex-col gap-1.5" data-queue>
+          <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs text-muted">
+            <span className="ide-chip h-5.5 px-2 font-sans text-ink" role="status">{t('queue-count', { count: queue.waiting.length })}</span>
+            {/* The waiting prompt is the person's own text; shown as text, cut to one line. */}
+            <span className="min-w-0 flex-1 truncate" title={(queue.waiting[0] as ChatLine).text} dir="auto">“{(queue.waiting[0] as ChatLine).text}”</span>
+            <span className="max-md:hidden">{t('queue-note')}</span>
+            {actions.cancelTurn && rich && !dropAsk && <button type="button" className="text-xs underline underline-offset-2 hover:text-ink" onClick={() => setDropAsk(true)}>{t('queue-drop')}</button>}
+          </div>
+          {dropAsk && (
+            <div role="alertdialog" aria-label={t('queue-drop-title')} className="flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-s border border-needs-you/60 bg-surface-2 px-3 py-2">
+              <div className="min-w-0 flex-1 basis-64 text-xs"><strong className="block">{t('queue-drop-title')}</strong><span className="text-muted">{t('queue-drop-body', { count: queue.waiting.length })}</span></div>
+              <button type="button" className="button px-3 py-1 text-xs" disabled={stopping === 'busy'} onClick={() => void stopTurn(true)}>{t('queue-drop-yes')}</button>
+              <button type="button" className="button button--primary px-3 py-1 text-xs" onClick={() => setDropAsk(false)}>{t('queue-drop-no')}</button>
+            </div>
+          )}
+        </div>
+      )}
+      <form className="relative mx-auto flex w-full max-w-195 flex-none flex-col gap-2 rounded-l border border-line bg-surface-1 p-2.5 shadow-card transition-colors focus-within:border-accent" onSubmit={(e) => { e.preventDefault(); void go(); }}>
+        {menuOpen && (
+          <ul id="slash-menu" role="listbox" aria-label={t('slash-menu')} className="absolute start-0 end-0 bottom-full z-20 m-0 mb-1.5 grid max-h-64 list-none gap-px overflow-y-auto rounded-m border border-line bg-surface-1 p-1 shadow-card">
+            {matches.map((c, i) => (
+              <li key={`${i}:${c.name}`} id={`slash-opt-${i}`} role="option" aria-selected={i === at} data-slash-option
+                className={`flex min-h-9 cursor-pointer items-baseline gap-2.5 rounded-xs px-2.5 py-1.5 text-[0.8125rem] ${i === at ? 'bg-accent/15 text-ink' : 'text-muted hover:bg-surface-2'}`}
+                // Pressing here must not move the caret out of the box before the choice is taken.
+                onPointerDown={(e) => e.preventDefault()} onClick={() => take(i)}>
+                <code dir="ltr" className="flex-none font-mono text-xs font-semibold text-ink">/{c.name.replace(/^\/+/, '')}</code>
+                {c.inputHint && <span dir="auto" className="flex-none truncate text-xs text-muted italic max-md:hidden">{c.inputHint}</span>}
+                <span dir="auto" className="min-w-0 flex-1 truncate text-xs">{c.description}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+        <textarea ref={field} value={text} onChange={(e) => { setText(e.target.value); setCaret(e.target.selectionStart); setSlashOff(false); setSlashAt(0); }}
+          onSelect={(e) => setCaret(e.currentTarget.selectionStart)}
+          aria-label={t('prompt-label')} placeholder={t(commands.length > 0 ? 'prompt-placeholder-commands' : 'prompt-label')} rows={rowCount}
+          {...(commands.length > 0 ? { role: 'combobox' as const, 'aria-autocomplete': 'list' as const, 'aria-haspopup': 'listbox' as const, 'aria-expanded': menuOpen, 'aria-controls': menuOpen ? 'slash-menu' : undefined, 'aria-activedescendant': menuOpen ? `slash-opt-${at}` : undefined } : {})}
           className="w-full resize-none border-0 bg-transparent p-1 text-ink outline-none focus-visible:outline-none"
           disabled={agent.closed}
           onCompositionEnd={() => { composedAt.current = Date.now(); }}
           onKeyDown={(e) => {
+            // The menu takes the arrows, Enter or Tab (to choose) and Escape; not while an input method is composing.
+            const composing = e.nativeEvent.isComposing || e.keyCode === 229 || Date.now() - composedAt.current <= IME_GRACE_MS;
+            if (menuOpen && !composing) {
+              if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); setSlashAt(stepIndex(at, e.key === 'ArrowDown' ? 1 : -1, matches.length)); return; }
+              if ((e.key === 'Enter' && !e.shiftKey) || (e.key === 'Tab' && !e.shiftKey)) { e.preventDefault(); take(at); return; }
+              if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); setSlashOff(true); return; }
+            }
             // Enter sends, Shift+Enter starts a new line; a key that only confirms an input method's candidate is not a send (Safari too).
             if (e.key === 'Enter' && !e.shiftKey) e.preventDefault();
             if (sendsOnEnter({ key: e.key, shiftKey: e.shiftKey, isComposing: e.nativeEvent.isComposing, keyCode: e.keyCode }, Date.now() - composedAt.current)) void go();
           }} />
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
-          {agent.session && <SessionBar key={agent.id} part="controls" agentKey={agent.id} session={agent.session} disabled={agent.closed} choose={choose} />}
+          {agent.session && <SessionBar key={agent.id} part="controls" agentKey={agent.id} session={agent.session} disabled={agent.closed} choose={choose} setConfig={actions.setConfig} />}
           <NoAskBadge agent={agent} />
           <span className="flex-1" />
-          {sent && <span role="status" className={`text-xs ${sent === 'ok' ? 'text-finished' : 'text-needs-you'}`}>{t(sent === 'ok' ? 'prompt-sent' : 'prompt-failed')}</span>}
+          {sent && <span role="status" className={`text-xs ${sent === 'ok' || sent === 'queued' ? 'text-finished' : 'text-needs-you'}`}>{sentText}</span>}
+          {stopFailed && <span role="status" className="text-xs text-needs-you">{t(stopFailed)}</span>}
           <span className="hidden text-xs text-muted md:inline">{t(agent.closed ? 'prompt-closed' : 'prompt-hint')}</span>
+          {/* Ends this turn only: the agent stays and can be asked again. Not the same as stopping the agent. */}
+          {canStop && <button type="button" className="button gap-1.5 px-3 text-removed" disabled={stopping === 'busy'} title={t('turn-stop-hint')} aria-label={`${t('turn-stop')}. ${t('turn-stop-hint')}`} onClick={() => void stopTurn(false)}>
+            <svg aria-hidden viewBox="0 0 16 16" className="size-3.5 fill-current"><rect x="3.5" y="3.5" width="9" height="9" rx="1.5" /></svg>{t('turn-stop')}
+          </button>}
           <button type="submit" className="button button--primary" disabled={busy || !text.trim() || !send || agent.closed}>{t('prompt-send')}</button>
         </div>
       </form>

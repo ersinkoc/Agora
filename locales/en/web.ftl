@@ -1156,3 +1156,53 @@ fm-kind-archive = Archive
 fm-kind-config = Settings
 fm-kind-file = File
 fm-kind-private = Private file
+tool-status-pending = Waiting to start
+tool-status-running = Running
+tool-status-done = Done
+tool-status-failed = Failed
+tool-output-cut = The output was shortened.
+chat-thinking = Thinking…
+chat-steps-call-failed = { $count ->
+    [one] A step failed
+   *[other] { $count } steps failed
+}
+permission-pending = Asked for permission
+permission-approved = Permission given
+permission-denied = Permission refused
+permission-cancelled = Not answered
+permission-show = Show the request
+chat-queued-mark = Waiting
+chat-not-sent-mark = Not sent
+session-effort = Effort
+session-on = On
+session-off = Off
+session-more = More settings
+session-config-unavailable = Choices that make the agent act without asking are not available yet from here. Start the agent that way instead.
+prompt-queued = Waiting for this turn to end.
+prompt-queue-full = Too many messages are waiting. Wait for the agent, or stop its turn.
+prompt-placeholder-commands = What should it do? Type / for commands.
+queue-count = { $count ->
+    [one] 1 queued
+   *[other] { $count } queued
+}
+queue-note = Sent when this turn ends
+queue-drop = Drop the queue
+queue-drop-title = Drop the waiting messages?
+queue-drop-body = { $count ->
+    [one] This also stops the agent's current turn, and the waiting message is not sent. The agent itself keeps running.
+   *[other] This also stops the agent's current turn, and the { $count } waiting messages are not sent. The agent itself keeps running.
+}
+queue-drop-yes = Drop and stop the turn
+queue-drop-no = Keep them
+slash-menu = Commands the agent offers
+turn-stop = Stop turn
+turn-stop-hint = Ends this turn only. The agent keeps running and you can send it another message.
+turn-stop-failed = The turn did not stop.
+chat-trimmed = { $count ->
+    [one] 1 earlier entry is not loaded.
+   *[other] { $count } earlier entries are not loaded.
+}
+refusal-unsupported = This agent's machine does not support that yet.
+refusal-unconfirmed = That choice lets the agent act without asking, and it needs a confirmation this window cannot give yet. Start the agent that way instead.
+refusal-forbidden = This machine's settings do not let the agent act without asking.
+refusal-unknown-option = The agent no longer offers that setting or value.

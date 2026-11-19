@@ -4,7 +4,18 @@
 export interface SessionOptionModel { id: string; name: string; description: string; skipsPermissions: boolean }
 // What an agent reported about its session: the modes and models it offers and the ones in use, how full its context is, and its own
 // cost (in micro-units of `currency`). Absent parts were never reported.
+// ADR-0090: one setting of the session the agent lets the user change (the model, the mode, the reasoning effort, ...). Every word in it is
+// the agent's own and untrusted. `skipsPermissions` is the node's own judgement (a choice, or for a boolean the option as a whole): it is
+// shown, never sent from the window.
+export type ConfigCategory = 'mode' | 'model' | 'model_config' | 'thought_level' | 'custom' | '';
+export interface ConfigOptionModel { id: string; name: string; description: string; category: ConfigCategory; type: 'select' | 'boolean'; current: string; choices: SessionOptionModel[]; skipsPermissions: boolean }
+// A slash command the agent offers; `inputHint` says what follows its name (empty when nothing does).
+export interface CommandModel { name: string; description: string; inputHint: string }
 export interface SessionModel {
+  /** ADR-0090: the agent's own list of settings (`AgentSessionConfig`), when its node offers one; absent from an old node. */
+  config?: ConfigOptionModel[];
+  /** ADR-0090: the slash commands the agent offers (`AgentCommands`). */
+  commands?: CommandModel[];
   modes: SessionOptionModel[];
   models: SessionOptionModel[];
   currentMode: string;

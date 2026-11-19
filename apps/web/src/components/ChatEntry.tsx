@@ -1,11 +1,11 @@
 import { memo, useMemo, useState, type ReactNode } from 'react';
 import { t } from '../i18n';
-import type { ChatLine } from '../net/chat';
+import type { CallStatus, ChatLine } from '../net/chat';
 import { parseHunks } from '../net/diff';
 import { blocks, inlines, type Block, type Inline } from '../net/markdown';
 import { titleSays, toolView, type ToolAction } from '../net/tool';
-import { changedFiles, stepsSummary, type GroupFlag, type TranscriptItem } from '../net/transcript';
-import { initial, planProgress, stepTone, type StepStatus, type StepTone } from '../net/chatView';
+import { actionOf, changedFiles, stepsSummary, type GroupFlag, type TranscriptItem } from '../net/transcript';
+import { callMs, currentStep, initial, outputTail, planProgress, planSteps, stepTone, type StepStatus, type StepTone } from '../net/chatView';
 import { preciseDuration } from '../net/time';
 import { useHighlightedCode } from '../highlight/useHighlight';
 import { Icon, type IconName } from './Icon';
@@ -92,11 +92,14 @@ const Reply = memo(function Reply({ text, atMs }: { text: string; atMs: number }
 });
 
 // What a person said: a tinted bubble on the right with its time under it.
-export const UserText = memo(function UserText({ line }: { line: ChatLine }) {
+// ADR-0090: a prompt that waits behind the turn that runs says "Waiting", and one the node said it will not send says "Not sent"
+// (`state`); either way it is drawn quieter, as what it is.
+export const UserText = memo(function UserText({ line, state }: { line: ChatLine; state?: 'waiting' | 'not-sent' }) {
   return (
-    <div className="group/msg relative ms-auto max-w-[88%] rounded-l rounded-ee-xs border border-accent/30 bg-accent/15 px-3.5 py-2.5 max-md:max-w-full" title={fullStamp(line.atMs)} data-role="user">
+    <div className={`group/msg relative ms-auto max-w-[88%] rounded-l rounded-ee-xs border bg-accent/15 px-3.5 py-2.5 max-md:max-w-full ${state ? 'border-dashed border-accent/40 opacity-80' : 'border-accent/30'}`} title={fullStamp(line.atMs)} data-role="user" data-queued={state}>
       <div className="break-words whitespace-pre-wrap"><span className="sr-only">{t('chat-you')}: </span>{line.text}</div>
       <div className="mt-1 flex items-center justify-end gap-2 text-xs text-muted">
+        {state && <span className="ide-chip h-5 px-1.5">{t(state === 'waiting' ? 'chat-queued-mark' : 'chat-not-sent-mark')}</span>}
         {line.atMs > 0 && <span>{clock(line.atMs)}</span>}
         <CopyButton text={line.text} label="chat-copy-message" className={HOVER} />
       </div>
@@ -119,14 +122,14 @@ export function Turn({ name, model, atMs, children }: { name: string; model?: st
   );
 }
 
-// What the agent thought, folded: "Thought for 9 s" and, opened, the text. The node does not send thinking yet (ADR-0090), so nothing
-// draws this today; it is here so that the entry kind, when it arrives, needs only a line in `Item`. The text is untrusted: plain text.
-export function Thought({ text, seconds }: { text: string; seconds?: number }) {
+// What the agent thought, folded: "Thought for 9 s" and, opened, the text; "Thinking…" while it still thinks (ADR-0090). Collapsed by
+// default and only opened by the reader. The text is untrusted (a model wrote it): plain text, never HTML, and it goes nowhere else.
+export function Thought({ text, seconds, live = false }: { text: string; seconds?: number; live?: boolean }) {
   return (
-    <details className="group max-w-3xl rounded-m border border-dashed border-line" data-thought>
+    <details className="group max-w-3xl rounded-m border border-dashed border-line" data-thought={live ? 'live' : ''}>
       <summary className="flex min-h-9 cursor-pointer list-none items-center gap-2.5 px-3 py-1.5 text-[0.8125rem] text-muted italic hover:bg-surface-2 [&::-webkit-details-marker]:hidden">
         <Icon name="think" className="size-3.5" />
-        <span>{seconds && seconds > 0 ? t('chat-thought-for', { time: preciseDuration(seconds * 1000) }) : t('chat-act-think')}</span>
+        <span>{live ? t('chat-thinking') : seconds && seconds > 0 ? t('chat-thought-for', { time: preciseDuration(seconds * 1000) }) : t('chat-act-think')}</span>
         <Icon name="chevron" className="ms-auto size-3 transition-transform motion-reduce:transition-none rtl:rotate-180 group-open:rotate-90!" />
       </summary>
       <div className="px-3.5 pt-0.5 pb-3 ps-9 text-[0.8125rem] break-words whitespace-pre-wrap text-muted italic">{text}</div>
@@ -167,33 +170,84 @@ const Counts = ({ added, removed }: { added: number; removed: number }) => (
   (added > 0 || removed > 0) ? <span className="flex-none font-mono text-xs"><span className="text-finished">+{added}</span> <span className="text-removed">−{removed}</span></span> : null
 );
 
+// Where a call is in its life, as a mark: a spinner while it runs (a still ring when motion is reduced), a hollow ring while it waits, a tick
+// when it is done and a cross when it failed. Said in words for a screen reader. Only drawn when the node sends a status (ADR-0090).
+const MARKS: Record<CallStatus, string> = { pending: 'tool-status-pending', in_progress: 'tool-status-running', completed: 'tool-status-done', failed: 'tool-status-failed' };
+export function CallMark({ status }: { status: CallStatus }) {
+  const label = t(MARKS[status]);
+  const box = 'grid size-4 flex-none place-items-center';
+  switch (status) {
+    case 'in_progress': return <span role="img" aria-label={label} title={label} className={box}><span className="size-3.5 animate-spin rounded-full border-2 border-line border-t-working motion-reduce:animate-none" /></span>;
+    case 'pending': return <span role="img" aria-label={label} title={label} className={box}><span className="size-3 rounded-full border-2 border-dashed border-muted" /></span>;
+    case 'completed': return <span role="img" aria-label={label} title={label} className={`${box} text-finished`}><Icon name="check" className="size-3.5" /></span>;
+    case 'failed': return <span role="img" aria-label={label} title={label} className={`${box} text-removed`}><Icon name="close" className="size-3.5" /></span>;
+  }
+}
+
+// What a call printed: the last lines (the end of a run is what matters), the rest on request. Text from a tool: plain text.
+const OUTPUT_TAIL = 12;
+function OutputBlock({ text, cut }: { text: string; cut?: boolean }) {
+  const [full, setFull] = useState(false);
+  const tail = useMemo(() => outputTail(text, full ? Number.MAX_SAFE_INTEGER : OUTPUT_TAIL), [text, full]);
+  return (
+    <div data-output>
+      <pre dir="ltr" className="m-0 max-h-60 overflow-auto font-mono text-xs leading-5 break-all whitespace-pre-wrap text-muted">{tail.text}</pre>
+      {tail.hidden > 0 && <button type="button" className="mt-1 text-xs text-muted underline underline-offset-2 hover:text-ink" onClick={() => setFull(true)}>{t('chat-diff-show-all', { count: tail.hidden + OUTPUT_TAIL })}</button>}
+      {cut && <p className="m-0 mt-1 text-xs text-muted">{t('tool-output-cut')}</p>}
+    </div>
+  );
+}
+
+// The files a call touched, as chips (a path the node gave; never a link the window follows). The first two, then how many more.
+const baseName = (p: string): string => p.slice(p.replace(/\\/g, '/').lastIndexOf('/') + 1) || p;
+function PlaceChips({ places, skip }: { places: readonly { path: string; line: number }[]; skip?: string }) {
+  const list = places.filter((p) => p.path !== skip);
+  if (list.length === 0) return null;
+  return <>
+    {list.slice(0, 2).map((p, i) => <code key={`${p.path}:${p.line}`} dir="ltr" title={p.line > 0 ? `${p.path}:${p.line}` : p.path} data-place className={`min-w-0 max-w-40 truncate rounded-xs border border-line bg-surface-2 px-2 py-0.5 font-mono text-xs text-muted ${i > 0 ? 'max-md:hidden' : ''}`}>{baseName(p.path)}{p.line > 0 ? `:${p.line}` : ''}</code>)}
+    {list.length > 2 && <span className="flex-none text-xs text-muted max-md:hidden">+{list.length - 2}</span>}
+  </>;
+}
+
 // One thing the agent did: an icon tile, a sentence, the file or command it was about as a chip, and the full input folded underneath.
-// An edit that has its diff shows the change inside the row.
+// An edit that has its diff shows the change inside the row. With the node's data (ADR-0090) the row also has the call's status mark,
+// how long it took, the files it touched and, folded, what it printed.
 const ToolStep = memo(function ToolStep({ line, diff }: { line: ChatLine; diff?: ChatLine }) {
   const v = useMemo(() => toolView(line.text), [line.text]);
   const d = useMemo(() => (diff ? parseHunks(diff.text) : undefined), [diff]);
+  const action = actionOf(line, v.action);
+  const took = callMs(line);
   const showsSubject = v.subject && !titleSays(v.title, v.subject);
+  // A command that is running shows its output from the start (read once; afterwards the fold is the reader's).
+  const [runOpen] = useState(() => line.status === 'in_progress' && !!line.output);
   const heading = v.raw
     ? <span className="min-w-0 flex-1 truncate font-mono text-xs text-muted">{v.raw}</span>
     : <>
-      <span className="min-w-0 shrink-0 font-medium text-ink">{v.title ? <Inlines parts={inlineTitle(v.title)} /> : t(`tool-${v.action}`)}</span>
+      <span className="min-w-0 shrink-0 font-medium text-ink">{v.title ? <Inlines parts={inlineTitle(v.title)} /> : t(`tool-${action}`)}</span>
       {showsSubject && <code dir="ltr" className="min-w-0 truncate rounded-xs border border-line bg-surface-2 px-2 py-0.5 font-mono text-xs text-muted">{v.subject}</code>}
+      {line.locations && <PlaceChips places={line.locations} skip={showsSubject ? v.subject : undefined} />}
     </>;
   const row = 'flex min-h-9 min-w-0 items-center gap-2.5 px-3 py-1.5 text-[0.8125rem]';
-  const icon = <span aria-hidden className={`grid size-5.5 flex-none place-items-center rounded-xs border border-line bg-surface-2 ${TONE[stepTone(v.action)]}`}><Icon name={ICONS[v.action]} className="size-3.5" /></span>;
-  if (v.details.length === 0 && !v.raw && !d) return <div className={row} title={fullStamp(line.atMs)}>{icon}{heading}</div>;
+  const icon = <span aria-hidden className={`grid size-5.5 flex-none place-items-center rounded-xs border border-line bg-surface-2 ${TONE[stepTone(action)]}`}><Icon name={ICONS[action]} className="size-3.5" /></span>;
+  const tail = <>
+    {took !== undefined && <span className="flex-none text-xs text-muted tabular-nums" data-took>{preciseDuration(took)}</span>}
+    {line.status && <CallMark status={line.status} />}
+  </>;
+  if (v.details.length === 0 && !v.raw && !d && !line.output) return <div className={row} title={fullStamp(line.atMs)} data-status={line.status}>{icon}{heading}<span className="flex-1" />{tail}</div>;
   return (
-    <details className="group" open={d && d.lines.length <= 24 ? true : undefined} data-diff-path={diff?.path}>
+    <details className="group" open={(d && d.lines.length <= 24) || runOpen ? true : undefined} data-diff-path={diff?.path} data-status={line.status}>
       <summary className={`${row} cursor-pointer list-none hover:bg-surface-2 [&::-webkit-details-marker]:hidden`} title={fullStamp(line.atMs)}>
         {icon}{heading}
         <span className="flex-1" />
         {d && <Counts added={d.added} removed={d.removed} />}
+        {tail}
         <Icon name="chevron" className={CHEVRON} />
       </summary>
       {d && diff ? <div className="border-t border-line"><DiffLines lines={d.lines} fallback={diff.text} /></div> : (
         <div className="border-t border-line bg-surface-0 px-3.5 py-2">
           {v.raw ? <pre dir="ltr" className="m-0 max-h-60 overflow-auto font-mono text-xs break-all whitespace-pre-wrap">{v.raw}</pre> : <>
-            {v.action === 'run' && v.subject && <pre dir="ltr" className="m-0 mb-2 max-h-52 overflow-auto font-mono text-xs leading-6 break-all whitespace-pre-wrap text-muted"><span aria-hidden className="select-none">$ </span>{v.subject}</pre>}
+            {action === 'run' && v.subject && <pre dir="ltr" className="m-0 mb-2 max-h-52 overflow-auto font-mono text-xs leading-6 break-all whitespace-pre-wrap text-muted"><span aria-hidden className="select-none">$ </span>{v.subject}</pre>}
+            {line.output && <div className={v.details.length ? 'mb-2 border-b border-line pb-2' : ''}><OutputBlock text={line.output} cut={line.outputCut} /></div>}
             <dl dir="ltr" className="m-0 grid max-h-72 grid-cols-[max-content_minmax(0,1fr)] gap-x-3 gap-y-1 overflow-auto font-mono text-xs">
               {v.details.map(([k, val], i) => <div key={i} className="contents">
                 <dt className="text-muted">{k}</dt>
@@ -214,6 +268,10 @@ const ToolStep = memo(function ToolStep({ line, diff }: { line: ChatLine; diff?:
 const SHOWN_KINDS = 3;
 export const ToolSteps = memo(function ToolSteps({ lines, running = false, flag, open = false, diffs }: { lines: ChatLine[]; running?: boolean; flag?: GroupFlag; open?: boolean; diffs?: ReadonlyMap<number, ChatLine> }) {
   const sum = useMemo(() => stepsSummary(lines), [lines]);
+  // With the node's per-call status (ADR-0090) the spinner follows the calls themselves; without it, the agent's own state.
+  const rich = lines.some((l) => l.status !== undefined);
+  const spinning = rich ? lines.some((l) => l.status === 'in_progress') : running;
+  const failed = lines.filter((l) => l.status === 'failed').length;
   const kinds = sum.actions.slice(0, SHOWN_KINDS).map((a) => t(`chat-act-${a.action}`, { count: a.count }));
   const more = sum.actions.length - SHOWN_KINDS;
   // Uncontrolled after the first draw: `open` is read once, and a flag keeps the group open from the moment it is set.
@@ -223,13 +281,13 @@ export const ToolSteps = memo(function ToolSteps({ lines, running = false, flag,
   return (
     <details open={start || flagged || flag ? true : undefined} className={`group max-w-3xl overflow-hidden rounded-m border bg-surface-1 ${flag ? 'border-needs-you/70' : 'border-line'}`} data-steps={sum.total} data-flag={flag}>
       <summary className="flex min-h-9 min-w-0 cursor-pointer list-none items-center gap-2 bg-surface-2 px-3 py-1.5 text-xs text-muted hover:text-ink [&::-webkit-details-marker]:hidden" aria-label={`${t('chat-steps-open')}: ${t('chat-steps-count', { count: sum.total })}`}>
-        {running && !flag
+        {spinning && !flag
           ? <span role="img" aria-label={t('chat-working')} className="size-3.5 flex-none animate-spin rounded-full border-2 border-line border-t-working motion-reduce:animate-none" />
           : <Icon name="board" className="size-3.5 flex-none" />}
         <span className="flex-none font-medium text-ink">{t('chat-steps-count', { count: sum.total })}{sum.spanMs ? ` · ${preciseDuration(sum.spanMs)}` : ''}</span>
         <span className="min-w-0 flex-1 truncate max-md:hidden">{kinds.join(' · ')}{more > 0 ? ` · +${more}` : ''}{sum.last ? ` — ${sum.last}` : ''}</span>
         <span className="flex-1 md:hidden" />
-        {flag && <span className="flex flex-none items-center gap-1 text-xs font-medium text-needs-you"><Icon name="warn" className="size-3" />{t(flag === 'failed' ? 'chat-steps-failed' : 'chat-steps-needs-you')}</span>}
+        {flag && <span className="flex flex-none items-center gap-1 text-xs font-medium text-needs-you"><Icon name="warn" className="size-3" />{flag === 'call-failed' ? t('chat-steps-call-failed', { count: failed }) : t(flag === 'failed' ? 'chat-steps-failed' : 'chat-steps-needs-you')}</span>}
         <Icon name="chevron" className={CHEVRON} />
       </summary>
       <div className="grid grid-cols-1 divide-y divide-line border-t border-line">
@@ -237,7 +295,8 @@ export const ToolSteps = memo(function ToolSteps({ lines, running = false, flag,
       </div>
     </details>
   );
-}, (a, b) => a.running === b.running && a.flag === b.flag && a.lines.length === b.lines.length && a.lines[0]?.id === b.lines[0]?.id && (a.diffs?.size ?? 0) === (b.diffs?.size ?? 0));
+  // An entry that changed in place is a new object under the same id (ADR-0090): compare the lines themselves, not only how many.
+}, (a, b) => a.running === b.running && a.flag === b.flag && a.lines.length === b.lines.length && a.lines.every((l, i) => l === b.lines[i]) && (a.diffs?.size ?? 0) === (b.diffs?.size ?? 0));
 
 // A file the agent changed that no step claimed: a card with its name and how much changed, the lines numbered and coloured; a long
 // change starts folded.
@@ -292,6 +351,8 @@ export function FilesChanged({ lines, onGo, onReview }: { lines: readonly ChatLi
 // progress bar is drawn: `status` (one per step) turns on the ticks and the bar once the node reports it (ADR-0090). Nothing is ever faked.
 export function PlanCard({ steps, status, label }: { steps: readonly string[]; status?: readonly (StepStatus | undefined)[]; label: string }) {
   const progress = status ? planProgress(status) : undefined;
+  // The step being worked on: marked for a screen reader (`aria-current`) and in weight, as well as by its dot.
+  const now = status ? currentStep(status) : undefined;
   return (
     <div className="max-w-3xl rounded-m border border-line bg-surface-1 px-3.5 py-3 text-[0.8125rem]" data-plan>
       <div className="mb-2 flex items-center gap-2 font-semibold text-ink">
@@ -302,7 +363,7 @@ export function PlanCard({ steps, status, label }: { steps: readonly string[]; s
       <ol className="m-0 grid list-none gap-1.5 p-0">{steps.map((p, i) => {
         const s = status?.[i];
         return (
-          <li key={i} className={`flex items-start gap-2.5 ${s === 'completed' ? 'text-muted line-through' : s === 'in_progress' ? 'font-medium text-ink' : s ? 'text-muted' : ''}`} data-status={s}>
+          <li key={i} aria-current={now === i ? 'step' : undefined} className={`flex items-start gap-2.5 ${s === 'completed' ? 'text-muted line-through' : s === 'in_progress' ? 'font-medium text-ink' : now === i ? 'font-medium text-ink' : s ? 'text-muted' : ''}`} data-status={s} data-current={now === i ? '' : undefined}>
             <span aria-hidden className={`mt-px grid size-5 flex-none place-items-center rounded-xs border text-xs ${s === 'completed' ? 'border-finished bg-finished text-on-accent' : s === 'in_progress' ? 'border-working text-working' : 'border-line bg-surface-0 text-muted'}`}>
               {s === 'completed' ? <Icon name="check" className="size-3" /> : s === 'in_progress' ? <span className="size-1.5 rounded-full bg-working" /> : s ? null : i + 1}
             </span>
@@ -314,17 +375,39 @@ export function PlanCard({ steps, status, label }: { steps: readonly string[]; s
   );
 }
 
+// A plan: the node's steps with their status when it sends them (ADR-0090: a tick for done, a dot for the step in hand, a bar for how
+// far), the joined lines of an old node otherwise. The same entry is sent again each time a step changes, and replaces this one.
 const PlanEntry = memo(function PlanEntry({ line, latest }: { line: ChatLine; latest: boolean }) {
-  const steps = line.text.split('\n').filter((s) => s.trim());
+  const list = planSteps(line);
+  const steps = list.map((s) => s.text);
+  const status = list.some((s) => s.status !== undefined) ? list.map((s) => s.status) : undefined;
   if (!latest) {
     return (
       <details className="max-w-3xl text-xs text-muted">
         <summary className="cursor-pointer">{t('chat-plan-earlier', { count: steps.length })}</summary>
-        <div className="mt-1 ps-1"><PlanCard steps={steps} label={t('chat-plan-steps', { count: steps.length })} /></div>
+        <div className="mt-1 ps-1"><PlanCard steps={steps} status={status} label={t('chat-plan-steps', { count: steps.length })} /></div>
       </details>
     );
   }
-  return <div title={fullStamp(line.atMs)}><PlanCard steps={steps} label={t('chat-plan-steps', { count: steps.length })} /></div>;
+  return <div title={fullStamp(line.atMs)}><PlanCard steps={steps} status={status} label={t('chat-plan-steps', { count: steps.length })} /></div>;
+});
+
+// A request the agent made for permission, as a record in the conversation (ADR-0090). It is a VIEW of the approval: it says how that
+// stands and never answers it; Allow and Deny stay in the pinned bar. While it waits, "Show the request" takes the reader there.
+const OUTCOME_ICON: Record<NonNullable<ChatLine['outcome']>, IconName> = { pending: 'lock', approved: 'check', denied: 'close', cancelled: 'step' };
+const OUTCOME_TONE: Record<NonNullable<ChatLine['outcome']>, string> = { pending: 'text-needs-you', approved: 'text-finished', denied: 'text-removed', cancelled: 'text-muted' };
+const PermissionRecord = memo(function PermissionRecord({ line, onShow }: { line: ChatLine; onShow?: () => void }) {
+  const outcome = line.outcome ?? 'pending';
+  return (
+    <div role="note" className={`flex max-w-3xl flex-wrap items-center gap-x-2.5 gap-y-1 rounded-m border px-3 py-1.5 text-[0.8125rem] ${outcome === 'pending' ? 'border-needs-you/55 bg-needs-you/8' : 'border-line bg-surface-1'}`} data-permission={outcome} title={fullStamp(line.atMs)}>
+      <span aria-hidden className={`grid size-5 flex-none place-items-center ${OUTCOME_TONE[outcome]}`}><Icon name={OUTCOME_ICON[outcome]} className="size-3.5" /></span>
+      <span className="min-w-0 flex-1 break-words">
+        <span className="font-medium text-ink">{t(`permission-${outcome}`)}</span>
+        {line.text && <> <code dir="ltr" className="rounded-xs border border-line bg-surface-2 px-1.5 py-0.5 font-mono text-xs text-muted">{line.text}</code></>}
+      </span>
+      {outcome === 'pending' && onShow && <button type="button" className="text-xs text-muted underline underline-offset-2 hover:text-ink" onClick={onShow}>{t('permission-show')}</button>}
+    </div>
+  );
 });
 
 // Where the day changes: a line with the date, in the reader's own format.
@@ -333,11 +416,13 @@ function DateRule({ atMs }: { atMs: number }) {
   return <div role="separator" aria-label={label} className="flex items-center gap-3 py-1 text-xs text-muted"><span className="h-px flex-1 bg-line" /><span>{label}</span><span className="h-px flex-1 bg-line" /></div>;
 }
 
-export function Item({ item, running, flag, open, diffs, notice }: { item: TranscriptItem; running?: boolean; flag?: GroupFlag; open?: boolean; diffs?: ReadonlyMap<number, ChatLine>; notice: (l: ChatLine) => ReactNode }) {
+export function Item({ item, running, flag, open, diffs, notice, queued, onShowRequest }: { item: TranscriptItem; running?: boolean; flag?: GroupFlag; open?: boolean; diffs?: ReadonlyMap<number, ChatLine>; notice: (l: ChatLine) => ReactNode; queued?: 'waiting' | 'not-sent'; onShowRequest?: () => void }) {
   switch (item.kind) {
     case 'date': return <DateRule atMs={item.atMs} />;
-    case 'user': return <UserText line={item.line} />;
+    case 'user': return <UserText line={item.line} state={queued} />;
     case 'reply': return <Reply text={item.text} atMs={item.atMs} />;
+    case 'thought': return <Thought text={item.text} seconds={Math.round((item.endMs - item.atMs) / 1000)} live={running} />;
+    case 'permission': return <PermissionRecord line={item.line} onShow={onShowRequest} />;
     case 'steps': return <ToolSteps lines={item.lines} running={running} flag={flag} open={open} diffs={diffs} />;
     case 'plan': return <PlanEntry line={item.line} latest={item.latest} />;
     case 'diff': return <DiffEntry line={item.line} />;

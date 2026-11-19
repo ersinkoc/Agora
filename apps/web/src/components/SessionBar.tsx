@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { refusalKey, type ActionResult } from '../net/refusal';
 import { settingName } from './launchSettings';
 import { startedWith } from './launchMemory';
 import { Icon } from './Icon';
@@ -6,7 +7,13 @@ import { Menu, type MenuItem } from '../layout/Menu';
 import { duration } from '../net/time';
 import { t } from '../i18n';
 import type { SessionModel, SessionOptionModel, UiState } from '../model';
-import { choices, confirmed, contextFill, contextLabel, contextPercent, isChange, needsConfirm, needsPlaceholder, NOT_REPORTED, pendingFor, shortCount, type OptionKind, type PendingChoice } from './sessionChoice';
+import type { ConfigOptionModel } from '../model';
+import { anyUnavailable, choices, choiceState, configChoices, configGroups, confirmed, contextFill, contextLabel, contextPercent, isChange, needsConfirm, needsPlaceholder, NOT_REPORTED, pendingFor, shortCount, type OptionKind, type PendingChoice } from './sessionChoice';
+
+// ADR-0090: the word a setting is called in the window. The three the window knows get its own words (the agent's name for them is its
+// own and untrusted); any other keeps the agent's name.
+const CATEGORY_WORD: Record<string, string> = { mode: 'session-mode', model: 'session-model', thought_level: 'session-effort' };
+const configWord = (o: ConfigOptionModel): string => (CATEGORY_WORD[o.category] ? t(CATEGORY_WORD[o.category] as string) : o.name || o.id);
 
 // ADR-0058: the mode and model a chat agent runs with, how full its context is, and what it says it cost. The pickers appear only
 // for what the agent reported; a mode in which the agent acts without asking is chosen only after the user confirms it. Every choice
@@ -15,10 +22,10 @@ import { choices, confirmed, contextFill, contextLabel, contextPercent, isChange
 const PILL: Record<UiState, string> = {
   working: 'border-working/40 text-working', 'needs-you': 'border-needs-you/50 text-needs-you', finished: 'border-finished/40 text-finished', idle: 'border-line text-muted', unknown: 'border-line text-muted',
 };
-export function SessionBar({ agentKey, session, choose, disabled, startedMs, state, tokens, part = 'all' }: { part?: 'all' | 'controls' | 'status'; agentKey: string; session: SessionModel; startedMs?: number; state?: UiState; tokens?: number; choose?: (agentKey: string, kind: OptionKind, id: string) => Promise<boolean>; disabled?: boolean }) {
+export function SessionBar({ agentKey, session, choose, setConfig, disabled, startedMs, state, tokens, part = 'all' }: { part?: 'all' | 'controls' | 'status'; agentKey: string; session: SessionModel; startedMs?: number; state?: UiState; tokens?: number; choose?: (agentKey: string, kind: OptionKind, id: string) => Promise<boolean>; setConfig?: (agentKey: string, configId: string, value: string) => Promise<ActionResult>; disabled?: boolean }) {
   const [held, setPending] = useState<PendingChoice | undefined>();
   const pending = pendingFor(held, agentKey);
-  const [failed, setFailed] = useState(false);
+  const [failed, setFailed] = useState<string | false>(false); // the locale key of what to say when a change did not go through
   const [busy, setBusy] = useState(false);
   // How long it has run, when this window saw it start; moves once a second-ish (every 15 s is enough for minutes).
   const [now, setNow] = useState(() => Date.now());
@@ -32,7 +39,7 @@ export function SessionBar({ agentKey, session, choose, disabled, startedMs, sta
     setBusy(true);
     const ok = await choose(target, kind, id);
     setBusy(false);
-    setFailed(!ok);
+    setFailed(ok ? false : 'session-change-failed');
   };
   const pick = (kind: OptionKind, list: readonly SessionOptionModel[], id: string) => {
     if (!isChange(kind === 'mode' ? session.currentMode : session.currentModel, id)) return; // the placeholder and the one in use are not choices
@@ -59,15 +66,53 @@ export function SessionBar({ agentKey, session, choose, disabled, startedMs, sta
       </Menu>
     );
   };
+  // ADR-0090: the agent's own settings. Choosing one sends `AgentSetConfig`; a choice the node marks as acting without asking is shown
+  // disabled and never sent.
+  const groups = useMemo(() => configGroups(session), [session]);
+  const latest = useRef(session.config);
+  latest.current = session.config;
+  const applyConfig = async (o: ConfigOptionModel, value: string) => {
+    // Judged again with the setting AS IT IS NOW, not as the menu was drawn: one that turned into a skipping choice while the menu was
+    // open is never sent from a click on the old picture.
+    const now = latest.current?.find((x) => x.id === o.id);
+    if (!setConfig || !now || choiceState(now, value) !== 'ok') return;
+    setFailed(false);
+    setBusy(true);
+    const r = await setConfig(agentKey, o.id, value);
+    setBusy(false);
+    setFailed(r === true ? false : refusalKey(typeof r === 'string' ? r : '') ?? 'session-change-failed');
+  };
+  const choiceName = (o: ConfigOptionModel, c: { id: string; name: string; skipsPermissions: boolean }): string => {
+    const base = o.type === 'boolean' ? t(c.id === 'true' ? 'session-on' : 'session-off') : c.name || c.id;
+    return c.skipsPermissions ? t('session-mode-unasked', { name: base }) : base;
+  };
+  const configItems = (o: ConfigOptionModel): MenuItem[] => configChoices(o).map((c) => {
+    const st = choiceState(o, c.id);
+    return { label: choiceName(o, c), checked: st === 'current', disabled: disabled || busy || !setConfig || st === 'unavailable', hint: st === 'unavailable' ? t('session-unasked-unavailable-hint') : undefined, run: () => void applyConfig(o, c.id) };
+  });
+  const configShown = (o: ConfigOptionModel): string => {
+    const now = configChoices(o).find((c) => c.id === o.current);
+    return now ? choiceName(o, now) : o.current || t('session-not-reported');
+  };
+  const configChip = (o: ConfigOptionModel) => (
+    <Menu key={o.id} label={`${configWord(o)}: ${configShown(o)}`} items={configItems(o)} align="start" className="ide-chip h-7 max-w-56 min-w-0 cursor-pointer rounded-s px-2.5 hover:border-accent hover:text-ink">
+      <span className="flex-none">{configWord(o)}</span><span className="min-w-0 truncate font-medium text-ink">{configShown(o)}</span><Icon name="chevronDown" className="size-3" />
+    </Menu>
+  );
+  const moreItems: MenuItem[] = groups.more.map((o) => ({ label: `${configWord(o)}: ${configShown(o)}`, items: configItems(o) }));
   // What this device chose when it started the agent (an effort, say): the agent does not report it, so it is shown read-only and only
-  // when known. A model or mode already has its own menu.
-  const started = useMemo(() => startedWith(agentKey).filter(([id]) => !(id === 'model' && session.models.length > 0) && !(id === 'mode' && session.modes.length > 0)), [agentKey, session.models.length, session.modes.length]);
+  // when known. A model, mode or effort that the agent offers has its own menu.
+  const hasEffort = groups.chips.some((o) => o.category === 'thought_level');
+  const started = useMemo(() => startedWith(agentKey).filter(([id]) => !(id === 'model' && (session.models.length > 0 || groups.replaces.model)) && !(id === 'mode' && (session.modes.length > 0 || groups.replaces.mode)) && !(id === 'effort' && hasEffort)), [agentKey, session.models.length, session.modes.length, groups, hasEffort]);
   const controls = <>
-    {picker('mode', session.modes, session.currentMode)}
-    {picker('model', session.models, session.currentModel)}
-    {started.map(([id, value]) => <span key={id} className="ide-chip h-7 rounded-s px-2.5" title={t('session-started-hint')}>{t('session-started-with', { name: settingName({ id, label: `setting-${id}`, values: [], defaultValue: '' }, t), value })}</span>)}
-    {session.modes.some((o) => needsConfirm('mode', o) && o.id !== session.currentMode) && <span role="note" className="text-xs text-muted">{t('session-unasked-unavailable')}</span>}
-    {failed && <span role="status" className="text-xs text-needs-you">{t('session-change-failed')}</span>}
+    {!groups.replaces.mode && picker('mode', session.modes, session.currentMode)}
+    {!groups.replaces.model && picker('model', session.models, session.currentModel)}
+    {groups.chips.map(configChip)}
+    {moreItems.length > 0 && <Menu label={t('session-more')} items={moreItems} align="start" className="ide-chip h-7 cursor-pointer rounded-s px-2.5 hover:border-accent hover:text-ink"><span>{t('session-more')}</span><Icon name="chevronDown" className="size-3" /></Menu>}
+    {started.map(([id, value]) =><span key={id} className="ide-chip h-7 rounded-s px-2.5" title={t('session-started-hint')}>{t('session-started-with', { name: settingName({ id, label: `setting-${id}`, values: [], defaultValue: '' }, t), value })}</span>)}
+    {!groups.replaces.mode && session.modes.some((o) => needsConfirm('mode', o) && o.id !== session.currentMode) && <span role="note" className="text-xs text-muted">{t('session-unasked-unavailable')}</span>}
+    {anyUnavailable([...groups.chips, ...groups.more]) && <span role="note" className="text-xs text-muted">{t('session-config-unavailable')}</span>}
+    {failed && <span role="status" className="text-xs text-needs-you">{t(failed)}</span>}
   </>;
   const word = state ? t(`state-${state}`) : '';
   const status = <>

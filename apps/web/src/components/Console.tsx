@@ -8,6 +8,7 @@ import type { ApprovalModel, BoardModel, MachineModel, MessageModel, ProjectCost
 import type { TerminalSource } from '../terminal/source';
 import { DiffDialog } from './DiffDialog';
 import { PromptBox } from './PromptBox';
+import type { PromptSend } from './chatActions';
 import type { ChatSource } from '../net/chat';
 import { FilesDialog } from './FilesDialog';
 import { HistoryDialog } from './HistoryDialog';
@@ -79,7 +80,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   boards?: readonly BoardModel[];
   terminalFor: (agentId: string) => TerminalSource;
   chatOf?: (agent: AgentTileModel) => ChatSource | undefined;
-  sendPrompt?: (agent: AgentTileModel, text: string) => Promise<boolean>;
+  sendPrompt?: PromptSend;
   chooseOption?: (agentKey: string, kind: 'mode' | 'model', id: string) => Promise<boolean>;
   loadDiff?: (agent: AgentTileModel, path?: string) => Promise<DiffSource>;
   loadHistory?: (agent: AgentTileModel) => Promise<CommitItem[]>;
@@ -329,7 +330,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
         resumeError={resumeError?.id === a.id ? resumeError.code : undefined} /> : <>
         {a.terminal !== false && <LiveSummary agent={a} now={now} onChanges={() => { setRailTab('changes'); setShowDetails(true); }} />}
         <div className="pane min-h-0 flex-1 p-1.5">
-        {a.terminal === false ? <PromptBox agent={a} send={sendPrompt} source={chatOf?.(a)} choose={chooseOption} onReview={loadDiff ? () => setReviewing(a.id) : undefined} approvals={pinnedAsks(a.id)} /> : (
+        {a.terminal === false ? <PromptBox key={a.id} agent={a} send={sendPrompt} source={chatOf?.(a)} choose={chooseOption} onReview={loadDiff ? () => setReviewing(a.id) : undefined} approvals={pinnedAsks(a.id)} /> : (
           <Suspense fallback={<div className="terminal" aria-busy="true" />}>
             <TerminalView source={terminalFor(a.id)} label={`${t('focus-terminal')} · ${a.name}`} />
           </Suspense>
