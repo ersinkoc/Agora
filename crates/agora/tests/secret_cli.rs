@@ -375,7 +375,7 @@ fn a_secret_is_in_no_output_of_the_node_the_cli_the_terminal_or_a_file() {
             ),
         )
         .unwrap();
-        let node = start_node(&h, &repo, &log, &[], true);
+        let node = start_node(&h, &repo, &log, &[], agora_platform::CONTROL_TOKEN_REQUIRED);
         let (code, out, err) = run(
             &h,
             &["agent", "start", "probe", "--project", "demo", "--worktree"],
