@@ -10,7 +10,7 @@ use agora_core::AgentId;
 use agora_protocol::jsonrpc::{parse_line, Message};
 use serde_json::{json, Map, Value};
 
-use crate::broker::{AskStatus, Limits, Mesh, MeshError, TaskStatus};
+use crate::broker::{inbox_message_number, AskStatus, Limits, Mesh, MeshError, TaskStatus};
 
 /// Versions of the MCP specification this server can speak, newest first.
 pub const SUPPORTED_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
@@ -195,6 +195,14 @@ pub fn ok_tool_result(v: &Value) -> Value {
 
 fn str_arg<'a>(a: &'a Value, k: &str) -> Option<&'a str> {
     a.get(k).and_then(Value::as_str)
+}
+
+fn optional_str_arg<'a>(a: &'a Value, k: &str) -> Result<Option<&'a str>, ()> {
+    match a.get(k) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) => Ok(Some(s)),
+        Some(_) => Err(()),
+    }
 }
 
 fn strs_arg(a: &Value, k: &str) -> Option<Vec<String>> {
@@ -425,6 +433,12 @@ impl McpConnection {
                 }
             }
             "inbox" => {
+                let Ok(since) = optional_str_arg(&args, "since") else {
+                    return bad();
+                };
+                if since.is_some_and(|id| inbox_message_number(id).is_none()) {
+                    return bad();
+                }
                 let limit = match args.get("limit") {
                     None | Some(Value::Null) => 50,
                     Some(v) => match v.as_u64() {
@@ -432,7 +446,7 @@ impl McpConnection {
                         None => return bad(),
                     },
                 };
-                done(mesh.inbox(me, str_arg(&args, "since"), limit).map(|ms| json!(ms.iter().map(|m| json!({
+                done(mesh.inbox(me, since, limit).map(|ms| json!(ms.iter().map(|m| json!({
                     "message_id": m.id, "from": m.provenance.from.as_str(), "body": m.body, "refs": m.refs,
                     "at": m.at_ms, "kind": m.kind, "reply_to": m.reply_to,
                     "provenance": {"agent": m.provenance.from.as_str(), "kind": m.provenance.kind,
@@ -440,12 +454,12 @@ impl McpConnection {
                 })).collect::<Vec<_>>())))
             }
             "task_list" => {
-                let status = match str_arg(&args, "status") {
-                    None => None,
-                    Some("open") => Some(TaskStatus::Open),
-                    Some("claimed") => Some(TaskStatus::Claimed),
-                    Some("done") => Some(TaskStatus::Done),
-                    Some(_) => return bad(),
+                let status = match optional_str_arg(&args, "status") {
+                    Ok(None) => None,
+                    Ok(Some("open")) => Some(TaskStatus::Open),
+                    Ok(Some("claimed")) => Some(TaskStatus::Claimed),
+                    Ok(Some("done")) => Some(TaskStatus::Done),
+                    _ => return bad(),
                 };
                 done(mesh.task_list(me, status).map(|ts| json!(ts.iter().map(|t| json!({
                     "task_id": t.id.as_str(), "title": t.title, "detail": t.detail,
@@ -456,13 +470,15 @@ impl McpConnection {
                 })).collect::<Vec<_>>())))
             }
             "task_create" => {
-                let (Some(title), Some(deps)) =
-                    (str_arg(&args, "title"), strs_arg(&args, "depends_on"))
-                else {
+                let (Some(title), Ok(detail), Some(deps)) = (
+                    str_arg(&args, "title"),
+                    optional_str_arg(&args, "detail"),
+                    strs_arg(&args, "depends_on"),
+                ) else {
                     return bad();
                 };
                 done(
-                    mesh.task_create(me, title, str_arg(&args, "detail").unwrap_or(""), &deps)
+                    mesh.task_create(me, title, detail.unwrap_or(""), &deps)
                         .map(|t| json!({"task_id": t.as_str()})),
                 )
             }
@@ -484,9 +500,10 @@ impl McpConnection {
                 )
             }
             "lease_acquire" => {
-                let (Some(paths), Ok(Some(ttl))) =
-                    (strs_arg(&args, "paths"), secs_ms(&args, "ttl_s"))
-                else {
+                let (Some(paths), Ok(Some(ttl))) = (
+                    strs_arg(&args, "paths").filter(|paths| !paths.is_empty()),
+                    secs_ms(&args, "ttl_s"),
+                ) else {
                     return bad();
                 };
                 done(
@@ -501,15 +518,16 @@ impl McpConnection {
                 done(mesh.lease_release(me, l, now).map(|()| json!({"ok": true})))
             }
             "handoff" => {
-                let (Some(to), Some(summary), Some(refs)) = (
+                let (Some(to), Ok(task_id), Some(summary), Some(refs)) = (
                     str_arg(&args, "to"),
+                    optional_str_arg(&args, "task_id"),
                     str_arg(&args, "summary"),
                     strs_arg(&args, "refs"),
                 ) else {
                     return bad();
                 };
                 done(
-                    mesh.handoff(me, to, str_arg(&args, "task_id"), summary, &refs, now)
+                    mesh.handoff(me, to, task_id, summary, &refs, now)
                         .map(|h| json!({"handoff_id": h})),
                 )
             }
@@ -766,6 +784,46 @@ mod tests {
     }
 
     #[test]
+    fn inbox_zero_limit_leaves_messages_for_the_next_read() {
+        let (mut m, _, mut b) = setup();
+        m.send_message(&AgentId::new("a"), "b", "hello", &[], None, 0)
+            .unwrap();
+        let (page, err) = payload(call(&mut b, &mut m, 0, "inbox", json!({"limit": 0})));
+        assert!(!err);
+        assert_eq!(page, json!([]));
+        let (page, err) = payload(call(&mut b, &mut m, 0, "inbox", json!({"limit": 1})));
+        assert!(!err);
+        assert_eq!(page[0]["body"], "hello");
+    }
+
+    #[test]
+    fn inbox_rejects_invalid_cursors_and_keeps_valid_pagination() {
+        let (mut m, _, mut b) = setup();
+        let sender = AgentId::new("a");
+        let first = m.send_message(&sender, "b", "first", &[], None, 0).unwrap();
+        let second = m
+            .send_message(&sender, "b", "second", &[], None, 1)
+            .unwrap();
+        for since in [
+            json!(true),
+            json!("m-invalid"),
+            json!(first.replacen("m-", "t-", 1)),
+        ] {
+            assert!(matches!(
+                call(&mut b, &mut m, 2, "inbox", json!({"since": since})),
+                Outcome::Reply(Message::ErrorResponse {
+                    code: INVALID_PARAMS,
+                    ..
+                })
+            ));
+        }
+        let (page, err) = payload(call(&mut b, &mut m, 2, "inbox", json!({"since": first})));
+        assert!(!err);
+        assert_eq!(page.as_array().unwrap().len(), 1);
+        assert_eq!(page[0]["message_id"], second);
+    }
+
+    #[test]
     fn errors_come_back_as_tool_errors_with_stable_codes() {
         let (mut m, mut a, _) = setup();
         let (r, err) = payload(call(
@@ -821,6 +879,71 @@ mod tests {
                 "{name} {args}"
             );
         }
+    }
+
+    #[test]
+    fn a_pathless_lease_returns_invalid_params_without_granting_anything() {
+        let (mut m, mut a, _) = setup();
+        for args in [
+            json!({"ttl_s": 10}),
+            json!({"paths": null, "ttl_s": 10}),
+            json!({"paths": [], "ttl_s": 10}),
+        ] {
+            assert!(matches!(
+                call(&mut a, &mut m, 0, "lease_acquire", args),
+                Outcome::Reply(Message::ErrorResponse {
+                    code: INVALID_PARAMS,
+                    ..
+                })
+            ));
+        }
+        assert!(m.take_events().is_empty());
+        assert!(m.live_leases("p", 0).is_empty());
+    }
+
+    #[test]
+    fn malformed_optional_task_strings_are_not_treated_as_omitted() {
+        let (mut m, mut a, _) = setup();
+        let (task, err) = payload(call(
+            &mut a,
+            &mut m,
+            0,
+            "task_create",
+            json!({"title": "existing"}),
+        ));
+        assert!(!err);
+        m.take_events();
+        for (name, args) in [
+            ("task_create", json!({"title": "new", "detail": 23})),
+            ("task_list", json!({"status": false})),
+            (
+                "handoff",
+                json!({"to": "b", "summary": "next", "task_id": []}),
+            ),
+        ] {
+            assert!(
+                matches!(
+                    call(&mut a, &mut m, 1, name, args),
+                    Outcome::Reply(Message::ErrorResponse {
+                        code: INVALID_PARAMS,
+                        ..
+                    })
+                ),
+                "{name}"
+            );
+        }
+        assert!(m.take_events().is_empty());
+        assert!(m.inbox(&AgentId::new("b"), None, 10).unwrap().is_empty());
+        let (rows, err) = payload(call(
+            &mut a,
+            &mut m,
+            2,
+            "task_list",
+            json!({"status": "open"}),
+        ));
+        assert!(!err);
+        assert_eq!(rows.as_array().unwrap().len(), 1);
+        assert_eq!(rows[0]["task_id"], task["task_id"]);
     }
 
     #[test]
