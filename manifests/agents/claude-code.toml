@@ -50,6 +50,9 @@ argv = ["claude", "--resume", "{session_id}"]
 # ADR-0060 Amendment A: the node's own resume of an agent that was working carries this sentence as the first message (checked on Claude Code
 # 2.1.325: `claude --resume <id> "<prompt>"`).
 continue_argv = ["claude", "--resume", "{session_id}", "{continue}"]
+# A session Claude Code was never spoken to is not saved, so `--resume` finds nothing and exits at once. The node then starts it from nothing
+# under the same id. Claude Code refuses `--session-id` for an id that exists, so a real conversation is never overwritten.
+fresh_argv = ["claude", "--session-id", "{session_id}"]
 continue = "This session was cut off by a restart of the machine or of Agora. Before anything else, check the state of what you were doing (the files, the running tasks, git status), then carry on where you stopped."
 
 [session]
