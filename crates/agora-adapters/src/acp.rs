@@ -31,6 +31,8 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
+use crate::perm::{self, Category};
+
 /// How long agent text chunks are joined into one chat item.
 const JOIN: Duration = Duration::from_millis(150);
 /// The most text one joined item holds before it is sent anyway.
@@ -68,23 +70,6 @@ const OPTIONS_MAX: usize = 200;
 const OPTION_ID_MAX: usize = 200;
 const OPTION_NAME_MAX: usize = 200;
 const OPTION_DESCRIPTION_MAX: usize = 500;
-/// ADR-0058: words in a mode's id or name (lowercase, letters and digits only) that mark a mode in which the agent acts without
-/// asking. ACP has no field for it, so the bridge errs on the side of asking the user to confirm.
-const SKIPS_PERMISSIONS: &[&str] = &[
-    "bypass",
-    "yolo",
-    "danger",
-    "skippermission",
-    "nopermission",
-    "noapproval",
-    "fullaccess",
-    "autoapprove",
-    "autoaccept",
-    "acceptedits",
-    "acceptall",
-    "unsafe",
-];
-
 enum Ev {
     Node(Value),
     Agent(Value),
@@ -104,6 +89,13 @@ enum Waiting {
     },
     Prompt {
         cancelling: bool,
+    },
+    /// ADR-0090: the node's `session/set_config`, until the agent answered `session/set_config_option`.
+    SetConfig {
+        node_id: Value,
+        session_id: String,
+        id: String,
+        value: String,
     },
     /// ADR-0058: the node's `session/set_option`, until the agent answered `session/set_mode` or `session/set_model`.
     SetOption {
@@ -251,33 +243,6 @@ fn turn_outcome(answer: &Value, said: bool) -> Option<(&'static str, Value)> {
     }
 }
 
-/// ADR-0058: whether a mode's id or name says the agent acts without asking in it.
-fn skips_permissions(id: &str, name: &str, description: &str) -> bool {
-    let squash = |s: &str| -> String {
-        s.chars()
-            .filter(char::is_ascii_alphanumeric)
-            .map(|c| c.to_ascii_lowercase())
-            .collect()
-    };
-    // `auto` only as a whole word (`auto`, `Auto mode`, `auto-edit`), so `autosave` or `automatic-plan` are not marked by it.
-    let has_word = |s: &str, w: &str| {
-        s.split(|c: char| !c.is_ascii_alphanumeric())
-            .any(|part| part.eq_ignore_ascii_case(w))
-    };
-    let d = description.to_ascii_lowercase();
-    let approves_automatically = d
-        .find("approve")
-        .is_some_and(|at| d[at..].contains("automatically"));
-    let (sid, sname) = (squash(id), squash(name));
-    SKIPS_PERMISSIONS
-        .iter()
-        .any(|w| sid.contains(w) || sname.contains(w))
-        || has_word(id, "auto")
-        || has_word(name, "auto")
-        || d.contains("without asking")
-        || approves_automatically
-}
-
 /// ADR-0058: an ACP mode list (`availableModes` of `{id, name, description}`) or model list (`availableModels` of `{modelId, name,
 /// description}`) as adapter-protocol options, bounded.
 fn acp_options(list: Option<&Value>, id_key: &str, mode: bool) -> Vec<Value> {
@@ -294,7 +259,14 @@ fn acp_options(list: Option<&Value>, id_key: &str, mode: bool) -> Vec<Value> {
                     let name = text(o, "name", OPTION_NAME_MAX);
                     let mut v = json!({"id": id, "name": name,
                                        "description": text(o, "description", OPTION_DESCRIPTION_MAX)});
-                    if mode && skips_permissions(id, &name, o.get("description").and_then(Value::as_str).unwrap_or("")) {
+                    // ADR-0090: modes and models alike; a mode that is not clearly one that asks is flagged too (`perm`).
+                    let (category, option) = if mode {
+                        (Category::Mode, ("mode", "mode"))
+                    } else {
+                        (Category::Model, ("model", "model"))
+                    };
+                    let description = o.get("description").and_then(Value::as_str).unwrap_or("");
+                    if perm::value_skips(category, option, (id, &name, description)) {
                         v["skipsPermissions"] = json!(true);
                     }
                     Some(v)
@@ -303,6 +275,142 @@ fn acp_options(list: Option<&Value>, id_key: &str, mode: bool) -> Vec<Value> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// ADR-0090: the most config options passed on, and the most choices of one; the node bounds them again.
+const CONFIG_OPTIONS_MAX: usize = 64;
+const CONFIG_CHOICES_MAX: usize = 64;
+/// ADR-0090: the most slash commands passed on.
+const COMMANDS_MAX: usize = 100;
+/// ADR-0090: the most paths of one tool call passed on.
+const LOCATIONS_MAX: usize = 64;
+/// ADR-0090: a tool's output is cut here (head and tail kept) before secrets are removed; the node cuts it to its own cap after.
+const OUTPUT_MAX: usize = 64 * 1024;
+
+/// `s` as is when it fits `max` bytes, otherwise its first and last `max / 2` bytes (cut on character boundaries).
+fn head_tail(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let half = max / 2;
+    let mut head = half;
+    while !s.is_char_boundary(head) {
+        head -= 1;
+    }
+    let mut tail = s.len() - half;
+    while !s.is_char_boundary(tail) {
+        tail += 1;
+    }
+    format!("{}{}", &s[..head], &s[tail..])
+}
+
+/// ADR-0090: ACP `configOptions` as adapter-protocol options (`session/config`): `{id, name, description, category, type, current,
+/// choices[], skipsPermissions}`, bounded. Choices of a grouped select are flattened. `skipsPermissions` follows `perm` (the
+/// agent's category and words, with an unknown value in a permission option counted as skipping); for a boolean it is set on the
+/// option, for a select on each choice.
+fn acp_config(list: Option<&Value>) -> Vec<Value> {
+    let text =
+        |o: &Value, k: &str, max: usize| clip(o.get(k).and_then(Value::as_str).unwrap_or(""), max);
+    let choice = |category: Category, option: (&str, &str), o: &Value| -> Option<Value> {
+        let id = o.get("value")?.as_str()?;
+        if id.is_empty() || id.len() > OPTION_ID_MAX {
+            return None;
+        }
+        let name = text(o, "name", OPTION_NAME_MAX);
+        let description = text(o, "description", OPTION_DESCRIPTION_MAX);
+        let mut v = json!({"id": id, "name": name, "description": description});
+        if perm::value_skips(category, option, (id, &name, &description)) {
+            v["skipsPermissions"] = json!(true);
+        }
+        Some(v)
+    };
+    list.and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|o| {
+                    let id = o.get("id")?.as_str()?;
+                    if id.is_empty() || id.len() > OPTION_ID_MAX {
+                        return None;
+                    }
+                    let name = text(o, "name", OPTION_NAME_MAX);
+                    let description = text(o, "description", OPTION_DESCRIPTION_MAX);
+                    let word = o
+                        .get("category")
+                        .and_then(Value::as_str)
+                        .map(|c| clip(c, 40));
+                    let category = Category::from_acp(word.as_deref());
+                    let mut v = json!({"id": id, "name": name, "description": description,
+                                       "category": word.clone().unwrap_or_default()});
+                    if o.get("type").and_then(Value::as_str) == Some("boolean") {
+                        v["type"] = json!("boolean");
+                        v["current"] = json!(o
+                            .get("currentValue")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false)
+                            .to_string());
+                        v["choices"] = json!([]);
+                        if perm::boolean_skips(category, (id, &name), &description) {
+                            v["skipsPermissions"] = json!(true);
+                        }
+                    } else {
+                        v["type"] = json!("select");
+                        v["current"] = json!(clip(
+                            o.get("currentValue").and_then(Value::as_str).unwrap_or(""),
+                            OPTION_ID_MAX
+                        ));
+                        let flat: Vec<&Value> = o
+                            .get("options")
+                            .and_then(Value::as_array)
+                            .map(|l| {
+                                l.iter()
+                                    .flat_map(|x| {
+                                        match x.get("options").and_then(Value::as_array) {
+                                            Some(group) => group.iter().collect::<Vec<_>>(),
+                                            None => vec![x],
+                                        }
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        v["choices"] = json!(flat
+                            .into_iter()
+                            .filter_map(|c| choice(category, (id, &name), c))
+                            .take(CONFIG_CHOICES_MAX)
+                            .collect::<Vec<_>>());
+                    }
+                    Some(v)
+                })
+                .take(CONFIG_OPTIONS_MAX)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// ADR-0090: the text a tool call produced, from an ACP `content` array (`content` blocks of type text) or, failing that, its
+/// `rawOutput`: bounded, with anything that looks like a secret replaced (the same removal as for a stderr tail). `None` when the
+/// update carries neither.
+fn tool_output(u: &Value) -> Option<String> {
+    let from_content = u.get("content").and_then(Value::as_array).map(|a| {
+        a.iter()
+            .filter(|c| c.get("type").and_then(Value::as_str) == Some("content"))
+            .filter_map(|c| c.pointer("/content/text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n")
+    });
+    let raw = u
+        .get("rawOutput")
+        .filter(|v| !v.is_null())
+        .map(|v| match v {
+            Value::String(s) => s.clone(),
+            other => other.to_string(),
+        });
+    // Text blocks win; a diff-only `content` carries no output (the diff has its own item), so `rawOutput` is used, or nothing.
+    let text = match (from_content, raw) {
+        (Some(c), _) if !c.is_empty() => c,
+        (_, Some(r)) => r,
+        _ => return None,
+    };
+    Some(redact(&head_tail(&text, OUTPUT_MAX)))
 }
 
 /// A notice's parameters: a reason's parameters with every value as a string.
@@ -739,6 +847,20 @@ struct SessionState {
     mode: String,
 }
 
+/// ADR-0090: what the bridge keeps only for a node that said it takes rich chat (`nodeCapabilities` has `chat.rich`). Without it the
+/// bridge behaves as before: thinking, tool status, config options and commands are dropped.
+#[derive(Default)]
+struct Rich {
+    on: bool,
+    /// The buffered text is the agent's thinking.
+    thought: bool,
+    /// The agent's config options as last reported (adapter-protocol form), to check what the node asks to set.
+    config: Vec<Value>,
+    /// The id of the config option the mode (or model) list was built from, when the agent gave no `modes` (or `models`) of its own.
+    modes_from: Option<String>,
+    models_from: Option<String>,
+}
+
 struct Bridge<W: Write> {
     out: W,
     agent: std::process::ChildStdin,
@@ -764,6 +886,7 @@ struct Bridge<W: Write> {
     stderr: Arc<Mutex<Kept>>,
     turn_mark: u64,
     home: Option<String>,
+    rich: Rich,
 }
 
 impl<W: Write> Bridge<W> {
@@ -850,6 +973,12 @@ impl<W: Write> Bridge<W> {
         }
         let t = std::mem::take(&mut self.text);
         let sid = std::mem::take(&mut self.text_session);
+        if std::mem::take(&mut self.rich.thought) {
+            // Thinking is not the agent saying something: a turn of nothing else is still an empty turn.
+            let mut p = json!({"thought": {"text": t}});
+            p["sessionId"] = json!(sid);
+            return self.note("chat/append", p);
+        }
         self.chat(json!({"text": {"text": t}}), Some(&sid))
     }
 
@@ -893,7 +1022,7 @@ impl<W: Write> Bridge<W> {
             Waiting::Initialize { .. } => "initialize",
             Waiting::NewSession { .. } => "session",
             Waiting::Prompt { .. } => "turn",
-            Waiting::SetOption { .. } => "option",
+            Waiting::SetOption { .. } | Waiting::SetConfig { .. } => "option",
         };
         let stage = ["initialize", "session", "turn", "option"]
             .into_iter()
@@ -915,7 +1044,8 @@ impl<W: Write> Bridge<W> {
         for (_, w) in &waiting {
             if let Waiting::Initialize { node_id }
             | Waiting::NewSession { node_id, .. }
-            | Waiting::SetOption { node_id, .. } = w
+            | Waiting::SetOption { node_id, .. }
+            | Waiting::SetConfig { node_id, .. } = w
             {
                 if !node_id.is_null() {
                     let data =
@@ -1008,14 +1138,29 @@ impl<W: Write> Bridge<W> {
             }
             return Ok(());
         };
-        let (method, key) = if mode {
-            ("session/set_mode", "modeId")
+        let from_config = if mode {
+            self.rich.modes_from.clone()
         } else {
-            ("session/set_model", "modelId")
+            self.rich.models_from.clone()
+        };
+        let (method, params) = match from_config {
+            // The agent gave no mode (or model) list of its own: the list is its config option, set the way ACP sets one.
+            Some(config_id) => (
+                "session/set_config_option",
+                json!({"sessionId": sid, "configId": config_id, "value": want}),
+            ),
+            None if mode => (
+                "session/set_mode",
+                json!({"sessionId": sid, "modeId": want}),
+            ),
+            None => (
+                "session/set_model",
+                json!({"sessionId": sid, "modelId": want}),
+            ),
         };
         self.ask_agent(
             method,
-            json!({"sessionId": sid, key: want}),
+            params,
             Waiting::SetOption {
                 node_id,
                 session_id: sid,
@@ -1024,6 +1169,166 @@ impl<W: Write> Bridge<W> {
             },
         );
         Ok(())
+    }
+
+    /// ADR-0090: the node's `session/set_config`. Only an option and a value the agent reported are passed on; anything else is
+    /// refused here with `adapter.option_refused`.
+    fn set_config(&mut self, id: Option<Value>, params: &Value) -> io::Result<()> {
+        let node_id = id.unwrap_or(Value::Null);
+        let text = |k: &str| {
+            params
+                .get(k)
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string()
+        };
+        let (config_id, value) = (text("configId"), text("value"));
+        let acp_value = self
+            .rich
+            .config
+            .iter()
+            .find(|o| o["id"].as_str() == Some(config_id.as_str()))
+            .and_then(|o| {
+                if o["type"] == "boolean" {
+                    match value.as_str() {
+                        "true" => Some(json!({"type": "boolean", "value": true})),
+                        "false" => Some(json!({"type": "boolean", "value": false})),
+                        _ => None,
+                    }
+                } else if o["choices"]
+                    .as_array()
+                    .is_some_and(|c| c.iter().any(|c| c["id"].as_str() == Some(value.as_str())))
+                {
+                    Some(json!({"value": value}))
+                } else {
+                    None
+                }
+            });
+        let (Some(acp_value), Some(sid)) =
+            (acp_value.filter(|_| self.rich.on), self.session.clone())
+        else {
+            if !node_id.is_null() {
+                let data = json!({"code": "adapter.option_refused", "params": {"id": config_id}});
+                self.send_node(&json!({"jsonrpc": "2.0", "id": node_id,
+                    "error": {"code": -32602, "message": "not offered", "data": data}}))?;
+            }
+            return Ok(());
+        };
+        let mut p = json!({"sessionId": sid, "configId": config_id});
+        if let (Some(m), Some(v)) = (p.as_object_mut(), acp_value.as_object()) {
+            m.extend(v.iter().map(|(k, v)| (k.clone(), v.clone())));
+        }
+        self.ask_agent(
+            "session/set_config_option",
+            p,
+            Waiting::SetConfig {
+                node_id,
+                session_id: sid,
+                id: config_id,
+                value,
+            },
+        );
+        Ok(())
+    }
+
+    /// ADR-0090: the mode and model lists of the older API, built from the agent's config options when the agent gave no list of its
+    /// own (the ACP spec has agents send both during the transition; an agent that sends only config options still gets a mode and
+    /// a model switch). Only for a node that takes rich chat, so a node without it sees what it always saw.
+    fn derive_from_config(&mut self) {
+        if !self.rich.on {
+            return;
+        }
+        let Some(sid) = self.session.clone() else {
+            return;
+        };
+        let find = |config: &[Value], category: &str| {
+            config
+                .iter()
+                .find(|o| o["category"] == category && o["type"] == "select")
+                .cloned()
+        };
+        let state = self.session_state.entry(sid).or_default();
+        if self.modes.is_empty() || self.rich.modes_from.is_some() {
+            match find(&self.rich.config, "mode") {
+                Some(o) => {
+                    self.modes = o["choices"].as_array().cloned().unwrap_or_default();
+                    self.rich.modes_from = o["id"].as_str().map(str::to_string);
+                    state.mode = o["current"].as_str().unwrap_or("").to_string();
+                }
+                None => {
+                    if self.rich.modes_from.take().is_some() {
+                        self.modes.clear();
+                    }
+                }
+            }
+        }
+        if self.models.is_empty() || self.rich.models_from.is_some() {
+            match find(&self.rich.config, "model") {
+                Some(o) => {
+                    self.models = o["choices"].as_array().cloned().unwrap_or_default();
+                    self.rich.models_from = o["id"].as_str().map(str::to_string);
+                    state.model = clip(o["current"].as_str().unwrap_or(""), MODEL_MAX);
+                }
+                None => {
+                    if self.rich.models_from.take().is_some() {
+                        self.models.clear();
+                    }
+                }
+            }
+        }
+    }
+
+    /// ADR-0090: the agent's config options changed (a reply to `session/new`, `session/set_config_option` or a
+    /// `config_option_update`): remembered, and reported to the node together with the lists built from them.
+    fn config_changed(&mut self, list: Option<&Value>) -> io::Result<()> {
+        if !self.rich.on {
+            return Ok(());
+        }
+        self.config_replaced(acp_config(list))
+    }
+
+    /// [`Self::config_changed`] for options already in the adapter-protocol form.
+    fn config_replaced(&mut self, config: Vec<Value>) -> io::Result<()> {
+        self.rich.config = config;
+        self.derive_from_config();
+        let Some(sid) = self.session.clone() else {
+            return Ok(());
+        };
+        self.note(
+            "session/config",
+            json!({"sessionId": sid, "options": &self.rich.config}),
+        )?;
+        if self.rich.modes_from.is_some() || self.rich.models_from.is_some() {
+            self.options()?;
+        }
+        Ok(())
+    }
+
+    /// What the bridge declares to the node. The ADR-0090 ones only to a node that said `chat.rich`: `thought`, `tool_status`,
+    /// `plan_status`, `config`, `commands`, and `turns` (the bridge reports `working` at the start of every prompt turn and `idle` at
+    /// its end, which is what lets the node queue a prompt behind a turn).
+    fn capabilities(&self) -> Vec<&'static str> {
+        let mut c = vec![
+            "chat",
+            "approvals",
+            "plan",
+            "diff",
+            "cancel",
+            "usage",
+            "set_mode",
+            "set_model",
+        ];
+        if self.rich.on {
+            c.extend([
+                "thought",
+                "tool_status",
+                "plan_status",
+                "config",
+                "commands",
+                "turns",
+            ]);
+        }
+        c
     }
 
     /// A request or notification from the node.
@@ -1037,6 +1342,10 @@ impl<W: Write> Bridge<W> {
         };
         match method {
             "initialize" => {
+                self.rich.on = params
+                    .get("nodeCapabilities")
+                    .and_then(Value::as_array)
+                    .is_some_and(|a| a.iter().any(|c| c.as_str() == Some("chat.rich")));
                 self.ask_agent(
                     "initialize",
                     json!({"protocolVersion": 1, "clientCapabilities": {"fs": {"readTextFile": false, "writeTextFile": false}, "terminal": false}}),
@@ -1152,6 +1461,7 @@ impl<W: Write> Bridge<W> {
                 }
             }
             "session/set_option" => self.set_option(id, &params)?,
+            "session/set_config" => self.set_config(id, &params)?,
             "session/stop" | "shutdown" => {
                 self.flush_text()?;
                 return Ok(ControlFlow::Break(id));
@@ -1167,7 +1477,7 @@ impl<W: Write> Bridge<W> {
             "agent_message_chunk" => {
                 if let Some(t) = u.pointer("/content/text").and_then(Value::as_str) {
                     let sid = replay_id.or(self.session.as_deref()).unwrap_or_default();
-                    if !self.text.is_empty() && self.text_session != sid {
+                    if !self.text.is_empty() && (self.rich.thought || self.text_session != sid) {
                         self.flush_text()?;
                     }
                     if self.text.is_empty() {
@@ -1182,6 +1492,62 @@ impl<W: Write> Bridge<W> {
                         self.flush_text()?;
                     }
                 }
+            }
+            "agent_thought_chunk" if self.rich.on => {
+                if let Some(t) = u.pointer("/content/text").and_then(Value::as_str) {
+                    let sid = replay_id
+                        .or(self.session.as_deref())
+                        .unwrap_or_default()
+                        .to_string();
+                    // A thought and a message are different entries: whichever the buffer holds goes first.
+                    if !self.text.is_empty() && (!self.rich.thought || self.text_session != sid) {
+                        self.flush_text()?;
+                    }
+                    if self.text.is_empty() {
+                        self.text_session = sid.clone();
+                        self.text_since = Instant::now();
+                        self.rich.thought = true;
+                    }
+                    self.text.push_str(t);
+                    if self.text.len() >= JOIN_MAX {
+                        self.flush_text()?;
+                    }
+                }
+            }
+            "tool_call" | "tool_call_update" if self.rich.on && self.tool_item(u).is_some() => {
+                self.flush_text()?;
+                if let Some(item) = self.tool_item(u) {
+                    self.chat(json!({"toolCall": item}), replay_id)?;
+                }
+                self.diffs_in(u, replay_id)?;
+            }
+            "available_commands_update" if self.rich.on && replay_id.is_none() => {
+                let commands: Vec<Value> = u
+                    .get("availableCommands")
+                    .and_then(Value::as_array)
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|c| {
+                                let name = c.get("name")?.as_str().filter(|n| !n.is_empty())?;
+                                Some(json!({
+                                    "name": clip(name, OPTION_ID_MAX),
+                                    "description": clip(c.get("description").and_then(Value::as_str).unwrap_or(""), OPTION_DESCRIPTION_MAX),
+                                    "inputHint": clip(c.pointer("/input/hint").and_then(Value::as_str).unwrap_or(""), OPTION_NAME_MAX),
+                                }))
+                            })
+                            .take(COMMANDS_MAX)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if let Some(sid) = self.session.clone() {
+                    self.note(
+                        "session/commands",
+                        json!({"sessionId": sid, "commands": commands}),
+                    )?;
+                }
+            }
+            "config_option_update" if self.rich.on && replay_id.is_none() => {
+                self.config_changed(u.get("configOptions"))?;
             }
             "tool_call" => {
                 self.flush_text()?;
@@ -1211,7 +1577,23 @@ impl<W: Write> Bridge<W> {
                             .collect()
                     })
                     .unwrap_or_default();
-                self.chat(json!({"plan": {"steps": steps}}), replay_id)?;
+                let mut plan = json!({"steps": steps});
+                if self.rich.on {
+                    // ADR-0090: the steps' status and priority.
+                    plan["entries"] = json!(u
+                        .get("entries")
+                        .and_then(Value::as_array)
+                        .map(|a| a
+                            .iter()
+                            .filter_map(|e| {
+                                Some(json!({"text": e.get("content")?.as_str()?,
+                                            "status": e.get("status").and_then(Value::as_str).unwrap_or(""),
+                                            "priority": e.get("priority").and_then(Value::as_str).unwrap_or("")}))
+                            })
+                            .collect::<Vec<_>>())
+                        .unwrap_or_default());
+                }
+                self.chat(json!({"plan": plan}), replay_id)?;
             }
             "usage_update" => self.usage(u, replay_id)?,
             "current_mode_update" => {
@@ -1234,6 +1616,55 @@ impl<W: Write> Bridge<W> {
             _ => {} // agent_thought_chunk, user_message_chunk, available_commands_update, ...
         }
         Ok(())
+    }
+
+    /// ADR-0090: an ACP `tool_call` or `tool_call_update` as an adapter-protocol tool item that names its call. `None` when the
+    /// update has no usable call id (the older item is sent then). A field the update leaves out is left out here too, so the node
+    /// keeps what it holds, as ACP means an update.
+    fn tool_item(&self, u: &Value) -> Option<Value> {
+        let call = u
+            .get("toolCallId")
+            .and_then(Value::as_str)
+            .filter(|c| !c.is_empty() && c.len() <= 256)?;
+        let create = u.get("sessionUpdate").and_then(Value::as_str) == Some("tool_call");
+        let mut t = json!({"callId": call});
+        let title = u.get("title").and_then(Value::as_str);
+        let kind = u
+            .get("kind")
+            .and_then(Value::as_str)
+            .filter(|k| k.len() <= 40);
+        if let Some(title) = title.or(if create { kind.or(Some("tool")) } else { None }) {
+            t["tool"] = json!(title);
+        }
+        if let Some(raw) = u.get("rawInput").filter(|v| !v.is_null()) {
+            t["argumentsJson"] = json!(raw.to_string());
+        } else if create {
+            t["argumentsJson"] = json!("");
+        }
+        if let Some(k) = kind {
+            t["kind"] = json!(k);
+        }
+        if let Some(s) = u
+            .get("status")
+            .and_then(Value::as_str)
+            .filter(|s| s.len() <= 40)
+        {
+            t["status"] = json!(s);
+        }
+        if let Some(a) = u.get("locations").and_then(Value::as_array) {
+            t["locations"] = json!(a
+                .iter()
+                .filter_map(|l| {
+                    Some(json!({"path": clip(l.get("path")?.as_str()?, 1024),
+                                "line": l.get("line").and_then(Value::as_u64).unwrap_or(0)}))
+                })
+                .take(LOCATIONS_MAX)
+                .collect::<Vec<_>>());
+        }
+        if let Some(out) = tool_output(u) {
+            t["output"] = json!(out);
+        }
+        Some(t)
     }
 
     /// ACP `usage_update`: the cost is the session's running total, so the report carries its growth since the last one (like
@@ -1405,7 +1836,7 @@ impl<W: Write> Bridge<W> {
                                 self.reply(
                                     &node_id,
                                     json!({"adapterName": "acp-bridge", "version": "1", "agentKind": "acp",
-                                           "capabilities": ["chat", "approvals", "plan", "diff", "cancel", "usage", "set_mode", "set_model"]}),
+                                           "capabilities": self.capabilities()}),
                                 )?;
                             }
                         }
@@ -1455,6 +1886,17 @@ impl<W: Write> Bridge<W> {
                                     "session/reported",
                                     json!({"sessionId": sid, "nativeSessionId": sid}),
                                 )?;
+                                if self.rich.on {
+                                    self.rich.modes_from = None;
+                                    self.rich.models_from = None;
+                                    let list = msg.pointer("/result/configOptions");
+                                    self.rich.config = acp_config(list);
+                                    self.derive_from_config();
+                                    self.note(
+                                        "session/config",
+                                        json!({"sessionId": sid, "options": &self.rich.config}),
+                                    )?;
+                                }
                                 self.options()?;
                                 self.state("IDLE")?;
                             }
@@ -1481,6 +1923,37 @@ impl<W: Write> Bridge<W> {
                                 self.state_because("IDLE", code)?;
                             }
                             None => self.state("IDLE")?,
+                        }
+                    }
+                    Some(Waiting::SetConfig {
+                        node_id,
+                        session_id,
+                        id,
+                        value,
+                    }) => {
+                        if msg.get("error").is_some() {
+                            let data =
+                                json!({"code": "adapter.option_refused", "params": {"id": id}});
+                            self.send_node(&json!({"jsonrpc": "2.0", "id": node_id,
+                                "error": {"code": -32000, "message": "the agent refused", "data": data}}))?;
+                        } else {
+                            self.reply(&node_id, json!({}))?;
+                            if self.session.as_deref() == Some(session_id.as_str()) {
+                                match msg.pointer("/result/configOptions") {
+                                    Some(list) => self.config_changed(Some(list))?,
+                                    None => {
+                                        // The agent did not repeat its options: the one that was set holds the new value.
+                                        let mut kept = std::mem::take(&mut self.rich.config);
+                                        if let Some(o) = kept
+                                            .iter_mut()
+                                            .find(|o| o["id"].as_str() == Some(id.as_str()))
+                                        {
+                                            o["current"] = json!(value);
+                                        }
+                                        self.config_replaced(kept)?;
+                                    }
+                                }
+                            }
                         }
                     }
                     Some(Waiting::SetOption {
@@ -1564,6 +2037,7 @@ where
         models: Vec::new(),
         stderr: Arc::clone(&kept),
         turn_mark: 0,
+        rich: Rich::default(),
         home: std::env::var("HOME")
             .or_else(|_| std::env::var("USERPROFILE"))
             .ok(),
@@ -1657,6 +2131,7 @@ mod tests {
             models: Vec::new(),
             stderr: Arc::new(Mutex::new(Kept::default())),
             turn_mark: 0,
+            rich: Rich::default(),
             home: None,
         };
         // Dispatch chunks directly to leave the join buffer populated.
@@ -1975,27 +2450,24 @@ mod tests {
 
     #[test]
     fn modes_that_act_without_asking_are_marked_and_others_are_not() {
-        assert!(skips_permissions(
-            "bypassPermissions",
-            "Bypass Permissions",
-            ""
-        ));
-        assert!(skips_permissions("full", "Full Access", ""));
-        assert!(skips_permissions("acceptEdits", "", ""));
-        assert!(!skips_permissions("build", "Build", ""));
-        assert!(!skips_permissions("plan", "Plan", ""));
-        assert!(!skips_permissions("default", "Always Ask", ""));
+        let skips = |id: &str, name: &str, d: &str| {
+            perm::value_skips(Category::Mode, ("mode", "mode"), (id, name, d))
+        };
+        assert!(skips("bypassPermissions", "Bypass Permissions", ""));
+        assert!(skips("full", "Full Access", ""));
+        assert!(skips("acceptEdits", "", ""));
+        assert!(!skips("build", "Build", ""));
+        assert!(!skips("plan", "Plan", ""));
+        assert!(!skips("default", "Always Ask", ""));
         // Codex's `auto`; `auto` only as a whole word.
-        assert!(skips_permissions("auto", "Auto", ""));
-        assert!(!skips_permissions("autosave", "Autosave", ""));
+        assert!(skips("auto", "Auto", ""));
+        assert!(!perm::says_it_skips("autosave", "Autosave", "", true));
         // What a description says.
-        assert!(skips_permissions("x", "X", "Runs tools without asking"));
-        assert!(skips_permissions(
-            "x",
-            "X",
-            "Approve every edit automatically"
-        ));
-        assert!(!skips_permissions("x", "X", "Ask before every edit"));
+        assert!(skips("x", "X", "Runs tools without asking"));
+        assert!(skips("x", "X", "Approve every edit automatically"));
+        // A mode the rule cannot place is not taken for one that asks (ADR-0090): the user is asked to confirm it.
+        assert!(skips("turbo", "Turbo", "Ask before every edit"));
+        assert!(!skips("ask", "Ask", "Ask before every edit"));
     }
 
     /// The mode list of Antigravity (`agy`) 1.5.6 as it offers it: `accept-edits` and `auto` act without asking first.
@@ -2046,6 +2518,34 @@ mod tests {
             notice_params(&json!({"a": "x", "b": 3})),
             json!({"a": "x", "b": "3"})
         );
+    }
+
+    #[test]
+    fn a_long_output_keeps_its_head_and_tail_on_character_boundaries() {
+        assert_eq!(head_tail("short", 10), "short");
+        let long = format!("{}{}{}", "a".repeat(100), "é".repeat(100), "z".repeat(100));
+        let cut = head_tail(&long, 50);
+        assert!(
+            cut.len() <= 50 && cut.starts_with("aaa") && cut.ends_with("zzz"),
+            "{cut}"
+        );
+        // Two-byte characters on both cut points.
+        let wide = "é".repeat(101);
+        assert!(head_tail(&wide, 51).chars().all(|c| c == 'é'));
+    }
+
+    #[test]
+    fn a_tool_output_comes_from_text_blocks_or_the_raw_output_and_is_redacted() {
+        let u = json!({"content": [{"type": "diff", "path": "a", "newText": "x"}]});
+        assert_eq!(tool_output(&u), None, "a diff alone is not output");
+        let u = json!({"content": [{"type": "content", "content": {"type": "text", "text": "a"}},
+                                   {"type": "content", "content": {"type": "text", "text": "b"}}]});
+        assert_eq!(tool_output(&u).as_deref(), Some("a\nb"));
+        let u = json!({"rawOutput": {"exit": 0}});
+        assert_eq!(tool_output(&u).as_deref(), Some("{\"exit\":0}"));
+        let u = json!({"rawOutput": "token=abcdefghijklmnopqrstuvwxyz0123456789ABCDEF"});
+        assert!(tool_output(&u)
+            .is_some_and(|o| o.contains(REDACTED) && !o.contains("abcdefghijklmnopqrstuv")));
     }
 
     #[test]

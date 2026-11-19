@@ -79,8 +79,8 @@ impl SignedCommands {
                 "agent.prompt",
                 "agent.set_mode",
                 "agent.set_model",
-                // ADR-0090: not handled by any node yet; listed so a limited device's grant covers them the day it is (a MODE-category
-                // option is a mode switch).
+                // ADR-0090: handled by this node; listed so a limited device's grant covers them (a MODE-category option is a mode
+                // switch).
                 "agent.set_config",
                 "agent.cancel_turn",
                 "terminal.open",

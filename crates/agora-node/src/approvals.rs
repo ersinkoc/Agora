@@ -888,14 +888,40 @@ impl NodeApprovals {
         out
     }
 
-    /// An agent stopped or died: nothing stays waiting on it.
-    pub fn cancel_agent(&self, agent: &agora_core::AgentId) {
-        self.l().retain(|(_, a, _)| a != agent);
+    /// An agent stopped or died, or its turn was cancelled: nothing stays waiting on it. Returns the ids of the requests that were
+    /// withdrawn (ADR-0090: their entries in the conversation are shown as cancelled).
+    pub fn cancel_agent(&self, agent: &agora_core::AgentId) -> Vec<String> {
+        let mut withdrawn = Vec::new();
+        self.l().retain(|(id, a, _)| {
+            let keep = a != agent;
+            if !keep {
+                withdrawn.push(id.clone());
+            }
+            keep
+        });
         let gone = self.q().cancel_agent(agent.as_str());
         let mut routes = self.r();
         for p in gone {
             routes.remove(&p.id);
+            withdrawn.push(p.id);
         }
+        withdrawn
+    }
+
+    /// ADR-0090: the agent's turn was cancelled: the permission requests its adapter asked for (the ones that have a route back to the
+    /// adapter) are withdrawn and their ids returned. Requests of another kind (an `agent.start` the agent waits for) stay: the agent
+    /// is still alive and still waits for them.
+    pub fn cancel_adapter_requests(&self, agent: &agora_core::AgentId) -> Vec<String> {
+        let ids: Vec<String> = self
+            .r()
+            .iter()
+            .filter(|(_, (a, _))| a == agent)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &ids {
+            self.withdraw(id);
+        }
+        ids
     }
 
     /// Withdraws one request (ADR-0057: the agent that asked to start a helper stopped waiting).
