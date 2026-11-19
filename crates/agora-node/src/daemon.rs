@@ -1950,10 +1950,12 @@ impl Node {
                                         ev.approval_requested(&p);
                                     } else {
                                         // No safe id: refuse rather than let the action through.
-                                        let _ = sup
+                                        // The adapter's answer is waited for after the lock is let go.
+                                        let call = sup
                                             .lock()
                                             .unwrap_or_else(|e| e.into_inner())
-                                            .adapter_resolve_approval(agent, approval_id, false);
+                                            .prepare_resolve_approval(agent, approval_id, false);
+                                        let _ = call.and_then(|c| c.run());
                                     }
                                 }
                                 // ADR-0090: a queued prompt went out (or could not), or was lost with its adapter.
@@ -1989,10 +1991,11 @@ impl Node {
                             if spawner.expired(&node_approval) {
                                 continue;
                             }
-                            let _ = sup
+                            let call = sup
                                 .lock()
                                 .unwrap_or_else(|e| e.into_inner())
-                                .adapter_resolve_approval(&agent, &adapter_id, false);
+                                .prepare_resolve_approval(&agent, &adapter_id, false);
+                            let _ = call.and_then(|c| c.run());
                             // ADR-0090: nobody decided in time.
                             chat.set_permission(
                                 &agent,

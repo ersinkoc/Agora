@@ -1925,3 +1925,66 @@ fn a_permission_shows_in_the_conversation_and_follows_only_the_nodes_approval_st
     outcome_is(&first, v1::PermissionOutcome::Approved);
     outcome_is(&second, v1::PermissionOutcome::Denied);
 }
+
+/// ADR-0090: a verified decision that cannot be delivered (the adapter answers with an error) does not leave the entry in the
+/// conversation pending for good: it is shown as cancelled, and the user gets the error.
+#[test]
+fn a_decision_the_adapter_cannot_take_does_not_leave_the_permission_entry_pending() {
+    use agora_node::approvals::signed_message;
+    use v1::event::Body;
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+        return;
+    }
+    let e = env("permission-undeliverable");
+    add_manifest(
+        &e,
+        "ad.toml",
+        &format!("kind = \"adapted\"\ndisplay_name = \"A\"\nversion = \"1\"\nmin_engine = 1\n[adapter]\ncommand = [{:?}, \"--adapter\"]\n", fake_adapter_path()),
+    );
+    let n = node(&e, NodeLimits::default());
+    n.approvals.set_verifier(Box::new(EchoVerifier));
+    let mut c = Client::connect(n.socket().unwrap()).unwrap();
+    let s = started(ok(c.call(start_cmd("adapted"))));
+    let agent = agora_core::AgentId::new(s.agent_id.clone());
+    ok(c.call(Cmd::AgentPrompt(v1::AgentPrompt {
+        agent_id: s.agent_id.clone(),
+        text: "ask-error".into(),
+    })));
+    let end = Instant::now() + Duration::from_secs(15);
+    let id = loop {
+        if let Some(a) = n
+            .events
+            .events_after(0)
+            .into_iter()
+            .find_map(|e| match e.body {
+                Some(Body::ApprovalRequested(a)) => Some(a),
+                _ => None,
+            })
+        {
+            break a.approval_id;
+        }
+        assert!(Instant::now() < end, "no approval request announced");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let outcome = || {
+        n.chat
+            .snapshot(&agent)
+            .into_iter()
+            .find(|e| e.kind == v1::ChatKind::Permission as i32 && e.approval_id == id)
+            .map(|e| e.permission_outcome)
+    };
+    assert_eq!(outcome(), Some(v1::PermissionOutcome::Pending as i32));
+    let r = c.call(Cmd::ApprovalResolve(v1::ApprovalResolve {
+        approval_id: id.clone(),
+        approved: true,
+        signer_device_id: "phone".into(),
+        signature: signed_message("node-test", &id, true),
+        helper_grant: 0,
+        helpers_may_start: false,
+    }));
+    assert!(
+        r_is_err(r),
+        "the user is told the decision did not reach the agent"
+    );
+    assert_eq!(outcome(), Some(v1::PermissionOutcome::Cancelled as i32));
+}

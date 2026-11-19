@@ -14,7 +14,7 @@
 //! one clone per follower per version, one binary search of the ring (at most 500) per update; no per-byte work on terminals.
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::Mutex;
 
 use agora_adapters::host::{ChatItem, PlanItem, ToolItem};
@@ -42,6 +42,14 @@ pub const MAX_CALL_ID: usize = 256;
 pub const MAX_PERMISSION_BYTES: usize = 512;
 /// ADR-0090: the most often one entry's changes are sent: one version per this many milliseconds.
 pub const COALESCE_MS: u64 = 150;
+/// The most entries a follower may have waiting. A follower that falls further behind (a client that stopped reading) is dropped, and
+/// its stream ends: the client subscribes again and gets the ring. One slow client therefore never grows the node's memory.
+pub const FOLLOWER_QUEUE: usize = 1024;
+/// Work on a text is done on at most this many bytes of it (head and tail) before it is cleaned and cut to its cap, so an adapter
+/// cannot make the node spend more than a bounded pass on one item.
+const PRE_BOUND: usize = 64 * 1024;
+/// Notice codes only the node makes. An adapter's item with one of them is dropped: it could otherwise forge the node's own words.
+pub const NODE_NOTICES: &[&str] = &["adapter.queue_dropped"];
 /// ADR-0058: a notice's code is at most this long and has this many parameters at most, each key at most `MAX_PARAM_KEY` bytes and
 /// each value at most `MAX_PARAM_BYTES` (more is cut). An adapter is untrusted; a notice that does not fit the shape is dropped.
 pub const MAX_CODE: usize = 64;
@@ -62,7 +70,7 @@ struct Transcript {
     entries: VecDeque<ChatEntry>,
     bytes: usize,
     next_id: u64,
-    followers: Vec<Sender<ChatEntry>>,
+    followers: Vec<SyncSender<ChatEntry>>,
     /// Tool calls by the agent's id of the call; each points at an entry that is still in the ring.
     calls: HashMap<String, Call>,
     /// The entry of the plan, while it is in the ring: a new plan replaces it in place.
@@ -217,6 +225,63 @@ fn json_string(s: &str) -> String {
     out
 }
 
+/// Removes what would act on a terminal or a reader instead of being shown: escape sequences (CSI, OSC, DCS, ...) with their payload,
+/// every control character (C0, DEL, C1) and the characters that reorder text (bidi overrides). With `multiline` a newline and a tab
+/// stay; without, they become a space (a one-line field).
+fn strip_controls(s: &str, multiline: bool) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\u{1b}' | '\u{9b}' | '\u{9d}' | '\u{90}' | '\u{98}' | '\u{9e}' | '\u{9f}' => {
+                let kind = match c {
+                    '\u{1b}' => chars.next(),
+                    '\u{9b}' => Some('['),
+                    '\u{9d}' => Some(']'),
+                    _ => Some('P'),
+                };
+                match kind {
+                    Some('[') => {
+                        for c in chars.by_ref() {
+                            if ('@'..='~').contains(&c) {
+                                break;
+                            }
+                        }
+                    }
+                    Some(']' | 'P' | '_' | '^' | 'X') => {
+                        while let Some(c) = chars.next() {
+                            if c == '\u{7}' || c == '\u{9c}' {
+                                break;
+                            }
+                            if c == '\u{1b}' {
+                                if chars.peek() == Some(&'\\') {
+                                    chars.next();
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            '\n' | '\t' if multiline => out.push(c),
+            '\n' | '\t' => out.push(' '),
+            c if c.is_control() => {}
+            '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// A text from an adapter made safe and bounded: at most `PRE_BOUND` bytes of it are looked at (head and tail), control characters and
+/// escape sequences are removed, and it is cut to `max` bytes. `true` when something was cut. Done before any lock is taken.
+fn tidy(text: &str, max: usize, multiline: bool) -> (String, bool) {
+    let (bounded, cut_first) = head_and_tail(text.to_string(), PRE_BOUND);
+    let (out, cut_last) = head_and_tail(strip_controls(&bounded, multiline), max);
+    (out, cut_first || cut_last)
+}
+
 /// ACP `ToolKind` as the protocol's; a word this build does not know is `UNSPECIFIED`.
 fn tool_kind(word: &str) -> ToolKind {
     match word {
@@ -314,8 +379,8 @@ impl Transcript {
     }
 
     fn send(&mut self, entry: &ChatEntry) {
-        // A follower that went away is dropped here.
-        self.followers.retain(|f| f.send(entry.clone()).is_ok());
+        // A follower that went away, or fell `FOLLOWER_QUEUE` entries behind, is dropped here.
+        self.followers.retain(|f| f.try_send(entry.clone()).is_ok());
     }
 
     /// Numbers an entry, keeps it, and hands it to every follower. Returns its id.
@@ -415,6 +480,10 @@ impl ChatBoard {
     pub fn push_item(&self, agent: &AgentId, item: &ChatItem, at_ms: u64) {
         match item {
             ChatItem::Notice { code, params } => {
+                // The node's own notices are not the adapter's to make.
+                if NODE_NOTICES.contains(&code.as_str()) {
+                    return;
+                }
                 let Some((code, params)) = notice(code, params) else {
                     return;
                 };
@@ -425,7 +494,7 @@ impl ChatBoard {
             }
             ChatItem::Thought(text) => {
                 // The agent's thinking: an entry of its own, cut at 8 KiB, and nothing else (it is never routed anywhere).
-                let text = cut_to(text.clone(), MAX_THOUGHT_BYTES);
+                let (text, _) = tidy(text, MAX_THOUGHT_BYTES, true);
                 self.insert(
                     agent,
                     entry(ChatRole::Agent, ChatKind::Thought, text, at_ms),
@@ -449,6 +518,43 @@ impl ChatBoard {
         if item.call_id.is_empty() || item.call_id.len() > MAX_CALL_ID {
             return;
         }
+        // Everything that costs work in proportion to the text (cleaning, cutting, formatting, cloning) is done here, before the lock.
+        let tool_in = item.tool.as_ref().map(|x| tidy(x, MAX_PATH_BYTES, false).0);
+        let args_in = item
+            .arguments_json
+            .as_ref()
+            .map(|x| tidy(x, MAX_ENTRY_BYTES, true).0);
+        let kind = tool_kind(&item.kind);
+        let status = tool_status(&item.status);
+        let paths: Option<Vec<ToolLocation>> = item.locations.as_ref().map(|l| {
+            l.iter()
+                .take(MAX_PATHS)
+                .map(|(path, line)| ToolLocation {
+                    path: tidy(path, MAX_PATH_BYTES, false).0,
+                    line: *line,
+                })
+                .collect()
+        });
+        let secret_path = paths.as_ref().is_some_and(|p| {
+            p.iter()
+                .any(|p| agora_core::secrets::is_secret_path(&p.path))
+        });
+        let output = item
+            .output
+            .as_ref()
+            .map(|o| tidy(o, MAX_OUTPUT_BYTES, true));
+        // The text of the entry when this item is the whole story (a new call, or one that names both), and when it is only part.
+        let text_new = tool_text(
+            tool_in.as_deref().unwrap_or("tool"),
+            args_in.as_deref().unwrap_or(""),
+        );
+        let text_whole = tool_in
+            .as_ref()
+            .zip(args_in.as_ref())
+            .map(|(tool, args)| tool_text(tool, args));
+        let call_id = item.call_id.clone();
+        let terminal = status == ToolStatus::Completed || status == ToolStatus::Failed;
+
         let mut g = self.lock();
         let t = g.entry(agent.clone()).or_default();
         let known = t
@@ -456,41 +562,7 @@ impl ChatBoard {
             .get(&item.call_id)
             .filter(|c| t.index(c.entry).is_some())
             .map(|c| (c.entry, c.tool.clone(), c.args.clone()));
-        let (tool, args) = match &known {
-            Some((_, tool, args)) => (
-                item.tool
-                    .clone()
-                    .map_or_else(|| tool.clone(), |x| cut_to(x, MAX_PATH_BYTES)),
-                item.arguments_json
-                    .clone()
-                    .map_or_else(|| args.clone(), cut),
-            ),
-            None => (
-                cut_to(
-                    item.tool.clone().unwrap_or_else(|| "tool".into()),
-                    MAX_PATH_BYTES,
-                ),
-                cut(item.arguments_json.clone().unwrap_or_default()),
-            ),
-        };
-        let kind = tool_kind(&item.kind);
-        let status = tool_status(&item.status);
-        let paths: Option<Vec<ToolLocation>> = item.locations.as_ref().map(|l| {
-            l.iter()
-                .take(MAX_PATHS)
-                .map(|(path, line)| ToolLocation {
-                    path: cut_to(path.clone(), MAX_PATH_BYTES),
-                    line: *line,
-                })
-                .collect()
-        });
-        let output = item
-            .output
-            .clone()
-            .map(|o| head_and_tail(o, MAX_OUTPUT_BYTES));
-        let text = tool_text(&tool, &args);
-        let call_id = item.call_id.clone();
-        let apply = move |e: &mut ChatEntry, creating: bool| {
+        let apply = |e: &mut ChatEntry, creating: bool, text: String| {
             e.text = text;
             if kind != ToolKind::Unspecified || creating {
                 e.tool_kind = kind as i32;
@@ -508,9 +580,10 @@ impl ChatBoard {
                 e.output_truncated = truncated;
             }
             // What a tool printed about a secret file is not shown, whatever order the pieces arrived in.
-            if e.paths
-                .iter()
-                .any(|p| agora_core::secrets::is_secret_path(&p.path))
+            if secret_path
+                || e.paths
+                    .iter()
+                    .any(|p| agora_core::secrets::is_secret_path(&p.path))
             {
                 e.output.clear();
                 e.output_truncated = false;
@@ -524,11 +597,16 @@ impl ChatBoard {
             }
         };
         match known {
-            Some((id, ..)) => {
-                let terminal = status == ToolStatus::Completed || status == ToolStatus::Failed;
-                let ok = t.modify(id, now_ms, !terminal, |e| {
+            Some((id, old_tool, old_args)) => {
+                let tool = tool_in.unwrap_or(old_tool);
+                let args = args_in.unwrap_or(old_args);
+                let text = text_whole.unwrap_or_else(|| tool_text(&tool, &args));
+                // A call that reaches `completed` or `failed` is sent at once, once. The same final status again (a burst of repeats)
+                // is held to one per 150 ms like any other change.
+                let was_final = t.index(id).is_some_and(|i| finished(t.entries[i].status));
+                let ok = t.modify(id, now_ms, !terminal || was_final, |e| {
                     // The time it began is kept from the first sight; `now_ms` only ends it.
-                    apply(e, false);
+                    apply(e, false, text);
                 });
                 if ok {
                     if let Some(c) = t.calls.get_mut(&call_id) {
@@ -541,14 +619,14 @@ impl ChatBoard {
                 let mut e = entry(ChatRole::Agent, ChatKind::ToolCall, String::new(), now_ms);
                 e.call_id = call_id.clone();
                 e.started_ms = now_ms;
-                apply(&mut e, true);
+                apply(&mut e, true, text_new);
                 let id = t.add(e, now_ms);
                 t.calls.insert(
                     call_id,
                     Call {
                         entry: id,
-                        tool,
-                        args,
+                        tool: tool_in.unwrap_or_else(|| "tool".into()),
+                        args: args_in.unwrap_or_default(),
                     },
                 );
             }
@@ -562,7 +640,7 @@ impl ChatBoard {
             .iter()
             .take(MAX_PLAN_STEPS)
             .map(|s| PlanStep {
-                text: cut_to(s.text.clone(), MAX_PLAN_STEP_BYTES),
+                text: tidy(&s.text, MAX_PLAN_STEP_BYTES, false).0,
                 status: plan_status(&s.status) as i32,
                 priority: plan_priority(&s.priority) as i32,
             })
@@ -655,7 +733,7 @@ impl ChatBoard {
         let mut e = entry(
             ChatRole::Agent,
             ChatKind::Permission,
-            cut_to(action.to_string(), MAX_PERMISSION_BYTES),
+            tidy(action, MAX_PERMISSION_BYTES, false).0,
             now_ms,
         );
         e.approval_id = approval_id.to_string();
@@ -705,7 +783,7 @@ impl ChatBoard {
     pub fn follow(&self, agent: &AgentId) -> (Vec<ChatEntry>, Receiver<ChatEntry>) {
         let mut g = self.lock();
         let t = g.entry(agent.clone()).or_default();
-        let (tx, rx) = channel();
+        let (tx, rx) = sync_channel(FOLLOWER_QUEUE);
         t.followers.push(tx);
         (t.entries.iter().cloned().collect(), rx)
     }
@@ -1347,6 +1425,204 @@ mod tests {
         // The label is cut.
         b.push_permission(&a, "n2", &"x".repeat(5000), 5);
         assert!(b.snapshot(&a)[1].text.len() <= MAX_PERMISSION_BYTES);
+    }
+
+    #[test]
+    fn escape_sequences_and_control_characters_never_reach_an_entry() {
+        let dirty = "a\u{1b}[31mred\u{1b}[0m \u{1b}]0;title\u{7}b\u{1b}]8;;http://x\u{1b}\\link\u{7} c\u{7}d\u{0}e\r\nf\tg\u{85}h\u{9b}31mi\u{202e}j\u{7f}k";
+        assert_eq!(strip_controls(dirty, true), "ared blink cde\nf\tghijk");
+        assert_eq!(strip_controls("x\ny\tz", false), "x y z");
+        let b = ChatBoard::new();
+        let a = AgentId::new("a");
+        b.push_item(&a, &ChatItem::Thought(dirty.into()), 0);
+        b.push_item(
+            &a,
+            &ChatItem::Tool(ToolItem {
+                tool: Some("\u{1b}[2Jrun\u{7}\n".into()),
+                arguments_json: Some("{\"a\":\"\u{1b}]0;t\u{7}x\"}".into()),
+                locations: Some(vec![("src/\u{1b}[31ma.rs\u{7}".into(), 1)]),
+                output: Some(dirty.into()),
+                ..tool("c")
+            }),
+            0,
+        );
+        b.push_item(
+            &a,
+            &ChatItem::PlanSteps(vec![PlanItem {
+                text: "step\u{1b}[1m one\nline\u{7}".into(),
+                ..PlanItem::default()
+            }]),
+            0,
+        );
+        b.push_permission(&a, "ap-1", "run\u{1b}[31m it\u{7}\n", 0);
+        let bad = |s: &str| {
+            s.chars()
+                .any(|c| (c.is_control() && c != '\n' && c != '\t') || c == '\u{202e}')
+        };
+        for e in b.snapshot(&a) {
+            assert!(
+                !bad(&e.text)
+                    && !bad(&e.output)
+                    && e.paths.iter().all(|p| !bad(&p.path))
+                    && e.plan_steps.iter().all(|s| !bad(&s.text)),
+                "{e:?}"
+            );
+        }
+        let s = b.snapshot(&a);
+        assert_eq!(s[1].paths[0].path, "src/a.rs");
+        assert_eq!(s[1].text, "{\"tool\":\"run \",\"arguments\":{\"a\":\"x\"}}");
+        assert_eq!(
+            s[2].plan_steps[0].text, "step one line",
+            "a step is one line"
+        );
+        assert_eq!(s[3].text, "run it ", "a label is one line");
+    }
+
+    #[test]
+    fn work_on_one_item_is_bounded_whatever_the_adapter_sends() {
+        let b = ChatBoard::new();
+        let a = AgentId::new("a");
+        let huge = format!("HEAD{}TAIL", "x\u{1b}[0m".repeat(2 * 1024 * 1024));
+        let start = std::time::Instant::now();
+        b.push_item(
+            &a,
+            &ChatItem::Tool(ToolItem {
+                output: Some(huge.clone()),
+                ..tool("h")
+            }),
+            0,
+        );
+        b.push_item(&a, &ChatItem::Thought(huge), 0);
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(2),
+            "{:?}",
+            start.elapsed()
+        );
+        let s = b.snapshot(&a);
+        assert!(s[0].output.len() <= MAX_OUTPUT_BYTES && s[0].output_truncated);
+        assert!(
+            s[0].output.starts_with("HEAD") && s[0].output.ends_with("TAIL"),
+            "head and tail survive the first bound"
+        );
+        assert!(s[1].text.len() <= MAX_THOUGHT_BYTES);
+    }
+
+    #[test]
+    fn a_burst_of_repeated_final_updates_is_held_to_one_per_window_and_a_stalled_follower_is_dropped(
+    ) {
+        let b = ChatBoard::new();
+        let a = AgentId::new("a");
+        b.push_item(
+            &a,
+            &ChatItem::Tool(ToolItem {
+                status: "in_progress".into(),
+                ..tool("t")
+            }),
+            1000,
+        );
+        let (_, rx) = b.follow(&a);
+        // The call completes: sent at once. Then 100 more `completed` updates (the output grows) inside the window: held.
+        b.push_item(
+            &a,
+            &ChatItem::Tool(ToolItem {
+                status: "completed".into(),
+                ..tool("t")
+            }),
+            1010,
+        );
+        assert_eq!(rx.try_recv().unwrap().status, ToolStatus::Completed as i32);
+        for i in 0..100u64 {
+            b.push_item(
+                &a,
+                &ChatItem::Tool(ToolItem {
+                    status: "completed".into(),
+                    output: Some(format!("o{i}")),
+                    ..tool("t")
+                }),
+                1011 + i,
+            );
+        }
+        assert!(
+            rx.try_recv().is_err(),
+            "repeats of a final status are rate limited too"
+        );
+        b.flush_due(1200);
+        assert_eq!(
+            rx.try_recv().unwrap().output,
+            "o99",
+            "the last one is not lost"
+        );
+        assert!(rx.try_recv().is_err());
+        // A follower that never reads is dropped after FOLLOWER_QUEUE entries; one that reads is kept.
+        let (_, slow) = b.follow(&a);
+        let (_, fast) = b.follow(&a);
+        for i in 0..(FOLLOWER_QUEUE + 50) {
+            b.push(
+                &a,
+                ChatRole::Agent,
+                ChatKind::Text,
+                format!("{i}"),
+                String::new(),
+                0,
+            );
+            while fast.try_recv().is_ok() {}
+        }
+        let mut got = 0;
+        while slow.try_recv().is_ok() {
+            got += 1;
+        }
+        assert!(got <= FOLLOWER_QUEUE, "{got}");
+        assert!(
+            matches!(
+                slow.try_recv(),
+                Err(std::sync::mpsc::TryRecvError::Disconnected)
+            ),
+            "its stream ends"
+        );
+        b.push(
+            &a,
+            ChatRole::Agent,
+            ChatKind::Text,
+            "after".into(),
+            String::new(),
+            0,
+        );
+        assert_eq!(
+            fast.try_recv().unwrap().text,
+            "after",
+            "the reading follower stays"
+        );
+    }
+
+    #[test]
+    fn an_adapter_cannot_forge_the_nodes_own_notices() {
+        let b = ChatBoard::new();
+        let a = AgentId::new("a");
+        for code in NODE_NOTICES {
+            b.push_item(
+                &a,
+                &ChatItem::Notice {
+                    code: (*code).into(),
+                    params: vec![("count".into(), "99".into())],
+                },
+                0,
+            );
+        }
+        assert!(b.snapshot(&a).is_empty());
+        // An ordinary one of the adapter still comes through, and the node's own is made by the node.
+        b.push_item(
+            &a,
+            &ChatItem::Notice {
+                code: "adapter.turn_empty".into(),
+                params: vec![],
+            },
+            0,
+        );
+        b.drop_queued(&a, &[], 0);
+        let q = b.push_queued(&a, "x".into(), 0);
+        b.drop_queued(&a, &[q], 0);
+        let codes: Vec<String> = b.snapshot(&a).into_iter().map(|e| e.code).collect();
+        assert_eq!(codes, ["adapter.turn_empty", "adapter.queue_dropped"]);
     }
 
     #[test]

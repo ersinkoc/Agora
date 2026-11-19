@@ -904,8 +904,13 @@ impl Spawner {
                     // In a terminal a line break would be Enter mid-prompt: it is typed as a space, so the prompt goes as one request.
                     let _ = control.write_input(text.replace(['\n', '\t'], " ").as_bytes());
                 }
-                None if sup.adapter_prompt(&agent, &text, false).is_ok() => {
+                None if {
+                    // The adapter's answer is waited for after the lock is let go.
+                    let call = sup.prepare_prompt(&agent, &text, false);
                     drop(sup);
+                    call.and_then(crate::supervisor::AdapterCall::run).is_ok()
+                } =>
+                {
                     self.chat.push(
                         &agent,
                         v1::ChatRole::User,

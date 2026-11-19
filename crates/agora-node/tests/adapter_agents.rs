@@ -196,11 +196,63 @@ fn an_adapter_agent_gets_its_own_worktree_and_reports_its_state() {
         ))
     );
     for _ in 0..3 {
-        assert_eq!(
-            s.adapter_submit(&id, "hello", |_| panic!("queued")),
-            Ok(agora_node::supervisor::Submitted::Sent)
-        );
+        match s.adapter_submit(&id, "hello", |_| panic!("queued")) {
+            Ok(agora_node::supervisor::Submit::Send(call)) => call.run().unwrap(),
+            _ => panic!("a prompt to an adapter without `turns` is sent at once"),
+        }
     }
+}
+
+/// ADR-0090: the supervisor's lock is not held while an adapter answers. An adapter that never answers a prompt stalls only the call
+/// made to it: the tick, a listing, and another agent's commands go on answering while it hangs.
+#[test]
+fn a_hung_adapter_stalls_only_its_own_call_not_the_supervisor() {
+    use std::sync::{Arc, Mutex};
+    let e = env("hung");
+    let mut s = supervisor();
+    let hung = start(&mut s, &e, "hung");
+    let other = start(&mut s, &e, "other");
+    until(&mut s, state_is(AgentState::Idle));
+    settle(&mut s, &hung, AgentState::Idle);
+    settle(&mut s, &other, AgentState::Idle);
+    let sup = Arc::new(Mutex::new(s));
+    // The call is prepared under the lock and made after it is let go, as the node does it.
+    let call = sup
+        .lock()
+        .unwrap()
+        .prepare_prompt(&hung, "hang", false)
+        .unwrap();
+    let stuck = std::thread::spawn(move || call.run());
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        !stuck.is_finished(),
+        "the adapter has not answered: the call is still waiting"
+    );
+    let begun = Instant::now();
+    // Everything else answers at once: a listing, a tick, the other agent's prompt, a refused option, a mode switch's check.
+    let views = sup.lock().unwrap().list();
+    assert_eq!(views.len(), 2);
+    sup.lock().unwrap().tick(Instant::now());
+    let call = sup
+        .lock()
+        .unwrap()
+        .prepare_prompt(&other, "hello", false)
+        .unwrap();
+    call.run().unwrap();
+    assert!(sup
+        .lock()
+        .unwrap()
+        .prepare_set_config(&other, "effort", "low")
+        .is_err());
+    assert!(
+        begun.elapsed() < Duration::from_secs(3),
+        "the lock was held while the adapter hung: {:?}",
+        begun.elapsed()
+    );
+    assert!(!stuck.is_finished());
+    // The hung call ends by its own timeout (10 s), with an error, and nothing else was waiting on it.
+    drop(sup);
+    let _ = stuck.join();
 }
 
 #[test]

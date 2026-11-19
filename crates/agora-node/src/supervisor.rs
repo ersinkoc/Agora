@@ -7,12 +7,12 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use agora_adapters::host::{
-    Adapter, AdapterCommand, AdapterConfig, AdapterEvent, ConfigOption, HostError, McpServer,
-    OptionKind, SessionOption, SessionOptions,
+    Adapter, AdapterCommand, AdapterConfig, AdapterEvent, Caller, ConfigOption, HostError,
+    McpServer, OptionKind, SessionOption, SessionOptions,
 };
 use agora_adapters::perm::{self, Category};
 use agora_adapters::{Detector, Manifest, Pacer};
@@ -207,11 +207,62 @@ pub enum SupervisorEvent {
 /// ADR-0090: the most prompts that wait behind a turn, per agent (`agent.queue_full`).
 pub const MAX_PROMPT_QUEUE: usize = 8;
 
-/// What [`Supervisor::adapter_submit`] did with a prompt.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Submitted {
-    /// The agent took it now.
-    Sent,
+/// ADR-0090: the longest prompt that is queued behind a turn (a longer one is refused with `protocol.invalid_message`, field `text`).
+/// A prompt sent at once is not bounded here, as before.
+pub const MAX_QUEUED_PROMPT_BYTES: usize = 64 * 1024;
+
+/// How long after a cancelled turn the node waits for the adapter to say it ended before it reads the turn as over (an adapter that
+/// ignores `session/cancel` must not hold the agent, and what waits behind its turn, for good).
+pub const CANCEL_GRACE: Duration = Duration::from_secs(5);
+
+/// A request to an adapter that is made AFTER the supervisor's lock is let go: [`AdapterCall::run`] waits for the adapter's answer
+/// (up to ten seconds), so an adapter that does not answer stalls only its own caller, never the node's tick or another agent's
+/// command. Taken under the lock (which checks everything that can be checked without the adapter), run without it.
+pub struct AdapterCall {
+    caller: Caller,
+    session: String,
+    op: CallOp,
+}
+
+enum CallOp {
+    Prompt { text: String, from_mesh: bool },
+    Cancel,
+    SetConfig { id: String, value: String },
+    SetOption { kind: OptionKind, value: String },
+    Resolve { approval: String, approved: bool },
+}
+
+impl AdapterCall {
+    /// Makes the request and waits for the answer.
+    pub fn run(self) -> Result<(), SupervisorError> {
+        const WAIT: Duration = Duration::from_secs(10);
+        let session = self.session.as_str();
+        match &self.op {
+            CallOp::Prompt { text, from_mesh } => self
+                .caller
+                .prompt(session, text, *from_mesh, WAIT)
+                .map_err(|e| SupervisorError::Spawn(e.to_string())),
+            CallOp::Cancel => self.caller.cancel(session, WAIT).map_err(adapter_error),
+            CallOp::SetConfig { id, value } => self
+                .caller
+                .set_config(session, id, value, WAIT)
+                .map_err(adapter_error),
+            CallOp::SetOption { kind, value } => self
+                .caller
+                .set_option(session, *kind, value, WAIT)
+                .map_err(adapter_error),
+            CallOp::Resolve { approval, approved } => self
+                .caller
+                .resolve_approval(session, approval, *approved, WAIT)
+                .map_err(|e| SupervisorError::Spawn(e.to_string())),
+        }
+    }
+}
+
+/// What [`Supervisor::adapter_submit`] decided about a prompt.
+pub enum Submit {
+    /// The agent is free: make this call now (outside the lock). If it fails, tell [`Supervisor::adapter_send_failed`].
+    Send(AdapterCall),
     /// A turn runs: it waits, with this many waiting in all (this one included).
     Queued { queue_len: usize },
 }
@@ -490,24 +541,152 @@ struct Queued {
     tag: u64,
 }
 
-/// ADR-0090: an adapter agent's config options and commands as last reported (checked and bounded), whether a turn is open (a prompt was
-/// sent and the adapter has not reported `idle` since), and the prompts waiting behind it. The queue is node memory only (ADR-0089
-/// is the persistence question).
+/// ADR-0090: the outcomes of sends of queued prompts, `(agent, tag, sent)`, written by the threads that made them.
+type SentResults = Arc<Mutex<Vec<(AgentId, u64, bool)>>>;
+
+/// ADR-0090: whether an adapter agent that reports its turns has one open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum Turn {
+    #[default]
+    Idle,
+    /// A prompt was sent (or the adapter began a turn by itself). `seen_working`: the adapter has said `working` or `blocked`
+    /// since, so an `idle` now ends this turn (an `idle` before that is a stray one from earlier and is ignored). `cancel_by`: the
+    /// turn was cancelled and is read as over at that time if the adapter has not said so.
+    Busy {
+        seen_working: bool,
+        cancel_by: Option<Instant>,
+    },
+}
+
+/// What [`AdapterRich::route`] decided.
+#[derive(Debug, PartialEq, Eq)]
+enum Route {
+    Send,
+    Queued(usize),
+}
+
+/// ADR-0090: an adapter agent's config options and commands as last reported (checked and bounded), the turn state machine
+/// (`Idle` or `Busy`), and the prompts waiting behind a turn. The queue is node memory only (ADR-0089 is the persistence question).
+/// Pure data: every rule of the queue is a method here and is tested without a process.
 #[derive(Default)]
 struct AdapterRich {
     config: Vec<ConfigOption>,
     commands: Vec<AdapterCommand>,
-    turn_open: AtomicBool,
+    turn: Turn,
     queue: VecDeque<Queued>,
 }
 
 impl AdapterRich {
+    /// A user's prompt: sent now (the turn becomes busy), or queued behind the turn (also while others wait, to keep their order).
+    /// `turns`: the adapter reports its turns; one that does not is never queued for. `tag` runs only for a queued prompt.
+    fn route(
+        &mut self,
+        turns: bool,
+        text: &str,
+        tag: impl FnOnce(usize) -> u64,
+    ) -> Result<Route, SupervisorError> {
+        if turns && (self.turn != Turn::Idle || !self.queue.is_empty()) {
+            if text.len() > MAX_QUEUED_PROMPT_BYTES {
+                return Err(SupervisorError::OptionUnknown("text"));
+            }
+            if self.queue.len() >= MAX_PROMPT_QUEUE {
+                return Err(SupervisorError::QueueFull(MAX_PROMPT_QUEUE));
+            }
+            let len = self.queue.len() + 1;
+            self.queue.push_back(Queued {
+                text: text.to_string(),
+                tag: tag(len),
+            });
+            return Ok(Route::Queued(len));
+        }
+        if turns {
+            self.turn = Turn::Busy {
+                seen_working: false,
+                cancel_by: None,
+            };
+        }
+        Ok(Route::Send)
+    }
+
+    /// The adapter reported a state. Returns the prompt to send next when this ended the turn. `working` or `blocked` marks the
+    /// turn as really running; `idle` ends it only after that (a stray `idle`, or a second one, ends nothing and so never pops a
+    /// prompt into a running turn); `done` and `unknown` end it whatever came before (an adapter that never says `idle`).
+    fn observe(&mut self, state: AgentState) -> Option<Queued> {
+        match state {
+            AgentState::Working | AgentState::Blocked => {
+                match &mut self.turn {
+                    Turn::Busy { seen_working, .. } => *seen_working = true,
+                    // The adapter began a turn of its own (a mesh prompt).
+                    Turn::Idle => {
+                        self.turn = Turn::Busy {
+                            seen_working: true,
+                            cancel_by: None,
+                        }
+                    }
+                }
+                None
+            }
+            AgentState::Idle => match self.turn {
+                Turn::Busy {
+                    seen_working: true, ..
+                } => self.finish(),
+                _ => None,
+            },
+            _ => self.finish(),
+        }
+    }
+
+    /// The turn is over: the next waiting prompt, if any, becomes the turn.
+    fn finish(&mut self) -> Option<Queued> {
+        self.turn = Turn::Idle;
+        let next = self.queue.pop_front()?;
+        self.turn = Turn::Busy {
+            seen_working: false,
+            cancel_by: None,
+        };
+        Some(next)
+    }
+
+    /// The prompt that was being sent did not go out: its turn never began, so the next one goes (or the agent is free).
+    fn send_failed(&mut self) -> Option<Queued> {
+        match self.turn {
+            Turn::Busy {
+                seen_working: false,
+                ..
+            } => self.finish(),
+            _ => None,
+        }
+    }
+
+    /// The adapter took `session/cancel`: the turn is read as over at `now + CANCEL_GRACE` if it has not said so. With `drop_queue`
+    /// the waiting prompts are returned (their tags) and forgotten.
+    fn cancelled(&mut self, now: Instant, drop_queue: bool) -> Vec<u64> {
+        if let Turn::Busy { cancel_by, .. } = &mut self.turn {
+            *cancel_by = Some(now + CANCEL_GRACE);
+        }
+        if drop_queue {
+            self.queue.drain(..).map(|q| q.tag).collect()
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// A cancelled turn whose adapter did not end it in time is over; returns the prompt to send next.
+    fn expire_cancel(&mut self, now: Instant) -> Option<Queued> {
+        match self.turn {
+            Turn::Busy {
+                cancel_by: Some(t), ..
+            } if now >= t => self.finish(),
+            _ => None,
+        }
+    }
+
     /// The report of a restarted adapter is the only truth: what the old process said is forgotten, so a choice it offered cannot be
     /// used against the new one, and no prompt waits for a turn that ended with the process.
     fn forget(&mut self) -> Vec<u64> {
         self.config.clear();
         self.commands.clear();
-        self.turn_open.store(false, Ordering::SeqCst);
+        self.turn = Turn::Idle;
         self.queue.drain(..).map(|q| q.tag).collect()
     }
 }
@@ -582,6 +761,9 @@ pub struct Supervisor {
     /// ADR-0084: the secrets this node holds and which kind may receive which.
     credentials: crate::credentials::Credentials,
     adapters: BTreeMap<AgentId, AdapterEntry>,
+    /// ADR-0090: the outcome of sends of queued prompts, made on threads of their own (a hung adapter must not stall the tick): `(agent,
+    /// tag, sent)`. The next poll reads them.
+    sent: SentResults,
     /// ADR-0057: helper -> the agent that started it.
     parents: BTreeMap<AgentId, AgentId>,
     /// ADR-0059: the owner's `skip_permissions` policy.
@@ -603,6 +785,7 @@ impl Supervisor {
             sandbox: Default::default(),
             credentials: Default::default(),
             adapters: BTreeMap::new(),
+            sent: Arc::default(),
             parents: BTreeMap::new(),
             skip_permissions: SkipPermissions::default(),
             holder: None,
@@ -1602,7 +1785,31 @@ impl Supervisor {
         for id in due {
             self.restart_adapter(&id, now, events);
         }
+        let sent = Arc::clone(&self.sent);
+        // ADR-0090: a queued prompt that could not be sent is dropped (its entry says so) and the next one goes.
+        let failed: Vec<(AgentId, u64)> =
+            std::mem::take(&mut *sent.lock().unwrap_or_else(|e| e.into_inner()))
+                .into_iter()
+                .filter(|(_, _, ok)| !ok)
+                .map(|(id, tag, _)| (id, tag))
+                .collect();
+        for (id, tag) in failed {
+            events.push(SupervisorEvent::PromptDequeued {
+                agent: id.clone(),
+                tag,
+                sent: false,
+            });
+            if let Some(e) = self.adapters.get_mut(&id) {
+                if let Some(next) = e.rich.send_failed() {
+                    begin_send(e, &id, next, &sent, events);
+                }
+            }
+        }
         for (id, e) in &mut self.adapters {
+            // ADR-0090: a cancelled turn the adapter never ended is over after the grace.
+            if let Some(next) = e.rich.expire_cancel(now) {
+                begin_send(e, id, next, &sent, events);
+            }
             let polled = match &e.adapter {
                 Some(adapter) if e.running => adapter.poll(),
                 _ => continue,
@@ -1611,35 +1818,10 @@ impl Supervisor {
                 match ev {
                     AdapterEvent::State { state, .. } => {
                         // ADR-0090: an adapter that reports its turns (`turns`) tells when one is open; the next queued prompt goes
-                        // out when it ends, one per `idle`.
+                        // out when it ends, one per end.
                         if e.capabilities.iter().any(|c| c == "turns") {
-                            match state {
-                                AgentState::Working | AgentState::Blocked => {
-                                    e.rich.turn_open.store(true, Ordering::SeqCst);
-                                }
-                                _ => {
-                                    e.rich.turn_open.store(false, Ordering::SeqCst);
-                                    if state == AgentState::Idle {
-                                        if let (Some(next), Some(adapter)) =
-                                            (e.rich.queue.pop_front(), e.adapter.as_ref())
-                                        {
-                                            let sent = adapter
-                                                .prompt(
-                                                    &e.session_id,
-                                                    &next.text,
-                                                    false,
-                                                    Duration::from_secs(10),
-                                                )
-                                                .is_ok();
-                                            e.rich.turn_open.store(sent, Ordering::SeqCst);
-                                            events.push(SupervisorEvent::PromptDequeued {
-                                                agent: id.clone(),
-                                                tag: next.tag,
-                                                sent,
-                                            });
-                                        }
-                                    }
-                                }
+                            if let Some(next) = e.rich.observe(state) {
+                                begin_send(e, id, next, &sent, events);
                             }
                         }
                         if e.agent.observe(state, StateSource::Reported) {
@@ -1786,72 +1968,113 @@ impl Supervisor {
         }
     }
 
-    fn adapter_of(&self, id: &AgentId) -> Result<(&Adapter, &str), SupervisorError> {
+    fn adapter_of(&self, id: &AgentId) -> Result<&AdapterEntry, SupervisorError> {
         self.adapters
             .get(id)
-            .filter(|e| e.running)
-            .and_then(|e| Some((e.adapter.as_ref()?, e.session_id.as_str())))
+            .filter(|e| e.running && e.adapter.is_some())
             .ok_or_else(|| SupervisorError::NotFound(id.clone()))
     }
 
-    /// Sends text to an adapter agent (user input; mesh content uses `from_mesh`).
+    fn call_of(&self, id: &AgentId, op: CallOp) -> Result<AdapterCall, SupervisorError> {
+        let e = self.adapter_of(id)?;
+        Ok(AdapterCall {
+            caller: e
+                .adapter
+                .as_ref()
+                .ok_or_else(|| SupervisorError::NotFound(id.clone()))?
+                .caller(),
+            session: e.session_id.clone(),
+            op,
+        })
+    }
+
+    /// The `skip_permissions` policy's refusal of something that makes an agent act without asking, with the confirmation it needs.
+    ///
+    /// A launch option needs the user's confirmation (`Requested::confirmed`, signed), and so does a mode or a config option that
+    /// skips permissions. The schema has no field to carry it on `AgentSetMode` or `AgentSetConfig` yet, so the node cannot be shown
+    /// one: it refuses with `agent.option_unconfirmed`, after the policy (`agent.option_forbidden`) has had its say. (Missing: a
+    /// `confirmed` field on those two commands, signed like the launch's; adding it is a schema change that needs an ADR.)
+    fn skip_refusal(&self, kind: &str, option: &str) -> Option<SupervisorError> {
+        let confined =
+            self.sandbox.level != crate::sandbox::Level::Off && self.sandbox.enforceable();
+        Some(match self.skip_permissions.refusal(confined) {
+            Some(policy) => {
+                SupervisorError::OptionForbidden(kind.to_string(), option.to_string(), policy)
+            }
+            None => SupervisorError::OptionUnconfirmed(kind.to_string(), option.to_string()),
+        })
+    }
+
+    /// A prompt to an adapter agent without the queue (mesh content uses `from_mesh`). The call is made by [`AdapterCall::run`],
+    /// after the lock is let go.
+    pub fn prepare_prompt(
+        &self,
+        id: &AgentId,
+        text: &str,
+        from_mesh: bool,
+    ) -> Result<AdapterCall, SupervisorError> {
+        self.call_of(
+            id,
+            CallOp::Prompt {
+                text: text.to_string(),
+                from_mesh,
+            },
+        )
+    }
+
+    /// [`prepare_prompt`](Self::prepare_prompt) and run, under the caller's lock: for callers without one to let go (tests).
     pub fn adapter_prompt(
         &self,
         id: &AgentId,
         text: &str,
         from_mesh: bool,
     ) -> Result<(), SupervisorError> {
-        let (adapter, session) = self.adapter_of(id)?;
-        adapter
-            .prompt(session, text, from_mesh, Duration::from_secs(10))
-            .map_err(|e| SupervisorError::Spawn(e.to_string()))
+        self.prepare_prompt(id, text, from_mesh)?.run()
     }
 
-    /// ADR-0090: a user's prompt to an adapter agent: sent now, or queued behind the turn that runs (an adapter that reports its
-    /// turns declares `turns`; one that does not is sent to at once, as before). `tag` is called only for a prompt that is queued and
-    /// returns what identifies it later (the id of its chat entry); the supervisor is not changed while it runs.
+    /// ADR-0090: a user's prompt to an adapter agent: to be sent now ([`Submit::Send`], made outside the lock), or queued behind the
+    /// turn that runs (an adapter that reports its turns declares `turns`; one that does not is sent to at once, as before). `tag` is
+    /// called only for a prompt that is queued and returns what identifies it later (the id of its chat entry).
     pub fn adapter_submit(
         &mut self,
         id: &AgentId,
         text: &str,
         tag: impl FnOnce(usize) -> u64,
-    ) -> Result<Submitted, SupervisorError> {
-        let Some(e) = self.adapters.get_mut(id).filter(|e| e.running) else {
+    ) -> Result<Submit, SupervisorError> {
+        self.adapter_of(id)?;
+        let Some(e) = self.adapters.get_mut(id) else {
             return Err(SupervisorError::NotFound(id.clone()));
         };
         let turns = e.capabilities.iter().any(|c| c == "turns");
-        if turns && (e.rich.turn_open.load(Ordering::SeqCst) || !e.rich.queue.is_empty()) {
-            if e.rich.queue.len() >= MAX_PROMPT_QUEUE {
-                return Err(SupervisorError::QueueFull(MAX_PROMPT_QUEUE));
-            }
-            let queue_len = e.rich.queue.len() + 1;
-            e.rich.queue.push_back(Queued {
-                text: text.to_string(),
-                tag: tag(queue_len),
-            });
-            return Ok(Submitted::Queued { queue_len });
+        match e.rich.route(turns, text, tag)? {
+            Route::Queued(queue_len) => Ok(Submit::Queued { queue_len }),
+            Route::Send => match self.prepare_prompt(id, text, false) {
+                Ok(call) => Ok(Submit::Send(call)),
+                Err(err) => {
+                    // The prompt will not go out: the turn that was just marked busy never began.
+                    if let Some(e) = self.adapters.get_mut(id) {
+                        let _ = e.rich.send_failed();
+                    }
+                    Err(err)
+                }
+            },
         }
-        let adapter = e
-            .adapter
-            .as_ref()
-            .ok_or_else(|| SupervisorError::NotFound(id.clone()))?;
-        adapter
-            .prompt(&e.session_id, text, false, Duration::from_secs(10))
-            .map_err(|e| SupervisorError::Spawn(e.to_string()))?;
-        e.rich.turn_open.store(turns, Ordering::SeqCst);
-        Ok(Submitted::Sent)
     }
 
-    /// ADR-0090: ends an adapter agent's current turn (the adapter's `session/cancel`); the agent and its process live on. With
-    /// `drop_queue` the prompts waiting behind the turn are thrown away, and their tags returned; otherwise they are kept and sent in
-    /// order as the turns end. Only an adapter that declared `cancel` has this; a terminal agent has no turn to cancel.
-    pub fn adapter_cancel_turn(
-        &mut self,
-        id: &AgentId,
-        drop_queue: bool,
-    ) -> Result<Vec<u64>, SupervisorError> {
+    /// ADR-0090: the call of a [`Submit::Send`] failed: its turn never began, so the agent is free (and what waits goes next, at
+    /// the next poll's `idle`: nothing waits when a prompt was sent at once).
+    pub fn adapter_send_failed(&mut self, id: &AgentId) {
+        if let Some(e) = self.adapters.get_mut(id) {
+            let _ = e.rich.send_failed();
+        }
+    }
+
+    /// ADR-0090: ends an adapter agent's current turn (the adapter's `session/cancel`); the agent and its process live on. Only an
+    /// adapter that declared `cancel` has this; a terminal agent has no turn to cancel. Run the call outside the lock, then
+    /// [`adapter_turn_cancelled`](Self::adapter_turn_cancelled).
+    pub fn prepare_cancel_turn(&self, id: &AgentId) -> Result<AdapterCall, SupervisorError> {
         const CAPABILITY: &str = "agent.cancel_turn";
-        let Some(e) = self.adapters.get_mut(id) else {
+        let Some(e) = self.adapters.get(id) else {
             return Err(if self.agents.contains_key(id) {
                 SupervisorError::OptionUnsupported(CAPABILITY)
             } else {
@@ -1864,30 +2087,32 @@ impl Supervisor {
         if !e.capabilities.iter().any(|c| c == "cancel") {
             return Err(SupervisorError::OptionUnsupported(CAPABILITY));
         }
-        let adapter = e
-            .adapter
-            .as_ref()
-            .ok_or_else(|| SupervisorError::NotFound(id.clone()))?;
-        adapter
-            .cancel(&e.session_id, Duration::from_secs(10))
-            .map_err(adapter_error)?;
-        Ok(if drop_queue {
-            e.rich.queue.drain(..).map(|q| q.tag).collect()
-        } else {
-            Vec::new()
-        })
+        self.call_of(id, CallOp::Cancel)
+    }
+
+    /// ADR-0090: the adapter took the cancel. With `drop_queue` the prompts waiting behind the turn are thrown away and their tags
+    /// returned; otherwise they are kept and sent in order as the turns end. The turn is read as over after [`CANCEL_GRACE`] if the
+    /// adapter does not say so.
+    pub fn adapter_turn_cancelled(&mut self, id: &AgentId, drop_queue: bool) -> Vec<u64> {
+        let now = Instant::now();
+        self.adapters
+            .get_mut(id)
+            .map(|e| e.rich.cancelled(now, drop_queue))
+            .unwrap_or_default()
     }
 
     /// ADR-0090: sets one of the config options an adapter agent reported (the reasoning effort is one). The id and the value are
     /// checked against the last report. Whether the choice makes the agent act without asking is the node's own judgement
-    /// (`perm`, on top of what the adapter said), and the owner's `skip_permissions` policy decides it here, on the node, whatever the
-    /// window or the hub said, exactly as for a mode (ADR-0059).
-    pub fn adapter_set_config(
+    /// (`perm`, on top of what the adapter said); one that does is refused by the owner's `skip_permissions` policy
+    /// (`agent.option_forbidden`) and otherwise for want of the user's confirmation (`agent.option_unconfirmed`, see
+    /// [`skip_refusal`](Self::skip_refusal)), whatever the window or the hub said. A change to the value that keeps protection
+    /// (turning an `auto_approve` off) is never refused for it. The call is made by [`AdapterCall::run`] after the lock is let go.
+    pub fn prepare_set_config(
         &self,
         id: &AgentId,
         config_id: &str,
         value: &str,
-    ) -> Result<(), SupervisorError> {
+    ) -> Result<AdapterCall, SupervisorError> {
         const CAPABILITY: &str = "agent.set_config";
         let Some(e) = self.adapters.get(id) else {
             return Err(if self.agents.contains_key(id) {
@@ -1911,10 +2136,18 @@ impl Supervisor {
             return Err(SupervisorError::ConfigUnknown(config_id.to_string()));
         };
         let skips = if option.boolean {
-            if value != "true" && value != "false" {
-                return Err(SupervisorError::ConfigUnknown(value.to_string()));
-            }
-            option.skips_permissions
+            let on = match value {
+                "true" => true,
+                "false" => false,
+                _ => return Err(SupervisorError::ConfigUnknown(value.to_string())),
+            };
+            perm::boolean_value_skips(
+                Category::from_acp(Some(option.category.as_str())),
+                (&option.id, &option.name),
+                &option.description,
+                option.skips_permissions,
+                on,
+            )
         } else {
             let Some(choice) = option
                 .choices
@@ -1926,31 +2159,39 @@ impl Supervisor {
             choice.skips_permissions
         };
         if skips {
-            let confined =
-                self.sandbox.level != crate::sandbox::Level::Off && self.sandbox.enforceable();
-            if let Some(policy) = self.skip_permissions.refusal(confined) {
-                return Err(SupervisorError::OptionForbidden(
-                    e.agent.kind.clone(),
-                    config_id.to_string(),
-                    policy,
-                ));
+            if let Some(err) = self.skip_refusal(&e.agent.kind, config_id) {
+                return Err(err);
             }
         }
-        let (adapter, session) = self.adapter_of(id)?;
-        adapter
-            .set_config(session, config_id, value, Duration::from_secs(10))
-            .map_err(adapter_error)
+        self.call_of(
+            id,
+            CallOp::SetConfig {
+                id: config_id.to_string(),
+                value: value.to_string(),
+            },
+        )
+    }
+
+    /// [`prepare_set_config`](Self::prepare_set_config) and run, under the caller's lock (tests).
+    pub fn adapter_set_config(
+        &self,
+        id: &AgentId,
+        config_id: &str,
+        value: &str,
+    ) -> Result<(), SupervisorError> {
+        self.prepare_set_config(id, config_id, value)?.run()
     }
 
     /// ADR-0058: switches an adapter agent to one of the modes or models it reported. Only the user's own command reaches this (an
     /// agent has no mesh tool for it); a terminal agent, an adapter that did not declare the switch, and an id the agent did not offer
-    /// are refused before the adapter hears of it.
-    pub fn adapter_set_option(
+    /// are refused before the adapter hears of it. A mode that skips permissions is refused as a config option is (see
+    /// [`prepare_set_config`](Self::prepare_set_config)). The call is made by [`AdapterCall::run`] after the lock is let go.
+    pub fn prepare_set_option(
         &self,
         id: &AgentId,
         kind: OptionKind,
         value: &str,
-    ) -> Result<(), SupervisorError> {
+    ) -> Result<AdapterCall, SupervisorError> {
         let (capability, field) = match kind {
             OptionKind::Mode => ("agent.set_mode", "mode"),
             OptionKind::Model => ("agent.set_model", "model"),
@@ -1973,35 +2214,57 @@ impl Supervisor {
             return Err(SupervisorError::OptionUnknown(field));
         };
         // A mode that makes the agent act without asking is a launch option's twin (ADR-0059): the owner's `skip_permissions` policy
-        // decides it here, on the node, whatever the window or the hub said. Whether it skips is what the adapter reported.
+        // decides it here, on the node, whatever the window or the hub said, and it needs the user's confirmation too.
         if chosen.skips_permissions {
-            let confined =
-                self.sandbox.level != crate::sandbox::Level::Off && self.sandbox.enforceable();
-            if let Some(policy) = self.skip_permissions.refusal(confined) {
-                return Err(SupervisorError::OptionForbidden(
-                    e.agent.kind.clone(),
-                    chosen.id.clone(),
-                    policy,
-                ));
+            if let Some(err) = self.skip_refusal(&e.agent.kind, &chosen.id) {
+                return Err(err);
             }
         }
-        let (adapter, session) = self.adapter_of(id)?;
-        adapter
-            .set_option(session, kind, value, Duration::from_secs(10))
-            .map_err(adapter_error)
+        self.call_of(
+            id,
+            CallOp::SetOption {
+                kind,
+                value: value.to_string(),
+            },
+        )
     }
 
-    /// Delivers a decision the node has already verified (ADR-0020) to the adapter that asked.
+    /// [`prepare_set_option`](Self::prepare_set_option) and run, under the caller's lock (tests).
+    pub fn adapter_set_option(
+        &self,
+        id: &AgentId,
+        kind: OptionKind,
+        value: &str,
+    ) -> Result<(), SupervisorError> {
+        self.prepare_set_option(id, kind, value)?.run()
+    }
+
+    /// Delivers a decision the node has already verified (ADR-0020) to the adapter that asked: the call to make after the lock is
+    /// let go.
+    pub fn prepare_resolve_approval(
+        &self,
+        id: &AgentId,
+        approval_id: &str,
+        approved: bool,
+    ) -> Result<AdapterCall, SupervisorError> {
+        self.call_of(
+            id,
+            CallOp::Resolve {
+                approval: approval_id.to_string(),
+                approved,
+            },
+        )
+    }
+
+    /// [`prepare_resolve_approval`](Self::prepare_resolve_approval) and run, under the caller's lock (tests).
     pub fn adapter_resolve_approval(
         &self,
         id: &AgentId,
         approval_id: &str,
         approved: bool,
     ) -> Result<(), SupervisorError> {
-        let (adapter, session) = self.adapter_of(id)?;
-        adapter
-            .resolve_approval(session, approval_id, approved, Duration::from_secs(10))
-            .map_err(|e| SupervisorError::Spawn(e.to_string()))
+        self.prepare_resolve_approval(id, approval_id, approved)?
+            .run()
     }
 
     /// ADR-0060: an agent's first launch. A kind whose manifest has `[session] id_args` gets a session id the node chooses (a random
@@ -3103,6 +3366,61 @@ fn bounded_options(o: SessionOptions) -> SessionOptions {
     }
 }
 
+/// ADR-0090: a queued prompt becomes the turn: it is reported as sent and the send itself is made on a thread of its own, so a hung
+/// adapter cannot stall the tick (which holds the supervisor's lock). A send that fails is reported back through `sent` and read by
+/// the next poll, which drops that prompt and goes on with the next.
+fn begin_send(
+    e: &AdapterEntry,
+    id: &AgentId,
+    next: Queued,
+    sent: &SentResults,
+    events: &mut Vec<SupervisorEvent>,
+) {
+    let caller = e
+        .adapter
+        .as_ref()
+        .filter(|_| e.running)
+        .map(Adapter::caller);
+    let Some(caller) = caller else {
+        sent.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((id.clone(), next.tag, false));
+        return;
+    };
+    events.push(SupervisorEvent::PromptDequeued {
+        agent: id.clone(),
+        tag: next.tag,
+        sent: true,
+    });
+    let call = AdapterCall {
+        caller,
+        session: e.session_id.clone(),
+        op: CallOp::Prompt {
+            text: next.text,
+            from_mesh: false,
+        },
+    };
+    let (results, agent, tag) = (Arc::clone(sent), id.clone(), next.tag);
+    let spawned = std::thread::Builder::new()
+        .name("agora-queued-prompt".into())
+        .spawn({
+            let (results, agent) = (Arc::clone(&results), agent.clone());
+            move || {
+                let ok = call.run().is_ok();
+                results
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push((agent, tag, ok));
+            }
+        });
+    if spawned.is_err() {
+        results
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((agent, tag, false));
+    }
+}
+
 /// ADR-0090: the most config options kept per agent, choices per option, commands, and the longest text of each.
 const CONFIG_OPTIONS_MAX: usize = 64;
 const CONFIG_CHOICES_MAX: usize = 64;
@@ -3863,6 +4181,159 @@ mod adapter_option_tests {
         assert!(bounded_config(vec![flagged])[0].choices[0].skips_permissions);
     }
 
+    fn queued(r: &mut AdapterRich, text: &str, tag: u64) -> Result<Route, SupervisorError> {
+        r.route(true, text, |_| tag)
+    }
+
+    fn busy() -> Turn {
+        Turn::Busy {
+            seen_working: false,
+            cancel_by: None,
+        }
+    }
+
+    /// The first prompt goes at once; later ones wait in order, at most eight, each of at most 64 KiB; an adapter that does not
+    /// report its turns is never queued for.
+    #[test]
+    fn the_queue_takes_eight_in_order_and_only_for_an_adapter_that_reports_its_turns() {
+        let mut r = AdapterRich::default();
+        assert_eq!(queued(&mut r, "a", 0), Ok(Route::Send));
+        assert_eq!(r.turn, busy());
+        for n in 1..=8u64 {
+            assert_eq!(queued(&mut r, "q", n), Ok(Route::Queued(n as usize)));
+        }
+        assert_eq!(
+            queued(&mut r, "q", 9),
+            Err(SupervisorError::QueueFull(MAX_PROMPT_QUEUE))
+        );
+        let big = "x".repeat(MAX_QUEUED_PROMPT_BYTES + 1);
+        let mut other = AdapterRich::default();
+        assert_eq!(queued(&mut other, "a", 0), Ok(Route::Send));
+        assert_eq!(
+            queued(&mut other, &big, 1),
+            Err(SupervisorError::OptionUnknown("text"))
+        );
+        assert!(other.queue.is_empty());
+        assert_eq!(
+            queued(&mut other, &"x".repeat(MAX_QUEUED_PROMPT_BYTES), 2),
+            Ok(Route::Queued(1))
+        );
+        // No `turns`: always sent, never queued, however busy it looks.
+        let mut plain = AdapterRich::default();
+        for _ in 0..20 {
+            assert_eq!(plain.route(false, "x", |_| 0), Ok(Route::Send));
+        }
+        assert_eq!(plain.turn, Turn::Idle);
+    }
+
+    /// (a) A prompt that fails to send leaves nothing stuck: the turn it never began is over and the next prompt goes.
+    #[test]
+    fn a_prompt_that_fails_to_send_does_not_hold_the_queue() {
+        let mut r = AdapterRich::default();
+        let _ = queued(&mut r, "a", 0);
+        let _ = queued(&mut r, "b", 1);
+        let _ = queued(&mut r, "c", 2);
+        // `a` was sent and failed: `b` becomes the turn; it fails too: `c`; it fails: nothing waits, the agent is free.
+        assert_eq!(r.send_failed().map(|q| q.tag), Some(1));
+        assert_eq!(r.send_failed().map(|q| q.tag), Some(2));
+        assert!(r.send_failed().is_none());
+        assert_eq!(r.turn, Turn::Idle);
+        assert_eq!(
+            queued(&mut r, "d", 3),
+            Ok(Route::Send),
+            "later prompts are not left waiting for an idle that never comes"
+        );
+        // A failure is only about a turn that has not begun.
+        r.observe(AgentState::Working);
+        let _ = queued(&mut r, "e", 4);
+        assert!(r.send_failed().is_none());
+        assert_eq!(r.queue.len(), 1);
+    }
+
+    /// (b) An adapter that says `done` or `unknown` instead of `idle` ends the turn too.
+    #[test]
+    fn done_or_unknown_ends_a_turn_like_idle() {
+        for ending in [AgentState::Done, AgentState::Unknown] {
+            let mut r = AdapterRich::default();
+            let _ = queued(&mut r, "a", 0);
+            let _ = queued(&mut r, "b", 1);
+            // Even before it said `working`: it will not say `idle` any more.
+            assert_eq!(r.observe(ending).map(|q| q.tag), Some(1), "{ending:?}");
+            assert_eq!(r.turn, busy());
+            assert!(r.observe(ending).is_none());
+            assert_eq!(r.turn, Turn::Idle);
+        }
+    }
+
+    /// (c) A stray `idle`, or a second one, ends nothing and never sends a prompt into a running turn.
+    #[test]
+    fn a_stray_idle_does_not_pop_a_prompt_into_a_running_turn() {
+        let mut r = AdapterRich::default();
+        let _ = queued(&mut r, "a", 0);
+        let _ = queued(&mut r, "b", 1);
+        let _ = queued(&mut r, "c", 2);
+        // The startup `idle` that arrives after the prompt was sent: before any `working`.
+        assert!(r.observe(AgentState::Idle).is_none());
+        assert_eq!(r.queue.len(), 2);
+        assert!(r.observe(AgentState::Working).is_none());
+        assert_eq!(
+            r.observe(AgentState::Idle).map(|q| q.tag),
+            Some(1),
+            "the turn ended: `b` goes"
+        );
+        // `b` is the turn now. A second `idle` (a duplicate of the last one) must not release `c`.
+        assert!(r.observe(AgentState::Idle).is_none());
+        assert_eq!(r.queue.len(), 1);
+        assert!(r.observe(AgentState::Working).is_none());
+        assert!(r.observe(AgentState::Blocked).is_none());
+        assert_eq!(r.observe(AgentState::Idle).map(|q| q.tag), Some(2));
+        assert!(r.observe(AgentState::Working).is_none());
+        assert!(r.observe(AgentState::Idle).is_none());
+        assert_eq!(r.turn, Turn::Idle);
+        // An idle agent that gets an `idle` stays idle.
+        assert!(r.observe(AgentState::Idle).is_none());
+    }
+
+    /// (d) An adapter that ignores `session/cancel` does not hold the agent for good: the turn is read as over after the grace, and
+    /// what waits goes (or, with `drop_queue`, is gone).
+    #[test]
+    fn a_cancelled_turn_the_adapter_never_ends_is_over_after_the_grace() {
+        let t0 = Instant::now();
+        let mut r = AdapterRich::default();
+        let _ = queued(&mut r, "a", 0);
+        r.observe(AgentState::Working);
+        let _ = queued(&mut r, "b", 1);
+        assert!(r.cancelled(t0, false).is_empty(), "the queue is kept");
+        assert!(r
+            .expire_cancel(t0 + CANCEL_GRACE - Duration::from_millis(1))
+            .is_none());
+        assert_eq!(
+            r.turn,
+            Turn::Busy {
+                seen_working: true,
+                cancel_by: Some(t0 + CANCEL_GRACE)
+            }
+        );
+        assert_eq!(r.expire_cancel(t0 + CANCEL_GRACE).map(|q| q.tag), Some(1));
+        // Not cancelled: never expires.
+        assert!(r.expire_cancel(t0 + CANCEL_GRACE * 100).is_none());
+        // With drop_queue the tags come back and the turn is free after the grace.
+        let mut r = AdapterRich::default();
+        let _ = queued(&mut r, "a", 0);
+        let _ = queued(&mut r, "b", 5);
+        let _ = queued(&mut r, "c", 6);
+        assert_eq!(r.cancelled(t0, true), [5, 6]);
+        assert!(r.expire_cancel(t0 + CANCEL_GRACE).is_none());
+        assert_eq!(r.turn, Turn::Idle);
+        // An adapter that does end the cancelled turn (the normal case) needs no grace.
+        let mut r = AdapterRich::default();
+        let _ = queued(&mut r, "a", 0);
+        r.observe(AgentState::Working);
+        let _ = queued(&mut r, "b", 1);
+        r.cancelled(t0, false);
+        assert_eq!(r.observe(AgentState::Idle).map(|q| q.tag), Some(1));
+    }
+
     /// ADR-0090: what a restarted adapter's old process reported is forgotten (a stale mode list could decide a choice against the
     /// new process), and the prompts that waited for its turn are handed back to be dropped.
     #[test]
@@ -3875,7 +4346,10 @@ mod adapter_option_tests {
             }],
             ..AdapterRich::default()
         };
-        r.turn_open.store(true, Ordering::SeqCst);
+        r.turn = Turn::Busy {
+            seen_working: true,
+            cancel_by: None,
+        };
         r.queue.push_back(Queued {
             text: "a".into(),
             tag: 7,
@@ -3886,7 +4360,7 @@ mod adapter_option_tests {
         });
         assert_eq!(r.forget(), [7, 9]);
         assert!(r.config.is_empty() && r.commands.is_empty() && r.queue.is_empty());
-        assert!(!r.turn_open.load(Ordering::SeqCst));
+        assert_eq!(r.turn, Turn::Idle);
         assert!(r.forget().is_empty());
     }
 

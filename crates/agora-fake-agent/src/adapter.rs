@@ -3,6 +3,8 @@
 //!
 //! Prompts (the `text` of `session/prompt`):
 //! - `ask`: goes `blocked`, sends an `approval/request`, waits for `approval/resolve`, then works and finishes.
+//! - `hang`: does not answer the prompt for 30 s (an adapter that is stuck).
+//! - `ask-error`: like `ask`, but answers the decision with a JSON-RPC error.
 //! - `crash`: exits abruptly with status 3 (a crashing adapter).
 //! - `env`: appends a chat item saying whether the variable `AGORA_TEST_SECRET` is visible to the adapter.
 //! - `mcp-servers`: appends a chat item with the `mcpServers` of `session/start`, as JSON (`[]` when there were none).
@@ -86,8 +88,12 @@ pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
                 state(out, &session, "IDLE")?;
             }
             "session/prompt" => {
-                reply(out, json!({}))?;
                 let text = params.get("text").and_then(Value::as_str).unwrap_or("");
+                // `hang`: never answers the prompt (for 30 s), like an adapter that is stuck.
+                if text == "hang" {
+                    std::thread::sleep(std::time::Duration::from_secs(30));
+                }
+                reply(out, json!({}))?;
                 match text {
                     "cwd" => note(
                         out,
@@ -115,7 +121,7 @@ pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
                         state(out, &session, "WORKING")?;
                         state(out, &session, "IDLE")?;
                     }
-                    "ask" => {
+                    "ask" | "ask-error" => {
                         state(out, &session, "BLOCKED")?;
                         note(
                             out,
@@ -130,6 +136,14 @@ pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
                             };
                             if m.get("method").and_then(Value::as_str) == Some("approval/resolve") {
                                 if let Some(id) = m.get("id") {
+                                    if text == "ask-error" {
+                                        // The adapter cannot take the decision (it answers with an error).
+                                        send(
+                                            out,
+                                            &json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32000, "message": "no"}}),
+                                        )?;
+                                        break;
+                                    }
                                     send(out, &json!({"jsonrpc": "2.0", "id": id, "result": {}}))?;
                                 }
                                 let approved = m["params"]["approved"].as_bool().unwrap_or(false);

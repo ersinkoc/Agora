@@ -299,9 +299,128 @@ pub struct Adapter {
     writer: Option<SyncSender<(u64, String)>>,
     pending: Pending,
     events: Receiver<AdapterEvent>,
-    next_id: AtomicU64,
+    next_id: Arc<AtomicU64>,
     ignored: Arc<AtomicUsize>,
     reader: Option<std::thread::JoinHandle<()>>,
+}
+
+/// What an [`Adapter`] needs to make a request: see [`Adapter::caller`].
+#[derive(Clone)]
+pub struct Caller {
+    writer: Option<SyncSender<(u64, String)>>,
+    pending: Pending,
+    next_id: Arc<AtomicU64>,
+}
+
+impl Caller {
+    /// A request and its answer. Fails with `Exited` if the adapter dies first.
+    pub fn call(&self, method: &str, params: Value, timeout: Duration) -> Result<Value, HostError> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = channel();
+        let mut line = to_line(&Message::Request {
+            id: json!(id),
+            method: method.to_string(),
+            params,
+        });
+        line.push('\n');
+        {
+            // Check admission and enqueue under one lock so the writer cannot miss a send
+            // while it closes and drains the queue. The send is nonblocking.
+            let mut p = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(writer) = self.writer.as_ref().filter(|_| !p.closed) else {
+                return Err(HostError::Exited);
+            };
+            match writer.try_send((id, line)) {
+                Ok(()) => {
+                    p.map.insert(id, tx);
+                }
+                Err(TrySendError::Full(_)) => return Err(HostError::Timeout),
+                Err(TrySendError::Disconnected(_)) => return Err(HostError::Exited),
+            }
+        }
+        let out = match rx.recv_timeout(timeout) {
+            Ok(r) => r,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(HostError::Timeout),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(HostError::Exited),
+        };
+        self.pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .map
+            .remove(&id);
+        out
+    }
+
+    pub fn prompt(
+        &self,
+        session: &str,
+        text: &str,
+        from_mesh: bool,
+        timeout: Duration,
+    ) -> Result<(), HostError> {
+        self.call(
+            "session/prompt",
+            json!({"sessionId": session, "text": text,
+                   "source": if from_mesh { "INPUT_SOURCE_MESH" } else { "INPUT_SOURCE_USER" }}),
+            timeout,
+        )
+        .map(drop)
+    }
+
+    pub fn cancel(&self, session: &str, timeout: Duration) -> Result<(), HostError> {
+        self.call("session/cancel", json!({"sessionId": session}), timeout)
+            .map(drop)
+    }
+
+    /// Delivers a decision the node has already verified (ADR-0020). The adapter never decides for itself.
+    pub fn resolve_approval(
+        &self,
+        session: &str,
+        approval_id: &str,
+        approved: bool,
+        timeout: Duration,
+    ) -> Result<(), HostError> {
+        self.call(
+            "approval/resolve",
+            json!({"sessionId": session, "approvalId": approval_id, "approved": approved}),
+            timeout,
+        )
+        .map(drop)
+    }
+
+    /// ADR-0058: switches the session to one of the modes or models the adapter reported. The caller checks the adapter declared
+    /// [`OptionKind::capability`] first.
+    pub fn set_option(
+        &self,
+        session: &str,
+        kind: OptionKind,
+        id: &str,
+        timeout: Duration,
+    ) -> Result<(), HostError> {
+        self.call(
+            "session/set_option",
+            json!({"sessionId": session, "kind": kind.wire(), "id": id}),
+            timeout,
+        )
+        .map(drop)
+    }
+
+    /// ADR-0090: sets one of the options the adapter reported in `session/config`. The caller checks the adapter declared the
+    /// capability `config`, that the id and value are among what it reported, and the node's skip-permissions policy.
+    pub fn set_config(
+        &self,
+        session: &str,
+        config_id: &str,
+        value: &str,
+        timeout: Duration,
+    ) -> Result<(), HostError> {
+        self.call(
+            "session/set_config",
+            json!({"sessionId": session, "configId": config_id, "value": value}),
+            timeout,
+        )
+        .map(drop)
+    }
 }
 
 /// Reads one line without ever holding more than `MAX_LINE` bytes. `Ok(None)` at end of input; an over-long line
@@ -684,7 +803,7 @@ impl Adapter {
             writer: None,
             pending: Arc::default(),
             events,
-            next_id: AtomicU64::new(1),
+            next_id: Arc::new(AtomicU64::new(1)),
             ignored: Arc::new(AtomicUsize::new(0)),
             reader: None,
         };
@@ -711,40 +830,17 @@ impl Adapter {
 
     /// A request and its answer. Fails with `Exited` if the adapter dies first.
     pub fn call(&self, method: &str, params: Value, timeout: Duration) -> Result<Value, HostError> {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let (tx, rx) = channel();
-        let mut line = to_line(&Message::Request {
-            id: json!(id),
-            method: method.to_string(),
-            params,
-        });
-        line.push('\n');
-        {
-            // Check admission and enqueue under one lock so the writer cannot miss a send
-            // while it closes and drains the queue. The send is nonblocking.
-            let mut p = self.pending.lock().unwrap_or_else(|e| e.into_inner());
-            let Some(writer) = self.writer.as_ref().filter(|_| !p.closed) else {
-                return Err(HostError::Exited);
-            };
-            match writer.try_send((id, line)) {
-                Ok(()) => {
-                    p.map.insert(id, tx);
-                }
-                Err(TrySendError::Full(_)) => return Err(HostError::Timeout),
-                Err(TrySendError::Disconnected(_)) => return Err(HostError::Exited),
-            }
+        self.caller().call(method, params, timeout)
+    }
+
+    /// A handle that makes requests without borrowing the adapter: the node takes one under its supervisor lock, lets the lock go,
+    /// and only then waits for the answer, so an adapter that does not answer never stalls anything but its own caller.
+    pub fn caller(&self) -> Caller {
+        Caller {
+            writer: self.writer.clone(),
+            pending: Arc::clone(&self.pending),
+            next_id: Arc::clone(&self.next_id),
         }
-        let out = match rx.recv_timeout(timeout) {
-            Ok(r) => r,
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(HostError::Timeout),
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(HostError::Exited),
-        };
-        self.pending
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .map
-            .remove(&id);
-        out
     }
 
     pub fn initialize(
@@ -823,18 +919,11 @@ impl Adapter {
         from_mesh: bool,
         timeout: Duration,
     ) -> Result<(), HostError> {
-        self.call(
-            "session/prompt",
-            json!({"sessionId": session, "text": text,
-                   "source": if from_mesh { "INPUT_SOURCE_MESH" } else { "INPUT_SOURCE_USER" }}),
-            timeout,
-        )
-        .map(drop)
+        self.caller().prompt(session, text, from_mesh, timeout)
     }
 
     pub fn cancel(&self, session: &str, timeout: Duration) -> Result<(), HostError> {
-        self.call("session/cancel", json!({"sessionId": session}), timeout)
-            .map(drop)
+        self.caller().cancel(session, timeout)
     }
 
     /// Delivers a decision the node has already verified (ADR-0020). The adapter never decides for itself.
@@ -845,12 +934,8 @@ impl Adapter {
         approved: bool,
         timeout: Duration,
     ) -> Result<(), HostError> {
-        self.call(
-            "approval/resolve",
-            json!({"sessionId": session, "approvalId": approval_id, "approved": approved}),
-            timeout,
-        )
-        .map(drop)
+        self.caller()
+            .resolve_approval(session, approval_id, approved, timeout)
     }
 
     /// ADR-0058: switches the session to one of the modes or models the adapter reported. The caller checks the adapter declared
@@ -862,12 +947,7 @@ impl Adapter {
         id: &str,
         timeout: Duration,
     ) -> Result<(), HostError> {
-        self.call(
-            "session/set_option",
-            json!({"sessionId": session, "kind": kind.wire(), "id": id}),
-            timeout,
-        )
-        .map(drop)
+        self.caller().set_option(session, kind, id, timeout)
     }
 
     /// ADR-0090: sets one of the options the adapter reported in `session/config`. The caller checks the adapter declared the
@@ -879,12 +959,7 @@ impl Adapter {
         value: &str,
         timeout: Duration,
     ) -> Result<(), HostError> {
-        self.call(
-            "session/set_config",
-            json!({"sessionId": session, "configId": config_id, "value": value}),
-            timeout,
-        )
-        .map(drop)
+        self.caller().set_config(session, config_id, value, timeout)
     }
 
     pub fn stop_session(

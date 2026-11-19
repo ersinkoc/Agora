@@ -381,7 +381,10 @@ fn a_mode_that_skips_permissions_follows_the_nodes_policy() {
         }
         let skipped = set_mode("bypassPermissions");
         if allowed {
-            assert!(skipped.is_ok(), "{skipped:?}");
+            // The policy allows it, but a launch option that skips permissions needs the user's confirmation and `AgentSetMode` has no
+            // field to carry one yet: refused as unconfirmed, never applied.
+            assert_eq!(skipped.unwrap_err().code, "agent.option_unconfirmed");
+            assert!(set_mode("build").is_ok());
         } else {
             let err = skipped.unwrap_err();
             assert_eq!(err.code, "agent.option_forbidden");
@@ -723,6 +726,9 @@ fn prompts_queue_behind_a_turn_and_cancelling_the_turn_leaves_the_agent_alive() 
             .iter()
             .any(|e| e.call_id == "t4" && e.status == v1::ToolStatus::InProgress as i32)
     });
+    // A prompt that would wait is bounded (64 KiB); the same text would have been sent at once if the agent were free.
+    let long = prompt(&home, &id, &"x".repeat(64 * 1024 + 1)).unwrap_err();
+    assert_eq!(long.code, "protocol.invalid_message");
     // Eight wait, each answered with how many wait now; the ninth is refused with a stable code.
     for n in 1..=8u32 {
         let r = prompt(&home, &id, &format!("q{n}")).unwrap();
@@ -952,14 +958,18 @@ fn a_config_option_is_set_checked_and_held_to_the_skip_permissions_policy() {
         assert_eq!(set("effort", "").unwrap_err().code, "agent.option_unknown");
         // `turbo` is in no list of bad names; the node cannot tell it asks, so it is held to the policy like `bypass`. The
         // boolean about approvals too.
-        for (config_id, value) in [
-            ("approvals", "turbo"),
-            ("auto_approve", "true"),
-            ("auto_approve", "false"),
-        ] {
+        // Turning auto-approve OFF is protection: allowed under any policy. Turning it ON is refused.
+        assert!(set("auto_approve", "false").is_ok());
+        for (config_id, value) in [("approvals", "turbo"), ("auto_approve", "true")] {
             let r = set(config_id, value);
             if allowed {
-                assert!(r.is_ok(), "{config_id}={value}: {r:?}");
+                // Allowed by the policy; unconfirmed, for want of a confirmation field on the command.
+                let err = r.unwrap_err();
+                assert_eq!(err.code, "agent.option_unconfirmed", "{config_id}={value}");
+                assert_eq!(
+                    param(&err, "option"),
+                    Some(v1::param_value::Value::Str(config_id.into()))
+                );
             } else {
                 let err = r.unwrap_err();
                 assert_eq!(err.code, "agent.option_forbidden", "{config_id}={value}");
