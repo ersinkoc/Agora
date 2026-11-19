@@ -101,7 +101,7 @@ towards the node, so chat items, approvals, state and cancel work as for any L3 
 
 | ACP (agent → client) | Adapter protocol (bridge → node) |
 | --- | --- |
-| `session/update` `agent_message_chunk` | `chat/append` text, chunks joined for up to 150 ms (or 4 KiB) |
+| `session/update` `agent_message_chunk` | `chat/append` text, chunks joined for up to 150 ms (or 4 KiB). An explicit stop or the end of the node's request stream flushes buffered text while the reply stream remains open |
 | `session/update` `tool_call` (title, `rawInput`) | `chat/append` tool call; a `diff` in its content (or in `tool_call_update`) becomes a diff item (old and new text shown as a whole-file replacement) |
 | `session/update` `plan` | `chat/append` plan, one step per entry |
 | `session/request_permission` | `approval/request` (action: the tool call's title, detail: its input cut at 300 characters) and state `blocked` |
@@ -111,11 +111,16 @@ towards the node, so chat items, approvals, state and cancel work as for any L3 
 | `session/update` `current_mode_update` | `session/options` again with the new current mode |
 | `agent_thought_chunk`, `available_commands_update`, other updates | dropped |
 
+The bridge accepts updates with a session ID for the active session or a matching pending `session/load`. An update without a
+session ID uses the active session for compatibility. A successful change of session retires pending prompts from the previous
+session. Only a reply to an active prompt ends its turn.
+
 Node → bridge → agent: `session/start` → `session/new` (or `session/load` when the agent said it can and a resume id is known),
 with the node's `mcpServers` (the agent's mesh server) as ACP stdio servers `{name, command, args, env: []}` (at most 16; an entry
 without a name or command, or with an argument that is not a string, is dropped). ACP requires every agent to take stdio servers, so
 they are always sent unless the agent's `initialize` says `agentCapabilities.mcpCapabilities.stdio: false`;
-`session/prompt` → `session/prompt` with one text block; `session/cancel` → the ACP `session/cancel` notification;
+`session/prompt` → `session/prompt` with one text block. `session/cancel` sends the ACP `session/cancel` notification. The bridge
+replies `cancelled` to pending ACP permission requests and to requests that arrive before the cancelled turn completes.
 `session/set_option` → ACP `session/set_mode { sessionId, modeId }` or `session/set_model { sessionId, modelId }` for an id the
 agent offered (anything else is refused by the bridge without asking the agent), answered once the agent answered, and followed by
 `session/options` with the new current mode or model; an agent's error answer is `adapter.option_refused`;
@@ -128,6 +133,8 @@ manifests and fixtures from real accounts (P2-09).
 
 ### Turn and exit reasons
 
+The bridge treats the ACP `cancelled` stop reason and the ACP cancellation code `-32800` as a normal transition to `idle`.
+
 The bridge never writes text for people. When something went wrong it gives a stable code and parameters (values are strings):
 
 | Code | Params | When | Where |
@@ -135,7 +142,7 @@ The bridge never writes text for people. When something went wrong it gives a st
 | `adapter.turn_empty` | `stderr_tail` (only when the agent wrote to stderr during the turn) | The agent answered the prompt with `end_turn` (or no stop reason) and sent nothing: no text, tool call, plan, diff or permission request. opencode does this when its provider refuses the request | the closing `state/update` `idle` (`message`), a `log` line (`LOG_LEVEL_WARN`) and a `chat/append` notice (ADR-0058) |
 | `adapter.turn_stopped` | `stop_reason` (`refusal`, `max_tokens`, `max_turn_requests`, ...; `other` for anything that is not a lowercase word) | The agent stopped the turn itself | same |
 | `adapter.turn_failed` | `rpc_code`, `stderr_tail` (as for `turn_empty`) | The agent answered `session/prompt` with a JSON-RPC error | same |
-| `adapter.agent_exited` | `stage` (`initialize`, `session`, `turn`, `idle`, `start`, `option`), `exit_code` (when it exited with one), `stderr_tail` | The agent's output ended. Every request the node still waits for (`initialize`, `session/start`, `session/set_option`) is answered with a JSON-RPC error whose `data` is `{code, params}` with the stage of that request; a `log` line (`LOG_LEVEL_ERROR`) and a `chat/append` notice carry the same for the stage it was in. An agent that died before the node asked anything (`start`) leaves the bridge waiting up to 2 s for the node's first request, which it answers the same way (`initialize` or `session` as its stage). Then the bridge exits | error `data` (`HostError::reason` on the node side), notice and `log` |
+| `adapter.agent_exited` | `stage` (`initialize`, `session`, `turn`, `idle`, `start`, `option`), `exit_code` (when it exited with one), `stderr_tail` | The agent's output ended. Every request the node still waits for (`initialize`, `session/start`, `session/set_option`) is answered with a JSON-RPC error whose `data` is `{code, params}` with the stage of that request. A `log` line (`LOG_LEVEL_ERROR`) and a `chat/append` notice carry the agent's stage, including `session` after successful initialization and before the first session opens. If the agent dies before opening a session, the bridge waits up to 2 s for a late request and answers it with the exit reason, using `initialize` or `session` for the corresponding request. Then the bridge exits | error `data` (`HostError::reason` on the node side), notice and `log` |
 | `adapter.agent_refused` | `stage` (`initialize`, `session`); the notice also `rpc_code` and `detail` (the agent's error message, scrubbed and cut like a stderr tail) | The agent answered its own `initialize` or `session/new` (`session/load`) with an error (opencode 2.x: -32603 `ServiceUnavailableError` without `opencode service`) | error `data` of the node's request (`stage` only) and a `chat/append` notice |
 | `adapter.option_refused` | `id` | The id was not one the agent offered, or the agent answered `session/set_mode` / `session/set_model` with an error | error `data` of `session/set_option` |
 

@@ -259,6 +259,14 @@ fn split_address(to: &str) -> Option<(&str, &str)> {
     (!node.is_empty() && !agent.is_empty() && !agent.contains('/')).then_some((node, agent))
 }
 
+pub(crate) fn inbox_message_number(id: &str) -> Option<u64> {
+    let digits = id.strip_prefix("m-")?;
+    if !digits.as_bytes().first().is_some_and(u8::is_ascii_digit) {
+        return None;
+    }
+    digits.parse().ok()
+}
+
 #[derive(Clone)]
 pub struct Mesh {
     outbox: Vec<Outbound>,
@@ -575,7 +583,9 @@ impl Mesh {
         self.sent.remove(agent);
         self.activity.remove(agent);
         self.presence_sent.remove(agent);
-        self.asks.retain(|_, a| &a.from != agent && &a.to != agent);
+        // An accepted answer remains the live caller's until it polls or cancels, even after the responder exits.
+        self.asks
+            .retain(|_, a| &a.from != agent && (&a.to != agent || a.answer.is_some()));
         let held: Vec<String> = self
             .batches
             .iter()
@@ -696,6 +706,20 @@ impl Mesh {
         }));
     }
 
+    fn local_address<'a>(&self, info: &AgentInfo, to: &'a str) -> &'a str {
+        // Your own node's name in front is just a longer way to say "here" — unless the whole address
+        // already names an agent: the hub's board keeps hub-wide `<node>/<agent>` ids (ADR-0053), so on
+        // it "n1/b" for an agent of node n1 is that agent, not "b".
+        match split_address(to) {
+            Some((node, agent))
+                if node == info.node && !self.agents.contains_key(&AgentId::new(to)) =>
+            {
+                agent
+            }
+            _ => to,
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn post(
         &mut self,
@@ -709,17 +733,7 @@ impl Mesh {
     ) -> Result<(Message, Vec<AgentId>), MeshError> {
         let info = self.caller(from)?.clone();
         self.check_content(body, refs)?;
-        // Your own node's name in front is just a longer way to say "here" — unless the whole address
-        // already names an agent: the hub's board keeps hub-wide `<node>/<agent>` ids (ADR-0053), so on
-        // it "n1/b" for an agent of node n1 is that agent, not "b".
-        let to = match split_address(to) {
-            Some((node, agent))
-                if node == info.node && !self.agents.contains_key(&AgentId::new(to)) =>
-            {
-                agent
-            }
-            _ => to,
-        };
+        let to = self.local_address(&info, to);
         if let (Some((node, agent)), "message") = (split_address(to), kind) {
             self.check_rate(from, now_ms)?;
             let m = Message {
@@ -784,10 +798,17 @@ impl Mesh {
         reply_to: Option<&str>,
         now_ms: u64,
     ) -> Result<String, MeshError> {
-        let answers = reply_to
-            .and_then(|r| self.asks.get(r).map(|a| (r.to_string(), a.to == *from)))
-            .filter(|(_, mine)| *mine)
-            .map(|(r, _)| r);
+        let answers = reply_to.and_then(|r| {
+            self.asks
+                .get(r)
+                .filter(|a| now_ms < a.deadline_ms && a.to == *from)
+                .filter(|a| {
+                    self.agents
+                        .get(from)
+                        .is_some_and(|info| a.from.as_str() == self.local_address(info, to))
+                })
+                .map(|_| r.to_string())
+        });
         let kind = if answers.is_some() {
             "reply"
         } else {
@@ -887,12 +908,11 @@ impl Mesh {
         let Some(inbox) = self.inboxes.get(agent) else {
             return Ok(Vec::new());
         };
-        let number = |id: &str| id.rsplit('-').next().and_then(|n| n.parse::<u64>().ok());
-        let after = since.and_then(number).unwrap_or(0);
+        let after = since.and_then(inbox_message_number).unwrap_or(0);
         Ok(inbox
             .iter()
-            .filter(|m| number(&m.id).is_some_and(|n| n > after))
-            .take(limit.max(1))
+            .filter(|m| inbox_message_number(&m.id).is_some_and(|n| n > after))
+            .take(limit)
             .cloned()
             .collect())
     }
@@ -1633,6 +1653,116 @@ mod tests {
         // An unanswered ask times out.
         let slow = m.ask(&id("a"), "b", "hello?", Some(100), 0).unwrap();
         assert_eq!(m.ask_status(&slow, 100), AskStatus::TimedOut);
+    }
+
+    #[test]
+    fn an_accepted_answer_survives_responder_exit_until_the_live_caller_polls() {
+        let mut m = mesh();
+        let ask = m.ask(&id("a"), "b", "ready?", Some(100), 0).unwrap();
+        m.send_message(&id("b"), "a", "ready", &[], Some(&ask), 1)
+            .unwrap();
+        // Hold the caller's poll until responder cleanup has completed.
+        let (release, gate) = std::sync::mpsc::channel::<Mesh>();
+        let poller = std::thread::spawn(move || {
+            let mut m = gate.recv().unwrap();
+            assert_eq!(
+                m.ask_status(&ask, 200),
+                AskStatus::Answered {
+                    reply: "ready".into(),
+                    from: id("b"),
+                }
+            );
+            assert_eq!(m.ask_status(&ask, 201), AskStatus::TimedOut);
+        });
+        m.unregister(&id("b"), 2);
+        release.send(m).unwrap();
+        poller.join().unwrap();
+    }
+
+    #[test]
+    fn ask_cleanup_still_discards_departing_callers_and_unanswered_targets() {
+        for (replied, departing, expected) in [
+            (false, "b", AskStatus::TimedOut),
+            (true, "a", AskStatus::TimedOut),
+            (
+                true,
+                "c",
+                AskStatus::Answered {
+                    reply: "ready".into(),
+                    from: id("b"),
+                },
+            ),
+        ] {
+            let mut m = mesh();
+            let ask = m.ask(&id("a"), "b", "ready?", Some(100), 0).unwrap();
+            if replied {
+                m.send_message(&id("b"), "a", "ready", &[], Some(&ask), 1)
+                    .unwrap();
+            }
+            m.unregister(&id(departing), 2);
+            assert_eq!(m.ask_status(&ask, 200), expected);
+        }
+    }
+
+    #[test]
+    fn a_reply_must_arrive_before_the_ask_deadline_even_if_polled_later() {
+        for (timeout, reply_at, poll_at, answered) in [
+            (10, 9, 11, true),
+            (10, 10, 11, false),
+            (10, 11, 12, false),
+            (0, 0, 0, false),
+            (1, 0, 1, true),
+        ] {
+            let mut m = mesh();
+            let ask = m.ask(&id("a"), "b", "?", Some(timeout), 0).unwrap();
+            m.send_message(&id("b"), "a", "reply", &[], Some(&ask), reply_at)
+                .unwrap();
+            let status = m.ask_status(&ask, poll_at);
+            assert_eq!(
+                matches!(status, AskStatus::Answered { .. }),
+                answered,
+                "timeout={timeout} reply_at={reply_at}: {status:?}"
+            );
+            assert_eq!(m.ask_status(&ask, poll_at), AskStatus::TimedOut);
+            // A late reply is still delivered as an ordinary message.
+            assert_eq!(m.inbox(&id("a"), None, 10).unwrap()[0].body, "reply");
+        }
+    }
+
+    #[test]
+    fn a_reply_answers_only_the_asker_and_keeps_address_aliases_working() {
+        let mut m = mesh();
+        let ask = m.ask(&id("a"), "b", "?", Some(100), 0).unwrap();
+        m.send_message(&id("b"), "c", "only for c", &[], Some(&ask), 1)
+            .unwrap();
+        assert_eq!(m.inbox(&id("c"), None, 10).unwrap()[0].body, "only for c");
+        assert!(m.inbox(&id("a"), None, 10).unwrap().is_empty());
+        assert_eq!(m.ask_status(&ask, 2), AskStatus::Pending);
+        // b's own node prefix is an alias for the same local recipient.
+        m.send_message(&id("b"), "server/a", "answer", &[], Some(&ask), 3)
+            .unwrap();
+        assert!(
+            matches!(m.ask_status(&ask, 4), AskStatus::Answered { reply, .. } if reply == "answer")
+        );
+
+        let ask = m.ask(&id("a"), "b", "remote?", Some(100), 5).unwrap();
+        m.send_message(&id("b"), "remote/c", "remote only", &[], Some(&ask), 6)
+            .unwrap();
+        assert_eq!(m.take_outbound()[0].body, "remote only");
+        assert_eq!(m.ask_status(&ask, 7), AskStatus::Pending);
+
+        // A hub-wide recipient id must stay qualified when that whole id is registered.
+        let mut m = Mesh::new(Limits::default());
+        m.register(agent("n/a", "p", "n"));
+        m.register(agent("n/b", "p", "n"));
+        m.register(agent("n/c", "p", "n"));
+        let ask = m.ask(&id("n/a"), "n/b", "?", Some(100), 0).unwrap();
+        m.send_message(&id("n/b"), "n/c", "other", &[], Some(&ask), 1)
+            .unwrap();
+        assert_eq!(m.ask_status(&ask, 2), AskStatus::Pending);
+        m.send_message(&id("n/b"), "n/a", "answer", &[], Some(&ask), 3)
+            .unwrap();
+        assert!(matches!(m.ask_status(&ask, 4), AskStatus::Answered { .. }));
     }
 
     #[test]

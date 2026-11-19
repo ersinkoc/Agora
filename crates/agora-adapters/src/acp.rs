@@ -23,6 +23,7 @@
 
 use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, Read, Write};
+use std::ops::ControlFlow;
 use std::process::{Child, ChildStderr, Command, Stdio};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
@@ -59,8 +60,7 @@ const SECRET_WORDS: &[&str] = &[
 const EXIT_WAIT: Duration = Duration::from_secs(2);
 /// How long a failed or empty turn waits for the stderr lines the agent wrote just before it answered.
 const STDERR_SETTLE: Duration = Duration::from_millis(100);
-/// How long a bridge whose agent died before the node asked anything waits for the node's first request, to answer it with the
-/// reason.
+/// How long the bridge waits for a late request after its agent dies before opening a session.
 const LATE_REQUEST_WAIT: Duration = Duration::from_secs(2);
 /// ADR-0058: the most modes or models passed on, and the longest id, name and description kept. An option whose id is longer is
 /// dropped (a cut id would name another option).
@@ -100,11 +100,15 @@ enum Waiting {
     },
     NewSession {
         node_id: Value,
+        resume_id: Option<String>,
     },
-    Prompt,
+    Prompt {
+        cancelling: bool,
+    },
     /// ADR-0058: the node's `session/set_option`, until the agent answered `session/set_mode` or `session/set_model`.
     SetOption {
         node_id: Value,
+        session_id: String,
         mode: bool,
         id: String,
     },
@@ -158,15 +162,14 @@ pub fn replace_diff(path: &str, old: Option<&str>, new: &str) -> String {
         usize::from(count(new) > 0),
         count(new),
     );
-    for l in old_text.lines() {
-        out.push('-');
-        out.push_str(l);
-        out.push('\n');
-    }
-    for l in new.lines() {
-        out.push('+');
-        out.push_str(l);
-        out.push('\n');
+    for (prefix, text) in [('-', old_text), ('+', new)] {
+        for line in text.split_inclusive('\n') {
+            out.push(prefix);
+            out.push_str(line);
+            if !line.ends_with('\n') {
+                out.push_str("\n\\ No newline at end of file\n");
+            }
+        }
     }
     out
 }
@@ -221,6 +224,9 @@ fn cost_micros(cost: &Value) -> Option<(String, u64)> {
 fn turn_outcome(answer: &Value, said: bool) -> Option<(&'static str, Value)> {
     if let Some(e) = answer.get("error") {
         let code = e.get("code").and_then(Value::as_i64).unwrap_or(0);
+        if code == -32800 {
+            return None; // ACP Request Cancelled.
+        }
         return Some(("adapter.turn_failed", json!({"rpc_code": code.to_string()})));
     }
     match answer
@@ -724,6 +730,15 @@ fn acp_mcp_servers(from_node: Option<&Value>) -> Vec<Value> {
         .collect()
 }
 
+#[derive(Default)]
+struct SessionState {
+    /// The session's cumulative cost (currency, micro-units).
+    cost: Option<(String, u64)>,
+    context: (u64, u64),
+    model: String,
+    mode: String,
+}
+
 struct Bridge<W: Write> {
     out: W,
     agent: std::process::ChildStdin,
@@ -732,23 +747,19 @@ struct Bridge<W: Write> {
     session: Option<String>,
     perms: HashMap<String, Permission>,
     text: String,
+    text_session: String,
     text_since: Instant,
+    initialized: bool,
     can_load: bool,
     /// The agent takes stdio MCP servers in `session/new` and `session/load`. ACP requires every agent to, so this is true unless
     /// the agent's `initialize` says `mcpCapabilities.stdio: false`.
     mcp_stdio: bool,
     /// Something reached the node during the current turn (text, a tool call, a plan, a diff, an approval).
     said: bool,
-    /// The model the agent said it uses (`session/new` `models.currentModelId`), for usage reports.
-    model: String,
-    /// The agent's cumulative session cost as last reported: (currency, micro-units).
-    cost: Option<(String, u64)>,
-    /// The context's level and size as last reported (ADR-0058).
-    context: (u64, u64),
-    /// ADR-0058: the modes and models the agent offers (adapter-protocol options) and the ones in use.
+    session_state: HashMap<String, SessionState>,
+    /// ADR-0058: the modes and models offered by the active session.
     modes: Vec<Value>,
     models: Vec<Value>,
-    current_mode: String,
     /// The agent's stderr, how much of it there was when the current turn began, and the bridge's own home folder (if it has one).
     stderr: Arc<Mutex<Kept>>,
     turn_mark: u64,
@@ -811,21 +822,23 @@ impl<W: Write> Bridge<W> {
 
     /// ADR-0058: what the agent offers and uses, sent whenever it changes.
     fn options(&mut self) -> io::Result<()> {
-        if self.modes.is_empty() && self.models.is_empty() {
+        let Some(sid) = self.session.as_deref() else {
             return Ok(());
-        }
-        let sid = self.session.clone().unwrap_or_default();
-        let (modes, models) = (self.modes.clone(), self.models.clone());
-        let (mode, model) = (self.current_mode.clone(), self.model.clone());
+        };
+        let (mode, model) = self
+            .session_state
+            .get(sid)
+            .map(|state| (state.mode.as_str(), state.model.as_str()))
+            .unwrap_or_default();
         self.note(
             "session/options",
-            json!({"sessionId": sid, "modes": modes, "models": models, "currentMode": mode, "currentModel": model}),
+            json!({"sessionId": sid, "modes": &self.modes, "models": &self.models, "currentMode": mode, "currentModel": model}),
         )
     }
 
-    fn chat(&mut self, item: Value) -> io::Result<()> {
+    fn chat(&mut self, item: Value, replay_id: Option<&str>) -> io::Result<()> {
         self.said = true;
-        let sid = self.session.clone().unwrap_or_default();
+        let sid = replay_id.or(self.session.as_deref()).unwrap_or_default();
         let mut p = item;
         p["sessionId"] = json!(sid);
         self.note("chat/append", p)
@@ -836,7 +849,15 @@ impl<W: Write> Bridge<W> {
             return Ok(());
         }
         let t = std::mem::take(&mut self.text);
-        self.chat(json!({"text": {"text": t}}))
+        let sid = std::mem::take(&mut self.text_session);
+        self.chat(json!({"text": {"text": t}}), Some(&sid))
+    }
+
+    fn flush_on_node_eof(&mut self) -> io::Result<()> {
+        match self.flush_text() {
+            Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+            result => result,
+        }
     }
 
     /// A line to the agent. A failed write means the agent is gone or going: the end of its output follows and is reported then
@@ -856,6 +877,11 @@ impl<W: Write> Bridge<W> {
         self.send_agent(&json!({"jsonrpc": "2.0", "method": method, "params": params}));
     }
 
+    fn cancel_permission(&mut self, request: Value) {
+        self.send_agent(&json!({"jsonrpc": "2.0", "id": request,
+            "result": {"outcome": {"outcome": "cancelled"}}}));
+    }
+
     /// The agent's output ended and it exited (`exit_code` when known). Every request the node still waits for is answered with
     /// `adapter.agent_exited` and the stage it was in; a `log` line says the same, so an exit in the middle of a turn or while
     /// idle is reported too.
@@ -866,14 +892,16 @@ impl<W: Write> Bridge<W> {
         let stage_of = |w: &Waiting| match w {
             Waiting::Initialize { .. } => "initialize",
             Waiting::NewSession { .. } => "session",
-            Waiting::Prompt => "turn",
+            Waiting::Prompt { .. } => "turn",
             Waiting::SetOption { .. } => "option",
         };
-        let stage = ["initialize", "session", "turn"]
+        let stage = ["initialize", "session", "turn", "option"]
             .into_iter()
             .find(|s| waiting.iter().any(|(_, w)| stage_of(w) == *s))
             .unwrap_or(if self.session.is_some() {
                 "idle"
+            } else if self.initialized {
+                "session"
             } else {
                 "start"
             });
@@ -886,7 +914,7 @@ impl<W: Write> Bridge<W> {
         };
         for (_, w) in &waiting {
             if let Waiting::Initialize { node_id }
-            | Waiting::NewSession { node_id }
+            | Waiting::NewSession { node_id, .. }
             | Waiting::SetOption { node_id, .. } = w
             {
                 if !node_id.is_null() {
@@ -907,9 +935,12 @@ impl<W: Write> Bridge<W> {
         let Some(id) = msg.get("id").filter(|id| !id.is_null()).cloned() else {
             return Ok(false);
         };
-        let stage = match msg.get("method").and_then(Value::as_str) {
-            Some("initialize") => "initialize",
-            Some("session/start") => "session",
+        let Some(method) = msg.get("method").and_then(Value::as_str) else {
+            return Ok(false);
+        };
+        let stage = match method {
+            "initialize" => "initialize",
+            "session/start" => "session",
             _ => "start",
         };
         let mut p = json!({"stage": stage, "stderr_tail": tail});
@@ -987,6 +1018,7 @@ impl<W: Write> Bridge<W> {
             json!({"sessionId": sid, key: want}),
             Waiting::SetOption {
                 node_id,
+                session_id: sid,
                 mode,
                 id: want.clone(),
             },
@@ -995,7 +1027,7 @@ impl<W: Write> Bridge<W> {
     }
 
     /// A request or notification from the node.
-    fn handle_node(&mut self, msg: &Value) -> io::Result<bool> {
+    fn handle_node(&mut self, msg: &Value) -> io::Result<ControlFlow<Option<Value>>> {
         let id = msg.get("id").cloned();
         let method = msg.get("method").and_then(Value::as_str).unwrap_or("");
         let params = msg.get("params").cloned().unwrap_or(Value::Null);
@@ -1032,17 +1064,22 @@ impl<W: Write> Bridge<W> {
                 };
                 match resume.filter(|_| self.can_load) {
                     Some(r) => {
-                        self.session = Some(r.clone());
                         self.ask_agent(
                             "session/load",
                             json!({"sessionId": r, "cwd": cwd, "mcpServers": servers}),
-                            Waiting::NewSession { node_id },
+                            Waiting::NewSession {
+                                node_id,
+                                resume_id: Some(r),
+                            },
                         );
                     }
                     None => self.ask_agent(
                         "session/new",
                         json!({"cwd": cwd, "mcpServers": servers}),
-                        Waiting::NewSession { node_id },
+                        Waiting::NewSession {
+                            node_id,
+                            resume_id: None,
+                        },
                     ),
                 }
             }
@@ -1056,7 +1093,7 @@ impl<W: Write> Bridge<W> {
                     if let Some(id) = &id {
                         self.send_node(&json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32000, "message": "no session"}}))?;
                     }
-                    return Ok(false);
+                    return Ok(ControlFlow::Continue(()));
                 };
                 done(self)?;
                 self.said = false;
@@ -1065,13 +1102,21 @@ impl<W: Write> Bridge<W> {
                 self.ask_agent(
                     "session/prompt",
                     json!({"sessionId": sid, "prompt": [{"type": "text", "text": text}]}),
-                    Waiting::Prompt,
+                    Waiting::Prompt { cancelling: false },
                 );
             }
             "session/cancel" => {
                 done(self)?;
                 if let Some(sid) = self.session.clone() {
+                    for request in self.waiting.values_mut() {
+                        if let Waiting::Prompt { cancelling } = request {
+                            *cancelling = true;
+                        }
+                    }
                     self.tell_agent("session/cancel", json!({"sessionId": sid}));
+                    for permission in std::mem::take(&mut self.perms).into_values() {
+                        self.cancel_permission(permission.request);
+                    }
                 }
             }
             "approval/resolve" => {
@@ -1108,20 +1153,28 @@ impl<W: Write> Bridge<W> {
             }
             "session/set_option" => self.set_option(id, &params)?,
             "session/stop" | "shutdown" => {
-                done(self)?;
-                return Ok(true);
+                self.flush_text()?;
+                return Ok(ControlFlow::Break(id));
             }
             // `mesh/deliver` and anything else new: acknowledged, not acted on.
             _ => done(self)?,
         }
-        Ok(false)
+        Ok(ControlFlow::Continue(()))
     }
 
-    fn update(&mut self, u: &Value) -> io::Result<()> {
+    fn update(&mut self, u: &Value, replay_id: Option<&str>) -> io::Result<()> {
         match u.get("sessionUpdate").and_then(Value::as_str).unwrap_or("") {
             "agent_message_chunk" => {
                 if let Some(t) = u.pointer("/content/text").and_then(Value::as_str) {
+                    let sid = replay_id.or(self.session.as_deref()).unwrap_or_default();
+                    if !self.text.is_empty() && self.text_session != sid {
+                        self.flush_text()?;
+                    }
                     if self.text.is_empty() {
+                        self.text_session = replay_id
+                            .or(self.session.as_deref())
+                            .unwrap_or_default()
+                            .to_string();
                         self.text_since = Instant::now();
                     }
                     self.text.push_str(t);
@@ -1138,10 +1191,13 @@ impl<W: Write> Bridge<W> {
                     .or_else(|| u.get("kind").and_then(Value::as_str))
                     .unwrap_or("tool");
                 let args = u.get("rawInput").map(Value::to_string).unwrap_or_default();
-                self.chat(json!({"toolCall": {"tool": title, "argumentsJson": args}}))?;
-                self.diffs_in(u)?;
+                self.chat(
+                    json!({"toolCall": {"tool": title, "argumentsJson": args}}),
+                    replay_id,
+                )?;
+                self.diffs_in(u, replay_id)?;
             }
-            "tool_call_update" => self.diffs_in(u)?,
+            "tool_call_update" => self.diffs_in(u, replay_id)?,
             "plan" => {
                 self.flush_text()?;
                 let steps: Vec<String> = u
@@ -1155,14 +1211,24 @@ impl<W: Write> Bridge<W> {
                             .collect()
                     })
                     .unwrap_or_default();
-                self.chat(json!({"plan": {"steps": steps}}))?;
+                self.chat(json!({"plan": {"steps": steps}}), replay_id)?;
             }
-            "usage_update" => self.usage(u)?,
+            "usage_update" => self.usage(u, replay_id)?,
             "current_mode_update" => {
-                let id = u.get("currentModeId").and_then(Value::as_str).unwrap_or("");
-                if !id.is_empty() && id != self.current_mode && id.len() <= OPTION_ID_MAX {
-                    self.current_mode = id.to_string();
-                    self.options()?;
+                let sid = replay_id.or(self.session.as_deref());
+                let mode = u
+                    .get("currentModeId")
+                    .and_then(Value::as_str)
+                    .filter(|id| !id.is_empty() && id.len() <= OPTION_ID_MAX);
+                if let (Some(sid), Some(mode)) = (sid, mode) {
+                    let state = self.session_state.entry(sid.to_owned()).or_default();
+                    if mode != state.mode {
+                        state.mode = mode.to_string();
+                        // A loading session's options are published with its successful reply.
+                        if replay_id.is_none() {
+                            self.options()?;
+                        }
+                    }
                 }
             }
             _ => {} // agent_thought_chunk, user_message_chunk, available_commands_update, ...
@@ -1173,32 +1239,41 @@ impl<W: Write> Bridge<W> {
     /// ACP `usage_update`: the cost is the session's running total, so the report carries its growth since the last one (like
     /// tokens, which are reported as they grow); `used` and `size` are the context's level and size (ADR-0058), passed on as they
     /// are. Nothing is sent when neither changed.
-    fn usage(&mut self, u: &Value) -> io::Result<()> {
+    fn usage(&mut self, u: &Value, replay_id: Option<&str>) -> io::Result<()> {
+        let sid = replay_id.or(self.session.as_deref()).unwrap_or_default();
+        let previous = self.session_state.entry(sid.to_owned()).or_default();
         let cost = u.get("cost").and_then(cost_micros);
-        let grew = cost.as_ref().map(|(currency, micros)| match &self.cost {
-            Some((c, last)) if c == currency => micros.saturating_sub(*last),
-            _ => *micros,
-        });
+        let grew = cost
+            .as_ref()
+            .map(|(currency, micros)| match &previous.cost {
+                Some((c, last)) if c == currency => micros.saturating_sub(*last),
+                _ => *micros,
+            });
         let context = (
             u.get("used").and_then(Value::as_u64).unwrap_or(0),
             u.get("size").and_then(Value::as_u64).unwrap_or(0),
         );
-        let context_moved = context != (0, 0) && context != self.context;
+        let context_moved = context != (0, 0) && context != previous.context;
         if context != (0, 0) {
-            self.context = context;
+            previous.context = context;
         }
         let currency = cost.as_ref().map(|(c, _)| c.clone());
-        if let Some(c) = cost {
-            self.cost = Some(c);
+        if let Some(c) = cost.filter(|(currency, micros)| {
+            previous
+                .cost
+                .as_ref()
+                .is_none_or(|(previous_currency, last)| {
+                    currency != previous_currency || micros >= last
+                })
+        }) {
+            previous.cost = Some(c);
         }
         let grew = grew.filter(|g| *g > 0);
         if grew.is_none() && !context_moved {
             return Ok(());
         }
-        let sid = self.session.clone().unwrap_or_default();
-        let model = self.model.clone();
-        let mut p = json!({"sessionId": sid, "model": model, "inputTokens": 0, "outputTokens": 0,
-                           "contextTokens": self.context.0, "contextWindow": self.context.1});
+        let mut p = json!({"sessionId": sid, "model": previous.model, "inputTokens": 0, "outputTokens": 0,
+                           "contextTokens": previous.context.0, "contextWindow": previous.context.1});
         if let (Some(g), Some(c)) = (grew, currency) {
             p["costMicros"] = json!(g);
             p["currency"] = json!(c);
@@ -1206,7 +1281,7 @@ impl<W: Write> Bridge<W> {
         self.note("usage/report", p)
     }
 
-    fn diffs_in(&mut self, u: &Value) -> io::Result<()> {
+    fn diffs_in(&mut self, u: &Value, replay_id: Option<&str>) -> io::Result<()> {
         let Some(content) = u.get("content").and_then(Value::as_array) else {
             return Ok(());
         };
@@ -1220,6 +1295,7 @@ impl<W: Write> Bridge<W> {
             self.flush_text()?;
             self.chat(
                 json!({"diff": {"path": path, "unifiedDiff": replace_diff(path, old, new)}}),
+                replay_id,
             )?;
         }
         Ok(())
@@ -1232,10 +1308,35 @@ impl<W: Write> Bridge<W> {
         match (method, id) {
             (Some("session/update"), _) => {
                 if let Some(u) = msg.pointer("/params/update") {
-                    self.update(u)?;
+                    // ACP replays history before acknowledging the load. Route those updates
+                    // without changing the session used for commands.
+                    let replay_id = msg
+                        .pointer("/params/sessionId")
+                        .and_then(Value::as_str)
+                        .filter(|&id| self.session.as_deref() != Some(id));
+                    if replay_id.is_some_and(|id| {
+                        !self.waiting.values().any(|request| {
+                            matches!(
+                                request,
+                                Waiting::NewSession { resume_id: Some(requested), .. }
+                                    if requested == id
+                            )
+                        })
+                    }) {
+                        return Ok(());
+                    }
+                    self.update(u, replay_id)?;
                 }
             }
             (Some("session/request_permission"), Some(request)) => {
+                if self
+                    .waiting
+                    .values()
+                    .any(|request| matches!(request, Waiting::Prompt { cancelling: true }))
+                {
+                    self.cancel_permission(request);
+                    return Ok(());
+                }
                 self.flush_text()?;
                 let p = msg.get("params").cloned().unwrap_or(Value::Null);
                 let call = p.get("toolCall").cloned().unwrap_or(Value::Null);
@@ -1280,12 +1381,18 @@ impl<W: Write> Bridge<W> {
             }
             (Some(_), None) => {}
             (None, Some(id)) => {
+                let has_result = msg.get("result").is_some();
+                let has_error = msg.get("error").is_some();
+                if has_result == has_error {
+                    return Ok(());
+                }
                 let Some(n) = id.as_u64() else { return Ok(()) };
                 match self.waiting.remove(&n) {
                     Some(Waiting::Initialize { node_id }) => {
                         if msg.get("error").is_some() {
                             self.refused(&node_id, "initialize", msg)?;
                         } else {
+                            self.initialized = true;
                             self.can_load = msg
                                 .pointer("/result/agentCapabilities/loadSession")
                                 .and_then(Value::as_bool)
@@ -1303,20 +1410,28 @@ impl<W: Write> Bridge<W> {
                             }
                         }
                     }
-                    Some(Waiting::NewSession { node_id }) => {
+                    Some(Waiting::NewSession { node_id, resume_id }) => {
                         let sid = msg
                             .pointer("/result/sessionId")
                             .and_then(Value::as_str)
                             .map(str::to_string)
-                            .or_else(|| self.session.clone());
+                            .or(resume_id);
                         match sid {
                             Some(sid) if msg.get("error").is_none() => {
+                                if self.session.as_deref() != Some(sid.as_str()) {
+                                    // A reply from the previous session cannot finish the new turn.
+                                    self.waiting.retain(|_, request| {
+                                        !matches!(request, Waiting::Prompt { .. })
+                                    });
+                                    self.perms.clear();
+                                }
+                                let state = self.session_state.entry(sid.clone()).or_default();
                                 self.session = Some(sid.clone());
                                 if let Some(m) = msg
                                     .pointer("/result/models/currentModelId")
                                     .and_then(Value::as_str)
                                 {
-                                    self.model = clip(m, MODEL_MAX);
+                                    state.model = clip(m, MODEL_MAX);
                                 }
                                 self.models = acp_options(
                                     msg.pointer("/result/models/availableModels"),
@@ -1333,7 +1448,7 @@ impl<W: Write> Bridge<W> {
                                     .and_then(Value::as_str)
                                     .filter(|m| m.len() <= OPTION_ID_MAX)
                                 {
-                                    self.current_mode = m.to_string();
+                                    state.mode = m.to_string();
                                 }
                                 self.reply(&node_id, json!({"sessionId": sid}))?;
                                 self.note(
@@ -1348,7 +1463,7 @@ impl<W: Write> Bridge<W> {
                             }
                         }
                     }
-                    Some(Waiting::Prompt) => {
+                    Some(Waiting::Prompt { .. }) => {
                         self.flush_text()?;
                         self.perms.clear();
                         match turn_outcome(msg, self.said) {
@@ -1368,20 +1483,29 @@ impl<W: Write> Bridge<W> {
                             None => self.state("IDLE")?,
                         }
                     }
-                    Some(Waiting::SetOption { node_id, mode, id }) => {
+                    Some(Waiting::SetOption {
+                        node_id,
+                        session_id,
+                        mode,
+                        id,
+                    }) => {
                         if msg.get("error").is_some() {
                             let data =
                                 json!({"code": "adapter.option_refused", "params": {"id": id}});
                             self.send_node(&json!({"jsonrpc": "2.0", "id": node_id,
                                 "error": {"code": -32000, "message": "the agent refused", "data": data}}))?;
                         } else {
+                            let is_current = self.session.as_deref() == Some(session_id.as_str());
+                            let state = self.session_state.entry(session_id).or_default();
                             if mode {
-                                self.current_mode = id;
+                                state.mode = id;
                             } else {
-                                self.model = clip(&id, MODEL_MAX);
+                                state.model = clip(&id, MODEL_MAX);
                             }
                             self.reply(&node_id, json!({}))?;
-                            self.options()?;
+                            if is_current {
+                                self.options()?;
+                            }
                         }
                     }
                     None => {}
@@ -1429,32 +1553,31 @@ where
         session: None,
         perms: HashMap::new(),
         text: String::new(),
+        text_session: String::new(),
         text_since: Instant::now(),
+        initialized: false,
         can_load: false,
         mcp_stdio: true,
         said: false,
-        model: String::new(),
-        cost: None,
-        context: (0, 0),
+        session_state: HashMap::new(),
         modes: Vec::new(),
         models: Vec::new(),
-        current_mode: String::new(),
         stderr: Arc::clone(&kept),
         turn_mark: 0,
         home: std::env::var("HOME")
             .or_else(|_| std::env::var("USERPROFILE"))
             .ok(),
     };
-    let result = (|| -> io::Result<()> {
+    let result = (|| -> io::Result<Option<Value>> {
         loop {
             match rx.recv_timeout(Duration::from_millis(50)) {
                 Ok(Ev::Node(m)) => {
-                    if b.handle_node(&m)? {
-                        return Ok(());
+                    if let ControlFlow::Break(id) = b.handle_node(&m)? {
+                        return Ok(id);
                     }
                 }
                 Ok(Ev::Agent(m)) => b.handle_agent(&m)?,
-                Ok(Ev::NodeGone) => return Ok(()),
+                Ok(Ev::NodeGone) => return Ok(None),
                 Ok(Ev::AgentGone) => {
                     let code = wait_briefly(&mut child);
                     // The rest of its stderr, unless something it started still holds the stream open.
@@ -1465,8 +1588,7 @@ where
                         .ok();
                     let tail = stderr_tail(&raw, home.as_deref());
                     b.agent_gone(code, &tail)?;
-                    // An agent that died before the node asked anything: the node's `initialize` may still be on its way. It is
-                    // answered with the reason too, instead of with the bridge's exit (which the node could only call `internal`).
+                    // The node's initialize or session/start may still be on its way. Give it the exit reason too.
                     if b.session.is_none() {
                         let end = Instant::now() + LATE_REQUEST_WAIT;
                         while let Some(left) = end.checked_duration_since(Instant::now()) {
@@ -1484,7 +1606,7 @@ where
                     return Err(io::Error::other("the agent exited"));
                 }
                 Err(RecvTimeoutError::Timeout) => {}
-                Err(RecvTimeoutError::Disconnected) => return Ok(()),
+                Err(RecvTimeoutError::Disconnected) => return Ok(None),
             }
             if !b.text.is_empty() && b.text_since.elapsed() >= JOIN {
                 b.flush_text()?;
@@ -1492,12 +1614,93 @@ where
         }
     })();
     let _ = child.kill();
-    let _ = child.wait();
-    result
+    let reaped = child.wait();
+    let Some(id) = result? else {
+        return b.flush_on_node_eof();
+    };
+    // The host may kill the bridge as soon as it sees the reply.
+    reaped?;
+    b.reply(&id, json!({}))
 }
 
 #[cfg(test)]
 mod tests {
+    fn bridge_with_buffered_chat() -> std::io::Result<super::Bridge<Vec<u8>>> {
+        use super::*;
+
+        let mut child = Command::new(std::env::current_exe()?)
+            .arg("--list")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .spawn()?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| io::Error::other("fixture stdin missing"))?;
+        assert!(child.wait()?.success());
+        let mut bridge = Bridge {
+            out: Vec::new(),
+            agent: stdin,
+            next: 0,
+            waiting: HashMap::new(),
+            session: Some("s".to_string()),
+            perms: HashMap::new(),
+            text: String::new(),
+            text_session: String::new(),
+            text_since: Instant::now(),
+            initialized: true,
+            can_load: false,
+            mcp_stdio: true,
+            said: false,
+            session_state: HashMap::new(),
+            modes: Vec::new(),
+            models: Vec::new(),
+            stderr: Arc::new(Mutex::new(Kept::default())),
+            turn_mark: 0,
+            home: None,
+        };
+        // Dispatch chunks directly to leave the join buffer populated.
+        for text in ["last ", "words"] {
+            bridge.handle_agent(&json!({"jsonrpc":"2.0","method":"session/update","params":{
+                "sessionId":"s","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":text}}
+            }}))?;
+        }
+        assert!(bridge.out.is_empty());
+        Ok(bridge)
+    }
+
+    #[test]
+    fn explicit_stop_delivers_buffered_chat() -> Result<(), Box<dyn std::error::Error>> {
+        use super::*;
+
+        for method in ["session/stop", "shutdown"] {
+            let mut bridge = bridge_with_buffered_chat()?;
+            assert_eq!(
+                bridge.handle_node(&json!({"jsonrpc":"2.0","id":7,"method":method}))?,
+                ControlFlow::Break(Some(json!(7)))
+            );
+            assert!(bridge.text.is_empty());
+            assert_eq!(
+                serde_json::from_slice::<Value>(&bridge.out)?,
+                json!({"jsonrpc":"2.0","method":"chat/append","params":{"sessionId":"s","text":{"text":"last words"}}})
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn node_eof_delivers_buffered_chat() -> Result<(), Box<dyn std::error::Error>> {
+        let mut bridge = bridge_with_buffered_chat()?;
+        bridge.flush_on_node_eof()?;
+        assert!(bridge.text.is_empty());
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&bridge.out)?,
+            serde_json::json!({"jsonrpc":"2.0","method":"chat/append",
+                "params":{"sessionId":"s","text":{"text":"last words"}}})
+        );
+        Ok(())
+    }
+
     #[test]
     fn the_error_line_is_kept_among_routine_ones() {
         let raw = b"INFO service=default providers=2\nINFO service=config path=/config/providers\nERROR service=llm provider rejected: auth\nINFO service=session idle\nINFO service=bus done\nINFO service=x y\nINFO service=z w\n";
@@ -1573,6 +1776,22 @@ mod tests {
             n.starts_with("--- /dev/null\n+++ b/n.txt\n@@ -0,0 +1,1 @@\n+hi"),
             "{n}"
         );
+    }
+
+    #[test]
+    fn a_replacement_diff_preserves_line_endings_and_missing_final_newlines() {
+        assert_eq!(
+            replace_diff("a", Some("old"), "new\n"),
+            "--- a/a\n+++ b/a\n@@ -1,1 +1,1 @@\n-old\n\\ No newline at end of file\n+new\n"
+        );
+        assert!(replace_diff("a", Some("old\n"), "new")
+            .ends_with("-old\n+new\n\\ No newline at end of file\n"));
+        assert!(replace_diff("a", Some("old\r\n"), "new\r\n").ends_with("-old\r\n+new\r\n"));
+        assert_eq!(
+            replace_diff("a", Some(""), ""),
+            "--- a/a\n+++ b/a\n@@ -0,0 +0,0 @@\n"
+        );
+        assert!(replace_diff("a", None, "new").ends_with("+new\n\\ No newline at end of file\n"));
     }
 
     /// A line that is not UTF-8 used to end the reader as if the agent had exited (audit F044).
@@ -1734,6 +1953,10 @@ mod tests {
         );
         assert_eq!(
             turn_outcome(&json!({"result": {"stopReason": "cancelled"}}), false),
+            None
+        );
+        assert_eq!(
+            turn_outcome(&json!({"error": {"code": -32800}}), false),
             None
         );
         assert_eq!(

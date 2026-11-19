@@ -28,6 +28,15 @@ export function languageOf(path: string): string | undefined {
   return dot > 0 && Object.hasOwn(BY_EXT, ext) ? BY_EXT[ext] : undefined;
 }
 
+const KNOWN = new Set(Object.values(BY_EXT));
+
+/** The language a code block's fence names (```ts, ```rust, ```sh), or undefined for a tag the highlighter does not have. */
+export function languageOfTag(tag: string): string | undefined {
+  const t = tag.trim().toLowerCase();
+  if (Object.hasOwn(BY_EXT, t)) return BY_EXT[t];
+  return KNOWN.has(t) ? t : undefined;
+}
+
 const TAG = /<span class="[^"<>]*">|<\/span>/g;
 
 /** A whole file's highlighted HTML as one string per line, each with its spans closed at the end and reopened at the start of the

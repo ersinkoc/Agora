@@ -6,7 +6,7 @@ import { visible, type ApprovalModel, type MachineModel } from '../net/view';
 import { demoSource, type TerminalSource } from '../terminal/source';
 import type { ChatSource } from '../net/chat';
 import { dismiss, dismissedIds, subscribeDismissed } from '../net/dismissed';
-import { money, type UsageSummary } from '../net/usage';
+import type { UsageSummary } from '../net/usage';
 import { Icon, type IconName } from '../components/Icon';
 import { StateBadge, StateMark } from '../components/StateBadge';
 import { NoAskBadge } from '../components/NoAskBadge';
@@ -281,14 +281,13 @@ export function PhoneHome({ agents, machines, approvals, onResolve, untrusted, n
 }
 
 // One agent: Back, its name and state, what it asks, then its terminal (with the key bar) or its conversation.
-export function PhoneAgent({ agent, agents, approvals, machines, onResolve, untrusted, notice, link = 'live', source, chatSource, sendPrompt, chooseOption, costMicroUsd, loadDiff, filesOf, onOpen, onBack }: PhoneCommon & {
+export function PhoneAgent({ agent, agents, approvals, machines, onResolve, untrusted, notice, link = 'live', source, chatSource, sendPrompt, chooseOption, loadDiff, filesOf, onOpen, onBack }: PhoneCommon & {
   agent: AgentTileModel | undefined;
   agents: readonly AgentTileModel[];
   source?: TerminalSource;
   chatSource?: ChatSource;
   sendPrompt?: (agent: AgentTileModel, text: string) => Promise<boolean>;
   chooseOption?: (agentKey: string, kind: 'mode' | 'model', id: string) => Promise<boolean>;
-  costMicroUsd?: number;
   /** What the agent changed (the review screen) and its files (the file browser), as on the desktop; absent without a hub. */
   loadDiff?: (agent: AgentTileModel, path?: string) => Promise<DiffSource>;
   filesOf?: (agent: AgentTileModel) => WorkspaceFiles | undefined;
@@ -316,7 +315,7 @@ export function PhoneAgent({ agent, agents, approvals, machines, onResolve, untr
         <button type="button" className="phone-iconbtn" onClick={onBack} aria-label={t('phone-back')} title={t('phone-back')}><Icon name="chevron" className="size-5 rotate-180 rtl:rotate-0" /></button>
         <div className="min-w-0 flex-1">
           <h1 className="m-0 truncate text-[15px] font-semibold tracking-normal">{agent?.name ?? t('focus-not-found')}</h1>
-          {agent && <span className="flex min-w-0 items-center gap-2 text-xs text-muted"><StateBadge state={agent.state} /><span className="truncate">{agent.machine}</span>{costMicroUsd !== undefined && <span className="flex-none">{money(costMicroUsd)}</span>}</span>}
+          {agent && <span className="flex min-w-0 items-center gap-2 text-xs text-muted"><StateBadge state={agent.state} /><span className="truncate">{agent.machine}</span></span>}
         </div>
         {agent && <NoAskBadge agent={agent} />}
         {next && <button type="button" className="phone-chipbtn text-needs-you" onClick={() => onOpen(next)}>{t('phone-next', { count: elsewhere.length })}</button>}

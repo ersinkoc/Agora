@@ -36,11 +36,13 @@ import { loadAudit } from './net/audit';
 import { agentTarget } from './components/sessionChoice';
 import { usableId } from './components/launchChoice';
 import { launchSettingsField } from './components/launchSettings';
+import { rememberStarted } from './components/launchMemory';
 import { PhoneAgent, PhoneHome, PhoneTheme, usePhone } from './phone/Phone';
 import { approvalRedirect, phoneScreen } from './phone/nav';
 import { AttentionLayer } from './components/AttentionLayer';
 import { attentionList } from './net/fleet';
-import { requestPanel, requestProject } from './layout/requests';
+import { requestPanel, requestProject, requestTool } from './layout/requests';
+import { TOOL_PANELS } from './net/paneTools';
 import { isMachinesHash, machineOfHash, paletteExtras, projectsOf } from './net/paletteExtras';
 import { themeStore } from './themes/store';
 import { themeName } from './themes/messages';
@@ -109,7 +111,10 @@ export function App() {
   const [later, setLater] = useState<Set<string>>(new Set());
   const [proven, setProven] = useState<Set<string>>(new Set());
   const [notice, setNotice] = useState<string | undefined>();
-  const [starting, setStarting] = useState<{ node?: string } | false>(false);
+  const [starting, setStarting] = useState<{ node?: string; kind?: string } | false>(false);
+  // A terminal started from "New terminal" opens as a Terminal pane of the window instead of taking the whole window.
+  const startedAsTerminal = useRef(false);
+  const openStart = useCallback((node?: string, terminal = false) => { startedAsTerminal.current = terminal; setStarting({ ...(node ? { node } : {}), ...(terminal ? { kind: 'shell' } : {}) }); }, []);
   // A machine refused a command until the owner allows it (ADR-0041): what was asked, shown as a dialog.
   const [grantAsk, setGrantAsk] = useState<{ node: string; body: CommandBody; ask: GrantAsk; busy: boolean; failed: boolean } | undefined>();
   const loadKinds = useCallback(async (node: string): Promise<KindChoice[]> => {
@@ -148,7 +153,9 @@ export function App() {
       const ok = await api.command(node, { agentLaunch: { path: info.path, projectId: info.projectId, kind, separateWorktree, acceptIdentityChange, authorization, launchOptions: launch.ids, confirmedLaunchOptions: launch.confirmed, ...launchSettingsField(launch.settings) } });
       const id = ok.agentLaunch?.agentId;
       setStarting(false);
-      if (id) window.location.hash = `#/agent/${encodeURIComponent(`${node}/${id}`)}`;
+      if (id) rememberStarted(`${node}/${id}`, launch.settings);
+      if (id && startedAsTerminal.current && kind === 'shell') requestTool({ panel: 'terminal', agent: `${node}/${id}`, wait: true });
+      else if (id) window.location.hash = `#/agent/${encodeURIComponent(`${node}/${id}`)}`;
       return undefined;
     } catch (e) {
       const code = (e as { code?: string }).code;
@@ -439,10 +446,17 @@ export function App() {
     if (!phone) requestPanel('fleet');
     window.setTimeout(() => document.querySelector<HTMLElement>('.pair-window button:not(:disabled)')?.focus(), 50);
   }, [go, phone]);
+  // Back to the window (the panes live there); from the window itself (the demo included) nothing moves.
+  const toWindow = useCallback(() => { if (!['', '#/', '#/demo'].includes(hash)) go('#/'); }, [hash, go]);
   const items: PaletteItem[] = useMemo(() => [
     { id: 'next', label: t('palette-next-attention'), run: next },
     { id: 'home', label: t('palette-go-home'), run: () => { go('#/'); if (!phone) requestPanel('fleet'); } },
-    ...(hub ? [{ id: 'start', label: t('action-start-agent'), run: () => { go('#/'); setStarting({}); } }] : []),
+    ...(hub ? [{ id: 'start', label: t('action-start-agent'), run: () => { toWindow(); openStart(); } }] : []),
+    // The tools open as panes of the window, beside the agent in focus (not on a phone, which has no panes).
+    ...(phone ? [] : [
+      ...TOOL_PANELS.map((panel) => ({ id: `tool-${panel}`, label: t(`palette-open-${panel}`), run: () => { toWindow(); requestTool({ panel }); } })),
+      ...(hub ? [{ id: 'new-terminal', label: t('palette-new-terminal'), run: () => { toWindow(); openStart(undefined, true); } }] : []),
+    ]),
     { id: 'machines', label: t('palette-go-machines'), run: () => go('#/machines') },
     ...paletteExtras({ machines: live ? machines(live) : hub ? [] : demoMachines, projects: projectsOf(agents), hub: !!hub, phone, passwordSet: info.passwordSet, canPair: !!pairing.ui?.onOpen, go,
       showProject: (id) => { go('#/'); requestProject(id); }, showPairing, lock: hub ? lockNow : undefined }),
@@ -452,7 +466,7 @@ export function App() {
     { id: 'theme-editor', label: t('palette-theme-editor'), run: editTheme },
     ...themeStore.themes().map((x) => ({ id: `theme-${x.id}`, label: t('palette-theme', { name: themeName(x) }), run: () => themeStore.choose(x.id) })),
     ...agents.map((a) => ({ id: `agent-${a.id}`, label: t('palette-open-agent', { name: a.name }), run: () => open(a.id) })),
-  ], [agents, go, hub, next, open, language, editTheme, palette, phone, live, info.passwordSet, pairing.ui, lockNow, showPairing]);
+  ], [agents, go, toWindow, hub, next, open, openStart, language, editTheme, palette, phone, live, info.passwordSet, pairing.ui, lockNow, showPairing]);
 
   useEffect(() => {
     const on = (e: KeyboardEvent) => {
@@ -466,9 +480,9 @@ export function App() {
 
   // ADR-0061: a machine that reported whom it trusts, and not this browser; one that has not reported is not called untrusted.
   const untrustedOn = hub && device && live?.trusted ? (node: string) => { const ids = live.trusted?.get(node); return !!ids && !ids.includes(device.id); } : undefined;
-  const startWindow = !hub && import.meta.env.DEV && starting ? <StartAgent initialNode={starting.node} projects={demoProjects} machines={demoMachines}
+  const startWindow = !hub && import.meta.env.DEV && starting ? <StartAgent initialNode={starting.node} initialKind={starting.kind} projects={demoProjects} machines={demoMachines}
     loadKinds={async () => [{ kind: 'claude-code', name: 'Claude Code', installed: true }, { kind: 'codex', name: 'Codex', installed: true }, { kind: 'shell', name: 'Shell', installed: true }, { kind: 'gemini', name: 'Gemini CLI', installed: false }]}
-    list={async (_n, path) => demoList(path)} inspect={async (_n, path) => ({ path, projectId: 'demo', gitRoot: path, branch: 'main', portable: false })} onStart={async () => { setStarting(false); return undefined; }} onClose={() => setStarting(false)} /> : starting && live ? <StartAgent initialNode={starting ? starting.node : undefined} trust={device ? { id: device.id, key: device.publicKeyHex } : undefined}
+    list={async (_n, path) => demoList(path)} inspect={async (_n, path) => ({ path, projectId: 'demo', gitRoot: path, branch: 'main', portable: false })} onStart={async () => { setStarting(false); return undefined; }} onClose={() => setStarting(false)} /> : starting && live ? <StartAgent initialNode={starting ? starting.node : undefined} initialKind={starting ? starting.kind : undefined} trust={device ? { id: device.id, key: device.publicKeyHex } : undefined}
     askApproval={device ? { can: (node) => canBeApprovedOn(live.trusted, node, mine, device.id), ask: askApproval } : undefined} projects={projectChoices(live)} machines={machines(live)} inspect={inspectDirectory} list={listDirectory} loadKinds={loadKinds} onStart={startAgent} onClose={() => setStarting(false)} /> : undefined;
 
   // Served by the hub (a production build) and not signed in: ask for the code. Development keeps the demo data.
@@ -485,18 +499,18 @@ export function App() {
             onSet={async (password, current) => { const r = await setPassword(hub.token, password, current); if (r.ok) refreshInfo(); return r; }} /> : undefined} /> : hash === '#/theme' && phone ? <PhoneTheme onBack={() => go('#/')} />
         : current !== undefined && phone
         ? <PhoneAgent agent={selectedAgent} agents={agents} approvals={approvalsNow} loadDiff={hub && api ? loadDiff : !hub ? demoLoadDiff : undefined} filesOf={hub && api ? filesOf : !hub ? demoFilesOf : undefined} machines={live ? machines(live) : hub ? [] : demoMachines} onResolve={resolve} untrusted={untrustedOn} notice={notice ? t(notice) : undefined}
-          source={terminal} chatSource={selectedAgent?.terminal === false ? chatOf(selectedAgent) : undefined} sendPrompt={hub && api ? sendPrompt : undefined} chooseOption={hub && api ? chooseOption : undefined}
-          costMicroUsd={current ? usage?.perAgent.get(current) : undefined} link={hub ? link : 'live'} onOpen={open} onBack={() => go('#/')} />
+          source={terminal} chatSource={selectedAgent?.terminal === false ? chatOf(selectedAgent) : undefined} sendPrompt={hub && api ? sendPrompt : undefined} chooseOption={hub && api ? chooseOption : undefined} link={hub ? link : 'live'} onOpen={open} onBack={() => go('#/')} />
         : current !== undefined
-        ? <Focus agent={selectedAgent} approvals={live ? approvalList(live) : hub ? [] : demoApprovals} onResolve={resolve} chatSource={selectedAgent?.terminal === false ? chatOf(selectedAgent) : undefined} sendPrompt={hub && api ? sendPrompt : undefined} chooseOption={hub && api ? chooseOption : undefined} costMicroUsd={current ? usage?.perAgent.get(current) : undefined} source={terminal} onBack={() => go('#/')} />
+        ? <Focus agent={selectedAgent} approvals={live ? approvalList(live) : hub ? [] : demoApprovals} onResolve={resolve} chatSource={selectedAgent?.terminal === false ? chatOf(selectedAgent) : undefined} sendPrompt={hub && api ? sendPrompt : undefined} chooseOption={hub && api ? chooseOption : undefined} source={terminal} onBack={() => go('#/')} />
         : phone
         ? <PhoneHome agents={agents} machines={live ? machines(live) : hub ? [] : demoMachines} approvals={approvalsNow} onResolve={resolve} untrusted={untrustedOn} notice={notice ? t(notice) : undefined}
           link={hub ? link : 'live'} onRetry={api ? api.retry : undefined} onOpen={open} onCommand={() => setPalette(true)} onLock={hub ? lockNow : undefined} start={startWindow} pairing={pairing.ui}
-          onStart={hub && api && live ? () => setStarting({}) : (!hub && import.meta.env.DEV ? () => setStarting({}) : undefined)} />
+          onStart={hub && api && live ? () => openStart() : (!hub && import.meta.env.DEV ? () => openStart() : undefined)} />
         : <Console agents={agents} machines={live ? machines(live) : []} usage={usage} projects={live && usage ? costByProject(live, usage.perAgent) : []}
           approvals={live ? approvalList(live) : hub ? [] : demoApprovals} messages={live ? recentMessages(live) : []} boards={live ? boards(live) : []} terminalFor={terminalFor} chatOf={hub && api ? chatOf : undefined} sendPrompt={hub && api ? sendPrompt : undefined} chooseOption={hub && api ? chooseOption : undefined} loadDiff={hub && api ? loadDiff : !hub ? demoLoadDiff : undefined} loadHistory={hub && api ? loadHistory : undefined} filesOf={hub && api ? filesOf : !hub ? demoFilesOf : undefined} onOpen={open}
           onResolve={resolve} helperGrants={hub && api ? helperGrants : undefined} revokeGrant={hub && api ? revokeGrant : undefined} notice={notice ? t(notice) : undefined} link={hub ? link : 'live'} onRetry={api ? api.retry : undefined}
-          onStart={hub && api && live ? (node) => setStarting({ node }) : (!hub && import.meta.env.DEV ? (node) => setStarting({ node }) : undefined)} onCommand={() => setPalette(true)} onForget={hub && api ? forgetAgent : undefined} onResume={hub && api ? resumeAgent : (!hub && import.meta.env.DEV ? async () => undefined : undefined)} onLock={hub ? lockNow : undefined}
+          onStart={hub && api && live ? (node) => openStart(node) : (!hub && import.meta.env.DEV ? (node) => openStart(node) : undefined)}
+          onNewTerminal={hub && api && live ? (node) => openStart(node, true) : (!hub && import.meta.env.DEV ? (node) => openStart(node, true) : undefined)} onCommand={() => setPalette(true)} onForget={hub && api ? forgetAgent : undefined} onResume={hub && api ? resumeAgent : (!hub && import.meta.env.DEV ? async () => undefined : undefined)} onLock={hub ? lockNow : undefined}
           start={startWindow} pairing={pairing.ui} />}
       {grantAsk && <GrantDialog machine={live?.nodes.get(grantAsk.node)?.hostname || grantAsk.node} kind={grantAsk.ask.kind} busy={grantAsk.busy} failed={grantAsk.failed} onAllow={() => void allowGrant()} onClose={() => setGrantAsk(undefined)} />}
       {/* Away from Home (an agent, a page) a request to join still reaches the owner: the first card floats over the window. */}
@@ -512,7 +526,8 @@ export function App() {
   );
 }
 
-// The demo window (no hub): the closed demo agent's workspace, so the review screen and the file browser can be seen and tested.
-const DEMO_CHANGED = 'a6';
-const demoLoadDiff = async (a: AgentTileModel, path?: string) => (a.id === DEMO_CHANGED ? demoDiff(path) : '');
-const demoFilesOf = (a: AgentTileModel) => (a.id === DEMO_CHANGED ? demoFiles : undefined);
+// The demo window (no hub): the login-fix workspace of the demo agents, so the review screen, the file browser and the tool panes can be
+// seen and tested. Another demo workspace is a clean, empty folder.
+const demoLoadDiff = async (a: AgentTileModel, path?: string) => (a.workspaceRef?.id === 'login-fix' ? demoDiff(path) : '');
+const emptyFiles: WorkspaceFiles = { list: async () => [], read: async () => { throw new Error('not found'); } };
+const demoFilesOf = (a: AgentTileModel) => (a.workspaceRef ? (a.workspaceRef.id === 'login-fix' ? demoFiles : emptyFiles) : undefined);

@@ -11,9 +11,11 @@ const KEY = 'agora.hubToken';
 export function readToken(hash: string, store: Pick<Storage, 'getItem' | 'setItem'> | undefined): { token?: string; rest: string } {
   const m = /^#token=([^&]+)(?:&(.*))?$/.exec(hash);
   if (m) {
-    const token = decodeURIComponent(m[1] as string);
-    try { store?.setItem(KEY, token); } catch { /* private mode: the token lasts until reload */ }
-    return { token, rest: m[2] ? `#${m[2]}` : '' };
+    try {
+      const token = decodeURIComponent(m[1] as string);
+      try { store?.setItem(KEY, token); } catch { /* private mode: the token lasts until reload */ }
+      return { token, rest: m[2] ? `#${m[2]}` : '' };
+    } catch { /* malformed fragment: keep the saved token */ }
   }
   let saved: string | null = null;
   try { saved = store?.getItem(KEY) ?? null; } catch { /* unavailable */ }
@@ -67,7 +69,11 @@ export function forgetToken(): void {
 export function readCode(hash: string): { code?: string; rest: string } {
   const m = /^#code=([^&]+)(?:&(.*))?$/.exec(hash);
   if (!m) return { rest: hash };
-  return { code: decodeURIComponent(m[1] as string), rest: m[2] ? `#${m[2]}` : '' };
+  try {
+    return { code: decodeURIComponent(m[1] as string), rest: m[2] ? `#${m[2]}` : '' };
+  } catch {
+    return { rest: hash };
+  }
 }
 
 // What the sign-in screen needs to know before it asks: does this hub want the screen password from here (it never does from its own

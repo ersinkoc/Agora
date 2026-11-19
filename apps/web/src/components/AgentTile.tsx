@@ -1,18 +1,20 @@
 import { memo } from 'react';
 import { t } from '../i18n';
 import { type AgentTileModel, endedWithError, shownExitCode } from '../model';
-import { lastLine, span } from '../net/fleet';
+import { lastLine, span, type GroupBy, type ProjectSpread } from '../net/fleet';
+import { ProjectChip } from './ProjectMark';
 import { ago } from '../net/time';
+import { Icon } from './Icon';
 import { StateBadge } from './StateBadge';
 import { NoAskBadge } from './NoAskBadge';
 
 // What the fleet console adds to a tile: where it is drawn (the group already names the machine or the project, so the tile names the
-// other one), what the agent asks for, what it cost, and the time. Without it the tile is the plain one of the gallery.
+// other one), what the agent asks for, and the time. Without it the tile is the plain one of the gallery.
 export interface TileContext {
-  group: 'machine' | 'project';
+  group: GroupBy;
   ask?: string; // what the agent asks permission for, when it waits on a request
-  cost?: string; // its estimated cost, already formatted
   now?: number;
+  same?: ProjectSpread; // the project is open on more than one machine (net/fleet.ts, `sharedAcross`)
 }
 
 // The one line that says what the agent is doing, from what the window has: the last line of its terminal when it has a preview,
@@ -41,7 +43,7 @@ function Tile({ agent, onOpen, context }: { agent: AgentTileModel; onOpen?: (id:
       >
         <span className="tile__name">{agent.name}</span>
         <StateBadge state={agent.state} failed={failed} />
-        <NoAskBadge agent={agent} />
+        <NoAskBadge agent={agent} nested />
         <span className="muted">
           {t('agent-on-machine', { machine: agent.machine })} · {t('agent-workspace', { name: agent.workspace })}
         </span>
@@ -51,7 +53,7 @@ function Tile({ agent, onOpen, context }: { agent: AgentTileModel; onOpen?: (id:
     );
   }
   const line = activity(agent, context);
-  const where = context.group === 'machine' ? [agent.project || agent.workspace, agent.branch] : [agent.machine, agent.branch];
+  const where = context.group === 'machine' ? [agent.project || agent.workspace, agent.branch] : context.group === 'project' ? [agent.machine, agent.branch] : [agent.machine, agent.project || agent.workspace, agent.branch];
   const changed = agent.filesChanged ?? 0;
   const when = context.now === undefined ? undefined
     : agent.closed ? (agent.endedMs || agent.since ? t('fleet-tile-ended', { when: ago((agent.endedMs || agent.since) as number, context.now) }) : undefined)
@@ -68,13 +70,13 @@ function Tile({ agent, onOpen, context }: { agent: AgentTileModel; onOpen?: (id:
         <span className="tile__name">{agent.name}</span>
         <StateBadge state={agent.state} failed={failed} />
       </span>
-      <NoAskBadge agent={agent} />
-      {line ? <span className={`tile__activity${agent.preview && !agent.closed && !(context.ask && agent.state === 'needs-you') ? ' tile__activity--line' : ''}`} dir="auto">{line}</span> : null}
+      <NoAskBadge agent={agent} nested />
+      {context.same && <ProjectChip spread={context.same} />}
+      {line ? <span className={`tile__activity${agent.preview && !agent.closed && !(context.ask && agent.state === 'needs-you') ? ' tile__activity--line' : ''}${agent.state === 'needs-you' && !agent.closed ? ' tile__activity--ask' : ''}`} dir="auto">{line}</span> : null}
       <span className="tile__meta">
         {where.filter(Boolean).map((x, i) => <span key={i} className="tile__where">{x}</span>)}
         {changed > 0 ? <span>{t('changes-files', { count: changed })}</span> : null}
-        {context.cost ? <span>{t('agent-cost', { amount: context.cost })}</span> : null}
-        {typeof when === 'string' ? <span>{when}</span> : when ? <span title={when.title}>{when.text}</span> : null}
+        {typeof when === 'string' ? <span>{when}</span> : when ? <span className="tile__when" title={when.title}><Icon name="clock" className="size-3" />{when.text}</span> : null}
       </span>
     </button>
   );
@@ -83,4 +85,4 @@ function Tile({ agent, onOpen, context }: { agent: AgentTileModel; onOpen?: (id:
 // A tile is redrawn only when what it shows changed: with hundreds of them, a filter or a regrouping redraws the ones that come or go,
 // not the ones that stay. (`context` is a new object on every render of the console, so it is compared by its parts.)
 export const AgentTile = memo(Tile, (a, b) => a.agent === b.agent && a.onOpen === b.onOpen && a.context?.group === b.context?.group && a.context?.ask === b.context?.ask
-  && a.context?.cost === b.context?.cost && a.context?.now === b.context?.now && !a.context === !b.context);
+ && a.context?.now === b.context?.now && a.context?.same === b.context?.same && !a.context === !b.context);

@@ -53,6 +53,35 @@
   /* Tab strips scroll sideways without drawing scroll buttons or bars (WebView2 showed arrows). */
   .quiet-scroll { scrollbar-width: none; }
   .quiet-scroll::-webkit-scrollbar { display: none; }
+  /* The right panel: an icon rail that is always visible, and the subject beside it. Wide: the subject is part of the layout. Narrow: it is a
+     drawer over the content, opening from the rail, so the rail never clips. Tokens only; the rail's width is the console's RAIL_WIDTH. */
+  .inspector { @apply relative flex min-h-0 border-line bg-surface-1 lg:border-s; }
+  .inspector__panel { @apply flex min-h-0 min-w-0 flex-col border-line bg-surface-1 lg:flex-1 max-lg:absolute max-lg:inset-y-0 max-lg:end-full max-lg:z-20 max-lg:w-[min(22rem,calc(100vw-4.5rem))] max-lg:border-s; }
+  @media (max-width: 1023.98px) { .inspector__panel { box-shadow: var(--shadow); } }
+  .rail { @apply flex w-11 flex-none flex-col items-center gap-1 border-s border-line bg-surface-1 py-2; }
+  .rail__btn { @apply relative inline-grid size-9 place-items-center rounded-s text-muted transition-colors duration-150 hover:bg-surface-2 hover:text-ink; }
+  .rail__btn[aria-selected='true'] { @apply bg-surface-2 text-ink; box-shadow: inset 2px 0 0 var(--accent); }
+  .rail__badge { @apply absolute -end-0.5 -top-0.5 min-w-4 rounded-full bg-surface-2 px-1 text-center text-xs leading-4 font-semibold text-ink; border: 1px solid var(--border); }
+  .rail__badge--alert { @apply border-transparent bg-needs-you text-on-accent; }
+  /* The name and shortcut of a rail icon: beside it, towards the panel, on hover and keyboard focus. */
+  .rail__btn::after { content: attr(data-tip); @apply pointer-events-none invisible absolute end-full top-1/2 z-30 me-2 -translate-y-1/2 whitespace-nowrap rounded-xs border border-line bg-surface-1 px-2 py-1 text-xs text-ink opacity-0 transition-opacity duration-150; box-shadow: var(--shadow); }
+  .rail__btn:focus-visible::after { @apply visible opacity-100; }
+  @media (hover: hover) { .rail__btn:hover::after { @apply visible opacity-100; } }
+  /* The subject that is open already says its name in the panel's heading: its tip would only cover the panel's own values (a row's number
+     at the end of the line sits right where the tip lands). */
+  .rail__btn[aria-selected='true']::after { @apply hidden; }
+
+  /* A tab row wider than its space: the edge that has more fades out (a mask, so it follows any theme), mirrored in a right-to-left row. */
+  .tab-strip[data-fade-end] { mask-image: linear-gradient(to right, #000 calc(100% - 2rem), transparent); }
+  .tab-strip[data-fade-start] { mask-image: linear-gradient(to left, #000 calc(100% - 2rem), transparent); }
+  .tab-strip[data-fade-start][data-fade-end] { mask-image: linear-gradient(to right, transparent, #000 2rem, #000 calc(100% - 2rem), transparent); }
+  [dir='rtl'] .tab-strip[data-fade-end] { mask-image: linear-gradient(to left, #000 calc(100% - 2rem), transparent); }
+  [dir='rtl'] .tab-strip[data-fade-start] { mask-image: linear-gradient(to right, #000 calc(100% - 2rem), transparent); }
+  /* A short label with its whole meaning on hover and on focus (a tap focuses it on a touch screen): the text is in `data-tip`. */
+  .tip { @apply relative; }
+  .tip[tabindex]::after { content: attr(data-tip); @apply pointer-events-none invisible absolute start-0 top-full z-30 mt-1 w-max max-w-64 rounded-xs border border-line bg-surface-1 px-2 py-1 text-xs font-normal whitespace-normal text-ink opacity-0 transition-opacity duration-150; box-shadow: var(--shadow); }
+  .tip[tabindex]:focus-visible::after, .tip[tabindex]:focus::after { @apply visible opacity-100; }
+  @media (hover: hover) { .tip[tabindex]:hover::after { @apply visible opacity-100; } }
   .ide-section { @apply px-3 pb-1 pt-3 text-xs font-semibold tracking-wider text-muted uppercase; }
   .page { @apply mx-auto grid max-w-3xl gap-6 px-4 py-8; }
   .topbar { @apply flex items-center justify-between gap-4; }
@@ -151,6 +180,23 @@
   .tile__meta { @apply flex min-w-0 flex-wrap gap-x-2 gap-y-0.5 text-xs text-muted; }
   .tile__where { @apply min-w-0 break-all; }
   .tile--failed { border-color: var(--text-muted); }
+
+  /* Polish (state first): a tile's edge carries its state colour (the state word and mark are inside: never colour alone). What needs you is
+     the loudest thing on the page: a tinted card with a strong edge and its question in full-strength text. Working has a slow line along
+     its foot; finished settles quietly. Motion is only for people who have not asked for reduced motion. */
+  .tile--compact { @apply relative overflow-hidden transition-[background-color,border-color,transform] duration-150; border-inline-start-width: 4px; }
+  .tile--compact:hover { @apply -translate-y-px; }
+  .tile--needs-you { background: color-mix(in oklab, var(--state-needs-you) 9%, var(--surface-1)); border-color: color-mix(in oklab, var(--state-needs-you) 70%, var(--border)); border-inline-start-color: var(--state-needs-you); box-shadow: 0 0 0 1px color-mix(in oklab, var(--state-needs-you) 35%, transparent); }
+  .tile--needs-you:hover { background: color-mix(in oklab, var(--state-needs-you) 14%, var(--surface-1)); }
+  .tile__activity--ask { @apply text-sm font-medium text-ink; }
+  .tile--working::after { content: ''; @apply pointer-events-none absolute inset-x-0 bottom-0 h-0.5; background: linear-gradient(90deg, transparent, var(--state-working), transparent); opacity: 0.55; }
+  .tile--closed .tile__name { @apply text-muted; }
+  .tile__when { @apply inline-flex items-center gap-1; }
+  .tile--needs-you .tile__when { @apply font-medium text-needs-you; }
+  @media (prefers-reduced-motion: no-preference) {
+    .tile--working::after { background-size: 200% 100%; animation: sweep 2.8s ease-in-out infinite; }
+    .tile--needs-you:not(.tile--closed) { animation: nudge 2.4s ease-in-out infinite; }
+  }
   .tile--closed { @apply opacity-90; }
 
   .fleet-empty { @apply mx-auto grid max-w-xl justify-items-start gap-3 py-10; }
@@ -167,6 +213,17 @@
   /* A picture in a menu (the layout presets): a tile with room for a finger; the chosen one is marked in the accent. */
   .menu-tile { @apply grid min-h-11 place-items-center rounded-xs border border-transparent px-2 py-1.5 text-muted transition-colors duration-150 hover:bg-surface-2 hover:text-ink disabled:opacity-40; }
   .menu-tile[aria-checked='true'] { @apply border-accent bg-surface-2 text-ink; }
+
+  /* Empty and loading panels: friendly, quiet, never an error look. The skeleton pulses softly and is still for people who asked for less motion. */
+  .empty-state { @apply grid justify-items-center gap-1.5 px-4 py-8 text-center; }
+  .empty-state__icon { @apply grid size-10 place-items-center rounded-full border border-line bg-surface-2 text-muted; }
+  .empty-state__title { @apply m-0 mt-1 font-medium text-ink; }
+  .empty-state__hint { @apply m-0 max-w-64 text-[0.8125rem] text-muted; }
+  .skeleton { @apply block rounded-xs bg-surface-2; }
+  .fleet-empty--wide { @apply max-w-none; }
+  .fleet-empty--wide .tile { @apply pointer-events-none; }
+  /* Pressed: a controls sinks by a pixel (a state of its own beside hover and focus). */
+  .button:active:not(:disabled), .ide-iconbtn:active:not(:disabled), .ide-chip:is(button):active, .fleet-seg:active, .fleet-count:active:not(:disabled), .rail__btn:active { @apply translate-y-px; }
 
   .gallery { @apply max-w-5xl; }
   .gallery__row { @apply flex flex-wrap items-center gap-4; }
@@ -212,7 +269,7 @@
 /* A touch screen (a phone, a tablet at any width): everything a finger presses has a hit area of at least --tap, buttons, tabs, rows,
    icon buttons, chips that act and the menu tiles. They grow on touch only; with a mouse they keep their dense size. */
 @media (pointer: coarse) {
-  .button, .terminal-jump, .ide-iconbtn, .ide-tab, .ide-row, .menu-tile, .fleet-count, .fleet-seg, .tile, button.ide-chip, a.ide-chip, .ide-bar > a, .ide-bar > button, input:not([type='checkbox'], [type='radio']), select { min-height: var(--tap); }
+  .button, .terminal-jump, .ide-iconbtn, .ide-tab, .ide-row, .rail__btn, .menu-tile, .fleet-count, .fleet-seg, .tile, button.ide-chip, a.ide-chip, .ide-bar > a, .ide-bar > button, input:not([type='checkbox'], [type='radio']), select { min-height: var(--tap); }
   footer.ide-bar { height: auto; }
   /* A row whose label holds a radio or a checkbox: the whole label is the target (the box itself stays its size). */
   .touch-row { min-height: var(--tap); }
@@ -220,7 +277,11 @@
 }
 
 @keyframes flow { to { stroke-dashoffset: -24; } }
+@keyframes sweep { from { background-position: 100% 0; } to { background-position: -100% 0; } }
+@keyframes nudge { 50% { box-shadow: 0 0 0 3px color-mix(in oklab, var(--state-needs-you) 28%, transparent); } }
 @keyframes breathe { 50% { opacity: 0.45; } }
+@keyframes soft-pulse { 50% { opacity: 0.55; } }
+@media (prefers-reduced-motion: no-preference) { .skeleton { animation: soft-pulse 1.6s ease-in-out infinite; } }
 @keyframes attend { 50% { transform: scale(1.25); } }
 @media (prefers-reduced-motion: no-preference) { .net-link--on { animation: flow 1.2s linear infinite; } }
 @media (prefers-reduced-motion: reduce) { .state__mark { animation: none !important; } }
@@ -251,3 +312,8 @@
 .hljs-meta, .hljs-doctag, .hljs-subst { color: var(--syntax-meta); }
 .hljs-emphasis { font-style: italic; }
 .hljs-strong { font-weight: 600; }
+
+/* People who asked for less motion get none: transitions and animations collapse to an instant change (state is still shown by shape and text). */
+@media (prefers-reduced-motion: reduce) {
+  *, ::before, ::after { transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; scroll-behavior: auto !important; }
+}

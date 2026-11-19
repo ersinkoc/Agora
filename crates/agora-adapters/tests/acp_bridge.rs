@@ -2,7 +2,7 @@
 //! is a real child process (this test binary, re-executed as the fake agent). No real agent, account or token.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::io::{Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -469,6 +469,24 @@ fn a_running_cost_becomes_usage_reports_of_what_it_grew_by() {
 }
 
 #[test]
+fn a_replayed_lower_cost_does_not_charge_the_same_session_growth_again() {
+    let mut n = started();
+    for _ in 0..3 {
+        // The fake reports the same cumulative amounts each time: 0.0123 then 0.02 USD.
+        turn_end(&mut n, "usage");
+    }
+    let increments: Vec<u64> = n
+        .messages()
+        .iter()
+        .filter(|m| m["method"] == "usage/report")
+        .filter_map(|m| m["params"]["costMicros"].as_u64())
+        .collect();
+    assert_eq!(increments, [12300, 7700]);
+    n.call("shutdown", json!({}));
+    n.done.take().unwrap().join().unwrap().unwrap();
+}
+
+#[test]
 fn the_context_level_and_size_ride_along_with_the_cost() {
     let mut n = started();
     n.call(
@@ -751,4 +769,568 @@ fn the_mesh_server_reaches_the_agents_session() {
         json!({"sessionId": "acp-s1", "text": "mcp-servers"}),
     );
     n.wait(|m| m["method"] == "chat/append" && m["params"]["text"]["text"] == "[]");
+}
+
+fn edge_child_requested(name: &str) -> bool {
+    let args = std::env::args().skip(1).collect::<Vec<_>>();
+    args == ["--exact", name, "--nocapture", "--test-threads=1"]
+}
+
+fn edge_child_send(out: &mut impl Write, msg: Value) {
+    writeln!(out, "{msg}").unwrap();
+    out.flush().unwrap();
+}
+
+#[test]
+fn acp_edge_noise_child() {
+    if !edge_child_requested("acp_edge_noise_child") {
+        return;
+    }
+    let mut input = BufReader::new(io::stdin().lock());
+    let mut line = String::new();
+    assert_ne!(input.read_line(&mut line).unwrap(), 0);
+    let msg: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(msg["method"], "initialize");
+    let mut out = io::stdout().lock();
+    writeln!(out).unwrap();
+    edge_child_send(&mut out, json!({"jsonrpc":"2.0","id":msg["id"]}));
+    edge_child_send(
+        &mut out,
+        json!({"jsonrpc":"2.0","id":msg["id"],"result":{},"error":{"code":-32603}}),
+    );
+    edge_child_send(
+        &mut out,
+        json!({"jsonrpc":"2.0","id":msg["id"],"error":{"code":-32603,"message":"fixture refusal"}}),
+    );
+}
+
+#[test]
+fn acp_edge_option_child() {
+    if !edge_child_requested("acp_edge_option_child") {
+        return;
+    }
+    let input = BufReader::new(io::stdin().lock());
+    let mut out = io::stdout().lock();
+    writeln!(out).unwrap();
+    for line in input.lines() {
+        let msg: Value = serde_json::from_str(&line.unwrap()).unwrap();
+        let result = match msg["method"].as_str().unwrap() {
+            "initialize" => json!({"agentCapabilities":{}}),
+            "session/new" => json!({"sessionId":"s","modes":{
+                "currentModeId":"build","availableModes":[{"id":"build","name":"Build"},{"id":"plan","name":"Plan"}]
+            }}),
+            "session/set_mode" => std::process::exit(7),
+            other => panic!("unexpected fixture request {other}"),
+        };
+        edge_child_send(
+            &mut out,
+            json!({"jsonrpc":"2.0","id":msg["id"],"result":result}),
+        );
+        if msg["params"]["cwd"] == "fixture-idle" {
+            std::process::exit(8);
+        }
+    }
+}
+
+#[test]
+fn malformed_acp_replies_do_not_settle_initialize() {
+    let mut node = Node::start_with("acp_edge_noise_child");
+    let reply = node.call("initialize", json!({}));
+    assert_eq!(reply["error"]["data"]["code"], "adapter.agent_refused");
+    let all = notices(&node);
+    let refusal = all
+        .iter()
+        .find(|note| note["code"] == "adapter.agent_refused")
+        .unwrap();
+    assert_eq!(refusal["params"]["detail"], "fixture refusal");
+    node.wait(|m| {
+        m["method"] == "log"
+            && m["params"]["message"]
+                .as_str()
+                .is_some_and(|s| s.contains("adapter.agent_exited"))
+    });
+    assert!(node.done.take().unwrap().join().unwrap().is_err());
+}
+
+#[test]
+fn an_agent_exit_during_option_change_reports_the_option_stage() {
+    let mut node = Node::start_with("acp_edge_option_child");
+    assert_eq!(
+        node.call("initialize", json!({}))["result"]["adapterName"],
+        "acp-bridge"
+    );
+    assert_eq!(
+        node.call("session/start", json!({}))["result"]["sessionId"],
+        "s"
+    );
+    let reply = node.call(
+        "session/set_option",
+        json!({"kind":"SESSION_OPTION_KIND_MODE","id":"plan"}),
+    );
+    assert_eq!(reply["error"]["data"]["params"]["stage"], "option");
+    assert!(node.done.take().unwrap().join().unwrap().is_err());
+    assert!(logs(&node).iter().any(
+        |entry| entry["code"] == "adapter.agent_exited" && entry["params"]["stage"] == "option"
+    ));
+    assert!(notices(&node).iter().any(
+        |entry| entry["code"] == "adapter.agent_exited" && entry["params"]["stage"] == "option"
+    ));
+}
+
+#[test]
+fn acp_session_identity_child() {
+    if !edge_child_requested("acp_session_identity_child") {
+        return;
+    }
+    let input = BufReader::new(io::stdin().lock());
+    let mut out = io::stdout().lock();
+    writeln!(out).unwrap();
+    let mut held_prompt = None;
+    for line in input.lines() {
+        let msg: Value = serde_json::from_str(&line.unwrap()).unwrap();
+        let sid = &msg["params"]["sessionId"];
+        let result = match msg["method"].as_str().unwrap() {
+            "initialize" => json!({"agentCapabilities":{"loadSession":true}}),
+            "session/load" if sid == "missing" => {
+                edge_child_send(
+                    &mut out,
+                    json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":sid,
+                        "update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"partial history"}}}}),
+                );
+                edge_child_send(
+                    &mut out,
+                    json!({"jsonrpc":"2.0","id":msg["id"],"error":{"code":-32603,"message":"missing session"}}),
+                );
+                continue;
+            }
+            "session/load" if sid == "replayed" => {
+                for update in [
+                    json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"restored history"}}),
+                    json!({"sessionUpdate":"plan","entries":[{"content":"restored plan"}]}),
+                ] {
+                    edge_child_send(
+                        &mut out,
+                        json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":sid,"update":update}}),
+                    );
+                }
+                json!({})
+            }
+            "session/load" => json!({}),
+            "session/new" if msg["params"]["cwd"] == "missing-id" => json!({}),
+            "session/new" if msg["params"]["cwd"] == "turn-exiting" => {
+                edge_child_send(
+                    &mut out,
+                    json!({"jsonrpc":"2.0","id":msg["id"],"result":{"sessionId":"turn-exiting"}}),
+                );
+                std::process::exit(21);
+            }
+            "session/new" if msg["params"]["cwd"] == "selection-empty" => {
+                json!({"sessionId":"selection-empty"})
+            }
+            "session/new"
+                if matches!(
+                    msg["params"]["cwd"].as_str(),
+                    Some("selection-first" | "selection-second")
+                ) =>
+            {
+                let session = &msg["params"]["cwd"];
+                let mut result = json!({"sessionId":session,
+                    "modes":{"availableModes":[{"id":"build","name":"Build"}]},
+                    "models":{"availableModels":[{"modelId":"fixture/model","name":"Model"}]}});
+                if session == "selection-first" {
+                    result["modes"]["currentModeId"] = json!("build");
+                    result["models"]["currentModelId"] = json!("fixture/model");
+                }
+                result
+            }
+            "session/new" => json!({"sessionId":"created"}),
+            "session/prompt" if msg["params"]["prompt"][0]["text"] == "hold-turn" => {
+                held_prompt = Some(msg["id"].clone());
+                edge_child_send(
+                    &mut out,
+                    json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":sid,
+                        "update":{"sessionUpdate":"plan","entries":[{"content":"turn held"}]}}}),
+                );
+                continue;
+            }
+            "session/prompt" => {
+                if let Some(id) = held_prompt.take() {
+                    edge_child_send(
+                        &mut out,
+                        json!({"jsonrpc":"2.0","id":id,"result":{"stopReason":"refusal"}}),
+                    );
+                }
+                if msg["params"]["prompt"][0]["text"] == "late-usage" {
+                    edge_child_send(
+                        &mut out,
+                        json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"usage-first",
+                            "update":{"sessionUpdate":"usage_update","cost":{"currency":"USD","amount":0.09},
+                                "used":900,"size":1000}}}),
+                    );
+                }
+                if let Some(amount) = match sid.as_str() {
+                    Some("usage-first") => Some(0.04),
+                    Some("usage-second") => Some(0.01),
+                    _ => None,
+                } {
+                    edge_child_send(
+                        &mut out,
+                        json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":sid,
+                            "update":{"sessionUpdate":"usage_update","cost":{"currency":"USD","amount":amount},
+                                "used":12,"size":100}}}),
+                    );
+                }
+                edge_child_send(
+                    &mut out,
+                    json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":sid,
+                        "update":{"sessionUpdate":"plan","entries":[{"content":sid}]}}}),
+                );
+                json!({"stopReason":"end_turn"})
+            }
+            other => panic!("unexpected fixture request {other}"),
+        };
+        edge_child_send(
+            &mut out,
+            json!({"jsonrpc":"2.0","id":msg["id"],"result":result}),
+        );
+    }
+}
+
+#[test]
+fn only_a_load_can_use_the_session_id_from_its_request() {
+    let mut node = Node::start_with("acp_session_identity_child");
+    node.call("initialize", json!({}));
+    let loaded = node.call("session/start", json!({"resumeSessionId":"previous"}));
+    assert_eq!(loaded["result"]["sessionId"], "previous");
+
+    let missing = node.call("session/start", json!({"worktree":"missing-id"}));
+    assert_eq!(
+        missing["error"]["data"],
+        json!({"code":"adapter.agent_refused","params":{"stage":"session"}})
+    );
+
+    let created = node.call("session/start", json!({}));
+    assert_eq!(created["result"]["sessionId"], "created");
+}
+
+#[test]
+fn the_next_session_reports_its_own_options_even_when_empty() {
+    let mut node = Node::start_with("acp_session_identity_child");
+    node.call("initialize", json!({}));
+    for (sid, mode, model, count) in [
+        ("selection-first", "build", "fixture/model", 1),
+        ("selection-second", "", "", 1),
+        ("selection-empty", "", "", 0),
+    ] {
+        let reply = node.call("session/start", json!({"worktree":sid}));
+        assert_eq!(reply["result"]["sessionId"], sid);
+        let message =
+            node.wait(|m| m["method"] == "session/options" && m["params"]["sessionId"] == sid);
+        let params = &message["params"];
+        assert_eq!(params["currentMode"], mode);
+        assert_eq!(params["currentModel"], model);
+        assert_eq!(params["modes"].as_array().unwrap().len(), count);
+        assert_eq!(params["models"].as_array().unwrap().len(), count);
+    }
+}
+
+#[test]
+fn usage_baselines_are_independent_between_sessions() {
+    let mut node = Node::start_with("acp_session_identity_child");
+    node.call("initialize", json!({}));
+    for sid in ["usage-first", "usage-second", "usage-first"] {
+        let response = node.call("session/start", json!({"resumeSessionId":sid}));
+        assert_eq!(response["result"]["sessionId"], sid);
+        assert_eq!(turn_end(&mut node, "usage"), "");
+    }
+
+    let reports: Vec<_> = node
+        .messages()
+        .into_iter()
+        .filter(|message| message["method"] == "usage/report")
+        .map(|message| message["params"].clone())
+        .collect();
+    assert_eq!(reports.len(), 2, "{reports:#?}");
+    for (report, (sid, cost)) in reports
+        .iter()
+        .zip([("usage-first", 40_000), ("usage-second", 10_000)])
+    {
+        assert_eq!(report["sessionId"], sid);
+        assert_eq!(report["costMicros"], cost);
+        assert_eq!(report["contextTokens"], 12);
+        assert_eq!(report["contextWindow"], 100);
+    }
+}
+
+#[test]
+fn late_usage_from_the_previous_session_does_not_change_the_active_session() {
+    let mut node = Node::start_with("acp_session_identity_child");
+    node.call("initialize", json!({}));
+    for sid in ["usage-first", "usage-second"] {
+        let reply = node.call("session/start", json!({"resumeSessionId":sid}));
+        assert_eq!(reply["result"]["sessionId"], sid);
+    }
+    assert_eq!(turn_end(&mut node, "late-usage"), "");
+
+    let reports: Vec<_> = node
+        .messages()
+        .into_iter()
+        .filter(|message| message["method"] == "usage/report")
+        .map(|message| message["params"].clone())
+        .collect();
+    assert_eq!(reports.len(), 1, "{reports:#?}");
+    assert_eq!(reports[0]["sessionId"], "usage-second");
+    assert_eq!(reports[0]["costMicros"], 10_000);
+    assert_eq!(reports[0]["contextTokens"], 12);
+}
+
+fn node_with_held_prompt() -> Node {
+    let mut node = Node::start_with("acp_session_identity_child");
+    node.call("initialize", json!({}));
+    let reply = node.call("session/start", json!({"resumeSessionId":"turn-held"}));
+    assert_eq!(reply["result"]["sessionId"], "turn-held");
+    assert_eq!(
+        node.call("session/prompt", json!({"text":"hold-turn"}))["result"],
+        json!({})
+    );
+    node.wait(|m| m["params"]["plan"]["steps"][0] == "turn held");
+    node
+}
+
+#[test]
+fn a_replaced_sessions_prompt_does_not_finish_the_new_turn() {
+    let mut node = node_with_held_prompt();
+    let reply = node.call("session/start", json!({"resumeSessionId":"turn-current"}));
+    assert_eq!(reply["result"]["sessionId"], "turn-current");
+    assert_eq!(turn_end(&mut node, "complete-turn"), "");
+    assert!(notices(&node)
+        .iter()
+        .all(|notice| notice["code"] != "adapter.turn_stopped"));
+}
+
+#[test]
+fn a_replaced_sessions_prompt_does_not_mark_an_idle_exit_as_a_turn() {
+    let mut node = node_with_held_prompt();
+    let reply = node.call("session/start", json!({"worktree":"turn-exiting"}));
+    assert_eq!(reply["result"]["sessionId"], "turn-exiting");
+    assert!(node.done.take().unwrap().join().unwrap().is_err());
+    let log = logs(&node)
+        .into_iter()
+        .find(|log| log["code"] == "adapter.agent_exited")
+        .unwrap();
+    assert_eq!(log["params"]["stage"], "idle");
+    assert_eq!(log["params"]["exit_code"], "21");
+}
+
+#[test]
+fn a_refused_load_keeps_the_active_session() {
+    let mut node = Node::start_with("acp_session_identity_child");
+    node.call("initialize", json!({}));
+    let loaded = node.call("session/start", json!({"resumeSessionId":"replayed"}));
+    assert_eq!(loaded["result"]["sessionId"], "replayed");
+    let history = node.wait(|m| m["params"]["text"]["text"] == "restored history");
+    assert_eq!(history["params"]["sessionId"], "replayed");
+
+    let refused = node.call("session/start", json!({"resumeSessionId":"missing"}));
+    assert_eq!(refused["error"]["data"]["code"], "adapter.agent_refused");
+    assert_eq!(
+        node.call("session/prompt", json!({"text":"next"}))["result"],
+        json!({})
+    );
+    let plan = node.wait(|m| {
+        m["method"] == "chat/append"
+            && m["params"]["plan"]["steps"][0]
+                .as_str()
+                .is_some_and(|s| s != "restored plan")
+    });
+    assert_eq!(plan["params"]["plan"]["steps"][0], "replayed");
+    let partial = node.wait(|m| m["params"]["text"]["text"] == "partial history");
+    assert_eq!(partial["params"]["sessionId"], "missing");
+}
+
+#[test]
+fn acp_exit_after_initialize_child() {
+    if !edge_child_requested("acp_exit_after_initialize_child") {
+        return;
+    }
+    let request = BufReader::new(io::stdin().lock())
+        .lines()
+        .next()
+        .unwrap()
+        .unwrap();
+    let init: Value = serde_json::from_str(&request).unwrap();
+    assert_eq!(init["method"], "initialize");
+
+    let mut out = io::stdout().lock();
+    writeln!(out).unwrap();
+    edge_child_send(
+        &mut out,
+        json!({"jsonrpc":"2.0","id":init["id"],"result":{"agentCapabilities":{}}}),
+    );
+    std::process::exit(11);
+}
+
+#[test]
+fn exit_after_initialize_is_reported_at_the_session_stage() {
+    let mut node = Node::start_with("acp_exit_after_initialize_child");
+    assert_eq!(
+        node.call("initialize", json!({}))["result"]["adapterName"],
+        "acp-bridge"
+    );
+    node.wait(|message| message["method"] == "log");
+    let log = logs(&node)
+        .into_iter()
+        .find(|log| log["code"] == "adapter.agent_exited")
+        .unwrap();
+    let notice = notices(&node)
+        .into_iter()
+        .find(|notice| notice["code"] == "adapter.agent_exited")
+        .unwrap();
+    let reply = node.call("session/start", json!({}));
+    let error = &reply["error"]["data"];
+    for diagnostic in [&log, &notice, error] {
+        assert_eq!(diagnostic["code"], "adapter.agent_exited");
+        assert_eq!(diagnostic["params"]["stage"], "session");
+        assert_eq!(diagnostic["params"]["exit_code"], "11");
+    }
+    assert!(node.done.take().unwrap().join().unwrap().is_err());
+}
+
+#[test]
+fn a_late_response_does_not_consume_the_exit_diagnostic() {
+    let mut node = Node::start_with("acp_exit_after_initialize_child");
+    node.call("initialize", json!({}));
+    node.wait(|message| message["method"] == "log");
+    // The response and the following call share the same input stream.
+    let unrelated = json!({"jsonrpc":"2.0","id":90,"result":{}});
+    node.to_bridge
+        .send(format!("{unrelated}\n").into_bytes())
+        .unwrap();
+    let reply = node.call("session/start", json!({}));
+    assert_eq!(reply["error"]["data"]["code"], "adapter.agent_exited");
+    assert!(node.done.take().unwrap().join().unwrap().is_err());
+    assert!(!node.messages().iter().any(|msg| msg["id"] == 90));
+}
+
+#[test]
+fn acp_cancel_pending_child() {
+    if !edge_child_requested("acp_cancel_pending_child") {
+        return;
+    }
+    let input = BufReader::new(io::stdin().lock());
+    let mut out = io::stdout().lock();
+    writeln!(out).unwrap();
+    let mut prompt = None;
+    let mut pending = std::collections::BTreeSet::new();
+    let mut cancelled = false;
+    let mut late = false;
+    for line in input.lines() {
+        let message: Value = serde_json::from_str(&line.unwrap()).unwrap();
+        let result = match message["method"].as_str() {
+            Some("initialize") => json!({"agentCapabilities":{}}),
+            Some("session/new") => json!({"sessionId":"cancel-fixture"}),
+            Some("session/prompt") => {
+                prompt = Some(message["id"].clone());
+                late = message["params"]["prompt"][0]["text"] == "late";
+                if late {
+                    edge_child_send(
+                        &mut out,
+                        json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"cancel-fixture",
+                            "update":{"sessionUpdate":"plan","entries":[{"content":"prompt held"}]}}}),
+                    );
+                } else {
+                    send_cancel_fixture_confirmations(&mut out, &mut pending);
+                }
+                continue;
+            }
+            Some("session/cancel") => {
+                assert_eq!(message["params"]["sessionId"], "cancel-fixture");
+                cancelled = true;
+                if std::mem::take(&mut late) {
+                    send_cancel_fixture_confirmations(&mut out, &mut pending);
+                }
+                continue;
+            }
+            None => {
+                assert!(cancelled);
+                assert!(pending.remove(&message["id"].as_u64().unwrap()));
+                assert_eq!(message["result"]["outcome"], json!({"outcome":"cancelled"}));
+                if pending.is_empty() {
+                    edge_child_send(
+                        &mut out,
+                        json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"cancel-fixture",
+                            "update":{"sessionUpdate":"plan","entries":[{"content":"confirmations cleared"}]}}}),
+                    );
+                    edge_child_send(
+                        &mut out,
+                        json!({"jsonrpc":"2.0","id":prompt.take().unwrap(),"result":{"stopReason":"cancelled"}}),
+                    );
+                }
+                continue;
+            }
+            other => panic!("unexpected fixture method {other:?}"),
+        };
+        edge_child_send(
+            &mut out,
+            json!({"jsonrpc":"2.0","id":message["id"],"result":result}),
+        );
+    }
+}
+
+fn send_cancel_fixture_confirmations(
+    out: &mut impl Write,
+    pending: &mut std::collections::BTreeSet<u64>,
+) {
+    for (id, title) in [
+        (90, "First fixture confirmation"),
+        (91, "Second fixture confirmation"),
+    ] {
+        assert!(pending.insert(id));
+        edge_child_send(
+            out,
+            json!({"jsonrpc":"2.0","id":id,"method":"session/request_permission","params":{
+                "sessionId":"cancel-fixture","toolCall":{"title":title},"options":[]
+            }}),
+        );
+    }
+}
+
+#[test]
+fn cancelling_a_prompt_answers_every_pending_confirmation() {
+    let mut node = Node::start_with("acp_cancel_pending_child");
+    node.call("initialize", json!({}));
+    assert_eq!(
+        node.call("session/start", json!({}))["result"]["sessionId"],
+        "cancel-fixture"
+    );
+    node.call("session/prompt", json!({"text":"fixture"}));
+    node.wait(|message| {
+        message["method"] == "approval/request"
+            && message["params"]["action"] == "Second fixture confirmation"
+    });
+    assert_eq!(node.call("session/cancel", json!({}))["result"], json!({}));
+    node.wait(|message| message["params"]["plan"]["steps"][0] == "confirmations cleared");
+    assert_eq!(node.call("shutdown", json!({}))["result"], json!({}));
+    node.done.take().unwrap().join().unwrap().unwrap();
+}
+
+#[test]
+fn a_confirmation_arriving_during_cancellation_is_cancelled() {
+    let mut node = Node::start_with("acp_cancel_pending_child");
+    node.call("initialize", json!({}));
+    assert_eq!(
+        node.call("session/start", json!({}))["result"]["sessionId"],
+        "cancel-fixture"
+    );
+    node.call("session/prompt", json!({"text":"late"}));
+    node.wait(|message| message["params"]["plan"]["steps"][0] == "prompt held");
+    assert_eq!(node.call("session/cancel", json!({}))["result"], json!({}));
+    node.wait(|message| message["params"]["plan"]["steps"][0] == "confirmations cleared");
+    assert!(node
+        .messages()
+        .iter()
+        .all(|message| message["method"] != "approval/request"));
+    assert!(!node.state("AGENT_STATE_BLOCKED"));
+    assert_eq!(node.call("shutdown", json!({}))["result"], json!({}));
+    node.done.take().unwrap().join().unwrap().unwrap();
 }

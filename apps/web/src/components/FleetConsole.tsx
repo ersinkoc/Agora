@@ -1,14 +1,17 @@
 import { useMemo, useState } from 'react';
 import { t } from '../i18n';
 import type { AgentTileModel } from '../model';
-import { type AttentionItem, type FleetFilter, type GroupBy, FLEET_FILTERS, type FleetCounts, collapseAttention, decidableInline, emptyKind, fleetView, groupFleet } from '../net/fleet';
-import { loadGroupBy, saveGroupBy } from '../net/fleetPrefs';
+import { type AttentionItem, type FleetFilter, FLEET_FILTERS, projectSpread, sharedAcross, type ProjectSpread, type FleetCounts, collapseAttention, decidableInline, emptyKind, fleetView, groupFleet } from '../net/fleet';
+import { saveGroupBy, useGroupBy } from '../net/fleetPrefs';
+import { GroupByControl, groupTitle } from './GroupByControl';
+import { ProjectChip, ProjectHint } from './ProjectMark';
 import { ago } from '../net/time';
-import { money, type UsageSummary } from '../net/usage';
+import type { UsageSummary } from '../net/usage';
 import { approvalName } from '../net/approvalText';
 import { detailText } from '../net/tool';
 import { type ApprovalModel, type MachineModel, visible } from '../net/view';
 import { AgentTile } from './AgentTile';
+import { Skeleton } from './EmptyState';
 import { Icon } from './Icon';
 import { StateBadge, StateMark } from './StateBadge';
 import type { StartChoice } from './StartApproval';
@@ -189,7 +192,8 @@ function Command({ text }: { text: string }) {
 export function FleetEmpty({ kind, machines, onStart, onRetry, pairing }: { kind: 'connecting' | 'offline' | 'empty' | 'first-run'; machines: readonly MachineModel[]; onStart?: (machine?: string) => void; onRetry?: () => void; pairing?: PairingUi }) {
   const host = typeof window !== 'undefined' && window.location?.host ? window.location.host : 'HUB:7443';
   const online = machines.filter((m) => m.online);
-  if (kind === 'connecting') return <div className="fleet-empty" role="status" aria-busy="true"><p className="muted m-0">{t('fleet-loading')}</p></div>;
+  if (kind === 'connecting') return <div className="fleet-empty fleet-empty--wide" role="status" aria-busy="true"><p className="muted m-0">{t('fleet-loading')}</p>
+      <div className="fleet-grid w-full" aria-hidden>{[0, 1, 2].map((i) => <div key={i} className="tile tile--compact"><Skeleton className="h-4 w-2/3" /><Skeleton className="h-3 w-full" /><Skeleton className="h-3 w-1/2" /></div>)}</div></div>;
   if (kind === 'offline') {
     return (
       <div className="fleet-empty" role="alert">
@@ -247,8 +251,8 @@ export function FleetConsole({ fleet, machines, approvals, usage, link, now, onO
 }) {
   const view = useMemo(() => fleetView(fleet, approvals, machines, pairing?.cards), [fleet, approvals, machines, pairing?.cards]);
   const [filter, setFilter] = useState<FleetFilter | undefined>();
-  const [by, setBy] = useState<GroupBy>(() => loadGroupBy());
-  const chooseBy = (next: GroupBy) => { setBy(next); saveGroupBy(next); };
+  const by = useGroupBy();
+  const spread = useMemo(() => projectSpread(fleet), [fleet]);
   const groups = useMemo(() => groupFleet(view.sorted, machines, by, filter), [view.sorted, machines, by, filter]);
   const empty = emptyKind(link, fleet.length + approvals.length, machines.length);
   const asks = useMemo(() => {
@@ -256,7 +260,6 @@ export function FleetConsole({ fleet, machines, approvals, usage, link, now, onO
     for (const x of approvals) if (!m.has(x.agentId)) m.set(x.agentId, askText(x));
     return m;
   }, [approvals]);
-  const cost = (a: AgentTileModel) => (usage?.perAgent.has(a.id) ? money(usage.perAgent.get(a.id) ?? 0) : undefined);
 
   const body = empty ? (
     <>
@@ -271,27 +274,27 @@ export function FleetConsole({ fleet, machines, approvals, usage, link, now, onO
       {pairing?.window?.open && <PairWindowControl ui={pairing} />}
       <section className="fleet-groups" aria-label={t('fleet-panel')}>
         <div className="fleet-tools">
-          <div className="fleet-tools__by" role="group" aria-label={t('fleet-group-by')}>
-            <span className="muted">{t('fleet-group-by')}</span>
-            {(['machine', 'project'] as const).map((g) => <button key={g} type="button" className="fleet-seg" aria-pressed={by === g} onClick={() => chooseBy(g)}>{t(g === 'machine' ? 'fleet-group-machine' : 'fleet-group-project')}</button>)}
-          </div>
+          <GroupByControl by={by} onChange={saveGroupBy} />
           {filter && <p className="fleet-tools__filter m-0" role="status">{t('fleet-filter-active', { name: t(FILTER_WORD[filter]) })} <button type="button" className="link" onClick={() => setFilter(undefined)}>{t('fleet-filter-clear')}</button></p>}
         </div>
         {groups.length === 0 && <p className="muted m-0">{t('fleet-filter-none')}</p>}
         {groups.map((g) => (
-          <section key={g.key} className={`fleet-group${g.online ? '' : ' fleet-group--offline'}`} aria-label={g.name || t('fleet-no-project')}>
+          <section key={g.key} className={`fleet-group${g.online ? '' : ' fleet-group--offline'}`} aria-label={groupTitle(g, by)}>
             <header className="fleet-group__head">
               {by === 'machine' && <span aria-hidden className={`fleet-dot ${g.online ? 'bg-finished' : 'bg-unknown'}`} />}
-              <h3 className="fleet-group__name">{g.name || t('fleet-no-project')}</h3>
+              <h3 className="fleet-group__name">{groupTitle(g, by)}</h3>
               <span className="muted">{t('ide-status-agents', { count: g.agents.length })}</span>
+              {by === 'project' && sharedAcross(spread.get(g.key)) && <ProjectChip spread={spread.get(g.key) as ProjectSpread} />}
               {by === 'machine' && !g.online && g.machine && <span className="muted">{t('fleet-offline-since', { when: ago(g.machine.lastSeenMs, now) })}</span>}
               <span className="flex-1" />
               {by === 'machine' && g.online && onStart && <button type="button" className="ide-iconbtn" onClick={() => onStart(g.machine?.id)} aria-label={t('fleet-start-on', { machine: g.name })} title={t('fleet-start-on', { machine: g.name })}><Icon name="plus" /></button>}
             </header>
             {by === 'machine' && !g.online && <p className="muted m-0">{t('fleet-offline-note')}</p>}
+            {by === 'project' && sharedAcross(spread.get(g.key)) && <p className="muted m-0 text-xs">{t('fleet-same-project-on', { machines: (spread.get(g.key) as ProjectSpread).machines.join(', ') })}</p>}
+            {by === 'project' && spread.get(g.key) && <ProjectHint spread={spread.get(g.key) as ProjectSpread} />}
             {g.agents.length === 0 ? (g.online ? <p className="muted m-0">{t('fleet-no-agents-here')}</p> : null) : (
               <div className="fleet-grid">
-                {g.agents.map((a) => <AgentTile key={a.id} agent={a} onOpen={onOpen} context={{ group: by, ask: asks.get(a.id), cost: cost(a), now }} />)}
+                {g.agents.map((a) => <AgentTile key={a.id} agent={a} onOpen={onOpen} context={{ group: by, ask: asks.get(a.id), now, same: by !== 'project' && a.projectId && sharedAcross(spread.get(a.projectId)) ? spread.get(a.projectId) : undefined }} />)}
               </div>
             )}
           </section>

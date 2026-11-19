@@ -166,7 +166,16 @@ fn repo(h: &Path) -> PathBuf {
 }
 
 /// A node as a real process whose stdout and stderr go to `log` (appended). `extra` is set in its environment.
-fn start_node(h: &Path, repo: &Path, log: &Path, extra: &[(&str, &str)]) -> NodeProc {
+/// `control_token`: the policy makes this node require the control token (ADR-0082). The node binds the socket before it
+/// writes the token beside it (a second node fails at the bind and never replaces the running one's token, control.rs), so
+/// such a node is ready for control calls only when both exist; a CLI racing in between reads no token and is refused.
+fn start_node(
+    h: &Path,
+    repo: &Path,
+    log: &Path,
+    extra: &[(&str, &str)],
+    control_token: bool,
+) -> NodeProc {
     let _ = std::fs::remove_file(h.join("node.sock"));
     let open = || {
         std::fs::OpenOptions::new()
@@ -183,8 +192,9 @@ fn start_node(h: &Path, repo: &Path, log: &Path, extra: &[(&str, &str)]) -> Node
         .stdout(open())
         .stderr(open());
     let node = NodeProc(c.spawn().unwrap());
+    let token = h.join("control.token");
     let end = Instant::now() + Duration::from_secs(60);
-    while !h.join("node.sock").exists() {
+    while !h.join("node.sock").exists() || (control_token && !token.exists()) {
         assert!(Instant::now() < end, "no node");
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -286,7 +296,7 @@ fn a_secret_is_in_no_output_of_the_node_the_cli_the_terminal_or_a_file() {
     let log = h.join("node.log");
     let mut seen_cli = String::new();
     // The node's own environment carries another kind's token (it is scrubbed, and must not be printed either).
-    let node = start_node(&h, &repo, &log, &[("OTHER_TOKEN", OTHER)]);
+    let node = start_node(&h, &repo, &log, &[("OTHER_TOKEN", OTHER)], false);
     let start = |kind: &str| {
         let (code, out, err) = run(
             &h,
@@ -344,7 +354,7 @@ fn a_secret_is_in_no_output_of_the_node_the_cli_the_terminal_or_a_file() {
     drop(attach);
     // The node itself restarts: its output continues in the same log.
     drop(node);
-    let node = start_node(&h, &repo, &log, &[("OTHER_TOKEN", OTHER)]);
+    let node = start_node(&h, &repo, &log, &[("OTHER_TOKEN", OTHER)], false);
     let (_, out, err) = run(&h, &["agent", "list"], "");
     seen_cli += &format!("{out}{err}");
     let (_, out, err) = run(&h, &["doctor"], "");
@@ -365,7 +375,7 @@ fn a_secret_is_in_no_output_of_the_node_the_cli_the_terminal_or_a_file() {
             ),
         )
         .unwrap();
-        let node = start_node(&h, &repo, &log, &[]);
+        let node = start_node(&h, &repo, &log, &[], agora_platform::CONTROL_TOKEN_REQUIRED);
         let (code, out, err) = run(
             &h,
             &["agent", "start", "probe", "--project", "demo", "--worktree"],

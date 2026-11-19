@@ -34,15 +34,16 @@ Bind   = { "agent": string } | { "follow": "attention" | "selection" }
 | id | shows |
 | --- | --- |
 | `fleet` | Home: the fleet console (`fleet-console.md`): what needs you, then every agent as a tile; added with the fleet console, an older window shows it as an unknown panel |
-| `terminal` | the bound agent's terminal |
+| `terminal` | the bound agent's terminal as a tile of its own (a slim bar with machine, folder and branch, state and text size, then the terminal) |
 | `conversation` | the bound agent's chat |
 | `agent` | terminal or chat, whichever the agent has (and its summary once it has ended) |
 | `approvals` | what needs you (requests waiting for your OK) |
-| `changes` | changed files across workspaces |
-| `files` | the bound agent's files |
+| `changes` | the changed files of the bound agent's folder and the diff of the one chosen, side by side or unified; unbound it asks which folder (the ones with changes first) |
+| `files` | the bound agent's folder as a tree, a file with syntax colours and its changed lines, search by name; read-only |
+| `manager` | the file manager of the bound agent's folder: a sortable, filterable list with a folder tree, a breadcrumb and a preview; read-only (added with the tool panes; an older window shows it as an unknown panel) |
 | `tasks` | shared tasks and files |
 | `messages` | team chat between agents |
-| `usage` | what was spent |
+| `usage` | tokens, context and time (no money) |
 | `theme` | the theme editor (`themes.md`); added in rung 2, an older window shows it as an unknown panel |
 | `empty` | a chooser: an agent, "what needs you next", "the selected agent", or one of the panels above |
 

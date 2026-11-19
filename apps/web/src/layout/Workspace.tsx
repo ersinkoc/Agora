@@ -7,8 +7,10 @@ import { NoAskBadge } from '../components/NoAskBadge';
 import { type Action, type Place, type Workspace as WorkspaceState, displayRoot, visiblePanes } from './engine';
 import { type Divider, type Frame, type Rect, arrange, dragDelta, dropPlace } from './geometry';
 import { Menu, type MenuItem } from './Menu';
+import { TabStrip } from './TabStrip';
 import { type Bindings, agentOf } from './streams';
 import { type Pane, MIN_RATIO, bindOf, followOf, isKnownPanel, panesOf } from './tree';
+import { TOOL_PANELS, isToolPanel, type ToolPanel } from '../net/paneTools';
 
 const BAR = '2.25rem'; // the height of a pane's bar (h-9)
 const DRAG_TYPE = 'application/x-agora-pane';
@@ -25,10 +27,10 @@ function box(r: Rect, top?: string): CSSProperties {
 // The panel names the user sees for each panel id (UI vocabulary, not internal terms).
 const PANEL_LABEL: Record<string, string> = {
   fleet: 'fleet-panel', terminal: 'focus-terminal', conversation: 'chat-log', agent: 'layout-panel-agent', approvals: 'attention-title', changes: 'ide-tab-changes',
-  files: 'console-files', tasks: 'board-title', messages: 'ide-tab-messages', usage: 'ide-tab-cost', theme: 'theme-editor-title', empty: 'layout-panel-empty',
+  files: 'console-files', manager: 'layout-panel-manager', tasks: 'board-title', messages: 'ide-tab-messages', usage: 'ide-tab-cost', theme: 'theme-editor-title', empty: 'layout-panel-empty',
 };
 export const panelLabel = (panel: string) => (PANEL_LABEL[panel] ? t(PANEL_LABEL[panel] as string) : t('layout-panel-unknown', { id: panel }));
-const GLOBAL_PANELS = ['fleet', 'approvals', 'changes', 'tasks', 'messages', 'usage', 'theme'];
+const GLOBAL_PANELS = ['fleet', 'approvals', 'tasks', 'messages', 'usage', 'theme'];
 
 export interface WorkspaceProps {
   ws: WorkspaceState;
@@ -40,14 +42,15 @@ export interface WorkspaceProps {
   renderAgent: (a: AgentTileModel) => ReactNode;
   // A panel that is not about one agent (Needs you, Changes, ...); undefined when this window cannot draw it.
   renderPanel: (panel: string) => ReactNode | undefined;
-  onFiles?: (a: AgentTileModel) => void;
-  /** The agent's files drawn inside a Files pane; without it the pane offers to open them in a window. */
-  renderFiles?: (a: AgentTileModel) => ReactNode | undefined;
+  /** A tool pane (Terminal, Changes, Files, File manager) for the agent the pane shows, or the chooser when it shows none yet;
+   *  undefined when this window cannot draw it. `rebind` points the pane at another agent's folder. */
+  renderTool?: (panel: ToolPanel, agent: AgentTileModel | undefined, rebind: (agentId: string) => void) => ReactNode | undefined;
   welcome: ReactNode;
-  onStart?: () => void;
+  /** What the + button of a tab group offers (start an agent, a terminal, the tools beside the agent in focus). */
+  plusItems?: () => MenuItem[];
 }
 
-export function Workspace({ ws, dispatch, fleet, bindings, narrow, renderAgent, renderPanel, onFiles, renderFiles, welcome, onStart }: WorkspaceProps) {
+export function Workspace({ ws, dispatch, fleet, bindings, narrow, renderAgent, renderPanel, renderTool, welcome, plusItems }: WorkspaceProps) {
   const host = useRef<HTMLDivElement>(null);
   const root = displayRoot(ws, narrow);
   const { frames, dividers } = useMemo(() => arrange(root), [root]);
@@ -55,7 +58,8 @@ export function Workspace({ ws, dispatch, fleet, bindings, narrow, renderAgent, 
   const all = panesOf(ws.layout.root);
   const byId = useMemo(() => new Map(fleet.map((a) => [a.id, a])), [fleet]);
   const agentFor = (p: Pane) => { const id = agentOf(p, bindings); return id ? byId.get(id) : undefined; };
-  const label = (p: Pane) => { const a = agentFor(p); return a ? a.name : followOf(p) ? t(`layout-follow-${followOf(p)}`) : panelLabel(p.panel); };
+  // A pane's name: the agent it shows; for a tool (Terminal, Changes, Files, File manager) the tool first, so two panes of one agent differ.
+  const label = (p: Pane) => { const a = agentFor(p); return a ? (isToolPanel(p.panel) ? t('layout-tool-of', { what: panelLabel(p.panel), name: a.name }) : a.name) : followOf(p) ? t(`layout-follow-${followOf(p)}`) : panelLabel(p.panel); };
   const [drag, setDrag] = useState<string | undefined>();
   const [drop, setDrop] = useState<{ frame: string; place: Place } | undefined>();
   const single = all.length === 1;
@@ -69,10 +73,12 @@ export function Workspace({ ws, dispatch, fleet, bindings, narrow, renderAgent, 
     { label: t('layout-follow-selection'), checked: followOf(p) === 'selection', run: () => dispatch({ type: 'bind', pane: p.id, bind: { follow: 'selection' }, panel: 'agent' }) },
     ...fleet.filter((a) => !a.closed).map((a, i) => ({ label: t('layout-show-agent', { name: a.name }), divider: i === 0, checked: bindOf(p) === a.id, run: () => dispatch({ type: 'bind', pane: p.id, bind: { agent: a.id }, panel: 'agent' }) })),
     ...GLOBAL_PANELS.map((panel, i) => ({ label: panelLabel(panel), divider: i === 0, checked: p.panel === panel, run: () => dispatch({ type: 'bind', pane: p.id, panel }) })),
-    // A pane bound to one agent shows the agent itself or its files (an editor's file tree next to its terminal).
-    ...(bindOf(p) && renderFiles ? [
-      { label: t('layout-show-agent-itself'), divider: true, checked: p.panel !== 'files', run: () => dispatch({ type: 'bind', pane: p.id, bind: { agent: bindOf(p) as string }, panel: 'agent' }) },
-      { label: t('layout-show-agent-files'), checked: p.panel === 'files', run: () => dispatch({ type: 'bind', pane: p.id, bind: { agent: bindOf(p) as string }, panel: 'files' }) },
+    // The tools: for a pane bound to one agent, the same agent's terminal, changes, files and file manager (an editor's file tree next to
+    // its terminal); for any other, the tool's own chooser.
+    ...(renderTool ? [
+      ...(bindOf(p) ? [{ label: t('layout-show-agent-itself'), divider: true, checked: p.panel === 'agent', run: () => dispatch({ type: 'bind', pane: p.id, bind: { agent: bindOf(p) as string }, panel: 'agent' }) }] : []),
+      ...TOOL_PANELS.map((panel, i) => ({ label: panelLabel(panel), divider: i === 0 && !bindOf(p), checked: p.panel === panel,
+        run: () => dispatch({ type: 'bind', pane: p.id, panel, ...(bindOf(p) ? { bind: { agent: bindOf(p) as string } } : {}) }) })),
     ] : []),
   ];
   const others = (p: Pane) => all.filter((o) => o.id !== p.id);
@@ -145,7 +151,8 @@ export function Workspace({ ws, dispatch, fleet, bindings, narrow, renderAgent, 
       <div key={`bar:${f.key}`} style={{ ...box(f.rect), bottom: undefined, height: BAR }} className={`flex items-stretch border-b border-line bg-surface-1 ${ring}`}
         onPointerDownCapture={() => dispatch({ type: 'focus', pane: front.id })}>
         {f.tabs ? (
-          <div role="tablist" aria-label={t('console-agents')} className="flex min-w-0 flex-1 overflow-x-auto quiet-scroll">
+          <TabStrip tabs={f.panes.map((p, i) => { const pa = agentFor(p); return { id: p.id, label: label(p), active: i === f.active, state: pa?.state, failed: pa ? endedWithError(pa) : undefined }; })} onPick={(id) => dispatch({ type: 'activate', pane: id })}
+            trailing={plusItems && focused ? <Menu label={t('ide-new-tab')} items={plusItems} className="ide-iconbtn m-1 flex-none self-center"><Icon name="plus" /></Menu> : undefined}>
             {f.panes.map((p, i) => {
               const pa = agentFor(p);
               return (
@@ -154,13 +161,12 @@ export function Workspace({ ws, dispatch, fleet, bindings, narrow, renderAgent, 
                   onClick={() => dispatch({ type: 'activate', pane: p.id })} onKeyDown={(e) => tabKey(e, f, i)} {...dragProps(p)}>
                   {pa ? <StateMark state={pa.state} failed={endedWithError(pa)} /> : <Icon name="layout" className="size-3.5 text-muted" />}
                   <span className="min-w-0 truncate">{label(p)}</span>
-                  {pa && <NoAskBadge agent={pa} icon />}
+                  {pa && <NoAskBadge agent={pa} icon nested />}
                   <button type="button" tabIndex={-1} aria-hidden className="ide-iconbtn size-5 opacity-60 group-hover:opacity-100" onClick={(e) => { e.stopPropagation(); dispatch({ type: 'close', pane: p.id }); }} title={t('ide-close-tab', { name: label(p) })}><Icon name="close" className="size-3" /></button>
                 </div>
               );
             })}
-            {onStart && focused && <button type="button" className="ide-iconbtn m-1 flex-none" onClick={() => onStart()} aria-label={t('ide-new-tab')} title={t('ide-new-tab')}><Icon name="plus" /></button>}
-          </div>
+          </TabStrip>
         ) : (
           <div className="flex min-w-0 flex-1 cursor-grab items-center gap-2 px-3 text-[0.8125rem]" title={t('layout-drag')} {...dragProps(front)}>
             {a ? <StateMark state={a.state} failed={endedWithError(a)} /> : <Icon name="layout" className="size-3.5 text-muted" />}
@@ -188,10 +194,18 @@ export function Workspace({ ws, dispatch, fleet, bindings, narrow, renderAgent, 
       if (followed === 'attention') return <Note>{t('attention-empty')}</Note>;
       if (followed === 'selection') return <Note>{t('layout-nothing-selected')}</Note>;
       if (bindOf(p)) return <Note>{t('layout-gone')}</Note>;
+      if (isToolPanel(p.panel)) return renderTool?.(p.panel, undefined, (id) => dispatch({ type: 'bind', pane: p.id, bind: { agent: id }, panel: p.panel })) ?? <Note>{t('layout-files-none')}</Note>;
       return picker(p);
     }
-    if (p.panel === 'files' && renderFiles) { const view = renderFiles(a); if (view) return <Fragment key={a.id}>{view}</Fragment>; }
-    if (p.panel === 'files') return <Note>{onFiles ? <button type="button" className="button" onClick={() => onFiles(a)}><Icon name="files" />{t('layout-files-open', { name: a.name })}</button> : t('layout-files-none')}</Note>;
+    if (renderTool && isToolPanel(p.panel)) {
+      if (p.panel === 'terminal' && a.terminal === false && !a.closed) return <Note>{t('layout-no-terminal')}</Note>;
+      // A terminal that ended shows what the agent's own view shows (the summary), not a dead screen.
+      if (!(p.panel === 'terminal' && a.closed)) {
+        const view = renderTool(p.panel, a, (id) => dispatch({ type: 'bind', pane: p.id, bind: { agent: id }, panel: p.panel }));
+        if (view) return <Fragment key={`${a.id}:${p.panel}`}>{view}</Fragment>;
+        return <Note>{t('layout-files-none')}</Note>;
+      }
+    }
     if (p.panel === 'terminal' && a.terminal === false && !a.closed) return <Note>{t('layout-no-terminal')}</Note>;
     if (p.panel === 'conversation' && a.terminal !== false && !a.closed) return <Note>{t('layout-no-conversation')}</Note>;
     // Keyed by the agent: a pane that changes agent (following attention) mounts a new view; one that keeps it keeps its terminal.
@@ -211,7 +225,7 @@ export function Workspace({ ws, dispatch, fleet, bindings, narrow, renderAgent, 
           <div className="flex flex-wrap gap-1.5">
             <button type="button" className="ide-chip hover:text-ink" onClick={() => pick({ type: 'bind', pane: pane.id, bind: { follow: 'attention' }, panel: 'agent' })}>{t('layout-follow-attention')}</button>
             <button type="button" className="ide-chip hover:text-ink" onClick={() => pick({ type: 'bind', pane: pane.id, bind: { follow: 'selection' }, panel: 'agent' })}>{t('layout-follow-selection')}</button>
-            {GLOBAL_PANELS.map((panel) => <button key={panel} type="button" className="ide-chip hover:text-ink" onClick={() => pick({ type: 'bind', pane: pane.id, panel })}>{panelLabel(panel)}</button>)}
+            {[...(renderTool ? TOOL_PANELS : []), ...GLOBAL_PANELS].map((panel) => <button key={panel} type="button" className="ide-chip hover:text-ink" onClick={() => pick({ type: 'bind', pane: pane.id, panel })}>{panelLabel(panel)}</button>)}
           </div>
         </div>
       </div>

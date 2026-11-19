@@ -13,6 +13,7 @@ import { themeStore } from './themes/store';
 import { themeName } from './themes/messages';
 import { PromptBox } from './components/PromptBox';
 import type { ChatSource } from './net/chat';
+import { demoConversation } from './demoChat';
 import { AgentTile } from './components/AgentTile';
 import { StartAgent, type KindChoice } from './components/StartAgent';
 import { AttentionStrip } from './components/AttentionStrip';
@@ -23,7 +24,7 @@ import { NoAskBadge } from './components/NoAskBadge';
 import type { ApprovalModel, MachineModel, MessageModel, ProjectCost } from './net/view';
 import type { Device } from './net/approval';
 import { deviceLabel } from './net/devices';
-import { money, type UsageSummary } from './net/usage';
+import type { UsageSummary } from './net/usage';
 import { demoAgents, demoHelper, demoStartApproval, demoStartSettingsApproval } from './fixtures';
 import { demoSource, type TerminalSource } from './terminal/source';
 import { Suspense, lazy, useEffect, useMemo, useState, useSyncExternalStore, type ReactNode } from 'react';
@@ -60,31 +61,17 @@ const STATES: UiState[] = ['working', 'needs-you', 'finished', 'idle', 'unknown'
 
 // ADR-0058: a chat agent that reported its modes, models, context and cost, and a conversation with a notice in it.
 const demoChatAgent: AgentTileModel = {
-  ...(demoAgents[0] as AgentTileModel), id: 'demo/chat', terminal: false,
+  ...(demoAgents[0] as AgentTileModel), id: 'demo/chat', terminal: false, startedMs: Date.now() - 754_000,
   session: {
     modes: [{ id: 'build', name: 'Build', description: '', skipsPermissions: false }, { id: 'plan', name: 'Plan', description: 'No edits', skipsPermissions: false },
       { id: 'bypassPermissions', name: 'Bypass Permissions', description: '', skipsPermissions: true }],
     models: [{ id: 'provider/model-large', name: 'Model Large', description: '', skipsPermissions: false }, { id: 'provider/model-small', name: 'Model Small', description: '', skipsPermissions: false }],
-    currentMode: 'build', currentModel: 'provider/model-large', contextTokens: 61_400, contextWindow: 200_000, costMicros: 23_000, currency: 'USD',
+    currentMode: 'build', currentModel: 'provider/model-large', contextTokens: 61_400, contextWindow: 200_000,
   },
 };
 const demoChat: ChatSource = {
   connect(onLines) {
-    onLines([
-      { id: 1, atMs: 0, role: 'user', kind: 'text', text: 'Fix the login test.', path: '' },
-      { id: 2, atMs: 0, role: 'agent', kind: 'notice', text: '', path: '', code: 'adapter.turn_empty', params: {} },
-      { id: 3, atMs: 0, role: 'user', kind: 'text', text: 'Try again with the small model.', path: '' },
-      { id: 4, atMs: 0, role: 'agent', kind: 'plan', text: 'Run the login test\nFind why it fails', path: '' },
-      { id: 5, atMs: 0, role: 'agent', kind: 'tool', text: '{"tool":"execute","arguments":{"command":["bash","-lc","cargo test -p auth login"]}}', path: '' },
-      { id: 6, atMs: 0, role: 'agent', kind: 'tool', text: '{"tool":"Read src/auth.rs","arguments":{"file_path":"src/auth.rs","limit":200}}', path: '' },
-      { id: 7, atMs: 0, role: 'agent', kind: 'tool', text: '{"tool":"grep \\"redirect\\"","arguments":{"pattern":"redirect","path":"tests"}}', path: '' },
-      { id: 8, atMs: 0, role: 'agent', kind: 'tool', text: '{"tool":"Read tests/login.rs","arguments":{"file_path":"tests/login.rs"}}', path: '' },
-      { id: 9, atMs: 0, role: 'agent', kind: 'tool', text: '{"tool":"Edit `tests/login.rs`","arguments":{"file_path":"tests/login.rs","old_string":"\\"/home\\"","new_string":"\\"/dashboard\\""}}', path: '' },
-      { id: 10, atMs: 0, role: 'agent', kind: 'diff', text: '--- a/tests/login.rs\n+++ b/tests/login.rs\n@@ -1,1 +1,1 @@\n-    assert_eq!(res.location(), "/home");\n+    assert_eq!(res.location(), "/dashboard");\n', path: 'tests/login.rs' },
-      { id: 11, atMs: 0, role: 'agent', kind: 'plan', text: 'Run the login test\nFind why it fails\nUpdate the expected redirect', path: '' },
-      { id: 12, atMs: 0, role: 'agent', kind: 'text', text: 'The test expected the **old** redirect; I updated it to `/dashboard`.\n\n```sh\ncargo test -p auth login\n```', path: '' },
-      { id: 13, atMs: 0, role: 'agent', kind: 'notice', text: '', path: '', code: 'adapter.agent_exited', params: { stage: 'idle', exit_code: '1', stderr_tail: 'error: free usage limit reached' } },
-    ], true);
+    onLines(demoConversation(), true);
     return { close() {} };
   },
 };
@@ -159,12 +146,11 @@ export function Gallery() {
 }
 
 // Focus: one agent, full size. The terminal arrives with the hub connection; until then a placeholder.
-export function Focus({ agent, approvals = [], onResolve, source: live, costMicroUsd, chatSource, sendPrompt, chooseOption, onBack }: {
+export function Focus({ agent, approvals = [], onResolve, source: live, chatSource, sendPrompt, chooseOption, onBack }: {
   agent: AgentTileModel | undefined;
   // What this agent waits on, answered here as in the window (an agent shown full size must not be left waiting).
   approvals?: readonly ApprovalModel[];
   onResolve?: (approval: ApprovalModel, approved: boolean, choice?: StartChoice) => void;
-  costMicroUsd?: number;
   source?: TerminalSource;
   chatSource?: ChatSource;
   sendPrompt?: (agent: AgentTileModel, text: string) => Promise<boolean>;
@@ -193,7 +179,7 @@ export function Focus({ agent, approvals = [], onResolve, source: live, costMicr
         <NoAskBadge agent={agent} />
         <span className="hidden min-w-0 items-center gap-1.5 truncate text-xs text-muted md:flex"><Icon name="machine" className="size-3.5" />{agent.machine}<Icon name="chevron" className="size-3 rtl:rotate-180" /><Icon name="folder" className="size-3.5" />{agent.project || agent.workspace}{agent.branch && <><Icon name="branch" className="ms-1 size-3.5" /><span className="font-mono">{agent.branch}</span></>}</span>
         <span className="flex-1" />
-        {agent.tokens ? <span className="ide-chip">{t('agent-tokens', { count: agent.tokens })}{costMicroUsd !== undefined ? ` · ${t('agent-cost', { amount: money(costMicroUsd) })}` : ''}</span> : null}
+        {agent.tokens ? <span className="ide-chip">{t('agent-tokens', { count: agent.tokens })}</span> : null}
         <span className="hidden sm:block"><LanguagePicker compact /></span>
         <ThemePicker />
       </header>
@@ -429,19 +415,6 @@ export function MachinesPage({ machines, agents = [], usage, projects = [], onBa
   return (
     <PageFrame wide title={t('machines-title')} onBack={onBack}>
       <NetworkView machines={machines} agents={agents} usage={usage} hubName={window.location.host} onForget={onForget} focus={focus} />
-      {projects.length > 0 && (
-        <section className="stack" aria-label={t('usage-projects')}>
-          <h2>{t('usage-projects')}</h2>
-          <ul className="machines">
-            {projects.map((p) => <li key={p.label} className="machine"><strong>{p.label}</strong><span className="muted">{t('machine-cost', { amount: money(p.microUsd) })}</span></li>)}
-          </ul>
-        </section>
-      )}
-      {usage && usage.totalMicroUsd > 0 && (
-        <p className="muted">
-          {t('usage-total', { amount: money(usage.totalMicroUsd) })} · {usage.pricesAtMs ? t('usage-prices-date', { date: new Date(usage.pricesAtMs).toLocaleDateString() }) : t('usage-prices-bundled')}
-        </p>
-      )}
     </PageFrame>
   );
 }

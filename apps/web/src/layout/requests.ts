@@ -27,3 +27,20 @@ export function takeProjectRequest(): string | undefined {
   return p;
 }
 export const subscribeProjectRequests = (l: () => void) => { projectListeners.add(l); return () => { projectListeners.delete(l); }; };
+
+// The same for a tool pane (Terminal, Changes, Files, File manager) asked for from outside the window (the command palette, a terminal
+// that was just started): which tool, and for which agent when the caller knows it. `wait` holds the request until that agent is in the
+// fleet (a terminal started a moment ago is not there yet).
+export interface ToolRequest { panel: string; agent?: string; wait?: boolean }
+let pendingTools: ToolRequest[] = [];
+const toolListeners = new Set<() => void>();
+export function requestTool(req: ToolRequest) {
+  pendingTools = [...pendingTools, req].slice(-8);
+  toolListeners.forEach((l) => l());
+}
+export function takeToolRequests(): ToolRequest[] {
+  const r = pendingTools;
+  pendingTools = [];
+  return r;
+}
+export const subscribeToolRequests = (l: () => void) => { toolListeners.add(l); return () => { toolListeners.delete(l); }; };

@@ -7,6 +7,7 @@ import { childPath, directoryReasonKey, type DirectoryInfo, type DirectoryListin
 import { Icon } from './Icon';
 import { isBareName, machineFor, missingPrograms, shortBinary, trustCommand } from './startChoice';
 import { LaunchSettings } from './LaunchSettings';
+import { recall, remember } from './launchMemory';
 import { chosenSettings, noSettings, settingName, usableSettings, type LaunchSettingChoice, type SettingsState } from './launchSettings';
 import { ASK, chosenIds, confirmedIds, confirmSkip, harmless, initialLaunch, keepAsking, labelOf, pickPermission, skipping, toggleHarmless, usableOptions, type LaunchOptionChoice } from './launchChoice';
 // ADR-0059: `options` are the kind's launch options as the machine lists them (none from an older machine).
@@ -39,10 +40,12 @@ const chipOff = 'border-line bg-surface-0 text-muted hover:bg-surface-2 hover:te
 
 // "Start an agent" in one window: the machine, the folder (a known one in a click, or any path), then the agent. Choosing the
 // folder shows the folder the node resolved before anything starts (ADR-0052); the rest is a click.
-export function StartAgent({ projects, machines, initialNode, trust, askApproval, loadKinds, inspect, list, onStart, onClose }: {
+export function StartAgent({ projects, machines, initialNode, initialKind, trust, askApproval, loadKinds, inspect, list, onStart, onClose }: {
   projects: readonly ProjectChoice[];
   machines: readonly MachineModel[];
   initialNode?: string;
+  // A kind to start on (a plain terminal asks for `shell`); when the machine offers no such kind nothing is chosen for the person.
+  initialKind?: string;
   // This device's id and public key: when a machine does not trust the device yet, the command that fixes it is shown right here.
   trust?: { id: string; key: string };
   // ADR-0061: whether another device of this person that `node` trusts could approve this one, and asking it to.
@@ -73,7 +76,12 @@ export function StartAgent({ projects, machines, initialNode, trust, askApproval
   const [acceptIdentityChange, setAcceptIdentityChange] = useState(false);
   // ADR-0059: "Ask before acting" until the user picks an option that skips permissions and confirms it; a new agent kind starts over.
   const [launch, setLaunch] = useState(initialLaunch);
-  useEffect(() => { setLaunch(initialLaunch()); setChosen(noSettings); }, [kind, node]);
+  useEffect(() => {
+    setLaunch(initialLaunch());
+    // ADR-0066 decision 3: what was last chosen for this kind on this machine, cleaned against what the machine lists now.
+    const listed = kinds !== 'loading' && kinds !== 'failed' ? kinds.find((k) => k.kind === kind)?.settings : undefined;
+    setChosen(kind && listed ? recall(node, kind, listed) : noSettings);
+  }, [kind, node, kinds]); // eslint-disable-line react-hooks/exhaustive-deps
   // ADR-0066: a value per setting, or nothing (the agent's own default); a new kind or machine starts over.
   const [chosen, setChosen] = useState<SettingsState>(noSettings);
   const [busy, setBusy] = useState(false);
@@ -96,7 +104,7 @@ export function StartAgent({ projects, machines, initialNode, trust, askApproval
     if (!node) return;
     let current = true;
     setKinds('loading'); setKind(''); setInfo(undefined); setError(undefined);
-    loadKinds(node).then(k => { if (current) { setKinds(k); setKind(k.find(x => x.installed)?.kind ?? ''); } }, () => { if (current) setKinds('failed'); });
+    loadKinds(node).then(k => { if (current) { setKinds(k); setKind(k.find(x => x.installed && x.kind === initialKind)?.kind ?? (initialKind ? '' : k.find(x => x.installed)?.kind ?? '')); } }, () => { if (current) setKinds('failed'); });
     return () => { current = false; };
   }, [node, loadKinds]);
   const changePath = (value: string) => { setPath(value); setInfo(undefined); setError(undefined); setSeparate(false); setAcceptIdentityChange(false); };
@@ -125,7 +133,10 @@ export function StartAgent({ projects, machines, initialNode, trust, askApproval
   };
   const go = async () => {
     if (!info) return;
-    setBusy(true); setError(await onStart(node, info, kind, separate, acceptIdentityChange, { ids: chosenIds(launch, offered), confirmed: confirmedIds(launch, offered), settings: sending })); setBusy(false);
+    setBusy(true);
+    const failure = await onStart(node, info, kind, separate, acceptIdentityChange, { ids: chosenIds(launch, offered), confirmed: confirmedIds(launch, offered), settings: sending });
+    if (!failure) remember(node, kind, sending, takes);
+    setError(failure); setBusy(false);
   };
   // Ids outside `[a-z0-9-]` are never offered (the hub relays the list; the machine decides).
   const offered: LaunchOptionChoice[] = usableOptions((kinds !== 'loading' && kinds !== 'failed' ? kinds.find((k) => k.kind === kind)?.options : undefined) ?? []);
@@ -213,6 +224,7 @@ export function StartAgent({ projects, machines, initialNode, trust, askApproval
                     {k.name}{!k.installed && <span className="text-xs">— {t('start-not-installed')}</span>}
                   </button>)}
                 </div>}
+              {Array.isArray(kinds) && initialKind && !kinds.some(k => k.installed && k.kind === initialKind) && <p role="note" className="m-0 text-xs text-muted">{t('start-terminal-missing', { kind: initialKind })}</p>}
               {Array.isArray(kinds) && kinds.some(k => !k.installed) && (() => {
                 // ADR-0069: each missing program by name; the general sentence for a kind from an older machine that does not name it.
                 const missing = missingPrograms(kinds);
