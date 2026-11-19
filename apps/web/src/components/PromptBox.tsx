@@ -39,7 +39,7 @@ export function PromptBox({ agent, send, source, choose }: { agent: AgentTileMod
   return (
     <div className="flex h-full min-h-0 flex-col gap-3 rounded-m bg-surface-0 p-3">
       {/* Keyed by the agent: another agent on screen gets a fresh bar, so nothing left open carries over; usage updates keep it. */}
-      {agent.session && <SessionBar key={agent.id} agentKey={agent.id} session={agent.session} disabled={agent.closed} choose={choose} />}
+      {agent.session && <SessionBar key={agent.id} agentKey={agent.id} session={agent.session} startedMs={agent.startedMs} disabled={agent.closed} choose={choose} />}
       <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto [&>*]:shrink-0" aria-live="polite" aria-label={t('chat-log')}>
         {lines.length === 0 && <p className="muted m-0">{t(source ? 'chat-empty' : 'prompt-intro')}</p>}
         {groups.map((g) => g.kind === 'steps'

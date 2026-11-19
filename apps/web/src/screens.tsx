@@ -60,7 +60,7 @@ const STATES: UiState[] = ['working', 'needs-you', 'finished', 'idle', 'unknown'
 
 // ADR-0058: a chat agent that reported its modes, models, context and cost, and a conversation with a notice in it.
 const demoChatAgent: AgentTileModel = {
-  ...(demoAgents[0] as AgentTileModel), id: 'demo/chat', terminal: false,
+  ...(demoAgents[0] as AgentTileModel), id: 'demo/chat', terminal: false, startedMs: Date.now() - 754_000,
   session: {
     modes: [{ id: 'build', name: 'Build', description: '', skipsPermissions: false }, { id: 'plan', name: 'Plan', description: 'No edits', skipsPermissions: false },
       { id: 'bypassPermissions', name: 'Bypass Permissions', description: '', skipsPermissions: true }],

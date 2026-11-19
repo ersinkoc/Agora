@@ -1,4 +1,7 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import { Icon } from './Icon';
+import { Menu, type MenuItem } from '../layout/Menu';
+import { duration } from '../net/time';
 import { t } from '../i18n';
 import type { SessionModel, SessionOptionModel } from '../model';
 import { choices, confirmed, contextFill, contextLabel, contextPercent, needsConfirm, needsPlaceholder, NOT_REPORTED, ownCost, pendingFor, shortCount, type OptionKind, type PendingChoice } from './sessionChoice';
@@ -6,11 +9,15 @@ import { choices, confirmed, contextFill, contextLabel, contextPercent, needsCon
 // ADR-0058: the mode and model a chat agent runs with, how full its context is, and what it says it cost. The pickers appear only
 // for what the agent reported; a mode in which the agent acts without asking is chosen only after the user confirms it. Every choice
 // names the agent (`agentKey`, hub-wide) it was made for, so a confirmation left open never reaches another agent.
-export function SessionBar({ agentKey, session, choose, disabled }: { agentKey: string; session: SessionModel; choose?: (agentKey: string, kind: OptionKind, id: string) => Promise<boolean>; disabled?: boolean }) {
+export function SessionBar({ agentKey, session, choose, disabled, startedMs }: { agentKey: string; session: SessionModel; startedMs?: number; choose?: (agentKey: string, kind: OptionKind, id: string) => Promise<boolean>; disabled?: boolean }) {
   const [held, setPending] = useState<PendingChoice | undefined>();
   const pending = pendingFor(held, agentKey);
   const [failed, setFailed] = useState(false);
   const [busy, setBusy] = useState(false);
+  // How long it has run, when this window saw it start; moves once a second-ish (every 15 s is enough for minutes).
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => { if (!startedMs || disabled) return; const id = setInterval(() => setNow(Date.now()), 15000); return () => clearInterval(id); }, [startedMs, disabled]);
+  const elapsed = startedMs && !disabled ? Math.max(0, now - startedMs) : undefined;
   const pct = contextPercent(session);
   const label = contextLabel(session);
   const said = label ? t(label.key, { percent: label.percent }) : '';
@@ -30,21 +37,23 @@ export function SessionBar({ agentKey, session, choose, disabled }: { agentKey: 
     setPending(undefined);
     void apply(agentKey, kind, id);
   };
-  const picker = (kind: OptionKind, list: readonly SessionOptionModel[], current: string) => list.length > 0 && (
-    <label className="flex min-w-0 items-center gap-1.5 text-xs text-muted">
-      <span>{t(kind === 'mode' ? 'session-mode' : 'session-model')}</span>
-      <select className="min-w-0 max-w-48 truncate rounded-xs border border-line bg-surface-1 px-1.5 py-0.5 text-xs text-ink"
-        value={current} disabled={disabled || busy || !choose} onChange={(e) => pick(kind, list, e.target.value)}>
-        {needsPlaceholder(current) && <option value={NOT_REPORTED}>{t('session-not-reported')}</option>}
-        {choices(list, current).map((o) => <option key={o.id} value={o.id} title={o.description || undefined}>
-          {o.skipsPermissions ? t('session-mode-unasked', { name: o.name || o.id }) : (o.name || o.id)}
-        </option>)}
-      </select>
-    </label>
-  );
+  // A custom menu, not a native select: it looks the same on every platform and in both themes, and lists only what the agent reported.
+  const picker = (kind: OptionKind, list: readonly SessionOptionModel[], current: string) => {
+    if (list.length === 0) return null;
+    const word = t(kind === 'mode' ? 'session-mode' : 'session-model');
+    const name = (o: SessionOptionModel) => (o.skipsPermissions ? t('session-mode-unasked', { name: o.name || o.id }) : (o.name || o.id));
+    const now = list.find((o) => o.id === current);
+    const shown = now ? name(now) : needsPlaceholder(current) ? t('session-not-reported') : current;
+    const items: MenuItem[] = choices(list, current).map((o) => ({ label: name(o), checked: o.id === current, disabled: disabled || busy || !choose, run: () => pick(kind, list, o.id) }));
+    return (
+      <Menu label={`${word}: ${shown}`} items={items} align="start" className="ide-chip max-w-56 min-w-0 cursor-pointer hover:border-accent hover:text-ink">
+        <span className="flex-none">{word}</span><span className="min-w-0 truncate font-medium text-ink">{shown}</span><Icon name="chevronDown" className="size-3" />
+      </Menu>
+    );
+  };
   return (
     <div className="flex flex-none flex-col gap-1.5 border-b border-line pb-2">
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5" role="group" aria-label={t('session-header')}>
         {picker('mode', session.modes, session.currentMode)}
         {picker('model', session.models, session.currentModel)}
         {pct !== undefined && (
@@ -57,6 +66,7 @@ export function SessionBar({ agentKey, session, choose, disabled }: { agentKey: 
             </span>
           </span>
         )}
+        {elapsed !== undefined && <span className="ide-chip" title={t('session-elapsed-hint')}><Icon name="clock" className="size-3" />{duration(elapsed)}</span>}
         {cost !== undefined && <span className="ide-chip">{t('session-cost', { amount: cost })}</span>}
         {failed && <span role="status" className="text-xs text-needs-you">{t('session-change-failed')}</span>}
       </div>
