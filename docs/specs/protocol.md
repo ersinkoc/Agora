@@ -868,8 +868,7 @@ it has, so no code and no owner step is needed while it is still valid.
 ### A structured agent's conversation (ADR-0090)
 
 All additions; nothing published changed. **Built (steps 3 and 4 of the ADR):** the ACP bridge and the node send and handle everything
-below and advertise the four capabilities. The hub relays and gates them; the hub's own view and the clients (steps 5 to 7) do not use
-them yet. A node that lacks a capability refuses `AgentSetConfig` and `AgentCancelTurn` with `protocol.capability_missing`, and the hub never
+below and advertise the four capabilities. The hub relays and gates them and keeps the last of each per agent (step 5); the clients (steps 6 and 7) are built after. A node that lacks a capability refuses `AgentSetConfig` and `AgentCancelTurn` with `protocol.capability_missing`, and the hub never
 forwards either to a node that did not offer it.
 
 - **Chat entries** (`ChatEntry`, `schema/agora/v1/commands.proto`). New `ChatKind` values `CHAT_KIND_THOUGHT` (6, the agent's thinking in
@@ -885,7 +884,7 @@ forwards either to a node that did not offer it.
 - **Events.** `AgentSessionConfig` (`Event` field 39: `agent_id`, `options[]` of `SessionConfigOption { id, name, description, category,
   type, current, choices[], skips_permissions }`; replaces the previous report; the reasoning effort is the option with category
   `SESSION_CONFIG_CATEGORY_THOUGHT_LEVEL`) and `AgentCommands` (`Event` field 66: `agent_id`, `commands[]` of `AgentCommand { name,
-  description, input_hint }`; replaces the previous list). The hub stores and relays both and keeps nothing of them in its view yet.
+  description, input_hint }`; replaces the previous list). The hub stores and relays both and keeps the LAST of each per agent in its view (at most 64 KiB encoded, 64 options of 64 choices, 100 commands: a larger report is not kept and the one before it is dropped; gone when the agent exits, is interrupted or is forgotten). `AgentSnapshot` has no field for them (adding one needs a schema change), so a window that takes a snapshot is sent each kept report right after it, as the event the node sent, at the snapshot's `pos`; a window applies these two events, which only replace, although their position is not after its own. A window that resumes from a position gets them from the backlog as before. Only for agents the window may see.
 - **Commands.** `AgentSetConfig` (request field 106: `agent_id`, `config_id`, `value`; capability `agent.set_config`) and `AgentCancelTurn`
   (107: `agent_id`, `drop_queue`; capability `agent.cancel_turn`), both the user's own and unsigned. Distinct from `AgentStop`: cancelling
   a turn ends no process. The hub audits and scopes them like `AgentSetModel`.

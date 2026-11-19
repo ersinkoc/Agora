@@ -199,7 +199,7 @@ Everything is additive (ADR-0006): new enum values, new fields and new messages 
   is at most 64 KiB.
 - **Known gap (not fixed here, `docs/backlog/phase-2.md` P2-16):** the node never checks an adapter's CURRENT mode or config value
   against the `skip_permissions` policy at start: an adapter that starts in a bypass mode is not refused.
-- Step 5 (hub: its own snapshot of `AgentSessionConfig` and `AgentCommands`), 6 (web) and 7 (TUI): not started. Step 1 (real-agent
+- Step 5 (hub): done: the hub keeps the last `AgentSessionConfig` and `AgentCommands` per agent (bounded, dropped with the agent) and sends them after a snapshot, since `AgentSnapshot` has no field for them. Steps 6 (web) and 7 (TUI): not done in that PR. Step 1 (real-agent
   fixtures) is still the maintainer's: nothing here was run against a real agent, and what real agents send (thinking, config options,
   `usage_update`) is unverified.
 

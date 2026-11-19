@@ -729,6 +729,18 @@ where
         conn.send(&frame(STREAM_EVENTS, kinds::SNAPSHOT, body.encode_to_vec()))
             .await?;
     }
+    // ADR-0090: the snapshot has no field for an agent's config options and slash commands; the last report of each follows it as
+    // the event the node sent, at the snapshot's position (a window applies these two, which replace, at its own position). Only
+    // what the window may see: the cut view of a member, the shown view of the owner.
+    if let Some((view, pos)) = &subscription.snapshot {
+        let replay = match &scope {
+            Some(s) => s.filter_view(view).session_replay(),
+            None => view.session_replay(),
+        };
+        for event in replay {
+            send_positioned(&mut conn, &crate::hub::Delivered { pos: *pos, event }).await?;
+        }
+    }
     for d in &subscription.backlog {
         send_shown(&mut conn, d, owner).await?;
     }

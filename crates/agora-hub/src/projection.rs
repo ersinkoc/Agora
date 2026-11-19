@@ -75,6 +75,10 @@ pub struct WorktreeView {
 pub struct SessionView {
     /// The last `AgentSessionOptions` (its `agent_id` is the node's local id).
     pub options: Option<agora_protocol::v1::AgentSessionOptions>,
+    /// ADR-0090: the last `AgentSessionConfig` and `AgentCommands` (local agent id), kept so a window that connects later sees the
+    /// model, mode and effort options and the slash commands. Bounded ([`MAX_CONFIG_BYTES`]); gone when the agent ends.
+    pub config: Option<agora_protocol::v1::AgentSessionConfig>,
+    pub commands: Option<agora_protocol::v1::AgentCommands>,
     /// The context's level and size as last reported; 0 when never reported.
     pub context_tokens: u64,
     pub context_window: u64,
@@ -83,6 +87,15 @@ pub struct SessionView {
     pub cost_micros: Option<u64>,
     pub currency: String,
 }
+
+/// ADR-0090: the largest `AgentSessionConfig` or `AgentCommands` the hub keeps, encoded. A node already holds to 64 options of 64
+/// choices and 100 commands; this is the hub's own bound, so a node that does not cannot make the view grow. A larger report is not
+/// kept (and the one before it is dropped, as it was replaced).
+pub const MAX_CONFIG_BYTES: usize = 64 * 1024;
+/// ADR-0090: counts the hub accepts (the node's caps).
+const MAX_CONFIG_OPTIONS: usize = 64;
+const MAX_CONFIG_CHOICES: usize = 64;
+const MAX_COMMANDS: usize = 100;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct AgentView {
@@ -206,7 +219,7 @@ pub(crate) fn named_node(body: &Body) -> Result<Option<&str>, &'static str> {
         | Body::AgentUsageReported(_)
         | Body::AgentExited(_)
         | Body::AgentSessionOptions(_)
-        // ADR-0090: stored and relayed like the options above; no node says them yet.
+        // ADR-0090: stored and relayed like the options above.
         | Body::AgentSessionConfig(_)
         | Body::AgentCommands(_)
         | Body::AgentInterrupted(_)
@@ -283,6 +296,29 @@ impl View {
         {
             a.forgotten = false;
         }
+    }
+
+    /// ADR-0090: the last `AgentSessionConfig` and `AgentCommands` of every running agent, as the events a node sent them in (producer
+    /// the node, the agent's local id), for a window that takes a snapshot: the snapshot has no field for them. Each replaces what the
+    /// window has, so a window that applies one twice is no worse off. Not for forgotten machines, forgotten or ended agents.
+    pub fn session_replay(&self) -> Vec<Event> {
+        let shown = self.shown();
+        let mut out = Vec::new();
+        for a in shown.agents.values().filter(|a| a.running && !a.forgotten) {
+            let one = |body| Event {
+                producer_id: a.node_id.clone(),
+                seq: 0,
+                at_ms: 0,
+                body: Some(body),
+            };
+            if let Some(c) = &a.session.config {
+                out.push(one(Body::AgentSessionConfig(c.clone())));
+            }
+            if let Some(c) = &a.session.commands {
+                out.push(one(Body::AgentCommands(c.clone())));
+            }
+        }
+        out
     }
 
     /// ADR-0073: the view clients are shown. A forgotten machine, and everything keyed under it (`<node>/...`: its folders, worktrees,
@@ -527,6 +563,8 @@ impl View {
                         skips_permissions: false,
                     });
                 a.running = false;
+                a.session.config = None;
+                a.session.commands = None;
                 a.state = AgentState::Done;
                 a.interrupted = Some(InterruptedView {
                     resumable: e.resumable,
@@ -577,13 +615,40 @@ impl View {
             Body::AgentForgotten(e) if producer == RESERVED_HUB_ID => {
                 if let Some(a) = self.agents.get_mut(&e.agent_id) {
                     a.forgotten = true;
+                    a.session.config = None;
+                    a.session.commands = None;
                 }
             }
             Body::AgentForgotten(_) => {}
-            // ADR-0090: the hub keeps nothing of them in its view yet (a later step puts the last report in the snapshot).
-            Body::AgentSessionConfig(_) | Body::AgentCommands(_) => {}
+            // ADR-0090: the last report of each is kept per agent (replaced, bounded) and replayed to a window that connects later.
+            Body::AgentSessionConfig(e) => {
+                if let Some(a) = self.agents.get_mut(&q(&e.agent_id)) {
+                    let fits = e.options.len() <= MAX_CONFIG_OPTIONS
+                        && e.options.iter().all(|o| o.choices.len() <= MAX_CONFIG_CHOICES)
+                        && e.encoded_len() <= MAX_CONFIG_BYTES;
+                    a.session.config = fits.then(|| e.clone());
+                }
+            }
+            Body::AgentCommands(e) => {
+                if let Some(a) = self.agents.get_mut(&q(&e.agent_id)) {
+                    let fits = e.commands.len() <= MAX_COMMANDS && e.encoded_len() <= MAX_CONFIG_BYTES;
+                    // A name that repeats (ignoring a leading "/" and case) is one command: the first wins, so a window never gets two
+                    // rows that would act as one.
+                    a.session.commands = fits.then(|| {
+                        let mut seen = BTreeSet::new();
+                        let mut kept = e.clone();
+                        kept.commands.retain(|c| {
+                            let n = c.name.trim_start_matches('/').to_lowercase();
+                            !n.is_empty() && seen.insert(n)
+                        });
+                        kept
+                    });
+                }
+            }
             Body::AgentExited(e) => {
                 if let Some(a) = self.agents.get_mut(&q(&e.agent_id)) {
+                    a.session.config = None;
+                    a.session.commands = None;
                     a.running = false;
                     a.exit_code = Some(e.exit_code);
                     a.state = AgentState::Done;
@@ -1322,6 +1387,96 @@ mod tests {
             (Some(7), "EUR"),
             "another currency starts again"
         );
+    }
+
+    #[test]
+    fn the_last_config_and_commands_are_kept_bounded_and_dropped_with_the_agent() {
+        let cfg = |n: usize| {
+            Body::AgentSessionConfig(AgentSessionConfig {
+                agent_id: "a".into(),
+                options: (0..n)
+                    .map(|i| SessionConfigOption {
+                        id: format!("o{i}"),
+                        ..SessionConfigOption::default()
+                    })
+                    .collect(),
+            })
+        };
+        let cmds = |n: usize| {
+            Body::AgentCommands(AgentCommands {
+                agent_id: "a".into(),
+                commands: (0..n)
+                    .map(|i| AgentCommand {
+                        name: format!("c{i}"),
+                        ..AgentCommand::default()
+                    })
+                    .collect(),
+            })
+        };
+        let mut v = View::default();
+        v.apply(&ev("n1", 1, cfg(2))); // an agent the hub does not know: ignored
+        assert!(v.session_replay().is_empty());
+        v.apply(&ev("n1", 2, started("a")));
+        v.apply(&ev("n1", 3, cfg(2)));
+        v.apply(&ev("n1", 4, cfg(3)));
+        v.apply(&ev("n1", 5, cmds(2)));
+        let r = v.session_replay();
+        assert_eq!(r.len(), 2);
+        assert_eq!(r[0].producer_id, "n1");
+        match r[0].body.as_ref() {
+            Some(Body::AgentSessionConfig(c)) => {
+                assert_eq!(c.options.len(), 3, "the last report replaces")
+            }
+            other => panic!("{other:?}"),
+        }
+        // Over the caps: not kept, and what it replaced is gone too.
+        v.apply(&ev("n1", 6, cfg(65)));
+        v.apply(&ev("n1", 7, cmds(101)));
+        assert!(v.session_replay().is_empty());
+        v.apply(&ev("n1", 8, cfg(1)));
+        // A repeated name (or one with a leading slash and another case) is kept once, the first.
+        v.apply(&ev(
+            "n1",
+            9,
+            Body::AgentCommands(AgentCommands {
+                agent_id: "a".into(),
+                commands: ["Dup", "/dup", "dup", "other"]
+                    .iter()
+                    .map(|n| AgentCommand {
+                        name: (*n).into(),
+                        ..AgentCommand::default()
+                    })
+                    .collect(),
+            }),
+        ));
+        match v.session_replay().last().and_then(|e| e.body.as_ref()) {
+            Some(Body::AgentCommands(c)) => assert_eq!(
+                c.commands
+                    .iter()
+                    .map(|x| x.name.as_str())
+                    .collect::<Vec<_>>(),
+                ["Dup", "other"]
+            ),
+            other => panic!("{other:?}"),
+        }
+        v.apply(&ev("n1", 9, cmds(1)));
+        assert_eq!(v.session_replay().len(), 2);
+        v.apply(&ev(
+            "n1",
+            10,
+            Body::AgentExited(AgentExited {
+                agent_id: "a".into(),
+                exit_code: 0,
+            }),
+        ));
+        assert!(v.session_replay().is_empty(), "dropped when the agent ends");
+        assert!(v.agents["n1/a"].session.config.is_none());
+        // A new run of the id starts empty.
+        v.apply(&ev("n1", 11, started("a")));
+        v.apply(&ev("n1", 12, cfg(1)));
+        assert_eq!(v.session_replay().len(), 1);
+        v.apply(&ev("n1", 13, started("a")));
+        assert!(v.session_replay().is_empty());
     }
 
     #[test]
