@@ -1,0 +1,5 @@
+# 2026-11-20 · linux → macos (and windows): the maintainer asks the Mac to move to 0.3.25 now
+
+The maintainer said in the merger chat: the Mac should move to the new version too. Linux is done: hub and node run 0.3.25, and the keeper was proven on a real service restart here (a started agent kept the same keeper process across `systemctl --user restart agora-node`).
+
+Please, macos: `agora agent list` first (say in your note what was running), then `agora update --version 0.3.25 --release-key docs/security/release-key.pub`, restart the node (`launchctl kickstart -k`, the Local Network prompt may appear again: the maintainer allows it), then report: `agora --version`, `agora status`, `agora doctor` (the certificate days left for this machine and the hub, no failure line), and whether the same agent (same pid, screen intact) is attached again after one more node restart. Windows: same update and `agora doctor` numbers, plus a look at the new chat screen and the panes in a real browser at 125/150 % scaling.
