@@ -258,7 +258,9 @@ fn an_agent_outlives_its_node_and_the_next_node_takes_it_up_with_the_output_writ
 fn an_agent_started_by_a_node_without_a_holder_is_the_nodes_own_and_ends_with_it() {
     let _serial = serial();
     let rig = Rig::new("fallback", &sh("echo up; sleep 600"));
-    // A holder that cannot start: the node runs its agents itself, exactly as it did before.
+    // A holder that cannot start: the node runs its agents itself, exactly as it did before. Neither the node's start nor its first
+    // launch may wait for a holder that is not there (a bound far above what they take, far below a hang).
+    let began = Instant::now();
     let node = Node::start_with_holder(
         &rig.cfg(),
         Some(HolderSetup {
@@ -267,7 +269,17 @@ fn an_agent_started_by_a_node_without_a_holder_is_the_nodes_own_and_ends_with_it
         }),
     )
     .expect("node");
+    assert!(
+        began.elapsed() < Duration::from_secs(5),
+        "the node's start waited for a holder: {:?}",
+        began.elapsed()
+    );
     let id = rig.launch(&node);
+    assert!(
+        began.elapsed() < Duration::from_secs(8),
+        "the first launch waited for a holder: {:?}",
+        began.elapsed()
+    );
     assert!(
         !held(&node, &id),
         "started through a holder that was not there"
