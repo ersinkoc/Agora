@@ -84,7 +84,7 @@ pub trait EventStore {
     fn set_setting(&self, key: &str, value: &[u8]) -> Result<(), StoreError>;
 }
 
-const SCHEMA_VERSION: i64 = 12;
+const SCHEMA_VERSION: i64 = 13;
 
 pub struct SqliteStore {
     conn: Mutex<Connection>,
@@ -341,6 +341,34 @@ impl SqliteStore {
                  PRAGMA user_version = 12;
                  COMMIT;",
             )?;
+        }
+        // ADR-0085 (schema 13): per certificate, when a machine first connected with it (NULL until it does) so the hub can revoke a
+        // machine's older certificates a week after it connected with a newer one; and, for a certificate issued by a renewal, its PEM
+        // (public data) and the SHA-256 of the public key of the request it was issued for, so a renewal whose answer was lost can be
+        // answered again with the same certificate. Checked at EVERY open, not only when the version is older: an unreleased build of
+        // schema 13 (developer or test hubs) left databases at version 13 without the later columns, and every renewal on one would fail.
+        // Each column is added only when missing, inside one transaction, so it is idempotent (a database taken back to an older version
+        // by hand, as the tests do, has some of them already).
+        let mut script = String::new();
+        for (name, kind) in [
+            ("first_seen_ms", "INTEGER"),
+            ("cert_pem", "TEXT"),
+            ("csr_key_hash", "BLOB"),
+        ] {
+            let has: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('devices') WHERE name = ?1",
+                [name],
+                |r| r.get(0),
+            )?;
+            if has == 0 {
+                script.push_str(&format!(" ALTER TABLE devices ADD COLUMN {name} {kind};"));
+            }
+        }
+        if version < 13 {
+            script.push_str(" PRAGMA user_version = 13;");
+        }
+        if !script.is_empty() {
+            conn.execute_batch(&format!("BEGIN;{script} COMMIT;"))?;
         }
         Ok(Self {
             conn: Mutex::new(conn),
@@ -1013,6 +1041,75 @@ mod tests {
             }
         );
         drop(s);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// ADR-0085: a schema 12 database opens, keeps its enrolled devices and gains the `first_seen_ms` column, empty.
+    #[test]
+    fn a_database_from_before_certificate_renewal_upgrades_in_place() {
+        let d = tmpdir("upgrade12");
+        let path = d.join("hub.db");
+        {
+            let s = SqliteStore::open(&path).unwrap();
+            let conn = s.lock().unwrap();
+            conn.execute_batch(
+                "INSERT INTO devices (serial, node_id, enrolled_ms) VALUES ('ab', 'n1', 7);
+                 ALTER TABLE devices DROP COLUMN first_seen_ms;
+                 ALTER TABLE devices DROP COLUMN cert_pem;
+                 ALTER TABLE devices DROP COLUMN csr_key_hash;
+                 PRAGMA user_version = 12;",
+            )
+            .unwrap();
+        }
+        let s = SqliteStore::open(&path).unwrap();
+        let conn = s.lock().unwrap();
+        let (node, seen): (String, Option<i64>) = conn
+            .query_row(
+                "SELECT node_id, first_seen_ms FROM devices WHERE serial = 'ab'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((node.as_str(), seen), ("n1", None));
+        drop(conn);
+        drop(s);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// An unreleased build of schema 13 left databases at `user_version = 13` without the renewal columns. Opening one adds them (and
+    /// keeps the rows), so a renewal on it does not fail with "no such column".
+    #[test]
+    fn a_database_at_version_13_without_the_renewal_columns_gets_them_on_open() {
+        let d = tmpdir("v13-missing-columns");
+        let path = d.join("hub.db");
+        {
+            let s = SqliteStore::open(&path).unwrap();
+            let conn = s.lock().unwrap();
+            conn.execute_batch(
+                "INSERT INTO devices (serial, node_id, enrolled_ms) VALUES ('ab', 'n1', 7);
+                 ALTER TABLE devices DROP COLUMN cert_pem;
+                 ALTER TABLE devices DROP COLUMN csr_key_hash;",
+            )
+            .unwrap();
+            let v: i64 = conn
+                .pragma_query_value(None, "user_version", |r| r.get(0))
+                .unwrap();
+            assert_eq!(v, 13);
+        }
+        let s = SqliteStore::open(&path).unwrap();
+        let conn = s.lock().unwrap();
+        let (node, pem, hash): (String, Option<String>, Option<Vec<u8>>) = conn
+            .query_row(
+                "SELECT node_id, cert_pem, csr_key_hash FROM devices WHERE serial = 'ab'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!((node.as_str(), pem, hash), ("n1", None, None));
+        drop(conn);
+        // Opening again changes nothing.
+        drop(s);
+        assert!(SqliteStore::open(&path).is_ok());
         let _ = std::fs::remove_dir_all(&d);
     }
 }

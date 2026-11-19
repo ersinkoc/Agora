@@ -27,8 +27,9 @@ impl From<rcgen::Error> for CaError {
     }
 }
 
-/// Validity of an issued device certificate. Short-lived on purpose. Nothing renews it yet: a machine must be enrolled again
-/// before this many days pass (docs/adr/0085-machine-and-hub-certificates-renew-themselves.md is the proposed fix, not built).
+/// Validity of an issued device certificate. Short-lived on purpose. A machine renews it over its own connection and the hub replaces its
+/// own server certificate before it ends (docs/adr/0085-machine-and-hub-certificates-renew-themselves.md); the hub side is built, the
+/// machine side is not yet, so until then a machine must still be enrolled again before this many days pass.
 pub const DEVICE_CERT_DAYS: i64 = 90;
 /// `agora doctor` and `agora hub machines` warn when a certificate has fewer days than this left.
 pub const EXPIRY_WARN_DAYS: i64 = 30;
@@ -261,6 +262,29 @@ fn valid_id_char(c: char) -> bool {
 }
 
 /// Node side: a fresh key pair and the CSR to send to the hub. Returns `(private_key_pem, csr_pem)`.
+/// SHA-256 of the public key a certificate signing request carries, after checking that the request is signed by that key (proof of
+/// possession). ADR-0085 keeps it with each certificate a renewal issued, to recognize the same request asked again.
+pub fn csr_key_hash(csr_pem: &str) -> Result<[u8; 32], CaError> {
+    use sha2::{Digest, Sha256};
+    use x509_parser::prelude::FromDer;
+    let der = x509_parser::pem::parse_x509_pem(csr_pem.as_bytes())
+        .map_err(|e| CaError(e.to_string()))?
+        .1;
+    let (_, csr) =
+        x509_parser::certification_request::X509CertificationRequest::from_der(&der.contents)
+            .map_err(|e| CaError(e.to_string()))?;
+    csr.verify_signature()
+        .map_err(|_| CaError("the request is not signed by its own key".into()))?;
+    Ok(Sha256::digest(
+        csr.certification_request_info
+            .subject_pki
+            .subject_public_key
+            .data
+            .as_ref(),
+    )
+    .into())
+}
+
 pub fn new_device_request() -> Result<(String, String), CaError> {
     let key = KeyPair::generate()?;
     let mut p = CertificateParams::default();

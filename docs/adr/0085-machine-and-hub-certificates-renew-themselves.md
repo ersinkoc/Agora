@@ -4,6 +4,12 @@ Date: 2026-11-17
 
 Accepted: 2026-11-19 (the maintainer's explicit message in the merger chat naming this ADR: "ADR-0085'i kabul ediyorum"). The open questions' proposed answers stand.
 
+Build progress: schema and hub side done (`RenewRequest`/`RenewResponse`, `enroll.renew`, `enroll.renew_refused`; the hub answers a renewal on a certificate connection,
+audits it, revokes superseded certificates after 7 days, and replaces its own server certificate daily when under 30 days remain). Review changes: only a machine's newest certificate may renew (`superseded` otherwise); refused renewals are audited, rate-limited to one row per machine per reason per hour.
+What remains: a thief with the machine's CURRENT certificate and key is indistinguishable from the machine until the owner notices (the audit view shows `superseded`/`too_frequent` signals); revocation (ADR-0015, ADR-0073) is the answer. A machine that lost a renewal's answer asks again with the same request and the hub sends the same certificate again (idempotent: same serial, nothing issued or revoked, audit `enroll.renew_resent`, at most 5 an hour); this works only for the request whose key the certificate was issued for, so a thief with an older certificate gets nothing, and not after the newest certificate has connected. The node (next PR) must keep its fresh key and request until it has stored the answer. The columns for this are part of schema 13, which is unreleased, so the migration was amended, not extended.
+Not built yet: the node asking
+(30 days left, daily retry, atomic write of `cert.pem` and `key.pem`), `agora doctor` days left, the window's "needs to join again" card, and the `agora-platform` atomic-replace test.
+
 Origin: an internal audit. `crates/agora-hub/src/ca.rs` promised "renewal is automatic while enrolled"; reading the code and then running it
 (`crates/agora/tests/cert_lifetime.rs`) showed that nothing renews anything.
 

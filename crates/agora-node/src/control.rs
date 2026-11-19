@@ -1419,6 +1419,8 @@ pub(crate) fn command_name(c: &Cmd) -> &'static str {
         Cmd::PreviewOpen(_) => "preview.open",
         Cmd::PreviewClose(_) => "preview.close",
         Cmd::PreviewList(_) => "preview.list",
+        // ADR-0085: renewal is asked of the hub, on the machine's own connection; a node never receives it (refused as unsupported).
+        Cmd::Renew(_) => "enroll.renew",
         Cmd::PreviewConnect(_) => "preview.connect",
         // ADR-0082: only the local control socket answers it (in `handle_request`); anywhere else it is refused as unsupported.
         Cmd::ControlAuth(_) => "control.auth",

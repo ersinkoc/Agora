@@ -1,0 +1,6 @@
+{
+  "renew": {
+    "certPem": "x",
+    "notAfterMs": "1"
+  }
+}

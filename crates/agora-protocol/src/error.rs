@@ -105,6 +105,7 @@ pub enum ErrorCode {
     PreviewUnavailable,
     AgentOptionUnknown,
     AgentQueueFull,
+    EnrollRenewRefused,
     Internal,
     /// A code this build does not know (sent by a newer peer).
     Unknown(String),
@@ -204,6 +205,7 @@ impl ErrorCode {
         ErrorCode::PreviewUnavailable,
         ErrorCode::AgentOptionUnknown,
         ErrorCode::AgentQueueFull,
+        ErrorCode::EnrollRenewRefused,
         ErrorCode::Internal,
     ];
 
@@ -300,6 +302,7 @@ impl ErrorCode {
             ErrorCode::PreviewUnavailable => "preview.unavailable",
             ErrorCode::AgentOptionUnknown => "agent.option_unknown",
             ErrorCode::AgentQueueFull => "agent.queue_full",
+            ErrorCode::EnrollRenewRefused => "enroll.renew_refused",
             ErrorCode::Internal => "internal",
             ErrorCode::Unknown(s) => s,
         }
@@ -408,6 +411,7 @@ impl ErrorCode {
             ErrorCode::PreviewUnavailable => &["reason"],
             ErrorCode::AgentOptionUnknown => &["id"],
             ErrorCode::AgentQueueFull => &["limit"],
+            ErrorCode::EnrollRenewRefused => &["reason"],
             ErrorCode::Internal => &["incident_id"],
             ErrorCode::Unknown(_) => &[],
         }

@@ -98,6 +98,8 @@ message CommandRequest {
     AgentSetConfig agent_set_config = 106;
     // ADR-0090, sent only to a node with the capability `agent.cancel_turn` (a hub refuses it for any other node).
     AgentCancelTurn agent_cancel_turn = 107;
+    // ADR-0085: renew this machine's certificate; only on the machine's own authenticated connection, capability `enroll.renew`.
+    RenewRequest renew = 108;
   }
 }
 
@@ -145,6 +147,8 @@ message CommandOk {
     PreviewConnectResult preview_connect = 28;
     // ADR-0090: the answer to `AgentPrompt` from a node with the capability `chat.rich`.
     AgentPromptResult agent_prompt = 29;
+    // ADR-0085
+    RenewResponse renew = 30;
   }
 }
 

@@ -812,6 +812,59 @@ either as "previews are not available here" and never assumes an open worked fro
 - **Errors**: `preview.port_refused` (`port`, `reason`), `preview.limit` (`limit`), `preview.expired` (`forward_id`),
   `preview.unknown` (`forward_id`), `preview.unavailable` (`reason`); see `error-codes.md`.
 
+### Certificate renewal (ADR-0085)
+
+All additions; nothing published changed. A machine renews its client certificate itself, over a connection it opens with the certificate
+it has, so no code and no owner step is needed while it is still valid.
+
+- **Messages** (`schema/agora/v1/enroll.proto`): `RenewRequest { csr_pem }` and `RenewResponse { cert_pem, not_after_ms }`. `CommandRequest`
+  field 108 (`renew`) and `CommandOk` field 30 (`renew`) carry them. Golden fixtures: `RenewRequest` and `RenewResponse` in
+  `schema/fixtures/v1/`, the two oneof arms in `schema/fixtures/enroll-renew/`.
+- **Capability `enroll.renew`.** Offered by a hub that handles the command (the hub offers it from this step; no node offers or sends it yet). A machine asks only a hub that offers it (an older hub never sees
+  the message). Nodes offer nothing for it; they only send.
+- **Where it is accepted.** Only as the first command (`STREAM_COMMANDS`, kind 0) on a TLS connection whose client certificate verifies and
+  that the hub lists as active (the connection of ADR-0061's one-shot questions). It is answered once and the connection ends. Without a
+  certificate it is `auth.unauthenticated`; from a client it is `protocol.invalid_message`.
+- **What the hub does.** The CSR comes from the machine, which makes a fresh key pair each time. The hub issues a certificate for the same
+  node id as the connection's certificate, for client authentication only; any name, extension or usage in the CSR is ignored, exactly as at
+  enrollment. It records the new serial and an audit row (action `enroll.renew`, node, outcome `ok serial=NEW presented=OLD`), and does not revoke the previous certificate:
+  that stays valid until its own end, and the hub revokes a machine's older serials 7 days after the machine first connects with a newer one.
+- **Only the newest certificate renews.** A machine's older certificate that is still valid (its grace) may connect but not renew: a copy of
+  an old certificate and key could otherwise renew hourly, become the newest, and have the real machine's certificate revoked a week later.
+  The hour limit is checked after that, so a copy of an older certificate cannot use up the real machine's hour.
+- **Lost answer: an idempotent re-issue.** The hub keeps, for each certificate a renewal issued, its PEM (public data) and the SHA-256 of
+  the public key of the request it was issued for (`devices.cert_pem`, `devices.csr_key_hash`, part of schema 13). When a machine presents
+  a certificate that is not the newest and sends a `RenewRequest` whose request carries EXACTLY that public key, while the newest
+  certificate was issued by a renewal and has never connected (`first_seen_ms` empty), the hub answers with that same certificate again:
+  same serial, nothing issued, nothing revoked, no new certificate row, only an audit row `enroll.renew_resent` (`presented=OLD serial=NEW`).
+  Resends are outside the hour limit for new certificates and limited to 5 an hour per machine (`too_frequent` after that). This gives a
+  thief nothing: the private key of the request never left the machine, so someone holding only an older certificate cannot send that key,
+  and any other request from an older certificate is `superseded`. Only the newest issued certificate is resent, and not after it has
+  connected. **The node must keep the fresh key and the request of a renewal until it has received and stored the answer** (the next
+  step's requirement), and send the same request again after a failure.
+- **Refusals** are `enroll.renew_refused` with a `reason`, checked in this order: `unknown`, `revoked`, `expired` (the end the certificate
+  carries has passed), `too_old` (the hub's record says it issued the certificate more than one current lifetime ago; it differs from
+  `expired` when the certificate carries a later end than the hub's lifetime now allows, for example after the lifetime was lowered),
+  `superseded` (a newer certificate of the machine exists), `too_frequent` (a certificate was issued for this machine within the last hour). A CSR that does not parse is
+  `protocol.invalid_message` (`field` `csr_pem`).
+- **Grace and limits.** `devices` records when each certificate was issued and when the machine first connected with it
+  (`first_seen_ms`, schema 13). A machine's older certificates are revoked 7 days after that first connection with a newer one (checked at
+  each connection and daily); an open connection on a revoked one is closed by the usual check. One certificate per machine per hour counts
+  every certificate issued for it, enrollment included.
+- **Refusals are audited** as `enroll.renew_refused` (node, outcome `reason=R presented=SERIAL`), at most one row per machine per reason per
+  hour, so a flood cannot grow the table. `superseded` and `too_frequent` are the signal that someone holds a copy of a machine's certificate
+  : the owner sees them in the audit view; a thief with the machine's CURRENT certificate
+  and key is indistinguishable from the machine until the owner notices, and revocation (ADR-0015, ADR-0073) is the answer. A machine that
+  lost the answer of a renewal asks again with the same request and is answered again (see Lost answer).
+- **Clock.** The grace and the hour limit use the hub's clock. A clock that jumps forward can revoke a machine's older certificates early
+  (only ones a newer certificate already replaced and that has connected); one that jumps back only delays it.
+- **The hub's own certificate** is not a message: once at start and then daily the hub replaces its server certificate when fewer than 30 days
+  remain (same names, same CA, a fresh key), rewrites `<hub dir>/server-cert.pem`, and new connections use the new one while open ones keep
+  theirs (nodes pin the CA, not the certificate). The new certificate is switched on first; when `server-cert.pem` cannot be written afterwards the hub logs a warning and counts it, and keeps
+  serving the new one. A failed round (or a panic) is logged at warn level and retried after 5 minutes, doubling up to an hour. A pairing
+  session in flight keeps working across a swap: it froze the hash of the certificate its own connection was shown, and that connection keeps
+  its own certificate; the hub's current hash is refreshed for later ones.
+
 ### A structured agent's conversation (ADR-0090)
 
 All additions; nothing published changed. **Built (steps 3 and 4 of the ADR):** the ACP bridge and the node send and handle everything
