@@ -60,9 +60,9 @@ describe('an entry that changes in place', () => {
     const held = [call(1, { status: 'completed' })];
     expect(mergeLines(held, [call(1, { status: 'completed' })])).toBe(held);
   });
-  it('still appends the new, skips a snapshot overlap that is older than the newest, and takes an update of an old entry', () => {
+  it('appends the new, places an older unseen id by its number, and takes an update of an old entry', () => {
     const held = [L(1), L(2), L(5)];
-    expect(mergeLines(held, [L(3)]).map((l) => l.id)).toEqual([1, 2, 5]); // not held and older than the newest: the overlap of a snapshot
+    expect(mergeLines(held, [L(3)]).map((l) => l.id)).toEqual([1, 2, 3, 5]); // older and not held: never dropped (ids restart with the node), placed by id
     expect(mergeLines(held, [L(6)]).map((l) => l.id)).toEqual([1, 2, 5, 6]);
     const upd = mergeLines(held, [L(2, { text: 'changed' })]);
     expect(upd.map((l) => l.text)).toEqual(['m1', 'changed', 'm5']);

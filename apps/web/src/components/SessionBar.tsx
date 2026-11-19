@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { refusalKey, type ActionResult } from '../net/refusal';
 import { settingName } from './launchSettings';
 import { startedWith } from './launchMemory';
 import { Icon } from './Icon';
@@ -21,10 +22,10 @@ const configWord = (o: ConfigOptionModel): string => (CATEGORY_WORD[o.category] 
 const PILL: Record<UiState, string> = {
   working: 'border-working/40 text-working', 'needs-you': 'border-needs-you/50 text-needs-you', finished: 'border-finished/40 text-finished', idle: 'border-line text-muted', unknown: 'border-line text-muted',
 };
-export function SessionBar({ agentKey, session, choose, setConfig, disabled, startedMs, state, tokens, part = 'all' }: { part?: 'all' | 'controls' | 'status'; agentKey: string; session: SessionModel; startedMs?: number; state?: UiState; tokens?: number; choose?: (agentKey: string, kind: OptionKind, id: string) => Promise<boolean>; setConfig?: (agentKey: string, configId: string, value: string) => Promise<boolean>; disabled?: boolean }) {
+export function SessionBar({ agentKey, session, choose, setConfig, disabled, startedMs, state, tokens, part = 'all' }: { part?: 'all' | 'controls' | 'status'; agentKey: string; session: SessionModel; startedMs?: number; state?: UiState; tokens?: number; choose?: (agentKey: string, kind: OptionKind, id: string) => Promise<boolean>; setConfig?: (agentKey: string, configId: string, value: string) => Promise<ActionResult>; disabled?: boolean }) {
   const [held, setPending] = useState<PendingChoice | undefined>();
   const pending = pendingFor(held, agentKey);
-  const [failed, setFailed] = useState(false);
+  const [failed, setFailed] = useState<string | false>(false); // the locale key of what to say when a change did not go through
   const [busy, setBusy] = useState(false);
   // How long it has run, when this window saw it start; moves once a second-ish (every 15 s is enough for minutes).
   const [now, setNow] = useState(() => Date.now());
@@ -38,7 +39,7 @@ export function SessionBar({ agentKey, session, choose, setConfig, disabled, sta
     setBusy(true);
     const ok = await choose(target, kind, id);
     setBusy(false);
-    setFailed(!ok);
+    setFailed(ok ? false : 'session-change-failed');
   };
   const pick = (kind: OptionKind, list: readonly SessionOptionModel[], id: string) => {
     if (!isChange(kind === 'mode' ? session.currentMode : session.currentModel, id)) return; // the placeholder and the one in use are not choices
@@ -68,13 +69,18 @@ export function SessionBar({ agentKey, session, choose, setConfig, disabled, sta
   // ADR-0090: the agent's own settings. Choosing one sends `AgentSetConfig`; a choice the node marks as acting without asking is shown
   // disabled and never sent.
   const groups = useMemo(() => configGroups(session), [session]);
+  const latest = useRef(session.config);
+  latest.current = session.config;
   const applyConfig = async (o: ConfigOptionModel, value: string) => {
-    if (!setConfig || choiceState(o, value) !== 'ok') return;
+    // Judged again with the setting AS IT IS NOW, not as the menu was drawn: one that turned into a skipping choice while the menu was
+    // open is never sent from a click on the old picture.
+    const now = latest.current?.find((x) => x.id === o.id);
+    if (!setConfig || !now || choiceState(now, value) !== 'ok') return;
     setFailed(false);
     setBusy(true);
-    const ok = await setConfig(agentKey, o.id, value);
+    const r = await setConfig(agentKey, o.id, value);
     setBusy(false);
-    setFailed(!ok);
+    setFailed(r === true ? false : refusalKey(typeof r === 'string' ? r : '') ?? 'session-change-failed');
   };
   const choiceName = (o: ConfigOptionModel, c: { id: string; name: string; skipsPermissions: boolean }): string => {
     const base = o.type === 'boolean' ? t(c.id === 'true' ? 'session-on' : 'session-off') : c.name || c.id;
@@ -106,7 +112,7 @@ export function SessionBar({ agentKey, session, choose, setConfig, disabled, sta
     {started.map(([id, value]) =><span key={id} className="ide-chip h-7 rounded-s px-2.5" title={t('session-started-hint')}>{t('session-started-with', { name: settingName({ id, label: `setting-${id}`, values: [], defaultValue: '' }, t), value })}</span>)}
     {!groups.replaces.mode && session.modes.some((o) => needsConfirm('mode', o) && o.id !== session.currentMode) && <span role="note" className="text-xs text-muted">{t('session-unasked-unavailable')}</span>}
     {anyUnavailable([...groups.chips, ...groups.more]) && <span role="note" className="text-xs text-muted">{t('session-config-unavailable')}</span>}
-    {failed && <span role="status" className="text-xs text-needs-you">{t('session-change-failed')}</span>}
+    {failed && <span role="status" className="text-xs text-needs-you">{t(failed)}</span>}
   </>;
   const word = state ? t(`state-${state}`) : '';
   const status = <>

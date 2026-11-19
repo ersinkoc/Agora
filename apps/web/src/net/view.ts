@@ -49,7 +49,9 @@ export function configOf(list: readonly ConfigWire[] | null | undefined): Config
   }));
 }
 export function commandsOf(list: readonly { name?: string | null; description?: string | null; inputHint?: string | null }[] | null | undefined): CommandModel[] {
-  return (list ?? []).slice(0, 100).filter((c) => c.name).map((c) => ({ name: c.name ?? '', description: c.description ?? '', inputHint: c.inputHint ?? '' }));
+  const seen = new Set<string>();
+  // The first of a repeated name wins (the hub dedupes too): two rows with one name would act as one.
+  return (list ?? []).filter((c) => { const n = (c.name ?? '').replace(/^\/+/, '').toLowerCase(); if (!n || seen.has(n)) return false; seen.add(n); return true; }).slice(0, 100).map((c) => ({ name: c.name ?? '', description: c.description ?? '', inputHint: c.inputHint ?? '' }));
 }
 const emptySession = (): SessionModel => ({ modes: [], models: [], currentMode: '', currentModel: '', contextTokens: 0, contextWindow: 0 });
 

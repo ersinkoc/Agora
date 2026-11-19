@@ -83,6 +83,9 @@ export function configGroups(s: SessionModel | undefined): { chips: ConfigOption
 export type ChoiceState = 'current' | 'ok' | 'unavailable';
 export function choiceState(o: ConfigOptionModel, value: string): ChoiceState {
   if (value === o.current) return 'current';
+  // A boolean the node marks as skipping: only turning it ON ("true") can make the agent act without asking; turning it OFF puts the
+  // protection back and the node never refuses that (supervisor `prepare_set_config`), so it stays available.
+  if (o.type === 'boolean') return o.skipsPermissions && value === 'true' ? 'unavailable' : 'ok';
   const choice = o.choices.find((c) => c.id === value);
   return o.skipsPermissions || choice?.skipsPermissions ? 'unavailable' : 'ok';
 }

@@ -293,6 +293,9 @@ describe('the agent\'s own settings', () => {
     await act(async () => { high.click(); });
     expect(setConfig).not.toHaveBeenCalled();
   });
+  // ADR-0058's "Switch anyway" confirmation is INTENTIONALLY GONE for a mode that skips permissions: the node refuses the switch
+  // (`agent.option_unconfirmed`) because the schema has no signed field to carry the user's confirmation, so a dialog could never succeed.
+  // The choice is disabled with why, and nothing is sent. (e2e-session-options.mjs asserts the same in a real browser.)
   it('a choice the node marks as acting without asking is shown DISABLED with why, and is never sent', async () => {
     const setConfig = vi.fn(async () => true);
     act(() => root.render(<SessionBar part="controls" agentKey="n/a" session={{ ...base, config: [mode] }} setConfig={setConfig} />));
@@ -306,7 +309,7 @@ describe('the agent\'s own settings', () => {
     expect(host.textContent).toContain('not available yet from here. Start the agent that way instead.');
     expect(host.querySelector('[role=alertdialog]')).toBeNull(); // no confirmation could make it succeed
   });
-  it('a boolean the node marks as skipping is disabled in both values', () => {
+  it('a boolean the node marks as skipping: turning it ON is disabled (never sent)', () => {
     const auto: ConfigOptionModel = { id: 'auto', name: 'Auto approve', description: '', category: 'custom', type: 'boolean', current: 'false', skipsPermissions: true, choices: [] };
     act(() => root.render(<SessionBar part="controls" agentKey="n/a" session={{ ...base, config: [auto] }} setConfig={async () => true} />));
     open(/More settings/);

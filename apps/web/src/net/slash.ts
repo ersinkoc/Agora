@@ -26,5 +26,19 @@ export function filterCommands(list: readonly CommandModel[], query: string, max
 /** What choosing a command puts in the box: `/name ` (the person adds the rest). */
 export const insertText = (c: CommandModel): string => `/${bare(c.name)} `;
 
+/** The box after choosing a command: only the "/token" the caret is in is replaced (with `/name `); what the person typed after it stays. */
+export function applyCommand(text: string, caret: number, c: CommandModel): { text: string; caret: number } {
+  const rest = text.slice(caret).replace(/^\S*/, ''); // the rest of the word the caret is in belongs to the token
+  const head = `/${bare(c.name)}`;
+  const next = head + (rest.startsWith(' ') || rest.startsWith('\n') ? '' : ' ') + rest;
+  return { text: next, caret: head.length + 1 };
+}
+
+/** The commands without a repeated name (the first wins), so a list never has two rows that would act as one. */
+export function uniqueCommands(list: readonly CommandModel[]): CommandModel[] {
+  const seen = new Set<string>();
+  return list.filter((c) => { const n = bare(c.name).toLowerCase(); if (!n || seen.has(n)) return false; seen.add(n); return true; });
+}
+
 /** Where the highlight goes after an arrow key, wrapping at both ends. */
 export const stepIndex = (at: number, by: 1 | -1, count: number): number => (count === 0 ? 0 : (at + by + count) % count);

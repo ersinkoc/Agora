@@ -82,31 +82,48 @@ export function noticeText(line: ChatLine, tr: (id: string, args?: Record<string
 }
 
 // The fields that change in place; a repeat that differs in none of them says nothing new.
-const SAME_KEYS: readonly (keyof ChatLine)[] = ['text', 'kind', 'path', 'status', 'callKind', 'output', 'outputCut', 'startedMs', 'endedMs', 'queued', 'outcome'];
+const SAME_KEYS: readonly (keyof ChatLine)[] = ['role', 'text', 'kind', 'path', 'code', 'approvalId', 'callId', 'status', 'callKind', 'output', 'outputCut', 'startedMs', 'endedMs', 'queued', 'outcome', 'atMs'];
 function same(a: ChatLine, b: ChatLine): boolean {
-  return SAME_KEYS.every((k) => a[k] === b[k]) && JSON.stringify(a.steps) === JSON.stringify(b.steps) && JSON.stringify(a.locations) === JSON.stringify(b.locations);
+  return SAME_KEYS.every((k) => a[k] === b[k]) && JSON.stringify(a.steps) === JSON.stringify(b.steps) && JSON.stringify(a.locations) === JSON.stringify(b.locations) && JSON.stringify(a.params) === JSON.stringify(b.params);
+}
+
+/** The most entries a window holds per conversation. The node keeps 500; a hostile or buggy stream of new ids cannot make this grow. */
+export const MAX_LINES = 5000;
+
+// `held` is sorted by id (appended in order, inserted in place), so an entry is found by binary search: no per-chunk index to rebuild.
+function find(list: readonly ChatLine[], id: number): { at: number; found: boolean } {
+  let lo = 0, hi = list.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if ((list[mid] as ChatLine).id < id) lo = mid + 1; else hi = mid;
+  }
+  return { at: lo, found: lo < list.length && (list[lo] as ChatLine).id === id };
+}
+
+/** The newest `cap` entries, and how many older ones were left out (the window says "earlier entries are not loaded"). */
+export function trimLines(lines: ChatLine[], cap = MAX_LINES): { lines: ChatLine[]; dropped: number } {
+  return lines.length > cap ? { lines: lines.slice(lines.length - cap), dropped: lines.length - cap } : { lines, dropped: 0 };
 }
 
 // Adds new lines after the ones already held. An entry the node sends again with the same id (a tool call or a plan that changed, a
 // queued prompt that was sent) REPLACES the held one in its place (ADR-0090): the transcript has one row for it, never two, and nothing
-// moves but that row. A repeat that changes nothing keeps the held object, so nothing redraws. An id that is not held and is not newer
-// than the newest held is the overlap of a snapshot and is skipped. From an old node an id never repeats, so this is what it was.
+// moves but that row. A repeat that changes nothing keeps the held object, so nothing redraws. An id that is not held is NEVER dropped: a
+// newer one is appended, an older one (ids that restarted after the node did, a late frame) goes in its place by id. A snapshot replaces
+// the whole held set instead (the caller). Each entry costs a binary search, not a rebuilt index.
 export function mergeLines(held: readonly ChatLine[], incoming: readonly ChatLine[]): ChatLine[] {
   let out: ChatLine[] | undefined;
-  const at = new Map<number, number>();
-  held.forEach((l, i) => at.set(l.id, i));
-  let last = held.length ? (held[held.length - 1] as ChatLine).id : 0;
   for (const l of incoming) {
-    const i = at.get(l.id);
-    if (i !== undefined) {
-      if (same((out ?? held)[i] as ChatLine, l)) continue;
+    const cur = out ?? held;
+    const last = cur.length ? (cur[cur.length - 1] as ChatLine).id : 0;
+    if (l.id > last) { out ??= [...held]; out.push(l); continue; }
+    const { at, found } = find(cur, l.id);
+    if (found) {
+      if (same(cur[at] as ChatLine, l)) continue;
       out ??= [...held];
-      out[i] = l;
-    } else if (l.id > last) {
+      out[at] = l;
+    } else {
       out ??= [...held];
-      at.set(l.id, out.length);
-      out.push(l);
-      last = l.id;
+      out.splice(at, 0, l);
     }
   }
   return out ?? (held as ChatLine[]);

@@ -1141,3 +1141,11 @@ slash-menu = Ajanın sunduğu komutlar
 turn-stop = Turu durdur
 turn-stop-hint = Yalnızca bu turu bitirir. Ajan çalışmaya devam eder ve ona başka bir mesaj gönderebilirsiniz.
 turn-stop-failed = Tur durmadı.
+chat-trimmed = { $count ->
+    [one] 1 eski kayıt yüklenmedi.
+   *[other] { $count } eski kayıt yüklenmedi.
+}
+refusal-unsupported = Bu ajanın makinesi bunu henüz desteklemiyor.
+refusal-unconfirmed = Bu seçim ajanın sormadan işlem yapmasına izin verir ve bu pencerenin henüz veremediği bir onay gerektirir. Ajanı o şekilde başlatın.
+refusal-forbidden = Bu makinenin ayarları ajanın sormadan işlem yapmasına izin vermiyor.
+refusal-unknown-option = Ajan bu ayarı ya da değeri artık sunmuyor.

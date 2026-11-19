@@ -1,10 +1,11 @@
 import { useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { t } from '../i18n';
 import type { AgentTileModel, SessionModel } from '../model';
-import { isRich, mergeLines, noticeText, queueState, type ChatLine, type ChatSource } from '../net/chat';
+import { isRich, mergeLines, noticeText, queueState, trimLines, type ChatLine, type ChatSource } from '../net/chat';
 import { groupTurns, pairDiffs, type TurnItem } from '../net/chatView';
 import { atBottom, grew, jumped, keepPosition, scrolled, start, type Follow } from '../net/follow';
-import { filterCommands, insertText, slashQuery, stepIndex } from '../net/slash';
+import { refusalKey } from '../net/refusal';
+import { applyCommand, filterCommands, slashQuery, stepIndex, uniqueCommands } from '../net/slash';
 import { flagOf, transcript, windowed } from '../net/transcript';
 import { FilesChanged, Item, Turn } from './ChatEntry';
 import { ChatActionsContext, type PromptResult, type PromptSend } from './chatActions';
@@ -36,7 +37,9 @@ export function PromptBox({ agent, send, source, choose, approvals, onReview }: 
   const [text, setText] = useState('');
   const [sent, setSent] = useState<'ok' | 'queued' | 'full' | 'failed' | undefined>();
   const [busy, setBusy] = useState(false);
-  const [lines, setLines] = useState<ChatLine[]>([]);
+  // At most MAX_LINES entries are held; older ones are dropped and counted, so a stream of new ids cannot grow memory or the per-chunk work.
+  const [held, setHeld] = useState<{ lines: ChatLine[]; trimmed: number }>({ lines: [], trimmed: 0 });
+  const lines = held.lines;
   const [shown, setShown] = useState(PAGE);
   const [follow, setFollow] = useState<Follow>(start);
   // The "/" menu: where the caret is, which command is highlighted, and whether Escape closed it for what is typed now.
@@ -44,7 +47,8 @@ export function PromptBox({ agent, send, source, choose, approvals, onReview }: 
   const [slashAt, setSlashAt] = useState(0);
   const [slashOff, setSlashOff] = useState(false);
   // Stopping the turn, and dropping the queue (which asks first, because it also stops the turn).
-  const [stopping, setStopping] = useState<'busy' | 'failed' | undefined>();
+  const [stopping, setStopping] = useState<'busy' | undefined>();
+  const [stopFailed, setStopFailed] = useState<string | undefined>(); // the locale key of why the turn did not stop
   const [dropAsk, setDropAsk] = useState(false);
   const log = useRef<HTMLDivElement>(null);
   const field = useRef<HTMLTextAreaElement>(null);
@@ -63,12 +67,17 @@ export function PromptBox({ agent, send, source, choose, approvals, onReview }: 
   const queue = useMemo(() => queueState(lines), [lines]);
   const modelId = agent.session?.currentModel;
   const model = agent.session?.models.find((m) => m.id === modelId)?.name || undefined;
-  const commands = agent.session?.commands ?? [];
+  const offered = agent.session?.commands;
+  const commands = useMemo(() => uniqueCommands(offered ?? []), [offered]);
 
   useEffect(() => {
     if (!source) return;
-    setLines([]); setShown(PAGE); setFollow(start); seen.current = 0;
-    const sub = source.connect((incoming, replace) => setLines((held) => (replace ? incoming : mergeLines(held, incoming))));
+    setHeld({ lines: [], trimmed: 0 }); setShown(PAGE); setFollow(start); seen.current = 0;
+    const sub = source.connect((incoming, replace) => setHeld((h) => {
+      const t = trimLines(replace ? [...incoming] : mergeLines(h.lines, incoming));
+      if (t.lines === h.lines) return h; // nothing new: nothing redraws
+      return { lines: t.lines, trimmed: (replace ? 0 : h.trimmed) + t.dropped };
+    }));
     return () => sub.close();
   }, [source]);
 
@@ -88,8 +97,9 @@ export function PromptBox({ agent, send, source, choose, approvals, onReview }: 
   // moves nothing: `lines.length` is the same.
   useLayoutEffect(() => {
     const el = log.current;
-    const added = lines.length - seen.current;
-    seen.current = lines.length;
+    const total = held.trimmed + lines.length;
+    const added = total - seen.current;
+    seen.current = total;
     if (!el) return;
     if (follow.following) el.scrollTop = el.scrollHeight;
     else if (added > 0) setFollow((f) => grew(f, added));
@@ -132,9 +142,11 @@ export function PromptBox({ agent, send, source, choose, approvals, onReview }: 
   const stopTurn = async (dropQueue: boolean) => {
     if (!actions.cancelTurn) return;
     setStopping('busy');
-    const ok = await actions.cancelTurn(agent.id, dropQueue);
-    setStopping(ok ? undefined : 'failed');
-    if (ok) setDropAsk(false);
+    setStopFailed(undefined);
+    const r = await actions.cancelTurn(agent.id, dropQueue);
+    setStopping(undefined);
+    if (r !== true) setStopFailed(refusalKey(typeof r === 'string' ? r : '') ?? 'turn-stop-failed');
+    if (r === true) setDropAsk(false);
   };
 
   // The "/" menu: open while the first word starts with "/" and the agent offers commands that fit; never in a closed agent.
@@ -145,9 +157,9 @@ export function PromptBox({ agent, send, source, choose, approvals, onReview }: 
   const take = (i: number) => {
     const c = matches[i];
     if (!c) return;
-    const next = insertText(c);
-    caretTo.current = next.length;
-    setText(next); setCaret(next.length); setSlashAt(0);
+    const next = applyCommand(text, caret, c);
+    caretTo.current = next.caret;
+    setText(next.text); setCaret(next.caret); setSlashAt(0);
     field.current?.focus();
   };
   useEffect(() => {
@@ -167,6 +179,7 @@ export function PromptBox({ agent, send, source, choose, approvals, onReview }: 
         <div ref={log} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto px-4 pt-6 pb-4 max-md:pt-4" aria-live="polite" aria-label={t('chat-log')} role="log" tabIndex={0}>
           <div className="mx-auto flex max-w-195 flex-col gap-5 [&>*]:shrink-0">
             {lines.length === 0 && <p className="muted m-0">{t(source ? 'chat-empty' : 'prompt-intro')}</p>}
+            {held.trimmed > 0 && <p role="note" className="muted m-0 self-center text-xs" data-trimmed>{t('chat-trimmed', { count: held.trimmed })}</p>}
             {view.hidden > 0 && <button type="button" className="button justify-self-center self-center px-3 py-1 text-xs" onClick={earlier}>{t('chat-earlier-items', { count: view.hidden })}</button>}
             {rows.map(({ row, paired }) => {
               if (row.kind !== 'turn' || !paired) return row.kind === 'turn' ? null : <Item key={row.id} item={row} notice={notice} queued={row.kind === 'user' ? (queue.notSent.has(row.line.id) ? 'not-sent' : row.line.queued ? 'waiting' : undefined) : undefined} />;
@@ -210,7 +223,7 @@ export function PromptBox({ agent, send, source, choose, approvals, onReview }: 
         {menuOpen && (
           <ul id="slash-menu" role="listbox" aria-label={t('slash-menu')} className="absolute start-0 end-0 bottom-full z-20 m-0 mb-1.5 grid max-h-64 list-none gap-px overflow-y-auto rounded-m border border-line bg-surface-1 p-1 shadow-card">
             {matches.map((c, i) => (
-              <li key={c.name} id={`slash-opt-${i}`} role="option" aria-selected={i === at} data-slash-option
+              <li key={`${i}:${c.name}`} id={`slash-opt-${i}`} role="option" aria-selected={i === at} data-slash-option
                 className={`flex min-h-9 cursor-pointer items-baseline gap-2.5 rounded-xs px-2.5 py-1.5 text-[0.8125rem] ${i === at ? 'bg-accent/15 text-ink' : 'text-muted hover:bg-surface-2'}`}
                 // Pressing here must not move the caret out of the box before the choice is taken.
                 onPointerDown={(e) => e.preventDefault()} onClick={() => take(i)}>
@@ -245,7 +258,7 @@ export function PromptBox({ agent, send, source, choose, approvals, onReview }: 
           <NoAskBadge agent={agent} />
           <span className="flex-1" />
           {sent && <span role="status" className={`text-xs ${sent === 'ok' || sent === 'queued' ? 'text-finished' : 'text-needs-you'}`}>{sentText}</span>}
-          {stopping === 'failed' && <span role="status" className="text-xs text-needs-you">{t('turn-stop-failed')}</span>}
+          {stopFailed && <span role="status" className="text-xs text-needs-you">{t(stopFailed)}</span>}
           <span className="hidden text-xs text-muted md:inline">{t(agent.closed ? 'prompt-closed' : 'prompt-hint')}</span>
           {/* Ends this turn only: the agent stays and can be asked again. Not the same as stopping the agent. */}
           {canStop && <button type="button" className="button gap-1.5 px-3 text-removed" disabled={stopping === 'busy'} title={t('turn-stop-hint')} aria-label={`${t('turn-stop')}. ${t('turn-stop-hint')}`} onClick={() => void stopTurn(false)}>

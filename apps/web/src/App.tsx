@@ -35,6 +35,7 @@ import { num } from './net/view';
 import { loadAudit } from './net/audit';
 import { agentTarget } from './components/sessionChoice';
 import { ChatActionsContext, type ChatActions, type PromptResult } from './components/chatActions';
+import type { ActionResult } from './net/refusal';
 import { usableId } from './components/launchChoice';
 import { launchSettingsField } from './components/launchSettings';
 import { rememberStarted } from './components/launchMemory';
@@ -396,15 +397,15 @@ export function App() {
 
   // ADR-0090: the agent's own settings (model, mode, effort, ...) and ending its turn. Both are the user's own commands, addressed by the
   // hub-wide key the choice was made for; a node without the capability answers `protocol.capability_missing`, which reads as "no".
-  const setConfig = useCallback(async (agentKey: string, configId: string, value: string): Promise<boolean> => {
+  const setConfig = useCallback(async (agentKey: string, configId: string, value: string): Promise<ActionResult> => {
     const to = agentTarget(agentKey);
     if (!api || !to) return false;
-    try { await api.command(to.node, { agentSetConfig: { agentId: to.agentId, configId, value } }); return true; } catch { return false; }
+    try { await api.command(to.node, { agentSetConfig: { agentId: to.agentId, configId, value } }); return true; } catch (e) { return (e as { code?: string }).code ?? false; }
   }, [api]);
-  const cancelTurn = useCallback(async (agentKey: string, dropQueue: boolean): Promise<boolean> => {
+  const cancelTurn = useCallback(async (agentKey: string, dropQueue: boolean): Promise<ActionResult> => {
     const to = agentTarget(agentKey);
     if (!api || !to) return false;
-    try { await api.command(to.node, { agentCancelTurn: { agentId: to.agentId, dropQueue } }); return true; } catch { return false; }
+    try { await api.command(to.node, { agentCancelTurn: { agentId: to.agentId, dropQueue } }); return true; } catch (e) { return (e as { code?: string }).code ?? false; }
   }, [api]);
   const chatActions = useMemo<ChatActions>(() => (hub && api ? { setConfig, cancelTurn, rich } : {}), [hub, api, setConfig, cancelTurn, rich]);
 

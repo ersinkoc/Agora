@@ -215,7 +215,7 @@ export function Focus({ agent, approvals = [], onResolve, source: live, chatSour
         {agent.terminal === false ? null : approvals.filter((x) => x.agentId === agent.id).map((x) => <ApprovalBanner key={x.id} approval={x} onResolve={onResolve} />)}
         <AgentAddress key={agent.id} agent={agent} />
         <div className="pane min-h-0 flex-1 bg-surface-0 p-1.5" aria-label={agent.terminal === false ? t('chat-log') : t('focus-terminal')}>
-          {agent.terminal === false ? <PromptBox agent={agent} source={chatSource} send={sendPrompt} choose={chooseOption} approvals={asks.length ? <div className="grid gap-2">{asks.map((x) => <ApprovalBanner key={x.id} approval={x} onResolve={onResolve} pinned />)}</div> : undefined} /> : (
+          {agent.terminal === false ? <PromptBox key={agent.id} agent={agent} source={chatSource} send={sendPrompt} choose={chooseOption} approvals={asks.length ? <div className="grid gap-2">{asks.map((x) => <ApprovalBanner key={x.id} approval={x} onResolve={onResolve} pinned />)}</div> : undefined} /> : (
             <Suspense fallback={<div className="terminal" aria-busy="true" />}>
               <TerminalView source={source} label={t('focus-terminal')} />
             </Suspense>

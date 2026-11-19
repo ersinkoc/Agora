@@ -1198,3 +1198,11 @@ slash-menu = Commands the agent offers
 turn-stop = Stop turn
 turn-stop-hint = Ends this turn only. The agent keeps running and you can send it another message.
 turn-stop-failed = The turn did not stop.
+chat-trimmed = { $count ->
+    [one] 1 earlier entry is not loaded.
+   *[other] { $count } earlier entries are not loaded.
+}
+refusal-unsupported = This agent's machine does not support that yet.
+refusal-unconfirmed = That choice lets the agent act without asking, and it needs a confirmation this window cannot give yet. Start the agent that way instead.
+refusal-forbidden = This machine's settings do not let the agent act without asking.
+refusal-unknown-option = The agent no longer offers that setting or value.
