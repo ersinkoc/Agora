@@ -837,6 +837,20 @@ ADR), and no capability below is advertised by any build. A node refuses `AgentS
   a turn ends no process. The hub audits and scopes them like `AgentSetModel`.
 - **Queued prompts.** `AgentPrompt` is unchanged. A node with `chat.rich` answers it with `AgentPromptResult` (`CommandOk` field 29:
   `queued`, `queue_len`); a node without it answers `empty`, read as sent. The queue holds at most 8 prompts.
+- **A permission entry is a view, never an answer.** `ChatEntry.approval_id` of a `CHAT_KIND_PERMISSION` entry is minted by the node (the
+  id of the approval it queued, ADR-0020), never taken from agent text or from an adapter item; `permission_outcome` derives only from the
+  node's approval state (pending, or how the user's signed decision, a cancelled turn or the agent leaving ended it). A chat entry can never
+  answer an approval: approving and denying stay `ApprovalResolve`, signed and verified on the node.
+- **Size caps the node must enforce (ADR-0090 build step 4), before the hub sees anything:** `output` 16 KiB per tool call (head and tail
+  kept, `output_truncated` set), 8 KiB per thought entry, 64 plan steps of 512 bytes each, 64 `paths` per tool call, 100 commands, 64 config
+  options of 64 choices, at most 8 queued prompts per agent, and at most one entry update per call per 150 ms; the ring bound of ADR-0038 still
+  holds. Secret removal (ADR-0080) happens before an entry exists. The schema carries no limit itself: a peer that does not enforce them is
+  not conforming, and a client truncates what it shows.
+- **`skips_permissions` for options.** The determination rules for `SessionConfigOption.skips_permissions` (the node's own, not the agent's
+  category) and their enforcement for `AgentSetConfig` belong to node build step 4. Until then the only enforcement is today's: `AgentSetMode`
+  of a mode the adapter reported with `skips_permissions` is refused with `agent.option_forbidden` (`policy` `forbid` or `confined_only`) when
+  the node's `skip_permissions` policy does not allow it (`Supervisor::adapter_set_option`, as a launch option, ADR-0059). Both commands are in
+  the team-default `signed_commands` of a node with limited devices.
 - **Capabilities (not advertised yet):** `chat.rich`, `agent.set_config`, `agent.cancel_turn`, `agent.commands`.
 - **Errors:** `agent.option_unknown` (`id`), `agent.queue_full` (`limit`); a refusal by the agent itself is `adapter.option_refused`.
 

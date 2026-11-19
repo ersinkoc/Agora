@@ -24,7 +24,11 @@ fn the_new_shapes_round_trip_and_decode_in_the_typed_message() {
             continue;
         }
         seen += 1;
-        let file = path.file_name().expect("name").to_string_lossy().into_owned();
+        let file = path
+            .file_name()
+            .expect("name")
+            .to_string_lossy()
+            .into_owned();
         let message = file.split('.').take(3).collect::<Vec<_>>().join(".");
         let desc = pool.get_message_by_name(&message).expect("message");
         let json = std::fs::read_to_string(&path).expect("read json");

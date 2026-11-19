@@ -404,6 +404,13 @@ mod tests {
         use agora_protocol::v1::{self, command_request::Command as C};
         assert!(viewer_may(&C::ProjectList(v1::ProjectList::default())));
         assert!(!viewer_may(&C::AgentStop(v1::AgentStop::default())));
+        // ADR-0090: a viewer may neither change an agent's options nor cancel its turn.
+        assert!(!viewer_may(&C::AgentSetConfig(
+            v1::AgentSetConfig::default()
+        )));
+        assert!(!viewer_may(&C::AgentCancelTurn(
+            v1::AgentCancelTurn::default()
+        )));
         assert!(!viewer_may(&C::TerminalInput(v1::TerminalInput::default())));
         assert!(!viewer_may(&C::ApprovalResolve(
             v1::ApprovalResolve::default()
