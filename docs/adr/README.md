@@ -105,3 +105,4 @@ Date: YYYY-MM-DD
 | 0085 | Machine and hub certificates renew themselves | Proposed |
 | 0086 | Any machine can be the hub: one authoritative hub with takeover | Proposed |
 | 0087 | Install and update coding agents on a machine from the window | Proposed |
+| 0088 | Preview an agent's local web server in the window | Proposed |
