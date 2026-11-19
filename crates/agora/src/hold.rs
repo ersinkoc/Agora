@@ -645,7 +645,12 @@ mod tests {
             .unwrap();
         let node_start = agora_platform::process_start_time(node.id()).unwrap();
         assert_eq!(admit_by_lock(&lock, &peer(me)), Some(mine.start));
-        assert_eq!(admit_by_lock(&lock, &peer(node.id())), Some(node_start));
+        // Where a script is named after its interpreter (macOS) the stand-in cannot be named `agora`: the positive case is then
+        // only covered on Linux, and the refusals below hold either way.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        if agora_platform::process_name(node.id()).is_ok_and(|n| n.starts_with("agora")) {
+            assert_eq!(admit_by_lock(&lock, &peer(node.id())), Some(node_start));
+        }
         assert_eq!(
             admit_by_lock(&lock, &peer(stranger.id())),
             None,
