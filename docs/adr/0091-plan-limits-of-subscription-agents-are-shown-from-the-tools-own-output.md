@@ -1,8 +1,8 @@
 # 0091. The plan limits of subscription agents are shown from the tools' own output
-Status: Proposed
+Status: Accepted
 Date: 2026-11-19
 
-Not accepted. Nothing here may be built until the maintainer names this ADR in an acceptance message.
+Accepted: 2026-11-19 (the maintainer's explicit message in the merger chat: "ADR-0091'i kabul ediyorum"). The open questions' proposed answers stand: percentage and reset time only, the Claude Code reporter rung is decided when the Codex rung is built (and needs its own acceptance by name), notices at 95 percent off by default.
 
 Builds on ADR-0042 (usage from agent files), ADR-0021 and ADR-0033 (the catalog and price estimate), ADR-0004 (agents are manifests),
 `docs/design/usage-and-cost.md` section 3 ("quota profiles", not built). Touches ADR-0020 (approvals, for the Claude Code reporter), the

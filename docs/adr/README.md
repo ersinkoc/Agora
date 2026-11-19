@@ -107,4 +107,4 @@ Date: YYYY-MM-DD
 | 0087 | Install and update coding agents on a machine from the window | Proposed |
 | 0088 | Preview an agent's local web server in the window | Accepted |
 | 0090 | A structured agent's conversation is complete: thinking, tool calls with status, plan progress, effort, cancel and usage | Accepted |
-| 0091 | The plan limits of subscription agents are shown from the tools' own output | Proposed |
+| 0091 | The plan limits of subscription agents are shown from the tools' own output | Accepted |
