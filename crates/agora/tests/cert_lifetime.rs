@@ -266,6 +266,16 @@ impl Rig {
         })
     }
 
+    /// `(action, node)` of every audit row.
+    fn audit_rows(&self) -> Vec<(String, String)> {
+        agora_hub::audit::Audit::new(self.state.hub.store())
+            .list(0, None, 1000)
+            .unwrap()
+            .into_iter()
+            .map(|r| (r.action, r.node))
+            .collect()
+    }
+
     fn online(&self, id: &str) -> bool {
         self.state
             .hub
@@ -419,17 +429,53 @@ fn a_machine_connected_longer_than_its_lifetime_still_connects_after_renewal() {
 /// ADR-0085: the renewal itself needs a certificate that is valid and active; a machine that is late cannot ask.
 #[test]
 fn a_machine_whose_certificate_ended_cannot_renew_it() {
-    let rig = rig("late-renew", None, SHORT, &[("m", true)]);
+    let rig = rig(
+        "late-renew",
+        None,
+        SHORT,
+        &[("m", true), ("control", false)],
+    );
     let addr = rig.listen_with(rig.acceptor.clone());
     rig.wait_past_expiry();
     // The hub refuses the TLS handshake of an ended certificate, so there is no one to answer.
     let err = rig
         .renew(addr, "m")
         .expect_err("an ended certificate renewed");
-    // Refused by TLS before any command (a certificate alert), not by a hub answer: no `enroll.renew_refused` could be sent.
+    // Refused by TLS before any command, never by a hub answer (`enroll.renew_refused`). How the refusal surfaces depends on the
+    // platform: a certificate alert (Linux, macOS), or the connection reset, aborted or closed while the handshake finishes (Windows:
+    // os error 10053 / 10054).
+    let text = err.to_lowercase();
+    let tls_refusal = [
+        "cert",
+        "alert",
+        "expired",
+        "reset",
+        "abort",
+        "broken pipe",
+        "closed",
+        "10053",
+        "10054",
+    ]
+    .iter()
+    .any(|w| text.contains(w));
     assert!(
-        !err.starts_with("enroll.") && err.to_lowercase().contains("cert"),
+        !err.starts_with("enroll.") && tls_refusal,
         "refused for another reason than the ended certificate: {err}"
+    );
+    // It is the certificate and not the setup: a machine with a valid certificate renews at the same hub, in the same test.
+    rig.renew(addr, "control")
+        .expect("a valid certificate renews at the same hub");
+    // And the hub saw no renewal command from the ended one: the only audit row of any renewal is the control machine's.
+    let rows = rig.audit_rows();
+    assert!(
+        rows.iter()
+            .all(|(action, node)| !action.starts_with("enroll.renew") || node == "control"),
+        "the hub recorded a renewal for the ended certificate: {rows:?}"
+    );
+    assert_eq!(
+        rows.iter().filter(|(a, _)| a == "enroll.renew").count(),
+        1,
+        "{rows:?}"
     );
 }
 
