@@ -7,6 +7,7 @@ import { UsagePanel } from './UsagePanel';
 import type { ApprovalModel, BoardModel, MessageModel, ProjectCost } from '../net/view';
 import { ApprovalCard } from './ApprovalCard';
 import type { StartChoice } from './StartApproval';
+import { EmptyState } from './EmptyState';
 import { Icon } from './Icon';
 import { ProjectBoard } from './ProjectBoard';
 import { StateBadge } from './StateBadge';
@@ -136,7 +137,7 @@ export function Details({ tab, fleet = [], now = Date.now(), attention, approval
         {pairing && <PairCards ui={pairing} />}
         {approvals.map(a => <ApprovalCard key={a.id} approval={a} onResolve={(ok, choice) => onResolve(a, ok, choice)} />)}
       </div>}
-    {tab === 'changes' && (changed.length === 0 ? <p className="muted">{t('changes-none')}</p> : <ul className="m-0 grid list-none gap-1 p-0">
+    {tab === 'changes' && (changed.length === 0 ? <EmptyState icon="check" title={t('empty-changes-title')} hint={t('empty-changes-hint')} /> : <ul className="m-0 grid list-none gap-1 p-0">
         {changed.map(a => <li key={a.id}>
           <button type="button" className="ide-row justify-between gap-3 py-1.5" onClick={() => (onReview ? onReview(a.id) : onOpen(a.id))}>
             <span className="min-w-0"><span className="block truncate font-medium">{a.shared ? a.workspace : a.name}</span><span className="block truncate text-xs text-muted">{a.shared ? t('workspace-shared') : a.machine} · {a.workspace}</span></span>
@@ -145,7 +146,7 @@ export function Details({ tab, fleet = [], now = Date.now(), attention, approval
         </li>)}
       </ul>)}
     {tab === 'board' && <div className="grid gap-2">{boards.map(b => <ProjectBoard key={b.projectId} board={b} machines={boardMachines} />)}</div>}
-    {tab === 'messages' && (messages.length === 0 ? <p className="muted">{t('console-no-messages')}</p> : <ul className="m-0 grid list-none gap-2 p-0">
+    {tab === 'messages' && (messages.length === 0 ? <EmptyState icon="chat" title={t('empty-messages-title')} hint={t('empty-messages-hint')} /> : <ul className="m-0 grid list-none gap-2 p-0">
         {messages.map((m, i) => <li key={`${m.atMs}-${i}`} className="rounded-xs border border-line bg-surface-0 p-2.5">
           <div className="text-xs"><strong>{m.from}</strong> <span className="inline-block rtl:-scale-x-100" aria-hidden="true">→</span> <strong>{m.to}</strong>{m.crossMachine ? <span className="ide-chip ms-1.5">{t('message-cross')}</span> : null}</div>
           <div className="mt-1 break-words text-muted">{m.body}</div>

@@ -19,7 +19,7 @@ function Meter({ pct, label }: { pct: number; label: string }) {
 function AgentRow({ a }: { a: UsageAgent }) {
   return <li className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-0.5 py-1.5">
     <span className={`min-w-0 flex-1 basis-32 truncate ${a.running ? 'text-ink' : 'text-muted'}`}>{a.name}</span>
-    <span className="flex-none text-xs text-muted">{shortCount(a.tokens)}</span>
+    <span className="flex-none text-xs text-muted">{a.tokens > 0 ? shortCount(a.tokens) : '—'}</span>
     <span className="flex-none text-xs text-muted">{time(a.activeMs)}</span>
     {a.contextPct !== undefined && <span className="flex flex-none items-center gap-1.5 text-xs text-muted"><Meter pct={a.contextPct} label={t('usage-context', { percent: a.contextPct })} />{a.contextPct}%</span>}
   </li>;

@@ -16,6 +16,7 @@ import type { DiffSource } from '../net/diff';
 import type { WorkspaceFiles } from '../net/files';
 import { AgentAddress } from './AgentAddress';
 import { NoAskBadge } from './NoAskBadge';
+import { LiveSummary } from './LiveSummary';
 import { Explorer } from './Explorer';
 import { FleetConsole } from './FleetConsole';
 import type { PairingUi } from './Pairing';
@@ -290,13 +291,15 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
         onStart={onStart ? () => onStart() : undefined} onDismiss={() => dismiss([a.id])}
         onForget={onForget ? () => removeClosed([a.id]) : undefined} forgetError={forgetError}
         onResume={resume && a.interrupted ? (action) => resume(a, action) : undefined} resuming={resuming === a.id}
-        resumeError={resumeError?.id === a.id ? resumeError.code : undefined} /> : <div className="pane min-h-0 flex-1 p-1.5">
+        resumeError={resumeError?.id === a.id ? resumeError.code : undefined} /> : <>
+        {a.terminal !== false && <LiveSummary agent={a} now={now} onChanges={() => { setRailTab('changes'); setShowDetails(true); }} />}
+        <div className="pane min-h-0 flex-1 p-1.5">
         {a.terminal === false ? <PromptBox agent={a} send={sendPrompt} source={chatOf?.(a)} choose={chooseOption} /> : (
           <Suspense fallback={<div className="terminal" aria-busy="true" />}>
             <TerminalView source={terminalFor(a.id)} label={`${t('focus-terminal')} · ${a.name}`} />
           </Suspense>
         )}
-      </div>}
+      </div></>}
     </div>
   );
   const panel = (id: string) => id === 'fleet' ? home : PANEL_TAB[id] ? <div className="min-h-0 flex-1 overflow-y-auto p-3">

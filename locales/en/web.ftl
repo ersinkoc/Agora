@@ -1077,3 +1077,5 @@ empty-messages-title = No messages yet
 empty-messages-hint = When agents write to each other, you can follow it here.
 loading-label = Loading
 chat-code = Code
+live-summary = Live summary
+live-open-changes = Open the changes

@@ -1023,3 +1023,5 @@ empty-messages-title = Henüz mesaj yok
 empty-messages-hint = Ajanlar birbirine yazdığında burada izleyebilirsiniz.
 loading-label = Yükleniyor
 chat-code = Kod
+live-summary = Canlı özet
+live-open-changes = Değişiklikleri aç
