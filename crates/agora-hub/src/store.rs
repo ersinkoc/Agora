@@ -342,30 +342,33 @@ impl SqliteStore {
                  COMMIT;",
             )?;
         }
-        if version < 13 {
-            // ADR-0085: per certificate, when a machine first connected with it (NULL until it does) so the hub can revoke a machine's
-            // older certificates a week after it connected with a newer one; and, for a certificate issued by a renewal, its PEM (public
-            // data) and the SHA-256 of the public key of the request it was issued for, so a renewal whose answer was lost can be answered
-            // again with the same certificate. Schema 13 is unreleased, so these columns are part of it, not a step 14.
-            // Each column is added only when missing, as the other steps are idempotent: a database taken back to an older version by hand
-            // (the tests do) already has them.
-            let mut script = String::from("BEGIN;");
-            for (name, kind) in [
-                ("first_seen_ms", "INTEGER"),
-                ("cert_pem", "TEXT"),
-                ("csr_key_hash", "BLOB"),
-            ] {
-                let has: i64 = conn.query_row(
-                    "SELECT COUNT(*) FROM pragma_table_info('devices') WHERE name = ?1",
-                    [name],
-                    |r| r.get(0),
-                )?;
-                if has == 0 {
-                    script.push_str(&format!(" ALTER TABLE devices ADD COLUMN {name} {kind};"));
-                }
+        // ADR-0085 (schema 13): per certificate, when a machine first connected with it (NULL until it does) so the hub can revoke a
+        // machine's older certificates a week after it connected with a newer one; and, for a certificate issued by a renewal, its PEM
+        // (public data) and the SHA-256 of the public key of the request it was issued for, so a renewal whose answer was lost can be
+        // answered again with the same certificate. Checked at EVERY open, not only when the version is older: an unreleased build of
+        // schema 13 (developer or test hubs) left databases at version 13 without the later columns, and every renewal on one would fail.
+        // Each column is added only when missing, inside one transaction, so it is idempotent (a database taken back to an older version
+        // by hand, as the tests do, has some of them already).
+        let mut script = String::new();
+        for (name, kind) in [
+            ("first_seen_ms", "INTEGER"),
+            ("cert_pem", "TEXT"),
+            ("csr_key_hash", "BLOB"),
+        ] {
+            let has: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('devices') WHERE name = ?1",
+                [name],
+                |r| r.get(0),
+            )?;
+            if has == 0 {
+                script.push_str(&format!(" ALTER TABLE devices ADD COLUMN {name} {kind};"));
             }
-            script.push_str(" PRAGMA user_version = 13; COMMIT;");
-            conn.execute_batch(&script)?;
+        }
+        if version < 13 {
+            script.push_str(" PRAGMA user_version = 13;");
+        }
+        if !script.is_empty() {
+            conn.execute_batch(&format!("BEGIN;{script} COMMIT;"))?;
         }
         Ok(Self {
             conn: Mutex::new(conn),
@@ -1070,6 +1073,43 @@ mod tests {
         assert_eq!((node.as_str(), seen), ("n1", None));
         drop(conn);
         drop(s);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// An unreleased build of schema 13 left databases at `user_version = 13` without the renewal columns. Opening one adds them (and
+    /// keeps the rows), so a renewal on it does not fail with "no such column".
+    #[test]
+    fn a_database_at_version_13_without_the_renewal_columns_gets_them_on_open() {
+        let d = tmpdir("v13-missing-columns");
+        let path = d.join("hub.db");
+        {
+            let s = SqliteStore::open(&path).unwrap();
+            let conn = s.lock().unwrap();
+            conn.execute_batch(
+                "INSERT INTO devices (serial, node_id, enrolled_ms) VALUES ('ab', 'n1', 7);
+                 ALTER TABLE devices DROP COLUMN cert_pem;
+                 ALTER TABLE devices DROP COLUMN csr_key_hash;",
+            )
+            .unwrap();
+            let v: i64 = conn
+                .pragma_query_value(None, "user_version", |r| r.get(0))
+                .unwrap();
+            assert_eq!(v, 13);
+        }
+        let s = SqliteStore::open(&path).unwrap();
+        let conn = s.lock().unwrap();
+        let (node, pem, hash): (String, Option<String>, Option<Vec<u8>>) = conn
+            .query_row(
+                "SELECT node_id, cert_pem, csr_key_hash FROM devices WHERE serial = 'ab'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!((node.as_str(), pem, hash), ("n1", None, None));
+        drop(conn);
+        // Opening again changes nothing.
+        drop(s);
+        assert!(SqliteStore::open(&path).is_ok());
         let _ = std::fs::remove_dir_all(&d);
     }
 }

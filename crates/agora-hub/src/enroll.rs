@@ -451,6 +451,10 @@ impl<'a> Enrollment<'a> {
             let Some(pem) = newest_pem.filter(|_| same_request) else {
                 return Ok(Decision::Refuse(RenewRefusal::Superseded));
             };
+            // A certificate that has itself ended is not sent again: the machine could not use it.
+            if crate::ca::cert_not_after_secs(&pem).map_or(true, |end| end <= now_s) {
+                return Ok(Decision::Refuse(RenewRefusal::Expired));
+            }
             let recent: i64 = tx.query_row(
                 "SELECT COUNT(*) FROM audit WHERE action = 'enroll.renew_resent' AND node = ?1 AND at_ms > ?2",
                 params![from.node_id, to_i64(now_ms.saturating_sub(RESEND_WINDOW_MS))],
@@ -1511,5 +1515,40 @@ mod tests {
             refusal(e.renew(&ca, &from(&x, "x", x_end), &csr_x, t + 2)),
             "superseded"
         );
+    }
+
+    /// A certificate that has itself ended is not sent again, even for the request it was issued for.
+    #[test]
+    fn a_resend_of_a_certificate_that_has_ended_is_refused_as_expired() {
+        let (store, ca, _) = setup();
+        let e = Enrollment::new(&store);
+        // The machine's records are dated 30 days ahead of the real clock, so that the new certificate (whose end is real: 90 days
+        // from now) ends while the older one is still inside its lifetime by the hub's record.
+        let real_ms = u64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .unwrap();
+        let t0 = real_ms + 30 * DAY;
+        let (a, _) = enrolled(&store, &ca, "n", t0);
+        let far = i64::MAX / 4;
+        let (_, csr) = new_device_request().unwrap();
+        let b = e.renew(&ca, &from(&a, "n", far), &csr, t0 + HOUR).unwrap();
+        let b_end_ms =
+            u64::try_from(crate::ca::cert_not_after_secs(&b.cert_pem).unwrap()).unwrap() * 1000;
+        // Before B's end it is sent again; after its end it is refused, and nothing is sent.
+        assert_eq!(
+            e.renew(&ca, &from(&a, "n", far), &csr, b_end_ms - 2000)
+                .unwrap()
+                .serial_hex,
+            b.serial_hex
+        );
+        assert_eq!(
+            refusal(e.renew(&ca, &from(&a, "n", far), &csr, b_end_ms + 1000)),
+            "expired"
+        );
+        assert_eq!(resent_rows(&store).len(), 1);
     }
 }
