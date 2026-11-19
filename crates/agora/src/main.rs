@@ -461,7 +461,7 @@ fn doctor(say: &Say, o: &Opts) -> ExitCode {
         socket: socket_path(o),
         manifests_dir: o.manifests.clone().unwrap_or_else(|| h.join("manifests")),
     });
-    // Certificates last 90 days and nothing renews them yet: say so before a machine stops connecting.
+    // Certificates last 90 days and renew themselves (ADR-0085): the days left, and what a refused renewal needs.
     checks.extend(certs::checks_now(&hubcli::link_dir(), &hubcli::hub_dir(o)));
     // ADR-0067 rung 3: how the hub is reached from outside this machine, and whether the screen password protects it.
     checks.extend(remotecmd::checks(o));
@@ -502,6 +502,10 @@ fn doctor(say: &Say, o: &Opts) -> ExitCode {
             ("cert-node", Status::Warn) => key!("doctor-cert-node-soon"),
             ("cert-node", _) if c.detail == certs::UNUSABLE => key!("doctor-cert-node-unusable"),
             ("cert-node", _) => key!("doctor-cert-node-expired"),
+            ("cert-renew-join-again", _) => key!("doctor-cert-renew-join-again"),
+            ("cert-renew-superseded", _) => key!("doctor-cert-renew-superseded"),
+            ("cert-renew-rejected", _) => key!("doctor-cert-renew-rejected"),
+            ("cert-renew-pending", _) => key!("doctor-cert-renew-pending"),
             ("cert-hub", Status::Ok) => key!("doctor-cert-hub"),
             ("cert-hub", Status::Warn) => key!("doctor-cert-hub-soon"),
             ("cert-hub", _) if c.detail == certs::UNUSABLE => key!("doctor-cert-hub-unusable"),

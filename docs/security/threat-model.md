@@ -204,14 +204,22 @@ even for an empty requested path, keeping parent-checkout changes outside the wo
 place a selected subdirectory outside the shared system temp folder and prove inside writes succeed while parent
 checkout writes fail, in both directory and explicit-worktree modes. Explicit policy write allowances still apply.
 
-## Known limit: certificates are not renewed (ADR-0085, Accepted, not built yet)
+## Certificates renew themselves (ADR-0085, built); what is left
 
-Machine certificates and the hub's server certificate last 90 days (`DEVICE_CERT_DAYS`) and nothing renews them. A machine whose certificate
-has ended is refused at its next connection (an open connection is not cut), and a hub that keeps running past the end of its own server
-certificate is refused by every machine that dials it (it issues one at start). Both are proven with a few-second lifetime in
-`crates/agora/tests/cert_lifetime.rs`. This is an availability limit, not a way in: an expired certificate is never accepted. Until renewal
-is built the owner joins each machine again before day 90 and restarts the hub now and then; `agora doctor` (node `cert.pem`, hub
-`server-cert.pem`) warns 30 days before and fails after the end, and `agora hub machines` notes a machine close to its end.
+Machine certificates and the hub's server certificate last 90 days (`DEVICE_CERT_DAYS`). A machine renews its own when a third of its life is
+left and the hub is up to date; the hub replaces its own server certificate when 30 days are left, without a restart. A machine whose
+certificate has ended is still refused at its next connection (an open connection is not cut) and must join again with the owner's approval, and
+a hub that keeps running past the end of its own certificate without replacing it is refused by every machine that dials it. Both are proven with a
+few-second lifetime in `crates/agora/tests/cert_lifetime.rs`, as is the renewal itself. An expired certificate is never accepted.
+On the node (`agora-node` `link_renewal`): the fresh key and request are written (private, whole-file) before they are sent and kept until the
+answer is stored, so a lost answer is met by sending the same request again and no second certificate is issued; an answer for another node, another
+key, another CA, the wrong usage or an end no later than the certificate in use is rejected and the pair in use is kept; the pair is replaced in an
+order that leaves the folder one whole pair after any stop and is restored from the previous pair if it cannot be finished; the previous pair is
+removed only after a connection with the new one was accepted; no key or request text is logged. A certificate that is no longer the newest one the
+hub issued (`superseded`) is logged as security relevant and shown by `agora doctor` (another holder of the machine's certificate may exist);
+revocation (ADR-0015, ADR-0073) remains the answer. A revoked certificate is refused at the TLS connection, so the machine cannot be told why and
+retries slowly (a minute, doubling, at most an hour); this is an availability limit, not a way in. `agora doctor` shows the days left on this
+machine's certificate and the hub's.
 
 ## Open gap: unix sockets under confinement
 

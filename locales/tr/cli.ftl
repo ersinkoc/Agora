@@ -122,21 +122,25 @@ doctor-manifest-invalid = { $detail } ajan tanımı okunamadı.
 doctor-cert-node = Bu makinenin hub sertifikası { $detail ->
     [one] bir gün daha
    *[other] { $detail } gün daha
-} geçerli. Henüz hiçbir şey onu yenilemiyor: bitmeden bu makineyi yeniden katıl.
+} geçerli. Ömrünün üçte biri kaldığında, makine hub'a bağlıyken kendini yeniler.
 doctor-cert-node-soon = Bu makinenin hub sertifikası { $detail ->
     [one] bir gün sonra
    *[other] { $detail } gün sonra
-} bitiyor. Henüz hiçbir şey onu yenilemiyor: bitince bu makine hub'a bağlanamaz. Öncesinde yeniden katıl: hub'da "agora hub code" çalıştır, sonra burada yeni kodla "agora node enroll" çalıştır.
+} bitiyor. Şimdiye kadar kendini yenilemiş olması gerekirdi: bunu, güncel bir hub'a bağlıyken yapar. Böyle kalırsa hub'ın çalıştığını ve buradan ulaşılabildiğini kontrol et; yoksa süresi bitince bu makine hub'a bağlanamaz ve yeniden katılmalıdır (hub'da "agora hub code" çalıştır, sonra burada yeni kodla "agora node enroll" çalıştır).
 doctor-cert-node-expired = Bu makinenin hub sertifikasının süresi doldu, bu yüzden hub'a bağlanamıyor ({ $file }). Yeniden katıl: hub'da "agora hub code" çalıştır, sonra burada yeni kodla "agora node enroll" çalıştır.
 doctor-cert-node-unusable = Bu makinenin hub sertifikası sertifika olarak okunamıyor ({ $file }). Dosyanın tam olduğunu ve bu kullanıcının okuyabildiğini kontrol et; dosya bozulduysa makineyi yeniden katıl: hub'da "agora hub code" çalıştır, sonra burada yeni kodla "agora node enroll" çalıştır.
+doctor-cert-renew-join-again = Bu makinenin hub sertifikası yenilenemiyor ({ $detail }): hub artık yenisi için onu kabul etmiyor, bu yüzden süresi bitince bu makine bağlanamaz. Makineyi sahibinin onayıyla yeniden katıl: hub'da "agora hub code" çalıştır (ya da eşleştir), sonra burada yeni kodla "agora node enroll" çalıştır. Ajanlarına ve bekleyen olaylarına dokunulmaz.
+doctor-cert-renew-superseded = Bu makinenin hub sertifikası, hub'ın onun için verdiği en yeni sertifika değil: makinenin sertifikasının başka bir sahibi olabilir. Sahibinden hub'ın denetim görünümünde bu makineye bakmasını iste; nedenini bilmiyorsan makineyi hub'dan kaldır ("agora hub machines") ve yeniden katıl. O zamana kadar makine bu sertifikayla, süresi bitene dek çalışmaya devam eder.
+doctor-cert-renew-rejected = Hub, bu makinenin sertifika yenileme isteğine doğrulanamayan bir sertifikayla karşılık verdi ({ $detail }); bu yüzden kullanılmadı ve kullanımdaki sertifika değişmedi. Bir saat sonra yine istenir. Tekrarlanırsa bu makinenin kaydolduğu hub'a ulaştığından emin ol.
+doctor-cert-renew-pending = Bu makine için yeni bir sertifika alınıyor; hub henüz yanıtlamadı. Makine elindeki sertifikayla çalışmaya devam eder ve kendisi yine sorar.
 doctor-cert-hub = Hub'ın kendi sertifikası { $detail ->
     [one] bir gün daha
    *[other] { $detail } gün daha
-} geçerli. Hub her başladığında yeniden üretilir.
+} geçerli. Hub, 30 gün kaldığında yeniden başlatmaya gerek kalmadan kendisi yeniler.
 doctor-cert-hub-soon = Hub'ın kendi sertifikası { $detail ->
     [one] bir gün sonra
    *[other] { $detail } gün sonra
-} bitiyor. Öncesinde hub'ı yeniden başlat ("agora hub run" ya da servisini yeniden başlat) ki yenisini alsın; bitiminden sonra çalışmaya devam eden bir hub yeni bağlantıları reddeder.
+} bitiyor. Hub, 30 günden az kaldığında sertifikasını kendisi yeniler (her gün bakar); bu yüzden bu dosya olması gerekenden eski. Böyle kalırsa hub'ı yeniden başlat ("agora hub run" ya da servisini yeniden başlat); bitiminden sonra çalışmaya devam eden bir hub yeni bağlantıları reddeder.
 doctor-cert-hub-expired = Hub'ın kendi sertifikasının süresi doldu ({ $file }): ona yeni bağlantılar reddediliyor. Yenisini almak için hub'ı yeniden başlat ("agora hub run" ya da servisini yeniden başlat).
 doctor-cert-hub-unusable = Hub'ın kendi sertifikası sertifika olarak okunamıyor ({ $file }). Dosyanın tam olduğunu ve hub'ın çalıştığı kullanıcının okuyabildiğini kontrol et; hub'ı yeniden başlatmak ("agora hub run" ya da servisini yeniden başlat) yenisini yazar.
 doctor-summary-ok = Agora'nın ihtiyaç duyduğu her şey yerinde.
@@ -404,7 +408,7 @@ cli-machine-cert-soon = { $id } · sertifikası { $date } tarihinde bitiyor{ $da
     [0] , bugün
     [1] , bir gün sonra
    *[other] , { $days } gün sonra
-}. Öncesinde yeniden katıl (henüz hiçbir şey onu yenilemiyor): burada "agora hub code", o makinede "agora node enroll".
+}. Bağlıyken kendini yeniler; yenilemezse o makinede "agora doctor" çalıştır ya da yeniden katıl: burada "agora hub code", o makinede "agora node enroll".
 cli-machine-cert-expired = { $id } · sertifikası { $date } tarihinde bitti, bu yüzden bağlanamıyor. Yeniden katıl: burada "agora hub code", o makinede "agora node enroll".
 cli-machine-unknown = Hub { $id } adında bir makine göstermiyor.
 cli-machines-question = Bu makineler unutulsun mu? Her pencereden kalkarlar; yeniden bağlanan geri gelir. [e/H]
