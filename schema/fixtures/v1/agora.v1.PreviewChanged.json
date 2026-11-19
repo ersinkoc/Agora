@@ -1,0 +1,11 @@
+{
+  "forward": {
+    "forwardId": "x",
+    "port": 1,
+    "openedAtMs": "1",
+    "expiresAtMs": "1",
+    "creator": "x",
+    "state": "PREVIEW_STATE_OPEN",
+    "closeReason": "PREVIEW_CLOSE_REASON_CLOSED"
+  }
+}

@@ -50,6 +50,8 @@ pub const CAPABILITIES: &[&str] = &[
     "kinds.program",
     // ADR-0065: speaks the pairing messages (`pairing.v1`, docs/specs/pairing.md). Nothing sends them yet.
     "pairing.v1",
+    // ADR-0088: speaks the preview messages (`preview.v1`, docs/specs/preview.md). Nothing sends them yet; a command is refused with `protocol.capability_missing`.
+    "preview.v1",
 ];
 
 /// Events sent per step; the hub acknowledges after each batch.

@@ -751,3 +751,54 @@ and means "speaks these messages"; a hub that cannot pair (it does not know its 
   `PAIR_DECIDED` (6) (`agora_protocol::frame::kinds`), memory only; other clients never receive them and clients ignore kinds they do not know.
 - **Errors**: `pair.closed`, `pair.limit` (`seconds`), `pair.expired`, `pair.mismatch`, `pair.denied`, `pair.unknown`, `pair.state`
   (`state`), `pair.insecure_transport`, `pair.names_missing` (`reason`, `names`; the hub refuses `PairOpen` when it cannot name its addresses in its certificate), and the machine-local, never-sent `pair.name_unverified` (`name`), `pair.discovery_unconfirmed` and `pair.ca_mismatch`; see `error-codes.md`.
+
+### Preview (ADR-0088)
+
+Schema only so far (`schema/agora/v1/preview.proto`, `docs/specs/preview.md` is the design); no node or hub sends or handles these messages yet.
+All additions; nothing published changed. Capability `preview.v1` is offered by both the hub and the node and means "speaks these
+messages". **Older peers refuse, they do not drop:** the hub never sends a preview command to a node that did not offer `preview.v1`
+and answers the client `protocol.capability_missing {capability: preview.v1}`; a peer that gets a preview command it does not handle
+answers the same code, as for any command it does not know. A client never assumes an open worked from silence.
+
+- **Commands** (`CommandRequest` fields): `PreviewOpen` (102: `port`, `expires_seconds`, `authorization`), `PreviewClose` (103: `forward_id`, `all`),
+  `PreviewList` (104) and `PreviewConnect` (105: `forward_id`). `PreviewConnect` is opened on a dynamic stream like `TerminalSubscribe`
+  (any other command on a dynamic stream stays `protocol.invalid_message`).
+- **Results** (`CommandOk` fields): `PreviewOpenResult` (26: `forward`), `PreviewListResult` (27), `PreviewConnectResult` (28:
+  `max_chunk_bytes`, `window_bytes`, `rate_bytes_per_second`, `total_bytes_limit`); `PreviewClose` answers `empty`. A forward is a
+  `PreviewForward { forward_id, port, opened_at_ms, expires_at_ms, creator, state, close_reason }`.
+- **Events** (`Event` fields): `PreviewSuggested` (80: `agent_id`, `port`, `note`) is a fact "my app is on port N". It is shown as a
+  card with an Open button and is never an open and never carries authority; the note is untrusted text. `PreviewChanged` (81: a
+  `PreviewForward`) is written when a forward opens or ends, for the indicator and the audit trail (the port, never the content).
+- **Stream frames** (dynamic stream opened by `PreviewConnect`, one stream per TCP connection to the forward's port; the hub relays
+  frames without decoding them, like the terminal relay). Kinds 20..22 are new and do not reuse 0..3 (terminal) or 10..11 (chat):
+
+  | Kind | Name | Payload | Direction |
+  | --- | --- | --- | --- |
+  | 20 | `PREVIEW_DATA` | raw bytes, at most `max_chunk_bytes` (default 16384) | both |
+  | 21 | `PREVIEW_CREDIT` | `PreviewCredit { bytes }` | both |
+  | 22 | `PREVIEW_END` | `PreviewEnd { reason, bytes_to_target, bytes_from_target }` | either, once, before kind 255 |
+  | 255 | `STREAM_CLOSE` | empty | either (as for every dynamic stream) |
+
+  Each side starts with `window_bytes` (default 262144) of credit toward the other and sends no `PREVIEW_DATA` beyond the credit it
+  holds; the receiver grants more with `PREVIEW_CREDIT` as it drains. A frame over `max_chunk_bytes`, or data beyond the credit, ends the
+  stream with reason `PROTOCOL`. `rate_bytes_per_second` and `total_bytes_limit` (0 = none) are ceilings the node enforces; going over
+  ends the stream with reason `BUDGET`. Preview frames are the lowest priority (section 6): they never delay terminal bytes, and input
+  outranks them. `PreviewCloseReason`: `CLOSED`, `EXPIRED`, `NODE_STOPPED`, `TARGET_GONE`, `BUDGET`, `PROTOCOL`, `POLICY`. Constants:
+  `agora_protocol::frame::kinds::{PREVIEW_DATA, PREVIEW_CREDIT, PREVIEW_END}`.
+- **Signing: `preview-action-v1`.** Through the hub a `PreviewOpen` carries a `PreviewAuthorization { device_id, nonce, expires_at_ms,
+  signature }` (the shape of `DirectoryAuthorization`, defined in `preview.proto` because `commands.proto` imports it), signed by a
+  device the node trusts (ADR-0020) over, in the order the approval card shows them (the node, the port, how long):
+
+  ```
+  preview-action-v1\0node\0open\0port\0expires_seconds\0nonce\0expires_at_ms
+  ```
+
+  The port and the seconds are decimal digits (`expires_seconds` is what the request carries, `0` for the default, so the signature
+  covers exactly what was shown); the other fields are as in `directory-action-v1` and the nonce is single-use. A signature made for
+  another node, port, expiry or by another device does not verify, so the hub can neither open a forward nor change its port or
+  lifetime. An agent cannot send `PreviewOpen`; a suggestion is only an event. `PreviewClose` and `PreviewList` need no signature
+  (closing only removes access; listing shows ports and creators to people who may see the machine). On the node's own control socket
+  (the owner) no signature is needed. Vectors: `schema/fixtures/signing/preview-action-v1.json`
+  (`crates/agora-protocol/tests/preview_signing.rs`).
+- **Errors**: `preview.port_refused` (`port`, `reason`), `preview.limit` (`limit`), `preview.expired` (`forward_id`),
+  `preview.unknown` (`forward_id`), `preview.unavailable` (`reason`); see `error-codes.md`.

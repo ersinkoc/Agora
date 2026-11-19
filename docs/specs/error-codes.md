@@ -94,6 +94,11 @@ or a local response timeout has a localized retry message.
 | `pair.names_missing` | `reason`, `names` | ADR-0065 section 5b: the hub cannot be sure its certificate names the address a machine will dial, so `PairOpen` is refused and the switch stays closed. `reason` is `interfaces` (the system would not list the network addresses; `names` is empty), `invalid` (a `--name` a certificate cannot carry; `names` is that name), `too_many` (more `--name` values than a certificate carries), `issue` (the certificate could not be made; `names` is what it should have carried) or `write` (the new certificate could not be saved to `server-cert.pem`; nothing was switched). The sentence tells the owner to start the hub with `--name ADDRESS` |
 | `pair.discovery_unconfirmed` | — | ADR-0065 section 15: **machine-local, never sent.** `agora join` found a hub by discovery and cannot ask the person to confirm its fingerprint (no terminal), so it does not choose; nothing is stored. The person gives the address, or runs it in a terminal |
 | `pair.ca_mismatch` | — | ADR-0065 section 15: **machine-local, never sent.** The person confirmed a hub found by discovery by the fingerprint of its certificate authority, and the certificate authority the hub then delivered has another one; nothing is stored |
+| `preview.port_refused` | `port`, `reason` | ADR-0088: the node will not forward to that port. `reason` is `invalid` (not 1..65535), `privileged` (below 1024, and the owner's policy does not name it), `node_port` (one of the node's own listening ports: control, hub link, holder) or `not_loopback` (the port answers only on another address). The hub cannot widen this |
+| `preview.limit` | `limit` | ADR-0088: the node already has `limit` open forwards (8) |
+| `preview.expired` | `forward_id` | ADR-0088: the forward's expiry passed; a window opens it again with a new signed open |
+| `preview.unknown` | `forward_id` | ADR-0088: no such forward on that node (never opened, closed, or the node restarted) |
+| `preview.unavailable` | `reason` | ADR-0088: the hub cannot give a forward an origin of its own in this setup (`no_origin`: no wildcard name and no separate port); nothing was opened |
 | `internal` | `incident_id` | Unexpected failure; details only in logs |
 
 ### Command-line codes (ADR-0067 rung 3)

@@ -201,6 +201,8 @@ impl Scope {
             }
             Body::GitStatusChanged(e) => self.granted(self.worktrees.get(&q(&e.worktree_id))),
             Body::FilesChanged(e) => self.granted(self.worktrees.get(&q(&e.worktree_id))),
+            // ADR-0088 (schema only): who may see a preview event is decided with the hub step; until then nobody is sent one.
+            Body::PreviewSuggested(_) | Body::PreviewChanged(_) => false,
             Body::AgentStarted(e) => {
                 let p = qualified(node, &e.project_id);
                 self.agents.insert(q(&e.agent_id), p.clone());

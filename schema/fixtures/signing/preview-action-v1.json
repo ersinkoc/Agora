@@ -1,0 +1,23 @@
+{
+ "about": "ADR-0088 preview-action-v1: the signed bytes of a preview.open sent through the hub. Fields are NUL-separated: the domain, the node, the operation `open`, then the port and the expiry in seconds (0 = the default) as decimal digits, the nonce, and the signature's expiry (`expires`, ms) as decimal digits. Checked by crates/agora-protocol/tests/preview_signing.rs; the node, the terminal client and the web window check them when the open is built.",
+ "cases": [
+  {
+   "name": "default expiry",
+   "node": "laptop",
+   "port": 3000,
+   "expires_seconds": 0,
+   "nonce": "00112233445566778899aabbccddeeff",
+   "expires": 1700000120000,
+   "hex": "707265766965772d616374696f6e2d7631006c6170746f70006f70656e003330303000300030303131323233333434353536363737383839396161626263636464656566660031373030303030313230303030"
+  },
+  {
+   "name": "two hours",
+   "node": "build-box",
+   "port": 5173,
+   "expires_seconds": 7200,
+   "nonce": "ffeeddccbbaa99887766554433221100",
+   "expires": 1700000180000,
+   "hex": "707265766965772d616374696f6e2d7631006275696c642d626f78006f70656e003531373300373230300066666565646463636262616139393838373736363535343433333232313130300031373030303030313830303030"
+  }
+ ]
+}
