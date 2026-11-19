@@ -196,6 +196,7 @@ fn node_with_acp_policy(tag: &str, policy: Option<&str>) -> Option<(std::path::P
         ("acp-fake", ""),
         ("acp-broken", ", \"--fail-at-start\""),
         ("acp-bypass", ", \"--bypass-mode\""),
+        ("acp-config", ", \"--config-options\""),
     ] {
         std::fs::write(
             home.join(format!("manifests/{kind}.toml")),
@@ -391,43 +392,6 @@ fn a_mode_that_skips_permissions_follows_the_nodes_policy() {
     }
 }
 
-/// ADR-0090 (schema only): no node handles `AgentSetConfig` or `AgentCancelTurn` yet, so each is answered with
-/// `protocol.capability_missing`, never accepted and never dropped.
-#[test]
-fn the_new_conversation_commands_are_refused_until_a_node_handles_them() {
-    let Some((home, node)) = node_with_acp("refuse-0090") else {
-        return;
-    };
-    let id = started_agent(&home);
-    let mut c = Client::connect(&home.join("node.sock")).unwrap();
-    for (cmd, capability) in [
-        (
-            Cmd::AgentSetConfig(v1::AgentSetConfig {
-                agent_id: id.clone(),
-                config_id: "effort".into(),
-                value: "high".into(),
-            }),
-            "agent.set_config",
-        ),
-        (
-            Cmd::AgentCancelTurn(v1::AgentCancelTurn {
-                agent_id: id.clone(),
-                drop_queue: false,
-            }),
-            "agent.cancel_turn",
-        ),
-    ] {
-        let err = c.call(cmd).unwrap().unwrap_err();
-        assert_eq!(err.code, "protocol.capability_missing");
-        assert_eq!(
-            err.params.get("capability").and_then(|p| p.value.clone()),
-            Some(v1::param_value::Value::Str(capability.into()))
-        );
-    }
-    drop(node);
-    let _ = std::fs::remove_dir_all(&home);
-}
-
 /// ADR-0058: an agent that dies while starting is reported with its reason, not as `internal`.
 #[test]
 fn an_acp_agent_that_dies_while_starting_says_why() {
@@ -556,4 +520,471 @@ fn an_acp_agent_uses_the_mesh_through_its_own_server() {
     );
     drop(node);
     let _ = std::fs::remove_dir_all(&home);
+}
+
+// ---- ADR-0090: a structured agent's conversation, through a real node, the bridge and the fake ACP agent ----
+
+/// One subscription to an agent's conversation, keeping every version of every entry it saw, in the order they arrived.
+struct Chat {
+    c: Client,
+    seen: Vec<v1::ChatEntry>,
+}
+
+impl Chat {
+    fn open(home: &Path, agent: &str) -> Self {
+        let mut c = Client::connect(&home.join("node.sock")).unwrap();
+        c.call_on(
+            3,
+            Cmd::ChatSubscribe(v1::ChatSubscribe {
+                agent_id: agent.into(),
+            }),
+        )
+        .unwrap()
+        .expect("subscribed");
+        Self {
+            c,
+            seen: Vec::new(),
+        }
+    }
+
+    fn pump(&mut self) {
+        let Some(f) = self.c.read_frame(Some(Duration::from_millis(100))).unwrap() else {
+            return;
+        };
+        if f.stream_id != 3 {
+            return;
+        }
+        match f.kind {
+            KIND_CHAT_SNAPSHOT => self.seen.extend(
+                v1::ChatSnapshot::decode(f.payload.as_slice())
+                    .unwrap()
+                    .entries,
+            ),
+            KIND_CHAT_ENTRY => self
+                .seen
+                .push(v1::ChatEntry::decode(f.payload.as_slice()).unwrap()),
+            _ => {}
+        }
+    }
+
+    /// The newest version of each entry, in entry order.
+    fn latest(&self) -> Vec<v1::ChatEntry> {
+        let mut by_id: std::collections::BTreeMap<u64, v1::ChatEntry> = Default::default();
+        for e in &self.seen {
+            by_id.insert(e.entry_id, e.clone());
+        }
+        by_id.into_values().collect()
+    }
+
+    fn wait(&mut self, what: &str, ok: impl Fn(&Chat) -> bool) {
+        let end = Instant::now() + Duration::from_secs(30);
+        while !ok(self) {
+            assert!(
+                Instant::now() < end,
+                "never saw {what}: {:#?}",
+                self.latest()
+            );
+            self.pump();
+        }
+    }
+}
+
+type Reply = Result<v1::AgentPromptResult, v1::ErrorInfo>;
+
+/// `AgentPrompt` to an adapter agent: what the node answered (`AgentPromptResult`, or its error).
+fn prompt(home: &Path, agent: &str, text: &str) -> Reply {
+    let mut c = Client::connect(&home.join("node.sock")).unwrap();
+    c.call(Cmd::AgentPrompt(v1::AgentPrompt {
+        agent_id: agent.into(),
+        text: text.into(),
+    }))
+    .unwrap()
+    .map(|ok| match ok.result {
+        Some(v1::command_ok::Result::AgentPrompt(r)) => r,
+        other => panic!("not an AgentPromptResult: {other:?}"),
+    })
+}
+
+fn command(home: &Path, cmd: Cmd) -> Result<v1::CommandOk, v1::ErrorInfo> {
+    Client::connect(&home.join("node.sock"))
+        .unwrap()
+        .call(cmd)
+        .unwrap()
+}
+
+fn param(e: &v1::ErrorInfo, k: &str) -> Option<v1::param_value::Value> {
+    e.params.get(k).and_then(|p| p.value.clone())
+}
+
+fn says(chat: &Chat, text: &str) -> bool {
+    chat.latest().iter().any(|e| {
+        e.role == v1::ChatRole::Agent as i32
+            && e.kind == v1::ChatKind::Text as i32
+            && e.text == text
+    })
+}
+
+/// Thinking, a tool call (one entry that changes in place, with status, files, output and a duration the node measured), a plan with
+/// step status (one entry, replaced) and the answer: the conversation of a structured agent is complete.
+#[test]
+fn a_structured_agents_conversation_has_thinking_tool_status_and_plan_steps() {
+    let Some((home, node)) = node_with_acp("rich") else {
+        return;
+    };
+    let id = started_agent(&home);
+    let mut chat = Chat::open(&home, &id);
+    let sent = prompt(&home, &id, "rich").unwrap();
+    assert!(!sent.queued && sent.queue_len == 0, "{sent:?}");
+    chat.wait("the end of the turn", |c| says(c, "done"));
+
+    let all = chat.latest();
+    let thought = all
+        .iter()
+        .find(|e| e.kind == v1::ChatKind::Thought as i32)
+        .expect("a thought");
+    assert_eq!(thought.text, "thinking hard", "the chunks are joined");
+    // One tool entry, however many times it changed; the versions the subscriber saw share its id.
+    let tools: Vec<&v1::ChatEntry> = all
+        .iter()
+        .filter(|e| e.kind == v1::ChatKind::ToolCall as i32)
+        .collect();
+    assert_eq!(tools.len(), 1, "{tools:#?}");
+    let tool = tools[0];
+    let versions: Vec<&v1::ChatEntry> = chat.seen.iter().filter(|e| e.call_id == "t3").collect();
+    assert!(
+        versions.len() >= 3,
+        "pending, in progress, completed: {versions:#?}"
+    );
+    assert!(versions.iter().all(|e| e.entry_id == tool.entry_id));
+    assert_eq!(
+        versions.first().unwrap().status,
+        v1::ToolStatus::Pending as i32
+    );
+    assert_eq!(tool.status, v1::ToolStatus::Completed as i32);
+    assert_eq!(tool.tool_kind, v1::ToolKind::Read as i32);
+    assert_eq!(tool.output, "file text");
+    assert_eq!(
+        (tool.paths[0].path.as_str(), tool.paths[0].line),
+        ("a.rs", 3)
+    );
+    assert_eq!(
+        tool.text,
+        "{\"tool\":\"read a.rs\",\"arguments\":{\"path\":\"a.rs\"}}"
+    );
+    // The node's clock measured it: the fake agent waited 400 ms between the first sight and the end.
+    assert!(
+        tool.started_ms > 0 && tool.ended_ms >= tool.started_ms + 300,
+        "{tool:?}"
+    );
+    // The plan: one entry, replaced; its last version has the later status; old clients read the lines.
+    let plans: Vec<&v1::ChatEntry> = all
+        .iter()
+        .filter(|e| e.kind == v1::ChatKind::Plan as i32)
+        .collect();
+    assert_eq!(plans.len(), 1);
+    assert_eq!(plans[0].text, "read the code\nfix the bug");
+    assert_eq!(
+        plans[0].plan_steps[0].status,
+        v1::ToolStatus::Completed as i32
+    );
+    assert_eq!(
+        plans[0].plan_steps[1].status,
+        v1::ToolStatus::InProgress as i32
+    );
+    assert_eq!(
+        plans[0].plan_steps[0].priority,
+        v1::PlanPriority::High as i32
+    );
+    // A subscriber that arrives later sees the same ring: one entry each, newest version.
+    let mut late = Chat::open(&home, &id);
+    late.wait("the snapshot", |c| !c.seen.is_empty());
+    let snap = late.latest();
+    assert_eq!(snap.iter().filter(|e| e.call_id == "t3").count(), 1);
+    assert_eq!(
+        snap.iter().find(|e| e.call_id == "t3").unwrap().status,
+        v1::ToolStatus::Completed as i32
+    );
+    drop(node);
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// A prompt during a turn waits behind it, at most 8; cancelling the turn ends it and leaves the agent alive (only a stop ends the
+/// agent); `drop_queue` throws the waiting prompts away.
+#[test]
+fn prompts_queue_behind_a_turn_and_cancelling_the_turn_leaves_the_agent_alive() {
+    let Some((home, node)) = node_with_acp("queue") else {
+        return;
+    };
+    let id = started_agent(&home);
+    let mut chat = Chat::open(&home, &id);
+    assert!(!prompt(&home, &id, "slow").unwrap().queued);
+    chat.wait("the running call", |c| {
+        c.latest()
+            .iter()
+            .any(|e| e.call_id == "t4" && e.status == v1::ToolStatus::InProgress as i32)
+    });
+    // Eight wait, each answered with how many wait now; the ninth is refused with a stable code.
+    for n in 1..=8u32 {
+        let r = prompt(&home, &id, &format!("q{n}")).unwrap();
+        assert!(r.queued && r.queue_len == n, "{n}: {r:?}");
+    }
+    let full = prompt(&home, &id, "q9").unwrap_err();
+    assert_eq!(full.code, "agent.queue_full");
+    assert_eq!(param(&full, "limit"), Some(v1::param_value::Value::Int(8)));
+    chat.wait("eight queued entries", |c| {
+        c.latest().iter().filter(|e| e.queued).count() == 8
+    });
+    assert!(chat
+        .latest()
+        .iter()
+        .filter(|e| e.queued)
+        .all(|e| e.role == v1::ChatRole::User as i32));
+
+    // Cancel the turn and drop the queue: the agent returns to idle and is still there; the waiting prompts are gone with a notice.
+    command(
+        &home,
+        Cmd::AgentCancelTurn(v1::AgentCancelTurn {
+            agent_id: id.clone(),
+            drop_queue: true,
+        }),
+    )
+    .unwrap();
+    wait_ready(&home, &id);
+    chat.wait("the notice", |c| {
+        c.latest().iter().any(|e| e.code == "adapter.queue_dropped")
+    });
+    let notice = chat
+        .latest()
+        .into_iter()
+        .find(|e| e.code == "adapter.queue_dropped")
+        .unwrap();
+    assert_eq!(notice.params["count"], "8");
+    let mut fresh = Chat::open(&home, &id);
+    fresh.wait("the snapshot", |c| !c.seen.is_empty());
+    assert!(
+        fresh.latest().iter().all(|e| !e.queued),
+        "no waiting prompt survives in the ring"
+    );
+    assert!(!says(&fresh, "q1"), "a dropped prompt was never sent");
+    // The agent is alive and takes the next prompt.
+    assert!(!prompt(&home, &id, "again").unwrap().queued);
+    chat.wait("the agent answering again", |c| says(c, "again"));
+    let (_, list) = agora(&home, &["agent", "list"]);
+    assert!(
+        list.lines()
+            .any(|l| l.contains(&id) && !l.contains("stopped")),
+        "{list}"
+    );
+    // A stop ends it.
+    command(
+        &home,
+        Cmd::AgentStop(v1::AgentStop {
+            agent_id: id.clone(),
+            stop_helpers: false,
+        }),
+    )
+    .unwrap();
+    let end = Instant::now() + Duration::from_secs(20);
+    loop {
+        let (_, list) = agora(&home, &["agent", "list"]);
+        if !list.lines().any(|l| l.contains(&id) && l.contains("idle")) {
+            break;
+        }
+        assert!(Instant::now() < end, "{list}");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    drop(node);
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// Cancelling the turn without `drop_queue` keeps what waits: it is sent, in order, as the turns end.
+#[test]
+fn cancelling_a_turn_keeps_the_queue_unless_told_to_drop_it() {
+    let Some((home, node)) = node_with_acp("queue-keep") else {
+        return;
+    };
+    let id = started_agent(&home);
+    let mut chat = Chat::open(&home, &id);
+    assert!(!prompt(&home, &id, "slow").unwrap().queued);
+    chat.wait("the running call", |c| {
+        c.latest().iter().any(|e| e.call_id == "t4")
+    });
+    for t in ["k1", "k2"] {
+        assert!(prompt(&home, &id, t).unwrap().queued);
+    }
+    command(
+        &home,
+        Cmd::AgentCancelTurn(v1::AgentCancelTurn {
+            agent_id: id.clone(),
+            drop_queue: false,
+        }),
+    )
+    .unwrap();
+    chat.wait("both answered", |c| says(c, "k1") && says(c, "k2"));
+    let all = chat.latest();
+    let at = |t: &str| {
+        all.iter()
+            .position(|e| e.role == v1::ChatRole::Agent as i32 && e.text == t)
+            .unwrap()
+    };
+    assert!(at("k1") < at("k2"), "in order");
+    assert!(
+        all.iter().all(|e| !e.queued),
+        "nothing is still marked as waiting: {all:#?}"
+    );
+    // Their entries are the user's own prompts, sent and no longer queued.
+    assert!(all
+        .iter()
+        .any(|e| e.role == v1::ChatRole::User as i32 && e.text == "k1"));
+    drop(node);
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// A permission request of the agent is in the conversation as an entry that shows it pending; cancelling the turn answers it
+/// cancelled, from the node's own approval state, and the agent lives on.
+#[test]
+fn cancelling_a_turn_cancels_its_permission_entry() {
+    let Some((home, node)) = node_with_acp("perm-cancel") else {
+        return;
+    };
+    let id = started_agent(&home);
+    let mut chat = Chat::open(&home, &id);
+    assert!(!prompt(&home, &id, "ask").unwrap().queued);
+    chat.wait("a pending permission", |c| {
+        c.latest().iter().any(|e| {
+            e.kind == v1::ChatKind::Permission as i32
+                && e.permission_outcome == v1::PermissionOutcome::Pending as i32
+        })
+    });
+    let entry = chat
+        .latest()
+        .into_iter()
+        .find(|e| e.kind == v1::ChatKind::Permission as i32)
+        .unwrap();
+    assert!(
+        entry.approval_id.starts_with("ap-"),
+        "the node's own id, not the bridge's `acp-N`: {entry:?}"
+    );
+    assert_eq!(entry.text, "run_command");
+    command(
+        &home,
+        Cmd::AgentCancelTurn(v1::AgentCancelTurn {
+            agent_id: id.clone(),
+            drop_queue: false,
+        }),
+    )
+    .unwrap();
+    chat.wait("cancelled", |c| {
+        c.latest().iter().any(|e| {
+            e.approval_id == entry.approval_id
+                && e.permission_outcome == v1::PermissionOutcome::Cancelled as i32
+        })
+    });
+    wait_ready(&home, &id);
+    // Cancelling is for agents with a turn: an unknown agent is not found.
+    let err = command(
+        &home,
+        Cmd::AgentCancelTurn(v1::AgentCancelTurn {
+            agent_id: "agent-404".into(),
+            drop_queue: false,
+        }),
+    )
+    .unwrap_err();
+    assert_eq!(err.code, "agent.not_found");
+    drop(node);
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// `AgentSetConfig`: the id and the value are checked against what the agent reported; an option that skips permissions (or that the
+/// node cannot tell from one) follows the node's `skip_permissions` policy, whatever category the agent gave it.
+#[test]
+fn a_config_option_is_set_checked_and_held_to_the_skip_permissions_policy() {
+    for (policy, allowed) in [
+        ("skip_permissions = forbid\n", false),
+        ("skip_permissions = allow\n", true),
+    ] {
+        let tag = if allowed {
+            "config-allow"
+        } else {
+            "config-forbid"
+        };
+        let Some((home, node)) = node_with_acp_policy(tag, Some(policy)) else {
+            return;
+        };
+        let id = started_agent_of(&home, "acp-config");
+        let set = |config_id: &str, value: &str| {
+            command(
+                &home,
+                Cmd::AgentSetConfig(v1::AgentSetConfig {
+                    agent_id: id.clone(),
+                    config_id: config_id.into(),
+                    value: value.into(),
+                }),
+            )
+        };
+        // The report arrives just after the start.
+        let end = Instant::now() + Duration::from_secs(15);
+        while set("effort", "low").is_err() {
+            assert!(Instant::now() < end, "the option was never accepted");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        // A reasoning level, a safe mode and an unrelated boolean are never held to the policy.
+        assert!(set("effort", "high").is_ok());
+        assert!(set("approvals", "plan").is_ok());
+        assert!(set("extended", "true").is_ok());
+        // Not reported by the agent: a stable error with the id that is not known.
+        let unknown = set("nope", "x").unwrap_err();
+        assert_eq!(unknown.code, "agent.option_unknown");
+        assert_eq!(
+            param(&unknown, "id"),
+            Some(v1::param_value::Value::Str("nope".into()))
+        );
+        let unknown = set("effort", "extreme").unwrap_err();
+        assert_eq!(unknown.code, "agent.option_unknown");
+        assert_eq!(
+            param(&unknown, "id"),
+            Some(v1::param_value::Value::Str("extreme".into()))
+        );
+        assert_eq!(
+            set("extended", "yes").unwrap_err().code,
+            "agent.option_unknown"
+        );
+        assert_eq!(set("effort", "").unwrap_err().code, "agent.option_unknown");
+        // `turbo` is in no list of bad names; the node cannot tell it asks, so it is held to the policy like `bypass`. The
+        // boolean about approvals too.
+        for (config_id, value) in [
+            ("approvals", "turbo"),
+            ("auto_approve", "true"),
+            ("auto_approve", "false"),
+        ] {
+            let r = set(config_id, value);
+            if allowed {
+                assert!(r.is_ok(), "{config_id}={value}: {r:?}");
+            } else {
+                let err = r.unwrap_err();
+                assert_eq!(err.code, "agent.option_forbidden", "{config_id}={value}");
+                assert_eq!(
+                    param(&err, "policy"),
+                    Some(v1::param_value::Value::Str("forbid".into()))
+                );
+                assert_eq!(
+                    param(&err, "option"),
+                    Some(v1::param_value::Value::Str(config_id.into()))
+                );
+            }
+        }
+        // An agent that reported no options has nothing to set.
+        let plain = started_agent(&home);
+        let r = command(
+            &home,
+            Cmd::AgentSetConfig(v1::AgentSetConfig {
+                agent_id: plain,
+                config_id: "effort".into(),
+                value: "low".into(),
+            }),
+        );
+        assert_eq!(r.unwrap_err().code, "agent.option_unknown");
+        drop(node);
+        let _ = std::fs::remove_dir_all(&home);
+    }
 }

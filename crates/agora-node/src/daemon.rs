@@ -231,6 +231,46 @@ fn activity_word(item: &agora_adapters::host::ChatItem) -> Option<&'static str> 
         ChatItem::Plan(_) => Some("planning"),
         ChatItem::Diff { .. } => Some("editing files"),
         ChatItem::Notice { .. } => None,
+        // ADR-0090: thinking is never routed to the mesh, not even as a word; a tool call with an id says what kind of tool it is.
+        ChatItem::Thought(_) => None,
+        ChatItem::Tool(t) => t.tool.as_deref().map(agora_mesh::awareness::tool_word),
+        ChatItem::PlanSteps(_) => Some("planning"),
+    }
+}
+
+/// ADR-0090: a config option as the protocol carries it. The category word is the agent's: one this build does not know is
+/// `UNSPECIFIED` (a name starting with `_` is the agent's own, `CUSTOM`).
+fn config_option(o: &agora_adapters::host::ConfigOption) -> v1::SessionConfigOption {
+    use v1::SessionConfigCategory as C;
+    v1::SessionConfigOption {
+        id: o.id.clone(),
+        name: o.name.clone(),
+        description: o.description.clone(),
+        category: match o.category.as_str() {
+            "mode" => C::Mode,
+            "model" => C::Model,
+            "model_config" => C::ModelConfig,
+            "thought_level" => C::ThoughtLevel,
+            c if c.starts_with('_') => C::Custom,
+            _ => C::Unspecified,
+        } as i32,
+        r#type: if o.boolean {
+            v1::SessionConfigType::Boolean
+        } else {
+            v1::SessionConfigType::Select
+        } as i32,
+        current: o.current.clone(),
+        choices: o
+            .choices
+            .iter()
+            .map(|c| v1::SessionOption {
+                id: c.id.clone(),
+                name: c.name.clone(),
+                description: c.description.clone(),
+                skips_permissions: c.skips_permissions,
+            })
+            .collect(),
+        skips_permissions: o.skips_permissions,
     }
 }
 
@@ -686,6 +726,26 @@ impl EventSink {
                             models: list(&options.models),
                             current_mode: options.current_mode.clone(),
                             current_model: options.current_model.clone(),
+                        }));
+                    }
+                    // ADR-0090: the config options and the commands, checked and bounded by the supervisor, only when they changed.
+                    AdapterEvent::Config { options, .. } => {
+                        self.record(Body::AgentSessionConfig(v1::AgentSessionConfig {
+                            agent_id: agent.as_str().to_string(),
+                            options: options.iter().map(config_option).collect(),
+                        }));
+                    }
+                    AdapterEvent::Commands { commands, .. } => {
+                        self.record(Body::AgentCommands(v1::AgentCommands {
+                            agent_id: agent.as_str().to_string(),
+                            commands: commands
+                                .iter()
+                                .map(|c| v1::AgentCommand {
+                                    name: c.name.clone(),
+                                    description: c.description.clone(),
+                                    input_hint: c.input_hint.clone(),
+                                })
+                                .collect(),
                         }));
                     }
                     AdapterEvent::SessionReported {
@@ -1412,6 +1472,8 @@ pub struct Node {
     pub grants: Arc<crate::grants::Grants>,
     /// Agents that start agents (ADR-0057).
     pub spawner: Arc<crate::spawn::Spawner>,
+    /// The conversations of the agents without a terminal (ADR-0038, ADR-0090).
+    pub chat: Arc<crate::chat::ChatBoard>,
     /// The devices this machine trusts and the endorsements and revocations the hub carries (ADR-0061).
     pub devices: Arc<crate::device_trust::DeviceTrust>,
     devices_watch: Option<JoinHandle<()>>,
@@ -1846,6 +1908,8 @@ impl Node {
                             }
                         }
                         spawner.tick();
+                        // ADR-0090: versions of chat entries held back to keep to one per 150 ms go out once they are due.
+                        chat.flush_due(now_ms());
                         for v in views.iter().filter(|v| v.running) {
                             mesh.observe(&v.id, state_word(v.state), v.parent.as_ref());
                         }
@@ -1880,6 +1944,9 @@ impl Node {
                                     if let Some(p) =
                                         approvals.request(agent, approval_id, action, detail, now)
                                     {
+                                        // ADR-0090: the request also appears in the conversation. The entry points at the id the node
+                                        // minted (`p.id`), never at the adapter's own.
+                                        chat.push_permission(agent, &p.id, action, now);
                                         ev.approval_requested(&p);
                                     } else {
                                         // No safe id: refuse rather than let the action through.
@@ -1889,12 +1956,31 @@ impl Node {
                                             .adapter_resolve_approval(agent, approval_id, false);
                                     }
                                 }
+                                // ADR-0090: a queued prompt went out (or could not), or was lost with its adapter.
+                                SupervisorEvent::PromptDequeued { agent, tag, sent } => {
+                                    if *sent {
+                                        chat.unqueue(agent, *tag, now);
+                                    } else {
+                                        chat.drop_queued(agent, &[*tag], now);
+                                    }
+                                }
+                                SupervisorEvent::PromptsDropped { agent, tags } => {
+                                    chat.drop_queued(agent, tags, now);
+                                }
                                 SupervisorEvent::Stopped { agent }
                                 | SupervisorEvent::AdapterCrashed { agent } => {
                                     // The spawner first: a start the agent waited for is withdrawn and its slot released, before
                                     // the queue drops the request.
                                     spawner.agent_ended(agent);
-                                    approvals.cancel_agent(agent);
+                                    // ADR-0090: what was still waiting for a decision is shown as cancelled, from the queue's own state.
+                                    for id in approvals.cancel_agent(agent) {
+                                        chat.set_permission(
+                                            agent,
+                                            &id,
+                                            v1::PermissionOutcome::Cancelled,
+                                            now,
+                                        );
+                                    }
                                 }
                                 _ => {}
                             }
@@ -1907,6 +1993,13 @@ impl Node {
                                 .lock()
                                 .unwrap_or_else(|e| e.into_inner())
                                 .adapter_resolve_approval(&agent, &adapter_id, false);
+                            // ADR-0090: nobody decided in time.
+                            chat.set_permission(
+                                &agent,
+                                &node_approval,
+                                v1::PermissionOutcome::Cancelled,
+                                now,
+                            );
                             ev.approval_resolved(&node_approval, false, "");
                         }
                         // Resources are reported when they change, not on a timer, so an idle node is silent: when the number of
@@ -2002,6 +2095,7 @@ impl Node {
             approvals,
             grants,
             spawner,
+            chat: Arc::clone(&chat),
             devices,
             devices_watch: Some(devices_watch),
             node_id: cfg.node_id.clone(),

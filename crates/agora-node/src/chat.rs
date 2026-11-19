@@ -3,20 +3,45 @@
 //! The adapter host reports chat items to the node; the node keeps the latest of them, plus the requests users sent, in a
 //! ring per agent (like a terminal's screen, kept in memory and gone when the node restarts). A subscriber gets the ring
 //! first and every entry after it. Nothing here touches the hub's event store.
+//!
+//! ADR-0090: a tool call and a plan are ONE entry the node changes in place (a later version carries the same `entry_id`, which a
+//! client that knows the capability `chat.rich` replaces); the node measures a call's duration, enforces every size cap before an
+//! entry exists, removes secrets from what a tool printed, and sends at most one update of an entry per 150 ms (the last one is
+//! never lost: [`ChatBoard::flush_due`] sends what was held back). Everything in an entry is untrusted data from a model or a tool.
+//! Entries of kind `CHAT_KIND_PERMISSION` are made by the node from its own approvals queue, never from an adapter's item.
+//!
+//! Cost of one entry: O(its size) once to cut it (a cap is applied with one pass over at most the cap's bytes after a length test),
+//! one clone per follower per version, one binary search of the ring (at most 500) per update; no per-byte work on terminals.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Mutex;
 
-use agora_adapters::host::ChatItem;
+use agora_adapters::host::{ChatItem, PlanItem, ToolItem};
 use agora_core::AgentId;
-use agora_protocol::v1::{ChatEntry, ChatKind, ChatRole};
+use agora_protocol::v1::{
+    ChatEntry, ChatKind, ChatRole, PermissionOutcome, PlanPriority, PlanStep, ToolKind,
+    ToolLocation, ToolStatus,
+};
 
 /// Most entries and most bytes of text a transcript keeps; older entries are dropped first.
 pub const MAX_ENTRIES: usize = 500;
 pub const MAX_BYTES: usize = 256 * 1024;
 /// Longest text of one entry; more is cut.
 pub const MAX_ENTRY_BYTES: usize = 16 * 1024;
+/// ADR-0090: a tool call's `output` (head and tail kept, `output_truncated` set) and one thought entry's text.
+pub const MAX_OUTPUT_BYTES: usize = 16 * 1024;
+pub const MAX_THOUGHT_BYTES: usize = 8 * 1024;
+/// ADR-0090: a plan's steps and the longest text of one; the files of one tool call; the longest path and call id.
+pub const MAX_PLAN_STEPS: usize = 64;
+pub const MAX_PLAN_STEP_BYTES: usize = 512;
+pub const MAX_PATHS: usize = 64;
+pub const MAX_PATH_BYTES: usize = 1024;
+pub const MAX_CALL_ID: usize = 256;
+/// ADR-0090: the longest label of a permission entry (the action the agent asked to take).
+pub const MAX_PERMISSION_BYTES: usize = 512;
+/// ADR-0090: the most often one entry's changes are sent: one version per this many milliseconds.
+pub const COALESCE_MS: u64 = 150;
 /// ADR-0058: a notice's code is at most this long and has this many parameters at most, each key at most `MAX_PARAM_KEY` bytes and
 /// each value at most `MAX_PARAM_BYTES` (more is cut). An adapter is untrusted; a notice that does not fit the shape is dropped.
 pub const MAX_CODE: usize = 64;
@@ -24,12 +49,27 @@ pub const MAX_PARAMS: usize = 8;
 pub const MAX_PARAM_KEY: usize = 32;
 pub const MAX_PARAM_BYTES: usize = 1024;
 
+/// What the node knows of a tool call it has an entry for: its name and arguments (the entry's `text` is made of both, and an update
+/// may carry only one).
+struct Call {
+    entry: u64,
+    tool: String,
+    args: String,
+}
+
 #[derive(Default)]
 struct Transcript {
     entries: VecDeque<ChatEntry>,
     bytes: usize,
     next_id: u64,
     followers: Vec<Sender<ChatEntry>>,
+    /// Tool calls by the agent's id of the call; each points at an entry that is still in the ring.
+    calls: HashMap<String, Call>,
+    /// The entry of the plan, while it is in the ring: a new plan replaces it in place.
+    plan: Option<u64>,
+    /// When each entry that changes in place was last sent, and which ones hold a change not yet sent.
+    sent_ms: HashMap<u64, u64>,
+    dirty: BTreeSet<u64>,
 }
 
 /// The transcripts of every chat agent on this node.
@@ -51,6 +91,36 @@ fn cut_to(mut text: String, max: usize) -> String {
         text.truncate(end);
     }
     text
+}
+
+/// `text` as is when it fits `max` bytes; otherwise its first and its last bytes (cut on character boundaries, `max` in all) and
+/// `true`. Tool output keeps its head (what ran) and its tail (how it ended).
+fn head_and_tail(text: String, max: usize) -> (String, bool) {
+    if text.len() <= max {
+        return (text, false);
+    }
+    let mut head = max / 2;
+    while !text.is_char_boundary(head) {
+        head -= 1;
+    }
+    let mut tail = text.len() - (max - head);
+    while !text.is_char_boundary(tail) {
+        tail += 1;
+    }
+    (format!("{}{}", &text[..head], &text[tail..]), true)
+}
+
+/// The text of a tool call entry: the tool and its arguments as JSON (what an old client shows).
+fn tool_text(tool: &str, arguments_json: &str) -> String {
+    cut(format!(
+        "{{\"tool\":{},\"arguments\":{}}}",
+        json_string(tool),
+        if arguments_json.is_empty() {
+            "null"
+        } else {
+            arguments_json
+        }
+    ))
 }
 
 /// What an adapter's chat item looks like as an entry (kind, text, path).
@@ -75,10 +145,32 @@ pub fn describe(item: &ChatItem) -> (ChatKind, String, String) {
         ),
         ChatItem::Plan(lines) => (ChatKind::Plan, lines.join("\n"), String::new()),
         ChatItem::Diff { path, unified_diff } => {
-            (ChatKind::Diff, unified_diff.clone(), path.clone())
+            // ADR-0080: what a secret file's change says is not shown, only that it changed and where.
+            let text = if agora_core::secrets::is_secret_path(path) {
+                String::new()
+            } else {
+                unified_diff.clone()
+            };
+            (ChatKind::Diff, text, path.clone())
         }
         // The code and parameters travel in their own fields (`notice`).
         ChatItem::Notice { .. } => (ChatKind::Notice, String::new(), String::new()),
+        ChatItem::Thought(t) => (ChatKind::Thought, t.clone(), String::new()),
+        // These two have entries of their own (`upsert_tool`, `upsert_plan`); this is only what an old reader would show.
+        ChatItem::Tool(t) => (
+            ChatKind::ToolCall,
+            tool_text(t.tool.as_deref().unwrap_or("tool"), ""),
+            String::new(),
+        ),
+        ChatItem::PlanSteps(steps) => (
+            ChatKind::Plan,
+            steps
+                .iter()
+                .map(|s| s.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n"),
+            String::new(),
+        ),
     }
 }
 
@@ -125,6 +217,162 @@ fn json_string(s: &str) -> String {
     out
 }
 
+/// ACP `ToolKind` as the protocol's; a word this build does not know is `UNSPECIFIED`.
+fn tool_kind(word: &str) -> ToolKind {
+    match word {
+        "read" => ToolKind::Read,
+        "edit" => ToolKind::Edit,
+        "delete" => ToolKind::Delete,
+        "move" => ToolKind::Move,
+        "search" => ToolKind::Search,
+        "execute" => ToolKind::Execute,
+        "think" => ToolKind::Think,
+        "fetch" => ToolKind::Fetch,
+        "switch_mode" => ToolKind::SwitchMode,
+        "other" => ToolKind::Other,
+        _ => ToolKind::Unspecified,
+    }
+}
+
+/// ACP `ToolCallStatus` (and a plan entry's status) as the protocol's.
+fn tool_status(word: &str) -> ToolStatus {
+    match word {
+        "pending" => ToolStatus::Pending,
+        "in_progress" => ToolStatus::InProgress,
+        "completed" => ToolStatus::Completed,
+        "failed" => ToolStatus::Failed,
+        _ => ToolStatus::Unspecified,
+    }
+}
+
+fn plan_status(word: &str) -> ToolStatus {
+    // A plan step is never failed.
+    match tool_status(word) {
+        ToolStatus::Failed => ToolStatus::Unspecified,
+        s => s,
+    }
+}
+
+fn plan_priority(word: &str) -> PlanPriority {
+    match word {
+        "high" => PlanPriority::High,
+        "medium" => PlanPriority::Medium,
+        "low" => PlanPriority::Low,
+        _ => PlanPriority::Unspecified,
+    }
+}
+
+fn finished(status: i32) -> bool {
+    status == ToolStatus::Completed as i32 || status == ToolStatus::Failed as i32
+}
+
+impl Transcript {
+    fn index(&self, id: u64) -> Option<usize> {
+        self.entries.binary_search_by_key(&id, |e| e.entry_id).ok()
+    }
+
+    fn size(e: &ChatEntry) -> usize {
+        e.text.len()
+            + e.path.len()
+            + e.code.len()
+            + e.params
+                .iter()
+                .map(|(k, v)| k.len() + v.len())
+                .sum::<usize>()
+            + e.call_id.len()
+            + e.output.len()
+            + e.approval_id.len()
+            + e.paths.iter().map(|p| p.path.len()).sum::<usize>()
+            + e.plan_steps.iter().map(|s| s.text.len()).sum::<usize>()
+    }
+
+    /// Keeps the ring within its bounds, and forgets what pointed at an entry that left it.
+    fn evict(&mut self) {
+        while self.entries.len() > MAX_ENTRIES || self.bytes > MAX_BYTES {
+            let Some(old) = self.entries.pop_front() else {
+                break;
+            };
+            self.bytes = self.bytes.saturating_sub(Self::size(&old));
+            self.forget(&old);
+        }
+    }
+
+    fn forget(&mut self, e: &ChatEntry) {
+        if !e.call_id.is_empty()
+            && self
+                .calls
+                .get(&e.call_id)
+                .is_some_and(|c| c.entry == e.entry_id)
+        {
+            self.calls.remove(&e.call_id);
+        }
+        if self.plan == Some(e.entry_id) {
+            self.plan = None;
+        }
+        self.sent_ms.remove(&e.entry_id);
+        self.dirty.remove(&e.entry_id);
+    }
+
+    fn send(&mut self, entry: &ChatEntry) {
+        // A follower that went away is dropped here.
+        self.followers.retain(|f| f.send(entry.clone()).is_ok());
+    }
+
+    /// Numbers an entry, keeps it, and hands it to every follower. Returns its id.
+    fn add(&mut self, mut entry: ChatEntry, now_ms: u64) -> u64 {
+        self.next_id += 1;
+        entry.entry_id = self.next_id;
+        self.bytes += Self::size(&entry);
+        self.entries.push_back(entry.clone());
+        self.sent_ms.insert(entry.entry_id, now_ms);
+        self.evict();
+        self.send(&entry);
+        entry.entry_id
+    }
+
+    /// Changes an entry in place. With `coalesce`, a version is sent only when the last one went out at least [`COALESCE_MS`] ago;
+    /// otherwise the entry is marked as holding a change and [`ChatBoard::flush_due`] sends it. False when the entry is gone.
+    fn modify(
+        &mut self,
+        id: u64,
+        now_ms: u64,
+        coalesce: bool,
+        f: impl FnOnce(&mut ChatEntry),
+    ) -> bool {
+        let Some(i) = self.index(id) else {
+            return false;
+        };
+        let before = Self::size(&self.entries[i]);
+        f(&mut self.entries[i]);
+        let entry = self.entries[i].clone();
+        self.bytes = (self.bytes + Self::size(&entry)).saturating_sub(before);
+        let due = self
+            .sent_ms
+            .get(&id)
+            .is_none_or(|last| now_ms < *last || now_ms - *last >= COALESCE_MS);
+        if coalesce && !due {
+            self.dirty.insert(id);
+        } else {
+            self.dirty.remove(&id);
+            self.sent_ms.insert(id, now_ms);
+            self.send(&entry);
+        }
+        self.evict();
+        true
+    }
+}
+
+fn entry(role: ChatRole, kind: ChatKind, text: String, at_ms: u64) -> ChatEntry {
+    ChatEntry {
+        entry_id: 0,
+        at_ms,
+        role: role as i32,
+        kind: kind as i32,
+        text,
+        ..Default::default()
+    }
+}
+
 impl ChatBoard {
     pub fn new() -> Self {
         Self::default()
@@ -144,74 +392,304 @@ impl ChatBoard {
         path: String,
         at_ms: u64,
     ) {
-        self.insert(
-            agent,
-            ChatEntry {
-                entry_id: 0,
-                at_ms,
-                role: role as i32,
-                kind: kind as i32,
-                text: cut(text),
-                path,
-                code: String::new(),
-                params: std::collections::HashMap::new(),
-                ..Default::default()
-            },
-        );
+        let mut e = entry(role, kind, cut(text), at_ms);
+        e.path = path;
+        self.insert(agent, e);
     }
 
-    fn size(e: &ChatEntry) -> usize {
-        e.text.len()
-            + e.path.len()
-            + e.code.len()
-            + e.params
-                .iter()
-                .map(|(k, v)| k.len() + v.len())
-                .sum::<usize>()
+    /// ADR-0090: a prompt of the user's that waits behind the agent's turn (`queued`). Returns the id of its entry, which
+    /// [`Self::unqueue`] or [`Self::drop_queued`] names later.
+    pub fn push_queued(&self, agent: &AgentId, text: String, at_ms: u64) -> u64 {
+        let mut e = entry(ChatRole::User, ChatKind::Text, cut(text), at_ms);
+        e.queued = true;
+        self.insert(agent, e)
     }
 
-    /// Numbers an entry, keeps it within the ring's bounds and hands it to every follower.
-    fn insert(&self, agent: &AgentId, mut entry: ChatEntry) {
-        let mut g = self.lock();
-        let t = g.entry(agent.clone()).or_default();
-        t.next_id += 1;
-        entry.entry_id = t.next_id;
-        t.bytes += Self::size(&entry);
-        t.entries.push_back(entry.clone());
-        while t.entries.len() > MAX_ENTRIES || t.bytes > MAX_BYTES {
-            let Some(old) = t.entries.pop_front() else {
-                break;
-            };
-            t.bytes = t.bytes.saturating_sub(Self::size(&old));
-        }
-        // A follower that went away is dropped here.
-        t.followers.retain(|f| f.send(entry.clone()).is_ok());
+    /// Numbers an entry, keeps it within the ring's bounds and hands it to every follower. Returns its id.
+    fn insert(&self, agent: &AgentId, e: ChatEntry) -> u64 {
+        let at = e.at_ms;
+        self.lock().entry(agent.clone()).or_default().add(e, at)
     }
 
     /// What an adapter said. A notice whose code has the wrong shape is dropped (ADR-0058).
     pub fn push_item(&self, agent: &AgentId, item: &ChatItem, at_ms: u64) {
-        if let ChatItem::Notice { code, params } = item {
-            let Some((code, params)) = notice(code, params) else {
-                return;
-            };
-            self.insert(
-                agent,
-                ChatEntry {
-                    entry_id: 0,
-                    at_ms,
-                    role: ChatRole::Agent as i32,
-                    kind: ChatKind::Notice as i32,
-                    text: String::new(),
-                    path: String::new(),
-                    code,
-                    params,
-                    ..Default::default()
-                },
-            );
+        match item {
+            ChatItem::Notice { code, params } => {
+                let Some((code, params)) = notice(code, params) else {
+                    return;
+                };
+                let mut e = entry(ChatRole::Agent, ChatKind::Notice, String::new(), at_ms);
+                e.code = code;
+                e.params = params;
+                self.insert(agent, e);
+            }
+            ChatItem::Thought(text) => {
+                // The agent's thinking: an entry of its own, cut at 8 KiB, and nothing else (it is never routed anywhere).
+                let text = cut_to(text.clone(), MAX_THOUGHT_BYTES);
+                self.insert(
+                    agent,
+                    entry(ChatRole::Agent, ChatKind::Thought, text, at_ms),
+                );
+            }
+            ChatItem::Tool(tool) => self.upsert_tool(agent, tool, at_ms),
+            ChatItem::PlanSteps(steps) => self.upsert_plan(agent, steps, at_ms),
+            other => {
+                let (kind, text, path) = describe(other);
+                self.push(agent, ChatRole::Agent, kind, text, path, at_ms);
+            }
+        }
+    }
+
+    /// ADR-0090: a tool call or an update to one. The first sight of a call id makes the entry; a later one changes it in place: a
+    /// field the item carries replaces the field, one it leaves out keeps it. The duration is the node's own: `started_ms` is when
+    /// the call was first seen and `ended_ms` when it first reached `completed` or `failed`. Paths are cut to 64; output keeps
+    /// its head and tail within 16 KiB; and what a tool printed about a secret file (ADR-0080) is not kept at all.
+    fn upsert_tool(&self, agent: &AgentId, item: &ToolItem, now_ms: u64) {
+        // An id that does not fit would, cut, name another call: such an item is dropped.
+        if item.call_id.is_empty() || item.call_id.len() > MAX_CALL_ID {
             return;
         }
-        let (kind, text, path) = describe(item);
-        self.push(agent, ChatRole::Agent, kind, text, path, at_ms);
+        let mut g = self.lock();
+        let t = g.entry(agent.clone()).or_default();
+        let known = t
+            .calls
+            .get(&item.call_id)
+            .filter(|c| t.index(c.entry).is_some())
+            .map(|c| (c.entry, c.tool.clone(), c.args.clone()));
+        let (tool, args) = match &known {
+            Some((_, tool, args)) => (
+                item.tool
+                    .clone()
+                    .map_or_else(|| tool.clone(), |x| cut_to(x, MAX_PATH_BYTES)),
+                item.arguments_json
+                    .clone()
+                    .map_or_else(|| args.clone(), cut),
+            ),
+            None => (
+                cut_to(
+                    item.tool.clone().unwrap_or_else(|| "tool".into()),
+                    MAX_PATH_BYTES,
+                ),
+                cut(item.arguments_json.clone().unwrap_or_default()),
+            ),
+        };
+        let kind = tool_kind(&item.kind);
+        let status = tool_status(&item.status);
+        let paths: Option<Vec<ToolLocation>> = item.locations.as_ref().map(|l| {
+            l.iter()
+                .take(MAX_PATHS)
+                .map(|(path, line)| ToolLocation {
+                    path: cut_to(path.clone(), MAX_PATH_BYTES),
+                    line: *line,
+                })
+                .collect()
+        });
+        let output = item
+            .output
+            .clone()
+            .map(|o| head_and_tail(o, MAX_OUTPUT_BYTES));
+        let text = tool_text(&tool, &args);
+        let call_id = item.call_id.clone();
+        let apply = move |e: &mut ChatEntry, creating: bool| {
+            e.text = text;
+            if kind != ToolKind::Unspecified || creating {
+                e.tool_kind = kind as i32;
+            }
+            if status != ToolStatus::Unspecified {
+                e.status = status as i32;
+            } else if creating {
+                e.status = ToolStatus::Pending as i32;
+            }
+            if let Some(p) = paths {
+                e.paths = p;
+            }
+            if let Some((o, truncated)) = output {
+                e.output = o;
+                e.output_truncated = truncated;
+            }
+            // What a tool printed about a secret file is not shown, whatever order the pieces arrived in.
+            if e.paths
+                .iter()
+                .any(|p| agora_core::secrets::is_secret_path(&p.path))
+            {
+                e.output.clear();
+                e.output_truncated = false;
+            }
+            if finished(e.status) {
+                if e.ended_ms == 0 {
+                    e.ended_ms = now_ms.max(e.started_ms);
+                }
+            } else {
+                e.ended_ms = 0;
+            }
+        };
+        match known {
+            Some((id, ..)) => {
+                let terminal = status == ToolStatus::Completed || status == ToolStatus::Failed;
+                let ok = t.modify(id, now_ms, !terminal, |e| {
+                    // The time it began is kept from the first sight; `now_ms` only ends it.
+                    apply(e, false);
+                });
+                if ok {
+                    if let Some(c) = t.calls.get_mut(&call_id) {
+                        c.tool = tool;
+                        c.args = args;
+                    }
+                }
+            }
+            None => {
+                let mut e = entry(ChatRole::Agent, ChatKind::ToolCall, String::new(), now_ms);
+                e.call_id = call_id.clone();
+                e.started_ms = now_ms;
+                apply(&mut e, true);
+                let id = t.add(e, now_ms);
+                t.calls.insert(
+                    call_id,
+                    Call {
+                        entry: id,
+                        tool,
+                        args,
+                    },
+                );
+            }
+        }
+    }
+
+    /// ADR-0090: the plan with each step's status. A plan replaces the earlier one in the same entry while that is still in the ring;
+    /// at most 64 steps of 512 bytes; `text` stays the step lines joined for old clients.
+    fn upsert_plan(&self, agent: &AgentId, steps: &[PlanItem], now_ms: u64) {
+        let steps: Vec<PlanStep> = steps
+            .iter()
+            .take(MAX_PLAN_STEPS)
+            .map(|s| PlanStep {
+                text: cut_to(s.text.clone(), MAX_PLAN_STEP_BYTES),
+                status: plan_status(&s.status) as i32,
+                priority: plan_priority(&s.priority) as i32,
+            })
+            .collect();
+        let text = cut(steps
+            .iter()
+            .map(|s| s.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n"));
+        let mut g = self.lock();
+        let t = g.entry(agent.clone()).or_default();
+        if let Some(id) = t.plan.filter(|id| t.index(*id).is_some()) {
+            let (text, steps) = (text.clone(), steps.clone());
+            if t.modify(id, now_ms, true, move |e| {
+                e.text = text;
+                e.plan_steps = steps;
+            }) {
+                return;
+            }
+        }
+        let mut e = entry(ChatRole::Agent, ChatKind::Plan, text, now_ms);
+        e.plan_steps = steps;
+        let id = t.add(e, now_ms);
+        t.plan = Some(id);
+    }
+
+    /// ADR-0090: sends the changes of entries that were held back to keep to one version per [`COALESCE_MS`], once that time is
+    /// over. Called by the node's tick; an entry whose last change is final was never held back.
+    pub fn flush_due(&self, now_ms: u64) {
+        let mut g = self.lock();
+        for t in g.values_mut() {
+            if t.dirty.is_empty() {
+                continue;
+            }
+            let due: Vec<u64> = t
+                .dirty
+                .iter()
+                .copied()
+                .filter(|id| {
+                    t.sent_ms
+                        .get(id)
+                        .is_none_or(|last| now_ms < *last || now_ms - *last >= COALESCE_MS)
+                })
+                .collect();
+            for id in due {
+                t.dirty.remove(&id);
+                if let Some(i) = t.index(id) {
+                    let e = t.entries[i].clone();
+                    t.sent_ms.insert(id, now_ms);
+                    t.send(&e);
+                }
+            }
+        }
+    }
+
+    /// ADR-0090: the prompt of this entry was sent (it no longer waits).
+    pub fn unqueue(&self, agent: &AgentId, entry_id: u64, now_ms: u64) {
+        if let Some(t) = self.lock().get_mut(agent) {
+            t.modify(entry_id, now_ms, false, |e| e.queued = false);
+        }
+    }
+
+    /// ADR-0090: queued prompts that will not be sent. Their entries leave the transcript (a new subscriber never sees them) and a
+    /// notice with the stable code `adapter.queue_dropped` and the count says so to everyone following; a client that holds one of
+    /// the entries clears its waiting mark when it sees that notice.
+    pub fn drop_queued(&self, agent: &AgentId, entry_ids: &[u64], now_ms: u64) {
+        if entry_ids.is_empty() {
+            return;
+        }
+        let mut g = self.lock();
+        let t = g.entry(agent.clone()).or_default();
+        for id in entry_ids {
+            if let Some(i) = t.index(*id) {
+                if let Some(old) = t.entries.remove(i) {
+                    t.bytes = t.bytes.saturating_sub(Transcript::size(&old));
+                    t.forget(&old);
+                }
+            }
+        }
+        let mut n = entry(ChatRole::Agent, ChatKind::Notice, String::new(), now_ms);
+        n.code = "adapter.queue_dropped".into();
+        n.params = HashMap::from([("count".to_string(), entry_ids.len().to_string())]);
+        t.add(n, now_ms);
+    }
+
+    /// ADR-0090: a permission entry for an approval the node itself queued. `approval_id` is the id the node minted for it (never the
+    /// adapter's own id and never text from the agent); `action` is the label the approvals list shows, cut. The entry holds no
+    /// decision: it starts `pending` and only [`Self::set_permission`] changes it, from the node's approval state.
+    pub fn push_permission(&self, agent: &AgentId, approval_id: &str, action: &str, now_ms: u64) {
+        let mut e = entry(
+            ChatRole::Agent,
+            ChatKind::Permission,
+            cut_to(action.to_string(), MAX_PERMISSION_BYTES),
+            now_ms,
+        );
+        e.approval_id = approval_id.to_string();
+        e.permission_outcome = PermissionOutcome::Pending as i32;
+        self.insert(agent, e);
+    }
+
+    /// ADR-0090: how the approval of a permission entry ended, from the node's own approval state: the user's verified decision, or
+    /// `Cancelled` when the turn was cancelled, the agent went away or the request ran out of time. Only a pending entry changes: a
+    /// decision, once shown, is not rewritten by what comes after it.
+    pub fn set_permission(
+        &self,
+        agent: &AgentId,
+        approval_id: &str,
+        outcome: PermissionOutcome,
+        now_ms: u64,
+    ) {
+        if approval_id.is_empty() {
+            return;
+        }
+        let mut g = self.lock();
+        let Some(t) = g.get_mut(agent) else {
+            return;
+        };
+        let found = t.entries.iter().find(|e| {
+            e.kind == ChatKind::Permission as i32
+                && e.approval_id == approval_id
+                && e.permission_outcome == PermissionOutcome::Pending as i32
+        });
+        if let Some(id) = found.map(|e| e.entry_id) {
+            t.modify(id, now_ms, false, |e| {
+                e.permission_outcome = outcome as i32;
+            });
+        }
     }
 
     /// The transcript so far.
@@ -222,7 +700,8 @@ impl ChatBoard {
             .unwrap_or_default()
     }
 
-    /// The transcript so far and a channel with every entry from now on, taken together so none is missed or repeated.
+    /// The transcript so far and a channel with every entry from now on, taken together so none is missed or repeated. A version of
+    /// an entry that changed in place arrives as a new `ChatEntry` with the same `entry_id`.
     pub fn follow(&self, agent: &AgentId) -> (Vec<ChatEntry>, Receiver<ChatEntry>) {
         let mut g = self.lock();
         let t = g.entry(agent.clone()).or_default();
@@ -361,5 +840,537 @@ mod tests {
         assert_eq!(n.params.len(), MAX_PARAMS);
         assert!(!n.params.contains_key("Bad Key"));
         assert!(n.params["stderr_tail"].len() <= MAX_PARAM_BYTES);
+    }
+
+    // ---- ADR-0090 ----
+
+    fn tool(call: &str) -> ToolItem {
+        ToolItem {
+            call_id: call.into(),
+            ..ToolItem::default()
+        }
+    }
+
+    /// The bytes the transcript counts equal what its entries add up to: updates in place never drift the ring's accounting.
+    fn accounted(b: &ChatBoard, a: &AgentId) {
+        let g = b.lock();
+        let t = g.get(a).unwrap();
+        assert_eq!(
+            t.bytes,
+            t.entries.iter().map(Transcript::size).sum::<usize>()
+        );
+    }
+
+    #[test]
+    fn a_tool_call_is_one_entry_that_changes_in_place_with_its_duration_measured_by_the_node() {
+        let b = ChatBoard::new();
+        let a = AgentId::new("a");
+        let (_, rx) = b.follow(&a);
+        b.push_item(
+            &a,
+            &ChatItem::Tool(ToolItem {
+                tool: Some("read a.rs".into()),
+                arguments_json: Some("{\"p\":1}".into()),
+                kind: "read".into(),
+                status: "pending".into(),
+                locations: Some(vec![("a.rs".into(), 3)]),
+                ..tool("t1")
+            }),
+            1000,
+        );
+        // Later versions carry less: a field the update leaves out is kept.
+        b.push_item(
+            &a,
+            &ChatItem::Tool(ToolItem {
+                status: "in_progress".into(),
+                ..tool("t1")
+            }),
+            1500,
+        );
+        b.push_item(
+            &a,
+            &ChatItem::Tool(ToolItem {
+                status: "completed".into(),
+                output: Some("file text".into()),
+                ..tool("t1")
+            }),
+            2600,
+        );
+        let s = b.snapshot(&a);
+        assert_eq!(s.len(), 1, "{s:?}");
+        let e = &s[0];
+        assert_eq!(e.kind, ChatKind::ToolCall as i32);
+        assert_eq!(e.call_id, "t1");
+        assert_eq!(e.tool_kind, ToolKind::Read as i32);
+        assert_eq!(e.status, ToolStatus::Completed as i32);
+        assert_eq!(e.text, "{\"tool\":\"read a.rs\",\"arguments\":{\"p\":1}}");
+        assert_eq!((e.paths[0].path.as_str(), e.paths[0].line), ("a.rs", 3));
+        assert_eq!(e.output, "file text");
+        // The node's clock: first seen at 1000, finished at 2600.
+        assert_eq!((e.at_ms, e.started_ms, e.ended_ms), (1000, 1000, 2600));
+        // Followers saw every version under the same entry id (the middle one was inside 150 ms of the first: held, see below).
+        let seen: Vec<ChatEntry> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(seen.iter().all(|x| x.entry_id == e.entry_id));
+        assert_eq!(seen.first().unwrap().status, ToolStatus::Pending as i32);
+        assert_eq!(seen.last().unwrap().status, ToolStatus::Completed as i32);
+        accounted(&b, &a);
+    }
+
+    #[test]
+    fn an_update_for_a_call_that_left_the_ring_or_was_never_seen_makes_a_new_entry() {
+        let b = ChatBoard::new();
+        let a = AgentId::new("a");
+        b.push_item(
+            &a,
+            &ChatItem::Tool(ToolItem {
+                tool: Some("x".into()),
+                ..tool("t1")
+            }),
+            0,
+        );
+        for i in 0..MAX_ENTRIES {
+            b.push(
+                &a,
+                ChatRole::Agent,
+                ChatKind::Text,
+                format!("{i}"),
+                String::new(),
+                0,
+            );
+        }
+        assert!(
+            b.snapshot(&a).iter().all(|e| e.call_id != "t1"),
+            "t1 was evicted"
+        );
+        b.push_item(
+            &a,
+            &ChatItem::Tool(ToolItem {
+                status: "completed".into(),
+                ..tool("t1")
+            }),
+            5,
+        );
+        let s = b.snapshot(&a);
+        assert_eq!(s.iter().filter(|e| e.call_id == "t1").count(), 1);
+        assert_eq!(s.len(), MAX_ENTRIES);
+        // The ring's index forgot the evicted call; it did not grow with it.
+        assert!(b.lock().get(&a).unwrap().calls.len() <= 1);
+        accounted(&b, &a);
+    }
+
+    #[test]
+    fn updates_in_place_do_not_grow_the_ring_and_keep_its_byte_accounting() {
+        let b = ChatBoard::new();
+        let a = AgentId::new("a");
+        for i in 0..2000u64 {
+            b.push_item(
+                &a,
+                &ChatItem::Tool(ToolItem {
+                    output: Some("y".repeat(((i % 7) as usize) * 4096)),
+                    status: "in_progress".into(),
+                    ..tool("t1")
+                }),
+                i * 1000,
+            );
+        }
+        assert_eq!(b.snapshot(&a).len(), 1);
+        accounted(&b, &a);
+        // Many calls with big output stay under the byte bound.
+        for i in 0..100 {
+            b.push_item(
+                &a,
+                &ChatItem::Tool(ToolItem {
+                    output: Some("z".repeat(MAX_OUTPUT_BYTES * 2)),
+                    ..tool(&format!("c{i}"))
+                }),
+                0,
+            );
+        }
+        let total: usize = b.snapshot(&a).iter().map(Transcript::size).sum();
+        assert!(total <= MAX_BYTES && b.snapshot(&a).len() <= MAX_ENTRIES);
+        accounted(&b, &a);
+    }
+
+    #[test]
+    fn every_size_cap_of_the_protocol_spec_is_enforced_before_the_entry_exists() {
+        let b = ChatBoard::new();
+        let a = AgentId::new("a");
+        // Output: 16 KiB, head and tail kept, the flag says it was cut, on character boundaries.
+        let long = format!("HEAD{}TAIL", "é".repeat(MAX_OUTPUT_BYTES));
+        b.push_item(
+            &a,
+            &ChatItem::Tool(ToolItem {
+                output: Some(long),
+                ..tool("o")
+            }),
+            0,
+        );
+        // Thought: 8 KiB.
+        b.push_item(&a, &ChatItem::Thought("t".repeat(MAX_THOUGHT_BYTES * 3)), 0);
+        // Paths: 64, each cut.
+        let many: Vec<(String, u32)> = (0..200)
+            .map(|i| (format!("{}{i}", "p".repeat(2000)), 1))
+            .collect();
+        b.push_item(
+            &a,
+            &ChatItem::Tool(ToolItem {
+                locations: Some(many),
+                ..tool("p")
+            }),
+            0,
+        );
+        // A call id too long to keep is dropped, not cut into another call's id.
+        b.push_item(&a, &ChatItem::Tool(tool(&"i".repeat(MAX_CALL_ID + 1))), 0);
+        // Plan: 64 steps of 512 bytes.
+        let steps: Vec<PlanItem> = (0..200)
+            .map(|i| PlanItem {
+                text: format!("{i}{}", "s".repeat(2000)),
+                ..PlanItem::default()
+            })
+            .collect();
+        b.push_item(&a, &ChatItem::PlanSteps(steps), 0);
+        let s = b.snapshot(&a);
+        assert_eq!(
+            s.len(),
+            4,
+            "the call id of {} bytes was dropped",
+            MAX_CALL_ID + 1
+        );
+        let o = &s[0];
+        assert!(o.output.len() <= MAX_OUTPUT_BYTES && o.output_truncated);
+        assert!(
+            o.output.starts_with("HEAD") && o.output.ends_with("TAIL"),
+            "head and tail kept"
+        );
+        assert!(s[1].text.len() <= MAX_THOUGHT_BYTES && s[1].kind == ChatKind::Thought as i32);
+        assert_eq!(s[2].paths.len(), MAX_PATHS);
+        assert!(s[2].paths.iter().all(|p| p.path.len() <= MAX_PATH_BYTES));
+        assert_eq!(s[3].plan_steps.len(), MAX_PLAN_STEPS);
+        assert!(s[3]
+            .plan_steps
+            .iter()
+            .all(|p| p.text.len() <= MAX_PLAN_STEP_BYTES));
+        // An output that fits is passed whole and not flagged.
+        b.push_item(
+            &a,
+            &ChatItem::Tool(ToolItem {
+                output: Some("ok".into()),
+                ..tool("o")
+            }),
+            0,
+        );
+        let o = b
+            .snapshot(&a)
+            .into_iter()
+            .find(|e| e.call_id == "o")
+            .unwrap();
+        assert!(!o.output_truncated && o.output == "ok");
+    }
+
+    #[test]
+    fn at_most_one_version_of_an_entry_is_sent_per_150_ms_and_the_last_is_never_lost() {
+        let b = ChatBoard::new();
+        let a = AgentId::new("a");
+        b.push_item(
+            &a,
+            &ChatItem::Tool(ToolItem {
+                status: "pending".into(),
+                ..tool("t")
+            }),
+            1000,
+        );
+        let (_, rx) = b.follow(&a);
+        // A burst of 50 updates in 100 ms: none is sent now (the first version went out at 1000).
+        for i in 1..=50u64 {
+            b.push_item(
+                &a,
+                &ChatItem::Tool(ToolItem {
+                    output: Some(format!("line {i}")),
+                    status: "in_progress".into(),
+                    ..tool("t")
+                }),
+                1000 + i * 2,
+            );
+        }
+        assert!(rx.try_recv().is_err(), "held back inside the window");
+        // The ring holds the newest version already (a new subscriber sees it).
+        assert_eq!(b.snapshot(&a)[0].output, "line 50");
+        // Not yet due at 1149; due at 1150: one version with the newest content.
+        b.flush_due(1149);
+        assert!(rx.try_recv().is_err());
+        b.flush_due(1150);
+        let sent = rx.try_recv().unwrap();
+        assert_eq!(sent.output, "line 50");
+        assert!(rx.try_recv().is_err(), "one version for the burst");
+        b.flush_due(5000);
+        assert!(rx.try_recv().is_err(), "nothing is sent twice");
+        // A final status is never held back, even inside the window.
+        b.push_item(
+            &a,
+            &ChatItem::Tool(ToolItem {
+                output: Some("a".into()),
+                status: "in_progress".into(),
+                ..tool("t")
+            }),
+            1151,
+        );
+        b.push_item(
+            &a,
+            &ChatItem::Tool(ToolItem {
+                status: "completed".into(),
+                ..tool("t")
+            }),
+            1152,
+        );
+        let last = std::iter::from_fn(|| rx.try_recv().ok()).last().unwrap();
+        assert_eq!(last.status, ToolStatus::Completed as i32);
+        assert_eq!(
+            last.output, "a",
+            "the held change rides along with the final version"
+        );
+        // A clock that moved back does not stall an entry.
+        b.push_item(
+            &a,
+            &ChatItem::Tool(ToolItem {
+                output: Some("b".into()),
+                status: "in_progress".into(),
+                ..tool("t")
+            }),
+            10,
+        );
+        b.flush_due(10);
+        assert_eq!(rx.try_recv().unwrap().output, "b");
+    }
+
+    #[test]
+    fn a_plan_is_replaced_in_the_same_entry_with_its_step_status() {
+        let b = ChatBoard::new();
+        let a = AgentId::new("a");
+        let step = |t: &str, s: &str, p: &str| PlanItem {
+            text: t.into(),
+            status: s.into(),
+            priority: p.into(),
+        };
+        b.push_item(
+            &a,
+            &ChatItem::PlanSteps(vec![
+                step("one", "in_progress", "high"),
+                step("two", "pending", "low"),
+            ]),
+            0,
+        );
+        b.push_item(&a, &ChatItem::Text("between".into()), 1);
+        b.push_item(
+            &a,
+            &ChatItem::PlanSteps(vec![
+                step("one", "completed", "high"),
+                step("two", "in_progress", "weird"),
+            ]),
+            2000,
+        );
+        let s = b.snapshot(&a);
+        assert_eq!(s.len(), 2, "one plan entry and the text");
+        let p = &s[0];
+        assert_eq!(p.text, "one\ntwo", "old clients read the lines");
+        assert_eq!(p.plan_steps[0].status, ToolStatus::Completed as i32);
+        assert_eq!(p.plan_steps[1].status, ToolStatus::InProgress as i32);
+        assert_eq!(p.plan_steps[0].priority, PlanPriority::High as i32);
+        assert_eq!(
+            p.plan_steps[1].priority,
+            PlanPriority::Unspecified as i32,
+            "an unknown word is unspecified"
+        );
+        // A plan step is never failed.
+        assert_eq!(plan_status("failed"), ToolStatus::Unspecified);
+        accounted(&b, &a);
+    }
+
+    #[test]
+    fn what_a_tool_printed_about_a_secret_file_is_not_kept() {
+        let b = ChatBoard::new();
+        let a = AgentId::new("a");
+        b.push_item(
+            &a,
+            &ChatItem::Tool(ToolItem {
+                locations: Some(vec![("/w/.env".into(), 1)]),
+                output: Some("API_KEY=hunter2".into()),
+                status: "completed".into(),
+                ..tool("s")
+            }),
+            0,
+        );
+        // The output may arrive before the location does, too.
+        b.push_item(
+            &a,
+            &ChatItem::Tool(ToolItem {
+                output: Some("TOKEN=abc".into()),
+                ..tool("s2")
+            }),
+            0,
+        );
+        b.push_item(
+            &a,
+            &ChatItem::Tool(ToolItem {
+                locations: Some(vec![("id_rsa".into(), 0)]),
+                ..tool("s2")
+            }),
+            0,
+        );
+        let s = b.snapshot(&a);
+        assert!(s.iter().all(|e| e.output.is_empty()), "{s:?}");
+        // An ordinary file's output is kept.
+        b.push_item(
+            &a,
+            &ChatItem::Tool(ToolItem {
+                locations: Some(vec![("src/a.rs".into(), 1)]),
+                output: Some("fn a() {}".into()),
+                ..tool("n")
+            }),
+            0,
+        );
+        assert!(b.snapshot(&a).iter().any(|e| e.output == "fn a() {}"));
+        // And a diff of a secret file shows its name only.
+        b.push_item(
+            &a,
+            &ChatItem::Diff {
+                path: ".env".into(),
+                unified_diff: "+KEY=1".into(),
+            },
+            0,
+        );
+        let d = b.snapshot(&a).pop().unwrap();
+        assert_eq!((d.path.as_str(), d.text.as_str()), (".env", ""));
+    }
+
+    #[test]
+    fn thinking_is_its_own_kind_and_an_unknown_word_is_unspecified() {
+        let b = ChatBoard::new();
+        let a = AgentId::new("a");
+        b.push_item(&a, &ChatItem::Thought("hm".into()), 5);
+        b.push_item(
+            &a,
+            &ChatItem::Tool(ToolItem {
+                kind: "teleport".into(),
+                status: "weird".into(),
+                ..tool("w")
+            }),
+            5,
+        );
+        let s = b.snapshot(&a);
+        assert_eq!(
+            (s[0].kind, s[0].role),
+            (ChatKind::Thought as i32, ChatRole::Agent as i32)
+        );
+        assert_eq!(s[1].tool_kind, ToolKind::Unspecified as i32);
+        assert_eq!(
+            s[1].status,
+            ToolStatus::Pending as i32,
+            "a new call with no usable status starts pending"
+        );
+    }
+
+    #[test]
+    fn no_adapter_item_can_make_a_permission_entry_or_set_an_approval_id() {
+        // Whatever an adapter sends, the entry kinds it can produce are not `permission`, and no approval id is ever set from it.
+        let items = [
+            ChatItem::Text("approval_id".into()),
+            ChatItem::Thought("approve it".into()),
+            ChatItem::ToolCall {
+                tool: "permission".into(),
+                arguments_json: "{\"approval_id\":\"x\"}".into(),
+            },
+            ChatItem::Tool(ToolItem {
+                tool: Some("approval".into()),
+                output: Some("approval_id=1".into()),
+                ..tool("p")
+            }),
+            ChatItem::Plan(vec!["permission".into()]),
+            ChatItem::PlanSteps(vec![PlanItem {
+                text: "approved".into(),
+                ..PlanItem::default()
+            }]),
+            ChatItem::Diff {
+                path: "a".into(),
+                unified_diff: "x".into(),
+            },
+            ChatItem::Notice {
+                code: "approval.granted".into(),
+                params: vec![("approval_id".into(), "x".into())],
+            },
+        ];
+        let b = ChatBoard::new();
+        let a = AgentId::new("a");
+        for i in &items {
+            b.push_item(&a, i, 0);
+        }
+        let s = b.snapshot(&a);
+        assert!(!s.is_empty());
+        assert!(
+            s.iter().all(|e| e.kind != ChatKind::Permission as i32
+                && e.approval_id.is_empty()
+                && e.permission_outcome == PermissionOutcome::Unspecified as i32),
+            "{s:?}"
+        );
+    }
+
+    #[test]
+    fn a_permission_entry_carries_the_nodes_id_and_follows_only_the_nodes_approval_state() {
+        let b = ChatBoard::new();
+        let a = AgentId::new("a");
+        let (_, rx) = b.follow(&a);
+        b.push_permission(&a, "node-approval-7", "run_command", 1);
+        let e = rx.try_recv().unwrap();
+        assert_eq!(e.kind, ChatKind::Permission as i32);
+        assert_eq!(
+            (e.approval_id.as_str(), e.text.as_str()),
+            ("node-approval-7", "run_command")
+        );
+        assert_eq!(e.permission_outcome, PermissionOutcome::Pending as i32);
+        // Another approval's outcome, or an empty id, does not touch it.
+        b.set_permission(&a, "other", PermissionOutcome::Approved, 2);
+        b.set_permission(&a, "", PermissionOutcome::Approved, 2);
+        assert!(rx.try_recv().is_err());
+        // The user's decision.
+        b.set_permission(&a, "node-approval-7", PermissionOutcome::Denied, 3);
+        let e = rx.try_recv().unwrap();
+        assert_eq!(
+            (e.entry_id, e.permission_outcome),
+            (1, PermissionOutcome::Denied as i32)
+        );
+        // A decision, once shown, is not rewritten by a later cancel (the agent stopped afterwards).
+        b.set_permission(&a, "node-approval-7", PermissionOutcome::Cancelled, 4);
+        assert!(rx.try_recv().is_err());
+        assert_eq!(
+            b.snapshot(&a)[0].permission_outcome,
+            PermissionOutcome::Denied as i32
+        );
+        // The label is cut.
+        b.push_permission(&a, "n2", &"x".repeat(5000), 5);
+        assert!(b.snapshot(&a)[1].text.len() <= MAX_PERMISSION_BYTES);
+    }
+
+    #[test]
+    fn a_queued_prompt_is_marked_until_it_is_sent_and_a_dropped_one_leaves_with_a_notice() {
+        let b = ChatBoard::new();
+        let a = AgentId::new("a");
+        let first = b.push_queued(&a, "one".into(), 1);
+        let second = b.push_queued(&a, "two".into(), 2);
+        assert!(b
+            .snapshot(&a)
+            .iter()
+            .all(|e| e.queued && e.role == ChatRole::User as i32));
+        let (_, rx) = b.follow(&a);
+        b.unqueue(&a, first, 3);
+        let sent = rx.try_recv().unwrap();
+        assert_eq!(
+            (sent.entry_id, sent.queued, sent.text.as_str()),
+            (first, false, "one")
+        );
+        b.drop_queued(&a, &[second], 4);
+        let s = b.snapshot(&a);
+        assert_eq!(s.len(), 2);
+        assert_eq!(s[1].code, "adapter.queue_dropped");
+        assert_eq!(s[1].params["count"], "1");
+        accounted(&b, &a);
     }
 }

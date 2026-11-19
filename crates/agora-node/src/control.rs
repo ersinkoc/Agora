@@ -30,7 +30,7 @@ use prost::Message;
 
 use crate::daemon::EventSink;
 use crate::git;
-use crate::supervisor::{StartRequest, Supervisor, SupervisorError, SupervisorEvent};
+use crate::supervisor::{StartRequest, Submitted, Supervisor, SupervisorError, SupervisorEvent};
 use crate::terminal::{Output, OutputSubscription, Snapshot};
 
 pub const KIND_REQUEST: u8 = 0;
@@ -222,6 +222,16 @@ pub fn terminal_id_of(agent: &AgentId) -> String {
 
 pub(crate) fn agent_of_terminal(terminal_id: &str) -> Option<AgentId> {
     terminal_id.strip_prefix("t-").map(AgentId::new)
+}
+
+/// ADR-0090: the answer to `AgentPrompt` for an adapter agent: whether the prompt was sent or queued, and how many wait.
+fn prompt_result(queued: bool, queue_len: usize) -> v1::CommandOk {
+    v1::CommandOk {
+        result: Some(v1::command_ok::Result::AgentPrompt(v1::AgentPromptResult {
+            queued,
+            queue_len: u32::try_from(queue_len).unwrap_or(u32::MAX),
+        })),
+    }
 }
 
 fn ok_empty() -> v1::CommandOk {
@@ -735,6 +745,26 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                 if let Some(s) = &ctx.spawn {
                     s.agent_ended(&id);
                 }
+                // ADR-0090: what its adapter still asked permission for is withdrawn, and its entries in the conversation say
+                // cancelled (the agent left before anyone decided).
+                if let Some(approvals) = &ctx.approvals {
+                    for approval in approvals.cancel_adapter_requests(&id) {
+                        ctx.chat.set_permission(
+                            &id,
+                            &approval,
+                            v1::PermissionOutcome::Cancelled,
+                            crate::daemon::now_ms(),
+                        );
+                        if let Some(ev) = &ctx.events {
+                            ev.approval_resolved(&approval, false, "");
+                        }
+                    }
+                }
+                for e in &events {
+                    if let SupervisorEvent::PromptsDropped { agent, tags } = e {
+                        ctx.chat.drop_queued(agent, tags, crate::daemon::now_ms());
+                    }
+                }
                 if let Some(ev) = &ctx.events {
                     ev.supervisor_events(&events, &ctx.sup().list());
                 }
@@ -743,21 +773,28 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
         }
         Cmd::AgentPrompt(a) => {
             let id = AgentId::new(a.agent_id.clone());
-            let sup = ctx.sup();
+            let mut sup = ctx.sup();
             if sup.terminal(&id).is_none() {
-                // An adapter agent takes prompts through its adapter; the request is part of its conversation.
+                // An adapter agent takes prompts through its adapter; the request is part of its conversation. ADR-0090: a prompt
+                // that arrives during a turn waits behind it (at most 8), shown as queued until it is sent.
+                let now = crate::daemon::now_ms();
                 return sup
-                    .adapter_prompt(&id, &a.text, false)
-                    .map(|()| {
-                        ctx.chat.push(
-                            &id,
-                            v1::ChatRole::User,
-                            v1::ChatKind::Text,
-                            a.text.clone(),
-                            String::new(),
-                            crate::daemon::now_ms(),
-                        );
-                        ok_empty()
+                    .adapter_submit(&id, &a.text, |_| {
+                        ctx.chat.push_queued(&id, a.text.clone(), now)
+                    })
+                    .map(|submitted| match submitted {
+                        Submitted::Sent => {
+                            ctx.chat.push(
+                                &id,
+                                v1::ChatRole::User,
+                                v1::ChatKind::Text,
+                                a.text.clone(),
+                                String::new(),
+                                now,
+                            );
+                            prompt_result(false, 0)
+                        }
+                        Submitted::Queued { queue_len } => prompt_result(true, queue_len),
                     })
                     .map_err(sup_err);
             }
@@ -798,6 +835,34 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
             )
             .map(|()| ok_empty())
             .map_err(sup_err),
+        // ADR-0090: the user's own change of an option the agent reported (the reasoning effort is one). The supervisor checks the id and
+        // the value against the report, and the node's `skip_permissions` policy against what the choice does.
+        Cmd::AgentSetConfig(a) => ctx
+            .sup()
+            .adapter_set_config(&AgentId::new(a.agent_id.clone()), &a.config_id, &a.value)
+            .map(|()| ok_empty())
+            .map_err(sup_err),
+        // ADR-0090: ends the agent's current turn; the agent and its process live on (`AgentStop` ends them). Permission requests of
+        // the turn are withdrawn and shown as cancelled; queued prompts are kept unless `drop_queue` says to throw them away.
+        Cmd::AgentCancelTurn(a) => {
+            let id = AgentId::new(a.agent_id.clone());
+            let dropped = ctx
+                .sup()
+                .adapter_cancel_turn(&id, a.drop_queue)
+                .map_err(sup_err)?;
+            let now = crate::daemon::now_ms();
+            ctx.chat.drop_queued(&id, &dropped, now);
+            if let Some(approvals) = &ctx.approvals {
+                for approval in approvals.cancel_adapter_requests(&id) {
+                    ctx.chat
+                        .set_permission(&id, &approval, v1::PermissionOutcome::Cancelled, now);
+                    if let Some(ev) = &ctx.events {
+                        ev.approval_resolved(&approval, false, "");
+                    }
+                }
+            }
+            Ok(ok_empty())
+        }
         Cmd::TerminalInput(t) => {
             // The write happens after the supervisor lock is let go: a program that does not read its input blocks this
             // call, and nothing else (ticks, stop and shutdown keep going).
@@ -852,6 +917,17 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
             ctx.sup()
                 .adapter_resolve_approval(&agent, &adapter_id, approved)
                 .map_err(sup_err)?;
+            // ADR-0090: the entry in the conversation shows the verified decision, never anything the agent said.
+            ctx.chat.set_permission(
+                &agent,
+                &r.approval_id,
+                if approved {
+                    v1::PermissionOutcome::Approved
+                } else {
+                    v1::PermissionOutcome::Denied
+                },
+                crate::daemon::now_ms(),
+            );
             if let Some(ev) = &ctx.events {
                 ev.approval_resolved(&r.approval_id, approved, &r.signer_device_id);
             }
@@ -1271,7 +1347,6 @@ pub(crate) fn command_name(c: &Cmd) -> &'static str {
         Cmd::AgentPrompt(_) => "agent.prompt",
         Cmd::AgentSetMode(_) => "agent.set_mode",
         Cmd::AgentSetModel(_) => "agent.set_model",
-        // ADR-0090: in the schema, handled by no node code yet, so the node refuses them as `protocol.capability_missing`.
         Cmd::AgentSetConfig(_) => "agent.set_config",
         Cmd::AgentCancelTurn(_) => "agent.cancel_turn",
         Cmd::TerminalOpen(_) => "terminal.open",

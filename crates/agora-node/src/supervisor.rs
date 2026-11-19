@@ -5,14 +5,16 @@
 //! when the hub is unreachable and the caller buffers the events (AGENTS.md, nodes are autonomous). Time is
 //! passed in, so restart and detection timing is testable without sleeping.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use agora_adapters::host::{
-    Adapter, AdapterConfig, AdapterEvent, HostError, McpServer, OptionKind, SessionOption,
-    SessionOptions,
+    Adapter, AdapterCommand, AdapterConfig, AdapterEvent, ConfigOption, HostError, McpServer,
+    OptionKind, SessionOption, SessionOptions,
 };
+use agora_adapters::perm::{self, Category};
 use agora_adapters::{Detector, Manifest, Pacer};
 use agora_core::{Agent, AgentId, AgentState, IntegrationLevel, NodeId, StateSource, WorktreeId};
 use agora_platform::{spawn, ExitStatus, ProcessLimits, PtyConfig};
@@ -187,6 +189,31 @@ pub enum SupervisorEvent {
     AdapterCrashed {
         agent: AgentId,
     },
+    /// ADR-0090: a prompt that waited behind a turn was sent (`sent`), or could not be (the adapter refused it). `tag` is what the
+    /// caller gave when it queued it (the id of its chat entry).
+    PromptDequeued {
+        agent: AgentId,
+        tag: u64,
+        sent: bool,
+    },
+    /// ADR-0090: queued prompts that will never be sent, because their adapter ended (the user dropped them through
+    /// `AgentCancelTurn` is answered to the caller instead).
+    PromptsDropped {
+        agent: AgentId,
+        tags: Vec<u64>,
+    },
+}
+
+/// ADR-0090: the most prompts that wait behind a turn, per agent (`agent.queue_full`).
+pub const MAX_PROMPT_QUEUE: usize = 8;
+
+/// What [`Supervisor::adapter_submit`] did with a prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Submitted {
+    /// The agent took it now.
+    Sent,
+    /// A turn runs: it waits, with this many waiting in all (this one included).
+    Queued { queue_len: usize },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -224,6 +251,10 @@ pub enum SupervisorError {
     OptionUnsupported(&'static str),
     /// ADR-0058: the agent did not offer this id; the field (`mode`, `model`).
     OptionUnknown(&'static str),
+    /// ADR-0090: the agent did not report this config option or this value of it (`agent.option_unknown`); the id that is not known.
+    ConfigUnknown(String),
+    /// ADR-0090: eight prompts already wait behind the agent's turn (`agent.queue_full`).
+    QueueFull(usize),
     /// ADR-0059: a launch option the node's policy refuses: `(kind, option, policy)`. Nothing was started.
     OptionForbidden(String, String, &'static str),
     /// ADR-0059: a launch option id that is malformed, unknown, repeated or too many: `(kind, option)`.
@@ -294,6 +325,11 @@ impl SupervisorError {
             Self::OptionUnknown(f) => {
                 Error::new(ErrorCode::ProtocolInvalidMessage).with("field", *f)
             }
+            Self::ConfigUnknown(id) => {
+                Error::new(ErrorCode::AgentOptionUnknown).with("id", id.as_str())
+            }
+            Self::QueueFull(limit) => Error::new(ErrorCode::AgentQueueFull)
+                .with("limit", i64::try_from(*limit).unwrap_or(i64::MAX)),
             Self::OptionInvalid(k, o) => Error::new(ErrorCode::AgentOptionInvalid)
                 .with("kind", k.as_str())
                 .with("option", o.as_str()),
@@ -448,6 +484,34 @@ pub struct ScreenCheck {
 }
 
 /// An agent driven through an L3 adapter process instead of a terminal.
+/// A prompt waiting behind a turn (ADR-0090). `tag` is the caller's, the id of its chat entry.
+struct Queued {
+    text: String,
+    tag: u64,
+}
+
+/// ADR-0090: an adapter agent's config options and commands as last reported (checked and bounded), whether a turn is open (a prompt was
+/// sent and the adapter has not reported `idle` since), and the prompts waiting behind it. The queue is node memory only (ADR-0089
+/// is the persistence question).
+#[derive(Default)]
+struct AdapterRich {
+    config: Vec<ConfigOption>,
+    commands: Vec<AdapterCommand>,
+    turn_open: AtomicBool,
+    queue: VecDeque<Queued>,
+}
+
+impl AdapterRich {
+    /// The report of a restarted adapter is the only truth: what the old process said is forgotten, so a choice it offered cannot be
+    /// used against the new one, and no prompt waits for a turn that ended with the process.
+    fn forget(&mut self) -> Vec<u64> {
+        self.config.clear();
+        self.commands.clear();
+        self.turn_open.store(false, Ordering::SeqCst);
+        self.queue.drain(..).map(|q| q.tag).collect()
+    }
+}
+
 struct AdapterEntry {
     agent: Agent,
     /// `None` once a user stop has ended the adapter process.
@@ -465,6 +529,8 @@ struct AdapterEntry {
     capabilities: Vec<String>,
     /// The modes and models the adapter last reported (ADR-0058), checked and bounded.
     options: SessionOptions,
+    /// ADR-0090: what the adapter reports beyond modes and models, and the prompts waiting behind its turn.
+    rich: AdapterRich,
     /// The agent's own mesh endpoint, passed in `session/start` (`mcp_servers`). Kept across restarts after a crash, as a terminal
     /// agent's is; a stopped agent left the mesh and gets a fresh one when resumed.
     mesh: Option<agora_adapters::inject::Endpoint>,
@@ -1268,6 +1334,7 @@ impl Supervisor {
                     restart_at: None,
                     capabilities,
                     options: SessionOptions::default(),
+                    rich: AdapterRich::default(),
                     mesh,
                     launch: choice,
                     folder: folder.map(|f| f.path().to_path_buf()),
@@ -1513,6 +1580,7 @@ impl Supervisor {
                 restart_at: None,
                 capabilities,
                 options: SessionOptions::default(),
+                rich: AdapterRich::default(),
                 mesh,
                 launch,
                 folder: None,
@@ -1542,6 +1610,38 @@ impl Supervisor {
             for ev in polled {
                 match ev {
                     AdapterEvent::State { state, .. } => {
+                        // ADR-0090: an adapter that reports its turns (`turns`) tells when one is open; the next queued prompt goes
+                        // out when it ends, one per `idle`.
+                        if e.capabilities.iter().any(|c| c == "turns") {
+                            match state {
+                                AgentState::Working | AgentState::Blocked => {
+                                    e.rich.turn_open.store(true, Ordering::SeqCst);
+                                }
+                                _ => {
+                                    e.rich.turn_open.store(false, Ordering::SeqCst);
+                                    if state == AgentState::Idle {
+                                        if let (Some(next), Some(adapter)) =
+                                            (e.rich.queue.pop_front(), e.adapter.as_ref())
+                                        {
+                                            let sent = adapter
+                                                .prompt(
+                                                    &e.session_id,
+                                                    &next.text,
+                                                    false,
+                                                    Duration::from_secs(10),
+                                                )
+                                                .is_ok();
+                                            e.rich.turn_open.store(sent, Ordering::SeqCst);
+                                            events.push(SupervisorEvent::PromptDequeued {
+                                                agent: id.clone(),
+                                                tag: next.tag,
+                                                sent,
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         if e.agent.observe(state, StateSource::Reported) {
                             events.push(SupervisorEvent::StateChanged {
                                 agent: id.clone(),
@@ -1562,6 +1662,32 @@ impl Supervisor {
                             });
                         }
                     }
+                    AdapterEvent::Config { options, .. } => {
+                        let options = bounded_config(options);
+                        if options != e.rich.config {
+                            e.rich.config = options.clone();
+                            events.push(SupervisorEvent::Adapter {
+                                agent: id.clone(),
+                                event: AdapterEvent::Config {
+                                    session_id: e.session_id.clone(),
+                                    options,
+                                },
+                            });
+                        }
+                    }
+                    AdapterEvent::Commands { commands, .. } => {
+                        let commands = bounded_commands(commands);
+                        if commands != e.rich.commands {
+                            e.rich.commands = commands.clone();
+                            events.push(SupervisorEvent::Adapter {
+                                agent: id.clone(),
+                                event: AdapterEvent::Commands {
+                                    session_id: e.session_id.clone(),
+                                    commands,
+                                },
+                            });
+                        }
+                    }
                     AdapterEvent::SessionReported {
                         native_session_id, ..
                     } => {
@@ -1576,6 +1702,14 @@ impl Supervisor {
                     }
                     AdapterEvent::Exited => {
                         e.running = false;
+                        e.options = SessionOptions::default();
+                        let dropped = e.rich.forget();
+                        if !dropped.is_empty() {
+                            events.push(SupervisorEvent::PromptsDropped {
+                                agent: id.clone(),
+                                tags: dropped,
+                            });
+                        }
                         if e.agent.observe(AgentState::Unknown, StateSource::Reported) {
                             events.push(SupervisorEvent::StateChanged {
                                 agent: id.clone(),
@@ -1639,6 +1773,10 @@ impl Supervisor {
                 e.adapter = Some(adapter);
                 e.session_id = session_id;
                 e.capabilities = capabilities;
+                // What the old process reported does not carry over: a mode that skips permissions is checked against what the new
+                // one reports.
+                e.options = SessionOptions::default();
+                e.rich.forget();
                 e.running = true;
                 e.agent.process_restarted();
                 events.push(SupervisorEvent::Started { agent: id.clone() });
@@ -1667,6 +1805,141 @@ impl Supervisor {
         adapter
             .prompt(session, text, from_mesh, Duration::from_secs(10))
             .map_err(|e| SupervisorError::Spawn(e.to_string()))
+    }
+
+    /// ADR-0090: a user's prompt to an adapter agent: sent now, or queued behind the turn that runs (an adapter that reports its
+    /// turns declares `turns`; one that does not is sent to at once, as before). `tag` is called only for a prompt that is queued and
+    /// returns what identifies it later (the id of its chat entry); the supervisor is not changed while it runs.
+    pub fn adapter_submit(
+        &mut self,
+        id: &AgentId,
+        text: &str,
+        tag: impl FnOnce(usize) -> u64,
+    ) -> Result<Submitted, SupervisorError> {
+        let Some(e) = self.adapters.get_mut(id).filter(|e| e.running) else {
+            return Err(SupervisorError::NotFound(id.clone()));
+        };
+        let turns = e.capabilities.iter().any(|c| c == "turns");
+        if turns && (e.rich.turn_open.load(Ordering::SeqCst) || !e.rich.queue.is_empty()) {
+            if e.rich.queue.len() >= MAX_PROMPT_QUEUE {
+                return Err(SupervisorError::QueueFull(MAX_PROMPT_QUEUE));
+            }
+            let queue_len = e.rich.queue.len() + 1;
+            e.rich.queue.push_back(Queued {
+                text: text.to_string(),
+                tag: tag(queue_len),
+            });
+            return Ok(Submitted::Queued { queue_len });
+        }
+        let adapter = e
+            .adapter
+            .as_ref()
+            .ok_or_else(|| SupervisorError::NotFound(id.clone()))?;
+        adapter
+            .prompt(&e.session_id, text, false, Duration::from_secs(10))
+            .map_err(|e| SupervisorError::Spawn(e.to_string()))?;
+        e.rich.turn_open.store(turns, Ordering::SeqCst);
+        Ok(Submitted::Sent)
+    }
+
+    /// ADR-0090: ends an adapter agent's current turn (the adapter's `session/cancel`); the agent and its process live on. With
+    /// `drop_queue` the prompts waiting behind the turn are thrown away, and their tags returned; otherwise they are kept and sent in
+    /// order as the turns end. Only an adapter that declared `cancel` has this; a terminal agent has no turn to cancel.
+    pub fn adapter_cancel_turn(
+        &mut self,
+        id: &AgentId,
+        drop_queue: bool,
+    ) -> Result<Vec<u64>, SupervisorError> {
+        const CAPABILITY: &str = "agent.cancel_turn";
+        let Some(e) = self.adapters.get_mut(id) else {
+            return Err(if self.agents.contains_key(id) {
+                SupervisorError::OptionUnsupported(CAPABILITY)
+            } else {
+                SupervisorError::NotFound(id.clone())
+            });
+        };
+        if !e.running {
+            return Err(SupervisorError::NotFound(id.clone()));
+        }
+        if !e.capabilities.iter().any(|c| c == "cancel") {
+            return Err(SupervisorError::OptionUnsupported(CAPABILITY));
+        }
+        let adapter = e
+            .adapter
+            .as_ref()
+            .ok_or_else(|| SupervisorError::NotFound(id.clone()))?;
+        adapter
+            .cancel(&e.session_id, Duration::from_secs(10))
+            .map_err(adapter_error)?;
+        Ok(if drop_queue {
+            e.rich.queue.drain(..).map(|q| q.tag).collect()
+        } else {
+            Vec::new()
+        })
+    }
+
+    /// ADR-0090: sets one of the config options an adapter agent reported (the reasoning effort is one). The id and the value are
+    /// checked against the last report. Whether the choice makes the agent act without asking is the node's own judgement
+    /// (`perm`, on top of what the adapter said), and the owner's `skip_permissions` policy decides it here, on the node, whatever the
+    /// window or the hub said, exactly as for a mode (ADR-0059).
+    pub fn adapter_set_config(
+        &self,
+        id: &AgentId,
+        config_id: &str,
+        value: &str,
+    ) -> Result<(), SupervisorError> {
+        const CAPABILITY: &str = "agent.set_config";
+        let Some(e) = self.adapters.get(id) else {
+            return Err(if self.agents.contains_key(id) {
+                SupervisorError::OptionUnsupported(CAPABILITY)
+            } else {
+                SupervisorError::NotFound(id.clone())
+            });
+        };
+        if !e.running {
+            return Err(SupervisorError::NotFound(id.clone()));
+        }
+        if !e.capabilities.iter().any(|c| c == "config") {
+            return Err(SupervisorError::OptionUnsupported(CAPABILITY));
+        }
+        let Some(option) = e
+            .rich
+            .config
+            .iter()
+            .find(|o| !config_id.is_empty() && o.id == config_id)
+        else {
+            return Err(SupervisorError::ConfigUnknown(config_id.to_string()));
+        };
+        let skips = if option.boolean {
+            if value != "true" && value != "false" {
+                return Err(SupervisorError::ConfigUnknown(value.to_string()));
+            }
+            option.skips_permissions
+        } else {
+            let Some(choice) = option
+                .choices
+                .iter()
+                .find(|c| !value.is_empty() && c.id == value)
+            else {
+                return Err(SupervisorError::ConfigUnknown(value.to_string()));
+            };
+            choice.skips_permissions
+        };
+        if skips {
+            let confined =
+                self.sandbox.level != crate::sandbox::Level::Off && self.sandbox.enforceable();
+            if let Some(policy) = self.skip_permissions.refusal(confined) {
+                return Err(SupervisorError::OptionForbidden(
+                    e.agent.kind.clone(),
+                    config_id.to_string(),
+                    policy,
+                ));
+            }
+        }
+        let (adapter, session) = self.adapter_of(id)?;
+        adapter
+            .set_config(session, config_id, value, Duration::from_secs(10))
+            .map_err(adapter_error)
     }
 
     /// ADR-0058: switches an adapter agent to one of the modes or models it reported. Only the user's own command reaches this (an
@@ -2214,6 +2487,14 @@ impl Supervisor {
                     state: AgentState::Done,
                 });
             }
+            // ADR-0090: the prompts that waited for its turn will never be sent.
+            let dropped = e.rich.forget();
+            if !dropped.is_empty() {
+                events.push(SupervisorEvent::PromptsDropped {
+                    agent: id.clone(),
+                    tags: dropped,
+                });
+            }
             events.push(SupervisorEvent::Stopped { agent: id.clone() });
             return Ok(events);
         }
@@ -2279,6 +2560,7 @@ impl Supervisor {
                     restart_at: None,
                     capabilities: Vec::new(),
                     options: SessionOptions::default(),
+                    rich: AdapterRich::default(),
                     mesh: None,
                     // ADR-0060: a resumed agent gets none of its launch options back (a resumed agent asks before acting again).
                     launch: LaunchChoice::default(),
@@ -2785,11 +3067,23 @@ fn bounded_options(o: SessionOptions) -> SessionOptions {
             .filter(|o| !o.id.is_empty() && o.id.len() <= OPTION_ID_MAX)
             .filter(|o| seen.insert(o.id.clone()))
             .take(OPTIONS_MAX)
-            .map(|o| SessionOption {
-                name: clip(&o.name, OPTION_NAME_MAX),
-                description: clip(&o.description, OPTION_DESCRIPTION_MAX),
-                skips_permissions: modes && o.skips_permissions,
-                id: o.id,
+            .map(|o| {
+                let name = clip(&o.name, OPTION_NAME_MAX);
+                let description = clip(&o.description, OPTION_DESCRIPTION_MAX);
+                // The adapter's word and the node's own rule (`perm`): either flags it, neither ever clears the other. A model is
+                // flagged only by the strong words (a mode that is not clearly one that asks is flagged too).
+                let (category, option) = if modes {
+                    (Category::Mode, ("mode", "mode"))
+                } else {
+                    (Category::Model, ("model", "model"))
+                };
+                SessionOption {
+                    skips_permissions: o.skips_permissions
+                        || perm::value_skips(category, option, (&o.id, &name, &description)),
+                    name,
+                    description,
+                    id: o.id,
+                }
             })
             .collect()
     };
@@ -2807,6 +3101,95 @@ fn bounded_options(o: SessionOptions) -> SessionOptions {
         modes,
         models,
     }
+}
+
+/// ADR-0090: the most config options kept per agent, choices per option, commands, and the longest text of each.
+const CONFIG_OPTIONS_MAX: usize = 64;
+const CONFIG_CHOICES_MAX: usize = 64;
+const COMMANDS_MAX: usize = 100;
+const COMMAND_NAME_MAX: usize = 100;
+const COMMAND_HINT_MAX: usize = 200;
+const CONFIG_CATEGORY_MAX: usize = 40;
+
+/// ADR-0090: an adapter's config options, checked and bounded: at most 64 options of 64 choices, an empty, overlong or repeated id
+/// dropped (a cut id would name another option), text cut. `skips_permissions` is the adapter's word or the node's own rule
+/// (`perm`): an unknown value of a permission option counts as skipping, so the unknown case is never read as safe and the
+/// window asks first.
+fn bounded_config(options: Vec<ConfigOption>) -> Vec<ConfigOption> {
+    let mut seen = std::collections::BTreeSet::new();
+    options
+        .into_iter()
+        .filter(|o| !o.id.is_empty() && o.id.len() <= OPTION_ID_MAX)
+        .filter(|o| seen.insert(o.id.clone()))
+        .take(CONFIG_OPTIONS_MAX)
+        .map(|o| {
+            let name = clip(&o.name, OPTION_NAME_MAX);
+            let description = clip(&o.description, OPTION_DESCRIPTION_MAX);
+            let category = Category::from_acp(Some(o.category.as_str()));
+            let mut seen = std::collections::BTreeSet::new();
+            let choices: Vec<SessionOption> = if o.boolean {
+                Vec::new()
+            } else {
+                o.choices
+                    .into_iter()
+                    .filter(|c| !c.id.is_empty() && c.id.len() <= OPTION_ID_MAX)
+                    .filter(|c| seen.insert(c.id.clone()))
+                    .take(CONFIG_CHOICES_MAX)
+                    .map(|c| {
+                        let (cname, cdesc) = (
+                            clip(&c.name, OPTION_NAME_MAX),
+                            clip(&c.description, OPTION_DESCRIPTION_MAX),
+                        );
+                        SessionOption {
+                            skips_permissions: c.skips_permissions
+                                || perm::value_skips(
+                                    category,
+                                    (&o.id, &name),
+                                    (&c.id, &cname, &cdesc),
+                                ),
+                            name: cname,
+                            description: cdesc,
+                            id: c.id,
+                        }
+                    })
+                    .collect()
+            };
+            // A select's current value that is not one of its choices is dropped; a boolean's is `true` or `false`.
+            let current = if o.boolean {
+                if o.current == "true" { "true" } else { "false" }.to_string()
+            } else if choices.iter().any(|c| c.id == o.current) {
+                o.current
+            } else {
+                String::new()
+            };
+            ConfigOption {
+                skips_permissions: o.boolean
+                    && (o.skips_permissions
+                        || perm::boolean_skips(category, (&o.id, &name), &description)),
+                category: clip(&o.category, CONFIG_CATEGORY_MAX),
+                id: o.id,
+                name,
+                description,
+                boolean: o.boolean,
+                current,
+                choices,
+            }
+        })
+        .collect()
+}
+
+/// ADR-0090: an adapter's slash commands, bounded (100, a nameless one dropped, text cut).
+fn bounded_commands(commands: Vec<AdapterCommand>) -> Vec<AdapterCommand> {
+    commands
+        .into_iter()
+        .filter(|c| !c.name.is_empty() && c.name.len() <= COMMAND_NAME_MAX)
+        .take(COMMANDS_MAX)
+        .map(|c| AdapterCommand {
+            description: clip(&c.description, OPTION_DESCRIPTION_MAX),
+            input_hint: clip(&c.input_hint, COMMAND_HINT_MAX),
+            name: c.name,
+        })
+        .collect()
 }
 
 /// An adapter's error answer as a supervisor error: one of the stable reasons the node passes on (ADR-0058), with only the
@@ -3005,7 +3388,7 @@ fn open_session(
     const INIT: Duration = Duration::from_secs(30);
     const SESSION: Duration = Duration::from_secs(60);
     let init = adapter
-        .initialize(&["chat"], "en", INIT)
+        .initialize(&["chat", "chat.rich"], "en", INIT)
         .map_err(adapter_error)?;
     // The agent's own mesh server, described as for a terminal agent (`inject`): `agora mesh stdio --socket <its socket>`.
     let servers: Vec<McpServer> = mesh
@@ -3336,7 +3719,7 @@ mod adapter_option_tests {
     }
 
     #[test]
-    fn reported_options_are_bounded_and_a_model_never_skips_permissions() {
+    fn reported_options_are_bounded_and_flagged_by_the_adapter_or_the_nodes_own_rule() {
         let mut models: Vec<SessionOption> =
             (0..250).map(|i| opt(&format!("m{i}"), true)).collect();
         models.insert(0, opt(&"x".repeat(OPTION_ID_MAX + 1), false));
@@ -3352,6 +3735,7 @@ mod adapter_option_tests {
             current_mode: "yolo".into(),
             current_model: "gone".into(),
         });
+        // `plan` was reported twice: the first one counts (and the adapter's later claim on it does not).
         assert_eq!(
             o.modes
                 .iter()
@@ -3361,14 +3745,168 @@ mod adapter_option_tests {
             "empty and repeated ids are dropped"
         );
         assert_eq!(o.models.len(), OPTIONS_MAX);
+        // The adapter's flag is kept for a model too (it can only add protection); text is cut.
         assert!(o
             .models
             .iter()
-            .all(|m| !m.skips_permissions && m.name.len() <= OPTION_NAME_MAX));
+            .all(|m| m.skips_permissions && m.name.len() <= OPTION_NAME_MAX));
         assert_eq!(
             (o.current_mode.as_str(), o.current_model.as_str()),
             ("yolo", "")
         );
+    }
+
+    /// ADR-0090: the node judges by its own rule (`perm`) what an adapter did not flag: a mode it cannot place is flagged, a model that
+    /// merely is called `auto` is not, an explicit bypass in a model's name is.
+    #[test]
+    fn the_node_flags_by_its_own_rule_what_the_adapter_did_not() {
+        let named = |id: &str| SessionOption {
+            id: id.into(),
+            name: id.into(),
+            ..SessionOption::default()
+        };
+        let o = bounded_options(SessionOptions {
+            modes: ["default", "plan", "turbo", "bypassPermissions"]
+                .map(named)
+                .to_vec(),
+            models: ["auto", "claude-x", "yolo-fast"].map(named).to_vec(),
+            ..SessionOptions::default()
+        });
+        let flags = |l: &[SessionOption]| l.iter().map(|m| m.skips_permissions).collect::<Vec<_>>();
+        assert_eq!(flags(&o.modes), [false, false, true, true]);
+        assert_eq!(flags(&o.models), [false, false, true]);
+    }
+
+    fn config(id: &str, category: &str, current: &str, choices: &[&str]) -> ConfigOption {
+        ConfigOption {
+            id: id.into(),
+            name: id.into(),
+            category: category.into(),
+            current: current.into(),
+            choices: choices
+                .iter()
+                .map(|c| SessionOption {
+                    id: (*c).into(),
+                    name: (*c).into(),
+                    ..SessionOption::default()
+                })
+                .collect(),
+            ..ConfigOption::default()
+        }
+    }
+
+    /// ADR-0090: 64 options of 64 choices, ids that do not fit dropped, a current value that is not a choice dropped, and the node's
+    /// own flag: an unknown value of a permission option is flagged, a reasoning level is not; a boolean about approvals is flagged.
+    #[test]
+    fn reported_config_is_bounded_and_flagged_by_the_nodes_own_rule() {
+        let many: Vec<ConfigOption> = (0..100)
+            .map(|i| config(&format!("o{i}"), "thought_level", "c0", &["c0"]))
+            .collect();
+        assert_eq!(bounded_config(many).len(), CONFIG_OPTIONS_MAX);
+        let choices: Vec<String> = (0..100).map(|i| format!("c{i}")).collect();
+        let refs: Vec<&str> = choices.iter().map(String::as_str).collect();
+        let o = bounded_config(vec![
+            config("effort", "thought_level", "c1", &refs),
+            config(&"x".repeat(OPTION_ID_MAX + 1), "mode", "", &[]),
+            config("", "mode", "", &[]),
+            config("effort", "thought_level", "c2", &["c2"]),
+        ]);
+        assert_eq!(
+            o.len(),
+            1,
+            "an overlong, an empty and a repeated id are dropped"
+        );
+        assert_eq!(o[0].choices.len(), CONFIG_CHOICES_MAX);
+        assert_eq!(o[0].current, "c1");
+        let o = bounded_config(vec![config("effort", "thought_level", "gone", &["low"])]);
+        assert_eq!(
+            o[0].current, "",
+            "a current value that is not a choice is dropped"
+        );
+
+        let o = bounded_config(vec![
+            config(
+                "approvals",
+                "mode",
+                "default",
+                &["default", "turbo", "plan", "bypass"],
+            ),
+            config("effort", "thought_level", "low", &["low", "turbo"]),
+            ConfigOption {
+                boolean: true,
+                current: "true".into(),
+                ..config("auto_approve", "_custom", "", &[])
+            },
+            ConfigOption {
+                boolean: true,
+                current: "maybe".into(),
+                ..config("verbose", "_custom", "", &[])
+            },
+        ]);
+        let flags = |c: &ConfigOption| {
+            c.choices
+                .iter()
+                .map(|x| x.skips_permissions)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(flags(&o[0]), [false, true, false, true]);
+        assert_eq!(
+            flags(&o[1]),
+            [false, false],
+            "a reasoning level is not a permission"
+        );
+        assert!(o[2].skips_permissions && o[2].current == "true");
+        assert!(!o[3].skips_permissions && o[3].current == "false");
+        // An adapter's own flag is never cleared by the node.
+        let mut flagged = config("effort", "thought_level", "low", &["low"]);
+        flagged.choices[0].skips_permissions = true;
+        assert!(bounded_config(vec![flagged])[0].choices[0].skips_permissions);
+    }
+
+    /// ADR-0090: what a restarted adapter's old process reported is forgotten (a stale mode list could decide a choice against the
+    /// new process), and the prompts that waited for its turn are handed back to be dropped.
+    #[test]
+    fn a_restarted_adapters_old_reports_and_queue_are_forgotten() {
+        let mut r = AdapterRich {
+            config: bounded_config(vec![config("effort", "thought_level", "low", &["low"])]),
+            commands: vec![AdapterCommand {
+                name: "review".into(),
+                ..AdapterCommand::default()
+            }],
+            ..AdapterRich::default()
+        };
+        r.turn_open.store(true, Ordering::SeqCst);
+        r.queue.push_back(Queued {
+            text: "a".into(),
+            tag: 7,
+        });
+        r.queue.push_back(Queued {
+            text: "b".into(),
+            tag: 9,
+        });
+        assert_eq!(r.forget(), [7, 9]);
+        assert!(r.config.is_empty() && r.commands.is_empty() && r.queue.is_empty());
+        assert!(!r.turn_open.load(Ordering::SeqCst));
+        assert!(r.forget().is_empty());
+    }
+
+    #[test]
+    fn reported_commands_are_bounded() {
+        let c = |n: &str| AdapterCommand {
+            name: n.into(),
+            description: "d".repeat(900),
+            input_hint: "h".repeat(900),
+        };
+        let mut list: Vec<AdapterCommand> = (0..150).map(|i| c(&format!("c{i}"))).collect();
+        list.insert(0, c(""));
+        list.insert(1, c(&"n".repeat(COMMAND_NAME_MAX + 1)));
+        let out = bounded_commands(list);
+        assert_eq!(out.len(), COMMANDS_MAX);
+        assert_eq!(out[0].name, "c0");
+        assert!(out
+            .iter()
+            .all(|c| c.description.len() <= OPTION_DESCRIPTION_MAX
+                && c.input_hint.len() <= COMMAND_HINT_MAX));
     }
 
     #[test]

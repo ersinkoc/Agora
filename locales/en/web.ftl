@@ -415,6 +415,7 @@ notice-adapter-turn_stopped = The agent stopped its turn ({ $stop_reason }).
 notice-adapter-turn_empty = The agent ended its turn without saying anything. Its provider may have refused the request. { $stderr_tail }
 notice-adapter-agent_exited = The agent stopped (step { $stage }, exit code { $exit_code }). Its last output: { $stderr_tail }
 notice-adapter-agent_refused = The agent refused to start (step { $stage }, error { $rpc_code }): { $detail }
+notice-adapter-queue_dropped = { $count } waiting prompts were not sent: the turn was cancelled with the queue dropped, or the agent ended.
 notice-other = The agent reported something this window cannot show ({ $code }).
 session-header = Agent settings
 session-elapsed-hint = How long it has been running

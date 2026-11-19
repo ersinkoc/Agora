@@ -1776,3 +1776,152 @@ fn a_subscriber_that_fell_behind_still_gets_the_exit_frame() {
     assert!(data < OUTPUT, "the subscriber never fell behind");
     assert_eq!(exit.payload.len(), 4);
 }
+
+/// ADR-0090: a permission request also shows in the conversation, as an entry that points at the node's own approval id, and its
+/// outcome follows only the node's approval state: the user's signed decision (approved, denied) or the agent leaving (cancelled).
+#[test]
+fn a_permission_shows_in_the_conversation_and_follows_only_the_nodes_approval_state() {
+    use agora_node::approvals::signed_message;
+    use v1::event::Body;
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+        return;
+    }
+    let e = env("permission-entry");
+    add_manifest(
+        &e,
+        "ad.toml",
+        &format!("kind = \"adapted\"\ndisplay_name = \"A\"\nversion = \"1\"\nmin_engine = 1\n[adapter]\ncommand = [{:?}, \"--adapter\"]\n", fake_adapter_path()),
+    );
+    let n = node(&e, NodeLimits::default());
+    n.approvals.set_verifier(Box::new(EchoVerifier));
+    let mut c = Client::connect(n.socket().unwrap()).unwrap();
+    let s = started(ok(c.call(start_cmd("adapted"))));
+    let agent = agora_core::AgentId::new(s.agent_id.clone());
+    let ask = |c: &mut Client| {
+        ok(c.call(Cmd::AgentPrompt(v1::AgentPrompt {
+            agent_id: s.agent_id.clone(),
+            text: "ask".into(),
+        })));
+    };
+    let requested = |n: &Node, skip: usize| -> String {
+        let end = Instant::now() + Duration::from_secs(15);
+        loop {
+            let found: Vec<String> = n
+                .events
+                .events_after(0)
+                .into_iter()
+                .filter_map(|e| match e.body {
+                    Some(Body::ApprovalRequested(a)) => Some(a.approval_id),
+                    _ => None,
+                })
+                .collect();
+            if let Some(id) = found.get(skip) {
+                return id.clone();
+            }
+            assert!(Instant::now() < end, "no approval request announced");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+    let entry_of = |id: &str| {
+        n.chat
+            .snapshot(&agent)
+            .into_iter()
+            .find(|e| e.kind == v1::ChatKind::Permission as i32 && e.approval_id == id)
+    };
+    let decide = |c: &mut Client, id: &str, approved: bool| {
+        ok(c.call(Cmd::ApprovalResolve(v1::ApprovalResolve {
+            approval_id: id.into(),
+            approved,
+            signer_device_id: "phone".into(),
+            signature: signed_message("node-test", id, approved),
+            helper_grant: 0,
+            helpers_may_start: false,
+        })));
+    };
+    let outcome_is = |id: &str, want: v1::PermissionOutcome| {
+        let end = Instant::now() + Duration::from_secs(15);
+        loop {
+            if entry_of(id).is_some_and(|e| e.permission_outcome == want as i32) {
+                return;
+            }
+            assert!(Instant::now() < end, "{id}: {:?}", entry_of(id));
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+
+    // Pending: the entry has the node's id (`ap-...`), not the adapter's own, and the action as its label.
+    ask(&mut c);
+    let first = requested(&n, 0);
+    assert!(first.starts_with("ap-"), "{first}");
+    outcome_is(&first, v1::PermissionOutcome::Pending);
+    assert!(n
+        .chat
+        .snapshot(&agent)
+        .iter()
+        .all(|e| e.approval_id.is_empty() || e.approval_id.starts_with("ap-")));
+    // A decision that fails verification changes nothing in the conversation.
+    let bad = c.call(Cmd::ApprovalResolve(v1::ApprovalResolve {
+        approval_id: first.clone(),
+        approved: true,
+        signer_device_id: "stranger".into(),
+        signature: signed_message("node-test", &first, true),
+        helper_grant: 0,
+        helpers_may_start: false,
+    }));
+    assert_eq!(err_code(bad), "approval.signature_invalid");
+    outcome_is(&first, v1::PermissionOutcome::Pending);
+    // The verified decision: approved.
+    decide(&mut c, &first, true);
+    outcome_is(&first, v1::PermissionOutcome::Approved);
+
+    // Another request, denied.
+    let end = Instant::now() + Duration::from_secs(15);
+    while n
+        .supervisor
+        .lock()
+        .unwrap()
+        .list()
+        .into_iter()
+        .find(|v| v.id == agent)
+        .unwrap()
+        .state
+        != agora_core::AgentState::Idle
+    {
+        assert!(Instant::now() < end, "agent never resumed");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    ask(&mut c);
+    let second = requested(&n, 1);
+    outcome_is(&second, v1::PermissionOutcome::Pending);
+    decide(&mut c, &second, false);
+    outcome_is(&second, v1::PermissionOutcome::Denied);
+    // The first stays approved: nothing later rewrites a decision.
+    outcome_is(&first, v1::PermissionOutcome::Approved);
+
+    // A third is still waiting when the agent is stopped: cancelled, and the first two are untouched.
+    let end = Instant::now() + Duration::from_secs(15);
+    while n
+        .supervisor
+        .lock()
+        .unwrap()
+        .list()
+        .into_iter()
+        .find(|v| v.id == agent)
+        .unwrap()
+        .state
+        != agora_core::AgentState::Idle
+    {
+        assert!(Instant::now() < end, "agent never resumed");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    ask(&mut c);
+    let third = requested(&n, 2);
+    outcome_is(&third, v1::PermissionOutcome::Pending);
+    ok(c.call(Cmd::AgentStop(v1::AgentStop {
+        agent_id: s.agent_id.clone(),
+        stop_helpers: false,
+    })));
+    outcome_is(&third, v1::PermissionOutcome::Cancelled);
+    outcome_is(&first, v1::PermissionOutcome::Approved);
+    outcome_is(&second, v1::PermissionOutcome::Denied);
+}

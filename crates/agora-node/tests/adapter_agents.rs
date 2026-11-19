@@ -187,6 +187,20 @@ fn an_adapter_agent_gets_its_own_worktree_and_reports_its_state() {
             ))
         );
     }
+    // ADR-0090: nor does it take a config option, and it never reported its turns (`turns`), so a prompt is sent at once and never
+    // queued, however many arrive: an adapter that never says `idle` must not hold prompts back for good.
+    assert_eq!(
+        s.adapter_set_config(&id, "effort", "low"),
+        Err(agora_node::supervisor::SupervisorError::OptionUnsupported(
+            "agent.set_config"
+        ))
+    );
+    for _ in 0..3 {
+        assert_eq!(
+            s.adapter_submit(&id, "hello", |_| panic!("queued")),
+            Ok(agora_node::supervisor::Submitted::Sent)
+        );
+    }
 }
 
 #[test]

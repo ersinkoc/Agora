@@ -37,6 +37,12 @@ pub const CAPABILITIES: &[&str] = &[
     // ADR-0058
     "agent.set_mode",
     "agent.set_model",
+    // ADR-0090: chat entries that change in place (tool calls and plans, with status, output, thinking, permissions and queued
+    // prompts), `AgentPromptResult`, `AgentSetConfig`, `AgentCancelTurn` and `AgentCommands`: each is handled by this node.
+    "chat.rich",
+    "agent.set_config",
+    "agent.cancel_turn",
+    "agent.commands",
     // ADR-0060
     "agent.resume",
     // ADR-0059
