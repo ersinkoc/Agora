@@ -105,6 +105,14 @@ Everything works as before by hand too (`agora hub run`, `agora node enroll`, `a
 `~/.agora` elsewhere. A machine whose `~/.agora` already has a hub folder or a link made by hand is not taken over yet: `agora`
 says so and changes nothing (use a new `AGORA_HOME`, or keep starting it by hand).
 
+## Certificates
+
+Every certificate Agora issues lasts 90 days. A machine renews its own by itself when 30 days are left, while it is connected to a hub that is
+up to date, and the hub replaces its own certificate by itself under 30 days left, so there is nothing to do. `agora doctor` shows the days left for
+this machine's certificate and for the hub's, and says when a renewal needs you: if it says this machine must join again (the hub no longer accepts
+its certificate, or it ended while the machine was off), run `agora hub code` on the hub and `agora node enroll` here with the new code; its agents
+and waiting events are untouched. Update the hub before the machines.
+
 ## Upgrading the hub, and going back
 
 The hub's database changes shape between some versions, and only forward: a hub binary that finds a database newer than it understands refuses it

@@ -56,6 +56,9 @@ pub const CAPABILITIES: &[&str] = &[
     "kinds.program",
     // ADR-0065: speaks the pairing messages (`pairing.v1`, docs/specs/pairing.md). Nothing sends them yet.
     "pairing.v1",
+    // ADR-0085: asks the hub for a new certificate before the old one ends. Offered so the hub's answer to the handshake says whether
+    // the hub handles it; a node never asks a hub that did not agree.
+    "enroll.renew",
 ];
 
 /// Events sent per step; the hub acknowledges after each batch.
@@ -120,6 +123,17 @@ impl Redial {
     }
 }
 
+/// Where a running uplink gets the certificate for its NEXT connection and tells what it learned about the hub (ADR-0085). The files
+/// belong to the `agora` crate; the uplink only asks before each dial and reports.
+pub trait CertSource: Send + Sync {
+    /// The `(cert_pem, key_pem)` to dial with now, when they differ from what the link was started with (a renewal replaced them).
+    fn current(&self) -> Option<(String, String)>;
+    /// The hub's answer to the handshake: the capabilities both sides have (`enroll.renew` says the hub handles renewals).
+    fn welcomed(&self, capabilities: &[String]);
+    /// The hub took a connection made with this certificate.
+    fn accepted(&self, cert_pem: &str);
+}
+
 /// Everything needed to dial the hub. PEM texts, as written at enrollment.
 #[derive(Clone)]
 pub struct HubLink {
@@ -143,6 +157,9 @@ pub struct HubLink {
     pub devices: Option<Arc<crate::device_trust::DeviceTrust>>,
     /// The node's data directory: where the link's state is written for `agora status` (see [`crate::link_state`]). `None`: not written.
     pub state_dir: Option<std::path::PathBuf>,
+    /// Where the certificate and key for each new dial come from, so a renewed certificate is used by the next connection. `None`: the
+    /// ones above are used for ever.
+    pub certs: Option<Arc<dyn CertSource>>,
 }
 
 type Done = Box<dyn FnOnce(Result<Option<crate::mesh_server::BoardReply>, String>) + Send>;
@@ -453,6 +470,7 @@ async fn run_once_noting(
                 Liveness::DEFAULT,
                 link.devices.clone(),
                 accepted,
+                link.certs.as_ref(),
             )
             .await
         };
@@ -544,6 +562,7 @@ async fn converse<S>(
     live: Liveness,
     devices: Option<Arc<crate::device_trust::DeviceTrust>>,
     accepted: &AtomicBool,
+    certs: Option<&Arc<dyn CertSource>>,
 ) -> Result<(), LinkError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -592,6 +611,9 @@ where
     )
     .map_err(|_| LinkError::Transport("bad welcome".into()))?;
     up.on_welcome(&welcome)?;
+    if let Some(c) = certs {
+        c.welcomed(&welcome.capabilities);
+    }
     conn.send(&frame(
         STREAM_CONTROL,
         kinds::RESUME,
@@ -1150,14 +1172,39 @@ pub fn spawn(sink: Arc<EventSink>, link: HubLink) -> std::io::Result<UplinkHandl
                     while !stop.load(Ordering::Acquire) {
                         let started = std::time::Instant::now();
                         let accepted = AtomicBool::new(false);
+                        // A renewed certificate is used from this dial on (ADR-0085). Read off the runtime's thread: the files wait
+                        // for the link folder's guard.
+                        let dialled = match link.certs.clone() {
+                            Some(source) => {
+                                let now = tokio::task::spawn_blocking(move || source.current())
+                                    .await
+                                    .ok()
+                                    .flatten();
+                                match now {
+                                    Some((cert_pem, key_pem)) => HubLink {
+                                        cert_pem,
+                                        key_pem,
+                                        ..link.clone()
+                                    },
+                                    None => link.clone(),
+                                }
+                            }
+                            None => link.clone(),
+                        };
                         // `up` is written as soon as the hub has taken the connection, not when it ends.
                         let r = {
-                            let run = run_once_noting(&link, &sink, &stop, &accepted);
+                            let run = run_once_noting(&dialled, &sink, &stop, &accepted);
                             let up = async {
                                 while !accepted.load(Ordering::Acquire) {
                                     tokio::time::sleep(Duration::from_millis(50)).await;
                                 }
                                 note(crate::link_state::LinkState::Up);
+                                if let Some(source) = dialled.certs.clone() {
+                                    let pem = dialled.cert_pem.clone();
+                                    drop(tokio::task::spawn_blocking(move || {
+                                        source.accepted(&pem);
+                                    }));
+                                }
                                 std::future::pending::<()>().await;
                             };
                             tokio::select! { r = run => r, () = up => Ok(()) }
@@ -1215,10 +1262,14 @@ pub fn spawn(sink: Arc<EventSink>, link: HubLink) -> std::io::Result<UplinkHandl
     })
 }
 
-/// ADR-0061: the devices registered on the hub (candidates only), asked on a connection of its own made with this node's certificate,
-/// so the node's running connection is not replaced. Blocks the calling thread; for `agora node trust --from-hub`.
-pub fn list_devices(link: &HubLink) -> Result<Vec<agora_protocol::v1::DeviceInfo>, LinkError> {
-    use agora_protocol::v1::{command_ok, DeviceList};
+/// One command on a connection of its own, made with this node's certificate (ADR-0061, ADR-0085): the running connection is not
+/// replaced. Sends `command` as the first command and returns the hub's answer. Blocks the calling thread.
+fn ask_once(
+    link: &HubLink,
+    request_id: &str,
+    command: command_request::Command,
+    what: &str,
+) -> Result<command_response::Result, LinkError> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -1227,7 +1278,7 @@ pub fn list_devices(link: &HubLink) -> Result<Vec<agora_protocol::v1::DeviceInfo
         let (tls, host, addr) = split_url(&link.url)?;
         if !tls {
             // Without TLS the hub cannot tell who is asking, so it would not answer.
-            return Err(LinkError::Bad("asking for devices needs wss://".into()));
+            return Err(LinkError::Bad(format!("{what} needs wss://")));
         }
         // Given up after the silence deadline, as the uplink's own dial is: a hub that took the connection and then says nothing
         // must not hold the command forever.
@@ -1247,10 +1298,10 @@ pub fn list_devices(link: &HubLink) -> Result<Vec<agora_protocol::v1::DeviceInfo
             Err(_) => return Err(LinkError::Silent),
         };
         let req = CommandRequest {
-            request_id: "devices".into(),
+            request_id: request_id.into(),
             idempotency_key: String::new(),
             target_node: String::new(),
-            command: Some(command_request::Command::DeviceList(DeviceList {})),
+            command: Some(command),
         };
         conn.send(&frame(STREAM_COMMANDS, 0, req.encode_to_vec()))
             .await?;
@@ -1262,18 +1313,74 @@ pub fn list_devices(link: &HubLink) -> Result<Vec<agora_protocol::v1::DeviceInfo
         };
         let resp = CommandResponse::decode(f.payload.as_slice())
             .map_err(|_| LinkError::Transport("bad response".into()))?;
-        match resp.result {
-            Some(command_response::Result::Ok(ok)) => match ok.result {
-                Some(command_ok::Result::DeviceList(l)) => Ok(l.devices),
-                _ => Err(LinkError::Transport("unexpected answer".into())),
-            },
-            Some(command_response::Result::Err(e)) => Err(LinkError::Refused(e.code)),
-            None => Err(LinkError::Transport("empty answer".into())),
-        }
+        resp.result
+            .ok_or_else(|| LinkError::Transport("empty answer".into()))
     });
     // Past the deadline a name lookup may still run on a blocking thread: the runtime does not wait for it.
     rt.shutdown_background();
     out
+}
+
+/// ADR-0061: the devices registered on the hub (candidates only), asked on a connection of its own made with this node's certificate,
+/// so the node's running connection is not replaced. Blocks the calling thread; for `agora node trust --from-hub`.
+pub fn list_devices(link: &HubLink) -> Result<Vec<agora_protocol::v1::DeviceInfo>, LinkError> {
+    use agora_protocol::v1::{command_ok, DeviceList};
+    match ask_once(
+        link,
+        "devices",
+        command_request::Command::DeviceList(DeviceList {}),
+        "asking for devices",
+    )? {
+        command_response::Result::Ok(ok) => match ok.result {
+            Some(command_ok::Result::DeviceList(l)) => Ok(l.devices),
+            _ => Err(LinkError::Transport("unexpected answer".into())),
+        },
+        command_response::Result::Err(e) => Err(LinkError::Refused(e.code)),
+    }
+}
+
+/// Why a renewal got no certificate.
+#[derive(Debug)]
+pub enum RenewError {
+    /// The hub answered with an error: its code and the `reason` parameter of `enroll.renew_refused` (empty when it had none).
+    Refused { code: String, reason: String },
+    /// The question or the answer did not get through (hub away, connection refused, bad answer): try again later.
+    Link(LinkError),
+}
+
+/// ADR-0085: asks the hub for a new certificate. One connection made with this node's CURRENT certificate (`link`), one
+/// `RenewRequest` carrying `csr_pem`, one answer: the new certificate's PEM. Blocks the calling thread; the caller keeps the request
+/// and its key until it has stored the answer, and sends the same request again after any failure (the hub answers it again with the
+/// same certificate).
+pub fn renew(link: &HubLink, csr_pem: &str) -> Result<String, RenewError> {
+    use agora_protocol::v1::{command_ok, RenewRequest};
+    let answer = ask_once(
+        link,
+        "renew",
+        command_request::Command::Renew(RenewRequest {
+            csr_pem: csr_pem.into(),
+        }),
+        "renewing a certificate",
+    )
+    .map_err(RenewError::Link)?;
+    match answer {
+        command_response::Result::Ok(ok) => match ok.result {
+            Some(command_ok::Result::Renew(r)) => Ok(r.cert_pem),
+            _ => Err(RenewError::Link(LinkError::Transport(
+                "unexpected answer".into(),
+            ))),
+        },
+        command_response::Result::Err(e) => {
+            let reason = match e.params.get("reason").and_then(|p| p.value.as_ref()) {
+                Some(agora_protocol::v1::param_value::Value::Str(s)) => s.clone(),
+                _ => String::new(),
+            };
+            Err(RenewError::Refused {
+                code: e.code,
+                reason,
+            })
+        }
+    }
 }
 
 /// Enrolls this node with a hub: presents the one-time `code` and a CSR over TLS that trusts only `ca_pem`, and
@@ -1522,6 +1629,7 @@ mod tests {
                 live,
                 None,
                 &AtomicBool::new(false),
+                None,
             )
             .await;
             (r, started.elapsed())

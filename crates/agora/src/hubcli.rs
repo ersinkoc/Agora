@@ -1739,10 +1739,21 @@ fn write_link(
     [url, id, ca_pem, cert_pem, key_pem]: [&str; 5],
     write: &dyn Fn(&Path, &[u8]) -> std::io::Result<()>,
 ) -> std::io::Result<()> {
-    match std::fs::remove_file(dir.join("node-id")) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e),
+    // What a certificate renewal (ADR-0085) kept for the identity being replaced goes first, before anything is written: a save that
+    // stops half way must never find the previous identity's pair, a request made for its certificate or its refusals and bring
+    // them back.
+    // `node-id` goes LAST of these: a removal that fails part way must never leave the old pair without the id that says whose it is.
+    for name in [
+        agora_node::link_renewal::PREVIOUS,
+        agora_node::link_renewal::PENDING,
+        agora_node::link_renewal::STATE,
+        "node-id",
+    ] {
+        match std::fs::remove_file(dir.join(name)) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
     }
     write(&dir.join("key.pem"), key_pem.as_bytes())?;
     write(&dir.join("ca.pem"), ca_pem.as_bytes())?;
@@ -1916,6 +1927,51 @@ mod store_tests {
                 "a stop after {fail_at} writes left a machine that looks joined"
             );
         }
+    }
+
+    /// ADR-0085: a save of the link forgets what a renewal kept for the identity before it, first, so a save that stops half way never
+    /// leaves the earlier identity's pair, its pending request or its refusals to be brought back.
+    #[test]
+    fn a_save_removes_what_a_renewal_kept_for_the_earlier_identity_before_writing_anything() {
+        for fail_at in 0..6 {
+            let dir = tmp(&format!("renewal{fail_at}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            for f in [
+                "previous.pem",
+                "renew-pending.pem",
+                "renew-state",
+                "node-id",
+            ] {
+                std::fs::write(dir.join(f), "old").unwrap();
+            }
+            let n = Cell::new(0);
+            // fail_at 5 is no failure at all.
+            let _ = store_into(&dir, LINK_GUARD_WAIT, NEW, &|p, c| {
+                if n.replace(n.get() + 1) == fail_at {
+                    return Err(std::io::Error::other("injected"));
+                }
+                agora_platform::write_private(p, c)
+            });
+            for f in ["previous.pem", "renew-pending.pem", "renew-state"] {
+                assert!(
+                    !dir.join(f).exists(),
+                    "{f} survived a save that stopped after {fail_at} writes"
+                );
+            }
+        }
+    }
+
+    /// A removal that fails must not have taken `node-id` already: the old pair is never left without the id that says whose it is.
+    #[test]
+    fn a_removal_that_fails_leaves_the_old_node_id() {
+        let dir = tmp("keepid");
+        std::fs::create_dir_all(dir.join("renew-state").join("inside")).unwrap();
+        std::fs::write(dir.join("node-id"), "old").unwrap();
+        std::fs::write(dir.join("previous.pem"), "old").unwrap();
+        let r = store_into(&dir, LINK_GUARD_WAIT, NEW, &agora_platform::write_private);
+        assert!(r.is_err());
+        assert_eq!(std::fs::read_to_string(dir.join("node-id")).unwrap(), "old");
+        assert!(!dir.join("previous.pem").exists());
     }
 
     #[cfg(unix)]
@@ -2310,6 +2366,11 @@ fn load_from(
         Err(e) if e.kind() == std::io::ErrorKind::TimedOut => return Err(e),
         Err(_) => None,
     };
+    // A stop in the middle of a certificate renewal (ADR-0085) left the certificate and key as two halves: finish it, or go back to the
+    // pair that was in use, before anything reads them. Only under the guard: without it a renewal may be running.
+    if _guard.is_some() {
+        agora_node::link_renewal::recover(&dir, &agora_node::link_renewal::Real);
+    }
     link_files(&dir, socket, read)
 }
 
@@ -2372,6 +2433,7 @@ fn link_files(
             mesh: None,
             devices: None,
             state_dir: None,
+            certs: None,
         },
     )))
 }

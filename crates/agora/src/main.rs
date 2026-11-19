@@ -461,7 +461,7 @@ fn doctor(say: &Say, o: &Opts) -> ExitCode {
         socket: socket_path(o),
         manifests_dir: o.manifests.clone().unwrap_or_else(|| h.join("manifests")),
     });
-    // Certificates last 90 days and nothing renews them yet: say so before a machine stops connecting.
+    // Certificates last 90 days and renew themselves (ADR-0085): the days left, and what a refused renewal needs.
     checks.extend(certs::checks_now(&hubcli::link_dir(), &hubcli::hub_dir(o)));
     // ADR-0067 rung 3: how the hub is reached from outside this machine, and whether the screen password protects it.
     checks.extend(remotecmd::checks(o));
@@ -502,6 +502,11 @@ fn doctor(say: &Say, o: &Opts) -> ExitCode {
             ("cert-node", Status::Warn) => key!("doctor-cert-node-soon"),
             ("cert-node", _) if c.detail == certs::UNUSABLE => key!("doctor-cert-node-unusable"),
             ("cert-node", _) => key!("doctor-cert-node-expired"),
+            ("cert-renew-join-again", _) => key!("doctor-cert-renew-join-again"),
+            ("cert-renew-superseded", _) => key!("doctor-cert-renew-superseded"),
+            ("cert-renew-rejected", _) => key!("doctor-cert-renew-rejected"),
+            ("cert-renew-hub-old", _) => key!("doctor-cert-renew-hub-old"),
+            ("cert-renew-pending", _) => key!("doctor-cert-renew-pending"),
             ("cert-hub", Status::Ok) => key!("doctor-cert-hub"),
             ("cert-hub", Status::Warn) => key!("doctor-cert-hub-soon"),
             ("cert-hub", _) if c.detail == certs::UNUSABLE => key!("doctor-cert-hub-unusable"),
@@ -661,7 +666,20 @@ fn node_run(say: &Say, o: &Opts) -> ExitCode {
         &[("socket", cfg.socket.display().to_string().into())],
     );
     // Connect to the hub in the background when enrolled. Agents never depend on it: events wait in the buffer.
+    let mut _renewal = None;
     let _uplink = link.and_then(|(_, mut l)| {
+        // ADR-0085: the certificate is renewed by the node itself when a third of its life is left, and the next connection uses the
+        // new one. A failure here changes nothing for the agents or the connection that is up.
+        let dir = hubcli::link_dir();
+        let renewer = agora_node::link_renewal::Renewer::new(
+            dir.clone(),
+            || agora_hub::ca::new_device_request().ok(),
+            move || {
+                hubcli::hold_link(&dir).map(|held| Box::new(held) as Box<dyn std::any::Any + Send>)
+            },
+        );
+        l.certs = Some(renewer.clone());
+        _renewal = agora_node::link_renewal::spawn(renewer).ok();
         // Messages for agents on other machines go through the hub connection (ADR-0031).
         let out = agora_node::uplink_client::MeshOut::new();
         node.mesh.set_remote(out.clone());

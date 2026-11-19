@@ -125,21 +125,32 @@ doctor-manifest-invalid = The agent description { $detail } could not be read.
 doctor-cert-node = This machine's hub certificate is valid for { $detail ->
     [one] one more day
    *[other] { $detail } more days
-}. Nothing renews it yet: join this machine again before it ends.
+}. It renews itself when a third of its life is left, while this machine is connected to the hub.
 doctor-cert-node-soon = This machine's hub certificate ends in { $detail ->
     [one] one day
    *[other] { $detail } days
-}. Nothing renews it yet: when it ends this machine cannot connect to the hub. Join it again before then: on the hub run "agora hub code", then here run "agora node enroll" with the new code.
+}. It should have renewed itself by now: it does so when this machine is connected to a hub that is up to date. If this stays so, check that the hub is running and reachable from here; otherwise this machine cannot connect to the hub once it ends, and must join again (on the hub run "agora hub code", then here run "agora node enroll" with the new code).
 doctor-cert-node-expired = This machine's hub certificate has ended, so it cannot connect to the hub ({ $file }). Join it again: on the hub run "agora hub code", then here run "agora node enroll" with the new code.
 doctor-cert-node-unusable = This machine's hub certificate cannot be read as a certificate ({ $file }). Check that the file is whole and readable by this user; if it is damaged, join this machine again: on the hub run "agora hub code", then here run "agora node enroll" with the new code.
+doctor-cert-renew-join-again = The hub would not renew this machine's hub certificate ({ $detail }), so when it ends this machine cannot connect. Join this machine again with the owner's approval: on the hub run "agora hub code" (or pair it), then here run "agora node enroll" with the new code. Its agents and its waiting events are not touched. { $asked ->
+    [yes] The hub was last asked on { $when }; it is asked again about once a day, so if the hub was at fault (restored from a backup, a wrong clock) this clears by itself.
+   *[no] It is asked again about once a day, so if the hub was at fault (restored from a backup, a wrong clock) this clears by itself.
+}
+doctor-cert-renew-superseded = This machine's hub certificate is no longer the newest one the hub issued for it: another holder of this machine's certificate may exist. Ask the owner to check the hub's audit view for this machine; if you do not know why, remove this machine on the hub ("agora hub machines") and join it again. Until then it keeps working with this certificate until it ends. { $asked ->
+    [yes] The hub was last asked on { $when }; it is asked again about once a day.
+   *[no] It is asked again about once a day.
+}
+doctor-cert-renew-rejected = The hub answered this machine's certificate renewal with a certificate that did not check out ({ $detail }), so it was not used and the certificate in use is unchanged. It is asked again after an hour, and after five times in a row with a new request. If this repeats, make sure this machine reaches the hub it enrolled with.
+doctor-cert-renew-hub-old = The hub this machine is connected to is older than certificate renewal, so this machine's certificate cannot renew itself yet. Update the hub (it is asked again about once an hour); until then, join this machine again before its certificate ends.
+doctor-cert-renew-pending = A new certificate for this machine is being fetched; the hub has not answered yet. This machine keeps working with the certificate it has, and asks again by itself.
 doctor-cert-hub = The hub's own certificate is valid for { $detail ->
     [one] one more day
    *[other] { $detail } more days
-}. It is made again each time the hub starts.
+}. The hub replaces it by itself when 30 days are left, without a restart.
 doctor-cert-hub-soon = The hub's own certificate ends in { $detail ->
     [one] one day
    *[other] { $detail } days
-}. Restart the hub before then ("agora hub run", or restart its service) so it gets a new one; a hub that keeps running past the end refuses new connections.
+}. The hub replaces it by itself when under 30 days are left (it checks every day), so this file is older than it should be. If this stays so, restart the hub ("agora hub run", or restart its service); a hub that keeps running past the end refuses new connections.
 doctor-cert-hub-expired = The hub's own certificate has ended ({ $file }): new connections to it are refused. Restart the hub ("agora hub run", or restart its service) to get a new one.
 doctor-cert-hub-unusable = The hub's own certificate cannot be read as a certificate ({ $file }). Check that the file is whole and readable by the user the hub runs as; restarting the hub ("agora hub run", or restart its service) writes a new one.
 doctor-summary-ok = Everything Agora needs is in place.
@@ -416,7 +427,7 @@ cli-machine-cert-soon = { $id } · its certificate ends on { $date }{ $days ->
     [0] , today
     [1] , in one day
    *[other] , in { $days } days
-}. Join it again before then (nothing renews it yet): "agora hub code" here, then "agora node enroll" on that machine.
+}. It renews itself while it is connected; if it does not, run "agora doctor" on that machine, or join it again: "agora hub code" here, then "agora node enroll" on that machine.
 cli-machine-cert-expired = { $id } · its certificate ended on { $date }, so it cannot connect. Join it again: "agora hub code" here, then "agora node enroll" on that machine.
 cli-machine-unknown = The hub shows no machine named { $id }.
 cli-machines-question = Forget these machines? They leave every window; one that connects again comes back. [y/N]

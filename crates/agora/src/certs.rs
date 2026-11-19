@@ -1,5 +1,6 @@
-//! Certificate lifetime checks for `agora doctor` (and the machine list). A machine certificate lasts 90 days and nothing renews
-//! it yet (docs/adr/0085-machine-and-hub-certificates-renew-themselves.md), so the owner is told in time. The files are read as they are on disk.
+//! Certificate lifetime checks for `agora doctor` (and the machine list). A certificate lasts 90 days and renews itself when a third
+//! of its life is left (docs/adr/0085-machine-and-hub-certificates-renew-themselves.md): the days left are shown, and so is what the
+//! hub said when this machine's renewal was refused. The files are read as they are on disk.
 
 use std::path::Path;
 
@@ -49,13 +50,77 @@ fn one(id: &'static str, file: &Path, now: i64) -> Option<Check> {
 /// The node's own certificate (`<link dir>/cert.pem`, written by enrollment) and the hub's server certificate
 /// (`<hub dir>/server-cert.pem`, written each time the hub starts).
 pub fn checks(link_dir: &Path, hub_dir: &Path, now: i64) -> Vec<Check> {
-    [
+    let mut out: Vec<Check> = [
         one("cert-node", &link_dir.join("cert.pem"), now),
         one("cert-hub", &hub_dir.join("server-cert.pem"), now),
     ]
     .into_iter()
     .flatten()
-    .collect()
+    .collect();
+    out.extend(renewal(link_dir, now));
+    out
+}
+
+/// What the machine's own renewal says (ADR-0085), from the files the node keeps beside the certificate: a refusal that only a new join
+/// can answer, a certificate that is no longer the newest (another holder may exist), an answer that did not check out, or a request
+/// still waiting for the hub's answer. Nothing when it works. A refusal recorded for another certificate than the one in use is ignored.
+fn renewal(link_dir: &Path, now: i64) -> Option<Check> {
+    use agora_node::link_renewal::{pending_exists, state};
+    let pem = std::fs::read_to_string(link_dir.join("cert.pem")).ok()?;
+    let ends = cert_not_after_secs(&pem).ok()?;
+    let file = link_dir.display().to_string();
+    // `asked` says whether the time of the last try is known; `when` is that time as a date.
+    let made = |id: &'static str, status, detail: String, asked_at: i64| Check {
+        id,
+        status,
+        detail,
+        args: vec![
+            ("file", file.clone()),
+            ("asked", if asked_at > 0 { "yes" } else { "no" }.to_string()),
+            (
+                "when",
+                crate::hubcli::utc(u64::try_from(asked_at).unwrap_or(0).saturating_mul(1000)),
+            ),
+        ],
+    };
+    match state(link_dir, ends) {
+        Some(s) if s.code == "join_again" => Some(made(
+            "cert-renew-join-again",
+            Status::Fail,
+            s.detail,
+            s.asked_at,
+        )),
+        Some(s) if s.code == "superseded" => Some(made(
+            "cert-renew-superseded",
+            Status::Warn,
+            s.detail,
+            s.asked_at,
+        )),
+        Some(s) if s.code == "rejected" => Some(made(
+            "cert-renew-rejected",
+            Status::Warn,
+            s.detail,
+            s.asked_at,
+        )),
+        // The hub this machine is connected to is older than renewal: nothing can be asked of it yet. Only a warning when the end is
+        // near.
+        Some(s) if s.code == "hub_old" => Some(made(
+            "cert-renew-hub-old",
+            if ends - now < agora_hub::ca::EXPIRY_WARN_DAYS * 86_400 {
+                Status::Warn
+            } else {
+                Status::Ok
+            },
+            String::new(),
+            s.asked_at,
+        )),
+        // A request is waiting for the hub's answer (the hub was away, or asked to wait): the machine keeps working with the
+        // certificate it has until the end.
+        _ if pending_exists(link_dir) && ends > now => {
+            Some(made("cert-renew-pending", Status::Ok, String::new(), 0))
+        }
+        _ => None,
+    }
 }
 
 pub fn checks_now(link_dir: &Path, hub_dir: &Path) -> Vec<Check> {
@@ -123,5 +188,102 @@ mod tests {
             (c[0].status, c[0].detail.as_str()),
             (Status::Fail, UNUSABLE)
         );
+    }
+
+    fn renewal_dir(name: &str) -> (std::path::PathBuf, i64) {
+        let d = dir(name);
+        let (_, csr) = new_device_request().unwrap();
+        let ca = Ca::generate("ca").unwrap();
+        let pem = ca.issue_node("n", &csr).unwrap().cert_pem;
+        std::fs::write(d.join("cert.pem"), &pem).unwrap();
+        (d, cert_not_after_secs(&pem).unwrap())
+    }
+
+    fn state(d: &Path, code: &str, detail: &str, ends: i64) {
+        std::fs::write(
+            d.join("renew-state"),
+            format!("{code}\n{detail}\n{ends}\n0\n1700000000\n0\n"),
+        )
+        .unwrap();
+    }
+
+    fn renewals(d: &Path, now: i64) -> Vec<(&'static str, Status, String)> {
+        checks(d, d, now)
+            .into_iter()
+            .filter(|c| c.id.starts_with("cert-renew"))
+            .map(|c| (c.id, c.status, c.detail))
+            .collect()
+    }
+
+    #[test]
+    fn a_machine_that_renews_fine_says_nothing_about_renewal() {
+        let (d, _) = renewal_dir("renew-fine");
+        assert!(renewals(&d, secs_now()).is_empty());
+    }
+
+    #[test]
+    fn a_refusal_only_a_new_join_answers_is_a_problem_and_one_for_another_certificate_is_ignored() {
+        let (d, ends) = renewal_dir("renew-join");
+        state(&d, "join_again", "revoked", ends);
+        assert_eq!(
+            renewals(&d, secs_now()),
+            [("cert-renew-join-again", Status::Fail, "revoked".to_string())]
+        );
+        // The machine joined again since: the state was about the certificate it had before.
+        state(&d, "join_again", "revoked", ends + 1);
+        assert!(renewals(&d, secs_now()).is_empty());
+    }
+
+    #[test]
+    fn a_certificate_that_is_no_longer_the_newest_is_a_warning_and_a_rejected_answer_too() {
+        let (d, ends) = renewal_dir("renew-sup");
+        state(&d, "superseded", "superseded", ends);
+        assert_eq!(renewals(&d, secs_now())[0].0, "cert-renew-superseded");
+        assert_eq!(renewals(&d, secs_now())[0].1, Status::Warn);
+        state(&d, "rejected", "key", ends);
+        assert_eq!(
+            renewals(&d, secs_now()),
+            [("cert-renew-rejected", Status::Warn, "key".to_string())]
+        );
+        // Waiting out the hub's hour is not a problem to report.
+        state(&d, "too_frequent", "too_frequent", ends);
+        assert!(renewals(&d, secs_now()).is_empty());
+    }
+
+    #[test]
+    fn a_renewal_that_waits_for_the_hubs_answer_is_shown_until_the_certificate_ends() {
+        let (d, ends) = renewal_dir("renew-pending");
+        std::fs::write(d.join("renew-pending.pem"), "x").unwrap();
+        assert_eq!(
+            renewals(&d, secs_now()),
+            [("cert-renew-pending", Status::Ok, String::new())]
+        );
+        assert!(renewals(&d, ends + 5).is_empty());
+    }
+
+    #[test]
+    fn the_last_try_and_an_old_hub_are_told_and_a_damaged_state_file_says_nothing() {
+        let (d, ends) = renewal_dir("renew-when");
+        state(&d, "join_again", "unknown", ends);
+        let c = checks(&d, &d, secs_now())
+            .into_iter()
+            .find(|c| c.id == "cert-renew-join-again")
+            .unwrap();
+        assert!(c.args.contains(&("asked", "yes".to_string())));
+        assert!(c
+            .args
+            .contains(&("when", "2023-11-14 22:13 UTC".to_string())));
+        // An older hub: nothing to ask of it, an informative line (a warning once the end is near).
+        state(&d, "hub_old", "", ends);
+        assert_eq!(
+            renewals(&d, secs_now()),
+            [("cert-renew-hub-old", Status::Ok, String::new())]
+        );
+        assert_eq!(renewals(&d, ends - 86_400)[0].1, Status::Warn);
+        // A state file that cannot be read is no state, and no line.
+        std::fs::write(d.join("renew-state"), [0xffu8, 0xfe, 0x00]).unwrap();
+        assert!(renewals(&d, secs_now()).is_empty());
+        std::fs::write(d.join("renew-state"), "join_again\n").unwrap();
+        assert!(renewals(&d, secs_now()).is_empty());
     }
 }

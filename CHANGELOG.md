@@ -4,7 +4,11 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
-_Nothing yet._
+### Certificates renew themselves
+- A machine's certificate for the hub now renews by itself when a third of its life is left (30 of 90 days), while the machine is connected to a hub that is up to date: no code, no owner step, and nothing to do before day 90 any more. The hub already replaces its own certificate by itself when 30 days are left, without a restart. Update the hub first, then the machines.
+- A machine keeps working throughout: agents never wait for a renewal, a hub that is away only delays it (it tries again by itself, more slowly each time), and the certificate in use is replaced only after the new one checked out. The new certificate is used by the machine's next connection.
+- `agora doctor` shows the days left on this machine's certificate and on the hub's, and says so when a renewal needs you: this machine must join again (the hub no longer accepts its certificate for a new one, or it ended), or its certificate is no longer the newest one the hub issued for it (another holder of it may exist: check the hub's audit view).
+- A machine that was off past the end of its certificate still has to join again with the owner's approval, as before.
 
 ## 0.3.24
 

@@ -123,6 +123,7 @@ impl Hubside {
             mesh: None,
             devices: None,
             state_dir: None,
+            certs: None,
         }
     }
 
