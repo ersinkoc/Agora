@@ -66,11 +66,11 @@ pub fn default_shell() -> String {
     }
 }
 
-pub use held::{Collected, HeldBuffer, HeldSignal, HELD_BUFFER};
+pub use held::{Collected, HeldBuffer, HeldControl, HeldSignal, HELD_BUFFER};
 #[cfg(not(unix))]
-pub use nohold::{HeldTerminal, ProcessWatch, TerminalHandle, TerminalReader};
+pub use nohold::{held_pty, HeldTerminal, ProcessWatch, TerminalHandle, TerminalReader};
 #[cfg(unix)]
-pub use unixhold::{HeldTerminal, ProcessWatch, TerminalHandle, TerminalReader};
+pub use unixhold::{held_pty, HeldTerminal, ProcessWatch, TerminalHandle, TerminalReader};
 
 /// ADR-0079 decision 2: makes this process the leader of a session of its own, so nothing that ends its starter's session or group
 /// ends it. A process that already leads one is left as it is.
@@ -1079,6 +1079,10 @@ pub const GIT_CONFIG_READ_ONLY: bool = cfg!(any(windows, target_os = "macos"));
 /// and Windows refuses the pipe to a restricted token. Callers use this instead of a `cfg`.
 pub const CONTROL_TOKEN_REQUIRED: bool = cfg!(target_os = "linux");
 
+/// Whether this build has the terminal holder (ADR-0079): Unix. Where it is `false` nothing starts one, and the node runs its agents
+/// itself (Windows joins in a later step).
+pub const HOLDER_BUILT: bool = cfg!(unix);
+
 /// True where a confined agent gets a temp folder of its own (`TMPDIR`, `TEMP`, `TMP` point at it): on macOS the per-user temp folder
 /// is private to the sandbox and on Windows the profile's is out of reach, so without one compilers and `mktemp` fail. On Linux the
 /// shared `/tmp` is writable to the agent instead. Callers use this instead of a `cfg`.
@@ -1319,6 +1323,8 @@ pub(crate) trait PtyControlOps: Send + Sync {
     fn kill(&self) -> io::Result<()>;
     fn foreground_pid(&self) -> io::Result<u32>;
     fn pid(&self) -> u32;
+    /// ADR-0079: the node stops and leaves a held agent running: its terminal stops being read and `kill` does nothing from now on.
+    fn detach(&self) {}
 }
 
 impl PtyControl {
@@ -1339,6 +1345,11 @@ impl PtyControl {
     }
     pub fn pid(&self) -> u32 {
         self.inner.pid()
+    }
+    /// ADR-0079: lets go of a held agent without ending it (the node is stopping): the read of its terminal ends and its copy of the
+    /// master closes. A terminal the node owns outright ignores this (dropping it kills the agent, as before).
+    pub fn detach(&self) {
+        self.inner.detach();
     }
 }
 

@@ -15,6 +15,17 @@ pub enum HeldSignal {
     Hangup,
 }
 
+/// What a node's terminal of a held agent needs from its holder (ADR-0079): the node reads and writes the terminal itself, and asks the
+/// holder, which is the agent's parent, for what only a parent knows. Implemented by the node over its holder link; this crate
+/// cannot name the link.
+pub trait HeldControl: Send + Sync {
+    /// Sends `signal` to the agent's process group, through the holder (which knows whether the leader was collected).
+    fn signal(&self, signal: HeldSignal) -> std::io::Result<()>;
+    /// How the agent ended: `Ok(None)` while it runs; the status once it ended, taken from the holder (which forgets the agent then).
+    /// `Err` when the holder cannot be asked (it ended): the agent's own end is then unknown.
+    fn exit_status(&self) -> std::io::Result<Option<crate::ExitStatus>>;
+}
+
 // ----- the bounded buffer -----
 
 /// Output kept for a node that is not there: at most `cap` bytes, the oldest dropped first.

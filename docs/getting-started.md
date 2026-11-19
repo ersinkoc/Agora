@@ -57,7 +57,7 @@ window again.
 
 - `agora status`: what runs (process, version, address, data folder, connected hub, agents running, log files), and whether the
   hub or the node crashed and was started again.
-- `agora down`: stops the node, then the hub (agents end with the node, as when it is stopped any other way).
+- `agora down`: stops the node, then the hub. On Linux and macOS the agents keep running (a small keeper process, `agora hold`, owns them, ADR-0079); `agora` brings them back into the window, and `agora status` counts them while the node is down. `agora down --agents` stops them too. An agent the node confines (a sandbox policy), and every agent on Windows, runs inside the node and ends with it.
 - If the hub or the node crashes, it is started again 30 seconds later, at most 5 times in 10 minutes; one that stops right
   after starting (its port is taken, its settings are wrong) is not retried, and its log says why. Each is run by a small
   `agora supervise` process that `agora` starts; stopping or killing it stops what it runs too, so nothing is left behind.

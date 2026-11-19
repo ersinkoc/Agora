@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use crate::held::{Collected, HeldBuffer, HeldSignal};
+use crate::held::{Collected, HeldBuffer, HeldControl, HeldSignal};
 use crate::unix::{cvt, status, winsize};
 use crate::{ExitStatus, PtyConfig};
 
@@ -637,6 +637,228 @@ pub(crate) fn recv_with_fd(sock: RawFd, buf: &mut [u8]) -> io::Result<(usize, Op
     Ok((n, got))
 }
 
+// ----- a held agent's terminal, on the node's side -----
+
+/// The node's side of a held agent (ADR-0079 decision 3): the master the holder handed over, read and written by the node itself, as
+/// [`crate::unix`] does for an agent the node started. Nothing passes through the holder per byte. What only the agent's parent knows
+/// (its exit status, a signal to its group) is asked of the holder through [`HeldControl`].
+struct HeldPty {
+    master: File,
+    pid: u32,
+    control: Arc<dyn HeldControl>,
+    output: std::sync::mpsc::Receiver<Vec<u8>>,
+    shared: Arc<HeldShared>,
+    reader: Option<JoinHandle<()>>,
+    status: Option<ExitStatus>,
+}
+
+/// What a [`HeldPty`] and its [`crate::PtyControl`] share.
+struct HeldShared {
+    /// The node is stopping and leaves the agent running: nothing ends it from here on.
+    detached: std::sync::atomic::AtomicBool,
+    /// Ends the reader's wait (the write end of a pipe the reader polls with the master).
+    wake: File,
+}
+
+impl HeldShared {
+    fn detach(&self) {
+        self.detached
+            .store(true, std::sync::atomic::Ordering::Release);
+        // One byte once; a full pipe cannot happen, and a failed write only means the reader is gone already.
+        let _ = io::Write::write(&mut &self.wake, &[1]);
+    }
+
+    fn detached(&self) -> bool {
+        self.detached.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
+const HELD_CHUNK: usize = 16 * 1024;
+const HELD_QUEUE: usize = 64;
+
+/// The end of an agent whose holder is gone: nothing is known of how it ended.
+const LOST: ExitStatus = ExitStatus {
+    code: None,
+    signal: None,
+};
+
+/// Wraps the master the holder handed over as a [`crate::Pty`] of the node's terminal actor. The reader waits with `poll` on the master
+/// and a wake pipe, so that [`crate::PtyControl::detach`] and dropping it end the read (a node that lets go must not take output meant
+/// for the next one); it reads the master blocking and in the same chunks as an agent the node started.
+pub fn held_pty(
+    master: TerminalHandle,
+    pid: u32,
+    control: Arc<dyn HeldControl>,
+) -> io::Result<Box<dyn crate::Pty>> {
+    let master = master.into_file()?;
+    let (wake_r, wake_w) = wake_pipe()?;
+    let mut read_side = master.try_clone()?;
+    let (tx, output) = std::sync::mpsc::sync_channel::<Vec<u8>>(HELD_QUEUE);
+    let reader = std::thread::Builder::new()
+        .name("agora-held-pty-reader".into())
+        .spawn(move || {
+            let mut buf = vec![0u8; HELD_CHUNK];
+            loop {
+                let mut fds = [pollfd(read_side.as_raw_fd()), pollfd(wake_r.as_raw_fd())];
+                if poll(&mut fds, -1).is_err() || fds[1].revents != 0 {
+                    break;
+                }
+                if fds[0].revents == 0 {
+                    continue;
+                }
+                match read_ready(&mut read_side, &mut buf) {
+                    Ok(Some(n)) => {
+                        if tx.send(buf[..n].to_vec()).is_err() {
+                            break;
+                        }
+                    }
+                    Ok(None) | Err(_) => break,
+                }
+            }
+        })?;
+    Ok(Box::new(HeldPty {
+        master,
+        pid,
+        control,
+        output,
+        shared: Arc::new(HeldShared {
+            detached: std::sync::atomic::AtomicBool::new(false),
+            wake: File::from(wake_w),
+        }),
+        reader: Some(reader),
+        status: None,
+    }))
+}
+
+fn kill_through_holder(shared: &HeldShared, control: &dyn HeldControl) -> io::Result<()> {
+    if shared.detached() {
+        return Ok(());
+    }
+    control.signal(HeldSignal::Kill)
+}
+
+impl crate::Pty for HeldPty {
+    fn output(&self) -> &std::sync::mpsc::Receiver<Vec<u8>> {
+        &self.output
+    }
+
+    fn write_input(&mut self, bytes: &[u8]) -> io::Result<()> {
+        io::Write::write_all(&mut self.master, bytes)
+    }
+
+    fn resize(&mut self, cols: u16, rows: u16) -> io::Result<()> {
+        let ws = winsize(cols, rows);
+        // SAFETY: a valid master and a pointer to a live winsize.
+        cvt(unsafe { libc::ioctl(self.master.as_raw_fd(), libc::TIOCSWINSZ as _, &ws) }).map(|_| ())
+    }
+
+    fn pid(&self) -> u32 {
+        self.pid
+    }
+
+    fn kill(&mut self) -> io::Result<()> {
+        if self.status.is_some() {
+            return Ok(());
+        }
+        kill_through_holder(&self.shared, self.control.as_ref())
+    }
+
+    fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+        if self.status.is_none() {
+            if self.shared.detached() {
+                // The node lets go: this ends the actor, and is not an end of the agent (nothing is reported of it).
+                return Ok(Some(LOST));
+            }
+            self.status = match self.control.exit_status() {
+                Ok(s) => s,
+                // The holder is gone: the agent's own end cannot be known.
+                Err(_) => Some(LOST),
+            };
+        }
+        Ok(self.status)
+    }
+
+    fn wait(&mut self) -> io::Result<ExitStatus> {
+        loop {
+            if let Some(s) = self.try_wait()? {
+                return Ok(s);
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn foreground_pid(&self) -> io::Result<u32> {
+        // SAFETY: a valid master.
+        let pgid = cvt(unsafe { libc::tcgetpgrp(self.master.as_raw_fd()) })?;
+        Ok(pgid as u32)
+    }
+
+    fn control(&self) -> io::Result<crate::PtyControl> {
+        Ok(crate::PtyControl {
+            inner: Arc::new(HeldControlOps {
+                input: Mutex::new(self.master.try_clone()?),
+                master: self.master.try_clone()?,
+                pid: self.pid,
+                control: Arc::clone(&self.control),
+                shared: Arc::clone(&self.shared),
+            }),
+        })
+    }
+}
+
+impl Drop for HeldPty {
+    fn drop(&mut self) {
+        // Ends the read first, so that no copy of the master outlives this value (a copy that kept reading would take output meant for
+        // the next node). Does not end the agent: that is `kill`, which the terminal's own drop calls first and which does nothing once
+        // detached.
+        self.output = std::sync::mpsc::sync_channel(1).1;
+        self.shared.detach();
+        if let Some(r) = self.reader.take() {
+            let _ = r.join();
+        }
+    }
+}
+
+/// [`crate::PtyControl`] of a held agent: input and size on the node's own copy of the master, a kill through the holder.
+struct HeldControlOps {
+    input: Mutex<File>,
+    master: File,
+    pid: u32,
+    control: Arc<dyn HeldControl>,
+    shared: Arc<HeldShared>,
+}
+
+impl crate::PtyControlOps for HeldControlOps {
+    fn write_input(&self, bytes: &[u8]) -> io::Result<()> {
+        let mut f = self.input.lock().unwrap_or_else(|e| e.into_inner());
+        io::Write::write_all(&mut *f, bytes)
+    }
+
+    fn resize(&self, cols: u16, rows: u16) -> io::Result<()> {
+        let ws = winsize(cols, rows);
+        // SAFETY: a valid master and a pointer to a live winsize.
+        cvt(unsafe { libc::ioctl(self.master.as_raw_fd(), libc::TIOCSWINSZ as _, &ws) }).map(|_| ())
+    }
+
+    fn kill(&self) -> io::Result<()> {
+        kill_through_holder(&self.shared, self.control.as_ref())
+    }
+
+    fn foreground_pid(&self) -> io::Result<u32> {
+        // SAFETY: a valid master.
+        let pgid = cvt(unsafe { libc::tcgetpgrp(self.master.as_raw_fd()) })?;
+        Ok(pgid as u32)
+    }
+
+    fn pid(&self) -> u32 {
+        self.pid
+    }
+
+    fn detach(&self) {
+        self.shared.detach();
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -794,5 +1016,123 @@ mod tests {
         assert_eq!(c.buffer.into_vec(), b"one");
         assert!(!c.ended);
         t.signal(HeldSignal::Kill).unwrap();
+    }
+
+    /// A holder-side stand-in for a node's [`HeldControl`]: it answers nothing about the agent's end and refuses every signal (so a test sees one that should not have been sent).
+    struct Quiet;
+
+    impl HeldControl for Quiet {
+        fn signal(&self, _: HeldSignal) -> io::Result<()> {
+            Err(io::Error::other("asked to signal"))
+        }
+        fn exit_status(&self) -> io::Result<Option<ExitStatus>> {
+            Ok(None)
+        }
+    }
+
+    fn sh_config(script: &str) -> PtyConfig {
+        PtyConfig {
+            argv: vec!["sh".into(), "-c".into(), script.into()],
+            cwd: None,
+            env: vec![("PATH".into(), "/usr/bin:/bin".into())],
+            cols: 80,
+            rows: 24,
+            limits: crate::ProcessLimits::default(),
+            sandbox: None,
+            identity: None,
+            env_remove: Vec::new(),
+        }
+    }
+
+    /// A held terminal as the node reads and writes it: its output arrives, its input reaches the program, and the end of the terminal
+    /// closes the output channel.
+    #[test]
+    fn a_held_terminal_reads_and_writes_like_one_the_node_started() {
+        let t = HeldTerminal::start(&sh_config("echo first; read x; echo got-$x")).unwrap();
+        let mut pty = held_pty(t.handle().unwrap(), t.pid(), Arc::new(Quiet)).unwrap();
+        let mut seen = Vec::new();
+        let end = std::time::Instant::now() + Duration::from_secs(10);
+        while !String::from_utf8_lossy(&seen).contains("first") {
+            assert!(std::time::Instant::now() < end, "{seen:?}");
+            if let Ok(c) = pty.output().recv_timeout(Duration::from_millis(50)) {
+                seen.extend(c);
+            }
+        }
+        pty.write_input(b"abc\n").unwrap();
+        while !String::from_utf8_lossy(&seen).contains("got-abc") {
+            assert!(
+                std::time::Instant::now() < end,
+                "{:?}",
+                String::from_utf8_lossy(&seen)
+            );
+            if let Ok(c) = pty.output().recv_timeout(Duration::from_millis(50)) {
+                seen.extend(c);
+            }
+        }
+        // The program ended: the channel closes.
+        while pty.output().recv_timeout(Duration::from_millis(50))
+            != Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
+        {
+            assert!(std::time::Instant::now() < end);
+        }
+    }
+
+    /// Letting go of a held terminal ends its read and closes the node's copy of the master (a copy that kept reading would take output
+    /// meant for the next node), and ends nothing: the agent runs on and its terminal can be read again.
+    #[test]
+    fn letting_go_of_a_held_terminal_ends_the_read_and_not_the_agent() {
+        let mut t =
+            HeldTerminal::start(&sh_config("while :; do echo tick; sleep 0.05; done")).unwrap();
+        let pty = held_pty(t.handle().unwrap(), t.pid(), Arc::new(Quiet)).unwrap();
+        let ctl = pty.control().unwrap();
+        ctl.detach();
+        // A kill after the node let go is nothing.
+        ctl.kill().unwrap();
+        drop(pty);
+        assert!(t.try_wait().unwrap().is_none(), "the agent ended");
+        // A new reader gets the output: nothing of it was taken by the one that let go (it is no longer reading).
+        let mut again = held_pty(t.handle().unwrap(), t.pid(), Arc::new(Quiet)).unwrap();
+        let c = again.output().recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(String::from_utf8_lossy(&c).contains("tick"));
+        let _ = again.kill();
+        t.signal(HeldSignal::Kill).unwrap();
+    }
+
+    /// ADR-0022: reading a terminal the node took over costs what reading one it started costs. Run with
+    /// `cargo test -p agora-platform --release held_terminal_throughput -- --ignored --nocapture`; the numbers are in the PR.
+    #[test]
+    #[ignore = "a measurement, not a check"]
+    fn held_terminal_throughput_matches_a_terminal_the_node_started() {
+        const MIB: usize = 64;
+        let script = format!("head -c {} /dev/zero | tr '\\0' x", MIB << 20);
+        let drain = |pty: &mut dyn crate::Pty| -> (usize, Duration) {
+            let began = std::time::Instant::now();
+            let mut n = 0;
+            while let Ok(c) = pty.output().recv_timeout(Duration::from_secs(20)) {
+                n += c.len();
+            }
+            (n, began.elapsed())
+        };
+        let mut rows = Vec::new();
+        for round in 0..5 {
+            let mut own = crate::spawn(&sh_config(&script)).unwrap();
+            let (n_own, t_own) = drain(own.as_mut());
+            let t = HeldTerminal::start(&sh_config(&script)).unwrap();
+            let mut held = held_pty(t.handle().unwrap(), t.pid(), Arc::new(Quiet)).unwrap();
+            let (n_held, t_held) = drain(held.as_mut());
+            let mib = |n: usize, d: Duration| n as f64 / (1 << 20) as f64 / d.as_secs_f64();
+            println!(
+                "round {round}: node-started {n_own} bytes {:.0} MiB/s; held {n_held} bytes {:.0} MiB/s",
+                mib(n_own, t_own),
+                mib(n_held, t_held)
+            );
+            rows.push((mib(n_own, t_own), mib(n_held, t_held)));
+        }
+        let mean = |f: fn(&(f64, f64)) -> f64| rows.iter().map(f).sum::<f64>() / rows.len() as f64;
+        println!(
+            "mean: node-started {:.0} MiB/s, held {:.0} MiB/s",
+            mean(|r| r.0),
+            mean(|r| r.1)
+        );
     }
 }

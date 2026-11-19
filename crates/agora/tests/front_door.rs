@@ -268,6 +268,25 @@ fn agora_brings_the_machine_up_and_killing_the_interface_leaves_agents_running()
         s.contains("The hub is not running") && s.contains("The node is not running"),
         "{s}"
     );
+    if agora_platform::HOLDER_BUILT {
+        // ADR-0079: the agent runs in the terminal holder, so plain `agora down` leaves it running, says so, and `status` still counts it.
+        assert!(out.contains("1 agent keeps running"), "{out}");
+        assert!(
+            agora_platform::process_start_time(agent_pid).is_some(),
+            "plain `agora down` ended the agent"
+        );
+        assert!(
+            s.contains("agents still running without the node: 1"),
+            "{s}"
+        );
+        let (code, out, err) = run(&home, &["down", "--agents"]);
+        assert_eq!(code, 0, "{out}{err}");
+        assert!(out.contains("Stopped 1 agent"), "{out}");
+        assert!(
+            agora_platform::process_start_time(agent_pid).is_none(),
+            "`agora down --agents` left the agent running"
+        );
+    }
     let (_, out, _) = run(&home, &["down"]);
     assert!(out.contains("Nothing to stop"), "{out}");
     let _ = std::fs::remove_dir_all(home);

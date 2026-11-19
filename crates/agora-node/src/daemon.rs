@@ -1437,6 +1437,23 @@ impl Node {
     /// Like [`start`](Self::start) with an explicit size cap for the event buffer, in bytes (tests use a small one to lose events
     /// the way a long offline burst does).
     pub fn start_with_event_cap(cfg: &NodeConfig, max_bytes: u64) -> Result<Self, NodeError> {
+        Self::start_inner(cfg, max_bytes, None)
+    }
+
+    /// [`start`](Self::start) with a terminal holder (ADR-0079): agents are started through it, and the ones it kept running while no
+    /// node was there are taken up again. `None` is [`start`](Self::start) (and what a node on a system without the holder does).
+    pub fn start_with_holder(
+        cfg: &NodeConfig,
+        holder: Option<crate::holder::HolderSetup>,
+    ) -> Result<Self, NodeError> {
+        Self::start_inner(cfg, EVENT_BUFFER_BYTES, holder)
+    }
+
+    fn start_inner(
+        cfg: &NodeConfig,
+        max_bytes: u64,
+        holder: Option<crate::holder::HolderSetup>,
+    ) -> Result<Self, NodeError> {
         std::fs::create_dir_all(&cfg.data_dir)?;
         std::fs::create_dir_all(&cfg.worktree_root)?;
         let events = Arc::new(EventSink::open_with_cap(
@@ -1506,6 +1523,13 @@ impl Node {
             });
         }
 
+        // ADR-0079: agents the holder kept running while no node was there are this node's again, before anything is called
+        // interrupted. A holder that cannot be had changes nothing: every agent runs in the node.
+        if let Some(setup) = holder {
+            let hub = Arc::new(crate::holder::HolderHub::new(setup));
+            take_up_held(&hub, &mut sup, &ledger, cfg);
+            sup.set_holder(hub);
+        }
         events.node_online(&cfg.node_id);
         for p in &projects {
             events.checkout_discovered(&cfg.node_id, &p.id, &p.root);
@@ -1733,7 +1757,7 @@ impl Node {
                     // ADR-0060: the process each agent runs as, as last written to the ledger.
                     let mut processes: std::collections::HashMap<AgentId, u32> = Default::default();
                     while !stop.load(Ordering::Acquire) {
-                        let (events, views, usage_targets, ended, session_targets, pids) = {
+                        let (events, views, usage_targets, ended, session_targets, pids, held) = {
                             let mut s = sup.lock().unwrap_or_else(|e| e.into_inner());
                             let events = s.tick(Instant::now());
                             (
@@ -1743,8 +1767,15 @@ impl Node {
                                 s.take_ended_usage_targets(),
                                 s.session_file_targets(),
                                 s.agent_pids(),
+                                s.held_agents(),
                             )
                         };
+                        // ADR-0079 decision 9: which holder each running agent is in, so the next node attaches instead of calling
+                        // it interrupted. An agent the node runs itself records none (also after a fallback).
+                        for v in views.iter().filter(|v| v.running) {
+                            let holder = held.1.filter(|_| held.0.contains(&v.id));
+                            ledger_tick.set_holder(v.id.as_str(), holder, now_ms());
+                        }
                         // ADR-0060: a new process (a start, a restart, a resume) is written to the ledger with its start time, so one
                         // that outlives a crashed node is recognised at the next start. Read only when the pid changed.
                         record_new_processes(
@@ -2155,6 +2186,75 @@ impl Drop for Node {
 pub fn load_manifests(dir: &Path) -> (Vec<Manifest>, Vec<(PathBuf, String)>) {
     let (loaded, problems) = crate::manifests::load(dir);
     (loaded.into_iter().map(|l| l.manifest).collect(), problems)
+}
+
+/// ADR-0079 decisions 4 and 9: attaches to the node's holder if one runs, and puts back every agent it kept running that the ledger
+/// says it holds (the same holder, by pid and start time). An agent that ended while no node was there is taken (the holder forgets it)
+/// and stays interrupted, offered for resume. One the ledger does not know, or whose folder is gone, is left as the holder keeps it.
+fn take_up_held(
+    hub: &crate::holder::HolderHub,
+    sup: &mut Supervisor,
+    ledger: &crate::ledger::Ledger,
+    cfg: &NodeConfig,
+) {
+    use crate::holder_link::AgentState as Held;
+    let Some((session, held)) = hub.attach_existing() else {
+        return;
+    };
+    for h in held {
+        let id = h.info.info.agent.clone();
+        let Some(entry) = ledger.get(&id) else {
+            continue;
+        };
+        let theirs = (entry.holder_pid, entry.holder_started) == (session.pid, session.start);
+        match h.info.info.state {
+            Held::Exited { .. } => {
+                if theirs {
+                    let _ = session.release(&id);
+                }
+            }
+            Held::Running if theirs && entry.interrupted() => {
+                let folder = PathBuf::from(&entry.folder);
+                let project = if entry.directory {
+                    crate::directory::inspect(&entry.folder, &cfg.node_id, false)
+                        .ok()
+                        .map(|(_, p)| p)
+                } else {
+                    git::discover_checkout(&folder).ok().map(|c| c.project)
+                };
+                let Some(project) = project else { continue };
+                let restore = crate::supervisor::Restore {
+                    id: AgentId::new(id.clone()),
+                    kind: entry.kind.clone(),
+                    project,
+                    folder,
+                    directory: entry.directory,
+                    branch: entry.branch.clone(),
+                    session: (!entry.session_id.is_empty()).then(|| entry.session_id.clone()),
+                    carry_on: false,
+                    private_config: (entry.directory && !entry.managed_worktree).then(|| {
+                        cfg.worktree_root
+                            .join(".sessions")
+                            .join(format!("resume-{id}"))
+                    }),
+                };
+                if sup
+                    .adopt_held(restore, h, &session, Instant::now())
+                    .is_err()
+                {
+                    continue;
+                }
+                if !entry.parent_agent_id.is_empty() {
+                    sup.set_parent(
+                        &AgentId::new(id.clone()),
+                        &AgentId::new(entry.parent_agent_id.clone()),
+                    );
+                }
+                ledger.reclaim(&id, (session.pid, session.start), now_ms());
+            }
+            Held::Running => {}
+        }
+    }
 }
 
 /// ADR-0060: writes the process of every agent whose pid is new to `recorded` into the ledger, and remembers it only once the ledger

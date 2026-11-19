@@ -5,7 +5,7 @@ cli-usage =
       agora [--ui tui|web|none [--save]] [--resume ask|auto [--save]]
       agora web
       agora status
-      agora down
+      agora down [--agents]
       agora service install|remove|status
       agora node run [--socket PATH] [--manifests DIR] [--project PATH]... [--data DIR] [--worktrees DIR] [--resume auto]
       agora agent start KIND [--cwd PATH] [--worktree] [--project NAME] [--name NAME] [--setting ID=VALUE]... [--accept-project-id-change] [--socket PATH]
@@ -320,6 +320,7 @@ status-node-link-hub-refused = not connected to { $hub }: the hub refused this m
 status-node-link-closed = not connected to { $hub }: the hub ended the connection; the node is trying again
 status-node-link-other = not connected to { $hub }: { $reason }
 status-agents = agents running: { $count }
+status-agents-kept = agents still running without the node: { $count } (`agora` brings them back, `agora down --agents` stops them)
 status-log = log: { $log }
 down-stopped = Stopped the { $role } (process { $pid }).
 down-stopped-supervised = Stopped the { $role } and its supervisor (process { $pid }).
@@ -327,6 +328,15 @@ down-failed = Could not stop the { $role }: { $reason }
 down-still-running = it was still running 10 seconds after being asked to stop
 down-lock-busy = The process ended, but another process has held { $path } for more than 10 seconds (it may be stopped or hung), so its old lock file stays: harmless, the next start replaces it. Find that process, or end it.
 down-nothing = Nothing to stop: `agora` did not start anything that is still running.
+down-agents-kept = { $count ->
+    [one] 1 agent keeps running. `agora` brings it back; `agora down --agents` stops it.
+   *[other] { $count } agents keep running. `agora` brings them back; `agora down --agents` stops them.
+  }
+down-agents-stopped = { $count ->
+    [one] Stopped 1 agent.
+   *[other] Stopped { $count } agents.
+  }
+down-holder = agents' keeper
 service-description = Starts the Agora { $role } when you log in (it keeps it running).
 service-unsupported = Starting Agora when you log in is not available on this system yet. Start it with `agora` after logging in.
 service-registering = Registering "{ $name }" to start the { $role } when you log in. It runs: { $command }
