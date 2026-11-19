@@ -31,16 +31,6 @@ export function shortCount(n: number, locale?: string): string {
   return new Intl.NumberFormat(locale, { notation: 'compact', maximumFractionDigits: 1 }).format(n);
 }
 
-// The agent's own cost in its currency, or undefined when it reported none (or a currency the browser does not know).
-export function ownCost(s: SessionModel | undefined, locale?: string): string | undefined {
-  if (!s || s.costMicros === undefined || !s.currency) return undefined;
-  try {
-    return new Intl.NumberFormat(locale, { style: 'currency', currency: s.currency }).format(s.costMicros / 1_000_000);
-  } catch {
-    return undefined;
-  }
-}
-
 // The current option first if the agent named one that is not in its list (it still is what runs), so the picker never claims another.
 export function choices(list: readonly SessionOptionModel[], current: string): SessionOptionModel[] {
   if (!current || list.some((o) => o.id === current)) return [...list];

@@ -8,7 +8,7 @@ import { isChange } from './sessionChoice';
 beforeEach(() => setLanguage('en'));
 
 const opt = (id: string, name: string, skips = false) => ({ id, name, description: '', skipsPermissions: skips });
-const session: SessionModel = { modes: [opt('build', 'Build'), opt('yolo', 'Bypass', true)], models: [opt('m1', 'Model Large')], currentMode: 'build', currentModel: 'm1', contextTokens: 50_000, contextWindow: 200_000, costMicros: 23_000, currency: 'USD' };
+const session: SessionModel = { modes: [opt('build', 'Build'), opt('yolo', 'Bypass', true)], models: [opt('m1', 'Model Large')], currentMode: 'build', currentModel: 'm1', contextTokens: 50_000, contextWindow: 200_000 };
 
 describe('the agent header', () => {
   it('is one row of menus (not native selects) for what the agent reported, with context, elapsed time and cost', () => {

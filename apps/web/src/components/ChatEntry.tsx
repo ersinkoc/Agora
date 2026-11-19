@@ -4,7 +4,7 @@ import type { ChatLine } from '../net/chat';
 import { parseHunks } from '../net/diff';
 import { blocks, inlines, type Block, type Inline } from '../net/markdown';
 import { titleSays, toolView, type ToolAction } from '../net/tool';
-import { changedFiles, stepsSummary, type TranscriptItem } from '../net/transcript';
+import { changedFiles, stepsSummary, type GroupFlag, type TranscriptItem } from '../net/transcript';
 import { duration } from '../net/time';
 import { useHighlightedCode } from '../highlight/useHighlight';
 import { Icon, type IconName } from './Icon';
@@ -138,20 +138,21 @@ function inlineTitle(title: string): Inline[] {
 // Tool calls in a row are one group, folded by default, with one line that says what they did: what kinds, how many, the last one, and
 // how long it took when the entries carry times. Opening it lists every step, each foldable on its own.
 const SHOWN_KINDS = 3;
-export const ToolSteps = memo(function ToolSteps({ lines, running = false }: { lines: ChatLine[]; running?: boolean }) {
+export const ToolSteps = memo(function ToolSteps({ lines, running = false, flag }: { lines: ChatLine[]; running?: boolean; flag?: GroupFlag }) {
   const sum = useMemo(() => stepsSummary(lines), [lines]);
   const kinds = sum.actions.slice(0, SHOWN_KINDS).map((a) => t(`chat-act-${a.action}`, { count: a.count }));
   const more = sum.actions.length - SHOWN_KINDS;
   const first = sum.actions[0]?.action ?? 'other';
   return (
-    <details className="group max-w-3xl overflow-hidden rounded-s border border-line bg-surface-1" data-steps={sum.total}>
+    <details open={flag ? true : undefined} className={`group max-w-3xl overflow-hidden rounded-s border bg-surface-1 ${flag ? 'border-needs-you/70' : 'border-line'}`} data-steps={sum.total} data-flag={flag}>
       <summary className="flex min-w-0 cursor-pointer list-none items-center gap-2 px-3 py-1.5 text-[0.8125rem] hover:bg-surface-2 [&::-webkit-details-marker]:hidden" aria-label={`${t('chat-steps-open')}: ${t('chat-steps-count', { count: sum.total })}`}>
         <Icon name={ICONS[first]} className="size-3.5 flex-none text-muted" />
         <span className="min-w-0 flex-1 truncate">
           <span className="font-medium text-ink">{kinds.join(' · ')}{more > 0 ? ` · +${more}` : ''}</span>
           {sum.last && <span className="text-muted"> — {sum.last}</span>}
         </span>
-        {running && <span className="state__mark flex-none rounded-full bg-working" style={{ width: '0.5rem', height: '0.5rem', animation: 'breathe 2.4s ease-in-out infinite' }} aria-hidden />}
+        {flag && <span className="flex flex-none items-center gap-1 text-xs font-medium text-needs-you"><Icon name="warn" className="size-3" />{t(flag === 'failed' ? 'chat-steps-failed' : 'chat-steps-needs-you')}</span>}
+        {running && !flag && <span className="state__mark flex-none rounded-full bg-working" style={{ width: '0.5rem', height: '0.5rem', animation: 'breathe 2.4s ease-in-out infinite' }} aria-hidden />}
         <span className="flex-none text-xs text-muted">{t('chat-steps-count', { count: sum.total })}{sum.spanMs ? ` · ${duration(sum.spanMs)}` : ''}</span>
         <Icon name="chevron" className="size-3 flex-none text-muted transition-transform motion-reduce:transition-none rtl:rotate-180 group-open:rotate-90!" />
       </summary>
@@ -160,7 +161,7 @@ export const ToolSteps = memo(function ToolSteps({ lines, running = false }: { l
       </div>
     </details>
   );
-});
+}, (a, b) => a.running === b.running && a.flag === b.flag && a.lines.length === b.lines.length && a.lines[0]?.id === b.lines[0]?.id);
 
 // A file the agent changed: a card with its name and how much changed, the lines coloured; a long change starts folded.
 const DiffEntry = memo(function DiffEntry({ line }: { line: ChatLine }) {
@@ -248,12 +249,12 @@ function DateRule({ atMs }: { atMs: number }) {
   return <div role="separator" aria-label={label} className="flex items-center gap-3 py-1 text-xs text-muted"><span className="h-px flex-1 bg-line" /><span>{label}</span><span className="h-px flex-1 bg-line" /></div>;
 }
 
-export function Item({ item, running, notice }: { item: TranscriptItem; running?: boolean; notice: (l: ChatLine) => ReactNode }) {
+export function Item({ item, running, flag, notice }: { item: TranscriptItem; running?: boolean; flag?: GroupFlag; notice: (l: ChatLine) => ReactNode }) {
   switch (item.kind) {
     case 'date': return <DateRule atMs={item.atMs} />;
     case 'user': return <UserText line={item.line} />;
     case 'reply': return <Reply text={item.text} atMs={item.atMs} />;
-    case 'steps': return <ToolSteps lines={item.lines} running={running} />;
+    case 'steps': return <ToolSteps lines={item.lines} running={running} flag={flag} />;
     case 'plan': return <PlanEntry line={item.line} latest={item.latest} />;
     case 'diff': return <DiffEntry line={item.line} />;
     case 'notice': return <>{notice(item.line)}</>;

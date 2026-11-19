@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { t } from '../i18n';
 import { ago } from '../net/time';
 import { machineKey, type AgentTileModel } from '../model';
-import { money, type UsageSummary } from '../net/usage';
+import type { UsageSummary } from '../net/usage';
 import { bytesLabel, isOld, type MachineModel } from '../net/view';
 import { ForgetMachines } from './ForgetMachines';
 import { Icon } from './Icon';

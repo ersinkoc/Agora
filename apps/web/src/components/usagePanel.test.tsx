@@ -15,7 +15,7 @@ const fleet = [
 describe('usage (no money)', () => {
   beforeEach(() => setLanguage('en'));
   it('adds tokens and time per machine and project, heaviest first', () => {
-    const v = usageView(fleet, 61_000, 'en');
+    const v = usageView(fleet, 61_000);
     expect(v.totalTokens).toBe(13_200);
     expect(v.byMachine.map((m) => m.machine)).toEqual(['laptop', 'vps']);
     expect(v.byProject[0]?.agents[0]?.contextPct).toBe(50);
@@ -28,13 +28,21 @@ describe('usage (no money)', () => {
     expect(railItems({ needs: 0, changed: 0, messages: 0, hasBoard: false, hasUsage: true }).some((x) => x.id === 'usage')).toBe(true);
     expect(loadRailTab({ getItem: () => 'cost' })).toBe('usage');
   });
-  it('never draws a currency amount outside the disclosure, and the disclosure carries its caveat', () => {
+  it('never draws a currency amount, even when an agent reported a cost', () => {
     const html = renderToStaticMarkup(<UsagePanel fleet={fleet} now={61_000} />);
-    const closed = html.slice(0, html.indexOf('<details'));
-    expect(closed).not.toMatch(/\$|USD/);
-    expect(html).toContain('Reported by the agent, may not reflect your plan.');
-    expect(html).toContain('$0.02');
+    expect(html).not.toMatch(/\$|USD|<details|reported by the agent/i);
     expect(html).toContain('Plan limits appear here when the agent reports them.');
+    expect(html).toContain('13.2K tokens used');
+  });
+  it('says one token, not "1 tokens", and keys machines by id so two with one name stay apart', () => {
+    expect(renderToStaticMarkup(<UsagePanel fleet={[agent({ tokens: 1, startedMs: 1 })]} now={5} />)).toContain('1 token used');
+    const v = usageView([agent({ id: 'n1/a', machineId: 'n1', tokens: 5 }), agent({ id: 'n2/b', machineId: 'n2', tokens: 7 })], 10);
+    expect(v.byMachine.map((m) => m.id)).toEqual(['n2', 'n1']);
+    expect(v.byMachine).toHaveLength(2);
+  });
+  it('stops counting time at the end of a closed agent', () => {
+    expect(activeMs(agent({ startedMs: 1_000, closed: true, endedMs: 5_000 }), 999_999)).toBe(4_000);
+    expect(activeMs(agent({ startedMs: 1_000 }), 6_000)).toBe(5_000);
   });
   it('says plainly when there is nothing yet, and keeps the plan limits place', () => {
     const html = renderToStaticMarkup(<UsagePanel fleet={[agent({})]} now={1} />);

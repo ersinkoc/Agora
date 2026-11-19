@@ -1,5 +1,6 @@
 import type { ChatLine } from './chat';
 import { parseHunks } from './diff';
+import { endedWithError } from '../model';
 import { toolView, type ToolAction } from './tool';
 
 // How a conversation reads: the node's entries (one per chunk of text, per tool call, per plan, per diff) become what a person sees.
@@ -85,4 +86,13 @@ export function changedFiles(lines: readonly ChatLine[]): ChangedFile[] {
 export function windowed<T>(items: readonly T[], shown: number): { items: T[]; hidden: number } {
   const hidden = Math.max(0, items.length - shown);
   return { items: hidden ? items.slice(hidden) : [...items], hidden };
+}
+
+/** A folded group must never hide that the agent needs you or that it failed: the newest group says so (and opens) while it is true.
+ *  The data has no per-call status, so this is the agent's own state, not a guess about one call. */
+export type GroupFlag = 'needs-you' | 'failed';
+export function groupFlag(agent: { state: string; closed?: boolean; exitCode?: number; interrupted?: unknown }, newest: boolean): GroupFlag | undefined {
+  if (!newest) return undefined;
+  if (!agent.closed) return agent.state === 'needs-you' ? 'needs-you' : undefined;
+  return endedWithError(agent) ? 'failed' : undefined;
 }

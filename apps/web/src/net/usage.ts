@@ -22,10 +22,3 @@ export function summarize(r: agora.v1.UsageReportResult.$Properties): UsageSumma
   }
   return { perAgent, perNode, totalMicroUsd: Number(r.totalMicroUsd ?? 0), pricesAtMs: Number(r.pricesAtMs ?? 0) };
 }
-
-// "$1.24"; amounts under a cent say so instead of rounding to $0.00.
-export function money(microUsd: number, locale?: string): string {
-  const f = new Intl.NumberFormat(locale, { style: 'currency', currency: 'USD' });
-  if (microUsd > 0 && microUsd < 10_000) return `<${f.format(0.01)}`;
-  return f.format(microUsd / 1_000_000);
-}

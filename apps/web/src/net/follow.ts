@@ -19,3 +19,6 @@ export const grew = (f: Follow, added: number): Follow => (f.following || added 
 
 /** The reader sent something or pressed "Jump to latest": back to the tail. */
 export const jumped = (): Follow => ({ ...start });
+
+/** After older entries were drawn above the reader, the scroll position that keeps the same line in view. */
+export const keepPosition = (scrollTop: number, heightBefore: number, heightAfter: number): number => scrollTop + (heightAfter - heightBefore);

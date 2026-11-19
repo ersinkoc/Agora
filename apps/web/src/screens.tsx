@@ -66,7 +66,7 @@ const demoChatAgent: AgentTileModel = {
     modes: [{ id: 'build', name: 'Build', description: '', skipsPermissions: false }, { id: 'plan', name: 'Plan', description: 'No edits', skipsPermissions: false },
       { id: 'bypassPermissions', name: 'Bypass Permissions', description: '', skipsPermissions: true }],
     models: [{ id: 'provider/model-large', name: 'Model Large', description: '', skipsPermissions: false }, { id: 'provider/model-small', name: 'Model Small', description: '', skipsPermissions: false }],
-    currentMode: 'build', currentModel: 'provider/model-large', contextTokens: 61_400, contextWindow: 200_000, costMicros: 23_000, currency: 'USD',
+    currentMode: 'build', currentModel: 'provider/model-large', contextTokens: 61_400, contextWindow: 200_000,
   },
 };
 const demoChat: ChatSource = {

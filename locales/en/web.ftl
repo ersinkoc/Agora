@@ -996,8 +996,6 @@ attention-notify-names-warn = These names come from the agents and machines them
 ide-tab-cost = Usage
 ide-tab-usage = Usage
 usage-empty = Nothing to show yet. Usage appears once an agent has worked.
-usage-total-tokens = { $count } tokens used
-usage-total-time = { $time } of agent time
 usage-agents = { $count ->
     [one] { $count } agent
    *[other] { $count } agents
@@ -1007,9 +1005,6 @@ usage-by-project = By project
 usage-context = Context { $percent }%
 usage-limits-title = Plan limits
 usage-limits-empty = Plan limits appear here when the agent reports them.
-usage-reported-toggle = What agents reported about cost
-usage-reported-note = Reported by the agent, may not reflect your plan.
-usage-reported-row = { $name }: { $amount }
 
 # The conversation of a chat agent
 chat-jump = Jump to latest
@@ -1079,3 +1074,12 @@ loading-label = Loading
 chat-code = Code
 live-summary = Live summary
 live-open-changes = Open the changes
+usage-total-tokens = { $count ->
+    [one] { $short } token used
+   *[other] { $short } tokens used
+}
+usage-total-time = { $time } of agent time since start
+usage-since-start = Time since start
+chat-steps-needs-you = Waiting for you
+chat-steps-failed = Ended with an error
+prompt-closed = This agent has ended, so it cannot take a request.

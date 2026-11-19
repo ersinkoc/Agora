@@ -978,17 +978,12 @@ attention-notify-names-warn = Bu adlar ajanlardan ve makinelerden gelir; bildiri
 ide-tab-cost = Kullanım
 ide-tab-usage = Kullanım
 usage-empty = Henüz gösterilecek bir şey yok. Bir ajan çalışınca kullanım burada görünür.
-usage-total-tokens = { $count } token kullanıldı
-usage-total-time = { $time } ajan süresi
 usage-agents = { $count } ajan
 usage-by-machine = Makineye göre
 usage-by-project = Projeye göre
 usage-context = Bağlam %{ $percent }
 usage-limits-title = Plan limitleri
 usage-limits-empty = Ajan bildirdiğinde plan limitleri burada görünür.
-usage-reported-toggle = Ajanların maliyet hakkında bildirdikleri
-usage-reported-note = Ajan tarafından bildirildi, planınızı yansıtmayabilir.
-usage-reported-row = { $name }: { $amount }
 
 # Sohbet ajanının konuşması
 chat-jump = En sona git
@@ -1025,3 +1020,9 @@ loading-label = Yükleniyor
 chat-code = Kod
 live-summary = Canlı özet
 live-open-changes = Değişiklikleri aç
+usage-total-tokens = { $short } token kullanıldı
+usage-total-time = Başlangıçtan beri { $time } ajan süresi
+usage-since-start = Başlangıçtan beri geçen süre
+chat-steps-needs-you = Sizi bekliyor
+chat-steps-failed = Hatayla bitti
+prompt-closed = Bu ajan sona erdi, istek alamaz.
