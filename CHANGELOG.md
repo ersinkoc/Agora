@@ -6,6 +6,22 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 _Nothing yet._
 
+## 0.3.23
+
+### The window
+- The right-hand panel is now a column of icons (Needs you with a count, Changes, Board, Messages, Usage) that stays visible on a narrow window; the panel opens beside it, or over the content on a small screen. Alt+Shift+1 to 5 open them.
+- The tabs of open agents scroll instead of being cut off, and a "More tabs" menu lists the hidden ones, with a dot when one of them needs you.
+- The agent list and the fleet view can be grouped by machine, project, agent kind or state, and the choice is remembered. The same project on several machines is one group, marked "Same project", and a hint appears when agents on different machines have changes in it.
+- Agents that run without asking carry a short "Acts freely" badge; the full explanation is in its tooltip.
+- An agent's screen shows its model and mode as menus (only what the agent reports), the context it has used and the time since it started. The start window remembers the last model and effort you chose for each kind on each machine.
+- The conversation of an agent without a terminal reads like a coding tool's: your requests and its replies look different, Markdown (lists, tables, code with a copy button) is drawn safely, tool calls are folded into one line per turn, changes are cards with a file list, and a "Jump to latest" button appears when you scroll up. Older entries are loaded on request.
+- A terminal agent shows a short live summary above its screen.
+- "Spent" is now "Usage" and shows tokens, context and time, never money. Plan limits will appear there when the agents report them.
+- Fleet cards show how long an agent has worked, and "needs you" is clearer.
+
+### Resume
+- Held terminals: the first part of keeping agents alive when the node stops is in place on Linux and macOS (not yet switched on).
+
 ## 0.3.22
 
 ### Resume
