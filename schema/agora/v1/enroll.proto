@@ -21,3 +21,15 @@ message EnrollResponse {
   // ADR-0061: the registered devices (candidates only), so the owner at the machine can say which ones it trusts. Old hubs send none.
   repeated DeviceInfo devices = 4;
 }
+
+// ADR-0085: a machine renews its own certificate over its existing authenticated connection (capability `enroll.renew`). Not enrollment:
+// it needs a live certificate the hub still lists as active. The node makes a fresh key pair and sends the CSR; the hub issues a certificate for
+// the same node id with the same usages and ignores any name or extension in the CSR, exactly as at enrollment.
+message RenewRequest {
+  string csr_pem = 1;
+}
+
+message RenewResponse {
+  string cert_pem = 1;
+  uint64 not_after_ms = 2;
+}

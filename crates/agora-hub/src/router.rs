@@ -774,7 +774,9 @@ pub fn forwardable(req: &v1::CommandRequest) -> Result<&str, Error> {
             | command_request::Command::PairApprove(_)
             | command_request::Command::PairDeny(_)
             | command_request::Command::PairRequest(_)
-            | command_request::Command::PairReveal(_),
+            | command_request::Command::PairReveal(_)
+            // ADR-0085: a machine asks the hub for its own certificate on its own connection; a client has no such thing to forward.
+            | command_request::Command::Renew(_),
         ) => Err(Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "command")),
         Some(_) if req.target_node.is_empty() => {
             Err(Error::new(ErrorCode::NodeUnknown).with("node_id", ""))

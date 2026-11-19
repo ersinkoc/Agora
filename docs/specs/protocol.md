@@ -812,6 +812,29 @@ either as "previews are not available here" and never assumes an open worked fro
 - **Errors**: `preview.port_refused` (`port`, `reason`), `preview.limit` (`limit`), `preview.expired` (`forward_id`),
   `preview.unknown` (`forward_id`), `preview.unavailable` (`reason`); see `error-codes.md`.
 
+### Certificate renewal (ADR-0085)
+
+All additions; nothing published changed. A machine renews its client certificate itself, over a connection it opens with the certificate
+it has, so no code and no owner step is needed while it is still valid.
+
+- **Messages** (`schema/agora/v1/enroll.proto`): `RenewRequest { csr_pem }` and `RenewResponse { cert_pem, not_after_ms }`. `CommandRequest`
+  field 108 (`renew`) and `CommandOk` field 30 (`renew`) carry them. Golden fixtures: `RenewRequest` and `RenewResponse` in
+  `schema/fixtures/v1/`, the two oneof arms in `schema/fixtures/enroll-renew/`.
+- **Capability `enroll.renew`.** Offered by a hub that handles the command. A machine asks only a hub that offers it (an older hub never sees
+  the message). Nodes offer nothing for it; they only send.
+- **Where it is accepted.** Only as the first command (`STREAM_COMMANDS`, kind 0) on a TLS connection whose client certificate verifies and
+  that the hub lists as active (the connection of ADR-0061's one-shot questions). It is answered once and the connection ends. Without a
+  certificate it is `auth.unauthenticated`; from a client it is `protocol.invalid_message`.
+- **What the hub does.** The CSR comes from the machine, which makes a fresh key pair each time. The hub issues a certificate for the same
+  node id as the connection's certificate, for client authentication only; any name, extension or usage in the CSR is ignored, exactly as at
+  enrollment. It records the new serial and an audit row (action `enroll.renew`, node, serial), and does not revoke the previous certificate:
+  that stays valid until its own end, and the hub revokes a machine's older serials 7 days after the machine first connects with a newer one.
+- **Refusals** are `enroll.renew_refused` with a `reason`: `unknown`, `revoked`, `expired`, `too_old` (the hub issued the certificate more than a
+  certificate lifetime ago), `too_frequent` (a certificate was issued for this machine within the last hour). A CSR that does not parse is
+  `protocol.invalid_message` (`field` `csr_pem`).
+- **The hub's own certificate** is not a message: the hub replaces its server certificate itself, before it ends, and new connections use it
+  (nodes pin the CA, not the certificate).
+
 ### A structured agent's conversation (ADR-0090, schema only)
 
 All additions; nothing published changed. **Schema only:** no node, bridge or window sends or reads these yet (build steps 3 to 7 of the

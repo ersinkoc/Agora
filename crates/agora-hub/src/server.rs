@@ -1630,6 +1630,11 @@ where
                 Err(e) => error_response(&req.request_id, &e),
             }
         }
+        // ADR-0085 (schema only): the hub does not renew certificates yet, so it says so rather than call the command misplaced.
+        Some(command_request::Command::Renew(_)) => error_response(
+            &req.request_id,
+            &Error::new(ErrorCode::ProtocolCapabilityMissing).with("capability", "enroll.renew"),
+        ),
         _ => error_response(
             &req.request_id,
             &Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "command"),
