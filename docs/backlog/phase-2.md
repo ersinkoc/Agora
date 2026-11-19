@@ -144,3 +144,12 @@ cross-review by Codex of all Phase 2 PRs (AGENTS.md).
 - **Do:** scenarios for 50 concurrent terminals, idle CPU, base and per-terminal memory, cold start.
 - **Done when:** results are compared to the budgets in `design/performance.md` §1 and recorded; the
   document is recalibrated if a budget is unreachable (never silently relaxed).
+
+### P2-16 An adapter that starts in a mode that skips permissions
+- **Crates:** `agora-node`
+- **After:** ADR-0090 steps 3 and 4
+- **Do:** when an adapter reports its first `session/options` or `session/config`, judge the CURRENT mode (and any current boolean or
+  select the node's rule flags, `agora_adapters::perm`) against the `skip_permissions` policy, as `AgentSetMode` is judged. Today only a
+  change the user asks for is checked: an adapter that starts in a bypass mode (its own default, or a saved setting) is not refused.
+- **Done when:** under `forbid` such an agent is stopped or switched to a safe mode with a notice, and a test with the fake ACP agent
+  starting in a bypass mode proves it.

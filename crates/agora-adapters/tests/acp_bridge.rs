@@ -1334,3 +1334,361 @@ fn a_confirmation_arriving_during_cancellation_is_cancelled() {
     assert_eq!(node.call("shutdown", json!({}))["result"], json!({}));
     node.done.take().unwrap().join().unwrap().unwrap();
 }
+
+/// ADR-0090: the fake agent that offers config options and slash commands.
+#[test]
+fn acp_child_config() {
+    if std::env::var_os("AGORA_TEST_ACP").is_none()
+        || !std::env::args().any(|a| a == "acp_child_config")
+    {
+        return;
+    }
+    println!();
+    std::env::set_var("AGORA_FAKE_ACP_CONFIG", "1");
+    let _ = agora_fake_agent::acp::run(std::io::stdin().lock(), &mut std::io::stdout().lock());
+}
+
+/// A bridge whose node said it takes rich chat (ADR-0090), with its session open.
+fn started_rich(child: &str) -> Node {
+    let mut n = Node::start_with(child);
+    let init = n.call(
+        "initialize",
+        json!({"protocolGeneration": 1, "nodeCapabilities": ["chat", "chat.rich"]}),
+    );
+    let caps: Vec<&str> = init["result"]["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    for c in [
+        "thought",
+        "tool_status",
+        "plan_status",
+        "config",
+        "commands",
+        "turns",
+    ] {
+        assert!(caps.contains(&c), "{c} missing: {caps:?}");
+    }
+    n.call(
+        "session/start",
+        json!({"projectRoot": ".", "worktree": "."}),
+    );
+    n.wait(|m| m["method"] == "state/update" && m["params"]["state"] == "AGENT_STATE_IDLE");
+    n
+}
+
+fn tool_items(n: &Node) -> Vec<Value> {
+    chats(n)
+        .into_iter()
+        .filter_map(|p| p.get("toolCall").cloned())
+        .collect()
+}
+
+/// ADR-0090: thinking, a tool call's whole life (matched by its id), and a plan with step status reach the node as items.
+#[test]
+fn a_rich_node_gets_thinking_tool_status_and_plan_steps() {
+    let mut n = started_rich("acp_child");
+    n.call(
+        "session/prompt",
+        json!({"sessionId": "acp-s1", "text": "rich"}),
+    );
+    n.wait(|m| m["method"] == "chat/append" && m["params"]["text"]["text"] == "done");
+    let c = chats(&n);
+    // The two chunks are joined into one thought, which comes before the tool call.
+    let thought = c
+        .iter()
+        .position(|p| p.get("thought").is_some())
+        .expect("a thought");
+    assert_eq!(c[thought]["thought"]["text"], "thinking hard");
+    let first_tool = c
+        .iter()
+        .position(|p| p.get("toolCall").is_some())
+        .expect("a tool call");
+    assert!(thought < first_tool);
+    // One call id, three versions: the first carries everything the call began with, the rest only what changed.
+    let calls = tool_items(&n);
+    assert_eq!(calls.len(), 3, "{calls:#?}");
+    assert!(calls.iter().all(|t| t["callId"] == "t3"));
+    assert_eq!(calls[0]["tool"], "read a.rs");
+    assert_eq!(calls[0]["kind"], "read");
+    assert_eq!(calls[0]["status"], "pending");
+    assert_eq!(calls[0]["locations"], json!([{"path": "a.rs", "line": 3}]));
+    assert_eq!(calls[0]["argumentsJson"], "{\"path\":\"a.rs\"}");
+    assert_eq!(calls[1]["status"], "in_progress");
+    assert!(calls[1].get("tool").is_none() && calls[1].get("output").is_none());
+    assert_eq!(calls[2]["status"], "completed");
+    assert_eq!(calls[2]["output"], "file text");
+    // The plan keeps its old lines and adds the entries with status and priority; the later plan has the new status.
+    let plans: Vec<&Value> = c.iter().filter_map(|p| p.get("plan")).collect();
+    assert_eq!(plans.len(), 2);
+    assert_eq!(plans[0]["steps"], json!(["read the code", "fix the bug"]));
+    assert_eq!(plans[0]["entries"][0]["status"], "in_progress");
+    assert_eq!(plans[1]["entries"][0]["status"], "completed");
+    assert_eq!(plans[1]["entries"][1]["priority"], "medium");
+}
+
+/// ADR-0090: a node that did not say `chat.rich` is served exactly as before: no thought, no call id or status, plan lines only.
+#[test]
+fn a_node_without_rich_chat_gets_the_old_items_byte_for_byte() {
+    let mut n = Node::start();
+    let init = n.call(
+        "initialize",
+        json!({"protocolGeneration": 1, "nodeCapabilities": ["chat"]}),
+    );
+    assert_eq!(
+        init["result"]["capabilities"],
+        json!([
+            "chat",
+            "approvals",
+            "plan",
+            "diff",
+            "cancel",
+            "usage",
+            "set_mode",
+            "set_model"
+        ])
+    );
+    n.call(
+        "session/start",
+        json!({"projectRoot": ".", "worktree": "."}),
+    );
+    n.call(
+        "session/prompt",
+        json!({"sessionId": "acp-s1", "text": "rich"}),
+    );
+    n.wait(|m| m["method"] == "chat/append" && m["params"]["text"]["text"] == "done");
+    let c = chats(&n);
+    assert!(c.iter().all(|p| p.get("thought").is_none()), "{c:#?}");
+    let calls = tool_items(&n);
+    assert_eq!(
+        calls,
+        [json!({"tool": "read a.rs", "argumentsJson": "{\"path\":\"a.rs\"}"})]
+    );
+    let plans: Vec<&Value> = c.iter().filter_map(|p| p.get("plan")).collect();
+    assert!(plans
+        .iter()
+        .all(|p| p.get("entries").is_none() && p["steps"].is_array()));
+    assert!(n
+        .messages()
+        .iter()
+        .all(|m| m["method"] != "session/config" && m["method"] != "session/commands"));
+}
+
+/// ADR-0090: a tool's output is cut (head and tail kept) and anything that looks like a secret is replaced before the node sees it.
+#[test]
+fn a_tool_output_is_bounded_and_its_secrets_are_removed() {
+    let mut n = started_rich("acp_child");
+    n.call(
+        "session/prompt",
+        json!({"sessionId": "acp-s1", "text": "rich-secret"}),
+    );
+    n.wait(|m| m["method"] == "chat/append" && m["params"]["text"]["text"] == "done");
+    let out = tool_items(&n)
+        .into_iter()
+        .find_map(|t| t.get("output").and_then(Value::as_str).map(str::to_string))
+        .expect("an output");
+    assert!(out.len() <= 64 * 1024, "{}", out.len());
+    assert!(
+        !out.contains("sk-fake0123456789abcdefghijklmnop"),
+        "a secret leaked"
+    );
+    assert!(out.contains("[redacted]"));
+}
+
+/// ADR-0090: config options and commands are reported, a value is set with the ACP call, and a bad id or value never reaches the
+/// agent. A mode value no list of bad names has is flagged; a boolean about approvals is; an unrelated one is not.
+#[test]
+fn config_options_and_commands_are_reported_and_can_be_set() {
+    let mut n = started_rich("acp_child_config");
+    let cfg = n.wait(|m| m["method"] == "session/config");
+    let options = cfg["params"]["options"].as_array().unwrap();
+    let by = |id: &str| {
+        options
+            .iter()
+            .find(|o| o["id"] == id)
+            .unwrap_or_else(|| panic!("{options:#?}"))
+    };
+    assert_eq!(by("effort")["category"], "thought_level");
+    assert_eq!(by("effort")["current"], "medium");
+    assert_eq!(by("effort")["choices"].as_array().unwrap().len(), 3);
+    assert!(by("effort")["choices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|c| c.get("skipsPermissions").is_none()));
+    let choice = |c: &str| {
+        by("approvals")["choices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["id"] == c)
+            .unwrap()
+            .clone()
+    };
+    assert!(
+        choice("turbo")["skipsPermissions"] == true,
+        "an unlisted name is not safe"
+    );
+    assert!(choice("default").get("skipsPermissions").is_none());
+    assert!(choice("plan").get("skipsPermissions").is_none());
+    assert_eq!(by("auto_approve")["type"], "boolean");
+    assert_eq!(by("auto_approve")["skipsPermissions"], true);
+    assert!(by("extended").get("skipsPermissions").is_none());
+    let cmds = n.wait(|m| m["method"] == "session/commands");
+    assert_eq!(
+        cmds["params"]["commands"][0],
+        json!({"name": "review", "description": "Review the changes", "inputHint": "a path"})
+    );
+    assert_eq!(cmds["params"]["commands"][1]["inputHint"], "");
+
+    // Setting a select: the agent takes it and the node hears the new current value.
+    let set = n.call(
+        "session/set_config",
+        json!({"sessionId": "acp-s1", "configId": "effort", "value": "high"}),
+    );
+    assert_eq!(set["result"], json!({}), "{set}");
+    n.wait(|m| {
+        m["method"] == "session/config"
+            && m["params"]["options"].as_array().is_some_and(|o| {
+                o.iter()
+                    .any(|o| o["id"] == "effort" && o["current"] == "high")
+            })
+    });
+    // A boolean goes to the agent as a boolean.
+    assert_eq!(
+        n.call(
+            "session/set_config",
+            json!({"configId": "extended", "value": "true"})
+        )["result"],
+        json!({})
+    );
+    // Not what the agent reported: refused here, with the stable code.
+    for (id, value) in [
+        ("effort", "extreme"),
+        ("nope", "x"),
+        ("extended", "yes"),
+        ("effort", ""),
+    ] {
+        let r = n.call(
+            "session/set_config",
+            json!({"configId": id, "value": value}),
+        );
+        assert_eq!(
+            r["error"]["data"]["code"], "adapter.option_refused",
+            "{id} {value}: {r}"
+        );
+    }
+    // The agent sent its own `modes`, so the lists are not built from its options.
+    let opts = n
+        .messages()
+        .into_iter()
+        .rev()
+        .find(|m| m["method"] == "session/options")
+        .unwrap();
+    assert_eq!(opts["params"]["modes"].as_array().unwrap().len(), 2);
+}
+
+/// ADR-0090: `session/cancel` ends the turn and leaves the agent alive and usable; only a stop ends it.
+#[test]
+fn cancelling_a_turn_leaves_the_agent_alive() {
+    let mut n = started_rich("acp_child");
+    n.call(
+        "session/prompt",
+        json!({"sessionId": "acp-s1", "text": "slow"}),
+    );
+    n.wait(|m| m["method"] == "chat/append" && m["params"]["toolCall"]["callId"] == "t4");
+    assert!(n.state("AGENT_STATE_WORKING"));
+    let before = n.messages().len();
+    n.call("session/cancel", json!({"sessionId": "acp-s1"}));
+    // The turn ended: idle, with no notice (a cancelled turn is a normal return to idle) and the bridge still running.
+    let end = Instant::now() + Duration::from_secs(10);
+    while !n.messages()[before..]
+        .iter()
+        .any(|m| m["params"]["state"] == "AGENT_STATE_IDLE")
+    {
+        assert!(Instant::now() < end, "{:#?}", n.messages());
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(chats(&n).iter().all(|p| p.get("notice").is_none()));
+    assert!(n.done.as_ref().is_some_and(|d| !d.is_finished()));
+    n.call(
+        "session/prompt",
+        json!({"sessionId": "acp-s1", "text": "again"}),
+    );
+    n.wait(|m| m["method"] == "chat/append" && m["params"]["text"]["text"] == "again");
+    // A stop ends it.
+    n.call(
+        "session/stop",
+        json!({"sessionId": "acp-s1", "reason": "user"}),
+    );
+    assert!(n.done.take().unwrap().join().unwrap().is_ok());
+}
+
+/// ADR-0090: the fake agent that offers config options and no mode or model list.
+#[test]
+fn acp_child_config_only() {
+    if std::env::var_os("AGORA_TEST_ACP").is_none()
+        || !std::env::args().any(|a| a == "acp_child_config_only")
+    {
+        return;
+    }
+    println!();
+    std::env::set_var("AGORA_FAKE_ACP_CONFIG", "1");
+    std::env::set_var("AGORA_FAKE_ACP_CONFIG_ONLY", "1");
+    let _ = agora_fake_agent::acp::run(std::io::stdin().lock(), &mut std::io::stdout().lock());
+}
+
+/// ADR-0090: an agent that gives config options and no mode list still gets a mode switch, built from its `mode` option and set
+/// the ACP way; the values the rule cannot place stay flagged.
+#[test]
+fn a_mode_list_is_built_from_the_config_options_when_the_agent_gave_none() {
+    let mut n = started_rich("acp_child_config_only");
+    let opts = n.wait(|m| {
+        m["method"] == "session/options"
+            && m["params"]["modes"]
+                .as_array()
+                .is_some_and(|m| !m.is_empty())
+    });
+    let modes = opts["params"]["modes"].as_array().unwrap();
+    assert_eq!(
+        modes
+            .iter()
+            .map(|m| m["id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["default", "turbo", "plan"]
+    );
+    assert_eq!(opts["params"]["currentMode"], "default");
+    assert!(modes[1]["skipsPermissions"] == true);
+    let set = n.call(
+        "session/set_option",
+        json!({"kind": "SESSION_OPTION_KIND_MODE", "id": "plan"}),
+    );
+    assert_eq!(set["result"], json!({}), "{set}");
+    n.wait(|m| m["method"] == "session/options" && m["params"]["currentMode"] == "plan");
+}
+
+/// ADR-0090: the same agent against a node without rich chat: nothing is built or reported, as before.
+#[test]
+fn a_node_without_rich_chat_sees_no_config_options() {
+    let mut n = Node::start_with("acp_child_config_only");
+    n.call("initialize", json!({"nodeCapabilities": ["chat"]}));
+    n.call(
+        "session/start",
+        json!({"projectRoot": ".", "worktree": "."}),
+    );
+    n.wait(|m| m["method"] == "state/update" && m["params"]["state"] == "AGENT_STATE_IDLE");
+    assert!(n.messages().iter().all(|m| m["method"] != "session/config"));
+    let opts = n
+        .messages()
+        .into_iter()
+        .find(|m| m["method"] == "session/options")
+        .unwrap();
+    assert_eq!(opts["params"]["modes"], json!([]));
+    let refused = n.call(
+        "session/set_config",
+        json!({"configId": "effort", "value": "high"}),
+    );
+    assert_eq!(refused["error"]["data"]["code"], "adapter.option_refused");
+}

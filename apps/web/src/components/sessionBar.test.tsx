@@ -40,3 +40,17 @@ describe('choosing what is already in use', () => {
     expect(isChange('', 'build')).toBe(true);
   });
 });
+
+describe('a mode that skips permission questions', () => {
+  it('is shown disabled with why, and never behind a confirmation that could not succeed', () => {
+    const html = renderToStaticMarkup(<SessionBar agentKey="n/a" session={session} choose={async () => true} />);
+    expect(html).toContain('Switching a running agent to a mode that skips permission questions is not available yet');
+    expect(html).not.toContain('alertdialog');
+    expect(html).not.toContain('Switch anyway');
+  });
+  it('says nothing when no such mode is on offer', () => {
+    const html = renderToStaticMarkup(<SessionBar agentKey="n/a" session={{ ...session, modes: [opt('build', 'Build'), opt('plan', 'Plan')] }} choose={async () => true} />);
+    expect(html).not.toContain('not available yet');
+  });
+});
+

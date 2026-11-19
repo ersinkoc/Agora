@@ -38,7 +38,9 @@ export function SessionBar({ agentKey, session, choose, disabled, startedMs, sta
     if (!isChange(kind === 'mode' ? session.currentMode : session.currentModel, id)) return; // the placeholder and the one in use are not choices
     const option = list.find((o) => o.id === id);
     setFailed(false);
-    if (option && needsConfirm(kind, option)) { setPending({ agentKey, option }); return; }
+    // Never reached from the menu (such a choice is disabled there), kept as a guard: the node refuses a switch to a mode that skips
+    // permission questions until a signed confirmation exists, so no dialog is offered for one that can never succeed.
+    if (option && needsConfirm(kind, option)) return;
     setPending(undefined);
     void apply(agentKey, kind, id);
   };
@@ -49,7 +51,8 @@ export function SessionBar({ agentKey, session, choose, disabled, startedMs, sta
     const name = (o: SessionOptionModel) => (o.skipsPermissions ? t('session-mode-unasked', { name: o.name || o.id }) : (o.name || o.id));
     const now = list.find((o) => o.id === current);
     const shown = now ? name(now) : needsPlaceholder(current) ? t('session-not-reported') : current;
-    const items: MenuItem[] = choices(list, current).map((o) => ({ label: name(o), checked: o.id === current, disabled: disabled || busy || !choose, run: () => pick(kind, list, o.id) }));
+    // A mode that skips permission questions cannot be switched to from here yet (the node refuses it): shown, disabled, with why.
+    const items: MenuItem[] = choices(list, current).map((o) => { const unavailable = needsConfirm(kind, o) && o.id !== current; return { label: name(o), checked: o.id === current, disabled: disabled || busy || !choose || unavailable, hint: unavailable ? t('session-unasked-unavailable-hint') : undefined, run: () => pick(kind, list, o.id) }; });
     return (
       <Menu label={`${word}: ${shown}`} items={items} align="start" className="ide-chip h-7 max-w-56 min-w-0 cursor-pointer rounded-s px-2.5 hover:border-accent hover:text-ink">
         <span className="flex-none">{word}</span><span className="min-w-0 truncate font-medium text-ink">{shown}</span><Icon name="chevronDown" className="size-3" />
@@ -63,6 +66,7 @@ export function SessionBar({ agentKey, session, choose, disabled, startedMs, sta
     {picker('mode', session.modes, session.currentMode)}
     {picker('model', session.models, session.currentModel)}
     {started.map(([id, value]) => <span key={id} className="ide-chip h-7 rounded-s px-2.5" title={t('session-started-hint')}>{t('session-started-with', { name: settingName({ id, label: `setting-${id}`, values: [], defaultValue: '' }, t), value })}</span>)}
+    {session.modes.some((o) => needsConfirm('mode', o) && o.id !== session.currentMode) && <span role="note" className="text-xs text-muted">{t('session-unasked-unavailable')}</span>}
     {failed && <span role="status" className="text-xs text-needs-you">{t('session-change-failed')}</span>}
   </>;
   const word = state ? t(`state-${state}`) : '';

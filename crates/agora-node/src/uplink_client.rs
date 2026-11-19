@@ -37,6 +37,12 @@ pub const CAPABILITIES: &[&str] = &[
     // ADR-0058
     "agent.set_mode",
     "agent.set_model",
+    // ADR-0090: chat entries that change in place (tool calls and plans, with status, output, thinking, permissions and queued
+    // prompts), `AgentPromptResult`, `AgentSetConfig`, `AgentCancelTurn` and `AgentCommands`: each is handled by this node.
+    "chat.rich",
+    "agent.set_config",
+    "agent.cancel_turn",
+    "agent.commands",
     // ADR-0060
     "agent.resume",
     // ADR-0059
@@ -873,7 +879,8 @@ fn relay_terminal(
     while accepted && alive.load(Ordering::Acquire) {
         match local.read_frame(Some(Duration::from_millis(200))) {
             Ok(Some(f)) if f.stream_id == stream => {
-                let exited = f.kind == 3;
+                // An exit frame (a terminal) or a close frame (a conversation whose follower was dropped, ADR-0090) is the last.
+                let exited = f.kind == 3 || f.kind == agora_protocol::frame::STREAM_CLOSE;
                 if out.blocking_send(f).is_err() || exited {
                     return;
                 }

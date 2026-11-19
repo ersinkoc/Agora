@@ -959,7 +959,7 @@ mod tests {
         }
     }
 
-    /// ADR-0090: no build offers these capabilities yet, so the hub refuses both commands for every node and forwards neither.
+    /// ADR-0090: the hub forwards each of the two commands only to a node that offers its capability, and refuses it for any other.
     #[test]
     fn a_config_or_cancel_turn_command_goes_only_to_a_node_that_offers_it() {
         let r = Router::new();
