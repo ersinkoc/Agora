@@ -4,7 +4,8 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
-_Nothing yet._
+### Resume
+- A Claude Code agent that was started but never given a message no longer disappears when Agora restarts. Claude Code saves no session until it is first spoken to, so there was nothing to continue; Agora now starts it again under the same session instead.
 
 ## 0.3.21
 

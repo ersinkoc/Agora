@@ -490,6 +490,10 @@ struct Entry {
     carry_on: bool,
     /// The last resume did carry it (read by [`carried_on`](Supervisor::carried_on)).
     carried_on: bool,
+    /// When a native resume of this agent's own session last started, until it ended (see `[resume] fresh_argv`).
+    native_since: Option<Instant>,
+    /// A resume failed at once and the kind has `[resume] fresh_argv`: the next restart starts the session from nothing.
+    fresh_next: bool,
     /// ADR-0059: the options it was started with (their arguments are in `extras.options`).
     launch: LaunchChoice,
     /// A selected folder (ADR-0052): its path as its start held it. A restart or resume holds it again and starts in it, or not at all
@@ -994,6 +998,8 @@ impl Supervisor {
                 private_config: None,
                 carry_on: false,
                 carried_on: false,
+                native_since: None,
+                fresh_next: false,
                 launch: choice,
                 folder: None,
             },
@@ -1247,6 +1253,8 @@ impl Supervisor {
                     private_config,
                     carry_on: false,
                     carried_on: false,
+                    native_since: None,
+                    fresh_next: false,
                     launch: choice,
                     folder: folder.map(|f| f.path().to_path_buf()),
                 },
@@ -1819,6 +1827,19 @@ impl Supervisor {
             });
             entry.terminal = None;
             self.ended_usage.push(id.clone());
+            // A resume that fails within moments, for a kind that can start its session from nothing: there was nothing to resume
+            // (the tool writes no session until it is spoken to), so the next start is a fresh one under the same id.
+            let quick = entry.native_since.take().is_some_and(|t| {
+                now.saturating_duration_since(t)
+                    < Duration::from_secs(agora_adapters::manifest::FRESH_WINDOW_SECS)
+            });
+            entry.fresh_next = quick
+                && !status.success()
+                && self
+                    .kinds
+                    .get(&entry.agent.kind)
+                    .and_then(|k| k.manifest.resume.as_ref())
+                    .is_some_and(|r| !r.fresh_argv.is_empty());
             if status.success() {
                 set_state(entry, AgentState::Done, StateSource::Reported, events);
             } else if entry.restarts < self.cfg.restart.max_restarts {
@@ -1872,7 +1893,9 @@ impl Supervisor {
             entry.folder.clone(),
         );
         // A restart of a process that died is never a resume by the node after its own stop: no "carry on" message here.
-        let (argv, native, fresh, _) = self.argv_for_resume(&kind, session.as_deref(), false);
+        let fresh_next = entry.fresh_next;
+        let (argv, native, fresh, _) =
+            self.argv_for_resume(&kind, session.as_deref(), false, fresh_next);
         // F1020: a selected folder is held again, so a restart never follows a link swapped in for it since the agent started.
         let result = folder
             .as_deref()
@@ -1884,9 +1907,11 @@ impl Supervisor {
         };
         entry.restart_at = None;
         entry.restarts += 1;
+        let from_nothing = std::mem::take(&mut entry.fresh_next);
         match result {
             Ok(t) => {
                 entry.terminal = Some(t);
+                entry.native_since = (native && !from_nothing).then_some(now);
                 entry.pacer = Pacer::default();
                 entry.next_check = now;
                 entry.agent.process_restarted();
@@ -1926,12 +1951,22 @@ impl Supervisor {
         kind: &str,
         session: Option<&str>,
         carry_on: bool,
+        fresh_start: bool,
     ) -> (Vec<String>, bool, Option<String>, bool) {
         let Some(k) = self.kinds.get(kind) else {
             return (Vec::new(), false, None, false);
         };
         let safe = session.filter(|s| crate::session_files::argv_safe(s));
         if let (Some(r), Some(sid)) = (&k.manifest.resume, safe) {
+            // `[resume] fresh_argv`: the session did not exist yet; it is started under the id it was meant to have (still native).
+            if fresh_start && !r.fresh_argv.is_empty() {
+                let argv = r
+                    .fresh_argv
+                    .iter()
+                    .map(|a| a.replace("{session_id}", sid))
+                    .collect();
+                return (argv, true, None, false);
+            }
             // ADR-0060 Amendment A: the node's own resume of a working agent uses the resume command that carries the kind's "carry on"
             // sentence (from its manifest, which checked it: one plain line, no placeholder, not an option) as one argument.
             if let (true, false, Some(text)) = (
@@ -2094,6 +2129,8 @@ impl Supervisor {
                 private_config: r.private_config,
                 carry_on: r.carry_on,
                 carried_on: false,
+                native_since: None,
+                fresh_next: false,
                 // ADR-0060: no launch option comes back with a resume.
                 launch: LaunchChoice::default(),
             },
@@ -2234,7 +2271,8 @@ impl Supervisor {
             .map(|p| held_again(checked, p))
             .transpose()?;
         let carry = self.agents.get(id).is_some_and(|e| e.carry_on);
-        let (argv, native, fresh, carried) = self.argv_for_resume(&kind, session.as_deref(), carry);
+        let (argv, native, fresh, carried) =
+            self.argv_for_resume(&kind, session.as_deref(), carry, false);
         // A stopped agent left the mesh and its endpoint closed; resuming joins again with a fresh one.
         let config = self.agents.get(id).and_then(|e| e.private_config.clone());
         // ADR-0059: a resumed agent keeps the options it was started with.
@@ -2272,6 +2310,7 @@ impl Supervisor {
         // Used once: a later restart of its process (a crash) never carries the message again.
         entry.carry_on = false;
         entry.carried_on = carried;
+        entry.native_since = native.then_some(now);
         if !native {
             entry.agent.session = fresh;
         }

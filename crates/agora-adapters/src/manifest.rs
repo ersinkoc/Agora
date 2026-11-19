@@ -97,11 +97,20 @@ pub struct Resume {
     /// only when the node brings back by itself an agent that was working. Empty: the kind is resumed as usual and gets no message.
     #[serde(default)]
     pub continue_argv: Vec<String>,
+    /// A command that starts the session under the same id from nothing (`claude --session-id {session_id}`), for a tool that writes
+    /// no session until the first message, so `argv` finds nothing to resume in an agent that was never spoken to. The node uses it
+    /// only for the next restart after a resume that failed within [`FRESH_WINDOW_SECS`] seconds of starting. Empty: never. Only for a
+    /// tool that refuses to start a new session over an existing id, so a failed resume of a real conversation is never overwritten.
+    #[serde(default)]
+    pub fresh_argv: Vec<String>,
     /// The sentence `{continue}` stands for: that the session was cut off by a restart, to check the state of what it was doing first
     /// and then carry on. Words are data, so they live here and not in the node's Rust.
     #[serde(default, rename = "continue")]
     pub continue_text: Option<String>,
 }
+
+/// How soon after a resume starts its failure counts as "there was nothing to resume" (`[resume] fresh_argv`).
+pub const FRESH_WINDOW_SECS: u64 = 30;
 
 /// The longest `[resume] continue` sentence, in bytes.
 pub const MAX_CONTINUE_BYTES: usize = 512;
@@ -454,6 +463,13 @@ impl Resume {
     /// ADR-0060 Amendment A: `continue_argv` and `continue` go together; the sentence is one plain line that cannot be read as an option
     /// or as a placeholder; `continue_argv` carries both placeholders, `{continue}` as an argument of its own.
     fn validate(&self) -> Result<(), ManifestError> {
+        if !self.fresh_argv.is_empty()
+            && (self.fresh_argv.first().is_none_or(String::is_empty)
+                || !self.fresh_argv.iter().any(|a| a.contains("{session_id}"))
+                || self.fresh_argv.iter().any(|a| a.contains("{continue}")))
+        {
+            return Err(invalid("resume.fresh_argv"));
+        }
         let text = self.continue_text.as_deref();
         match (self.continue_argv.is_empty(), text) {
             (true, None) => return Ok(()),
@@ -1038,6 +1054,30 @@ mod continue_tests {
 
     fn good() -> String {
         with(&format!("{ARGV}continue_argv = [\"k\", \"--resume\", \"{{session_id}}\", \"{{continue}}\"]\ncontinue = \"Check the state of what you were doing, then carry on.\"\n"))
+    }
+
+    /// `[resume] fresh_argv` starts the session from nothing: it needs a program and `{session_id}`, and takes no message.
+    #[test]
+    fn a_fresh_start_command_is_read_and_checked() {
+        let ok = format!("{ARGV}fresh_argv = [\"k\", \"--session-id\", \"{{session_id}}\"]\n");
+        let r = Manifest::parse(&with(&ok)).unwrap().resume.unwrap();
+        assert_eq!(r.fresh_argv, ["k", "--session-id", "{session_id}"]);
+        assert!(Manifest::parse(&with(ARGV))
+            .unwrap()
+            .resume
+            .unwrap()
+            .fresh_argv
+            .is_empty());
+        for bad in [
+            "fresh_argv = [\"k\", \"--session-id\"]",
+            "fresh_argv = [\"\", \"{session_id}\"]",
+            "fresh_argv = [\"k\", \"{session_id}\", \"{continue}\"]",
+        ] {
+            assert!(
+                Manifest::parse(&with(&format!("{ARGV}{bad}\n"))).is_err(),
+                "{bad}"
+            );
+        }
     }
 
     /// ADR-0060 Amendment A: the two fields go together and the sentence is data that cannot act as an option, a placeholder or a second
