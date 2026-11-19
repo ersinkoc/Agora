@@ -204,7 +204,7 @@ even for an empty requested path, keeping parent-checkout changes outside the wo
 place a selected subdirectory outside the shared system temp folder and prove inside writes succeed while parent
 checkout writes fail, in both directory and explicit-worktree modes. Explicit policy write allowances still apply.
 
-## Known limit: certificates are not renewed (ADR-0085, Proposed)
+## Known limit: certificates are not renewed (ADR-0085, Accepted, not built yet)
 
 Machine certificates and the hub's server certificate last 90 days (`DEVICE_CERT_DAYS`) and nothing renews them. A machine whose certificate
 has ended is refused at its next connection (an open connection is not cut), and a hub that keeps running past the end of its own server

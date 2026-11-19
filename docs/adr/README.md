@@ -102,9 +102,9 @@ Date: YYYY-MM-DD
 | 0082 | A confined agent cannot use the node's control socket | Accepted |
 | 0083 | A confined agent reaches only the unix sockets it is given | Accepted |
 | 0084 | A confined agent gets its login from a secret the node holds | Accepted |
-| 0085 | Machine and hub certificates renew themselves | Proposed |
-| 0086 | Any machine can be the hub: one authoritative hub with takeover | Proposed |
-| 0087 | Install and update coding agents on a machine from the window | Proposed |
+| 0085 | Machine and hub certificates renew themselves | Accepted |
+| 0086 | Any machine can be the hub: one authoritative hub with takeover | Accepted |
+| 0087 | Install and update coding agents on a machine from the window | Accepted |
 | 0088 | Preview an agent's local web server in the window | Accepted |
 | 0089 | The chat history of a structured agent survives the node and is read in pages | Accepted |
 | 0090 | A structured agent's conversation is complete: thinking, tool calls with status, plan progress, effort, cancel and usage | Accepted |

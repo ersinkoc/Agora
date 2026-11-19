@@ -1,11 +1,11 @@
 # 0086. Any machine can be the hub: one authoritative hub with takeover
-Status: Proposed
+Status: Accepted
 Date: 2026-11-17
 
-Not accepted. Nothing here may be built until the maintainer names this ADR in an acceptance message.
+Accepted: 2026-11-19 (the maintainer's explicit message in the merger chat naming this ADR: "ADR-0086'yı kabul ediyorum"). The open questions' proposed answers stand.
 
 Amends ADR-0056 decision 1 ("The hub stays single": the single authority stays, takeover is added). Touches ADR-0002, ADR-0065, ADR-0070,
-ADR-0085 (Proposed), ADR-0020, ADR-0049, ADR-0054, ADR-0055, ADR-0075, ADR-0079 and the threat model.
+ADR-0085 (Accepted), ADR-0020, ADR-0049, ADR-0054, ADR-0055, ADR-0075, ADR-0079 and the threat model.
 
 Origin: the maintainer, in the Windows developer's session on 2026-11-17, relayed on branch `comms`
 (`log/2026-11-17-0952-windows-maintainer-every-machine-a-hub.md`, replaced by `log/2026-11-17-1000-windows-maintainer-hub-decision-revised.md`).
@@ -30,7 +30,7 @@ they chose **one hub plus takeover**. This ADR designs that choice.
 - A node today dials one `wss://host:port` and checks the hub's server certificate against the one CA it pinned at enrolment. A browser's device key and
   sign-in belong to the page's origin (ADR-0048, ADR-0056 Amendment A); `agora panel` keeps that origin stable per machine (`127.0.0.1:<port>`).
 
-## Decision (proposed)
+## Decision
 1. **Every machine has the hub role installed. Exactly one hub is authoritative at a time**, identified by a signed, numbered **hub record** (epoch).
    Nodes and clients follow only the highest epoch they have seen. There is no second master and no merge of two hubs' state (that is federation, rejected, see
    "Alternatives").

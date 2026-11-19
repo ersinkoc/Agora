@@ -1,8 +1,8 @@
 # 0087. Install and update coding agents on a machine from the window
-Status: Proposed
+Status: Accepted
 Date: 2026-11-17
 
-Not accepted. Nothing here may be built until the maintainer names this ADR in an acceptance message.
+Accepted: 2026-11-19 (the maintainer's explicit message in the merger chat naming this ADR: "ADR-0087'yi kabul ediyorum"). The open questions' proposed answers stand.
 
 Builds on ADR-0020 (signed approvals), ADR-0034 (install a node over ssh), ADR-0044 (the signed registry), ADR-0067 (remote access),
 ADR-0062 (`agora up`), ADR-0069 (a missing agent kind says why), ADR-0075 (the node updates in place). Touches ADR-0004, ADR-0018,
