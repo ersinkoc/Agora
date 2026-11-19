@@ -270,7 +270,7 @@ Initial event families:
 | --- | --- |
 | node | `NodeOnline`, `NodeOffline`, `NodeResources`, `NodeLink` (hub-written presence, ADR-0070) |
 | project | `CheckoutDiscovered`, `WorktreeCreated`, `WorktreeRemoved`, `GitStatusChanged` (the node checks each running agent's workspace every 5 s and reports when the changed-file count, line counts or HEAD differ from the last report) |
-| agent | `AgentStarted`, `AgentStateChanged`, `AgentSessionReported`, `AgentUsageReported`, `AgentExited` |
+| agent | `AgentStarted`, `AgentStateChanged`, `AgentSessionReported`, `AgentUsageReported`, `AgentQuotaObserved` (ADR-0091), `AgentExited` |
 | terminal | `TerminalOpened`, `TerminalTitleChanged`, `TerminalClosed` |
 | approval | `ApprovalRequested`, `ApprovalResolved`, `AgentStartRefused` (ADR-0057) |
 | mesh | `MessagePosted`, `TaskChanged`, `LeaseGranted`, `LeaseReleased`, `HandoffCreated` |
@@ -993,3 +993,19 @@ forwards either to a node that did not offer it.
   binary search of the ring (at most 500 entries). Nothing is added to a terminal's byte path.
 - **Errors:** `agent.option_unknown` (`id`), `agent.queue_full` (`limit`); a refusal by the agent itself is `adapter.option_refused`.
 
+### Plan limits of subscription agents (ADR-0091)
+- **`AgentQuotaObserved`** (`Event` arm 67, capability `usage.quota`): `node_id` (1, the producer's own id, checked like `NodeResources`; a
+  node naming another machine is refused as forged), `tool` (2, the agent kind, `codex`), `window` (3), `used_percent` (4, 0 to 100),
+  `resets_at_ms` (5), `source` (6, `file`), `observed_at_ms` (7, the node's clock). One observation of one plan window of a tool on a
+  machine; the hub replaces the earlier one of the same `(node_id, tool, window)` (a later step: this build only relays it).
+- **`window`** is `five_hour`, `seven_day`, or `minutes:<n>` (a length in minutes, `n` from 1), derived from the window's length and never
+  from a field name such as "primary". A client must accept any `minutes:<n>`.
+- **Bounds, by the node:** `used_percent` is clamped to 0..100; `resets_at_ms` is not more than a day in the past and not more than 31 days
+  ahead of the node's clock, else the observation is not sent. An observation is sent when its numbers change, at most once per
+  `(tool, window)` every 5 seconds.
+- **What it never carries:** credits, balances, plan names, account ids, tokens, or any price. There is no field for them; a node forwards
+  an allow-list of the four numbers and the label, and nothing else the tool wrote.
+- **Fresh, reset, unknown are the client's call:** from `observed_at_ms` (its age) and `resets_at_ms` (after it passes the window is
+  "reset", not the old percentage, until a new observation arrives); no observation is "unknown". A limit is never inferred.
+- **Capability:** `usage.quota` is passed by the hub (`hubcli.rs`); a node advertises it once its reader exists.
+  Golden fixtures: `schema/fixtures/v1/agora.v1.AgentQuotaObserved.*` and `schema/fixtures/usage-quota/`.

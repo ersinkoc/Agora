@@ -67,3 +67,9 @@ untrusted, clamped; the reporter rung: a settings file the agent trusts).
 2. Node reader and the Codex manifest mapping.
 3. Hub snapshot table and the web Usage bars, chip and start hint.
 4. Optional, separately accepted: the Claude Code reporter rung.
+
+## Status of the build
+- Step 1 (schema): done. `AgentQuotaObserved` is `Event` arm 67 with `node_id`, `tool`, `window`, `used_percent`, `resets_at_ms`, `source`,
+  `observed_at_ms` (the record of decision 1 plus the machine it belongs to, which decision 5's table needs as a key), capability
+  `usage.quota` (passed by the hub), golden fixtures, `docs/specs/protocol.md`. The hub only routes the event (visible with its machine).
+- Step 2 (node reader, Codex mapping): see the PR of that step. Steps 3 (hub table, web) and 4 (Claude Code reporter): not done.

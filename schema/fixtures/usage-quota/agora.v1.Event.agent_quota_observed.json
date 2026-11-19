@@ -1,0 +1,14 @@
+{
+  "producerId": "n1",
+  "seq": "52",
+  "atMs": "1700000007000",
+  "agentQuotaObserved": {
+    "nodeId": "n1",
+    "tool": "codex",
+    "window": "five_hour",
+    "usedPercent": 42,
+    "resetsAtMs": "1700003600000",
+    "source": "file",
+    "observedAtMs": "1700000006500"
+  }
+}

@@ -48,6 +48,9 @@ message Event {
     AgentSessionConfig agent_session_config = 39;
     // ADR-0090: the slash commands the agent offers; replaces the previous list.
     AgentCommands agent_commands = 66;
+    // ADR-0091, capability `usage.quota`: how much of a plan window a subscription tool reports it has used, as the tool's own output
+    // says it. A fact about a tool on a machine, not about one agent.
+    AgentQuotaObserved agent_quota_observed = 67;
     // terminal
     TerminalOpened terminal_opened = 40;
     TerminalTitleChanged terminal_title_changed = 41;
@@ -223,6 +226,26 @@ message AgentCommand {
 message AgentCommands {
   string agent_id = 1;
   repeated AgentCommand commands = 2;
+}
+
+// ADR-0091: one observation of one plan window of a tool on a machine (`node_id` is the producer's own id, as for `NodeResources`). A
+// neutral record: nothing else a tool reports (credits, balances, plan names, account ids, tokens) is part of it, and there is no
+// price. The hub replaces the earlier observation of the same `(node_id, tool, window)`.
+message AgentQuotaObserved {
+  string node_id = 1;
+  // The agent kind the numbers belong to (`codex`).
+  string tool = 2;
+  // `five_hour`, `seven_day`, or `minutes:<n>` for any other length; derived from the window's length, never from a field name.
+  string window = 3;
+  // 0 to 100, clamped by the node.
+  uint32 used_percent = 4;
+  // Milliseconds since the Unix epoch: when the window resets, bounded by the node (not more than a day in the past, not more than 31
+  // days ahead; an observation outside is not sent).
+  uint64 resets_at_ms = 5;
+  // Where the node took it from: `file` (the tool's own file).
+  string source = 6;
+  // Milliseconds since the Unix epoch, node clock: when the node read it. Clients show its age and decide fresh, reset or unknown.
+  uint64 observed_at_ms = 7;
 }
 
 message AgentExited {

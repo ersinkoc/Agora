@@ -181,6 +181,8 @@ impl Scope {
             Body::NodeLink(e) => self.node_visible(&e.node_id),
             Body::NodeForgotten(e) => self.node_visible(&e.node_id),
             Body::NodeResources(e) => self.node_visible(&e.node_id),
+            // ADR-0091: a fact about a tool on a machine (no project, no agent, no path), seen with the machine.
+            Body::AgentQuotaObserved(e) => self.node_visible(&e.node_id),
             Body::NodeTrustedDevices(_) => self.node_visible(node),
             // A node speaks for itself only: the project is placed on the producer, whatever `node_id` the event names.
             Body::CheckoutDiscovered(e) => {
