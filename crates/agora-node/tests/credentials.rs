@@ -38,7 +38,8 @@ fn manifest(kind: &str, declares: &[&str], secrets: &Path) -> Manifest {
     let script = format!(
         "env > probe.tmp && mv probe.tmp probe.txt; \
          tr '\\0' ' ' < /proc/$$/cmdline > cmdline.txt 2>/dev/null; \
-         cat {}/* > read.tmp 2> read.err; echo $? > read.rc; mv read.tmp read.txt; sleep 60",
+         cat {}/* > read.tmp 2> read.err; rc=$?; \
+         echo $rc > read.rc.tmp; mv read.rc.tmp read.rc; mv read.tmp read.txt; sleep 60",
         secrets.display()
     );
     let launch = serde_json::to_string(&["/bin/sh", "-c", &script]).unwrap();
