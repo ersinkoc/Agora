@@ -691,6 +691,10 @@ fn attach(
         if !typed.is_empty() {
             session.terminal_input(node, &terminal, &typed);
         }
+        // The terminal closed (window gone, SSH lost): stop watching instead of running on unseen.
+        if terminal_gone() {
+            break;
+        }
     }
     session.terminal_close(stream);
     Ok(lost)
@@ -733,6 +737,9 @@ fn chat(
                 break;
             }
             ChatEvent::Quiet => {}
+        }
+        if terminal_gone() {
+            break;
         }
         while let Ok(k) = rx.try_recv() {
             match k {
