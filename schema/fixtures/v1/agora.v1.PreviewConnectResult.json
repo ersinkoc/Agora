@@ -1,0 +1,6 @@
+{
+  "maxChunkBytes": 1,
+  "windowBytes": 1,
+  "rateBytesPerSecond": 1,
+  "totalBytesLimit": "1"
+}

@@ -6,6 +6,7 @@ import "agora/v1/common.proto";
 import "agora/v1/devices.proto";
 import "agora/v1/enroll.proto";
 import "agora/v1/pairing.proto";
+import "agora/v1/preview.proto";
 
 // Commands flow client -> hub -> node (docs/specs/protocol.md section 4). Every request has a request_id
 // and an idempotency_key; the response is Ok or Err.
@@ -88,10 +89,15 @@ message CommandRequest {
     PairReveal pair_reveal = 100;
     // ADR-0082: the first request on a node's local control socket when the node requires its control token; accepted on no other path.
     ControlAuth control_auth = 101;
+    // ADR-0088, capability `preview.v1` (offered by the node and hub once they handle these; not yet): forwards to a port on a node's loopback. `PreviewConnect` is opened on a dynamic stream.
+    PreviewOpen preview_open = 102;
+    PreviewClose preview_close = 103;
+    PreviewList preview_list = 104;
+    PreviewConnect preview_connect = 105;
     // ADR-0090, sent only to a node with the capability `agent.set_config` (a hub refuses it for any other node).
-    AgentSetConfig agent_set_config = 102;
+    AgentSetConfig agent_set_config = 106;
     // ADR-0090, sent only to a node with the capability `agent.cancel_turn` (a hub refuses it for any other node).
-    AgentCancelTurn agent_cancel_turn = 103;
+    AgentCancelTurn agent_cancel_turn = 107;
   }
 }
 
@@ -133,8 +139,12 @@ message CommandOk {
     PairChallenge pair_challenge = 23;
     PairResult pair_result = 24;
     PairStatusResult pair_status = 25;
+    // ADR-0088
+    PreviewOpenResult preview_open = 26;
+    PreviewListResult preview_list = 27;
+    PreviewConnectResult preview_connect = 28;
     // ADR-0090: the answer to `AgentPrompt` from a node with the capability `chat.rich`.
-    AgentPromptResult agent_prompt = 26;
+    AgentPromptResult agent_prompt = 29;
   }
 }
 

@@ -1,0 +1,10 @@
+{
+  "port": 1,
+  "expiresSeconds": 1,
+  "authorization": {
+    "deviceId": "x",
+    "nonce": "x",
+    "expiresAtMs": "1",
+    "signature": "AQID"
+  }
+}

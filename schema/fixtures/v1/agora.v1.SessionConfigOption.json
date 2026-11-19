@@ -1,17 +1,23 @@
 {
-  "id": "x",
-  "name": "x",
-  "description": "x",
-  "category": "SESSION_CONFIG_CATEGORY_MODE",
+  "id": "effort",
+  "name": "Reasoning effort",
+  "description": "How long the agent thinks before it answers",
+  "category": "SESSION_CONFIG_CATEGORY_THOUGHT_LEVEL",
   "type": "SESSION_CONFIG_TYPE_SELECT",
-  "current": "x",
+  "current": "medium",
   "choices": [
     {
-      "id": "x",
-      "name": "x",
-      "description": "x",
-      "skipsPermissions": true
+      "id": "low",
+      "name": "Low"
+    },
+    {
+      "id": "medium",
+      "name": "Medium"
+    },
+    {
+      "id": "high",
+      "name": "High",
+      "description": "Slower, more thorough"
     }
-  ],
-  "skipsPermissions": true
+  ]
 }

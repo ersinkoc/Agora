@@ -1,0 +1,10 @@
+{
+  "requestId": "r1",
+  "idempotencyKey": "k1",
+  "targetNode": "n1",
+  "agentSetConfig": {
+    "agentId": "agent-1",
+    "configId": "effort",
+    "value": "high"
+  }
+}

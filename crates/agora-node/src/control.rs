@@ -1314,6 +1314,11 @@ pub(crate) fn command_name(c: &Cmd) -> &'static str {
         Cmd::PairDeny(_) => "pair.deny",
         Cmd::PairRequest(_) => "pair.request",
         Cmd::PairReveal(_) => "pair.reveal",
+        // ADR-0088: the preview messages exist in the schema; no node code handles them yet, so they are refused as unsupported.
+        Cmd::PreviewOpen(_) => "preview.open",
+        Cmd::PreviewClose(_) => "preview.close",
+        Cmd::PreviewList(_) => "preview.list",
+        Cmd::PreviewConnect(_) => "preview.connect",
         // ADR-0082: only the local control socket answers it (in `handle_request`); anywhere else it is refused as unsupported.
         Cmd::ControlAuth(_) => "control.auth",
     }

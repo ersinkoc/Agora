@@ -220,6 +220,8 @@ pub(crate) fn named_node(body: &Body) -> Result<Option<&str>, &'static str> {
         | Body::LeaseReleased(_)
         | Body::HandoffCreated(_)
         | Body::AgentStartRefused(_)
+        | Body::PreviewSuggested(_)
+        | Body::PreviewChanged(_)
         | Body::FilesChanged(_) => return Ok(None),
     }))
 }
@@ -664,6 +666,9 @@ impl View {
             Body::MessagePosted(_)
             | Body::HandoffCreated(_)
             | Body::FilesChanged(_)
+            // ADR-0088: the preview events change no view yet (schema only).
+            | Body::PreviewSuggested(_)
+            | Body::PreviewChanged(_)
             | Body::AgentStartRefused(_) => {}
         }
     }

@@ -1,0 +1,10 @@
+{
+  "requestId": "r3",
+  "idempotencyKey": "k3",
+  "targetNode": "n1",
+  "agentSetConfig": {
+    "agentId": "agent-1",
+    "configId": "mode",
+    "value": "plan"
+  }
+}

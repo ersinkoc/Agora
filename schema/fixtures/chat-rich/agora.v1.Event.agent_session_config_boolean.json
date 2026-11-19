@@ -1,0 +1,29 @@
+{
+  "producerId": "n1",
+  "seq": "42",
+  "atMs": "1700000007000",
+  "agentSessionConfig": {
+    "agentId": "agent-1",
+    "options": [
+      {
+        "id": "mode",
+        "name": "Mode",
+        "description": "How much the agent asks first",
+        "category": "SESSION_CONFIG_CATEGORY_MODE",
+        "type": "SESSION_CONFIG_TYPE_SELECT",
+        "current": "default",
+        "choices": [
+          { "id": "default", "name": "Ask first" },
+          { "id": "bypass", "name": "Do not ask", "skipsPermissions": true }
+        ]
+      },
+      {
+        "id": "web",
+        "name": "Web search",
+        "category": "SESSION_CONFIG_CATEGORY_CUSTOM",
+        "type": "SESSION_CONFIG_TYPE_BOOLEAN",
+        "current": "true"
+      }
+    ]
+  }
+}

@@ -1010,6 +1010,16 @@ where
                 .with("resource", "requests")
                 .with("limit", 256_i64));
         }
+        // ADR-0088 (schema only): the hub has no preview relay yet, so a stream-opening preview command is refused as a missing
+        // capability, not as a misplaced command.
+        if matches!(
+            req.command,
+            Some(command_request::Command::PreviewConnect(_))
+        ) {
+            return Err(
+                Error::new(ErrorCode::ProtocolCapabilityMissing).with("capability", "preview.v1")
+            );
+        }
         let subscribing = matches!(
             req.command,
             Some(
