@@ -1742,11 +1742,12 @@ fn write_link(
     // What a certificate renewal (ADR-0085) kept for the identity being replaced goes first, before anything is written: a save that
     // stops half way must never find the previous identity's pair, a request made for its certificate or its refusals and bring
     // them back.
+    // `node-id` goes LAST of these: a removal that fails part way must never leave the old pair without the id that says whose it is.
     for name in [
-        "node-id",
         agora_node::link_renewal::PREVIOUS,
         agora_node::link_renewal::PENDING,
         agora_node::link_renewal::STATE,
+        "node-id",
     ] {
         match std::fs::remove_file(dir.join(name)) {
             Ok(()) => {}
@@ -1958,6 +1959,19 @@ mod store_tests {
                 );
             }
         }
+    }
+
+    /// A removal that fails must not have taken `node-id` already: the old pair is never left without the id that says whose it is.
+    #[test]
+    fn a_removal_that_fails_leaves_the_old_node_id() {
+        let dir = tmp("keepid");
+        std::fs::create_dir_all(dir.join("renew-state").join("inside")).unwrap();
+        std::fs::write(dir.join("node-id"), "old").unwrap();
+        std::fs::write(dir.join("previous.pem"), "old").unwrap();
+        let r = store_into(&dir, LINK_GUARD_WAIT, NEW, &agora_platform::write_private);
+        assert!(r.is_err());
+        assert_eq!(std::fs::read_to_string(dir.join("node-id")).unwrap(), "old");
+        assert!(!dir.join("previous.pem").exists());
     }
 
     #[cfg(unix)]

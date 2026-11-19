@@ -60,7 +60,30 @@ const NAMES: [&str; 8] = [
 
 /// Text from the hub (or made from it) as it may be kept, logged or shown: no control characters, at most 200 characters.
 pub fn clean(text: &str) -> String {
-    text.chars().filter(|c| !c.is_control()).take(200).collect()
+    text.chars()
+        .filter(|c| {
+            !c.is_control()
+                // Zero-width and direction marks, embeddings, overrides and isolates, and the line and paragraph separators: they
+                // can make a line read as something else.
+                && !matches!(*c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{2028}' | '\u{2029}' | '\u{FEFF}')
+        })
+        .take(200)
+        .collect()
+}
+
+/// The most of a file of ours that is read (the state and the pending request are far smaller): a larger file is not read at all.
+const MAX_READ: u64 = 64 * 1024;
+
+/// The text of `path`, unless it is larger than [`MAX_READ`] or not text.
+fn read_capped(path: &Path) -> Option<String> {
+    use std::io::Read;
+    let mut text = String::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(MAX_READ + 1)
+        .read_to_string(&mut text)
+        .ok()?;
+    (u64::try_from(text.len()).ok()? <= MAX_READ).then_some(text)
 }
 
 /// What the hub said, kept as one short file next to the certificate it was said about.
@@ -117,7 +140,7 @@ impl State {
 
 /// The state recorded in `dir` for the certificate that ends at `ends` (none for a state about another certificate).
 pub fn state(dir: &Path, ends: i64) -> Option<State> {
-    let s = State::decode(&std::fs::read_to_string(dir.join(STATE)).ok()?)?;
+    let s = State::decode(&read_capped(&dir.join(STATE))?)?;
     (s.ends == ends).then_some(s)
 }
 
@@ -151,7 +174,7 @@ impl Ops for Real {
 }
 
 fn read(dir: &Path, name: &str) -> Option<String> {
-    std::fs::read_to_string(dir.join(name)).ok()
+    read_capped(&dir.join(name))
 }
 
 /// The pair of a `previous.pem`: the certificate, then the key.
@@ -625,6 +648,10 @@ impl Renewer {
                     return (Outcome::Failed, self.backoff());
                 };
                 let p = Pending::new(&key, &csr).bound(&snap.link.cert_pem);
+                // A new request has its own five attempts: what was counted for the one given up does not carry over.
+                if state(&self.dir, ends).is_some_and(|s| s.code == "rejected") {
+                    self.clear_state();
+                }
                 let stored = (self.hold)().and_then(|_g| {
                     self.ops
                         .write(&self.dir.join(PENDING), p.encode().as_bytes())
@@ -681,7 +708,7 @@ impl Renewer {
             let count = state(&self.dir, ends)
                 .filter(|s| s.code == "rejected")
                 .map_or(0, |s| s.count)
-                + 1;
+                .saturating_add(1);
             let given_up = count >= MAX_REJECTED;
             let wait = if given_up {
                 self.drop_pending();
@@ -1723,6 +1750,16 @@ mod tests {
         let c = csrs.lock().unwrap();
         assert_eq!(c.len(), 6);
         assert_ne!(c[5], c[0]);
+        drop(c);
+        // The new request starts again from one, and is not given up before its own fifth rejected answer.
+        assert_eq!(state(&j.dir, ends(&j)).unwrap().count, 1);
+        assert!(pending_exists(&j.dir));
+        for n in 2..=4u32 {
+            clock.fetch_add(2 * 3600, Ordering::Relaxed);
+            assert_eq!(r.tick().0, Outcome::Failed);
+            assert_eq!(state(&j.dir, ends(&j)).unwrap().count, n);
+            assert!(pending_exists(&j.dir), "given up after {n}");
+        }
         let _ = std::fs::remove_dir_all(&j.dir);
     }
 
@@ -1839,6 +1876,16 @@ mod tests {
         ] {
             std::fs::write(j.dir.join(f), "keep").unwrap();
         }
+        // A folder named like a temporary file is left alone; a link named like one may go, never what it points at.
+        std::fs::create_dir(j.dir.join("url.tmp-77")).unwrap();
+        std::fs::write(j.dir.join("url.tmp-77").join("inside"), "keep").unwrap();
+        let target = folder("sweep-target");
+        std::fs::write(target.join("secret"), "keep").unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&target, j.dir.join("ca.pem.tmp-88")).unwrap();
+            std::os::unix::fs::symlink(target.join("secret"), j.dir.join("node-id.tmp-5")).unwrap();
+        }
         assert_eq!(recover(&j.dir, &Real), Recovery::Whole);
         assert_eq!(
             files(&j.dir),
@@ -1852,9 +1899,13 @@ mod tests {
                 "mine.pem",
                 "node-id",
                 "notes.tmp-1",
-                "url"
+                "url",
+                "url.tmp-77"
             ]
         );
+        assert_eq!(read_file(&target, "secret"), "keep");
+        assert_eq!(read_file(&j.dir.join("url.tmp-77"), "inside"), "keep");
+        let _ = std::fs::remove_dir_all(&target);
         let _ = std::fs::remove_dir_all(&j.dir);
     }
 
@@ -2026,6 +2077,37 @@ mod tests {
             pending_exists(&j.dir),
             "the only copy of the new key was dropped"
         );
+        let _ = std::fs::remove_dir_all(&j.dir);
+    }
+
+    #[test]
+    fn hub_text_loses_direction_marks_and_zero_width_characters() {
+        let text = "ab\u{202E}cd\u{2066}e\u{200B}f\u{200F}g\u{2028}h\u{FEFF}i\u{202A}j";
+        assert_eq!(clean(text), "abcdefghij");
+        assert_eq!(clean("plain text, ünïcode ok"), "plain text, ünïcode ok");
+    }
+
+    #[test]
+    fn a_state_or_pending_file_larger_than_the_cap_is_not_read() {
+        let j = joined("cap");
+        let e = ends(&j);
+        let line = format!("join_again\nunknown\n{e}\n0\n1\n0\n");
+        std::fs::write(j.dir.join(STATE), &line).unwrap();
+        assert!(state(&j.dir, e).is_some());
+        let mut big = line.clone();
+        big.push_str(&"#".repeat(70 * 1024));
+        std::fs::write(j.dir.join(STATE), &big).unwrap();
+        assert!(state(&j.dir, e).is_none());
+        let (k, c) = request();
+        let p = Pending::new(&k, &c).bound(&j.cert);
+        let mut text = p.encode();
+        std::fs::write(j.dir.join(PENDING), &text).unwrap();
+        assert!(read(&j.dir, PENDING)
+            .and_then(|t| Pending::decode(&t))
+            .is_some());
+        text.push_str(&" ".repeat(70 * 1024));
+        std::fs::write(j.dir.join(PENDING), text).unwrap();
+        assert!(read(&j.dir, PENDING).is_none());
         let _ = std::fs::remove_dir_all(&j.dir);
     }
 }
