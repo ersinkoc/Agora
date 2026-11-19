@@ -170,17 +170,25 @@ fn the_quota_fixtures_give_the_windows_the_files_say() {
         let dir = root().join("fixtures").join(&manifest.kind);
         let mut reader = agora_adapters::usage::FileReader::new(spec).with_quota(Some(quota));
         let mut got = String::new();
+        // Fed as a Windows checkout may give it: every line ends in `\r` (the reader must tolerate it).
         for line in std::fs::read_to_string(dir.join("quota.jsonl"))
             .unwrap()
             .lines()
+            .map(|l| format!("{l}\r"))
         {
-            reader.line(line);
+            reader.line(&line);
             for q in reader.take_quota() {
                 got.push_str(&format!("{} {} {}\n", q.minutes, q.percent, q.resets_ms));
             }
         }
         let want = std::fs::read_to_string(dir.join("quota.expect")).unwrap();
-        assert_eq!(got, want, "{}", manifest.kind);
+        // A checkout may have changed the line endings of the expected text; its content is what counts.
+        assert_eq!(
+            got.trim_end(),
+            want.replace("\r\n", "\n").trim_end(),
+            "{}",
+            manifest.kind
+        );
         checked += 1;
     }
     assert_eq!(checked, 1, "codex maps its rate limits");

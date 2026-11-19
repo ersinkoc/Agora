@@ -694,4 +694,14 @@ mod tests {
         r.line(&limits(BOTH));
         assert_eq!(r.take_quota()[0].line_ms, None);
     }
+
+    /// A JSONL line that still ends in `\r` (a CRLF file, split at `\n`) is read like any other, tokens and plan windows alike.
+    #[test]
+    fn a_line_ending_in_a_carriage_return_is_read() {
+        let mut r = quota_reader();
+        r.line(&format!("{}\r", limits(BOTH)));
+        assert_eq!(r.take_quota().len(), 2);
+        let tokens = r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":7,"output_tokens":1}}}}"#;
+        assert_eq!(r.line(&format!("{tokens}\r")).unwrap().input, 7);
+    }
 }
