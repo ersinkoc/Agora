@@ -27,8 +27,9 @@ impl From<rcgen::Error> for CaError {
     }
 }
 
-/// Validity of an issued device certificate. Short-lived on purpose. Nothing renews it yet: a machine must be enrolled again
-/// before this many days pass (docs/adr/0085-machine-and-hub-certificates-renew-themselves.md is the proposed fix, not built).
+/// Validity of an issued device certificate. Short-lived on purpose. A machine renews it over its own connection and the hub replaces its
+/// own server certificate before it ends (docs/adr/0085-machine-and-hub-certificates-renew-themselves.md); the hub side is built, the
+/// machine side is not yet, so until then a machine must still be enrolled again before this many days pass.
 pub const DEVICE_CERT_DAYS: i64 = 90;
 /// `agora doctor` and `agora hub machines` warn when a certificate has fewer days than this left.
 pub const EXPIRY_WARN_DAYS: i64 = 30;

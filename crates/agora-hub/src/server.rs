@@ -1608,12 +1608,14 @@ fn give_device_changes(hub: &Hub, node_id: &str) {
 async fn serve_node_query<S>(
     mut conn: Conn<S>,
     hub: &Hub,
-    node_id: &str,
+    ca: Option<&Ca>,
+    id: &crate::tls::NodeIdentity,
     first: Frame,
 ) -> Result<(), ServeError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    let node_id = id.node_id.as_str();
     let req =
         v1::CommandRequest::decode(first.payload.as_slice()).map_err(|_| invalid("request"))?;
     let resp = match req.command {
@@ -1630,11 +1632,16 @@ where
                 Err(e) => error_response(&req.request_id, &e),
             }
         }
-        // ADR-0085 (schema only): the hub does not renew certificates yet, so it says so rather than call the command misplaced.
-        Some(command_request::Command::Renew(_)) => error_response(
-            &req.request_id,
-            &Error::new(ErrorCode::ProtocolCapabilityMissing).with("capability", "enroll.renew"),
-        ),
+        // ADR-0085: renewal, only here (the connection's certificate verified and was found active before this function ran).
+        Some(command_request::Command::Renew(r)) => match ca {
+            Some(ca) => renew_certificate(hub, ca, id, &r, &req.request_id),
+            // A hub without a CA issues nothing.
+            None => error_response(
+                &req.request_id,
+                &Error::new(ErrorCode::ProtocolCapabilityMissing)
+                    .with("capability", "enroll.renew"),
+            ),
+        },
         _ => error_response(
             &req.request_id,
             &Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "command"),
@@ -1644,6 +1651,47 @@ where
         .await?;
     conn.close().await;
     Ok(())
+}
+
+/// ADR-0085: answers a machine's `RenewRequest`. The refusal reasons are `enroll.renew_refused`'s; a CSR that does not parse is an invalid
+/// message; a store that cannot be read or written is `internal` (the machine keeps its certificate and asks again).
+fn renew_certificate(
+    hub: &Hub,
+    ca: &Ca,
+    id: &crate::tls::NodeIdentity,
+    r: &v1::RenewRequest,
+    request_id: &str,
+) -> v1::CommandResponse {
+    use crate::enroll::{RenewError, RenewFrom};
+    let now = now_ms();
+    let from = RenewFrom {
+        serial_hex: &id.serial_hex,
+        node_id: &id.node_id,
+        not_after_secs: id.not_after_secs,
+    };
+    match Enrollment::new(hub.store()).renew(ca, &from, &r.csr_pem, now) {
+        Ok(issued) => v1::CommandResponse {
+            request_id: request_id.to_string(),
+            result: Some(command_response::Result::Ok(v1::CommandOk {
+                result: Some(command_ok::Result::Renew(v1::RenewResponse {
+                    cert_pem: issued.cert_pem,
+                    not_after_ms: now.saturating_add(ca.lifetime_ms()),
+                })),
+            })),
+        },
+        Err(RenewError::Refused(why)) => error_response(
+            request_id,
+            &Error::new(ErrorCode::EnrollRenewRefused).with("reason", why.reason()),
+        ),
+        Err(RenewError::Ca(_)) => error_response(
+            request_id,
+            &Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "csr_pem"),
+        ),
+        Err(RenewError::Store(_)) => error_response(
+            request_id,
+            &Error::new(ErrorCode::Internal).with("incident_id", "enroll.renew"),
+        ),
+    }
 }
 
 /// Appends a row to the audit trail. A failure to write is not allowed to take the hub down with it.
@@ -1950,6 +1998,13 @@ async fn handle_within(
                     Error::new(ErrorCode::AuthDeviceRevoked).with("device_id", id.node_id.as_str()),
                 ));
             }
+            // ADR-0085: the first connection with a certificate starts the week after which the machine's older certificates are revoked.
+            // Failing to record it must not stop a machine that is allowed in.
+            if let Err(e) =
+                Enrollment::new(state.hub.store()).note_connected(&id.serial_hex, now_ms())
+            {
+                eprintln!("node {}: could not note its certificate: {e:?}", id.node_id);
+            }
             let mut conn = conn;
             // The first frame decides; a peer that says nothing is dropped like a silent node (ADR-0070).
             let first = match tokio::time::timeout(NODE_SILENCE, conn.recv()).await {
@@ -1961,7 +2016,7 @@ async fn handle_within(
             };
             // ADR-0061: a one-shot question on a connection of its own.
             if (first.stream_id, first.kind) == (STREAM_COMMANDS, 0) {
-                return serve_node_query(conn, &state.hub, &id.node_id, first).await;
+                return serve_node_query(conn, &state.hub, state.ca.as_ref(), &id, first).await;
             }
             // Revoking a node ends its connection, not only its next one (checked inside the conversation, so it ends as any other).
             // While the connection is open, only a record that says "revoked" ends it: a store that cannot be read right now is

@@ -32,6 +32,8 @@ fn err(e: impl fmt::Display) -> TlsError {
 pub struct NodeIdentity {
     pub node_id: String,
     pub serial_hex: String,
+    /// When the certificate ends, in seconds since 1970 (ADR-0085: a renewal is refused after it).
+    pub not_after_secs: i64,
 }
 
 /// An acceptor that completes the handshake only for clients holding a certificate from `ca_cert_pem`.
@@ -135,6 +137,7 @@ pub fn identity(peer_certs: Option<&[CertificateDer<'_>]>) -> Option<NodeIdentit
     Some(NodeIdentity {
         node_id,
         serial_hex: cert.raw_serial_as_string().replace(':', ""),
+        not_after_secs: cert.validity().not_after.timestamp(),
     })
 }
 

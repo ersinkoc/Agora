@@ -4,6 +4,10 @@ Date: 2026-11-17
 
 Accepted: 2026-11-19 (the maintainer's explicit message in the merger chat naming this ADR: "ADR-0085'i kabul ediyorum"). The open questions' proposed answers stand.
 
+Build progress: schema and hub side done (`RenewRequest`/`RenewResponse`, `enroll.renew`, `enroll.renew_refused`; the hub answers a renewal on a certificate connection,
+audits it, revokes superseded certificates after 7 days, and replaces its own server certificate daily when under 30 days remain). Not built yet: the node asking
+(30 days left, daily retry, atomic write of `cert.pem` and `key.pem`), `agora doctor` days left, the window's "needs to join again" card, and the `agora-platform` atomic-replace test.
+
 Origin: an internal audit. `crates/agora-hub/src/ca.rs` promised "renewal is automatic while enrolled"; reading the code and then running it
 (`crates/agora/tests/cert_lifetime.rs`) showed that nothing renews anything.
 

@@ -10,7 +10,7 @@
 use std::net::IpAddr;
 use std::sync::{Mutex, PoisonError};
 
-use crate::ca::Ca;
+use crate::ca::{cert_not_after_secs, Ca};
 use crate::names::{covers, select, Iface, NamesError};
 use crate::tls::{acceptor_with, leaf_hash, TlsSlot};
 
@@ -44,6 +44,8 @@ type HostName = Box<dyn Fn() -> Option<String> + Send + Sync>;
 struct Current {
     names: Vec<String>,
     hash: [u8; 32],
+    /// When the certificate in use ends, seconds since 1970 (ADR-0085).
+    not_after_secs: i64,
 }
 
 pub struct Leaf {
@@ -88,6 +90,7 @@ impl Leaf {
         };
         let (cert, key) = ca.issue_server(&names).map_err(|e| e.to_string())?;
         let hash = leaf_hash(&cert).map_err(|e| e.to_string())?;
+        let not_after_secs = cert_not_after_secs(&cert).map_err(|e| e.to_string())?;
         let acceptor =
             acceptor_with(&cert, &key, ca.cert_pem(), true).map_err(|e| e.to_string())?;
         if let Some(save) = &persist {
@@ -102,7 +105,11 @@ impl Leaf {
             persist,
             extra: None,
             slot: TlsSlot::new(acceptor, hash),
-            current: Mutex::new(Current { names, hash }),
+            current: Mutex::new(Current {
+                names,
+                hash,
+                not_after_secs,
+            }),
         };
         Ok((leaf, failure))
     }
@@ -135,6 +142,36 @@ impl Leaf {
 
     pub fn hash(&self) -> [u8; 32] {
         self.lock().hash
+    }
+
+    /// ADR-0085: replaces the certificate in use with a new one (same names, same CA, a fresh key) when it ends within `within_secs` of
+    /// `now_secs`. New connections use it from then on; open ones keep theirs. The file `agora doctor` reads is written first, and when
+    /// that fails nothing changes and the error is returned. `Ok(true)` when a new certificate is now in use.
+    pub fn renew_if_ending(&self, now_secs: i64, within_secs: i64) -> Result<bool, String> {
+        let mut cur = self.lock();
+        if cur.not_after_secs.saturating_sub(now_secs) > within_secs {
+            return Ok(false);
+        }
+        let (cert, key) = self
+            .ca
+            .issue_server(&cur.names)
+            .map_err(|e| e.to_string())?;
+        let hash = leaf_hash(&cert).map_err(|e| e.to_string())?;
+        let not_after_secs = cert_not_after_secs(&cert).map_err(|e| e.to_string())?;
+        let acceptor =
+            acceptor_with(&cert, &key, self.ca.cert_pem(), true).map_err(|e| e.to_string())?;
+        if let Some(save) = &self.persist {
+            save(&cert).map_err(|e| format!("server-cert.pem: {e}"))?;
+        }
+        self.slot.set(acceptor, hash);
+        cur.hash = hash;
+        cur.not_after_secs = not_after_secs;
+        Ok(true)
+    }
+
+    /// When the certificate in use ends, in seconds since 1970.
+    pub fn not_after_secs(&self) -> i64 {
+        self.lock().not_after_secs
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Current> {
@@ -195,6 +232,7 @@ impl Provision for Leaf {
         };
         let (cert, key) = self.ca.issue_server(&names).map_err(|_| failed())?;
         let hash = leaf_hash(&cert).map_err(|_| failed())?;
+        let not_after_secs = cert_not_after_secs(&cert).map_err(|_| failed())?;
         let acceptor =
             acceptor_with(&cert, &key, self.ca.cert_pem(), true).map_err(|_| failed())?;
         // Saved before it is switched on: when the file cannot be written nothing changes and the owner is told.
@@ -205,7 +243,11 @@ impl Provision for Leaf {
             })?;
         }
         self.slot.set(acceptor, hash);
-        *cur = Current { names, hash };
+        *cur = Current {
+            names,
+            hash,
+            not_after_secs,
+        };
         Ok(hash)
     }
 }
@@ -426,5 +468,79 @@ mod tests {
         let leaf = leaf.with_extra(Box::new(|| vec!["box.tail1.ts.net".to_string()]));
         assert!(leaf.provision().is_ok());
         assert_eq!(leaf.names(), owner);
+    }
+
+    fn quiet_leaf(ca: Ca, persist: Option<Persist>) -> Leaf {
+        Leaf::start(
+            ca,
+            vec!["10.1.2.3".to_string()],
+            "127.0.0.1".parse().unwrap(),
+            Box::new(|| None),
+            Box::new(|| Ok(vec![])),
+            persist,
+        )
+        .unwrap()
+        .0
+    }
+
+    /// ADR-0085: a certificate that does not end soon is left alone; one that does is replaced (same names, a new key), the file
+    /// `agora doctor` reads is rewritten, and a failed write changes nothing.
+    #[test]
+    fn the_server_certificate_is_replaced_only_when_it_ends_soon() {
+        let saved = Arc::new(Mutex::new(Vec::<String>::new()));
+        let sink = Arc::clone(&saved);
+        let ca = Ca::generate("ca")
+            .unwrap()
+            .with_lifetime_for_tests(std::time::Duration::from_secs(100));
+        let leaf = quiet_leaf(
+            ca,
+            Some(Box::new(move |pem| {
+                sink.lock().unwrap().push(pem.to_string());
+                Ok(())
+            })),
+        );
+        let (names, hash, end) = (leaf.names(), leaf.hash(), leaf.not_after_secs());
+        assert_eq!(saved.lock().unwrap().len(), 1, "written at start");
+        // 100 s of life: 60 s left is not within 30 s...
+        assert!(!leaf.renew_if_ending(end - 60, 30).unwrap());
+        assert_eq!(leaf.hash(), hash);
+        assert_eq!(saved.lock().unwrap().len(), 1);
+        // ...and 30 s left is.
+        assert!(leaf.renew_if_ending(end - 30, 30).unwrap());
+        assert_ne!(leaf.hash(), hash, "a new certificate is in use");
+        assert_eq!(leaf.names(), names);
+        assert_eq!(saved.lock().unwrap().len(), 2, "server-cert.pem rewritten");
+        assert_eq!(
+            leaf.slot().current().1,
+            leaf.hash(),
+            "new connections use it"
+        );
+        assert!(leaf.not_after_secs() >= end);
+    }
+
+    #[test]
+    fn a_failed_write_of_the_certificate_file_leaves_the_old_certificate_in_use() {
+        let ca = Ca::generate("ca")
+            .unwrap()
+            .with_lifetime_for_tests(std::time::Duration::from_secs(100));
+        let calls = Arc::new(Mutex::new(0u32));
+        let n = Arc::clone(&calls);
+        let leaf = quiet_leaf(
+            ca,
+            Some(Box::new(move |_| {
+                let mut c = n.lock().unwrap();
+                *c += 1;
+                if *c == 1 {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::other("disk full"))
+                }
+            })),
+        );
+        let (hash, end) = (leaf.hash(), leaf.not_after_secs());
+        assert!(leaf.renew_if_ending(end, 30).is_err());
+        assert_eq!(leaf.hash(), hash);
+        assert_eq!(leaf.slot().current().1, hash);
+        assert_eq!(leaf.not_after_secs(), end);
     }
 }

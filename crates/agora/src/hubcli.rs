@@ -44,6 +44,8 @@ const HUB_CAPABILITIES: &[&str] = &[
     // `DeviceList` on a connection of its own (`device.list`).
     "device.trust",
     "device.list",
+    // ADR-0085: answers a machine's `RenewRequest` on the connection it makes with its certificate.
+    "enroll.renew",
     // ADR-0069: the hub keeps `NodeOnline.binary` in its snapshot (`NodeSnapshot.binary`) and passes `AgentKind.program` through.
     "kinds.program",
     // ADR-0065: speaks the pairing messages (`pairing.v1`, docs/specs/pairing.md). Nothing sends them yet.
@@ -295,6 +297,7 @@ pub fn hub_run(say: &Say, o: &Opts) -> ExitCode {
             let leaf = start_leaf(say, &state, &dir, addr.ip(), &o.names)?;
             let acceptor_slot = leaf.slot();
             watch_remote_names(&dir, &leaf);
+            keep_certificates_fresh(&state, &leaf);
             // The hub can pair once it knows the hash of the certificate machines will see; the switch is closed until the owner
             // opens it.
             state.hub.pairing().enable(leaf.hash());
@@ -391,6 +394,31 @@ fn start_leaf(
     let remote_dir = dir.to_path_buf();
     let leaf = leaf.with_extra(Box::new(move || crate::remotecmd::saved_names(&remote_dir)));
     Ok(Arc::new(leaf))
+}
+
+/// ADR-0085: once at start and then every day, replaces the hub's own server certificate before it ends (when fewer than
+/// [`agora_hub::ca::EXPIRY_WARN_DAYS`] days remain: new connections use the new one, open ones are untouched, `server-cert.pem` is
+/// rewritten) and revokes the older certificates of machines that connected with a newer one a week ago. The thread lives as long as
+/// the process.
+fn keep_certificates_fresh(state: &Arc<ServerState>, leaf: &Arc<agora_hub::leaf::Leaf>) {
+    const DAY: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+    let (state, leaf) = (Arc::clone(state), Arc::clone(leaf));
+    let _ = std::thread::Builder::new()
+        .name("certificates".into())
+        .spawn(move || loop {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
+            match leaf.renew_if_ending(now, agora_hub::ca::EXPIRY_WARN_DAYS * 24 * 60 * 60) {
+                Ok(true) => state.hub.pairing().enable(leaf.hash()),
+                Ok(false) => {}
+                Err(e) => eprintln!("the hub's certificate could not be renewed: {e}"),
+            }
+            if let Err(e) = Enrollment::new(state.hub.store()).revoke_superseded(server::now_ms()) {
+                eprintln!("older machine certificates could not be revoked: {e:?}");
+            }
+            std::thread::sleep(DAY);
+        });
 }
 
 /// Gives the certificate the names `agora remote tailscale` writes while the hub runs: the file is looked at every few seconds, and a

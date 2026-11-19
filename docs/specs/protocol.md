@@ -820,7 +820,7 @@ it has, so no code and no owner step is needed while it is still valid.
 - **Messages** (`schema/agora/v1/enroll.proto`): `RenewRequest { csr_pem }` and `RenewResponse { cert_pem, not_after_ms }`. `CommandRequest`
   field 108 (`renew`) and `CommandOk` field 30 (`renew`) carry them. Golden fixtures: `RenewRequest` and `RenewResponse` in
   `schema/fixtures/v1/`, the two oneof arms in `schema/fixtures/enroll-renew/`.
-- **Capability `enroll.renew`.** Offered by a hub that handles the command. A machine asks only a hub that offers it (an older hub never sees
+- **Capability `enroll.renew`.** Offered by a hub that handles the command (the hub offers it from this step; no node offers or sends it yet). A machine asks only a hub that offers it (an older hub never sees
   the message). Nodes offer nothing for it; they only send.
 - **Where it is accepted.** Only as the first command (`STREAM_COMMANDS`, kind 0) on a TLS connection whose client certificate verifies and
   that the hub lists as active (the connection of ADR-0061's one-shot questions). It is answered once and the connection ends. Without a
@@ -832,8 +832,13 @@ it has, so no code and no owner step is needed while it is still valid.
 - **Refusals** are `enroll.renew_refused` with a `reason`: `unknown`, `revoked`, `expired`, `too_old` (the hub issued the certificate more than a
   certificate lifetime ago), `too_frequent` (a certificate was issued for this machine within the last hour). A CSR that does not parse is
   `protocol.invalid_message` (`field` `csr_pem`).
-- **The hub's own certificate** is not a message: the hub replaces its server certificate itself, before it ends, and new connections use it
-  (nodes pin the CA, not the certificate).
+- **Grace and limits.** `devices` records when each certificate was issued and when the machine first connected with it
+  (`first_seen_ms`, schema 13). A machine's older certificates are revoked 7 days after that first connection with a newer one (checked at
+  each connection and daily); an open connection on a revoked one is closed by the usual check. One certificate per machine per hour counts
+  every certificate issued for it, enrollment included.
+- **The hub's own certificate** is not a message: once at start and then daily the hub replaces its server certificate when fewer than 30 days
+  remain (same names, same CA, a fresh key), rewrites `<hub dir>/server-cert.pem`, and new connections use the new one while open ones keep
+  theirs (nodes pin the CA, not the certificate). When the file cannot be written nothing changes and the next day tries again.
 
 ### A structured agent's conversation (ADR-0090, schema only)
 
