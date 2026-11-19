@@ -7,6 +7,7 @@ import { childPath, directoryReasonKey, type DirectoryInfo, type DirectoryListin
 import { Icon } from './Icon';
 import { isBareName, machineFor, missingPrograms, shortBinary, trustCommand } from './startChoice';
 import { LaunchSettings } from './LaunchSettings';
+import { recall, remember } from './launchMemory';
 import { chosenSettings, noSettings, settingName, usableSettings, type LaunchSettingChoice, type SettingsState } from './launchSettings';
 import { ASK, chosenIds, confirmedIds, confirmSkip, harmless, initialLaunch, keepAsking, labelOf, pickPermission, skipping, toggleHarmless, usableOptions, type LaunchOptionChoice } from './launchChoice';
 // ADR-0059: `options` are the kind's launch options as the machine lists them (none from an older machine).
@@ -73,7 +74,12 @@ export function StartAgent({ projects, machines, initialNode, trust, askApproval
   const [acceptIdentityChange, setAcceptIdentityChange] = useState(false);
   // ADR-0059: "Ask before acting" until the user picks an option that skips permissions and confirms it; a new agent kind starts over.
   const [launch, setLaunch] = useState(initialLaunch);
-  useEffect(() => { setLaunch(initialLaunch()); setChosen(noSettings); }, [kind, node]);
+  useEffect(() => {
+    setLaunch(initialLaunch());
+    // ADR-0066 decision 3: what was last chosen for this kind on this machine, cleaned against what the machine lists now.
+    const listed = kinds !== 'loading' && kinds !== 'failed' ? kinds.find((k) => k.kind === kind)?.settings : undefined;
+    setChosen(kind && listed ? recall(node, kind, listed) : noSettings);
+  }, [kind, node, kinds]); // eslint-disable-line react-hooks/exhaustive-deps
   // ADR-0066: a value per setting, or nothing (the agent's own default); a new kind or machine starts over.
   const [chosen, setChosen] = useState<SettingsState>(noSettings);
   const [busy, setBusy] = useState(false);
@@ -125,7 +131,10 @@ export function StartAgent({ projects, machines, initialNode, trust, askApproval
   };
   const go = async () => {
     if (!info) return;
-    setBusy(true); setError(await onStart(node, info, kind, separate, acceptIdentityChange, { ids: chosenIds(launch, offered), confirmed: confirmedIds(launch, offered), settings: sending })); setBusy(false);
+    setBusy(true);
+    const failure = await onStart(node, info, kind, separate, acceptIdentityChange, { ids: chosenIds(launch, offered), confirmed: confirmedIds(launch, offered), settings: sending });
+    if (!failure) remember(node, kind, sending, takes);
+    setError(failure); setBusy(false);
   };
   // Ids outside `[a-z0-9-]` are never offered (the hub relays the list; the machine decides).
   const offered: LaunchOptionChoice[] = usableOptions((kinds !== 'loading' && kinds !== 'failed' ? kinds.find((k) => k.kind === kind)?.options : undefined) ?? []);

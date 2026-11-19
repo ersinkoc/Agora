@@ -8,7 +8,7 @@ import { isChange } from './sessionChoice';
 beforeEach(() => setLanguage('en'));
 
 const opt = (id: string, name: string, skips = false) => ({ id, name, description: '', skipsPermissions: skips });
-const session: SessionModel = { modes: [opt('build', 'Build'), opt('yolo', 'Bypass', true)], models: [opt('m1', 'Model Large')], currentMode: 'build', currentModel: 'm1', contextTokens: 50_000, contextWindow: 200_000, costMicros: 23_000, currency: 'USD' };
+const session: SessionModel = { modes: [opt('build', 'Build'), opt('yolo', 'Bypass', true)], models: [opt('m1', 'Model Large')], currentMode: 'build', currentModel: 'm1', contextTokens: 50_000, contextWindow: 200_000 };
 
 describe('the agent header', () => {
   it('is one row of menus (not native selects) for what the agent reported, with context, elapsed time and cost', () => {
@@ -19,7 +19,7 @@ describe('the agent header', () => {
     expect(html).toContain('aria-haspopup="menu"');
     expect(html).toContain('Context 25%');
     expect(html).toContain('2 min');
-    expect(html).toContain('reported by the agent');
+    expect(html).not.toMatch(/reported by the agent|\$|USD/); // no money in the header (it lives behind a disclosure in Usage)
   });
   it('never invents a reasoning effort picker: the agent reports modes and models only', () => {
     expect(renderToStaticMarkup(<SessionBar agentKey="n/a" session={session} />).toLowerCase()).not.toContain('effort');

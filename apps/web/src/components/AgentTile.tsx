@@ -9,11 +9,10 @@ import { StateBadge } from './StateBadge';
 import { NoAskBadge } from './NoAskBadge';
 
 // What the fleet console adds to a tile: where it is drawn (the group already names the machine or the project, so the tile names the
-// other one), what the agent asks for, what it cost, and the time. Without it the tile is the plain one of the gallery.
+// other one), what the agent asks for, and the time. Without it the tile is the plain one of the gallery.
 export interface TileContext {
   group: GroupBy;
   ask?: string; // what the agent asks permission for, when it waits on a request
-  cost?: string; // its estimated cost, already formatted
   now?: number;
   same?: ProjectSpread; // the project is open on more than one machine (net/fleet.ts, `sharedAcross`)
 }
@@ -77,7 +76,6 @@ function Tile({ agent, onOpen, context }: { agent: AgentTileModel; onOpen?: (id:
       <span className="tile__meta">
         {where.filter(Boolean).map((x, i) => <span key={i} className="tile__where">{x}</span>)}
         {changed > 0 ? <span>{t('changes-files', { count: changed })}</span> : null}
-        {context.cost ? <span>{t('agent-cost', { amount: context.cost })}</span> : null}
         {typeof when === 'string' ? <span>{when}</span> : when ? <span className="tile__when" title={when.title}><Icon name="clock" className="size-3" />{when.text}</span> : null}
       </span>
     </button>
@@ -87,4 +85,4 @@ function Tile({ agent, onOpen, context }: { agent: AgentTileModel; onOpen?: (id:
 // A tile is redrawn only when what it shows changed: with hundreds of them, a filter or a regrouping redraws the ones that come or go,
 // not the ones that stay. (`context` is a new object on every render of the console, so it is compared by its parts.)
 export const AgentTile = memo(Tile, (a, b) => a.agent === b.agent && a.onOpen === b.onOpen && a.context?.group === b.context?.group && a.context?.ask === b.context?.ask
-  && a.context?.cost === b.context?.cost && a.context?.now === b.context?.now && a.context?.same === b.context?.same && !a.context === !b.context);
+ && a.context?.now === b.context?.now && a.context?.same === b.context?.same && !a.context === !b.context);

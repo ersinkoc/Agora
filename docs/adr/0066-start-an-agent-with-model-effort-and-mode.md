@@ -38,7 +38,7 @@ Manifest format (`[[launch.setting]]`), schema (`AgentStart`/`AgentLaunch` setti
   approval card shows the settings in words (before the prompt, in the lines that must be read before y counts) and signs
   `agora-approval-start-v2` for a request that carries them (`decision_message`: an `agent.start` is only ever answered over v1 without
   settings or v2 with them); the `approval.needs_newer_window` refusal is gone.
-- **Not built yet:** the TUI's start picker (the card is done, the picker in the TUI's own start flow is not), "remembers the last choice per
-  kind per machine" (decision 3), the owner's `start.models` allow-list and the model's price class on the card (decisions 4 and 5: the ADR
+- **Remembered choices (web window):** the start window remembers the last model and effort per kind per machine on this device (localStorage; checked against what the machine lists now, so a value it no longer takes is dropped and never sent) and shows what an agent was started with, read-only, in its header. The agent never reports an effort (the adapter protocol carries modes and models only), so there is no effort menu.
+- **Not built yet:** the TUI's start picker (the card is done, the picker in the TUI's own start flow is not), the owner's `start.models` allow-list and the model's price class on the card (decisions 4 and 5: the ADR
   does not specify the policy key's place or the catalog lookup closely enough for a small change), `mode` as a shipped setting, and
   keeping the settings across a resume after a node restart.

@@ -6,11 +6,12 @@ import { saveGroupBy, useGroupBy } from '../net/fleetPrefs';
 import { GroupByControl, groupTitle } from './GroupByControl';
 import { ProjectChip, ProjectHint } from './ProjectMark';
 import { ago } from '../net/time';
-import { money, type UsageSummary } from '../net/usage';
+import type { UsageSummary } from '../net/usage';
 import { approvalName } from '../net/approvalText';
 import { detailText } from '../net/tool';
 import { type ApprovalModel, type MachineModel, visible } from '../net/view';
 import { AgentTile } from './AgentTile';
+import { Skeleton } from './EmptyState';
 import { Icon } from './Icon';
 import { StateBadge, StateMark } from './StateBadge';
 import type { StartChoice } from './StartApproval';
@@ -191,7 +192,8 @@ function Command({ text }: { text: string }) {
 export function FleetEmpty({ kind, machines, onStart, onRetry, pairing }: { kind: 'connecting' | 'offline' | 'empty' | 'first-run'; machines: readonly MachineModel[]; onStart?: (machine?: string) => void; onRetry?: () => void; pairing?: PairingUi }) {
   const host = typeof window !== 'undefined' && window.location?.host ? window.location.host : 'HUB:7443';
   const online = machines.filter((m) => m.online);
-  if (kind === 'connecting') return <div className="fleet-empty" role="status" aria-busy="true"><p className="muted m-0">{t('fleet-loading')}</p></div>;
+  if (kind === 'connecting') return <div className="fleet-empty fleet-empty--wide" role="status" aria-busy="true"><p className="muted m-0">{t('fleet-loading')}</p>
+      <div className="fleet-grid w-full" aria-hidden>{[0, 1, 2].map((i) => <div key={i} className="tile tile--compact"><Skeleton className="h-4 w-2/3" /><Skeleton className="h-3 w-full" /><Skeleton className="h-3 w-1/2" /></div>)}</div></div>;
   if (kind === 'offline') {
     return (
       <div className="fleet-empty" role="alert">
@@ -258,7 +260,6 @@ export function FleetConsole({ fleet, machines, approvals, usage, link, now, onO
     for (const x of approvals) if (!m.has(x.agentId)) m.set(x.agentId, askText(x));
     return m;
   }, [approvals]);
-  const cost = (a: AgentTileModel) => (usage?.perAgent.has(a.id) ? money(usage.perAgent.get(a.id) ?? 0) : undefined);
 
   const body = empty ? (
     <>
@@ -293,7 +294,7 @@ export function FleetConsole({ fleet, machines, approvals, usage, link, now, onO
             {by === 'project' && spread.get(g.key) && <ProjectHint spread={spread.get(g.key) as ProjectSpread} />}
             {g.agents.length === 0 ? (g.online ? <p className="muted m-0">{t('fleet-no-agents-here')}</p> : null) : (
               <div className="fleet-grid">
-                {g.agents.map((a) => <AgentTile key={a.id} agent={a} onOpen={onOpen} context={{ group: by, ask: asks.get(a.id), cost: cost(a), now, same: by !== 'project' && a.projectId && sharedAcross(spread.get(a.projectId)) ? spread.get(a.projectId) : undefined }} />)}
+                {g.agents.map((a) => <AgentTile key={a.id} agent={a} onOpen={onOpen} context={{ group: by, ask: asks.get(a.id), now, same: by !== 'project' && a.projectId && sharedAcross(spread.get(a.projectId)) ? spread.get(a.projectId) : undefined }} />)}
               </div>
             )}
           </section>

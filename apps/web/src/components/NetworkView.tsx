@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { t } from '../i18n';
 import { ago } from '../net/time';
 import { machineKey, type AgentTileModel } from '../model';
-import { money, type UsageSummary } from '../net/usage';
+import type { UsageSummary } from '../net/usage';
 import { bytesLabel, isOld, type MachineModel } from '../net/view';
 import { ForgetMachines } from './ForgetMachines';
 import { Icon } from './Icon';
@@ -50,7 +50,6 @@ export function NetworkView({ machines: all, agents, usage, hubName, onForget, f
         <code dir="ltr" className="break-all text-xs text-muted">{hubName}</code>
         <p className="m-0 flex items-center gap-1.5"><span aria-hidden className={`size-2 rounded-full ${online ? 'bg-finished' : 'bg-needs-you'}`} />{t('network-online', { online, total: machines.length })}</p>
         <p className="muted m-0">{t('ide-status-agents', { count: agents.length })}{totalMem > 0 ? ` · ${bytesLabel(totalMem)}` : ''}</p>
-        {usage && usage.totalMicroUsd > 0 && <p className="muted m-0">{money(usage.totalMicroUsd)}</p>}
       </div>
     </section>
 
@@ -84,7 +83,6 @@ export function NetworkView({ machines: all, agents, usage, hubName, onForget, f
             <span>{t('machine-agents', { count: m.agentsRunning })}</span>
             {!!m.terminalsOpen && <span>{t('network-terminals', { count: m.terminalsOpen })}</span>}
             {!!m.memoryBytes && <span className="font-mono">{bytesLabel(m.memoryBytes)}</span>}
-            {usage?.perNode.has(m.id) && <span>{t('machine-cost', { amount: money(usage.perNode.get(m.id) ?? 0) })}</span>}
           </div>
           {mine.length > 0 && <ul className="m-0 flex list-none flex-wrap gap-1.5 p-0">
             {mine.map(a => <li key={a.id}><a href={`#/agent/${encodeURIComponent(a.id)}`} className="ide-chip hover:text-ink"><StateMark state={a.state} />{a.name}</a></li>)}

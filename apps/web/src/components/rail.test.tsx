@@ -8,10 +8,10 @@ import { badgeText, loadRailTab, railItems, resolveTab, saveRailTab, shortcutInd
 beforeEach(() => setLanguage('en'));
 
 describe('the right panel rail', () => {
-  const counts = { needs: 2, changed: 3, messages: 0, hasBoard: false, hasCost: false };
-  it('always offers Needs you, Changes and Messages; Board and Spent only when there is something', () => {
+  const counts = { needs: 2, changed: 3, messages: 0, hasBoard: false, hasUsage: false };
+  it('always offers Needs you, Changes and Messages; Board and Usage only when there is something', () => {
     expect(railItems(counts).map((x) => x.id)).toEqual(['needs', 'changes', 'messages']);
-    expect(railItems({ ...counts, hasBoard: true, hasCost: true }).map((x) => x.id)).toEqual(['needs', 'changes', 'board', 'messages', 'cost']);
+    expect(railItems({ ...counts, hasBoard: true, hasUsage: true }).map((x) => x.id)).toEqual(['needs', 'changes', 'board', 'messages', 'usage']);
   });
   it('carries the counts as badges and marks only Needs you as an alert', () => {
     const items = railItems(counts);
@@ -41,7 +41,7 @@ describe('the right panel rail', () => {
     saveRailTab('changes', { setItem: (k, v) => { kept[k] = v; } });
     expect(loadRailTab({ getItem: (k) => kept[k] ?? null })).toBe('changes');
     expect(loadRailTab({ getItem: () => 'nonsense' })).toBeUndefined();
-    expect(() => saveRailTab('cost', { setItem: () => { throw new Error('quota'); } })).not.toThrow();
+    expect(() => saveRailTab('usage', { setItem: () => { throw new Error('quota'); } })).not.toThrow();
     expect(loadRailTab({ getItem: () => { throw new Error('blocked'); } })).toBeUndefined();
   });
 });

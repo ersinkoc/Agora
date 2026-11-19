@@ -29,7 +29,7 @@ palette's "Go home" brings it back. An empty window is the fleet console too. On
      decide*, which opens the agent where the whole request is shown and answered. The row's buttons are the banner's buttons: the same
      function answers, the same signing runs (ADR-0020); nothing is decided on text that was cut.
 3. **Tiles**, grouped by machine, by project, by agent kind or by state (the viewer's choice, remembered in this browser only; the agent list uses the same choice). A tile shows the agent's state,
-   what it is doing in one line, where it is (the project under a machine, the machine under a project), changed files, estimated cost and
+   what it is doing in one line, where it is (the project under a machine, the machine under a project), changed files and
    how long it has been in this state. Clicking a tile opens the agent like the agent list does. Most urgent first inside a group;
    groups that need you first; an offline machine says when it was last seen and that its agents keep running there.
 
