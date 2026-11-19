@@ -7,6 +7,7 @@ import { NoAskBadge } from '../components/NoAskBadge';
 import { type Action, type Place, type Workspace as WorkspaceState, displayRoot, visiblePanes } from './engine';
 import { type Divider, type Frame, type Rect, arrange, dragDelta, dropPlace } from './geometry';
 import { Menu, type MenuItem } from './Menu';
+import { TabStrip } from './TabStrip';
 import { type Bindings, agentOf } from './streams';
 import { type Pane, MIN_RATIO, bindOf, followOf, isKnownPanel, panesOf } from './tree';
 
@@ -145,7 +146,8 @@ export function Workspace({ ws, dispatch, fleet, bindings, narrow, renderAgent, 
       <div key={`bar:${f.key}`} style={{ ...box(f.rect), bottom: undefined, height: BAR }} className={`flex items-stretch border-b border-line bg-surface-1 ${ring}`}
         onPointerDownCapture={() => dispatch({ type: 'focus', pane: front.id })}>
         {f.tabs ? (
-          <div role="tablist" aria-label={t('console-agents')} className="flex min-w-0 flex-1 overflow-x-auto quiet-scroll">
+          <TabStrip tabs={f.panes.map((p, i) => ({ id: p.id, label: label(p), active: i === f.active }))} onPick={(id) => dispatch({ type: 'activate', pane: id })}
+            trailing={onStart && focused ? <button type="button" className="ide-iconbtn m-1 flex-none self-center" onClick={() => onStart()} aria-label={t('ide-new-tab')} title={t('ide-new-tab')}><Icon name="plus" /></button> : undefined}>
             {f.panes.map((p, i) => {
               const pa = agentFor(p);
               return (
@@ -159,8 +161,7 @@ export function Workspace({ ws, dispatch, fleet, bindings, narrow, renderAgent, 
                 </div>
               );
             })}
-            {onStart && focused && <button type="button" className="ide-iconbtn m-1 flex-none" onClick={() => onStart()} aria-label={t('ide-new-tab')} title={t('ide-new-tab')}><Icon name="plus" /></button>}
-          </div>
+          </TabStrip>
         ) : (
           <div className="flex min-w-0 flex-1 cursor-grab items-center gap-2 px-3 text-[0.8125rem]" title={t('layout-drag')} {...dragProps(front)}>
             {a ? <StateMark state={a.state} failed={endedWithError(a)} /> : <Icon name="layout" className="size-3.5 text-muted" />}

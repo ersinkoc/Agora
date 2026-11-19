@@ -53,6 +53,27 @@
   /* Tab strips scroll sideways without drawing scroll buttons or bars (WebView2 showed arrows). */
   .quiet-scroll { scrollbar-width: none; }
   .quiet-scroll::-webkit-scrollbar { display: none; }
+  /* The right panel: an icon rail that is always visible, and the subject beside it. Wide: the subject is part of the layout. Narrow: it is a
+     drawer over the content, opening from the rail, so the rail never clips. Tokens only; the rail's width is the console's RAIL_WIDTH. */
+  .inspector { @apply relative flex min-h-0 border-line bg-surface-1 lg:border-s; }
+  .inspector__panel { @apply flex min-h-0 min-w-0 flex-col border-line bg-surface-1 lg:flex-1 max-lg:absolute max-lg:inset-y-0 max-lg:end-full max-lg:z-20 max-lg:w-[min(22rem,calc(100vw-4.5rem))] max-lg:border-s; }
+  @media (max-width: 1023.98px) { .inspector__panel { box-shadow: var(--shadow); } }
+  .rail { @apply flex w-11 flex-none flex-col items-center gap-1 border-s border-line bg-surface-1 py-2; }
+  .rail__btn { @apply relative inline-grid size-9 place-items-center rounded-s text-muted transition-colors duration-150 hover:bg-surface-2 hover:text-ink; }
+  .rail__btn[aria-selected='true'] { @apply bg-surface-2 text-ink; box-shadow: inset 2px 0 0 var(--accent); }
+  .rail__badge { @apply absolute -end-0.5 -top-0.5 min-w-4 rounded-full bg-surface-2 px-1 text-center text-xs leading-4 font-semibold text-ink; border: 1px solid var(--border); }
+  .rail__badge--alert { @apply border-transparent bg-needs-you text-on-accent; }
+  /* The name and shortcut of a rail icon: beside it, towards the panel, on hover and keyboard focus. */
+  .rail__btn::after { content: attr(data-tip); @apply pointer-events-none invisible absolute end-full top-1/2 z-30 me-2 -translate-y-1/2 whitespace-nowrap rounded-xs border border-line bg-surface-1 px-2 py-1 text-xs text-ink opacity-0 transition-opacity duration-150; box-shadow: var(--shadow); }
+  .rail__btn:focus-visible::after { @apply visible opacity-100; }
+  @media (hover: hover) { .rail__btn:hover::after { @apply visible opacity-100; } }
+
+  /* A tab row wider than its space: the edge that has more fades out (a mask, so it follows any theme), mirrored in a right-to-left row. */
+  .tab-strip[data-fade-end] { mask-image: linear-gradient(to right, #000 calc(100% - 2rem), transparent); }
+  .tab-strip[data-fade-start] { mask-image: linear-gradient(to left, #000 calc(100% - 2rem), transparent); }
+  .tab-strip[data-fade-start][data-fade-end] { mask-image: linear-gradient(to right, transparent, #000 2rem, #000 calc(100% - 2rem), transparent); }
+  [dir='rtl'] .tab-strip[data-fade-end] { mask-image: linear-gradient(to left, #000 calc(100% - 2rem), transparent); }
+  [dir='rtl'] .tab-strip[data-fade-start] { mask-image: linear-gradient(to right, #000 calc(100% - 2rem), transparent); }
   .ide-section { @apply px-3 pb-1 pt-3 text-xs font-semibold tracking-wider text-muted uppercase; }
   .page { @apply mx-auto grid max-w-3xl gap-6 px-4 py-8; }
   .topbar { @apply flex items-center justify-between gap-4; }
@@ -212,7 +233,7 @@
 /* A touch screen (a phone, a tablet at any width): everything a finger presses has a hit area of at least --tap, buttons, tabs, rows,
    icon buttons, chips that act and the menu tiles. They grow on touch only; with a mouse they keep their dense size. */
 @media (pointer: coarse) {
-  .button, .terminal-jump, .ide-iconbtn, .ide-tab, .ide-row, .menu-tile, .fleet-count, .fleet-seg, .tile, button.ide-chip, a.ide-chip, .ide-bar > a, .ide-bar > button, input:not([type='checkbox'], [type='radio']), select { min-height: var(--tap); }
+  .button, .terminal-jump, .ide-iconbtn, .ide-tab, .ide-row, .rail__btn, .menu-tile, .fleet-count, .fleet-seg, .tile, button.ide-chip, a.ide-chip, .ide-bar > a, .ide-bar > button, input:not([type='checkbox'], [type='radio']), select { min-height: var(--tap); }
   footer.ide-bar { height: auto; }
   /* A row whose label holds a radio or a checkbox: the whole label is the target (the box itself stays its size). */
   .touch-row { min-height: var(--tap); }

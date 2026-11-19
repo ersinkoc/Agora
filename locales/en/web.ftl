@@ -568,6 +568,7 @@ ide-copy-address = Copy address
 ide-tab-changes = Changes
 ide-tab-messages = Messages
 ide-tab-cost = Spent
+ide-more-tabs = More tabs
 theme-label = Colour scheme
 theme-system = Follow the system
 ide-shared = Shared

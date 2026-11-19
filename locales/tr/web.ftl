@@ -550,6 +550,7 @@ ide-copy-address = Adresi kopyala
 ide-tab-changes = Değişiklikler
 ide-tab-messages = Mesajlar
 ide-tab-cost = Harcama
+ide-more-tabs = Diğer sekmeler
 theme-label = Renk düzeni
 theme-system = Sistemi izle
 ide-shared = Paylaşılan

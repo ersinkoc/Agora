@@ -21,6 +21,7 @@ import { FleetConsole } from './FleetConsole';
 import type { PairingUi } from './Pairing';
 import { Icon } from './Icon';
 import { Inspector } from './Inspector';
+import { loadRailTab, saveRailTab, type RailTab } from './rail';
 import { LanguagePicker } from './LanguagePicker';
 import { ThemePicker } from './ThemePicker';
 import { MAX_SIZE, MIN_SIZE, setTerminalSize, terminalSize } from '../terminal/prefs';
@@ -46,6 +47,8 @@ import { ThemeEditor } from '../themes/ThemeEditor';
 const TerminalView = lazy(() => import('../terminal/TerminalView').then((m) => ({ default: m.TerminalView })));
 
 const MAX_AUTO_PINNED = 4;
+// The icon rail of the right panel (2.75rem at the default text size), always there; the panel's own width comes on top when it is open.
+const RAIL_WIDTH = 44;
 // The search shortcut as the keyboard spells it: ⌘ on Apple machines (the desktop app's WebKit included), Ctrl elsewhere.
 const commandKey = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent) ? '⌘' : 'Ctrl';
 const homeWorkspace = () => workspaceOf({ version: LAYOUT_VERSION, root: { type: 'pane', id: 'p1', panel: 'fleet' } });
@@ -151,6 +154,9 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   useEffect(() => { const on = () => textSize((n) => n + 1); window.addEventListener('agora-terminal-size', on); return () => window.removeEventListener('agora-terminal-size', on); }, []);
   const [showAgents, setShowAgents] = useState(saved?.showAgents ?? wide());
   const [showDetails, setShowDetails] = useState(saved?.showDetails ?? wide());
+  // The right panel's rail: which subject it opens on, remembered in this browser (whether it is open is part of the saved layout).
+  const [railTab, setRailTabState] = useState<RailTab>(() => loadRailTab() ?? 'needs');
+  const setRailTab = useCallback((x: RailTab) => { setRailTabState(x); saveRailTab(x); }, []);
   const [leftWidth, setLeftWidth] = useState(saved?.leftWidth ?? 272);
   const [rightWidth, setRightWidth] = useState(saved?.rightWidth ?? 336);
   const [reviewing, setReviewing] = useState<string | undefined>();
@@ -205,7 +211,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   // An agent that is waiting and has an approval open is one thing that needs you, not two.
   const needs = attention.length + approvals.filter((x) => !attention.some((a) => a.id === x.agentId)).length + (pairing?.cards.length ?? 0);
   // Panel widths are what the user dragged them to; on a phone the panels stack and the widths do not apply.
-  const cols = `${showAgents ? `${leftWidth}px ` : ''}minmax(0,1fr)${showDetails ? ` ${rightWidth}px` : ''}`
+  const cols = `${showAgents ? `${leftWidth}px ` : ''}minmax(0,1fr) ${showDetails ? rightWidth + RAIL_WIDTH : RAIL_WIDTH}px`
   const find = (id?: string) => fleet.find((a) => a.id === id);
 
   // Editor habits: Alt+1…9 picks a tab of the group in focus (or a pane, when it has no tabs), Ctrl/⌘+B hides or shows the agent list.
@@ -303,7 +309,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   };
   const home = (
     <div className="min-h-0 flex-1 overflow-y-auto">
-      <FleetConsole fleet={fleet} machines={machines} approvals={approvals} usage={usage} link={link} now={now} onOpen={openFromFleet} onStart={onStart} onResolve={onResolve} onReview={() => setShowDetails(true)} onRetry={onRetry} pairing={pairing} />
+      <FleetConsole fleet={fleet} machines={machines} approvals={approvals} usage={usage} link={link} now={now} onOpen={openFromFleet} onStart={onStart} onResolve={onResolve} onReview={() => { setRailTab('needs'); setShowDetails(true); }} onRetry={onRetry} pairing={pairing} />
     </div>
   );
   const welcome = home;
@@ -324,27 +330,28 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
         <ThemePicker />
         <a className="ide-chip hidden whitespace-nowrap hover:text-ink md:inline-flex" href="#/device">{t('device-link')}</a>
         {onLock && <button type="button" className="ide-chip whitespace-nowrap hover:text-ink" onClick={onLock} title={t('lock-now-hint')}><Icon name="lock" className="size-3.5" />{t('lock-now')}</button>}
-        {!showDetails && <button type="button" className="ide-iconbtn" onClick={() => setShowDetails(true)} aria-label={t('ide-show-details')} title={t('ide-show-details')}><Icon name="panelRight" /></button>}
       </header>
 
-      <div className="relative grid min-h-0 grid-cols-1 overflow-y-auto max-lg:auto-rows-max lg:overflow-visible lg:[grid-template-columns:var(--cols)]" style={{ ['--cols' as string]: cols }}>
+      <div className="relative grid min-h-0 grid-cols-[minmax(0,1fr)_auto] overflow-hidden lg:[grid-template-columns:var(--cols)]" style={{ ['--cols' as string]: cols }}>
         {showAgents && <div className="absolute inset-y-0 z-10 hidden lg:block" style={{ insetInlineStart: leftWidth }}><Resizer side="start" value={leftWidth} min={200} max={480} onChange={setLeftWidth} /></div>}
-        {showDetails && <div className="absolute inset-y-0 z-10 hidden lg:block" style={{ insetInlineEnd: rightWidth }}><Resizer side="end" value={rightWidth} min={260} max={560} onChange={setRightWidth} /></div>}
+        {showDetails && <div className="absolute inset-y-0 z-10 hidden lg:block" style={{ insetInlineEnd: rightWidth + RAIL_WIDTH }}><Resizer side="end" value={rightWidth} min={260} max={560} onChange={setRightWidth} /></div>}
+        <div className="flex min-h-0 min-w-0 flex-col overflow-y-auto lg:contents">
         {showAgents && <Explorer fleet={projectFilter ? fleet.filter((a) => a.projectId === projectFilter) : fleet} machines={machines} projects={projectOptions} project={projectFilter} onProject={chooseProject} open={shownAgents} current={current?.id} onToggle={select} onStart={onStart} onCollapse={() => setShowAgents(false)} onDismiss={removeClosed} everyone={!!onForget} forgetError={forgetError} onResume={resume} resuming={resuming} resumeError={resumeError} />}
 
         <main className="flex min-h-[70dvh] min-w-0 flex-col lg:min-h-0" aria-label={t('focus-terminal')}>
           <Workspace ws={ws} dispatch={dispatch} fleet={fleet} bindings={bindings} narrow={narrow} renderAgent={agentBody} renderPanel={panel}
             onFiles={filesOf ? (a) => setBrowsing(a.id) : undefined} renderFiles={filesOf ? (a) => { const f = filesOf(a); return f ? <FilesView files={f} load={loadDiff && a.git !== false ? (path) => loadDiff(a, path) : undefined} changed={a.filesChanged} compact /> : undefined; } : undefined} onStart={onStart ? () => onStart() : undefined} welcome={welcome} />
         </main>
+        </div>
 
-        {showDetails && <Inspector pairing={pairing} attention={attention} approvals={approvals} notice={notice} changed={changed} boards={boards} messages={messages} usage={usage} projects={projects} onOpen={onOpen}
-          onResolve={onResolve} onReview={loadDiff ? setReviewing : undefined} onCollapse={() => setShowDetails(false)} />}
+        <Inspector pairing={pairing} attention={attention} approvals={approvals} notice={notice} changed={changed} boards={boards} messages={messages} usage={usage} projects={projects} onOpen={onOpen}
+          onResolve={onResolve} onReview={loadDiff ? setReviewing : undefined} open={showDetails} onOpenChange={setShowDetails} tab={railTab} onTab={setRailTab} />
       </div>
 
       <footer className="ide-bar h-6 flex-wrap border-t text-xs text-muted" aria-label={t('console-activity')}>
         <a className="inline-flex items-center gap-1.5 hover:text-ink" href="#/machines"><span aria-hidden className={`size-1.5 rounded-full ${link === 'live' ? 'bg-finished' : 'bg-needs-you'}`} />{t('machines-online', { count: machines.filter((m) => m.online).length })}</a>
         <span>{t('ide-status-agents', { count: fleet.filter((a) => !a.closed).length })}</span>
-        {needs > 0 && <button type="button" className="text-needs-you hover:underline" onClick={() => setShowDetails(true)}>{t('ide-status-needs', { count: needs })}</button>}
+        {needs > 0 && <button type="button" className="text-needs-you hover:underline" onClick={() => { setRailTab('needs'); setShowDetails(true); }}>{t('ide-status-needs', { count: needs })}</button>}
         {forgetError && <span role="alert" className="truncate text-needs-you">{t('closed-forget-failed', { reason: t(forgetReasonKey(forgetError)) })}</span>}
         <span className="flex-1" />
         {usage && usage.totalMicroUsd > 0 && <span>{money(usage.totalMicroUsd)}</span>}
