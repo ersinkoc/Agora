@@ -389,6 +389,7 @@ export function tiles(v: View): AgentTileModel[] {
     return {
       id,
       name: `${a.kind} · ${ACCENT_NAMES[i]}`,
+      ...(a.kind ? { kind: a.kind } : {}),
       accent: ACCENTS[i] as string,
       machine: node?.hostname || a.nodeId,
       machineId: a.nodeId,

@@ -21,6 +21,7 @@ export interface AgentTileModel {
   id: string;
   name: string; // generated short name, e.g. "claude · amber"
   accent: string; // CSS color for this instance
+  kind?: string; // what kind of agent it is ("claude", "codex"), as the node reported it
   machine: string;
   machineId?: string; // Enrollment identity; host names are display labels and need not be unique.
   workspace: string;

@@ -917,6 +917,20 @@ fleet-group-by = Group by
 fleet-group-machine = Machine
 fleet-group-project = Project
 fleet-no-project = No project
+fleet-group-kind = Agent
+fleet-group-state = State
+fleet-no-kind = Unknown agent
+fleet-same-project =
+    { $count ->
+        [one] Same project · { $count } machine
+       *[other] Same project · { $count } machines
+    }
+fleet-same-project-on = Open on { $machines }
+fleet-project-changing =
+    { $count ->
+        [one] Changes on { $count } machine in this project.
+       *[other] Agents on { $count } machines have changes in this project. Check that they are not editing the same files.
+    }
 fleet-offline-since = Offline. Last seen { $when }.
 fleet-offline-note = Agents keep running there; what they did shows up here when it reconnects.
 fleet-no-agents-here = No agents here yet.

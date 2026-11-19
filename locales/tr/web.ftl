@@ -899,6 +899,20 @@ fleet-group-by = Gruplama
 fleet-group-machine = Makine
 fleet-group-project = Proje
 fleet-no-project = Projesiz
+fleet-group-kind = Ajan
+fleet-group-state = Durum
+fleet-no-kind = Bilinmeyen ajan
+fleet-same-project =
+    { $count ->
+        [one] Aynı proje · { $count } makine
+       *[other] Aynı proje · { $count } makine
+    }
+fleet-same-project-on = Şurada açık: { $machines }
+fleet-project-changing =
+    { $count ->
+        [one] Bu projede { $count } makinede değişiklik var.
+       *[other] Bu projede { $count } makinedeki ajanların değişiklikleri var. Aynı dosyaları düzenlemediklerinden emin olun.
+    }
 fleet-offline-since = Çevrimdışı. Son görülme: { $when }.
 fleet-offline-note = Ajanlar orada çalışmaya devam eder; yaptıkları makine yeniden bağlanınca burada görünür.
 fleet-no-agents-here = Burada henüz ajan yok.

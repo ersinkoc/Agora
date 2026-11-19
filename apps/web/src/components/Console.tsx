@@ -21,6 +21,8 @@ import { FleetConsole } from './FleetConsole';
 import type { PairingUi } from './Pairing';
 import { Icon } from './Icon';
 import { Inspector } from './Inspector';
+import { saveGroupBy, useGroupBy } from '../net/fleetPrefs';
+import { projectSpread } from '../net/fleet';
 import { loadRailTab, saveRailTab, type RailTab } from './rail';
 import { LanguagePicker } from './LanguagePicker';
 import { ThemePicker } from './ThemePicker';
@@ -102,6 +104,8 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   const cleared = useSyncExternalStore(subscribeDismissed, dismissedIds, dismissedIds);
   // What was cleared stays hidden only while the agent is closed: one that runs again (a new run under the same id) is back in the list.
   const fleet = useMemo(() => sortFleet(agents.filter((a) => !(a.closed && cleared.has(a.id)))), [agents, cleared]);
+  const groupBy = useGroupBy();
+  const spread = useMemo(() => projectSpread(fleet), [fleet]);
   const [now, setNow] = useState(Date.now());
   useEffect(() => { const id = setInterval(() => setNow(Date.now()), 15000); return () => clearInterval(id); }, []);
   const saved = useRef(loadLayout()).current;
@@ -336,7 +340,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
         {showAgents && <div className="absolute inset-y-0 z-10 hidden lg:block" style={{ insetInlineStart: leftWidth }}><Resizer side="start" value={leftWidth} min={200} max={480} onChange={setLeftWidth} /></div>}
         {showDetails && <div className="absolute inset-y-0 z-10 hidden lg:block" style={{ insetInlineEnd: rightWidth + RAIL_WIDTH }}><Resizer side="end" value={rightWidth} min={260} max={560} onChange={setRightWidth} /></div>}
         <div className="flex min-h-0 min-w-0 flex-col overflow-y-auto lg:contents">
-        {showAgents && <Explorer fleet={projectFilter ? fleet.filter((a) => a.projectId === projectFilter) : fleet} machines={machines} projects={projectOptions} project={projectFilter} onProject={chooseProject} open={shownAgents} current={current?.id} onToggle={select} onStart={onStart} onCollapse={() => setShowAgents(false)} onDismiss={removeClosed} everyone={!!onForget} forgetError={forgetError} onResume={resume} resuming={resuming} resumeError={resumeError} />}
+        {showAgents && <Explorer by={groupBy} onBy={saveGroupBy} spread={spread} fleet={projectFilter ? fleet.filter((a) => a.projectId === projectFilter) : fleet} machines={machines} projects={projectOptions} project={projectFilter} onProject={chooseProject} open={shownAgents} current={current?.id} onToggle={select} onStart={onStart} onCollapse={() => setShowAgents(false)} onDismiss={removeClosed} everyone={!!onForget} forgetError={forgetError} onResume={resume} resuming={resuming} resumeError={resumeError} />}
 
         <main className="flex min-h-[70dvh] min-w-0 flex-col lg:min-h-0" aria-label={t('focus-terminal')}>
           <Workspace ws={ws} dispatch={dispatch} fleet={fleet} bindings={bindings} narrow={narrow} renderAgent={agentBody} renderPanel={panel}
