@@ -190,9 +190,9 @@ export function connectLive(o: LiveOptions): Live {
     const dropped = mayBeRefusal && isOpen && !heard;
     isOpen = false;
     refusals = heard ? 0 : dropped ? refusals + 1 : refusals;
-    if (refusals >= 2 && !closed) { closed = true; o.onRejected?.(); return; }
     for (const p of pending.values()) p.reject(new CommandError('node.offline'));
     pending.clear();
+    if (refusals >= 2 && !closed) { closed = true; o.onRejected?.(); return; }
     if (closed) return;
     o.onState('offline');
     if (timer) clearTimeout(timer);
@@ -227,6 +227,7 @@ export function connectLive(o: LiveOptions): Live {
     // come much later, or never.
     opening = setTimeout(() => { if (sock === s && !isOpen) abandon(s); }, OPEN_WITHIN_MS);
     s.onopen = () => {
+      if (closed || sock !== s) return;
       if (opening) clearTimeout(opening);
       opening = undefined;
       isOpen = true;
@@ -244,8 +245,9 @@ export function connectLive(o: LiveOptions): Live {
       for (const stream of chats.keys()) subscribeChat(stream);
     };
     s.onmessage = (m) => {
+      if (closed || sock !== s) return;
       if (!(m.data instanceof ArrayBuffer || ArrayBuffer.isView(m.data))) return;
-      const bytes = m.data instanceof ArrayBuffer ? new Uint8Array(m.data) : new Uint8Array((m.data as ArrayBufferView).buffer);
+      const bytes = m.data instanceof ArrayBuffer ? new Uint8Array(m.data) : new Uint8Array(m.data.buffer, m.data.byteOffset, m.data.byteLength);
       heard = true;
       received++;
       const f = decodeFrame(bytes);
@@ -374,7 +376,11 @@ export function connectLive(o: LiveOptions): Live {
       quiet();
       if (timer) clearTimeout(timer);
       if (opening) clearTimeout(opening);
-      sock?.close();
+      const s = sock;
+      if (s) {
+        lost(s, false);
+        s.close();
+      }
     },
   };
 }

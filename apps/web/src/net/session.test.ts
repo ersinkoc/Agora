@@ -15,6 +15,18 @@ describe('hub token', () => {
   it('is absent when nothing was given', () => {
     expect(readToken('', store())).toEqual({ token: undefined, rest: '' });
   });
+  it('ignores malformed escaping without overwriting the saved token', () => {
+    const s = store();
+    s.setItem('agora.hubToken', 'saved');
+    for (const value of ['%', '%2', '%GG', '%E0%A4%A', '%ED%A0%80', '%FF']) {
+      const hash = `#token=${value}&/agent/x`;
+      expect(readToken(hash, s)).toEqual({ token: 'saved', rest: hash });
+      expect(s.getItem('agora.hubToken')).toBe('saved');
+      expect(readToken(hash, undefined)).toEqual({ token: undefined, rest: hash });
+    }
+    expect(readToken('#token=', s)).toEqual({ token: 'saved', rest: '#token=' });
+    expect(readToken('#token=ab%2Bc&/agent/x', s)).toEqual({ token: 'ab+c', rest: '#/agent/x' });
+  });
 });
 
 describe('sign-in', () => {
@@ -22,6 +34,14 @@ describe('sign-in', () => {
   it('reads a code from the fragment', () => {
     expect(readCode('#code=AB12-CD34&/agent/x')).toEqual({ code: 'AB12-CD34', rest: '#/agent/x' });
     expect(readCode('#/x')).toEqual({ rest: '#/x' });
+  });
+  it('ignores invalid code escaping and keeps valid encoded codes', () => {
+    for (const value of ['%', '%2', '%GG', '%E0%A4%A', '%ED%A0%80', '%FF']) {
+      const hash = `#code=${value}&/agent/x`;
+      expect(readCode(hash)).toEqual({ rest: hash });
+    }
+    expect(readCode('#code=')).toEqual({ rest: '#code=' });
+    expect(readCode('#code=AB12%2DCD34&/agent/x')).toEqual({ code: 'AB12-CD34', rest: '#/agent/x' });
   });
   it('maps the hub answers', async () => {
     expect(await signIn('x', undefined, reply(401))).toEqual({ ok: false, reason: 'refused' });
