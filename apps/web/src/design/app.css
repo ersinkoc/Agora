@@ -177,6 +177,23 @@
   .tile__meta { @apply flex min-w-0 flex-wrap gap-x-2 gap-y-0.5 text-xs text-muted; }
   .tile__where { @apply min-w-0 break-all; }
   .tile--failed { border-color: var(--text-muted); }
+
+  /* Polish (state first): a tile's edge carries its state colour (the state word and mark are inside: never colour alone). What needs you is
+     the loudest thing on the page: a tinted card with a strong edge and its question in full-strength text. Working has a slow line along
+     its foot; finished settles quietly. Motion is only for people who have not asked for reduced motion. */
+  .tile--compact { @apply relative overflow-hidden transition-[background-color,border-color,transform] duration-150; border-inline-start-width: 4px; }
+  .tile--compact:hover { @apply -translate-y-px; }
+  .tile--needs-you { background: color-mix(in oklab, var(--state-needs-you) 9%, var(--surface-1)); border-color: color-mix(in oklab, var(--state-needs-you) 70%, var(--border)); border-inline-start-color: var(--state-needs-you); box-shadow: 0 0 0 1px color-mix(in oklab, var(--state-needs-you) 35%, transparent); }
+  .tile--needs-you:hover { background: color-mix(in oklab, var(--state-needs-you) 14%, var(--surface-1)); }
+  .tile__activity--ask { @apply text-sm font-medium text-ink; }
+  .tile--working::after { content: ''; @apply pointer-events-none absolute inset-x-0 bottom-0 h-0.5; background: linear-gradient(90deg, transparent, var(--state-working), transparent); opacity: 0.55; }
+  .tile--closed .tile__name { @apply text-muted; }
+  .tile__when { @apply inline-flex items-center gap-1; }
+  .tile--needs-you .tile__when { @apply font-medium text-needs-you; }
+  @media (prefers-reduced-motion: no-preference) {
+    .tile--working::after { background-size: 200% 100%; animation: sweep 2.8s ease-in-out infinite; }
+    .tile--needs-you:not(.tile--closed) { animation: nudge 2.4s ease-in-out infinite; }
+  }
   .tile--closed { @apply opacity-90; }
 
   .fleet-empty { @apply mx-auto grid max-w-xl justify-items-start gap-3 py-10; }
@@ -246,6 +263,8 @@
 }
 
 @keyframes flow { to { stroke-dashoffset: -24; } }
+@keyframes sweep { from { background-position: 100% 0; } to { background-position: -100% 0; } }
+@keyframes nudge { 50% { box-shadow: 0 0 0 3px color-mix(in oklab, var(--state-needs-you) 28%, transparent); } }
 @keyframes breathe { 50% { opacity: 0.45; } }
 @keyframes attend { 50% { transform: scale(1.25); } }
 @media (prefers-reduced-motion: no-preference) { .net-link--on { animation: flow 1.2s linear infinite; } }
