@@ -204,7 +204,7 @@ async fn a_machine_renews_on_a_connection_made_with_its_certificate() {
     ))]))
     .unwrap();
     assert!(e.is_active(&old.serial_hex).unwrap());
-    // It can be used to connect; asking again at once is refused by the hour limit, on either certificate.
+    // It can be used to connect; asking again at once is refused by the hour limit.
     let mut again = dial_tls(
         r.addr,
         client_tls(&r.trust, Some((done.cert_pem.clone(), new_key))),
@@ -213,14 +213,36 @@ async fn a_machine_renews_on_a_connection_made_with_its_certificate() {
     let (_, csr2) = new_device_request().unwrap();
     let refused = ask(&mut again, renew(&csr2)).await.expect("an answer");
     assert_eq!(code(&refused), "enroll.renew_refused too_frequent");
-    // The audit trail has one row for the renewal.
+    // The old certificate is still valid (grace) but is superseded: it may connect, and may not renew. Asking over and over is
+    // one audit row.
+    for _ in 0..3 {
+        let mut stale = dial_tls(
+            r.addr,
+            client_tls(&r.trust, Some((r.cert.clone(), r.key.clone()))),
+        )
+        .await;
+        let refused = ask(&mut stale, renew(&csr2)).await.expect("an answer");
+        assert_eq!(code(&refused), "enroll.renew_refused superseded");
+    }
+    // The audit trail has one row for the renewal (with the serial presented) and one per kind of refusal.
     let rows = agora_hub::audit::Audit::new(r.state.hub.store())
-        .list(0, None, 10)
+        .list(0, None, 100)
         .unwrap();
     let renewals: Vec<_> = rows.iter().filter(|a| a.action == "enroll.renew").collect();
     assert_eq!(renewals.len(), 1);
     assert_eq!(renewals[0].node, "box");
     assert!(renewals[0].outcome.contains(&id.serial_hex));
+    assert!(renewals[0]
+        .outcome
+        .contains(&format!("presented={}", old.serial_hex)));
+    let refusals: Vec<_> = rows
+        .iter()
+        .filter(|a| a.action == "enroll.renew_refused")
+        .map(|a| a.outcome.clone())
+        .collect();
+    assert_eq!(refusals.len(), 2, "{refusals:?}");
+    assert!(refusals.contains(&format!("reason=superseded presented={}", old.serial_hex)));
+    assert!(refusals.contains(&format!("reason=too_frequent presented={}", id.serial_hex)));
 }
 
 fn pem_der(pem: &str) -> Vec<u8> {

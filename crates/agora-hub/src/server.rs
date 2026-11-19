@@ -2000,9 +2000,11 @@ async fn handle_within(
             }
             // ADR-0085: the first connection with a certificate starts the week after which the machine's older certificates are revoked.
             // Failing to record it must not stop a machine that is allowed in.
-            if let Err(e) =
-                Enrollment::new(state.hub.store()).note_connected(&id.serial_hex, now_ms())
-            {
+            if let Err(e) = Enrollment::new(state.hub.store()).note_connected(
+                &id.node_id,
+                &id.serial_hex,
+                now_ms(),
+            ) {
                 eprintln!("node {}: could not note its certificate: {e:?}", id.node_id);
             }
             let mut conn = conn;

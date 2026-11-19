@@ -423,9 +423,13 @@ fn a_machine_whose_certificate_ended_cannot_renew_it() {
     let addr = rig.listen_with(rig.acceptor.clone());
     rig.wait_past_expiry();
     // The hub refuses the TLS handshake of an ended certificate, so there is no one to answer.
+    let err = rig
+        .renew(addr, "m")
+        .expect_err("an ended certificate renewed");
+    // Refused by TLS before any command (a certificate alert), not by a hub answer: no `enroll.renew_refused` could be sent.
     assert!(
-        rig.renew(addr, "m").is_err(),
-        "an ended certificate renewed"
+        !err.starts_with("enroll.") && err.to_lowercase().contains("cert"),
+        "refused for another reason than the ended certificate: {err}"
     );
 }
 

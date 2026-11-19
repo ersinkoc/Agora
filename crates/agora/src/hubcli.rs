@@ -399,26 +399,63 @@ fn start_leaf(
 /// ADR-0085: once at start and then every day, replaces the hub's own server certificate before it ends (when fewer than
 /// [`agora_hub::ca::EXPIRY_WARN_DAYS`] days remain: new connections use the new one, open ones are untouched, `server-cert.pem` is
 /// rewritten) and revokes the older certificates of machines that connected with a newer one a week ago. The thread lives as long as
-/// the process.
+/// the process and survives a failure or a panic of one round: it says so on the log at warn level and tries again after a wait that
+/// doubles from 5 minutes up to an hour, then returns to daily when a round works.
 fn keep_certificates_fresh(state: &Arc<ServerState>, leaf: &Arc<agora_hub::leaf::Leaf>) {
     const DAY: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+    const FIRST_RETRY: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+    const LAST_RETRY: std::time::Duration = std::time::Duration::from_secs(60 * 60);
     let (state, leaf) = (Arc::clone(state), Arc::clone(leaf));
     let _ = std::thread::Builder::new()
         .name("certificates".into())
-        .spawn(move || loop {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
-            match leaf.renew_if_ending(now, agora_hub::ca::EXPIRY_WARN_DAYS * 24 * 60 * 60) {
-                Ok(true) => state.hub.pairing().enable(leaf.hash()),
-                Ok(false) => {}
-                Err(e) => eprintln!("the hub's certificate could not be renewed: {e}"),
+        .spawn(move || {
+            let mut retry = FIRST_RETRY;
+            loop {
+                let round = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    certificate_round(&state, &leaf)
+                }));
+                let wait = match round {
+                    Ok(true) => {
+                        retry = FIRST_RETRY;
+                        DAY
+                    }
+                    Ok(false) => {
+                        let w = retry;
+                        retry = (retry * 2).min(LAST_RETRY);
+                        w
+                    }
+                    Err(_) => {
+                        eprintln!("warn: the certificate round panicked; trying again later");
+                        let w = retry;
+                        retry = (retry * 2).min(LAST_RETRY);
+                        w
+                    }
+                };
+                std::thread::sleep(wait);
             }
-            if let Err(e) = Enrollment::new(state.hub.store()).revoke_superseded(server::now_ms()) {
-                eprintln!("older machine certificates could not be revoked: {e:?}");
-            }
-            std::thread::sleep(DAY);
         });
+}
+
+/// One round of [`keep_certificates_fresh`]: `false` when something failed (and was logged).
+fn certificate_round(state: &ServerState, leaf: &agora_hub::leaf::Leaf) -> bool {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
+    let mut ok = true;
+    match leaf.renew_if_ending(now, agora_hub::ca::EXPIRY_WARN_DAYS * 24 * 60 * 60) {
+        // Pairing in flight is not disturbed: a session froze the hash of the certificate its own connection was shown.
+        Ok(true) => state.hub.pairing().enable(leaf.hash()),
+        Ok(false) => {}
+        Err(e) => {
+            eprintln!("warn: the hub's certificate could not be renewed: {e}");
+            ok = false;
+        }
+    }
+    if let Err(e) = Enrollment::new(state.hub.store()).revoke_superseded(server::now_ms()) {
+        eprintln!("warn: older machine certificates could not be revoked: {e:?}");
+        ok = false;
+    }
+    ok
 }
 
 /// Gives the certificate the names `agora remote tailscale` writes while the hub runs: the file is looked at every few seconds, and a
