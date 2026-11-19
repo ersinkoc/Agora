@@ -2,7 +2,7 @@ import { ApprovalBanner } from './ApprovalBanner';
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { t } from '../i18n';
 import { type AgentTileModel, endedWithError, machineKey, needsAttention, sortFleet, type ResumeAction } from '../model';
-import { money, type UsageSummary } from '../net/usage';
+import type { UsageSummary } from '../net/usage';
 import type { ApprovalModel, BoardModel, MachineModel, MessageModel, ProjectCost } from '../net/view';
 import type { TerminalSource } from '../terminal/source';
 import { DiffDialog } from './DiffDialog';
@@ -61,7 +61,7 @@ const subscribeNarrow = (cb: () => void) => { const m = typeof window !== 'undef
 const isNarrow = () => typeof window !== 'undefined' && !!window.matchMedia?.(NARROW).matches;
 // The layout's global panels and the details tab that draws each.
 // The layout's first panel is Home itself: the fleet console.
-const PANEL_TAB: Record<string, DetailsTab> = { approvals: 'needs', changes: 'changes', tasks: 'board', messages: 'messages', usage: 'cost' };
+const PANEL_TAB: Record<string, DetailsTab> = { approvals: 'needs', changes: 'changes', tasks: 'board', messages: 'messages', usage: 'usage' };
 
 // The one window, laid out like an editor: the agents on the left as a tree, the terminals you are watching as tabs in the
 // middle (or side by side), details on the right, and a status bar. Everything is derived from props.
@@ -270,7 +270,6 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
           {(a.filesChanged ?? 0) > 0 && (loadDiff
             ? <button type="button" className="ide-chip text-needs-you hover:brightness-125" onClick={() => setReviewing(a.id)}>{t('changes-files', { count: a.filesChanged ?? 0 })}</button>
             : <span className="ide-chip text-needs-you">{t('changes-files', { count: a.filesChanged ?? 0 })}</span>)}
-          {usage?.perAgent.has(a.id) && <span className="ide-chip">{t('agent-cost', { amount: money(usage.perAgent.get(a.id) ?? 0) })}</span>}
           <StateBadge state={a.state} failed={endedWithError(a)} />
           {a.terminal !== false && !a.closed && <span className="flex items-center" role="group" aria-label={t('terminal-size')}>
             <button type="button" className="ide-iconbtn w-6 text-xs font-semibold" onClick={() => setTerminalSize(terminalSize() - 1)} disabled={terminalSize() <= MIN_SIZE} aria-label={t('terminal-smaller')} title={t('terminal-smaller')}>A−</button>
@@ -286,7 +285,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
       <AgentAddress agent={a} />
       {helperGrants && revokeGrant && !a.closed && fleet.some((c) => c.parentId === a.id) &&
         <HelperGrants list={() => helperGrants(a)} revoke={(id) => revokeGrant(a, id)} refresh={fleet.filter((c) => c.parentId === a.id && !c.closed).length} />}
-      {a.closed ? <ClosedSummary agent={a} now={now} cost={usage?.perAgent.has(a.id) ? money(usage.perAgent.get(a.id) ?? 0) : undefined}
+      {a.closed ? <ClosedSummary agent={a} now={now}
         onReview={loadDiff ? () => setReviewing(a.id) : undefined} onHistory={loadHistory && a.git !== false ? () => setHistory(a.id) : undefined} onFiles={filesOf ? () => setBrowsing(a.id) : undefined}
         onStart={onStart ? () => onStart() : undefined} onDismiss={() => dismiss([a.id])}
         onForget={onForget ? () => removeClosed([a.id]) : undefined} forgetError={forgetError}
@@ -301,7 +300,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
     </div>
   );
   const panel = (id: string) => id === 'fleet' ? home : PANEL_TAB[id] ? <div className="min-h-0 flex-1 overflow-y-auto p-3">
-    <Details tab={PANEL_TAB[id] as DetailsTab} pairing={pairing} attention={attention} approvals={approvals} notice={notice} changed={changed} boards={boards} messages={messages} usage={usage} projects={projects} onOpen={onOpen}
+    <Details tab={PANEL_TAB[id] as DetailsTab} fleet={fleet} now={now} pairing={pairing} attention={attention} approvals={approvals} notice={notice} changed={changed} boards={boards} messages={messages} usage={usage} projects={projects} onOpen={onOpen}
       onResolve={onResolve} onReview={loadDiff ? setReviewing : undefined} />
   </div> : id === 'theme' ? <div className="min-h-0 flex-1 overflow-y-auto"><ThemeEditor /></div> : undefined;
 
@@ -348,7 +347,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
         </main>
         </div>
 
-        <Inspector pairing={pairing} attention={attention} approvals={approvals} notice={notice} changed={changed} boards={boards} messages={messages} usage={usage} projects={projects} onOpen={onOpen}
+        <Inspector fleet={fleet} now={now} pairing={pairing} attention={attention} approvals={approvals} notice={notice} changed={changed} boards={boards} messages={messages} usage={usage} projects={projects} onOpen={onOpen}
           onResolve={onResolve} onReview={loadDiff ? setReviewing : undefined} open={showDetails} onOpenChange={setShowDetails} tab={railTab} onTab={setRailTab} />
       </div>
 
@@ -358,7 +357,6 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
         {needs > 0 && <button type="button" className="text-needs-you hover:underline" onClick={() => { setRailTab('needs'); setShowDetails(true); }}>{t('ide-status-needs', { count: needs })}</button>}
         {forgetError && <span role="alert" className="truncate text-needs-you">{t('closed-forget-failed', { reason: t(forgetReasonKey(forgetError)) })}</span>}
         <span className="flex-1" />
-        {usage && usage.totalMicroUsd > 0 && <span>{money(usage.totalMicroUsd)}</span>}
       </footer>
 
       {start}

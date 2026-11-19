@@ -1,7 +1,9 @@
 import { useEffect, useRef, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { t } from '../i18n';
 import type { AgentTileModel } from '../model';
-import { money, type UsageSummary } from '../net/usage';
+import type { UsageSummary } from '../net/usage';
+import { hasUsage } from '../net/usageView';
+import { UsagePanel } from './UsagePanel';
 import type { ApprovalModel, BoardModel, MessageModel, ProjectCost } from '../net/view';
 import { ApprovalCard } from './ApprovalCard';
 import type { StartChoice } from './StartApproval';
@@ -17,7 +19,9 @@ type Tab = RailTab;
 // The right panel: an icon rail that is always there (it stays visible at every width) and the subject it opens beside it, one at a
 // time (at most two panels are ever visible, visual-language.md). On a wide window the subject sits in the layout; on a narrow one it
 // is a drawer over the content, so the rail never clips and nothing is pushed out of view.
-export function Inspector({ attention, approvals, notice, changed, boards, messages, usage, projects, onOpen, onResolve, onReview, open, onOpenChange, tab, onTab, pairing }: {
+export function Inspector({ fleet = [], now = Date.now(), attention, approvals, notice, changed, boards, messages, usage, projects, onOpen, onResolve, onReview, open, onOpenChange, tab, onTab, pairing }: {
+  fleet?: readonly AgentTileModel[];
+  now?: number;
   attention: readonly AgentTileModel[];
   approvals: readonly ApprovalModel[];
   notice?: string;
@@ -25,7 +29,7 @@ export function Inspector({ attention, approvals, notice, changed, boards, messa
   boards: readonly BoardModel[];
   messages: readonly MessageModel[];
   usage?: UsageSummary;
-  projects: readonly ProjectCost[];
+  projects?: readonly ProjectCost[];
   onOpen: (id: string) => void;
   onResolve: (a: ApprovalModel, approved: boolean, choice?: StartChoice) => void;
   onReview?: (id: string) => void;
@@ -39,7 +43,7 @@ export function Inspector({ attention, approvals, notice, changed, boards, messa
   pairing?: PairingUi;
 }) {
   const needs = attention.length + approvals.filter((x) => !attention.some((a) => a.id === x.agentId)).length + (pairing?.cards.length ?? 0);
-  const items = railItems({ needs, changed: changed.length, messages: messages.length, hasBoard: boards.length > 0, hasCost: !!usage && usage.totalMicroUsd > 0 });
+  const items = railItems({ needs, changed: changed.length, messages: messages.length, hasBoard: boards.length > 0, hasUsage: hasUsage(fleet) });
   const active = resolveTab(tab, items);
   const label = t(items.find((x) => x.id === active)?.labelKey ?? 'attention-title');
   // Closing returns focus to the rail icon (the drawer is where focus went when it opened); opening by the person puts focus in the panel.
@@ -78,7 +82,7 @@ export function Inspector({ attention, approvals, notice, changed, boards, messa
         <button type="button" className="ide-iconbtn" onClick={close} aria-label={t('ide-hide-panel')} title={t('ide-hide-panel')}><Icon name="close" /></button>
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto p-3">
-        <Details tab={active} pairing={pairing} attention={attention} approvals={approvals} notice={notice} changed={changed} boards={boards} messages={messages} usage={usage} projects={projects} onOpen={onOpen} onResolve={onResolve} onReview={onReview} />
+        <Details tab={active} fleet={fleet} now={now} pairing={pairing} attention={attention} approvals={approvals} notice={notice} changed={changed} boards={boards} messages={messages} usage={usage} projects={projects} onOpen={onOpen} onResolve={onResolve} onReview={onReview} />
       </div>
     </section>}
     <nav ref={rail} className="rail" role="tablist" aria-orientation="vertical" aria-label={t('ide-details')} onKeyDown={railKey}>
@@ -104,8 +108,10 @@ export function Inspector({ attention, approvals, notice, changed, boards, messa
 
 // One subject of the details, on its own: the Inspector's tabs and the layout's panels (ADR-0068) draw the same thing.
 export type DetailsTab = Tab;
-export function Details({ tab, attention, approvals, notice, changed, boards, messages, usage, projects, onOpen, onResolve, onReview, pairing }: {
+export function Details({ tab, fleet = [], now = Date.now(), attention, approvals, notice, changed, boards, messages, usage, projects, onOpen, onResolve, onReview, pairing }: {
   tab: Tab;
+  fleet?: readonly AgentTileModel[];
+  now?: number;
   attention: readonly AgentTileModel[];
   approvals: readonly ApprovalModel[];
   notice?: string;
@@ -113,7 +119,7 @@ export function Details({ tab, attention, approvals, notice, changed, boards, me
   boards: readonly BoardModel[];
   messages: readonly MessageModel[];
   usage?: UsageSummary;
-  projects: readonly ProjectCost[];
+  projects?: readonly ProjectCost[];
   onOpen: (id: string) => void;
   onResolve: (a: ApprovalModel, approved: boolean, choice?: StartChoice) => void;
   onReview?: (id: string) => void;
@@ -145,12 +151,7 @@ export function Details({ tab, attention, approvals, notice, changed, boards, me
           <div className="mt-1 break-words text-muted">{m.body}</div>
         </li>)}
       </ul>)}
-    {tab === 'cost' && usage && <div className="grid gap-2">
-        <p className="m-0 text-2xl font-semibold tracking-tight">{money(usage.totalMicroUsd)}</p>
-        <ul className="m-0 grid list-none gap-1 p-0">{projects.map(p => <li key={p.label} className="flex justify-between gap-2"><span className="truncate">{p.label}</span><span className="text-muted">{money(p.microUsd)}</span></li>)}</ul>
-        <p className="muted">{usage.pricesAtMs ? t('usage-prices-date', { date: new Date(usage.pricesAtMs).toLocaleDateString() }) : t('usage-prices-bundled')}</p>
-      </div>}
+    {tab === 'usage' && <UsagePanel fleet={fleet} now={now} />}
     {tab === 'board' && boards.length === 0 && <p className="muted">{t('layout-board-empty')}</p>}
-    {tab === 'cost' && !usage && <p className="muted">{t('layout-cost-empty')}</p>}
   </>;
 }

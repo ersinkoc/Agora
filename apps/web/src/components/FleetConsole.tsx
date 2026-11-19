@@ -258,7 +258,6 @@ export function FleetConsole({ fleet, machines, approvals, usage, link, now, onO
     for (const x of approvals) if (!m.has(x.agentId)) m.set(x.agentId, askText(x));
     return m;
   }, [approvals]);
-  const cost = (a: AgentTileModel) => (usage?.perAgent.has(a.id) ? money(usage.perAgent.get(a.id) ?? 0) : undefined);
 
   const body = empty ? (
     <>
@@ -293,7 +292,7 @@ export function FleetConsole({ fleet, machines, approvals, usage, link, now, onO
             {by === 'project' && spread.get(g.key) && <ProjectHint spread={spread.get(g.key) as ProjectSpread} />}
             {g.agents.length === 0 ? (g.online ? <p className="muted m-0">{t('fleet-no-agents-here')}</p> : null) : (
               <div className="fleet-grid">
-                {g.agents.map((a) => <AgentTile key={a.id} agent={a} onOpen={onOpen} context={{ group: by, ask: asks.get(a.id), cost: cost(a), now, same: by !== 'project' && a.projectId && sharedAcross(spread.get(a.projectId)) ? spread.get(a.projectId) : undefined }} />)}
+                {g.agents.map((a) => <AgentTile key={a.id} agent={a} onOpen={onOpen} context={{ group: by, ask: asks.get(a.id), now, same: by !== 'project' && a.projectId && sharedAcross(spread.get(a.projectId)) ? spread.get(a.projectId) : undefined }} />)}
               </div>
             )}
           </section>

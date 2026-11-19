@@ -4,7 +4,7 @@ import { Menu, type MenuItem } from '../layout/Menu';
 import { duration } from '../net/time';
 import { t } from '../i18n';
 import type { SessionModel, SessionOptionModel } from '../model';
-import { choices, confirmed, contextFill, contextLabel, contextPercent, isChange, needsConfirm, needsPlaceholder, NOT_REPORTED, ownCost, pendingFor, shortCount, type OptionKind, type PendingChoice } from './sessionChoice';
+import { choices, confirmed, contextFill, contextLabel, contextPercent, isChange, needsConfirm, needsPlaceholder, NOT_REPORTED, pendingFor, shortCount, type OptionKind, type PendingChoice } from './sessionChoice';
 
 // ADR-0058: the mode and model a chat agent runs with, how full its context is, and what it says it cost. The pickers appear only
 // for what the agent reported; a mode in which the agent acts without asking is chosen only after the user confirms it. Every choice
@@ -21,7 +21,6 @@ export function SessionBar({ agentKey, session, choose, disabled, startedMs }: {
   const pct = contextPercent(session);
   const label = contextLabel(session);
   const said = label ? t(label.key, { percent: label.percent }) : '';
-  const cost = ownCost(session);
   const apply = async (target: string, kind: OptionKind, id: string) => {
     if (!choose) return;
     setBusy(true);
@@ -67,7 +66,6 @@ export function SessionBar({ agentKey, session, choose, disabled, startedMs }: {
           </span>
         )}
         {elapsed !== undefined && <span className="ide-chip" title={t('session-elapsed-hint')}><Icon name="clock" className="size-3" />{duration(elapsed)}</span>}
-        {cost !== undefined && <span className="ide-chip">{t('session-cost', { amount: cost })}</span>}
         {failed && <span role="status" className="text-xs text-needs-you">{t('session-change-failed')}</span>}
       </div>
       {pending && (

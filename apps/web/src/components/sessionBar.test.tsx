@@ -19,7 +19,7 @@ describe('the agent header', () => {
     expect(html).toContain('aria-haspopup="menu"');
     expect(html).toContain('Context 25%');
     expect(html).toContain('2 min');
-    expect(html).toContain('reported by the agent');
+    expect(html).not.toMatch(/reported by the agent|\$|USD/); // no money in the header (it lives behind a disclosure in Usage)
   });
   it('never invents a reasoning effort picker: the agent reports modes and models only', () => {
     expect(renderToStaticMarkup(<SessionBar agentKey="n/a" session={session} />).toLowerCase()).not.toContain('effort');

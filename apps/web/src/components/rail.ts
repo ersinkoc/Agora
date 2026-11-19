@@ -3,20 +3,20 @@ import type { IconName } from './Icon';
 // The right panel's icon rail: which subjects it offers, in what order, the shortcut of each, and the one remembered between visits.
 // Pure, so it is tested without a page.
 
-export type RailTab = 'needs' | 'changes' | 'board' | 'messages' | 'cost';
+export type RailTab = 'needs' | 'changes' | 'board' | 'messages' | 'usage';
 
 export interface RailItem { id: RailTab; icon: IconName; labelKey: string; badge?: number; alert?: boolean }
 
-export interface RailCounts { needs: number; changed: number; messages: number; hasBoard: boolean; hasCost: boolean }
+export interface RailCounts { needs: number; changed: number; messages: number; hasBoard: boolean; hasUsage: boolean }
 
-// The rail's items, in a fixed order so a shortcut always means the same subject. Board and Spent appear only when there is something.
+// The rail's items, in a fixed order so a shortcut always means the same subject. Board and Usage appear only when there is something.
 export function railItems(c: RailCounts): RailItem[] {
   return [
     { id: 'needs', icon: 'bell', labelKey: 'attention-title', badge: c.needs, alert: true },
     { id: 'changes', icon: 'diff', labelKey: 'ide-tab-changes', badge: c.changed },
     ...(c.hasBoard ? [{ id: 'board' as const, icon: 'board' as const, labelKey: 'board-title' }] : []),
     { id: 'messages', icon: 'chat', labelKey: 'ide-tab-messages', badge: c.messages },
-    ...(c.hasCost ? [{ id: 'cost' as const, icon: 'coin' as const, labelKey: 'ide-tab-cost' }] : []),
+    ...(c.hasUsage ? [{ id: 'usage' as const, icon: 'coin' as const, labelKey: 'ide-tab-usage' }] : []),
   ];
 }
 
@@ -37,10 +37,11 @@ export function resolveTab(wanted: RailTab | undefined, items: readonly RailItem
   return wanted && items.some((x) => x.id === wanted) ? wanted : 'needs';
 }
 
+// `cost` is the old name of `usage`: a device that saved it still lands on the same subject.
 const KEY = 'agora.rail.tab';
-const TABS: readonly RailTab[] = ['needs', 'changes', 'board', 'messages', 'cost'];
+const TABS: readonly RailTab[] = ['needs', 'changes', 'board', 'messages', 'usage'];
 export function loadRailTab(kv: Pick<Storage, 'getItem'> | undefined = storage()): RailTab | undefined {
-  try { const v = kv?.getItem(KEY); return TABS.find((x) => x === v); } catch { return undefined; }
+  try { const v = kv?.getItem(KEY); return v === 'cost' ? 'usage' : TABS.find((x) => x === v); } catch { return undefined; }
 }
 export function saveRailTab(tab: RailTab, kv: Pick<Storage, 'setItem'> | undefined = storage()): void {
   try { kv?.setItem(KEY, tab); } catch { /* holds for this visit */ }

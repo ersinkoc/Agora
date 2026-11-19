@@ -42,7 +42,7 @@ Bind   = { "agent": string } | { "follow": "attention" | "selection" }
 | `files` | the bound agent's files |
 | `tasks` | shared tasks and files |
 | `messages` | team chat between agents |
-| `usage` | what was spent |
+| `usage` | tokens, context and time (no money) |
 | `theme` | the theme editor (`themes.md`); added in rung 2, an older window shows it as an unknown panel |
 | `empty` | a chooser: an agent, "what needs you next", "the selected agent", or one of the panels above |
 

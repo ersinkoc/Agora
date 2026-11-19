@@ -23,7 +23,7 @@ import { NoAskBadge } from './components/NoAskBadge';
 import type { ApprovalModel, MachineModel, MessageModel, ProjectCost } from './net/view';
 import type { Device } from './net/approval';
 import { deviceLabel } from './net/devices';
-import { money, type UsageSummary } from './net/usage';
+import type { UsageSummary } from './net/usage';
 import { demoAgents, demoHelper, demoStartApproval, demoStartSettingsApproval } from './fixtures';
 import { demoSource, type TerminalSource } from './terminal/source';
 import { Suspense, lazy, useEffect, useMemo, useState, useSyncExternalStore, type ReactNode } from 'react';
@@ -159,12 +159,11 @@ export function Gallery() {
 }
 
 // Focus: one agent, full size. The terminal arrives with the hub connection; until then a placeholder.
-export function Focus({ agent, approvals = [], onResolve, source: live, costMicroUsd, chatSource, sendPrompt, chooseOption, onBack }: {
+export function Focus({ agent, approvals = [], onResolve, source: live, chatSource, sendPrompt, chooseOption, onBack }: {
   agent: AgentTileModel | undefined;
   // What this agent waits on, answered here as in the window (an agent shown full size must not be left waiting).
   approvals?: readonly ApprovalModel[];
   onResolve?: (approval: ApprovalModel, approved: boolean, choice?: StartChoice) => void;
-  costMicroUsd?: number;
   source?: TerminalSource;
   chatSource?: ChatSource;
   sendPrompt?: (agent: AgentTileModel, text: string) => Promise<boolean>;
@@ -193,7 +192,7 @@ export function Focus({ agent, approvals = [], onResolve, source: live, costMicr
         <NoAskBadge agent={agent} />
         <span className="hidden min-w-0 items-center gap-1.5 truncate text-xs text-muted md:flex"><Icon name="machine" className="size-3.5" />{agent.machine}<Icon name="chevron" className="size-3 rtl:rotate-180" /><Icon name="folder" className="size-3.5" />{agent.project || agent.workspace}{agent.branch && <><Icon name="branch" className="ms-1 size-3.5" /><span className="font-mono">{agent.branch}</span></>}</span>
         <span className="flex-1" />
-        {agent.tokens ? <span className="ide-chip">{t('agent-tokens', { count: agent.tokens })}{costMicroUsd !== undefined ? ` · ${t('agent-cost', { amount: money(costMicroUsd) })}` : ''}</span> : null}
+        {agent.tokens ? <span className="ide-chip">{t('agent-tokens', { count: agent.tokens })}</span> : null}
         <span className="hidden sm:block"><LanguagePicker compact /></span>
         <ThemePicker />
       </header>
@@ -429,19 +428,6 @@ export function MachinesPage({ machines, agents = [], usage, projects = [], onBa
   return (
     <PageFrame wide title={t('machines-title')} onBack={onBack}>
       <NetworkView machines={machines} agents={agents} usage={usage} hubName={window.location.host} onForget={onForget} focus={focus} />
-      {projects.length > 0 && (
-        <section className="stack" aria-label={t('usage-projects')}>
-          <h2>{t('usage-projects')}</h2>
-          <ul className="machines">
-            {projects.map((p) => <li key={p.label} className="machine"><strong>{p.label}</strong><span className="muted">{t('machine-cost', { amount: money(p.microUsd) })}</span></li>)}
-          </ul>
-        </section>
-      )}
-      {usage && usage.totalMicroUsd > 0 && (
-        <p className="muted">
-          {t('usage-total', { amount: money(usage.totalMicroUsd) })} · {usage.pricesAtMs ? t('usage-prices-date', { date: new Date(usage.pricesAtMs).toLocaleDateString() }) : t('usage-prices-bundled')}
-        </p>
-      )}
     </PageFrame>
   );
 }
