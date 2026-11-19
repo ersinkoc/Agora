@@ -34,6 +34,7 @@ impl HeldTerminal {
     pub fn pid(&self) -> u32 {
         0
     }
+    pub fn kill_and_reap(&mut self) {}
     pub fn resize(&self, _cols: u16, _rows: u16) -> io::Result<()> {
         Err(unsupported())
     }
@@ -89,6 +90,8 @@ impl ProcessWatch {
         true
     }
 }
+
+pub(crate) fn close_inherited_descriptors() {}
 
 pub(crate) fn start_new_session() -> io::Result<()> {
     Err(unsupported())

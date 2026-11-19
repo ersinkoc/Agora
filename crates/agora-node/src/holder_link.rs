@@ -23,6 +23,10 @@ pub const MAX_FRAME: usize = 4 << 20;
 /// How long a peer may take to finish a frame it began.
 pub const FRAME_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// The write timeout to set on a link's stream: each blocked send waits this long, and [`write_frame`] gives up for good once
+/// [`FRAME_TIMEOUT`] has passed since the frame began (a send that moved some bytes returns early, so the timeout alone would restart).
+pub const WRITE_SLICE: Duration = Duration::from_secs(1);
+
 /// Where the holder of the Agora home `home` listens (a `0700` folder, a `0600` socket).
 pub fn socket_path(home: &Path) -> PathBuf {
     home.join("run").join("hold.sock")
@@ -615,7 +619,19 @@ pub fn write_frame(
         // The terminal goes with the first byte that goes; the rest follows plainly.
         sent = stream.send_with_terminal(&frame, terminal)?;
     }
-    stream.write_all(&frame[sent..])?;
+    let began = Instant::now();
+    while sent < frame.len() {
+        match stream.write(&frame[sent..]) {
+            Ok(0) => return Err(LinkError::Closed),
+            Ok(n) => sent += n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) if timed_out(&e) && began.elapsed() < FRAME_TIMEOUT => {}
+            Err(e) => return Err(e.into()),
+        }
+        if sent < frame.len() && began.elapsed() >= FRAME_TIMEOUT {
+            return Err(LinkError::Io(io::Error::from(io::ErrorKind::TimedOut)));
+        }
+    }
     Ok(())
 }
 
@@ -702,7 +718,7 @@ impl Client {
     pub fn connect_with_version(socket: &Path, version: u16) -> Result<Self, LinkError> {
         let mut stream = agora_platform::local_connect(socket)?;
         stream.set_read_timeout(Some(Duration::from_secs(10)))?;
-        stream.set_write_timeout(Some(Duration::from_secs(10)))?;
+        stream.set_write_timeout(Some(WRITE_SLICE))?;
         write_frame(&mut stream, &Request::Hello { version }.encode(), None)?;
         match Self::read_reply(&mut stream)?.0 {
             Reply::HelloOk {

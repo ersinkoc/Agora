@@ -452,6 +452,12 @@ fn exit_seen(kq: RawFd) -> bool {
 
 // ----- sessions and peers -----
 
+/// Closes every descriptor this process was handed at its start but 0, 1 and 2 (a pipe of its starter, another program's log). The holder
+/// calls it first thing, before it opens anything of its own.
+pub(crate) fn close_inherited_descriptors() {
+    crate::unix::close_from(3);
+}
+
 /// Makes this process the leader of a session of its own (no terminal, not in the starter's group), so what ends the starter's session
 /// or group does not end it. Already a session leader is fine. A process that leads a process group cannot call `setsid` (`EPERM`):
 /// that is an error here, never ignored, for a holder left in its starter's session would end with it. Whoever starts the holder
@@ -730,6 +736,39 @@ mod tests {
         let _ = child.wait();
         assert!(w.ended());
         assert!(ProcessWatch::open(child.id(), started).is_err());
+    }
+
+    #[test]
+    fn an_agent_the_holder_starts_sees_no_descriptor_it_was_handed() {
+        // Two descriptors that are not close-on-exec: what a starter's pipes look like to a process it started.
+        let mut ends = [0 as libc::c_int; 2];
+        // SAFETY: a valid out array of two descriptors.
+        assert_eq!(unsafe { libc::pipe(ends.as_mut_ptr()) }, 0);
+        let script = format!(
+            "for f in {} {}; do if [ -e /dev/fd/$f ]; then echo OPEN$f; fi; done; echo DONE; sleep 30",
+            ends[0], ends[1]
+        );
+        let cfg = PtyConfig {
+            argv: vec!["sh".into(), "-c".into(), script],
+            cwd: None,
+            env: vec![("PATH".into(), "/usr/bin:/bin".into())],
+            cols: 80,
+            rows: 24,
+            limits: crate::ProcessLimits::default(),
+            sandbox: None,
+            identity: None,
+            env_remove: Vec::new(),
+        };
+        let t = HeldTerminal::start(&cfg).unwrap();
+        let r = t.start_reader().unwrap();
+        std::thread::sleep(Duration::from_millis(1500));
+        let text = String::from_utf8_lossy(&r.end().buffer.into_vec()).into_owned();
+        assert!(text.contains("DONE"), "the script did not run: {text:?}");
+        assert!(
+            !text.contains("OPEN"),
+            "the agent was handed a descriptor: {text:?}"
+        );
+        t.signal(HeldSignal::Kill).unwrap();
     }
 
     #[test]

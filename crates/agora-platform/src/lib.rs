@@ -85,6 +85,16 @@ pub fn start_new_session() -> io::Result<()> {
     }
 }
 
+/// ADR-0079: closes every descriptor this process was handed at its start but 0, 1 and 2, so nothing of its starter reaches what it
+/// starts. Call it first thing in a process that starts agents on someone's behalf. Does nothing on Windows (handles are not
+/// inherited unless named).
+pub fn close_inherited_descriptors() {
+    #[cfg(unix)]
+    unixhold::close_inherited_descriptors();
+    #[cfg(not(unix))]
+    nohold::close_inherited_descriptors();
+}
+
 /// The process at the other end of a local connection and whether it runs as this user, as the system recorded them when it
 /// connected (ADR-0079 decision 5: the holder compares the pid and start time with the role lock's).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

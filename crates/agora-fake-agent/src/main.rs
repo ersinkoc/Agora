@@ -25,9 +25,28 @@ fn main() -> ExitCode {
         }
         return ExitCode::SUCCESS;
     }
+    if std::env::args().nth(1).as_deref() == Some("--print-env") {
+        // Says which environment variables it was started with, so a test can see what a parent leaked into it.
+        let mut lines: Vec<String> = std::env::vars()
+            .map(|(k, v)| format!("ENV {k}={v}"))
+            .collect();
+        lines.sort();
+        for l in lines {
+            print!("{l}\r\n");
+        }
+        print!("ENV-END\r\n");
+        let _ = io::stdout().flush();
+        std::thread::sleep(std::time::Duration::from_secs(120));
+        return ExitCode::SUCCESS;
+    }
     if std::env::args().nth(1).as_deref() == Some("--list-fds") {
         // Says which descriptors it was started with (Linux), so a test can see what a parent leaked into it.
-        let mut lines: Vec<String> = std::fs::read_dir("/proc/self/fd")
+        let dir = if std::path::Path::new("/proc/self/fd").is_dir() {
+            "/proc/self/fd"
+        } else {
+            "/dev/fd"
+        };
+        let mut lines: Vec<String> = std::fs::read_dir(dir)
             .map(|d| {
                 d.filter_map(Result::ok)
                     .map(|e| {

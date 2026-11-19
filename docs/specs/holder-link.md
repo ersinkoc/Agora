@@ -63,7 +63,12 @@ next frame's.
   holder's own environment is a stale snapshot of whoever started it and is never passed on). `env_remove` is therefore redundant for
   the holder and kept only for the format.
 - The terminal master, the listener, the wake pipe, the lock files and the pidfd are all close-on-exec; an agent sees none of them
-  (tested with an agent that lists its own descriptors).
+  (tested with an agent that lists its own descriptors). Neither does it see what the **holder was handed at its start** (a pipe of its
+  starter, a log): `agora hold` closes every descriptor but 0, 1 and 2 first thing, and the child of each started agent marks all of
+  them but 0, 1 and 2 close-on-exec before `exec` (marked, not closed, so the pipe std uses to report a failed `exec` still works).
+  Both are tested, the first with a holder started with extra non-close-on-exec descriptors.
+- A write to a node that does not read gives up after `FRAME_TIMEOUT` (5 s in all, each blocked send waits `WRITE_SLICE`, 1 s), and the
+  holder drops that node: a node that stops reading cannot hang it (tested).
 - `agora hold` refuses to start (it exits 1, `hold-failed`) when it cannot become a session leader (`setsid` fails with `EPERM` in a
   process-group leader); it never runs on in its starter's session.
 
@@ -80,3 +85,6 @@ next frame's.
    again", never as "a second node exists".
 5. **Dropping the link** while the node process keeps running does not make the holder read (item 5 above): a node that wants the
    holder to buffer for it must close its copies of the masters (or end).
+6. **A different node process taking the lock while the old one still runs:** admitting it clears the "departed" watch of the old
+   node (item 5 above), so the holder would not read, but both processes could then read the same master. The old node must close its
+   masters, or end, before the new node attaches.

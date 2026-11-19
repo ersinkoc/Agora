@@ -294,6 +294,67 @@ pub(crate) fn status(s: std::process::ExitStatus) -> ExitStatus {
 /// open forever (its output would never reach end-of-file). Other spawns in this process wait here.
 static SPAWN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Marks every open descriptor from `first` up close-on-exec. Async-signal-safe (system calls only): it runs between fork and exec.
+pub(crate) fn cloexec_from(first: libc::c_int) {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        // CLOSE_RANGE_CLOEXEC (Linux 5.11): the whole range in one call.
+        // SAFETY: plain system call with integer arguments.
+        let r = unsafe {
+            libc::syscall(
+                libc::SYS_close_range,
+                first as libc::c_uint,
+                libc::c_uint::MAX,
+                4 as libc::c_uint,
+            )
+        };
+        if r == 0 {
+            return;
+        }
+    }
+    for fd in first..descriptor_limit() {
+        // SAFETY: plain fcntl; a descriptor that is not open is `EBADF`, which is ignored.
+        unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+    }
+}
+
+/// Closes every descriptor from `first` up, for good. Only where nothing else of this process uses them (its own start).
+pub(crate) fn close_from(first: libc::c_int) {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        // SAFETY: plain system call with integer arguments.
+        let r = unsafe {
+            libc::syscall(
+                libc::SYS_close_range,
+                first as libc::c_uint,
+                libc::c_uint::MAX,
+                0 as libc::c_uint,
+            )
+        };
+        if r == 0 {
+            return;
+        }
+    }
+    for fd in first..descriptor_limit() {
+        // SAFETY: plain close; a descriptor that is not open is `EBADF`, which is ignored.
+        unsafe { libc::close(fd) };
+    }
+}
+
+/// One past the highest descriptor number worth trying: the soft limit, at most 65536 (a limit of millions would take seconds).
+fn descriptor_limit() -> libc::c_int {
+    let mut lim = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: a valid out pointer.
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE as _, &mut lim) } == 0 {
+        lim.rlim_cur.min(65536) as libc::c_int
+    } else {
+        1024
+    }
+}
+
 /// The lock that serializes starting programs (see [`SPAWN_LOCK`]), for code that makes descriptors outside a spawn.
 #[allow(dead_code)] // used only where `pipe2` is missing
 pub(crate) fn spawn_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -406,6 +467,12 @@ pub(crate) fn start_child(
         cmd.pre_exec(move || {
             if let Some(fd) = held {
                 cvt(libc::fchdir(fd))?;
+            }
+            if clear_env {
+                // Whatever this process was handed at its start (a pipe of its starter, a log) must not reach the agent: it keeps
+                // the terminal (0, 1, 2) and nothing else. Marked here, not closed, so std's own pipe that reports a failed `exec`
+                // to the parent still works; it all closes at `exec`.
+                cloexec_from(3);
             }
             #[cfg(target_os = "linux")]
             if die_with_parent {

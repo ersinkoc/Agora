@@ -90,10 +90,20 @@ impl Rig {
     fn new(tag: &str) -> Rig {
         let home = temp_home(tag);
         agora_platform::ensure_private_dir(&home.join("run")).expect("run folder");
-        let holder = Command::new(AGORA)
-            .args(["hold", "--home"])
+        // Started as a careless starter would: with extra descriptors that are not close-on-exec (7 and 8 are files, 9 is a pipe: the
+        // holder's stdin) and a variable of its own that no agent may see.
+        let extra = home.join("extra");
+        std::fs::write(&extra, b"x").expect("extra file");
+        let holder = Command::new("sh")
+            .args([
+                "-c",
+                "exec \"$0\" hold --home \"$1\" 7<\"$2\" 8>>\"$2\" 9<&0",
+            ])
+            .arg(AGORA)
             .arg(&home)
-            .stdin(Stdio::null())
+            .arg(&extra)
+            .env("AGORA_HOLD_TEST_SECRET", "leaked")
+            .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -631,21 +641,120 @@ fn an_agent_inherits_no_descriptor_of_the_holder() {
     let (_pid, terminal) = c.start(&request).expect("start");
     let rx = read_in_background(terminal.into_file().expect("file"));
     let all = collect_until(Vec::new(), &rx, "FDS-END", Duration::from_secs(20));
+    // The holder was started with descriptors 7, 8 and 9 open (see `Rig::new`). The agent has its terminal (0, 1, 2) and at most the
+    // one descriptor its own listing of the folder takes (`/proc/self/fd`, or `/dev/fd`).
     let mut seen = 0;
+    let mut beyond = Vec::new();
     for line in all.lines().filter_map(|l| l.trim().strip_prefix("FD ")) {
         seen += 1;
-        let target = line.split_once(' ').map_or("", |(_, t)| t);
-        let ok = target.starts_with("/dev/pts/")
-            || target.starts_with("/proc/")
-            || target == "/dev/null"
-            || target.is_empty();
+        let (n, target) = line.split_once(' ').unwrap_or((line, ""));
+        if n.parse::<u32>().is_ok_and(|n| n > 2) {
+            beyond.push((n.to_string(), target.to_string()));
+        }
+    }
+    assert!(seen >= 3, "{all:?}");
+    assert!(
+        beyond.len() <= 1
+            && beyond
+                .iter()
+                .all(|(_, t)| t.is_empty() || t.starts_with("/proc/") || t.starts_with("/dev/fd")),
+        "the agent holds descriptors of the holder: {beyond:?} in {all:?}"
+    );
+}
+
+#[test]
+fn an_agent_does_not_see_the_holders_own_environment() {
+    let rig = Rig::new("env");
+    rig.lock_self();
+    let mut c = rig.connect();
+    c.attach().expect("attach");
+    let request = StartRequest {
+        agent: "a1".into(),
+        argv: vec![fake_agent(), "--print-env".into()],
+        env: vec![("VISIBLE".into(), "1".into())],
+        cols: 80,
+        rows: 24,
+        ..StartRequest::default()
+    };
+    let (_pid, terminal) = c.start(&request).expect("start");
+    let rx = read_in_background(terminal.into_file().expect("file"));
+    let all = collect_until(Vec::new(), &rx, "ENV-END", Duration::from_secs(20));
+    assert!(all.contains("ENV VISIBLE=1"), "{all:?}");
+    assert!(
+        !all.contains("AGORA_HOLD_TEST_SECRET"),
+        "the holder's own variable reached the agent: {all:?}"
+    );
+    // Nothing else of the holder's environment either: its HOME, PATH and the rest are the node's to send.
+    assert!(!all.contains("ENV HOME="), "{all:?}");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn the_holder_closes_what_its_starter_handed_it() {
+    let rig = Rig::new("inherited");
+    let proc = format!("/proc/{}/fd", rig.holder.id());
+    for n in [7, 8, 9] {
         assert!(
-            ok,
-            "the agent holds a descriptor of the holder: {line:?} in {all:?}"
+            !Path::new(&format!("{proc}/{n}")).exists(),
+            "descriptor {n} of the starter is still open in the holder"
         );
     }
-    // Its own terminal as stdin, stdout and stderr, at least.
-    assert!(seen >= 3, "{all:?}");
+}
+
+#[test]
+fn a_holder_that_leads_a_process_group_refuses_to_start() {
+    use std::os::unix::process::CommandExt;
+    // `setsid` fails in a group leader: the holder would stay in its starter's session and end with it, so it must not run.
+    let home = temp_home("leader");
+    let status = Command::new(AGORA)
+        .args(["hold", "--home"])
+        .arg(&home)
+        .process_group(0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("run agora hold");
+    assert_eq!(status.code(), Some(1));
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn a_node_that_stops_reading_cannot_hang_the_holder() {
+    let rig = Rig::new("stuck");
+    // More than a socket holds, so the holder's send to a node that never reads cannot finish.
+    let text = "y".repeat(1_100_000);
+    let big = script(&rig.home, "big", &[(&text, 120_000)]);
+    let mut a = helper("node", &rig, Some(&big));
+    rig.lock_for(a.id());
+    say_go(&mut a);
+    let _ = helper_line(&mut a);
+    a.kill().expect("kill the node");
+    a.wait().expect("wait");
+    std::thread::sleep(Duration::from_millis(3000));
+
+    rig.lock_self();
+    let mut stuck = agora_platform::local_connect(&rig.socket()).expect("connect");
+    write_frame(
+        &mut stuck,
+        &Request::Hello {
+            version: LINK_VERSION,
+        }
+        .encode(),
+        None,
+    )
+    .expect("hello");
+    stuck
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("timeout");
+    let _ = agora_node::holder_link::read_frame(&mut stuck).expect("answer");
+    write_frame(&mut stuck, &Request::Attach.encode(), None).expect("attach");
+    // It reads nothing and stays connected. After the holder's write timeout it lets this node go, and the next one is served.
+    let began = Instant::now();
+    let mut c = rig.connect();
+    assert!(c.list().expect("list").len() == 1);
+    assert!(began.elapsed() < Duration::from_secs(10));
+    drop(stuck);
 }
 
 #[test]

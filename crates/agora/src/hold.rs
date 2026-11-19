@@ -15,7 +15,7 @@ use std::time::Duration;
 use agora_i18n::key;
 use agora_node::holder_link::{
     read_frame, socket_path, write_frame, AgentInfo, AgentState, Refusal, Reply, Request,
-    StartRequest, TerminalInfo, FRAME_TIMEOUT, LINK_VERSION,
+    StartRequest, TerminalInfo, LINK_VERSION, WRITE_SLICE,
 };
 use agora_platform::{
     ExitStatus, HeldBuffer, HeldSignal, HeldTerminal, LocalListener, LocalStream, Peer,
@@ -38,6 +38,8 @@ const MAX_ACCEPTS: usize = 16;
 
 /// `agora hold`.
 pub(crate) fn hold(say: &Say, opts: &Opts) -> ExitCode {
+    // First of all: what the starter handed this process (its pipes, its logs) is nobody's business here, and an agent must never get it.
+    agora_platform::close_inherited_descriptors();
     let home = opts.home.clone().unwrap_or_else(home);
     // Its own session: not ended with the terminal or the process group that started it (decision 2). A process that leads a group
     // cannot, and a holder left in its starter's session would end with it: it refuses to start (the starter must detach it).
@@ -250,7 +252,7 @@ impl Holder {
         {
             return;
         }
-        if stream.set_write_timeout(Some(FRAME_TIMEOUT)).is_err() {
+        if stream.set_write_timeout(Some(WRITE_SLICE)).is_err() {
             return;
         }
         // A node that comes back takes over the terminals from the one before it: the holder reads none for it.
