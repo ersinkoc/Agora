@@ -177,6 +177,11 @@ fn an_acp_agent_runs_through_the_bridge_like_any_chat_agent() {
 
 /// A node with two ACP kinds: `acp-fake` (the fake agent) and `acp-broken` (one that dies before `initialize`).
 fn node_with_acp(tag: &str) -> Option<(std::path::PathBuf, Node)> {
+    node_with_acp_policy(tag, None)
+}
+
+/// Like [`node_with_acp`]; with `policy` the node's policy file holds it (the kind `acp-bypass` offers a mode that skips permissions).
+fn node_with_acp_policy(tag: &str, policy: Option<&str>) -> Option<(std::path::PathBuf, Node)> {
     if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
         return None;
     }
@@ -187,23 +192,28 @@ fn node_with_acp(tag: &str) -> Option<(std::path::PathBuf, Node)> {
     git(&repo, &["init", "-q", "-b", "main"]);
     git(&repo, &["commit", "-q", "--allow-empty", "-m", "init"]);
     std::fs::create_dir_all(home.join("manifests")).unwrap();
-    for (kind, extra) in [("acp-fake", ""), ("acp-broken", ", \"--fail-at-start\"")] {
+    for (kind, extra) in [
+        ("acp-fake", ""),
+        ("acp-broken", ", \"--fail-at-start\""),
+        ("acp-bypass", ", \"--bypass-mode\""),
+    ] {
         std::fs::write(
             home.join(format!("manifests/{kind}.toml")),
             format!("kind = \"{kind}\"\ndisplay_name = \"Fake ACP\"\nversion = \"1\"\nmin_engine = 1\n[structured]\nacp = {{ argv = [{:?}, \"--acp\"{extra}] }}\n", fake_agent()),
         )
         .unwrap();
     }
-    let node = Node(
-        Command::new(AGORA)
-            .args(["node", "run", "--project"])
-            .arg(&repo)
-            .env("AGORA_HOME", &home)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("start node"),
-    );
+    if let Some(policy) = policy {
+        std::fs::create_dir_all(home.join("data")).unwrap();
+        std::fs::write(home.join("data/policy"), policy).unwrap();
+    }
+    let mut cmd = Command::new(AGORA);
+    cmd.args(["node", "run", "--project"])
+        .arg(&repo)
+        .env("AGORA_HOME", &home)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let node = Node(cmd.spawn().expect("start node"));
     let sock = home.join("node.sock");
     let end = Instant::now() + Duration::from_secs(60);
     while !sock.exists() {
@@ -214,7 +224,11 @@ fn node_with_acp(tag: &str) -> Option<(std::path::PathBuf, Node)> {
 }
 
 fn started_agent(home: &Path) -> String {
-    let (code, started) = agora(home, &["agent", "start", "acp-fake"]);
+    started_agent_of(home, "acp-fake")
+}
+
+fn started_agent_of(home: &Path, kind: &str) -> String {
+    let (code, started) = agora(home, &["agent", "start", kind]);
     assert_eq!(code, 0, "{started}");
     let id = started
         .split_whitespace()
@@ -333,6 +347,83 @@ fn the_user_switches_an_acp_agents_mode_and_model() {
         .unwrap()
         .unwrap_err();
     assert_eq!(unknown.code, "agent.not_found");
+    drop(node);
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// A mode in which the agent acts without asking follows the node's `skip_permissions` policy, as a launch option does (ADR-0059):
+/// `forbid` refuses it with `agent.option_forbidden`, `allow` takes it; a mode that asks stays possible under `forbid`.
+#[test]
+fn a_mode_that_skips_permissions_follows_the_nodes_policy() {
+    for (policy, allowed) in [
+        ("skip_permissions = forbid\n", false),
+        ("skip_permissions = allow\n", true),
+    ] {
+        let tag = if allowed { "skip-allow" } else { "skip-forbid" };
+        let Some((home, node)) = node_with_acp_policy(tag, Some(policy)) else {
+            return;
+        };
+        let id = started_agent_of(&home, "acp-bypass");
+        let mut c = Client::connect(&home.join("node.sock")).unwrap();
+        let mut set_mode = |mode: &str| {
+            c.call(Cmd::AgentSetMode(v1::AgentSetMode {
+                agent_id: id.clone(),
+                mode: mode.into(),
+            }))
+            .unwrap()
+        };
+        // The options arrive just after the start.
+        let end = Instant::now() + Duration::from_secs(15);
+        while set_mode("plan").is_err() {
+            assert!(Instant::now() < end, "the mode was never accepted");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let skipped = set_mode("bypassPermissions");
+        if allowed {
+            assert!(skipped.is_ok(), "{skipped:?}");
+        } else {
+            let err = skipped.unwrap_err();
+            assert_eq!(err.code, "agent.option_forbidden");
+            assert!(set_mode("build").is_ok());
+        }
+        drop(node);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+}
+
+/// ADR-0090 (schema only): no node handles `AgentSetConfig` or `AgentCancelTurn` yet, so each is answered with
+/// `protocol.capability_missing`, never accepted and never dropped.
+#[test]
+fn the_new_conversation_commands_are_refused_until_a_node_handles_them() {
+    let Some((home, node)) = node_with_acp("refuse-0090") else {
+        return;
+    };
+    let id = started_agent(&home);
+    let mut c = Client::connect(&home.join("node.sock")).unwrap();
+    for (cmd, capability) in [
+        (
+            Cmd::AgentSetConfig(v1::AgentSetConfig {
+                agent_id: id.clone(),
+                config_id: "effort".into(),
+                value: "high".into(),
+            }),
+            "agent.set_config",
+        ),
+        (
+            Cmd::AgentCancelTurn(v1::AgentCancelTurn {
+                agent_id: id.clone(),
+                drop_queue: false,
+            }),
+            "agent.cancel_turn",
+        ),
+    ] {
+        let err = c.call(cmd).unwrap().unwrap_err();
+        assert_eq!(err.code, "protocol.capability_missing");
+        assert_eq!(
+            err.params.get("capability").and_then(|p| p.value.clone()),
+            Some(v1::param_value::Value::Str(capability.into()))
+        );
+    }
     drop(node);
     let _ = std::fs::remove_dir_all(&home);
 }

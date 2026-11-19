@@ -1,0 +1,12 @@
+{
+  "producerId": "n1",
+  "seq": "41",
+  "atMs": "1700000006000",
+  "agentCommands": {
+    "agentId": "agent-1",
+    "commands": [
+      { "name": "review", "description": "Review the current changes" },
+      { "name": "init", "description": "Create an instructions file", "inputHint": "optional path" }
+    ]
+  }
+}

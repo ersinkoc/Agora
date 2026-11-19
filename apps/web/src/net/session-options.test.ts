@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { agora } from '../gen/agora.js';
 import { applyEvent, emptyView, fromSnapshot, tiles } from './view';
-import { agentTarget, choices, confirmed, contextFill, contextLabel, contextPercent, needsConfirm, needsPlaceholder, NOT_REPORTED, ownCost, pendingFor } from '../components/sessionChoice';
+import { agentTarget, choices, confirmed, contextFill, contextLabel, contextPercent, needsConfirm, needsPlaceholder, NOT_REPORTED, pendingFor } from '../components/sessionChoice';
 
 const ev = (producer: string, seq: number, body: Record<string, unknown>) => agora.v1.Event.create({ producerId: producer, seq, ...body });
 const opt = (id: string, skips = false) => ({ id, name: id.toUpperCase(), description: '', skipsPermissions: skips });
@@ -19,12 +19,11 @@ describe('session options, context and own cost', () => {
     expect(s?.models[0]?.skipsPermissions).toBe(false); // only a mode can skip permissions
     expect([s?.currentMode, s?.currentModel, s?.contextTokens, s?.costMicros]).toEqual(['build', 'm1', 250, 15_000]);
     expect(contextPercent(s)).toBe(25);
-    expect(ownCost(s, 'en-US')).toBe('$0.02');
   });
   it('comes back from the snapshot', () => {
     const v = fromSnapshot({ agents: [{ agentId: 'n1/a1', nodeId: 'n1', modes: [opt('plan')], currentMode: 'plan', contextTokens: 5, contextWindow: 10 }] });
     const s = tiles(v)[0]?.session;
-    expect([s?.currentMode, contextPercent(s), ownCost(s)]).toEqual(['plan', 50, undefined]);
+    expect([s?.currentMode, contextPercent(s)]).toEqual(['plan', 50]);
     expect(tiles(fromSnapshot({ agents: [{ agentId: 'n1/a2', nodeId: 'n1' }] }))[0]?.session).toBeUndefined();
   });
   it('asks before a mode that does not ask, and only then', () => {

@@ -20,7 +20,7 @@ Origin: the maintainer asked for a browser next to the terminal, the changes and
 
 ## Decision
 1. **A preview is a named, owner-approved forward.** The node opens a forward only for a port the user (or an approved agent request)
-   named, to `127.0.0.1` on that machine, never to another host. A forward has an id, a port, an expiry (default 8 hours) and a creator.
+   named, to the loopback of that machine (`127.0.0.1` or `::1`: dev servers on Windows often listen only on `::1`), never to another host. A forward has an id, a port, an expiry (default 8 hours) and a creator.
    Forwards are listed in the window and can be closed there; closing or node restart ends them.
 2. **Opening a forward is a sensitive action** (ADR-0020): a user-signed approval verified on the node, naming the port. An agent may
    *suggest* a port ("my app is on 3000"), shown as a card with an Open button; it can never open one by itself. An allow-list of ports
@@ -61,3 +61,12 @@ port and to open the node's control port: all must fail).
 2. Node forwarder and policy checks, with the escape tests.
 3. Hub relay, origin per forward, audit.
 4. Web Browser pane.
+
+## Status of the build
+1. Schema: done. `schema/agora/v1/preview.proto` (commands 102..105, results 26..28, events 80..81, frame kinds 20..22), capability
+   `preview.v1`, error codes `preview.port_refused`, `preview.limit`, `preview.expired`, `preview.unknown`, `preview.unavailable`, golden
+   fixtures, the signing domain `preview-action-v1` with vectors, and `docs/specs/preview.md`. The capability is not advertised yet (steps
+   2 and 3 add it); node and hub refuse the commands with `protocol.capability_missing`.
+2. Node forwarder and policy checks: not started.
+3. Hub relay, origin per forward, audit: not started.
+4. Web Browser pane: not started.

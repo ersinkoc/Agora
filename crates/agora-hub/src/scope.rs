@@ -201,6 +201,8 @@ impl Scope {
             }
             Body::GitStatusChanged(e) => self.granted(self.worktrees.get(&q(&e.worktree_id))),
             Body::FilesChanged(e) => self.granted(self.worktrees.get(&q(&e.worktree_id))),
+            // ADR-0088 (schema only): who may see a preview event is decided with the hub step; until then nobody is sent one.
+            Body::PreviewSuggested(_) | Body::PreviewChanged(_) => false,
             Body::AgentStarted(e) => {
                 let p = qualified(node, &e.project_id);
                 self.agents.insert(q(&e.agent_id), p.clone());
@@ -219,6 +221,9 @@ impl Scope {
             Body::AgentSessionReported(e) => self.granted(self.agents.get(&q(&e.agent_id))),
             Body::AgentUsageReported(e) => self.granted(self.agents.get(&q(&e.agent_id))),
             Body::AgentSessionOptions(e) => self.granted(self.agents.get(&q(&e.agent_id))),
+            // ADR-0090
+            Body::AgentSessionConfig(e) => self.granted(self.agents.get(&q(&e.agent_id))),
+            Body::AgentCommands(e) => self.granted(self.agents.get(&q(&e.agent_id))),
             Body::AgentExited(e) => self.granted(self.agents.get(&q(&e.agent_id))),
             Body::AgentStartRefused(e) => self.granted(self.agents.get(&q(&e.agent_id))),
             // Made by the hub, which names the agent by its hub-wide key already (ADR-0053).
@@ -288,6 +293,9 @@ impl Scope {
             C::AgentPrompt(c) => self.granted(self.agents.get(&q(&c.agent_id))),
             C::AgentSetMode(c) => self.granted(self.agents.get(&q(&c.agent_id))),
             C::AgentSetModel(c) => self.granted(self.agents.get(&q(&c.agent_id))),
+            // ADR-0090
+            C::AgentSetConfig(c) => self.granted(self.agents.get(&q(&c.agent_id))),
+            C::AgentCancelTurn(c) => self.granted(self.agents.get(&q(&c.agent_id))),
             C::ChatSubscribe(c) => self.granted(self.agents.get(&q(&c.agent_id))),
             C::TerminalInput(c) => self.granted(self.terminals.get(&q(&c.terminal_id))),
             C::TerminalResize(c) => self.granted(self.terminals.get(&q(&c.terminal_id))),

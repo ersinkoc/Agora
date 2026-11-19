@@ -6,11 +6,10 @@ import { ago, duration } from '../net/time';
 import { Icon } from './Icon';
 import { StateMark } from './StateBadge';
 
-// What a closed agent leaves behind: how it ended, how long it ran, what it changed and cost. Its terminal is gone, so this is shown
+// What a closed agent leaves behind: how it ended, how long it ran, what it changed and how many tokens it used. Its terminal is gone, so this is shown
 // in its place, with the ways to look at the work and to clear it from the list.
-export function ClosedSummary({ agent, cost, now, onReview, onHistory, onFiles, onDismiss, onForget, forgetError, onStart, onResume, resuming, resumeError }: {
+export function ClosedSummary({ agent, now, onReview, onHistory, onFiles, onDismiss, onForget, forgetError, onStart, onResume, resuming, resumeError }: {
   agent: AgentTileModel;
-  cost?: string;
   now: number;
   onReview?: () => void;
   onHistory?: () => void;
@@ -56,7 +55,7 @@ export function ClosedSummary({ agent, cost, now, onReview, onHistory, onFiles, 
           <dt className="text-muted">{t('closed-ended-label')}</dt><dd className="m-0">{agent.endedMs ? ago(agent.endedMs, now) : t('closed-earlier')}</dd>
           {ran && <><dt className="text-muted">{t('closed-ran-label')}</dt><dd className="m-0">{ran}</dd></>}
           <dt className="text-muted">{t('closed-changes-label')}</dt><dd className="m-0">{changes > 0 ? t('changes-files', { count: changes }) : t('closed-changes-none')}</dd>
-          {!!agent.tokens && <><dt className="text-muted">{t('closed-tokens-label')}</dt><dd className="m-0">{t('agent-tokens', { count: agent.tokens })}{cost ? ` · ${cost}` : ''}</dd></>}
+          {!!agent.tokens && <><dt className="text-muted">{t('closed-tokens-label')}</dt><dd className="m-0">{t('agent-tokens', { count: agent.tokens })}</dd></>}
         </dl>
         <div className="flex flex-wrap gap-2">
           {onReview && changes > 0 && <button type="button" className="button button--primary" onClick={onReview}>{t('closed-review')}</button>}

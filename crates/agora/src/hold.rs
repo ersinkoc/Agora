@@ -6,11 +6,13 @@
 //! pid and start time (ADR-0062 item 8). The link is `agora_node::holder_link`; `docs/specs/holder-link.md` describes it.
 //!
 //! One thread does everything, so the process that starts each agent lives as long as the holder (on Linux the agent's first process
-//! gets `SIGHUP` when it ends, which the kernel ties to the thread that forked). Nothing here is wired into the node yet (W2 step 1).
+//! gets `SIGHUP` when it ends, which the kernel ties to the thread that forked). The node starts it and starts its agents through it
+//! (W2 step 2, `agora_node::holder`). It writes `run/hold.pid` (its pid, start time and how many agents run), which `agora down` and
+//! `agora status` read, and on `SIGTERM` (`agora down --agents`) it ends its agents and itself.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use agora_i18n::key;
 use agora_node::holder_link::{
@@ -47,6 +49,9 @@ pub(crate) fn hold(say: &Say, opts: &Opts) -> ExitCode {
         say.err(key!("hold-failed"), &[("message", e.to_string().into())]);
         return ExitCode::from(1);
     }
+    // `agora down --agents` asks it to end by `SIGTERM`: its agents end first (a holder killed outright would leave them the kernel's
+    // hangup only). Not being able to catch it is not a reason not to hold anything.
+    let _ = agora_platform::catch_stop_requests();
     let lock = Role::Node.lock(&home);
     let admit: Admit = Box::new(move |peer| admit_by_lock(&lock, peer));
     match Holder::open(&home, admit).map(Holder::run) {
@@ -58,15 +63,65 @@ pub(crate) fn hold(say: &Say, opts: &Opts) -> ExitCode {
     }
 }
 
-/// Whether `peer` is the node holding the role lock now: its pid is the lock's, and its start time (read now) is the lock's, so a
-/// pid another process got after the node ended is not admitted. Returns that start time.
+/// Whether `peer` is the node holding the role lock now. Returns the peer's start time.
+///
+/// The lock names the process that holds the role: a supervisor, which runs the node as its child (ADR-0062 item 8), or the node itself
+/// when it holds the lock. So a peer is admitted when it is that process (its pid and its start time, read now, are the lock's: a pid
+/// another process got after the node ended is not admitted) or its direct child, an `agora` process, while the lock holder is alive
+/// (the supervisor's node).
 pub(crate) fn admit_by_lock(lock: &Path, peer: &Peer) -> Option<u64> {
     if !peer.same_user {
         return None;
     }
     let l = read_lock(lock)?;
     let start = agora_platform::process_start_time(peer.pid)?;
-    (l.pid == peer.pid && l.start == start).then_some(start)
+    if l.pid == peer.pid {
+        return (l.start == start).then_some(start);
+    }
+    // The supervisor's one child is the node, an `agora` process. The name is the process's own to set, so it is not what makes this
+    // safe: a supervisor starts nothing but its node, and an agent (a confined one too) is the node's or the holder's child, never a
+    // direct child of the lock holder. The name only keeps a lock held by something else (a test, a node that holds it itself) from
+    // admitting whatever it started.
+    let child = l.alive()
+        && agora_platform::process_children(l.pid).is_ok_and(|c| c.contains(&peer.pid))
+        && agora_platform::process_name(peer.pid)
+            .is_ok_and(|n| n.to_lowercase().starts_with("agora"));
+    child.then_some(start)
+}
+
+/// ADR-0079 W2 step 2: where this node's holder lives and how to start it, or `None` when it must not use one: no holder on this
+/// system, or this process is not the one the role lock admits (its pid, or a child of the supervisor that holds the lock), in which
+/// case a holder it started would refuse it and idle. The node then runs its agents itself, as before.
+pub(crate) fn setup_for_node(home: &Path) -> Option<agora_node::holder::HolderSetup> {
+    if !agora_platform::HOLDER_BUILT {
+        return None;
+    }
+    let me = Peer {
+        pid: std::process::id(),
+        same_user: true,
+    };
+    admit_by_lock(&Role::Node.lock(home), &me)?;
+    Some(agora_node::holder::HolderSetup {
+        home: home.to_path_buf(),
+        exe: std::env::current_exe().ok()?,
+    })
+}
+
+/// `run/hold.pid`: `pid start agents`, so that `agora down` and `agora status` can find the holder and say how many agents it keeps.
+pub(crate) fn info_path(home: &Path) -> PathBuf {
+    home.join("run").join("hold.pid")
+}
+
+/// The running holder of `home` and how many agents it keeps running; `None` when there is none (the file is stale, or missing).
+pub(crate) fn read_info(home: &Path) -> Option<(u32, usize)> {
+    let text = std::fs::read_to_string(info_path(home)).ok()?;
+    let mut w = text.split_whitespace();
+    let (pid, start, agents): (u32, u64, usize) = (
+        w.next()?.parse().ok()?,
+        w.next()?.parse().ok()?,
+        w.next()?.parse().ok()?,
+    );
+    (agora_platform::process_start_time(pid) == Some(start)).then_some((pid, agents))
 }
 
 /// Decides, from the kernel's record of who connected, whether a peer may use the holder: the verified start time, or `None`.
@@ -82,9 +137,37 @@ struct Agent {
     exit: Option<ExitStatus>,
     /// The terminal ended: every process closed its side, and nothing more can be read.
     eof: bool,
+    /// When the node asked to end it (`Stop`): an ending agent that is still not reaped a moment later has nobody reading its terminal.
+    ending: Option<Instant>,
 }
 
+/// How long an ending agent gets to leave by itself before the holder reads its terminal for it.
+const ENDING_GRACE: Duration = Duration::from_millis(200);
+
 impl Agent {
+    /// Whether the holder must read this agent's terminal so that it can exit: it is being ended, has not been reaped for
+    /// [`ENDING_GRACE`] (a node that reads its terminal would have let it go), no reader of ours runs, and no live node may read it
+    /// (`node_may_read`: a node whose link dropped still holds its copy). macOS keeps a process that exits with unread terminal
+    /// output in the exiting state until that output is read.
+    fn must_drain_to_end(&self, now: Instant, node_may_read: bool) -> bool {
+        !node_may_read
+            && self.exit.is_none()
+            && !self.eof
+            && self.reader.is_none()
+            && self
+                .ending
+                .is_some_and(|t| now.saturating_duration_since(t) >= ENDING_GRACE)
+    }
+
+    /// Reads what waits in the terminal into the buffer, when [`Self::must_drain_to_end`]; `true` when it did.
+    fn drain_to_end(&mut self, now: Instant, node_may_read: bool) -> bool {
+        if !self.must_drain_to_end(now, node_may_read) {
+            return false;
+        }
+        self.eof = self.term.drain(&mut self.held).unwrap_or(true);
+        true
+    }
+
     fn state(&self) -> AgentState {
         match self.exit {
             None => AgentState::Running,
@@ -132,6 +215,9 @@ pub(crate) struct Holder {
     had_agents: bool,
     pid: u32,
     start: u64,
+    /// The home, for `run/hold.pid`, and the count it last said.
+    home: PathBuf,
+    published: Option<usize>,
 }
 
 impl Holder {
@@ -154,17 +240,55 @@ impl Holder {
             had_agents: false,
             pid,
             start,
+            home: home.to_path_buf(),
+            published: None,
         })
     }
 
     /// Serves until nothing is left to keep: a holder that held agents and has none left, after a node took the last.
     pub(crate) fn run(mut self) {
         while self.tick() {}
+        let _ = std::fs::remove_file(info_path(&self.home));
+    }
+
+    /// Says (in `run/hold.pid`) how many agents run, when that changed. A failed write is only a stale count.
+    fn publish(&mut self) {
+        let running = self.agents.iter().filter(|a| a.exit.is_none()).count();
+        if self.published != Some(running) {
+            let text = format!("{} {} {running}\n", self.pid, self.start);
+            if agora_platform::write_private(&info_path(&self.home), text.as_bytes()).is_ok() {
+                self.published = Some(running);
+            }
+        }
+    }
+
+    /// `SIGTERM` (`agora down --agents`): every agent's group is asked to end, and killed when it has not within a few seconds.
+    fn end_agents(&mut self) {
+        for a in &self.agents {
+            let _ = a.term.signal(HeldSignal::Terminate);
+        }
+        let end = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < end {
+            self.reap();
+            if self.agents.iter().all(|a| a.exit.is_some()) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        for a in &self.agents {
+            let _ = a.term.signal(HeldSignal::Kill);
+        }
+        // What is left is killed and collected as the agents are dropped.
     }
 
     /// One pass; `false` when the holder is done. The node first, then the bounded rest.
     pub(crate) fn tick(&mut self) -> bool {
+        if agora_platform::stop_requested() {
+            self.end_agents();
+            return false;
+        }
         self.reap();
+        self.publish();
         if self.departed.as_ref().is_some_and(ProcessWatch::ended) {
             self.departed = None;
             self.start_readers();
@@ -183,9 +307,14 @@ impl Holder {
 
     /// Notes agents that ended, and keeps what an ended agent's terminal still holds.
     fn reap(&mut self) {
+        let now = Instant::now();
+        let node_may_read = self.departed.is_some();
         for a in &mut self.agents {
             if a.exit.is_none() {
                 a.exit = a.term.try_wait().unwrap_or(None);
+                if a.exit.is_none() && a.drain_to_end(now, node_may_read) {
+                    a.exit = a.term.try_wait().unwrap_or(None);
+                }
             }
             if a.exit.is_some() && !a.eof {
                 // Reading goes on until the terminal ends; with a reader that has seen the end, take what it kept.
@@ -383,6 +512,9 @@ impl Holder {
             None => self.refuse(Refusal::UnknownAgent),
             Some(a) => {
                 let r = a.term.signal(signal);
+                if r.is_ok() && matches!(signal, HeldSignal::Kill | HeldSignal::Terminate) {
+                    a.ending.get_or_insert_with(Instant::now);
+                }
                 self.answer(r);
             }
         }
@@ -428,6 +560,7 @@ impl Holder {
             held: HeldBuffer::default(),
             exit: None,
             eof: false,
+            ending: None,
         });
         self.send(
             &Reply::Started {
@@ -503,4 +636,142 @@ fn refuse(stream: &mut LocalStream, code: Refusal) {
         holder_version: LINK_VERSION,
     };
     let _ = write_frame(stream, &reply.encode(), None);
+}
+
+#[cfg(all(test, unix))]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    fn agent_with_output() -> Agent {
+        let config = PtyConfig {
+            argv: vec!["sh".into(), "-c".into(), "echo up; sleep 600".into()],
+            cwd: None,
+            env: Vec::new(),
+            cols: 80,
+            rows: 24,
+            limits: agora_platform::ProcessLimits {
+                cpu_seconds: None,
+                memory_bytes: None,
+            },
+            sandbox: None,
+            identity: None,
+            env_remove: Vec::new(),
+        };
+        let term = HeldTerminal::start(&config).unwrap();
+        Agent {
+            id: "a".into(),
+            term,
+            reader: None,
+            held: HeldBuffer::default(),
+            exit: None,
+            eof: false,
+            ending: None,
+        }
+    }
+
+    /// An agent being ended whose terminal nobody reads is read by the holder (so macOS lets it exit); one a node may read, one that is
+    /// not being ended, and one still within its grace are not.
+    #[test]
+    fn an_ending_agent_nobody_reads_is_drained_and_no_other_is() {
+        let mut a = agent_with_output();
+        std::thread::sleep(Duration::from_millis(300));
+        let t0 = Instant::now();
+        let later = t0 + ENDING_GRACE * 2;
+        // Not being ended: never read (the node reads it).
+        assert!(!a.drain_to_end(later, false));
+        a.ending = Some(t0);
+        // Within the grace: the node may still read it.
+        assert!(!a.drain_to_end(t0, false));
+        // A node whose link dropped still holds a copy.
+        assert!(!a.drain_to_end(later, true));
+        assert!(a.held.clone().into_vec().is_empty(), "output was taken");
+        // Ending, past the grace, nobody to read: read.
+        assert!(a.drain_to_end(later, false));
+        assert!(String::from_utf8_lossy(&a.held.clone().into_vec()).contains("up"));
+        // A reaped agent is left alone.
+        let _ = a.term.signal(HeldSignal::Kill);
+        std::thread::sleep(Duration::from_millis(200));
+        a.exit = a.term.try_wait().unwrap_or(None);
+        assert!(a.exit.is_some());
+        assert!(!a.drain_to_end(later, false));
+    }
+
+    /// The lock names a supervisor, which runs the node as its child (ADR-0062 item 8): the node is admitted, the supervisor itself is,
+    /// and neither a stranger nor the node's own child (an agent, a confined one included) is.
+    #[test]
+    fn the_lock_holder_and_its_direct_child_are_admitted_and_no_one_else() {
+        let dir = std::env::temp_dir().join(format!("agora-admit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let lock = dir.join("node.lock");
+        let me = std::process::id();
+        let mine = crate::frontdoor::LockInfo::of(me).unwrap();
+        std::fs::write(&lock, mine.text()).unwrap();
+        let peer = |pid: u32| Peer {
+            pid,
+            same_user: true,
+        };
+
+        // This process stands for the supervisor. Its node is an `agora` process (here `sleep` under that name); a stranger it started
+        // is not named so, and what the node started is the node's child, never the lock holder's.
+        let node_exe = dir.join("agora-admit-node");
+        std::fs::write(&node_exe, "#!/bin/sh\nsleep 5\n").unwrap();
+        std::fs::set_permissions(
+            &node_exe,
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
+        let mut node = std::process::Command::new(&node_exe)
+            .arg("5")
+            .spawn()
+            .unwrap();
+        let mut stranger = std::process::Command::new("sleep")
+            .arg("5")
+            .spawn()
+            .unwrap();
+        let mut grandchild = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("{} 5 & wait", node_exe.display()))
+            .spawn()
+            .unwrap();
+        let node_start = agora_platform::process_start_time(node.id()).unwrap();
+        assert_eq!(admit_by_lock(&lock, &peer(me)), Some(mine.start));
+        // Where a script is named after its interpreter (macOS) the stand-in cannot be named `agora`: the positive case is then
+        // only covered on Linux, and the refusals below hold either way.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        if agora_platform::process_name(node.id()).is_ok_and(|n| n.starts_with("agora")) {
+            assert_eq!(admit_by_lock(&lock, &peer(node.id())), Some(node_start));
+        }
+        assert_eq!(
+            admit_by_lock(&lock, &peer(stranger.id())),
+            None,
+            "a child of the lock holder that is not the node was admitted"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let agents = agora_platform::process_children(grandchild.id()).unwrap();
+        assert!(!agents.is_empty(), "the shell started nothing");
+        for agent in agents {
+            assert_eq!(
+                admit_by_lock(&lock, &peer(agent)),
+                None,
+                "a grandchild of the lock holder was admitted"
+            );
+        }
+        // Another user, however it is related.
+        let other_user = Peer {
+            pid: node.id(),
+            same_user: false,
+        };
+        assert_eq!(admit_by_lock(&lock, &other_user), None);
+        // A process that is not related to the lock holder at all (pid 1 is nobody's child but its own parent's).
+        assert_eq!(admit_by_lock(&lock, &peer(1)), None);
+        // A lock that names a process that is gone admits no child of it.
+        std::fs::write(&lock, format!("{} {} test\n", me, mine.start + 1)).unwrap();
+        assert_eq!(admit_by_lock(&lock, &peer(node.id())), None);
+        for child in [&mut node, &mut stranger, &mut grandchild] {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

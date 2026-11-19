@@ -391,7 +391,7 @@ export function keepLetters(e: KeyboardEvent<HTMLElement>): void {
 const MARK_CLASS: Record<ChangeMark, string> = { add: 'bg-finished', mod: 'bg-working', del: 'bg-needs-you' };
 
 // A file's lines with numbers and change marks, drawn a screenful at a time. Lines do not wrap; the view scrolls sideways.
-function CodeView({ label, lines, html, marks, matches, current }: { label: string; lines: string[]; html?: string[]; marks: Map<number, ChangeMark>; matches: Match[]; current?: Match }) {
+export function CodeView({ label, lines, html, marks, matches, current }: { label: string; lines: string[]; html?: string[]; marks: Map<number, ChangeMark>; matches: Match[]; current?: Match }) {
   const box = useRef<HTMLDivElement>(null);
   const [top, setTop] = useState(0);
   const [height, setHeight] = useState(600);

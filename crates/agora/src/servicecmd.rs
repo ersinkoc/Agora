@@ -6,7 +6,7 @@
 //! never with administrator rights; the per-system code is in `agora_platform` (`service_install`, `service_remove`,
 //! `service_status`). Before registering, the command says what it registers.
 //!
-//! `install` is idempotent: a role whose service is registered already is left as it is, and the command says so. It starts the role
+//! `install` is idempotent: a role whose service is registered already is left as it is, and the command says so (a unit Agora wrote that a newer Agora would write differently is rewritten and reloaded, never restarted). It starts the role
 //! now only when nothing holds it already. `remove` acts only on a registered service: it stops the role through its lock whoever
 //! started it (the service, `agora`, or a supervisor started by hand), exactly as `agora down` does, and then unregisters the service.
 //! Without a registered service it changes nothing (a role started by hand is stopped with `agora down`).
@@ -73,6 +73,9 @@ fn spec(say: &Say, h: &Path, role: Role) -> std::io::Result<ServiceSpec> {
         env,
         work_dir: h.to_path_buf(),
         restart_supervisor_on_failure: true,
+        // The node's agents run in the terminal holder, which must outlive a stop or restart of the unit (ADR-0079); the hub has no
+        // such children, and keeps the whole control group ending with it.
+        keep_children_on_stop: role == Role::Node,
     })
 }
 
@@ -241,11 +244,34 @@ pub(crate) fn install(say: &Say, h: &Path, m: &Machine) -> ExitCode {
             Ok(ServiceState::Installed { enabled: true }) => {
                 match agora_platform::service_drop_ins(&spec.name) {
                     Ok(others) if others.is_empty() => {
-                        say.out(
-                            key!("service-already"),
-                            &[("role", label), ("name", spec.name.clone().into())],
-                        );
-                        registered = true;
+                        // A unit Agora wrote earlier that a newer Agora would write differently is rewritten (and reloaded); the
+                        // running service is never restarted from here.
+                        match agora_platform::service_unit_differs(&spec) {
+                            Ok(true) => match agora_platform::service_install(&spec) {
+                                Ok(()) => {
+                                    say.out(
+                                        key!("service-updated"),
+                                        &[("role", label), ("name", spec.name.clone().into())],
+                                    );
+                                    registered = true;
+                                }
+                                Err(e) => {
+                                    failed(say, key!("service-install-failed"), &spec.name, &e);
+                                    code = ExitCode::from(1);
+                                }
+                            },
+                            Ok(false) => {
+                                say.out(
+                                    key!("service-already"),
+                                    &[("role", label), ("name", spec.name.clone().into())],
+                                );
+                                registered = true;
+                            }
+                            Err(e) => {
+                                failed(say, key!("service-status-failed"), &spec.name, &e);
+                                code = ExitCode::from(1);
+                            }
+                        }
                     }
                     Ok(others) => {
                         say.err(

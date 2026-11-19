@@ -6,6 +6,41 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 _Nothing yet._
 
+## 0.3.24
+
+### Agents survive the node (Linux and macOS)
+- An agent now keeps running when Agora's node stops or restarts. Agents are started through a small keeper process (`agora hold`) that outlives the node; the next `agora` attaches to them again, with their screens and whatever they printed meanwhile.
+- `agora down` stops the node and the hub and leaves the agents running (it says how many); `agora down --agents` stops them too. `agora status` shows agents that run without a node.
+- Agents that are confined (a sandbox policy), and every agent on Windows, still run inside the node and end with it, as before; a keeper that cannot start changes nothing.
+- With the login service installed on Linux, restarting or stopping the node's service no longer ends the agents that run through the keeper. For a service installed earlier, run `agora service install` again (it updates the unit and reloads systemd) and then `systemctl --user restart agora-node`; that one restart still ends the agents of the old keeper.
+
+### The window
+- Terminal, Changes, Files and a file manager open as panes in the workspace, beside an agent or on their own: from the + of a tab group, from Ctrl+K, from an agent's header and from the right-hand icons. The file manager shows a folder tree, a sortable list, a preview and Copy path; renaming, moving, deleting and uploading are shown switched off with the reason.
+- The conversation of an agent without a terminal has a new look: a header with the state and the context used, each turn with the agent's name, model and time, your requests in tinted bubbles, tool calls in one framed group per turn (an edit shows its diff inline, with line numbers), a plan card, the approval pinned above the message box, and a calmer message box.
+- The Usage panel's icon is bars, not a dollar sign. Long folders in the file manager scroll smoothly.
+
+### Safety
+- A mode or option that makes an agent skip its permission questions is now refused by the node when its policy forbids it, on every way of changing a mode.
+
+### Fixes
+- On a Mac, ending an agent whose start answer was lost no longer hangs: the keeper reads what an ending agent printed so the process can leave.
+
+## 0.3.23
+
+### The window
+- The right-hand panel is now a column of icons (Needs you with a count, Changes, Board, Messages, Usage) that stays visible on a narrow window; the panel opens beside it, or over the content on a small screen. Alt+Shift+1 to 5 open them.
+- The tabs of open agents scroll instead of being cut off, and a "More tabs" menu lists the hidden ones, with a dot when one of them needs you.
+- The agent list and the fleet view can be grouped by machine, project, agent kind or state, and the choice is remembered. The same project on several machines is one group, marked "Same project", and a hint appears when agents on different machines have changes in it.
+- Agents that run without asking carry a short "Acts freely" badge; the full explanation is in its tooltip.
+- An agent's screen shows its model and mode as menus (only what the agent reports), the context it has used and the time since it started. The start window remembers the last model and effort you chose for each kind on each machine.
+- The conversation of an agent without a terminal reads like a coding tool's: your requests and its replies look different, Markdown (lists, tables, code with a copy button) is drawn safely, tool calls are folded into one line per turn, changes are cards with a file list, and a "Jump to latest" button appears when you scroll up. Older entries are loaded on request.
+- A terminal agent shows a short live summary above its screen.
+- "Spent" is now "Usage" and shows tokens, context and time, never money. Plan limits will appear there when the agents report them.
+- Fleet cards show how long an agent has worked, and "needs you" is clearer.
+
+### Resume
+- Held terminals: the first part of keeping agents alive when the node stops is in place on Linux and macOS (not yet switched on).
+
 ## 0.3.22
 
 ### Resume

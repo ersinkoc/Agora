@@ -20,6 +20,8 @@ use agora_protocol::{Error, ErrorCode};
 use agora_vt::Size;
 
 use crate::git::{self, GitError};
+use crate::holder::{HolderHub, HolderSession};
+use crate::holder_link::{Held, LinkError, Refusal as HolderRefusal};
 use crate::launch_options::{LaunchChoice, Refusal, Requested, SkipPermissions};
 use crate::terminal::{TerminalHandle, TerminalOptions};
 
@@ -518,6 +520,8 @@ pub struct Supervisor {
     parents: BTreeMap<AgentId, AgentId>,
     /// ADR-0059: the owner's `skip_permissions` policy.
     skip_permissions: SkipPermissions,
+    /// ADR-0079: the terminal holder agents are started through, when this node has one (Unix); `None` runs every agent in the node.
+    holder: Option<std::sync::Arc<HolderHub>>,
 }
 
 impl Supervisor {
@@ -535,7 +539,83 @@ impl Supervisor {
             adapters: BTreeMap::new(),
             parents: BTreeMap::new(),
             skip_permissions: SkipPermissions::default(),
+            holder: None,
         }
+    }
+
+    /// ADR-0079: starts agents through this holder (and falls back to running them here when it cannot be had). A confined agent is
+    /// always run by the node: the holder does not carry a confinement yet.
+    pub fn set_holder(&mut self, holder: std::sync::Arc<HolderHub>) {
+        self.holder = Some(holder);
+    }
+
+    /// The holder this node uses, if any (tests).
+    #[doc(hidden)]
+    pub fn holder_hub(&self) -> Option<std::sync::Arc<HolderHub>> {
+        self.holder.clone()
+    }
+
+    /// ADR-0079 decision 9: the agents whose process is the holder's, and the holder's process (pid and start time), for the ledger.
+    pub fn held_agents(&self) -> (Vec<AgentId>, Option<(u32, u64)>) {
+        let ids = self
+            .agents
+            .iter()
+            .filter(|(_, e)| e.terminal.as_ref().is_some_and(TerminalHandle::is_held))
+            .map(|(id, _)| id.clone())
+            .collect();
+        (ids, self.holder.as_ref().and_then(|h| h.identity()))
+    }
+
+    /// ADR-0079 decision 4: takes an agent the holder kept running while the node was away: it is put back as `r.id` with its terminal,
+    /// which first shows what it printed meanwhile (`held.info.buffer`) and then gets a resize nudge, so full-screen agents redraw.
+    /// Nothing is started. On failure nothing is left behind, and the agent stays in the holder.
+    pub fn adopt_held(
+        &mut self,
+        r: Restore,
+        held: Held,
+        session: &std::sync::Arc<HolderSession>,
+        now: Instant,
+    ) -> Result<(), SupervisorError> {
+        let id = r.id.clone();
+        let (kind, project, worktree) = (r.kind.clone(), r.project.to_string(), r.folder.clone());
+        let Held { info, terminal } = held;
+        let Some(master) = terminal else {
+            return Err(SupervisorError::Spawn("no terminal".into()));
+        };
+        let size = self.cfg.terminal.size;
+        self.restore(r)?;
+        let made = agora_platform::held_pty(master, info.info.pid, session.control_of(id.as_str()))
+            .and_then(|pty| TerminalHandle::start_with_output(pty, self.cfg.terminal, &info.buffer))
+            .map(TerminalHandle::into_held);
+        let terminal = match made {
+            Ok(t) => t,
+            Err(e) => {
+                self.unrestore(&id);
+                return Err(SupervisorError::Spawn(e.to_string()));
+            }
+        };
+        // The agent's mesh endpoint was the old node's: made again at the same path, so its configuration keeps working.
+        if let Some(hook) = &self.hook {
+            let _ = hook(&Launching {
+                id: id.clone(),
+                kind,
+                project,
+                node: self.cfg.node.as_str().to_string(),
+                worktree,
+                identity: None,
+            });
+        }
+        // Two resizes so the program gets a window change even when the size did not differ.
+        if let Ok(ctl) = terminal.input_handle() {
+            let _ = ctl.resize(size.cols, size.rows.saturating_sub(1).max(1));
+            let _ = ctl.resize(size.cols, size.rows);
+        }
+        if let Some(e) = self.agents.get_mut(&id) {
+            e.terminal = Some(terminal);
+            e.pacer = Pacer::default();
+            e.next_check = now;
+        }
+        Ok(())
     }
 
     /// ADR-0060: agent ids start at `next` (the session ledger's), so an id is never given twice across the node's restarts.
@@ -971,7 +1051,7 @@ impl Supervisor {
             req.kind.clone(),
             IntegrationLevel::L1Manifest,
         );
-        let terminal = match self.first_launch(&req.kind, &argv, &worktree, &extras, None) {
+        let terminal = match self.first_launch(&id, &req.kind, &argv, &worktree, &extras, None) {
             Ok((t, session)) => {
                 agent.session = session;
                 t
@@ -1218,7 +1298,7 @@ impl Supervisor {
                 }
             };
             let (terminal, session) =
-                match self.first_launch(&req.kind, &argv, &worktree, &extras, folder) {
+                match self.first_launch(&id, &req.kind, &argv, &worktree, &extras, folder) {
                     Ok(t) => t,
                     Err(e) => {
                         if let Some(hook) = &self.abort_hook {
@@ -1616,8 +1696,21 @@ impl Supervisor {
             OptionKind::Mode => &e.options.modes,
             OptionKind::Model => &e.options.models,
         };
-        if value.is_empty() || !offered.iter().any(|o| o.id == value) {
+        let Some(chosen) = offered.iter().find(|o| !value.is_empty() && o.id == value) else {
             return Err(SupervisorError::OptionUnknown(field));
+        };
+        // A mode that makes the agent act without asking is a launch option's twin (ADR-0059): the owner's `skip_permissions` policy
+        // decides it here, on the node, whatever the window or the hub said. Whether it skips is what the adapter reported.
+        if chosen.skips_permissions {
+            let confined =
+                self.sandbox.level != crate::sandbox::Level::Off && self.sandbox.enforceable();
+            if let Some(policy) = self.skip_permissions.refusal(confined) {
+                return Err(SupervisorError::OptionForbidden(
+                    e.agent.kind.clone(),
+                    chosen.id.clone(),
+                    policy,
+                ));
+            }
         }
         let (adapter, session) = self.adapter_of(id)?;
         adapter
@@ -1642,6 +1735,7 @@ impl Supervisor {
     /// v4 UUID), returned so the caller reports it before anything else of the agent; restarts and resumes use `[resume]` with it.
     fn first_launch(
         &self,
+        id: &AgentId,
         kind: &str,
         argv: &[String],
         worktree: &Path,
@@ -1655,13 +1749,16 @@ impl Supervisor {
             .map(|s| s.id_args.clone())
             .unwrap_or_default();
         if id_args.is_empty() {
-            return Ok((self.launch_in(kind, argv, worktree, extras, folder)?, None));
+            return Ok((
+                self.launch_in(id, kind, argv, worktree, extras, folder)?,
+                None,
+            ));
         }
         let session = new_session_id().map_err(|e| SupervisorError::Spawn(e.to_string()))?;
         let mut argv = argv.to_vec();
         argv.extend(id_args.iter().map(|a| a.replace("{session_id}", &session)));
         Ok((
-            self.launch_in(kind, &argv, worktree, extras, folder)?,
+            self.launch_in(id, kind, &argv, worktree, extras, folder)?,
             Some(session),
         ))
     }
@@ -1709,6 +1806,7 @@ impl Supervisor {
     /// Starts a terminal agent's process, in `folder` when it is given (F1012): `worktree` is that folder's path.
     fn launch_in(
         &self,
+        id: &AgentId,
         kind: &str,
         argv: &[String],
         worktree: &std::path::Path,
@@ -1764,6 +1862,13 @@ impl Supervisor {
             cfg.env.push(("TEMP".into(), temp.clone()));
             cfg.env.push(("TMP".into(), temp));
         }
+        // ADR-0079: an agent the node does not confine is started through the holder when this node has one, and run here when it
+        // cannot be (no holder built, it cannot start, the link fails): exactly as before.
+        if cfg.sandbox.is_none() {
+            if let Some(started) = self.launch_held(id, &cfg, folder) {
+                return started;
+            }
+        }
         let started = match folder {
             Some(f) => agora_platform::spawn_in(&cfg, f),
             None => spawn(&cfg),
@@ -1788,6 +1893,88 @@ impl Supervisor {
         })?;
         TerminalHandle::start(pty, self.cfg.terminal)
             .map_err(|e| SupervisorError::Spawn(e.to_string()))
+    }
+
+    /// Starts `cfg` through the holder (ADR-0079). `None` means "not through the holder": the caller runs it itself. The environment is
+    /// complete (the holder passes nothing of its own); a selected folder is checked to be in place right before and right after the
+    /// start (the holder changes into the path, not into the handle the node holds: weaker than the node's own start, see
+    /// `docs/specs/holder-link.md`).
+    fn launch_held(
+        &self,
+        id: &AgentId,
+        cfg: &PtyConfig,
+        folder: Option<&agora_platform::HeldFolder>,
+    ) -> Option<Result<TerminalHandle, SupervisorError>> {
+        let hub = self.holder.as_ref()?;
+        let cwd = cfg.cwd.as_ref()?.to_str()?.to_string();
+        // A folder that moved is the node path's to report (`FolderMoved`).
+        if folder.is_some_and(|f| !f.in_place()) {
+            return None;
+        }
+        // The link carries text. A variable that is not UTF-8 cannot travel, and leaving it out would start the agent with a smaller
+        // environment than the node's own start gives it: such an agent is run by the node (`None`).
+        let mut env: Vec<(String, String)> = Vec::new();
+        for (k, v) in std::env::vars_os() {
+            if agora_platform::env_removed(&k, &cfg.env_remove) {
+                continue;
+            }
+            env.push((k.into_string().ok()?, v.into_string().ok()?));
+        }
+        for (k, v) in &cfg.env {
+            env.retain(|(a, _)| a != k);
+            env.push((k.clone(), v.clone()));
+        }
+        let request = crate::holder::StartRequest {
+            agent: id.as_str().to_string(),
+            argv: cfg.argv.clone(),
+            cwd: Some(cwd),
+            env,
+            env_remove: Vec::new(),
+            cols: cfg.cols,
+            rows: cfg.rows,
+            cpu_seconds: cfg.limits.cpu_seconds,
+            memory_bytes: cfg.limits.memory_bytes,
+        };
+        // A second try with a fresh session: the holder may have ended between the check and the start (it ends with its last agent).
+        for _ in 0..2 {
+            let session = hub.session()?;
+            let (pid, master) = match session.start(&request) {
+                Ok(started) => started,
+                // It does not know how to start this (a program that is not there, an id in use): the node's own start says why.
+                Err(LinkError::Refused(HolderRefusal::Failed | HolderRefusal::AgentExists, _)) => {
+                    return None
+                }
+                // Refused for another reason: nothing was started.
+                Err(LinkError::Refused(..)) => continue,
+                // The link failed: the holder may have started the agent all the same. Ask before anything else is done: an agent it
+                // has is ended (the node never got its terminal) and only then is another start made, so two copies never run. When
+                // that cannot be settled the start fails rather than run a second copy, unless the holder itself is gone.
+                Err(_) => {
+                    if session.end_agent(id.as_str()).is_ok() || session.holder_ended() {
+                        continue;
+                    }
+                    return Some(Err(SupervisorError::Spawn("holder link failed".into())));
+                }
+            };
+            let made = agora_platform::held_pty(master, pid, session.control_of(id.as_str()))
+                .and_then(|pty| TerminalHandle::start(pty, self.cfg.terminal))
+                .map(TerminalHandle::into_held);
+            let terminal = match made {
+                Ok(t) => t,
+                Err(_) => {
+                    // The agent runs in the holder but the node cannot hold its terminal: ended, and the node runs it itself.
+                    let _ = session.stop(id.as_str(), true);
+                    return None;
+                }
+            };
+            if folder.is_some_and(|f| !f.in_place()) {
+                // Dropping the terminal ends the agent (a swapped folder is never the agent's).
+                drop(terminal);
+                return Some(Err(SupervisorError::FolderMoved));
+            }
+            return Some(Ok(terminal));
+        }
+        None
     }
 
     /// Drive detection, exits, and restarts. Call regularly (a few times per second is plenty); the
@@ -1901,7 +2088,7 @@ impl Supervisor {
             .as_deref()
             .map(|p| held_again(None, p))
             .transpose()
-            .and_then(|f| self.launch_in(&kind, &argv, &worktree, &extras, f.as_ref()));
+            .and_then(|f| self.launch_in(id, &kind, &argv, &worktree, &extras, f.as_ref()));
         let Some(entry) = self.agents.get_mut(id) else {
             return;
         };
@@ -2286,7 +2473,7 @@ impl Supervisor {
             .inject(id, &kind, &project, &worktree, config.as_deref())
             .map(|extras| Extras { options, ..extras })
             .and_then(|extras| {
-                let t = self.launch_in(&kind, &argv, &worktree, &extras, folder.as_ref())?;
+                let t = self.launch_in(id, &kind, &argv, &worktree, &extras, folder.as_ref())?;
                 Ok((t, extras))
             });
         let (terminal, extras) = match launched {
@@ -2371,14 +2558,22 @@ impl Supervisor {
         self.agents.get(id)?.terminal.as_ref()
     }
 
-    /// The node is stopping: every agent's process ends now (terminal process groups killed, adapters shut down), without an end
+    /// The node is stopping: every agent's process ends now (terminal process groups killed, adapters shut down; an agent in the holder
+    /// is let go and runs on, ADR-0079), without an end
     /// recorded anywhere, so the session ledger finds them interrupted at the next start (ADR-0060). Nothing is restarted.
     pub fn shutdown(&mut self) {
         for e in self.agents.values_mut() {
             e.restart_at = None;
+            // ADR-0079: an agent in the holder keeps running (its terminal is let go, not ended); any other ends with the handle.
+            if let Some(t) = &e.terminal {
+                t.detach();
+            }
             // Dropping the handle kills the process group and joins the actor.
             e.terminal = None;
         }
+        // ADR-0079: the link to the holder closes with the node, so that the next node (or this process, in a test) can attach: the
+        // holder serves one node at a time. Every terminal's copy of it is gone with its handle above.
+        self.holder = None;
         for e in self.adapters.values_mut() {
             e.restart_at = None;
             e.running = false;

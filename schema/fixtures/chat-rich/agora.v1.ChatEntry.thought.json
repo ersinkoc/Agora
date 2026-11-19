@@ -1,0 +1,7 @@
+{
+  "entryId": "9",
+  "atMs": "1700000002000",
+  "role": "CHAT_ROLE_AGENT",
+  "kind": "CHAT_KIND_THOUGHT",
+  "text": "the test needs a fake agent"
+}

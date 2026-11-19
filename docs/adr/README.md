@@ -106,4 +106,6 @@ Date: YYYY-MM-DD
 | 0086 | Any machine can be the hub: one authoritative hub with takeover | Proposed |
 | 0087 | Install and update coding agents on a machine from the window | Proposed |
 | 0088 | Preview an agent's local web server in the window | Accepted |
-| 0089 | The chat history of a structured agent survives the node and is read in pages | Proposed |
+| 0089 | The chat history of a structured agent survives the node and is read in pages | Accepted |
+| 0090 | A structured agent's conversation is complete: thinking, tool calls with status, plan progress, effort, cancel and usage | Accepted |
+| 0091 | The plan limits of subscription agents are shown from the tools' own output | Accepted |

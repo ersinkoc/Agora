@@ -5,7 +5,7 @@ cli-usage =
       agora [--ui tui|web|none [--save]] [--resume ask|auto [--save]]
       agora web
       agora status
-      agora down
+      agora down [--agents]
       agora service install|remove|status
       agora node run [--socket YOL] [--manifests DİZİN] [--project YOL]... [--data DİZİN] [--worktrees DİZİN] [--resume auto]
       agora agent start TÜR [--cwd YOL] [--worktree] [--project AD] [--name AD] [--setting KİMLİK=DEĞER]... [--accept-project-id-change] [--socket YOL]
@@ -317,6 +317,7 @@ status-node-link-hub-refused = { $hub } adresine bağlı değil: hub bu makineyi
 status-node-link-closed = { $hub } adresine bağlı değil: hub bağlantıyı kapattı; düğüm yeniden deniyor
 status-node-link-other = { $hub } adresine bağlı değil: { $reason }
 status-agents = çalışan ajan: { $count }
+status-agents-kept = node olmadan çalışmaya devam eden ajan: { $count } (`agora` onları geri alır, `agora down --agents` durdurur)
 status-log = günlük: { $log }
 down-stopped = { $role } durduruldu (süreç { $pid }).
 down-stopped-supervised = { $role } ve gözeticisi durduruldu (süreç { $pid }).
@@ -324,11 +325,15 @@ down-failed = { $role } durdurulamadı: { $reason }
 down-still-running = durması istendikten 10 saniye sonra hâlâ çalışıyordu
 down-lock-busy = Süreç durdu, ama başka bir süreç { $path } dosyasını 10 saniyeden uzun süredir tutuyor (durdurulmuş ya da takılmış olabilir), bu yüzden eski kilit dosyası kaldı: zararsız, bir sonraki başlatma onu değiştirir. O süreci bulun ya da kapatın.
 down-nothing = Durdurulacak bir şey yok: `agora` şu anda çalışan hiçbir şey başlatmamış.
+down-agents-kept = { $count } ajan çalışmaya devam ediyor. `agora` onları geri alır; `agora down --agents` durdurur.
+down-agents-stopped = { $count } ajan durduruldu.
+down-holder = ajanların tutucusu
 service-description = Oturum açtığınızda Agora { $role } sürecini başlatır (ve çalışır tutar).
 service-unsupported = Oturum açınca Agora'yı başlatma bu sistemde henüz yok. Oturum açtıktan sonra `agora` ile başlatın.
 service-registering = { $role } oturum açtığınızda başlasın diye "{ $name }" kaydediliyor. Çalıştırdığı komut: { $command }
 service-installed = { $role } artık oturum açtığınızda başlıyor ("{ $name }") ve şimdi de başlatıldı.
 service-already = { $role } zaten oturum açtığınızda başlıyor ("{ $name }"); hiçbir şey değişmedi. Yeniden kaydetmek için önce `agora service remove` çalıştırın.
+service-updated = { $role } hizmeti ("{ $name }") eski ayarlarla kurulmuştu; dosyası güncellendi. Çalışan hizmet, siz yeniden başlatana kadar eski ayarlarla sürer: `systemctl --user restart { $name }`.
 service-installed-running = { $role } artık oturum açtığınızda başlıyor ("{ $name }"). Zaten çalışıyor (süreç { $pid }), bu yüzden yeniden başlatılmadı.
 service-installed-not-started = { $role } artık oturum açtığınızda başlıyor ("{ $name }"), ama şimdi başlatılamadı: { $reason }. `agora` onu başlatır.
 service-bad-path = "{ $path }" oturum açılış kaydına konamıyor: `%` içeriyor (sistem bunu bir değişken sanar) ya da taşıyamadığı karakterler var. Agora'yı ya da klasörünü sade bir yola taşıyın.

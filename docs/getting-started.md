@@ -57,7 +57,7 @@ window again.
 
 - `agora status`: what runs (process, version, address, data folder, connected hub, agents running, log files), and whether the
   hub or the node crashed and was started again.
-- `agora down`: stops the node, then the hub (agents end with the node, as when it is stopped any other way).
+- `agora down`: stops the node, then the hub. On Linux and macOS the agents keep running (a small keeper process, `agora hold`, owns them, ADR-0079); `agora` brings them back into the window, and `agora status` counts them while the node is down. `agora down --agents` stops them too. An agent the node confines (a sandbox policy), and every agent on Windows, runs inside the node and ends with it.
 - If the hub or the node crashes, it is started again 30 seconds later, at most 5 times in 10 minutes; one that stops right
   after starting (its port is taken, its settings are wrong) is not retried, and its log says why. Each is run by a small
   `agora supervise` process that `agora` starts; stopping or killing it stops what it runs too, so nothing is left behind.
@@ -95,7 +95,10 @@ window again.
   again after every `agora update` (the new program is another binary to it; measured with unsigned builds), and `agora update` says so
   when a login service is set up; after you allow it, restart the node once more (the running process keeps failing until then). Removing it ends the supervisor and the node, but not your agents: each runs in its own
   terminal session, which launchd does not end (as when the node is started by `agora`). On every system a service already set up is
-  not rewritten by `install` (after moving Agora, or for another `PATH`): run `agora service remove`, then `install`.
+  not registered again by `install` (after moving Agora or for another `PATH`: run `agora service remove`, then `install`). On Linux,
+  `install` does rewrite a unit Agora wrote when a newer Agora would write it differently (such as the node's `KillMode=process`, which
+  lets agents outlive a service restart): it reloads systemd, never restarts the service, and says to run `systemctl --user restart`. On Linux, stopping or restarting the node's
+  service leaves the agents running (the keeper stays; systemd's "left-over process" note for it is expected).
 - Logs: `~/.agora/logs/hub.log` and `node.log` (renamed to `.1` when over 5 MiB at a start).
 
 Everything works as before by hand too (`agora hub run`, `agora node enroll`, `agora node run`, `agora tui`); `AGORA_HOME` moves

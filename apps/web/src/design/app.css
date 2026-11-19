@@ -67,6 +67,9 @@
   .rail__btn::after { content: attr(data-tip); @apply pointer-events-none invisible absolute end-full top-1/2 z-30 me-2 -translate-y-1/2 whitespace-nowrap rounded-xs border border-line bg-surface-1 px-2 py-1 text-xs text-ink opacity-0 transition-opacity duration-150; box-shadow: var(--shadow); }
   .rail__btn:focus-visible::after { @apply visible opacity-100; }
   @media (hover: hover) { .rail__btn:hover::after { @apply visible opacity-100; } }
+  /* The subject that is open already says its name in the panel's heading: its tip would only cover the panel's own values (a row's number
+     at the end of the line sits right where the tip lands). */
+  .rail__btn[aria-selected='true']::after { @apply hidden; }
 
   /* A tab row wider than its space: the edge that has more fades out (a mask, so it follows any theme), mirrored in a right-to-left row. */
   .tab-strip[data-fade-end] { mask-image: linear-gradient(to right, #000 calc(100% - 2rem), transparent); }
@@ -211,6 +214,17 @@
   .menu-tile { @apply grid min-h-11 place-items-center rounded-xs border border-transparent px-2 py-1.5 text-muted transition-colors duration-150 hover:bg-surface-2 hover:text-ink disabled:opacity-40; }
   .menu-tile[aria-checked='true'] { @apply border-accent bg-surface-2 text-ink; }
 
+  /* Empty and loading panels: friendly, quiet, never an error look. The skeleton pulses softly and is still for people who asked for less motion. */
+  .empty-state { @apply grid justify-items-center gap-1.5 px-4 py-8 text-center; }
+  .empty-state__icon { @apply grid size-10 place-items-center rounded-full border border-line bg-surface-2 text-muted; }
+  .empty-state__title { @apply m-0 mt-1 font-medium text-ink; }
+  .empty-state__hint { @apply m-0 max-w-64 text-[0.8125rem] text-muted; }
+  .skeleton { @apply block rounded-xs bg-surface-2; }
+  .fleet-empty--wide { @apply max-w-none; }
+  .fleet-empty--wide .tile { @apply pointer-events-none; }
+  /* Pressed: a controls sinks by a pixel (a state of its own beside hover and focus). */
+  .button:active:not(:disabled), .ide-iconbtn:active:not(:disabled), .ide-chip:is(button):active, .fleet-seg:active, .fleet-count:active:not(:disabled), .rail__btn:active { @apply translate-y-px; }
+
   .gallery { @apply max-w-5xl; }
   .gallery__row { @apply flex flex-wrap items-center gap-4; }
   .theme-panel { @apply grid gap-4 rounded-l border border-line bg-surface-0 p-4 text-ink; }
@@ -266,6 +280,11 @@
 @keyframes sweep { from { background-position: 100% 0; } to { background-position: -100% 0; } }
 @keyframes nudge { 50% { box-shadow: 0 0 0 3px color-mix(in oklab, var(--state-needs-you) 28%, transparent); } }
 @keyframes breathe { 50% { opacity: 0.45; } }
+/* The chat header's state dot: a ring that spreads and fades while the agent works (colour from the pill's own text colour). */
+@keyframes chat-pulse { 0% { box-shadow: 0 0 0 0 color-mix(in oklab, currentColor 55%, transparent); } 70%, 100% { box-shadow: 0 0 0 7px transparent; } }
+@media (prefers-reduced-motion: no-preference) { .chat-dot--pulse { animation: chat-pulse 2s infinite; } }
+@keyframes soft-pulse { 50% { opacity: 0.55; } }
+@media (prefers-reduced-motion: no-preference) { .skeleton { animation: soft-pulse 1.6s ease-in-out infinite; } }
 @keyframes attend { 50% { transform: scale(1.25); } }
 @media (prefers-reduced-motion: no-preference) { .net-link--on { animation: flow 1.2s linear infinite; } }
 @media (prefers-reduced-motion: reduce) { .state__mark { animation: none !important; } }
@@ -296,3 +315,8 @@
 .hljs-meta, .hljs-doctag, .hljs-subst { color: var(--syntax-meta); }
 .hljs-emphasis { font-style: italic; }
 .hljs-strong { font-weight: 600; }
+
+/* People who asked for less motion get none: transitions and animations collapse to an instant change (state is still shown by shape and text). */
+@media (prefers-reduced-motion: reduce) {
+  *, ::before, ::after { transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; scroll-behavior: auto !important; }
+}

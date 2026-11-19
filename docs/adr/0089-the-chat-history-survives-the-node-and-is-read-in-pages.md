@@ -1,8 +1,8 @@
 # 0089. The chat history of a structured agent survives the node and is read in pages
-Status: Proposed
+Status: Accepted
 Date: 2026-11-19
 
-Not accepted. Nothing here may be built until the maintainer names this ADR in an acceptance message.
+Accepted: 2026-11-19 (the maintainer's explicit message in the merger chat: "ADR-0089'u kabul ediyorum"). The open questions' proposed answers stand: 30 days and 32 MiB per agent, the node's own known secret values replaced by a marker (unknown secrets in output cannot be found and the ADR says so), export to Markdown later as its own small PR. It builds on ADR-0090 (Accepted): the new entry kinds and fields are what is stored.
 
 Builds on ADR-0038 (the chat transcript stream; it says "persisting transcripts is a separate decision"), ADR-0060 (the agent session
 ledger and resume), ADR-0022 (bulk output stays out of the event store), ADR-0053 (forget closed agents). Touches the threat model

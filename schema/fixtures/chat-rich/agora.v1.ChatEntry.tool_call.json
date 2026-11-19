@@ -1,0 +1,20 @@
+{
+  "entryId": "7",
+  "atMs": "1700000000000",
+  "role": "CHAT_ROLE_AGENT",
+  "kind": "CHAT_KIND_TOOL_CALL",
+  "text": "{\"tool\":\"Read\",\"path\":\"src/main.rs\"}",
+  "callId": "call_1",
+  "toolKind": "TOOL_KIND_READ",
+  "status": "TOOL_STATUS_COMPLETED",
+  "paths": [
+    {
+      "path": "src/main.rs",
+      "line": 12
+    }
+  ],
+  "output": "fn main() {}",
+  "outputTruncated": true,
+  "startedMs": "1700000000100",
+  "endedMs": "1700000000900"
+}

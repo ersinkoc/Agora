@@ -1,0 +1,133 @@
+syntax = "proto3";
+
+package agora.v1;
+
+// ADR-0088 (docs/specs/preview.md): preview an agent's local web server in the window. Capability `preview.v1` (named here; node and hub offer it when they handle these messages, build steps 2 and 3).
+//
+// Carriage: `PreviewOpen`, `PreviewClose`, `PreviewList` and `PreviewConnect` are `CommandRequest` arms (102..105); the answers are
+// `CommandOk` arms (26, 27, 28; `PreviewClose` answers `empty`). `PreviewSuggested` and `PreviewChanged` are `Event` arms (80, 81).
+// The relayed bytes ride a dynamic stream opened by `PreviewConnect` with frame kinds 20..22 (docs/specs/protocol.md, "Preview").
+// Everything here is new; nothing published changed.
+
+enum PreviewState {
+  // Unknown or not set. Receivers must treat an unrecognised value like this one.
+  PREVIEW_STATE_UNSPECIFIED = 0;
+  PREVIEW_STATE_OPEN = 1;
+  PREVIEW_STATE_CLOSED = 2;
+  PREVIEW_STATE_EXPIRED = 3;
+}
+
+// Why a forward or one relayed connection ended. Used by `PreviewChanged` and `PreviewEnd`.
+enum PreviewCloseReason {
+  // Unknown or not set. Receivers must treat an unrecognised value like this one.
+  PREVIEW_CLOSE_REASON_UNSPECIFIED = 0;
+  // A person closed it ("Close", "Close all previews").
+  PREVIEW_CLOSE_REASON_CLOSED = 1;
+  // The forward's expiry passed.
+  PREVIEW_CLOSE_REASON_EXPIRED = 2;
+  // The node stopped or restarted (forwards never survive a node restart).
+  PREVIEW_CLOSE_REASON_NODE_STOPPED = 3;
+  // Nothing listens on the port any more, or the program on it closed the connection.
+  PREVIEW_CLOSE_REASON_TARGET_GONE = 4;
+  // The connection went over its size or rate budget.
+  PREVIEW_CLOSE_REASON_BUDGET = 5;
+  // The peer broke the stream's credit rules, or sent a frame over `max_chunk_bytes`.
+  PREVIEW_CLOSE_REASON_PROTOCOL = 6;
+  // The node's policy no longer allows it (for example the owner changed the port rules).
+  PREVIEW_CLOSE_REASON_POLICY = 7;
+}
+
+// Same shape as `DirectoryAuthorization` (commands.proto); a separate message because commands.proto imports this file.
+// The signature is over the domain `preview-action-v1` (docs/specs/protocol.md, "Preview").
+message PreviewAuthorization {
+  string device_id = 1;
+  string nonce = 2;
+  uint64 expires_at_ms = 3;
+  bytes signature = 4;
+}
+
+// One forward, as listed and as announced.
+message PreviewForward {
+  // The node's own id (`fwd-3`), not reused while the node runs; the hub keys it by node.
+  string forward_id = 1;
+  // The port on the node's loopback (`127.0.0.1` or `::1`).
+  uint32 port = 2;
+  // Milliseconds since the Unix epoch, node clock.
+  uint64 opened_at_ms = 3;
+  uint64 expires_at_ms = 4;
+  // The device id that signed the open (ADR-0020); `owner` for an open on the node's local control socket.
+  string creator = 5;
+  PreviewState state = 6;
+  // Set when `state` is not open.
+  PreviewCloseReason close_reason = 7;
+}
+
+// A person opens a forward. Routed through the hub only with `authorization`; the node's own local control socket (the owner) needs
+// no signature. An agent can never send this (mesh messages are untrusted data); it can only raise `PreviewSuggested`.
+message PreviewOpen {
+  // 1..65535. The node refuses its own ports and ports below 1024 (`preview.port_refused`).
+  uint32 port = 1;
+  // How long the forward lasts; 0 means the default of 28800 (8 hours). The node caps it at 86400.
+  uint32 expires_seconds = 2;
+  PreviewAuthorization authorization = 3;
+}
+// Answer to `PreviewOpen`: `CommandOk.preview_open`.
+message PreviewOpenResult {
+  PreviewForward forward = 1;
+}
+
+// Close one forward, or every forward on the node ("Close all previews"). Needs no signature: closing only removes access.
+// Answers `empty`; an unknown or already ended id is `preview.unknown`.
+message PreviewClose {
+  string forward_id = 1;
+  // When true `forward_id` must be empty.
+  bool all = 2;
+}
+
+message PreviewList {}
+// Answer to `PreviewList`: `CommandOk.preview_list`. Open forwards only.
+message PreviewListResult {
+  repeated PreviewForward forwards = 1;
+}
+
+// Opened on a dynamic stream the client chooses (3+), like `TerminalSubscribe`: one stream per TCP connection to the forward's
+// port. The hub relays the stream's frames opaquely and never parses them. Answered on stream 1 with `CommandOk.preview_connect`.
+message PreviewConnect {
+  string forward_id = 1;
+}
+message PreviewConnectResult {
+  // The largest payload of a `PREVIEW_DATA` frame (default 16384).
+  uint32 max_chunk_bytes = 1;
+  // Credit each side starts with, in bytes (default 262144): a side sends no more than the credit the other has granted.
+  uint32 window_bytes = 2;
+  // Ceiling for bytes per second on one connection, both directions together; 0 means no rate limit.
+  uint32 rate_bytes_per_second = 3;
+  // Ceiling for all bytes on one forward over its life; 0 means no limit.
+  uint64 total_bytes_limit = 4;
+}
+
+// Frame kind 21 (`PREVIEW_CREDIT`) payload: the receiver of `PREVIEW_DATA` frames allows `bytes` more.
+message PreviewCredit {
+  uint32 bytes = 1;
+}
+// Frame kind 22 (`PREVIEW_END`) payload: sent once by the side that ends the connection, before `STREAM_CLOSE` (kind 255).
+message PreviewEnd {
+  PreviewCloseReason reason = 1;
+  // Bytes relayed on this connection, toward the target and from it.
+  uint64 bytes_to_target = 2;
+  uint64 bytes_from_target = 3;
+}
+
+// A suggestion: an agent or the node saw a server listening ("my app is on port 3000"). A fact shown as a card with an Open button;
+// it is never an open and carries no authority. `Event` arm 80. The text is untrusted (it comes from an agent).
+message PreviewSuggested {
+  // The node's own agent id (`agent-7`); empty when the node itself noticed the port.
+  string agent_id = 1;
+  uint32 port = 2;
+  // A short optional note from the agent, at most 200 bytes of text. Untrusted; shown as text only.
+  string note = 3;
+}
+// A forward opened or ended, for the indicator and the audit trail (the port, never the content). `Event` arm 81.
+message PreviewChanged {
+  PreviewForward forward = 1;
+}

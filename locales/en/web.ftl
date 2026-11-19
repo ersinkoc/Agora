@@ -225,11 +225,6 @@ device-passkey-intro = Add a passkey to sign in on this device without a code.
 device-passkey-add = Add a passkey
 device-passkey-added = Passkey added. Next time, choose "Sign in with a passkey".
 device-passkey-failed = Could not add the passkey.
-agent-cost = about { $amount } (estimated)
-machine-cost = about { $amount } spent (estimated)
-usage-total = About { $amount } spent in total (estimated)
-usage-prices-date = prices from { $date }
-usage-prices-bundled = prices from this hub's release
 board-title = Shared tasks and files
 board-open = open
 board-done = done
@@ -237,14 +232,12 @@ board-project-identity = Project identity
 board-project-folders = Machines and folders ({ $count })
 messages-title = Recent messages
 message-cross = between machines
-usage-projects = Spent by project
 console-agents = Agents
 console-activity = Activity
 console-wall-empty = Pick an agent on the left to watch its terminal here.
 console-maximize = Full size
 console-hide = Stop watching
 console-no-messages = Agents have not written to each other yet.
-console-spent = Spent so far (estimated)
 changes-title = Uncommitted changes
 changes-none = Nothing uncommitted. Every workspace is clean.
 changes-files = { $count ->
@@ -432,7 +425,6 @@ session-mode-unasked = { $name } (does not ask)
 session-context = Context { $percent }%
 session-context-under-one = Context <1%
 session-context-detail = { $used } of { $size } tokens in the agent's context
-session-cost = { $amount } reported by the agent
 session-change-failed = The agent did not switch.
 session-confirm-title = Let the agent act without asking?
 session-confirm-body = In { $name } the agent runs commands and changes files without asking you first.
@@ -569,7 +561,6 @@ ide-options = Options
 ide-copy-address = Copy address
 ide-tab-changes = Changes
 ide-tab-messages = Messages
-ide-tab-cost = Spent
 ide-more-tabs = More tabs
 ide-more-tabs-needs = a hidden tab needs you
 ide-more-tabs-failed = a hidden tab ended with an error
@@ -724,14 +715,12 @@ layout-follows-selection = Follows the selection
 layout-show-agent = { $name }
 layout-panel-agent = Agent
 layout-show-agent-itself = This agent
-layout-show-agent-files = This agent's files
 layout-panel-empty = Empty pane
 layout-panel-unknown = Unknown panel “{ $id }”: this window cannot show it.
 layout-drag = Drag onto another pane: an edge puts it beside, the middle makes it a tab
 layout-empty-title = Choose what this pane shows
 layout-nothing-selected = Select an agent in the list to see it here.
 layout-gone = This agent is no longer here.
-layout-files-open = Browse the files of { $name }
 layout-files-none = Files are shown once this window is connected to your machines.
 layout-no-terminal = This agent is a chat; it has no terminal.
 layout-no-conversation = This agent has a terminal, not a chat.
@@ -759,7 +748,6 @@ layout-error-newer = This layout was made by a newer version. Update to use it.
 layout-error-too-deep = This layout is nested too deeply (at most { $max } levels).
 layout-error-too-many = This layout has too many panes (at most { $max }).
 layout-board-empty = No shared tasks or files yet.
-layout-cost-empty = Nothing spent yet.
 
 ## Themes (ADR-0068 rung 2, docs/ux/themes.md)
 theme-editor-title = Theme
@@ -1001,3 +989,167 @@ notify-body-named = { $name } needs you
 notify-body-named-on = { $name } on { $machine } needs you
 attention-sent = Answer sent. If this card stays, open it with Review.
 attention-notify-names-warn = These names come from the agents and machines themselves, and a notification may show them on a locked screen. A name that is not plain text is left out.
+
+# Usage (no money: tokens, context and time)
+ide-tab-cost = Usage
+ide-tab-usage = Usage
+usage-empty = Nothing to show yet. Usage appears once an agent has worked.
+usage-agents = { $count ->
+    [one] { $count } agent
+   *[other] { $count } agents
+}
+usage-by-machine = By machine
+usage-by-project = By project
+usage-context = Context { $percent }%
+usage-limits-title = Plan limits
+usage-limits-empty = Plan limits appear here when the agent reports them.
+
+# The conversation of a chat agent
+chat-jump = Jump to latest
+chat-jump-new = { $count ->
+    [one] Jump to latest, 1 new
+   *[other] Jump to latest, { $count } new
+}
+chat-earlier-items = Show earlier ({ $count })
+chat-you = You
+chat-agent = Agent
+chat-copy-reply = Copy reply
+chat-copy-message = Copy message
+chat-act-read = { $count ->
+    [one] Read a file
+   *[other] Read { $count } files
+}
+chat-act-edit = { $count ->
+    [one] Edited a file
+   *[other] Edited { $count } files
+}
+chat-act-run = { $count ->
+    [one] Ran a command
+   *[other] Ran { $count } commands
+}
+chat-act-search = { $count ->
+    [one] Searched once
+   *[other] Searched { $count } times
+}
+chat-act-fetch = { $count ->
+    [one] Fetched a page
+   *[other] Fetched { $count } pages
+}
+chat-act-delete = { $count ->
+    [one] Deleted a file
+   *[other] Deleted { $count } files
+}
+chat-act-move = { $count ->
+    [one] Moved a file
+   *[other] Moved { $count } files
+}
+chat-act-think = Thought
+chat-act-other = { $count ->
+    [one] 1 other step
+   *[other] { $count } other steps
+}
+chat-steps-count = { $count ->
+    [one] 1 step
+   *[other] { $count } steps
+}
+chat-steps-last = Last: { $step }
+chat-steps-open = Show the steps
+chat-files-title = { $count ->
+    [one] 1 file changed
+   *[other] { $count } files changed
+}
+chat-files-more = And { $count } more
+chat-plan-label = Plan
+chat-error-label = Something went wrong
+prompt-hint = Enter sends, Shift+Enter starts a new line.
+session-started-with = { $name }: { $value }
+session-started-hint = Chosen when this agent was started. The agent does not report it, so it may have changed since.
+empty-changes-title = All clean
+empty-changes-hint = Files an agent changes and has not committed appear here.
+empty-messages-title = No messages yet
+empty-messages-hint = When agents write to each other, you can follow it here.
+loading-label = Loading
+chat-code = Code
+live-summary = Live summary
+live-open-changes = Open the changes
+usage-total-tokens = { $count ->
+    [one] { $short } token used
+   *[other] { $short } tokens used
+}
+usage-total-time = { $time } of agent time since start
+usage-since-start = Time since start
+chat-steps-needs-you = Waiting for you
+chat-steps-failed = Ended with an error
+prompt-closed = This agent has ended, so it cannot take a request.
+chat-thought-for = Thought for { $time }
+chat-plan-progress = { $done } of { $total } done
+chat-review-changes = Review changes
+chat-diff-show-all = Show all { $count } lines
+chat-state-since = { $state } · { $time }
+
+# Tool panes: Terminal, Changes, Files and File manager as panes of the workspace (ADR-0068).
+layout-tool-of = { $what } · { $name }
+layout-panel-manager = File manager
+palette-open-terminal = Open the terminal beside
+palette-open-changes = Open Changes beside
+palette-open-files = Open Files beside
+palette-open-manager = Open the File manager beside
+palette-new-terminal = Start a new terminal
+pane-new-terminal = New terminal
+pane-open-beside = Open beside
+pane-open-beside-named = Open the changes of { $name } beside
+pane-open-changes = Open the changes in a pane
+pane-switch-folder = Show another folder
+pane-choose-folder = Choose a folder for { $name }
+pane-choose-terminal = Choose a terminal to show
+pane-no-folders-title = No folders yet
+pane-no-folders-hint = A folder appears here once an agent has started in it on one of your machines.
+pane-no-terminals-title = No terminals yet
+pane-no-terminals-hint = Start an agent or a terminal on a machine and it can be shown here.
+pane-offline-title = { $name } is not available here
+pane-offline-hint = This window is not connected to your machines.
+pane-no-folder-title = No folder for this agent
+pane-no-folder-hint = The machine has not reported a folder for it yet. Try again in a moment.
+start-terminal-missing = This machine offers no plain terminal (the “{ $kind }” kind). Add a “{ $kind }” manifest to its agents folder, or choose an agent.
+fm-col-name = Name
+fm-col-kind = Kind
+fm-col-size = Size
+fm-up = Parent folder
+fm-actions = File actions
+fm-copy-path = Copy path
+fm-copy-path-hint = Copy the path, relative to the folder
+fm-copied = Path copied
+fm-copy-failed = Could not copy
+fm-download = Download
+fm-download-none = Choose a file to download it
+fm-download-failed = Could not download this file
+fm-terminal = Agent terminal
+fm-terminal-root = Open the agent's terminal beside
+fm-terminal-subfolder = A terminal opens in the agent's own folder only. This window cannot start one in a sub-folder.
+fm-terminal-closed = This agent has ended, so it has no terminal.
+fm-terminal-chat = This agent is a chat; it has no terminal.
+fm-terminal-none = There is no terminal to open here.
+fm-rename = Rename
+fm-move = Move
+fm-delete = Delete
+fm-upload = Upload
+fm-write-why = Changing files needs your approval on the machine, and this window cannot ask for it yet.
+fm-folders = Folders
+fm-list = Files in this folder
+fm-empty = This folder is empty.
+fm-count = { $count ->
+    [one] 1 item
+   *[other] { $count } items
+}
+fm-preview = Preview
+fm-back = Back to the list
+fm-close-preview = Close the preview
+fm-binary = This file is not text, so it is not shown here. You can download it.
+fm-kind-folder = Folder
+fm-kind-code = Code
+fm-kind-text = Text
+fm-kind-image = Image
+fm-kind-archive = Archive
+fm-kind-config = Settings
+fm-kind-file = File
+fm-kind-private = Private file

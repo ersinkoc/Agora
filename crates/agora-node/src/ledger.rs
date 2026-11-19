@@ -79,6 +79,10 @@ pub struct Entry {
     /// ADR-0060 Amendment A: when the node last gave this agent its one "carry on" message after bringing it back by itself (0: never).
     /// One for each interruption: it is sent only while this is older than `interrupted_at_ms`.
     pub continue_sent_ms: u64,
+    /// ADR-0079 decision 9: the terminal holder whose process the agent is while it runs (the holder's pid and start time); 0: the node's
+    /// own. A node that starts and finds that holder alive attaches to the agent instead of reporting it interrupted.
+    pub holder_pid: u32,
+    pub holder_started: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -162,6 +166,8 @@ impl Entry {
             "process_name": self.process_name,
             "auto_resumed_at_ms": self.auto_resumed_at_ms,
             "continue_sent_ms": self.continue_sent_ms,
+            "holder_pid": self.holder_pid,
+            "holder_started": self.holder_started,
         })
     }
 
@@ -205,6 +211,8 @@ impl Entry {
             process_name: field(v, "process_name"),
             auto_resumed_at_ms: number(v, "auto_resumed_at_ms"),
             continue_sent_ms: number(v, "continue_sent_ms"),
+            holder_pid: u32::try_from(number(v, "holder_pid")).unwrap_or(0),
+            holder_started: number(v, "holder_started"),
         };
         (!e.agent_id.is_empty() && !e.kind.is_empty()).then_some(e)
     }
@@ -418,6 +426,43 @@ impl Ledger {
             e.process_boot,
             e.process_name,
         ) = now;
+        e.updated_at_ms = now_ms;
+        st.dirty = true;
+        drop(st);
+        let _ = self.flush();
+        true
+    }
+
+    /// ADR-0079 decision 9: the terminal holder the agent runs in now (`None`: the node's own). Written when it changed. `false` when the
+    /// ledger does not hold the agent yet (try again later), as [`Self::set_process`].
+    pub fn set_holder(&self, agent_id: &str, holder: Option<(u32, u64)>, now_ms: u64) -> bool {
+        let mut st = self.st();
+        let Some(e) = st.entries.get_mut(agent_id) else {
+            return false;
+        };
+        let (pid, started) = holder.unwrap_or((0, 0));
+        if (e.holder_pid, e.holder_started) == (pid, started) {
+            return true;
+        }
+        (e.holder_pid, e.holder_started) = (pid, started);
+        e.updated_at_ms = now_ms;
+        st.dirty = true;
+        drop(st);
+        let _ = self.flush();
+        true
+    }
+
+    /// ADR-0079 decision 9: an agent whose holder is alive was found running in it: it is not interrupted. `true` when `agent_id` was
+    /// interrupted, held by exactly this holder, and now is not (the caller then attaches it).
+    pub fn reclaim(&self, agent_id: &str, holder: (u32, u64), now_ms: u64) -> bool {
+        let mut st = self.st();
+        let Some(e) = st.entries.get_mut(agent_id) else {
+            return false;
+        };
+        if !e.interrupted() || (e.holder_pid, e.holder_started) != holder || holder.0 == 0 {
+            return false;
+        }
+        e.interrupted_at_ms = 0;
         e.updated_at_ms = now_ms;
         st.dirty = true;
         drop(st);

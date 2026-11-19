@@ -1371,6 +1371,13 @@ pub fn status(say: &Say, o_data: &Option<PathBuf>) -> ExitCode {
                 }
                 if let Some(n) = agents_running(&h) {
                     detail(say, key!("status-agents"), &[("count", n.into())]);
+                } else if let Some((_, n)) = crate::hold::read_info(&h).filter(|(_, n)| *n > 0) {
+                    // ADR-0079: the node is not running, the agents are.
+                    detail(
+                        say,
+                        key!("status-agents-kept"),
+                        &[("count", (n as i64).into())],
+                    );
                 }
             }
         }
@@ -1491,8 +1498,55 @@ pub(crate) fn stop_role(
     stopped_any
 }
 
-/// `agora down`: stops what the front door started, the node first, then the hub.
-pub fn down(say: &Say) -> ExitCode {
+/// ADR-0079: what `agora down` does about the terminal holder, after the node is stopped. The holder keeps the agents running
+/// (plain `agora down` says how many); with `agents` it is asked to end them (`SIGTERM`: it ends every agent's group, then itself).
+fn stop_holder(say: &Say, h: &Path, agents: bool, code: &mut ExitCode) -> bool {
+    let Some((pid, running)) = crate::hold::read_info(h) else {
+        return false;
+    };
+    if !agents {
+        if running == 0 {
+            return false;
+        }
+        say.out(
+            key!("down-agents-kept"),
+            &[("count", (running as i64).into())],
+        );
+        return true;
+    }
+    let failed = |code: &mut ExitCode, reason: Arg| {
+        say.err(
+            key!("down-failed"),
+            &[
+                ("role", say.text(key!("down-holder"), &[]).into()),
+                ("reason", reason),
+            ],
+        );
+        *code = ExitCode::from(1);
+    };
+    if let Err(e) = agora_platform::terminate_process(pid) {
+        failed(code, e.to_string().into());
+        return false;
+    }
+    // The holder gives its agents a few seconds before it kills them.
+    let end = Instant::now() + Duration::from_secs(10);
+    while crate::hold::read_info(h).is_some() && Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    if crate::hold::read_info(h).is_some() {
+        failed(code, say.text(key!("down-still-running"), &[]).into());
+        return false;
+    }
+    say.out(
+        key!("down-agents-stopped"),
+        &[("count", (running as i64).into())],
+    );
+    true
+}
+
+/// `agora down`: stops what the front door started, the node first, then the hub. Agents the terminal holder keeps running (ADR-0079)
+/// keep running, and `agents` (`--agents`) stops them too.
+pub fn down(say: &Say, agents: bool) -> ExitCode {
     let h = home();
     let machine = load(&h);
     let mut code = ExitCode::SUCCESS;
@@ -1500,6 +1554,7 @@ pub fn down(say: &Say) -> ExitCode {
     for role in [Role::Node, Role::Hub] {
         stopped_any |= stop_role(say, &h, machine.as_ref(), role, &mut code);
     }
+    stopped_any |= stop_holder(say, &h, agents, &mut code);
     if !stopped_any && code == ExitCode::SUCCESS {
         say.out(key!("down-nothing"), &[]);
     }
