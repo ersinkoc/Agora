@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, sync_channel, Receiver, Sender, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
@@ -214,8 +214,7 @@ pub struct Initialized {
     pub capabilities: Vec<String>,
 }
 
-/// Calls waiting for an answer. `closed` is set (under the same lock) when the adapter's output ended, so a call
-/// that starts after that fails at once instead of waiting for an answer nobody can send.
+/// Calls waiting for an answer. `closed` stops admitting new calls after output ends or a write fails.
 #[derive(Default)]
 struct PendingState {
     map: HashMap<u64, Sender<Result<Value, HostError>>>,
@@ -247,7 +246,10 @@ fn read_line_capped<R: BufRead>(r: &mut R) -> io::Result<Option<Option<String>>>
     let mut too_long = false;
     let mut any = false;
     loop {
-        let chunk = r.fill_buf()?;
+        let chunk = match r.fill_buf() {
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            result => result?,
+        };
         if chunk.is_empty() {
             break;
         }
@@ -257,11 +259,12 @@ fn read_line_capped<R: BufRead>(r: &mut R) -> io::Result<Option<Option<String>>>
             None => (chunk.len(), false),
         };
         if !too_long {
-            if buf.len() + take > MAX_LINE + 1 {
+            let content_len = take - usize::from(done);
+            if buf.len() + content_len > MAX_LINE {
                 too_long = true;
                 buf.clear();
             } else {
-                buf.extend_from_slice(&chunk[..take]);
+                buf.extend_from_slice(&chunk[..content_len]);
             }
         }
         r.consume(take);
@@ -275,9 +278,11 @@ fn read_line_capped<R: BufRead>(r: &mut R) -> io::Result<Option<Option<String>>>
     if too_long {
         return Ok(Some(None));
     }
-    Ok(Some(Some(
-        String::from_utf8_lossy(&buf).trim_end().to_string(),
-    )))
+    Ok(Some(
+        String::from_utf8(buf)
+            .ok()
+            .map(|line| line.trim_end().to_string()),
+    ))
 }
 
 fn s(v: &Value, key: &str) -> String {
@@ -511,79 +516,78 @@ impl Adapter {
         if let Some(dir) = &cfg.cwd {
             cmd.current_dir(dir);
         }
-        let mut child = cmd.spawn()?;
-        let (stdin, stdout) = match (child.stdin.take(), child.stdout.take()) {
-            (Some(i), Some(o)) => (i, o),
-            _ => {
-                let _ = child.kill();
-                return Err(io::Error::other("adapter pipes missing"));
-            }
-        };
-        let pending: Pending = Arc::default();
-        let (writer, lines) = sync_channel(WRITE_QUEUE);
-        let spawned = {
-            let pending = Arc::clone(&pending);
-            std::thread::Builder::new()
-                .name("agora-adapter-write".into())
-                .spawn(move || write_loop(stdin, &lines, &pending))
-        };
-        if let Err(e) = spawned {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(e);
-        }
-        let ignored = Arc::new(AtomicUsize::new(0));
-        let (tx, events) = channel();
-        let reader = {
-            let (pending, ignored) = (Arc::clone(&pending), Arc::clone(&ignored));
+        Self::attach_child(cmd.spawn()?, |stdout, pending, ignored, tx| {
             std::thread::Builder::new()
                 .name("agora-adapter-read".into())
-                .spawn(move || read_loop(stdout, &pending, &ignored, &tx))?
-        };
-        Ok(Self {
+                .spawn(move || read_loop(stdout, &pending, &ignored, &tx))
+        })
+    }
+
+    fn attach_child(
+        child: Child,
+        start_reader: impl FnOnce(
+            ChildStdout,
+            Pending,
+            Arc<AtomicUsize>,
+            Sender<AdapterEvent>,
+        ) -> io::Result<std::thread::JoinHandle<()>>,
+    ) -> io::Result<Self> {
+        let (tx, events) = channel();
+        // Own the child before starting workers so early errors use the same cleanup as a normal drop.
+        let mut adapter = Self {
             child,
-            writer: Some(writer),
-            pending,
+            writer: None,
+            pending: Arc::default(),
             events,
             next_id: AtomicU64::new(1),
-            ignored,
-            reader: Some(reader),
-        })
+            ignored: Arc::new(AtomicUsize::new(0)),
+            reader: None,
+        };
+        let (stdin, stdout) = adapter
+            .child
+            .stdin
+            .take()
+            .zip(adapter.child.stdout.take())
+            .ok_or_else(|| io::Error::other("adapter pipes missing"))?;
+        let (writer, lines) = sync_channel(WRITE_QUEUE);
+        let pending = Arc::clone(&adapter.pending);
+        std::thread::Builder::new()
+            .name("agora-adapter-write".into())
+            .spawn(move || write_loop(stdin, &lines, &pending))?;
+        adapter.writer = Some(writer);
+        adapter.reader = Some(start_reader(
+            stdout,
+            Arc::clone(&adapter.pending),
+            Arc::clone(&adapter.ignored),
+            tx,
+        )?);
+        Ok(adapter)
     }
 
     /// A request and its answer. Fails with `Exited` if the adapter dies first.
     pub fn call(&self, method: &str, params: Value, timeout: Duration) -> Result<Value, HostError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = channel();
-        {
-            let mut p = self.pending.lock().unwrap_or_else(|e| e.into_inner());
-            if p.closed {
-                return Err(HostError::Exited);
-            }
-            p.map.insert(id, tx);
-        }
         let mut line = to_line(&Message::Request {
             id: json!(id),
             method: method.to_string(),
             params,
         });
         line.push('\n');
-        // Queued, never written here: a write failure comes back through `pending` like an answer.
-        let refused = match &self.writer {
-            Some(w) => match w.try_send((id, line)) {
-                Ok(()) => None,
-                Err(TrySendError::Full(_)) => Some(HostError::Timeout),
-                Err(TrySendError::Disconnected(_)) => Some(HostError::Exited),
-            },
-            None => Some(HostError::Exited),
-        };
-        if let Some(e) = refused {
-            self.pending
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .map
-                .remove(&id);
-            return Err(e);
+        {
+            // Check admission and enqueue under one lock so the writer cannot miss a send
+            // while it closes and drains the queue. The send is nonblocking.
+            let mut p = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(writer) = self.writer.as_ref().filter(|_| !p.closed) else {
+                return Err(HostError::Exited);
+            };
+            match writer.try_send((id, line)) {
+                Ok(()) => {
+                    p.map.insert(id, tx);
+                }
+                Err(TrySendError::Full(_)) => return Err(HostError::Timeout),
+                Err(TrySendError::Disconnected(_)) => return Err(HostError::Exited),
+            }
         }
         let out = match rx.recv_timeout(timeout) {
             Ok(r) => r,
@@ -822,12 +826,22 @@ fn read_loop<R: Read>(
 
 /// Writes queued requests in order. When the adapter's input is gone, the call whose line failed and every call queued behind
 /// it fail at once (as the old in-line write did) instead of waiting for their timeouts.
-fn write_loop(mut stdin: ChildStdin, lines: &Receiver<(u64, String)>, pending: &Pending) {
+fn write_loop<W: Write>(mut stdin: W, lines: &Receiver<(u64, String)>, pending: &Pending) {
     while let Ok((id, line)) = lines.recv() {
+        // A caller can time out while its line is still queued. Never hold this lock during I/O.
+        let active = pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .map
+            .contains_key(&id);
+        if !active {
+            continue;
+        }
         if let Err(e) = stdin
             .write_all(line.as_bytes())
             .and_then(|()| stdin.flush())
         {
+            pending.lock().unwrap_or_else(|e| e.into_inner()).closed = true;
             let err = if e.kind() == io::ErrorKind::BrokenPipe {
                 HostError::Exited
             } else {
@@ -932,6 +946,144 @@ mod tests {
     use std::io::Cursor;
 
     #[test]
+    fn startup_cleanup_child() {
+        if std::env::var_os("AGORA_TEST_STARTUP_CLEANUP_CHILD").is_some() {
+            // Keep the fake alive independently of its pipes. The timeout bounds a failed test.
+            let (_hold, release) = channel::<()>();
+            let _ = release.recv_timeout(Duration::from_secs(30));
+        }
+    }
+
+    #[test]
+    fn a_reader_start_error_reaps_the_spawned_adapter() {
+        if agora_platform::process_identity(std::process::id())
+            .is_err_and(|e| e.kind() == io::ErrorKind::Unsupported)
+        {
+            return;
+        }
+        let child = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "host::tests::startup_cleanup_child"])
+            .env("AGORA_TEST_STARTUP_CLEANUP_CHILD", "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let identity = agora_platform::process_identity(child.id()).unwrap();
+        let result = Adapter::attach_child(child, |_, _, _, _| {
+            assert!(agora_platform::process_still_running(&identity));
+            Err(io::Error::from(io::ErrorKind::WouldBlock))
+        });
+        let alive = agora_platform::process_still_running(&identity);
+        if alive {
+            let _ = agora_platform::kill_process_if_same(&identity);
+        }
+        assert!(!alive, "the child is still present after startup failed");
+        assert!(matches!(result, Err(e) if e.kind() == io::ErrorKind::WouldBlock));
+    }
+
+    #[test]
+    fn a_queued_request_is_skipped_after_its_caller_times_out() {
+        struct GatedWriter {
+            entered: Option<Sender<()>>,
+            release: Receiver<()>,
+            output: Vec<u8>,
+        }
+
+        impl Write for GatedWriter {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                if let Some(entered) = self.entered.take() {
+                    entered.send(()).unwrap();
+                    self.release.recv_timeout(Duration::from_secs(10)).unwrap();
+                }
+                self.output.write(bytes)
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let pending: Pending = Arc::default();
+        let (requests, lines) = channel();
+        let (entered, blocked) = channel();
+        let (resume, release) = channel();
+        let mut responses = Vec::new();
+        for (id, line) in [(1, "first\n"), (2, "expired\n"), (3, "last\n")] {
+            let (reply, response) = channel();
+            pending.lock().unwrap().map.insert(id, reply);
+            responses.push(response);
+            requests.send((id, line.into())).unwrap();
+        }
+        drop(requests);
+        let writer_pending = Arc::clone(&pending);
+        let worker = std::thread::spawn(move || {
+            let mut writer = GatedWriter {
+                entered: Some(entered),
+                release,
+                output: Vec::new(),
+            };
+            write_loop(&mut writer, &lines, &writer_pending);
+            writer.output
+        });
+        blocked.recv_timeout(Duration::from_secs(10)).unwrap();
+        // Adapter::call removes its pending entry before returning Timeout.
+        pending.lock().unwrap().map.remove(&2);
+        resume.send(()).unwrap();
+        assert_eq!(worker.join().unwrap(), b"first\nlast\n");
+    }
+
+    #[test]
+    fn a_write_failure_closes_admission_before_writer_retirement() {
+        struct BrokenWriter(Sender<()>, Receiver<()>);
+
+        impl Write for BrokenWriter {
+            fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+                Err(io::ErrorKind::BrokenPipe.into())
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        impl Drop for BrokenWriter {
+            fn drop(&mut self) {
+                self.0.send(()).unwrap();
+                self.1.recv_timeout(Duration::from_secs(10)).unwrap();
+            }
+        }
+
+        let pending: Pending = Arc::default();
+        let (requests, lines) = sync_channel(2);
+        let (retiring, drained) = channel();
+        let (resume, release) = channel();
+        let responses = [1, 2, 3].map(|id| {
+            let (reply, response) = channel();
+            pending.lock().unwrap().map.insert(id, reply);
+            if id > 1 {
+                requests.try_send((id, format!("{id}\n"))).unwrap();
+            }
+            response
+        });
+        let writer_pending = Arc::clone(&pending);
+        let worker = std::thread::spawn(move || {
+            write_loop(BrokenWriter(retiring, release), &lines, &writer_pending);
+        });
+        drained.recv_timeout(Duration::from_secs(10)).unwrap();
+        // The failed write and queue drain are complete, but the receiver still exists.
+        let closed = pending.lock().unwrap().closed;
+        resume.send(()).unwrap();
+        worker.join().unwrap();
+        assert!(closed);
+        let [sent, failed, queued] = responses;
+        for response in [failed, queued] {
+            assert!(matches!(response.try_recv(), Ok(Err(HostError::Exited))));
+        }
+        deliver(&pending, &json!(1), Ok(json!("answer")));
+        assert_eq!(sent.try_recv().unwrap().unwrap(), "answer");
+    }
+
+    #[test]
     fn long_lines_are_skipped_whole_and_the_next_line_is_read() {
         let mut data = vec![b'x'; MAX_LINE + 10];
         data.push(b'\n');
@@ -946,6 +1098,72 @@ mod tests {
     fn a_last_line_without_a_newline_is_still_read() {
         let mut r = Cursor::new(b"abc".to_vec());
         assert_eq!(read_line_capped(&mut r).unwrap(), Some(Some("abc".into())));
+    }
+
+    #[test]
+    fn an_interrupted_read_keeps_the_final_response() {
+        struct InterruptOnce<R>(bool, R);
+
+        impl<R: Read> Read for InterruptOnce<R> {
+            fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+                if !std::mem::replace(&mut self.0, true) {
+                    return Err(io::ErrorKind::Interrupted.into());
+                }
+                self.1.read(bytes)
+            }
+        }
+
+        let pending: Pending = Arc::default();
+        let (reply, response) = channel();
+        pending.lock().unwrap().map.insert(1, reply);
+        let (events, output) = channel();
+        let head = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":";
+        let tail = b"\"done\"}";
+        let input = Cursor::new(head).chain(InterruptOnce(false, Cursor::new(tail)));
+        read_loop(input, &pending, &AtomicUsize::new(0), &events);
+        assert_eq!(response.try_recv().unwrap().unwrap(), json!("done"));
+        assert_eq!(output.try_recv().unwrap(), AdapterEvent::Exited);
+        assert!(output.try_recv().is_err());
+    }
+
+    #[test]
+    fn the_line_cap_applies_to_the_final_unterminated_line() {
+        let mut data = vec![b'x'; MAX_LINE];
+        let line = read_line_capped(&mut Cursor::new(data.as_slice())).unwrap();
+        assert_eq!(line.unwrap().unwrap().len(), MAX_LINE);
+        data.push(b'x');
+        assert_eq!(
+            read_line_capped(&mut Cursor::new(data.as_slice())).unwrap(),
+            Some(None)
+        );
+    }
+
+    #[test]
+    fn invalid_utf8_is_ignored_without_settling_a_request_or_ending_the_stream() {
+        let pending: Pending = Arc::default();
+        let (answer, response) = channel();
+        pending.lock().unwrap().map.insert(1, answer);
+        let ignored = AtomicUsize::new(0);
+        let (events, output) = channel();
+        let input = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"text\":\"\xff\"}}\n\
+                      {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"text\":\"valid\"}}\n";
+        read_loop(Cursor::new(input), &pending, &ignored, &events);
+        assert_eq!(response.recv().unwrap().unwrap(), json!({"text": "valid"}));
+        assert_eq!(ignored.load(Ordering::Relaxed), 1);
+        assert_eq!(output.try_recv().unwrap(), AdapterEvent::Exited);
+        assert!(output.try_recv().is_err());
+    }
+
+    #[test]
+    fn invalid_utf8_at_eof_is_discarded_and_a_valid_replacement_character_is_kept() {
+        let mut invalid = Cursor::new(b"\xe2\x82".to_vec());
+        assert_eq!(read_line_capped(&mut invalid).unwrap(), Some(None));
+        assert_eq!(read_line_capped(&mut invalid).unwrap(), None);
+        let mut valid = Cursor::new("valid �\r\n".as_bytes());
+        assert_eq!(
+            read_line_capped(&mut valid).unwrap(),
+            Some(Some("valid �".into()))
+        );
     }
 
     #[test]
