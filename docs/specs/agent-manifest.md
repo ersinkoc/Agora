@@ -204,11 +204,14 @@ Manifests in this repository: `claude-code` and `codex` (screens captured from t
 how much of a plan window is used. Each `[[quota.window]]` (at most 4) has three dotted JSON paths, each at most 128 characters:
 `percent` (a number, rounded and clamped to 0..100), `minutes` (the window's length, a whole number from 1 to 525 600) and `resets` (a Unix
 time: seconds, or milliseconds when the value is 100 000 000 000 or more; both are read). All three must be numbers on the line, else the
-window is skipped (unknown, never guessed). The node names the window from its length (`five_hour` for 300, `seven_day` for 10 080,
+window is skipped (unknown, never guessed). An optional `at` path (`[quota] at = "timestamp"`, an RFC 3339 string) names the line's own time:
+when a file is read from its start (a resumed session), only the newest report of each window is sent, stamped with that time (else the file's
+modification time), never later than now, so an old report is not shown as new; lines appended later are stamped with the read time. The node names the window from its length (`five_hour` for 300, `seven_day` for 10 080,
 `minutes:<n>` otherwise), never from a key such as `primary`, bounds `resets` (not more than a day ago, not more than 31 days ahead; else
 the observation is dropped) and sends `AgentQuotaObserved` when the numbers change, at most one per tool and window every 5 seconds. Nothing
 else on the line is read for this: credits, balances, plan names and account ids stay in the file. Only the agent's own file counts (the
-rule for tokens). Shipped for `codex` (`rate_limits.primary` and `.secondary`; the secondary may be missing).
+rule for tokens). A copy of the `codex` manifest in the node's manifests folder replaces the built-in one (see "Where agent kinds come from"), so a copy
+made before `[quota]` existed gives no plan limits; the node prints one line at start for each folder file that replaces a built-in kind. Shipped for `codex` (`rate_limits.primary` and `.secondary`; the secondary may be missing).
 
 ## Usage files (ADR-0042)
 The node follows the files of a running terminal agent whose kind has `[usage.file]`: a file belongs to the agent when it was touched after

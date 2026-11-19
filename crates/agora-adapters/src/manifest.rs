@@ -333,6 +333,9 @@ pub struct QuotaWindow {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct QuotaSpec {
+    /// Optional path of the line's own time (an RFC 3339 string, as Codex's `timestamp`): when a file is read from its start, the
+    /// observation is stamped with it instead of with the time the node read it. Read defensively; never later than now.
+    pub at: Option<String>,
     #[serde(default)]
     pub window: Vec<QuotaWindow>,
 }
@@ -644,6 +647,7 @@ impl Manifest {
                 && self.usage.as_ref().is_some_and(|u| u.file.is_some())
                 && !q.window.is_empty()
                 && q.window.len() <= MAX_QUOTA_WINDOWS
+                && q.at.as_ref().is_none_or(path_ok)
                 && q.window
                     .iter()
                     .all(|w| [&w.percent, &w.minutes, &w.resets].into_iter().all(path_ok));
@@ -1060,10 +1064,17 @@ mod usage_tests {
                 "missing resets",
             ),
             (quota(5, true, &QUOTA.repeat(5)), "too many windows"),
+            (
+                quota(5, true, &format!("at = \"\"\n{QUOTA}")),
+                "empty at path",
+            ),
         ] {
             assert!(Manifest::parse(&bad).is_err(), "{why}");
         }
         assert!(Manifest::parse(&quota(5, true, &QUOTA.repeat(4))).is_ok());
+        let with_at =
+            Manifest::parse(&quota(5, true, &format!("at = \"timestamp\"\n{QUOTA}"))).unwrap();
+        assert_eq!(with_at.quota.unwrap().at.as_deref(), Some("timestamp"));
     }
 
     #[test]

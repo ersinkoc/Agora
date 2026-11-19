@@ -136,7 +136,6 @@ resets = "payload.rate_limits.secondary.resets_at"
     };
     let worktree = std::fs::canonicalize(&s.worktree_id).unwrap();
     let agent = s.agent_id.clone();
-    std::thread::sleep(Duration::from_millis(400));
     let mine = worktree.to_string_lossy().into_owned();
     let resets = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -152,7 +151,7 @@ resets = "payload.rate_limits.secondary.resets_at"
     .unwrap();
 
     let wait = |want: &dyn Fn(&[v1::AgentQuotaObserved]) -> bool| {
-        let end = Instant::now() + Duration::from_secs(25);
+        let end = Instant::now() + Duration::from_secs(40);
         loop {
             let got = quota_events(&n);
             if want(&got) || Instant::now() > end {
@@ -161,6 +160,19 @@ resets = "payload.rate_limits.secondary.resets_at"
             std::thread::sleep(Duration::from_millis(100));
         }
     };
+    // The node notices the agent a moment after it starts, and only follows files written after that. Instead of guessing how long
+    // that takes, the same report is appended again and again (an unchanged report is no event) until the node has read the file.
+    let foreign = home.join("logs/p/foreign.jsonl");
+    let mut g = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&foreign)
+        .unwrap();
+    let end = Instant::now() + Duration::from_secs(40);
+    while quota_events(&n).len() < 2 && Instant::now() < end {
+        writeln!(f, "{}", line(&mine, 40.0, resets, Some(7.0))).unwrap();
+        writeln!(g, "{}", line("/somewhere/else", 99.0, resets, Some(99.0))).unwrap();
+        std::thread::sleep(Duration::from_millis(250));
+    }
     let got = wait(&|q| q.len() >= 2);
     assert_eq!(got.len(), 2, "{got:?}");
     let by = |w: &str| got.iter().find(|q| q.window == w).unwrap();
@@ -173,7 +185,14 @@ resets = "payload.rate_limits.secondary.resets_at"
             ("node-test", "quotash")
         );
         assert_eq!(q.source, "file");
-        assert!(q.observed_at_ms > 0);
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        assert!(
+            q.observed_at_ms > 0 && q.observed_at_ms <= now,
+            "never later than now"
+        );
     }
     // Same numbers again are not an event; a change is (once it is due, at most one per window every 5 seconds).
     writeln!(f, "{}", line(&mine, 40.0, resets, Some(7.0))).unwrap();

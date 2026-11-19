@@ -89,6 +89,8 @@ mode = "total"
 # by its length in minutes (300 is the 5 hour window, 10080 the weekly one), never by `primary` or `secondary`; `resets_at` is a Unix
 # time in seconds. `credits`, `plan_type` and everything else on the line are not mapped, so they never leave the file.
 [quota]
+# The line's own time (RFC 3339), used to stamp what is read from the start of a file (a resumed session), so an old report is not shown as new.
+at = "timestamp"
 [[quota.window]]
 percent = "payload.rate_limits.primary.used_percent"
 minutes = "payload.rate_limits.primary.window_minutes"

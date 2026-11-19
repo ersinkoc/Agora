@@ -80,4 +80,7 @@ untrusted, clamped; the reporter rung: a settings file the agent trusts).
   only, at most one per tool and window every 5 seconds (the newest waits and is sent when due), at most 32 windows; only the agent's own file
   counts. The node advertises `usage.quota`. Threat model T50. The Codex mapping was written from this ADR's description and community sources;
   it was not checked against a real rollout file here (no real user data was read), so the first run on a real Codex is the check.
+- Review follow-ups (same PR): a file read from its start sends only the newest report per window, stamped with the line's own time (`[quota] at`, RFC 3339) or
+  the file's, never later than now; an observation older than the newest of its window is dropped; `five_hour` and `seven_day` are never evicted by invented
+  `minutes:<n>` windows (30 of those, oldest offered goes first); the node prints a line at start when a folder manifest replaces a built-in kind.
 - Steps 3 (hub table, web Usage bars, chip, start hint) and 4 (Claude Code reporter: needs its own acceptance): not done.

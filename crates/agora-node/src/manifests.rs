@@ -139,6 +139,26 @@ pub fn load(dir: &Path) -> (Vec<Loaded>, Vec<(PathBuf, String)>) {
     (by_kind.into_values().collect(), problems)
 }
 
+/// The folder files that replace a built-in kind, as `(kind, file)`: the node says so once at start, because a stale copy of a shipped
+/// manifest in the folder silently hides what a newer build brings (a missing `[quota]` among them).
+pub fn shadowing(loaded: &[Loaded]) -> Vec<(String, PathBuf)> {
+    let built_in: Vec<String> = BUILT_IN
+        .iter()
+        .filter_map(|(_, text)| Manifest::parse(text).ok())
+        .map(|m| m.kind)
+        .chain([SHELL_KIND.to_string()])
+        .collect();
+    loaded
+        .iter()
+        .filter_map(|l| match &l.source {
+            Source::Folder(p) if built_in.contains(&l.manifest.kind) => {
+                Some((l.manifest.kind.clone(), p.clone()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 /// The program the node looks for to tell whether a kind is installed: the L3 adapter's command, the ACP command, or the terminal
 /// launch command, whichever the manifest uses (the same order the node starts it in).
 pub fn program(m: &Manifest) -> Option<&str> {
@@ -168,6 +188,21 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn a_folder_file_of_a_built_in_kind_is_named_and_a_new_kind_is_not() {
+        let d = tmp("shadow");
+        let make = |kind: &str| {
+            format!("kind = \"{kind}\"\ndisplay_name = \"X\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [\"x\"]\n")
+        };
+        std::fs::write(d.join("codex.toml"), make("codex")).unwrap();
+        std::fs::write(d.join("mine.toml"), make("my-own-kind")).unwrap();
+        let (loaded, _) = load(&d);
+        let shadowed = shadowing(&loaded);
+        assert_eq!(shadowed, vec![("codex".to_string(), d.join("codex.toml"))]);
+        let (loaded, _) = load(&tmp("shadow-none"));
+        assert!(shadowing(&loaded).is_empty());
     }
 
     #[test]

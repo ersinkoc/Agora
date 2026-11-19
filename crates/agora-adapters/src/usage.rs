@@ -39,6 +39,9 @@ pub struct QuotaRaw {
     pub minutes: u64,
     /// Milliseconds since the Unix epoch.
     pub resets_ms: u64,
+    /// The line's own time (`[quota] at`), milliseconds since the Unix epoch, when the line has a readable one. The node uses it to
+    /// stamp what it replays from a file it reads from the start; it is never taken as later than the node's clock.
+    pub line_ms: Option<u64>,
 }
 
 /// A bounded observation: what the node may send.
@@ -79,6 +82,95 @@ impl QuotaRaw {
     }
 }
 
+/// An RFC 3339 time (`2026-11-20T09:00:05.123Z`, or with a `+hh:mm` offset) as milliseconds since the Unix epoch. Anything else, or a
+/// year outside 1970..=2200, is `None`.
+pub fn parse_rfc3339_ms(s: &str) -> Option<u64> {
+    let b = s.as_bytes();
+    if b.len() < 20 || b.len() > 40 || !s.is_ascii() {
+        return None;
+    }
+    let num = |from: usize, to: usize| -> Option<i64> {
+        let t = s.get(from..to)?;
+        t.bytes()
+            .all(|c| c.is_ascii_digit())
+            .then(|| t.parse().ok())?
+    };
+    if b[4] != b'-'
+        || b[7] != b'-'
+        || !matches!(b[10], b'T' | b't' | b' ')
+        || b[13] != b':'
+        || b[16] != b':'
+    {
+        return None;
+    }
+    let (y, mo, d, h, mi, sec) = (
+        num(0, 4)?,
+        num(5, 7)?,
+        num(8, 10)?,
+        num(11, 13)?,
+        num(14, 16)?,
+        num(17, 19)?,
+    );
+    if !(1970..=2200).contains(&y)
+        || !(1..=12).contains(&mo)
+        || !(1..=31).contains(&d)
+        || h > 23
+        || mi > 59
+        || sec > 60
+    {
+        return None;
+    }
+    let mut i = 19;
+    let mut frac_ms = 0i64;
+    if b[i] == b'.' {
+        let start = i + 1;
+        i = start;
+        while i < b.len() && b[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i == start {
+            return None;
+        }
+        let digits: String = s[start..i].chars().take(3).collect();
+        frac_ms = format!("{digits:0<3}").parse().ok()?;
+    }
+    let offset_s = match s.get(i..)? {
+        "Z" | "z" => 0,
+        tz if tz.len() == 6
+            && (tz.starts_with('+') || tz.starts_with('-'))
+            && tz.as_bytes()[3] == b':' =>
+        {
+            let (oh, om) = (num(i + 1, i + 3)?, num(i + 4, i + 6)?);
+            if oh > 23 || om > 59 {
+                return None;
+            }
+            let secs = oh * 3600 + om * 60;
+            if tz.starts_with('+') {
+                secs
+            } else {
+                -secs
+            }
+        }
+        _ => return None,
+    };
+    // Days since 1970-01-01 (proleptic Gregorian, after Howard Hinnant's `days_from_civil`).
+    let (yy, mm) = if mo <= 2 {
+        (y - 1, mo + 9)
+    } else {
+        (y, mo - 3)
+    };
+    let era = yy.div_euclid(400);
+    let yoe = yy - era * 400;
+    let doy = (153 * mm + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    let secs = days * 86_400 + h * 3600 + mi * 60 + sec - offset_s;
+    u64::try_from(secs)
+        .ok()?
+        .checked_mul(1000)?
+        .checked_add(frac_ms as u64)
+}
+
 fn float(v: &Value, path: &str) -> Option<f64> {
     at(v, path)?.as_f64().filter(|f| f.is_finite())
 }
@@ -86,6 +178,11 @@ fn float(v: &Value, path: &str) -> Option<f64> {
 /// The plan windows one selected line carries, by the manifest's paths. A window with a missing, non-numeric or impossible value (a
 /// length of 0 or over a year, a reset time that is not positive) is left out.
 fn quota_windows(v: &Value, spec: &QuotaSpec) -> Vec<QuotaRaw> {
+    let line_ms = spec
+        .at
+        .as_deref()
+        .and_then(|p| at(v, p)?.as_str())
+        .and_then(parse_rfc3339_ms);
     let mut out = Vec::new();
     for w in &spec.window {
         let (Some(percent), Some(minutes), Some(resets)) = (
@@ -112,6 +209,7 @@ fn quota_windows(v: &Value, spec: &QuotaSpec) -> Vec<QuotaRaw> {
             percent,
             minutes: minutes as u64,
             resets_ms: resets_ms as u64,
+            line_ms,
         });
     }
     out
@@ -358,6 +456,7 @@ mod tests {
             resets: format!("payload.rate_limits.{k}.resets_at"),
         };
         QuotaSpec {
+            at: Some("timestamp".into()),
             window: vec![window("primary"), window("secondary")],
         }
     }
@@ -386,12 +485,14 @@ mod tests {
                 QuotaRaw {
                     percent: 17.0,
                     minutes: 300,
-                    resets_ms: 1_795_000_000_000
+                    resets_ms: 1_795_000_000_000,
+                    line_ms: None,
                 },
                 QuotaRaw {
                     percent: 4.0,
                     minutes: 10_080,
-                    resets_ms: 1_795_400_000_000
+                    resets_ms: 1_795_400_000_000,
+                    line_ms: None,
                 },
             ]
         );
@@ -482,6 +583,7 @@ mod tests {
             percent,
             minutes: 300,
             resets_ms,
+            line_ms: None,
         };
         // The percentage is clamped, not trusted.
         assert_eq!(raw(1e30, now).bound(now).unwrap().used_percent, 100);
@@ -547,5 +649,49 @@ mod tests {
         let q = r.take_quota();
         assert_eq!(q.len(), QUOTA_HELD);
         assert_eq!(q.last().unwrap().percent, 39.0);
+    }
+
+    #[test]
+    fn a_lines_own_time_is_read_defensively() {
+        assert_eq!(
+            parse_rfc3339_ms("2026-11-20T09:00:05.000Z"),
+            Some(1_795_165_205_000)
+        );
+        assert_eq!(parse_rfc3339_ms("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(
+            parse_rfc3339_ms("2026-11-20T11:00:05.5+02:00"),
+            Some(1_795_165_205_500)
+        );
+        assert_eq!(
+            parse_rfc3339_ms("2026-11-20T04:00:05-05:00"),
+            Some(1_795_165_205_000)
+        );
+        for bad in [
+            "",
+            "yesterday",
+            "2026-11-20",
+            "2026-13-20T09:00:05Z",
+            "2026-11-20T25:00:05Z",
+            "2026-11-20T09:00:05",
+            "2026-11-20T09:00:05+2:00",
+            "2026-11-20T09:00:05.Z",
+            "1969-12-31T23:59:59Z",
+            "9999-01-01T00:00:00Z",
+            "2026-11-20T09:00:05Zjunk",
+            "２０２６-11-20T09:00:05Z",
+        ] {
+            assert_eq!(parse_rfc3339_ms(bad), None, "{bad}");
+        }
+        let mut r = quota_reader();
+        let line = format!(
+            r#"{{"timestamp":"2026-11-20T09:00:05.000Z","type":"event_msg","payload":{{"type":"token_count","info":null,"rate_limits":{BOTH}}}}}"#
+        );
+        r.line(&line);
+        assert_eq!(r.take_quota()[0].line_ms, Some(1_795_165_205_000));
+        // A missing or unreadable time is no time, and the window is still read.
+        r.line(&line.replace("2026-11-20T09:00:05.000Z", "soon"));
+        assert_eq!(r.take_quota()[0].line_ms, None);
+        r.line(&limits(BOTH));
+        assert_eq!(r.take_quota()[0].line_ms, None);
     }
 }

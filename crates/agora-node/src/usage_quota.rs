@@ -11,8 +11,10 @@ use agora_protocol::v1::AgentQuotaObserved;
 
 /// At most one observation per tool and window in this time; a change that comes sooner waits and is sent when it is due.
 pub const MIN_GAP: Duration = Duration::from_secs(5);
-/// Most `(tool, window)` pairs followed: a hostile file cannot make the table grow by inventing window lengths.
-const MAX_WINDOWS: usize = 32;
+/// Most `minutes:<n>` windows followed (the two named windows are always kept and not counted): a hostile file cannot make the table
+/// grow by inventing window lengths, and cannot push `five_hour` or `seven_day` out. A new one past the limit replaces the one
+/// that was offered longest ago.
+const MAX_OTHER_WINDOWS: usize = 30;
 /// Where the numbers came from (the tool's own file).
 const SOURCE: &str = "file";
 
@@ -21,6 +23,11 @@ struct Entry {
     sent: Option<((u32, u64), Instant)>,
     /// The newest observation that differs from what was sent and waits for its time, with the node's clock when it was read.
     waiting: Option<(QuotaSample, u64)>,
+    /// The newest time an observation of this window was stamped with: an older one is dropped (a second file of the same tool
+    /// that is behind must not undo a newer value).
+    newest_ms: u64,
+    /// When this window was last offered, for eviction.
+    touched: Instant,
 }
 
 pub struct QuotaGate {
@@ -49,7 +56,8 @@ impl QuotaGate {
         }
     }
 
-    /// One window as read from a file at `now_ms` (the node's clock). Returns the observation to send now, if any: the numbers are
+    /// One window as read from a file at `now_ms` (the node's clock); `raw.line_ms`, when the node set it (a replay), is the time the
+    /// observation is stamped with, never later than `now_ms`, else the stamp is `now_ms`. Returns the observation to send now, if any: the numbers are
     /// bounded (an impossible reset time drops it), must differ from the last sent, and the window must not have sent within
     /// [`MIN_GAP`]; otherwise the newest waits for [`Self::due`].
     pub fn offer(
@@ -60,14 +68,23 @@ impl QuotaGate {
         raw: &QuotaRaw,
     ) -> Option<AgentQuotaObserved> {
         let sample = raw.bound(now_ms)?;
+        let observed_ms = raw.line_ms.map_or(now_ms, |t| t.min(now_ms));
         let key = (tool.to_string(), sample.window.clone());
-        if !self.windows.contains_key(&key) && self.windows.len() >= MAX_WINDOWS {
-            return None;
+        if !self.windows.contains_key(&key) {
+            self.make_room(&key);
         }
         let entry = self.windows.entry(key).or_insert(Entry {
             sent: None,
             waiting: None,
+            newest_ms: 0,
+            touched: now,
         });
+        entry.touched = now;
+        if observed_ms < entry.newest_ms {
+            // Older than what this window already has: it never replaces a newer value, sent or waiting.
+            return None;
+        }
+        entry.newest_ms = observed_ms;
         let numbers = (sample.used_percent, sample.resets_at_ms);
         if entry.sent.map(|(n, _)| n) == Some(numbers) {
             // Back to what the window already shows: nothing to say, and nothing left waiting.
@@ -78,12 +95,33 @@ impl QuotaGate {
             .sent
             .is_none_or(|(_, at)| now.saturating_duration_since(at) >= MIN_GAP);
         if !due {
-            entry.waiting = Some((sample, now_ms));
+            entry.waiting = Some((sample, observed_ms));
             return None;
         }
         entry.sent = Some((numbers, now));
         entry.waiting = None;
-        Some(self.event(tool, &sample, now_ms))
+        Some(self.event(tool, &sample, observed_ms))
+    }
+
+    /// Makes room for a window not followed yet: only `minutes:<n>` windows are limited, and the one offered longest ago goes.
+    fn make_room(&mut self, key: &(String, String)) {
+        if !key.1.starts_with("minutes:") {
+            return;
+        }
+        let others = || {
+            self.windows
+                .iter()
+                .filter(|(k, _)| k.1.starts_with("minutes:"))
+        };
+        if others().count() < MAX_OTHER_WINDOWS {
+            return;
+        }
+        if let Some(oldest) = others()
+            .min_by_key(|(_, e)| e.touched)
+            .map(|(k, _)| k.clone())
+        {
+            self.windows.remove(&oldest);
+        }
     }
 
     /// The observations that waited for their time and whose time has come.
@@ -120,6 +158,7 @@ mod tests {
             percent,
             minutes,
             resets_ms,
+            line_ms: None,
         }
     }
 
@@ -152,7 +191,9 @@ mod tests {
         // A new reset time is a change too.
         let r2 = raw(41.0, 300, NOW_MS + 4_000_000);
         let much_later = later + Duration::from_secs(60);
-        assert!(g.offer(much_later, NOW_MS, "codex", &r2).is_some());
+        assert!(g
+            .offer(much_later, NOW_MS + 120_000, "codex", &r2)
+            .is_some());
     }
 
     #[test]
@@ -194,12 +235,12 @@ mod tests {
         // A change that returns to what was sent leaves nothing waiting.
         let t = t0 + Duration::from_secs(31);
         assert!(g
-            .offer(t, NOW_MS, "codex", &raw(14.0, 300, resets))
+            .offer(t, NOW_MS + 31_000, "codex", &raw(14.0, 300, resets))
             .is_some());
         assert!(g
             .offer(
                 t + Duration::from_secs(1),
-                NOW_MS,
+                NOW_MS + 32_000,
                 "codex",
                 &raw(15.0, 300, resets)
             )
@@ -207,7 +248,7 @@ mod tests {
         assert!(g
             .offer(
                 t + Duration::from_secs(2),
-                NOW_MS,
+                NOW_MS + 33_000,
                 "codex",
                 &raw(14.0, 300, resets)
             )
@@ -260,12 +301,96 @@ mod tests {
         let t = Instant::now();
         let mut sent = 0;
         for minutes in 1..=100 {
-            if g.offer(t, NOW_MS, "c", &raw(1.0, minutes, NOW_MS + 1000))
+            let at = t + Duration::from_millis(minutes);
+            if g.offer(at, NOW_MS, "c", &raw(1.0, minutes, NOW_MS + 1000))
                 .is_some()
             {
                 sent += 1;
             }
         }
-        assert_eq!(sent, MAX_WINDOWS);
+        assert_eq!(sent, 100, "each new one is followed, the oldest is dropped");
+        assert_eq!(
+            g.windows
+                .keys()
+                .filter(|k| k.1.starts_with("minutes:"))
+                .count(),
+            MAX_OTHER_WINDOWS
+        );
+        // The two named windows are never starved or evicted by invented ones.
+        let t = t + Duration::from_secs(1);
+        assert!(g
+            .offer(t, NOW_MS, "c", &raw(1.0, 300, NOW_MS + 1000))
+            .is_some());
+        assert!(g
+            .offer(t, NOW_MS, "c", &raw(1.0, 10_080, NOW_MS + 1000))
+            .is_some());
+        for minutes in 101..=200 {
+            let at = t + Duration::from_millis(minutes);
+            g.offer(at, NOW_MS, "c", &raw(2.0, minutes, NOW_MS + 1000));
+        }
+        let t = t + Duration::from_secs(10);
+        let e = g
+            .offer(t, NOW_MS, "c", &raw(9.0, 300, NOW_MS + 1000))
+            .unwrap();
+        assert_eq!((e.window.as_str(), e.used_percent), ("five_hour", 9));
+        assert!(g
+            .offer(t, NOW_MS, "c", &raw(9.0, 10_080, NOW_MS + 1000))
+            .is_some());
+        // The oldest invented one is the one that goes.
+        assert!(!g
+            .windows
+            .contains_key(&("c".to_string(), "minutes:101".to_string())));
+        assert!(g
+            .windows
+            .contains_key(&("c".to_string(), "minutes:200".to_string())));
+    }
+
+    /// A replay carries the time of the line (or file), never later than now; the newest pending value always wins and an older
+    /// observation of a window never replaces a newer one.
+    #[test]
+    fn a_replayed_observation_keeps_its_own_time_and_an_older_one_never_wins() {
+        let mut g = QuotaGate::new("n1");
+        let t0 = Instant::now();
+        let resets = NOW_MS + 3_600_000;
+        let at = |p: f64, line_ms: Option<u64>| QuotaRaw {
+            line_ms,
+            ..raw(p, 300, resets)
+        };
+        let hours20 = 20 * 3600 * 1000;
+        let e = g
+            .offer(t0, NOW_MS, "codex", &at(30.0, Some(NOW_MS - hours20)))
+            .unwrap();
+        assert_eq!(
+            e.observed_at_ms,
+            NOW_MS - hours20,
+            "not stamped as read now"
+        );
+        // A time in the future is cut to now.
+        let e = g
+            .offer(
+                t0 + MIN_GAP,
+                NOW_MS,
+                "codex",
+                &at(31.0, Some(NOW_MS + 99_999)),
+            )
+            .unwrap();
+        assert_eq!(e.observed_at_ms, NOW_MS);
+        // A second, older file of the same tool does not undo it, sent or waiting.
+        assert!(g
+            .offer(
+                t0 + MIN_GAP * 2,
+                NOW_MS,
+                "codex",
+                &at(10.0, Some(NOW_MS - 5000))
+            )
+            .is_none());
+        assert!(g.due(t0 + MIN_GAP * 3).is_empty());
+        // Newer values keep replacing the waiting one: the newest is what is sent when due.
+        let t = t0 + MIN_GAP * 4;
+        assert!(g.offer(t, NOW_MS + 10, "codex", &at(32.0, None)).is_some());
+        assert!(g.offer(t, NOW_MS + 20, "codex", &at(33.0, None)).is_none());
+        assert!(g.offer(t, NOW_MS + 30, "codex", &at(34.0, None)).is_none());
+        let due = g.due(t + MIN_GAP);
+        assert_eq!((due.len(), due[0].used_percent), (1, 34));
     }
 }

@@ -2296,6 +2296,12 @@ impl Drop for Node {
 /// The node reads them at start and again before it lists or starts agents, so a manifest added later is seen without a restart.
 pub fn load_manifests(dir: &Path) -> (Vec<Manifest>, Vec<(PathBuf, String)>) {
     let (loaded, problems) = crate::manifests::load(dir);
+    for (kind, file) in crate::manifests::shadowing(&loaded) {
+        eprintln!(
+            "manifests: {} replaces the built-in kind {kind}; newer built-in features of it (such as plan limits) are not used",
+            file.display()
+        );
+    }
     (loaded.into_iter().map(|l| l.manifest).collect(), problems)
 }
 

@@ -996,7 +996,7 @@ forwards either to a node that did not offer it.
 ### Plan limits of subscription agents (ADR-0091)
 - **`AgentQuotaObserved`** (`Event` arm 67, capability `usage.quota`): `node_id` (1, the producer's own id, checked like `NodeResources`; a
   node naming another machine is refused as forged), `tool` (2, the agent kind, `codex`), `window` (3), `used_percent` (4, 0 to 100),
-  `resets_at_ms` (5), `source` (6, `file`), `observed_at_ms` (7, the node's clock). One observation of one plan window of a tool on a
+  `resets_at_ms` (5), `source` (6, `file`), `observed_at_ms` (7, the node's clock when it read a live line; for what it replays from the start of a file, the line's own time or the file's, never later than the node's clock). One observation of one plan window of a tool on a
   machine; the hub replaces the earlier one of the same `(node_id, tool, window)` (a later step: this build only relays it).
 - **`window`** is `five_hour`, `seven_day`, or `minutes:<n>` (a length in minutes, `n` from 1), derived from the window's length and never
   from a field name such as "primary". A client must accept any `minutes:<n>`.
