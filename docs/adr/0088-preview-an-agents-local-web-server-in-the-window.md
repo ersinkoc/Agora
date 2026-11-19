@@ -1,8 +1,8 @@
 # 0088. Preview an agent's local web server in the window
-Status: Proposed
+Status: Accepted
 Date: 2026-11-19
 
-Not accepted. Nothing here may be built until the maintainer names this ADR in an acceptance message.
+Accepted: 2026-11-19 (the maintainer's explicit message in the merger chat: "ADR-0088'i kabul ediyorum"). The open questions' proposed answers stand.
 
 Builds on ADR-0020 (signed approvals), ADR-0067 (remote access and the screen password), ADR-0068 (a customizable workspace) and ADR-0070
 (the hub owns whether a machine is online). Touches the threat model (networking) and the invariant "Secrets never leave the node".
