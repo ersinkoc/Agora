@@ -295,10 +295,13 @@ function step(ws: Workspace, action: Action): Workspace {
       // A panel about one agent (Changes, Files, ...) is "shown" when a pane has that panel for that agent; without an agent, any pane of it.
       const shown = panesOf(root).find((p) => p.panel === action.panel && (!action.bind || ('agent' in action.bind ? bindOf(p) === action.bind.agent : followOf(p) === action.bind.follow)));
       if (shown) return { ...step(ws, { type: 'activate', pane: shown.id }), ...(ws.zoom && ws.zoom !== shown.id ? { zoom: undefined } : {}) };
+      // A chooser of that tool that is waiting for an agent (the pane that asked for a new terminal) becomes the pane that was asked for.
+      const waiting = action.bind ? panesOf(root).find((p) => p.panel === action.panel && !p.bind) : undefined;
+      if (waiting) return step(ws, { type: 'bind', pane: waiting.id, panel: action.panel, bind: action.bind });
       const panes = panesOf(root);
       const target = panes.find((p) => p.id === ws.focus) ?? panes[0];
       if (!target) return ws;
-      if (target.panel === 'empty') return step(ws, { type: 'bind', pane: target.id, panel: action.panel, ...(action.bind ? { bind: action.bind } : {}) });
+      if (target.panel === 'empty') return step(ws, { type: 'bind', pane: target.id, panel: action.panel,...(action.bind ? { bind: action.bind } : {}) });
       const fits = (n: LayoutNode) => panesOf(n).length <= MAX_PANES && depthOf(n) <= MAX_DEPTH;
       const split = step(ws, { type: 'split', pane: target.id, direction: 'row', panel: action.panel, ...(action.bind ? { bind: action.bind } : {}) });
       if (fits(split.layout.root)) return split;

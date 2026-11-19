@@ -3,6 +3,10 @@
 import type { AgentTileModel } from '../model';
 import type { FileItem } from './files';
 
+// One collator for every name comparison: building one per comparison is what made sorting thousands of names slow.
+const COLLATOR = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+export const compareNames = (a: string, b: string): number => COLLATOR.compare(a, b);
+
 export const TOOL_PANELS = ['terminal', 'changes', 'files', 'manager'] as const;
 export type ToolPanel = (typeof TOOL_PANELS)[number];
 export const isToolPanel = (p: string): p is ToolPanel => (TOOL_PANELS as readonly string[]).includes(p);
@@ -74,13 +78,15 @@ export type SortKey = 'name' | 'size' | 'kind';
 export interface Sort { key: SortKey; descending: boolean }
 // Folders first, always; then by the chosen column, ties by name so the order never jumps.
 export function sortEntries(items: readonly FileItem[], sort: Sort): FileItem[] {
+  const dir = sort.descending ? -1 : 1;
+  // The kind is worked out once per item, not once per comparison.
+  const kinds = sort.key === 'kind' ? new Map(items.map((i) => [i, kindOf(i)])) : undefined;
   const by = (a: FileItem, b: FileItem): number => {
     if (sort.key === 'size') return a.size - b.size;
-    if (sort.key === 'kind') return kindOf(a).localeCompare(kindOf(b));
-    return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
+    if (kinds) return (kinds.get(a) as string).localeCompare(kinds.get(b) as string);
+    return COLLATOR.compare(a.name, b.name);
   };
-  const name = (a: FileItem, b: FileItem) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
-  return [...items].sort((a, b) => Number(b.isDir) - Number(a.isDir) || ((sort.descending ? -1 : 1) * by(a, b)) || name(a, b));
+  return [...items].sort((a, b) => Number(b.isDir) - Number(a.isDir) || (dir * by(a, b)) || COLLATOR.compare(a.name, b.name));
 }
 export const nextSort = (cur: Sort, key: SortKey): Sort => (cur.key === key ? { key, descending: !cur.descending } : { key, descending: false });
 

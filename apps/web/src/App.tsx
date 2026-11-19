@@ -154,7 +154,7 @@ export function App() {
       const id = ok.agentLaunch?.agentId;
       setStarting(false);
       if (id) rememberStarted(`${node}/${id}`, launch.settings);
-      if (id && startedAsTerminal.current) requestTool({ panel: 'terminal', agent: `${node}/${id}`, wait: true });
+      if (id && startedAsTerminal.current && kind === 'shell') requestTool({ panel: 'terminal', agent: `${node}/${id}`, wait: true });
       else if (id) window.location.hash = `#/agent/${encodeURIComponent(`${node}/${id}`)}`;
       return undefined;
     } catch (e) {

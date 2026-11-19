@@ -28,6 +28,13 @@ describe('opening a tool pane', () => {
     expect(kinds(again)).toEqual(kinds(ws));
     expect(again.focus).toBe(panesOf(ws.layout.root)[1]?.id);
   });
+  it('turns a chooser of that tool that waits for an agent into the pane asked for (a new terminal leaves no empty chooser behind)', () => {
+    let ws = open(reduce(ws0(), { type: 'open', agent: 'n/a' }), 'terminal'); // the chooser
+    const chooser = panesOf(ws.layout.root).find((p) => p.panel === 'terminal' && !p.bind)?.id;
+    ws = open(ws, 'terminal', 'n/new');
+    expect(kinds(ws)).toEqual(['agent:n/a', 'terminal:n/new']);
+    expect(panesOf(ws.layout.root)[1]?.id).toBe(chooser);
+  });
   it('makes another for another agent (two folders side by side)', () => {
     let ws = open(reduce(ws0(), { type: 'open', agent: 'n/a' }), 'changes', 'n/a');
     ws = open(ws, 'changes', 'n/b');

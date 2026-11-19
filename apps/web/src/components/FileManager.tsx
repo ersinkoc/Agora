@@ -3,7 +3,7 @@ import { t } from '../i18n';
 import { crumbs } from '../net/fileview';
 import { decodeText, formatSize, joinPath, readFailure, type FileItem, type WorkspaceFiles } from '../net/files';
 import { baseName } from '../net/diff';
-import { filterEntries, kindOf, nextSort, parentOf, sortEntries, type FileKind, type Sort, type SortKey } from '../net/paneTools';
+import { compareNames, filterEntries, kindOf, nextSort, parentOf, sortEntries, type FileKind, type Sort, type SortKey } from '../net/paneTools';
 import { useHighlightedFile } from '../highlight/useHighlight';
 import { Skeleton } from './EmptyState';
 import { CodeView, keepLetters } from './FilesView';
@@ -18,6 +18,15 @@ type Listing = FileItem[] | 'loading' | 'failed';
 type Content = { lines: string[]; bytes: number } | 'loading' | 'binary' | 'failed' | 'secret';
 
 const KIND_ICON: Record<FileKind, IconName> = { folder: 'folder', code: 'code', text: 'files', image: 'image', archive: 'files', config: 'files', file: 'files', private: 'lock' };
+const ROW = 28; // px: one row of the list
+const OVERSCAN = 12;
+// The rows to draw: those in view and around it, and the one that holds the Tab stop (so it can always be reached with Tab).
+export const rowIndexes = (first: number, last: number, keep: number): number[] => {
+  const out: number[] = [];
+  for (let i = first; i < last; i++) out.push(i);
+  if (keep >= 0 && (keep < first || keep >= last)) out.push(keep);
+  return out;
+};
 const EMPTY_MARKS = new Map<number, 'add' | 'mod' | 'del'>();
 const columns: { key: SortKey; label: string; width: string }[] = [
   { key: 'name', label: 'fm-col-name', width: 'min-w-0 flex-1' },
@@ -47,7 +56,9 @@ export function FileManager({ files, rootName, onTerminal, terminalWhy }: {
   const tree = useRef<HTMLDivElement>(null);
   const refocus = useRef(false);
   const noteTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  useEffect(() => () => { if (noteTimer.current) clearTimeout(noteTimer.current); }, []);
+  // The retry timers of a listing that failed: all cleared when the manager goes away, and the answers still in flight are dropped.
+  const retries = useRef(new Set<ReturnType<typeof setTimeout>>());
+  useEffect(() => () => { if (noteTimer.current) clearTimeout(noteTimer.current); generation.current++; for (const r of retries.current) clearTimeout(r); retries.current.clear(); }, []);
   const say = (key: string) => { setNote(key); if (noteTimer.current) clearTimeout(noteTimer.current); noteTimer.current = setTimeout(() => setNote(undefined), 2500); };
 
   // A folder that cannot be listed is tried twice more, a little later each time; then it says so, with a way to try again.
@@ -57,7 +68,7 @@ export function FileManager({ files, rootName, onTerminal, terminalWhy }: {
     setListings((l) => { const v = l.get(path); return v === undefined || v === 'failed' ? new Map(l).set(path, 'loading') : l; });
     const attempt = (n: number) => files.list(path).then(
       (items) => put(items),
-      () => { if (gen !== generation.current) return; if (n < 2) setTimeout(() => attempt(n + 1), 1000 * (n + 1)); else put('failed'); },
+      () => { if (gen !== generation.current) return; if (n < 2) { const id = setTimeout(() => { retries.current.delete(id); attempt(n + 1); }, 1000 * (n + 1)); retries.current.add(id); } else put('failed'); },
     );
     attempt(0);
   }, [files]);
@@ -67,18 +78,53 @@ export function FileManager({ files, rootName, onTerminal, terminalWhy }: {
   const listing = listings.get(dir);
   const entries = useMemo(() => (Array.isArray(listing) ? filterEntries(sortEntries(listing, sort), query) : []), [listing, sort, query]);
   const rowPath = (e: FileItem) => joinPath(dir, e.name);
-  const focusPath = cursor !== undefined && entries.some((e) => rowPath(e) === cursor) ? cursor : entries[0] ? rowPath(entries[0]) : undefined;
-  const cursorItem = entries.find((e) => rowPath(e) === focusPath);
-  // After the list of a new folder arrives, the first row takes the focus (when the focus was in the list).
+  const index = useMemo(() => new Map(entries.map((e, i) => [joinPath(dir, e.name), i])), [entries, dir]);
+  const focusIndex = cursor !== undefined && index.has(cursor) ? (index.get(cursor) as number) : entries.length > 0 ? 0 : -1;
+  const focusPath = focusIndex >= 0 ? rowPath(entries[focusIndex] as FileItem) : undefined;
+  const cursorItem = focusIndex >= 0 ? entries[focusIndex] : undefined;
+  // After the list of a new folder arrives, the first row takes the focus (when the focus was in the list). An empty folder ends the wish
+  // too, so a later refresh does not take the focus.
   useEffect(() => {
-    if (!refocus.current || entries.length === 0) return;
+    if (!refocus.current || !Array.isArray(listing)) return;
     refocus.current = false;
     grid.current?.querySelector<HTMLElement>('[role=row][data-path]')?.focus();
-  }, [entries]);
+  }, [entries, listing]);
+
+  // Only the rows in view are drawn (fixed height), so 5 000 entries cost what a screenful costs; the row that holds the Tab stop is
+  // always drawn, and the keys move by index and scroll the row into view.
+  const scroller = useRef<HTMLDivElement>(null);
+  const [view, setView] = useState({ top: 0, height: 600 });
+  useEffect(() => {
+    const el = scroller.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(() => setView((v) => (v.height === el.clientHeight || el.clientHeight === 0 ? v : { ...v, height: el.clientHeight })));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [listing]);
+  const first = Math.max(0, Math.floor(view.top / ROW) - OVERSCAN);
+  const last = Math.min(entries.length, Math.ceil((view.top + view.height) / ROW) + OVERSCAN);
+  const toFocus = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    const p = toFocus.current;
+    if (p === undefined) return;
+    toFocus.current = undefined;
+    [...(grid.current?.querySelectorAll<HTMLElement>('[role=row][data-path]') ?? [])].find((r) => r.dataset.path === p)?.focus();
+  });
+  const focusAt = (i: number) => {
+    const to = Math.max(0, Math.min(entries.length - 1, i));
+    const e = entries[to];
+    const el = scroller.current;
+    if (!e || !el) return;
+    const top = to * ROW;
+    if (top < el.scrollTop) el.scrollTop = top; else if (top + ROW > el.scrollTop + el.clientHeight) el.scrollTop = top + ROW - el.clientHeight;
+    setView((v) => ({ ...v, top: el.scrollTop }));
+    toFocus.current = rowPath(e);
+    setCursor(rowPath(e));
+  };
 
   const go = (path: string, keepFocus = false) => {
     refocus.current = keepFocus;
-    setDir(path); setQuery(''); setPreview(undefined); setCursor(undefined);
+    setDir(path); setQuery(''); setPreview(undefined); setCursor(undefined); setView((v) => ({ ...v, top: 0 }));
     setExpanded((o) => { const n = new Set(o); n.add(''); for (let p = path; p; p = parentOf(p)) n.add(p); return n; });
   };
 
@@ -129,14 +175,16 @@ export function FileManager({ files, rootName, onTerminal, terminalWhy }: {
     if (slash(e)) return;
     keepLetters(e);
     if ((e.target as HTMLElement).closest('input, button')) return;
-    const rows = [...(grid.current?.querySelectorAll<HTMLElement>('[role=row][data-path]') ?? [])];
-    const at = rows.indexOf(document.activeElement as HTMLElement);
-    const move = (i: number) => { const r = rows[Math.max(0, Math.min(rows.length - 1, i))]; if (r) { e.preventDefault(); r.focus(); } };
+    const at = index.get((document.activeElement as HTMLElement | null)?.dataset?.path ?? '') ?? -1;
+    const move = (i: number) => { if (entries.length > 0) { e.preventDefault(); focusAt(i); } };
+    const page = Math.max(1, Math.floor(view.height / ROW) - 1);
     const item = at >= 0 ? entries[at] : undefined;
-    if (e.key === 'ArrowDown') move(at + 1);
+    if (e.key === 'PageDown') move(at + page);
+    else if (e.key === 'PageUp') move(at - page);
+    else if (e.key === 'ArrowDown') move(at + 1);
     else if (e.key === 'ArrowUp') move(at - 1);
     else if (e.key === 'Home') move(0);
-    else if (e.key === 'End') move(rows.length - 1);
+    else if (e.key === 'End') move(entries.length - 1);
     else if (e.key === 'Enter' && item) { e.preventDefault(); open(item, true); }
     else if (e.key === 'ArrowRight' && item?.isDir) { e.preventDefault(); open(item, true); }
     else if ((e.key === 'ArrowLeft' || e.key === 'Backspace') && dir) { e.preventDefault(); go(parentOf(dir), true); }
@@ -213,8 +261,8 @@ export function FileManager({ files, rootName, onTerminal, terminalWhy }: {
         <button type="button" className="ide-iconbtn" onClick={() => void copyPath()} aria-label={t('fm-copy-path')} title={t('fm-copy-path-hint')}><Icon name="copy" /></button>
         <button type="button" className="ide-iconbtn" disabled={!canDownload} onClick={() => target && void download(target)} aria-label={t('fm-download')} title={canDownload ? t('fm-download') : t('fm-download-none')}><Icon name="download" /></button>
         {onTerminal
-          ? <button type="button" className={`ide-iconbtn inline-flex! w-auto gap-1.5 px-2 text-xs ${dir ? 'cursor-not-allowed opacity-40' : ''}`} onClick={dir ? undefined : onTerminal} aria-disabled={dir ? true : undefined} title={dir ? t('fm-terminal-subfolder') : t('fm-terminal-root')}><Icon name="terminal" /><span className="hidden @md:inline">{t('fm-terminal')}</span></button>
-          : <button type="button" className="ide-iconbtn inline-flex! w-auto gap-1.5 px-2 text-xs opacity-40" aria-disabled="true" title={t(terminalWhy ?? 'fm-terminal-none')}><Icon name="terminal" /><span className="hidden @md:inline">{t('fm-terminal')}</span></button>}
+          ? <button type="button" className={`ide-iconbtn inline-flex! w-auto gap-1.5 px-2 text-xs ${dir ? 'cursor-not-allowed opacity-40' : ''}`} onClick={dir ? undefined : onTerminal} aria-disabled={dir ? true : undefined} aria-label={t('fm-terminal')} title={dir ? t('fm-terminal-subfolder') : t('fm-terminal-root')}><Icon name="terminal" /><span className="hidden @md:inline">{t('fm-terminal')}</span></button>
+          : <button type="button" className="ide-iconbtn inline-flex! w-auto gap-1.5 px-2 text-xs opacity-40" aria-disabled="true" aria-label={t('fm-terminal')} title={t(terminalWhy ?? 'fm-terminal-none')}><Icon name="terminal" /><span className="hidden @md:inline">{t('fm-terminal')}</span></button>}
         <span aria-hidden className="mx-1 h-4 w-px bg-line" />
         {(['pencil', 'move', 'trash', 'upload'] as const).map((icon) => {
           const label = t(`fm-${icon === 'pencil' ? 'rename' : icon === 'move' ? 'move' : icon === 'trash' ? 'delete' : 'upload'}`);
@@ -241,19 +289,20 @@ export function FileManager({ files, rootName, onTerminal, terminalWhy }: {
                 </div>
               ))}
             </div>
-            <div className="min-h-0 flex-1 overflow-auto py-0.5">
+            <div ref={scroller} className="min-h-0 flex-1 overflow-auto" onScroll={(e) => { const top = e.currentTarget.scrollTop; setView((v) => (Math.abs(v.top - top) < 1 ? v : { ...v, top })); }}>
               {listing === undefined || listing === 'loading' ? <div className="grid gap-1.5 p-3" aria-hidden>{[0, 1, 2, 3, 4].map((i) => <Skeleton key={i} className="h-4" />)}</div>
                 : listing === 'failed' ? <p role="alert" className="m-0 flex items-center gap-2 p-4 text-needs-you">{t('files-failed')}<button type="button" className="button" onClick={() => { generation.current++; setListings((l) => { const n = new Map(l); n.delete(dir); return n; }); }}>{t('changes-retry')}</button></p>
                 : listing.length === 0 ? <p className="muted m-0 p-4">{t('fm-empty')}</p>
                 : entries.length === 0 ? <p className="muted m-0 p-4">{t('files-no-match')}</p>
-                : entries.map((e, i) => {
+                : <div className="relative" style={{ height: entries.length * ROW }}>{rowIndexes(first, last, focusIndex).map((i) => {
+                  const e = entries[i] as FileItem;
                   const path = rowPath(e);
                   const kind = kindOf(e);
                   return (
-                    <div key={e.name} role="row" aria-rowindex={i + 2} aria-selected={path === preview?.path || undefined} data-path={path} tabIndex={path === focusPath ? 0 : -1}
+                    <div key={e.name} role="row" aria-rowindex={i + 2} aria-selected={path === preview?.path || undefined} data-path={path} tabIndex={path === focusPath ? 0 : -1} style={{ position: 'absolute', insetInline: 0, top: i * ROW, height: ROW }}
                       aria-label={e.secret ? t('files-secret-row', { name: e.name }) : undefined}
-                      className={`flex cursor-pointer items-center gap-2 px-3 py-1 text-[0.8125rem] outline-none hover:bg-surface-2 focus-visible:bg-surface-2 focus-visible:shadow-[inset_2px_0_0_var(--accent)] ${path === preview?.path ? 'bg-surface-2' : ''}`}
-                      onFocus={() => setCursor(path)} onClick={() => open(e)}>
+                      className={`flex cursor-pointer items-center gap-2 px-3 text-[0.8125rem] outline-none hover:bg-surface-2 focus-visible:bg-surface-2 focus-visible:shadow-[inset_2px_0_0_var(--accent)] ${path === preview?.path ? 'bg-surface-2' : ''}`}
+                      onFocus={() => setCursor((c) => (c === path ? c : path))} onClick={() => open(e)}>
                       <div role="gridcell" className="flex min-w-0 flex-1 items-center gap-2">
                         <Icon name={KIND_ICON[kind]} className={`size-3.5 ${kind === 'folder' ? 'text-accent' : 'text-muted'}`} />
                         <span className="min-w-0 truncate" dir="ltr" title={e.name}>{e.name}</span>
@@ -262,7 +311,7 @@ export function FileManager({ files, rootName, onTerminal, terminalWhy }: {
                       <div role="gridcell" className="w-20 flex-none text-end text-xs text-muted">{e.isDir ? '—' : formatSize(e.size)}</div>
                     </div>
                   );
-                })}
+                })}</div>}
             </div>
           </div>
           <p className="m-0 flex-none border-t border-line px-3 py-1 text-xs text-muted" aria-live="polite">{Array.isArray(listing) ? t('fm-count', { count: entries.length }) : ''}</p>
@@ -298,7 +347,7 @@ function TreeNode({ path, name, depth, listings, expanded, list, toggle, current
   const open = expanded.has(path);
   const l = listings.get(path);
   useEffect(() => { if (open && l === undefined) list(path); }, [open, l, list, path]);
-  const kids = Array.isArray(l) ? l.filter((x) => x.isDir).sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' })) : [];
+  const kids = Array.isArray(l) ? l.filter((x) => x.isDir).sort((a, b) => compareNames(a.name, b.name)) : [];
   return (
     <div role="none">
       <div role="treeitem" aria-level={depth + 1} aria-expanded={open} aria-selected={path === current} data-path={path} tabIndex={path === current ? 0 : -1}

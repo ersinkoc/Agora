@@ -153,6 +153,49 @@ describe('the file manager keyboard', () => {
   });
 });
 
+describe('a folder of thousands', () => {
+  const many: FileItem[] = Array.from({ length: 5000 }, (_, i) => ({ name: `file${i}.txt`, isDir: false, size: i }));
+  const rendered = () => host.querySelectorAll('[role=row][data-path]').length;
+  it('draws only the rows in view, keeps the full count for assistive technology, and sorts quickly', async () => {
+    await mount(files({ list: async () => many }));
+    expect(rendered()).toBeLessThan(120);
+    expect(host.querySelector('[role=grid]')?.getAttribute('aria-rowcount')).toBe('5001');
+    expect(host.querySelector('[role=row][data-path="file0.txt"]')?.getAttribute('aria-rowindex')).toBe('2');
+    expect(host.textContent).toContain('5,000 items');
+    const size = [...host.querySelectorAll('[role=columnheader] button')].find((b) => b.textContent === 'Size') as HTMLElement;
+    const t0 = performance.now();
+    click(size); click(size);
+    expect(performance.now() - t0).toBeLessThan(1500);
+    expect(rendered()).toBeLessThan(120);
+  });
+  it('End goes to the last row, which is drawn and focused; Home comes back; one row is the Tab stop throughout', async () => {
+    await mount(files({ list: async () => many }));
+    const stops = () => host.querySelectorAll('[role=row][data-path][tabindex="0"]').length;
+    const firstRow = host.querySelector<HTMLElement>('[role=row][data-path]') as HTMLElement;
+    firstRow.focus();
+    key(firstRow, 'End');
+    await flush();
+    expect(document.activeElement?.getAttribute('data-path')).toBe('file4999.txt');
+    expect(document.activeElement?.getAttribute('aria-rowindex')).toBe('5001');
+    expect(stops()).toBe(1);
+    key(document.activeElement as Element, 'Home');
+    await flush();
+    expect(document.activeElement?.getAttribute('aria-rowindex')).toBe('2');
+    expect(rendered()).toBeLessThan(120);
+  });
+});
+
+describe('leaving', () => {
+  it('stops retrying a listing that failed once the manager is gone', async () => {
+    let calls = 0;
+    await mount(files({ list: async () => { calls++; throw new Error('down'); } }));
+    const before = calls;
+    act(() => root.render(null));
+    await act(async () => { await new Promise((r) => setTimeout(r, 1300)); });
+    expect(calls).toBe(before);
+  });
+});
+
 describe('the preview', () => {
   it('reads a text file once, shows its lines and size, and closes', async () => {
     await mount();
@@ -203,7 +246,7 @@ describe('the actions', () => {
     expect(host.querySelector('[role=status]')?.textContent).toBe(t('fm-write-why'));
     expect(reads).toEqual([]);
   });
-  it('offers Download for a chosen file only, and Terminal here at the folder\'s top only', async () => {
+  it('offers Download for a chosen file only, and Agent terminal at the folder\'s top only', async () => {
     let opened = 0;
     await mount(files(), { onTerminal: () => { opened++; } });
     const dl = () => host.querySelector<HTMLButtonElement>('button[aria-label=Download]') as HTMLButtonElement;
@@ -214,7 +257,7 @@ describe('the actions', () => {
     click(row('.env'));
     await flush();
     expect(dl().disabled).toBe(true); // a private file is never downloaded
-    const term = [...host.querySelectorAll('[role=toolbar] button')].find((b) => b.textContent === 'Terminal here') as HTMLElement;
+    const term = [...host.querySelectorAll('[role=toolbar] button')].find((b) => b.textContent === 'Agent terminal') as HTMLElement;
     click(term);
     expect(opened).toBe(1);
     click(row('src'));
@@ -226,7 +269,7 @@ describe('the actions', () => {
   });
   it('says why there is no terminal when the agent has none', async () => {
     await mount(files(), { terminalWhy: 'fm-terminal-chat' });
-    const term = [...host.querySelectorAll('[role=toolbar] button')].find((b) => b.textContent === 'Terminal here') as HTMLElement;
+    const term = [...host.querySelectorAll('[role=toolbar] button')].find((b) => b.textContent === 'Agent terminal') as HTMLElement;
     expect(term.getAttribute('aria-disabled')).toBe('true');
     expect(term.getAttribute('title')).toBe(t('fm-terminal-chat'));
   });
