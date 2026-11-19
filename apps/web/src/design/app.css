@@ -67,6 +67,9 @@
   .rail__btn::after { content: attr(data-tip); @apply pointer-events-none invisible absolute end-full top-1/2 z-30 me-2 -translate-y-1/2 whitespace-nowrap rounded-xs border border-line bg-surface-1 px-2 py-1 text-xs text-ink opacity-0 transition-opacity duration-150; box-shadow: var(--shadow); }
   .rail__btn:focus-visible::after { @apply visible opacity-100; }
   @media (hover: hover) { .rail__btn:hover::after { @apply visible opacity-100; } }
+  /* The subject that is open already says its name in the panel's heading: its tip would only cover the panel's own values (a row's number
+     at the end of the line sits right where the tip lands). */
+  .rail__btn[aria-selected='true']::after { @apply hidden; }
 
   /* A tab row wider than its space: the edge that has more fades out (a mask, so it follows any theme), mirrored in a right-to-left row. */
   .tab-strip[data-fade-end] { mask-image: linear-gradient(to right, #000 calc(100% - 2rem), transparent); }

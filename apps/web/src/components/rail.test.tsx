@@ -1,7 +1,9 @@
+import { readFileSync } from 'node:fs';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { setLanguage } from '../i18n';
 import { demoAgents } from '../fixtures';
+import { Icon } from './Icon';
 import { Inspector } from './Inspector';
 import { badgeText, loadRailTab, railItems, resolveTab, saveRailTab, shortcutIndex, shortcutLabel } from './rail';
 
@@ -60,5 +62,17 @@ describe('Inspector', () => {
   });
   it('no longer draws a horizontal tab row', () => {
     expect(draw(true)).not.toContain('overflow-x-auto');
+  });
+  it('shows Usage as bars, never as money', () => {
+    const usage = railItems({ needs: 0, changed: 0, messages: 0, hasBoard: false, hasUsage: true }).find((x) => x.id === 'usage');
+    expect(usage?.icon).toBe('gauge');
+    // The icon set has no coin or dollar glyph left to pick by mistake, and no rail item uses one.
+    expect(renderToStaticMarkup(<Icon name="gauge" />)).toContain('M2.5 13.5h11');
+    expect(Object.keys(railItems({ needs: 1, changed: 1, messages: 1, hasBoard: true, hasUsage: true })).length).toBeGreaterThan(0);
+    expect(railItems({ needs: 1, changed: 1, messages: 1, hasBoard: true, hasUsage: true }).map((x) => x.icon as string)).not.toContain('coin');
+  });
+  it('does not draw the open subject\'s tip over its own panel (it hid the values at the end of a row)', () => {
+    const css = readFileSync('src/design/app.css', 'utf8');
+    expect(css).toMatch(/\.rail__btn\[aria-selected='true'\]::after \{ @apply hidden; \}/);
   });
 });

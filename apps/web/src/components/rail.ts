@@ -16,7 +16,7 @@ export function railItems(c: RailCounts): RailItem[] {
     { id: 'changes', icon: 'diff', labelKey: 'ide-tab-changes', badge: c.changed },
     ...(c.hasBoard ? [{ id: 'board' as const, icon: 'board' as const, labelKey: 'board-title' }] : []),
     { id: 'messages', icon: 'chat', labelKey: 'ide-tab-messages', badge: c.messages },
-    ...(c.hasUsage ? [{ id: 'usage' as const, icon: 'coin' as const, labelKey: 'ide-tab-usage' }] : []),
+    ...(c.hasUsage ? [{ id: 'usage' as const, icon: 'gauge' as const, labelKey: 'ide-tab-usage' }] : []),
   ];
 }
 

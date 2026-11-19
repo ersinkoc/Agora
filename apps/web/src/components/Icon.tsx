@@ -40,9 +40,14 @@ const PATHS = {
   diff: 'M5 2.5v7M5 12.5a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3zM11 13.5V6.5M11 3.5a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3zM8 4.5h-1M7.5 4.5L9 3M7.5 4.5L9 6',
   board: 'M2.5 3h3.5v10H2.5zM6.5 3H10v6H6.5zM10.5 3H14v8h-3.5z',
   chat: 'M2.5 3.5h11v7h-6l-3 2.5v-2.5h-2z',
-  coin: 'M8 14a6 6 0 1 0 0-12 6 6 0 0 0 0 12zM9.8 6.2c-.3-.7-1-1-1.8-1-1 0-1.8.5-1.8 1.3 0 1.8 3.8.8 3.8 2.6 0 .8-.8 1.4-1.9 1.4-.9 0-1.6-.4-1.9-1.1M8 4v1.2M8 10.8V12',
   warn: 'M8 2.5l6 10.5H2zM8 6.5v3M8 11.2v.1',
   check: 'M3.5 8.5l3 3 6-7',
+  // Usage (bars, never money), and the file manager: upload, download, a code file, a picture.
+  gauge: 'M2.5 13.5h11M4.5 12V8M8 12V3.5M11.5 12V6.5',
+  upload: 'M8 11V3M5 6l3-3 3 3M3 13h10',
+  download: 'M8 3v8M5 8l3 3 3-3M3 13h10',
+  code: 'M6 5L3 8l3 3M10 5l3 3-3 3',
+  image: 'M2.5 3.5h11v9h-11zM2.5 11l3.5-3.5 3 3 2-2 2.5 2.5',
   chevronDown: 'M4 6l4 4 4-4',
   clock: 'M8 14a6 6 0 1 0 0-12 6 6 0 0 0 0 12zM8 4.5V8l2.3 1.4',
 } as const;

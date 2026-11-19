@@ -2,7 +2,7 @@
 // valid tree; one that would break a rule (too many panes, too deep, an unknown pane) returns the workspace unchanged.
 import {
   type Bind, type Layout, type LayoutNode, type Pane, type Split, type Tabs,
-  LAYOUT_VERSION, MAX_DEPTH, MAX_PANES, MIN_RATIO, bindOf, depthOf, emptyPane, freshId, normalise, panesOf,
+  LAYOUT_VERSION, MAX_DEPTH, MAX_PANES, MIN_RATIO, bindOf, depthOf, emptyPane, followOf, freshId, normalise, panesOf,
 } from './tree';
 
 export interface Workspace {
@@ -30,7 +30,7 @@ export type Action =
   | { type: 'preset'; preset: Preset; agents: readonly string[] }
   | { type: 'bind'; pane: string; bind?: Bind; panel?: string }
   | { type: 'open'; agent: string; background?: boolean }
-  | { type: 'show'; panel: string }
+  | { type: 'show'; panel: string; bind?: Bind }
   | { type: 'prune'; alive: ReadonlySet<string> }
   | { type: 'replace'; layout: Layout };
 
@@ -292,19 +292,23 @@ function step(ws: Workspace, action: Action): Workspace {
     case 'show': {
       // A panel that is not about one agent (the theme editor): brought to the front where it is, else put beside the pane in
       // focus so what it changes stays in view (as a tab there when the limits leave no room for another pane).
-      const shown = panesOf(root).find((p) => p.panel === action.panel);
+      // A panel about one agent (Changes, Files, ...) is "shown" when a pane has that panel for that agent; without an agent, any pane of it.
+      const shown = panesOf(root).find((p) => p.panel === action.panel && (!action.bind || ('agent' in action.bind ? bindOf(p) === action.bind.agent : followOf(p) === action.bind.follow)));
       if (shown) return { ...step(ws, { type: 'activate', pane: shown.id }), ...(ws.zoom && ws.zoom !== shown.id ? { zoom: undefined } : {}) };
+      // A chooser of that tool that is waiting for an agent (the pane that asked for a new terminal) becomes the pane that was asked for.
+      const waiting = action.bind ? panesOf(root).find((p) => p.panel === action.panel && !p.bind) : undefined;
+      if (waiting) return step(ws, { type: 'bind', pane: waiting.id, panel: action.panel, bind: action.bind });
       const panes = panesOf(root);
       const target = panes.find((p) => p.id === ws.focus) ?? panes[0];
       if (!target) return ws;
-      if (target.panel === 'empty') return step(ws, { type: 'bind', pane: target.id, panel: action.panel });
+      if (target.panel === 'empty') return step(ws, { type: 'bind', pane: target.id, panel: action.panel,...(action.bind ? { bind: action.bind } : {}) });
       const fits = (n: LayoutNode) => panesOf(n).length <= MAX_PANES && depthOf(n) <= MAX_DEPTH;
-      const split = step(ws, { type: 'split', pane: target.id, direction: 'row', panel: action.panel });
+      const split = step(ws, { type: 'split', pane: target.id, direction: 'row', panel: action.panel, ...(action.bind ? { bind: action.bind } : {}) });
       if (fits(split.layout.root)) return split;
       // No room beside it: a tab next to the pane in focus, else next to any pane where a tab fits.
       const id = freshId(root);
       for (const p of [target, ...panes.filter((x) => x.id !== target.id)]) {
-        const next = normalise(addTab(root, p.id, { type: 'pane', id, panel: action.panel }));
+        const next = normalise(addTab(root, p.id, { type: 'pane', id, panel: action.panel, ...(action.bind ? { bind: action.bind } : {}) }));
         if (next && fits(next)) return set(next, { focus: id, zoom: undefined });
       }
       return ws;

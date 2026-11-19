@@ -40,10 +40,12 @@ const chipOff = 'border-line bg-surface-0 text-muted hover:bg-surface-2 hover:te
 
 // "Start an agent" in one window: the machine, the folder (a known one in a click, or any path), then the agent. Choosing the
 // folder shows the folder the node resolved before anything starts (ADR-0052); the rest is a click.
-export function StartAgent({ projects, machines, initialNode, trust, askApproval, loadKinds, inspect, list, onStart, onClose }: {
+export function StartAgent({ projects, machines, initialNode, initialKind, trust, askApproval, loadKinds, inspect, list, onStart, onClose }: {
   projects: readonly ProjectChoice[];
   machines: readonly MachineModel[];
   initialNode?: string;
+  // A kind to start on (a plain terminal asks for `shell`); when the machine offers no such kind nothing is chosen for the person.
+  initialKind?: string;
   // This device's id and public key: when a machine does not trust the device yet, the command that fixes it is shown right here.
   trust?: { id: string; key: string };
   // ADR-0061: whether another device of this person that `node` trusts could approve this one, and asking it to.
@@ -102,7 +104,7 @@ export function StartAgent({ projects, machines, initialNode, trust, askApproval
     if (!node) return;
     let current = true;
     setKinds('loading'); setKind(''); setInfo(undefined); setError(undefined);
-    loadKinds(node).then(k => { if (current) { setKinds(k); setKind(k.find(x => x.installed)?.kind ?? ''); } }, () => { if (current) setKinds('failed'); });
+    loadKinds(node).then(k => { if (current) { setKinds(k); setKind(k.find(x => x.installed && x.kind === initialKind)?.kind ?? (initialKind ? '' : k.find(x => x.installed)?.kind ?? '')); } }, () => { if (current) setKinds('failed'); });
     return () => { current = false; };
   }, [node, loadKinds]);
   const changePath = (value: string) => { setPath(value); setInfo(undefined); setError(undefined); setSeparate(false); setAcceptIdentityChange(false); };
@@ -222,6 +224,7 @@ export function StartAgent({ projects, machines, initialNode, trust, askApproval
                     {k.name}{!k.installed && <span className="text-xs">— {t('start-not-installed')}</span>}
                   </button>)}
                 </div>}
+              {Array.isArray(kinds) && initialKind && !kinds.some(k => k.installed && k.kind === initialKind) && <p role="note" className="m-0 text-xs text-muted">{t('start-terminal-missing', { kind: initialKind })}</p>}
               {Array.isArray(kinds) && kinds.some(k => !k.installed) && (() => {
                 // ADR-0069: each missing program by name; the general sentence for a kind from an older machine that does not name it.
                 const missing = missingPrograms(kinds);
