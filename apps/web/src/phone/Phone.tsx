@@ -12,6 +12,7 @@ import { StateBadge, StateMark } from '../components/StateBadge';
 import { NoAskBadge } from '../components/NoAskBadge';
 import { ThemePicker } from '../components/ThemePicker';
 import { PromptBox } from '../components/PromptBox';
+import type { PromptSend } from '../components/chatActions';
 import { ClosedSummary } from '../components/ClosedSummary';
 import { DiffDialog } from '../components/DiffDialog';
 import { FilesDialog } from '../components/FilesDialog';
@@ -286,7 +287,7 @@ export function PhoneAgent({ agent, agents, approvals, machines, onResolve, untr
   agents: readonly AgentTileModel[];
   source?: TerminalSource;
   chatSource?: ChatSource;
-  sendPrompt?: (agent: AgentTileModel, text: string) => Promise<boolean>;
+  sendPrompt?: PromptSend;
   chooseOption?: (agentKey: string, kind: 'mode' | 'model', id: string) => Promise<boolean>;
   /** What the agent changed (the review screen) and its files (the file browser), as on the desktop; absent without a hub. */
   loadDiff?: (agent: AgentTileModel, path?: string) => Promise<DiffSource>;

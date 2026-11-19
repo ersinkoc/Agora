@@ -6,6 +6,30 @@ import type { ChatLine } from './net/chat';
 const day = (d: number, h: number, m: number, s = 0) => new Date(2026, 10, d, h, m, s).getTime();
 const tool = (name: string, args: Record<string, unknown>) => JSON.stringify({ tool: name, arguments: args });
 
+// ADR-0090: what a node with `chat.rich` sends: thinking, calls with a kind, status, duration, files and output, a plan with step status, a
+// request for permission, a prompt waiting behind the turn. Same shape as the approved design: one turn, one login fix.
+export function demoRichConversation(): ChatLine[] {
+  const t0 = new Date(2026, 10, 19, 14, 2, 0).getTime();
+  const call = (id: number, atMs: number, name: string, args: Record<string, unknown>, over: Partial<ChatLine>): ChatLine => ({ id, atMs, role: 'agent', kind: 'tool', text: tool(name, args), path: '', callId: `c${id}`, ...over });
+  return [
+    { id: 1, atMs: t0, role: 'user', kind: 'text', text: 'The login redirect sends people to /home after sign-in. It should go to the dashboard. Fix it and update the test.', path: '' },
+    { id: 2, atMs: t0 + 1000, role: 'agent', kind: 'thought', text: 'The redirect target is probably hard-coded in the session handler. ', path: '' },
+    { id: 3, atMs: t0 + 5000, role: 'agent', kind: 'thought', text: 'I should find where it is built before changing the test, so the test and the code agree on one source of truth.', path: '' },
+    { id: 4, atMs: t0 + 10_000, role: 'agent', kind: 'text', text: "I'll look at where the redirect is decided, then change it and the test that pins it.", path: '' },
+    call(5, t0 + 11_000, 'search', { pattern: 'redirect', path: 'src' }, { callKind: 'search', status: 'completed', startedMs: t0 + 11_000, endedMs: t0 + 11_600, output: 'src/session.rs:41     let target = "/home";\nsrc/session.rs:58     redirect(target)\ntests/login.rs:12    assert_eq!(res.location(), "/home");', locations: [{ path: 'src', line: 0 }] }),
+    call(6, t0 + 12_000, 'read', { file_path: 'tests/login.rs' }, { callKind: 'read', status: 'completed', startedMs: t0 + 12_000, endedMs: t0 + 12_200, locations: [{ path: 'tests/login.rs', line: 12 }] }),
+    call(7, t0 + 13_000, 'edit', { file_path: 'src/session.rs', old_string: '"/home"', new_string: '"/dashboard"' }, { callKind: 'edit', status: 'completed', startedMs: t0 + 13_000, endedMs: t0 + 13_300, locations: [{ path: 'src/session.rs', line: 41 }] }),
+    { id: 8, atMs: t0 + 13_400, role: 'agent', kind: 'diff', text: '--- a/src/session.rs\n+++ b/src/session.rs\n@@ -39,7 +39,7 @@ fn after_sign_in\n     let user = session.user();\n-    let target = "/home";\n+    let target = "/dashboard";\n     log::info!("signed in {user}");\n', path: 'src/session.rs' },
+    { id: 9, atMs: t0 + 14_000, role: 'agent', kind: 'plan', text: 'Find where the redirect is decided\nChange the target to /dashboard\nUpdate the test that pins the old target\nRun the whole suite', path: '',
+      steps: [{ text: 'Find where the redirect is decided', status: 'completed' }, { text: 'Change the target to /dashboard', status: 'completed' }, { text: 'Update the test that pins the old target', status: 'in_progress' }, { text: 'Run the whole suite', status: 'pending' }] },
+    { id: 10, atMs: t0 + 15_000, role: 'agent', kind: 'text', text: 'The target was a string in `after_sign_in`, so it was a one-line change. Now the test.', path: '' },
+    call(11, t0 + 16_000, 'execute', { command: ['bash', '-lc', 'cargo test --no-fail-fast login'] }, { callKind: 'run', status: 'failed', startedMs: t0 + 16_000, endedMs: t0 + 21_000, output: 'running 2 tests\ntest redirects_to_dashboard ... ok\ntest redirect_keeps_return_url ... FAILED\n\nfailures:\n    redirect_keeps_return_url\n\ntest result: FAILED. 1 passed; 1 failed' }),
+    call(12, t0 + 22_000, 'execute', { command: ['bash', '-lc', 'cargo test login'] }, { callKind: 'run', status: 'in_progress', startedMs: t0 + 22_000, output: '   Compiling agora v0.3.24\n    Finished test profile in 3.2s\n     Running tests/login.rs\ntest redirects_to_dashboard ... ok\ntest redirect_keeps_return_url ... running' }),
+    { id: 13, atMs: t0 + 23_000, role: 'agent', kind: 'permission', text: 'run_command', path: '', approvalId: 'ap-1', outcome: 'pending' },
+    { id: 14, atMs: t0 + 24_000, role: 'user', kind: 'text', text: 'Then update the changelog', path: '', queued: true },
+  ];
+}
+
 export function demoConversation(): ChatLine[] {
   let id = 0;
   const out: ChatLine[] = [];

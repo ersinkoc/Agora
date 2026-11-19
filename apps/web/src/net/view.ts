@@ -2,7 +2,7 @@
 // positioned events. Keys are hub-wide `<producer>/<local id>`. Pure: no sockets, no React.
 
 import { agora } from '../gen/agora.js';
-import { type AgentTileModel, type SessionModel, type SessionOptionModel, uiState } from '../model';
+import { type AgentTileModel, type CommandModel, type ConfigCategory, type ConfigOptionModel, type SessionModel, type SessionOptionModel, uiState } from '../model';
 
 type Ev = agora.v1.Event.$Properties;
 type Num = number | bigint | { toString(): string } | null | undefined;
@@ -36,6 +36,21 @@ export interface InterruptedV { resumable: boolean; atMs: number; folder: string
 type OptionWire = { id?: string | null; name?: string | null; description?: string | null; skipsPermissions?: boolean | null };
 const optionsOf = (l: readonly OptionWire[] | null | undefined, modes: boolean): SessionOptionModel[] =>
   (l ?? []).map((o) => ({ id: o.id ?? '', name: o.name ?? '', description: o.description ?? '', skipsPermissions: modes && !!o.skipsPermissions })).filter((o) => o.id);
+// ADR-0090: an agent's settings and slash commands, as the hub sent them (`SessionConfigCategory` 1..5, `SessionConfigType` 1 select, 2 boolean).
+// Bounded here too (a node holds to 64 options of 64 choices and 100 commands); an option with no id cannot be set and is dropped.
+const CATEGORIES: readonly ConfigCategory[] = ['', 'mode', 'model', 'model_config', 'thought_level', 'custom'];
+type ConfigWire = { id?: string | null; name?: string | null; description?: string | null; category?: number | null; type?: number | null; current?: string | null; choices?: readonly OptionWire[] | null; skipsPermissions?: boolean | null };
+export function configOf(list: readonly ConfigWire[] | null | undefined): ConfigOptionModel[] {
+  return (list ?? []).slice(0, 64).filter((o) => o.id).map((o) => ({
+    id: o.id ?? '', name: o.name ?? '', description: o.description ?? '', category: CATEGORIES[o.category ?? 0] ?? '',
+    type: o.type === 2 ? 'boolean' as const : 'select' as const, current: o.current ?? '',
+    choices: (o.choices ?? []).slice(0, 64).map((c) => ({ id: c.id ?? '', name: c.name ?? '', description: c.description ?? '', skipsPermissions: !!c.skipsPermissions })).filter((c) => c.id),
+    skipsPermissions: !!o.skipsPermissions,
+  }));
+}
+export function commandsOf(list: readonly { name?: string | null; description?: string | null; inputHint?: string | null }[] | null | undefined): CommandModel[] {
+  return (list ?? []).slice(0, 100).filter((c) => c.name).map((c) => ({ name: c.name ?? '', description: c.description ?? '', inputHint: c.inputHint ?? '' }));
+}
 const emptySession = (): SessionModel => ({ modes: [], models: [], currentMode: '', currentModel: '', contextTokens: 0, contextWindow: 0 });
 
 // ADR-0058: a usage report's context level and the agent's own cost, folded like the hub does (a new currency starts the sum again).
@@ -145,7 +160,11 @@ export function fromSnapshot(s: agora.v1.Snapshot.$Properties): View {
 // Applies one event at log position `pos`. An event at or before the view's position was already folded in
 // (a resume replays the tail), so it is ignored: applying is idempotent.
 export function applyEvent(v: View, pos: number, ev: Ev): void {
-  if (pos <= v.pos) return;
+  // ADR-0090: the hub sends an agent's last settings and slash commands right after a snapshot, AT the snapshot's position (the snapshot
+  // has no field for them). These two replace what is held, so they are applied at the window's own position too; every other event
+  // at or before it was already seen.
+  const replacing = pos === v.pos && (ev.body === 'agentSessionConfig' || ev.body === 'agentCommands');
+  if (pos <= v.pos && !replacing) return;
   v.pos = pos;
   const producer = ev.producerId ?? '';
   const q = (id: string | null | undefined) => `${producer}/${id ?? ''}`;
@@ -283,6 +302,16 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
       }
       break;
     }
+    case 'agentSessionConfig': {
+      const a = v.agents.get(q(e.agentSessionConfig.agentId));
+      if (a) a.session = { ...(a.session ?? emptySession()), config: configOf(e.agentSessionConfig.options) };
+      break;
+    }
+    case 'agentCommands': {
+      const a = v.agents.get(q(e.agentCommands.agentId));
+      if (a) a.session = { ...(a.session ?? emptySession()), commands: commandsOf(e.agentCommands.commands) };
+      break;
+    }
     // ADR-0053: the hub stopped listing a closed agent (its id is already the hub-wide key).
     case 'agentForgotten': {
       const id = e.agentForgotten.agentId ?? '';
@@ -310,7 +339,11 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
     }
     case 'agentExited': {
       const a = v.agents.get(q(e.agentExited.agentId));
-      if (a) { a.running = false; a.state = 4 /* done */; a.sinceMs = at; a.exitCode = e.agentExited.exitCode ?? 0; }
+      if (a) {
+        a.running = false; a.state = 4 /* done */; a.sinceMs = at; a.exitCode = e.agentExited.exitCode ?? 0;
+        // ADR-0090: an ended agent can be asked nothing; its settings and commands are gone (the hub drops them too).
+        if (a.session) a.session = { ...a.session, config: undefined, commands: undefined };
+      }
       break;
     }
     case 'terminalOpened':

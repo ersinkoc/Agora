@@ -8,6 +8,7 @@ import type { ApprovalModel, BoardModel, MachineModel, MessageModel, ProjectCost
 import type { TerminalSource } from '../terminal/source';
 import { DiffDialog } from './DiffDialog';
 import { PromptBox } from './PromptBox';
+import type { PromptSend } from './chatActions';
 import type { ChatSource } from '../net/chat';
 import { FilesDialog } from './FilesDialog';
 import { HistoryDialog } from './HistoryDialog';
@@ -79,7 +80,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   boards?: readonly BoardModel[];
   terminalFor: (agentId: string) => TerminalSource;
   chatOf?: (agent: AgentTileModel) => ChatSource | undefined;
-  sendPrompt?: (agent: AgentTileModel, text: string) => Promise<boolean>;
+  sendPrompt?: PromptSend;
   chooseOption?: (agentKey: string, kind: 'mode' | 'model', id: string) => Promise<boolean>;
   loadDiff?: (agent: AgentTileModel, path?: string) => Promise<DiffSource>;
   loadHistory?: (agent: AgentTileModel) => Promise<CommitItem[]>;

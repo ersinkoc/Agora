@@ -12,8 +12,10 @@ import { ThemePicker } from './components/ThemePicker';
 import { themeStore } from './themes/store';
 import { themeName } from './themes/messages';
 import { PromptBox } from './components/PromptBox';
+import type { PromptSend } from './components/chatActions';
 import type { ChatSource } from './net/chat';
-import { demoConversation } from './demoChat';
+import { demoConversation, demoRichConversation } from './demoChat';
+import { ChatActionsContext } from './components/chatActions';
 import { AgentTile } from './components/AgentTile';
 import { StartAgent, type KindChoice } from './components/StartAgent';
 import { AttentionStrip } from './components/AttentionStrip';
@@ -75,6 +77,28 @@ const demoChat: ChatSource = {
     return { close() {} };
   },
 };
+// ADR-0090: an agent whose node offers settings and slash commands, and a conversation that has thinking, calls with a status, a plan with
+// step status, a request for permission and a prompt waiting behind the turn.
+const choice = (id: string, name: string, skips = false) => ({ id, name, description: '', skipsPermissions: skips });
+const demoRichAgent: AgentTileModel = {
+  ...demoChatAgent, id: 'demo/rich',
+  session: {
+    ...(demoChatAgent.session as NonNullable<AgentTileModel['session']>), contextTokens: 62_000,
+    config: [
+      { id: 'mode', name: 'Mode', description: '', category: 'mode', type: 'select', current: 'plan', skipsPermissions: false, choices: [choice('plan', 'Plan'), choice('build', 'Build'), choice('yolo', 'Bypass Permissions', true)] },
+      { id: 'model', name: 'Model', description: '', category: 'model', type: 'select', current: 'large', skipsPermissions: false, choices: [choice('large', 'Opus 5.5'), choice('small', 'Haiku 5')] },
+      { id: 'effort', name: 'Effort', description: '', category: 'thought_level', type: 'select', current: 'high', skipsPermissions: false, choices: [choice('low', 'Low'), choice('medium', 'Medium'), choice('high', 'High')] },
+      { id: 'compact', name: 'Auto compact', description: '', category: 'custom', type: 'boolean', current: 'true', skipsPermissions: false, choices: [] },
+    ],
+    commands: [{ name: 'review', description: 'Review the changes in this folder', inputHint: '' }, { name: 'compact', description: 'Summarise the conversation to free context', inputHint: 'what to keep' }, { name: 'init', description: 'Write a project guide', inputHint: '' }],
+  },
+};
+const demoRich: ChatSource = {
+  connect(onLines) {
+    onLines(demoRichConversation(), true);
+    return { close() {} };
+  },
+};
 
 // ADR-0059: the start window with a kind that offers "Don't ask", for the gallery (nothing is sent anywhere).
 // ADR-0069: and one whose program the machine cannot find, named in the explanation.
@@ -101,6 +125,9 @@ function Themed({ theme, onStart }: { theme: 'dark' | 'light'; onStart?: () => v
       <div className="fleet">{demoAgents.map((a) => <AgentTile key={a.id} agent={a} />)}</div>
       <Messages messages={demoMessages} />
       <div className="h-[44rem] max-w-2xl"><PromptBox agent={demoChatAgent} source={demoChat} choose={async () => true} approvals={<ApprovalBanner approval={demoApprovals[0] as ApprovalModel} onResolve={() => {}} pinned />} /></div>
+      <ChatActionsContext.Provider value={{ setConfig: async () => true, cancelTurn: async () => true }}>
+        <div className="h-[52rem] max-w-2xl"><PromptBox agent={demoRichAgent} source={demoRich} send={async () => true} choose={async () => true} approvals={<ApprovalBanner approval={demoApprovals[0] as ApprovalModel} onResolve={() => {}} pinned />} /></div>
+      </ChatActionsContext.Provider>
       <div className="fleet"><AgentTile agent={demoHelper} /></div>
       <AgentAddress agent={{ ...demoHelper, machineId: 'laptop', id: 'laptop/a8' }} />
       <StartApproval approval={demoStartApproval} start={demoStartApproval.start} onResolve={() => {}} />
@@ -153,7 +180,7 @@ export function Focus({ agent, approvals = [], onResolve, source: live, chatSour
   onResolve?: (approval: ApprovalModel, approved: boolean, choice?: StartChoice) => void;
   source?: TerminalSource;
   chatSource?: ChatSource;
-  sendPrompt?: (agent: AgentTileModel, text: string) => Promise<boolean>;
+  sendPrompt?: PromptSend;
   chooseOption?: (agentKey: string, kind: 'mode' | 'model', id: string) => Promise<boolean>;
   onBack: () => void;
 }) {

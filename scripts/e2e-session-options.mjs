@@ -1,7 +1,8 @@
-// ADR-0058 in a real browser: an ACP agent (agora-fake-agent --acp through the bridge) offers modes and models; a mode that skips
-// permissions is marked, never preselected and needs a confirmation that is bound to its agent; a refused switch is said; notices
-// for an empty, a failed and an exited turn carry no secret; context and cost are shown; desktop in both themes and a phone fit.
-// Only agora-fake-agent is used. See browser-harness.mjs for prerequisites.
+// ADR-0058 in a real browser: an ACP agent (agora-fake-agent --acp through the bridge) offers modes and models, in the window's own menus
+// (not native selects); a mode that skips permissions is marked, never preselected, shown DISABLED with why (a switch to it cannot succeed
+// until a signed confirmation exists, so no dialog is offered: the node refuses it with `agent.option_unconfirmed`) and never sent; a
+// refused switch is said; notices for an empty, a failed and an exited turn carry no secret; context is shown and money is not; desktop in
+// both themes and a phone fit. Only agora-fake-agent is used. See browser-harness.mjs for prerequisites.
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { startStack, root } from './browser-harness.mjs';
@@ -34,67 +35,83 @@ try {
     await page.goto(`${origin}/#/agent/${encodeURIComponent(`laptop/${agent}`)}`);
     await page.waitForSelector('form textarea', { timeout: 30000 });
   };
-  const mode = page.getByRole('combobox', { name: 'Mode', exact: true });
-  const model = page.getByRole('combobox', { name: 'Model', exact: true });
-  const confirmation = page.getByText('Let the agent act without asking?', { exact: true });
-  const say = async text => { await page.fill('form textarea', text); await page.click('button:has-text("Send")'); };
+  // The window's own menus: a button named "Mode: <current>" opens a list of radio items (a native select is not used).
+  const mode = page.locator('button[aria-haspopup=menu][aria-label^="Mode:"]');
+  const model = page.locator('button[aria-haspopup=menu][aria-label^="Model:"]');
+  const items = page.locator('[role=menu] [role=menuitemradio]');
+  const openMenu = async button => { if (!(await page.locator('[role=menu]').count())) await button.click(); await page.locator('[role=menu]').waitFor(); };
+  const closeMenu = () => page.keyboard.press('Escape');
+  const dialog = page.locator('[role=alertdialog]');
+  // The window may draw the screen again once more after it opens (the agent's settings arrive): type when the box keeps what is typed.
+  const say = async text => {
+    for (let i = 0; i < 5; i++) {
+      await page.fill('form textarea', text);
+      await page.waitForTimeout(400);
+      if ((await page.inputValue('form textarea')) === text) break;
+    }
+    await page.click('button:has-text("Send")');
+  };
   const conversation = () => page.locator('[aria-live][aria-label="Conversation"]').innerText().catch(() => '');
+  const until = async (ok, ms = 10000) => { const end = Date.now() + ms; while (Date.now() < end) { if (await ok()) return true; await page.waitForTimeout(250); } return false; };
+  const label = button => button.getAttribute('aria-label');
 
-  // 1. Pickers: the skipping mode is marked and not preselected.
+  // 1. Pickers: the skipping mode is marked, is not the current one, and is disabled with why.
   await open(a);
   await mode.waitFor({ timeout: 30000 });
-  const modes = await mode.locator('option').allTextContents();
-  const bypass = modes.find(m => /does not ask/.test(m));
-  check(!!bypass, `the permission-skipping mode is marked: ${JSON.stringify(modes)}`);
-  check(!/does not ask/.test(await mode.locator('option:checked').innerText()), 'it is not preselected');
-  check((await model.locator('option').count()) >= 2, `the models are offered: ${JSON.stringify(await model.locator('option').allTextContents())}`);
+  const modeNow = await label(mode);
+  await openMenu(mode);
+  const modes = await items.allTextContents();
+  const bypassItem = items.filter({ hasText: 'does not ask' });
+  check((await bypassItem.count()) === 1, `the permission-skipping mode is marked: ${JSON.stringify(modes)}`);
+  check(!/does not ask/.test(modeNow ?? ''), `it is not preselected: ${modeNow}`);
+  check(await bypassItem.isDisabled(), 'it is shown disabled');
+  check(/not available yet/.test(await bypassItem.innerText()), 'and says why');
+  check(/Start the agent that way instead/.test(await page.locator('main').innerText()), 'the explanation says it can be started that way');
+  await closeMenu();
+  await openMenu(model);
+  check((await items.count()) >= 2, `the models are offered: ${JSON.stringify(await items.allTextContents())}`);
+  await closeMenu();
 
-  // 2. Confirmation: Keep asking leaves the mode; Switch anyway switches.
-  const before = await mode.inputValue();
-  await mode.selectOption({ label: bypass });
-  await confirmation.waitFor();
-  check(true, 'choosing it asks for confirmation first');
-  await page.getByRole('button', { name: 'Keep asking', exact: true }).click();
+  // 2. A switch to it cannot succeed until a signed confirmation exists, so nothing is offered and nothing is sent.
+  await openMenu(mode);
+  await bypassItem.click({ force: true, timeout: 2000 }).catch(() => {});
   await page.waitForTimeout(800);
-  check((await mode.inputValue()) === before, '"Keep asking" leaves the mode as it was');
-  await mode.selectOption({ label: bypass });
-  await confirmation.waitFor();
-  await page.getByRole('button', { name: 'Switch anyway', exact: true }).click();
-  const until = async (ok, ms = 10000) => { const end = Date.now() + ms; while (Date.now() < end) { if (await ok()) return true; await page.waitForTimeout(250); } return false; };
-  check(await until(async () => /does not ask/.test(await mode.locator('option:checked').innerText())), '"Switch anyway" switches it');
-  await mode.selectOption('plan');
-  check(await until(async () => (await mode.inputValue()) === 'plan' && (await confirmation.count()) === 0), 'switching back to an ordinary mode needs no confirmation');
+  check((await dialog.count()) === 0, 'choosing it opens no confirmation that could not succeed');
+  check((await label(mode)) === modeNow, 'and the mode stays as it was');
+  await closeMenu();
+  await openMenu(mode);
+  await items.filter({ hasText: /^Plan/ }).click();
+  check(await until(async () => /Plan/.test((await label(mode)) ?? '')), 'switching to an ordinary mode works');
 
-  // 3. The confirmation belongs to its agent: opened on A, the focus moves to B, nothing is sent to B (#418).
-  await mode.selectOption({ label: bypass });
-  await confirmation.waitFor();
+  // 3. Each agent has its own menus: B shows its own mode, never A's.
   await open(b);
   await mode.waitFor({ timeout: 30000 });
-  check((await confirmation.count()) === 0, 'moving to another agent closes the open confirmation');
-  check(!/does not ask/.test(await mode.locator('option:checked').innerText()), 'and the other agent\'s mode is unchanged');
+  check((await dialog.count()) === 0, 'no confirmation is open on another agent');
+  check(!/Plan/.test((await label(mode)) ?? '') && !/does not ask/.test((await label(mode)) ?? ''), `the other agent's mode is its own: ${await label(mode)}`);
 
-  // 3b. An agent that does not say which mode or model it runs with: both pickers show "Not reported", not the first option (#418),
+  // 3b. An agent that does not say which mode or model it runs with: both menus show "Not reported", not the first option (#418),
   // so neither a mode that skips permissions nor any other is presented as chosen.
   await open(c);
   await mode.waitFor({ timeout: 30000 });
-  check((await mode.locator('option:checked').innerText()) === 'Not reported', `an unknown current mode shows "Not reported": ${await mode.locator('option:checked').innerText()}`);
-  check((await model.locator('option:checked').innerText()) === 'Not reported', `an unknown current model shows "Not reported": ${await model.locator('option:checked').innerText()}`);
+  check((await label(mode)) === 'Mode: Not reported', `an unknown current mode shows "Not reported": ${await label(mode)}`);
+  check((await label(model)) === 'Model: Not reported', `an unknown current model shows "Not reported": ${await label(model)}`);
 
   // 4. A refused switch is said, and the model stays.
   await open(a);
   await model.waitFor({ timeout: 30000 });
-  const modelBefore = await model.inputValue();
-  await model.selectOption({ index: 1 });
+  const modelBefore = await label(model);
+  await openMenu(model);
+  await items.filter({ hasNot: page.locator('[aria-checked=true]') }).nth(1).click();
   const refused = await page.getByText('The agent did not switch.', { exact: true }).waitFor({ timeout: 10000 }).then(() => true, () => false);
   check(refused, 'a model the agent refuses is reported');
-  check((await model.inputValue()) === modelBefore, `and the model shown stays ${modelBefore}`);
+  check((await label(model)) === modelBefore, `and the model shown stays: ${await label(model)}`);
 
-  // 5. Context and cost, then notices: empty, failed, exited. No key, no home folder.
+  // 5. Context (never money), then notices: empty, failed, exited. No key, no home folder.
   await say('usage');
-  await page.getByText(/reported by the agent/).first().waitFor({ timeout: 15000 }).catch(() => {});
+  await page.getByText(/Context \S+%/).first().waitFor({ timeout: 15000 }).catch(() => {});
   const bar = await page.locator('main').innerText();
   check(/Context \S+%/.test(bar), `the context fill is shown: ${(bar.match(/Context \S+%/) ?? [''])[0]}`);
-  check(/reported by the agent/.test(bar), 'the cost is shown');
+  check(!/reported by the agent|\$\d|USD/.test(bar), 'and no money is');
   await say('silent-loud');
   await page.getByText(/ended its turn without saying anything/).waitFor({ timeout: 15000 }).catch(() => {});
   await say('fail');

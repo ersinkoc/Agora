@@ -12,7 +12,7 @@ export type Row = Exclude<TranscriptItem, TurnItem> | { kind: 'turn'; id: string
 /** When an item happened, when it says (0 when it does not). */
 export function atOf(item: TranscriptItem): number {
   switch (item.kind) {
-    case 'date': case 'reply': return item.atMs;
+    case 'date': case 'reply': case 'thought': return item.atMs;
     case 'steps': return item.lines.find((l) => l.atMs > 0)?.atMs ?? 0;
     default: return item.line.atMs;
   }
@@ -38,7 +38,38 @@ export function stepTone(action: ToolAction): StepTone {
   return action === 'edit' || action === 'delete' || action === 'move' ? 'edit' : action === 'run' ? 'run' : 'plain';
 }
 
-/** A plan step's progress, when the node reports one. Today it does not (the steps are text only), so no step is ever drawn done. */
+/** How long a call took, in ms, once the node has measured both ends (ADR-0090); undefined while it runs or when the node did not say. */
+export function callMs(line: Pick<ChatLine, 'startedMs' | 'endedMs'>): number | undefined {
+  const a = line.startedMs, b = line.endedMs;
+  return a !== undefined && b !== undefined && b >= a ? b - a : undefined;
+}
+
+/** The last `max` lines of a call's output, and how many earlier lines are left out (the end of a run is what matters). */
+export function outputTail(text: string, max: number): { text: string; hidden: number } {
+  const lines = text.replace(/\n+$/, '').split('\n');
+  if (lines.length <= max) return { text: lines.join('\n'), hidden: 0 };
+  return { text: lines.slice(lines.length - max).join('\n'), hidden: lines.length - max };
+}
+
+/** The steps of a plan to draw: the node's own, with their status (ADR-0090), else the joined lines of an old node (no status). */
+export function planSteps(line: Pick<ChatLine, 'text' | 'steps'>): { text: string; status?: StepStatus }[] {
+  if (line.steps?.length) return line.steps.map((s) => ({ text: s.text, status: s.status }));
+  return line.text.split('\n').filter((s) => s.trim()).map((text) => ({ text }));
+}
+
+/** The one step being worked on: the first `in_progress`, else the first not done once some are; undefined when every step is done, when
+ *  nothing has started or when the plan carries no status. */
+export function currentStep(status: readonly (StepStatus | undefined)[]): number | undefined {
+  if (status.every((s) => s === undefined)) return undefined;
+  const at = status.findIndex((s) => s === 'in_progress');
+  if (at >= 0) return at;
+  // Between steps (some done, none running): the next one. A plan nothing has started has no current step.
+  if (!status.includes('completed')) return undefined;
+  const open = status.findIndex((s) => s !== 'completed');
+  return open >= 0 ? open : undefined;
+}
+
+/** A plan step's progress, when the node reports one (ADR-0090); an old node does not, and then no step is drawn done. */
 export type StepStatus = 'pending' | 'in_progress' | 'completed';
 export interface PlanProgress { done: number; total: number; percent: number }
 

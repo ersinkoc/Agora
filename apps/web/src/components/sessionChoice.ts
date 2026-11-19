@@ -1,4 +1,4 @@
-import type { SessionModel, SessionOptionModel } from '../model';
+import type { ConfigOptionModel, SessionModel, SessionOptionModel } from '../model';
 
 // ADR-0058: what the session bar of a chat agent shows and asks. Pure, so it is tested without a page.
 
@@ -65,3 +65,33 @@ export const needsPlaceholder = (current: string): boolean => current === NOT_RE
 // Choosing what is already in use changes nothing: nothing is sent and no confirmation opens (a mode that acts without asking would
 // otherwise ask again for the one it already runs).
 export const isChange = (current: string, id: string): boolean => id !== NOT_REPORTED && id !== current;
+
+// ---- ADR-0090: the agent's own settings (`AgentSessionConfig`): model, mode, reasoning effort and whatever else it lets the user change.
+
+const FIRST: readonly ConfigOptionModel['category'][] = ['mode', 'model', 'thought_level'];
+
+/** The settings to draw as chips in the composer (mode, model, effort, in that order) and the rest, for one "more" menu. A select with no
+ *  choice cannot be set and is left out. `replaces`: the older pickers a setting stands in for (the same thing, set another way). */
+export function configGroups(s: SessionModel | undefined): { chips: ConfigOptionModel[]; more: ConfigOptionModel[]; replaces: { mode: boolean; model: boolean } } {
+  const all = (s?.config ?? []).filter((o) => o.type === 'boolean' || o.choices.length > 0);
+  const chips = FIRST.flatMap((c) => all.filter((o) => o.category === c));
+  return { chips, more: all.filter((o) => !FIRST.includes(o.category)), replaces: { mode: chips.some((o) => o.category === 'mode'), model: chips.some((o) => o.category === 'model') } };
+}
+
+/** What the window may do with a choice of a setting. A choice (or, for a boolean, the option as a whole) that the node marked as making
+ *  the agent act without asking is `unavailable`: shown, disabled and NEVER sent, because the node cannot be told the user confirmed it. */
+export type ChoiceState = 'current' | 'ok' | 'unavailable';
+export function choiceState(o: ConfigOptionModel, value: string): ChoiceState {
+  if (value === o.current) return 'current';
+  const choice = o.choices.find((c) => c.id === value);
+  return o.skipsPermissions || choice?.skipsPermissions ? 'unavailable' : 'ok';
+}
+
+/** The values a setting offers: a boolean's two, else its choices (the one in use first when the agent named it and does not list it). */
+export function configChoices(o: ConfigOptionModel): SessionOptionModel[] {
+  if (o.type === 'boolean') return ['true', 'false'].map((id) => ({ id, name: id, description: '', skipsPermissions: false }));
+  return choices(o.choices, o.current);
+}
+
+/** Whether any choice of a shown setting is held back, so the window says why once. */
+export const anyUnavailable = (list: readonly ConfigOptionModel[]): boolean => list.some((o) => configChoices(o).some((c) => choiceState(o, c.id) === 'unavailable'));

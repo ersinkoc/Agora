@@ -11,6 +11,9 @@ export type TranscriptItem =
   | { kind: 'date'; id: string; atMs: number }
   | { kind: 'user'; id: string; line: ChatLine }
   | { kind: 'reply'; id: string; text: string; atMs: number }
+  // ADR-0090: what the agent thought (chunks joined like a reply); `endMs` is when the next thing happened, so "Thought for N s".
+  | { kind: 'thought'; id: string; text: string; atMs: number; endMs: number }
+  | { kind: 'permission'; id: string; line: ChatLine }
   | { kind: 'steps'; id: string; lines: ChatLine[] }
   | { kind: 'plan'; id: string; line: ChatLine; latest: boolean }
   | { kind: 'diff'; id: string; line: ChatLine }
@@ -35,6 +38,13 @@ export function transcript(lines: readonly ChatLine[]): TranscriptItem[] {
       case 'plan': out.push({ kind: 'plan', id: `p${l.id}`, line: l, latest: i === lastPlan }); return;
       case 'diff': out.push({ kind: 'diff', id: `f${l.id}`, line: l }); return;
       case 'notice': out.push({ kind: 'notice', id: `n${l.id}`, line: l }); return;
+      case 'permission': out.push({ kind: 'permission', id: `a${l.id}`, line: l }); return;
+      case 'thought': {
+        const next = lines[i + 1];
+        const endMs = next && next.kind !== 'thought' && next.atMs > 0 ? next.atMs : l.atMs;
+        if (prev?.kind === 'thought') { prev.text += l.text; prev.endMs = Math.max(prev.endMs, endMs); } else out.push({ kind: 'thought', id: `h${l.id}`, text: l.text, atMs: l.atMs, endMs: Math.max(l.atMs, endMs) });
+        return;
+      }
       default:
         // The adapter sends what the agent says in chunks; they are one message, so the reply grows in place instead of stacking.
         if (prev?.kind === 'reply') prev.text += l.text; else out.push({ kind: 'reply', id: `r${l.id}`, text: l.text, atMs: l.atMs });
@@ -58,11 +68,14 @@ export function stepsSummary(lines: readonly ChatLine[]): StepsSummary {
   let last = '';
   for (const l of lines) {
     const v = toolView(l.text);
-    counts.set(v.action, (counts.get(v.action) ?? 0) + 1);
+    const action = actionOf(l, v.action);
+    counts.set(action, (counts.get(action) ?? 0) + 1);
     last = ((v.title || v.subject || v.raw).split('\n')[0] ?? '').replace(/`/g, '');
   }
-  const first = lines.find((l) => l.atMs > 0)?.atMs;
-  const end = [...lines].reverse().find((l) => l.atMs > 0)?.atMs;
+  // The node's own clock when it measured the calls (ADR-0090): from the first call's start to the last end; else the entries' times.
+  const measured = lines.filter((l) => l.startedMs !== undefined);
+  const first = measured.length ? Math.min(...measured.map((l) => l.startedMs as number)) : lines.find((l) => l.atMs > 0)?.atMs;
+  const end = measured.length && measured.every((l) => l.endedMs !== undefined) ? Math.max(...measured.map((l) => l.endedMs as number)) : measured.length ? undefined : [...lines].reverse().find((l) => l.atMs > 0)?.atMs;
   const span = first !== undefined && end !== undefined ? end - first : 0;
   return { actions: [...counts].map(([action, count]) => ({ action, count })), total: lines.length, last, ...(span >= 1000 ? { spanMs: span } : {}) };
 }
@@ -88,11 +101,26 @@ export function windowed<T>(items: readonly T[], shown: number): { items: T[]; h
   return { items: hidden ? items.slice(hidden) : [...items], hidden };
 }
 
-/** A folded group must never hide that the agent needs you or that it failed: the newest group says so (and opens) while it is true.
- *  The data has no per-call status, so this is the agent's own state, not a guess about one call. */
-export type GroupFlag = 'needs-you' | 'failed';
-export function groupFlag(agent: { state: string; closed?: boolean; exitCode?: number; interrupted?: unknown }, newest: boolean): GroupFlag | undefined {
+/** A folded group must never hide that the agent needs you or that it failed: the newest group says so (and opens) while it is true
+ *  (the agent's own state, not a guess about one call); `flagOf` adds the per-call status of ADR-0090 for every group. */
+export type GroupFlag = 'needs-you' | 'failed' | 'call-failed';
+type AgentFlagState = { state: string; closed?: boolean; exitCode?: number; interrupted?: unknown };
+export function groupFlag(agent: AgentFlagState, newest: boolean): GroupFlag | undefined {
   if (!newest) return undefined;
   if (!agent.closed) return agent.state === 'needs-you' ? 'needs-you' : undefined;
   return endedWithError(agent) ? 'failed' : undefined;
+}
+
+/** What a call is, for its icon and its words: the kind the node sent (ACP's own, ADR-0090) when it says more than "other", else what the arguments suggest. */
+export const actionOf = (line: ChatLine, inferred: ToolAction): ToolAction => (line.callKind && line.callKind !== 'other' ? line.callKind : inferred);
+
+/** How many calls of a group failed. A group with one is never folded shut, wherever it sits in the conversation. */
+export const failedCalls = (lines: readonly ChatLine[]): number => lines.filter((l) => l.status === 'failed').length;
+/** The group right before a request that still waits for the user's answer is the one it is about: it opens too. */
+export const asksBefore = (next: TranscriptItem | undefined): boolean => next?.kind === 'permission' && next.line.outcome === 'pending';
+
+/** The flag a group of calls carries: the agent's own state on the newest one, and for ANY group a failed call, or a request right after
+ *  it that waits for the user. Pure: the one rule the screen draws from. */
+export function flagOf(agent: AgentFlagState, newest: boolean, lines: readonly ChatLine[], next?: TranscriptItem): GroupFlag | undefined {
+  return groupFlag(agent, newest) ?? (asksBefore(next) ? 'needs-you' : failedCalls(lines) > 0 ? 'call-failed' : undefined);
 }
