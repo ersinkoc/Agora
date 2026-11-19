@@ -1,0 +1,798 @@
+//! ADR-0079 W2 step 1: the Unix primitives of the terminal holder, the process that owns the agents' PTY masters so they outlive their
+//! node. Each part is tested by itself; the holder (`agora hold`), its link and the node's use of it are built on these:
+//! - a program on a new PTY in a session of its own, whose master the holder keeps ([`HeldTerminal`]);
+//! - the master as one passable thing: [`TerminalHandle`], sent over a unix socket with `SCM_RIGHTS` ([`crate::LocalStream`]);
+//! - the peer of a unix socket ([`crate::Peer`]: pid and user);
+//! - watching another process end ([`ProcessWatch`]: a pidfd on Linux, `kqueue` on macOS, the start time elsewhere);
+//! - reading a terminal into a bounded buffer while no node is attached, on a loop that can be ended before a handover
+//!   ([`TerminalReader`]).
+//!
+//! The holder never sets `O_NONBLOCK` on a master: the flag belongs to the open file description, which the node's copy shares, and the
+//! node reads its copy with blocking reads. The reader waits with `poll` and reads only what `poll` said is there.
+#![allow(dead_code)] // `agora hold` and the node call these; the platform tests also do.
+
+use std::fs::File;
+use std::io::{self, Read};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::process::Child;
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
+use std::time::Duration;
+
+use crate::held::{Collected, HeldBuffer, HeldSignal};
+use crate::unix::{cvt, status, winsize};
+use crate::{ExitStatus, PtyConfig};
+
+fn signal_number(signal: HeldSignal) -> libc::c_int {
+    match signal {
+        HeldSignal::Interrupt => libc::SIGINT,
+        HeldSignal::Terminate => libc::SIGTERM,
+        HeldSignal::Kill => libc::SIGKILL,
+        HeldSignal::Hangup => libc::SIGHUP,
+    }
+}
+
+// ----- poll -----
+
+fn poll(fds: &mut [libc::pollfd], timeout_ms: libc::c_int) -> io::Result<usize> {
+    loop {
+        // SAFETY: a valid slice of pollfd for the length given.
+        let r = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout_ms) };
+        if r >= 0 {
+            return Ok(r as usize);
+        }
+        let e = io::Error::last_os_error();
+        if e.kind() != io::ErrorKind::Interrupted {
+            return Err(e);
+        }
+    }
+}
+
+fn pollfd(fd: RawFd) -> libc::pollfd {
+    libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    }
+}
+
+/// One read of a master that `poll` said is ready: `Ok(None)` at the end of the terminal (the slave closed: `EIO` on Linux, 0 on macOS).
+fn read_ready(master: &mut File, buf: &mut [u8]) -> io::Result<Option<usize>> {
+    loop {
+        match master.read(buf) {
+            Ok(0) => return Ok(None),
+            Ok(n) => return Ok(Some(n)),
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) if e.raw_os_error() == Some(libc::EIO) => return Ok(None),
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+// ----- the terminal -----
+
+/// The master of a terminal as one thing that can be sent to another process (`SCM_RIGHTS`) and read and written there.
+#[derive(Debug)]
+pub struct TerminalHandle {
+    pub(crate) fd: OwnedFd,
+}
+
+impl TerminalHandle {
+    /// The master as a file: blocking reads and writes, as the node uses it.
+    pub fn into_file(self) -> io::Result<File> {
+        Ok(File::from(self.fd))
+    }
+}
+
+/// A program on a PTY the holder owns: its master, its child (so its exit status) and nothing else. The holder is the child's parent.
+#[derive(Debug)]
+pub struct HeldTerminal {
+    master: File,
+    child: Child,
+    exit: Option<ExitStatus>,
+}
+
+impl HeldTerminal {
+    /// Starts `config` in a session of its own, with exactly the environment in `config` (the holder's own is a stale snapshot of
+    /// whoever started it, so none of it is passed on). On Linux the first process gets `SIGHUP` when the holder ends (ADR-0079 decision 8,
+    /// with no node attached): call this from a thread that lives as long as the holder, for the kernel ties the signal to the
+    /// thread that forked.
+    pub fn start(config: &PtyConfig) -> io::Result<Self> {
+        let (child, master) = crate::unix::start_child(config, None, true, true)?;
+        Ok(Self {
+            master,
+            child,
+            exit: None,
+        })
+    }
+
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
+    /// Ends the agent's process group with `SIGKILL` and reaps its leader, so that no zombie is left (an agent that never got to be
+    /// handed to a node).
+    pub fn kill_and_reap(&mut self) {
+        let _ = self.signal(HeldSignal::Kill);
+        let _ = self.child.wait();
+        self.exit = Some(ExitStatus {
+            code: None,
+            signal: Some(libc::SIGKILL),
+        });
+    }
+
+    pub fn resize(&self, cols: u16, rows: u16) -> io::Result<()> {
+        let ws = winsize(cols, rows);
+        // SAFETY: a valid master and a pointer to a live winsize.
+        cvt(unsafe { libc::ioctl(self.master.as_raw_fd(), libc::TIOCSWINSZ as _, &ws) }).map(|_| ())
+    }
+
+    /// Sends `signal` to the agent's process group. Nothing once the leader's end was collected ([`Self::try_wait`]): its process
+    /// number may belong to another process then.
+    pub fn signal(&self, signal: HeldSignal) -> io::Result<()> {
+        if self.exit.is_some() {
+            return Ok(());
+        }
+        // SAFETY: signalling the group this child leads (setsid), whose leader is not reaped yet.
+        cvt(unsafe { libc::killpg(self.child.id() as libc::pid_t, signal_number(signal)) })
+            .map(|_| ())
+    }
+
+    /// The agent's exit status once it ended, kept from then on.
+    pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+        if self.exit.is_none() {
+            self.exit = self.child.try_wait()?.map(status);
+        }
+        Ok(self.exit)
+    }
+
+    /// A duplicate of the master for the node (`SCM_RIGHTS`); the holder keeps its own.
+    pub fn handle(&self) -> io::Result<TerminalHandle> {
+        Ok(TerminalHandle {
+            fd: self.master.try_clone()?.into(),
+        })
+    }
+
+    /// Starts reading this terminal into a bounded buffer (ADR-0079 decision 4).
+    pub fn start_reader(&self) -> io::Result<TerminalReader> {
+        TerminalReader::start(self.master.try_clone()?)
+    }
+
+    /// Reads what is waiting now into `buf`, never blocking. `true` at the end of the terminal. Only with no reader running.
+    pub fn drain(&self, buf: &mut HeldBuffer) -> io::Result<bool> {
+        let mut master = self.master.try_clone()?;
+        let mut chunk = [0u8; 16 * 1024];
+        loop {
+            let mut fds = [pollfd(master.as_raw_fd())];
+            if poll(&mut fds, 0)? == 0 {
+                return Ok(false);
+            }
+            match read_ready(&mut master, &mut chunk)? {
+                Some(n) => buf.push(&chunk[..n]),
+                None => return Ok(true),
+            }
+        }
+    }
+}
+
+impl Drop for HeldTerminal {
+    fn drop(&mut self) {
+        // A holder that lets go of an agent that still runs ends it, as the master closing would; and its leader is not left a zombie.
+        if self.exit.is_none() {
+            self.kill_and_reap();
+        }
+    }
+}
+
+// ----- the reader -----
+
+struct Shared {
+    buffer: HeldBuffer,
+    ended: bool,
+}
+
+/// One thread reading one terminal into a bounded buffer. [`TerminalReader::end`] stops it and waits for it, so no read is in flight
+/// when the buffer is handed over: a line read just then would otherwise be in neither the buffer nor the terminal.
+pub struct TerminalReader {
+    shared: Arc<Mutex<Shared>>,
+    wake: File,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl TerminalReader {
+    fn start(master: File) -> io::Result<Self> {
+        let (wake_r, wake_w) = wake_pipe()?;
+        let shared = Arc::new(Mutex::new(Shared {
+            buffer: HeldBuffer::default(),
+            ended: false,
+        }));
+        let theirs = Arc::clone(&shared);
+        let thread = std::thread::Builder::new()
+            .name("agora-held-reader".into())
+            .spawn(move || read_loop(master, wake_r, &theirs))?;
+        Ok(Self {
+            shared,
+            wake: File::from(wake_w),
+            thread: Some(thread),
+        })
+    }
+
+    /// Whether the terminal ended while being read.
+    pub fn ended(&self) -> bool {
+        self.shared.lock().unwrap_or_else(|e| e.into_inner()).ended
+    }
+
+    /// Bytes kept so far.
+    pub fn buffered(&self) -> usize {
+        self.shared
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .buffer
+            .len()
+    }
+
+    /// Ends the read and waits until it has ended, then returns what it kept. Output not read yet stays in the terminal.
+    pub fn end(mut self) -> Collected {
+        self.stop();
+        let mut s = self.shared.lock().unwrap_or_else(|e| e.into_inner());
+        Collected {
+            buffer: std::mem::take(&mut s.buffer),
+            ended: s.ended,
+        }
+    }
+
+    fn stop(&mut self) {
+        let Some(thread) = self.thread.take() else {
+            return;
+        };
+        // A full pipe cannot happen (one byte, once); a failed write only means the thread is gone already.
+        let _ = io::Write::write(&mut &self.wake, &[1]);
+        let _ = thread.join();
+    }
+}
+
+impl Drop for TerminalReader {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+/// A pipe that no program the holder starts can inherit: made close-on-exec in one step where the system allows, and otherwise under
+/// the lock that serializes starting programs.
+fn wake_pipe() -> io::Result<(OwnedFd, OwnedFd)> {
+    let mut ends = [0 as libc::c_int; 2];
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        // SAFETY: a valid out array of two descriptors.
+        cvt(unsafe { libc::pipe2(ends.as_mut_ptr(), libc::O_CLOEXEC) })?;
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    let _guard = crate::unix::spawn_lock();
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    {
+        // SAFETY: a valid out array of two descriptors.
+        cvt(unsafe { libc::pipe(ends.as_mut_ptr()) })?;
+    }
+    // SAFETY: pipe returned two fresh descriptors that nothing else owns.
+    let (r, w) = unsafe { (OwnedFd::from_raw_fd(ends[0]), OwnedFd::from_raw_fd(ends[1])) };
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    for fd in [&r, &w] {
+        // SAFETY: plain fcntl on a descriptor we own.
+        cvt(unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) })?;
+    }
+    Ok((r, w))
+}
+
+fn read_loop(mut master: File, wake: OwnedFd, shared: &Mutex<Shared>) {
+    let mut chunk = vec![0u8; 16 * 1024];
+    loop {
+        let mut fds = [pollfd(master.as_raw_fd()), pollfd(wake.as_raw_fd())];
+        if poll(&mut fds, -1).is_err() {
+            break;
+        }
+        // The stop request wins over output that is waiting: that output stays in the terminal for the node.
+        if fds[1].revents != 0 {
+            break;
+        }
+        if fds[0].revents == 0 {
+            continue;
+        }
+        match read_ready(&mut master, &mut chunk) {
+            Ok(Some(n)) => shared
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .buffer
+                .push(&chunk[..n]),
+            Ok(None) | Err(_) => {
+                shared.lock().unwrap_or_else(|e| e.into_inner()).ended = true;
+                break;
+            }
+        }
+    }
+}
+
+// ----- watching a process -----
+
+/// Another process (the node, or the holder), watched for its end. Opened once and checked against its start time on that handle.
+pub struct ProcessWatch {
+    pid: u32,
+    started: u64,
+    #[cfg(target_os = "linux")]
+    pidfd: Option<OwnedFd>,
+    #[cfg(target_os = "macos")]
+    kq: Option<OwnedFd>,
+}
+
+impl ProcessWatch {
+    /// Watches process `pid`, which must have started at `started` ([`crate::process_start_time`]); `NotFound` when no such process
+    /// runs or another one has its pid now. The check follows the opening of the handle, so the two cannot name two processes.
+    pub fn open(pid: u32, started: u64) -> io::Result<Self> {
+        #[allow(unused_mut)]
+        let mut watch = Self {
+            pid,
+            started,
+            #[cfg(target_os = "linux")]
+            pidfd: None,
+            #[cfg(target_os = "macos")]
+            kq: None,
+        };
+        #[cfg(target_os = "linux")]
+        {
+            // SAFETY: pidfd_open takes a pid and flags and returns a new descriptor or -1.
+            let r = unsafe { libc::syscall(libc::SYS_pidfd_open, pid as libc::pid_t, 0) };
+            if r >= 0 {
+                // SAFETY: a fresh descriptor that nothing else owns.
+                let fd = unsafe { OwnedFd::from_raw_fd(r as RawFd) };
+                // SAFETY: plain fcntl on a descriptor we own.
+                cvt(unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) })?;
+                watch.pidfd = Some(fd);
+            } else {
+                let e = io::Error::last_os_error();
+                // No such process; any other failure (an old kernel, a seccomp filter) falls back to the start-time poll.
+                if e.raw_os_error() == Some(libc::ESRCH) {
+                    return Err(io::Error::from(io::ErrorKind::NotFound));
+                }
+            }
+        }
+        #[cfg(target_os = "macos")]
+        {
+            watch.kq = register_exit(pid)?;
+        }
+        if crate::process_start_time(pid) != Some(started) {
+            return Err(io::Error::from(io::ErrorKind::NotFound));
+        }
+        Ok(watch)
+    }
+
+    pub fn pid(&self) -> u32 {
+        self.pid
+    }
+
+    /// Whether the process has ended (an ended one nobody reaped yet counts), without waiting.
+    pub fn ended(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        if let Some(fd) = &self.pidfd {
+            let mut fds = [pollfd(fd.as_raw_fd())];
+            return poll(&mut fds, 0).is_ok_and(|n| n > 0);
+        }
+        #[cfg(target_os = "macos")]
+        if let Some(kq) = &self.kq {
+            if exit_seen(kq.as_raw_fd()) {
+                return true;
+            }
+        }
+        crate::process_start_time(self.pid) != Some(self.started)
+    }
+
+    /// Waits up to `timeout` for the process to end.
+    pub fn wait(&self, timeout: Duration) -> bool {
+        let end = std::time::Instant::now() + timeout;
+        loop {
+            if self.ended() {
+                return true;
+            }
+            let left = end.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return false;
+            }
+            std::thread::sleep(left.min(Duration::from_millis(10)));
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn register_exit(pid: u32) -> io::Result<Option<OwnedFd>> {
+    // SAFETY: plain system call.
+    let kq = unsafe { libc::kqueue() };
+    if kq < 0 {
+        return Ok(None);
+    }
+    // SAFETY: a fresh descriptor that nothing else owns.
+    let kq = unsafe { OwnedFd::from_raw_fd(kq) };
+    // SAFETY: an all-zero kevent is a valid value.
+    let mut ev: libc::kevent = unsafe { std::mem::zeroed() };
+    ev.ident = pid as libc::uintptr_t;
+    ev.filter = libc::EVFILT_PROC;
+    ev.flags = libc::EV_ADD | libc::EV_ONESHOT;
+    ev.fflags = libc::NOTE_EXIT;
+    // SAFETY: valid kqueue and one valid change; no event list requested.
+    let r = unsafe {
+        libc::kevent(
+            kq.as_raw_fd(),
+            &ev,
+            1,
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null(),
+        )
+    };
+    if r < 0 {
+        let e = io::Error::last_os_error();
+        if e.raw_os_error() == Some(libc::ESRCH) {
+            return Err(io::Error::from(io::ErrorKind::NotFound));
+        }
+        // Registering can fail for a process of another user; the start-time poll still works.
+        return Ok(None);
+    }
+    Ok(Some(kq))
+}
+
+#[cfg(target_os = "macos")]
+fn exit_seen(kq: RawFd) -> bool {
+    // SAFETY: an all-zero kevent is a valid out-buffer.
+    let mut ev: libc::kevent = unsafe { std::mem::zeroed() };
+    let zero = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: a valid kqueue, no changes, one valid out event and a zero timeout.
+    let r = unsafe { libc::kevent(kq, std::ptr::null(), 0, &mut ev, 1, &zero) };
+    r > 0
+}
+
+// ----- sessions and peers -----
+
+/// Closes every descriptor this process was handed at its start but 0, 1 and 2 (a pipe of its starter, another program's log). The holder
+/// calls it first thing, before it opens anything of its own.
+pub(crate) fn close_inherited_descriptors() {
+    crate::unix::close_from(3);
+}
+
+/// Makes this process the leader of a session of its own (no terminal, not in the starter's group), so what ends the starter's session
+/// or group does not end it. Already a session leader is fine. A process that leads a process group cannot call `setsid` (`EPERM`):
+/// that is an error here, never ignored, for a holder left in its starter's session would end with it. Whoever starts the holder
+/// must make sure it is not a group leader (start it detached, or fork once).
+pub(crate) fn start_new_session() -> io::Result<()> {
+    // SAFETY: plain system calls.
+    unsafe {
+        if libc::getsid(0) == libc::getpid() {
+            return Ok(());
+        }
+        cvt(libc::setsid()).map(|_| ())
+    }
+}
+
+/// The process and user at the other end of a connected unix socket, as the kernel recorded them when it connected.
+pub(crate) fn peer_of(sock: RawFd) -> io::Result<crate::Peer> {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        let mut cred: libc::ucred = libc::ucred {
+            pid: 0,
+            uid: 0,
+            gid: 0,
+        };
+        let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+        // SAFETY: a valid out buffer and its length.
+        cvt(unsafe {
+            libc::getsockopt(
+                sock,
+                libc::SOL_SOCKET,
+                libc::SO_PEERCRED,
+                (&mut cred as *mut libc::ucred).cast(),
+                &mut len,
+            )
+        })?;
+        // SAFETY: plain system call.
+        let mine = unsafe { libc::geteuid() };
+        Ok(crate::Peer {
+            pid: cred.pid as u32,
+            same_user: cred.uid == mine,
+        })
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    {
+        let (mut uid, mut gid): (libc::uid_t, libc::gid_t) = (0, 0);
+        // SAFETY: valid out pointers.
+        cvt(unsafe { libc::getpeereid(sock, &mut uid, &mut gid) })?;
+        let mut pid: libc::pid_t = 0;
+        let mut len = std::mem::size_of::<libc::pid_t>() as libc::socklen_t;
+        // SAFETY: a valid out buffer and its length. SOL_LOCAL is 0 and LOCAL_PEERPID 2 on macOS.
+        cvt(unsafe {
+            libc::getsockopt(sock, 0, 2, (&mut pid as *mut libc::pid_t).cast(), &mut len)
+        })?;
+        // SAFETY: plain system call.
+        let mine = unsafe { libc::geteuid() };
+        Ok(crate::Peer {
+            pid: pid as u32,
+            same_user: uid == mine,
+        })
+    }
+}
+
+// ----- descriptors over a unix socket -----
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+const SEND_FLAGS: libc::c_int = libc::MSG_NOSIGNAL;
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+const SEND_FLAGS: libc::c_int = 0;
+
+/// Room for one `SCM_RIGHTS` message of one descriptor, aligned for `cmsghdr`.
+const CONTROL_WORDS: usize = 8;
+
+/// One `sendmsg` of `bytes`, with `fd` attached to them when given. Returns how many bytes went; the descriptor went with them
+/// when that is more than 0.
+pub(crate) fn send_with_fd(sock: RawFd, bytes: &[u8], fd: Option<RawFd>) -> io::Result<usize> {
+    let mut iov = libc::iovec {
+        iov_base: bytes.as_ptr() as *mut libc::c_void,
+        iov_len: bytes.len(),
+    };
+    let mut control = [0u64; CONTROL_WORDS];
+    // SAFETY: an all-zero msghdr is a valid value.
+    let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+    msg.msg_iov = &mut iov;
+    msg.msg_iovlen = 1;
+    if let Some(fd) = fd {
+        // SAFETY: CMSG_SPACE/CMSG_LEN are pure size computations.
+        let space = unsafe { libc::CMSG_SPACE(std::mem::size_of::<RawFd>() as u32) } as usize;
+        debug_assert!(space <= std::mem::size_of_val(&control));
+        msg.msg_control = control.as_mut_ptr().cast();
+        msg.msg_controllen = space as _;
+        // SAFETY: msg_control points at a zeroed, aligned buffer of `space` bytes, so the first header and its data fit.
+        unsafe {
+            let c = libc::CMSG_FIRSTHDR(&msg);
+            (*c).cmsg_level = libc::SOL_SOCKET;
+            (*c).cmsg_type = libc::SCM_RIGHTS;
+            (*c).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<RawFd>() as u32) as _;
+            std::ptr::copy_nonoverlapping(
+                (&fd as *const RawFd).cast::<u8>(),
+                libc::CMSG_DATA(c),
+                std::mem::size_of::<RawFd>(),
+            );
+        }
+    }
+    loop {
+        // SAFETY: `msg` and everything it points at live through the call.
+        let r = unsafe { libc::sendmsg(sock, &msg, SEND_FLAGS) };
+        if r >= 0 {
+            return Ok(r as usize);
+        }
+        let e = io::Error::last_os_error();
+        if e.kind() != io::ErrorKind::Interrupted {
+            return Err(e);
+        }
+    }
+}
+
+/// One `recvmsg` into `buf` that also collects a descriptor sent with the bytes (at most one is kept; any more are closed). Callers
+/// read a message in exact sizes, so a descriptor sent with its first byte is never mixed up with the next message's.
+pub(crate) fn recv_with_fd(sock: RawFd, buf: &mut [u8]) -> io::Result<(usize, Option<OwnedFd>)> {
+    let mut iov = libc::iovec {
+        iov_base: buf.as_mut_ptr().cast(),
+        iov_len: buf.len(),
+    };
+    let mut control = [0u64; CONTROL_WORDS];
+    // SAFETY: an all-zero msghdr is a valid value.
+    let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+    msg.msg_iov = &mut iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = control.as_mut_ptr().cast();
+    msg.msg_controllen = std::mem::size_of_val(&control) as _;
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    let flags = libc::MSG_CMSG_CLOEXEC;
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    let flags = 0;
+    let n = loop {
+        // SAFETY: `msg` and everything it points at live through the call.
+        let r = unsafe { libc::recvmsg(sock, &mut msg, flags) };
+        if r >= 0 {
+            break r as usize;
+        }
+        let e = io::Error::last_os_error();
+        if e.kind() != io::ErrorKind::Interrupted {
+            return Err(e);
+        }
+    };
+    let mut got: Option<OwnedFd> = None;
+    // SAFETY: the kernel filled `msg_control` with well-formed headers; each data area holds `cmsg_len - CMSG_LEN(0)` bytes.
+    unsafe {
+        let mut c = libc::CMSG_FIRSTHDR(&msg);
+        while !c.is_null() {
+            if (*c).cmsg_level == libc::SOL_SOCKET && (*c).cmsg_type == libc::SCM_RIGHTS {
+                let bytes = (*c).cmsg_len as usize - libc::CMSG_LEN(0) as usize;
+                let data = libc::CMSG_DATA(c);
+                for i in 0..bytes / std::mem::size_of::<RawFd>() {
+                    let mut fd: RawFd = -1;
+                    std::ptr::copy_nonoverlapping(
+                        data.add(i * std::mem::size_of::<RawFd>()),
+                        (&mut fd as *mut RawFd).cast::<u8>(),
+                        std::mem::size_of::<RawFd>(),
+                    );
+                    let owned = OwnedFd::from_raw_fd(fd);
+                    if got.is_none() {
+                        // macOS has no MSG_CMSG_CLOEXEC; where it has, this only repeats it.
+                        let _ = libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+                        got = Some(owned);
+                    } // else: dropped, which closes it
+                }
+            }
+            c = libc::CMSG_NXTHDR(&msg, c);
+        }
+    }
+    if msg.msg_flags & libc::MSG_CTRUNC != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "descriptors were cut off",
+        ));
+    }
+    Ok((n, got))
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use crate::held::HELD_BUFFER;
+
+    #[test]
+    fn the_buffer_drops_the_oldest_first() {
+        let mut b = HeldBuffer::with_capacity(8);
+        b.push(b"abcd");
+        b.push(b"efgh");
+        assert!(!b.dropped());
+        assert_eq!(b.clone().into_vec(), b"abcdefgh");
+        b.push(b"ij");
+        assert!(b.dropped());
+        assert_eq!(b.clone().into_vec(), b"cdefghij");
+        // A write bigger than the bound keeps its own tail.
+        b.push(b"0123456789AB");
+        assert_eq!(b.into_vec(), b"456789AB");
+    }
+
+    #[test]
+    fn the_buffer_is_one_megabyte() {
+        let mut b = HeldBuffer::default();
+        b.push(&vec![7u8; HELD_BUFFER]);
+        assert!(!b.dropped());
+        b.push(b"x");
+        assert!(b.dropped());
+        assert_eq!(b.len(), HELD_BUFFER);
+    }
+
+    #[test]
+    fn a_descriptor_travels_with_its_bytes_and_no_other_message_gets_it() {
+        use std::os::unix::net::UnixStream;
+        let (a, b) = UnixStream::pair().unwrap();
+        let file = tempfile_like();
+        // Two messages in a row: only the first carries a descriptor.
+        assert_eq!(
+            send_with_fd(a.as_raw_fd(), b"one!", Some(file.as_raw_fd())).unwrap(),
+            4
+        );
+        assert_eq!(send_with_fd(a.as_raw_fd(), b"two!", None).unwrap(), 4);
+        let mut buf = [0u8; 4];
+        let (n, fd) = recv_with_fd(b.as_raw_fd(), &mut buf).unwrap();
+        assert_eq!((n, &buf), (4, b"one!"));
+        let fd = fd.expect("the descriptor");
+        let (n, none) = recv_with_fd(b.as_raw_fd(), &mut buf).unwrap();
+        assert_eq!((n, &buf), (4, b"two!"));
+        assert!(none.is_none());
+        // It is the same open file: what the sender wrote through its end is read through the copy.
+        let mut copy = File::from(fd);
+        let mut text = String::new();
+        io::Seek::seek(&mut copy, io::SeekFrom::Start(0)).unwrap();
+        copy.read_to_string(&mut text).unwrap();
+        assert_eq!(text, "shared");
+    }
+
+    fn tempfile_like() -> File {
+        // A memfd-free stand-in that works on every Unix: an unlinked file in the temp folder.
+        let path = std::env::temp_dir().join(format!(
+            "agora-fd-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let mut f = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        std::fs::remove_file(&path).unwrap();
+        io::Write::write_all(&mut f, b"shared").unwrap();
+        f
+    }
+
+    #[test]
+    fn the_peer_is_this_process() {
+        use std::os::unix::net::UnixStream;
+        let (a, _b) = UnixStream::pair().unwrap();
+        let p = peer_of(a.as_raw_fd()).unwrap();
+        assert_eq!(p.pid, std::process::id());
+        assert!(p.same_user);
+    }
+
+    #[test]
+    fn a_watch_sees_a_process_end_and_refuses_a_wrong_start_time() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let started = crate::process_start_time(child.id()).unwrap();
+        assert!(ProcessWatch::open(child.id(), started + 1).is_err());
+        let w = ProcessWatch::open(child.id(), started).unwrap();
+        assert!(!w.ended());
+        child.kill().unwrap();
+        assert!(w.wait(Duration::from_secs(5)));
+        let _ = child.wait();
+        assert!(w.ended());
+        assert!(ProcessWatch::open(child.id(), started).is_err());
+    }
+
+    #[test]
+    fn an_agent_the_holder_starts_sees_no_descriptor_it_was_handed() {
+        // Two descriptors that are not close-on-exec: what a starter's pipes look like to a process it started.
+        let mut ends = [0 as libc::c_int; 2];
+        // SAFETY: a valid out array of two descriptors.
+        assert_eq!(unsafe { libc::pipe(ends.as_mut_ptr()) }, 0);
+        let script = format!(
+            "for f in {} {}; do if [ -e /dev/fd/$f ]; then echo OPEN$f; fi; done; echo DONE; sleep 30",
+            ends[0], ends[1]
+        );
+        let cfg = PtyConfig {
+            argv: vec!["sh".into(), "-c".into(), script],
+            cwd: None,
+            env: vec![("PATH".into(), "/usr/bin:/bin".into())],
+            cols: 80,
+            rows: 24,
+            limits: crate::ProcessLimits::default(),
+            sandbox: None,
+            identity: None,
+            env_remove: Vec::new(),
+        };
+        let t = HeldTerminal::start(&cfg).unwrap();
+        let r = t.start_reader().unwrap();
+        std::thread::sleep(Duration::from_millis(1500));
+        let text = String::from_utf8_lossy(&r.end().buffer.into_vec()).into_owned();
+        assert!(text.contains("DONE"), "the script did not run: {text:?}");
+        assert!(
+            !text.contains("OPEN"),
+            "the agent was handed a descriptor: {text:?}"
+        );
+        t.signal(HeldSignal::Kill).unwrap();
+    }
+
+    #[test]
+    fn a_reader_buffers_and_what_it_ends_with_is_all_it_read() {
+        let cfg = PtyConfig {
+            argv: vec!["sh".into(), "-c".into(), "printf one; sleep 30".into()],
+            cwd: None,
+            env: Vec::new(),
+            cols: 80,
+            rows: 24,
+            limits: crate::ProcessLimits::default(),
+            sandbox: None,
+            identity: None,
+            env_remove: Vec::new(),
+        };
+        let t = HeldTerminal::start(&cfg).unwrap();
+        let r = t.start_reader().unwrap();
+        let end = std::time::Instant::now() + Duration::from_secs(5);
+        while r.buffered() < 3 && std::time::Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let c = r.end();
+        assert_eq!(c.buffer.into_vec(), b"one");
+        assert!(!c.ended);
+        t.signal(HeldSignal::Kill).unwrap();
+    }
+}

@@ -572,3 +572,4 @@ doctor-remote-proxy-on = The hub is reachable from the internet through a truste
 doctor-remote-proxy-listen = A trusted proxy is on, but the hub listens on { $addr }, beyond this machine. Start it on a local address so that the proxy is the only way in.
 doctor-remote-proxy-damaged = The file that turns on the trusted proxy is damaged. A hub that is running keeps the last good settings (its Host and Origin checks too); one that starts now trusts no proxy and checks no Host or Origin. Run `agora remote off`, then `agora remote proxy` again.
 cli-hub-proxy-on = Trusted proxy: on. The hub answers { $hosts } and is reachable from the internet through it.
+hold-failed = The terminal holder could not start: { $message }

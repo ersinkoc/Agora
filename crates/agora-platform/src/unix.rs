@@ -78,7 +78,7 @@ fn kill_group(pid: u32) -> io::Result<()> {
     Ok(())
 }
 
-fn winsize(cols: u16, rows: u16) -> libc::winsize {
+pub(crate) fn winsize(cols: u16, rows: u16) -> libc::winsize {
     libc::winsize {
         ws_row: rows,
         ws_col: cols,
@@ -87,7 +87,7 @@ fn winsize(cols: u16, rows: u16) -> libc::winsize {
     }
 }
 
-fn cvt(r: libc::c_int) -> io::Result<libc::c_int> {
+pub(crate) fn cvt(r: libc::c_int) -> io::Result<libc::c_int> {
     if r < 0 {
         Err(io::Error::last_os_error())
     } else {
@@ -282,7 +282,7 @@ pub(crate) fn terminal_size() -> Option<(u16, u16)> {
     (r == 0 && ws.ws_col > 0 && ws.ws_row > 0).then_some((ws.ws_col, ws.ws_row))
 }
 
-fn status(s: std::process::ExitStatus) -> ExitStatus {
+pub(crate) fn status(s: std::process::ExitStatus) -> ExitStatus {
     ExitStatus {
         code: s.code(),
         signal: s.signal(),
@@ -294,6 +294,73 @@ fn status(s: std::process::ExitStatus) -> ExitStatus {
 /// open forever (its output would never reach end-of-file). Other spawns in this process wait here.
 static SPAWN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Marks every open descriptor from `first` up close-on-exec. Async-signal-safe (system calls only): it runs between fork and exec.
+pub(crate) fn cloexec_from(first: libc::c_int) {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        // CLOSE_RANGE_CLOEXEC (Linux 5.11): the whole range in one call.
+        // SAFETY: plain system call with integer arguments.
+        let r = unsafe {
+            libc::syscall(
+                libc::SYS_close_range,
+                first as libc::c_uint,
+                libc::c_uint::MAX,
+                4 as libc::c_uint,
+            )
+        };
+        if r == 0 {
+            return;
+        }
+    }
+    for fd in first..descriptor_limit() {
+        // SAFETY: plain fcntl; a descriptor that is not open is `EBADF`, which is ignored.
+        unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+    }
+}
+
+/// Closes every descriptor from `first` up, for good. Only where nothing else of this process uses them (its own start).
+pub(crate) fn close_from(first: libc::c_int) {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        // SAFETY: plain system call with integer arguments.
+        let r = unsafe {
+            libc::syscall(
+                libc::SYS_close_range,
+                first as libc::c_uint,
+                libc::c_uint::MAX,
+                0 as libc::c_uint,
+            )
+        };
+        if r == 0 {
+            return;
+        }
+    }
+    for fd in first..descriptor_limit() {
+        // SAFETY: plain close; a descriptor that is not open is `EBADF`, which is ignored.
+        unsafe { libc::close(fd) };
+    }
+}
+
+/// One past the highest descriptor number worth trying: the soft limit, at most 65536 (a limit of millions would take seconds).
+fn descriptor_limit() -> libc::c_int {
+    let mut lim = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: a valid out pointer.
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE as _, &mut lim) } == 0 {
+        lim.rlim_cur.min(65536) as libc::c_int
+    } else {
+        1024
+    }
+}
+
+/// The lock that serializes starting programs (see [`SPAWN_LOCK`]), for code that makes descriptors outside a spawn.
+#[allow(dead_code)] // used only where `pipe2` is missing
+pub(crate) fn spawn_lock() -> std::sync::MutexGuard<'static, ()> {
+    SPAWN_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 #[cfg(test)]
 pub(crate) fn spawn(config: &PtyConfig) -> io::Result<Box<dyn Pty>> {
     spawn_in(config, None)
@@ -304,6 +371,22 @@ pub(crate) fn spawn_in(
     config: &PtyConfig,
     folder: Option<&crate::HeldFolder>,
 ) -> io::Result<Box<dyn Pty>> {
+    let (child, writer) = start_child(config, folder, false, false)?;
+    start_reader(child, writer)
+}
+
+/// Starts `config` on a new PTY in a session of its own and returns the child and the master. `die_with_parent` (Linux only,
+/// ADR-0079 decision 8): the child's first process gets `SIGHUP` when the process that started it ends; the kernel ties this to the
+/// *thread* that forked, so the caller starts from a thread that lives as long as the process. `clear_env`: the child gets exactly
+/// `config.env` (plus a default `TERM`) and nothing of this process's own environment.
+pub(crate) fn start_child(
+    config: &PtyConfig,
+    folder: Option<&crate::HeldFolder>,
+    die_with_parent: bool,
+    clear_env: bool,
+) -> io::Result<(Child, File)> {
+    #[cfg(not(target_os = "linux"))]
+    let _ = die_with_parent;
     let _guard = SPAWN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut ws = winsize(config.cols, config.rows);
     let (mut master, mut slave) = (-1, -1);
@@ -354,9 +437,13 @@ pub(crate) fn spawn_in(
     if let (Some(cwd), None) = (&config.cwd, held) {
         cmd.current_dir(cwd);
     }
-    for (name, _) in std::env::vars_os() {
-        if crate::env_removed(&name, &config.env_remove) {
-            cmd.env_remove(name);
+    if clear_env {
+        cmd.env_clear();
+    } else {
+        for (name, _) in std::env::vars_os() {
+            if crate::env_removed(&name, &config.env_remove) {
+                cmd.env_remove(name);
+            }
         }
     }
     if !config.env.iter().any(|(k, _)| k == "TERM") {
@@ -380,6 +467,19 @@ pub(crate) fn spawn_in(
         cmd.pre_exec(move || {
             if let Some(fd) = held {
                 cvt(libc::fchdir(fd))?;
+            }
+            if clear_env {
+                // Whatever this process was handed at its start (a pipe of its starter, a log) must not reach the agent: it keeps
+                // the terminal (0, 1, 2) and nothing else. Marked here, not closed, so std's own pipe that reports a failed `exec`
+                // to the parent still works; it all closes at `exec`.
+                cloexec_from(3);
+            }
+            #[cfg(target_os = "linux")]
+            if die_with_parent {
+                cvt(libc::prctl(
+                    libc::PR_SET_PDEATHSIG,
+                    libc::SIGHUP as libc::c_ulong,
+                ))?;
             }
             // New session so the child leads its own process group, then make the PTY its controlling terminal.
             cvt(libc::setsid())?;
@@ -408,7 +508,11 @@ pub(crate) fn spawn_in(
     let child = cmd.spawn()?;
     drop(cmd); // closes the parent's copies of the slave side, so EOF/EIO reaches the reader on exit
 
-    let writer = File::from(master);
+    Ok((child, File::from(master)))
+}
+
+/// The consumer-side reader thread of an ordinary [`UnixPty`].
+fn start_reader(child: Child, writer: File) -> io::Result<Box<dyn Pty>> {
     let mut read_side = writer.try_clone()?;
     let (tx, output) = sync_channel::<Vec<u8>>(QUEUE);
     let mut child = child;

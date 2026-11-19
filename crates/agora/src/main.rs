@@ -27,6 +27,7 @@ const TERMINAL_STREAM: u32 = 3;
 mod adaptercmd;
 mod certs;
 mod frontdoor;
+mod hold;
 mod hubcli;
 mod joincmd;
 mod meshbridge;
@@ -332,6 +333,8 @@ fn main() -> ExitCode {
                 resume: opts.resume.as_deref(),
             },
         ),
+        // ADR-0079 W2 step 1: the terminal holder. Started by nothing yet, so not in the usage page either.
+        ["hold"] => hold::hold(&say, &opts),
         ["agent", "start"] => agent_start(&say, &opts),
         ["project", "init"] => project_init(&say, &opts),
         ["agent", "stop"] => agent_stop(&say, &opts),

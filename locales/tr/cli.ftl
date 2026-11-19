@@ -566,3 +566,4 @@ doctor-remote-proxy-on = Hub, güvenilen bir vekil üzerinden internetten erişi
 doctor-remote-proxy-listen = Güvenilen bir vekil açık, ama hub bu makinenin ötesinde { $addr } adresinde dinliyor. Vekilin tek yol olması için hub'ı yerel bir adreste başlatın.
 doctor-remote-proxy-damaged = Güvenilen vekili açan dosya bozuk. Çalışan bir hub son sağlam ayarları korur (Host ve Origin denetimleri dahil); şimdi başlayan bir hub hiçbir vekile güvenmez ve Host ile Origin denetlemez. `agora remote off` çalıştırın, sonra `agora remote proxy` komutunu yeniden verin.
 cli-hub-proxy-on = Güvenilen vekil: açık. Hub { $hosts } adlarını yanıtlar ve onun üzerinden internetten erişilebilir.
+hold-failed = Terminal tutucu başlatılamadı: { $message }
