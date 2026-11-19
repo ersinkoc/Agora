@@ -48,3 +48,6 @@ export function saveRailTab(tab: RailTab, kv: Pick<Storage, 'setItem'> | undefin
 function storage(): Storage | undefined {
   try { return typeof window !== 'undefined' ? window.localStorage : undefined; } catch { return undefined; }
 }
+
+// A rail button's accessible name carries its count ("Needs you, 1"): the badge itself is only decoration.
+export const railLabel = (text: string, badge?: number): string => (badge ? `${text}, ${badge}` : text);

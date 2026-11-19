@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { hiddenTabs, scrollEdges } from './overflow';
+import { hiddenTabs, scrollEdges, tabSignal } from './overflow';
 
 describe('scrollEdges', () => {
   it('has nothing to scroll when the tabs fit', () => {
@@ -24,5 +24,19 @@ describe('hiddenTabs', () => {
   });
   it('lists none when every tab is inside', () => {
     expect(hiddenTabs(view, [{ id: 'a', left: 100, right: 250 }, { id: 'b', left: 250.5, right: 400.4 }])).toEqual([]);
+  });
+});
+
+describe('tabSignal', () => {
+  const tabs = [{ id: 'a' }, { id: 'b', working: true }, { id: 'c', failed: true }, { id: 'd', needsYou: true }];
+  it('says what is worth knowing about the hidden tabs: needs you, then failed, then working', () => {
+    expect(tabSignal(tabs, ['a', 'b', 'c', 'd'])).toBe('needs-you');
+    expect(tabSignal(tabs, ['a', 'b', 'c'])).toBe('failed');
+    expect(tabSignal(tabs, ['a', 'b'])).toBe('working');
+  });
+  it('says nothing when nothing hidden is of note, and ignores tabs that are in view', () => {
+    expect(tabSignal(tabs, ['a'])).toBeUndefined();
+    expect(tabSignal(tabs, [])).toBeUndefined();
+    expect(tabSignal(tabs, ['a', 'b'])).not.toBe('needs-you'); // the tab that needs you is in view
   });
 });

@@ -167,9 +167,10 @@ describe('grouping', () => {
     expect(g[0]?.agents.map((a) => a.id)).toEqual(['b', 'a']);
     expect(g[2]).toMatchObject({ online: false, agents: [] });
   });
-  it('groups by project and puts what has no project last', () => {
+  it('groups by project; an agent with no project name is named by its folder, and a nameless one comes last', () => {
     const g = groupFleet(fleet, machines, 'project');
-    expect(g.map((x) => x.name)).toEqual(['login', 'infra', '']);
+    expect(g.map((x) => x.name)).toEqual(['login', 'infra', 'w']);
+    expect(groupFleet([...fleet, agent('z', { workspace: '' })], machines, 'project').map((x) => x.name)).toEqual(['login', 'infra', 'w', '']);
   });
   it('with a filter shows only groups with a match', () => {
     const g = groupFleet(fleet, machines, 'machine', 'needs-you');

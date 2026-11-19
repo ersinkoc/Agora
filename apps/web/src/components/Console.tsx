@@ -49,8 +49,8 @@ import { ThemeEditor } from '../themes/ThemeEditor';
 const TerminalView = lazy(() => import('../terminal/TerminalView').then((m) => ({ default: m.TerminalView })));
 
 const MAX_AUTO_PINNED = 4;
-// The icon rail of the right panel (2.75rem at the default text size), always there; the panel's own width comes on top when it is open.
-const RAIL_WIDTH = 44;
+// The icon rail of the right panel (rem, so it grows with the text size like the rail itself, `w-11`), always there; the panel's own width comes on top when it is open.
+const RAIL_WIDTH = '2.75rem';
 // The search shortcut as the keyboard spells it: ⌘ on Apple machines (the desktop app's WebKit included), Ctrl elsewhere.
 const commandKey = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent) ? '⌘' : 'Ctrl';
 const homeWorkspace = () => workspaceOf({ version: LAYOUT_VERSION, root: { type: 'pane', id: 'p1', panel: 'fleet' } });
@@ -160,7 +160,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   const [showDetails, setShowDetails] = useState(saved?.showDetails ?? wide());
   // The right panel's rail: which subject it opens on, remembered in this browser (whether it is open is part of the saved layout).
   const [railTab, setRailTabState] = useState<RailTab>(() => loadRailTab() ?? 'needs');
-  const setRailTab = useCallback((x: RailTab) => { setRailTabState(x); saveRailTab(x); }, []);
+  const setRailTab = useCallback((x: RailTab, remember = true) => { setRailTabState(x); if (remember) saveRailTab(x); }, []);
   const [leftWidth, setLeftWidth] = useState(saved?.leftWidth ?? 272);
   const [rightWidth, setRightWidth] = useState(saved?.rightWidth ?? 336);
   const [reviewing, setReviewing] = useState<string | undefined>();
@@ -215,7 +215,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   // An agent that is waiting and has an approval open is one thing that needs you, not two.
   const needs = attention.length + approvals.filter((x) => !attention.some((a) => a.id === x.agentId)).length + (pairing?.cards.length ?? 0);
   // Panel widths are what the user dragged them to; on a phone the panels stack and the widths do not apply.
-  const cols = `${showAgents ? `${leftWidth}px ` : ''}minmax(0,1fr) ${showDetails ? rightWidth + RAIL_WIDTH : RAIL_WIDTH}px`
+  const cols = `${showAgents ? `${leftWidth}px ` : ''}minmax(0,1fr) ${showDetails ? `calc(${rightWidth}px + ${RAIL_WIDTH})` : RAIL_WIDTH}`
   const find = (id?: string) => fleet.find((a) => a.id === id);
 
   // Editor habits: Alt+1…9 picks a tab of the group in focus (or a pane, when it has no tabs), Ctrl/⌘+B hides or shows the agent list.
@@ -338,7 +338,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
 
       <div className="relative grid min-h-0 grid-cols-[minmax(0,1fr)_auto] overflow-hidden lg:[grid-template-columns:var(--cols)]" style={{ ['--cols' as string]: cols }}>
         {showAgents && <div className="absolute inset-y-0 z-10 hidden lg:block" style={{ insetInlineStart: leftWidth }}><Resizer side="start" value={leftWidth} min={200} max={480} onChange={setLeftWidth} /></div>}
-        {showDetails && <div className="absolute inset-y-0 z-10 hidden lg:block" style={{ insetInlineEnd: rightWidth + RAIL_WIDTH }}><Resizer side="end" value={rightWidth} min={260} max={560} onChange={setRightWidth} /></div>}
+        {showDetails && <div className="absolute inset-y-0 z-10 hidden lg:block" style={{ insetInlineEnd: `calc(${rightWidth}px + ${RAIL_WIDTH})` }}><Resizer side="end" value={rightWidth} min={260} max={560} onChange={setRightWidth} /></div>}
         <div className="flex min-h-0 min-w-0 flex-col overflow-y-auto lg:contents">
         {showAgents && <Explorer by={groupBy} onBy={saveGroupBy} spread={spread} fleet={projectFilter ? fleet.filter((a) => a.projectId === projectFilter) : fleet} machines={machines} projects={projectOptions} project={projectFilter} onProject={chooseProject} open={shownAgents} current={current?.id} onToggle={select} onStart={onStart} onCollapse={() => setShowAgents(false)} onDismiss={removeClosed} everyone={!!onForget} forgetError={forgetError} onResume={resume} resuming={resuming} resumeError={resumeError} />}
 

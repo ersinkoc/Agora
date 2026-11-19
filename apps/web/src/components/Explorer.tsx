@@ -76,16 +76,29 @@ export function Explorer({ by, onBy, spread, fleet, machines, open, current, pro
   const flat = useMemo(() => {
     if (by === 'machine') return [];
     const q = filter.trim().toLowerCase();
-    const live = fleet.filter((a) => !a.closed && (!q || [a.name, a.id, a.machine, machineKey(a), a.project ?? '', a.workspace, a.branch ?? ''].some((x) => x.toLowerCase().includes(q))));
+    const live = fleet.filter((a) => (!a.closed || !!a.interrupted) && (!q || [a.name, a.id, a.machine, machineKey(a), a.project ?? '', a.workspace, a.branch ?? ''].some((x) => x.toLowerCase().includes(q))));
     return groupFleet(sortByUrgency(live), [], by);
   }, [fleet, filter, by]);
   const now = Date.now();
+  // ADR-0060: an agent its machine's restart interrupted, with Resume or Start again; shown in every grouping.
+  const stoppedRow = (a: AgentTileModel) => <li key={a.id}>
+                <div className="flex items-center">
+                  <button type="button" className="ide-row flex-1 opacity-80" aria-current={current === a.id ? 'true' : undefined} aria-pressed={open.includes(a.id)} onClick={() => onToggle(a.id)} title={`${a.machine} · ${a.workspace}`}>
+                    <span className="[&_.state__mark]:!animate-none"><StateMark state="finished" /></span>
+                    <span className="min-w-0 flex-1 truncate">{a.name}</span>
+                  </button>
+                  {onResume && <button type="button" className="ide-chip me-1 flex-none hover:text-ink" disabled={resuming === a.id} onClick={() => onResume(a, a.interrupted?.stillRunning ? 'stop' : a.interrupted?.resumable ? 'resume' : 'again')}>
+                    {t(a.interrupted?.stillRunning ? 'action-stop-old' : a.interrupted?.resumable ? 'action-resume' : 'action-start-again')}
+                  </button>}
+                </div>
+                {resumeError?.id === a.id && <p role="alert" className="m-0 px-2 pb-1 text-xs text-needs-you">{t(resumeReasonKey(resumeError.code))}</p>}
+              </li>;
   const agentRow = (a: AgentTileModel, depth: number, withMachine: boolean) => <li key={a.id} className={depth === 0 ? undefined : depth === 1 ? 'ms-3' : 'ms-6'}>
     <button type="button" className="ide-row" aria-current={current === a.id ? 'true' : undefined} aria-pressed={open.includes(a.id)} onClick={() => onToggle(a.id)} title={`${a.machine} · ${a.workspace}${a.branch ? ` · ${a.branch}` : ''}${a.parentName ? ` · ${t('helper-started-by', { name: a.parentName })}` : ''}`}>
       <StateMark state={a.state} />
       <span className="min-w-0 flex-1 truncate">{a.name}{a.parentName && <span className="ms-1.5 text-xs text-muted">{t('helper-started-by', { name: a.parentName })}</span>}{withMachine && <span className="ms-1.5 text-xs text-muted">{a.machine}</span>}</span>
       <NoAskBadge agent={a} compact nested />
-      {by !== 'project' && a.projectId && sharedAcross(spread.get(a.projectId)) && <ProjectChip spread={spread.get(a.projectId) as ProjectSpread} compact />}
+      {(by === 'kind' || by === 'state') && a.projectId && sharedAcross(spread.get(a.projectId)) && <ProjectChip spread={spread.get(a.projectId) as ProjectSpread} compact />}
       {a.shared && <span className="flex-none text-xs text-muted" title={t('workspace-shared')}>{t('ide-shared')}</span>}
       {(a.filesChanged ?? 0) > 0 && <span className="font-mono text-xs text-needs-you">{a.filesChanged}</span>}
     </button>
@@ -123,7 +136,11 @@ export function Explorer({ by, onBy, spread, fleet, machines, open, current, pro
           </button>
           {!folded.has(key) && <div className="ms-3 border-s border-line ps-1">
             {sp && <div className="px-2 pb-0.5"><ProjectHint spread={sp} /></div>}
-            <ul className="m-0 list-none p-0">{g.agents.map((a) => agentRow(a, 0, true))}</ul>
+            <ul className="m-0 list-none p-0">{g.agents.filter((a) => !a.closed).map((a) => agentRow(a, 0, true))}</ul>
+            {g.agents.some((a) => a.closed) && <div role="group" aria-label={t('interrupted-section')}>
+              <div className="px-2 pt-1.5 pb-0.5 text-xs text-muted" title={t('interrupted-hint')}>{t('interrupted-section')}</div>
+              <ul className="m-0 list-none p-0">{g.agents.filter((a) => a.closed).map(stoppedRow)}</ul>
+            </div>}
           </div>}
         </section>;
       })}
@@ -157,18 +174,7 @@ export function Explorer({ by, onBy, spread, fleet, machines, open, current, pro
           {!closed && stopped.length > 0 && <div className="ms-3 border-s border-line ps-1" role="group" aria-label={t('interrupted-section')}>
             <div className="px-2 pt-1.5 pb-0.5 text-xs text-muted" title={t('interrupted-hint')}>{t('interrupted-section')}</div>
             <ul className="m-0 list-none p-0">
-              {stopped.map((a) => <li key={a.id}>
-                <div className="flex items-center">
-                  <button type="button" className="ide-row flex-1 opacity-80" aria-current={current === a.id ? 'true' : undefined} aria-pressed={open.includes(a.id)} onClick={() => onToggle(a.id)} title={`${a.machine} · ${a.workspace}`}>
-                    <span className="[&_.state__mark]:!animate-none"><StateMark state="finished" /></span>
-                    <span className="min-w-0 flex-1 truncate">{a.name}</span>
-                  </button>
-                  {onResume && <button type="button" className="ide-chip me-1 flex-none hover:text-ink" disabled={resuming === a.id} onClick={() => onResume(a, a.interrupted?.stillRunning ? 'stop' : a.interrupted?.resumable ? 'resume' : 'again')}>
-                    {t(a.interrupted?.stillRunning ? 'action-stop-old' : a.interrupted?.resumable ? 'action-resume' : 'action-start-again')}
-                  </button>}
-                </div>
-                {resumeError?.id === a.id && <p role="alert" className="m-0 px-2 pb-1 text-xs text-needs-you">{t(resumeReasonKey(resumeError.code))}</p>}
-              </li>)}
+              {stopped.map(stoppedRow)}
             </ul>
           </div>}
         </section>;

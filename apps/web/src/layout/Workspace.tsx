@@ -146,7 +146,7 @@ export function Workspace({ ws, dispatch, fleet, bindings, narrow, renderAgent, 
       <div key={`bar:${f.key}`} style={{ ...box(f.rect), bottom: undefined, height: BAR }} className={`flex items-stretch border-b border-line bg-surface-1 ${ring}`}
         onPointerDownCapture={() => dispatch({ type: 'focus', pane: front.id })}>
         {f.tabs ? (
-          <TabStrip tabs={f.panes.map((p, i) => ({ id: p.id, label: label(p), active: i === f.active }))} onPick={(id) => dispatch({ type: 'activate', pane: id })}
+          <TabStrip tabs={f.panes.map((p, i) => { const pa = agentFor(p); return { id: p.id, label: label(p), active: i === f.active, state: pa?.state, failed: pa ? endedWithError(pa) : undefined }; })} onPick={(id) => dispatch({ type: 'activate', pane: id })}
             trailing={onStart && focused ? <button type="button" className="ide-iconbtn m-1 flex-none self-center" onClick={() => onStart()} aria-label={t('ide-new-tab')} title={t('ide-new-tab')}><Icon name="plus" /></button> : undefined}>
             {f.panes.map((p, i) => {
               const pa = agentFor(p);

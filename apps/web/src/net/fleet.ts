@@ -172,7 +172,9 @@ export function stateGroupOf(a: AgentTileModel): StateGroup {
 // The project identity of an agent: the hub's project id, which is the same on every machine that has the project (it comes from the
 // repository's normalised remote and root commit, events.proto). An agent without one is only ever grouped with agents of the same machine
 // and folder name: two folders that merely share a name on different machines are different projects.
-export const projectKeyOf = (a: AgentTileModel): string => a.projectId ?? (a.project || a.workspace ? `local:${machineKey(a)}:${a.project || a.workspace}` : '');
+// What an agent without a project name is called: the last part of its folder. Never empty unless the agent has no folder at all.
+export const folderNameOf = (a: AgentTileModel): string => a.project || a.workspace.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || '';
+export const projectKeyOf = (a: AgentTileModel): string => a.projectId ?? (folderNameOf(a) ? `local:${machineKey(a)}:${folderNameOf(a)}` : '');
 
 export interface ProjectSpread { machines: string[]; agents: number; changing: number }
 // For each project id: the machines it is open on (names, in first-seen order), how many live agents work in it, and on how many machines
@@ -227,7 +229,7 @@ export function groupFleet(sorted: readonly AgentTileModel[], machines: readonly
     } else if (by === 'project') {
       const key = projectKeyOf(a);
       g = groups.get(key);
-      if (!g) { g = { key, name: a.project || '', online: true, agents: [] }; groups.set(key, g); }
+      if (!g) { g = { key, name: folderNameOf(a), online: true, agents: [] }; groups.set(key, g); }
     } else if (by === 'kind') {
       const key = agentKindOf(a);
       g = groups.get(key);

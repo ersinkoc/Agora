@@ -58,6 +58,16 @@ describe('the same project on several machines', () => {
   });
 });
 
+describe('agents without a project id', () => {
+  it('are grouped by the folder they run in, never into several groups with one title', () => {
+    const fleet = sortByUrgency([agent('a', { workspace: '/srv/api' }), agent('b', { workspace: '/srv/web/' }), agent('c', { workspace: '/srv/api' }), agent('d', { workspace: 'D:\\code\\site', machineId: 'n2', machine: 'pc' })]);
+    const g = groupFleet(fleet, [], 'project');
+    expect(g.map((x) => x.name).sort()).toEqual(['api', 'site', 'web']);
+    expect(new Set(g.map((x) => x.name)).size).toBe(g.length);
+    expect(g.find((x) => x.name === 'api')?.agents).toHaveLength(2);
+  });
+});
+
 describe('the remembered grouping', () => {
   it('knows the four choices and falls back to machine', () => {
     for (const g of ['machine', 'project', 'kind', 'state']) expect(parseGroupBy(g)).toBe(g);

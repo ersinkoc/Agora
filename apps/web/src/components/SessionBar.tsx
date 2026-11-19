@@ -4,7 +4,7 @@ import { Menu, type MenuItem } from '../layout/Menu';
 import { duration } from '../net/time';
 import { t } from '../i18n';
 import type { SessionModel, SessionOptionModel } from '../model';
-import { choices, confirmed, contextFill, contextLabel, contextPercent, needsConfirm, needsPlaceholder, NOT_REPORTED, ownCost, pendingFor, shortCount, type OptionKind, type PendingChoice } from './sessionChoice';
+import { choices, confirmed, contextFill, contextLabel, contextPercent, isChange, needsConfirm, needsPlaceholder, NOT_REPORTED, ownCost, pendingFor, shortCount, type OptionKind, type PendingChoice } from './sessionChoice';
 
 // ADR-0058: the mode and model a chat agent runs with, how full its context is, and what it says it cost. The pickers appear only
 // for what the agent reported; a mode in which the agent acts without asking is chosen only after the user confirms it. Every choice
@@ -30,7 +30,7 @@ export function SessionBar({ agentKey, session, choose, disabled, startedMs }: {
     setFailed(!ok);
   };
   const pick = (kind: OptionKind, list: readonly SessionOptionModel[], id: string) => {
-    if (id === NOT_REPORTED) return; // the placeholder is not a choice
+    if (!isChange(kind === 'mode' ? session.currentMode : session.currentModel, id)) return; // the placeholder and the one in use are not choices
     const option = list.find((o) => o.id === id);
     setFailed(false);
     if (option && needsConfirm(kind, option)) { setPending({ agentKey, option }); return; }

@@ -71,3 +71,7 @@ export function agentTarget(agentKey: string): { node: string; agentId: string }
 // sends nothing when picked. So nothing is shown as chosen that the agent did not report.
 export const NOT_REPORTED = '';
 export const needsPlaceholder = (current: string): boolean => current === NOT_REPORTED;
+
+// Choosing what is already in use changes nothing: nothing is sent and no confirmation opens (a mode that acts without asking would
+// otherwise ask again for the one it already runs).
+export const isChange = (current: string, id: string): boolean => id !== NOT_REPORTED && id !== current;

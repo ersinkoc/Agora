@@ -16,3 +16,14 @@ export interface Span { id: string; left: number; right: number }
 export function hiddenTabs(view: { left: number; right: number }, tabs: readonly Span[]): string[] {
   return tabs.filter((x) => x.left < view.left - 1 || x.right > view.right + 1).map((x) => x.id);
 }
+
+export type TabSignal = 'needs-you' | 'failed' | 'working';
+// The one thing worth showing on the "more" button about the tabs that are out of sight: a tab that needs you first, then one that ended in
+// an error, then one that works. Nothing for the rest.
+export function tabSignal(tabs: readonly { id: string; needsYou?: boolean; failed?: boolean; working?: boolean }[], hidden: readonly string[]): TabSignal | undefined {
+  const out = tabs.filter((x) => hidden.includes(x.id));
+  if (out.some((x) => x.needsYou)) return 'needs-you';
+  if (out.some((x) => x.failed)) return 'failed';
+  if (out.some((x) => x.working)) return 'working';
+  return undefined;
+}

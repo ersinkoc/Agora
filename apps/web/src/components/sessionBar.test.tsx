@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { setLanguage } from '../i18n';
 import type { SessionModel } from '../model';
 import { SessionBar } from './SessionBar';
+import { isChange } from './sessionChoice';
 
 beforeEach(() => setLanguage('en'));
 
@@ -28,5 +29,14 @@ describe('the agent header', () => {
     expect(html).not.toContain('Model:');
     expect(html).toContain('Mode: Build');
     expect(html).not.toContain('How long it has been running');
+  });
+});
+
+describe('choosing what is already in use', () => {
+  it('is not a change: nothing is sent and no confirmation opens', () => {
+    expect(isChange('yolo', 'yolo')).toBe(false);
+    expect(isChange('build', '')).toBe(false); // the "not reported" placeholder
+    expect(isChange('build', 'yolo')).toBe(true);
+    expect(isChange('', 'build')).toBe(true);
   });
 });

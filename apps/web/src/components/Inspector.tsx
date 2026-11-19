@@ -10,7 +10,7 @@ import { ProjectBoard } from './ProjectBoard';
 import { StateBadge } from './StateBadge';
 
 import { PairCards, type PairingUi } from './Pairing';
-import { badgeText, railItems, resolveTab, shortcutIndex, shortcutLabel, type RailTab } from './rail';
+import { badgeText, railItems, railLabel, resolveTab, shortcutIndex, shortcutLabel, type RailTab } from './rail';
 
 type Tab = RailTab;
 
@@ -33,7 +33,8 @@ export function Inspector({ attention, approvals, notice, changed, boards, messa
   open: boolean;
   onOpenChange: (open: boolean) => void;
   tab: RailTab;
-  onTab: (tab: RailTab) => void;
+  // `remember` false: the window moved there by itself (something needs you), so the subject this device chose stays the saved one.
+  onTab: (tab: RailTab, remember?: boolean) => void;
   // ADR-0065: machines asking to join, answered in their full cards here.
   pairing?: PairingUi;
 }) {
@@ -41,10 +42,15 @@ export function Inspector({ attention, approvals, notice, changed, boards, messa
   const items = railItems({ needs, changed: changed.length, messages: messages.length, hasBoard: boards.length > 0, hasCost: !!usage && usage.totalMicroUsd > 0 });
   const active = resolveTab(tab, items);
   const label = t(items.find((x) => x.id === active)?.labelKey ?? 'attention-title');
-  const press = (id: RailTab) => { if (open && id === active) onOpenChange(false); else { onTab(id); onOpenChange(true); } };
+  // Closing returns focus to the rail icon (the drawer is where focus went when it opened); opening by the person puts focus in the panel.
+  const panel = useRef<HTMLElement>(null);
+  const focusPanel = useRef(false);
+  const close = () => { onOpenChange(false); document.getElementById(`rail-${active}`)?.focus(); };
+  const press = (id: RailTab) => { if (open && id === active) close(); else { focusPanel.current = true; onTab(id); onOpenChange(true); } };
+  useEffect(() => { if (open && focusPanel.current) panel.current?.focus(); focusPanel.current = false; }, [open]);
   // Something new that needs the user wins over a subject that is quietly open; one that goes away does not pull the user back.
   const seen = useRef(needs);
-  useEffect(() => { if (needs > seen.current) onTab('needs'); seen.current = needs; }, [needs]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (needs > seen.current) onTab('needs', false); seen.current = needs; }, [needs]); // eslint-disable-line react-hooks/exhaustive-deps
   const rail = useRef<HTMLElement>(null);
   useEffect(() => {
     const on = (e: KeyboardEvent) => {
@@ -59,16 +65,17 @@ export function Inspector({ attention, approvals, notice, changed, boards, messa
   const railKey = (e: ReactKeyboardEvent<HTMLElement>) => {
     const tabs = [...(rail.current?.querySelectorAll<HTMLElement>('[role=tab]') ?? [])];
     const at = tabs.indexOf(document.activeElement as HTMLElement);
+    if (e.key === 'Escape' && open) { e.preventDefault(); e.stopPropagation(); close(); return; }
     const to = e.key === 'ArrowDown' ? (at + 1) % tabs.length : e.key === 'ArrowUp' ? (at - 1 + tabs.length) % tabs.length : e.key === 'Home' ? 0 : e.key === 'End' ? tabs.length - 1 : undefined;
     if (to !== undefined) { e.preventDefault(); tabs[to]?.focus(); }
   };
 
   return <aside className="inspector" aria-label={t('console-activity')} data-open={open}>
-    {open && <section className="inspector__panel" id="inspector-panel" role="tabpanel" aria-labelledby={`rail-${active}`}
-      onKeyDown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); onOpenChange(false); document.getElementById(`rail-${active}`)?.focus(); } }}>
+    {open && <section ref={panel} tabIndex={-1} className="inspector__panel" id="inspector-panel" role="tabpanel" aria-labelledby={`rail-${active}`}
+      onKeyDown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } }}>
       <div className="flex h-9 flex-none items-center justify-between gap-2 border-b border-line ps-3 pe-1">
         <h2 className="m-0 truncate">{label}</h2>
-        <button type="button" className="ide-iconbtn" onClick={() => onOpenChange(false)} aria-label={t('ide-hide-panel')} title={t('ide-hide-panel')}><Icon name="close" /></button>
+        <button type="button" className="ide-iconbtn" onClick={close} aria-label={t('ide-hide-panel')} title={t('ide-hide-panel')}><Icon name="close" /></button>
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto p-3">
         <Details tab={active} pairing={pairing} attention={attention} approvals={approvals} notice={notice} changed={changed} boards={boards} messages={messages} usage={usage} projects={projects} onOpen={onOpen} onResolve={onResolve} onReview={onReview} />
@@ -79,7 +86,7 @@ export function Inspector({ attention, approvals, notice, changed, boards, messa
         const text = t(x.labelKey);
         const selected = open && active === x.id;
         const count = x.badge ? ` (${x.badge})` : '';
-        return <button key={x.id} id={`rail-${x.id}`} type="button" role="tab" aria-selected={selected} aria-controls={selected ? 'inspector-panel' : undefined} aria-label={text}
+        return <button key={x.id} id={`rail-${x.id}`} type="button" role="tab" aria-selected={selected} aria-controls={selected ? 'inspector-panel' : undefined} aria-label={railLabel(text, x.badge)}
           aria-keyshortcuts={shortcutLabel(i)} tabIndex={selected || (!open && active === x.id) ? 0 : -1} data-tip={`${text}${count} · ${shortcutLabel(i)}`}
           className="rail__btn" onClick={() => press(x.id)}>
           <Icon name={x.icon} className="size-[1.125rem]" />
