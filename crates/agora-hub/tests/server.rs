@@ -3229,3 +3229,62 @@ async fn a_running_hub_follows_the_proxy_file_and_checks_what_comes_through_it()
     }
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[tokio::test]
+async fn a_window_that_connects_later_is_sent_the_last_config_and_commands_of_a_running_agent() {
+    let st = state(None);
+    let addr = start(Arc::clone(&st)).await;
+    let (mut node, _t) = node_conn(&st, "n1").await;
+    handshake(&mut node).await;
+    let bodies = vec![
+        online("n1"),
+        agent("n1", "a1"),
+        Body::AgentSessionConfig(v1::AgentSessionConfig {
+            agent_id: "a1".into(),
+            options: vec![v1::SessionConfigOption {
+                id: "effort".into(),
+                ..Default::default()
+            }],
+        }),
+        Body::AgentCommands(v1::AgentCommands {
+            agent_id: "a1".into(),
+            commands: vec![v1::AgentCommand {
+                name: "review".into(),
+                ..Default::default()
+            }],
+        }),
+    ];
+    for (i, b) in bodies.into_iter().enumerate() {
+        let seq = i as u64 + 1;
+        node.send(&f(STREAM_EVENTS, kinds::EVENT, event("n1", seq, b)))
+            .await
+            .unwrap();
+        next_ack(&mut node).await;
+    }
+    let mut client = dial(addr, Some("good-token")).await;
+    client
+        .send(&f(
+            STREAM_EVENTS,
+            kinds::SUBSCRIBE,
+            v1::Subscribe::default().encode_to_vec(),
+        ))
+        .await
+        .unwrap();
+    let snap = recv(&mut client).await;
+    assert_eq!(snap.kind, kinds::SNAPSHOT);
+    let pos = v1::Snapshot::decode(snap.payload.as_slice()).unwrap().pos;
+    let mut seen = Vec::new();
+    for _ in 0..2 {
+        let fr = recv(&mut client).await;
+        assert_eq!(fr.kind, kinds::POSITIONED_EVENT);
+        let pe = v1::PositionedEvent::decode(fr.payload.as_slice()).unwrap();
+        assert_eq!(pe.pos, pos, "at the snapshot's position");
+        let e = pe.event.unwrap();
+        assert_eq!(e.producer_id, "n1");
+        seen.push(e.body.unwrap());
+    }
+    assert!(
+        matches!(&seen[0], Body::AgentSessionConfig(c) if c.agent_id == "a1" && c.options[0].id == "effort")
+    );
+    assert!(matches!(&seen[1], Body::AgentCommands(c) if c.commands[0].name == "review"));
+}

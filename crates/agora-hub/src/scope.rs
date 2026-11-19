@@ -399,6 +399,37 @@ mod tests {
     }
 
     #[test]
+    fn a_member_is_replayed_the_config_and_commands_of_only_the_agents_they_may_see() {
+        let mut full = View::default();
+        let mut s = scope(&["n1/id:shared"]);
+        let cmds = |node: &str, id: &str| {
+            ev(
+                node,
+                Body::AgentCommands(v1::AgentCommands {
+                    agent_id: id.into(),
+                    commands: vec![v1::AgentCommand {
+                        name: "review".into(),
+                        ..Default::default()
+                    }],
+                }),
+            )
+        };
+        for (event, visible) in [
+            (agent("n1", "a1", "id:shared"), true),
+            (agent("n2", "a2", "id:shared"), false),
+            (cmds("n1", "a1"), true),
+            (cmds("n2", "a2"), false),
+        ] {
+            full.apply(&event);
+            assert_eq!(s.admit(&event), visible);
+        }
+        assert_eq!(full.session_replay().len(), 2);
+        let replay = s.filter_view(&full).session_replay();
+        assert_eq!(replay.len(), 1);
+        assert_eq!(replay[0].producer_id, "n1");
+    }
+
+    #[test]
     fn portable_identity_does_not_grant_another_nodes_workspace_or_arbitrary_directory_launch() {
         let mut full = View::default();
         let mut s = scope(&["n1/id:shared"]);
