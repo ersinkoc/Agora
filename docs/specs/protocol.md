@@ -812,11 +812,12 @@ either as "previews are not available here" and never assumes an open worked fro
 - **Errors**: `preview.port_refused` (`port`, `reason`), `preview.limit` (`limit`), `preview.expired` (`forward_id`),
   `preview.unknown` (`forward_id`), `preview.unavailable` (`reason`); see `error-codes.md`.
 
-### A structured agent's conversation (ADR-0090, schema only)
+### A structured agent's conversation (ADR-0090)
 
-All additions; nothing published changed. **Schema only:** no node, bridge or window sends or reads these yet (build steps 3 to 7 of the
-ADR), and no capability below is advertised by any build. A node refuses `AgentSetConfig` and `AgentCancelTurn` with
-`protocol.capability_missing`, and the hub never forwards either to a node that did not offer its capability.
+All additions; nothing published changed. **Built (steps 3 and 4 of the ADR):** the ACP bridge and the node send and handle everything
+below and advertise the four capabilities. The hub relays and gates them; the hub's own view and the clients (steps 5 to 7) do not use
+them yet. A node that lacks a capability refuses `AgentSetConfig` and `AgentCancelTurn` with `protocol.capability_missing`, and the hub never
+forwards either to a node that did not offer it.
 
 - **Chat entries** (`ChatEntry`, `schema/agora/v1/commands.proto`). New `ChatKind` values `CHAT_KIND_THOUGHT` (6, the agent's thinking in
   `text`) and `CHAT_KIND_PERMISSION` (7, a marker). New fields: `call_id` (9), `tool_kind` (10, `ToolKind`, the ACP names), `status` (11,
@@ -835,8 +836,14 @@ ADR), and no capability below is advertised by any build. A node refuses `AgentS
 - **Commands.** `AgentSetConfig` (request field 106: `agent_id`, `config_id`, `value`; capability `agent.set_config`) and `AgentCancelTurn`
   (107: `agent_id`, `drop_queue`; capability `agent.cancel_turn`), both the user's own and unsigned. Distinct from `AgentStop`: cancelling
   a turn ends no process. The hub audits and scopes them like `AgentSetModel`.
-- **Queued prompts.** `AgentPrompt` is unchanged. A node with `chat.rich` answers it with `AgentPromptResult` (`CommandOk` field 29:
-  `queued`, `queue_len`); a node without it answers `empty`, read as sent. The queue holds at most 8 prompts.
+- **Queued prompts.** `AgentPrompt` is unchanged. A node with `chat.rich` answers it for an agent without a terminal with
+  `AgentPromptResult` (`CommandOk` field 29: `queued`, `queue_len`); a node without it, and every terminal agent, answers `empty`, read as
+  sent. The node queues a prompt that arrives while the agent's turn is open (its adapter declared `turns`, a prompt was sent and no `idle`
+  followed), at most 8 per agent (`agent.queue_full`, `limit` 8), and sends them one per `idle`, in order. A queued prompt is a user entry
+  with `queued` set until it is sent, then the same entry is sent again with `queued` unset. Prompts that will not be sent (the adapter
+  ended, or `AgentCancelTurn` with `drop_queue`) leave the transcript and a notice `adapter.queue_dropped` (`count`) says so: the
+  schema has no way to delete an entry, so a client that holds one clears its waiting mark when it sees that notice (a tombstone entry would
+  need an ADR). The queue is node memory: it is lost when the node restarts (ADR-0089).
 - **A permission entry is a view, never an answer.** `ChatEntry.approval_id` of a `CHAT_KIND_PERMISSION` entry is minted by the node (the
   id of the approval it queued, ADR-0020), never taken from agent text or from an adapter item; `permission_outcome` derives only from the
   node's approval state (pending, or how the user's signed decision, a cancelled turn or the agent leaving ended it). A chat entry can never
@@ -846,11 +853,32 @@ ADR), and no capability below is advertised by any build. A node refuses `AgentS
   options of 64 choices, at most 8 queued prompts per agent, and at most one entry update per call per 150 ms; the ring bound of ADR-0038 still
   holds. Secret removal (ADR-0080) happens before an entry exists. The schema carries no limit itself: a peer that does not enforce them is
   not conforming, and a client truncates what it shows.
-- **`skips_permissions` for options.** The determination rules for `SessionConfigOption.skips_permissions` (the node's own, not the agent's
-  category) and their enforcement for `AgentSetConfig` belong to node build step 4. Until then the only enforcement is today's: `AgentSetMode`
-  of a mode the adapter reported with `skips_permissions` is refused with `agent.option_forbidden` (`policy` `forbid` or `confined_only`) when
-  the node's `skip_permissions` policy does not allow it (`Supervisor::adapter_set_option`, as a launch option, ADR-0059). Both commands are in
-  the team-default `signed_commands` of a node with limited devices.
-- **Capabilities (not advertised yet):** `chat.rich`, `agent.set_config`, `agent.cancel_turn`, `agent.commands`.
+- **`skips_permissions` for options** is the adapter's flag or the node's own rule (`agora_adapters::perm`, `docs/specs/adapter-protocol.md`), never the
+  agent's category alone: a denylist of words that say the agent acts without asking, and, in an option about permissions (category `mode`
+  or a name that says so), an allowlist of the clearly asking or read-only values: a value the rule cannot place counts as skipping, so the
+  unknown case is never read as safe (the window asks the user to confirm; a node whose policy forbids skipping refuses it). Neither the
+  adapter nor the node can clear the other's flag. For a select the flag is on each choice; for a boolean it is on the option and holds for
+  both values. `AgentSetMode`, `AgentSetModel` and `AgentSetConfig` of a choice that skips are refused with `agent.option_forbidden`
+  (`kind`, `option`: the mode, the model or the config id, `policy` `forbid` or `confined_only`) when the node's `skip_permissions` policy does
+  not allow it (`Supervisor::adapter_set_option`, `adapter_set_config`, as a launch option, ADR-0059). The check is on the node, whatever
+  the window or the hub said. The node forgets an adapter's reported options when it restarts, so a stale list cannot decide a choice.
+  Both commands are in the team-default `signed_commands` of a node with limited devices.
+- **Capabilities:** `chat.rich` (entries that change in place, thinking, permission entries, queued prompts, `AgentPromptResult`),
+  `agent.set_config`, `agent.cancel_turn` and `agent.commands` (`AgentCommands` events), advertised by every node of this build in
+  `uplink_client.rs` and passed by the hub (`hubcli.rs`).
+- **What the node does with each item.** A tool call is one entry, found again by `call_id` (an id over 256 bytes is dropped, not cut); the
+  first sight sets `started_ms`, the first `completed` or `failed` sets `ended_ms` (the node's clock; a status that is not final clears
+  it); a field an update leaves out keeps its value. The output of a call whose paths name a secret file (ADR-0080) is not kept, and a diff
+  of one keeps its path and no text; the bridge has already replaced anything that looks like a secret in output. A plan is one entry
+  replaced in place while it is in the ring (a plan step is never `FAILED`; an unknown status or priority word is `UNSPECIFIED`). A
+  permission entry is made by the node when its own approvals queue accepts a request; it is `PENDING` and only the node's approval
+  state changes it (once: a decision is never rewritten): `APPROVED` or `DENIED` by the verified decision, `CANCELLED` when the turn was
+  cancelled, the agent was stopped or ended, or the request ran out of time. `AgentCancelTurn` withdraws the permission requests of the
+  agent's adapter and announces them resolved as not approved; it does not touch an `agent.start` request the agent waits for.
+- **Coalescing.** At most one version of an entry is sent per 150 ms; a version held back is stored (a new subscriber sees it) and sent by
+  the node's tick once 150 ms have passed; a final tool status is never held back. A client therefore may see fewer versions than the
+  agent sent, never a stale last one.
+- **Cost.** One entry costs one pass over at most its cap in bytes (a length test first), one clone per follower per version and one
+  binary search of the ring (at most 500 entries). Nothing is added to a terminal's byte path.
 - **Errors:** `agent.option_unknown` (`id`), `agent.queue_full` (`limit`); a refusal by the agent itself is `adapter.option_refused`.
 
