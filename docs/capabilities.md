@@ -37,7 +37,7 @@ L1 is an agent in a terminal read from its screen (a manifest); L2/L3 are struct
 | Launch options, including "do not ask" modes | ADR-0059 Accepted | yes | node and web tests | none recorded here |
 | Start with model, effort and mode | ADR-0066 Accepted | node and hub yes (a start with settings is signed; the approval card lists them); the start window's picker yes (`LaunchSettings.tsx`); the terminal client's start picker not built | node, hub and web tests | none recorded here |
 | Agent login and accounts on a node ([design](design/agent-accounts.md)) | no ADR (design only) | not built (the manifest table is parsed; nothing runs a login) | — | — |
-| Install and update coding agents on a machine from the window | ADR-0087 Proposed | not built, ADR proposed | — | — |
+| Install and update coding agents on a machine from the window | ADR-0087 Accepted | not built, ADR accepted | — | — |
 | A missing agent kind says why | ADR-0069 Accepted | yes (protocol, web start window, terminal client) | protocol fixtures; web and terminal-client tests | none recorded here |
 | Resume after the node restarts (session ledger) | ADR-0060 Accepted | yes | node tests | none recorded here |
 | An agent starts helpers, with the user's signed approval | ADR-0057 Accepted | yes | node, hub and web tests | none recorded here |

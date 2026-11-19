@@ -1,8 +1,8 @@
 # 0085. Machine and hub certificates renew themselves
-Status: Proposed
+Status: Accepted
 Date: 2026-11-17
 
-Not accepted. Nothing here may be built until the maintainer names this ADR in an acceptance message.
+Accepted: 2026-11-19 (the maintainer's explicit message in the merger chat naming this ADR: "ADR-0085'i kabul ediyorum"). The open questions' proposed answers stand.
 
 Origin: an internal audit. `crates/agora-hub/src/ca.rs` promised "renewal is automatic while enrolled"; reading the code and then running it
 (`crates/agora/tests/cert_lifetime.rs`) showed that nothing renews anything.
@@ -42,7 +42,7 @@ Not recommended as the only answer; acceptable as a complement once A exists (A 
 ### C. Re-enroll by hand
 What happens today. Kept only as the fallback for a machine that was offline past its end.
 
-## Decision (proposed)
+## Decision
 1. **Option A** for machine certificates: `RenewRequest` / `RenewResponse` as above, capability `enroll.renew`, schema added in `schema/agora/v1/enroll.proto`
    with a golden fixture (append-only; nothing existing changes).
 2. **The hub's server certificate is replaced without a restart.** The hub keeps the acceptor behind a swappable handle (`ArcSwap`-style with `std`
