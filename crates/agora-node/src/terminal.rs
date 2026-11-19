@@ -225,14 +225,29 @@ pub struct TerminalHandle {
     control: Option<PtyControl>,
     pid: u32,
     thread: Option<JoinHandle<()>>,
+    /// ADR-0079: the process belongs to the node's terminal holder (it outlives the node).
+    held: bool,
 }
 
 impl TerminalHandle {
     /// Take ownership of a running PTY and start its actor.
     pub fn start(pty: Box<dyn Pty>, options: TerminalOptions) -> io::Result<Self> {
+        Self::start_with_output(pty, options, &[])
+    }
+
+    /// [`Self::start`] for a terminal the node takes over (ADR-0079 decision 4): `earlier` is what the terminal showed since the node
+    /// last read it (the holder's buffer), fed to the screen before anything live.
+    pub fn start_with_output(
+        pty: Box<dyn Pty>,
+        options: TerminalOptions,
+        earlier: &[u8],
+    ) -> io::Result<Self> {
         let pid = pty.pid();
         let control = pty.control()?;
-        let term = AlacrittyTerminal::with_scrollback(options.size, options.scrollback);
+        let mut term = AlacrittyTerminal::with_scrollback(options.size, options.scrollback);
+        if !earlier.is_empty() {
+            term.feed(earlier);
+        }
         let inner = Arc::new(Inner {
             shared: Mutex::new(Shared {
                 term: Box::new(term),
@@ -251,7 +266,28 @@ impl TerminalHandle {
             control: Some(control),
             pid,
             thread: Some(thread),
+            held: false,
         })
+    }
+
+    /// Marks this terminal's process as the holder's (see [`Self::is_held`]).
+    #[must_use]
+    pub fn into_held(mut self) -> Self {
+        self.held = true;
+        self
+    }
+
+    /// ADR-0079: the process belongs to the terminal holder and outlives the node.
+    pub fn is_held(&self) -> bool {
+        self.held
+    }
+
+    /// ADR-0079: the node is stopping and leaves a held agent running: reading its terminal ends, and dropping this handle no longer
+    /// ends it. A terminal the node owns outright is unaffected (dropping it kills the agent, as before).
+    pub fn detach(&self) {
+        if let Some(c) = &self.control {
+            c.detach();
+        }
     }
 
     pub fn pid(&self) -> u32 {

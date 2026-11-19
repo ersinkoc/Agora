@@ -23,6 +23,15 @@ impl TerminalHandle {
     }
 }
 
+/// A held agent's terminal as a [`crate::Pty`] (Unix only for now).
+pub fn held_pty(
+    _master: TerminalHandle,
+    _pid: u32,
+    _control: std::sync::Arc<dyn crate::HeldControl>,
+) -> io::Result<Box<dyn crate::Pty>> {
+    Err(unsupported())
+}
+
 /// A program on a terminal the holder owns (Unix only for now).
 #[derive(Debug)]
 pub struct HeldTerminal(());

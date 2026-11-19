@@ -171,6 +171,8 @@ pub(crate) struct Opts {
     replace: bool,
     /// ADR-0073: `agora hub machines forget --old` and `--refuse-return`.
     old: bool,
+    /// `agora down --agents`: also stops the agents the terminal holder keeps running (ADR-0079).
+    agents: bool,
     refuse_return: bool,
     /// `agora hub run --metrics`: the hub answers `GET /api/metrics` (owner only).
     metrics: bool,
@@ -225,6 +227,7 @@ fn parse(args: &[String]) -> Option<Opts> {
             "--proxy-addr" => o.proxy_addrs.push(it.next()?.clone()),
             "--expires" => o.expires = Some(it.next()?.parse().ok()?),
             "--old" => o.old = true,
+            "--agents" => o.agents = true,
             "--refuse-return" => o.refuse_return = true,
             "--unsigned" => o.unsigned = true,
             "--release-url" => o.release_url = Some(it.next()?.clone()),
@@ -315,7 +318,7 @@ fn main() -> ExitCode {
         [] => frontdoor::front_door(&say, &opts),
         ["web"] => frontdoor::web(&say),
         ["status"] => frontdoor::status(&say, &opts.data),
-        ["down"] => frontdoor::down(&say),
+        ["down"] => frontdoor::down(&say, opts.agents),
         ["service", op @ ("install" | "remove" | "status")] => servicecmd::service(&say, op),
         ["node", "run"] => node_run(&say, &opts),
         // ADR-0065: the owner's switch for new machines, and a new machine asking to join.
@@ -333,7 +336,7 @@ fn main() -> ExitCode {
                 resume: opts.resume.as_deref(),
             },
         ),
-        // ADR-0079 W2 step 1: the terminal holder. Started by nothing yet, so not in the usage page either.
+        // ADR-0079: the terminal holder, started by the node (not by people, so not in the usage page).
         ["hold"] => hold::hold(&say, &opts),
         ["agent", "start"] => agent_start(&say, &opts),
         ["project", "init"] => project_init(&say, &opts),
@@ -621,7 +624,8 @@ fn node_run(say: &Say, o: &Opts) -> ExitCode {
     if let Some(parent) = cfg.socket.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let node = match Node::start(&cfg) {
+    // ADR-0079: agents start through the terminal holder where there is one, so they outlive this node.
+    let node = match Node::start_with_holder(&cfg, hold::setup_for_node(&h)) {
         Ok(n) => n,
         Err(e) => {
             eprintln!("{e}");
