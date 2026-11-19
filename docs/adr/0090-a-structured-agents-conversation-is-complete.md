@@ -1,8 +1,8 @@
 # 0090. A structured agent's conversation is complete: thinking, tool calls with status, plan progress, effort, cancel and usage
-Status: Proposed
+Status: Accepted
 Date: 2026-11-19
 
-Not accepted. Nothing here may be built until the maintainer accepts it by name. Origin: the maintainer: in structured (ACP) mode the chat
+Accepted: 2026-11-19 (the maintainer's explicit message in the merger chat: "ADR-0090'ı kabul ediyorum"). The open questions' proposed answers stand. Origin: the maintainer: in structured (ACP) mode the chat
 screen must be a real coding-agent experience where everything works: choose the model and the reasoning effort (also while the agent runs),
 see tool calls with kind, status, duration, files and output, messages, thinking, the plan with step status, stop the current turn (not the
 whole agent), queued prompts, permission requests inline, the slash commands the agent offers, token usage in and out, and history.
