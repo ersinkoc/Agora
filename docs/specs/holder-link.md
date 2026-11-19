@@ -33,13 +33,19 @@ Holder to node: `HelloOk`(64: version, holder pid, holder start time), `Refused`
    when no agent runs, and otherwise reports the agents as running in an older holder (decision 5).
 2. `List` may come at once. Everything else but `Attach` is `Refused(NotAttached)` until `Attach`.
 3. `Attach`: for each agent the holder **first ends its own read** (it waits for the reader thread), then sends one `Terminal` frame
-   with the PTY master attached (`SCM_RIGHTS`) for a running agent, and `AttachDone`. A running agent's buffer is given to the node and
-   forgotten; an ended agent's status and buffer are sent without a terminal and **kept** until the node sends `Release` (it may die
+   with the PTY master attached (`SCM_RIGHTS`) for a running agent, and `AttachDone`. A running agent's buffer is forgotten **only after
+   its frame was sent**, so a link that breaks mid-way loses nothing (what was sent into a socket nobody reads is the one unavoidable
+   loss); an ended agent's status and buffer are sent without a terminal and **kept** until the node sends `Release` (it may die
    between the two). Terminals are never read by the holder while a node is attached, and it never writes to them.
 4. `Start` returns `Started` with the new terminal attached. The launch is the node's: the holder adds and widens nothing. (The
    confinement a node builds is not carried yet; a later step adds it as a new tag.)
-5. Loss of the link, or of the node's process (a pidfd on Linux, `kqueue` on macOS, else the start time), detaches: the holder reads each
-   terminal into a 1 MiB buffer (oldest dropped first), so no agent blocks on a full terminal.
+5. **The holder reads a terminal only once the node's process has ended** (a pidfd on Linux, `kqueue` on macOS, else the start time): it
+   then reads each terminal into a 1 MiB buffer (oldest dropped first), so no agent blocks on a full terminal. A link that drops while
+   the node's process still runs does **not** start the reads: the node still holds its own copy of each master and reads it itself,
+   and a terminal two processes read cannot be read without blocking (the master is shared by `dup`, so the holder cannot make its
+   copy non-blocking without making the node's one non-blocking too). The holder watches that process and starts reading when it
+   ends; a node that comes back first (same process or another that holds the lock) simply attaches, and no byte is read twice.
+   A node that drops the link and stops reading its terminals while it lives lets the agents fill them, as a node does today.
 6. `Release` of an ended agent forgets it. A holder that held agents and has none left ends (decision 2).
 
 A running agent gets `SIGHUP` when the holder dies (Linux `PR_SET_PDEATHSIG` on its first process; the kernel's hangup on the last
@@ -47,3 +53,30 @@ master) and nothing guarantees more: decision 8.
 
 A terminal is read in exact sizes (the length, then the payload), so the descriptor sent with a frame's first byte is never taken for the
 next frame's.
+
+## Limits of the holder itself
+- Connections are checked and closed (a peer that is not the lock holder gets no answer and no read) at most 16 per pass of the holder's
+  loop, and the node is served first in every pass, so a flood of connections from the same user slows the node by those checks at
+  most. A peer that is the lock holder and starts a frame then stalls holds the holder for up to `FRAME_TIMEOUT` (5 s); sends have a
+  write timeout of the same length, so a node that never reads cannot hang the holder.
+- A holder agent starts with **exactly** the environment in `Start` (the holder runs it with an empty environment plus that list; the
+  holder's own environment is a stale snapshot of whoever started it and is never passed on). `env_remove` is therefore redundant for
+  the holder and kept only for the format.
+- The terminal master, the listener, the wake pipe, the lock files and the pidfd are all close-on-exec; an agent sees none of them
+  (tested with an agent that lists its own descriptors).
+- `agora hold` refuses to start (it exits 1, `hold-failed`) when it cannot become a session leader (`setsid` fails with `EPERM` in a
+  process-group leader); it never runs on in its starter's session.
+
+## REQUIRED of step 2 (the node's side; found in the independent review of #760)
+1. **Environment:** the node sends the complete environment of each agent (what `spawn` would have built from the node's own
+   environment, minus `env_remove`, plus its additions), because the holder passes nothing of its own.
+2. **Starting the holder:** the node (or the supervisor) starts `agora hold` through a path that guarantees `setsid`: detached, and not
+   as a process-group leader (a fork once, or `spawn_detached`). A start where `setsid` fails refuses, and the node must treat that as
+   "the holder is not available" and run its agents itself, as today. Never `spawn_bound` (it would tie the holder to its starter).
+3. **Descriptors:** the node's link descriptor and every master it receives stay close-on-exec, so no agent the node (or the holder)
+   starts inherits them (`recv_with_terminal` sets it).
+4. **Busy after a drop:** when a node drops the link and connects again at once, the holder notices the old end of file one pass (50 ms)
+   later and answers `Refused(Busy)` until then. `Client` users retry on `Busy` for a few seconds (the tests do) and treat it as "try
+   again", never as "a second node exists".
+5. **Dropping the link** while the node process keeps running does not make the holder read (item 5 above): a node that wants the
+   holder to buffer for it must close its copies of the masters (or end).

@@ -294,6 +294,12 @@ pub(crate) fn status(s: std::process::ExitStatus) -> ExitStatus {
 /// open forever (its output would never reach end-of-file). Other spawns in this process wait here.
 static SPAWN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// The lock that serializes starting programs (see [`SPAWN_LOCK`]), for code that makes descriptors outside a spawn.
+#[allow(dead_code)] // used only where `pipe2` is missing
+pub(crate) fn spawn_lock() -> std::sync::MutexGuard<'static, ()> {
+    SPAWN_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 #[cfg(test)]
 pub(crate) fn spawn(config: &PtyConfig) -> io::Result<Box<dyn Pty>> {
     spawn_in(config, None)
@@ -304,17 +310,19 @@ pub(crate) fn spawn_in(
     config: &PtyConfig,
     folder: Option<&crate::HeldFolder>,
 ) -> io::Result<Box<dyn Pty>> {
-    let (child, writer) = start_child(config, folder, false)?;
+    let (child, writer) = start_child(config, folder, false, false)?;
     start_reader(child, writer)
 }
 
 /// Starts `config` on a new PTY in a session of its own and returns the child and the master. `die_with_parent` (Linux only,
 /// ADR-0079 decision 8): the child's first process gets `SIGHUP` when the process that started it ends; the kernel ties this to the
-/// *thread* that forked, so the caller starts from a thread that lives as long as the process.
+/// *thread* that forked, so the caller starts from a thread that lives as long as the process. `clear_env`: the child gets exactly
+/// `config.env` (plus a default `TERM`) and nothing of this process's own environment.
 pub(crate) fn start_child(
     config: &PtyConfig,
     folder: Option<&crate::HeldFolder>,
     die_with_parent: bool,
+    clear_env: bool,
 ) -> io::Result<(Child, File)> {
     #[cfg(not(target_os = "linux"))]
     let _ = die_with_parent;
@@ -368,9 +376,13 @@ pub(crate) fn start_child(
     if let (Some(cwd), None) = (&config.cwd, held) {
         cmd.current_dir(cwd);
     }
-    for (name, _) in std::env::vars_os() {
-        if crate::env_removed(&name, &config.env_remove) {
-            cmd.env_remove(name);
+    if clear_env {
+        cmd.env_clear();
+    } else {
+        for (name, _) in std::env::vars_os() {
+            if crate::env_removed(&name, &config.env_remove) {
+                cmd.env_remove(name);
+            }
         }
     }
     if !config.env.iter().any(|(k, _)| k == "TERM") {

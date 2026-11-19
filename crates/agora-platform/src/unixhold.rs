@@ -93,11 +93,12 @@ pub struct HeldTerminal {
 }
 
 impl HeldTerminal {
-    /// Starts `config` in a session of its own. On Linux the first process gets `SIGHUP` when the holder ends (ADR-0079 decision 8,
+    /// Starts `config` in a session of its own, with exactly the environment in `config` (the holder's own is a stale snapshot of
+    /// whoever started it, so none of it is passed on). On Linux the first process gets `SIGHUP` when the holder ends (ADR-0079 decision 8,
     /// with no node attached): call this from a thread that lives as long as the holder, for the kernel ties the signal to the
     /// thread that forked.
     pub fn start(config: &PtyConfig) -> io::Result<Self> {
-        let (child, master) = crate::unix::start_child(config, None, true)?;
+        let (child, master) = crate::unix::start_child(config, None, true, true)?;
         Ok(Self {
             master,
             child,
@@ -107,6 +108,17 @@ impl HeldTerminal {
 
     pub fn pid(&self) -> u32 {
         self.child.id()
+    }
+
+    /// Ends the agent's process group with `SIGKILL` and reaps its leader, so that no zombie is left (an agent that never got to be
+    /// handed to a node).
+    pub fn kill_and_reap(&mut self) {
+        let _ = self.signal(HeldSignal::Kill);
+        let _ = self.child.wait();
+        self.exit = Some(ExitStatus {
+            code: None,
+            signal: Some(libc::SIGKILL),
+        });
     }
 
     pub fn resize(&self, cols: u16, rows: u16) -> io::Result<()> {
@@ -163,6 +175,15 @@ impl HeldTerminal {
     }
 }
 
+impl Drop for HeldTerminal {
+    fn drop(&mut self) {
+        // A holder that lets go of an agent that still runs ends it, as the master closing would; and its leader is not left a zombie.
+        if self.exit.is_none() {
+            self.kill_and_reap();
+        }
+    }
+}
+
 // ----- the reader -----
 
 struct Shared {
@@ -180,16 +201,7 @@ pub struct TerminalReader {
 
 impl TerminalReader {
     fn start(master: File) -> io::Result<Self> {
-        let mut ends = [0 as libc::c_int; 2];
-        // SAFETY: a valid out array of two descriptors.
-        cvt(unsafe { libc::pipe(ends.as_mut_ptr()) })?;
-        // SAFETY: pipe returned two fresh descriptors that nothing else owns.
-        let (wake_r, wake_w) =
-            unsafe { (OwnedFd::from_raw_fd(ends[0]), OwnedFd::from_raw_fd(ends[1])) };
-        for fd in [&wake_r, &wake_w] {
-            // SAFETY: plain fcntl on a descriptor we own.
-            cvt(unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) })?;
-        }
+        let (wake_r, wake_w) = wake_pipe()?;
         let shared = Arc::new(Mutex::new(Shared {
             buffer: HeldBuffer::default(),
             ended: false,
@@ -243,6 +255,32 @@ impl Drop for TerminalReader {
     fn drop(&mut self) {
         self.stop();
     }
+}
+
+/// A pipe that no program the holder starts can inherit: made close-on-exec in one step where the system allows, and otherwise under
+/// the lock that serializes starting programs.
+fn wake_pipe() -> io::Result<(OwnedFd, OwnedFd)> {
+    let mut ends = [0 as libc::c_int; 2];
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        // SAFETY: a valid out array of two descriptors.
+        cvt(unsafe { libc::pipe2(ends.as_mut_ptr(), libc::O_CLOEXEC) })?;
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    let _guard = crate::unix::spawn_lock();
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    {
+        // SAFETY: a valid out array of two descriptors.
+        cvt(unsafe { libc::pipe(ends.as_mut_ptr()) })?;
+    }
+    // SAFETY: pipe returned two fresh descriptors that nothing else owns.
+    let (r, w) = unsafe { (OwnedFd::from_raw_fd(ends[0]), OwnedFd::from_raw_fd(ends[1])) };
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    for fd in [&r, &w] {
+        // SAFETY: plain fcntl on a descriptor we own.
+        cvt(unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) })?;
+    }
+    Ok((r, w))
 }
 
 fn read_loop(mut master: File, wake: OwnedFd, shared: &Mutex<Shared>) {
@@ -415,7 +453,9 @@ fn exit_seen(kq: RawFd) -> bool {
 // ----- sessions and peers -----
 
 /// Makes this process the leader of a session of its own (no terminal, not in the starter's group), so what ends the starter's session
-/// or group does not end it. Already a leader is fine.
+/// or group does not end it. Already a session leader is fine. A process that leads a process group cannot call `setsid` (`EPERM`):
+/// that is an error here, never ignored, for a holder left in its starter's session would end with it. Whoever starts the holder
+/// must make sure it is not a group leader (start it detached, or fork once).
 pub(crate) fn start_new_session() -> io::Result<()> {
     // SAFETY: plain system calls.
     unsafe {

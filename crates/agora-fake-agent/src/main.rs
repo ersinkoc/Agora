@@ -1,6 +1,6 @@
 //! `agora-fake-agent --script x.toml`: plays a scripted screen sequence to the terminal.
 
-use std::io;
+use std::io::{self, Write};
 use std::process::ExitCode;
 
 use agora_fake_agent::{play, Script};
@@ -23,6 +23,29 @@ fn main() -> ExitCode {
         while std::io::stdin().read_line(&mut line).is_ok_and(|n| n != 0) {
             line.clear();
         }
+        return ExitCode::SUCCESS;
+    }
+    if std::env::args().nth(1).as_deref() == Some("--list-fds") {
+        // Says which descriptors it was started with (Linux), so a test can see what a parent leaked into it.
+        let mut lines: Vec<String> = std::fs::read_dir("/proc/self/fd")
+            .map(|d| {
+                d.filter_map(Result::ok)
+                    .map(|e| {
+                        let target = std::fs::read_link(e.path())
+                            .map(|t| t.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        format!("FD {} {}", e.file_name().to_string_lossy(), target)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        lines.sort();
+        for l in lines {
+            print!("{l}\r\n");
+        }
+        print!("FDS-END\r\n");
+        let _ = io::stdout().flush();
+        std::thread::sleep(std::time::Duration::from_secs(120));
         return ExitCode::SUCCESS;
     }
     let mut args = std::env::args().skip(1);

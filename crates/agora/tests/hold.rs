@@ -13,7 +13,8 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use agora_node::holder_link::{
-    socket_path, AgentState, Client, LinkError, Refusal, StartRequest, LINK_VERSION,
+    socket_path, write_frame, AgentState, Client, LinkError, Refusal, Reply, Request, StartRequest,
+    LINK_VERSION,
 };
 
 const AGORA: &str = env!("CARGO_BIN_EXE_agora");
@@ -228,6 +229,12 @@ fn helper_entry() {
                 Err(e) => println!("\nHELPER refused {e}"),
             }
             std::io::stdout().flush().ok();
+        }
+        "flood" => {
+            // Connects and closes as fast as it can, until it is killed: a same-user process that is not the node.
+            loop {
+                let _ = agora_platform::local_connect(&socket);
+            }
         }
         other => panic!("unknown helper {other}"),
     }
@@ -481,4 +488,188 @@ fn a_version_mismatch_changes_nothing() {
     assert_eq!(listed.len(), 1);
     assert_eq!((listed[0].pid, listed[0].state), (pid, AgentState::Running));
     assert!(alive(pid));
+}
+
+/// Kills the processes it holds when dropped, so a failed test leaves none.
+struct Reaper(Vec<Child>);
+
+impl Drop for Reaper {
+    fn drop(&mut self) {
+        for c in &mut self.0 {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+    }
+}
+
+#[test]
+fn a_flood_of_connections_cannot_starve_the_node() {
+    let rig = Rig::new("flood");
+    rig.lock_self();
+    let mut node = rig.connect();
+    node.attach().expect("attach");
+    let mut flood = Reaper(Vec::new());
+    for _ in 0..8 {
+        let mut f = helper("flood", &rig, None);
+        say_go(&mut f);
+        flood.0.push(f);
+    }
+    std::thread::sleep(Duration::from_millis(500));
+    // The node's requests are answered at once, whatever else connects: each of these took seconds when accepting had no bound.
+    for _ in 0..5 {
+        let began = Instant::now();
+        node.list().expect("list");
+        let took = began.elapsed();
+        assert!(
+            took < Duration::from_secs(2),
+            "a list took {took:?} under a flood"
+        );
+    }
+}
+
+#[test]
+fn a_node_that_keeps_its_terminal_and_drops_only_the_link_reattaches_at_once_and_loses_no_output() {
+    let rig = Rig::new("livenode");
+    rig.lock_self();
+    // "a" at the start, "b" six seconds later.
+    let long = script(&rig.home, "long", &[("a", 6000), ("b", 120_000)]);
+    let mut c = rig.connect();
+    c.attach().expect("attach");
+    let (_pid, terminal) = c.start(&start_request("a1", &long)).expect("start");
+    // The node keeps its master and reads it itself.
+    let rx = read_in_background(terminal.into_file().expect("file"));
+    drop(c);
+    std::thread::sleep(Duration::from_millis(300));
+
+    // Only the link dropped: the node process runs and still reads its terminal, so the holder reads none (a read of a terminal that
+    // two processes read blocks, and ending it would never return). Reattaching is prompt.
+    let began = Instant::now();
+    let mut c = rig.connect();
+    let held = c.attach().expect("attach again");
+    let took = began.elapsed();
+    assert!(took < Duration::from_secs(3), "reattaching took {took:?}");
+    assert_eq!(held.len(), 1);
+    assert!(
+        held[0].info.buffer.is_empty(),
+        "the holder read what the node reads"
+    );
+    assert!(held[0].terminal.is_some());
+    // Everything the agent wrote reached the node's own read once.
+    let all = collect_until(Vec::new(), &rx, "b", Duration::from_secs(20));
+    assert_eq!(all, "ab");
+}
+
+#[test]
+fn a_buffer_is_not_lost_when_the_link_breaks_during_attach() {
+    let rig = Rig::new("midsend");
+    // More than one socket buffer holds, so the send cannot finish into the void.
+    let text: String = format!("{}END", "x".repeat(600_000));
+    let big = script(&rig.home, "big", &[(&text, 120_000)]);
+    let mut a = helper("node", &rig, Some(&big));
+    rig.lock_for(a.id());
+    say_go(&mut a);
+    let _ = helper_line(&mut a);
+    a.kill().expect("kill the node");
+    a.wait().expect("wait");
+    // The holder reads it all while no node is there.
+    std::thread::sleep(Duration::from_millis(2500));
+
+    rig.lock_self();
+    // A node that asks to attach and goes away before reading anything.
+    let mut raw = {
+        let end = Instant::now() + Duration::from_secs(10);
+        loop {
+            let mut s = agora_platform::local_connect(&rig.socket()).expect("connect");
+            write_frame(
+                &mut s,
+                &Request::Hello {
+                    version: LINK_VERSION,
+                }
+                .encode(),
+                None,
+            )
+            .expect("hello");
+            s.set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("timeout");
+            let (payload, _) = agora_node::holder_link::read_frame(&mut s)
+                .expect("frame")
+                .expect("an answer");
+            match Reply::decode(&payload).expect("reply") {
+                Reply::HelloOk { .. } => break s,
+                Reply::Refused {
+                    code: Refusal::Busy,
+                    ..
+                } if Instant::now() < end => {}
+                other => panic!("{other:?}"),
+            }
+        }
+    };
+    write_frame(&mut raw, &Request::Attach.encode(), None).expect("attach");
+    drop(raw);
+
+    // The next node still gets all of it.
+    let mut b = rig.connect();
+    let held = b.attach().expect("attach");
+    assert_eq!(held.len(), 1);
+    assert_eq!(held[0].info.buffer.len(), 600_003);
+    assert!(held[0].info.buffer.ends_with(b"END"));
+}
+
+#[test]
+fn an_agent_inherits_no_descriptor_of_the_holder() {
+    let rig = Rig::new("cloexec");
+    rig.lock_self();
+    let mut c = rig.connect();
+    c.attach().expect("attach");
+    let request = StartRequest {
+        agent: "a1".into(),
+        argv: vec![fake_agent(), "--list-fds".into()],
+        cols: 80,
+        rows: 24,
+        ..StartRequest::default()
+    };
+    let (_pid, terminal) = c.start(&request).expect("start");
+    let rx = read_in_background(terminal.into_file().expect("file"));
+    let all = collect_until(Vec::new(), &rx, "FDS-END", Duration::from_secs(20));
+    let mut seen = 0;
+    for line in all.lines().filter_map(|l| l.trim().strip_prefix("FD ")) {
+        seen += 1;
+        let target = line.split_once(' ').map_or("", |(_, t)| t);
+        let ok = target.starts_with("/dev/pts/")
+            || target.starts_with("/proc/")
+            || target == "/dev/null"
+            || target.is_empty();
+        assert!(
+            ok,
+            "the agent holds a descriptor of the holder: {line:?} in {all:?}"
+        );
+    }
+    // Its own terminal as stdin, stdout and stderr, at least.
+    assert!(seen >= 3, "{all:?}");
+}
+
+#[test]
+fn the_buffer_keeps_exactly_the_last_mebibyte_and_says_it_dropped() {
+    let rig = Rig::new("bound");
+    // 1.5 MB of a pattern a miscounted bound cannot match by luck.
+    let total = 1_500_000usize;
+    let text: String = (0..total)
+        .map(|i| char::from(b'a' + (i % 26) as u8))
+        .collect();
+    let flood = script(&rig.home, "flood", &[(&text, 120_000)]);
+    let mut a = helper("node", &rig, Some(&flood));
+    rig.lock_for(a.id());
+    say_go(&mut a);
+    let _ = helper_line(&mut a);
+    a.kill().expect("kill the node");
+    a.wait().expect("wait");
+    std::thread::sleep(Duration::from_millis(3000));
+
+    rig.lock_self();
+    let mut b = rig.connect();
+    let held = b.attach().expect("attach");
+    let buffer = &held[0].info.buffer;
+    assert_eq!(buffer.len(), 1 << 20);
+    assert!(held[0].info.buffer_dropped);
+    assert_eq!(buffer.as_slice(), &text.as_bytes()[total - (1 << 20)..]);
 }

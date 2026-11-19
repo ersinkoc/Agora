@@ -670,6 +670,20 @@ impl LocalStream {
         }
     }
 
+    /// How long a send may wait for the peer to take what it sent (`None`: for ever). Past it the send fails with `WouldBlock` or
+    /// `TimedOut`. Windows pipes have no such limit yet: the call does nothing there.
+    pub fn set_write_timeout(&self, timeout: Option<std::time::Duration>) -> io::Result<()> {
+        #[cfg(unix)]
+        {
+            self.inner.set_write_timeout(timeout)
+        }
+        #[cfg(windows)]
+        {
+            let _ = timeout;
+            Ok(())
+        }
+    }
+
     /// The process at the other end (on a listener's accepted stream: the client that connected).
     pub fn peer(&self) -> io::Result<Peer> {
         #[cfg(unix)]

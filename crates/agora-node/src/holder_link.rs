@@ -702,6 +702,7 @@ impl Client {
     pub fn connect_with_version(socket: &Path, version: u16) -> Result<Self, LinkError> {
         let mut stream = agora_platform::local_connect(socket)?;
         stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+        stream.set_write_timeout(Some(Duration::from_secs(10)))?;
         write_frame(&mut stream, &Request::Hello { version }.encode(), None)?;
         match Self::read_reply(&mut stream)?.0 {
             Reply::HelloOk {

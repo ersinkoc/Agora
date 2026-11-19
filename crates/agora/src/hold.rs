@@ -15,7 +15,7 @@ use std::time::Duration;
 use agora_i18n::key;
 use agora_node::holder_link::{
     read_frame, socket_path, write_frame, AgentInfo, AgentState, Refusal, Reply, Request,
-    StartRequest, TerminalInfo, LINK_VERSION,
+    StartRequest, TerminalInfo, FRAME_TIMEOUT, LINK_VERSION,
 };
 use agora_platform::{
     ExitStatus, HeldBuffer, HeldSignal, HeldTerminal, LocalListener, LocalStream, Peer,
@@ -28,14 +28,23 @@ use crate::{home, Opts, Say};
 /// How often the holder looks for a node's end, an ended agent and a new connection.
 const TICK: Duration = Duration::from_millis(50);
 
-/// How long a peer that passed the pid check may take to say hello.
+/// How long a peer that passed the pid check may take to begin its hello. One that begins a frame and stalls holds the holder for up
+/// to [`FRAME_TIMEOUT`] (5 s); only the process that holds the node lock can be that peer.
 const HELLO_WAIT: Duration = Duration::from_secs(1);
+
+/// Connections taken in one pass. The node is served first in every pass, so a flood of connections (each is checked and closed at
+/// once) slows the node by at most this many checks and can never starve it, a reap or a watch.
+const MAX_ACCEPTS: usize = 16;
 
 /// `agora hold`.
 pub(crate) fn hold(say: &Say, opts: &Opts) -> ExitCode {
     let home = opts.home.clone().unwrap_or_else(home);
-    // Its own session: not ended with the terminal or the process group that started it (decision 2). A failure leaves it where it is.
-    let _ = agora_platform::start_new_session();
+    // Its own session: not ended with the terminal or the process group that started it (decision 2). A process that leads a group
+    // cannot, and a holder left in its starter's session would end with it: it refuses to start (the starter must detach it).
+    if let Err(e) = agora_platform::start_new_session() {
+        say.err(key!("hold-failed"), &[("message", e.to_string().into())]);
+        return ExitCode::from(1);
+    }
     let lock = Role::Node.lock(&home);
     let admit: Admit = Box::new(move |peer| admit_by_lock(&lock, peer));
     match Holder::open(&home, admit).map(Holder::run) {
@@ -113,6 +122,10 @@ pub(crate) struct Holder {
     admit: Admit,
     agents: Vec<Agent>,
     node: Option<Node>,
+    /// The node whose link dropped while its process runs: it still holds its copies of the terminals and reads them itself, so the
+    /// holder reads none until that process has ended (a read of a terminal two processes read blocks, and ending it would never
+    /// return). `docs/specs/holder-link.md`.
+    departed: Option<ProcessWatch>,
     /// An agent was ever started: a holder that never had one waits for its first.
     had_agents: bool,
     pid: u32,
@@ -135,6 +148,7 @@ impl Holder {
             admit,
             agents: Vec::new(),
             node: None,
+            departed: None,
             had_agents: false,
             pid,
             start,
@@ -146,15 +160,20 @@ impl Holder {
         while self.tick() {}
     }
 
-    /// One pass; `false` when the holder is done.
+    /// One pass; `false` when the holder is done. The node first, then the bounded rest.
     pub(crate) fn tick(&mut self) -> bool {
         self.reap();
-        self.accept();
-        if let Some(done) = self.serve_node() {
-            if done {
-                return false;
-            }
-        } else {
+        if self.departed.as_ref().is_some_and(ProcessWatch::ended) {
+            self.departed = None;
+            self.start_readers();
+        }
+        let served = self.serve_node();
+        if served == Some(true) {
+            return false;
+        }
+        let accepted = self.accept();
+        // Idle (no node, nothing new): wait a tick. A node's read already waited one.
+        if served.is_none() && accepted == 0 {
             std::thread::sleep(TICK);
         }
         true
@@ -175,14 +194,19 @@ impl Holder {
         }
     }
 
-    fn accept(&mut self) {
-        loop {
+    /// Takes at most [`MAX_ACCEPTS`] waiting connections; returns how many.
+    fn accept(&mut self) -> usize {
+        let mut n = 0;
+        while n < MAX_ACCEPTS {
             match self.listener.accept() {
-                Ok(stream) => self.admit_connection(stream),
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return,
-                Err(_) => return,
+                Ok(stream) => {
+                    n += 1;
+                    self.admit_connection(stream);
+                }
+                Err(_) => break,
             }
         }
+        n
     }
 
     /// The first rule on a new connection is who it is: before anything is read from it, a peer that is not the node holding the lock
@@ -226,6 +250,11 @@ impl Holder {
         {
             return;
         }
+        if stream.set_write_timeout(Some(FRAME_TIMEOUT)).is_err() {
+            return;
+        }
+        // A node that comes back takes over the terminals from the one before it: the holder reads none for it.
+        self.departed = None;
         self.node = Some(Node {
             stream,
             watch,
@@ -256,9 +285,20 @@ impl Holder {
         Some(self.handle(request))
     }
 
-    /// The node is gone: every terminal is read into its buffer again, so no agent blocks on a full terminal (decision 4).
+    /// The node's link is gone. If its process ended too, every terminal is read into its buffer, so no agent blocks on a full
+    /// terminal (decision 4). If it runs, it still has its copies of the terminals: it is watched, and the reads start when it ends.
     fn detach(&mut self) {
-        self.node = None;
+        let Some(node) = self.node.take() else {
+            return;
+        };
+        if node.watch.ended() {
+            self.start_readers();
+        } else {
+            self.departed = Some(node.watch);
+        }
+    }
+
+    fn start_readers(&mut self) {
         for a in &mut self.agents {
             if a.reader.is_none() && !a.eof {
                 a.reader = a.term.start_reader().ok();
@@ -371,8 +411,10 @@ impl Holder {
             Ok(t) => t,
             Err(_) => return self.refuse(Refusal::Failed),
         };
+        let mut term = term;
         let Ok(handle) = term.handle() else {
-            let _ = term.signal(HeldSignal::Kill);
+            // Never handed to the node: ended and reaped, so no process and no zombie is left behind.
+            term.kill_and_reap();
             return self.refuse(Refusal::Failed);
         };
         let pid = term.pid();
@@ -394,9 +436,9 @@ impl Holder {
         );
     }
 
-    /// Hands every terminal and its buffer over: first each read is ended, and only then is anything sent (decision 4).
+    /// Hands every terminal and its buffer over: first each read is ended, and only then is anything sent (decision 4). A running
+    /// agent's buffer is forgotten only once its frame was sent, so a link that breaks mid-way loses nothing.
     fn attach(&mut self) -> bool {
-        let mut frames = Vec::new();
         for a in &mut self.agents {
             a.end_read();
             a.exit = a.exit.or_else(|| a.term.try_wait().unwrap_or(None));
@@ -404,34 +446,34 @@ impl Holder {
                 // Nobody reads any more: what an ended agent left in its terminal is taken now.
                 a.eof = a.term.drain(&mut a.held).unwrap_or(true);
             }
-            let ended = a.exit.is_some();
-            let buffer_dropped = a.held.dropped();
-            // A running agent's buffer goes to the node. An ended agent's stays until the node releases it.
-            let held = if ended {
-                a.held.clone()
-            } else {
-                std::mem::take(&mut a.held)
-            };
-            let terminal = if ended { None } else { a.term.handle().ok() };
-            frames.push((
-                Reply::Terminal(TerminalInfo {
-                    info: a.info(),
-                    buffer_dropped,
-                    buffer: held.into_vec(),
-                }),
-                terminal,
-            ));
         }
-        let count = frames.len() as u32;
         if let Some(n) = self.node.as_mut() {
             n.attached = true;
         }
-        for (reply, terminal) in &frames {
-            if !self.send(reply, terminal.as_ref()) {
+        let count = self.agents.len();
+        for i in 0..count {
+            let a = &self.agents[i];
+            let ended = a.exit.is_some();
+            let terminal = if ended { None } else { a.term.handle().ok() };
+            let reply = Reply::Terminal(TerminalInfo {
+                info: a.info(),
+                buffer_dropped: a.held.dropped(),
+                buffer: a.held.clone().into_vec(),
+            });
+            if !self.send(&reply, terminal.as_ref()) {
                 return false;
             }
+            // Sent: a running agent's buffer is the node's now. An ended agent's stays until the node releases it.
+            if !ended {
+                self.agents[i].held = HeldBuffer::default();
+            }
         }
-        if !self.send(&Reply::AttachDone { count }, None) {
+        if !self.send(
+            &Reply::AttachDone {
+                count: count as u32,
+            },
+            None,
+        ) {
             return false;
         }
         // A node that attaches and finds nothing left of what the holder held ends it (decision 2).
