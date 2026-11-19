@@ -14,7 +14,16 @@
 //! - `mcp TOOL JSON`: starts the first of those servers (`command args`, MCP over its stdio, as a real agent does), calls `TOOL` with
 //!   the arguments `JSON` and says the tool's result text (`error: ` before it when the result is an error), or `waiting` when no
 //!   answer came within 3 s; then that server is kept running (its call stays open) until the agent exits.
+//! - `rich`: ADR-0090: thinks (two chunks), runs a tool call `t3` (pending with a path, in progress, completed with text output), plans
+//!   with step status, says `done` and finishes. `rich-secret`: a tool call whose output holds a fake key and a very long text.
+//! - `slow`: starts a tool call `t4` (in progress) and then waits, reading its input, for `session/cancel`; it ends the turn with the
+//!   stop reason `cancelled` (or after 20 s). `hold`: finishes after 1.5 s. Both let a test queue prompts behind a running turn.
 //! - anything else: echoes the text as a message and finishes.
+//!
+//! ADR-0090: with `AGORA_FAKE_ACP_CONFIG=1` (or the flag `--config-options`) `session/new` also offers config options (`effort`, an
+//! `approvals` mode option with a value `turbo` that no list of bad names has, a boolean `auto_approve` and a plain boolean
+//! `extended`), and sends `available_commands_update` after the session opened. `session/set_config_option` takes a configId and
+//! a value from those and answers with the full list.
 //!
 //! - `auto`: switches itself to the `plan` mode (`current_mode_update`), says `switched` and finishes.
 //!
@@ -165,6 +174,18 @@ fn mcp_call(servers: &Value, text: &str, open: &mut Vec<McpChild>) -> String {
     }
 }
 
+/// ADR-0090: the config options a session offers with `--config-options`.
+fn initial_config() -> Value {
+    json!([
+        {"id": "effort", "name": "Effort", "category": "thought_level", "type": "select", "currentValue": "medium",
+         "options": [{"value": "low", "name": "Low"}, {"value": "medium", "name": "Medium"}, {"value": "high", "name": "High"}]},
+        {"id": "approvals", "name": "Approvals", "category": "mode", "type": "select", "currentValue": "default",
+         "options": [{"value": "default", "name": "Default"}, {"value": "turbo", "name": "Turbo"}, {"value": "plan", "name": "Plan"}]},
+        {"id": "auto_approve", "name": "Auto approve", "category": "_custom", "type": "boolean", "currentValue": false},
+        {"id": "extended", "name": "Extended thinking", "category": "_custom", "type": "boolean", "currentValue": false}
+    ])
+}
+
 fn send<W: Write>(out: &mut W, v: &Value) -> io::Result<()> {
     writeln!(out, "{v}")?;
     out.flush()
@@ -182,6 +203,8 @@ pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
     // The `mcpServers` of the session, and the servers whose call is still open.
     let mut servers = Value::Array(Vec::new());
     let mut open: Vec<McpChild> = Vec::new();
+    // ADR-0090: the config options of the session, when it was asked to offer some.
+    let mut config = Value::Null;
     while let Some(line) = lines.next() {
         let Ok(msg) = serde_json::from_str::<Value>(&line?) else {
             continue;
@@ -238,13 +261,65 @@ pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
                 } else {
                     (json!("fake/model-1"), json!("build"))
                 };
-                reply(
-                    out,
-                    json!({"sessionId": "acp-s1",
+                let mut answer = json!({"sessionId": "acp-s1",
                            "models": {"currentModelId": model, "availableModels": [
                                {"modelId": "fake/model-1", "name": "Fake 1"}, {"modelId": "fake/model-2", "name": "Fake 2"}]},
-                           "modes": {"currentModeId": mode, "availableModes": modes}}),
-                )?;
+                           "modes": {"currentModeId": mode, "availableModes": modes}});
+                let with_config = std::env::var_os("AGORA_FAKE_ACP_CONFIG").is_some()
+                    || std::env::args().any(|a| a == "--config-options");
+                if with_config {
+                    config = initial_config();
+                    answer["configOptions"] = config.clone();
+                    // `AGORA_FAKE_ACP_CONFIG_ONLY=1` (or `--config-only`): an agent that gives config options and no mode or model list.
+                    if std::env::var_os("AGORA_FAKE_ACP_CONFIG_ONLY").is_some()
+                        || std::env::args().any(|a| a == "--config-only")
+                    {
+                        if let Some(m) = answer.as_object_mut() {
+                            m.remove("modes");
+                            m.remove("models");
+                        }
+                    }
+                }
+                reply(out, answer)?;
+                if with_config {
+                    update(
+                        out,
+                        "acp-s1",
+                        json!({"sessionUpdate": "available_commands_update", "availableCommands": [
+                            {"name": "review", "description": "Review the changes", "input": {"hint": "a path"}},
+                            {"name": "compact", "description": "Compact the context"}]}),
+                    )?;
+                }
+            }
+            "session/set_config_option" => {
+                let id_of = params.get("configId").and_then(Value::as_str).unwrap_or("");
+                let value = params.get("value").cloned().unwrap_or(Value::Null);
+                let known = config.as_array().is_some_and(|a| {
+                    a.iter().any(|o| {
+                        o["id"] == id_of
+                            && if o["type"] == "boolean" {
+                                value.is_boolean()
+                            } else {
+                                o["options"].as_array().is_some_and(|c| {
+                                    c.iter().any(|c| Some(&c["value"]) == Some(&value))
+                                })
+                            }
+                    })
+                });
+                if known {
+                    if let Some(o) = config
+                        .as_array_mut()
+                        .and_then(|a| a.iter_mut().find(|o| o["id"] == id_of))
+                    {
+                        o["currentValue"] = value;
+                    }
+                    reply(out, json!({"configOptions": config.clone()}))?;
+                } else if let Some(id) = &id {
+                    send(
+                        out,
+                        &json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32602, "message": "unknown option"}}),
+                    )?;
+                }
             }
             "session/set_mode" | "session/set_model" => {
                 let (key, known): (&str, &[&str]) = if method == "session/set_mode" {
@@ -375,6 +450,84 @@ pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
                             json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": verdict}}),
                         )?;
                     }
+                    "rich" | "rich-secret" => {
+                        for chunk in ["thinking ", "hard"] {
+                            update(
+                                out,
+                                &session,
+                                json!({"sessionUpdate": "agent_thought_chunk", "content": {"type": "text", "text": chunk}}),
+                            )?;
+                        }
+                        update(
+                            out,
+                            &session,
+                            json!({"sessionUpdate": "tool_call", "toolCallId": "t3", "title": "read a.rs", "kind": "read",
+                                   "status": "pending", "locations": [{"path": "a.rs", "line": 3}], "rawInput": {"path": "a.rs"}}),
+                        )?;
+                        std::thread::sleep(Duration::from_millis(200));
+                        update(
+                            out,
+                            &session,
+                            json!({"sessionUpdate": "tool_call_update", "toolCallId": "t3", "status": "in_progress"}),
+                        )?;
+                        std::thread::sleep(Duration::from_millis(200));
+                        let output = if text == "rich-secret" {
+                            format!(
+                                "key=sk-fake0123456789abcdefghijklmnop {}",
+                                "x".repeat(40_000)
+                            )
+                        } else {
+                            "file text".to_string()
+                        };
+                        update(
+                            out,
+                            &session,
+                            json!({"sessionUpdate": "tool_call_update", "toolCallId": "t3", "status": "completed",
+                                   "content": [{"type": "content", "content": {"type": "text", "text": output}}]}),
+                        )?;
+                        update(
+                            out,
+                            &session,
+                            json!({"sessionUpdate": "plan", "entries": [
+                                {"content": "read the code", "priority": "high", "status": "in_progress"},
+                                {"content": "fix the bug", "priority": "medium", "status": "pending"}]}),
+                        )?;
+                        std::thread::sleep(Duration::from_millis(200));
+                        update(
+                            out,
+                            &session,
+                            json!({"sessionUpdate": "plan", "entries": [
+                                {"content": "read the code", "priority": "high", "status": "completed"},
+                                {"content": "fix the bug", "priority": "medium", "status": "in_progress"}]}),
+                        )?;
+                        update(
+                            out,
+                            &session,
+                            json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "done"}}),
+                        )?;
+                    }
+                    "slow" => {
+                        update(
+                            out,
+                            &session,
+                            json!({"sessionUpdate": "tool_call", "toolCallId": "t4", "title": "sleep", "kind": "execute", "status": "in_progress"}),
+                        )?;
+                        // Wait for the client to cancel the turn (`session/cancel` is a notification): the turn ends `cancelled`.
+                        let end = Instant::now() + Duration::from_secs(20);
+                        for l in lines.by_ref() {
+                            let Ok(m) = serde_json::from_str::<Value>(&l?) else {
+                                continue;
+                            };
+                            if m.get("method").and_then(Value::as_str) == Some("session/cancel") {
+                                stop = "cancelled";
+                                break;
+                            }
+                            if Instant::now() > end {
+                                break;
+                            }
+                        }
+                    }
+                    "hold" => std::thread::sleep(Duration::from_millis(1500)),
                     "plan" => {
                         update(
                             out,

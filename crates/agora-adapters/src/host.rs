@@ -60,6 +60,61 @@ pub enum ChatItem {
         code: String,
         params: Vec<(String, String)>,
     },
+    /// ADR-0090 (adapter capability `thought`): the agent's thinking. Untrusted text.
+    Thought(String),
+    /// ADR-0090 (adapter capability `tool_status`): a tool call or a change to one, matched by its id.
+    Tool(ToolItem),
+    /// ADR-0090 (adapter capability `plan_status`): the whole plan with each step's status; it replaces the earlier plan.
+    PlanSteps(Vec<PlanItem>),
+}
+
+/// ADR-0090: a tool call, or an update to one (`chat/append` `toolCall` with a `callId`). A field the adapter left out is `None` (or
+/// empty) and keeps what the node holds; a field it sent replaces it, as ACP's `tool_call_update` does. All text is untrusted.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ToolItem {
+    pub call_id: String,
+    pub tool: Option<String>,
+    pub arguments_json: Option<String>,
+    /// ACP `ToolKind` word (`read`, `edit`, ...); empty when not sent.
+    pub kind: String,
+    /// ACP `ToolCallStatus` word (`pending`, `in_progress`, `completed`, `failed`); empty when not sent.
+    pub status: String,
+    pub locations: Option<Vec<(String, u32)>>,
+    pub output: Option<String>,
+}
+
+/// ADR-0090: one step of a plan.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PlanItem {
+    pub text: String,
+    /// `pending`, `in_progress` or `completed`; empty when not sent.
+    pub status: String,
+    /// `high`, `medium` or `low`; empty when not sent.
+    pub priority: String,
+}
+
+/// ADR-0090: one option of the agent's session the user may change (`session/config`).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ConfigOption {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    /// ACP category word: `mode`, `model`, `model_config`, `thought_level`, or another.
+    pub category: String,
+    /// A boolean; otherwise a select.
+    pub boolean: bool,
+    pub current: String,
+    pub choices: Vec<SessionOption>,
+    /// What the adapter says; the node adds its own judgement (`perm`).
+    pub skips_permissions: bool,
+}
+
+/// ADR-0090: one slash command the agent offers (`session/commands`).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AdapterCommand {
+    pub name: String,
+    pub description: String,
+    pub input_hint: String,
 }
 
 /// ADR-0058: one mode or model the agent offers.
@@ -145,6 +200,16 @@ pub enum AdapterEvent {
     Log {
         level: String,
         message: String,
+    },
+    /// ADR-0090: `session/config`, the options the user may change; replaces the last report.
+    Config {
+        session_id: String,
+        options: Vec<ConfigOption>,
+    },
+    /// ADR-0090: `session/commands`, the slash commands the agent offers; replaces the last list.
+    Commands {
+        session_id: String,
+        commands: Vec<AdapterCommand>,
     },
     /// The adapter's output ended: it exited or closed stdout. Always the last event.
     Exited,
@@ -353,11 +418,49 @@ fn to_event(method: &str, p: &Value) -> Option<AdapterEvent> {
         "chat/append" => {
             let item = if let Some(t) = p.get("text") {
                 ChatItem::Text(s(t, "text"))
+            } else if let Some(t) = p.get("thought") {
+                ChatItem::Thought(s(t, "text"))
             } else if let Some(t) = p.get("toolCall") {
-                ChatItem::ToolCall {
-                    tool: s(t, "tool"),
-                    arguments_json: s(t, "argumentsJson"),
+                match t.get("callId").and_then(Value::as_str) {
+                    // ADR-0090: a call with an id is one entry the node updates in place.
+                    Some(call_id) if !call_id.is_empty() => {
+                        let opt = |k: &str| t.get(k).and_then(Value::as_str).map(str::to_string);
+                        ChatItem::Tool(ToolItem {
+                            call_id: call_id.to_string(),
+                            tool: opt("tool"),
+                            arguments_json: opt("argumentsJson"),
+                            kind: s(t, "kind"),
+                            status: s(t, "status"),
+                            locations: t.get("locations").and_then(Value::as_array).map(|a| {
+                                a.iter()
+                                    .filter_map(|l| {
+                                        Some((
+                                            l.get("path")?.as_str()?.to_string(),
+                                            u32::try_from(u(l, "line")).unwrap_or(0),
+                                        ))
+                                    })
+                                    .collect()
+                            }),
+                            output: opt("output"),
+                        })
+                    }
+                    _ => ChatItem::ToolCall {
+                        tool: s(t, "tool"),
+                        arguments_json: s(t, "argumentsJson"),
+                    },
                 }
+            } else if let Some(entries) = p.pointer("/plan/entries").and_then(Value::as_array) {
+                ChatItem::PlanSteps(
+                    entries
+                        .iter()
+                        .filter(|e| e.is_object())
+                        .map(|e| PlanItem {
+                            text: s(e, "text"),
+                            status: s(e, "status"),
+                            priority: s(e, "priority"),
+                        })
+                        .collect(),
+                )
             } else if let Some(t) = p.get("plan") {
                 ChatItem::Plan(
                     t.get("steps")
@@ -418,6 +521,48 @@ fn to_event(method: &str, p: &Value) -> Option<AdapterEvent> {
                 current_mode: s(p, "currentMode"),
                 current_model: s(p, "currentModel"),
             },
+        },
+        "session/config" => AdapterEvent::Config {
+            session_id: s(p, "sessionId"),
+            options: p
+                .get("options")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter(|o| o.is_object())
+                        .map(|o| ConfigOption {
+                            id: s(o, "id"),
+                            name: s(o, "name"),
+                            description: s(o, "description"),
+                            category: s(o, "category"),
+                            boolean: s(o, "type") == "boolean",
+                            current: s(o, "current"),
+                            choices: options(o.get("choices")),
+                            skips_permissions: o
+                                .get("skipsPermissions")
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+        },
+        "session/commands" => AdapterEvent::Commands {
+            session_id: s(p, "sessionId"),
+            commands: p
+                .get("commands")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter(|c| c.is_object())
+                        .map(|c| AdapterCommand {
+                            name: s(c, "name"),
+                            description: s(c, "description"),
+                            input_hint: s(c, "inputHint"),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
         },
         "session/reported" => AdapterEvent::SessionReported {
             session_id: s(p, "sessionId"),
@@ -720,6 +865,23 @@ impl Adapter {
         self.call(
             "session/set_option",
             json!({"sessionId": session, "kind": kind.wire(), "id": id}),
+            timeout,
+        )
+        .map(drop)
+    }
+
+    /// ADR-0090: sets one of the options the adapter reported in `session/config`. The caller checks the adapter declared the
+    /// capability `config`, that the id and value are among what it reported, and the node's skip-permissions policy.
+    pub fn set_config(
+        &self,
+        session: &str,
+        config_id: &str,
+        value: &str,
+        timeout: Duration,
+    ) -> Result<(), HostError> {
+        self.call(
+            "session/set_config",
+            json!({"sessionId": session, "configId": config_id, "value": value}),
             timeout,
         )
         .map(drop)
