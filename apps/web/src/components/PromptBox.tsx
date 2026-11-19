@@ -133,7 +133,7 @@ export function PromptBox({ agent, send, source, choose, approvals, onReview }: 
         )}
       </div>
       <div className="flex flex-none flex-col gap-2 px-4 pt-2 pb-3.5">
-      {approvals && <div className="mx-auto w-full max-w-195" data-pinned-approvals>{approvals}</div>}
+      {approvals && <div className="mx-auto max-h-[40vh] w-full max-w-195 overflow-y-auto" data-pinned-approvals>{approvals}</div>}
       <form className="mx-auto flex w-full max-w-195 flex-none flex-col gap-2 rounded-l border border-line bg-surface-1 p-2.5 shadow-card transition-colors focus-within:border-accent" onSubmit={(e) => { e.preventDefault(); void go(); }}>
         <textarea value={text} onChange={(e) => setText(e.target.value)} aria-label={t('prompt-label')} placeholder={t('prompt-label')} rows={rowCount}
           className="w-full resize-none border-0 bg-transparent p-1 text-ink outline-none focus-visible:outline-none"

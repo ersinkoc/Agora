@@ -22,7 +22,7 @@ export function SessionBar({ agentKey, session, choose, disabled, startedMs, sta
   const [busy, setBusy] = useState(false);
   // How long it has run, when this window saw it start; moves once a second-ish (every 15 s is enough for minutes).
   const [now, setNow] = useState(() => Date.now());
-  useEffect(() => { if (!startedMs || disabled) return; const id = setInterval(() => setNow(Date.now()), 15000); return () => clearInterval(id); }, [startedMs, disabled]);
+  useEffect(() => { if (!startedMs || disabled) return; const id = setInterval(() => setNow(Date.now()), 30000); return () => clearInterval(id); }, [startedMs, disabled]);
   const elapsed = startedMs && !disabled ? Math.max(0, now - startedMs) : undefined;
   const pct = contextPercent(session);
   const label = contextLabel(session);
@@ -70,7 +70,7 @@ export function SessionBar({ agentKey, session, choose, disabled, startedMs, sta
     {state && (
       <span className={`inline-flex h-6 items-center gap-2 rounded-full border bg-surface-2 px-2.5 text-xs whitespace-nowrap ${PILL[state]}`} title={elapsed !== undefined ? t('session-elapsed-hint') : undefined} data-state-pill={state}>
         <span aria-hidden className={`chat-dot size-2 rounded-full bg-current ${state === 'working' ? 'chat-dot--pulse' : ''}`} />
-        {elapsed !== undefined ? t('chat-state-since', { state: word, time: duration(elapsed) }) : word}
+        {elapsed !== undefined && elapsed >= 60000 ? t('chat-state-since', { state: word, time: elapsed < 3_600_000 ? `${Math.floor(elapsed / 60000)} min` : duration(Math.floor(elapsed / 60000) * 60000) }) : word}
       </span>
     )}
     {!state && elapsed !== undefined && <span className="ide-chip" title={t('session-elapsed-hint')}><Icon name="clock" className="size-3" />{duration(elapsed)}</span>}

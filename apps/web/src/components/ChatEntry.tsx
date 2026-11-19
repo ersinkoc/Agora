@@ -96,8 +96,10 @@ export const UserText = memo(function UserText({ line }: { line: ChatLine }) {
   return (
     <div className="group/msg relative ms-auto max-w-[88%] rounded-l rounded-ee-xs border border-accent/30 bg-accent/15 px-3.5 py-2.5 max-md:max-w-full" title={fullStamp(line.atMs)} data-role="user">
       <div className="break-words whitespace-pre-wrap"><span className="sr-only">{t('chat-you')}: </span>{line.text}</div>
-      {line.atMs > 0 && <div className="mt-1 flex justify-end text-xs text-muted">{clock(line.atMs)}</div>}
-      <CopyButton text={line.text} label="chat-copy-message" className={`absolute -start-7 top-1 ${HOVER}`} />
+      <div className="mt-1 flex items-center justify-end gap-2 text-xs text-muted">
+        {line.atMs > 0 && <span>{clock(line.atMs)}</span>}
+        <CopyButton text={line.text} label="chat-copy-message" className={HOVER} />
+      </div>
     </div>
   );
 });
@@ -141,8 +143,11 @@ const TONE: Record<StepTone, string> = { edit: 'text-accent', run: 'text-needs-y
 const CHEVRON = 'size-3 flex-none text-muted transition-transform motion-reduce:transition-none rtl:rotate-180 group-open:rotate-90!';
 
 // The lines of a change: a hunk bar, then each line with its number; added and deleted lines say so by glyph and bar as well as colour.
-function DiffLines({ lines, fallback }: { lines: ReturnType<typeof parseHunks>['lines']; fallback: string }) {
-  if (lines.length === 0) return <pre dir="ltr" className="m-0 max-h-60 overflow-auto bg-surface-0 p-2 font-mono text-xs">{fallback}</pre>;
+const DIFF_CAP = 200;
+function DiffLines({ lines: all, fallback }: { lines: ReturnType<typeof parseHunks>['lines']; fallback: string }) {
+  const [full, setFull] = useState(false);
+  const lines = full ? all : all.slice(0, DIFF_CAP);
+  if (all.length === 0) return <pre dir="ltr" className="m-0 max-h-60 overflow-auto bg-surface-0 p-2 font-mono text-xs">{fallback}</pre>;
   return (
     <pre dir="ltr" className="m-0 max-h-80 overflow-auto bg-surface-0 font-mono text-xs leading-5">
       {lines.map((l, i) => l.kind === 'hunk'
@@ -153,6 +158,7 @@ function DiffLines({ lines, fallback }: { lines: ReturnType<typeof parseHunks>['
             <span className="whitespace-pre"><span aria-hidden className={l.kind === 'add' ? 'text-finished' : l.kind === 'del' ? 'text-removed' : ''}>{l.kind === 'add' ? '+ ' : l.kind === 'del' ? '− ' : '  '}</span>{l.text || ' '}</span>
           </div>
         ))}
+      {lines.length < all.length && <button type="button" className="block w-full border-t border-line bg-surface-2 px-3.5 py-1.5 text-start text-muted hover:text-ink" onClick={() => setFull(true)}>{t('chat-diff-show-all', { count: all.length })}</button>}
     </pre>
   );
 }
@@ -202,15 +208,20 @@ const ToolStep = memo(function ToolStep({ line, diff }: { line: ChatLine; diff?:
 });
 
 // Tool calls in a row are one bordered group, with a header that says how many steps and, when the entries carry times, how long they took;
-// then what kinds. The newest group is open (the caller says so); an older one is folded. Opening it lists every step, each foldable on
-// its own. A group that waits on you or failed is always open: that is never hidden in a folded group.
+// then what kinds. `open` is only where a group starts (the newest when it appears): afterwards the reader owns the fold, so a newer
+// group arriving never folds one under them. The data has no status per call, so a flag is the agent's own state (it waits on you, or
+// ended with an error) on its newest group: a group that was flagged opens and stays open, and is never hidden in a fold meanwhile.
 const SHOWN_KINDS = 3;
 export const ToolSteps = memo(function ToolSteps({ lines, running = false, flag, open = false, diffs }: { lines: ChatLine[]; running?: boolean; flag?: GroupFlag; open?: boolean; diffs?: ReadonlyMap<number, ChatLine> }) {
   const sum = useMemo(() => stepsSummary(lines), [lines]);
   const kinds = sum.actions.slice(0, SHOWN_KINDS).map((a) => t(`chat-act-${a.action}`, { count: a.count }));
   const more = sum.actions.length - SHOWN_KINDS;
+  // Uncontrolled after the first draw: `open` is read once, and a flag keeps the group open from the moment it is set.
+  const [start] = useState(open);
+  const [flagged, setFlagged] = useState(!!flag);
+  if (flag && !flagged) setFlagged(true);
   return (
-    <details open={flag || open ? true : undefined} className={`group max-w-3xl overflow-hidden rounded-m border bg-surface-1 ${flag ? 'border-needs-you/70' : 'border-line'}`} data-steps={sum.total} data-flag={flag}>
+    <details open={start || flagged || flag ? true : undefined} className={`group max-w-3xl overflow-hidden rounded-m border bg-surface-1 ${flag ? 'border-needs-you/70' : 'border-line'}`} data-steps={sum.total} data-flag={flag}>
       <summary className="flex min-h-9 min-w-0 cursor-pointer list-none items-center gap-2 bg-surface-2 px-3 py-1.5 text-xs text-muted hover:text-ink [&::-webkit-details-marker]:hidden" aria-label={`${t('chat-steps-open')}: ${t('chat-steps-count', { count: sum.total })}`}>
         {running && !flag
           ? <span role="img" aria-label={t('chat-working')} className="size-3.5 flex-none animate-spin rounded-full border-2 border-line border-t-working motion-reduce:animate-none" />
@@ -226,7 +237,7 @@ export const ToolSteps = memo(function ToolSteps({ lines, running = false, flag,
       </div>
     </details>
   );
-}, (a, b) => a.running === b.running && a.flag === b.flag && a.open === b.open && a.lines.length === b.lines.length && a.lines[0]?.id === b.lines[0]?.id && (a.diffs?.size ?? 0) === (b.diffs?.size ?? 0));
+}, (a, b) => a.running === b.running && a.flag === b.flag && a.lines.length === b.lines.length && a.lines[0]?.id === b.lines[0]?.id && (a.diffs?.size ?? 0) === (b.diffs?.size ?? 0));
 
 // A file the agent changed that no step claimed: a card with its name and how much changed, the lines numbered and coloured; a long
 // change starts folded.

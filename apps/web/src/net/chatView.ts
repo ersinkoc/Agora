@@ -53,12 +53,17 @@ export function planProgress(status: readonly (StepStatus | undefined)[]): PlanP
 const samePath = (subject: string, path: string): boolean => {
   const a = subject.replace(/\\/g, '/');
   const b = path.replace(/\\/g, '/');
-  return !!a && !!b && (a === b || a.endsWith(`/${b}`) || b.endsWith(`/${a}`));
+  if (!a || !b) return false;
+  if (a === b) return true;
+  // One may be the other with a folder prefix (an absolute path against the repository path), but only when the shorter one has a folder
+  // of its own: a bare name ("x.rs") names only that exact path, never "other/dir/x.rs".
+  const [short, long] = a.length <= b.length ? [a, b] : [b, a];
+  return short.includes('/') && long.endsWith(`/${short}`);
 };
 
 /**
  * An edit step and the diff the agent sent for the same file are one thing to read: the diff opens inside the step's row. Each diff
- * attaches to the latest earlier edit step of its turn that names the same file and has none yet; a diff that matches no step stays
+ * attaches to the earliest earlier edit step of its turn that names the same file and has none yet (two edits of one file get their diffs in order); a diff that matches no step stays
  * its own item. Returns the items still to draw and, per step entry id, the diff entries that belong to it.
  */
 export function pairDiffs(items: readonly TurnItem[]): { items: TurnItem[]; attached: Map<number, ChatLine> } {
@@ -73,13 +78,17 @@ export function pairDiffs(items: readonly TurnItem[]): { items: TurnItem[]; atta
       }
     }
     if (item.kind === 'diff' && item.line.path) {
-      const hit = [...edits].reverse().find((e) => !attached.has(e.id) && samePath(e.subject, item.line.path));
+      const hit = edits.find((e) => !attached.has(e.id) && samePath(e.subject, item.line.path));
       if (hit) { attached.set(hit.id, item.line); continue; }
     }
     kept.push(item);
   }
   return { items: kept, attached };
 }
+
+/** Where an agent's pending requests are drawn: pinned above a chat composer, or (a terminal agent, or a closed chat agent that has no
+ *  composer) as a bar under the pane's header. A request must always be drawn somewhere. */
+export const asksUnderHeader = (agent: { terminal?: boolean; closed?: boolean }): boolean => agent.terminal !== false || !!agent.closed;
 
 /** The first letter of an agent's name, for its avatar tile ("claude · amber" is C). */
 export function initial(name: string): string {

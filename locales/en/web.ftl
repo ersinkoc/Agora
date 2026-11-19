@@ -1084,6 +1084,7 @@ prompt-closed = This agent has ended, so it cannot take a request.
 chat-thought-for = Thought for { $time }
 chat-plan-progress = { $done } of { $total } done
 chat-review-changes = Review changes
+chat-diff-show-all = Show all { $count } lines
 chat-state-since = { $state } · { $time }
 
 # Tool panes: Terminal, Changes, Files and File manager as panes of the workspace (ADR-0068).

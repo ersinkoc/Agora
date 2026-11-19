@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ChatLine } from './chat';
-import { atOf, groupTurns, initial, pairDiffs, planProgress, stepTone } from './chatView';
+import { asksUnderHeader, atOf, groupTurns, initial, pairDiffs, planProgress, stepTone } from './chatView';
 import { transcript } from './transcript';
 import { preciseDuration } from './time';
 
@@ -62,6 +62,32 @@ describe('an edit and its diff', () => {
     const { items, attached } = pairDiffs(turn([edit(1, 'src/x.rs'), diff(2, 'src/z.rs'), diff(3, 'src/x.rs'), diff(4, 'src/x.rs')]));
     expect(items.filter((i) => i.kind === 'diff')).toHaveLength(2);
     expect(attached.get(1)?.id).toBe(3);
+  });
+});
+
+describe('pairing in order and by path', () => {
+  const edit = (id: number, path: string): ChatLine => ({ id, atMs: 0, role: 'agent', kind: 'tool', text: JSON.stringify({ tool: 'Edit', arguments: { file_path: path, old_string: 'a', new_string: 'b' } }), path: '' });
+  const diff = (id: number, path: string): ChatLine => ({ id, atMs: 0, role: 'agent', kind: 'diff', text: '@@ -1 +1 @@\n-a\n+b\n', path });
+  const turn = (lines: ChatLine[]) => groupTurns(transcript(lines)).flatMap((r) => (r.kind === 'turn' ? r.items : []));
+  it('gives two edits of one file their diffs in order', () => {
+    const { attached } = pairDiffs(turn([edit(1, 'a.ts'), edit(2, 'a.ts'), diff(3, 'a.ts'), diff(4, 'a.ts')]));
+    expect(attached.get(1)?.id).toBe(3);
+    expect(attached.get(2)?.id).toBe(4);
+  });
+  it('matches a bare name only to that exact path', () => {
+    expect(pairDiffs(turn([edit(1, 'x.rs'), diff(2, 'other/dir/x.rs')])).attached.size).toBe(0);
+    expect(pairDiffs(turn([edit(1, 'other/dir/x.rs'), diff(2, 'x.rs')])).attached.size).toBe(0);
+    expect(pairDiffs(turn([edit(1, 'x.rs'), diff(2, 'x.rs')])).attached.size).toBe(1);
+    expect(pairDiffs(turn([edit(1, '/home/a/src/x.rs'), diff(2, 'src/x.rs')])).attached.size).toBe(1);
+  });
+});
+
+describe('where a request is drawn', () => {
+  it('pins it above a live chat agent\'s composer and under the header for every other agent, closed chat agents included', () => {
+    expect(asksUnderHeader({ terminal: false })).toBe(false);
+    expect(asksUnderHeader({ terminal: false, closed: true })).toBe(true);
+    expect(asksUnderHeader({})).toBe(true);
+    expect(asksUnderHeader({ terminal: true, closed: true })).toBe(true);
   });
 });
 

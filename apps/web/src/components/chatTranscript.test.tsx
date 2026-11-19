@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 import { beforeEach, describe, expect, it } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { setLanguage } from '../i18n';
@@ -56,6 +57,31 @@ describe('the conversation as drawn', () => {
     expect(renderToStaticMarkup(<ToolSteps lines={lines} />)).not.toMatch(/<details[^>]*\sopen/);
     expect(renderToStaticMarkup(<ToolSteps lines={lines} open />)).toMatch(/<details[^>]*\sopen/);
     expect(renderToStaticMarkup(<ToolSteps lines={lines} flag="needs-you" />)).toMatch(/<details[^>]*\sopen/);
+  });
+  it('leaves the fold to the reader: a newer group arriving does not fold the old newest, and a flagged group stays open', async () => {
+    const { act } = await import('react');
+    const { createRoot } = await import('react-dom/client');
+    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    const host = document.createElement('div');
+    const root = createRoot(host);
+    const lines = [line(1, '{"tool":"Read","arguments":{}}', { kind: 'tool' })];
+    act(() => root.render(<ToolSteps lines={lines} open />));
+    expect((host.querySelector('details') as HTMLDetailsElement).open).toBe(true);
+    act(() => root.render(<ToolSteps lines={lines} open={false} />));
+    expect((host.querySelector('details') as HTMLDetailsElement).open).toBe(true);
+    const other = [line(9, '{"tool":"Read","arguments":{}}', { kind: 'tool' })];
+    act(() => root.render(<ToolSteps key="b" lines={other} />));
+    expect((host.querySelector('details') as HTMLDetailsElement).open).toBe(false);
+    act(() => root.render(<ToolSteps key="b" lines={other} flag="needs-you" />));
+    act(() => root.render(<ToolSteps key="b" lines={other} />));
+    expect((host.querySelector('details') as HTMLDetailsElement).open).toBe(true);
+    act(() => root.unmount());
+  });
+  it('draws at most 200 lines of a huge diff until asked for all', () => {
+    const big = `@@ -1,500 +1,500 @@\n${Array.from({ length: 500 }, (_, i) => `+line ${i}`).join('\n')}\n`;
+    const html = renderToStaticMarkup(<ToolSteps open lines={[line(1, '{"tool":"Edit","arguments":{"file_path":"a.rs","old_string":"a"}}', { kind: 'tool' })]} diffs={new Map([[1, line(2, big, { kind: 'diff', path: 'a.rs' })]])} />);
+    expect(html.match(/grid-cols-\[3rem_minmax/g)?.length).toBeLessThanOrEqual(200);
+    expect(html).toContain('Show all 501 lines');
   });
   it('shows an edit with its diff inside the row, with line numbers and a hunk header', () => {
     const html = renderToStaticMarkup(<ToolSteps open lines={[line(1, '{"tool":"Edit","arguments":{"file_path":"src/a.rs","old_string":"a","new_string":"b"}}', { kind: 'tool' })]}
