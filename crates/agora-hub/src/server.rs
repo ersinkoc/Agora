@@ -1670,15 +1670,25 @@ fn renew_certificate(
         not_after_secs: id.not_after_secs,
     };
     match Enrollment::new(hub.store()).renew(ca, &from, &r.csr_pem, now) {
-        Ok(issued) => v1::CommandResponse {
-            request_id: request_id.to_string(),
-            result: Some(command_response::Result::Ok(v1::CommandOk {
-                result: Some(command_ok::Result::Renew(v1::RenewResponse {
-                    cert_pem: issued.cert_pem,
-                    not_after_ms: now.saturating_add(ca.lifetime_ms()),
+        Ok(issued) => {
+            // From the certificate itself: a certificate sent again keeps its own end.
+            let not_after_ms = crate::ca::cert_not_after_secs(&issued.cert_pem)
+                .ok()
+                .and_then(|s| u64::try_from(s).ok())
+                .map_or_else(
+                    || now.saturating_add(ca.lifetime_ms()),
+                    |s| s.saturating_mul(1000),
+                );
+            v1::CommandResponse {
+                request_id: request_id.to_string(),
+                result: Some(command_response::Result::Ok(v1::CommandOk {
+                    result: Some(command_ok::Result::Renew(v1::RenewResponse {
+                        cert_pem: issued.cert_pem,
+                        not_after_ms,
+                    })),
                 })),
-            })),
-        },
+            }
+        }
         Err(RenewError::Refused(why)) => error_response(
             request_id,
             &Error::new(ErrorCode::EnrollRenewRefused).with("reason", why.reason()),

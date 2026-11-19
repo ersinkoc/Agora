@@ -357,3 +357,32 @@ async fn a_client_cannot_send_a_renewal() {
     };
     assert_eq!(code(&answer), "protocol.invalid_message command");
 }
+
+/// A renewal whose answer was lost is answered again, over the wire, with the same certificate for the same request; another request
+/// from the same (now superseded) certificate gets nothing.
+#[tokio::test]
+async fn a_lost_answer_is_sent_again_for_the_same_request_only() {
+    let r = rig().await;
+    let (_, csr) = new_device_request().unwrap();
+    let (_, other) = new_device_request().unwrap();
+    let creds = || Some((r.cert.clone(), r.key.clone()));
+    let first = {
+        let mut c = dial_tls(r.addr, client_tls(&r.trust, creds())).await;
+        ask(&mut c, renew(&csr)).await.expect("an answer")
+    };
+    // (the first answer is "lost": the machine asks again with the request it kept)
+    let again = {
+        let mut c = dial_tls(r.addr, client_tls(&r.trust, creds())).await;
+        ask(&mut c, renew(&csr)).await.expect("an answer")
+    };
+    let pem = |resp: &v1::CommandResponse| match &resp.result {
+        Some(command_response::Result::Ok(v1::CommandOk {
+            result: Some(command_ok::Result::Renew(d)),
+        })) => (d.cert_pem.clone(), d.not_after_ms),
+        _ => panic!("{resp:?}"),
+    };
+    assert_eq!(pem(&first), pem(&again));
+    let mut thief = dial_tls(r.addr, client_tls(&r.trust, creds())).await;
+    let refused = ask(&mut thief, renew(&other)).await.expect("an answer");
+    assert_eq!(code(&refused), "enroll.renew_refused superseded");
+}

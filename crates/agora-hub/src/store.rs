@@ -343,21 +343,29 @@ impl SqliteStore {
             )?;
         }
         if version < 13 {
-            // ADR-0085: when a machine first connected with each certificate (NULL until it does), so the hub can revoke a machine's older
-            // certificates a week after it connected with a newer one.
-            // Only added when missing, as the other steps are idempotent: a database taken back to an older version by hand (the tests
-            // do) already has it.
-            let has: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('devices') WHERE name = 'first_seen_ms'",
-                [],
-                |r| r.get(0),
-            )?;
-            let add = if has == 0 {
-                "ALTER TABLE devices ADD COLUMN first_seen_ms INTEGER;"
-            } else {
-                ""
-            };
-            conn.execute_batch(&format!("BEGIN; {add} PRAGMA user_version = 13; COMMIT;"))?;
+            // ADR-0085: per certificate, when a machine first connected with it (NULL until it does) so the hub can revoke a machine's
+            // older certificates a week after it connected with a newer one; and, for a certificate issued by a renewal, its PEM (public
+            // data) and the SHA-256 of the public key of the request it was issued for, so a renewal whose answer was lost can be answered
+            // again with the same certificate. Schema 13 is unreleased, so these columns are part of it, not a step 14.
+            // Each column is added only when missing, as the other steps are idempotent: a database taken back to an older version by hand
+            // (the tests do) already has them.
+            let mut script = String::from("BEGIN;");
+            for (name, kind) in [
+                ("first_seen_ms", "INTEGER"),
+                ("cert_pem", "TEXT"),
+                ("csr_key_hash", "BLOB"),
+            ] {
+                let has: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('devices') WHERE name = ?1",
+                    [name],
+                    |r| r.get(0),
+                )?;
+                if has == 0 {
+                    script.push_str(&format!(" ALTER TABLE devices ADD COLUMN {name} {kind};"));
+                }
+            }
+            script.push_str(" PRAGMA user_version = 13; COMMIT;");
+            conn.execute_batch(&script)?;
         }
         Ok(Self {
             conn: Mutex::new(conn),
@@ -1044,6 +1052,8 @@ mod tests {
             conn.execute_batch(
                 "INSERT INTO devices (serial, node_id, enrolled_ms) VALUES ('ab', 'n1', 7);
                  ALTER TABLE devices DROP COLUMN first_seen_ms;
+                 ALTER TABLE devices DROP COLUMN cert_pem;
+                 ALTER TABLE devices DROP COLUMN csr_key_hash;
                  PRAGMA user_version = 12;",
             )
             .unwrap();

@@ -25,6 +25,17 @@ pub const RENEW_MIN_GAP_MS: u64 = 60 * 60 * 1000;
 pub const SUPERSEDED_GRACE_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 /// ADR-0085: a refused renewal is written to the audit trail at most once per machine per reason in this long.
 pub const REFUSAL_AUDIT_GAP_MS: u64 = 60 * 60 * 1000;
+/// ADR-0085: how many times an hour a machine may have the same renewal answered again (its answer was lost).
+pub const RESENDS_PER_HOUR: i64 = 5;
+const RESEND_WINDOW_MS: u64 = 60 * 60 * 1000;
+
+/// What [`Enrollment::renew`] decided.
+enum Decision {
+    Refuse(RenewRefusal),
+    /// The same certificate again (the request is the one it was issued for, and it never connected).
+    Resend(IssuedCert),
+    Issue,
+}
 
 /// What a renewal needs to know about the certificate that asks for it.
 pub struct RenewFrom<'a> {
@@ -312,21 +323,21 @@ impl<'a> Enrollment<'a> {
 
     /// ADR-0085: renews a machine's certificate. `from` is the certificate of the connection that asked (already verified by TLS and
     /// found active by the caller; every fact here is checked again against the record). Issues a certificate for the same node id with
-    /// the same usages and a fresh key (the CSR's key; its name, extensions and usages are ignored, as at enrollment), records it and an
-    /// audit row in one transaction, and revokes nothing: the previous certificate stays valid until its own end (see
-    /// [`Self::revoke_superseded`]).
+    /// the same usages and a fresh key (the CSR's key; its name, extensions and usages are ignored, as at enrollment), records it (with
+    /// its PEM and the hash of the CSR's key) and an audit row in one transaction, and revokes nothing: the previous certificate stays
+    /// valid until its own end (see [`Self::revoke_superseded`]).
     ///
     /// Only the machine's **newest** active certificate may renew. An older one, still valid during its grace, may connect but is refused
     /// as `superseded`: otherwise a copy of an old certificate and key could renew hourly, become the newest, and have the real machine's
-    /// certificate a week later. A refusal is an audit row too (see [`REFUSAL_AUDIT_GAP_MS`]).
+    /// certificate revoked a week later. A refusal is an audit row too (see [`REFUSAL_AUDIT_GAP_MS`]).
     ///
-    /// One exception, for a renewal whose answer was lost (the machine crashed or timed out after the hub issued): the machine then
-    /// holds the PREVIOUS certificate and the newest one was never delivered. When the newest active certificate has never connected
-    /// (`first_seen_ms` is empty), the previous one is the machine's current credential, and it may renew: the never-used newest one is
-    /// revoked and a fresh one issued (`lost_answer` in the audit row). A thief with an older copy gains nothing from this: once the
-    /// real machine has moved to the newest certificate it has connected with it, and from then on every older one is `superseded`; and
-    /// before that moment the older certificate being used IS the machine's credential, so the thief holds what the machine holds (the
-    /// accepted residual: revocation is the answer). Only the previous one (not any older one) qualifies, and the hour limit still applies.
+    /// **A renewal whose answer was lost** (the machine crashed or timed out after the hub issued) is answered again, idempotently: when
+    /// the newest active certificate B was issued by a renewal, has never connected, and the request carries EXACTLY the public key of the
+    /// request B was issued for, the hub returns B again (same serial; nothing new issued or revoked; an `enroll.renew_resent` audit row;
+    /// at most [`RESENDS_PER_HOUR`] an hour per machine and outside the hour limit for new certificates). This gives a thief nothing: B's
+    /// private key never left the machine, so a thief holding only an older certificate cannot send that key, and a different request from
+    /// an older certificate is still `superseded`. Once B has connected it is no longer offered. The machine must keep the key and request
+    /// of a renewal until it has stored the answer.
     pub fn renew(
         &self,
         ca: &Ca,
@@ -336,36 +347,43 @@ impl<'a> Enrollment<'a> {
     ) -> Result<IssuedCert, RenewError> {
         let mut conn = self.store.lock()?;
         let tx = conn.transaction()?;
-        match Self::refusal(&tx, ca, from, now_ms)? {
-            Err(why) => {
+        match Self::decide(&tx, ca, from, csr_pem, now_ms)? {
+            Decision::Refuse(why) => {
                 Self::audit_refusal(&tx, from, why, now_ms)?;
                 tx.commit()?;
                 Err(RenewError::Refused(why))
             }
-            Ok(lost) => {
-                let issued = ca.issue_node(from.node_id, csr_pem)?;
-                if let Some(never_used) = &lost {
-                    tx.execute(
-                        "UPDATE devices SET revoked_ms = ?2 WHERE serial = ?1 AND revoked_ms IS NULL",
-                        params![never_used, to_i64(now_ms)],
-                    )?;
-                }
-                let marker = lost
-                    .as_ref()
-                    .map_or(String::new(), |n| format!(" lost_answer revoked={n}"));
+            Decision::Resend(again) => {
                 tx.execute(
-                    "INSERT INTO devices (serial, node_id, enrolled_ms) VALUES (?1, ?2, ?3)",
-                    params![issued.serial_hex, from.node_id, to_i64(now_ms)],
+                    "INSERT INTO audit (at_ms, who, session, action, node, outcome) VALUES (?1, ?2, '', 'enroll.renew_resent', ?2, ?3)",
+                    params![
+                        to_i64(now_ms),
+                        from.node_id,
+                        format!("presented={} serial={}", from.serial_hex, again.serial_hex)
+                    ],
+                )?;
+                tx.commit()?;
+                Ok(again)
+            }
+            Decision::Issue => {
+                let key_hash = crate::ca::csr_key_hash(csr_pem)?;
+                let issued = ca.issue_node(from.node_id, csr_pem)?;
+                tx.execute(
+                    "INSERT INTO devices (serial, node_id, enrolled_ms, cert_pem, csr_key_hash) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![
+                        issued.serial_hex,
+                        from.node_id,
+                        to_i64(now_ms),
+                        issued.cert_pem,
+                        key_hash.to_vec()
+                    ],
                 )?;
                 tx.execute(
                     "INSERT INTO audit (at_ms, who, session, action, node, outcome) VALUES (?1, ?2, '', 'enroll.renew', ?2, ?3)",
                     params![
                         to_i64(now_ms),
                         from.node_id,
-                        format!(
-                            "ok serial={} presented={}{marker}",
-                            issued.serial_hex, from.serial_hex
-                        )
+                        format!("ok serial={} presented={}", issued.serial_hex, from.serial_hex)
                     ],
                 )?;
                 tx.commit()?;
@@ -374,14 +392,16 @@ impl<'a> Enrollment<'a> {
         }
     }
 
-    /// Why this certificate may not renew now (`Err`), checked in this order; or that it may (`Ok`): with `Some(serial)` when it is the
-    /// lost-answer case and `serial` is the never-connected newest certificate to revoke.
-    fn refusal(
+    /// What a renewal request gets: refused, answered again with a certificate already issued, or a new certificate. Checks, in order:
+    /// unknown, revoked, expired, too_old; then which certificate asks (the newest, or an older one that may only be answered again, else
+    /// `superseded`); then the hour limit for a new certificate.
+    fn decide(
         tx: &rusqlite::Transaction<'_>,
         ca: &Ca,
         from: &RenewFrom<'_>,
+        csr_pem: &str,
         now_ms: u64,
-    ) -> Result<Result<Option<String>, RenewRefusal>, RenewError> {
+    ) -> Result<Decision, RenewError> {
         let row: Option<(String, i64, Option<i64>)> = tx
             .query_row(
                 "SELECT node_id, enrolled_ms, revoked_ms FROM devices WHERE serial = ?1",
@@ -391,49 +411,70 @@ impl<'a> Enrollment<'a> {
             .optional()?;
         // A serial the hub never issued, or one issued to another machine than the certificate names: nothing to renew.
         let Some((_, issued_ms, revoked)) = row.filter(|(n, _, _)| n == from.node_id) else {
-            return Ok(Err(RenewRefusal::Unknown));
+            return Ok(Decision::Refuse(RenewRefusal::Unknown));
         };
         if revoked.is_some() {
-            return Ok(Err(RenewRefusal::Revoked));
+            return Ok(Decision::Refuse(RenewRefusal::Revoked));
         }
         let now_s = i64::try_from(now_ms / 1000).unwrap_or(i64::MAX);
         if from.not_after_secs <= now_s {
-            return Ok(Err(RenewRefusal::Expired));
+            return Ok(Decision::Refuse(RenewRefusal::Expired));
         }
         // The hub's own record of when it issued the certificate. Distinct from `Expired`, which trusts the end the certificate
         // carries: this one covers a certificate whose end is later than the hub's current lifetime allows (the lifetime was lowered
         // after it was issued, or the certificate was issued under a longer one), so such a certificate cannot be prolonged further
         // than one current lifetime from when the hub issued it.
         if issued_ms.saturating_add(to_i64(ca.lifetime_ms())) <= to_i64(now_ms) {
-            return Ok(Err(RenewRefusal::TooOld));
+            return Ok(Decision::Refuse(RenewRefusal::TooOld));
         }
-        // The machine's two newest active certificates, newest first, and whether the newest has ever connected.
-        let mut stmt = tx.prepare(
-            "SELECT serial, first_seen_ms IS NOT NULL FROM devices WHERE node_id = ?1 AND revoked_ms IS NULL ORDER BY enrolled_ms DESC, rowid DESC LIMIT 2",
-        )?;
-        let top: Vec<(String, bool)> = stmt
-            .query_map([from.node_id], |r| Ok((r.get(0)?, r.get(1)?)))?
-            .collect::<Result<_, _>>()?;
-        drop(stmt);
-        let mut lost = None;
-        match top.as_slice() {
-            [(newest, _), ..] if newest == from.serial_hex => {}
-            [(newest, connected), (previous, _)] if previous == from.serial_hex && !connected => {
-                lost = Some(newest.clone());
+        // The machine's newest active certificate: its serial, whether it has connected, and what a renewal stored for it.
+        type Newest = (String, bool, Option<String>, Option<Vec<u8>>);
+        let newest: Option<Newest> = tx
+            .query_row(
+                "SELECT serial, first_seen_ms IS NOT NULL, cert_pem, csr_key_hash FROM devices WHERE node_id = ?1 AND revoked_ms IS NULL
+                 ORDER BY enrolled_ms DESC, rowid DESC LIMIT 1",
+                [from.node_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()?;
+        let Some((newest_serial, connected, newest_pem, newest_key)) = newest else {
+            return Ok(Decision::Refuse(RenewRefusal::Superseded));
+        };
+        if newest_serial != from.serial_hex {
+            // An older certificate. It gets nothing new; it can only be answered again, with the certificate the machine's own key
+            // (which the older certificate does not give anyone) was issued for.
+            let same_request = match (&newest_pem, &newest_key, connected) {
+                (Some(_), Some(stored), false) => crate::ca::csr_key_hash(csr_pem)
+                    .is_ok_and(|h| h.as_slice() == stored.as_slice()),
+                _ => false,
+            };
+            let Some(pem) = newest_pem.filter(|_| same_request) else {
+                return Ok(Decision::Refuse(RenewRefusal::Superseded));
+            };
+            let recent: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM audit WHERE action = 'enroll.renew_resent' AND node = ?1 AND at_ms > ?2",
+                params![from.node_id, to_i64(now_ms.saturating_sub(RESEND_WINDOW_MS))],
+                |r| r.get(0),
+            )?;
+            if recent >= RESENDS_PER_HOUR {
+                return Ok(Decision::Refuse(RenewRefusal::TooFrequent));
             }
-            _ => return Ok(Err(RenewRefusal::Superseded)),
+            return Ok(Decision::Resend(IssuedCert {
+                cert_pem: pem,
+                serial_hex: newest_serial,
+            }));
         }
-        // One certificate per machine per hour, counting every certificate the hub issued for it (enrollment included). Only the newest
-        // certificate gets here, so a copy of an older one cannot use up the real machine's hour.
+        // One new certificate per machine per hour, counting every certificate the hub issued for it (enrollment included). Only the
+        // newest certificate gets here, so a copy of an older one cannot use up the real machine's hour.
         let latest: i64 = tx.query_row(
             "SELECT MAX(enrolled_ms) FROM devices WHERE node_id = ?1",
             [from.node_id],
             |r| r.get(0),
         )?;
         if latest.saturating_add(to_i64(RENEW_MIN_GAP_MS)) > to_i64(now_ms) {
-            return Ok(Err(RenewRefusal::TooFrequent));
+            return Ok(Decision::Refuse(RenewRefusal::TooFrequent));
         }
-        Ok(Ok(lost))
+        Ok(Decision::Issue)
     }
 
     /// Records a refused renewal as `enroll.renew_refused` (node, reason, presenting serial), at most once per node per reason per
@@ -1281,80 +1322,194 @@ mod tests {
             .unwrap()
     }
 
-    /// A renewal whose answer was lost: the machine holds the previous certificate and the newest one never connected. The previous
-    /// one renews, the never-used newest one is revoked, a fresh one is issued, and the audit row says so.
-    #[test]
-    fn a_machine_that_lost_the_answer_of_a_renewal_renews_from_its_previous_certificate() {
-        let (store, ca, _) = setup();
-        let e = Enrollment::new(&store);
-        let (old, end) = enrolled(&store, &ca, "a", 1_000_000);
-        let (_, csr) = new_device_request().unwrap();
-        let t = 1_000_000 + HOUR;
-        // The hub issued `lost`, the answer never arrived: it never connected.
-        let lost = e.renew(&ca, &from(&old, "a", end), &csr, t).unwrap();
-        // Within the hour the hour limit still applies.
-        assert_eq!(
-            refusal(e.renew(&ca, &from(&old, "a", end), &csr, t + HOUR - 1)),
-            "too_frequent"
-        );
-        let fresh = e.renew(&ca, &from(&old, "a", end), &csr, t + HOUR).unwrap();
-        assert!(
-            is_revoked(&store, &lost.serial_hex),
-            "the never-used certificate is revoked"
-        );
-        assert!(
-            !is_revoked(&store, &old),
-            "the previous one stays valid (grace)"
-        );
-        assert!(e.is_active(&fresh.serial_hex).unwrap());
-        let rows = crate::audit::Audit::new(&store).list(0, None, 100).unwrap();
-        let row = rows.iter().rfind(|r| r.action == "enroll.renew").unwrap();
-        assert_eq!(
-            row.outcome,
-            format!(
-                "ok serial={} presented={old} lost_answer revoked={}",
-                fresh.serial_hex, lost.serial_hex
+    fn active_count(store: &SqliteStore, node: &str) -> i64 {
+        store
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM devices WHERE node_id = ?1 AND revoked_ms IS NULL",
+                [node],
+                |r| r.get(0),
             )
-        );
-        // The machine can lose the answer again and still recover, an hour later.
-        let again = e
-            .renew(&ca, &from(&old, "a", end), &csr, t + 2 * HOUR)
-            .unwrap();
-        assert!(is_revoked(&store, &fresh.serial_hex));
-        assert!(e.is_active(&again.serial_hex).unwrap());
+            .unwrap()
     }
 
-    /// Once the newest certificate has connected even once, the older ones are refused as superseded; and an older one than the previous
-    /// never qualifies.
+    fn resent_rows(store: &SqliteStore) -> Vec<crate::audit::Entry> {
+        crate::audit::Audit::new(store)
+            .list(0, None, 1000)
+            .unwrap()
+            .into_iter()
+            .filter(|r| r.action == "enroll.renew_resent")
+            .collect()
+    }
+
+    /// (1) A renewal whose answer was lost is answered again with the same certificate when the same request comes from the machine's
+    /// previous certificate: nothing new is issued, nothing is revoked, and the hour limit for new certificates does not apply.
     #[test]
-    fn the_lost_answer_path_closes_when_the_newest_certificate_connects_and_never_reaches_older_ones(
-    ) {
+    fn a_lost_answer_is_answered_again_with_the_same_certificate() {
         let (store, ca, _) = setup();
         let e = Enrollment::new(&store);
-        let (first, end) = enrolled(&store, &ca, "a", 1_000_000);
+        let (a, end) = enrolled(&store, &ca, "n", 1_000_000);
         let (_, csr) = new_device_request().unwrap();
         let t = 1_000_000 + HOUR;
-        let second = e.renew(&ca, &from(&first, "a", end), &csr, t).unwrap();
-        // The newest connects once: the previous one may not renew any more.
-        e.note_connected("a", &second.serial_hex, t + 10).unwrap();
-        assert_eq!(
-            refusal(e.renew(&ca, &from(&first, "a", end), &csr, t + 2 * HOUR)),
-            "superseded"
-        );
-        assert!(!is_revoked(&store, &second.serial_hex));
-        // The answer of the next renewal is lost: `third` was issued and never connected.
+        let b = e.renew(&ca, &from(&a, "n", end), &csr, t).unwrap();
+        // The answer is lost; the machine asks again, with the same request, within the hour.
+        let again = e.renew(&ca, &from(&a, "n", end), &csr, t + 60_000).unwrap();
+        assert_eq!(again.serial_hex, b.serial_hex);
+        assert_eq!(again.cert_pem, b.cert_pem);
+        // Nothing new: the machine has its first and the one renewal, both still active, and a third ask is the same again.
+        assert_eq!(device_rows(&store), 2);
+        assert_eq!(active_count(&store, "n"), 2);
+        assert!(!is_revoked(&store, &a) && !is_revoked(&store, &b.serial_hex));
         let third = e
-            .renew(&ca, &from(&second.serial_hex, "a", end), &csr, t + 3 * HOUR)
+            .renew(&ca, &from(&a, "n", end), &csr, t + 120_000)
             .unwrap();
-        // `first` is two behind the newest, not the previous one: it cannot use the lost-answer path.
+        assert_eq!(third.serial_hex, b.serial_hex);
+        // One audit row of the renewal, one per resend (with the presenting and the resent serial).
+        let rows = resent_rows(&store);
+        assert_eq!(rows.len(), 2);
         assert_eq!(
-            refusal(e.renew(&ca, &from(&first, "a", end), &csr, t + 5 * HOUR)),
+            rows[0].outcome,
+            format!("presented={a} serial={}", b.serial_hex)
+        );
+        let all = crate::audit::Audit::new(&store).list(0, None, 100).unwrap();
+        assert_eq!(all.iter().filter(|r| r.action == "enroll.renew").count(), 1);
+        assert!(all.iter().all(|r| !r.outcome.contains("lost_answer")));
+    }
+
+    /// (2) A thief holding only an older certificate: a different request is `superseded`, the never-connected newest certificate is
+    /// untouched (not revoked, nothing issued), and the refusal is an audit row.
+    #[test]
+    fn a_thief_with_an_older_certificate_gets_nothing_while_the_newest_has_never_connected() {
+        let (store, ca, _) = setup();
+        let e = Enrollment::new(&store);
+        let (a, end) = enrolled(&store, &ca, "n", 1_000_000);
+        let (_, csr) = new_device_request().unwrap();
+        let t = 1_000_000 + HOUR;
+        let b = e.renew(&ca, &from(&a, "n", end), &csr, t).unwrap();
+        let (_, thief_csr) = new_device_request().unwrap();
+        for i in 0..20 {
+            assert_eq!(
+                refusal(e.renew(&ca, &from(&a, "n", end), &thief_csr, t + HOUR * 2 + i)),
+                "superseded"
+            );
+        }
+        assert!(!is_revoked(&store, &b.serial_hex));
+        assert_eq!(device_rows(&store), 2);
+        assert!(resent_rows(&store).is_empty());
+        assert_eq!(refusal_rows(&store).len(), 1);
+        // A request that does not parse is just as refused.
+        assert_eq!(
+            refusal(e.renew(&ca, &from(&a, "n", end), "not a csr", t + HOUR * 2)),
             "superseded"
         );
-        // `second` is the previous one and `third` never connected: it recovers.
+        // And the machine, with its own key, still gets its certificate.
+        assert_eq!(
+            e.renew(&ca, &from(&a, "n", end), &csr, t + HOUR * 2)
+                .unwrap()
+                .serial_hex,
+            b.serial_hex
+        );
+    }
+
+    /// (3) Once the newest certificate has connected it is no longer resent, and the older one is superseded.
+    #[test]
+    fn a_resend_is_not_offered_after_the_newest_certificate_connects() {
+        let (store, ca, _) = setup();
+        let e = Enrollment::new(&store);
+        let (a, end) = enrolled(&store, &ca, "n", 1_000_000);
+        let (_, csr) = new_device_request().unwrap();
+        let t = 1_000_000 + HOUR;
+        let b = e.renew(&ca, &from(&a, "n", end), &csr, t).unwrap();
+        assert!(e.renew(&ca, &from(&a, "n", end), &csr, t + 1).is_ok());
+        e.note_connected("n", &b.serial_hex, t + 2).unwrap();
+        assert_eq!(
+            refusal(e.renew(&ca, &from(&a, "n", end), &csr, t + 3)),
+            "superseded"
+        );
+        assert_eq!(resent_rows(&store).len(), 1);
+    }
+
+    /// (4) At most five resends an hour per machine; the sixth is `too_frequent`, and the hour after it works again.
+    #[test]
+    fn resends_are_limited_per_machine_per_hour() {
+        let (store, ca, _) = setup();
+        let e = Enrollment::new(&store);
+        let (a, end) = enrolled(&store, &ca, "n", 1_000_000);
+        let (other, other_end) = enrolled(&store, &ca, "m", 1_000_000);
+        let (_, csr) = new_device_request().unwrap();
+        let t = 1_000_000 + HOUR;
+        e.renew(&ca, &from(&a, "n", end), &csr, t).unwrap();
+        for i in 0..RESENDS_PER_HOUR {
+            assert!(
+                e.renew(
+                    &ca,
+                    &from(&a, "n", end),
+                    &csr,
+                    t + 1 + u64::try_from(i).unwrap()
+                )
+                .is_ok(),
+                "resend {i}"
+            );
+        }
+        assert_eq!(
+            refusal(e.renew(&ca, &from(&a, "n", end), &csr, t + 100)),
+            "too_frequent"
+        );
+        // Another machine has its own budget.
+        let (_, csr2) = new_device_request().unwrap();
+        let m_new = e
+            .renew(&ca, &from(&other, "m", other_end), &csr2, t)
+            .unwrap();
         assert!(e
-            .renew(&ca, &from(&second.serial_hex, "a", end), &csr, t + 5 * HOUR)
+            .renew(&ca, &from(&other, "m", other_end), &csr2, t + 1)
             .is_ok());
-        assert!(is_revoked(&store, &third.serial_hex));
+        assert_eq!(resent_rows(&store).len(), 6);
+        // An hour after the first resend the budget is back.
+        assert!(e
+            .renew(&ca, &from(&a, "n", end), &csr, t + 1 + HOUR + 1)
+            .is_ok());
+        let _ = m_new;
+    }
+
+    /// (5) A request whose key matches an OLDER issued certificate is not resent: only the newest one is.
+    #[test]
+    fn only_the_newest_issued_certificate_is_resent() {
+        let (store, ca, _) = setup();
+        let e = Enrollment::new(&store);
+        let (a, end) = enrolled(&store, &ca, "n", 1_000_000);
+        let (_, csr_b) = new_device_request().unwrap();
+        let (_, csr_c) = new_device_request().unwrap();
+        let t = 1_000_000 + HOUR;
+        let b = e.renew(&ca, &from(&a, "n", end), &csr_b, t).unwrap();
+        e.note_connected("n", &b.serial_hex, t + 1).unwrap();
+        // The next renewal (from B, the newest) issues C; the answer is lost.
+        let c = e
+            .renew(&ca, &from(&b.serial_hex, "n", end), &csr_c, t + 2 * HOUR)
+            .unwrap();
+        // B's request asked again (by A or B itself) is not C's: it is not resent.
+        assert_eq!(
+            refusal(e.renew(&ca, &from(&a, "n", end), &csr_b, t + 2 * HOUR + 1)),
+            "superseded"
+        );
+        // C's request is resent to the machine's previous certificate B.
+        let again = e
+            .renew(
+                &ca,
+                &from(&b.serial_hex, "n", end),
+                &csr_c,
+                t + 2 * HOUR + 2,
+            )
+            .unwrap();
+        assert_eq!(again.serial_hex, c.serial_hex);
+        // A certificate that was not issued by a renewal (enrollment) has no stored request and is never resent.
+        let (x, x_end) = enrolled(&store, &ca, "x", 1_000_000);
+        let (_, csr_x) = new_device_request().unwrap();
+        let y = e.renew(&ca, &from(&x, "x", x_end), &csr_x, t).unwrap();
+        e.note_connected("x", &y.serial_hex, t + 1).unwrap();
+        assert_eq!(
+            refusal(e.renew(&ca, &from(&x, "x", x_end), &csr_x, t + 2)),
+            "superseded"
+        );
     }
 }
