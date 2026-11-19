@@ -357,7 +357,21 @@ pub fn write_private(path: &std::path::Path, contents: &[u8]) -> io::Result<()> 
             f.sync_all()?;
             // Windows cannot rename a file that is still open.
             drop(f);
-            std::fs::rename(&tmp, path)
+            std::fs::rename(&tmp, path)?;
+            // The rename itself is kept through a power loss only once the folder is on disk (Unix; Windows does this at the rename).
+            // A folder that cannot be opened or synced for this does not undo the write.
+            #[cfg(unix)]
+            if let Some(dir) = path.parent() {
+                let dir = if dir.as_os_str().is_empty() {
+                    std::path::Path::new(".")
+                } else {
+                    dir
+                };
+                if let Ok(d) = std::fs::File::open(dir) {
+                    let _ = d.sync_all();
+                }
+            }
+            Ok(())
         })();
         if result.is_err() {
             let _ = std::fs::remove_file(&tmp);

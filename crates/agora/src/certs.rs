@@ -69,26 +69,55 @@ fn renewal(link_dir: &Path, now: i64) -> Option<Check> {
     let pem = std::fs::read_to_string(link_dir.join("cert.pem")).ok()?;
     let ends = cert_not_after_secs(&pem).ok()?;
     let file = link_dir.display().to_string();
-    let made = |id: &'static str, status, detail: String| Check {
+    // `asked` says whether the time of the last try is known; `when` is that time as a date.
+    let made = |id: &'static str, status, detail: String, asked_at: i64| Check {
         id,
         status,
         detail,
-        args: vec![("file", file.clone())],
+        args: vec![
+            ("file", file.clone()),
+            ("asked", if asked_at > 0 { "yes" } else { "no" }.to_string()),
+            (
+                "when",
+                crate::hubcli::utc(u64::try_from(asked_at).unwrap_or(0).saturating_mul(1000)),
+            ),
+        ],
     };
     match state(link_dir, ends) {
-        Some(s) if s.code == "join_again" => {
-            Some(made("cert-renew-join-again", Status::Fail, s.detail))
-        }
-        Some(s) if s.code == "superseded" => {
-            Some(made("cert-renew-superseded", Status::Warn, s.detail))
-        }
-        Some(s) if s.code == "rejected" => {
-            Some(made("cert-renew-rejected", Status::Warn, s.detail))
-        }
+        Some(s) if s.code == "join_again" => Some(made(
+            "cert-renew-join-again",
+            Status::Fail,
+            s.detail,
+            s.asked_at,
+        )),
+        Some(s) if s.code == "superseded" => Some(made(
+            "cert-renew-superseded",
+            Status::Warn,
+            s.detail,
+            s.asked_at,
+        )),
+        Some(s) if s.code == "rejected" => Some(made(
+            "cert-renew-rejected",
+            Status::Warn,
+            s.detail,
+            s.asked_at,
+        )),
+        // The hub this machine is connected to is older than renewal: nothing can be asked of it yet. Only a warning when the end is
+        // near.
+        Some(s) if s.code == "hub_old" => Some(made(
+            "cert-renew-hub-old",
+            if ends - now < agora_hub::ca::EXPIRY_WARN_DAYS * 86_400 {
+                Status::Warn
+            } else {
+                Status::Ok
+            },
+            String::new(),
+            s.asked_at,
+        )),
         // A request is waiting for the hub's answer (the hub was away, or asked to wait): the machine keeps working with the
         // certificate it has until the end.
         _ if pending_exists(link_dir) && ends > now => {
-            Some(made("cert-renew-pending", Status::Ok, String::new()))
+            Some(made("cert-renew-pending", Status::Ok, String::new(), 0))
         }
         _ => None,
     }
@@ -173,7 +202,7 @@ mod tests {
     fn state(d: &Path, code: &str, detail: &str, ends: i64) {
         std::fs::write(
             d.join("renew-state"),
-            format!("{code}\n{detail}\n{ends}\n0\n"),
+            format!("{code}\n{detail}\n{ends}\n0\n1700000000\n0\n"),
         )
         .unwrap();
     }
@@ -230,5 +259,31 @@ mod tests {
             [("cert-renew-pending", Status::Ok, String::new())]
         );
         assert!(renewals(&d, ends + 5).is_empty());
+    }
+
+    #[test]
+    fn the_last_try_and_an_old_hub_are_told_and_a_damaged_state_file_says_nothing() {
+        let (d, ends) = renewal_dir("renew-when");
+        state(&d, "join_again", "unknown", ends);
+        let c = checks(&d, &d, secs_now())
+            .into_iter()
+            .find(|c| c.id == "cert-renew-join-again")
+            .unwrap();
+        assert!(c.args.contains(&("asked", "yes".to_string())));
+        assert!(c
+            .args
+            .contains(&("when", "2023-11-14 22:13 UTC".to_string())));
+        // An older hub: nothing to ask of it, an informative line (a warning once the end is near).
+        state(&d, "hub_old", "", ends);
+        assert_eq!(
+            renewals(&d, secs_now()),
+            [("cert-renew-hub-old", Status::Ok, String::new())]
+        );
+        assert_eq!(renewals(&d, ends - 86_400)[0].1, Status::Warn);
+        // A state file that cannot be read is no state, and no line.
+        std::fs::write(d.join("renew-state"), [0xffu8, 0xfe, 0x00]).unwrap();
+        assert!(renewals(&d, secs_now()).is_empty());
+        std::fs::write(d.join("renew-state"), "join_again\n").unwrap();
+        assert!(renewals(&d, secs_now()).is_empty());
     }
 }

@@ -27,7 +27,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 # ECDSA P-256 verification of approval signatures (ADR-0028); already in the tree via the hub.
 ring = { version = "0.17", default-features = false }
 # Pairing checks the certificate the hub delivers (its subject and public key) before keeping it; already in the tree through the hub.
-x509-parser = "0.18"
+x509-parser = { version = "0.18", features = ["verify"] }
 # The mesh server speaks MCP (JSON-RPC with JSON payloads).
 serde_json = "1"
 

@@ -546,6 +546,7 @@ fn fast() -> Timing {
         check_every: Duration::from_millis(200),
         unknown_every: Duration::from_millis(100),
         too_frequent: Duration::from_secs(3600),
+        refused_every: Duration::from_secs(86_400),
         retry_first: Duration::from_millis(100),
         retry_max: Duration::from_millis(400),
     }

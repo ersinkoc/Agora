@@ -4,15 +4,24 @@
 //! The link folder holds `url`, `node-id`, `ca.pem`, `cert.pem` and `key.pem` (written by enrollment or pairing). A renewal adds three
 //! files, all private to this user and each written whole (a temporary file renamed over the target):
 //!
-//! - `renew-pending.pem`: the fresh key and its request. **Written before the request is sent** and kept until the answer is stored,
-//!   so a crash or a lost answer is met by sending the SAME request again (the hub answers it with the same certificate, nothing new
-//!   issued).
+//! - `renew-pending.pem`: the fresh key and its request, and the fingerprint of the certificate they were made for. **Written before the
+//!   request is sent** and kept until the answer is stored, so a crash or a lost answer is met by sending the SAME request again (the
+//!   hub answers it with the same certificate, nothing new issued). A request made for another certificate than the one in use (the
+//!   machine joined again) is dropped, not sent.
 //! - `previous.pem`: the certificate and key that were in use before the new pair was written; removed once a connection made with the
-//!   new certificate was accepted, so a pair is never given up before its replacement has worked once.
-//! - `renew-state`: what the hub last said when it refused (`join_again`, `superseded`, `too_frequent`, `rejected`), for `agora doctor`.
+//!   new certificate was accepted, so a pair is never given up before its replacement has worked once. It is put back only for the
+//!   same node id as the link's `node-id`, and every save of the link (`agora join`, `enroll`, pairing) removes it first.
+//! - `renew-state`: what the hub last said (`join_again`, `superseded`, `too_frequent`, `rejected`, `hub_old`), when it was asked, for
+//!   `agora doctor`. It is only information and a rest period: nothing here is ever decided for good. A refusal that only a new join
+//!   answers is asked again about once a day, and a success clears it.
 //!
 //! The order of an install (see [`install`]) keeps the folder usable at every point: after each step either the old pair or the new
-//! pair can be read as a whole, or [`recover`] makes it so (it runs under the folder's guard whenever the link is loaded).
+//! pair can be read as a whole, or [`recover`] makes it so (it runs under the folder's guard whenever the link is loaded). When it
+//! cannot write (a full disk) [`usable`] still names a pair that matches, from memory, so the uplink never dials with a certificate and
+//! a key that do not belong together.
+//!
+//! The clock is never trusted to give a verdict: whether the certificate has ended is worked out again at every look from its own end
+//! and the clock, and nothing about it is written down, so a clock that jumps forward and back costs nothing.
 //!
 //! Nothing here holds a lock that agents or the supervisor use, and nothing waits on the network while holding the folder's guard.
 //! Agents never depend on any of it: a renewal that cannot finish leaves the node as it was.
@@ -23,47 +32,85 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::cert_renew::{check_renewed, due, pair_matches, validity, Pending, Refusal};
+use crate::cert_renew::{
+    check_renewed, due, fingerprint, pair_matches, subject_name, validity, Pending, Refusal,
+};
 use crate::uplink_client::{CertSource, HubLink, LinkError, RenewError};
 
 /// The fresh key and request of a renewal that has not been answered yet.
 pub const PENDING: &str = "renew-pending.pem";
 /// The pair that was in use before the last renewal, until the new one has connected.
 pub const PREVIOUS: &str = "previous.pem";
-/// What the hub last refused, for `agora doctor`.
+/// What the hub last said, for `agora doctor`.
 pub const STATE: &str = "renew-state";
 
 /// The capability a hub offers when it handles renewals.
 pub const CAPABILITY: &str = "enroll.renew";
 
+/// How many answers that did not check out are asked for again before the request is given up and a new one is made.
+pub const MAX_REJECTED: u32 = 5;
+
+/// The longest a state may hold a retry back, whatever the file says (a damaged or hostile file must not wedge a machine).
+const MAX_HOLD_SECS: i64 = 2 * 86_400;
+
+/// The files the link folder's writers make; a temporary file of theirs is `<name>.tmp-<pid>`.
+const NAMES: [&str; 8] = [
+    "node-id", "url", "ca.pem", "cert.pem", "key.pem", PENDING, PREVIOUS, STATE,
+];
+
+/// Text from the hub (or made from it) as it may be kept, logged or shown: no control characters, at most 200 characters.
+pub fn clean(text: &str) -> String {
+    text.chars().filter(|c| !c.is_control()).take(200).collect()
+}
+
 /// What the hub said, kept as one short file next to the certificate it was said about.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct State {
-    /// `join_again`, `superseded`, `too_frequent` or `rejected`.
+    /// `join_again`, `superseded`, `too_frequent`, `rejected` or `hub_old`.
     pub code: String,
     /// The `reason` the hub gave (or why the answer was rejected): a stable word, shown only as a parameter.
     pub detail: String,
     /// When the certificate this was said about ends: a state about another certificate (the machine joined again) is ignored.
     pub ends: i64,
-    /// Seconds since 1970 before which no new try is made; 0 for a refusal that is never retried.
+    /// Seconds since 1970 before which no new try is made (0: none).
     pub retry_at: i64,
+    /// Seconds since 1970 when the hub was last asked.
+    pub asked_at: i64,
+    /// How many answers in a row did not check out (`rejected`).
+    pub count: u32,
 }
 
 impl State {
     fn encode(&self) -> String {
         format!(
-            "{}\n{}\n{}\n{}\n",
-            self.code, self.detail, self.ends, self.retry_at
+            "{}\n{}\n{}\n{}\n{}\n{}\n",
+            clean(&self.code),
+            clean(&self.detail),
+            self.ends,
+            self.retry_at,
+            self.asked_at,
+            self.count
         )
     }
 
+    /// Reads what [`Self::encode`] wrote, and the shorter form an earlier build wrote. A file that cannot be read is `None`: it is
+    /// then as if nothing was recorded, and the next refusal writes it again.
     fn decode(text: &str) -> Option<Self> {
         let mut l = text.lines();
-        Some(Self {
-            code: l.next()?.to_string(),
-            detail: l.next()?.to_string(),
-            ends: l.next()?.parse().ok()?,
-            retry_at: l.next()?.parse().ok()?,
+        let code = clean(l.next()?);
+        let detail = clean(l.next()?);
+        let ends = l.next()?.trim().parse().ok()?;
+        let mut num = || l.next().and_then(|v| v.trim().parse::<i64>().ok());
+        let retry_at = num().unwrap_or(0);
+        let asked_at = num().unwrap_or(0);
+        let count = num().and_then(|n| u32::try_from(n).ok()).unwrap_or(0);
+        (!code.is_empty()).then_some(Self {
+            code,
+            detail,
+            ends,
+            retry_at,
+            asked_at,
+            count,
         })
     }
 }
@@ -120,11 +167,38 @@ fn split_pair(text: &str) -> Option<(String, String)> {
     ))
 }
 
+/// The pair in `previous.pem`, when it is whole and for the node the link folder is for now (`node-id`): a rejoin of another identity
+/// must never be undone by the pair of the one before.
+fn previous_pair(dir: &Path) -> Option<(String, String)> {
+    let (cert, key) = split_pair(&read(dir, PREVIOUS)?)?;
+    let id = read(dir, "node-id")?;
+    (pair_matches(&cert, &key) && subject_name(&cert).as_deref() == Some(id.trim()))
+        .then_some((cert, key))
+}
+
+/// Removes what a writer of this folder left behind when it stopped between creating its temporary file and renaming it: a file named
+/// `<one of our files>.tmp-<digits>`, nothing else. It may hold a private key. The caller holds the folder's guard, so no writer is
+/// in the middle of one.
+fn sweep_temporaries(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let Some((base, pid)) = name.split_once(".tmp-") else {
+            continue;
+        };
+        if NAMES.contains(&base) && !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit()) {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+}
+
 /// Puts the new certificate and its key in place of the pair in use, in an order that leaves the folder readable whole after every
 /// step: (1) the pair in use is copied to `previous.pem`, (2) the new certificate is written over `cert.pem`, (3) the key of the
 /// request over `key.pem`, (4) `renew-pending.pem` is dropped, (5) `renew-state` is dropped. Between 2 and 3 the files do not match:
-/// [`recover`] finishes the install from `renew-pending.pem`, which is still there. Each write is a temporary file renamed over its
-/// target, so no step leaves half a file. The caller holds the folder's guard.
+/// [`recover`] finishes the install from `renew-pending.pem`, which is still there, or goes back to `previous.pem`. Each write is a
+/// temporary file renamed over its target, so no step leaves half a file. The caller holds the folder's guard.
 pub fn install(
     dir: &Path,
     ops: &dyn Ops,
@@ -145,57 +219,96 @@ pub fn install(
     ops.remove(&dir.join(STATE))
 }
 
+/// What [`recover`] found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Recovery {
+    /// `cert.pem` and `key.pem` already were one pair (or there is no link to look at).
+    Whole,
+    /// They were not, or a stopped install had left files behind, and the folder is now one whole pair.
+    Repaired,
+    /// They are not one pair and could not be made one (the folder cannot be written). [`usable`] still names a pair.
+    Unrepaired,
+}
+
 /// Brings the folder to a state where `cert.pem` and `key.pem` are one pair, after a stop between the steps of [`install`] (the caller
-/// holds the guard):
-/// - the certificate belongs to the pending key but the key file does not: the install is finished (the key is written, the pending
-///   file dropped);
-/// - the pair matches and the pending key is the one in use: the pending file is a leftover and is dropped;
-/// - nothing matches and `previous.pem` holds a whole pair: that pair is put back.
+/// holds the guard). Temporary files a stopped writer left are removed first. Then:
+/// - the pair matches and the pending key is the one in use: an install that only lacked its clean-up is finished (leftovers removed);
+/// - the certificate belongs to the pending key but the key file does not: the key is written and the leftovers dropped; when that
+///   cannot be written the folder is rolled BACK to the pair in `previous.pem` (the same node id only);
+/// - nothing explains the mismatch and `previous.pem` is whole: that pair is put back.
 ///
-/// Returns whether anything was changed. Does nothing for a folder whose files already match.
-pub fn recover(dir: &Path, ops: &dyn Ops) -> bool {
+/// It never says `Whole` or `Repaired` for a folder whose files do not match when read again.
+pub fn recover(dir: &Path, ops: &dyn Ops) -> Recovery {
+    sweep_temporaries(dir);
     let (Some(cert), Some(key)) = (read(dir, "cert.pem"), read(dir, "key.pem")) else {
-        return false;
+        return Recovery::Whole;
     };
     let pending = read(dir, PENDING).and_then(|t| Pending::decode(&t));
-    let matches = pair_matches(&cert, &key);
+    let whole = |dir: &Path| match (read(dir, "cert.pem"), read(dir, "key.pem")) {
+        (Some(c), Some(k)) => pair_matches(&c, &k),
+        _ => false,
+    };
+    if pair_matches(&cert, &key) {
+        if pending
+            .as_ref()
+            .is_some_and(|p| pair_matches(&cert, &p.key_pem))
+        {
+            let _ = ops.remove(&dir.join(PENDING));
+            let _ = ops.remove(&dir.join(STATE));
+            return Recovery::Repaired;
+        }
+        return Recovery::Whole;
+    }
     if let Some(p) = &pending {
+        if pair_matches(&cert, &p.key_pem)
+            && ops
+                .write(&dir.join("key.pem"), format!("{}\n", p.key_pem).as_bytes())
+                .is_ok()
+            && whole(dir)
+        {
+            let _ = ops.remove(&dir.join(PENDING));
+            let _ = ops.remove(&dir.join(STATE));
+            return Recovery::Repaired;
+        }
+    }
+    // Roll back: the certificate first, so that a stop between the two leaves the old pair whole (the key on disk is the old one).
+    if let Some((c, k)) = previous_pair(dir) {
+        let _ = ops.write(&dir.join("cert.pem"), c.as_bytes());
+        let _ = ops.write(&dir.join("key.pem"), format!("{k}\n").as_bytes());
+        if whole(dir) {
+            return Recovery::Repaired;
+        }
+    }
+    Recovery::Unrepaired
+}
+
+/// The certificate and key to use now: the files when they are one pair; else, when only the key could not be written, the new
+/// certificate with the pending key (the new pair, from memory); else the previous pair; else nothing. Never two that do not match.
+pub fn usable(dir: &Path) -> Option<(String, String)> {
+    let cert = read(dir, "cert.pem")?;
+    let key = read(dir, "key.pem")?;
+    if pair_matches(&cert, &key) {
+        return Some((cert, key));
+    }
+    if let Some(p) = read(dir, PENDING).and_then(|t| Pending::decode(&t)) {
         if pair_matches(&cert, &p.key_pem) {
-            // The new certificate is in place. Finish: the key, then drop what is left of the renewal.
-            let ok = matches
-                || ops
-                    .write(&dir.join("key.pem"), format!("{}\n", p.key_pem).as_bytes())
-                    .is_ok();
-            if ok {
-                let _ = ops.remove(&dir.join(PENDING));
-                let _ = ops.remove(&dir.join(STATE));
-            }
-            return true;
+            return Some((cert, p.key_pem));
         }
     }
-    if matches {
-        return false;
-    }
-    // A mismatch the pending key does not explain: go back to the pair that was in use, if it is whole.
-    if let Some((c, k)) = read(dir, PREVIOUS).and_then(|t| split_pair(&t)) {
-        if pair_matches(&c, &k) {
-            let _ = ops.write(&dir.join("cert.pem"), c.as_bytes());
-            let _ = ops.write(&dir.join("key.pem"), format!("{k}\n").as_bytes());
-            return true;
-        }
-    }
-    false
+    previous_pair(dir)
 }
 
 /// How long the timer waits in each case.
 #[derive(Debug, Clone, Copy)]
 pub struct Timing {
-    /// Between looks at the certificate when nothing is due (an hour).
+    /// Between looks at the certificate when nothing is due, and between asks of a hub that does not handle renewals (an hour).
     pub check_every: Duration,
-    /// Between looks while the hub has not said it handles renewals (it may not be connected yet, or it is an older hub).
+    /// Between looks while no hub has said yet whether it handles renewals (it may not be connected yet): a look is a few file reads.
     pub unknown_every: Duration,
-    /// After a refusal `too_frequent` (an hour: the hub's own limit).
+    /// After a refusal `too_frequent` and after an answer that did not check out (an hour: the hub's own limit).
     pub too_frequent: Duration,
+    /// After a refusal that only a new join answers (a day, and up to a tenth more at random so machines do not ask together).
+    pub refused_every: Duration,
     /// After the first failure to reach the hub, doubling up to `retry_max`.
     pub retry_first: Duration,
     pub retry_max: Duration,
@@ -207,6 +320,7 @@ impl Default for Timing {
             check_every: Duration::from_secs(3600),
             unknown_every: Duration::from_secs(15),
             too_frequent: Duration::from_secs(3600),
+            refused_every: Duration::from_secs(86_400),
             retry_first: Duration::from_secs(60),
             retry_max: Duration::from_secs(3600),
         }
@@ -218,11 +332,13 @@ impl Default for Timing {
 pub enum Outcome {
     /// No link, or the certificate has more than a third of its life left.
     Idle,
+    /// The certificate has ended by the clock (nothing is written down about it).
+    Ended,
     /// Due, but the hub has not said it handles renewals.
     WaitingForHub,
     /// A new certificate was stored; the next connection uses it.
     Renewed,
-    /// The hub refused (or a refusal from earlier still holds): the code of the state recorded.
+    /// The hub refused (or a refusal from earlier still rests): the code of the state recorded.
     Refused(String),
     /// The hub could not be reached, answered something else, or the answer was rejected: tried again after a wait.
     Failed,
@@ -239,8 +355,13 @@ pub struct Renewer {
     timing: Timing,
     /// Whether the hub's last welcome listed [`CAPABILITY`].
     hub_offers: AtomicBool,
+    /// Whether a hub has welcomed this node without it (an older hub), as opposed to no welcome yet.
+    hub_without: AtomicBool,
     /// Consecutive failures to reach the hub, for the backoff.
     fails: AtomicU32,
+    /// A rest the state file asked for beyond [`MAX_HOLD_SECS`]: the value in the file and the end this process holds it to, counted
+    /// from when it first saw it (so a file that says "a thousand years" holds two days, not for ever).
+    capped: Mutex<Option<(i64, i64)>>,
     last_log: Mutex<String>,
     /// The lines logged so far (the last 100), for the tests of what is and is not said.
     logged: Mutex<Vec<String>>,
@@ -257,11 +378,21 @@ fn secs_now() -> i64 {
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(0))
 }
 
+/// `base` seconds and up to a tenth more.
+fn jittered(base: Duration) -> i64 {
+    let secs = i64::try_from(base.as_secs()).unwrap_or(i64::MAX / 2);
+    let mut b = [0u8; 4];
+    let _ = getrandom::getrandom(&mut b);
+    secs + i64::from(u32::from_le_bytes(b)) % (secs / 10 + 1)
+}
+
 /// What a look found in the folder, read under its guard.
 struct Snapshot {
     node_id: String,
     link: HubLink,
     pending: Option<Pending>,
+    /// The new certificate is in use (in memory at least) and only its key file or the clean-up is missing: nothing to ask.
+    finishing: bool,
 }
 
 impl Renewer {
@@ -272,19 +403,15 @@ impl Renewer {
         fresh: impl Fn() -> Option<(String, String)> + Send + Sync + 'static,
         hold: impl Fn() -> io::Result<Box<dyn std::any::Any + Send>> + Send + Sync + 'static,
     ) -> Arc<Self> {
-        Arc::new(Self {
+        Self::with_parts(
             dir,
-            timing: Timing::default(),
-            hub_offers: AtomicBool::new(false),
-            fails: AtomicU32::new(0),
-            last_log: Mutex::new(String::new()),
-            logged: Mutex::new(Vec::new()),
-            fresh: Box::new(fresh),
-            ask: Box::new(crate::uplink_client::renew),
-            clock: Box::new(secs_now),
-            hold: Box::new(hold),
-            ops: Arc::new(Real),
-        })
+            Timing::default(),
+            fresh,
+            hold,
+            crate::uplink_client::renew,
+            secs_now,
+            Arc::new(Real),
+        )
     }
 
     /// For tests: the waits, the connection, the clock and the file operations replaced.
@@ -302,7 +429,9 @@ impl Renewer {
             dir,
             timing,
             hub_offers: AtomicBool::new(false),
+            hub_without: AtomicBool::new(false),
             fails: AtomicU32::new(0),
+            capped: Mutex::new(None),
             last_log: Mutex::new(String::new()),
             logged: Mutex::new(Vec::new()),
             fresh: Box::new(fresh),
@@ -316,6 +445,7 @@ impl Renewer {
     /// Says whether the hub handles renewals (what [`CertSource::welcomed`] does).
     pub fn set_hub_offers(&self, offers: bool) {
         self.hub_offers.store(offers, Ordering::Release);
+        self.hub_without.store(!offers, Ordering::Release);
     }
 
     /// Log lines go to the node's log, once per change: a hub that stays away does not repeat itself every minute.
@@ -346,11 +476,12 @@ impl Renewer {
         let _guard = (self.hold)().ok()?;
         recover(&self.dir, self.ops.as_ref());
         let node_id = read(&self.dir, "node-id")?.trim().to_string();
+        let (cert_pem, key_pem) = usable(&self.dir)?;
         let link = HubLink {
             url: read(&self.dir, "url")?.trim().to_string(),
             ca_pem: read(&self.dir, "ca.pem")?,
-            cert_pem: read(&self.dir, "cert.pem")?,
-            key_pem: read(&self.dir, "key.pem")?,
+            cert_pem,
+            key_pem,
             commands: None,
             mesh_out: None,
             grants: None,
@@ -359,16 +490,65 @@ impl Renewer {
             state_dir: None,
             certs: None,
         };
-        let pending = read(&self.dir, PENDING).and_then(|t| Pending::decode(&t));
+        let mut pending = read(&self.dir, PENDING).and_then(|t| Pending::decode(&t));
+        let mut finishing = false;
+        if let Some(p) = &pending {
+            if pair_matches(&link.cert_pem, &p.key_pem) {
+                // The new certificate is the one in use. With the files one pair that is a leftover; otherwise the new key could not
+                // be written yet and the pending file is its only copy.
+                if read(&self.dir, "key.pem").is_some_and(|k| pair_matches(&link.cert_pem, &k)) {
+                    let _ = self.ops.remove(&self.dir.join(PENDING));
+                    pending = None;
+                } else {
+                    finishing = true;
+                }
+            } else if p.for_cert != fingerprint(&link.cert_pem) {
+                // Made for a certificate that is not this one (the machine joined again since): never sent.
+                let _ = self.ops.remove(&self.dir.join(PENDING));
+                pending = None;
+            }
+        }
         Some(Snapshot {
             node_id,
             link,
             pending,
+            finishing,
         })
     }
 
     fn write_state(&self, s: &State) {
+        let Ok(_guard) = (self.hold)() else {
+            return;
+        };
         let _ = self.ops.write(&self.dir.join(STATE), s.encode().as_bytes());
+    }
+
+    fn clear_state(&self) {
+        if let Ok(_guard) = (self.hold)() {
+            let _ = self.ops.remove(&self.dir.join(STATE));
+        }
+    }
+
+    fn drop_pending(&self) {
+        if let Ok(_guard) = (self.hold)() {
+            let _ = self.ops.remove(&self.dir.join(PENDING));
+        }
+    }
+
+    /// The end of a rest the state file asks for: as written, unless it is further than [`MAX_HOLD_SECS`] away, then that long from
+    /// the first time it was seen.
+    fn held_until(&self, retry_at: i64, now: i64) -> i64 {
+        if retry_at <= now + MAX_HOLD_SECS {
+            return retry_at;
+        }
+        let mut held = self.capped.lock().unwrap_or_else(|e| e.into_inner());
+        match *held {
+            Some((file, until)) if file == retry_at => until,
+            _ => {
+                *held = Some((retry_at, now + MAX_HOLD_SECS));
+                now + MAX_HOLD_SECS
+            }
+        }
     }
 
     /// The wait after a failure to reach the hub: the first wait, doubled each time, up to the longest.
@@ -390,36 +570,50 @@ impl Renewer {
         let Some((_, ends)) = validity(&snap.link.cert_pem) else {
             return (Outcome::Idle, self.timing.check_every);
         };
-        // What the hub said about this very certificate stands until its time: a refusal that is never retried is not asked again.
+        if ends <= now {
+            // Past its end the hub refuses the connection itself: nothing to ask. Only joining again helps. This is the clock's word
+            // and is never written down: a clock that was wrong for a while must not leave a verdict behind.
+            self.log(
+                "cert renewal: the certificate has ended by this clock; if the clock is right this machine must join again".into(),
+            );
+            return (Outcome::Ended, self.timing.check_every);
+        }
+        if snap.finishing {
+            self.log("cert renewal: the new key could not be written yet".into());
+            return (Outcome::Failed, self.backoff());
+        }
+        // What the hub said about this very certificate rests until its time (and never for longer than two days, whatever the file
+        // says); then it is asked again.
         if let Some(s) = state(&self.dir, ends) {
-            if s.code == "join_again" || s.code == "superseded" {
-                return (Outcome::Refused(s.code), self.timing.check_every);
-            }
-            if s.retry_at > now {
-                let wait = Duration::from_secs(u64::try_from(s.retry_at - now).unwrap_or(1));
-                return (Outcome::Refused(s.code), wait.min(self.timing.check_every));
+            if s.code == "hub_old" {
+                if self.hub_offers.load(Ordering::Acquire) {
+                    self.clear_state();
+                }
+            } else {
+                let retry_at = self.held_until(s.retry_at, now);
+                if retry_at > now {
+                    let wait = Duration::from_secs(u64::try_from(retry_at - now).unwrap_or(1));
+                    return (Outcome::Refused(s.code), wait.min(self.timing.check_every));
+                }
             }
         }
         if snap.pending.is_none() && due(&snap.link.cert_pem, now) != Some(true) {
             return (Outcome::Idle, self.timing.check_every);
         }
-        if ends <= now {
-            // Past its end the hub refuses the connection itself: nothing to ask. Only joining again helps.
-            self.write_state(&State {
-                code: "join_again".into(),
-                detail: "expired".into(),
-                ends,
-                retry_at: 0,
-            });
-            self.log(
-                "cert renewal: the certificate has ended; this machine must join again".into(),
-            );
-            return (
-                Outcome::Refused("join_again".into()),
-                self.timing.check_every,
-            );
-        }
         if !self.hub_offers.load(Ordering::Acquire) {
+            if self.hub_without.load(Ordering::Acquire) {
+                // A hub that answered the handshake without the capability is an older one: asked about once an hour, said once.
+                self.write_state(&State {
+                    code: "hub_old".into(),
+                    detail: String::new(),
+                    ends,
+                    retry_at: 0,
+                    asked_at: now,
+                    count: 0,
+                });
+                self.log("cert renewal: the hub does not support renewal yet".into());
+                return (Outcome::WaitingForHub, self.timing.check_every);
+            }
             return (Outcome::WaitingForHub, self.timing.unknown_every);
         }
         // The fresh key and request are written BEFORE they are sent, and kept until the answer is stored.
@@ -430,7 +624,7 @@ impl Renewer {
                     self.log("cert renewal: a new key could not be made".into());
                     return (Outcome::Failed, self.backoff());
                 };
-                let p = Pending::new(&key, &csr);
+                let p = Pending::new(&key, &csr).bound(&snap.link.cert_pem);
                 let stored = (self.hold)().and_then(|_g| {
                     self.ops
                         .write(&self.dir.join(PENDING), p.encode().as_bytes())
@@ -448,10 +642,10 @@ impl Renewer {
         match (self.ask)(&snap.link, &pending.csr_pem) {
             Ok(cert_pem) => self.stored(&snap, &pending, &cert_pem, ends, now),
             Err(RenewError::Refused { code, reason }) if code == "enroll.renew_refused" => {
-                self.refused(&snap, &reason, ends, now)
+                self.refused(&snap, &clean(&reason), ends, now)
             }
             Err(RenewError::Refused { code, .. }) => {
-                self.log(format!("cert renewal: the hub answered {code}"));
+                self.log(format!("cert renewal: the hub answered {}", clean(&code)));
                 (Outcome::Failed, self.backoff())
             }
             Err(RenewError::Link(e)) => {
@@ -481,19 +675,38 @@ impl Renewer {
             &snap.link.cert_pem,
             now,
         ) {
-            // The pair in use is kept as it is. The request is kept too: the hub answers it again with the same certificate, and
-            // asking anew would only be refused for an hour and then make the one it already issued the newest.
+            // The pair in use is kept as it is. The request is kept too, and asked again after an hour: the hub answers it again with
+            // the same certificate. After MAX_REJECTED answers in a row that do not check out the request is given up (its key goes
+            // with it) and the next due look makes a new one.
+            let count = state(&self.dir, ends)
+                .filter(|s| s.code == "rejected")
+                .map_or(0, |s| s.count)
+                + 1;
+            let given_up = count >= MAX_REJECTED;
+            let wait = if given_up {
+                self.drop_pending();
+                self.timing.refused_every
+            } else {
+                self.timing.too_frequent
+            };
             self.write_state(&State {
                 code: "rejected".into(),
                 detail: why.code().into(),
                 ends,
-                retry_at: now + i64::try_from(self.timing.too_frequent.as_secs()).unwrap_or(3600),
+                retry_at: now + jittered(wait),
+                asked_at: now,
+                count,
             });
             self.log(format!(
-                "cert renewal: the hub's answer was rejected: {}",
-                why.code()
+                "cert renewal: the hub's answer was rejected ({}), {count} in a row{}",
+                why.code(),
+                if given_up {
+                    "; the request is given up"
+                } else {
+                    ""
+                }
             ));
-            return (Outcome::Failed, self.timing.too_frequent);
+            return (Outcome::Failed, wait);
         }
         let done = (|| {
             let _guard = (self.hold)()?;
@@ -524,7 +737,8 @@ impl Renewer {
             }
             Ok(false) => (Outcome::Idle, self.timing.check_every),
             Err(e) => {
-                // A stop in the middle: the next look recovers the folder from the pending file and sends the same request again.
+                // A stop in the middle: the next look recovers the folder from the pending file (or rolls back to the previous pair)
+                // and sends the same request again.
                 self.log(format!(
                     "cert renewal: the new certificate could not be stored: {}",
                     e.kind()
@@ -534,23 +748,25 @@ impl Renewer {
         }
     }
 
-    /// The hub refused: what it means for this machine.
+    /// The hub refused: what it means for this machine. Nothing is final: the state tells the owner and rests the asking for a day.
     fn refused(&self, snap: &Snapshot, reason: &str, ends: i64, now: i64) -> (Outcome, Duration) {
-        let drop_pending = || {
-            let _ = (self.hold)().map(|_g| self.ops.remove(&self.dir.join(PENDING)));
+        let rest = |wait: Duration, code: &str| {
+            self.write_state(&State {
+                code: code.into(),
+                detail: reason.into(),
+                ends,
+                retry_at: now + jittered(wait),
+                asked_at: now,
+                count: 0,
+            });
         };
         match Refusal::from_reason(reason) {
             Refusal::JoinAgain => {
-                self.write_state(&State {
-                    code: "join_again".into(),
-                    detail: reason.into(),
-                    ends,
-                    retry_at: 0,
-                });
-                drop_pending();
+                rest(self.timing.refused_every, "join_again");
+                self.drop_pending();
                 self.log(format!(
                     "cert renewal: the hub refused ({reason}); node {} must join again",
-                    snap.node_id
+                    clean(&snap.node_id)
                 ));
                 (
                     Outcome::Refused("join_again".into()),
@@ -558,13 +774,8 @@ impl Renewer {
                 )
             }
             Refusal::Superseded => {
-                self.write_state(&State {
-                    code: "superseded".into(),
-                    detail: reason.into(),
-                    ends,
-                    retry_at: 0,
-                });
-                drop_pending();
+                rest(self.timing.refused_every, "superseded");
+                self.drop_pending();
                 // Security relevant: a newer certificate of this machine exists that this machine does not have.
                 self.log(
                     "cert renewal: SECURITY: this machine's certificate is no longer the newest: another holder may exist".into(),
@@ -576,17 +787,12 @@ impl Renewer {
             }
             Refusal::TooFrequent => {
                 let wait = self.timing.too_frequent;
-                self.write_state(&State {
-                    code: "too_frequent".into(),
-                    detail: reason.into(),
-                    ends,
-                    retry_at: now + i64::try_from(wait.as_secs()).unwrap_or(3600),
-                });
+                rest(wait, "too_frequent");
                 self.log("cert renewal: the hub asks to wait; trying again later".into());
                 (Outcome::Refused("too_frequent".into()), wait)
             }
             Refusal::Other(r) => {
-                self.log(format!("cert renewal: the hub refused ({r})"));
+                self.log(format!("cert renewal: the hub refused ({})", clean(&r)));
                 (Outcome::Failed, self.backoff())
             }
         }
@@ -596,8 +802,8 @@ impl Renewer {
 /// A short stable description of a link error for the log: no certificate or key text is ever in a [`LinkError`].
 fn brief(e: &LinkError) -> String {
     match e {
-        LinkError::Refused(c) => c.clone(),
-        other => format!("{other:?}").chars().take(120).collect(),
+        LinkError::Refused(c) => clean(c),
+        other => clean(&format!("{other:?}")).chars().take(120).collect(),
     }
 }
 
@@ -605,7 +811,7 @@ impl CertSource for Renewer {
     fn current(&self) -> Option<(String, String)> {
         let _guard = (self.hold)().ok()?;
         recover(&self.dir, self.ops.as_ref());
-        Some((read(&self.dir, "cert.pem")?, read(&self.dir, "key.pem")?))
+        usable(&self.dir)
     }
 
     fn welcomed(&self, capabilities: &[String]) {
@@ -776,6 +982,7 @@ mod tests {
             check_every: Duration::from_secs(1000),
             unknown_every: Duration::from_secs(10),
             too_frequent: Duration::from_secs(3600),
+            refused_every: Duration::from_secs(86_400),
             retry_first: Duration::from_secs(60),
             retry_max: Duration::from_secs(480),
         }
@@ -881,7 +1088,9 @@ mod tests {
         let j = joined("nooffer");
         let asked = Arc::new(AtomicU32::new(0));
         let r = renewer(&j, DUE, counting(&asked, away()), Arc::new(Real));
-        r.set_hub_offers(false);
+        // No hub has welcomed this node yet.
+        r.hub_offers.store(false, Ordering::Release);
+        r.hub_without.store(false, Ordering::Release);
         assert_eq!(r.tick(), (Outcome::WaitingForHub, Duration::from_secs(10)));
         assert_eq!(asked.load(Ordering::Relaxed), 0);
         // Nothing was made or kept for a hub that cannot answer.
@@ -1088,8 +1297,8 @@ mod tests {
             "{wait:?}"
         );
         assert_eq!(csrs.lock().unwrap().len(), 1);
-        // After the hour: the same request.
-        clock.fetch_add(1801, Ordering::Relaxed);
+        // After the hour (and the tenth more that keeps machines from asking together): the same request.
+        clock.fetch_add(2400, Ordering::Relaxed);
         assert_eq!(r.tick().0, Outcome::Renewed);
         let csrs = csrs.lock().unwrap();
         assert_eq!(csrs.len(), 2);
@@ -1125,17 +1334,41 @@ mod tests {
     }
 
     #[test]
-    fn a_certificate_that_has_ended_needs_a_new_join_without_asking_anyone() {
+    fn a_certificate_that_has_ended_by_the_clock_is_not_asked_about_and_nothing_is_written_down() {
         let j = joined("ended");
         let asked = Arc::new(AtomicU32::new(0));
         let r = renewer(&j, 100 * DAY, counting(&asked, away()), Arc::new(Real));
-        assert_eq!(r.tick().0, Outcome::Refused("join_again".into()));
+        assert_eq!(r.tick().0, Outcome::Ended);
         assert_eq!(asked.load(Ordering::Relaxed), 0);
-        let s = state(&j.dir, ends(&j)).unwrap();
-        assert_eq!(
-            (s.code.as_str(), s.detail.as_str()),
-            ("join_again", "expired")
+        assert!(state(&j.dir, ends(&j)).is_none());
+        assert!(!j.dir.join(STATE).exists());
+        let _ = std::fs::remove_dir_all(&j.dir);
+    }
+
+    /// A clock that jumps forward past the certificate's end and then comes back must cost nothing: no verdict was kept.
+    #[test]
+    fn a_clock_that_jumps_forward_and_back_does_not_wedge_the_machine() {
+        let j = joined("jump");
+        let clock = Arc::new(AtomicI64::new(DUE));
+        let asked = Arc::new(AtomicU32::new(0));
+        let r = renewer_clocked(
+            &j,
+            Arc::clone(&clock),
+            counting(&asked, answering(ca_of(&j), "m", 90 * DAY)),
+            Arc::new(Real),
         );
+        clock.store(100 * DAY, Ordering::Relaxed);
+        for _ in 0..3 {
+            assert_eq!(r.tick().0, Outcome::Ended);
+        }
+        assert_eq!(asked.load(Ordering::Relaxed), 0);
+        assert!(!j.dir.join(STATE).exists());
+        // The clock is right again: the machine renews as if nothing had happened.
+        clock.store(DUE, Ordering::Relaxed);
+        assert_eq!(r.tick().0, Outcome::Renewed);
+        assert_eq!(asked.load(Ordering::Relaxed), 1);
+        assert!(same_pair(&j.dir));
+        // A state an earlier build wrote for an ended certificate does not hold it either (and is not a retry-never).
         let _ = std::fs::remove_dir_all(&j.dir);
     }
 
@@ -1267,11 +1500,11 @@ mod tests {
         .unwrap();
         std::fs::write(j.dir.join("key.pem"), key2).unwrap();
         assert!(!same_pair(&j.dir));
-        assert!(recover(&j.dir, &Real));
+        assert_eq!(recover(&j.dir, &Real), Recovery::Repaired);
         assert!(same_pair(&j.dir));
         assert_eq!(read_file(&j.dir, "cert.pem").trim(), j.cert.trim());
         // A whole folder is left alone.
-        assert!(!recover(&j.dir, &Real));
+        assert_eq!(recover(&j.dir, &Real), Recovery::Whole);
         let _ = std::fs::remove_dir_all(&j.dir);
     }
 
@@ -1311,6 +1544,488 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         drop(timer);
+        let _ = std::fs::remove_dir_all(&j.dir);
+    }
+
+    /// B: no refusal is for good. It rests about a day, is asked again, and a success clears it.
+    #[test]
+    fn a_refusal_rests_about_a_day_is_asked_again_and_a_success_clears_it() {
+        for reason in ["unknown", "superseded", "expired", "too_old", "revoked"] {
+            let j = joined(&format!("again-{reason}"));
+            let clock = Arc::new(AtomicI64::new(DUE));
+            let healed = Arc::new(AtomicBool::new(false));
+            let asked = Arc::new(AtomicU32::new(0));
+            let ca = ca_of(&j);
+            let (h, a) = (Arc::clone(&healed), Arc::clone(&asked));
+            let ask: AskFn = Box::new(move |_, csr| {
+                a.fetch_add(1, Ordering::Relaxed);
+                if h.load(Ordering::Relaxed) {
+                    Ok(issue(&ca, csr, "m", 90 * DAY))
+                } else {
+                    Err(RenewError::Refused {
+                        code: "enroll.renew_refused".into(),
+                        reason: reason.into(),
+                    })
+                }
+            });
+            let r = renewer_clocked(&j, Arc::clone(&clock), ask, Arc::new(Real));
+            assert!(matches!(r.tick().0, Outcome::Refused(_)), "{reason}");
+            let s = state(&j.dir, ends(&j)).unwrap();
+            assert!(
+                s.asked_at > 0 && s.retry_at >= s.asked_at + 86_400,
+                "{reason}"
+            );
+            assert!(
+                s.retry_at <= s.asked_at + 86_400 + 8_641,
+                "{reason}: jitter is a tenth"
+            );
+            // Within the day: not asked, the owner is still told.
+            clock.fetch_add(3 * 3600, Ordering::Relaxed);
+            assert!(matches!(r.tick().0, Outcome::Refused(_)));
+            assert_eq!(asked.load(Ordering::Relaxed), 1, "{reason}");
+            // A day and a tenth later: asked again (still refused: still told, rested again).
+            clock.fetch_add(2 * DAY, Ordering::Relaxed);
+            assert!(matches!(r.tick().0, Outcome::Refused(_)));
+            assert_eq!(asked.load(Ordering::Relaxed), 2, "{reason}");
+            // The hub was at fault and is fine now: the next ask succeeds and nothing of the refusal is left.
+            healed.store(true, Ordering::Relaxed);
+            clock.fetch_add(2 * DAY, Ordering::Relaxed);
+            assert_eq!(r.tick().0, Outcome::Renewed, "{reason}");
+            assert!(!j.dir.join(STATE).exists(), "{reason}");
+            assert!(state(&j.dir, validity(&read_file(&j.dir, "cert.pem")).unwrap().1).is_none());
+            let _ = std::fs::remove_dir_all(&j.dir);
+        }
+    }
+
+    /// A state file that cannot be read, or that asks for a rest of a thousand years, holds nothing back for long.
+    #[test]
+    fn a_damaged_or_hostile_state_file_never_wedges_the_asking() {
+        let j = joined("state");
+        let clock = Arc::new(AtomicI64::new(DUE));
+        let asked = Arc::new(AtomicU32::new(0));
+        let r = renewer_clocked(
+            &j,
+            Arc::clone(&clock),
+            counting(&asked, away()),
+            Arc::new(Real),
+        );
+        for junk in [
+            "".to_string(),
+            "join_again".to_string(),
+            "join_again\nunknown\nnot a number\n".to_string(),
+            "\u{0}\u{1}\u{2}".to_string(),
+        ] {
+            std::fs::write(j.dir.join(STATE), junk).unwrap();
+            let before = asked.load(Ordering::Relaxed);
+            r.tick();
+            assert_eq!(
+                asked.load(Ordering::Relaxed),
+                before + 1,
+                "a damaged file held the asking back"
+            );
+            r.fails.store(0, Ordering::Release);
+        }
+        // A rest of a thousand years is cut to two days.
+        let e = ends(&j);
+        std::fs::write(
+            j.dir.join(STATE),
+            format!(
+                "join_again\nunknown\n{e}\n{}\n1\n0\n",
+                real_now() + 1000 * 365 * DAY
+            ),
+        )
+        .unwrap();
+        let before = asked.load(Ordering::Relaxed);
+        assert!(matches!(r.tick().0, Outcome::Refused(_)));
+        assert_eq!(asked.load(Ordering::Relaxed), before);
+        clock.fetch_add(3 * DAY, Ordering::Relaxed);
+        assert_eq!(r.tick().0, Outcome::Failed);
+        assert_eq!(asked.load(Ordering::Relaxed), before + 1);
+        // The shorter form an earlier build wrote is read too.
+        std::fs::write(j.dir.join(STATE), format!("rejected\nkey\n{e}\n0\n")).unwrap();
+        assert_eq!(state(&j.dir, e).unwrap().code, "rejected");
+        let _ = std::fs::remove_dir_all(&j.dir);
+    }
+
+    /// Text from the hub is cut and stripped before it is kept or logged.
+    #[test]
+    fn a_reason_from_the_hub_is_cut_and_stripped_of_control_characters() {
+        let j = joined("sanitize");
+        let nasty = format!("un\nknown\u{1b}[31m{}", "x".repeat(500));
+        let r = renewer(
+            &j,
+            DUE,
+            Box::new(move |_, _| {
+                Err(RenewError::Refused {
+                    code: "enroll.renew_refused".into(),
+                    reason: nasty.clone(),
+                })
+            }),
+            Arc::new(Real),
+        );
+        r.tick();
+        assert!(!r.log_lines().is_empty());
+        for l in r.log_lines() {
+            assert!(!l.chars().any(char::is_control), "{l:?}");
+            assert!(l.chars().count() < 400, "{}", l.len());
+        }
+        // A state file that carries such text (written by anything) is read cut and clean, in the one line it has.
+        let e = ends(&j);
+        std::fs::write(
+            j.dir.join(STATE),
+            format!("join_again\n{}\u{1b}[2J\n{e}\n0\n1\n0\n", "y".repeat(900)),
+        )
+        .unwrap();
+        let s = state(&j.dir, e).unwrap();
+        assert!(s.detail.chars().count() <= 200);
+        assert!(!s.detail.chars().any(char::is_control));
+        let _ = std::fs::remove_dir_all(&j.dir);
+    }
+
+    /// E: an answer that never checks out is asked for five times, then the request is given up and a new one is made.
+    #[test]
+    fn answers_that_never_check_out_are_given_up_after_five_and_a_new_request_is_made() {
+        let j = joined("giveup");
+        let clock = Arc::new(AtomicI64::new(DUE));
+        let csrs = Arc::new(Mutex::new(Vec::<String>::new()));
+        let (c2, ca) = (Arc::clone(&csrs), ca_of(&j));
+        let ask: AskFn = Box::new(move |_, csr| {
+            c2.lock().unwrap().push(csr.to_string());
+            // Always for another node.
+            Ok(issue(&ca, csr, "someone-else", 90 * DAY))
+        });
+        let r = renewer_clocked(&j, Arc::clone(&clock), ask, Arc::new(Real));
+        for n in 1..=5u32 {
+            assert_eq!(r.tick().0, Outcome::Failed);
+            let s = state(&j.dir, ends(&j)).unwrap();
+            assert_eq!((s.code.as_str(), s.count), ("rejected", n));
+            // Until its time nothing is asked.
+            assert_eq!(r.tick().0, Outcome::Refused("rejected".into()));
+            clock.fetch_add(2 * 3600, Ordering::Relaxed);
+        }
+        assert_eq!(csrs.lock().unwrap().len(), 5);
+        {
+            let c = csrs.lock().unwrap();
+            assert!(
+                c.iter().all(|x| *x == c[0]),
+                "the same request is asked for again"
+            );
+        }
+        assert!(
+            !pending_exists(&j.dir),
+            "the request was kept after five rejected answers"
+        );
+        let s = state(&j.dir, ends(&j)).unwrap();
+        assert!(s.retry_at > real_now() + clock.load(Ordering::Relaxed) + 20 * 3600);
+        // A day later the next due look makes a NEW request.
+        clock.fetch_add(2 * DAY, Ordering::Relaxed);
+        assert_eq!(r.tick().0, Outcome::Failed);
+        let c = csrs.lock().unwrap();
+        assert_eq!(c.len(), 6);
+        assert_ne!(c[5], c[0]);
+        let _ = std::fs::remove_dir_all(&j.dir);
+    }
+
+    /// An older hub: back off to once an hour, say so once, tell the doctor; a hub that does offer it clears that.
+    #[test]
+    fn an_older_hub_is_asked_about_once_an_hour_said_once_and_cleared_when_a_newer_one_answers() {
+        let j = joined("oldhub");
+        let asked = Arc::new(AtomicU32::new(0));
+        let r = renewer(&j, DUE, counting(&asked, away()), Arc::new(Real));
+        r.welcomed(&["terminal.raw".to_string()]);
+        for _ in 0..4 {
+            assert_eq!(
+                r.tick(),
+                (Outcome::WaitingForHub, Duration::from_secs(1000))
+            );
+        }
+        assert_eq!(asked.load(Ordering::Relaxed), 0);
+        assert_eq!(state(&j.dir, ends(&j)).unwrap().code, "hub_old");
+        let said: Vec<_> = r
+            .log_lines()
+            .into_iter()
+            .filter(|l| l.contains("does not support renewal"))
+            .collect();
+        assert_eq!(said.len(), 1, "{said:?}");
+        r.welcomed(&[CAPABILITY.to_string()]);
+        assert_eq!(r.tick().0, Outcome::Failed);
+        assert!(!j.dir.join(STATE).exists());
+        assert_eq!(asked.load(Ordering::Relaxed), 1);
+        let _ = std::fs::remove_dir_all(&j.dir);
+    }
+
+    /// D: a request made for a certificate that is no longer the one in use (the machine joined again) is never sent.
+    #[test]
+    fn a_pending_request_from_before_a_rejoin_is_dropped_and_a_new_one_is_made() {
+        let j = joined("stale");
+        let seen: Seen = Arc::default();
+        let r = renewer(&j, DUE, watching(&j.dir, &seen), Arc::new(Real));
+        assert_eq!(r.tick().0, Outcome::Failed);
+        assert!(pending_exists(&j.dir));
+        // The machine joins again: another certificate and key, the old files for the earlier identity left in the folder.
+        let (key2, csr2) = request();
+        std::fs::write(
+            j.dir.join("cert.pem"),
+            issue(&ca_of(&j), &csr2, "m", 60 * DAY),
+        )
+        .unwrap();
+        std::fs::write(j.dir.join("key.pem"), key2).unwrap();
+        let r2 = renewer(&j, DUE, watching(&j.dir, &seen), Arc::new(Real));
+        assert_eq!(r2.tick().0, Outcome::Failed);
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert_ne!(
+            seen[0].0, seen[1].0,
+            "a request made for the earlier certificate was sent"
+        );
+        // And the one sent is the one now kept, for the certificate now in use.
+        let p = Pending::decode(&read_file(&j.dir, PENDING)).unwrap();
+        assert_eq!(p.csr_pem, seen[1].0.trim());
+        assert_eq!(p.for_cert, fingerprint(&read_file(&j.dir, "cert.pem")));
+        let _ = std::fs::remove_dir_all(&j.dir);
+    }
+
+    /// D: the pair in `previous.pem` is never put back for another node id than the link's.
+    #[test]
+    fn a_previous_pair_of_another_identity_is_never_put_back() {
+        let j = joined("otheridentity");
+        // A previous pair for node "other" (a revoked identity this folder used to be), and a mismatched current pair.
+        let (okey, ocsr) = request();
+        let ocert = issue(&ca_of(&j), &ocsr, "other", 60 * DAY);
+        std::fs::write(
+            j.dir.join(PREVIOUS),
+            format!("{}\n{}\n", ocert.trim(), okey.trim()),
+        )
+        .unwrap();
+        let (key2, _) = request();
+        std::fs::write(j.dir.join("key.pem"), key2).unwrap();
+        let before = (read_file(&j.dir, "cert.pem"), read_file(&j.dir, "key.pem"));
+        assert_eq!(recover(&j.dir, &Real), Recovery::Unrepaired);
+        assert_eq!(
+            (read_file(&j.dir, "cert.pem"), read_file(&j.dir, "key.pem")),
+            before
+        );
+        assert_eq!(usable(&j.dir), None);
+        // No `node-id` (a save that stopped half way) restores nothing either.
+        std::fs::write(
+            j.dir.join(PREVIOUS),
+            format!("{}\n{}\n", j.cert.trim(), j.key.trim()),
+        )
+        .unwrap();
+        std::fs::remove_file(j.dir.join("node-id")).unwrap();
+        assert_eq!(recover(&j.dir, &Real), Recovery::Unrepaired);
+        let _ = std::fs::remove_dir_all(&j.dir);
+    }
+
+    /// F: temporary files a stopped writer left (they may hold a key) are removed, and only those.
+    #[test]
+    fn leftover_temporary_files_of_the_folders_writers_are_removed_and_nothing_else() {
+        let j = joined("sweep");
+        for f in [
+            "cert.pem.tmp-123",
+            "key.pem.tmp-9",
+            "renew-pending.pem.tmp-4242",
+            "previous.pem.tmp-1",
+            "renew-state.tmp-7",
+        ] {
+            std::fs::write(j.dir.join(f), "KEY").unwrap();
+        }
+        for f in [
+            "cert.pem.tmp-",
+            "cert.pem.tmp-x1",
+            "notes.tmp-1",
+            "mine.pem",
+            "lock",
+        ] {
+            std::fs::write(j.dir.join(f), "keep").unwrap();
+        }
+        assert_eq!(recover(&j.dir, &Real), Recovery::Whole);
+        assert_eq!(
+            files(&j.dir),
+            [
+                "ca.pem",
+                "cert.pem",
+                "cert.pem.tmp-",
+                "cert.pem.tmp-x1",
+                "key.pem",
+                "lock",
+                "mine.pem",
+                "node-id",
+                "notes.tmp-1",
+                "url"
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&j.dir);
+    }
+
+    /// Fails every operation from the n-th on (a full disk), until healed.
+    struct Disk {
+        from: u32,
+        seen: AtomicU32,
+        healed: AtomicBool,
+    }
+
+    impl Disk {
+        fn full_from(n: u32) -> Arc<Self> {
+            Arc::new(Self {
+                from: n,
+                seen: AtomicU32::new(0),
+                healed: AtomicBool::new(false),
+            })
+        }
+
+        fn step(&self) -> io::Result<()> {
+            let n = self.seen.fetch_add(1, Ordering::AcqRel);
+            if n >= self.from && !self.healed.load(Ordering::Acquire) {
+                return Err(io::Error::other("disk full"));
+            }
+            Ok(())
+        }
+    }
+
+    impl Ops for Disk {
+        fn write(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+            self.step()?;
+            Real.write(path, bytes)
+        }
+
+        fn remove(&self, path: &Path) -> io::Result<()> {
+            self.step()?;
+            Real.remove(path)
+        }
+    }
+
+    /// C: the disk stays broken from any step of an install on, through the restarts: the node always has one MATCHING pair to dial with.
+    /// When the disk is healed the renewal finishes with exactly one new certificate.
+    #[test]
+    fn a_disk_that_fails_from_any_step_on_never_leaves_a_certificate_and_key_that_do_not_match() {
+        for from in 0..8u32 {
+            let j = joined(&format!("full{from}"));
+            let made = Arc::new(Mutex::new(Vec::<String>::new()));
+            let disk = Disk::full_from(from);
+            let lives: Vec<Arc<Renewer>> = (0..3)
+                .map(|_| {
+                    renewer(
+                        &j,
+                        DUE,
+                        idempotent(ca_of(&j), &made),
+                        Arc::clone(&disk) as Arc<dyn Ops>,
+                    )
+                })
+                .collect();
+            for (n, life) in lives.iter().enumerate() {
+                let _ = life.tick();
+                let (c, k) = life
+                    .current()
+                    .unwrap_or_else(|| panic!("from {from}, life {n}: no pair to dial with"));
+                assert!(
+                    pair_matches(&c, &k),
+                    "from {from}, life {n}: the pair does not match"
+                );
+                // What recover says is true: it never reports a whole folder that is not.
+                let r = recover(&j.dir, disk.as_ref());
+                if r != Recovery::Unrepaired {
+                    assert!(
+                        same_pair(&j.dir),
+                        "from {from}, life {n}: {r:?} for a mismatched folder"
+                    );
+                }
+                assert!(usable(&j.dir).is_some_and(|(c, k)| pair_matches(&c, &k)));
+            }
+            // The disk is fixed; the next start finishes it.
+            disk.healed.store(true, Ordering::Release);
+            let last = renewer(&j, DUE, idempotent(ca_of(&j), &made), Arc::new(Real));
+            assert!(last.current().is_some());
+            let _ = last.tick();
+            let _ = last.tick();
+            assert!(same_pair(&j.dir), "from {from}");
+            let made = made.lock().unwrap();
+            assert_eq!(made.len(), 1, "from {from}: not exactly one certificate");
+            assert_eq!(
+                read_file(&j.dir, "cert.pem").trim(),
+                made[0].trim(),
+                "from {from}"
+            );
+            assert!(!pending_exists(&j.dir), "from {from}");
+            let _ = std::fs::remove_dir_all(&j.dir);
+        }
+    }
+
+    /// Fails every write of one file, for good.
+    struct NoWrites(&'static str);
+
+    impl Ops for NoWrites {
+        fn write(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+            if path.file_name().is_some_and(|n| n == self.0) {
+                return Err(io::Error::other("cannot write this file"));
+            }
+            Real.write(path, bytes)
+        }
+
+        fn remove(&self, path: &Path) -> io::Result<()> {
+            Real.remove(path)
+        }
+    }
+
+    /// C: the key cannot be written for good: the folder goes back to the pair in use, the node keeps dialling with it, and nothing loops
+    /// in the folder (each try leaves one whole pair).
+    #[test]
+    fn a_key_that_cannot_be_written_rolls_back_to_the_pair_in_use() {
+        let j = joined("nokey");
+        let made = Arc::new(Mutex::new(Vec::<String>::new()));
+        let ops: Arc<dyn Ops> = Arc::new(NoWrites("key.pem"));
+        for _ in 0..3 {
+            let r = renewer(&j, DUE, idempotent(ca_of(&j), &made), Arc::clone(&ops));
+            assert_eq!(r.tick().0, Outcome::Failed);
+            let (c, k) = r.current().unwrap();
+            assert!(pair_matches(&c, &k));
+            assert!(same_pair(&j.dir), "the folder is not one pair");
+            assert_eq!(read_file(&j.dir, "cert.pem").trim(), j.cert.trim());
+            assert_eq!(read_file(&j.dir, "key.pem").trim(), j.key.trim());
+        }
+        assert_eq!(made.lock().unwrap().len(), 1);
+        // The key file is writable again: the renewal finishes.
+        let r = renewer(&j, DUE, idempotent(ca_of(&j), &made), Arc::new(Real));
+        assert_eq!(r.tick().0, Outcome::Renewed);
+        assert!(same_pair(&j.dir));
+        let _ = std::fs::remove_dir_all(&j.dir);
+    }
+
+    /// The new certificate is in place but its key could not be written, and there is no previous pair to go back to: the pending
+    /// file holds the key, so the new pair is what the node dials with (from memory), and it is not a loop of asking.
+    #[test]
+    fn a_new_certificate_whose_key_was_not_written_is_used_with_the_pending_key() {
+        let j = joined("memory");
+        let (key2, csr2) = request();
+        let new_cert = issue(&ca_of(&j), &csr2, "m", 90 * DAY);
+        std::fs::write(j.dir.join("cert.pem"), &new_cert).unwrap();
+        std::fs::write(
+            j.dir.join(PENDING),
+            Pending::new(&key2, &csr2).bound(&j.cert).encode(),
+        )
+        .unwrap();
+        assert!(!same_pair(&j.dir));
+        let (c, k) = usable(&j.dir).unwrap();
+        assert_eq!(c, new_cert);
+        assert!(pair_matches(&c, &k));
+        let asked = Arc::new(AtomicU32::new(0));
+        let r = renewer(
+            &j,
+            DUE,
+            counting(&asked, away()),
+            Arc::new(NoWrites("key.pem")),
+        );
+        assert_eq!(r.current(), Some((c, k)));
+        assert_eq!(r.tick().0, Outcome::Failed);
+        assert_eq!(
+            asked.load(Ordering::Relaxed),
+            0,
+            "asked while only the key file is missing"
+        );
+        assert!(
+            pending_exists(&j.dir),
+            "the only copy of the new key was dropped"
+        );
         let _ = std::fs::remove_dir_all(&j.dir);
     }
 }

@@ -42,6 +42,9 @@ pub fn due(cert_pem: &str, now: i64) -> Option<bool> {
 pub struct Pending {
     pub key_pem: String,
     pub csr_pem: String,
+    /// The fingerprint ([`fingerprint`]) of the certificate this request was made for, the one in use when it was made. A request
+    /// kept from before this machine joined again is for another certificate and is dropped, not sent.
+    pub for_cert: String,
 }
 
 impl std::fmt::Debug for Pending {
@@ -56,24 +59,64 @@ impl Pending {
         Self {
             key_pem: key_pem.trim().to_string(),
             csr_pem: csr_pem.trim().to_string(),
+            for_cert: String::new(),
         }
     }
 
-    /// The text of the file: the key's PEM, then the request's PEM.
+    /// This request, made for the certificate `cert_pem` (the one in use).
+    #[must_use]
+    pub fn bound(mut self, cert_pem: &str) -> Self {
+        self.for_cert = fingerprint(cert_pem);
+        self
+    }
+
+    /// The text of the file: a line naming the certificate it is for, the key's PEM, then the request's PEM.
     pub fn encode(&self) -> String {
-        format!("{}\n{}\n", self.key_pem.trim_end(), self.csr_pem.trim_end())
+        format!(
+            "for: {}\n{}\n{}\n",
+            self.for_cert,
+            self.key_pem.trim_end(),
+            self.csr_pem.trim_end()
+        )
     }
 
     /// Reads [`Self::encode`]; `None` unless both parts are there and the request is the key's own (it carries the key's public key).
     pub fn decode(text: &str) -> Option<Self> {
         let at = text.find("-----BEGIN CERTIFICATE REQUEST-----")?;
         let (key_pem, csr_pem) = text.split_at(at);
-        let this = Self::new(key_pem, csr_pem);
+        let (for_cert, key_pem) = match key_pem.trim_start().strip_prefix("for:") {
+            Some(rest) => rest.split_once('\n').unwrap_or(("", "")),
+            None => ("", key_pem),
+        };
+        let mut this = Self::new(key_pem, csr_pem);
+        this.for_cert = for_cert.trim().to_string();
         if this.key_pem.is_empty() || !csr_matches_key(&this.csr_pem, &this.key_pem) {
             return None;
         }
         Some(this)
     }
+}
+
+/// The SHA-256 of the first certificate's DER in `cert_pem`, in hex; empty when the text holds none.
+pub fn fingerprint(cert_pem: &str) -> String {
+    let Some(Ok(der)) = CertificateDer::pem_slice_iter(cert_pem.as_bytes()).next() else {
+        return String::new();
+    };
+    ring::digest::digest(&ring::digest::SHA256, der.as_ref())
+        .as_ref()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// The common name of the first certificate in `cert_pem` (a node's id).
+pub fn subject_name(cert_pem: &str) -> Option<String> {
+    let der = CertificateDer::pem_slice_iter(cert_pem.as_bytes())
+        .next()?
+        .ok()?;
+    let (_, cert) = x509_parser::parse_x509_certificate(der.as_ref()).ok()?;
+    let cn = cert.subject().iter_common_name().next()?;
+    cn.as_str().ok().map(str::to_string)
 }
 
 fn provider() -> Arc<rustls::crypto::CryptoProvider> {
@@ -361,6 +404,7 @@ mod tests {
         let mixed = Pending {
             key_pem: p.key_pem.clone(),
             csr_pem: other.csr_pem,
+            for_cert: String::new(),
         };
         assert_eq!(Pending::decode(&mixed.encode()), None);
         assert_eq!(Pending::decode(&p.key_pem), None);
@@ -379,6 +423,36 @@ mod tests {
             Ok(())
         );
         assert!(pair_matches(&cert, &fresh.key_pem));
+    }
+
+    #[test]
+    fn an_answer_is_rejected_when_the_persisted_key_is_not_the_requests_key() {
+        // A request and key that do not belong together cannot be built by `decode`, but the checks must not rely on that: the
+        // certificate is for the request's key, and the key kept is another.
+        let ca = ca("ca");
+        let (fresh, cert, current) = good(&ca, "m");
+        let other = request();
+        let inconsistent = Pending {
+            key_pem: other.key_pem,
+            csr_pem: fresh.csr_pem,
+            for_cert: String::new(),
+        };
+        assert_eq!(
+            check_renewed(&ca.pem, &cert, "m", &inconsistent, &current, now()),
+            Err(Rejected::Key)
+        );
+    }
+
+    #[test]
+    fn a_pending_request_is_bound_to_the_certificate_it_was_made_for() {
+        let ca = ca("ca");
+        let (_, cert, current) = good(&ca, "m");
+        let p = request().bound(&current);
+        assert_eq!(Pending::decode(&p.encode()), Some(p.clone()));
+        assert_eq!(p.for_cert, fingerprint(&current));
+        assert_ne!(p.for_cert, fingerprint(&cert));
+        assert!(!p.for_cert.is_empty());
+        assert_eq!(subject_name(&cert).as_deref(), Some("m"));
     }
 
     #[test]
@@ -413,6 +487,7 @@ mod tests {
         let swapped = Pending {
             key_pem: stranger.key_pem,
             csr_pem: fresh.csr_pem.clone(),
+            for_cert: String::new(),
         };
         assert_eq!(Pending::decode(&swapped.encode()), None);
     }

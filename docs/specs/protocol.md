@@ -867,12 +867,23 @@ it has, so no code and no owner step is needed while it is still valid.
   only and not a CA, names this node, carries the public key of the request and of the persisted key, and ends later than the certificate in
   use; otherwise it is dropped, the pair in use is kept, and the same request is asked again after an hour. A good answer is stored in this
   order: the pair in use to `previous.pem`, then `cert.pem`, then `key.pem`, then `renew-pending.pem` removed; a start that finds the
-  certificate and key as two halves finishes the install from the pending file or restores `previous.pem`. The uplink reads the pair before
+  certificate and key as two halves finishes the install from the pending file, or, when the key cannot be written, rolls back to
+  `previous.pem` (only for the same node id as `node-id`; a link save removes `previous.pem`, `renew-pending.pem` and `renew-state` first);
+  when nothing can be written the node still dials with a certificate and key that match (the previous pair, or the new certificate with the
+  pending key from memory), never with two that do not. A pending request is bound to the fingerprint of the certificate it was made for
+  and dropped when that is not the certificate in use. Leftover `<file>.tmp-<digits>` files of the folder's writers are removed at each load. The uplink reads the pair before
   each dial, so the next connection uses the new one, and `previous.pem` is removed once a connection made with the new certificate was
-  accepted. Refusals: `unknown`, `revoked`, `expired` and `too_old` are remembered (`renew-state`, for `agora doctor`: the machine must join
-  again) and never retried; `superseded` is remembered the same way and logged as security relevant; `too_frequent` waits an hour; a hub
-  that cannot be reached, answers anything else or does not offer the capability is tried again with a growing wait (a minute, doubling,
-  at most an hour) and logged once per change. A certificate that has already ended is not asked about: only a new join helps.
+  accepted. Refusals are never final, because a hub can be at fault (a database restored from a backup answers `unknown` or `superseded`,
+  a wrong clock `expired` or `too_old`): `unknown`, `revoked`, `expired` and `too_old` are remembered (`renew-state`, for `agora doctor`: the
+  machine must join again, the reason and when the hub was last asked) and the hub is asked again about once a day (a tenth more at random,
+  a fresh request each time); `superseded` is the same and logged as security relevant; a success clears the state. `too_frequent` waits
+  an hour. An answer that does not check out is asked for again after an hour, five times in a row, then the request is given up and a new one
+  is made after a day. A hub that cannot be reached or answers anything else is tried again with a growing wait (a minute, doubling, at most an
+  hour) and logged once per change; a hub that welcomed the node without `enroll.renew` is asked about once an hour, logged once, and `agora
+  doctor` says it does not support renewal yet. Text from the hub that is kept, logged or shown is cut to 200 characters without control
+  characters, and a state file that cannot be read is ignored. Whether the certificate has ended is worked out from the clock at every look
+  and never written down (a clock that jumps forward and back must not leave a verdict behind); a certificate that has ended is not asked
+  about: only a new join helps.
   A revoked or unknown certificate is refused at the TLS connection before any command, so the node sees a failed connection, not the reason.
 - **The hub's own certificate** is not a message: once at start and then daily the hub replaces its server certificate when fewer than 30 days
   remain (same names, same CA, a fresh key), rewrites `<hub dir>/server-cert.pem`, and new connections use the new one while open ones keep
