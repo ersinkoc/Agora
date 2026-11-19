@@ -34,6 +34,10 @@ Decided in ADR-0021.
 
 ## 3. Quotas (how much is left) — quota profiles
 
+> ADR-0091 (accepted) replaces this section: plan limits are shown from the tools' own output (percentage and reset time), not from profiles or
+> estimates. Built so far: the schema (`AgentQuotaObserved`) and the node reader for Codex (`[quota]` in the manifest); the hub table and the
+> window follow. The text below is the earlier idea and is kept for the record.
+
 Subscription plans (for example rolling multi-hour windows, weekly caps, per-plan message or credit limits) are
 not in models.dev and change often. They are kept as **quota profiles**: versioned data files distributed
 through the adapter registry, so they update without a release, exactly like agent manifests.

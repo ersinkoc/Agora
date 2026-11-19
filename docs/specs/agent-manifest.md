@@ -25,7 +25,7 @@ it is.
 kind = "example-agent"          # stable id, lowercase, used in protocol and UI
 display_name = "Example Agent"  # brand name, not translated
 version = "2026.11.06.1"        # manifest version
-min_engine = 2                  # 4 with `[accounts] credential_env` (ADR-0084), 3 with [[launch.setting]] (ADR-0066), 2 with [[launch.option]] (ADR-0059); 1 otherwise
+min_engine = 2                  # 5 with `[quota]` (ADR-0091), 4 with `[accounts] credential_env` (ADR-0084), 3 with [[launch.setting]] (ADR-0066), 2 with [[launch.option]] (ADR-0059); 1 otherwise
 
 [process]
 names = ["example-agent", "exa"]        # foreground process names
@@ -198,6 +198,17 @@ and refuses it for helpers an agent starts (ADR-0057). A shipped manifest declar
 agent, with that version in a comment; a flag that was not checked is not declared.
 
 Manifests in this repository: `claude-code` and `codex` (screens captured from the real agents, `manifests/agents/fixtures/`); `wrongstack` and `wrongstack-acp` ship too (`manifests/agents/`). `crates/agora-adapters/tests/shipped_manifests.rs` checks every shipped manifest against its captured screens.
+
+## Plan limits (`[quota]`, ADR-0091)
+`[quota]` (`min_engine = 5`, only with `[usage.file]`) says where a selected usage line (the `select` of `[usage.file]` decides which) reports
+how much of a plan window is used. Each `[[quota.window]]` (at most 4) has three dotted JSON paths, each at most 128 characters:
+`percent` (a number, rounded and clamped to 0..100), `minutes` (the window's length, a whole number from 1 to 525 600) and `resets` (a Unix
+time: seconds, or milliseconds when the value is 100 000 000 000 or more; both are read). All three must be numbers on the line, else the
+window is skipped (unknown, never guessed). The node names the window from its length (`five_hour` for 300, `seven_day` for 10 080,
+`minutes:<n>` otherwise), never from a key such as `primary`, bounds `resets` (not more than a day ago, not more than 31 days ahead; else
+the observation is dropped) and sends `AgentQuotaObserved` when the numbers change, at most one per tool and window every 5 seconds. Nothing
+else on the line is read for this: credits, balances, plan names and account ids stay in the file. Only the agent's own file counts (the
+rule for tokens). Shipped for `codex` (`rate_limits.primary` and `.secondary`; the secondary may be missing).
 
 ## Usage files (ADR-0042)
 The node follows the files of a running terminal agent whose kind has `[usage.file]`: a file belongs to the agent when it was touched after

@@ -1007,5 +1007,6 @@ forwards either to a node that did not offer it.
   an allow-list of the four numbers and the label, and nothing else the tool wrote.
 - **Fresh, reset, unknown are the client's call:** from `observed_at_ms` (its age) and `resets_at_ms` (after it passes the window is
   "reset", not the old percentage, until a new observation arrives); no observation is "unknown". A limit is never inferred.
-- **Capability:** `usage.quota` is passed by the hub (`hubcli.rs`); a node advertises it once its reader exists.
+- **Capability:** `usage.quota` is passed by the hub (`hubcli.rs`) and advertised by every node of this build (`uplink_client.rs`), which has the
+  reader (manifest `[quota]`, `docs/specs/agent-manifest.md`; Codex only).
   Golden fixtures: `schema/fixtures/v1/agora.v1.AgentQuotaObserved.*` and `schema/fixtures/usage-quota/`.

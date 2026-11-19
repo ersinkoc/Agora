@@ -43,6 +43,8 @@ pub const CAPABILITIES: &[&str] = &[
     "agent.set_config",
     "agent.cancel_turn",
     "agent.commands",
+    // ADR-0091: reads the plan windows a tool reports in its usage file (`[quota]`) and sends `AgentQuotaObserved`.
+    "usage.quota",
     // ADR-0060
     "agent.resume",
     // ADR-0059

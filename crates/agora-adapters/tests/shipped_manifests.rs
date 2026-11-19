@@ -152,6 +152,40 @@ fn the_usage_fixtures_add_up_to_what_the_files_say() {
     );
 }
 
+/// ADR-0091: the plan windows a shipped manifest maps (`[quota]`), read from a sanitized line of the real shape (invented values).
+/// The line also carries credits and a plan name: only `minutes percent resets_ms` come out.
+#[test]
+fn the_quota_fixtures_give_the_windows_the_files_say() {
+    let mut checked = 0;
+    for entry in std::fs::read_dir(root()).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_none_or(|e| e != "toml") {
+            continue;
+        }
+        let manifest = Manifest::parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let Some(quota) = manifest.quota.clone() else {
+            continue;
+        };
+        let spec = manifest.usage.and_then(|u| u.file).unwrap();
+        let dir = root().join("fixtures").join(&manifest.kind);
+        let mut reader = agora_adapters::usage::FileReader::new(spec).with_quota(Some(quota));
+        let mut got = String::new();
+        for line in std::fs::read_to_string(dir.join("quota.jsonl"))
+            .unwrap()
+            .lines()
+        {
+            reader.line(line);
+            for q in reader.take_quota() {
+                got.push_str(&format!("{} {} {}\n", q.minutes, q.percent, q.resets_ms));
+            }
+        }
+        let want = std::fs::read_to_string(dir.join("quota.expect")).unwrap();
+        assert_eq!(got, want, "{}", manifest.kind);
+        checked += 1;
+    }
+    assert_eq!(checked, 1, "codex maps its rate limits");
+}
+
 /// ADR-0059: every shipped `[[launch.option]]` label (and ADR-0066 `[[launch.setting]]` label) is a message the windows can show: it is
 /// in the English web and terminal-client locale files (the clients that list them), so no window shows a bare id.
 #[test]
