@@ -6,7 +6,7 @@ Accepted: 2026-11-19 (the maintainer's explicit message in the merger chat namin
 
 Build progress: schema and hub side done (`RenewRequest`/`RenewResponse`, `enroll.renew`, `enroll.renew_refused`; the hub answers a renewal on a certificate connection,
 audits it, revokes superseded certificates after 7 days, and replaces its own server certificate daily when under 30 days remain). Review changes: only a machine's newest certificate may renew (`superseded` otherwise); refused renewals are audited, rate-limited to one row per machine per reason per hour.
-What remains: a thief with the machine's CURRENT certificate and key is indistinguishable from the machine until the owner notices (the audit view shows `superseded`/`too_frequent` signals); revocation (ADR-0015, ADR-0073) is the answer. A machine that lost a renewal's answer keeps a certificate that can connect but not renew and must join again before it ends.
+What remains: a thief with the machine's CURRENT certificate and key is indistinguishable from the machine until the owner notices (the audit view shows `superseded`/`too_frequent` signals); revocation (ADR-0015, ADR-0073) is the answer. A machine that lost a renewal's answer renews again from its previous certificate while the newest one has never connected (that one is revoked and the audit row says `lost_answer`); once the newest has connected, older ones are `superseded`.
 Not built yet: the node asking
 (30 days left, daily retry, atomic write of `cert.pem` and `key.pem`), `agora doctor` days left, the window's "needs to join again" card, and the `agora-platform` atomic-replace test.
 

@@ -832,6 +832,12 @@ it has, so no code and no owner step is needed while it is still valid.
 - **Only the newest certificate renews.** A machine's older certificate that is still valid (its grace) may connect but not renew: a copy of
   an old certificate and key could otherwise renew hourly, become the newest, and have the real machine's certificate revoked a week later.
   The hour limit is checked after that, so a copy of an older certificate cannot use up the real machine's hour.
+- **Lost answer.** One exception: when the newest active certificate has never connected (`first_seen_ms` empty), the machine's PREVIOUS
+  certificate may renew. The hub issued the newest one and the answer never arrived, so the previous one is the machine's current
+  credential. The never-connected newest certificate is revoked, a fresh one is issued (still one per hour), and the audit row ends
+  `lost_answer revoked=SERIAL`. A thief with an older copy gains nothing: once the real machine has connected with the newest
+  certificate every older one is `superseded`, and before that the older certificate in use is the machine's credential. Only the previous
+  certificate qualifies, not any older one.
 - **Refusals** are `enroll.renew_refused` with a `reason`, checked in this order: `unknown`, `revoked`, `expired` (the end the certificate
   carries has passed), `too_old` (the hub's record says it issued the certificate more than one current lifetime ago; it differs from
   `expired` when the certificate carries a later end than the hub's lifetime now allows, for example after the lifetime was lowered),
@@ -845,7 +851,7 @@ it has, so no code and no owner step is needed while it is still valid.
   hour, so a flood cannot grow the table. `superseded` and `too_frequent` are the signal that someone holds a copy of a machine's certificate
   (or that the machine lost the answer of a renewal): the owner sees them in the audit view; a thief with the machine's CURRENT certificate
   and key is indistinguishable from the machine until the owner notices, and revocation (ADR-0015, ADR-0073) is the answer. A machine that
-  lost the answer of a renewal keeps its previous certificate, which can connect but not renew, and must join again before it ends.
+  lost the answer of a renewal renews again from its previous certificate (see Lost answer) and does not have to join again.
 - **Clock.** The grace and the hour limit use the hub's clock. A clock that jumps forward can revoke a machine's older certificates early
   (only ones a newer certificate already replaced and that has connected); one that jumps back only delays it.
 - **The hub's own certificate** is not a message: once at start and then daily the hub replaces its server certificate when fewer than 30 days
