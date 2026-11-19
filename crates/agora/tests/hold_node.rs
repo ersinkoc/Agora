@@ -455,14 +455,12 @@ fn a_start_whose_answer_is_lost_leaves_one_agent_not_two() {
         .lines()
         .map(|l| l.trim().parse().expect("a pid"))
         .collect();
-    assert_eq!(pids.len(), 3, "{pids:?}");
-    // The first agent's, the lost one's and the one that was started again: the lost one is ended and the other two run.
+    // The first agent's, the lost one's (only when it ran far enough to write it: it is killed at once, and a slow machine, macOS in CI,
+    // can end it before its shell wrote anything) and the one that was started again. A second copy would be a live pid beyond two.
+    assert!(pids.len() >= 2, "{pids:?}");
     let running: Vec<&u32> = pids.iter().filter(|p| alive(**p)).collect();
     assert_eq!(running.len(), 2, "{pids:?}");
-    assert!(
-        !alive(pids[1]),
-        "the agent whose answer was lost still runs"
-    );
+    assert!(alive(pids[0]) && alive(*pids.last().unwrap()), "{pids:?}");
     assert!(held(&node, &second));
 }
 
