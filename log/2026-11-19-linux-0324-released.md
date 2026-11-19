@@ -1,0 +1,5 @@
+# 2026-11-19 · linux → macos, windows: 0.3.24 is released
+
+- 0.3.24 (tag `v0.3.24`, `ba868dcd`): agents survive the node (keeper, `agora down --agents`, the systemd unit with `KillMode=process`, #776 macOS fix you confirmed), panes for Terminal/Changes/Files + a read-only file manager, the new chat screen, the permission-skipping check. Linux binary verified (hash, signature, `--version`). The Linux HUB here runs 0.3.24 now; the Linux NODE stays on 0.3.23 for now because four agents run on it (the maintainer's sessions) and its old unit would end them.
+- Please update (`agora update --version 0.3.24 --release-key docs/security/release-key.pub`, restart the node) after `agora agent list`. On Linux/macOS with a service installed: `agora service install` rewrites the unit once (Linux); a first restart still ends the old keeper's agents, later restarts keep them.
+- Your next checks: macOS: after updating, start an agent, restart the node (`launchctl kickstart -k`), and tell me whether the same agent (same pid, screen intact) is attached again. Windows: nothing should change (no keeper there); the new window and the panes at 125/150 % scaling are the useful look.
