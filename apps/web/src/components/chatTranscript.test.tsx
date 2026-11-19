@@ -4,7 +4,7 @@ import { setLanguage } from '../i18n';
 import { demoConversation } from '../demoChat';
 import type { ChatLine } from '../net/chat';
 import { transcript } from '../net/transcript';
-import { FilesChanged, Item } from './ChatEntry';
+import { FilesChanged, Item, PlanCard, Thought, ToolSteps, Turn } from './ChatEntry';
 
 const line = (id: number, text: string, over: Partial<ChatLine> = {}): ChatLine => ({ id, atMs: 0, role: 'agent', kind: 'text', text, path: '', ...over });
 const draw = (lines: ChatLine[]) => renderToStaticMarkup(<>{transcript(lines).map((i) => <Item key={i.id} item={i} notice={() => null} />)}</>);
@@ -42,6 +42,51 @@ describe('the conversation as drawn', () => {
     expect(html).toContain('<table');
     expect(html).toContain('<th');
     expect(html).toContain('>rust<');
+  });
+  it('says "N steps" with a duration only when the entries carry times', () => {
+    const call = (id: number, atMs: number) => line(id, '{"tool":"Read","arguments":{"file_path":"a.rs"}}', { kind: 'tool', atMs });
+    const timed = renderToStaticMarkup(<ToolSteps lines={[call(1, 1_000_000), call(2, 1_004_100)]} />);
+    expect(timed).toContain('2 steps · 4.1 s');
+    const untimed = renderToStaticMarkup(<ToolSteps lines={[call(1, 0), call(2, 0), call(3, 0)]} />);
+    expect(untimed).toContain('3 steps');
+    expect(untimed).not.toMatch(/3 steps · /);
+  });
+  it('opens the newest group and the one that waits on you, and folds the rest', () => {
+    const lines = [line(1, '{"tool":"Read","arguments":{}}', { kind: 'tool' })];
+    expect(renderToStaticMarkup(<ToolSteps lines={lines} />)).not.toMatch(/<details[^>]*\sopen/);
+    expect(renderToStaticMarkup(<ToolSteps lines={lines} open />)).toMatch(/<details[^>]*\sopen/);
+    expect(renderToStaticMarkup(<ToolSteps lines={lines} flag="needs-you" />)).toMatch(/<details[^>]*\sopen/);
+  });
+  it('shows an edit with its diff inside the row, with line numbers and a hunk header', () => {
+    const html = renderToStaticMarkup(<ToolSteps open lines={[line(1, '{"tool":"Edit","arguments":{"file_path":"src/a.rs","old_string":"a","new_string":"b"}}', { kind: 'tool' })]}
+      diffs={new Map([[1, line(2, '@@ -39,2 +39,2 @@ fn f\n keep\n-old\n+new\n', { kind: 'diff', path: 'src/a.rs' })]])} />);
+    expect(html).toContain('data-diff-path="src/a.rs"');
+    expect(html).toContain('@@ -39,2 +39,2 @@ fn f');
+    expect(html).toContain('>39<');
+    expect(html).toContain('>40<');
+  });
+  it('draws a thinking block folded, with its time only when known, and the text as text', () => {
+    const html = renderToStaticMarkup(<Thought text="<b>x</b>" seconds={9} />);
+    expect(html).toContain('Thought for 9.0 s');
+    expect(html).not.toMatch(/<details[^>]*\sopen/);
+    expect(html).toContain('&lt;b&gt;x&lt;/b&gt;');
+    expect(renderToStaticMarkup(<Thought text="t" />)).not.toContain('Thought for');
+  });
+  it('draws a plan as a numbered list, and ticks and a bar only when a status is given', () => {
+    const plain = renderToStaticMarkup(<PlanCard steps={['a', 'b']} label="Plan" />);
+    expect(plain).not.toContain('progressbar');
+    expect(plain).not.toContain('line-through');
+    expect(plain).toContain('>1<');
+    const withStatus = renderToStaticMarkup(<PlanCard steps={['a', 'b', 'c', 'd']} status={['completed', 'completed', 'in_progress', 'pending']} label="Plan" />);
+    expect(withStatus).toContain('aria-valuenow="50"');
+    expect(withStatus).toContain('2 of 4 done');
+    expect(withStatus).toContain('data-status="completed"');
+  });
+  it('puts an agent turn beside its avatar, name, model and time', () => {
+    const html = renderToStaticMarkup(<Turn name="claude · amber" model="Opus" atMs={Date.now()}>x</Turn>);
+    expect(html).toContain('>C<');
+    expect(html).toContain('claude · amber');
+    expect(html).toContain('Opus');
   });
   it('lists each changed file once with its totals', () => {
     const html = renderToStaticMarkup(<FilesChanged lines={transcript(demoConversation()).flatMap((i) => (i.kind === 'diff' ? [i.line] : []))} />);

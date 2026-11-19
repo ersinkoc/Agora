@@ -25,7 +25,7 @@ import type { ApprovalModel, MachineModel, MessageModel, ProjectCost } from './n
 import type { Device } from './net/approval';
 import { deviceLabel } from './net/devices';
 import type { UsageSummary } from './net/usage';
-import { demoAgents, demoHelper, demoStartApproval, demoStartSettingsApproval } from './fixtures';
+import { demoAgents, demoApprovals, demoHelper, demoStartApproval, demoStartSettingsApproval } from './fixtures';
 import { demoSource, type TerminalSource } from './terminal/source';
 import { Suspense, lazy, useEffect, useMemo, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { actionKey, outcomeKind, type AuditResult } from './net/audit';
@@ -61,7 +61,7 @@ const STATES: UiState[] = ['working', 'needs-you', 'finished', 'idle', 'unknown'
 
 // ADR-0058: a chat agent that reported its modes, models, context and cost, and a conversation with a notice in it.
 const demoChatAgent: AgentTileModel = {
-  ...(demoAgents[0] as AgentTileModel), id: 'demo/chat', terminal: false, startedMs: Date.now() - 754_000,
+  ...(demoAgents[0] as AgentTileModel), id: 'demo/chat', terminal: false, state: 'working', tokens: 78_300, startedMs: Date.now() - 754_000,
   session: {
     modes: [{ id: 'build', name: 'Build', description: '', skipsPermissions: false }, { id: 'plan', name: 'Plan', description: 'No edits', skipsPermissions: false },
       { id: 'bypassPermissions', name: 'Bypass Permissions', description: '', skipsPermissions: true }],
@@ -100,7 +100,7 @@ function Themed({ theme, onStart }: { theme: 'dark' | 'light'; onStart?: () => v
       <AttentionStrip agents={needsAttention(demoAgents)} />
       <div className="fleet">{demoAgents.map((a) => <AgentTile key={a.id} agent={a} />)}</div>
       <Messages messages={demoMessages} />
-      <div className="h-[44rem] max-w-2xl"><PromptBox agent={demoChatAgent} source={demoChat} choose={async () => true} /></div>
+      <div className="h-[44rem] max-w-2xl"><PromptBox agent={demoChatAgent} source={demoChat} choose={async () => true} approvals={<ApprovalBanner approval={demoApprovals[0] as ApprovalModel} onResolve={() => {}} pinned />} /></div>
       <div className="fleet"><AgentTile agent={demoHelper} /></div>
       <AgentAddress agent={{ ...demoHelper, machineId: 'laptop', id: 'laptop/a8' }} />
       <StartApproval approval={demoStartApproval} start={demoStartApproval.start} onResolve={() => {}} />
@@ -169,6 +169,7 @@ export function Focus({ agent, approvals = [], onResolve, source: live, chatSour
     );
   }
   const why = agent.reportedBy === 'agent' ? t('focus-why-agent') : t('focus-why-screen');
+  const asks = approvals.filter((x) => x.agentId === agent.id);
   // Full size: the terminal takes the whole window under one slim bar, like a maximized editor tab.
   return (
     <div className="ide" style={{ gridTemplateRows: 'auto minmax(0, 1fr)' }}>
@@ -184,10 +185,10 @@ export function Focus({ agent, approvals = [], onResolve, source: live, chatSour
         <ThemePicker />
       </header>
       <main className="flex min-h-0 min-w-0 flex-col">
-        {approvals.filter((x) => x.agentId === agent.id).map((x) => <ApprovalBanner key={x.id} approval={x} onResolve={onResolve} />)}
+        {agent.terminal === false ? null : approvals.filter((x) => x.agentId === agent.id).map((x) => <ApprovalBanner key={x.id} approval={x} onResolve={onResolve} />)}
         <AgentAddress key={agent.id} agent={agent} />
         <div className="pane min-h-0 flex-1 bg-surface-0 p-1.5" aria-label={agent.terminal === false ? t('chat-log') : t('focus-terminal')}>
-          {agent.terminal === false ? <PromptBox agent={agent} source={chatSource} send={sendPrompt} choose={chooseOption} /> : (
+          {agent.terminal === false ? <PromptBox agent={agent} source={chatSource} send={sendPrompt} choose={chooseOption} approvals={asks.length ? <div className="grid gap-2">{asks.map((x) => <ApprovalBanner key={x.id} approval={x} onResolve={onResolve} pinned />)}</div> : undefined} /> : (
             <Suspense fallback={<div className="terminal" aria-busy="true" />}>
               <TerminalView source={source} label={t('focus-terminal')} />
             </Suspense>

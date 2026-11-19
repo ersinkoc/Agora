@@ -19,3 +19,10 @@ export function duration(ms: number): string {
   const h = Math.floor(s / 3600);
   return `${h} h ${Math.floor((s % 3600) / 60)} min`;
 }
+
+/** "4.1 s", "0.6 s", "12 s", "2 min 5 s": a short run keeps one decimal (a step is often a second or two); longer ones use `duration`. */
+export function preciseDuration(ms: number): string {
+  const v = Math.max(0, ms);
+  if (v < 10_000) return `${(Math.round(v / 100) / 10).toFixed(1)} s`;
+  return duration(v);
+}

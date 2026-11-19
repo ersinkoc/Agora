@@ -24,7 +24,7 @@ const chunk = (id: number): ChatLine => ({ id, atMs: 0, role: 'agent', kind: 'te
 // jsdom has no layout: every drawn child of the log is 100 px tall, and the log remembers its own scrollTop.
 function layout(log: HTMLElement) {
   let top = 0;
-  Object.defineProperty(log, 'scrollHeight', { get: () => log.children.length * 100 });
+  Object.defineProperty(log, 'scrollHeight', { get: () => (log.firstElementChild?.children.length ?? log.children.length) * 100 });
   Object.defineProperty(log, 'clientHeight', { get: () => 500 });
   Object.defineProperty(log, 'scrollTop', { get: () => top, set: (v: number) => { top = v; } });
 }

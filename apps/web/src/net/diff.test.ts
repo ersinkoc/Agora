@@ -297,6 +297,11 @@ describe('parseHunks', () => {
     expect([h.added, h.removed]).toEqual([2, 1]);
     expect(h.lines.map((l) => l.kind)).toEqual(['hunk', 'del', 'add', 'add']);
   });
+  it('numbers the lines from the hunk header: old numbers for deleted, new for added, both for unchanged', () => {
+    const h = parseHunks('@@ -39,3 +39,3 @@ fn f\n keep\n-old\n+new\n tail\n');
+    expect(h.lines.map((l) => [l.kind, l.oldNo, l.newNo])).toEqual([['hunk', undefined, undefined], ['ctx', 39, 39], ['del', 40, undefined], ['add', undefined, 40], ['ctx', 41, 41]]);
+    expect(parseHunks('@@ odd @@\n+a\n').lines[1]?.newNo).toBeUndefined();
+  });
   it('reads git\'s output too, and nothing without a hunk', () => {
     expect(parseHunks(SAMPLE).added).toBe(2);
     expect(parseHunks('just text')).toEqual({ added: 0, removed: 0, lines: [] });

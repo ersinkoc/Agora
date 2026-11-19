@@ -131,12 +131,23 @@ const HUNK = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@ ?(.*)$/;
 export function parseHunks(text: string): Pick<DiffFile, 'added' | 'removed' | 'lines'> {
   const out: Pick<DiffFile, 'added' | 'removed' | 'lines'> = { added: 0, removed: 0, lines: [] };
   let inHunk = false;
+  // Line numbers follow the hunk header (`@@ -old,n +new,n @@`); a header that cannot be read leaves its lines unnumbered.
+  let oldNo: number | undefined;
+  let newNo: number | undefined;
   for (const raw of text.split('\n')) {
-    if (raw.startsWith('@@')) { inHunk = true; out.lines.push({ kind: 'hunk', text: raw }); }
+    if (raw.startsWith('@@')) {
+      inHunk = true;
+      out.lines.push({ kind: 'hunk', text: raw });
+      const m = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(raw);
+      oldNo = m ? Number(m[1]) : undefined;
+      newNo = m ? Number(m[2]) : undefined;
+    }
     else if (!inHunk) continue;
-    else if (raw.startsWith('+')) { out.added++; out.lines.push({ kind: 'add', text: raw.slice(1) }); }
-    else if (raw.startsWith('-')) { out.removed++; out.lines.push({ kind: 'del', text: raw.slice(1) }); }
-    else if (raw.startsWith(' ')) out.lines.push({ kind: 'ctx', text: raw.slice(1) });
+    else if (raw.startsWith('+')) { out.added++; out.lines.push({ kind: 'add', text: raw.slice(1), ...(newNo !== undefined ? { newNo: newNo++ } : {}) }); }
+    else if (raw.startsWith('-')) { out.removed++; out.lines.push({ kind: 'del', text: raw.slice(1), ...(oldNo !== undefined ? { oldNo: oldNo++ } : {}) }); }
+    else if (raw.startsWith(' ')) {
+      out.lines.push({ kind: 'ctx', text: raw.slice(1), ...(oldNo !== undefined ? { oldNo: oldNo++ } : {}), ...(newNo !== undefined ? { newNo: newNo++ } : {}) });
+    }
     else if (raw.startsWith('diff --git ')) inHunk = false;
   }
   return out;
