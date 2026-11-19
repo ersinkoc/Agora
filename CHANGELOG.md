@@ -4,6 +4,10 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+_Nothing yet._
+
+## 0.3.21
+
 ### Links in the console
 - Web addresses with a query string (`?a=1&b=2`) can now be opened with Ctrl+click twice. Percent-encoded links (`%20`, `%E2%80%93`) open too; a `%NAME%` shape is still refused.
 - Opening an agent's terminal or conversation from the console and then closing the window (or losing the SSH session) now ends the console, instead of leaving it running unseen.
