@@ -281,7 +281,7 @@ describe('the agent\'s own settings', () => {
     const setConfig = vi.fn(async () => true);
     act(() => root.render(<SessionBar part="controls" agentKey="n/a" session={{ ...base, config: [effort] }} setConfig={setConfig} />));
     open(/Effort/);
-    const low = [...host.querySelectorAll('[role=menuitemradio]')].find((b) => b.textContent?.includes('Low')) as HTMLElement;
+    const low = [...document.querySelectorAll('[role=menuitemradio]')].find((b) => b.textContent?.includes('Low')) as HTMLElement;
     await act(async () => { low.click(); });
     expect(setConfig).toHaveBeenCalledWith('n/a', 'effort', 'low');
   });
@@ -289,7 +289,7 @@ describe('the agent\'s own settings', () => {
     const setConfig = vi.fn(async () => true);
     act(() => root.render(<SessionBar part="controls" agentKey="n/a" session={{ ...base, config: [effort] }} setConfig={setConfig} />));
     open(/Effort/);
-    const high = [...host.querySelectorAll('[role=menuitemradio]')].find((b) => b.textContent?.includes('High')) as HTMLElement;
+    const high = [...document.querySelectorAll('[role=menuitemradio]')].find((b) => b.textContent?.includes('High')) as HTMLElement;
     await act(async () => { high.click(); });
     expect(setConfig).not.toHaveBeenCalled();
   });
@@ -300,7 +300,7 @@ describe('the agent\'s own settings', () => {
     const setConfig = vi.fn(async () => true);
     act(() => root.render(<SessionBar part="controls" agentKey="n/a" session={{ ...base, config: [mode] }} setConfig={setConfig} />));
     open(/Mode/);
-    const yolo = [...host.querySelectorAll<HTMLButtonElement>('[role=menuitemradio]')].find((b) => b.textContent?.includes('Bypass')) as HTMLButtonElement;
+    const yolo = [...document.querySelectorAll<HTMLButtonElement>('[role=menuitemradio]')].find((b) => b.textContent?.includes('Bypass')) as HTMLButtonElement;
     expect(yolo.disabled).toBe(true);
     expect(yolo.textContent).toContain('not available yet');
     expect(yolo.textContent).toContain('does not ask');
@@ -313,8 +313,8 @@ describe('the agent\'s own settings', () => {
     const auto: ConfigOptionModel = { id: 'auto', name: 'Auto approve', description: '', category: 'custom', type: 'boolean', current: 'false', skipsPermissions: true, choices: [] };
     act(() => root.render(<SessionBar part="controls" agentKey="n/a" session={{ ...base, config: [auto] }} setConfig={async () => true} />));
     open(/More settings/);
-    act(() => (host.querySelector('[role=menuitem]') as HTMLElement).click()); // the submenu of the option
-    const items = [...host.querySelectorAll<HTMLButtonElement>('[role=menuitemradio]')];
+    act(() => (document.querySelector('[role=menuitem]') as HTMLElement).click()); // the submenu of the option
+    const items = [...document.querySelectorAll<HTMLButtonElement>('[role=menuitemradio]')];
     expect(items.map((b) => b.textContent)).toEqual(expect.arrayContaining([expect.stringContaining('On'), expect.stringContaining('Off')]));
     expect(items.filter((b) => b.textContent?.includes('On')).every((b) => b.disabled)).toBe(true);
   });
@@ -326,7 +326,7 @@ describe('the agent\'s own settings', () => {
   it('says the agent did not switch when the node refused', async () => {
     act(() => root.render(<SessionBar part="controls" agentKey="n/a" session={{ ...base, config: [effort] }} setConfig={async () => false} />));
     open(/Effort/);
-    await act(async () => { ([...host.querySelectorAll('[role=menuitemradio]')].find((b) => b.textContent?.includes('Low')) as HTMLElement).click(); });
+    await act(async () => { ([...document.querySelectorAll('[role=menuitemradio]')].find((b) => b.textContent?.includes('Low')) as HTMLElement).click(); });
     expect(host.textContent).toContain('The agent did not switch.');
   });
 });

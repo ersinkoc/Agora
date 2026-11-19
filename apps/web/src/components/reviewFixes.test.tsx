@@ -39,8 +39,8 @@ describe('1. a boolean that skips permissions: only turning it ON is held back',
     const setConfig = vi.fn(async () => true);
     act(() => root.render(<SessionBar part="controls" agentKey="n/a" session={{ ...base, config: [bool('true')] }} setConfig={setConfig} />));
     act(() => (host.querySelector('button[aria-haspopup=menu][aria-label*="More settings"]') as HTMLElement).click());
-    act(() => (host.querySelector('[role=menuitem]') as HTMLElement).click());
-    const items = [...host.querySelectorAll<HTMLButtonElement>('[role=menuitemradio]')];
+    act(() => (document.querySelector('[role=menuitem]') as HTMLElement).click());
+    const items = [...document.querySelectorAll<HTMLButtonElement>('[role=menuitemradio]')];
     const off = items.find((b) => b.textContent?.includes('Off')) as HTMLButtonElement;
     expect(off.disabled).toBe(false);
     await act(async () => { off.click(); });
@@ -144,10 +144,10 @@ describe('6. a click is judged with the setting as it is now', () => {
     const draw = (o: ConfigOptionModel) => act(() => root.render(<SessionBar part="controls" agentKey="n/a" session={{ ...base, config: [o] }} setConfig={setConfig} />));
     draw(effort(false));
     act(() => (host.querySelector('button[aria-haspopup=menu][aria-label*="Effort"]') as HTMLElement).click());
-    const low = [...host.querySelectorAll<HTMLButtonElement>('[role=menuitemradio]')].find((b) => b.textContent?.includes('Low')) as HTMLButtonElement;
+    const low = [...document.querySelectorAll<HTMLButtonElement>('[role=menuitemradio]')].find((b) => b.textContent?.includes('Low')) as HTMLButtonElement;
     expect(low.disabled).toBe(false);
     draw(effort(true)); // the node now says Low skips permissions, with the menu still open
-    const again = [...host.querySelectorAll<HTMLButtonElement>('[role=menuitemradio]')].find((b) => b.textContent?.includes('Low')) as HTMLButtonElement;
+    const again = [...document.querySelectorAll<HTMLButtonElement>('[role=menuitemradio]')].find((b) => b.textContent?.includes('Low')) as HTMLButtonElement;
     expect(again.disabled).toBe(true);
     await act(async () => { again.click(); low.click(); }); // a click on the new one, and one on the picture drawn before
     expect(setConfig).not.toHaveBeenCalled();
@@ -179,7 +179,7 @@ describe('8. a refusal is said in plain words', () => {
   it('a setting refused with a code says that, not the general sentence', async () => {
     act(() => root.render(<SessionBar part="controls" agentKey="n/a" session={{ ...base, config: [effort()] }} setConfig={async () => 'protocol.capability_missing'} />));
     act(() => (host.querySelector('button[aria-haspopup=menu][aria-label*="Effort"]') as HTMLElement).click());
-    await act(async () => { ([...host.querySelectorAll('[role=menuitemradio]')].find((b) => b.textContent?.includes('Low')) as HTMLElement).click(); });
+    await act(async () => { ([...document.querySelectorAll('[role=menuitemradio]')].find((b) => b.textContent?.includes('Low')) as HTMLElement).click(); });
     expect(host.textContent).toContain('does not support that yet');
     expect(host.textContent).not.toContain('The agent did not switch.');
   });
