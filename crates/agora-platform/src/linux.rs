@@ -340,8 +340,8 @@ pub(crate) fn end_with(supervisor: u32) {
 
 // `agora service` on Linux (ADR-0062 item 6): a systemd user unit, for this user only and never with root, sudo or `loginctl`.
 //
-// - The unit runs the supervisor in the foreground (`Type=simple`); systemd's default `KillMode=control-group` ends everything the
-//   role started when the unit stops, after `TimeoutStopSec=25`. `Restart=on-failure` (when the spec asks for a restart) starts again
+// - The unit runs the supervisor in the foreground (`Type=simple`); `KillMode=control-group` ends everything the role started when the
+//   unit stops, after `TimeoutStopSec=25`; the node's unit has `KillMode=process` (see `unit_text`) so its holder and agents stay. `Restart=on-failure` (when the spec asks for a restart) starts again
 //   a supervisor that crashed, was killed by a signal (an OOM kill) or timed out. Under a service (`--log`) its planned ends (give-up,
 //   refusal, lost lock, clean stop) exit 0 and are never restarted (decision `2026-11-18-1100-linux-563`). Nothing else restarts.
 // - The unit file is written owner-only (0600) and atomically into `$XDG_CONFIG_HOME/systemd/user` (`~/.config/systemd/user`),
@@ -921,7 +921,19 @@ fn unit_text(spec: &crate::ServiceSpec) -> io::Result<String> {
             env_word(&format!("PATH={path}"))
         ));
     }
-    unit.push_str("KillMode=control-group\nTimeoutStopSec=25\n");
+    // `control-group` (systemd's default) signals every process in the unit's cgroup when it stops, which would end the terminal holder
+    // and the agents it keeps (ADR-0079). `process` signals only the main process, the supervisor. That is enough: the supervisor
+    // catches `SIGTERM` and passes it on to the node (the path `agora down` uses); a supervisor killed outright (`SIGKILL` after
+    // `TimeoutStopSec`) still ends the node, which sets `PR_SET_PDEATHSIG` (`end_with`). The holder and the agents are each in a
+    // session of their own (`setsid`) and are not the supervisor's children, so nothing signals them and they keep running. The next
+    // start is a new supervisor and node, which attach to the holder that is still there. systemd logs "left-over process" for them:
+    // expected. The hub keeps `control-group`: it has no such children.
+    let kill_mode = if spec.keep_children_on_stop {
+        "process"
+    } else {
+        "control-group"
+    };
+    unit.push_str(&format!("KillMode={kill_mode}\nTimeoutStopSec=25\n"));
     if spec.restart_supervisor_on_failure {
         unit.push_str("Restart=on-failure\n");
     }
@@ -1098,6 +1110,7 @@ esac
             env: vec![("PATH".into(), "/usr/local/bin:/usr/bin".into())],
             work_dir: home.to_path_buf(),
             restart_supervisor_on_failure: true,
+            keep_children_on_stop: false,
         }
     }
 
@@ -1115,6 +1128,23 @@ esac
         let mut s = spec(Path::new("/home/u/.agora"));
         s.restart_supervisor_on_failure = false;
         assert!(!unit_text(&s).unwrap().contains("Restart="));
+    }
+
+    #[test]
+    fn only_a_unit_that_keeps_its_children_uses_kill_mode_process() {
+        let mut s = spec(Path::new("/home/u/.agora"));
+        let hub = unit_text(&s).unwrap();
+        assert!(hub.contains("KillMode=control-group\nTimeoutStopSec=25\n"));
+        assert!(!hub.contains("KillMode=process"));
+        s.keep_children_on_stop = true;
+        let node = unit_text(&s).unwrap();
+        assert!(node.contains("KillMode=process\nTimeoutStopSec=25\n"));
+        assert!(!node.contains("control-group"));
+        // Only that line differs: the quoting and the rest are the same.
+        assert_eq!(
+            node.replace("KillMode=process", "KillMode=control-group"),
+            hub
+        );
     }
 
     #[test]

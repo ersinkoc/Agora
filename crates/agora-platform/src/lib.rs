@@ -2102,6 +2102,11 @@ pub struct ServiceSpec {
     /// `KeepAlive = { SuccessfulExit = false }`). The supervisor exits 0 for every end it decided itself under a service (a give-up, a
     /// refusal, a clean stop), so only a crash of the supervisor itself is restarted. Windows has no such setting: ignored.
     pub restart_supervisor_on_failure: bool,
+    /// Stopping or restarting the service ends only its supervisor (and, through it, the role); processes the role started in a session
+    /// of their own (the terminal holder and its agents, ADR-0079) keep running. systemd: `KillMode=process` instead of
+    /// `control-group`. macOS already leaves them (`AbandonProcessGroup` false, and each agent is in its own session, measured) and
+    /// Windows has no holder yet: both ignore it.
+    pub keep_children_on_stop: bool,
 }
 
 /// Whether a service is registered (see [`ServiceSpec`]).

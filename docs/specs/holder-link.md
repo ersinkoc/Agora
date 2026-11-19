@@ -128,8 +128,12 @@ next frame's.
 - **Known limits:** (1) a selected folder is checked to be in place right before and right after the start, but the holder changes
   into the *path*, not into the handle the node holds (the node's own start uses `fchdir` on the handle): a swap within that window is
   possible, and the agent is ended at once if the check after fails; carrying the folder handle needs a new tag. (2) Under `agora
-  service` on Linux the unit's `KillMode=control-group` ends the holder (and so its agents) when the unit stops: the unit needs
-  `KillMode=process` (or the holder its own scope) before agents survive a service restart. (3) macOS is compile-checked only; Windows
+  service` on Linux the node's unit has `KillMode=process`: stopping or restarting it signals only the supervisor, which passes
+  `SIGTERM` on to the node (as `agora down` does); the holder and the agents are in sessions of their own and keep running, and the
+  new node attaches to the holder. systemd logs "left-over process" for them: expected. The hub's unit keeps `control-group`. A unit
+  written by an earlier version keeps `control-group` until `agora service remove` and `agora service install` (`install` leaves a
+  registered unit as it is); that `remove` ends the old unit's agents once. Logging out without lingering still ends the user manager
+  and with it everything left in its cgroup. macOS needs nothing (`AbandonProcessGroup` false, agents in their own sessions). (3) macOS is compile-checked only; Windows
   has no holder yet. (4) A node whose holder link breaks while the holder lives counts the agents ended (it can no longer reach
   them) and ends them in the holder when it next connects. (5) A different holder version is refused and the node runs its agents itself; the "agents running in an older
   holder" report of decision 5 is not built.

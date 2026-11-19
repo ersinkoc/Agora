@@ -73,6 +73,9 @@ fn spec(say: &Say, h: &Path, role: Role) -> std::io::Result<ServiceSpec> {
         env,
         work_dir: h.to_path_buf(),
         restart_supervisor_on_failure: true,
+        // The node's agents run in the terminal holder, which must outlive a stop or restart of the unit (ADR-0079); the hub has no
+        // such children, and keeps the whole control group ending with it.
+        keep_children_on_stop: role == Role::Node,
     })
 }
 

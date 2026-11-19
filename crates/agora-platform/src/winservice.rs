@@ -323,6 +323,7 @@ mod tests {
             env: Vec::new(),
             work_dir: PathBuf::from(r"D:\my agora\home"),
             restart_supervisor_on_failure: false,
+            keep_children_on_stop: false,
         }
     }
 

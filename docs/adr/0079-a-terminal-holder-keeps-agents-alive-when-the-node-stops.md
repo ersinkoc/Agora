@@ -2,6 +2,7 @@
 Status: Accepted
 Date: 2026-11-15
 Accepted: 2026-11-15 (the maintainer's explicit message in the merger chat, accepting the ADRs listed by number (#613 ADR-0060 Amendment A, #614 ADR-0078, #615 ADR-0080, #616 ADR-0079): they accepted all of them). The open questions' proposed answers stand.
+Built (Linux service unit): the node's `agora service` unit has `KillMode=process`, so stopping or restarting it signals only the supervisor and the holder and its agents keep running (the hub's unit keeps `control-group`); a unit written earlier keeps its old text until `agora service remove` and `install`.
 Origin: the maintainer, after agents came back by resume on `win` (2026-11-15): "even if Agora closes, the agents opened in it must
 not die, and when it comes back we must attach to the agents' screens again".
 
