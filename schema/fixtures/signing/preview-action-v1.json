@@ -1,5 +1,5 @@
 {
- "about": "ADR-0088 preview-action-v1: the signed bytes of a preview.open sent through the hub. Fields are NUL-separated: the domain, the node, the operation `open`, then the port and the expiry in seconds (0 = the default) as decimal digits, the nonce, and the signature's expiry (`expires`, ms) as decimal digits. Checked by crates/agora-protocol/tests/preview_signing.rs; the node, the terminal client and the web window check them when the open is built.",
+ "about": "ADR-0088 preview-action-v1: the signed bytes of a preview.open sent through the hub. The domain `preview-action-v1`, one NUL byte, then F(node) F(`open`) F(port) F(expires_seconds) F(nonce) F(expires), concatenated, where F(x) is the decimal byte length of x, `:`, then x. Numbers are canonical decimal (no leading zeros, no `+`, no whitespace; `expires_seconds` 0 is `0`). `expires` is the signature's expiry in ms. Checked by crates/agora-protocol/tests/preview_signing.rs; the node, the terminal client and the web window check them when the open is built.",
  "cases": [
   {
    "name": "default expiry",
@@ -8,7 +8,7 @@
    "expires_seconds": 0,
    "nonce": "00112233445566778899aabbccddeeff",
    "expires": 1700000120000,
-   "hex": "707265766965772d616374696f6e2d7631006c6170746f70006f70656e003330303000300030303131323233333434353536363737383839396161626263636464656566660031373030303030313230303030"
+   "hex": "707265766965772d616374696f6e2d763100363a6c6170746f70343a6f70656e343a33303030313a3033323a303031313232333334343535363637373838393961616262636364646565666631333a31373030303030313230303030"
   },
   {
    "name": "two hours",
@@ -17,7 +17,16 @@
    "expires_seconds": 7200,
    "nonce": "ffeeddccbbaa99887766554433221100",
    "expires": 1700000180000,
-   "hex": "707265766965772d616374696f6e2d7631006275696c642d626f78006f70656e003531373300373230300066666565646463636262616139393838373736363535343433333232313130300031373030303030313830303030"
+   "hex": "707265766965772d616374696f6e2d763100393a6275696c642d626f78343a6f70656e343a35313733343a3732303033323a666665656464636362626161393938383737363635353434333332323131303031333a31373030303030313830303030"
+  },
+  {
+   "name": "node with a colon and a space",
+   "node": "my:box 1",
+   "port": 8080,
+   "expires_seconds": 3600,
+   "nonce": "0123456789abcdef0123456789abcdef",
+   "expires": 1700000240000,
+   "hex": "707265766965772d616374696f6e2d763100383a6d793a626f782031343a6f70656e343a38303830343a3336303033323a303132333435363738396162636465663031323334353637383961626364656631333a31373030303030323430303030"
   }
  ]
 }

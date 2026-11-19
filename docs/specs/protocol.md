@@ -755,14 +755,17 @@ and means "speaks these messages"; a hub that cannot pair (it does not know its 
 ### Preview (ADR-0088)
 
 Schema only so far (`schema/agora/v1/preview.proto`, `docs/specs/preview.md` is the design); no node or hub sends or handles these messages yet.
-All additions; nothing published changed. Capability `preview.v1` is offered by both the hub and the node and means "speaks these
-messages". **Older peers refuse, they do not drop:** the hub never sends a preview command to a node that did not offer `preview.v1`
-and answers the client `protocol.capability_missing {capability: preview.v1}`; a peer that gets a preview command it does not handle
-answers the same code, as for any command it does not know. A client never assumes an open worked from silence.
+All additions; nothing published changed. Capability `preview.v1` is **not offered yet**: the node forwarder (build step 2) and the hub
+relay (step 3) add it to their capability lists when they handle the messages, and a hub never sends a preview command to a node that did
+not offer it. **Older peers refuse, they do not drop:** until then every peer answers `protocol.capability_missing`. The hub answers
+`PreviewConnect` with `capability` = `preview.v1`; a node that does not handle a preview command answers, as for any command it does
+not know, with `capability` = the command's name (`preview.open`, `preview.close`, `preview.list`, `preview.connect`). A client treats
+either as "previews are not available here" and never assumes an open worked from silence.
 
-- **Commands** (`CommandRequest` fields): `PreviewOpen` (102: `port`, `expires_seconds`, `authorization`), `PreviewClose` (103: `forward_id`, `all`),
-  `PreviewList` (104) and `PreviewConnect` (105: `forward_id`). `PreviewConnect` is opened on a dynamic stream like `TerminalSubscribe`
-  (any other command on a dynamic stream stays `protocol.invalid_message`).
+- **Commands** (`CommandRequest` fields): `PreviewOpen` (102: `port`, `expires_seconds`, `authorization`), `PreviewClose` (103: `forward_id`, `all`;
+  `all` with a non-empty `forward_id`, or neither, is `protocol.invalid_message {field: forward_id}`), `PreviewList` (104) and
+  `PreviewConnect` (105: `forward_id`). `PreviewConnect` is opened on a dynamic stream like `TerminalSubscribe` (any other command on a
+  dynamic stream stays `protocol.invalid_message`; the hub's own check for `PreviewConnect` is the capability refusal above).
 - **Results** (`CommandOk` fields): `PreviewOpenResult` (26: `forward`), `PreviewListResult` (27), `PreviewConnectResult` (28:
   `max_chunk_bytes`, `window_bytes`, `rate_bytes_per_second`, `total_bytes_limit`); `PreviewClose` answers `empty`. A forward is a
   `PreviewForward { forward_id, port, opened_at_ms, expires_at_ms, creator, state, close_reason }`.
@@ -787,18 +790,24 @@ answers the same code, as for any command it does not know. A client never assum
   `agora_protocol::frame::kinds::{PREVIEW_DATA, PREVIEW_CREDIT, PREVIEW_END}`.
 - **Signing: `preview-action-v1`.** Through the hub a `PreviewOpen` carries a `PreviewAuthorization { device_id, nonce, expires_at_ms,
   signature }` (the shape of `DirectoryAuthorization`, defined in `preview.proto` because `commands.proto` imports it), signed by a
-  device the node trusts (ADR-0020) over, in the order the approval card shows them (the node, the port, how long):
+  device the node trusts (ADR-0020) over the domain, one NUL byte, and then every field length-prefixed, in the order the approval card
+  shows them (the node, the port, how long) and the request carries them:
 
   ```
-  preview-action-v1\0node\0open\0port\0expires_seconds\0nonce\0expires_at_ms
+  preview-action-v1 0x00 F(node) F("open") F(port) F(expires_seconds) F(nonce) F(expires_at_ms)
   ```
 
-  The port and the seconds are decimal digits (`expires_seconds` is what the request carries, `0` for the default, so the signature
-  covers exactly what was shown); the other fields are as in `directory-action-v1` and the nonce is single-use. A signature made for
-  another node, port, expiry or by another device does not verify, so the hub can neither open a forward nor change its port or
-  lifetime. An agent cannot send `PreviewOpen`; a suggestion is only an event. `PreviewClose` and `PreviewList` need no signature
-  (closing only removes access; listing shows ports and creators to people who may see the machine). On the node's own control socket
-  (the owner) no signature is needed. Vectors: `schema/fixtures/signing/preview-action-v1.json`
-  (`crates/agora-protocol/tests/preview_signing.rs`).
+  `F(x)` is the decimal byte length of `x`, `:`, then `x` (UTF-8, concatenated with no separator), as in the device messages and the
+  ADR-0059 `signed_list`. Numbers are rendered canonically: decimal digits, no leading zeros, no `+`, no whitespace, `0` as `0`
+  (`expires_seconds` is what the request carries, `0` for the default, so the signature covers exactly what was shown). The node and the
+  nonce may contain any byte, a NUL included; the prefixes mean no two different tuples sign the same bytes. The node verifies, never the
+  hub: the device is trusted there (ADR-0020), the signature verifies, `expires_at_ms` is in the future and at most 5 minutes ahead of
+  the node's clock, and the nonce has not been seen. A nonce is single-use and the node keeps it until the signature's expiry
+  (persisted, so a restart does not forget it). A signature made for another node, port or lifetime, or by another device, does not
+  verify, so the hub can neither open a forward nor change its port or lifetime. An agent cannot send `PreviewOpen`; a suggestion is only
+  an event. `PreviewClose` and `PreviewList` need no signature (closing only removes access; listing shows ports and creators to people
+  who may see the machine). On the node's own control socket (the owner) no signature is needed. Vectors:
+  `schema/fixtures/signing/preview-action-v1.json` (`crates/agora-protocol/tests/preview_signing.rs`, which also checks that fields holding
+  NUL bytes cannot be shifted between the node and the nonce).
 - **Errors**: `preview.port_refused` (`port`, `reason`), `preview.limit` (`limit`), `preview.expired` (`forward_id`),
   `preview.unknown` (`forward_id`), `preview.unavailable` (`reason`); see `error-codes.md`.

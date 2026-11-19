@@ -1,7 +1,7 @@
 # Preview: an agent's local web server in the window (ADR-0088)
 
 Status: schema only. The messages, codes, frame kinds and signing domain exist (`schema/agora/v1/preview.proto`, `docs/specs/protocol.md`
-"Preview"); no node, hub or window sends or handles them yet. Capability `preview.v1`.
+"Preview"); no node, hub or window sends or handles them yet. Capability `preview.v1` is not offered yet; the node step (2) and the hub step (3) add it to their lists when they handle the messages.
 
 ## What it is
 A **forward** is a named, owner-approved path from the window to one port on `127.0.0.1` of one node, for a limited time. The window
@@ -22,7 +22,8 @@ shows the page in an isolated frame. Nothing else on the node's loopback becomes
   hub link, holder, any port it knows it owns): `preview.port_refused` with `reason` `invalid`, `privileged`, `node_port` or `not_loopback`.
 - At most 8 open forwards per node (`preview.limit`). Expiry default 28800 s, cap 86400 s. A forward ends at expiry, when closed, or
   when the node restarts; it is never restored (`preview.expired`, `preview.unknown`).
-- Through the hub, an open needs a device signature over `preview-action-v1` (protocol.md). A suggestion never opens anything.
+- Through the hub, an open needs a device signature over `preview-action-v1` (protocol.md: length-prefixed fields, a single-use nonce kept until its expiry, at most 5 minutes ahead), verified by the node, never by the hub. A suggestion never opens anything.
+- `PreviewClose` with `all` and a `forward_id`, or with neither, is `protocol.invalid_message {field: forward_id}`.
 - Stream budgets: `max_chunk_bytes` 16384, `window_bytes` 262144 of credit per direction, optional rate and total ceilings; over any of
   them the stream ends with `PreviewEnd.reason`. Preview bytes are the lowest priority and never delay terminal bytes (ADR-0022).
 

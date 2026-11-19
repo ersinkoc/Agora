@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package agora.v1;
 
-// ADR-0088 (docs/specs/preview.md): preview an agent's local web server in the window. Capability `preview.v1`.
+// ADR-0088 (docs/specs/preview.md): preview an agent's local web server in the window. Capability `preview.v1` (named here; node and hub offer it when they handle these messages, build steps 2 and 3).
 //
 // Carriage: `PreviewOpen`, `PreviewClose`, `PreviewList` and `PreviewConnect` are `CommandRequest` arms (102..105); the answers are
 // `CommandOk` arms (26, 27, 28; `PreviewClose` answers `empty`). `PreviewSuggested` and `PreviewChanged` are `Event` arms (80, 81).

@@ -89,7 +89,7 @@ message CommandRequest {
     PairReveal pair_reveal = 100;
     // ADR-0082: the first request on a node's local control socket when the node requires its control token; accepted on no other path.
     ControlAuth control_auth = 101;
-    // ADR-0088, capability `preview.v1` (node and hub): forwards to a port on a node's loopback. `PreviewConnect` is opened on a dynamic stream.
+    // ADR-0088, capability `preview.v1` (offered by the node and hub once they handle these; not yet): forwards to a port on a node's loopback. `PreviewConnect` is opened on a dynamic stream.
     PreviewOpen preview_open = 102;
     PreviewClose preview_close = 103;
     PreviewList preview_list = 104;

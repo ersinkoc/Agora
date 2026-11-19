@@ -61,7 +61,7 @@ message Event {
     AgentStartRefused agent_start_refused = 65;
     // files
     FilesChanged files_changed = 70;
-    // ADR-0088, capability `preview.v1`: an agent's suggestion (never an open), and a forward that opened or ended.
+    // ADR-0088, capability `preview.v1` (not offered yet): an agent's suggestion (never an open), and a forward that opened or ended.
     PreviewSuggested preview_suggested = 80;
     PreviewChanged preview_changed = 81;
   }

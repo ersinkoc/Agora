@@ -65,8 +65,8 @@ port and to open the node's control port: all must fail).
 ## Status of the build
 1. Schema: done. `schema/agora/v1/preview.proto` (commands 102..105, results 26..28, events 80..81, frame kinds 20..22), capability
    `preview.v1`, error codes `preview.port_refused`, `preview.limit`, `preview.expired`, `preview.unknown`, `preview.unavailable`, golden
-   fixtures, the signing domain `preview-action-v1` with vectors, and `docs/specs/preview.md`. Node and hub only refuse the commands
-   with `protocol.capability_missing`.
+   fixtures, the signing domain `preview-action-v1` with vectors, and `docs/specs/preview.md`. The capability is not advertised yet (steps
+   2 and 3 add it); node and hub refuse the commands with `protocol.capability_missing`.
 2. Node forwarder and policy checks: not started.
 3. Hub relay, origin per forward, audit: not started.
 4. Web Browser pane: not started.
