@@ -1,7 +1,8 @@
 //! ADR-0060, `[resume] fresh_argv`: an agent whose tool wrote no session until it was spoken to (Claude Code) has nothing to resume
 //! after a node restart. A resume that fails within moments starts the session from nothing under the same id, for a kind whose
-//! manifest says how; otherwise nothing changes. The "tool" is `agora-fake-agent` (never a real agent): with an unknown flag it exits
-//! at once with a failure, and `--probe-directory <file>` writes that file.
+//! manifest says how; otherwise nothing changes. The "tool" is a shell one-liner (never a real agent) that appends `R` (resume
+//! command) or `F` (fresh command) with the session id to a log and exits with a chosen code, so each test asserts what was launched.
+#![cfg(unix)]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 use agora_adapters::Manifest;
 use agora_core::NodeId;
@@ -14,32 +15,6 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 const SID: &str = "11111111-2222-4333-8444-555555555555";
-
-fn fake() -> String {
-    let p = std::env::current_exe()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join(format!("agora-fake-agent{}", std::env::consts::EXE_SUFFIX));
-    static BUILD: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-    BUILD.get_or_init(|| {
-        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
-        let mut command = Command::new(cargo);
-        command
-            .args(["build", "-q", "-p", "agora-fake-agent", "--target-dir"])
-            .arg(p.parent().unwrap().parent().unwrap());
-        if p.parent().unwrap().ends_with("release") {
-            command.arg("--release");
-        }
-        assert!(
-            command.status().unwrap().success(),
-            "building the fake failed"
-        );
-    });
-    p.to_string_lossy().into_owned()
-}
 
 fn git(dir: &Path, args: &[&str]) {
     assert!(Command::new("git")
@@ -73,24 +48,41 @@ impl Env {
         Self { root, repo }
     }
 
-    fn report(&self) -> PathBuf {
-        self.root.join(format!("fresh-{SID}.json"))
+    fn log(&self) -> PathBuf {
+        self.root.join("launches.log")
     }
 
-    /// A supervisor with a kind `k`: it launches and resumes as a command that fails at once; `fresh` says whether its manifest
-    /// has a `fresh_argv` (which writes the report file, named with the session id).
-    fn supervisor(&self, fresh: bool) -> Supervisor {
-        let fake = serde_json::to_string(&fake()).unwrap();
-        let report = serde_json::to_string(&self.report().to_string_lossy()).unwrap();
-        let report = report.replace(SID, "{session_id}");
-        let fresh = if fresh {
-            format!("fresh_argv = [{fake}, \"--probe-directory\", {report}]\n")
-        } else {
-            String::new()
+    /// What was launched so far, one `R <id>` or `F <id>` per line.
+    fn launches(&self) -> Vec<String> {
+        std::fs::read_to_string(self.log())
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// A supervisor with a kind `k`: its resume command logs `R` and exits with `resume_exit`; its `fresh_argv` (when `fresh_exit` is
+    /// given) logs `F` and exits with that code.
+    fn supervisor(&self, resume_exit: i32, fresh_exit: Option<i32>) -> Supervisor {
+        let log = self.log().to_string_lossy().into_owned();
+        let argv = |tag: &str, code: i32| {
+            serde_json::to_string(&[
+                "/bin/sh",
+                "-c",
+                &format!("echo \"{tag} $1\" >> '{log}'; exit {code}"),
+                "sh",
+                "{session_id}",
+            ])
+            .unwrap()
         };
+        let fresh = fresh_exit
+            .map(|c| format!("fresh_argv = {}\n", argv("F", c)))
+            .unwrap_or_default();
+        let launch = serde_json::to_string(&["/bin/sh", "-c", "exit 1"]).unwrap();
         let m = Manifest::parse(&format!(
-            "kind = \"k\"\ndisplay_name = \"K\"\nversion = \"1\"\nmin_engine = 2\n[process]\nlaunch = [{fake}, \"--nope\"]\n\
-             [resume]\nargv = [{fake}, \"--nope\", \"{{session_id}}\"]\n{fresh}"
+            "kind = \"k\"\ndisplay_name = \"K\"\nversion = \"1\"\nmin_engine = 2\n[process]\nlaunch = {launch}\n\
+             [resume]\nargv = {}\n{fresh}",
+            argv("R", resume_exit)
         ))
         .unwrap();
         let mut sup = Supervisor::new(SupervisorConfig {
@@ -107,8 +99,9 @@ impl Env {
         sup
     }
 
-    /// An agent as the node restores it from the ledger after a restart, then resumed at `at`.
-    fn resumed(&self, sup: &mut Supervisor, at: Instant) {
+    /// An agent as the node restores it from the ledger after a restart, then resumed.
+    fn resumed(&self, sup: &mut Supervisor) {
+        let at = Instant::now();
         let id = sup
             .start(
                 &StartRequest {
@@ -138,23 +131,22 @@ impl Env {
             private_config: None,
         })
         .unwrap();
+        // The start above ran `exit 1` and the stop ended it; only the resume logs. Clear the log all the same.
+        let _ = std::fs::remove_file(self.log());
         sup.resume(&id, at).unwrap();
     }
 
-    /// Ticks, with the clock `later` more ahead each round, until the report appears or two seconds pass.
-    fn drive(&self, sup: &mut Supervisor, later: Duration) -> bool {
-        let end = Instant::now() + Duration::from_secs(2);
+    /// Ticks for a while, the clock `later` more ahead each round (so a restart is as late after its own start as the first exit
+    /// was), and returns what was launched. Long enough for every restart to be due and every process to end.
+    fn run(&self, sup: &mut Supervisor, later: Duration) -> Vec<String> {
+        let end = Instant::now() + Duration::from_millis(1500);
         let mut round = 0;
         while Instant::now() < end {
-            // The clock runs on by `later` every round, so a restart is as late after its own start as the first exit was.
             round += 1;
             sup.tick(Instant::now() + later * round);
-            if self.report().exists() {
-                return true;
-            }
             std::thread::sleep(Duration::from_millis(15));
         }
-        false
+        self.launches()
     }
 }
 
@@ -164,27 +156,50 @@ impl Drop for Env {
     }
 }
 
+fn lines(tags: &str) -> Vec<String> {
+    tags.chars().map(|t| format!("{t} {SID}")).collect()
+}
+
 #[test]
-fn a_resume_that_fails_at_once_starts_the_session_from_nothing_when_the_manifest_says_how() {
+fn a_resume_that_fails_at_once_starts_the_session_from_nothing_under_the_same_id() {
     let e = Env::new("quick");
-    let mut sup = e.supervisor(true);
-    e.resumed(&mut sup, Instant::now());
-    assert!(e.drive(&mut sup, Duration::ZERO), "no fresh start");
+    let mut sup = e.supervisor(3, Some(0));
+    e.resumed(&mut sup);
+    // Resume fails, the fresh start (which works) runs once under the same id; its success ends the agent there.
+    assert_eq!(e.run(&mut sup, Duration::ZERO), lines("RF"));
+}
+
+#[test]
+fn a_fresh_start_that_fails_too_is_followed_by_the_resume_again_and_restarts_stay_bounded() {
+    let e = Env::new("both");
+    let mut sup = e.supervisor(3, Some(3));
+    e.resumed(&mut sup);
+    // The resume, then at most `max_restarts` (3) restarts: fresh, resume, fresh. A fresh start's own quick failure is not taken for
+    // a failed resume, so it never repeats itself.
+    assert_eq!(e.run(&mut sup, Duration::ZERO), lines("RFRF"));
 }
 
 #[test]
 fn a_kind_without_a_fresh_command_is_resumed_as_before() {
     let e = Env::new("none");
-    let mut sup = e.supervisor(false);
-    e.resumed(&mut sup, Instant::now());
-    assert!(!e.drive(&mut sup, Duration::ZERO));
+    let mut sup = e.supervisor(3, None);
+    e.resumed(&mut sup);
+    assert_eq!(e.run(&mut sup, Duration::ZERO), lines("RRRR"));
 }
 
 #[test]
-fn a_resume_that_failed_after_running_a_while_is_not_taken_for_a_session_that_never_began() {
+fn a_resume_that_failed_after_the_window_is_resumed_again_never_started_fresh() {
     let e = Env::new("late");
-    let mut sup = e.supervisor(true);
-    e.resumed(&mut sup, Instant::now());
+    let mut sup = e.supervisor(3, Some(0));
+    e.resumed(&mut sup);
     // Seen to end a minute after it started: an ordinary failure of a real session, which a fresh start must never overwrite.
-    assert!(!e.drive(&mut sup, Duration::from_secs(60)));
+    assert_eq!(e.run(&mut sup, Duration::from_secs(60)), lines("RRRR"));
+}
+
+#[test]
+fn a_resume_that_ends_well_within_the_window_never_starts_a_fresh_one() {
+    let e = Env::new("zero");
+    let mut sup = e.supervisor(0, Some(0));
+    e.resumed(&mut sup);
+    assert_eq!(e.run(&mut sup, Duration::ZERO), lines("R"));
 }

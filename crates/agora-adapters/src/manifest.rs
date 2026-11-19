@@ -464,7 +464,10 @@ impl Resume {
     /// or as a placeholder; `continue_argv` carries both placeholders, `{continue}` as an argument of its own.
     fn validate(&self) -> Result<(), ManifestError> {
         if !self.fresh_argv.is_empty()
-            && (self.fresh_argv.first().is_none_or(String::is_empty)
+            && (self
+                .fresh_argv
+                .first()
+                .is_none_or(|p| p.is_empty() || p.contains(['{', '}']))
                 || !self.fresh_argv.iter().any(|a| a.contains("{session_id}"))
                 || self.fresh_argv.iter().any(|a| a.contains("{continue}")))
         {
@@ -1071,6 +1074,8 @@ mod continue_tests {
         for bad in [
             "fresh_argv = [\"k\", \"--session-id\"]",
             "fresh_argv = [\"\", \"{session_id}\"]",
+            "fresh_argv = [\"{session_id}\"]",
+            "fresh_argv = [\"{x}k\", \"{session_id}\"]",
             "fresh_argv = [\"k\", \"{session_id}\", \"{continue}\"]",
         ] {
             assert!(

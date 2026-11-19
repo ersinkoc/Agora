@@ -241,7 +241,7 @@ command or message from the hub carries it; the ledger records when the message 
 `[resume] fresh_argv` (optional) is the command that starts the session from nothing under the id the node holds (`claude --session-id
 {session_id}`), for a tool that saves no session until it is first spoken to, so `argv` fails at once for an agent that never was. The node
 uses it for one restart after a resume (its own, a person's or a crash restart) that failed within 30 seconds of starting, and then
-goes back to `argv`. It needs a program and `{session_id}` and takes no `{continue}`; otherwise the manifest is invalid. Only declare it
+goes back to `argv`. It needs a program (a plain name, no placeholder) and `{session_id}` in an argument, and takes no `{continue}`; otherwise the manifest is invalid. Only declare it
 for a tool that refuses to start a new session over an id that already exists, so a failed resume of a real conversation is never
 overwritten. A kind without it is resumed as before.
 
