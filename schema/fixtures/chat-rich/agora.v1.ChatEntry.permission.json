@@ -1,0 +1,8 @@
+{
+  "entryId": "10",
+  "atMs": "1700000003000",
+  "role": "CHAT_ROLE_AGENT",
+  "kind": "CHAT_KIND_PERMISSION",
+  "approvalId": "ap_1",
+  "permissionOutcome": "PERMISSION_OUTCOME_PENDING"
+}

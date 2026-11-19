@@ -1271,6 +1271,9 @@ pub(crate) fn command_name(c: &Cmd) -> &'static str {
         Cmd::AgentPrompt(_) => "agent.prompt",
         Cmd::AgentSetMode(_) => "agent.set_mode",
         Cmd::AgentSetModel(_) => "agent.set_model",
+        // ADR-0090: in the schema, handled by no node code yet, so the node refuses them as `protocol.capability_missing`.
+        Cmd::AgentSetConfig(_) => "agent.set_config",
+        Cmd::AgentCancelTurn(_) => "agent.cancel_turn",
         Cmd::TerminalOpen(_) => "terminal.open",
         Cmd::TerminalInput(_) => "terminal.input",
         Cmd::TerminalResize(_) => "terminal.resize",

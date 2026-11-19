@@ -101,4 +101,6 @@ pair-name_unverified = { $name } adresindeki hub doğrulanamadı, bu yüzden hi�
 pair-names_missing = Hub, sertifikasının yeni bir makinenin kullanacağı adresi içerdiğinden emin olamadı ({ $reason }: { $names }). Hiçbir şey açılmadı. Hub'ı, yeni bir makinenin kullanacağı her adres için `--name ADRES` ile başlatın, örneğin `--name 192.168.1.20`.
 pair-discovery_unconfirmed = Ağda bulunan bir hub yalnızca bir terminalde onayladığınızda kullanılır. Hiçbir şey kaydedilmedi. `agora join` komutunu bir terminal penceresinde çalıştırın ya da hub'ın adresini verin: `agora join 192.168.1.20:7443`.
 pair-ca_mismatch = Hub, onayladığınız sertifika otoritesini sunmadı (duyurduğu parmak izi, teslim ettiğininkiyle aynı değil), bu yüzden bu makine ona katılmadı. Hiçbir şey kaydedilmedi.
+agent-option_unknown = Ajanın bu değerle { $id } adlı bir ayarı yok.
+agent-queue_full = Bu ajan için zaten { $limit } mesaj bekliyor. Ajanın bitirmesini bekleyin ya da geçerli turunu durdurun.
 internal = Bir şeyler ters gitti. Olay numarası: { $incident_id }.

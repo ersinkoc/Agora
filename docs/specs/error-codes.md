@@ -94,6 +94,8 @@ or a local response timeout has a localized retry message.
 | `pair.names_missing` | `reason`, `names` | ADR-0065 section 5b: the hub cannot be sure its certificate names the address a machine will dial, so `PairOpen` is refused and the switch stays closed. `reason` is `interfaces` (the system would not list the network addresses; `names` is empty), `invalid` (a `--name` a certificate cannot carry; `names` is that name), `too_many` (more `--name` values than a certificate carries), `issue` (the certificate could not be made; `names` is what it should have carried) or `write` (the new certificate could not be saved to `server-cert.pem`; nothing was switched). The sentence tells the owner to start the hub with `--name ADDRESS` |
 | `pair.discovery_unconfirmed` | — | ADR-0065 section 15: **machine-local, never sent.** `agora join` found a hub by discovery and cannot ask the person to confirm its fingerprint (no terminal), so it does not choose; nothing is stored. The person gives the address, or runs it in a terminal |
 | `pair.ca_mismatch` | — | ADR-0065 section 15: **machine-local, never sent.** The person confirmed a hub found by discovery by the fingerprint of its certificate authority, and the certificate authority the hub then delivered has another one; nothing is stored |
+| `agent.option_unknown` | `id` | ADR-0090: `agent.set_config` names an option, or a value of it, that the agent did not report (`id` is the option id) |
+| `agent.queue_full` | `limit` | ADR-0090: the agent is in a turn and `limit` (8) prompts already wait behind it; the prompt was not queued |
 | `internal` | `incident_id` | Unexpected failure; details only in logs |
 
 ### Command-line codes (ADR-0067 rung 3)

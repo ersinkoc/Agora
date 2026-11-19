@@ -646,6 +646,9 @@ impl Router {
             Some(command_request::Command::AgentSetModel(_)) => Some("agent.set_model"),
             // ADR-0060: a node that cannot resume agents is never sent the command.
             Some(command_request::Command::AgentResume(_)) => Some("agent.resume"),
+            // ADR-0090: a node that cannot set an option or cancel a turn is never sent the command.
+            Some(command_request::Command::AgentSetConfig(_)) => Some("agent.set_config"),
+            Some(command_request::Command::AgentCancelTurn(_)) => Some("agent.cancel_turn"),
             _ => None,
         };
         if let Some(cap) = switch.filter(|cap| !link.capabilities.iter().any(|c| c == cap)) {
@@ -938,6 +941,39 @@ mod tests {
             (
                 command_request::Command::AgentSetModel(v1::AgentSetModel::default()),
                 "agent.set_model",
+            ),
+        ] {
+            let mut request = req("old");
+            request.command = Some(command);
+            let refused = r.send("old", request.clone()).err().unwrap();
+            assert_eq!(refused.code, ErrorCode::ProtocolCapabilityMissing);
+            assert_eq!(
+                refused.params.get("capability"),
+                Some(&agora_protocol::ParamValue::Str(cap.into()))
+            );
+            assert!(old_rx.try_recv().is_err());
+            assert!(r.send("new", request).is_ok());
+            assert!(matches!(new_rx.try_recv(), Ok(ToNode::Command { .. })));
+        }
+    }
+
+    /// ADR-0090: no build offers these capabilities yet, so the hub refuses both commands for every node and forwards neither.
+    #[test]
+    fn a_config_or_cancel_turn_command_goes_only_to_a_node_that_offers_it() {
+        let r = Router::new();
+        let (_old, mut old_rx) = r.register("old");
+        let (_new, mut new_rx) = r.register_with_capabilities(
+            "new",
+            vec!["agent.set_config".into(), "agent.cancel_turn".into()],
+        );
+        for (command, cap) in [
+            (
+                command_request::Command::AgentSetConfig(v1::AgentSetConfig::default()),
+                "agent.set_config",
+            ),
+            (
+                command_request::Command::AgentCancelTurn(v1::AgentCancelTurn::default()),
+                "agent.cancel_turn",
             ),
         ] {
             let mut request = req("old");

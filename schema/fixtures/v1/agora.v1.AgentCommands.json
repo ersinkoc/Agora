@@ -1,0 +1,10 @@
+{
+  "agentId": "x",
+  "commands": [
+    {
+      "name": "x",
+      "description": "x",
+      "inputHint": "x"
+    }
+  ]
+}

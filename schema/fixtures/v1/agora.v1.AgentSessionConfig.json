@@ -1,0 +1,22 @@
+{
+  "agentId": "x",
+  "options": [
+    {
+      "id": "x",
+      "name": "x",
+      "description": "x",
+      "category": "SESSION_CONFIG_CATEGORY_MODE",
+      "type": "SESSION_CONFIG_TYPE_SELECT",
+      "current": "x",
+      "choices": [
+        {
+          "id": "x",
+          "name": "x",
+          "description": "x",
+          "skipsPermissions": true
+        }
+      ],
+      "skipsPermissions": true
+    }
+  ]
+}

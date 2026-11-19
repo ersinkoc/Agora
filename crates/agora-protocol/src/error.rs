@@ -98,6 +98,8 @@ pub enum ErrorCode {
     PairNamesMissing,
     PairDiscoveryUnconfirmed,
     PairCaMismatch,
+    AgentOptionUnknown,
+    AgentQueueFull,
     Internal,
     /// A code this build does not know (sent by a newer peer).
     Unknown(String),
@@ -190,6 +192,8 @@ impl ErrorCode {
         ErrorCode::PairNamesMissing,
         ErrorCode::PairDiscoveryUnconfirmed,
         ErrorCode::PairCaMismatch,
+        ErrorCode::AgentOptionUnknown,
+        ErrorCode::AgentQueueFull,
         ErrorCode::Internal,
     ];
 
@@ -279,6 +283,8 @@ impl ErrorCode {
             ErrorCode::PairNamesMissing => "pair.names_missing",
             ErrorCode::PairDiscoveryUnconfirmed => "pair.discovery_unconfirmed",
             ErrorCode::PairCaMismatch => "pair.ca_mismatch",
+            ErrorCode::AgentOptionUnknown => "agent.option_unknown",
+            ErrorCode::AgentQueueFull => "agent.queue_full",
             ErrorCode::Internal => "internal",
             ErrorCode::Unknown(s) => s,
         }
@@ -380,6 +386,8 @@ impl ErrorCode {
             ErrorCode::PairNamesMissing => &["reason", "names"],
             ErrorCode::PairDiscoveryUnconfirmed => &[],
             ErrorCode::PairCaMismatch => &[],
+            ErrorCode::AgentOptionUnknown => &["id"],
+            ErrorCode::AgentQueueFull => &["limit"],
             ErrorCode::Internal => &["incident_id"],
             ErrorCode::Unknown(_) => &[],
         }

@@ -39,6 +39,43 @@ message SessionOption {
   bool skips_permissions = 4;
 }
 
+// ADR-0090: how a config option is chosen, as ACP names it (`SessionConfigOption` type).
+enum SessionConfigType {
+  SESSION_CONFIG_TYPE_UNSPECIFIED = 0;
+  SESSION_CONFIG_TYPE_SELECT = 1;
+  SESSION_CONFIG_TYPE_BOOLEAN = 2;
+}
+
+// ADR-0090: what a config option is about (ACP `category`). The reasoning effort is THOUGHT_LEVEL. UNSPECIFIED also stands for a
+// category this build does not know.
+enum SessionConfigCategory {
+  SESSION_CONFIG_CATEGORY_UNSPECIFIED = 0;
+  SESSION_CONFIG_CATEGORY_MODE = 1;
+  SESSION_CONFIG_CATEGORY_MODEL = 2;
+  SESSION_CONFIG_CATEGORY_MODEL_CONFIG = 3;
+  SESSION_CONFIG_CATEGORY_THOUGHT_LEVEL = 4;
+  // An option the agent defines itself (ACP `_custom`).
+  SESSION_CONFIG_CATEGORY_CUSTOM = 5;
+}
+
+// ADR-0090: one option of the agent's session that the user may change (ACP `SessionConfigOption`). `name`, `description` and the
+// choices' words are the agent's own (untrusted text, shown as written).
+message SessionConfigOption {
+  // What `AgentSetConfig.config_id` takes.
+  string id = 1;
+  string name = 2;
+  string description = 3;
+  SessionConfigCategory category = 4;
+  SessionConfigType type = 5;
+  // The id of the chosen choice for a select; "true" or "false" for a boolean.
+  string current = 6;
+  // The choices of a select (empty for a boolean); `SessionOption.id` is what `AgentSetConfig.value` takes.
+  repeated SessionOption choices = 7;
+  // An option that makes the agent act without asking first (as `SessionOption.skips_permissions`); the node sets it by its own
+  // rules, not from the agent's category. A client asks the user to confirm before choosing it.
+  bool skips_permissions = 8;
+}
+
 // A flat error parameter: a string or a number (docs/specs/error-codes.md).
 message ParamValue {
   oneof value {

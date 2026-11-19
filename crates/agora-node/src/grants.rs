@@ -166,6 +166,8 @@ fn subject(c: &Cmd) -> Subject {
         Cmd::AgentPrompt(a) => s.agent = Some(a.agent_id.clone()),
         Cmd::AgentSetMode(a) => s.agent = Some(a.agent_id.clone()),
         Cmd::AgentSetModel(a) => s.agent = Some(a.agent_id.clone()),
+        Cmd::AgentSetConfig(a) => s.agent = Some(a.agent_id.clone()),
+        Cmd::AgentCancelTurn(a) => s.agent = Some(a.agent_id.clone()),
         Cmd::TerminalInput(t) => {
             s.agent = agent_of_terminal(&t.terminal_id).map(|a| a.as_str().to_string());
         }

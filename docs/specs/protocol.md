@@ -751,3 +751,32 @@ and means "speaks these messages"; a hub that cannot pair (it does not know its 
   `PAIR_DECIDED` (6) (`agora_protocol::frame::kinds`), memory only; other clients never receive them and clients ignore kinds they do not know.
 - **Errors**: `pair.closed`, `pair.limit` (`seconds`), `pair.expired`, `pair.mismatch`, `pair.denied`, `pair.unknown`, `pair.state`
   (`state`), `pair.insecure_transport`, `pair.names_missing` (`reason`, `names`; the hub refuses `PairOpen` when it cannot name its addresses in its certificate), and the machine-local, never-sent `pair.name_unverified` (`name`), `pair.discovery_unconfirmed` and `pair.ca_mismatch`; see `error-codes.md`.
+
+### A structured agent's conversation (ADR-0090, schema only)
+
+All additions; nothing published changed. **Schema only:** no node, bridge or window sends or reads these yet (build steps 3 to 7 of the
+ADR), and no capability below is advertised by any build. A node refuses `AgentSetConfig` and `AgentCancelTurn` with
+`protocol.capability_missing`, and the hub never forwards either to a node that did not offer its capability.
+
+- **Chat entries** (`ChatEntry`, `schema/agora/v1/commands.proto`). New `ChatKind` values `CHAT_KIND_THOUGHT` (6, the agent's thinking in
+  `text`) and `CHAT_KIND_PERMISSION` (7, a marker). New fields: `call_id` (9), `tool_kind` (10, `ToolKind`, the ACP names), `status` (11,
+  `ToolStatus`), `paths` (12, `ToolLocation { path, line }`), `output` (13) and `output_truncated` (14), `started_ms` (15) and `ended_ms`
+  (16, node clock; the duration is their difference, `ended_ms` is 0 while the call runs), `plan_steps` (17, `PlanStep { text, status,
+  priority }`), `queued` (18, a user entry waiting behind a turn), `approval_id` (19) and `permission_outcome` (20, `PermissionOutcome`).
+  `text` keeps its old meaning for every kind (tool name and arguments as JSON; plan lines joined by `"\n"`), so an old client still reads a
+  complete conversation. Unknown kinds and enum values read as `UNSPECIFIED`.
+- **An entry changes in place.** A tool call and a plan are ONE entry whose later versions carry the same `entry_id`. A client that knows the
+  node's capability `chat.rich` replaces the entry it holds; a client without it ignores the repeat (ADR-0038) and keeps the first version.
+  The existing fixtures are not touched: the new fields have fixtures of their own in `schema/fixtures/chat-rich/`.
+- **Events.** `AgentSessionConfig` (`Event` field 39: `agent_id`, `options[]` of `SessionConfigOption { id, name, description, category,
+  type, current, choices[], skips_permissions }`; replaces the previous report; the reasoning effort is the option with category
+  `SESSION_CONFIG_CATEGORY_THOUGHT_LEVEL`) and `AgentCommands` (`Event` field 66: `agent_id`, `commands[]` of `AgentCommand { name,
+  description, input_hint }`; replaces the previous list). The hub stores and relays both and keeps nothing of them in its view yet.
+- **Commands.** `AgentSetConfig` (request field 102: `agent_id`, `config_id`, `value`; capability `agent.set_config`) and `AgentCancelTurn`
+  (103: `agent_id`, `drop_queue`; capability `agent.cancel_turn`), both the user's own and unsigned. Distinct from `AgentStop`: cancelling
+  a turn ends no process. The hub audits and scopes them like `AgentSetModel`.
+- **Queued prompts.** `AgentPrompt` is unchanged. A node with `chat.rich` answers it with `AgentPromptResult` (`CommandOk` field 26:
+  `queued`, `queue_len`); a node without it answers `empty`, read as sent. The queue holds at most 8 prompts.
+- **Capabilities (not advertised yet):** `chat.rich`, `agent.set_config`, `agent.cancel_turn`, `agent.commands`.
+- **Errors:** `agent.option_unknown` (`id`), `agent.queue_full` (`limit`); a refusal by the agent itself is `adapter.option_refused`.
+
