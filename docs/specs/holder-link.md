@@ -50,6 +50,11 @@ Holder to node: `HelloOk`(64: version, holder pid, holder start time), `Refused`
    copy non-blocking without making the node's one non-blocking too). The holder watches that process and starts reading when it
    ends; a node that comes back first (same process or another that holds the lock) simply attaches, and no byte is read twice.
    A node that drops the link and stops reading its terminals while it lives lets the agents fill them, as a node does today.
+   One exception, for an agent being **ended** (a `Stop` was sent) that is still not reaped 200 ms later: no node read its terminal
+   (a start whose answer was lost, or a node that stopped reading), and on macOS a process that exits with unread terminal output stays
+   in the exiting state until that output is read. The holder then reads what waits in that terminal (non-blocking, into the agent's
+   bounded buffer) so the agent can exit. It never does this while a node whose link dropped still runs (that node may read it), nor
+   for an agent that was not asked to end, nor within the grace: a node that reads its terminal lets an ending agent go by itself.
 6. `Release` of an ended agent forgets it. A holder that held agents and has none left ends (decision 2).
 
 A running agent gets `SIGHUP` when the holder dies (Linux `PR_SET_PDEATHSIG` on its first process; the kernel's hangup on the last

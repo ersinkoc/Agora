@@ -137,9 +137,37 @@ struct Agent {
     exit: Option<ExitStatus>,
     /// The terminal ended: every process closed its side, and nothing more can be read.
     eof: bool,
+    /// When the node asked to end it (`Stop`): an ending agent that is still not reaped a moment later has nobody reading its terminal.
+    ending: Option<Instant>,
 }
 
+/// How long an ending agent gets to leave by itself before the holder reads its terminal for it.
+const ENDING_GRACE: Duration = Duration::from_millis(200);
+
 impl Agent {
+    /// Whether the holder must read this agent's terminal so that it can exit: it is being ended, has not been reaped for
+    /// [`ENDING_GRACE`] (a node that reads its terminal would have let it go), no reader of ours runs, and no live node may read it
+    /// (`node_may_read`: a node whose link dropped still holds its copy). macOS keeps a process that exits with unread terminal
+    /// output in the exiting state until that output is read.
+    fn must_drain_to_end(&self, now: Instant, node_may_read: bool) -> bool {
+        !node_may_read
+            && self.exit.is_none()
+            && !self.eof
+            && self.reader.is_none()
+            && self
+                .ending
+                .is_some_and(|t| now.saturating_duration_since(t) >= ENDING_GRACE)
+    }
+
+    /// Reads what waits in the terminal into the buffer, when [`Self::must_drain_to_end`]; `true` when it did.
+    fn drain_to_end(&mut self, now: Instant, node_may_read: bool) -> bool {
+        if !self.must_drain_to_end(now, node_may_read) {
+            return false;
+        }
+        self.eof = self.term.drain(&mut self.held).unwrap_or(true);
+        true
+    }
+
     fn state(&self) -> AgentState {
         match self.exit {
             None => AgentState::Running,
@@ -279,9 +307,14 @@ impl Holder {
 
     /// Notes agents that ended, and keeps what an ended agent's terminal still holds.
     fn reap(&mut self) {
+        let now = Instant::now();
+        let node_may_read = self.departed.is_some();
         for a in &mut self.agents {
             if a.exit.is_none() {
                 a.exit = a.term.try_wait().unwrap_or(None);
+                if a.exit.is_none() && a.drain_to_end(now, node_may_read) {
+                    a.exit = a.term.try_wait().unwrap_or(None);
+                }
             }
             if a.exit.is_some() && !a.eof {
                 // Reading goes on until the terminal ends; with a reader that has seen the end, take what it kept.
@@ -479,6 +512,9 @@ impl Holder {
             None => self.refuse(Refusal::UnknownAgent),
             Some(a) => {
                 let r = a.term.signal(signal);
+                if r.is_ok() && matches!(signal, HeldSignal::Kill | HeldSignal::Terminate) {
+                    a.ending.get_or_insert_with(Instant::now);
+                }
                 self.answer(r);
             }
         }
@@ -524,6 +560,7 @@ impl Holder {
             held: HeldBuffer::default(),
             exit: None,
             eof: false,
+            ending: None,
         });
         self.send(
             &Reply::Started {
@@ -605,6 +642,60 @@ fn refuse(stream: &mut LocalStream, code: Refusal) {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    fn agent_with_output() -> Agent {
+        let config = PtyConfig {
+            argv: vec!["sh".into(), "-c".into(), "echo up; sleep 600".into()],
+            cwd: None,
+            env: Vec::new(),
+            cols: 80,
+            rows: 24,
+            limits: agora_platform::ProcessLimits {
+                cpu_seconds: None,
+                memory_bytes: None,
+            },
+            sandbox: None,
+            identity: None,
+            env_remove: Vec::new(),
+        };
+        let term = HeldTerminal::start(&config).unwrap();
+        Agent {
+            id: "a".into(),
+            term,
+            reader: None,
+            held: HeldBuffer::default(),
+            exit: None,
+            eof: false,
+            ending: None,
+        }
+    }
+
+    /// An agent being ended whose terminal nobody reads is read by the holder (so macOS lets it exit); one a node may read, one that is
+    /// not being ended, and one still within its grace are not.
+    #[test]
+    fn an_ending_agent_nobody_reads_is_drained_and_no_other_is() {
+        let mut a = agent_with_output();
+        std::thread::sleep(Duration::from_millis(300));
+        let t0 = Instant::now();
+        let later = t0 + ENDING_GRACE * 2;
+        // Not being ended: never read (the node reads it).
+        assert!(!a.drain_to_end(later, false));
+        a.ending = Some(t0);
+        // Within the grace: the node may still read it.
+        assert!(!a.drain_to_end(t0, false));
+        // A node whose link dropped still holds a copy.
+        assert!(!a.drain_to_end(later, true));
+        assert!(a.held.clone().into_vec().is_empty(), "output was taken");
+        // Ending, past the grace, nobody to read: read.
+        assert!(a.drain_to_end(later, false));
+        assert!(String::from_utf8_lossy(&a.held.clone().into_vec()).contains("up"));
+        // A reaped agent is left alone.
+        let _ = a.term.signal(HeldSignal::Kill);
+        std::thread::sleep(Duration::from_millis(200));
+        a.exit = a.term.try_wait().unwrap_or(None);
+        assert!(a.exit.is_some());
+        assert!(!a.drain_to_end(later, false));
+    }
 
     /// The lock names a supervisor, which runs the node as its child (ADR-0062 item 8): the node is admitted, the supervisor itself is,
     /// and neither a stranger nor the node's own child (an agent, a confined one included) is.
