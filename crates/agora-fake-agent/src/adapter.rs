@@ -3,6 +3,7 @@
 //!
 //! Prompts (the `text` of `session/prompt`):
 //! - `ask`: goes `blocked`, sends an `approval/request`, waits for `approval/resolve`, then works and finishes.
+//! - `first:TEXT`: says TEXT, then answers the prompt 300 ms later.
 //! - `hang`: does not answer the prompt for 30 s (an adapter that is stuck).
 //! - `ask-error`: like `ask`, but answers the decision with a JSON-RPC error.
 //! - `crash`: exits abruptly with status 3 (a crashing adapter).
@@ -90,6 +91,16 @@ pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
             "session/prompt" => {
                 let text = params.get("text").and_then(Value::as_str).unwrap_or("");
                 // `hang`: never answers the prompt (for 30 s), like an adapter that is stuck.
+                // `first:TEXT`: says TEXT before it answers the prompt (and answers 300 ms later), so a client sees the agent's words
+                // before the reply to its own request.
+                if let Some(said) = text.strip_prefix("first:") {
+                    note(
+                        out,
+                        "chat/append",
+                        json!({"sessionId": session, "text": {"text": said}}),
+                    )?;
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                }
                 if text == "hang" {
                     std::thread::sleep(std::time::Duration::from_secs(30));
                 }

@@ -225,10 +225,39 @@ fn json_string(s: &str) -> String {
     out
 }
 
-/// Removes what would act on a terminal or a reader instead of being shown: escape sequences (CSI, OSC, DCS, ...) with their payload,
-/// every control character (C0, DEL, C1) and the characters that reorder text (bidi overrides). With `multiline` a newline and a tab
-/// stay; without, they become a space (a one-line field).
-fn strip_controls(s: &str, multiline: bool) -> String {
+/// How a text is shown, which decides what is kept of it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Style {
+    /// Prose over several lines (thinking, tool output): line breaks and tabs stay; the direction marks of Arabic and Hebrew text
+    /// (LRM, RLM, ALM) stay, and so do isolates (U+2066 to U+2069) when each one is closed.
+    Prose,
+    /// Prose on one line (a plan step): as `Prose`, with line breaks as spaces.
+    Step,
+    /// Code on several lines (a tool's arguments): line breaks stay, every direction control goes.
+    Code,
+    /// A name, a path or a label on one line: every direction control goes, since there they only serve to make one thing read as
+    /// another (`gpj.exe` written as `exe.jpg`).
+    Label,
+}
+
+impl Style {
+    fn multiline(self) -> bool {
+        matches!(self, Self::Prose | Self::Code)
+    }
+    fn keeps_marks(self) -> bool {
+        matches!(self, Self::Prose | Self::Step)
+    }
+}
+
+/// The longest payload an unterminated OSC, DCS, ... sequence may swallow: to the next line break or this many characters.
+const ESCAPE_PAYLOAD_MAX: usize = 4096;
+
+/// Removes what would act on a terminal or a reader instead of being shown: escape sequences (CSI, OSC, DCS, ...) with their payload
+/// (a sequence that is never closed swallows at most to the next line break or `ESCAPE_PAYLOAD_MAX` characters, never the rest of the
+/// text), every control character (C0, DEL, C1) and, always, the characters that override or embed a direction (U+202A to U+202E:
+/// the ones that spoof). Other direction marks are kept or removed by the [`Style`]. A bare carriage return is a line break in
+/// multi-line text and a space otherwise; `\r\n` is one line break.
+fn strip_controls(s: &str, style: Style) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
     while let Some(c) = chars.next() {
@@ -249,7 +278,14 @@ fn strip_controls(s: &str, multiline: bool) -> String {
                         }
                     }
                     Some(']' | 'P' | '_' | '^' | 'X') => {
-                        while let Some(c) = chars.next() {
+                        let mut taken = 0;
+                        while let Some(&c) = chars.peek() {
+                            // A line break ends a sequence that was never closed (it is left for the text).
+                            if c == '\n' || taken >= ESCAPE_PAYLOAD_MAX {
+                                break;
+                            }
+                            chars.next();
+                            taken += 1;
                             if c == '\u{7}' || c == '\u{9c}' {
                                 break;
                             }
@@ -264,21 +300,57 @@ fn strip_controls(s: &str, multiline: bool) -> String {
                     _ => {}
                 }
             }
-            '\n' | '\t' if multiline => out.push(c),
+            '\r' => {
+                if chars.peek() == Some(&'\n') {
+                    continue;
+                }
+                out.push(if style.multiline() { '\n' } else { ' ' });
+            }
+            '\n' | '\t' if style.multiline() => out.push(c),
             '\n' | '\t' => out.push(' '),
             c if c.is_control() => {}
-            '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' => {}
+            // Override and embedding controls: the spoofing risk, never kept.
+            '\u{202a}'..='\u{202e}' => {}
+            // LRM, RLM, ALM and the isolates: Arabic and Hebrew need them in prose.
+            '\u{200e}' | '\u{200f}' | '\u{61c}' | '\u{2066}'..='\u{2069}'
+                if !style.keeps_marks() => {}
             c => out.push(c),
         }
+    }
+    if style.keeps_marks() && out.contains(['\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}']) {
+        out = balance_isolates(&out);
     }
     out
 }
 
+/// Keeps an isolate (FSI, LRI, RLI) only with the PDI that closes it, and a PDI only after its opener: an unclosed one would reorder
+/// everything that follows it in the page.
+fn balance_isolates(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let mut keep = vec![true; chars.len()];
+    let mut open: Vec<usize> = Vec::new();
+    for (i, c) in chars.iter().enumerate() {
+        match c {
+            '\u{2066}'..='\u{2068}' => open.push(i),
+            '\u{2069}' if open.pop().is_none() => keep[i] = false,
+            _ => {}
+        }
+    }
+    for i in open {
+        keep[i] = false;
+    }
+    chars
+        .into_iter()
+        .zip(keep)
+        .filter_map(|(c, k)| k.then_some(c))
+        .collect()
+}
+
 /// A text from an adapter made safe and bounded: at most `PRE_BOUND` bytes of it are looked at (head and tail), control characters and
 /// escape sequences are removed, and it is cut to `max` bytes. `true` when something was cut. Done before any lock is taken.
-fn tidy(text: &str, max: usize, multiline: bool) -> (String, bool) {
+fn tidy(text: &str, max: usize, style: Style) -> (String, bool) {
     let (bounded, cut_first) = head_and_tail(text.to_string(), PRE_BOUND);
-    let (out, cut_last) = head_and_tail(strip_controls(&bounded, multiline), max);
+    let (out, cut_last) = head_and_tail(strip_controls(&bounded, style), max);
     (out, cut_first || cut_last)
 }
 
@@ -462,6 +534,27 @@ impl ChatBoard {
         self.insert(agent, e);
     }
 
+    /// The user's own prompt as an entry. Returns its id, which [`Self::retract`] names if the prompt did not go out.
+    pub fn push_user(&self, agent: &AgentId, text: String, at_ms: u64) -> u64 {
+        self.insert(
+            agent,
+            entry(ChatRole::User, ChatKind::Text, cut(text), at_ms),
+        )
+    }
+
+    /// Takes an entry back out of the transcript (a prompt that could not be sent): a new subscriber never sees it. A follower that
+    /// already got it keeps it; the user is told by the error of the command.
+    pub fn retract(&self, agent: &AgentId, entry_id: u64) {
+        if let Some(t) = self.lock().get_mut(agent) {
+            if let Some(i) = t.index(entry_id) {
+                if let Some(old) = t.entries.remove(i) {
+                    t.bytes = t.bytes.saturating_sub(Transcript::size(&old));
+                    t.forget(&old);
+                }
+            }
+        }
+    }
+
     /// ADR-0090: a prompt of the user's that waits behind the agent's turn (`queued`). Returns the id of its entry, which
     /// [`Self::unqueue`] or [`Self::drop_queued`] names later.
     pub fn push_queued(&self, agent: &AgentId, text: String, at_ms: u64) -> u64 {
@@ -494,7 +587,7 @@ impl ChatBoard {
             }
             ChatItem::Thought(text) => {
                 // The agent's thinking: an entry of its own, cut at 8 KiB, and nothing else (it is never routed anywhere).
-                let (text, _) = tidy(text, MAX_THOUGHT_BYTES, true);
+                let (text, _) = tidy(text, MAX_THOUGHT_BYTES, Style::Prose);
                 self.insert(
                     agent,
                     entry(ChatRole::Agent, ChatKind::Thought, text, at_ms),
@@ -519,18 +612,21 @@ impl ChatBoard {
             return;
         }
         // Everything that costs work in proportion to the text (cleaning, cutting, formatting, cloning) is done here, before the lock.
-        let tool_in = item.tool.as_ref().map(|x| tidy(x, MAX_PATH_BYTES, false).0);
+        let tool_in = item
+            .tool
+            .as_ref()
+            .map(|x| tidy(x, MAX_PATH_BYTES, Style::Label).0);
         let args_in = item
             .arguments_json
             .as_ref()
-            .map(|x| tidy(x, MAX_ENTRY_BYTES, true).0);
+            .map(|x| tidy(x, MAX_ENTRY_BYTES, Style::Code).0);
         let kind = tool_kind(&item.kind);
         let status = tool_status(&item.status);
         let paths: Option<Vec<ToolLocation>> = item.locations.as_ref().map(|l| {
             l.iter()
                 .take(MAX_PATHS)
                 .map(|(path, line)| ToolLocation {
-                    path: tidy(path, MAX_PATH_BYTES, false).0,
+                    path: tidy(path, MAX_PATH_BYTES, Style::Label).0,
                     line: *line,
                 })
                 .collect()
@@ -542,7 +638,7 @@ impl ChatBoard {
         let output = item
             .output
             .as_ref()
-            .map(|o| tidy(o, MAX_OUTPUT_BYTES, true));
+            .map(|o| tidy(o, MAX_OUTPUT_BYTES, Style::Prose));
         // The text of the entry when this item is the whole story (a new call, or one that names both), and when it is only part.
         let text_new = tool_text(
             tool_in.as_deref().unwrap_or("tool"),
@@ -640,7 +736,7 @@ impl ChatBoard {
             .iter()
             .take(MAX_PLAN_STEPS)
             .map(|s| PlanStep {
-                text: tidy(&s.text, MAX_PLAN_STEP_BYTES, false).0,
+                text: tidy(&s.text, MAX_PLAN_STEP_BYTES, Style::Step).0,
                 status: plan_status(&s.status) as i32,
                 priority: plan_priority(&s.priority) as i32,
             })
@@ -733,7 +829,7 @@ impl ChatBoard {
         let mut e = entry(
             ChatRole::Agent,
             ChatKind::Permission,
-            tidy(action, MAX_PERMISSION_BYTES, false).0,
+            tidy(action, MAX_PERMISSION_BYTES, Style::Label).0,
             now_ms,
         );
         e.approval_id = approval_id.to_string();
@@ -1430,8 +1526,11 @@ mod tests {
     #[test]
     fn escape_sequences_and_control_characters_never_reach_an_entry() {
         let dirty = "a\u{1b}[31mred\u{1b}[0m \u{1b}]0;title\u{7}b\u{1b}]8;;http://x\u{1b}\\link\u{7} c\u{7}d\u{0}e\r\nf\tg\u{85}h\u{9b}31mi\u{202e}j\u{7f}k";
-        assert_eq!(strip_controls(dirty, true), "ared blink cde\nf\tghijk");
-        assert_eq!(strip_controls("x\ny\tz", false), "x y z");
+        assert_eq!(
+            strip_controls(dirty, Style::Prose),
+            "ared blink cde\nf\tghijk"
+        );
+        assert_eq!(strip_controls("x\ny\tz", Style::Label), "x y z");
         let b = ChatBoard::new();
         let a = AgentId::new("a");
         b.push_item(&a, &ChatItem::Thought(dirty.into()), 0);
@@ -1476,6 +1575,77 @@ mod tests {
             "a step is one line"
         );
         assert_eq!(s[3].text, "run it ", "a label is one line");
+    }
+
+    /// Arabic and Hebrew prose keeps its direction marks and balanced isolates; the spoofing controls and unbalanced isolates go; in a
+    /// name, a path or a label every direction control goes.
+    #[test]
+    fn direction_controls_are_kept_for_prose_and_removed_where_they_only_spoof() {
+        let arabic =
+            "\u{627}\u{644}\u{633}\u{644}\u{627}\u{645} \u{200f}(abc)\u{200f} \u{644}\u{643}";
+        let hebrew = "\u{5e9}\u{5dc}\u{5d5}\u{5dd} \u{200e}123\u{200e} \u{2067}\u{5e2}\u{5d1}\u{5e8}\u{5d9}\u{5ea}\u{2069} ok";
+        for prose in [arabic, hebrew] {
+            assert_eq!(strip_controls(prose, Style::Prose), prose, "kept");
+            assert_eq!(strip_controls(prose, Style::Step), prose);
+        }
+        assert_eq!(strip_controls("\u{61c}x", Style::Prose), "\u{61c}x");
+        // Overrides and embeddings never stay: `exe.jpg` shown as `gpj.exe`.
+        let spoof = "invoice\u{202e}gpj.exe";
+        for s in [Style::Prose, Style::Step, Style::Code, Style::Label] {
+            assert_eq!(strip_controls(spoof, s), "invoicegpj.exe");
+            assert_eq!(
+                strip_controls("a\u{202a}b\u{202b}c\u{202c}d\u{202d}e", s),
+                "abcde"
+            );
+        }
+        // An isolate without its close, or a close without its opener, would reorder what follows: dropped. A pair stays.
+        assert_eq!(strip_controls("a\u{2067}b", Style::Prose), "ab");
+        assert_eq!(strip_controls("a\u{2069}b", Style::Prose), "ab");
+        assert_eq!(
+            strip_controls("a\u{2066}b\u{2069}c", Style::Prose),
+            "a\u{2066}b\u{2069}c"
+        );
+        assert_eq!(
+            strip_controls("\u{2066}\u{2067}x\u{2069}", Style::Prose),
+            "\u{2067}x\u{2069}",
+            "the unclosed outer one goes"
+        );
+        // Names, paths, labels and code: every direction control goes.
+        let marked = "src/\u{200f}a\u{2067}b\u{2069}.rs\u{200e}";
+        assert_eq!(strip_controls(marked, Style::Label), "src/ab.rs");
+        assert_eq!(strip_controls(marked, Style::Code), "src/ab.rs");
+    }
+
+    #[test]
+    fn a_carriage_return_is_a_line_break_or_a_space_and_an_unclosed_escape_swallows_little() {
+        assert_eq!(strip_controls("a\r\nb\rc", Style::Prose), "a\nb\nc");
+        assert_eq!(strip_controls("a\r\nb\rc", Style::Step), "a b c");
+        // An OSC that is never closed ends at the next line break, not at the end of the text.
+        assert_eq!(
+            strip_controls(
+                "x\u{1b}]0;title never closed\nvisible line\nmore",
+                Style::Prose
+            ),
+            "x\nvisible line\nmore"
+        );
+        // And at 4 KiB when there is no line break.
+        let long = format!("a\u{1b}]8;;{}tail", "y".repeat(ESCAPE_PAYLOAD_MAX + 100));
+        let cleaned = strip_controls(&long, Style::Prose);
+        assert!(
+            cleaned.starts_with('a') && cleaned.ends_with("tail") && cleaned.len() < 200,
+            "{}",
+            cleaned.len()
+        );
+        // A closed one still takes just its own payload.
+        assert_eq!(
+            strip_controls("a\u{1b}]0;t\u{7}b\u{1b}]0;u\u{1b}\\c", Style::Prose),
+            "abc"
+        );
+        // DCS and APC too.
+        assert_eq!(
+            strip_controls("a\u{1b}Ppayload\u{1b}\\b\u{1b}_apc\u{7}c", Style::Prose),
+            "abc"
+        );
     }
 
     #[test]

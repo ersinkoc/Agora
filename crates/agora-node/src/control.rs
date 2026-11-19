@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 
 use agora_core::AgentId;
 use agora_platform::{local_connect, local_listen, LocalStream};
-use agora_protocol::frame::{DEFAULT_MAX_PAYLOAD, STREAM_COMMANDS};
+use agora_protocol::frame::{DEFAULT_MAX_PAYLOAD, STREAM_CLOSE, STREAM_COMMANDS};
 use agora_protocol::v1::{self, command_request::Command as Cmd, command_response::Result as Res};
 use agora_protocol::{Decoder, Error, ErrorCode, Frame};
 use agora_vt::Size;
@@ -787,23 +787,20 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                 drop(sup);
                 return match submitted? {
                     Submit::Queued { queue_len } => Ok(prompt_result(true, queue_len)),
-                    Submit::Send(call) => match call.run() {
-                        Ok(()) => {
-                            ctx.chat.push(
-                                &id,
-                                v1::ChatRole::User,
-                                v1::ChatKind::Text,
-                                a.text.clone(),
-                                String::new(),
-                                now,
-                            );
-                            Ok(prompt_result(false, 0))
+                    Submit::Send(call) => {
+                        // The user's entry is in the conversation BEFORE the agent can answer, so a fast agent's first chunk never
+                        // comes ahead of the prompt it answers. A prompt that did not go out is taken back.
+                        let generation = call.generation();
+                        let entry = ctx.chat.push_user(&id, a.text.clone(), now);
+                        match call.run() {
+                            Ok(()) => Ok(prompt_result(false, 0)),
+                            Err(e) => {
+                                ctx.chat.retract(&id, entry);
+                                ctx.sup().adapter_send_failed(&id, generation);
+                                Err(sup_err(e))
+                            }
                         }
-                        Err(e) => {
-                            ctx.sup().adapter_send_failed(&id);
-                            Err(sup_err(e))
-                        }
-                    },
+                    }
                 };
             }
             let control = sup
@@ -863,8 +860,11 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
         Cmd::AgentCancelTurn(a) => {
             let id = AgentId::new(a.agent_id.clone());
             let call = ctx.sup().prepare_cancel_turn(&id).map_err(sup_err)?;
+            let generation = call.generation();
             call.run().map_err(sup_err)?;
-            let dropped = ctx.sup().adapter_turn_cancelled(&id, a.drop_queue);
+            let dropped = ctx
+                .sup()
+                .adapter_turn_cancelled(&id, generation, a.drop_queue);
             let now = crate::daemon::now_ms();
             ctx.chat.drop_queued(&id, &dropped, now);
             if let Some(approvals) = &ctx.approvals {
@@ -1788,7 +1788,13 @@ fn pump_chat(
                 }
             }
             Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => return,
+            // The follower was dropped: the transcript changed faster than this client read it (ADR-0090). The stream is ended
+            // explicitly (a close frame), never left silent, so the client (and the uplink relay in front of it) subscribes again and
+            // gets the ring as a fresh snapshot instead of keeping a transcript with a hole in it.
+            Err(RecvTimeoutError::Disconnected) => {
+                let _ = send(writer, stream, STREAM_CLOSE, Vec::new());
+                return;
+            }
         }
     }
 }

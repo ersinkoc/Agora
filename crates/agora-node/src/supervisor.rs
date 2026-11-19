@@ -222,6 +222,7 @@ pub struct AdapterCall {
     caller: Caller,
     session: String,
     op: CallOp,
+    generation: u64,
 }
 
 enum CallOp {
@@ -233,6 +234,11 @@ enum CallOp {
 }
 
 impl AdapterCall {
+    /// The turn (or restart) this call was made in: what the caller reports back about it names this, so a late report is ignored.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
     /// Makes the request and waits for the answer.
     pub fn run(self) -> Result<(), SupervisorError> {
         const WAIT: Duration = Duration::from_secs(10);
@@ -541,48 +547,69 @@ struct Queued {
     tag: u64,
 }
 
-/// ADR-0090: the outcomes of sends of queued prompts, `(agent, tag, sent)`, written by the threads that made them.
-type SentResults = Arc<Mutex<Vec<(AgentId, u64, bool)>>>;
+/// ADR-0090: the outcomes of sends of queued prompts, `(agent, tag, sent, generation)`, written by the threads that made them.
+type SentResults = Arc<Mutex<Vec<(AgentId, u64, bool, u64)>>>;
+
+/// ADR-0090: how long an adapter that reports `idle` but never `working` may take before its `idle` counts as the end of the turn
+/// (an `idle` sooner than this after a prompt is the stray one of the turn before).
+pub const IDLE_ONLY_GRACE: Duration = Duration::from_secs(3);
 
 /// ADR-0090: whether an adapter agent that reports its turns has one open.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum Turn {
     #[default]
     Idle,
-    /// A prompt was sent (or the adapter began a turn by itself). `seen_working`: the adapter has said `working` or `blocked`
-    /// since, so an `idle` now ends this turn (an `idle` before that is a stray one from earlier and is ignored). `cancel_by`: the
-    /// turn was cancelled and is read as over at that time if the adapter has not said so.
+    /// A prompt was sent (or the adapter began a turn by itself) at `since`. `seen_working`: the adapter has said `working` or
+    /// `blocked` since, so an `idle` now ends this turn. `idle_seen`: it said `idle` without that (a stray one, or an adapter that
+    /// never says `working`): it counts as the end once [`IDLE_ONLY_GRACE`] has passed. `cancel_by`: the turn was cancelled and is
+    /// read as over at that time if the adapter has not said so.
     Busy {
+        since: Instant,
         seen_working: bool,
+        idle_seen: bool,
         cancel_by: Option<Instant>,
     },
 }
 
-/// What [`AdapterRich::route`] decided.
+/// What [`AdapterRich::route`] decided. The number is the turn's generation.
 #[derive(Debug, PartialEq, Eq)]
 enum Route {
-    Send,
+    Send(u64),
     Queued(usize),
 }
 
-/// ADR-0090: an adapter agent's config options and commands as last reported (checked and bounded), the turn state machine
-/// (`Idle` or `Busy`), and the prompts waiting behind a turn. The queue is node memory only (ADR-0089 is the persistence question).
-/// Pure data: every rule of the queue is a method here and is tested without a process.
+/// A prompt that became the turn, with the generation of that turn.
+type Next = (Queued, u64);
+
 #[derive(Default)]
 struct AdapterRich {
     config: Vec<ConfigOption>,
     commands: Vec<AdapterCommand>,
     turn: Turn,
+    /// Counts the turns and the restarts of this adapter. Everything that was started in one turn (a send, a cancel) carries the
+    /// generation it began in and is ignored when it comes back to another: a late answer cannot touch a newer turn.
+    generation: u64,
     queue: VecDeque<Queued>,
 }
 
 impl AdapterRich {
+    fn busy(&mut self, now: Instant, seen_working: bool) {
+        self.generation += 1;
+        self.turn = Turn::Busy {
+            since: now,
+            seen_working,
+            idle_seen: false,
+            cancel_by: None,
+        };
+    }
+
     /// A user's prompt: sent now (the turn becomes busy), or queued behind the turn (also while others wait, to keep their order).
     /// `turns`: the adapter reports its turns; one that does not is never queued for. `tag` runs only for a queued prompt.
     fn route(
         &mut self,
         turns: bool,
         text: &str,
+        now: Instant,
         tag: impl FnOnce(usize) -> u64,
     ) -> Result<Route, SupervisorError> {
         if turns && (self.turn != Turn::Idle || !self.queue.is_empty()) {
@@ -600,67 +627,80 @@ impl AdapterRich {
             return Ok(Route::Queued(len));
         }
         if turns {
-            self.turn = Turn::Busy {
-                seen_working: false,
-                cancel_by: None,
-            };
+            self.busy(now, false);
         }
-        Ok(Route::Send)
+        Ok(Route::Send(self.generation))
     }
 
     /// The adapter reported a state. Returns the prompt to send next when this ended the turn. `working` or `blocked` marks the
-    /// turn as really running; `idle` ends it only after that (a stray `idle`, or a second one, ends nothing and so never pops a
-    /// prompt into a running turn); `done` and `unknown` end it whatever came before (an adapter that never says `idle`).
-    fn observe(&mut self, state: AgentState) -> Option<Queued> {
+    /// turn as really running; `idle` ends it after that, and without it only once [`IDLE_ONLY_GRACE`] has passed since the prompt
+    /// (a stray or repeated `idle` ends nothing and never sends a prompt into a running turn); `done` and `unknown` end it
+    /// whatever came before.
+    fn observe(&mut self, state: AgentState, now: Instant) -> Option<Next> {
         match state {
             AgentState::Working | AgentState::Blocked => {
                 match &mut self.turn {
                     Turn::Busy { seen_working, .. } => *seen_working = true,
                     // The adapter began a turn of its own (a mesh prompt).
-                    Turn::Idle => {
-                        self.turn = Turn::Busy {
-                            seen_working: true,
-                            cancel_by: None,
-                        }
-                    }
+                    Turn::Idle => self.busy(now, true),
                 }
                 None
             }
-            AgentState::Idle => match self.turn {
+            AgentState::Idle => match &mut self.turn {
                 Turn::Busy {
                     seen_working: true, ..
-                } => self.finish(),
-                _ => None,
+                } => self.finish(now),
+                Turn::Busy {
+                    since, idle_seen, ..
+                } => {
+                    *idle_seen = true;
+                    if now.saturating_duration_since(*since) >= IDLE_ONLY_GRACE {
+                        self.finish(now)
+                    } else {
+                        None
+                    }
+                }
+                Turn::Idle => None,
             },
-            _ => self.finish(),
+            _ => self.finish(now),
         }
     }
 
     /// The turn is over: the next waiting prompt, if any, becomes the turn.
-    fn finish(&mut self) -> Option<Queued> {
+    fn finish(&mut self, now: Instant) -> Option<Next> {
         self.turn = Turn::Idle;
         let next = self.queue.pop_front()?;
-        self.turn = Turn::Busy {
-            seen_working: false,
-            cancel_by: None,
-        };
-        Some(next)
+        self.busy(now, false);
+        Some((next, self.generation))
     }
 
-    /// The prompt that was being sent did not go out: its turn never began, so the next one goes (or the agent is free).
-    fn send_failed(&mut self) -> Option<Queued> {
-        match self.turn {
+    /// The outcome of the send of a prompt that became the turn at `generation`. Returns whether it was sent (what its entry shows)
+    /// and the prompt to send next. A failed send ends its turn, and only that one: when the generation is no longer the current one
+    /// (the adapter restarted, another turn began) the failure changes nothing here.
+    fn send_result(&mut self, ok: bool, generation: u64, now: Instant) -> (bool, Option<Next>) {
+        if ok {
+            return (true, None);
+        }
+        if generation != self.generation {
+            return (false, None);
+        }
+        let next = match self.turn {
             Turn::Busy {
                 seen_working: false,
                 ..
-            } => self.finish(),
+            } => self.finish(now),
             _ => None,
-        }
+        };
+        (false, next)
     }
 
-    /// The adapter took `session/cancel`: the turn is read as over at `now + CANCEL_GRACE` if it has not said so. With `drop_queue`
-    /// the waiting prompts are returned (their tags) and forgotten.
-    fn cancelled(&mut self, now: Instant, drop_queue: bool) -> Vec<u64> {
+    /// The adapter took `session/cancel` for the turn of `generation`: that turn is read as over at `now + CANCEL_GRACE` if the
+    /// adapter has not said so. With `drop_queue` the waiting prompts are returned (their tags) and forgotten. A cancel that comes
+    /// back to another turn, or to a restarted adapter, does nothing.
+    fn cancelled(&mut self, generation: u64, now: Instant, drop_queue: bool) -> Vec<u64> {
+        if generation != self.generation {
+            return Vec::new();
+        }
         if let Turn::Busy { cancel_by, .. } = &mut self.turn {
             *cancel_by = Some(now + CANCEL_GRACE);
         }
@@ -671,22 +711,31 @@ impl AdapterRich {
         }
     }
 
-    /// A cancelled turn whose adapter did not end it in time is over; returns the prompt to send next.
-    fn expire_cancel(&mut self, now: Instant) -> Option<Queued> {
+    /// A turn that ends by a clock: a cancelled one the adapter did not end in time, or one whose adapter only ever says `idle`.
+    /// Returns the prompt to send next.
+    fn expire(&mut self, now: Instant) -> Option<Next> {
         match self.turn {
             Turn::Busy {
                 cancel_by: Some(t), ..
-            } if now >= t => self.finish(),
+            } if now >= t => self.finish(now),
+            Turn::Busy {
+                since,
+                seen_working: false,
+                idle_seen: true,
+                ..
+            } if now.saturating_duration_since(since) >= IDLE_ONLY_GRACE => self.finish(now),
             _ => None,
         }
     }
 
     /// The report of a restarted adapter is the only truth: what the old process said is forgotten, so a choice it offered cannot be
-    /// used against the new one, and no prompt waits for a turn that ended with the process.
+    /// used against the new one, and no prompt waits for a turn that ended with the process. Anything still in flight from the old
+    /// process is stale from now on (the generation changed).
     fn forget(&mut self) -> Vec<u64> {
         self.config.clear();
         self.commands.clear();
         self.turn = Turn::Idle;
+        self.generation += 1;
         self.queue.drain(..).map(|q| q.tag).collect()
     }
 }
@@ -1787,28 +1836,33 @@ impl Supervisor {
         }
         let sent = Arc::clone(&self.sent);
         // ADR-0090: a queued prompt that could not be sent is dropped (its entry says so) and the next one goes.
-        let failed: Vec<(AgentId, u64)> =
-            std::mem::take(&mut *sent.lock().unwrap_or_else(|e| e.into_inner()))
-                .into_iter()
-                .filter(|(_, _, ok)| !ok)
-                .map(|(id, tag, _)| (id, tag))
-                .collect();
-        for (id, tag) in failed {
-            events.push(SupervisorEvent::PromptDequeued {
-                agent: id.clone(),
-                tag,
-                sent: false,
-            });
-            if let Some(e) = self.adapters.get_mut(&id) {
-                if let Some(next) = e.rich.send_failed() {
-                    begin_send(e, &id, next, &sent, events);
+        let done: Vec<(AgentId, u64, bool, u64)> =
+            std::mem::take(&mut *sent.lock().unwrap_or_else(|e| e.into_inner()));
+        for (id, tag, ok, generation) in done {
+            // Each tag is reported once, when its send ended: sent, or not (its entry then leaves with a notice).
+            match self.adapters.get_mut(&id) {
+                Some(e) => {
+                    let (was_sent, next) = e.rich.send_result(ok, generation, now);
+                    events.push(SupervisorEvent::PromptDequeued {
+                        agent: id.clone(),
+                        tag,
+                        sent: was_sent,
+                    });
+                    if let Some(next) = next {
+                        begin_send(e, &id, next, &sent);
+                    }
                 }
+                None => events.push(SupervisorEvent::PromptDequeued {
+                    agent: id.clone(),
+                    tag,
+                    sent: ok,
+                }),
             }
         }
         for (id, e) in &mut self.adapters {
             // ADR-0090: a cancelled turn the adapter never ended is over after the grace.
-            if let Some(next) = e.rich.expire_cancel(now) {
-                begin_send(e, id, next, &sent, events);
+            if let Some(next) = e.rich.expire(now) {
+                begin_send(e, id, next, &sent);
             }
             let polled = match &e.adapter {
                 Some(adapter) if e.running => adapter.poll(),
@@ -1820,8 +1874,8 @@ impl Supervisor {
                         // ADR-0090: an adapter that reports its turns (`turns`) tells when one is open; the next queued prompt goes
                         // out when it ends, one per end.
                         if e.capabilities.iter().any(|c| c == "turns") {
-                            if let Some(next) = e.rich.observe(state) {
-                                begin_send(e, id, next, &sent, events);
+                            if let Some(next) = e.rich.observe(state, now) {
+                                begin_send(e, id, next, &sent);
                             }
                         }
                         if e.agent.observe(state, StateSource::Reported) {
@@ -1985,6 +2039,7 @@ impl Supervisor {
                 .caller(),
             session: e.session_id.clone(),
             op,
+            generation: e.rich.generation,
         })
     }
 
@@ -2046,15 +2101,13 @@ impl Supervisor {
             return Err(SupervisorError::NotFound(id.clone()));
         };
         let turns = e.capabilities.iter().any(|c| c == "turns");
-        match e.rich.route(turns, text, tag)? {
+        match e.rich.route(turns, text, Instant::now(), tag)? {
             Route::Queued(queue_len) => Ok(Submit::Queued { queue_len }),
-            Route::Send => match self.prepare_prompt(id, text, false) {
+            Route::Send(generation) => match self.prepare_prompt(id, text, false) {
                 Ok(call) => Ok(Submit::Send(call)),
                 Err(err) => {
                     // The prompt will not go out: the turn that was just marked busy never began.
-                    if let Some(e) = self.adapters.get_mut(id) {
-                        let _ = e.rich.send_failed();
-                    }
+                    self.adapter_send_failed(id, generation);
                     Err(err)
                 }
             },
@@ -2063,9 +2116,11 @@ impl Supervisor {
 
     /// ADR-0090: the call of a [`Submit::Send`] failed: its turn never began, so the agent is free (and what waits goes next, at
     /// the next poll's `idle`: nothing waits when a prompt was sent at once).
-    pub fn adapter_send_failed(&mut self, id: &AgentId) {
+    /// `generation` is the call's ([`AdapterCall::generation`]): a failure that comes back after the adapter restarted, or after
+    /// another turn began, changes nothing.
+    pub fn adapter_send_failed(&mut self, id: &AgentId, generation: u64) {
         if let Some(e) = self.adapters.get_mut(id) {
-            let _ = e.rich.send_failed();
+            let _ = e.rich.send_result(false, generation, Instant::now());
         }
     }
 
@@ -2093,11 +2148,19 @@ impl Supervisor {
     /// ADR-0090: the adapter took the cancel. With `drop_queue` the prompts waiting behind the turn are thrown away and their tags
     /// returned; otherwise they are kept and sent in order as the turns end. The turn is read as over after [`CANCEL_GRACE`] if the
     /// adapter does not say so.
-    pub fn adapter_turn_cancelled(&mut self, id: &AgentId, drop_queue: bool) -> Vec<u64> {
+    ///
+    /// `generation` is the cancel call's ([`AdapterCall::generation`]): one that comes back after the adapter restarted, or after
+    /// the turn it was for ended and another began, does nothing (nothing is dropped and no clock is set on the newer turn).
+    pub fn adapter_turn_cancelled(
+        &mut self,
+        id: &AgentId,
+        generation: u64,
+        drop_queue: bool,
+    ) -> Vec<u64> {
         let now = Instant::now();
         self.adapters
             .get_mut(id)
-            .map(|e| e.rich.cancelled(now, drop_queue))
+            .map(|e| e.rich.cancelled(generation, now, drop_queue))
             .unwrap_or_default()
     }
 
@@ -3366,58 +3429,48 @@ fn bounded_options(o: SessionOptions) -> SessionOptions {
     }
 }
 
-/// ADR-0090: a queued prompt becomes the turn: it is reported as sent and the send itself is made on a thread of its own, so a hung
-/// adapter cannot stall the tick (which holds the supervisor's lock). A send that fails is reported back through `sent` and read by
-/// the next poll, which drops that prompt and goes on with the next.
-fn begin_send(
-    e: &AdapterEntry,
-    id: &AgentId,
-    next: Queued,
-    sent: &SentResults,
-    events: &mut Vec<SupervisorEvent>,
-) {
+/// ADR-0090: a queued prompt becomes the turn. The send itself is made on a thread of its own, so a hung adapter cannot stall the tick
+/// (which holds the supervisor's lock); its outcome comes back through `sent`, with the turn's generation, and the next poll reports
+/// it (once) and, when it failed, goes on with the next prompt.
+fn begin_send(e: &AdapterEntry, id: &AgentId, next: Next, sent: &SentResults) {
+    let (next, generation) = next;
     let caller = e
         .adapter
         .as_ref()
         .filter(|_| e.running)
         .map(Adapter::caller);
-    let Some(caller) = caller else {
-        sent.lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push((id.clone(), next.tag, false));
-        return;
+    let push = |results: &SentResults, ok: bool| {
+        results.lock().unwrap_or_else(|e| e.into_inner()).push((
+            id.clone(),
+            next.tag,
+            ok,
+            generation,
+        ));
     };
-    events.push(SupervisorEvent::PromptDequeued {
-        agent: id.clone(),
-        tag: next.tag,
-        sent: true,
-    });
+    let Some(caller) = caller else {
+        return push(sent, false);
+    };
     let call = AdapterCall {
         caller,
         session: e.session_id.clone(),
         op: CallOp::Prompt {
-            text: next.text,
+            text: next.text.clone(),
             from_mesh: false,
         },
+        generation,
     };
     let (results, agent, tag) = (Arc::clone(sent), id.clone(), next.tag);
     let spawned = std::thread::Builder::new()
         .name("agora-queued-prompt".into())
-        .spawn({
-            let (results, agent) = (Arc::clone(&results), agent.clone());
-            move || {
-                let ok = call.run().is_ok();
-                results
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .push((agent, tag, ok));
-            }
+        .spawn(move || {
+            let ok = call.run().is_ok();
+            results
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push((agent, tag, ok, generation));
         });
     if spawned.is_err() {
-        results
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push((agent, tag, false));
+        push(sent, false);
     }
 }
 
@@ -4182,14 +4235,20 @@ mod adapter_option_tests {
     }
 
     fn queued(r: &mut AdapterRich, text: &str, tag: u64) -> Result<Route, SupervisorError> {
-        r.route(true, text, |_| tag)
+        r.route(true, text, Instant::now(), |_| tag)
     }
 
-    fn busy() -> Turn {
-        Turn::Busy {
-            seen_working: false,
-            cancel_by: None,
-        }
+    /// The generation of the turn that is open.
+    fn gen(r: &AdapterRich) -> u64 {
+        r.generation
+    }
+
+    fn is_busy(r: &AdapterRich) -> bool {
+        matches!(r.turn, Turn::Busy { .. })
+    }
+
+    fn tag(n: Option<Next>) -> Option<u64> {
+        n.map(|(q, _)| q.tag)
     }
 
     /// The first prompt goes at once; later ones wait in order, at most eight, each of at most 64 KiB; an adapter that does not
@@ -4197,8 +4256,8 @@ mod adapter_option_tests {
     #[test]
     fn the_queue_takes_eight_in_order_and_only_for_an_adapter_that_reports_its_turns() {
         let mut r = AdapterRich::default();
-        assert_eq!(queued(&mut r, "a", 0), Ok(Route::Send));
-        assert_eq!(r.turn, busy());
+        assert!(matches!(queued(&mut r, "a", 0), Ok(Route::Send(_))));
+        assert!(is_busy(&r));
         for n in 1..=8u64 {
             assert_eq!(queued(&mut r, "q", n), Ok(Route::Queued(n as usize)));
         }
@@ -4208,7 +4267,7 @@ mod adapter_option_tests {
         );
         let big = "x".repeat(MAX_QUEUED_PROMPT_BYTES + 1);
         let mut other = AdapterRich::default();
-        assert_eq!(queued(&mut other, "a", 0), Ok(Route::Send));
+        assert!(matches!(queued(&mut other, "a", 0), Ok(Route::Send(_))));
         assert_eq!(
             queued(&mut other, &big, 1),
             Err(SupervisorError::OptionUnknown("text"))
@@ -4221,7 +4280,10 @@ mod adapter_option_tests {
         // No `turns`: always sent, never queued, however busy it looks.
         let mut plain = AdapterRich::default();
         for _ in 0..20 {
-            assert_eq!(plain.route(false, "x", |_| 0), Ok(Route::Send));
+            assert!(matches!(
+                plain.route(false, "x", Instant::now(), |_| 0),
+                Ok(Route::Send(_))
+            ));
         }
         assert_eq!(plain.turn, Turn::Idle);
     }
@@ -4229,38 +4291,50 @@ mod adapter_option_tests {
     /// (a) A prompt that fails to send leaves nothing stuck: the turn it never began is over and the next prompt goes.
     #[test]
     fn a_prompt_that_fails_to_send_does_not_hold_the_queue() {
+        let now = Instant::now();
         let mut r = AdapterRich::default();
-        let _ = queued(&mut r, "a", 0);
+        let Ok(Route::Send(g0)) = queued(&mut r, "a", 0) else {
+            panic!()
+        };
         let _ = queued(&mut r, "b", 1);
         let _ = queued(&mut r, "c", 2);
         // `a` was sent and failed: `b` becomes the turn; it fails too: `c`; it fails: nothing waits, the agent is free.
-        assert_eq!(r.send_failed().map(|q| q.tag), Some(1));
-        assert_eq!(r.send_failed().map(|q| q.tag), Some(2));
-        assert!(r.send_failed().is_none());
+        let (sent, next) = r.send_result(false, g0, now);
+        assert!(!sent);
+        let (b, g1) = next.unwrap();
+        assert_eq!(b.tag, 1);
+        let (_, next) = r.send_result(false, g1, now);
+        let (c, g2) = next.unwrap();
+        assert_eq!(c.tag, 2);
+        let (_, next) = r.send_result(false, g2, now);
+        assert!(next.is_none());
         assert_eq!(r.turn, Turn::Idle);
-        assert_eq!(
-            queued(&mut r, "d", 3),
-            Ok(Route::Send),
+        assert!(
+            matches!(queued(&mut r, "d", 3), Ok(Route::Send(_))),
             "later prompts are not left waiting for an idle that never comes"
         );
         // A failure is only about a turn that has not begun.
-        r.observe(AgentState::Working);
+        r.observe(AgentState::Working, now);
         let _ = queued(&mut r, "e", 4);
-        assert!(r.send_failed().is_none());
+        assert!(r.send_result(false, gen(&r), now).1.is_none());
         assert_eq!(r.queue.len(), 1);
+        // A send that succeeded changes nothing.
+        let (sent, next) = r.send_result(true, 0, now);
+        assert!(sent && next.is_none());
     }
 
     /// (b) An adapter that says `done` or `unknown` instead of `idle` ends the turn too.
     #[test]
     fn done_or_unknown_ends_a_turn_like_idle() {
+        let now = Instant::now();
         for ending in [AgentState::Done, AgentState::Unknown] {
             let mut r = AdapterRich::default();
             let _ = queued(&mut r, "a", 0);
             let _ = queued(&mut r, "b", 1);
             // Even before it said `working`: it will not say `idle` any more.
-            assert_eq!(r.observe(ending).map(|q| q.tag), Some(1), "{ending:?}");
-            assert_eq!(r.turn, busy());
-            assert!(r.observe(ending).is_none());
+            assert_eq!(tag(r.observe(ending, now)), Some(1), "{ending:?}");
+            assert!(is_busy(&r));
+            assert!(r.observe(ending, now).is_none());
             assert_eq!(r.turn, Turn::Idle);
         }
     }
@@ -4268,30 +4342,70 @@ mod adapter_option_tests {
     /// (c) A stray `idle`, or a second one, ends nothing and never sends a prompt into a running turn.
     #[test]
     fn a_stray_idle_does_not_pop_a_prompt_into_a_running_turn() {
+        let now = Instant::now();
         let mut r = AdapterRich::default();
         let _ = queued(&mut r, "a", 0);
         let _ = queued(&mut r, "b", 1);
         let _ = queued(&mut r, "c", 2);
         // The startup `idle` that arrives after the prompt was sent: before any `working`.
-        assert!(r.observe(AgentState::Idle).is_none());
+        assert!(r.observe(AgentState::Idle, now).is_none());
         assert_eq!(r.queue.len(), 2);
-        assert!(r.observe(AgentState::Working).is_none());
+        assert!(r.observe(AgentState::Working, now).is_none());
         assert_eq!(
-            r.observe(AgentState::Idle).map(|q| q.tag),
+            tag(r.observe(AgentState::Idle, now)),
             Some(1),
             "the turn ended: `b` goes"
         );
         // `b` is the turn now. A second `idle` (a duplicate of the last one) must not release `c`.
-        assert!(r.observe(AgentState::Idle).is_none());
+        assert!(r.observe(AgentState::Idle, now).is_none());
         assert_eq!(r.queue.len(), 1);
-        assert!(r.observe(AgentState::Working).is_none());
-        assert!(r.observe(AgentState::Blocked).is_none());
-        assert_eq!(r.observe(AgentState::Idle).map(|q| q.tag), Some(2));
-        assert!(r.observe(AgentState::Working).is_none());
-        assert!(r.observe(AgentState::Idle).is_none());
+        assert!(r.observe(AgentState::Working, now).is_none());
+        assert!(r.observe(AgentState::Blocked, now).is_none());
+        assert_eq!(tag(r.observe(AgentState::Idle, now)), Some(2));
+        assert!(r.observe(AgentState::Working, now).is_none());
+        assert!(r.observe(AgentState::Idle, now).is_none());
         assert_eq!(r.turn, Turn::Idle);
         // An idle agent that gets an `idle` stays idle.
-        assert!(r.observe(AgentState::Idle).is_none());
+        assert!(r.observe(AgentState::Idle, now).is_none());
+    }
+
+    /// An adapter that only ever says `idle` (never `working`) does not hold the agent for good: its `idle` ends the turn once the
+    /// grace has passed since the prompt, whether it comes late or came early and the clock catches up.
+    #[test]
+    fn an_adapter_that_never_says_working_is_not_stuck_busy() {
+        let t0 = Instant::now();
+        // The `idle` comes after the grace.
+        let mut r = AdapterRich::default();
+        let _ = queued(&mut r, "a", 0);
+        let _ = queued(&mut r, "b", 1);
+        assert!(r
+            .observe(
+                AgentState::Idle,
+                t0 + IDLE_ONLY_GRACE - Duration::from_millis(1)
+            )
+            .is_none());
+        // It was early: nothing else will come, so the clock ends it.
+        assert!(r.expire(t0 + Duration::from_secs(1)).is_none());
+        assert_eq!(
+            tag(r.expire(t0 + IDLE_ONLY_GRACE + Duration::from_secs(1))),
+            Some(1)
+        );
+        // A late `idle` ends it directly.
+        let mut r = AdapterRich::default();
+        let _ = queued(&mut r, "a", 0);
+        let _ = queued(&mut r, "b", 1);
+        assert_eq!(
+            tag(r.observe(
+                AgentState::Idle,
+                t0 + IDLE_ONLY_GRACE + Duration::from_secs(1)
+            )),
+            Some(1)
+        );
+        // Without any `idle` it is not read as over (only a cancel's grace or `done` can).
+        let mut r = AdapterRich::default();
+        let _ = queued(&mut r, "a", 0);
+        assert!(r.expire(t0 + Duration::from_secs(3600)).is_none());
+        assert!(is_busy(&r));
     }
 
     /// (d) An adapter that ignores `session/cancel` does not hold the agent for good: the turn is read as over after the grace, and
@@ -4301,37 +4415,83 @@ mod adapter_option_tests {
         let t0 = Instant::now();
         let mut r = AdapterRich::default();
         let _ = queued(&mut r, "a", 0);
-        r.observe(AgentState::Working);
+        r.observe(AgentState::Working, t0);
         let _ = queued(&mut r, "b", 1);
-        assert!(r.cancelled(t0, false).is_empty(), "the queue is kept");
+        let g = gen(&r);
+        assert!(r.cancelled(g, t0, false).is_empty(), "the queue is kept");
         assert!(r
-            .expire_cancel(t0 + CANCEL_GRACE - Duration::from_millis(1))
+            .expire(t0 + CANCEL_GRACE - Duration::from_millis(1))
             .is_none());
-        assert_eq!(
-            r.turn,
-            Turn::Busy {
-                seen_working: true,
-                cancel_by: Some(t0 + CANCEL_GRACE)
-            }
-        );
-        assert_eq!(r.expire_cancel(t0 + CANCEL_GRACE).map(|q| q.tag), Some(1));
+        assert_eq!(tag(r.expire(t0 + CANCEL_GRACE)), Some(1));
         // Not cancelled: never expires.
-        assert!(r.expire_cancel(t0 + CANCEL_GRACE * 100).is_none());
+        assert!(r.expire(t0 + CANCEL_GRACE * 100).is_none());
         // With drop_queue the tags come back and the turn is free after the grace.
         let mut r = AdapterRich::default();
         let _ = queued(&mut r, "a", 0);
         let _ = queued(&mut r, "b", 5);
         let _ = queued(&mut r, "c", 6);
-        assert_eq!(r.cancelled(t0, true), [5, 6]);
-        assert!(r.expire_cancel(t0 + CANCEL_GRACE).is_none());
+        assert_eq!(r.cancelled(gen(&r), t0, true), [5, 6]);
+        assert!(r.expire(t0 + CANCEL_GRACE).is_none());
         assert_eq!(r.turn, Turn::Idle);
         // An adapter that does end the cancelled turn (the normal case) needs no grace.
         let mut r = AdapterRich::default();
         let _ = queued(&mut r, "a", 0);
-        r.observe(AgentState::Working);
+        r.observe(AgentState::Working, t0);
         let _ = queued(&mut r, "b", 1);
-        r.cancelled(t0, false);
-        assert_eq!(r.observe(AgentState::Idle).map(|q| q.tag), Some(1));
+        r.cancelled(gen(&r), t0, false);
+        assert_eq!(tag(r.observe(AgentState::Idle, t0)), Some(1));
+    }
+
+    /// A late answer cannot corrupt a newer turn: a send that fails after the adapter restarted, and a cancel that comes back after
+    /// a restart or after its turn ended, change nothing; and a tag is reported once.
+    #[test]
+    fn late_results_of_an_old_turn_or_process_change_nothing() {
+        let t0 = Instant::now();
+        // Restart during a send: the prompt that was being sent fails with the old process.
+        let mut r = AdapterRich::default();
+        let _ = queued(&mut r, "a", 0);
+        let _ = queued(&mut r, "b", 1);
+        let (b, gb) = {
+            r.observe(AgentState::Working, t0);
+            r.observe(AgentState::Idle, t0).unwrap()
+        };
+        assert_eq!(b.tag, 1);
+        assert_eq!(
+            r.forget(),
+            Vec::<u64>::new(),
+            "`b` is in flight, not queued"
+        );
+        let _ = queued(&mut r, "c", 2); // the new process's first prompt
+        let (c_turn, g_new) = (is_busy(&r), gen(&r));
+        assert!(c_turn && g_new != gb);
+        let (sent, next) = r.send_result(false, gb, t0);
+        assert!(!sent, "its entry is dropped");
+        assert!(
+            next.is_none() && is_busy(&r) && gen(&r) == g_new,
+            "the new turn is untouched"
+        );
+        // Cancel after a restart: the old cancel call returns to the new process.
+        let mut r = AdapterRich::default();
+        let _ = queued(&mut r, "a", 0);
+        let old = gen(&r);
+        r.forget();
+        let _ = queued(&mut r, "b", 1);
+        let _ = queued(&mut r, "c", 2);
+        assert!(r.cancelled(old, t0, true).is_empty(), "nothing is dropped");
+        assert_eq!(r.queue.len(), 1);
+        assert!(
+            r.expire(t0 + CANCEL_GRACE * 10).is_none(),
+            "and no clock was set on the new turn"
+        );
+        // Cancel for a turn that has since ended and another began.
+        let mut r = AdapterRich::default();
+        let _ = queued(&mut r, "a", 0);
+        r.observe(AgentState::Working, t0);
+        let _ = queued(&mut r, "b", 1);
+        let old = gen(&r);
+        assert_eq!(tag(r.observe(AgentState::Idle, t0)), Some(1));
+        assert!(r.cancelled(old, t0, false).is_empty());
+        assert!(r.expire(t0 + CANCEL_GRACE * 10).is_none());
     }
 
     /// ADR-0090: what a restarted adapter's old process reported is forgotten (a stale mode list could decide a choice against the
@@ -4346,10 +4506,7 @@ mod adapter_option_tests {
             }],
             ..AdapterRich::default()
         };
-        r.turn = Turn::Busy {
-            seen_working: true,
-            cancel_by: None,
-        };
+        r.busy(Instant::now(), true);
         r.queue.push_back(Queued {
             text: "a".into(),
             tag: 7,

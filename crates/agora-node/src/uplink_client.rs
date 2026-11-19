@@ -879,7 +879,8 @@ fn relay_terminal(
     while accepted && alive.load(Ordering::Acquire) {
         match local.read_frame(Some(Duration::from_millis(200))) {
             Ok(Some(f)) if f.stream_id == stream => {
-                let exited = f.kind == 3;
+                // An exit frame (a terminal) or a close frame (a conversation whose follower was dropped, ADR-0090) is the last.
+                let exited = f.kind == 3 || f.kind == agora_protocol::frame::STREAM_CLOSE;
                 if out.blocking_send(f).is_err() || exited {
                     return;
                 }

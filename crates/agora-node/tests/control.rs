@@ -1988,3 +1988,143 @@ fn a_decision_the_adapter_cannot_take_does_not_leave_the_permission_entry_pendin
     );
     assert_eq!(outcome(), Some(v1::PermissionOutcome::Cancelled as i32));
 }
+
+/// ADR-0090: a client that reads too slowly is dropped from the conversation, and told: the stream ends with a close frame (which the
+/// uplink relays to the hub so the window subscribes again), and a new subscription gets the ring as a fresh snapshot with no entry
+/// twice.
+#[test]
+fn a_subscriber_that_falls_behind_is_told_its_stream_ended_and_can_subscribe_again() {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+        return;
+    }
+    let e = env("chat-lag");
+    std::fs::write(
+        e.dir.join("manifests/fake.toml"),
+        format!(
+            "kind = \"fake-adapter\"\ndisplay_name = \"F\"\nversion = \"1\"\nmin_engine = 1\n[adapter]\ncommand = [{:?}, \"--adapter\"]\n",
+            fake_agent_path()
+        ),
+    )
+    .unwrap();
+    let n = node(&e, NodeLimits::default());
+    let mut c = Client::connect(n.socket().unwrap()).unwrap();
+    let s = started(ok(c.call(start_cmd("fake-adapter"))));
+    let agent = agora_core::AgentId::new(s.agent_id.clone());
+    ok(c.call_on(
+        3,
+        Cmd::ChatSubscribe(v1::ChatSubscribe {
+            agent_id: s.agent_id.clone(),
+        }),
+    ));
+    // The client does not read while the transcript grows by far more than the follower's queue and the socket's buffers hold.
+    for i in 0..3000 {
+        n.chat.push(
+            &agent,
+            v1::ChatRole::Agent,
+            v1::ChatKind::Text,
+            format!("{i}{}", "x".repeat(8000)),
+            String::new(),
+            0,
+        );
+    }
+    // Now it reads: entries (in order, no gaps in what it got, since the queue was only ever cut at the end), then the close frame.
+    let mut ids = Vec::new();
+    let end = Instant::now() + Duration::from_secs(30);
+    loop {
+        assert!(
+            Instant::now() < end,
+            "the stream never ended: {} entries",
+            ids.len()
+        );
+        let Some(f) = c.read_frame(Some(Duration::from_millis(500))).unwrap() else {
+            continue;
+        };
+        if f.stream_id != 3 {
+            continue;
+        }
+        match f.kind {
+            agora_node::control::KIND_CHAT_ENTRY => ids.push(
+                <v1::ChatEntry as prost::Message>::decode(f.payload.as_slice())
+                    .unwrap()
+                    .entry_id,
+            ),
+            agora_node::control::KIND_CHAT_SNAPSHOT => {}
+            agora_protocol::frame::STREAM_CLOSE => break,
+            other => panic!("unexpected frame kind {other}"),
+        }
+    }
+    assert!(ids.windows(2).all(|w| w[0] < w[1]), "in order, none twice");
+    assert!(
+        ids.len() < 3000,
+        "the follower really was dropped part way: {}",
+        ids.len()
+    );
+    // Subscribing again gives the ring, newest entries included, each entry once.
+    ok(c.call_on(
+        4,
+        Cmd::ChatSubscribe(v1::ChatSubscribe {
+            agent_id: s.agent_id.clone(),
+        }),
+    ));
+    let snap = wait_frame(&mut c, 4, |f| {
+        f.kind == agora_node::control::KIND_CHAT_SNAPSHOT
+    });
+    let snap = <v1::ChatSnapshot as prost::Message>::decode(snap.payload.as_slice()).unwrap();
+    let fresh: Vec<u64> = snap.entries.iter().map(|e| e.entry_id).collect();
+    assert!(fresh.windows(2).all(|w| w[0] < w[1]), "no entry id twice");
+    assert_eq!(
+        fresh.last().copied(),
+        Some(snap.entries.iter().map(|e| e.entry_id).max().unwrap())
+    );
+    assert!(
+        snap.entries.iter().any(|e| e.text.starts_with("2999")),
+        "the newest entry is there"
+    );
+}
+
+/// The user's prompt is in the conversation before whatever the agent answers: the fake agent echoes at once, and every echo comes
+/// after the prompt it answers.
+#[test]
+fn the_users_prompt_comes_before_the_agents_answer() {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+        return;
+    }
+    let e = env("chat-order");
+    std::fs::write(
+        e.dir.join("manifests/fake.toml"),
+        format!(
+            "kind = \"fake-adapter\"\ndisplay_name = \"F\"\nversion = \"1\"\nmin_engine = 1\n[adapter]\ncommand = [{:?}, \"--adapter\"]\n",
+            fake_agent_path()
+        ),
+    )
+    .unwrap();
+    let n = node(&e, NodeLimits::default());
+    let mut c = Client::connect(n.socket().unwrap()).unwrap();
+    let s = started(ok(c.call(start_cmd("fake-adapter"))));
+    let agent = agora_core::AgentId::new(s.agent_id.clone());
+    std::thread::sleep(Duration::from_millis(800)); // the adapter finishes its handshake
+                                                    // The agent speaks BEFORE the node has its answer to the prompt: the user's entry must already be in the conversation.
+    ok(c.call(Cmd::AgentPrompt(v1::AgentPrompt {
+        agent_id: s.agent_id.clone(),
+        text: "first:hello".into(),
+    })));
+    let end = Instant::now() + Duration::from_secs(15);
+    let all = loop {
+        let all = n.chat.snapshot(&agent);
+        if all
+            .iter()
+            .any(|e| e.role == v1::ChatRole::Agent as i32 && e.text == "hello")
+        {
+            break all;
+        }
+        assert!(Instant::now() < end, "the agent never spoke");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let id_of = |role: v1::ChatRole, text: &str| {
+        all.iter()
+            .find(|e| e.role == role as i32 && e.text == text)
+            .map(|e| e.entry_id)
+            .unwrap()
+    };
+    assert!(id_of(v1::ChatRole::User, "first:hello") < id_of(v1::ChatRole::Agent, "hello"));
+}

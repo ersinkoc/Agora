@@ -112,35 +112,38 @@ const SKIP_PHRASES: &[&str] = &[
     "full access",
 ];
 
-/// Words (folded, whole) in an option's own id or name that say the option is about permissions.
+/// Words (folded, whole) in an option's own id or name that say the option is about permissions. Deliberately short: a word like
+/// `mode`, `access` or `trust` is in many names that have nothing to do with it (`display mode`, `access token`), and an option that is
+/// wrongly taken for a permission option has every value it does not list refused.
 const PERMISSION_TOKENS: &[&str] = &[
-    "mode",
     "allow",
     "allowed",
-    "policy",
     "execution",
     "exec",
     "perms",
     "autonomy",
     "yolo",
-    "auto",
-    "access",
-    "trust",
-    "ask",
 ];
 
-/// Words (folded, letters and digits only) found anywhere in an option's id or name that say the option is about permissions.
+/// Ids and names (folded, letters and digits only) that are, as a whole, the agent's permission or working mode: an option of exactly
+/// that name is the mode selector of agents that give no category.
+const PERMISSION_EXACT: &[&str] = &[
+    "mode",
+    "agentmode",
+    "executionmode",
+    "permissionmode",
+    "approvalmode",
+];
+
+/// Words (folded, letters and digits only) found anywhere in an option's id or name that say the option is about permissions or
+/// approval, clearly.
 const PERMISSION_SUBSTRINGS: &[&str] = &[
     "permission",
     "approval",
     "approve",
     "sandbox",
     "autonomy",
-    "trust",
-    "safety",
     "confirm",
-    "bypass",
-    "accept",
 ];
 
 /// Values (squashed) that are clearly safe in a permission option: the agent asks, or may only read.
@@ -203,21 +206,23 @@ fn words(s: &str) -> Vec<String> {
         .collect()
 }
 
-/// ADR-0058: whether a value's id, name or description says the agent acts without asking in it (the denylist). `auto` as a whole
-/// word counts only when `auto_word` is set.
-pub fn says_it_skips(id: &str, name: &str, description: &str, auto_word: bool) -> bool {
+/// ADR-0058: whether a value's id, name or description says the agent acts without asking in it (the denylist). `full` says the
+/// value is one of a permission option or of an option we know nothing about; for a model or a reasoning level (`full` false) the two
+/// weak rules are left out: `auto` as a whole word ("Auto" is a common model router) and a description that has `approve` or `accept`
+/// and `automatically` somewhere ("automatically picks the cheapest model that accepts the context").
+pub fn says_it_skips(id: &str, name: &str, description: &str, full: bool) -> bool {
     // `auto` only as a whole word (`auto`, `Auto mode`, `auto-edit`), so `autosave` or `automatic-plan` are not marked by it.
     let has_auto = |s: &str| words(s).iter().any(|w| w == "auto");
     let d = fold(description);
     let d = d.split_whitespace().collect::<Vec<_>>().join(" ");
     // Both words, in either order: "approves ... automatically", "Automatically approves tool calls".
     let approves_automatically =
-        (d.contains("approv") || d.contains("accept")) && d.contains("automatic");
+        full && (d.contains("approv") || d.contains("accept")) && d.contains("automatic");
     let (sid, sname) = (squash(id), squash(name));
     SKIPS_PERMISSIONS
         .iter()
         .any(|w| sid.contains(w) || sname.contains(w))
-        || (auto_word && (has_auto(id) || has_auto(name)))
+        || (full && (has_auto(id) || has_auto(name)))
         || SKIP_PHRASES.iter().any(|p| d.contains(p))
         || approves_automatically
 }
@@ -229,9 +234,11 @@ fn about_permissions(option_id: &str, option_name: &str) -> bool {
         .into_iter()
         .chain(words(option_name))
         .collect();
-    PERMISSION_SUBSTRINGS
-        .iter()
-        .any(|s| i.contains(s) || n.contains(s))
+    PERMISSION_EXACT.contains(&i.as_str())
+        || PERMISSION_EXACT.contains(&n.as_str())
+        || PERMISSION_SUBSTRINGS
+            .iter()
+            .any(|s| i.contains(s) || n.contains(s))
         || PERMISSION_TOKENS.iter().any(|t| w.iter().any(|x| x == t))
 }
 
@@ -240,7 +247,12 @@ fn about_permissions(option_id: &str, option_name: &str) -> bool {
 /// [`boolean_skips`] and [`boolean_value_skips`].
 pub fn value_skips(category: Category, option: (&str, &str), value: (&str, &str, &str)) -> bool {
     let (vid, vname, vdesc) = value;
-    if says_it_skips(vid, vname, vdesc, category != Category::Model) {
+    if says_it_skips(
+        vid,
+        vname,
+        vdesc,
+        matches!(category, Category::Mode | Category::Other),
+    ) {
         return true;
     }
     if matches!(category, Category::Model | Category::Tuning) {
@@ -416,6 +428,98 @@ mod tests {
             ""
         ));
         assert!(boolean_skips(Category::Other, ("x", "Ｙｏｌｏ"), ""));
+    }
+
+    /// The module doc's promise: a model or a reasoning level is never taken for a permission option, whatever a value is called.
+    #[test]
+    fn a_model_or_a_reasoning_level_is_never_flagged_for_being_called_auto() {
+        for category in [Category::Model, Category::Tuning] {
+            let v =
+                |id: &str, name: &str, d: &str| value_skips(category, ("x", "X"), (id, name, d));
+            assert!(!v("auto", "Auto", ""));
+            assert!(!v("auto", "Auto effort", "Chooses the level by itself"));
+            // A description that merely has the two words somewhere.
+            assert!(!v(
+                "router",
+                "Router",
+                "Automatically picks the cheapest model that accepts the context"
+            ));
+            assert!(!v("x", "X", "Approves nothing; automatically retries"));
+            // The strong words still count.
+            assert!(v("yolo", "Yolo", ""));
+            assert!(v("x", "X", "runs tools without asking"));
+        }
+        assert!(!boolean_skips(
+            Category::Tuning,
+            ("think", "Think"),
+            "Automatically accepts longer thinking"
+        ));
+        // For a mode the same two weak rules do count.
+        assert!(mode("x", "X", "Automatically accepts edits"));
+        assert!(mode("auto", "Auto", ""));
+    }
+
+    /// An option is taken for a permission option only when its name is clearly about permissions or approval: a name that merely has
+    /// `mode`, `access` or `trust` in it does not make its unknown values skipping.
+    #[test]
+    fn an_option_is_about_permissions_only_when_its_name_clearly_says_so() {
+        let other =
+            |opt: &str, name: &str, v: &str| value_skips(Category::Other, (opt, name), (v, v, ""));
+        for (opt, name) in [
+            ("display_mode", "Display mode"),
+            ("reasoning_mode", "Reasoning mode"),
+            ("dark_mode", "Dark mode"),
+            ("access_token_source", "Access token source"),
+            ("trusted_folders_view", "Trust view"),
+            ("verbosity", "Verbosity"),
+        ] {
+            assert!(!other(opt, name, "compact"), "{opt}");
+        }
+        // The mode selector of an agent that gives no category is still one (its id is exactly `mode`), and so are the clear ones.
+        assert!(other("mode", "Mode", "agent"));
+        assert!(other("approval_policy", "Approval policy", "yesterday"));
+        assert!(other("execution", "Execution", "everything"));
+        assert!(other("x", "Permission level", "weird"));
+        assert!(!other("x", "Permission level", "default"));
+        assert!(!boolean_skips(
+            Category::Other,
+            ("dark_mode", "Dark mode"),
+            ""
+        ));
+        assert!(!boolean_skips(
+            Category::Other,
+            ("access_token", "Access token"),
+            ""
+        ));
+    }
+
+    /// The ordinary default modes are not flagged by name: `build` and `code` with a neutral description are safe, and only what the
+    /// description (or the adapter's flag) says makes them skip.
+    #[test]
+    fn common_default_modes_stay_unflagged_unless_their_description_says_otherwise() {
+        for (id, name) in [
+            ("build", "Build"),
+            ("code", "Code"),
+            ("architect", "Architect"),
+            ("orchestrator", "Orchestrator"),
+            ("debug", "Debug"),
+        ] {
+            assert!(!mode(id, name, ""), "{id}");
+            assert!(
+                !mode(
+                    id,
+                    name,
+                    "Full tool access in the working folder, with permission asked per tool"
+                ),
+                "{id}"
+            );
+            assert!(mode(id, name, "runs tools without asking"), "{id}");
+            assert!(
+                mode(id, name, "Automatically approves every tool call"),
+                "{id}"
+            );
+            assert!(mode(id, name, "Skips all permission prompts"), "{id}");
+        }
     }
 
     #[test]

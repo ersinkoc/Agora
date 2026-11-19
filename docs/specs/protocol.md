@@ -846,8 +846,11 @@ forwards either to a node that did not offer it.
   need an ADR). The queue is node memory: it is lost when the node restarts (ADR-0089). A prompt that would wait is at most 64 KiB
   (`protocol.invalid_message`, `field` `text`); one sent at once is not bounded here. The turn is an explicit state, `Idle` or
   `Busy`: a sent prompt makes it busy; the adapter's `working` or `blocked` marks the turn as running; its `idle` ends the turn only
-  after that (a stray or repeated `idle` ends nothing and never sends a prompt into a running turn); `done` or `unknown` ends it
-  whatever came before; a queued prompt whose send fails is dropped (its entry leaves with the notice) and the next one goes; and a
+  after that (a stray or repeated `idle` ends nothing and never sends a prompt into a running turn), or, for an adapter that never
+  says `working`, once 3 s have passed since the prompt (the clock ends it when its `idle` came earlier); `done` or `unknown` ends it
+  whatever came before; every turn and every restart has a generation, and a send, a cancel or a failure that comes back to another
+  generation changes nothing (each queued prompt is reported once: sent, or not sent, after its send ended); the user's own entry is
+  in the transcript before the prompt is sent, so a fast agent never answers ahead of it; a queued prompt whose send fails is dropped (its entry leaves with the notice) and the next one goes; and a
   turn that was cancelled and that the adapter did not end is read as over 5 s after the cancel was taken. The sends of queued prompts
   are made off the node's tick and off the supervisor's lock: no adapter that hangs stalls the tick or another agent's command.
   `AgentSetMode`, `AgentSetConfig` and `AgentCancelTurn` likewise wait for the adapter after the lock is let go.
@@ -898,8 +901,12 @@ forwards either to a node that did not offer it.
   permission labels every escape sequence (CSI, OSC, DCS and the like, with their payload), every control character (C0, DEL, C1) and
   the characters that reorder text; a one-line field (name, path, step, label) also loses its line breaks. Only a bounded head and tail
   (64 KiB) of an item is looked at, and all of this is done before the transcript's lock is taken. A notice code that only the node makes
-  (`adapter.queue_dropped`) is dropped when an adapter sends it. A follower that falls 1024 entries behind is dropped (its stream
-  ends; the client subscribes again and gets the ring).
+  (`adapter.queue_dropped`) is dropped when an adapter sends it. A follower that falls 1024 entries behind is dropped and TOLD: its
+  stream ends with a close frame (kind 255), which the uplink relays to the hub, so the client subscribes again and gets the ring as a
+  fresh snapshot instead of keeping a transcript with a hole in it. Direction marks: the override and embedding controls (U+202A to
+  U+202E) are always removed; in prose (thinking, output, plan steps) LRM, RLM, ALM and balanced isolates stay, as Arabic and Hebrew
+  text needs them; in names, paths, labels and arguments every direction control goes. A lone carriage return is a line break (a space
+  in a one-line field); an escape sequence that is never closed swallows at most to the next line break or 4096 characters.
 - **Coalescing.** At most one version of an entry is sent per 150 ms, repeats of a final status included (the first `completed` goes at once); a version held back is stored (a new subscriber sees it) and sent by
   the node's tick once 150 ms have passed; a final tool status is never held back. A client therefore may see fewer versions than the
   agent sent, never a stale last one.
