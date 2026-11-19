@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { languageOf, splitHighlighted } from '../net/highlight';
+import { languageOf, languageOfTag, splitHighlighted } from '../net/highlight';
 
 type Highlighter = typeof import('./hl');
 
@@ -63,5 +63,20 @@ export function useHighlightedLines(path: string | undefined, texts: string[]): 
     });
     return () => { live = false; if (timer) clearTimeout(timer); };
   }, [path, key]); // eslint-disable-line react-hooks/exhaustive-deps
+  return html;
+}
+
+/** A code block of a reply, highlighted: undefined while the highlighter loads, for a language it does not have, or a large block (plain
+ *  text then). A block still being written is re-highlighted after a short pause, never on every chunk. Output is the highlighter's own:
+ *  text escaped, <span class> tags only. */
+export function useHighlightedCode(lang: string, text: string): string | undefined {
+  const [html, setHtml] = useState<string | undefined>();
+  useEffect(() => {
+    const language = languageOfTag(lang);
+    if (!language || text.length > MAX_HIGHLIGHT_CHARS) { setHtml(undefined); return; }
+    let live = true;
+    const timer = setTimeout(() => { void loaded().then((hl) => { if (live && hl) setHtml(hl.highlight(text, language)); }); }, 120);
+    return () => { live = false; clearTimeout(timer); };
+  }, [lang, text]);
   return html;
 }

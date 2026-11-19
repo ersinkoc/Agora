@@ -13,6 +13,7 @@ import { themeStore } from './themes/store';
 import { themeName } from './themes/messages';
 import { PromptBox } from './components/PromptBox';
 import type { ChatSource } from './net/chat';
+import { demoConversation } from './demoChat';
 import { AgentTile } from './components/AgentTile';
 import { StartAgent, type KindChoice } from './components/StartAgent';
 import { AttentionStrip } from './components/AttentionStrip';
@@ -70,21 +71,7 @@ const demoChatAgent: AgentTileModel = {
 };
 const demoChat: ChatSource = {
   connect(onLines) {
-    onLines([
-      { id: 1, atMs: 0, role: 'user', kind: 'text', text: 'Fix the login test.', path: '' },
-      { id: 2, atMs: 0, role: 'agent', kind: 'notice', text: '', path: '', code: 'adapter.turn_empty', params: {} },
-      { id: 3, atMs: 0, role: 'user', kind: 'text', text: 'Try again with the small model.', path: '' },
-      { id: 4, atMs: 0, role: 'agent', kind: 'plan', text: 'Run the login test\nFind why it fails', path: '' },
-      { id: 5, atMs: 0, role: 'agent', kind: 'tool', text: '{"tool":"execute","arguments":{"command":["bash","-lc","cargo test -p auth login"]}}', path: '' },
-      { id: 6, atMs: 0, role: 'agent', kind: 'tool', text: '{"tool":"Read src/auth.rs","arguments":{"file_path":"src/auth.rs","limit":200}}', path: '' },
-      { id: 7, atMs: 0, role: 'agent', kind: 'tool', text: '{"tool":"grep \\"redirect\\"","arguments":{"pattern":"redirect","path":"tests"}}', path: '' },
-      { id: 8, atMs: 0, role: 'agent', kind: 'tool', text: '{"tool":"Read tests/login.rs","arguments":{"file_path":"tests/login.rs"}}', path: '' },
-      { id: 9, atMs: 0, role: 'agent', kind: 'tool', text: '{"tool":"Edit `tests/login.rs`","arguments":{"file_path":"tests/login.rs","old_string":"\\"/home\\"","new_string":"\\"/dashboard\\""}}', path: '' },
-      { id: 10, atMs: 0, role: 'agent', kind: 'diff', text: '--- a/tests/login.rs\n+++ b/tests/login.rs\n@@ -1,1 +1,1 @@\n-    assert_eq!(res.location(), "/home");\n+    assert_eq!(res.location(), "/dashboard");\n', path: 'tests/login.rs' },
-      { id: 11, atMs: 0, role: 'agent', kind: 'plan', text: 'Run the login test\nFind why it fails\nUpdate the expected redirect', path: '' },
-      { id: 12, atMs: 0, role: 'agent', kind: 'text', text: 'The test expected the **old** redirect; I updated it to `/dashboard`.\n\n```sh\ncargo test -p auth login\n```', path: '' },
-      { id: 13, atMs: 0, role: 'agent', kind: 'notice', text: '', path: '', code: 'adapter.agent_exited', params: { stage: 'idle', exit_code: '1', stderr_tail: 'error: free usage limit reached' } },
-    ], true);
+    onLines(demoConversation(), true);
     return { close() {} };
   },
 };

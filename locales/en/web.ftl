@@ -1010,3 +1010,70 @@ usage-limits-empty = Plan limits appear here when the agent reports them.
 usage-reported-toggle = What agents reported about cost
 usage-reported-note = Reported by the agent, may not reflect your plan.
 usage-reported-row = { $name }: { $amount }
+
+# The conversation of a chat agent
+chat-jump = Jump to latest
+chat-jump-new = { $count ->
+    [one] Jump to latest, 1 new
+   *[other] Jump to latest, { $count } new
+}
+chat-earlier-items = Show earlier ({ $count })
+chat-you = You
+chat-agent = Agent
+chat-copy-reply = Copy reply
+chat-copy-message = Copy message
+chat-act-read = { $count ->
+    [one] Read a file
+   *[other] Read { $count } files
+}
+chat-act-edit = { $count ->
+    [one] Edited a file
+   *[other] Edited { $count } files
+}
+chat-act-run = { $count ->
+    [one] Ran a command
+   *[other] Ran { $count } commands
+}
+chat-act-search = { $count ->
+    [one] Searched once
+   *[other] Searched { $count } times
+}
+chat-act-fetch = { $count ->
+    [one] Fetched a page
+   *[other] Fetched { $count } pages
+}
+chat-act-delete = { $count ->
+    [one] Deleted a file
+   *[other] Deleted { $count } files
+}
+chat-act-move = { $count ->
+    [one] Moved a file
+   *[other] Moved { $count } files
+}
+chat-act-think = Thought
+chat-act-other = { $count ->
+    [one] 1 other step
+   *[other] { $count } other steps
+}
+chat-steps-count = { $count ->
+    [one] 1 step
+   *[other] { $count } steps
+}
+chat-steps-last = Last: { $step }
+chat-steps-open = Show the steps
+chat-files-title = { $count ->
+    [one] 1 file changed
+   *[other] { $count } files changed
+}
+chat-files-more = And { $count } more
+chat-plan-label = Plan
+chat-error-label = Something went wrong
+prompt-hint = Enter sends, Shift+Enter starts a new line.
+session-started-with = { $name }: { $value }
+session-started-hint = Chosen when this agent was started. The agent does not report it, so it may have changed since.
+empty-changes-title = All clean
+empty-changes-hint = Files an agent changes and has not committed appear here.
+empty-messages-title = No messages yet
+empty-messages-hint = When agents write to each other, you can follow it here.
+loading-label = Loading
+chat-code = Code
