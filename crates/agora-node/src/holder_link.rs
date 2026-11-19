@@ -1,0 +1,814 @@
+//! ADR-0079 decision 5: the private link between a node and its terminal holder (`agora hold`), and the node's client for it.
+//!
+//! Not a protocol message (`schema/` is for the wire between nodes, hubs and windows): a small versioned format private to Agora, over
+//! a local socket. `docs/specs/holder-link.md` is its specification; `tests/fixtures/holder-link/` holds golden fixtures, added and
+//! never edited.
+//!
+//! Every message is one frame: `length: u32 BE` (of what follows), `tag: u8`, the body. The frame, `Hello` (tag 1) and `Refused`
+//! (tag 65) are frozen for good, so a node and a holder of different versions can always tell each other that they differ. A terminal
+//! (Unix: its PTY master, by `SCM_RIGHTS`) travels with the frame that names it.
+
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+use agora_platform::{HeldSignal, LocalStream, TerminalHandle};
+
+/// The version of the holder link this build speaks. A holder and a node that differ do nothing together (decision 5).
+pub const LINK_VERSION: u16 = 1;
+
+/// The largest frame either side accepts: a terminal's whole buffer (1 MiB, [`agora_platform::HELD_BUFFER`]) and generous room for the rest.
+pub const MAX_FRAME: usize = 4 << 20;
+
+/// How long a peer may take to finish a frame it began.
+pub const FRAME_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Where the holder of the Agora home `home` listens (a `0700` folder, a `0600` socket).
+pub fn socket_path(home: &Path) -> PathBuf {
+    home.join("run").join("hold.sock")
+}
+
+/// What went wrong on the link.
+#[derive(Debug)]
+pub enum LinkError {
+    Io(io::Error),
+    /// The holder said no, and why; `holder_version` is its own link version.
+    Refused(Refusal, u16),
+    /// The peer sent something this version does not understand.
+    Malformed(&'static str),
+    /// The peer closed the link.
+    Closed,
+}
+
+impl From<io::Error> for LinkError {
+    fn from(e: io::Error) -> Self {
+        Self::Io(e)
+    }
+}
+
+impl std::fmt::Display for LinkError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(e) => write!(f, "holder link: {e}"),
+            Self::Refused(r, v) => write!(f, "holder link: refused ({r:?}, holder version {v})"),
+            Self::Malformed(w) => write!(f, "holder link: malformed {w}"),
+            Self::Closed => write!(f, "holder link: closed"),
+        }
+    }
+}
+
+impl std::error::Error for LinkError {}
+
+/// Why the holder refused a request. Stable numbers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refusal {
+    VersionMismatch = 1,
+    /// Another node is attached.
+    Busy = 2,
+    /// The request needs `Attach` first.
+    NotAttached = 3,
+    UnknownAgent = 4,
+    AgentExists = 5,
+    BadRequest = 6,
+    /// The system refused (the program did not start, the signal was not sent).
+    Failed = 7,
+}
+
+impl Refusal {
+    fn from_u8(n: u8) -> Option<Self> {
+        Some(match n {
+            1 => Self::VersionMismatch,
+            2 => Self::Busy,
+            3 => Self::NotAttached,
+            4 => Self::UnknownAgent,
+            5 => Self::AgentExists,
+            6 => Self::BadRequest,
+            7 => Self::Failed,
+            _ => return None,
+        })
+    }
+}
+
+/// The launch the node already decided (decision 5): the holder adds and widens nothing. The confinement a node builds (`Sandbox`,
+/// the agent identity) is not carried yet: step 2 adds it with a new message, never by changing this one.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct StartRequest {
+    /// The node's own name for the agent (its ledger id); the holder never interprets it.
+    pub agent: String,
+    pub argv: Vec<String>,
+    pub cwd: Option<String>,
+    pub env: Vec<(String, String)>,
+    pub env_remove: Vec<String>,
+    pub cols: u16,
+    pub rows: u16,
+    pub cpu_seconds: Option<u64>,
+    pub memory_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentState {
+    Running,
+    /// The agent ended: its exit code, or the signal that ended it.
+    Exited {
+        code: Option<i32>,
+        signal: Option<i32>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentInfo {
+    pub agent: String,
+    pub pid: u32,
+    pub state: AgentState,
+}
+
+/// One held terminal as `Attach` reports it: what it is and the output kept while no node was attached.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalInfo {
+    pub info: AgentInfo,
+    /// Older output was dropped to stay within the bound (the buffer may start inside an escape sequence).
+    pub buffer_dropped: bool,
+    pub buffer: Vec<u8>,
+}
+
+/// What a node sends.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Request {
+    Hello {
+        version: u16,
+    },
+    /// Hand me the terminals: the holder ends its own reads, then sends each terminal and its buffer.
+    Attach,
+    Start(StartRequest),
+    Resize {
+        agent: String,
+        cols: u16,
+        rows: u16,
+    },
+    Signal {
+        agent: String,
+        signal: HeldSignal,
+    },
+    /// End the agent's process group (`SIGTERM`, or `SIGKILL` when `force`).
+    Stop {
+        agent: String,
+        force: bool,
+    },
+    List,
+    /// The node has taken an ended agent's status and output: the holder forgets it.
+    Release {
+        agent: String,
+    },
+}
+
+/// What the holder answers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reply {
+    HelloOk {
+        version: u16,
+        holder_pid: u32,
+        holder_start: u64,
+    },
+    Refused {
+        code: Refusal,
+        holder_version: u16,
+    },
+    Ok,
+    /// An agent started; its terminal travels with this frame.
+    Started {
+        agent: String,
+        pid: u32,
+    },
+    Agents(Vec<AgentInfo>),
+    /// One held terminal; a running agent's terminal travels with this frame.
+    Terminal(TerminalInfo),
+    AttachDone {
+        count: u32,
+    },
+}
+
+// ----- encoding -----
+
+const T_HELLO: u8 = 1;
+const T_ATTACH: u8 = 2;
+const T_START: u8 = 3;
+const T_RESIZE: u8 = 4;
+const T_SIGNAL: u8 = 5;
+const T_STOP: u8 = 6;
+const T_LIST: u8 = 7;
+const T_RELEASE: u8 = 8;
+const T_HELLO_OK: u8 = 64;
+const T_REFUSED: u8 = 65;
+const T_OK: u8 = 66;
+const T_STARTED: u8 = 67;
+const T_AGENTS: u8 = 68;
+const T_TERMINAL: u8 = 69;
+const T_ATTACH_DONE: u8 = 70;
+
+#[derive(Default)]
+struct Enc(Vec<u8>);
+
+impl Enc {
+    fn u8(&mut self, v: u8) {
+        self.0.push(v);
+    }
+    fn u16(&mut self, v: u16) {
+        self.0.extend_from_slice(&v.to_be_bytes());
+    }
+    fn u32(&mut self, v: u32) {
+        self.0.extend_from_slice(&v.to_be_bytes());
+    }
+    fn u64(&mut self, v: u64) {
+        self.0.extend_from_slice(&v.to_be_bytes());
+    }
+    fn i32(&mut self, v: i32) {
+        self.0.extend_from_slice(&v.to_be_bytes());
+    }
+    fn bool(&mut self, v: bool) {
+        self.u8(u8::from(v));
+    }
+    fn bytes(&mut self, v: &[u8]) {
+        // A length that does not fit is refused by `MAX_FRAME` at the frame; saturate rather than wrap.
+        self.u32(u32::try_from(v.len()).unwrap_or(u32::MAX));
+        self.0.extend_from_slice(v);
+    }
+    fn str(&mut self, v: &str) {
+        self.bytes(v.as_bytes());
+    }
+    fn opt_str(&mut self, v: &Option<String>) {
+        match v {
+            Some(s) => {
+                self.u8(1);
+                self.str(s);
+            }
+            None => self.u8(0),
+        }
+    }
+    fn opt_u64(&mut self, v: Option<u64>) {
+        match v {
+            Some(n) => {
+                self.u8(1);
+                self.u64(n);
+            }
+            None => self.u8(0),
+        }
+    }
+    fn opt_i32(&mut self, v: Option<i32>) {
+        match v {
+            Some(n) => {
+                self.u8(1);
+                self.i32(n);
+            }
+            None => self.u8(0),
+        }
+    }
+    fn state(&mut self, s: AgentState) {
+        match s {
+            AgentState::Running => self.u8(0),
+            AgentState::Exited { code, signal } => {
+                self.u8(1);
+                self.opt_i32(code);
+                self.opt_i32(signal);
+            }
+        }
+    }
+    fn info(&mut self, i: &AgentInfo) {
+        self.str(&i.agent);
+        self.u32(i.pid);
+        self.state(i.state);
+    }
+}
+
+struct Dec<'a>(&'a [u8]);
+
+impl<'a> Dec<'a> {
+    fn take(&mut self, n: usize) -> Result<&'a [u8], LinkError> {
+        if self.0.len() < n {
+            return Err(LinkError::Malformed("frame (too short)"));
+        }
+        let (head, tail) = self.0.split_at(n);
+        self.0 = tail;
+        Ok(head)
+    }
+    fn u8(&mut self) -> Result<u8, LinkError> {
+        Ok(self.take(1)?[0])
+    }
+    fn u16(&mut self) -> Result<u16, LinkError> {
+        let b = self.take(2)?;
+        Ok(u16::from_be_bytes([b[0], b[1]]))
+    }
+    fn u32(&mut self) -> Result<u32, LinkError> {
+        let b = self.take(4)?;
+        Ok(u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+    }
+    fn u64(&mut self) -> Result<u64, LinkError> {
+        let b = self.take(8)?;
+        let mut a = [0u8; 8];
+        a.copy_from_slice(b);
+        Ok(u64::from_be_bytes(a))
+    }
+    fn i32(&mut self) -> Result<i32, LinkError> {
+        let b = self.take(4)?;
+        Ok(i32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+    }
+    fn bool(&mut self) -> Result<bool, LinkError> {
+        match self.u8()? {
+            0 => Ok(false),
+            1 => Ok(true),
+            _ => Err(LinkError::Malformed("flag")),
+        }
+    }
+    fn bytes(&mut self) -> Result<&'a [u8], LinkError> {
+        let n = self.u32()? as usize;
+        self.take(n)
+    }
+    fn str(&mut self) -> Result<String, LinkError> {
+        String::from_utf8(self.bytes()?.to_vec()).map_err(|_| LinkError::Malformed("text"))
+    }
+    fn opt_str(&mut self) -> Result<Option<String>, LinkError> {
+        if self.bool()? {
+            Ok(Some(self.str()?))
+        } else {
+            Ok(None)
+        }
+    }
+    fn opt_u64(&mut self) -> Result<Option<u64>, LinkError> {
+        if self.bool()? {
+            Ok(Some(self.u64()?))
+        } else {
+            Ok(None)
+        }
+    }
+    fn opt_i32(&mut self) -> Result<Option<i32>, LinkError> {
+        if self.bool()? {
+            Ok(Some(self.i32()?))
+        } else {
+            Ok(None)
+        }
+    }
+    /// A count that cannot be larger than what is left (every item takes at least one byte), so a lie cannot make a huge list.
+    fn count(&mut self) -> Result<usize, LinkError> {
+        let n = self.u32()? as usize;
+        if n > self.0.len() {
+            return Err(LinkError::Malformed("count"));
+        }
+        Ok(n)
+    }
+    fn state(&mut self) -> Result<AgentState, LinkError> {
+        match self.u8()? {
+            0 => Ok(AgentState::Running),
+            1 => Ok(AgentState::Exited {
+                code: self.opt_i32()?,
+                signal: self.opt_i32()?,
+            }),
+            _ => Err(LinkError::Malformed("state")),
+        }
+    }
+    fn info(&mut self) -> Result<AgentInfo, LinkError> {
+        Ok(AgentInfo {
+            agent: self.str()?,
+            pid: self.u32()?,
+            state: self.state()?,
+        })
+    }
+    fn done(&self) -> Result<(), LinkError> {
+        if self.0.is_empty() {
+            Ok(())
+        } else {
+            Err(LinkError::Malformed("frame (trailing bytes)"))
+        }
+    }
+}
+
+fn signal_code(s: HeldSignal) -> u8 {
+    match s {
+        HeldSignal::Interrupt => 1,
+        HeldSignal::Terminate => 2,
+        HeldSignal::Kill => 3,
+        HeldSignal::Hangup => 4,
+    }
+}
+
+fn signal_from(n: u8) -> Result<HeldSignal, LinkError> {
+    Ok(match n {
+        1 => HeldSignal::Interrupt,
+        2 => HeldSignal::Terminate,
+        3 => HeldSignal::Kill,
+        4 => HeldSignal::Hangup,
+        _ => return Err(LinkError::Malformed("signal")),
+    })
+}
+
+impl Request {
+    /// The frame's payload: its tag and body (no length).
+    pub fn encode(&self) -> Vec<u8> {
+        let mut e = Enc::default();
+        match self {
+            Self::Hello { version } => {
+                e.u8(T_HELLO);
+                e.u16(*version);
+            }
+            Self::Attach => e.u8(T_ATTACH),
+            Self::Start(s) => {
+                e.u8(T_START);
+                e.str(&s.agent);
+                e.u32(u32::try_from(s.argv.len()).unwrap_or(u32::MAX));
+                for a in &s.argv {
+                    e.str(a);
+                }
+                e.opt_str(&s.cwd);
+                e.u32(u32::try_from(s.env.len()).unwrap_or(u32::MAX));
+                for (k, v) in &s.env {
+                    e.str(k);
+                    e.str(v);
+                }
+                e.u32(u32::try_from(s.env_remove.len()).unwrap_or(u32::MAX));
+                for r in &s.env_remove {
+                    e.str(r);
+                }
+                e.u16(s.cols);
+                e.u16(s.rows);
+                e.opt_u64(s.cpu_seconds);
+                e.opt_u64(s.memory_bytes);
+            }
+            Self::Resize { agent, cols, rows } => {
+                e.u8(T_RESIZE);
+                e.str(agent);
+                e.u16(*cols);
+                e.u16(*rows);
+            }
+            Self::Signal { agent, signal } => {
+                e.u8(T_SIGNAL);
+                e.str(agent);
+                e.u8(signal_code(*signal));
+            }
+            Self::Stop { agent, force } => {
+                e.u8(T_STOP);
+                e.str(agent);
+                e.bool(*force);
+            }
+            Self::List => e.u8(T_LIST),
+            Self::Release { agent } => {
+                e.u8(T_RELEASE);
+                e.str(agent);
+            }
+        }
+        e.0
+    }
+
+    pub fn decode(payload: &[u8]) -> Result<Self, LinkError> {
+        let mut d = Dec(payload);
+        let r = match d.u8()? {
+            T_HELLO => Self::Hello { version: d.u16()? },
+            T_ATTACH => Self::Attach,
+            T_START => {
+                let agent = d.str()?;
+                let mut argv = Vec::new();
+                for _ in 0..d.count()? {
+                    argv.push(d.str()?);
+                }
+                let cwd = d.opt_str()?;
+                let mut env = Vec::new();
+                for _ in 0..d.count()? {
+                    env.push((d.str()?, d.str()?));
+                }
+                let mut env_remove = Vec::new();
+                for _ in 0..d.count()? {
+                    env_remove.push(d.str()?);
+                }
+                Self::Start(StartRequest {
+                    agent,
+                    argv,
+                    cwd,
+                    env,
+                    env_remove,
+                    cols: d.u16()?,
+                    rows: d.u16()?,
+                    cpu_seconds: d.opt_u64()?,
+                    memory_bytes: d.opt_u64()?,
+                })
+            }
+            T_RESIZE => Self::Resize {
+                agent: d.str()?,
+                cols: d.u16()?,
+                rows: d.u16()?,
+            },
+            T_SIGNAL => Self::Signal {
+                agent: d.str()?,
+                signal: signal_from(d.u8()?)?,
+            },
+            T_STOP => Self::Stop {
+                agent: d.str()?,
+                force: d.bool()?,
+            },
+            T_LIST => Self::List,
+            T_RELEASE => Self::Release { agent: d.str()? },
+            _ => return Err(LinkError::Malformed("request (unknown tag)")),
+        };
+        d.done()?;
+        Ok(r)
+    }
+}
+
+impl Reply {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut e = Enc::default();
+        match self {
+            Self::HelloOk {
+                version,
+                holder_pid,
+                holder_start,
+            } => {
+                e.u8(T_HELLO_OK);
+                e.u16(*version);
+                e.u32(*holder_pid);
+                e.u64(*holder_start);
+            }
+            Self::Refused {
+                code,
+                holder_version,
+            } => {
+                e.u8(T_REFUSED);
+                e.u8(*code as u8);
+                e.u16(*holder_version);
+            }
+            Self::Ok => e.u8(T_OK),
+            Self::Started { agent, pid } => {
+                e.u8(T_STARTED);
+                e.str(agent);
+                e.u32(*pid);
+            }
+            Self::Agents(list) => {
+                e.u8(T_AGENTS);
+                e.u32(u32::try_from(list.len()).unwrap_or(u32::MAX));
+                for i in list {
+                    e.info(i);
+                }
+            }
+            Self::Terminal(t) => {
+                e.u8(T_TERMINAL);
+                e.info(&t.info);
+                e.bool(t.buffer_dropped);
+                e.bytes(&t.buffer);
+            }
+            Self::AttachDone { count } => {
+                e.u8(T_ATTACH_DONE);
+                e.u32(*count);
+            }
+        }
+        e.0
+    }
+
+    pub fn decode(payload: &[u8]) -> Result<Self, LinkError> {
+        let mut d = Dec(payload);
+        let r = match d.u8()? {
+            T_HELLO_OK => Self::HelloOk {
+                version: d.u16()?,
+                holder_pid: d.u32()?,
+                holder_start: d.u64()?,
+            },
+            T_REFUSED => Self::Refused {
+                code: Refusal::from_u8(d.u8()?).ok_or(LinkError::Malformed("refusal"))?,
+                holder_version: d.u16()?,
+            },
+            T_OK => Self::Ok,
+            T_STARTED => Self::Started {
+                agent: d.str()?,
+                pid: d.u32()?,
+            },
+            T_AGENTS => {
+                let mut list = Vec::new();
+                for _ in 0..d.count()? {
+                    list.push(d.info()?);
+                }
+                Self::Agents(list)
+            }
+            T_TERMINAL => Self::Terminal(TerminalInfo {
+                info: d.info()?,
+                buffer_dropped: d.bool()?,
+                buffer: d.bytes()?.to_vec(),
+            }),
+            T_ATTACH_DONE => Self::AttachDone { count: d.u32()? },
+            _ => return Err(LinkError::Malformed("reply (unknown tag)")),
+        };
+        d.done()?;
+        Ok(r)
+    }
+}
+
+// ----- frames -----
+
+/// Sends one frame (`payload` is a tag and body), with `terminal` attached to its first bytes when given.
+pub fn write_frame(
+    stream: &mut LocalStream,
+    payload: &[u8],
+    terminal: Option<&TerminalHandle>,
+) -> Result<(), LinkError> {
+    if payload.is_empty() || payload.len() > MAX_FRAME {
+        return Err(LinkError::Malformed("frame (size)"));
+    }
+    let mut frame = Vec::with_capacity(4 + payload.len());
+    frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    frame.extend_from_slice(payload);
+    let mut sent = 0;
+    if terminal.is_some() {
+        // The terminal goes with the first byte that goes; the rest follows plainly.
+        sent = stream.send_with_terminal(&frame, terminal)?;
+    }
+    stream.write_all(&frame[sent..])?;
+    Ok(())
+}
+
+fn timed_out(e: &io::Error) -> bool {
+    matches!(
+        e.kind(),
+        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+    )
+}
+
+/// A frame's payload (tag and body) and the terminal that came with it.
+pub type Frame = (Vec<u8>, Option<TerminalHandle>);
+
+/// Reads one frame: its payload and the terminal that came with it. `Ok(None)` when nothing arrived within the stream's read
+/// timeout. A frame begun must end within [`FRAME_TIMEOUT`]. Reads are in exact sizes (the 4-byte length, then the payload), so a
+/// terminal sent with one frame is never taken for the next one's.
+pub fn read_frame(stream: &mut LocalStream) -> Result<Option<Frame>, LinkError> {
+    let mut terminal: Option<TerminalHandle> = None;
+    let mut head = [0u8; 4];
+    let mut have = 0;
+    let mut began: Option<Instant> = None;
+    while have < head.len() {
+        match stream.recv_with_terminal(&mut head[have..]) {
+            Ok((0, _)) => return Err(LinkError::Closed),
+            Ok((n, t)) => {
+                have += n;
+                began.get_or_insert_with(Instant::now);
+                terminal = terminal.or(t);
+            }
+            Err(e) if timed_out(&e) => {
+                let Some(b) = began else { return Ok(None) };
+                if b.elapsed() > FRAME_TIMEOUT {
+                    return Err(LinkError::Io(e));
+                }
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+    let len = u32::from_be_bytes(head) as usize;
+    if len == 0 || len > MAX_FRAME {
+        return Err(LinkError::Malformed("frame (size)"));
+    }
+    let began = began.unwrap_or_else(Instant::now);
+    let mut payload = vec![0u8; len];
+    let mut have = 0;
+    while have < len {
+        match stream.recv_with_terminal(&mut payload[have..]) {
+            Ok((0, _)) => return Err(LinkError::Closed),
+            Ok((n, t)) => {
+                have += n;
+                terminal = terminal.or(t);
+            }
+            Err(e) if timed_out(&e) && began.elapsed() <= FRAME_TIMEOUT => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(Some((payload, terminal)))
+}
+
+// ----- the node's client -----
+
+/// One terminal `Attach` handed over: what it is, what was buffered, and (for a running agent) the terminal itself.
+#[derive(Debug)]
+pub struct Held {
+    pub info: TerminalInfo,
+    pub terminal: Option<TerminalHandle>,
+}
+
+/// A node's connection to its holder.
+pub struct Client {
+    stream: LocalStream,
+    /// The holder's own process (pid and start time): what the ledger records (decision 9) and the node watches (decision 8).
+    pub holder_pid: u32,
+    pub holder_start: u64,
+}
+
+impl Client {
+    /// Connects and says hello with this build's [`LINK_VERSION`].
+    pub fn connect(socket: &Path) -> Result<Self, LinkError> {
+        Self::connect_with_version(socket, LINK_VERSION)
+    }
+
+    /// As [`Self::connect`] with another version (tests of the mismatch rule). `Refused(VersionMismatch, v)` carries the holder's.
+    pub fn connect_with_version(socket: &Path, version: u16) -> Result<Self, LinkError> {
+        let mut stream = agora_platform::local_connect(socket)?;
+        stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+        write_frame(&mut stream, &Request::Hello { version }.encode(), None)?;
+        match Self::read_reply(&mut stream)?.0 {
+            Reply::HelloOk {
+                holder_pid,
+                holder_start,
+                ..
+            } => Ok(Self {
+                stream,
+                holder_pid,
+                holder_start,
+            }),
+            Reply::Refused {
+                code,
+                holder_version,
+            } => Err(LinkError::Refused(code, holder_version)),
+            _ => Err(LinkError::Malformed("answer to hello")),
+        }
+    }
+
+    fn read_reply(stream: &mut LocalStream) -> Result<(Reply, Option<TerminalHandle>), LinkError> {
+        // A read timeout with nothing read is the holder not answering within the stream's timeout.
+        match read_frame(stream)? {
+            Some((payload, t)) => Ok((Reply::decode(&payload)?, t)),
+            None => Err(LinkError::Io(io::Error::from(io::ErrorKind::TimedOut))),
+        }
+    }
+
+    fn call(&mut self, request: &Request) -> Result<(Reply, Option<TerminalHandle>), LinkError> {
+        write_frame(&mut self.stream, &request.encode(), None)?;
+        let (reply, terminal) = Self::read_reply(&mut self.stream)?;
+        if let Reply::Refused {
+            code,
+            holder_version,
+        } = reply
+        {
+            return Err(LinkError::Refused(code, holder_version));
+        }
+        Ok((reply, terminal))
+    }
+
+    fn expect_ok(&mut self, request: &Request) -> Result<(), LinkError> {
+        match self.call(request)?.0 {
+            Reply::Ok => Ok(()),
+            _ => Err(LinkError::Malformed("answer")),
+        }
+    }
+
+    /// Every agent the holder has, running or ended, without taking anything.
+    pub fn list(&mut self) -> Result<Vec<AgentInfo>, LinkError> {
+        match self.call(&Request::List)?.0 {
+            Reply::Agents(a) => Ok(a),
+            _ => Err(LinkError::Malformed("answer to list")),
+        }
+    }
+
+    /// Takes over the terminals (decision 4): the holder ends its own reads first, then hands each terminal and its buffer over.
+    pub fn attach(&mut self) -> Result<Vec<Held>, LinkError> {
+        write_frame(&mut self.stream, &Request::Attach.encode(), None)?;
+        let mut held = Vec::new();
+        loop {
+            let (reply, terminal) = Self::read_reply(&mut self.stream)?;
+            match reply {
+                Reply::Terminal(info) => held.push(Held { info, terminal }),
+                Reply::AttachDone { count } if count as usize == held.len() => return Ok(held),
+                Reply::Refused {
+                    code,
+                    holder_version,
+                } => return Err(LinkError::Refused(code, holder_version)),
+                _ => return Err(LinkError::Malformed("answer to attach")),
+            }
+        }
+    }
+
+    /// Starts an agent; returns its pid and its terminal.
+    pub fn start(&mut self, request: &StartRequest) -> Result<(u32, TerminalHandle), LinkError> {
+        match self.call(&Request::Start(request.clone()))? {
+            (Reply::Started { pid, .. }, Some(t)) => Ok((pid, t)),
+            _ => Err(LinkError::Malformed("answer to start")),
+        }
+    }
+
+    pub fn resize(&mut self, agent: &str, cols: u16, rows: u16) -> Result<(), LinkError> {
+        self.expect_ok(&Request::Resize {
+            agent: agent.into(),
+            cols,
+            rows,
+        })
+    }
+
+    pub fn signal(&mut self, agent: &str, signal: HeldSignal) -> Result<(), LinkError> {
+        self.expect_ok(&Request::Signal {
+            agent: agent.into(),
+            signal,
+        })
+    }
+
+    pub fn stop(&mut self, agent: &str, force: bool) -> Result<(), LinkError> {
+        self.expect_ok(&Request::Stop {
+            agent: agent.into(),
+            force,
+        })
+    }
+
+    /// Tells the holder the node has taken an ended agent's status and output. A holder left with nothing ends.
+    pub fn release(&mut self, agent: &str) -> Result<(), LinkError> {
+        self.expect_ok(&Request::Release {
+            agent: agent.into(),
+        })
+    }
+}

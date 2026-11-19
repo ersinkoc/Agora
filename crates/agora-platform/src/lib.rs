@@ -9,8 +9,13 @@ use std::sync::mpsc::Receiver;
 
 #[cfg(windows)]
 mod conpty;
+mod held;
+#[cfg(not(unix))]
+mod nohold;
 #[cfg(unix)]
 mod unix;
+#[cfg(unix)]
+mod unixhold;
 #[cfg(windows)]
 mod winconfine;
 #[cfg(windows)]
@@ -59,6 +64,33 @@ pub fn default_shell() -> String {
             .filter(|s| std::path::Path::new(s).is_file())
             .unwrap_or_else(|| "sh".to_string())
     }
+}
+
+pub use held::{Collected, HeldBuffer, HeldSignal, HELD_BUFFER};
+#[cfg(not(unix))]
+pub use nohold::{HeldTerminal, ProcessWatch, TerminalHandle, TerminalReader};
+#[cfg(unix)]
+pub use unixhold::{HeldTerminal, ProcessWatch, TerminalHandle, TerminalReader};
+
+/// ADR-0079 decision 2: makes this process the leader of a session of its own, so nothing that ends its starter's session or group
+/// ends it. A process that already leads one is left as it is.
+pub fn start_new_session() -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        unixhold::start_new_session()
+    }
+    #[cfg(not(unix))]
+    {
+        nohold::start_new_session()
+    }
+}
+
+/// The process at the other end of a local connection and whether it runs as this user, as the system recorded them when it
+/// connected (ADR-0079 decision 5: the holder compares the pid and start time with the role lock's).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Peer {
+    pub pid: u32,
+    pub same_user: bool,
 }
 
 /// A connected local (same-machine) stream, used for the node's control socket.
@@ -635,6 +667,64 @@ impl LocalStream {
         #[cfg(windows)]
         {
             self.inner.set_read_timeout(timeout)
+        }
+    }
+
+    /// The process at the other end (on a listener's accepted stream: the client that connected).
+    pub fn peer(&self) -> io::Result<Peer> {
+        #[cfg(unix)]
+        {
+            unixhold::peer_of(std::os::fd::AsRawFd::as_raw_fd(&self.inner))
+        }
+        #[cfg(windows)]
+        {
+            // A pipe made owner-only admits only this user.
+            Ok(Peer {
+                pid: self.inner.client_pid()?,
+                same_user: true,
+            })
+        }
+    }
+
+    /// One send of `bytes` with `terminal` (a master from [`HeldTerminal::handle`]) attached when given; returns how many bytes went.
+    /// The terminal goes with the first byte that does: send the rest with `write`. Unix `SCM_RIGHTS`.
+    pub fn send_with_terminal(
+        &mut self,
+        bytes: &[u8],
+        terminal: Option<&TerminalHandle>,
+    ) -> io::Result<usize> {
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            unixhold::send_with_fd(
+                self.inner.as_raw_fd(),
+                bytes,
+                terminal.map(|t| t.fd.as_raw_fd()),
+            )
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (bytes, terminal);
+            Err(unsupported_io("passing a terminal"))
+        }
+    }
+
+    /// One receive into `buf` that also takes a terminal sent with the bytes. Read a message in exact sizes, so a terminal is never
+    /// taken for another message.
+    pub fn recv_with_terminal(
+        &mut self,
+        buf: &mut [u8],
+    ) -> io::Result<(usize, Option<TerminalHandle>)> {
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            let (n, fd) = unixhold::recv_with_fd(self.inner.as_raw_fd(), buf)?;
+            Ok((n, fd.map(|fd| TerminalHandle { fd })))
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = buf;
+            Err(unsupported_io("receiving a terminal"))
         }
     }
 

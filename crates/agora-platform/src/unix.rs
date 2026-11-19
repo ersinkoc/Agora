@@ -78,7 +78,7 @@ fn kill_group(pid: u32) -> io::Result<()> {
     Ok(())
 }
 
-fn winsize(cols: u16, rows: u16) -> libc::winsize {
+pub(crate) fn winsize(cols: u16, rows: u16) -> libc::winsize {
     libc::winsize {
         ws_row: rows,
         ws_col: cols,
@@ -87,7 +87,7 @@ fn winsize(cols: u16, rows: u16) -> libc::winsize {
     }
 }
 
-fn cvt(r: libc::c_int) -> io::Result<libc::c_int> {
+pub(crate) fn cvt(r: libc::c_int) -> io::Result<libc::c_int> {
     if r < 0 {
         Err(io::Error::last_os_error())
     } else {
@@ -282,7 +282,7 @@ pub(crate) fn terminal_size() -> Option<(u16, u16)> {
     (r == 0 && ws.ws_col > 0 && ws.ws_row > 0).then_some((ws.ws_col, ws.ws_row))
 }
 
-fn status(s: std::process::ExitStatus) -> ExitStatus {
+pub(crate) fn status(s: std::process::ExitStatus) -> ExitStatus {
     ExitStatus {
         code: s.code(),
         signal: s.signal(),
@@ -304,6 +304,20 @@ pub(crate) fn spawn_in(
     config: &PtyConfig,
     folder: Option<&crate::HeldFolder>,
 ) -> io::Result<Box<dyn Pty>> {
+    let (child, writer) = start_child(config, folder, false)?;
+    start_reader(child, writer)
+}
+
+/// Starts `config` on a new PTY in a session of its own and returns the child and the master. `die_with_parent` (Linux only,
+/// ADR-0079 decision 8): the child's first process gets `SIGHUP` when the process that started it ends; the kernel ties this to the
+/// *thread* that forked, so the caller starts from a thread that lives as long as the process.
+pub(crate) fn start_child(
+    config: &PtyConfig,
+    folder: Option<&crate::HeldFolder>,
+    die_with_parent: bool,
+) -> io::Result<(Child, File)> {
+    #[cfg(not(target_os = "linux"))]
+    let _ = die_with_parent;
     let _guard = SPAWN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut ws = winsize(config.cols, config.rows);
     let (mut master, mut slave) = (-1, -1);
@@ -381,6 +395,13 @@ pub(crate) fn spawn_in(
             if let Some(fd) = held {
                 cvt(libc::fchdir(fd))?;
             }
+            #[cfg(target_os = "linux")]
+            if die_with_parent {
+                cvt(libc::prctl(
+                    libc::PR_SET_PDEATHSIG,
+                    libc::SIGHUP as libc::c_ulong,
+                ))?;
+            }
             // New session so the child leads its own process group, then make the PTY its controlling terminal.
             cvt(libc::setsid())?;
             cvt(libc::ioctl(0, libc::TIOCSCTTY as _, 0))?;
@@ -408,7 +429,11 @@ pub(crate) fn spawn_in(
     let child = cmd.spawn()?;
     drop(cmd); // closes the parent's copies of the slave side, so EOF/EIO reaches the reader on exit
 
-    let writer = File::from(master);
+    Ok((child, File::from(master)))
+}
+
+/// The consumer-side reader thread of an ordinary [`UnixPty`].
+fn start_reader(child: Child, writer: File) -> io::Result<Box<dyn Pty>> {
     let mut read_side = writer.try_clone()?;
     let (tx, output) = sync_channel::<Vec<u8>>(QUEUE);
     let mut child = child;
