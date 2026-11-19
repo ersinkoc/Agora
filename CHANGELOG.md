@@ -4,11 +4,26 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+_Nothing yet._
+
+## 0.3.25
+
 ### Certificates renew themselves
 - A machine's certificate for the hub now renews by itself when a third of its life is left (30 of 90 days), while the machine is connected to a hub that is up to date: no code, no owner step, and nothing to do before day 90 any more. The hub already replaces its own certificate by itself when 30 days are left, without a restart. Update the hub first, then the machines.
 - A machine keeps working throughout: agents never wait for a renewal, a hub that is away only delays it (it tries again by itself, more slowly each time), and the certificate in use is replaced only after the new one checked out. The new certificate is used by the machine's next connection.
 - `agora doctor` shows the days left on this machine's certificate and on the hub's, and says so when a renewal needs you: this machine must join again (the hub no longer accepts its certificate for a new one, or it ended), or its certificate is no longer the newest one the hub issued for it (another holder of it may exist: check the hub's audit view).
 - A machine that was off past the end of its certificate still has to join again with the owner's approval, as before.
+
+### The conversation of an agent without a terminal
+- When the agent reports it, a tool call shows whether it is running, done or failed, how long it took, which files it touched and the tail of its output; a plan shows which steps are done; the agent's thinking shows as a folded "Thought for N s" block.
+- **Stop turn** ends what the agent is doing now and leaves the agent running; **Stop agent** is a separate, clearly different button. Messages you send while the agent is busy wait in a queue you can see and drop.
+- Model, mode and reasoning effort are menus fed by the agent's own options. Choices that would make an agent act without asking are shown switched off with the reason (start the agent that way instead); an agent can be switched back to asking.
+- Typing / in the message box offers the commands the agent provides. A window that connects later sees the same options and commands.
+- Permission requests show in the conversation as a record of what was asked and decided; answering still happens in the approval bar, signed on the node.
+
+### Known limits
+- Switching a running agent to a mode that skips permission questions is not available from the window until a signed confirmation exists; start the agent that way instead.
+- Plan limits of subscription agents and the preview of an agent's local web server are designed and have their messages in the schema, but are not built yet.
 
 ## 0.3.24
 
