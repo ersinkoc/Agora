@@ -94,9 +94,13 @@ fn same_dir(a: &Path, b: &Path) -> bool {
 fn session_in(file: &Path, spec: &SessionFile, folder: &Path) -> Option<String> {
     let f = std::fs::File::open(file).ok()?;
     let mut line = String::new();
-    BufReader::new(f.take(FIRST_LINE_MAX))
+    // One byte of lookahead distinguishes a complete line from a valid JSON prefix at the cap.
+    BufReader::new(f.take(FIRST_LINE_MAX + 1))
         .read_line(&mut line)
         .ok()?;
+    if line.len() as u64 > FIRST_LINE_MAX {
+        return None;
+    }
     let v: Value = serde_json::from_str(line.trim_end()).ok()?;
     if let Some(sel) = &spec.select {
         if at(&v, &sel.path).and_then(Value::as_str) != Some(sel.equals.as_str()) {
@@ -162,16 +166,15 @@ impl SessionWatcher {
             if now < w.next_scan {
                 continue;
             }
-            // Two agents of one kind waiting in one folder: a file cannot say which is whose.
-            let crowded = self.waiting.iter().any(|(other, o)| {
-                *other != t.agent && o.kind == w.kind && same_dir(&o.folder, &w.folder)
+            // A live agent can still write its file after discovery gave up on it.
+            let crowded = targets.iter().any(|other| {
+                other.agent != t.agent && other.kind == w.kind && same_dir(&other.folder, &w.folder)
             });
             if crowded {
-                let twins: Vec<AgentId> = self
-                    .waiting
+                let twins: Vec<AgentId> = targets
                     .iter()
-                    .filter(|(_, o)| o.kind == w.kind && same_dir(&o.folder, &w.folder))
-                    .map(|(a, _)| a.clone())
+                    .filter(|other| other.kind == w.kind && same_dir(&other.folder, &w.folder))
+                    .map(|other| other.agent.clone())
                     .collect();
                 for a in twins {
                     self.waiting.remove(&a);
@@ -362,5 +365,123 @@ mod tests {
                 "0199aaaa-0000-4000-8000-000000000013".to_string()
             )]
         );
+    }
+
+    #[test]
+    fn live_agents_whose_discovery_gave_up_keep_a_newcomers_session_ambiguous() {
+        for reverse in [false, true] {
+            let root = tmp(if reverse { "late-reversed" } else { "late" });
+            let mut w = SessionWatcher::new(Some(root.join("home")));
+            let now = Instant::now();
+            let mut targets = vec![
+                target("older-a", root.join("work/a")),
+                target("older-b", root.join("work/a")),
+            ];
+            // Both older agents give up before a third agent starts or a file exists.
+            assert!(w.poll(now, &targets, &HashSet::new()).is_empty());
+            let (release, gate) = std::sync::mpsc::channel();
+            let writer_root = root.clone();
+            let writer = std::thread::spawn(move || {
+                gate.recv().unwrap();
+                write(
+                    &writer_root,
+                    "rollout-late.jsonl",
+                    "0199aaaa-0000-4000-8000-000000000091",
+                    &writer_root.join("work/a"),
+                );
+            });
+            targets.push(target("newcomer", root.join("work/a")));
+            if reverse {
+                targets.reverse();
+            }
+            assert!(w
+                .poll(now + SCAN_EVERY, &targets, &HashSet::new())
+                .is_empty());
+            // Release the older agent's file only after the newcomer is registered.
+            release.send(()).unwrap();
+            writer.join().unwrap();
+            assert!(w
+                .poll(now + SCAN_EVERY * 2, &targets, &HashSet::new())
+                .is_empty());
+        }
+    }
+
+    #[test]
+    fn a_live_timed_out_agent_still_owns_its_possible_session_until_it_leaves() {
+        let root = tmp("expired-live");
+        let mut w = SessionWatcher::new(Some(root.join("home")));
+        let now = Instant::now();
+        let mut targets = vec![target("expired", root.join("work/a"))];
+        assert!(w.poll(now, &targets, &HashSet::new()).is_empty());
+        let expired = now + GIVE_UP_AFTER;
+        assert!(w.poll(expired, &targets, &HashSet::new()).is_empty());
+        targets.push(target("newcomer", root.join("work/a")));
+        assert!(w
+            .poll(expired + SCAN_EVERY, &targets, &HashSet::new())
+            .is_empty());
+        write(
+            &root,
+            "rollout-late.jsonl",
+            "0199aaaa-0000-4000-8000-000000000092",
+            &root.join("work/a"),
+        );
+        assert!(w
+            .poll(expired + SCAN_EVERY * 2, &targets, &HashSet::new())
+            .is_empty());
+        // Leaving the target set clears give-up state; a later unambiguous agent can discover its file.
+        assert!(w
+            .poll(expired + SCAN_EVERY * 3, &[], &HashSet::new())
+            .is_empty());
+        std::fs::remove_file(root.join("home/.tool/s/rollout-late.jsonl")).unwrap();
+        let fresh = [target("fresh", root.join("work/a"))];
+        assert!(w
+            .poll(expired + SCAN_EVERY * 4, &fresh, &HashSet::new())
+            .is_empty());
+        write(
+            &root,
+            "rollout-fresh.jsonl",
+            "0199aaaa-0000-4000-8000-000000000093",
+            &root.join("work/a"),
+        );
+        assert_eq!(
+            w.poll(expired + SCAN_EVERY * 5, &fresh, &HashSet::new()),
+            vec![(
+                fresh[0].agent.clone(),
+                "0199aaaa-0000-4000-8000-000000000093".into()
+            )]
+        );
+    }
+
+    #[test]
+    fn a_session_first_line_must_fit_completely_within_the_read_limit() {
+        let root = tmp("line-limit");
+        let folder = root.join("work/a");
+        let id = "0199aaaa-0000-4000-8000-000000000094";
+        let file = root.join("home/.tool/s/rollout-limit.jsonl");
+        let line =
+            serde_json::json!({"type":"session_meta","payload":{"id":id,"cwd":folder}}).to_string();
+        for length in [FIRST_LINE_MAX - 1, FIRST_LINE_MAX, FIRST_LINE_MAX + 1] {
+            let mut padded = line.as_bytes().to_vec();
+            padded.resize(length as usize, b' ');
+            std::fs::write(&file, &padded).unwrap();
+            assert_eq!(
+                session_in(&file, &spec(), &folder),
+                (length <= FIRST_LINE_MAX).then(|| id.to_string())
+            );
+        }
+        // The prefix at the limit is valid JSON, but the complete physical line is not.
+        let mut malformed = line.as_bytes().to_vec();
+        malformed.resize(FIRST_LINE_MAX as usize, b' ');
+        malformed.extend_from_slice(b"NOT_JSON\n");
+        assert!(serde_json::from_slice::<Value>(&malformed).is_err());
+        std::fs::write(&file, malformed).unwrap();
+        assert!(session_in(&file, &spec(), &folder).is_none());
+        // A bounded first line is accepted even when later lines are large.
+        std::fs::write(
+            &file,
+            format!("{line}\n{}", "x".repeat(FIRST_LINE_MAX as usize * 2)),
+        )
+        .unwrap();
+        assert_eq!(session_in(&file, &spec(), &folder), Some(id.to_string()));
     }
 }
