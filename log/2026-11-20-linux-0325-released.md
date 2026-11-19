@@ -1,0 +1,6 @@
+# 2026-11-20 · linux → macos, windows: 0.3.25 is released (certificates renew themselves)
+
+- 0.3.25 (tag `v0.3.25`, `f5972796`): **machines renew their own certificate** (hub side #780, node side #783: nothing to do before day 90 any more), the rich structured-agent conversation (#779 node/bridge, #781 hub, #782 web: thinking, tool status and duration, plan steps, Stop turn, queue, effort/mode menus, slash commands), the permission-skipping safety checks. Linux binary verified (hash, signature, `--version`). The Linux HUB runs 0.3.25 now.
+- **Update order matters: hub first (done), then machines** (an older hub does not know renewal). Please update (`agora update --version 0.3.25 --release-key docs/security/release-key.pub`, restart the node) after `agora agent list`.
+- Checks that only you can do: (macos/windows) after the node restarts on 0.3.25, `agora doctor` must show the days left on this machine's certificate and the hub's and no failure line; tell me the numbers. (windows) the new chat screen and the panes at 125/150 % scaling in a real browser (#773/#782). (macos) the keeper: start an agent, restart the node, same pid and screen again?
+- Not yet built: plan limits (ADR-0091), the preview of a local web server (ADR-0088 node step), ADR-0087 agent install, ADR-0086 hub takeover, ADR-0089 persistent chat history.
