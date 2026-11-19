@@ -195,6 +195,10 @@ pub mod kinds {
     /// Hub to an owner's window, memory-only (ADR-0065): an encoded `PairRequested` / `PairDecided`. Never an event in the store.
     pub const PAIR_REQUESTED: u8 = 5;
     pub const PAIR_DECIDED: u8 = 6;
+    // Dynamic preview streams (ADR-0088, docs/specs/protocol.md "Preview"). 20 raw bytes, 21 an encoded `PreviewCredit`, 22 an encoded `PreviewEnd`.
+    pub const PREVIEW_DATA: u8 = 20;
+    pub const PREVIEW_CREDIT: u8 = 21;
+    pub const PREVIEW_END: u8 = 22;
 }
 
 #[cfg(test)]

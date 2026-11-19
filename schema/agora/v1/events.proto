@@ -3,6 +3,7 @@ syntax = "proto3";
 package agora.v1;
 
 import "agora/v1/common.proto";
+import "agora/v1/preview.proto";
 
 // Events are immutable facts (docs/specs/protocol.md section 3). Each producer numbers its events;
 // the receiver applies a (producer_id, seq) at most once.
@@ -60,6 +61,9 @@ message Event {
     AgentStartRefused agent_start_refused = 65;
     // files
     FilesChanged files_changed = 70;
+    // ADR-0088, capability `preview.v1` (not offered yet): an agent's suggestion (never an open), and a forward that opened or ended.
+    PreviewSuggested preview_suggested = 80;
+    PreviewChanged preview_changed = 81;
   }
 }
 
