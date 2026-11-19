@@ -4,11 +4,26 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+_Nothing yet._
+
+## 0.3.24
+
 ### Agents survive the node (Linux and macOS)
 - An agent now keeps running when Agora's node stops or restarts. Agents are started through a small keeper process (`agora hold`) that outlives the node; the next `agora` attaches to them again, with their screens and whatever they printed meanwhile.
 - `agora down` stops the node and the hub and leaves the agents running (it says how many); `agora down --agents` stops them too. `agora status` shows agents that run without a node.
 - Agents that are confined (a sandbox policy), and every agent on Windows, still run inside the node and end with it, as before; a keeper that cannot start changes nothing.
 - With the login service installed on Linux, restarting or stopping the node's service no longer ends the agents that run through the keeper. For a service installed earlier, run `agora service install` again (it updates the unit and reloads systemd) and then `systemctl --user restart agora-node`; that one restart still ends the agents of the old keeper.
+
+### The window
+- Terminal, Changes, Files and a file manager open as panes in the workspace, beside an agent or on their own: from the + of a tab group, from Ctrl+K, from an agent's header and from the right-hand icons. The file manager shows a folder tree, a sortable list, a preview and Copy path; renaming, moving, deleting and uploading are shown switched off with the reason.
+- The conversation of an agent without a terminal has a new look: a header with the state and the context used, each turn with the agent's name, model and time, your requests in tinted bubbles, tool calls in one framed group per turn (an edit shows its diff inline, with line numbers), a plan card, the approval pinned above the message box, and a calmer message box.
+- The Usage panel's icon is bars, not a dollar sign. Long folders in the file manager scroll smoothly.
+
+### Safety
+- A mode or option that makes an agent skip its permission questions is now refused by the node when its policy forbids it, on every way of changing a mode.
+
+### Fixes
+- On a Mac, ending an agent whose start answer was lost no longer hangs: the keeper reads what an ending agent printed so the process can leave.
 
 ## 0.3.23
 
