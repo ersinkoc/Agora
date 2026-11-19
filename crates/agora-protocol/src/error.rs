@@ -98,6 +98,11 @@ pub enum ErrorCode {
     PairNamesMissing,
     PairDiscoveryUnconfirmed,
     PairCaMismatch,
+    PreviewPortRefused,
+    PreviewLimit,
+    PreviewExpired,
+    PreviewUnknown,
+    PreviewUnavailable,
     Internal,
     /// A code this build does not know (sent by a newer peer).
     Unknown(String),
@@ -190,6 +195,11 @@ impl ErrorCode {
         ErrorCode::PairNamesMissing,
         ErrorCode::PairDiscoveryUnconfirmed,
         ErrorCode::PairCaMismatch,
+        ErrorCode::PreviewPortRefused,
+        ErrorCode::PreviewLimit,
+        ErrorCode::PreviewExpired,
+        ErrorCode::PreviewUnknown,
+        ErrorCode::PreviewUnavailable,
         ErrorCode::Internal,
     ];
 
@@ -279,6 +289,11 @@ impl ErrorCode {
             ErrorCode::PairNamesMissing => "pair.names_missing",
             ErrorCode::PairDiscoveryUnconfirmed => "pair.discovery_unconfirmed",
             ErrorCode::PairCaMismatch => "pair.ca_mismatch",
+            ErrorCode::PreviewPortRefused => "preview.port_refused",
+            ErrorCode::PreviewLimit => "preview.limit",
+            ErrorCode::PreviewExpired => "preview.expired",
+            ErrorCode::PreviewUnknown => "preview.unknown",
+            ErrorCode::PreviewUnavailable => "preview.unavailable",
             ErrorCode::Internal => "internal",
             ErrorCode::Unknown(s) => s,
         }
@@ -380,6 +395,11 @@ impl ErrorCode {
             ErrorCode::PairNamesMissing => &["reason", "names"],
             ErrorCode::PairDiscoveryUnconfirmed => &[],
             ErrorCode::PairCaMismatch => &[],
+            ErrorCode::PreviewPortRefused => &["port", "reason"],
+            ErrorCode::PreviewLimit => &["limit"],
+            ErrorCode::PreviewExpired => &["forward_id"],
+            ErrorCode::PreviewUnknown => &["forward_id"],
+            ErrorCode::PreviewUnavailable => &["reason"],
             ErrorCode::Internal => &["incident_id"],
             ErrorCode::Unknown(_) => &[],
         }
