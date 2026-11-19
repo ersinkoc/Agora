@@ -20,7 +20,7 @@ type Tab = RailTab;
 // The right panel: an icon rail that is always there (it stays visible at every width) and the subject it opens beside it, one at a
 // time (at most two panels are ever visible, visual-language.md). On a wide window the subject sits in the layout; on a narrow one it
 // is a drawer over the content, so the rail never clips and nothing is pushed out of view.
-export function Inspector({ fleet = [], now = Date.now(), attention, approvals, notice, changed, boards, messages, usage, projects, onOpen, onResolve, onReview, open, onOpenChange, tab, onTab, pairing }: {
+export function Inspector({ fleet = [], now = Date.now(), attention, approvals, notice, changed, boards, messages, usage, projects, onOpen, onResolve, onReview, onPane, open, onOpenChange, tab, onTab, pairing }: {
   fleet?: readonly AgentTileModel[];
   now?: number;
   attention: readonly AgentTileModel[];
@@ -34,6 +34,8 @@ export function Inspector({ fleet = [], now = Date.now(), attention, approvals, 
   onOpen: (id: string) => void;
   onResolve: (a: ApprovalModel, approved: boolean, choice?: StartChoice) => void;
   onReview?: (id: string) => void;
+  // Open an agent's changes as a pane of the window, beside what is there.
+  onPane?: (id: string) => void;
   // Whether the subject is shown beside the rail (remembered per device by the window), and which one.
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -83,7 +85,7 @@ export function Inspector({ fleet = [], now = Date.now(), attention, approvals, 
         <button type="button" className="ide-iconbtn" onClick={close} aria-label={t('ide-hide-panel')} title={t('ide-hide-panel')}><Icon name="close" /></button>
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto p-3">
-        <Details tab={active} fleet={fleet} now={now} pairing={pairing} attention={attention} approvals={approvals} notice={notice} changed={changed} boards={boards} messages={messages} usage={usage} projects={projects} onOpen={onOpen} onResolve={onResolve} onReview={onReview} />
+        <Details tab={active} fleet={fleet} now={now} pairing={pairing} attention={attention} approvals={approvals} notice={notice} changed={changed} boards={boards} messages={messages} usage={usage} projects={projects} onOpen={onOpen} onResolve={onResolve} onReview={onReview} onPane={onPane} />
       </div>
     </section>}
     <nav ref={rail} className="rail" role="tablist" aria-orientation="vertical" aria-label={t('ide-details')} onKeyDown={railKey}>
@@ -109,7 +111,7 @@ export function Inspector({ fleet = [], now = Date.now(), attention, approvals, 
 
 // One subject of the details, on its own: the Inspector's tabs and the layout's panels (ADR-0068) draw the same thing.
 export type DetailsTab = Tab;
-export function Details({ tab, fleet = [], now = Date.now(), attention, approvals, notice, changed, boards, messages, usage, projects, onOpen, onResolve, onReview, pairing }: {
+export function Details({ tab, fleet = [], now = Date.now(), attention, approvals, notice, changed, boards, messages, usage, projects, onOpen, onResolve, onReview, onPane, pairing }: {
   tab: Tab;
   fleet?: readonly AgentTileModel[];
   now?: number;
@@ -124,6 +126,7 @@ export function Details({ tab, fleet = [], now = Date.now(), attention, approval
   onOpen: (id: string) => void;
   onResolve: (a: ApprovalModel, approved: boolean, choice?: StartChoice) => void;
   onReview?: (id: string) => void;
+  onPane?: (id: string) => void;
   pairing?: PairingUi;
 }) {
   // Every machine that has a folder on a board: a name is followed by its id only when two of them share it.
@@ -138,11 +141,12 @@ export function Details({ tab, fleet = [], now = Date.now(), attention, approval
         {approvals.map(a => <ApprovalCard key={a.id} approval={a} onResolve={(ok, choice) => onResolve(a, ok, choice)} />)}
       </div>}
     {tab === 'changes' && (changed.length === 0 ? <EmptyState icon="check" title={t('empty-changes-title')} hint={t('empty-changes-hint')} /> : <ul className="m-0 grid list-none gap-1 p-0">
-        {changed.map(a => <li key={a.id}>
-          <button type="button" className="ide-row justify-between gap-3 py-1.5" onClick={() => (onReview ? onReview(a.id) : onOpen(a.id))}>
+        {changed.map(a => <li key={a.id} className="flex items-center gap-1">
+          <button type="button" className="ide-row min-w-0 flex-1 justify-between gap-3 py-1.5" onClick={() => (onReview ? onReview(a.id) : onOpen(a.id))}>
             <span className="min-w-0"><span className="block truncate font-medium">{a.shared ? a.workspace : a.name}</span><span className="block truncate text-xs text-muted">{a.shared ? t('workspace-shared') : a.machine} · {a.workspace}</span></span>
             <span className="flex-none text-xs text-needs-you">{t('changes-files', { count: a.filesChanged ?? 0 })}</span>
           </button>
+          {onPane && <button type="button" className="ide-iconbtn flex-none" onClick={() => onPane(a.id)} aria-label={t('pane-open-beside-named', { name: a.shared ? a.workspace : a.name })} title={t('pane-open-changes')}><Icon name="splitRight" /></button>}
         </li>)}
       </ul>)}
     {tab === 'board' && <div className="grid gap-2">{boards.map(b => <ProjectBoard key={b.projectId} board={b} machines={boardMachines} />)}</div>}
