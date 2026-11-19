@@ -639,6 +639,15 @@ fn a_structured_agents_conversation_has_thinking_tool_status_and_plan_steps() {
     let sent = prompt(&home, &id, "rich").unwrap();
     assert!(!sent.queued && sent.queue_len == 0, "{sent:?}");
     chat.wait("the end of the turn", |c| says(c, "done"));
+    // A version held back inside the 150 ms window is sent when the window is over, which can be after the message that followed it.
+    chat.wait("the last version of the plan", |c| {
+        c.latest().iter().any(|e| {
+            e.kind == v1::ChatKind::Plan as i32
+                && e.plan_steps
+                    .first()
+                    .is_some_and(|s| s.status == v1::ToolStatus::Completed as i32)
+        })
+    });
 
     let all = chat.latest();
     let thought = all
@@ -997,4 +1006,42 @@ fn a_config_option_is_set_checked_and_held_to_the_skip_permissions_policy() {
         drop(node);
         let _ = std::fs::remove_dir_all(&home);
     }
+}
+
+/// The last update of an entry is always delivered: updates that come inside one 150 ms window, with nothing after them, still go out
+/// when the window is over (the node's tick sends what it held back), for a tool call and for the plan.
+#[test]
+fn the_last_update_inside_a_coalescing_window_is_still_delivered() {
+    let Some((home, node)) = node_with_acp("burst") else {
+        return;
+    };
+    let id = started_agent(&home);
+    let mut chat = Chat::open(&home, &id);
+    assert!(!prompt(&home, &id, "burst").unwrap().queued);
+    chat.wait("the end of the turn", |c| says(c, "burst-done"));
+    // Nothing follows the burst; the final state must still arrive within the window and a tick or two.
+    let begun = Instant::now();
+    chat.wait("the last tool output and plan status", |c| {
+        let all = c.latest();
+        all.iter().any(|e| e.call_id == "t5" && e.output == "three")
+            && all.iter().any(|e| {
+                e.kind == v1::ChatKind::Plan as i32
+                    && e.text == "only step"
+                    && e.plan_steps[0].status == v1::ToolStatus::Completed as i32
+            })
+    });
+    assert!(
+        begun.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        begun.elapsed()
+    );
+    // What a late subscriber is given is the same final state.
+    let mut late = Chat::open(&home, &id);
+    late.wait("the snapshot", |c| !c.seen.is_empty());
+    assert!(late
+        .latest()
+        .iter()
+        .any(|e| e.call_id == "t5" && e.output == "three"));
+    drop(node);
+    let _ = std::fs::remove_dir_all(&home);
 }

@@ -16,6 +16,7 @@
 //!   answer came within 3 s; then that server is kept running (its call stays open) until the agent exits.
 //! - `rich`: ADR-0090: thinks (two chunks), runs a tool call `t3` (pending with a path, in progress, completed with text output), plans
 //!   with step status, says `done` and finishes. `rich-secret`: a tool call whose output holds a fake key and a very long text.
+//! - `burst`: updates one tool call and the plan several times back to back, then says `burst-done` and stops.
 //! - `slow`: starts a tool call `t4` (in progress) and then waits, reading its input, for `session/cancel`; it ends the turn with the
 //!   stop reason `cancelled` (or after 20 s). `hold`: finishes after 1.5 s. Both let a test queue prompts behind a running turn.
 //! - anything else: echoes the text as a message and finishes.
@@ -504,6 +505,35 @@ pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
                             out,
                             &session,
                             json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "done"}}),
+                        )?;
+                    }
+                    "burst" => {
+                        // Updates of one tool call and of the plan back to back, the last of each inside the first's 150 ms window, and
+                        // then nothing more: the node must still deliver the last version.
+                        update(
+                            out,
+                            &session,
+                            json!({"sessionUpdate": "tool_call", "toolCallId": "t5", "title": "grep", "kind": "search", "status": "in_progress"}),
+                        )?;
+                        for text in ["one", "two", "three"] {
+                            update(
+                                out,
+                                &session,
+                                json!({"sessionUpdate": "tool_call_update", "toolCallId": "t5", "status": "in_progress",
+                                       "content": [{"type": "content", "content": {"type": "text", "text": text}}]}),
+                            )?;
+                        }
+                        for status in ["pending", "in_progress", "completed"] {
+                            update(
+                                out,
+                                &session,
+                                json!({"sessionUpdate": "plan", "entries": [{"content": "only step", "priority": "low", "status": status}]}),
+                            )?;
+                        }
+                        update(
+                            out,
+                            &session,
+                            json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "burst-done"}}),
                         )?;
                     }
                     "slow" => {
