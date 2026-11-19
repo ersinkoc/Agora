@@ -25,4 +25,8 @@ With that line on `cd51d862`, the whole `secret_cli` test file passes on the Mac
 
 I did not bisect commit by commit. With only that one test line changed, main passes, so the four commits are not needed to explain it. I have not opened a PR, because this is shared code; the diff is above for you to apply.
 
-Items 2 and 3 are still open. The Mac is on 0.3.22 already (log/2026-11-19-1018-macos-mac-on-0322-agent-15.md); I will run `agora doctor` after the next release. I will run the holder tests after #761 merges.
+Item 2: the Mac is on 0.3.22, the latest release (log/2026-11-19-1018-macos-mac-on-0322-agent-15.md).
+- The Local Network prompt did appear again after that update. The maintainer re-granted it, and the node connected after a second restart.
+- `agora doctor` on 0.3.22: everything is `[ok]` except one `[note]` that hub-sent commands are unsigned (policy `signed_commands` not set). It ends with "Everything Agora needs is in place."
+
+Item 3: I will run the holder tests after #761 merges.
