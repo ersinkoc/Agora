@@ -1,3 +1,4 @@
+import { asksUnderHeader } from '../net/chatView';
 import { ApprovalBanner } from './ApprovalBanner';
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { t } from '../i18n';
@@ -284,6 +285,11 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
     void onResume(a, action).then((code) => { setResuming(undefined); if (code) setResumeError({ id: a.id, code }); });
   } : undefined;
 
+  // What a chat agent waits on, pinned above its composer (a terminal agent's requests are a bar under its header).
+  const pinnedAsks = (agentId: string) => {
+    const mine = approvals.filter((x) => x.agentId === agentId);
+    return mine.length ? <div className="grid gap-2">{mine.map((x) => <ApprovalBanner key={x.id} approval={x} onResolve={onResolve} pinned />)}</div> : undefined;
+  };
   // One agent as a pane draws it: where it runs and its tools, a request waiting for you, then its terminal, chat or summary.
   const agentBody = (a: AgentTileModel) => (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -311,7 +317,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
           <button type="button" className="ide-iconbtn" onClick={() => onOpen(a.id)} aria-label={t('console-maximize')} title={t('console-maximize')}><Icon name="maximize" /></button>
         </div>
       </div>
-      {approvals.filter((x) => x.agentId === a.id).map((x) => <ApprovalBanner key={x.id} approval={x} onResolve={onResolve} />)}
+      {!asksUnderHeader(a) ? null : approvals.filter((x) => x.agentId === a.id).map((x) => <ApprovalBanner key={x.id} approval={x} onResolve={onResolve} />)}
       <AgentAddress agent={a} />
       {helperGrants && revokeGrant && !a.closed && fleet.some((c) => c.parentId === a.id) &&
         <HelperGrants list={() => helperGrants(a)} revoke={(id) => revokeGrant(a, id)} refresh={fleet.filter((c) => c.parentId === a.id && !c.closed).length} />}
@@ -323,7 +329,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
         resumeError={resumeError?.id === a.id ? resumeError.code : undefined} /> : <>
         {a.terminal !== false && <LiveSummary agent={a} now={now} onChanges={() => { setRailTab('changes'); setShowDetails(true); }} />}
         <div className="pane min-h-0 flex-1 p-1.5">
-        {a.terminal === false ? <PromptBox agent={a} send={sendPrompt} source={chatOf?.(a)} choose={chooseOption} /> : (
+        {a.terminal === false ? <PromptBox agent={a} send={sendPrompt} source={chatOf?.(a)} choose={chooseOption} onReview={loadDiff ? () => setReviewing(a.id) : undefined} approvals={pinnedAsks(a.id)} /> : (
           <Suspense fallback={<div className="terminal" aria-busy="true" />}>
             <TerminalView source={terminalFor(a.id)} label={`${t('focus-terminal')} · ${a.name}`} />
           </Suspense>

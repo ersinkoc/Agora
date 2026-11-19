@@ -1024,6 +1024,11 @@ usage-since-start = Başlangıçtan beri geçen süre
 chat-steps-needs-you = Sizi bekliyor
 chat-steps-failed = Hatayla bitti
 prompt-closed = Bu ajan sona erdi, istek alamaz.
+chat-thought-for = { $time } düşündü
+chat-plan-progress = { $done } / { $total } tamam
+chat-review-changes = Değişiklikleri incele
+chat-diff-show-all = Tüm { $count } satırı göster
+chat-state-since = { $state } · { $time }
 
 # Araç bölmeleri: Terminal, Değişiklikler, Dosyalar ve Dosya yöneticisi çalışma alanının bölmeleri olarak (ADR-0068).
 layout-tool-of = { $what } · { $name }

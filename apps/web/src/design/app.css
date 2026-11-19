@@ -280,6 +280,9 @@
 @keyframes sweep { from { background-position: 100% 0; } to { background-position: -100% 0; } }
 @keyframes nudge { 50% { box-shadow: 0 0 0 3px color-mix(in oklab, var(--state-needs-you) 28%, transparent); } }
 @keyframes breathe { 50% { opacity: 0.45; } }
+/* The chat header's state dot: a ring that spreads and fades while the agent works (colour from the pill's own text colour). */
+@keyframes chat-pulse { 0% { box-shadow: 0 0 0 0 color-mix(in oklab, currentColor 55%, transparent); } 70%, 100% { box-shadow: 0 0 0 7px transparent; } }
+@media (prefers-reduced-motion: no-preference) { .chat-dot--pulse { animation: chat-pulse 2s infinite; } }
 @keyframes soft-pulse { 50% { opacity: 0.55; } }
 @media (prefers-reduced-motion: no-preference) { .skeleton { animation: soft-pulse 1.6s ease-in-out infinite; } }
 @keyframes attend { 50% { transform: scale(1.25); } }

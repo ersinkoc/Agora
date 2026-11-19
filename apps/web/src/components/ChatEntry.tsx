@@ -5,7 +5,8 @@ import { parseHunks } from '../net/diff';
 import { blocks, inlines, type Block, type Inline } from '../net/markdown';
 import { titleSays, toolView, type ToolAction } from '../net/tool';
 import { changedFiles, stepsSummary, type GroupFlag, type TranscriptItem } from '../net/transcript';
-import { duration } from '../net/time';
+import { initial, planProgress, stepTone, type StepStatus, type StepTone } from '../net/chatView';
+import { preciseDuration } from '../net/time';
 import { useHighlightedCode } from '../highlight/useHighlight';
 import { Icon, type IconName } from './Icon';
 
@@ -75,12 +76,14 @@ function BlockView({ block }: { block: Block }) {
 function fullStamp(atMs: number): string | undefined {
   return atMs > 0 ? new Date(atMs).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) : undefined;
 }
+const clock = (atMs: number): string => new Date(atMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
 // What the agent said, with the Markdown it writes drawn as such. It grows in place while it streams: the parsed blocks of text that did
 // not change keep their elements, so nothing above the end moves or flickers.
 const Reply = memo(function Reply({ text, atMs }: { text: string; atMs: number }) {
   const parsed = useMemo(() => blocks(text), [text]);
   return (
-    <div className="group/msg relative max-w-3xl border-s-2 border-accent/40 ps-3" title={fullStamp(atMs)} data-role="agent">
+    <div className="group/msg relative max-w-3xl" title={fullStamp(atMs)} data-role="agent">
       <span className="sr-only">{t('chat-agent')}: </span>
       <div className="grid gap-2 leading-relaxed">{parsed.map((b, i) => <BlockView key={i} block={b} />)}</div>
       <CopyButton text={text} label="chat-copy-reply" className={`absolute end-0 top-0 ${HOVER}`} />
@@ -88,159 +91,240 @@ const Reply = memo(function Reply({ text, atMs }: { text: string; atMs: number }
   );
 });
 
+// What a person said: a tinted bubble on the right with its time under it.
 export const UserText = memo(function UserText({ line }: { line: ChatLine }) {
   return (
-    <div className="group/msg relative ms-auto max-w-[85%] rounded-m border border-accent/30 bg-accent/15 px-3 py-2 break-words whitespace-pre-wrap" title={fullStamp(line.atMs)} data-role="user">
-      <span className="sr-only">{t('chat-you')}: </span>{line.text}
-      <CopyButton text={line.text} label="chat-copy-message" className={`absolute -start-7 top-1 ${HOVER}`} />
+    <div className="group/msg relative ms-auto max-w-[88%] rounded-l rounded-ee-xs border border-accent/30 bg-accent/15 px-3.5 py-2.5 max-md:max-w-full" title={fullStamp(line.atMs)} data-role="user">
+      <div className="break-words whitespace-pre-wrap"><span className="sr-only">{t('chat-you')}: </span>{line.text}</div>
+      <div className="mt-1 flex items-center justify-end gap-2 text-xs text-muted">
+        {line.atMs > 0 && <span>{clock(line.atMs)}</span>}
+        <CopyButton text={line.text} label="chat-copy-message" className={HOVER} />
+      </div>
     </div>
   );
 });
 
-// One thing the agent did: a sentence with its subject, and the full input folded underneath.
-const ToolStep = memo(function ToolStep({ line }: { line: ChatLine }) {
-  const v = useMemo(() => toolView(line.text), [line.text]);
-  const heading = v.raw
-    ? <span className="min-w-0 flex-1 truncate font-mono text-xs text-muted">{v.raw}</span>
-    : <>
-      <span className="min-w-0 shrink truncate text-ink">{v.title ? <Inlines parts={inlineTitle(v.title)} /> : t(`tool-${v.action}`)}</span>
-      {v.subject && !titleSays(v.title, v.subject) && <code dir="ltr" className="min-w-0 flex-1 truncate font-mono text-xs text-muted">{v.subject}</code>}
-    </>;
-  const row = 'flex min-w-0 items-center gap-2 px-3 py-1.5 text-[0.8125rem]';
-  const icon = <Icon name={ICONS[v.action]} className="size-3.5 flex-none text-muted" />;
-  if (v.details.length === 0 && !v.raw) return <div className={row} title={fullStamp(line.atMs)}>{icon}{heading}</div>;
+// An agent's turn: its avatar tile, its name, the model it runs and when it began, and everything it said and did beside them.
+export function Turn({ name, model, atMs, children }: { name: string; model?: string; atMs: number; children: ReactNode }) {
   return (
-    <details className="group">
-      <summary className={`${row} cursor-pointer list-none hover:bg-surface-2 [&::-webkit-details-marker]:hidden`} title={fullStamp(line.atMs)}>
-        {icon}{heading}
-        <span className="flex-1" />
-        <Icon name="chevron" className="size-3 flex-none text-muted transition-transform motion-reduce:transition-none rtl:rotate-180 group-open:rotate-90!" />
-      </summary>
-      <div className="border-t border-line bg-surface-0 px-3 py-2">
-        {v.raw ? <pre dir="ltr" className="m-0 max-h-60 overflow-auto font-mono text-xs break-all whitespace-pre-wrap">{v.raw}</pre> : (
-          <dl dir="ltr" className="m-0 grid max-h-72 grid-cols-[max-content_minmax(0,1fr)] gap-x-3 gap-y-1 overflow-auto font-mono text-xs">
-            {v.details.map(([k, val], i) => <div key={i} className="contents">
-              <dt className="text-muted">{k}</dt>
-              <dd className="m-0 break-words whitespace-pre-wrap">{val}</dd>
-            </div>)}
-          </dl>
-        )}
+    <section className="grid grid-cols-[1.75rem_minmax(0,1fr)] gap-x-3 max-md:grid-cols-[minmax(0,1fr)]" data-turn aria-label={name}>
+      <div aria-hidden className="grid size-7 place-items-center rounded-m border border-line bg-surface-1 text-xs font-semibold text-accent max-md:hidden">{initial(name)}</div>
+      <div className="mb-2 flex min-w-0 items-center gap-2 text-xs text-muted">
+        <b className="truncate text-[0.8125rem] font-semibold text-ink">{name}</b>
+        {model && <span className="truncate">{model}</span>}
+        {atMs > 0 && <span className="flex-none">{clock(atMs)}</span>}
       </div>
+      <div className="col-start-2 flex min-w-0 flex-col gap-2.5 max-md:col-start-1">{children}</div>
+    </section>
+  );
+}
+
+// What the agent thought, folded: "Thought for 9 s" and, opened, the text. The node does not send thinking yet (ADR-0090), so nothing
+// draws this today; it is here so that the entry kind, when it arrives, needs only a line in `Item`. The text is untrusted: plain text.
+export function Thought({ text, seconds }: { text: string; seconds?: number }) {
+  return (
+    <details className="group max-w-3xl rounded-m border border-dashed border-line" data-thought>
+      <summary className="flex min-h-9 cursor-pointer list-none items-center gap-2.5 px-3 py-1.5 text-[0.8125rem] text-muted italic hover:bg-surface-2 [&::-webkit-details-marker]:hidden">
+        <Icon name="think" className="size-3.5" />
+        <span>{seconds && seconds > 0 ? t('chat-thought-for', { time: preciseDuration(seconds * 1000) }) : t('chat-act-think')}</span>
+        <Icon name="chevron" className="ms-auto size-3 transition-transform motion-reduce:transition-none rtl:rotate-180 group-open:rotate-90!" />
+      </summary>
+      <div className="px-3.5 pt-0.5 pb-3 ps-9 text-[0.8125rem] break-words whitespace-pre-wrap text-muted italic">{text}</div>
     </details>
   );
-});
+}
 
 // A title in backticks is a command or a name: it is shown as code. Inline backticks become inline code.
 function inlineTitle(title: string): Inline[] {
   return /^`[^`]+`$/.test(title) ? [{ kind: 'code', text: title.slice(1, -1) }] : inlines(title);
 }
 
-// Tool calls in a row are one group, folded by default, with one line that says what they did: what kinds, how many, the last one, and
-// how long it took when the entries carry times. Opening it lists every step, each foldable on its own.
+const TONE: Record<StepTone, string> = { edit: 'text-accent', run: 'text-needs-you', plain: 'text-muted' };
+const CHEVRON = 'size-3 flex-none text-muted transition-transform motion-reduce:transition-none rtl:rotate-180 group-open:rotate-90!';
+
+// The lines of a change: a hunk bar, then each line with its number; added and deleted lines say so by glyph and bar as well as colour.
+const DIFF_CAP = 200;
+function DiffLines({ lines: all, fallback }: { lines: ReturnType<typeof parseHunks>['lines']; fallback: string }) {
+  const [full, setFull] = useState(false);
+  const lines = full ? all : all.slice(0, DIFF_CAP);
+  if (all.length === 0) return <pre dir="ltr" className="m-0 max-h-60 overflow-auto bg-surface-0 p-2 font-mono text-xs">{fallback}</pre>;
+  return (
+    <pre dir="ltr" className="m-0 max-h-80 overflow-auto bg-surface-0 font-mono text-xs leading-5">
+      {lines.map((l, i) => l.kind === 'hunk'
+        ? <div key={i} className="bg-surface-2 px-3.5 py-1 text-muted">{l.text}</div>
+        : (
+          <div key={i} className={`grid grid-cols-[3rem_minmax(0,1fr)] ${l.kind === 'add' ? 'bg-finished/10 diff-bar-add' : l.kind === 'del' ? 'bg-removed/10 diff-bar-del' : ''}`}>
+            <span aria-hidden className="pe-2.5 text-end text-muted select-none">{l.kind === 'del' ? l.oldNo : l.newNo}</span>
+            <span className="whitespace-pre"><span aria-hidden className={l.kind === 'add' ? 'text-finished' : l.kind === 'del' ? 'text-removed' : ''}>{l.kind === 'add' ? '+ ' : l.kind === 'del' ? '− ' : '  '}</span>{l.text || ' '}</span>
+          </div>
+        ))}
+      {lines.length < all.length && <button type="button" className="block w-full border-t border-line bg-surface-2 px-3.5 py-1.5 text-start text-muted hover:text-ink" onClick={() => setFull(true)}>{t('chat-diff-show-all', { count: all.length })}</button>}
+    </pre>
+  );
+}
+
+const Counts = ({ added, removed }: { added: number; removed: number }) => (
+  (added > 0 || removed > 0) ? <span className="flex-none font-mono text-xs"><span className="text-finished">+{added}</span> <span className="text-removed">−{removed}</span></span> : null
+);
+
+// One thing the agent did: an icon tile, a sentence, the file or command it was about as a chip, and the full input folded underneath.
+// An edit that has its diff shows the change inside the row.
+const ToolStep = memo(function ToolStep({ line, diff }: { line: ChatLine; diff?: ChatLine }) {
+  const v = useMemo(() => toolView(line.text), [line.text]);
+  const d = useMemo(() => (diff ? parseHunks(diff.text) : undefined), [diff]);
+  const showsSubject = v.subject && !titleSays(v.title, v.subject);
+  const heading = v.raw
+    ? <span className="min-w-0 flex-1 truncate font-mono text-xs text-muted">{v.raw}</span>
+    : <>
+      <span className="min-w-0 shrink-0 font-medium text-ink">{v.title ? <Inlines parts={inlineTitle(v.title)} /> : t(`tool-${v.action}`)}</span>
+      {showsSubject && <code dir="ltr" className="min-w-0 truncate rounded-xs border border-line bg-surface-2 px-2 py-0.5 font-mono text-xs text-muted">{v.subject}</code>}
+    </>;
+  const row = 'flex min-h-9 min-w-0 items-center gap-2.5 px-3 py-1.5 text-[0.8125rem]';
+  const icon = <span aria-hidden className={`grid size-5.5 flex-none place-items-center rounded-xs border border-line bg-surface-2 ${TONE[stepTone(v.action)]}`}><Icon name={ICONS[v.action]} className="size-3.5" /></span>;
+  if (v.details.length === 0 && !v.raw && !d) return <div className={row} title={fullStamp(line.atMs)}>{icon}{heading}</div>;
+  return (
+    <details className="group" open={d && d.lines.length <= 24 ? true : undefined} data-diff-path={diff?.path}>
+      <summary className={`${row} cursor-pointer list-none hover:bg-surface-2 [&::-webkit-details-marker]:hidden`} title={fullStamp(line.atMs)}>
+        {icon}{heading}
+        <span className="flex-1" />
+        {d && <Counts added={d.added} removed={d.removed} />}
+        <Icon name="chevron" className={CHEVRON} />
+      </summary>
+      {d && diff ? <div className="border-t border-line"><DiffLines lines={d.lines} fallback={diff.text} /></div> : (
+        <div className="border-t border-line bg-surface-0 px-3.5 py-2">
+          {v.raw ? <pre dir="ltr" className="m-0 max-h-60 overflow-auto font-mono text-xs break-all whitespace-pre-wrap">{v.raw}</pre> : <>
+            {v.action === 'run' && v.subject && <pre dir="ltr" className="m-0 mb-2 max-h-52 overflow-auto font-mono text-xs leading-6 break-all whitespace-pre-wrap text-muted"><span aria-hidden className="select-none">$ </span>{v.subject}</pre>}
+            <dl dir="ltr" className="m-0 grid max-h-72 grid-cols-[max-content_minmax(0,1fr)] gap-x-3 gap-y-1 overflow-auto font-mono text-xs">
+              {v.details.map(([k, val], i) => <div key={i} className="contents">
+                <dt className="text-muted">{k}</dt>
+                <dd className="m-0 break-words whitespace-pre-wrap">{val}</dd>
+              </div>)}
+            </dl>
+          </>}
+        </div>
+      )}
+    </details>
+  );
+});
+
+// Tool calls in a row are one bordered group, with a header that says how many steps and, when the entries carry times, how long they took;
+// then what kinds. `open` is only where a group starts (the newest when it appears): afterwards the reader owns the fold, so a newer
+// group arriving never folds one under them. The data has no status per call, so a flag is the agent's own state (it waits on you, or
+// ended with an error) on its newest group: a group that was flagged opens and stays open, and is never hidden in a fold meanwhile.
 const SHOWN_KINDS = 3;
-export const ToolSteps = memo(function ToolSteps({ lines, running = false, flag }: { lines: ChatLine[]; running?: boolean; flag?: GroupFlag }) {
+export const ToolSteps = memo(function ToolSteps({ lines, running = false, flag, open = false, diffs }: { lines: ChatLine[]; running?: boolean; flag?: GroupFlag; open?: boolean; diffs?: ReadonlyMap<number, ChatLine> }) {
   const sum = useMemo(() => stepsSummary(lines), [lines]);
   const kinds = sum.actions.slice(0, SHOWN_KINDS).map((a) => t(`chat-act-${a.action}`, { count: a.count }));
   const more = sum.actions.length - SHOWN_KINDS;
-  const first = sum.actions[0]?.action ?? 'other';
+  // Uncontrolled after the first draw: `open` is read once, and a flag keeps the group open from the moment it is set.
+  const [start] = useState(open);
+  const [flagged, setFlagged] = useState(!!flag);
+  if (flag && !flagged) setFlagged(true);
   return (
-    <details open={flag ? true : undefined} className={`group max-w-3xl overflow-hidden rounded-s border bg-surface-1 ${flag ? 'border-needs-you/70' : 'border-line'}`} data-steps={sum.total} data-flag={flag}>
-      <summary className="flex min-w-0 cursor-pointer list-none items-center gap-2 px-3 py-1.5 text-[0.8125rem] hover:bg-surface-2 [&::-webkit-details-marker]:hidden" aria-label={`${t('chat-steps-open')}: ${t('chat-steps-count', { count: sum.total })}`}>
-        <Icon name={ICONS[first]} className="size-3.5 flex-none text-muted" />
-        <span className="min-w-0 flex-1 truncate">
-          <span className="font-medium text-ink">{kinds.join(' · ')}{more > 0 ? ` · +${more}` : ''}</span>
-          {sum.last && <span className="text-muted"> — {sum.last}</span>}
-        </span>
+    <details open={start || flagged || flag ? true : undefined} className={`group max-w-3xl overflow-hidden rounded-m border bg-surface-1 ${flag ? 'border-needs-you/70' : 'border-line'}`} data-steps={sum.total} data-flag={flag}>
+      <summary className="flex min-h-9 min-w-0 cursor-pointer list-none items-center gap-2 bg-surface-2 px-3 py-1.5 text-xs text-muted hover:text-ink [&::-webkit-details-marker]:hidden" aria-label={`${t('chat-steps-open')}: ${t('chat-steps-count', { count: sum.total })}`}>
+        {running && !flag
+          ? <span role="img" aria-label={t('chat-working')} className="size-3.5 flex-none animate-spin rounded-full border-2 border-line border-t-working motion-reduce:animate-none" />
+          : <Icon name="board" className="size-3.5 flex-none" />}
+        <span className="flex-none font-medium text-ink">{t('chat-steps-count', { count: sum.total })}{sum.spanMs ? ` · ${preciseDuration(sum.spanMs)}` : ''}</span>
+        <span className="min-w-0 flex-1 truncate max-md:hidden">{kinds.join(' · ')}{more > 0 ? ` · +${more}` : ''}{sum.last ? ` — ${sum.last}` : ''}</span>
+        <span className="flex-1 md:hidden" />
         {flag && <span className="flex flex-none items-center gap-1 text-xs font-medium text-needs-you"><Icon name="warn" className="size-3" />{t(flag === 'failed' ? 'chat-steps-failed' : 'chat-steps-needs-you')}</span>}
-        {running && !flag && <span className="state__mark flex-none rounded-full bg-working" style={{ width: '0.5rem', height: '0.5rem', animation: 'breathe 2.4s ease-in-out infinite' }} aria-hidden />}
-        <span className="flex-none text-xs text-muted">{t('chat-steps-count', { count: sum.total })}{sum.spanMs ? ` · ${duration(sum.spanMs)}` : ''}</span>
-        <Icon name="chevron" className="size-3 flex-none text-muted transition-transform motion-reduce:transition-none rtl:rotate-180 group-open:rotate-90!" />
+        <Icon name="chevron" className={CHEVRON} />
       </summary>
-      <div className="grid divide-y divide-line border-t border-line">
-        {lines.map((l) => <ToolStep key={l.id} line={l} />)}
+      <div className="grid grid-cols-1 divide-y divide-line border-t border-line">
+        {lines.map((l) => <ToolStep key={l.id} line={l} diff={diffs?.get(l.id)} />)}
       </div>
     </details>
   );
-}, (a, b) => a.running === b.running && a.flag === b.flag && a.lines.length === b.lines.length && a.lines[0]?.id === b.lines[0]?.id);
+}, (a, b) => a.running === b.running && a.flag === b.flag && a.lines.length === b.lines.length && a.lines[0]?.id === b.lines[0]?.id && (a.diffs?.size ?? 0) === (b.diffs?.size ?? 0));
 
-// A file the agent changed: a card with its name and how much changed, the lines coloured; a long change starts folded.
+// A file the agent changed that no step claimed: a card with its name and how much changed, the lines numbered and coloured; a long
+// change starts folded.
 const DiffEntry = memo(function DiffEntry({ line }: { line: ChatLine }) {
   const d = useMemo(() => parseHunks(line.text), [line.text]);
   const cut = line.path.replace(/\\/g, '/').lastIndexOf('/');
   const name = line.path.slice(cut + 1);
   const dir = cut > 0 ? line.path.slice(0, cut + 1) : '';
-  const body = d.lines.length ? (
-    <pre dir="ltr" className="m-0 max-h-80 overflow-auto font-mono text-xs leading-5">
-      {d.lines.map((l, i) => (
-        <div key={i} className={l.kind === 'add' ? 'bg-finished/15 diff-bar-add' : l.kind === 'del' ? 'bg-removed/15 diff-bar-del' : l.kind === 'hunk' ? 'bg-surface-2 text-muted' : ''}>
-          <span className="inline-block w-5 select-none text-center text-muted">{l.kind === 'add' ? '+' : l.kind === 'del' ? '−' : ''}</span>{l.text || ' '}
-        </div>
-      ))}
-    </pre>
-  ) : <pre dir="ltr" className="m-0 max-h-60 overflow-auto p-2 font-mono text-xs">{line.text}</pre>;
   return (
-    <details open={d.lines.length <= 24} className="group max-w-3xl overflow-hidden rounded-s border border-line" data-diff-path={line.path}>
-      <summary className="flex min-w-0 cursor-pointer list-none items-center gap-2 bg-surface-1 px-3 py-1.5 text-[0.8125rem] hover:bg-surface-2 [&::-webkit-details-marker]:hidden" title={fullStamp(line.atMs)}>
-        <Icon name="pencil" className="size-3.5 flex-none text-muted" />
+    <details open={d.lines.length <= 24} className="group max-w-3xl overflow-hidden rounded-m border border-line bg-surface-1" data-diff-path={line.path}>
+      <summary className="flex min-h-9 min-w-0 cursor-pointer list-none items-center gap-2.5 px-3 py-1.5 text-[0.8125rem] hover:bg-surface-2 [&::-webkit-details-marker]:hidden" title={fullStamp(line.atMs)}>
+        <span aria-hidden className="grid size-5.5 flex-none place-items-center rounded-xs border border-line bg-surface-2 text-accent"><Icon name="pencil" className="size-3.5" /></span>
         <span dir="ltr" className="min-w-0 flex-1 truncate font-mono text-xs"><span className="text-muted">{dir}</span><span className="font-semibold text-ink">{name}</span></span>
-        {(d.added > 0 || d.removed > 0) && <span className="flex-none font-mono text-xs"><span className="text-finished">+{d.added}</span> <span className="text-removed">−{d.removed}</span></span>}
-        <Icon name="chevron" className="size-3 flex-none text-muted transition-transform motion-reduce:transition-none rtl:rotate-180 group-open:rotate-90!" />
+        <Counts added={d.added} removed={d.removed} />
+        <Icon name="chevron" className={CHEVRON} />
       </summary>
-      <div className="border-t border-line">{body}</div>
+      <div className="border-t border-line"><DiffLines lines={d.lines} fallback={line.text} /></div>
     </details>
   );
 });
 
-// The files this conversation changed, in one place: each file once with its totals; a click goes to its change in the conversation.
-export function FilesChanged({ lines, onGo }: { lines: readonly ChatLine[]; onGo?: (path: string) => void }) {
+// The files this conversation changed, in one place: the count and totals, each file once as a chip (a click goes to its change in the
+// conversation), and the way into the review screen when the window has one.
+const SHOWN_FILES = 6;
+export function FilesChanged({ lines, onGo, onReview }: { lines: readonly ChatLine[]; onGo?: (path: string) => void; onReview?: () => void }) {
   const files = useMemo(() => changedFiles(lines), [lines]);
   if (files.length === 0) return null;
   const added = files.reduce((n, f) => n + f.added, 0);
   const removed = files.reduce((n, f) => n + f.removed, 0);
-  const SHOWN = 8;
+  const base = (p: string) => p.slice(p.replace(/\\/g, '/').lastIndexOf('/') + 1);
   return (
-    <details className="group flex-none rounded-s border border-line bg-surface-1">
-      <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-1.5 text-[0.8125rem] hover:bg-surface-2 [&::-webkit-details-marker]:hidden">
-        <Icon name="diff" className="size-3.5 flex-none text-muted" />
-        <span className="min-w-0 flex-1 truncate font-medium text-ink">{t('chat-files-title', { count: files.length })}</span>
-        <span className="flex-none font-mono text-xs"><span className="text-finished">+{added}</span> <span className="text-removed">−{removed}</span></span>
-        <Icon name="chevron" className="size-3 flex-none text-muted transition-transform motion-reduce:transition-none rtl:rotate-180 group-open:rotate-90!" />
-      </summary>
-      <ul className="m-0 grid max-h-40 list-none overflow-y-auto border-t border-line p-0">
-        {files.slice(0, SHOWN * 4).map((f) => <li key={f.path}>
-          <button type="button" className="ide-row justify-between gap-3 rounded-none px-3 py-1" onClick={() => onGo?.(f.path)}>
-            <span dir="ltr" className="min-w-0 flex-1 truncate font-mono text-xs">{f.path}</span>
-            <span className="flex-none font-mono text-xs"><span className="text-finished">+{f.added}</span> <span className="text-removed">−{f.removed}</span></span>
+    <div className="flex w-full flex-none flex-wrap items-center gap-x-3 gap-y-2 rounded-m border border-line bg-surface-1 px-3.5 py-2.5" data-files-changed>
+      <Icon name="diff" className="size-4 flex-none text-muted" />
+      <b className="font-semibold text-ink">{t('chat-files-title', { count: files.length })}</b>
+      <Counts added={added} removed={removed} />
+      <ul className="m-0 flex min-w-0 list-none flex-wrap gap-1.5 p-0">
+        {files.slice(0, SHOWN_FILES).map((f) => <li key={f.path} className="min-w-0">
+          <button type="button" dir="ltr" title={f.path} className="inline-flex h-6 max-w-full items-center rounded-xs border border-line bg-surface-2 px-2 font-mono text-xs text-muted hover:text-ink" onClick={() => onGo?.(f.path)}>
+            <span className="truncate">{files.some((o) => o !== f && base(o.path) === base(f.path)) ? f.path : base(f.path)}</span>
           </button>
         </li>)}
-        {files.length > SHOWN * 4 && <li className="muted px-3 py-1 text-xs">{t('chat-files-more', { count: files.length - SHOWN * 4 })}</li>}
+        {files.length > SHOWN_FILES && <li className="muted self-center text-xs">{t('chat-files-more', { count: files.length - SHOWN_FILES })}</li>}
       </ul>
-    </details>
+      <span className="flex-1" />
+      {onReview && <button type="button" className="button px-3 py-1 text-[0.8125rem]" onClick={onReview}>{t('chat-review-changes')}</button>}
+    </div>
   );
 }
 
-// The agent's plan, as a numbered checklist. Agents send the whole plan again each time it changes: the latest is shown, earlier copies
-// stay folded. The node keeps the steps' text only (no done or not done), so no step is ever drawn ticked.
+// The agent's plan as a card with a checklist. Agents send the whole plan again each time it changes: the latest is shown, earlier copies
+// stay folded. The node keeps the steps' text only (no done or not done), so by default every step is a plain numbered row and no
+// progress bar is drawn: `status` (one per step) turns on the ticks and the bar once the node reports it (ADR-0090). Nothing is ever faked.
+export function PlanCard({ steps, status, label }: { steps: readonly string[]; status?: readonly (StepStatus | undefined)[]; label: string }) {
+  const progress = status ? planProgress(status) : undefined;
+  return (
+    <div className="max-w-3xl rounded-m border border-line bg-surface-1 px-3.5 py-3 text-[0.8125rem]" data-plan>
+      <div className="mb-2 flex items-center gap-2 font-semibold text-ink">
+        <Icon name="board" className="size-4 text-accent" />{label}
+        {progress && <small className="font-normal text-muted">{t('chat-plan-progress', { done: progress.done, total: progress.total })}</small>}
+      </div>
+      {progress && <div role="progressbar" aria-label={t('chat-plan-label')} aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress.percent} className="mb-2.5 h-1 overflow-hidden rounded-full bg-surface-2"><div className="h-full rounded-full bg-finished" style={{ width: `${progress.percent}%` }} /></div>}
+      <ol className="m-0 grid list-none gap-1.5 p-0">{steps.map((p, i) => {
+        const s = status?.[i];
+        return (
+          <li key={i} className={`flex items-start gap-2.5 ${s === 'completed' ? 'text-muted line-through' : s === 'in_progress' ? 'font-medium text-ink' : s ? 'text-muted' : ''}`} data-status={s}>
+            <span aria-hidden className={`mt-px grid size-5 flex-none place-items-center rounded-xs border text-xs ${s === 'completed' ? 'border-finished bg-finished text-on-accent' : s === 'in_progress' ? 'border-working text-working' : 'border-line bg-surface-0 text-muted'}`}>
+              {s === 'completed' ? <Icon name="check" className="size-3" /> : s === 'in_progress' ? <span className="size-1.5 rounded-full bg-working" /> : s ? null : i + 1}
+            </span>
+            <span className="min-w-0 break-words"><Inlines parts={inlineTitle(p)} /></span>
+          </li>
+        );
+      })}</ol>
+    </div>
+  );
+}
+
 const PlanEntry = memo(function PlanEntry({ line, latest }: { line: ChatLine; latest: boolean }) {
   const steps = line.text.split('\n').filter((s) => s.trim());
-  const list = <ol className="m-0 grid list-none gap-1.5 p-0">{steps.map((p, i) => <li key={i} className="flex items-start gap-2.5">
-    <span aria-hidden className="mt-px grid size-5 flex-none place-items-center rounded-full border border-line bg-surface-0 text-xs text-muted">{i + 1}</span>
-    <span className="min-w-0 break-words"><Inlines parts={inlineTitle(p)} /></span>
-  </li>)}</ol>;
   if (!latest) {
     return (
       <details className="max-w-3xl text-xs text-muted">
         <summary className="cursor-pointer">{t('chat-plan-earlier', { count: steps.length })}</summary>
-        <div className="mt-1 ps-1 text-[0.8125rem] text-ink">{list}</div>
+        <div className="mt-1 ps-1"><PlanCard steps={steps} label={t('chat-plan-steps', { count: steps.length })} /></div>
       </details>
     );
   }
-  return (
-    <div className="max-w-3xl rounded-s border border-line bg-surface-1 px-3 py-2 text-[0.8125rem]" title={fullStamp(line.atMs)}>
-      <div className="mb-2 flex items-center gap-1.5 text-xs font-medium text-muted"><Icon name="board" className="size-3.5" />{t('chat-plan-steps', { count: steps.length })}</div>
-      {list}
-    </div>
-  );
+  return <div title={fullStamp(line.atMs)}><PlanCard steps={steps} label={t('chat-plan-steps', { count: steps.length })} /></div>;
 });
 
 // Where the day changes: a line with the date, in the reader's own format.
@@ -249,12 +333,12 @@ function DateRule({ atMs }: { atMs: number }) {
   return <div role="separator" aria-label={label} className="flex items-center gap-3 py-1 text-xs text-muted"><span className="h-px flex-1 bg-line" /><span>{label}</span><span className="h-px flex-1 bg-line" /></div>;
 }
 
-export function Item({ item, running, flag, notice }: { item: TranscriptItem; running?: boolean; flag?: GroupFlag; notice: (l: ChatLine) => ReactNode }) {
+export function Item({ item, running, flag, open, diffs, notice }: { item: TranscriptItem; running?: boolean; flag?: GroupFlag; open?: boolean; diffs?: ReadonlyMap<number, ChatLine>; notice: (l: ChatLine) => ReactNode }) {
   switch (item.kind) {
     case 'date': return <DateRule atMs={item.atMs} />;
     case 'user': return <UserText line={item.line} />;
     case 'reply': return <Reply text={item.text} atMs={item.atMs} />;
-    case 'steps': return <ToolSteps lines={item.lines} running={running} flag={flag} />;
+    case 'steps': return <ToolSteps lines={item.lines} running={running} flag={flag} open={open} diffs={diffs} />;
     case 'plan': return <PlanEntry line={item.line} latest={item.latest} />;
     case 'diff': return <DiffEntry line={item.line} />;
     case 'notice': return <>{notice(item.line)}</>;
