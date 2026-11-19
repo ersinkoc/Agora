@@ -74,6 +74,11 @@
   .tab-strip[data-fade-start][data-fade-end] { mask-image: linear-gradient(to right, transparent, #000 2rem, #000 calc(100% - 2rem), transparent); }
   [dir='rtl'] .tab-strip[data-fade-end] { mask-image: linear-gradient(to left, #000 calc(100% - 2rem), transparent); }
   [dir='rtl'] .tab-strip[data-fade-start] { mask-image: linear-gradient(to right, #000 calc(100% - 2rem), transparent); }
+  /* A short label with its whole meaning on hover and on focus (a tap focuses it on a touch screen): the text is in `data-tip`. */
+  .tip { @apply relative; }
+  .tip[tabindex]::after { content: attr(data-tip); @apply pointer-events-none invisible absolute start-0 top-full z-30 mt-1 w-max max-w-64 rounded-xs border border-line bg-surface-1 px-2 py-1 text-xs font-normal whitespace-normal text-ink opacity-0 transition-opacity duration-150; box-shadow: var(--shadow); }
+  .tip[tabindex]:focus-visible::after, .tip[tabindex]:focus::after { @apply visible opacity-100; }
+  @media (hover: hover) { .tip[tabindex]:hover::after { @apply visible opacity-100; } }
   .ide-section { @apply px-3 pb-1 pt-3 text-xs font-semibold tracking-wider text-muted uppercase; }
   .page { @apply mx-auto grid max-w-3xl gap-6 px-4 py-8; }
   .topbar { @apply flex items-center justify-between gap-4; }

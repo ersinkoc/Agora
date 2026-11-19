@@ -113,7 +113,7 @@ export function Explorer({ fleet, machines, open, current, projects, project, on
                 <button type="button" className="ide-row" aria-current={current === a.id ? 'true' : undefined} aria-pressed={open.includes(a.id)} onClick={() => onToggle(a.id)} title={`${a.machine} · ${a.workspace}${a.branch ? ` · ${a.branch}` : ''}${a.parentName ? ` · ${t('helper-started-by', { name: a.parentName })}` : ''}`}>
                   <StateMark state={a.state} />
                   <span className="min-w-0 flex-1 truncate">{a.name}{a.parentName && <span className="ms-1.5 text-xs text-muted">{t('helper-started-by', { name: a.parentName })}</span>}</span>
-                  <NoAskBadge agent={a} compact />
+                  <NoAskBadge agent={a} compact nested />
                   {a.shared && <span className="flex-none text-xs text-muted" title={t('workspace-shared')}>{t('ide-shared')}</span>}
                   {(a.filesChanged ?? 0) > 0 && <span className="font-mono text-xs text-needs-you">{a.filesChanged}</span>}
                 </button>

@@ -156,7 +156,7 @@ export function Workspace({ ws, dispatch, fleet, bindings, narrow, renderAgent, 
                   onClick={() => dispatch({ type: 'activate', pane: p.id })} onKeyDown={(e) => tabKey(e, f, i)} {...dragProps(p)}>
                   {pa ? <StateMark state={pa.state} failed={endedWithError(pa)} /> : <Icon name="layout" className="size-3.5 text-muted" />}
                   <span className="min-w-0 truncate">{label(p)}</span>
-                  {pa && <NoAskBadge agent={pa} icon />}
+                  {pa && <NoAskBadge agent={pa} icon nested />}
                   <button type="button" tabIndex={-1} aria-hidden className="ide-iconbtn size-5 opacity-60 group-hover:opacity-100" onClick={(e) => { e.stopPropagation(); dispatch({ type: 'close', pane: p.id }); }} title={t('ide-close-tab', { name: label(p) })}><Icon name="close" className="size-3" /></button>
                 </div>
               );

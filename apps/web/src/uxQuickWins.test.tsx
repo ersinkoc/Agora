@@ -194,24 +194,33 @@ describe('quick win: copy', () => {
   });
 });
 
-describe('quick win: the safety badge is never cut short', () => {
+describe('quick win: the safety badge is compact and says all of it on demand', () => {
   beforeEach(() => setLanguage('en'));
-  it('is a shield with the full words as its name in a tab, and the whole words elsewhere', () => {
+  it('is a warning sign with one short word, or the sign alone in a tab; the whole meaning is its name and tooltip', () => {
     const agent = { skipsPermissions: true };
-    const icon = renderToStaticMarkup(<NoAskBadge agent={agent} icon />);
-    expect(icon).toContain('Runs without asking');
-    expect(icon).toContain('sr-only');
-    expect(icon).toContain('title="Runs without asking: ');
-    expect(icon).not.toContain('truncate');
-    const words = renderToStaticMarkup(<NoAskBadge agent={agent} compact />);
-    expect(words).toContain('>Runs without asking<');
+    const full = 'Runs without asking: Started so that it acts without asking you first';
+    const sign = renderToStaticMarkup(<NoAskBadge agent={agent} icon nested />);
+    expect(sign).toContain(`aria-label="${full}"`);
+    expect(sign).toContain(`title="${full}"`);
+    expect(sign).not.toContain('Acts freely');
+    expect(sign).not.toContain('truncate');
+    const words = renderToStaticMarkup(<NoAskBadge agent={agent} compact nested />);
+    expect(words).toContain('>Acts freely<');
+    expect(words).not.toContain('>Runs without asking<');
     expect(words).toContain('flex-none');
-    expect(words).not.toContain('truncate');
     expect(renderToStaticMarkup(<NoAskBadge agent={{}} icon />)).toBe(''); // negative control: an agent that asks shows nothing
+  });
+  it('can be focused (so tapped) to show the explanation, except inside another control', () => {
+    const alone = renderToStaticMarkup(<NoAskBadge agent={{ skipsPermissions: true }} />);
+    expect(alone).toContain('tabindex="0"');
+    expect(alone).toContain('data-tip="Runs without asking: ');
+    const inside = renderToStaticMarkup(<NoAskBadge agent={{ skipsPermissions: true }} nested />);
+    expect(inside).not.toContain('tabindex');
   });
   it('says the same in Turkish', () => {
     setLanguage('tr');
     expect(renderToStaticMarkup(<NoAskBadge agent={{ skipsPermissions: true }} icon />)).toContain('Onay istemeden çalışır');
+    expect(renderToStaticMarkup(<NoAskBadge agent={{ skipsPermissions: true }} />)).toContain('>Serbest<');
     setLanguage('en');
   });
 });

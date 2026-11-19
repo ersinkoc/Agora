@@ -41,7 +41,7 @@ function Tile({ agent, onOpen, context }: { agent: AgentTileModel; onOpen?: (id:
       >
         <span className="tile__name">{agent.name}</span>
         <StateBadge state={agent.state} failed={failed} />
-        <NoAskBadge agent={agent} />
+        <NoAskBadge agent={agent} nested />
         <span className="muted">
           {t('agent-on-machine', { machine: agent.machine })} · {t('agent-workspace', { name: agent.workspace })}
         </span>
@@ -68,7 +68,7 @@ function Tile({ agent, onOpen, context }: { agent: AgentTileModel; onOpen?: (id:
         <span className="tile__name">{agent.name}</span>
         <StateBadge state={agent.state} failed={failed} />
       </span>
-      <NoAskBadge agent={agent} />
+      <NoAskBadge agent={agent} nested />
       {line ? <span className={`tile__activity${agent.preview && !agent.closed && !(context.ask && agent.state === 'needs-you') ? ' tile__activity--line' : ''}`} dir="auto">{line}</span> : null}
       <span className="tile__meta">
         {where.filter(Boolean).map((x, i) => <span key={i} className="tile__where">{x}</span>)}
