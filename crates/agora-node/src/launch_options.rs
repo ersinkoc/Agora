@@ -25,6 +25,17 @@ impl SkipPermissions {
         }
     }
 
+    /// Why this policy refuses something that makes an agent act without asking (`forbid`, `confined_only`), or `None` when it allows
+    /// it. `confined` says whether the agent's confinement is active.
+    pub fn refusal(self, confined: bool) -> Option<&'static str> {
+        match self {
+            Self::Allow => None,
+            Self::Forbid => Some("forbid"),
+            Self::ConfinedOnly if confined => None,
+            Self::ConfinedOnly => Some("confined_only"),
+        }
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Self::Forbid => "forbid",
@@ -119,13 +130,7 @@ pub fn choose(
                     option: o.id.clone(),
                 });
             }
-            let refused = match policy {
-                SkipPermissions::Allow => None,
-                SkipPermissions::Forbid => Some("forbid"),
-                SkipPermissions::ConfinedOnly if confined => None,
-                SkipPermissions::ConfinedOnly => Some("confined_only"),
-            };
-            if let Some(policy) = refused {
+            if let Some(policy) = policy.refusal(confined) {
                 return Err(Refusal::Forbidden {
                     option: o.id.clone(),
                     policy,

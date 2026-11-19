@@ -1616,8 +1616,21 @@ impl Supervisor {
             OptionKind::Mode => &e.options.modes,
             OptionKind::Model => &e.options.models,
         };
-        if value.is_empty() || !offered.iter().any(|o| o.id == value) {
+        let Some(chosen) = offered.iter().find(|o| !value.is_empty() && o.id == value) else {
             return Err(SupervisorError::OptionUnknown(field));
+        };
+        // A mode that makes the agent act without asking is a launch option's twin (ADR-0059): the owner's `skip_permissions` policy
+        // decides it here, on the node, whatever the window or the hub said. Whether it skips is what the adapter reported.
+        if chosen.skips_permissions {
+            let confined =
+                self.sandbox.level != crate::sandbox::Level::Off && self.sandbox.enforceable();
+            if let Some(policy) = self.skip_permissions.refusal(confined) {
+                return Err(SupervisorError::OptionForbidden(
+                    e.agent.kind.clone(),
+                    chosen.id.clone(),
+                    policy,
+                ));
+            }
         }
         let (adapter, session) = self.adapter_of(id)?;
         adapter
