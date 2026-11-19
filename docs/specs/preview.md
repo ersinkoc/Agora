@@ -4,7 +4,7 @@ Status: schema only. The messages, codes, frame kinds and signing domain exist (
 "Preview"); no node, hub or window sends or handles them yet. Capability `preview.v1` is not offered yet; the node step (2) and the hub step (3) add it to their lists when they handle the messages.
 
 ## What it is
-A **forward** is a named, owner-approved path from the window to one port on `127.0.0.1` of one node, for a limited time. The window
+A **forward** is a named, owner-approved path from the window to one port on the **loopback** of one node (`127.0.0.1` or `::1`), for a limited time. The window
 shows the page in an isolated frame. Nothing else on the node's loopback becomes reachable.
 
 ## Messages
@@ -18,8 +18,8 @@ shows the page in an isolated frame. Nothing else on the node's loopback becomes
 | `PreviewChanged` | event 81 | a forward opened or ended (indicator, audit: port only) |
 
 ## Rules the node enforces (never widened by the hub)
-- Port 1..65535 on `127.0.0.1` only; below 1024 only when the owner's policy names it; never one of the node's own ports (control,
-  hub link, holder, any port it knows it owns): `preview.port_refused` with `reason` `invalid`, `privileged`, `node_port` or `not_loopback`.
+- Port 1..65535 on the node's loopback only: `127.0.0.1` or `::1`, tried in the order `localhost` resolves on that machine (development servers such as Vite and Node on Windows often listen only on `[::1]`); below 1024 only when the owner's policy names it; never one of the node's own ports (control,
+  hub link, holder, any port it knows it owns): `preview.port_refused` with `reason` `invalid`, `privileged`, `node_port` or `not_loopback` (the port answers on neither `127.0.0.1` nor `::1`).
 - At most 8 open forwards per node (`preview.limit`). Expiry default 28800 s, cap 86400 s. A forward ends at expiry, when closed, or
   when the node restarts; it is never restored (`preview.expired`, `preview.unknown`).
 - Through the hub, an open needs a device signature over `preview-action-v1` (protocol.md: length-prefixed fields, a single-use nonce kept until its expiry, at most 5 minutes ahead), verified by the node, never by the hub. A suggestion never opens anything.

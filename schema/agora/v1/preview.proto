@@ -50,7 +50,7 @@ message PreviewAuthorization {
 message PreviewForward {
   // The node's own id (`fwd-3`), not reused while the node runs; the hub keys it by node.
   string forward_id = 1;
-  // The port on the node's `127.0.0.1`.
+  // The port on the node's loopback (`127.0.0.1` or `::1`).
   uint32 port = 2;
   // Milliseconds since the Unix epoch, node clock.
   uint64 opened_at_ms = 3;
