@@ -2951,3 +2951,57 @@ mod process_group_tests {
         s.is_empty() || s.starts_with('Z')
     }
 }
+
+/// ADR-0085 (Tests): a certificate renewal replaces `cert.pem` and `key.pem` with [`write_private`], which renames a temporary file over
+/// the existing one. On Unix that is one atomic step; on Windows it is the same rename over an existing file. These tests run on
+/// Linux, macOS and Windows in CI.
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod atomic_replace_tests {
+    use super::write_private;
+
+    fn dir(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("agora-plat-repl-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn a_file_that_exists_is_replaced_whole_each_time_and_no_temporary_is_left() {
+        let d = dir("over");
+        let cert = d.join("cert.pem");
+        let key = d.join("key.pem");
+        for round in 0..5 {
+            let c = format!("certificate {round} {}", "c".repeat(round * 700));
+            let k = format!("key {round} {}", "k".repeat(round * 300));
+            write_private(&cert, c.as_bytes()).unwrap();
+            write_private(&key, k.as_bytes()).unwrap();
+            assert_eq!(std::fs::read_to_string(&cert).unwrap(), c);
+            assert_eq!(std::fs::read_to_string(&key).unwrap(), k);
+        }
+        let mut names: Vec<_> = std::fs::read_dir(&d)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["cert.pem", "key.pem"]);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_replace_that_cannot_happen_leaves_what_was_there_untouched_and_no_temporary() {
+        let d = dir("fail");
+        // A folder where the file should go: the rename over it fails on every platform, as a full disk or a vanished folder would.
+        let target = d.join("cert.pem");
+        std::fs::create_dir_all(target.join("inside")).unwrap();
+        assert!(write_private(&target, b"new").is_err());
+        assert!(target.join("inside").is_dir());
+        assert_eq!(
+            std::fs::read_dir(&d).unwrap().count(),
+            1,
+            "a temporary file stayed behind"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+}

@@ -365,6 +365,77 @@ pub struct Delivery<'a> {
     pub csr_der: &'a [u8],
 }
 
+/// The checks a certificate this machine is about to use must pass, whether it came from pairing or from a renewal (ADR-0085): it
+/// chains to `roots`, holds now (not starting later than the clock slack, lasting at most [`MAX_CERT_SECONDS`]), may authenticate a
+/// client and is not a CA, names `node_id`, and carries the public key of `csr_der` (this machine's own request: the private key never
+/// left, so a certificate for any other key is of no use and means the sender is not what it says).
+pub(crate) fn check_client_certificate(
+    roots: Arc<rustls::RootCertStore>,
+    cert_pem: &str,
+    node_id: &str,
+    csr_der: &[u8],
+    now_secs: i64,
+) -> Result<(), PairError> {
+    use rustls::server::WebPkiClientVerifier;
+    let bad = PairError::CertificateInvalid;
+    let at = |secs: i64| {
+        UnixTime::since_unix_epoch(Duration::from_secs(u64::try_from(secs).unwrap_or(0)))
+    };
+    let times = [
+        at(now_secs),
+        at(now_secs.saturating_add(CLOCK_SLACK_SECONDS)),
+    ];
+    let der = CertificateDer::pem_slice_iter(cert_pem.as_bytes())
+        .next()
+        .ok_or(bad("certificate"))?
+        .map_err(|_| bad("certificate"))?;
+    let client = WebPkiClientVerifier::builder_with_provider(roots, provider())
+        .build()
+        .map_err(|_| bad("ca"))?;
+    if !times
+        .iter()
+        .any(|now| client.verify_client_cert(&der, &[], *now).is_ok())
+    {
+        return Err(bad("chain"));
+    }
+    let (_, cert) =
+        x509_parser::parse_x509_certificate(der.as_ref()).map_err(|_| bad("certificate"))?;
+    let (from, to) = (
+        cert.validity().not_before.timestamp(),
+        cert.validity().not_after.timestamp(),
+    );
+    if now_secs < from - CLOCK_SLACK_SECONDS || now_secs >= to || to - from > MAX_CERT_SECONDS {
+        return Err(bad("validity"));
+    }
+    let for_clients = cert
+        .extended_key_usage()
+        .ok()
+        .flatten()
+        .is_some_and(|e| e.value.client_auth);
+    let is_ca_cert = cert
+        .basic_constraints()
+        .ok()
+        .flatten()
+        .is_some_and(|b| b.value.ca);
+    if !for_clients || is_ca_cert {
+        return Err(bad("usage"));
+    }
+    let subject = cert
+        .subject()
+        .iter_common_name()
+        .next()
+        .and_then(|cn| cn.as_str().ok());
+    if subject != Some(node_id) {
+        return Err(bad("subject"));
+    }
+    let (_, csr) = x509_parser::certification_request::X509CertificationRequest::from_der(csr_der)
+        .map_err(|_| bad("request"))?;
+    if csr.certification_request_info.subject_pki.raw != cert.tbs_certificate.subject_pki.raw {
+        return Err(bad("key"));
+    }
+    Ok(())
+}
+
 /// Everything section 5 step 6 asks before a machine keeps a certificate. All of it must hold, or nothing is kept:
 /// - the delivered CA is exactly one certificate, is a CA (basic constraints) allowed to sign certificates (key usage) and is valid now;
 /// - the leaf the handshake showed chains to that CA and `host` is one of its names (`pair.name_unverified` otherwise);
@@ -375,7 +446,6 @@ pub struct Delivery<'a> {
 /// Returns the pinned CA's PEM (the one delivered) and its fingerprint.
 pub fn check_delivery(d: &Delivery<'_>, now_secs: i64) -> Result<(String, String), PairError> {
     use rustls::client::WebPkiServerVerifier;
-    use rustls::server::WebPkiClientVerifier;
     let bad = PairError::CertificateInvalid;
     let (roots, ca_der) = root_of(d.ca_pem)?;
     let roots = Arc::new(roots);
@@ -430,55 +500,7 @@ pub fn check_delivery(d: &Delivery<'_>, now_secs: i64) -> Result<(String, String
     }
 
     // The certificate this machine will use.
-    let der = CertificateDer::pem_slice_iter(d.cert_pem.as_bytes())
-        .next()
-        .ok_or(bad("certificate"))?
-        .map_err(|_| bad("certificate"))?;
-    let client = WebPkiClientVerifier::builder_with_provider(roots, provider())
-        .build()
-        .map_err(|_| bad("ca"))?;
-    if !times
-        .iter()
-        .any(|now| client.verify_client_cert(&der, &[], *now).is_ok())
-    {
-        return Err(bad("chain"));
-    }
-    let (_, cert) =
-        x509_parser::parse_x509_certificate(der.as_ref()).map_err(|_| bad("certificate"))?;
-    let (from, to) = (
-        cert.validity().not_before.timestamp(),
-        cert.validity().not_after.timestamp(),
-    );
-    if now_secs < from - CLOCK_SLACK_SECONDS || now_secs >= to || to - from > MAX_CERT_SECONDS {
-        return Err(bad("validity"));
-    }
-    let for_clients = cert
-        .extended_key_usage()
-        .ok()
-        .flatten()
-        .is_some_and(|e| e.value.client_auth);
-    let is_ca_cert = cert
-        .basic_constraints()
-        .ok()
-        .flatten()
-        .is_some_and(|b| b.value.ca);
-    if !for_clients || is_ca_cert {
-        return Err(bad("usage"));
-    }
-    let subject = cert
-        .subject()
-        .iter_common_name()
-        .next()
-        .and_then(|cn| cn.as_str().ok());
-    if subject != Some(d.node_id) {
-        return Err(bad("subject"));
-    }
-    let (_, csr) =
-        x509_parser::certification_request::X509CertificationRequest::from_der(d.csr_der)
-            .map_err(|_| bad("request"))?;
-    if csr.certification_request_info.subject_pki.raw != cert.tbs_certificate.subject_pki.raw {
-        return Err(bad("key"));
-    }
+    check_client_certificate(roots, d.cert_pem, d.node_id, d.csr_der, now_secs)?;
     let fingerprint = ca_fingerprint(d.ca_pem).ok_or(bad("ca"))?;
     Ok((d.ca_pem.to_string(), fingerprint))
 }

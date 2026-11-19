@@ -820,8 +820,8 @@ it has, so no code and no owner step is needed while it is still valid.
 - **Messages** (`schema/agora/v1/enroll.proto`): `RenewRequest { csr_pem }` and `RenewResponse { cert_pem, not_after_ms }`. `CommandRequest`
   field 108 (`renew`) and `CommandOk` field 30 (`renew`) carry them. Golden fixtures: `RenewRequest` and `RenewResponse` in
   `schema/fixtures/v1/`, the two oneof arms in `schema/fixtures/enroll-renew/`.
-- **Capability `enroll.renew`.** Offered by a hub that handles the command (the hub offers it from this step; no node offers or sends it yet). A machine asks only a hub that offers it (an older hub never sees
-  the message). Nodes offer nothing for it; they only send.
+- **Capability `enroll.renew`.** Offered by a hub that handles the command (the hub offers it from step 1). A node offers it too, from step 2 (ADR-0085), so that the hub's `Welcome` says whether the hub handles it: the intersection contains `enroll.renew` only when both do, and a node asks only then (an older hub never sees
+  the message). A node offering it means "I understand renewal"; it is not a message the hub sends to a node.
 - **Where it is accepted.** Only as the first command (`STREAM_COMMANDS`, kind 0) on a TLS connection whose client certificate verifies and
   that the hub lists as active (the connection of ADR-0061's one-shot questions). It is answered once and the connection ends. Without a
   certificate it is `auth.unauthenticated`; from a client it is `protocol.invalid_message`.
@@ -858,6 +858,22 @@ it has, so no code and no owner step is needed while it is still valid.
   lost the answer of a renewal asks again with the same request and is answered again (see Lost answer).
 - **Clock.** The grace and the hour limit use the hub's clock. A clock that jumps forward can revoke a machine's older certificates early
   (only ones a newer certificate already replaced and that has connected); one that jumps back only delays it.
+- **The node side (step 2, `agora-node` `link_renewal` and `cert_renew`).** A node looks at its certificate at start and then hourly. When
+  a third of the certificate's own life is left (computed from its `notBefore` and `notAfter`; 30 of 90 days) and the hub's welcome listed
+  `enroll.renew`, it makes a fresh key and request, **writes both to `<link dir>/renew-pending.pem` (private, whole-file replace) before it
+  sends anything**, and sends the request over a one-shot certificate connection made with its current certificate. It keeps the file until the
+  answer is stored; after a crash or a lost answer the next start sends the SAME request (the hub answers it again with the same
+  certificate). An answer is used only when it chains to the pinned CA, is valid now, lasts at most a year, is for client authentication
+  only and not a CA, names this node, carries the public key of the request and of the persisted key, and ends later than the certificate in
+  use; otherwise it is dropped, the pair in use is kept, and the same request is asked again after an hour. A good answer is stored in this
+  order: the pair in use to `previous.pem`, then `cert.pem`, then `key.pem`, then `renew-pending.pem` removed; a start that finds the
+  certificate and key as two halves finishes the install from the pending file or restores `previous.pem`. The uplink reads the pair before
+  each dial, so the next connection uses the new one, and `previous.pem` is removed once a connection made with the new certificate was
+  accepted. Refusals: `unknown`, `revoked`, `expired` and `too_old` are remembered (`renew-state`, for `agora doctor`: the machine must join
+  again) and never retried; `superseded` is remembered the same way and logged as security relevant; `too_frequent` waits an hour; a hub
+  that cannot be reached, answers anything else or does not offer the capability is tried again with a growing wait (a minute, doubling,
+  at most an hour) and logged once per change. A certificate that has already ended is not asked about: only a new join helps.
+  A revoked or unknown certificate is refused at the TLS connection before any command, so the node sees a failed connection, not the reason.
 - **The hub's own certificate** is not a message: once at start and then daily the hub replaces its server certificate when fewer than 30 days
   remain (same names, same CA, a fresh key), rewrites `<hub dir>/server-cert.pem`, and new connections use the new one while open ones keep
   theirs (nodes pin the CA, not the certificate). The new certificate is switched on first; when `server-cert.pem` cannot be written afterwards the hub logs a warning and counts it, and keeps

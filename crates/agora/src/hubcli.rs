@@ -2310,6 +2310,11 @@ fn load_from(
         Err(e) if e.kind() == std::io::ErrorKind::TimedOut => return Err(e),
         Err(_) => None,
     };
+    // A stop in the middle of a certificate renewal (ADR-0085) left the certificate and key as two halves: finish it, or go back to the
+    // pair that was in use, before anything reads them. Only under the guard: without it a renewal may be running.
+    if _guard.is_some() {
+        agora_node::link_renewal::recover(&dir, &agora_node::link_renewal::Real);
+    }
     link_files(&dir, socket, read)
 }
 
@@ -2372,6 +2377,7 @@ fn link_files(
             mesh: None,
             devices: None,
             state_dir: None,
+            certs: None,
         },
     )))
 }

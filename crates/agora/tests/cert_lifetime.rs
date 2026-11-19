@@ -110,7 +110,7 @@ fn rig(
         hub: Arc::new(Hub::open(store).unwrap()),
         support: Support {
             generations: vec![1],
-            capabilities: vec!["terminal.raw".into()],
+            capabilities: vec!["terminal.raw".into(), "enroll.renew".into()],
             required: vec![],
         },
         ca: Some(ca),
@@ -181,6 +181,7 @@ impl Rig {
             mesh: None,
             devices: None,
             state_dir: None,
+            certs: None,
         };
         let n = DIALS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let sink = sink(&tmp(&format!("{}-{id}-{n}", self.tag)), id);
@@ -531,4 +532,368 @@ fn the_hubs_certificate_is_replaced_before_it_ends_and_a_new_connection_after_th
     let (_s2, _late) = rig.dial("late", addr);
     rig.wait_online("late");
     assert!(rig.online("early"));
+}
+
+// ---- ADR-0085 step 2: the node renews its own certificate ----
+
+use agora_node::cert_renew::{pair_matches, validity};
+use agora_node::link_renewal::{self, Outcome, Real, Renewer, Timing, PENDING, PREVIOUS};
+use agora_node::uplink_client::{renew, CertSource, LinkError, RenewError};
+
+/// Waits that keep a test quick; the product's are an hour (look), a minute (hub not known yet) and an hour (too frequent).
+fn fast() -> Timing {
+    Timing {
+        check_every: Duration::from_millis(200),
+        unknown_every: Duration::from_millis(100),
+        too_frequent: Duration::from_secs(3600),
+        retry_first: Duration::from_millis(100),
+        retry_max: Duration::from_millis(400),
+    }
+}
+
+type Ask = Box<dyn Fn(&HubLink, &str) -> Result<String, RenewError> + Send + Sync>;
+
+fn real_ask() -> Ask {
+    Box::new(renew)
+}
+
+/// A link folder for machine `id` as enrollment leaves it (a short path: socket paths are limited).
+fn link_folder(rig: &Rig, id: &str, addr: SocketAddr, tag: &str) -> PathBuf {
+    let m = rig.machines.iter().find(|m| m.id == id).unwrap();
+    let d = std::env::temp_dir().join(format!("al{}-{tag}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    for (name, text) in [
+        ("node-id", id.to_string()),
+        ("url", format!("wss://localhost:{}", addr.port())),
+        ("ca.pem", rig.ca_pem.clone()),
+        ("cert.pem", m.cert_pem.clone()),
+        ("key.pem", m.key_pem.clone()),
+    ] {
+        std::fs::write(d.join(name), text).unwrap();
+    }
+    d
+}
+
+fn renewer(dir: &Path, ask: Ask, clock_offset_secs: i64) -> Arc<Renewer> {
+    let r = Renewer::with_parts(
+        dir.to_path_buf(),
+        fast(),
+        || new_device_request().ok(),
+        || Ok(Box::new(()) as Box<dyn std::any::Any + Send>),
+        ask,
+        move || {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64
+                + clock_offset_secs
+        },
+        Arc::new(Real),
+    );
+    r.set_hub_offers(true);
+    r
+}
+
+fn file(d: &Path, n: &str) -> String {
+    std::fs::read_to_string(d.join(n)).unwrap_or_default()
+}
+
+fn one_pair(d: &Path) -> bool {
+    pair_matches(&file(d, "cert.pem"), &file(d, "key.pem"))
+}
+
+fn count(rig: &Rig, action: &str, node: &str) -> usize {
+    rig.audit_rows()
+        .iter()
+        .filter(|(a, n)| a == action && n == node)
+        .count()
+}
+
+fn wait_for(what: &str, mut ok: impl FnMut() -> bool) {
+    let end = Instant::now() + Duration::from_secs(30);
+    while !ok() {
+        assert!(Instant::now() < end, "{what}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// ADR-0085: a machine whose certificate lasts 3 seconds renews it by itself against a real hub, stays connected past the original
+/// end, and its next connection (made after the old certificate ended) uses the new certificate; the old pair is given up only after
+/// that connection was accepted.
+#[test]
+fn a_node_renews_its_own_short_certificate_and_stays_connected_past_the_original_end() {
+    let rig = rig("auto", None, SHORT, &[("m", true), ("control", false)]);
+    let addr = rig.listen_with(rig.acceptor.clone());
+    let dir = link_folder(&rig, "m", addr, "auto");
+    let original = file(&dir, "cert.pem");
+    let r = renewer(&dir, real_ask(), 0);
+    r.set_hub_offers(false);
+    let link = |cert: &str, key: &str| HubLink {
+        mesh_out: None,
+        url: format!("wss://localhost:{}", addr.port()),
+        ca_pem: rig.ca_pem.clone(),
+        cert_pem: cert.to_string(),
+        key_pem: key.to_string(),
+        commands: None,
+        grants: None,
+        mesh: None,
+        devices: None,
+        state_dir: None,
+        certs: Some(Arc::clone(&r) as Arc<dyn CertSource>),
+    };
+    let m = rig.machines.iter().find(|m| m.id == "m").unwrap();
+    let timer = link_renewal::spawn(Arc::clone(&r)).unwrap();
+    let sink1 = sink(&tmp("auto-sink1"), "m");
+    let first = spawn(Arc::clone(&sink1), link(&m.cert_pem, &m.key_pem)).unwrap();
+    rig.wait_online("m");
+    // The node learns from the hub's welcome that it handles renewals, then renews with no one asking.
+    // The last step of storing an answer is dropping the request: after it the folder is the new pair whole.
+    wait_for("the certificate was never renewed", || {
+        file(&dir, "cert.pem") != original && !dir.join(PENDING).exists()
+    });
+    assert!(one_pair(&dir), "the folder is not one pair");
+    let new_cert = file(&dir, "cert.pem");
+    assert!(
+        cert_not_after_secs(&new_cert).unwrap() > rig.ends_at + 24 * 3600,
+        "the new certificate lasts a normal lifetime"
+    );
+    assert!(
+        !dir.join(PENDING).exists(),
+        "the request stays after the answer was stored"
+    );
+    assert_eq!(count(&rig, "enroll.renew", "m"), 1);
+
+    rig.wait_past_expiry();
+    assert!(rig.online("m"), "an open connection is cut at the end");
+
+    // The first connection ends; a new one made with the original (ended) certificate in the link would be refused, so what connects
+    // is the pair the renewal stored, which the uplink reads before each dial.
+    drop(first);
+    wait_for("m never went offline", || !rig.online("m"));
+    let sink2 = sink(&tmp("auto-sink2"), "m");
+    let _second = spawn(Arc::clone(&sink2), link(&m.cert_pem, &m.key_pem)).unwrap();
+    rig.wait_online("m");
+    // Control: the original certificate itself is refused after its end (the hub accepts only the new one).
+    assert!(cert_not_after_secs(&m.cert_pem).unwrap() < now_secs());
+    // The pair before the renewal is given up once a connection with the new certificate was accepted.
+    wait_for("the old pair was kept after the new one connected", || {
+        !dir.join(PREVIOUS).exists()
+    });
+    assert_eq!(file(&dir, "cert.pem"), new_cert);
+    // Still exactly one renewal for the machine, however many looks the timer made.
+    assert_eq!(count(&rig, "enroll.renew", "m"), 1);
+    drop(timer);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
+}
+
+/// ADR-0085: the answer is lost (the process stops after the hub issued the certificate, before it was stored). The next start sends the
+/// SAME persisted request, the hub answers with the same certificate, and the machine ends with exactly one new certificate.
+#[test]
+fn a_restart_after_a_lost_answer_sends_the_same_request_and_gets_the_same_certificate() {
+    let rig = rig("lost", None, SHORT, &[("m", true)]);
+    let addr = rig.listen_with(rig.acceptor.clone());
+    let dir = link_folder(&rig, "m", addr, "lost");
+    let original = (file(&dir, "cert.pem"), file(&dir, "key.pem"));
+    let answers = Arc::new(std::sync::Mutex::new(Vec::<(String, String)>::new()));
+
+    // First life: the hub issues the certificate, the answer never reaches the files.
+    let a = Arc::clone(&answers);
+    let lost: Ask = Box::new(move |link, csr| {
+        let cert = renew(link, csr)?;
+        a.lock().unwrap().push((csr.to_string(), cert));
+        Err(RenewError::Link(LinkError::Closed))
+    });
+    let first = renewer(&dir, lost, 0);
+    assert_eq!(first.tick().0, Outcome::Failed);
+    assert!(dir.join(PENDING).exists(), "the request was not kept");
+    assert_eq!((file(&dir, "cert.pem"), file(&dir, "key.pem")), original);
+    drop(first);
+
+    // Second life (a restart): the same request, the same certificate.
+    let a = Arc::clone(&answers);
+    let again: Ask = Box::new(move |link, csr| {
+        let cert = renew(link, csr)?;
+        a.lock().unwrap().push((csr.to_string(), cert.clone()));
+        Ok(cert)
+    });
+    let second = renewer(&dir, again, 0);
+    assert_eq!(second.tick().0, Outcome::Renewed);
+    let answers = answers.lock().unwrap();
+    assert_eq!(answers.len(), 2);
+    assert_eq!(answers[0].0, answers[1].0, "a restart made another request");
+    assert_eq!(
+        answers[0].1, answers[1].1,
+        "the hub issued another certificate"
+    );
+    assert_eq!(file(&dir, "cert.pem").trim(), answers[1].1.trim());
+    assert!(one_pair(&dir));
+    assert!(!dir.join(PENDING).exists());
+    // The hub issued one certificate and sent it again; it did not issue a second.
+    assert_eq!(count(&rig, "enroll.renew", "m"), 1);
+    assert_eq!(count(&rig, "enroll.renew_resent", "m"), 1);
+
+    // And the machine connects with it after the original ended.
+    rig.wait_past_expiry();
+    let (_s, _h) = rig.dial_with("m", &file(&dir, "cert.pem"), &file(&dir, "key.pem"), addr);
+    rig.wait_online("m");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ADR-0085: what the hub refuses, over the wire, and what the node does about it.
+#[test]
+fn refusals_from_a_real_hub_are_remembered_never_looped_and_the_node_keeps_its_certificate() {
+    // Certificates last 10 minutes here (15 with the five before their start) so the test is not racing a 3 second end; the node's own
+    // clock is 400 seconds ahead, which puts them inside the last third.
+    let rig = rig(
+        "refuse",
+        None,
+        Duration::from_secs(600),
+        &[
+            ("sup", true),
+            ("freq", true),
+            ("gone", true),
+            ("control", true),
+        ],
+    );
+    let addr = rig.listen_with(rig.acceptor.clone());
+
+    // Superseded: a copy of the machine's certificate renewed already; this one is no longer the newest.
+    let dir = link_folder(&rig, "sup", addr, "sup");
+    rig.renew(addr, "sup").expect("the other holder renews");
+    let asked = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let a = Arc::clone(&asked);
+    let counted: Ask = Box::new(move |l, c| {
+        a.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        renew(l, c)
+    });
+    let r = renewer(&dir, counted, 400);
+    assert_eq!(r.tick().0, Outcome::Refused("superseded".into()));
+    for _ in 0..3 {
+        r.tick();
+    }
+    assert_eq!(
+        asked.load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "asked in a loop"
+    );
+    let ends = validity(&file(&dir, "cert.pem")).unwrap().1;
+    assert_eq!(link_renewal::state(&dir, ends).unwrap().code, "superseded");
+    assert!(r.log_lines().iter().any(|l| l.contains("SECURITY")));
+    assert!(!dir.join(PENDING).exists());
+    assert!(one_pair(&dir));
+
+    // Too frequent: the machine renewed a moment ago; its new certificate is due again only on the node's own clock.
+    let dir = link_folder(&rig, "freq", addr, "freq");
+    let first = renewer(&dir, real_ask(), 400);
+    assert_eq!(first.tick().0, Outcome::Renewed);
+    let r = renewer(&dir, real_ask(), 65 * 86_400);
+    let (outcome, wait) = r.tick();
+    assert_eq!(outcome, Outcome::Refused("too_frequent".into()));
+    assert_eq!(
+        wait,
+        Duration::from_secs(3600),
+        "waits the hour the hub asked for"
+    );
+    let ends = validity(&file(&dir, "cert.pem")).unwrap().1;
+    let s = link_renewal::state(&dir, ends).unwrap();
+    assert_eq!(s.code, "too_frequent");
+    assert!(s.retry_at > now_secs() + 3000);
+    assert!(one_pair(&dir));
+    // The request is kept for the hour that follows, not made anew.
+    assert!(dir.join(PENDING).exists());
+
+    // A revoked machine's connection is refused before any command: the node sees a failed connection, waits longer each time and
+    // keeps what it has. Control: the same hub, in the same test, renews another machine.
+    let dir = link_folder(&rig, "gone", addr, "gone");
+    agora_hub::enroll::Enrollment::new(rig.state.hub.store())
+        .revoke("gone", agora_hub::server::now_ms())
+        .unwrap();
+    let r = renewer(&dir, real_ask(), 400);
+    let waits: Vec<u128> = (0..4)
+        .map(|_| {
+            let (o, w) = r.tick();
+            assert_eq!(o, Outcome::Failed);
+            w.as_millis()
+        })
+        .collect();
+    assert_eq!(waits, [100, 200, 400, 400]);
+    assert!(one_pair(&dir));
+    assert_eq!(
+        file(&dir, "cert.pem"),
+        rig.machines
+            .iter()
+            .find(|m| m.id == "gone")
+            .unwrap()
+            .cert_pem
+    );
+    let control = link_folder(&rig, "control", addr, "ctl");
+    let c = renewer(&control, real_ask(), 400);
+    assert_eq!(c.tick().0, Outcome::Renewed);
+    for d in ["sup", "freq", "gone", "ctl"] {
+        let _ = std::fs::remove_dir_all(
+            std::env::temp_dir().join(format!("al{}-{d}", std::process::id())),
+        );
+    }
+}
+
+/// ADR-0085: an answer that is not for this machine, not for this key, or not from the pinned CA is rejected and the pair in use is
+/// kept whole (the hub being what it says is checked by the machine, not assumed).
+#[test]
+fn an_answer_for_another_node_or_key_or_ca_is_rejected_and_the_pair_in_use_is_kept() {
+    let rig = rig(
+        "wrong",
+        None,
+        Duration::from_secs(600),
+        &[("m", true), ("control", false)],
+    );
+    let addr = rig.listen_with(rig.acceptor.clone());
+    let ca = rig.state.ca.as_ref().unwrap();
+    let foreign = Ca::generate("another hub").unwrap();
+    for (name, how) in [("node", 0), ("key", 1), ("ca", 2)] {
+        let dir = link_folder(&rig, "m", addr, &format!("wrong-{name}"));
+        let before = (file(&dir, "cert.pem"), file(&dir, "key.pem"));
+        let ask: Ask = {
+            let (ca, foreign) = (
+                Ca::from_pem(ca.cert_pem(), &ca.key_pem()).unwrap(),
+                Ca::from_pem(foreign.cert_pem(), &foreign.key_pem()).unwrap(),
+            );
+            Box::new(move |_, csr| {
+                Ok(match how {
+                    0 => ca.issue_node("control", csr).unwrap().cert_pem,
+                    1 => {
+                        ca.issue_node("m", &new_device_request().unwrap().1)
+                            .unwrap()
+                            .cert_pem
+                    }
+                    _ => foreign.issue_node("m", csr).unwrap().cert_pem,
+                })
+            })
+        };
+        let r = renewer(&dir, ask, 400);
+        assert_eq!(r.tick().0, Outcome::Failed, "{name}");
+        assert_eq!(
+            (file(&dir, "cert.pem"), file(&dir, "key.pem")),
+            before,
+            "{name}"
+        );
+        assert!(one_pair(&dir), "{name}");
+        assert!(!dir.join(PREVIOUS).exists(), "{name}");
+        assert!(
+            dir.join(PENDING).exists(),
+            "{name}: the request is kept for the same answer again"
+        );
+        for line in r.log_lines() {
+            assert!(!line.contains("PRIVATE"), "{line}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    assert_eq!(count(&rig, "enroll.renew", "m"), 0);
 }

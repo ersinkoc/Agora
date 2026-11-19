@@ -661,7 +661,20 @@ fn node_run(say: &Say, o: &Opts) -> ExitCode {
         &[("socket", cfg.socket.display().to_string().into())],
     );
     // Connect to the hub in the background when enrolled. Agents never depend on it: events wait in the buffer.
+    let mut _renewal = None;
     let _uplink = link.and_then(|(_, mut l)| {
+        // ADR-0085: the certificate is renewed by the node itself when a third of its life is left, and the next connection uses the
+        // new one. A failure here changes nothing for the agents or the connection that is up.
+        let dir = hubcli::link_dir();
+        let renewer = agora_node::link_renewal::Renewer::new(
+            dir.clone(),
+            || agora_hub::ca::new_device_request().ok(),
+            move || {
+                hubcli::hold_link(&dir).map(|held| Box::new(held) as Box<dyn std::any::Any + Send>)
+            },
+        );
+        l.certs = Some(renewer.clone());
+        _renewal = agora_node::link_renewal::spawn(renewer).ok();
         // Messages for agents on other machines go through the hub connection (ADR-0031).
         let out = agora_node::uplink_client::MeshOut::new();
         node.mesh.set_remote(out.clone());
