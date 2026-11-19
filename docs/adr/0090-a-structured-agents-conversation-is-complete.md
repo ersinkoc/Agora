@@ -190,7 +190,8 @@ Everything is additive (ADR-0006): new enum values, new fields and new messages 
   Answers to the open questions are as proposed (1: 16 KiB kept in the ring; 4: queue of 8; 6: context and cost only).
 - Review of #779 fixed in the same PR: a mode or config option that skips permissions is also refused with `agent.option_unconfirmed`
   (it needs the user's confirmation as a launch option does; the schema has no field for it on `AgentSetMode` / `AgentSetConfig`, so these
-  are refused always until a signed `confirmed` field is added by an ADR); the classifier also reads descriptions, word order, `mode` /
+  are refused always until a signed `confirmed` field is added by an ADR; the web client's switch to a mode that acts freely is
+  unavailable meanwhile: a grant's signature covers command names and a time, not the mode, so it cannot count as the confirmation); the classifier also reads descriptions, word order, `mode` /
   `allow` / `execution` options, full-width text, and a boolean's protective value is never refused; the prompt queue is an explicit
   `Idle` / `Busy` state machine (failed send, `done` / `unknown`, stray `idle`, cancel timeout); no blocking adapter call is made under
   the supervisor's lock; control characters and escape sequences are stripped from entries; repeated final updates are rate limited and

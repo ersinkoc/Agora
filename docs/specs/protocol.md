@@ -872,7 +872,14 @@ forwards either to a node that did not offer it.
   not allow it, and otherwise with `agent.option_unconfirmed` (same `kind` and `option`): a launch option that skips needs the user's
   confirmation (ADR-0059) and so does a mode or a config option, but the schema has no field to carry it on `AgentSetMode` or
   `AgentSetConfig`, so the node can never be shown one and refuses these always. **Missing:** a `confirmed` field on those two commands,
-  signed like the launch's; it is a schema change and needs an ADR (`Supervisor::prepare_set_option`, `prepare_set_config`). The check is on the node, whatever
+  signed like the launch's; it is a schema change and needs an ADR (`Supervisor::prepare_set_option`, `prepare_set_config`).
+  **Switching a running agent to a mode that skips permissions from a client (the web `SessionBar`'s "acts freely" after its
+  confirmation dialog) is therefore temporarily unavailable** under every policy until that field exists. Why a verified signature
+  cannot stand in for it today: a grant (`docs/specs/protocol.md`, ADR-0041) is signed over the node id, a grant id, a scope, the
+  command NAMES (`agent.set_mode`) and an expiry of up to 8 hours; it names no mode, option or value, and the control dispatch (a
+  granted command reaches `execute` like any other, over the node's socket) cannot tell a granted call from an owner's. Taking it for
+  the user's confirmation would let one blanket grant switch any agent to any skipping mode for hours, which is weaker than a launch
+  (whose signature names each option, `directory-action-v4`). The `agent.launch` path with its signed options is unaffected. The check is on the node, whatever
   the window or the hub said. The node forgets an adapter's reported options when it restarts, so a stale list cannot decide a choice.
   Both commands are in the team-default `signed_commands` of a node with limited devices.
 - **Capabilities:** `chat.rich` (entries that change in place, thinking, permission entries, queued prompts, `AgentPromptResult`),
