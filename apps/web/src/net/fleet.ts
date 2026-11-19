@@ -147,10 +147,59 @@ export function fleetCounts(fleet: readonly AgentTileModel[], approvals: readonl
 
 export const matchesFilter = (a: AgentTileModel, f: FleetFilter | undefined): boolean => !f || bucketOf(a) === f;
 
-export type GroupBy = 'machine' | 'project';
+// How the fleet is grouped, in the console and in the agent list (one choice for both, remembered per device): by machine, by project (the
+// machine-independent project identity, so the same project on several machines is one group), by the kind of agent, or by state.
+export type GroupBy = 'machine' | 'project' | 'kind' | 'state';
+export const GROUP_BYS: readonly GroupBy[] = ['machine', 'project', 'kind', 'state'];
+
+// The kind of agent ("claude", "codex", "wrongstack"). The window names an agent `<kind> · <accent>` from the kind the node reported, so the
+// name carries it when the model does not; an agent without either has no kind.
+export function agentKindOf(a: AgentTileModel): string {
+  if (a.kind) return a.kind;
+  const at = a.name.indexOf(' · ');
+  return at > 0 ? a.name.slice(0, at) : '';
+}
+
+// The state group an agent sits in: what needs you, what works, what waits, what ended well, what ended badly.
+export type StateGroup = 'needs-you' | 'working' | 'idle' | 'finished' | 'failed';
+export const STATE_GROUPS: readonly StateGroup[] = ['needs-you', 'working', 'idle', 'finished', 'failed'];
+export function stateGroupOf(a: AgentTileModel): StateGroup {
+  const b = bucketOf(a);
+  if (b) return b;
+  return 'idle'; // idle, unknown and stopped-by-restart agents wait
+}
+
+// The project identity of an agent: the hub's project id, which is the same on every machine that has the project (it comes from the
+// repository's normalised remote and root commit, events.proto). An agent without one is only ever grouped with agents of the same machine
+// and folder name: two folders that merely share a name on different machines are different projects.
+// What an agent without a project name is called: the last part of its folder. Never empty unless the agent has no folder at all.
+export const folderNameOf = (a: AgentTileModel): string => a.project || a.workspace.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || '';
+export const projectKeyOf = (a: AgentTileModel): string => a.projectId ?? (folderNameOf(a) ? `local:${machineKey(a)}:${folderNameOf(a)}` : '');
+
+export interface ProjectSpread { machines: string[]; agents: number; changing: number }
+// For each project id: the machines it is open on (names, in first-seen order), how many live agents work in it, and on how many machines
+// agents have uncommitted changes in it. Only agents that carry the hub's project id count: nothing is guessed from folder names.
+export function projectSpread(fleet: readonly AgentTileModel[]): Map<string, ProjectSpread> {
+  const out = new Map<string, ProjectSpread & { changed: Set<string>; seen: Set<string> }>();
+  for (const a of fleet) {
+    if (!a.projectId || a.closed) continue;
+    let e = out.get(a.projectId);
+    if (!e) { e = { machines: [], agents: 0, changing: 0, changed: new Set(), seen: new Set() }; out.set(a.projectId, e); }
+    const m = machineKey(a);
+    if (!e.seen.has(m)) { e.seen.add(m); e.machines.push(a.machine || m); }
+    e.agents++;
+    if ((a.filesChanged ?? 0) > 0) e.changed.add(m);
+  }
+  const res = new Map<string, ProjectSpread>();
+  for (const [k, e] of out) res.set(k, { machines: e.machines, agents: e.agents, changing: e.changed.size });
+  return res;
+}
+// "Same project" is only said when the project really is on more than one machine.
+export const sharedAcross = (spread: ProjectSpread | undefined): spread is ProjectSpread => !!spread && spread.machines.length > 1;
 export interface FleetGroup {
   key: string;
   name: string;
+  labelKey?: string; // a group that is named by the window (a state), not by the data
   machine?: MachineModel; // for a machine group: its health, to say "offline" and since when
   online: boolean;
   agents: AgentTileModel[];
@@ -177,10 +226,18 @@ export function groupFleet(sorted: readonly AgentTileModel[], machines: readonly
       const key = machineKey(a);
       g = groups.get(key) ?? byMachineName.get(key);
       if (!g) { g = { key, name: a.machine || key, online: true, agents: [] }; groups.set(key, g); }
-    } else {
-      const key = a.projectId ?? (a.project ? `name:${a.project}` : '');
+    } else if (by === 'project') {
+      const key = projectKeyOf(a);
       g = groups.get(key);
-      if (!g) { g = { key, name: a.project || '', online: true, agents: [] }; groups.set(key, g); }
+      if (!g) { g = { key, name: folderNameOf(a), online: true, agents: [] }; groups.set(key, g); }
+    } else if (by === 'kind') {
+      const key = agentKindOf(a);
+      g = groups.get(key);
+      if (!g) { g = { key, name: key, online: true, agents: [] }; groups.set(key, g); }
+    } else {
+      const key = stateGroupOf(a);
+      g = groups.get(key);
+      if (!g) { g = { key, name: '', labelKey: `state-${key}`, online: true, agents: [] }; groups.set(key, g); }
     }
     g.agents.push(a);
   }
@@ -188,7 +245,9 @@ export function groupFleet(sorted: readonly AgentTileModel[], machines: readonly
   // Only "needs you" lifts a group; a group does not move because one of its agents started or stopped working (F861).
   const urgency = (g: FleetGroup) => (g.agents[0] && rankOf(g.agents[0]) === 0 ? 0 : 1);
   // The project without a name comes last whatever its agents are doing: it is a leftover, not a place.
-  const leftover = (g: FleetGroup) => by === 'project' && g.key === '';
+  const leftover = (g: FleetGroup) => (by === 'project' || by === 'kind') && g.name === '';
+  // States keep their fixed order (what needs you first); the others sort as before.
+  if (by === 'state') return list.sort((x, y) => STATE_GROUPS.indexOf(x.key as StateGroup) - STATE_GROUPS.indexOf(y.key as StateGroup));
   return list.sort((x, y) => Number(leftover(x)) - Number(leftover(y)) || Number(y.online) - Number(x.online) || urgency(x) - urgency(y) || x.name.localeCompare(y.name));
 }
 
@@ -237,3 +296,4 @@ export function span(ms: number): string {
   if (h < 24) return m % 60 ? `${h} h ${m % 60} min` : `${h} h`;
   return `${Math.floor(h / 24)} d`;
 }
+

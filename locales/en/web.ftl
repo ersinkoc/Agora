@@ -423,6 +423,8 @@ notice-adapter-turn_empty = The agent ended its turn without saying anything. It
 notice-adapter-agent_exited = The agent stopped (step { $stage }, exit code { $exit_code }). Its last output: { $stderr_tail }
 notice-adapter-agent_refused = The agent refused to start (step { $stage }, error { $rpc_code }): { $detail }
 notice-other = The agent reported something this window cannot show ({ $code }).
+session-header = Agent settings
+session-elapsed-hint = How long it has been running
 session-mode = Mode
 session-model = Model
 session-not-reported = Not reported
@@ -568,6 +570,10 @@ ide-copy-address = Copy address
 ide-tab-changes = Changes
 ide-tab-messages = Messages
 ide-tab-cost = Spent
+ide-more-tabs = More tabs
+ide-more-tabs-needs = a hidden tab needs you
+ide-more-tabs-failed = a hidden tab ended with an error
+ide-more-tabs-working = a hidden tab is working
 theme-label = Colour scheme
 theme-system = Follow the system
 ide-shared = Shared
@@ -677,6 +683,7 @@ start-option-forbidden = This machine does not let agents act without asking. Ch
 start-option-confined-only = This machine lets an agent act without asking only while it is confined to its folder, and it would not be here.
 start-options-unsupported = This machine is too old for start options. Update it, or choose "Ask before acting".
 agent-does-not-ask = Runs without asking
+agent-does-not-ask-short = Acts freely
 agent-does-not-ask-explain = Started so that it acts without asking you first
 start-option-unconfirmed = This machine says that option lets the agent act without asking, and this window did not ask you first. Nothing was started; open the start window again.
 start-option-invalid = This machine does not offer that start option. Nothing was started; open the start window again.
@@ -913,6 +920,20 @@ fleet-group-by = Group by
 fleet-group-machine = Machine
 fleet-group-project = Project
 fleet-no-project = No project
+fleet-group-kind = Agent
+fleet-group-state = State
+fleet-no-kind = Unknown agent
+fleet-same-project =
+    { $count ->
+        [one] Same project · { $count } machine
+       *[other] Same project · { $count } machines
+    }
+fleet-same-project-on = Open on { $machines }
+fleet-project-changing =
+    { $count ->
+        [one] Changes on { $count } machine in this project.
+       *[other] Agents on { $count } machines have changes in this project. Check that they are not editing the same files.
+    }
 fleet-offline-since = Offline. Last seen { $when }.
 fleet-offline-note = Agents keep running there; what they did shows up here when it reconnects.
 fleet-no-agents-here = No agents here yet.

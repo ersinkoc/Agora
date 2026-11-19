@@ -405,6 +405,8 @@ notice-adapter-turn_empty = Ajan hiçbir şey söylemeden sırasını bitirdi. S
 notice-adapter-agent_exited = Ajan durdu (adım { $stage }, çıkış kodu { $exit_code }). Son çıktısı: { $stderr_tail }
 notice-adapter-agent_refused = Ajan başlamayı reddetti (adım { $stage }, hata { $rpc_code }): { $detail }
 notice-other = Ajan bu pencerenin gösteremediği bir şey bildirdi ({ $code }).
+session-header = Ajan ayarları
+session-elapsed-hint = Ne kadar süredir çalışıyor
 session-mode = Mod
 session-model = Model
 session-not-reported = Bildirilmedi
@@ -550,6 +552,10 @@ ide-copy-address = Adresi kopyala
 ide-tab-changes = Değişiklikler
 ide-tab-messages = Mesajlar
 ide-tab-cost = Harcama
+ide-more-tabs = Diğer sekmeler
+ide-more-tabs-needs = gizli bir sekme sizi bekliyor
+ide-more-tabs-failed = gizli bir sekme hatayla bitti
+ide-more-tabs-working = gizli bir sekme çalışıyor
 theme-label = Renk düzeni
 theme-system = Sistemi izle
 ide-shared = Paylaşılan
@@ -659,6 +665,7 @@ start-option-forbidden = Bu makine ajanların sormadan çalışmasına izin verm
 start-option-confined-only = Bu makine bir ajanın sormadan çalışmasına yalnızca klasörüyle sınırlıyken izin veriyor; burada sınırlı olmazdı.
 start-options-unsupported = Bu makine başlatma seçenekleri için fazla eski. Güncelleyin ya da "Önce sorsun"u seçin.
 agent-does-not-ask = Onay istemeden çalışır
+agent-does-not-ask-short = Serbest
 agent-does-not-ask-explain = Size önce sormadan çalışacak şekilde başlatıldı
 start-option-unconfirmed = Bu makineye göre o seçenek ajanın sormadan çalışmasını sağlıyor ve bu pencere önce size sormadı. Hiçbir şey başlatılmadı; başlatma penceresini yeniden açın.
 start-option-invalid = Bu makine o başlatma seçeneğini sunmuyor. Hiçbir şey başlatılmadı; başlatma penceresini yeniden açın.
@@ -895,6 +902,20 @@ fleet-group-by = Gruplama
 fleet-group-machine = Makine
 fleet-group-project = Proje
 fleet-no-project = Projesiz
+fleet-group-kind = Ajan
+fleet-group-state = Durum
+fleet-no-kind = Bilinmeyen ajan
+fleet-same-project =
+    { $count ->
+        [one] Aynı proje · { $count } makine
+       *[other] Aynı proje · { $count } makine
+    }
+fleet-same-project-on = Şurada açık: { $machines }
+fleet-project-changing =
+    { $count ->
+        [one] Bu projede { $count } makinede değişiklik var.
+       *[other] Bu projede { $count } makinedeki ajanların değişiklikleri var. Aynı dosyaları düzenlemediklerinden emin olun.
+    }
 fleet-offline-since = Çevrimdışı. Son görülme: { $when }.
 fleet-offline-note = Ajanlar orada çalışmaya devam eder; yaptıkları makine yeniden bağlanınca burada görünür.
 fleet-no-agents-here = Burada henüz ajan yok.

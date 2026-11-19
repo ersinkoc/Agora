@@ -8,9 +8,16 @@ import { bytesLabel, type MachineModel } from '../net/view';
 import { ago } from '../net/time';
 import { Icon } from './Icon';
 import { StateMark } from './StateBadge';
+import { GroupByControl, groupTitle } from './GroupByControl';
+import { ProjectChip, ProjectHint } from './ProjectMark';
+import { groupFleet, sharedAcross, sortByUrgency, type GroupBy, type ProjectSpread } from '../net/fleet';
 
 // The left panel: machine → folder → agent, like a file explorer. Opening an agent puts it in a tab.
-export function Explorer({ fleet, machines, open, current, projects, project, onProject, onToggle, onStart, onCollapse, onDismiss, everyone, forgetError, onResume, resuming, resumeError }: {
+export function Explorer({ by, onBy, spread, fleet, machines, open, current, projects, project, onProject, onToggle, onStart, onCollapse, onDismiss, everyone, forgetError, onResume, resuming, resumeError }: {
+  // How the list is grouped (one choice with the fleet console) and where each project is open (net/fleet.ts `projectSpread`).
+  by: GroupBy;
+  onBy: (by: GroupBy) => void;
+  spread: ReadonlyMap<string, ProjectSpread>;
   fleet: readonly AgentTileModel[];
   machines: readonly MachineModel[];
   open: readonly string[];
@@ -65,7 +72,37 @@ export function Explorer({ fleet, machines, open, current, projects, project, on
     }
     return by;
   }, [fleet, filter]);
+  // Grouped by project, agent or state: flat groups of live agents, most urgent first; the machine moves into each row.
+  const flat = useMemo(() => {
+    if (by === 'machine') return [];
+    const q = filter.trim().toLowerCase();
+    const live = fleet.filter((a) => (!a.closed || !!a.interrupted) && (!q || [a.name, a.id, a.machine, machineKey(a), a.project ?? '', a.workspace, a.branch ?? ''].some((x) => x.toLowerCase().includes(q))));
+    return groupFleet(sortByUrgency(live), [], by);
+  }, [fleet, filter, by]);
   const now = Date.now();
+  // ADR-0060: an agent its machine's restart interrupted, with Resume or Start again; shown in every grouping.
+  const stoppedRow = (a: AgentTileModel) => <li key={a.id}>
+                <div className="flex items-center">
+                  <button type="button" className="ide-row flex-1 opacity-80" aria-current={current === a.id ? 'true' : undefined} aria-pressed={open.includes(a.id)} onClick={() => onToggle(a.id)} title={`${a.machine} · ${a.workspace}`}>
+                    <span className="[&_.state__mark]:!animate-none"><StateMark state="finished" /></span>
+                    <span className="min-w-0 flex-1 truncate">{a.name}</span>
+                  </button>
+                  {onResume && <button type="button" className="ide-chip me-1 flex-none hover:text-ink" disabled={resuming === a.id} onClick={() => onResume(a, a.interrupted?.stillRunning ? 'stop' : a.interrupted?.resumable ? 'resume' : 'again')}>
+                    {t(a.interrupted?.stillRunning ? 'action-stop-old' : a.interrupted?.resumable ? 'action-resume' : 'action-start-again')}
+                  </button>}
+                </div>
+                {resumeError?.id === a.id && <p role="alert" className="m-0 px-2 pb-1 text-xs text-needs-you">{t(resumeReasonKey(resumeError.code))}</p>}
+              </li>;
+  const agentRow = (a: AgentTileModel, depth: number, withMachine: boolean) => <li key={a.id} className={depth === 0 ? undefined : depth === 1 ? 'ms-3' : 'ms-6'}>
+    <button type="button" className="ide-row" aria-current={current === a.id ? 'true' : undefined} aria-pressed={open.includes(a.id)} onClick={() => onToggle(a.id)} title={`${a.machine} · ${a.workspace}${a.branch ? ` · ${a.branch}` : ''}${a.parentName ? ` · ${t('helper-started-by', { name: a.parentName })}` : ''}`}>
+      <StateMark state={a.state} />
+      <span className="min-w-0 flex-1 truncate">{a.name}{a.parentName && <span className="ms-1.5 text-xs text-muted">{t('helper-started-by', { name: a.parentName })}</span>}{withMachine && <span className="ms-1.5 text-xs text-muted">{a.machine}</span>}</span>
+      <NoAskBadge agent={a} compact nested />
+      {(by === 'kind' || by === 'state') && a.projectId && sharedAcross(spread.get(a.projectId)) && <ProjectChip spread={spread.get(a.projectId) as ProjectSpread} compact />}
+      {a.shared && <span className="flex-none text-xs text-muted" title={t('workspace-shared')}>{t('ide-shared')}</span>}
+      {(a.filesChanged ?? 0) > 0 && <span className="font-mono text-xs text-needs-you">{a.filesChanged}</span>}
+    </button>
+  </li>;
 
   return <aside className="flex min-h-0 flex-col border-line bg-surface-1 lg:border-e" aria-label={t('console-agents')}>
     <div className="flex h-9 flex-none items-center gap-1 border-b border-line ps-3 pe-1">
@@ -83,9 +120,31 @@ export function Explorer({ fleet, machines, open, current, projects, project, on
     {projects.length > 0 && <label className="flex-none px-2 pb-2 text-xs text-muted"><span className="sr-only">{t('filter-project')}</span>
       <select value={project} onChange={e => onProject(e.target.value)} className="w-full rounded-xs py-1 text-[0.8125rem]"><option value="">{t('filter-all-projects')}</option>{projects.map(([id, p]) => <option key={id} value={id}>{t('filter-project-machines', { name: p.name, count: p.machines.size })}</option>)}</select>
     </label>}
+    <div className="flex-none px-2 pb-2"><GroupByControl by={by} onChange={onBy} /></div>
     <nav className="min-h-0 flex-1 overflow-y-auto px-1 pb-3">
       {machines.length === 0 && fleet.length === 0 && <p className="muted px-3 py-2">{t('machines-empty')}</p>}
-      {[...tree.entries()].map(([machine, folders]) => {
+      {by !== 'machine' && flat.map((g) => {
+        const key = `~${by}:${g.key}`;
+        const sp = by === 'project' ? spread.get(g.key) : undefined;
+        const title = groupTitle(g, by);
+        return <section key={key} data-group={g.key} className="mb-0.5">
+          <button type="button" className="ide-row font-medium" aria-expanded={!folded.has(key)} onClick={() => fold(key)}>
+            <Icon name="chevron" className={`size-3.5 text-muted transition-transform duration-150 ${folded.has(key) ? 'rtl:rotate-180' : 'rotate-90'}`} />
+            <span className="min-w-0 flex-1 truncate">{title}</span>
+            {sharedAcross(sp) && <ProjectChip spread={sp} compact />}
+            <span className="text-xs font-normal text-muted">{g.agents.length}</span>
+          </button>
+          {!folded.has(key) && <div className="ms-3 border-s border-line ps-1">
+            {sp && <div className="px-2 pb-0.5"><ProjectHint spread={sp} /></div>}
+            <ul className="m-0 list-none p-0">{g.agents.filter((a) => !a.closed).map((a) => agentRow(a, 0, true))}</ul>
+            {g.agents.some((a) => a.closed) && <div role="group" aria-label={t('interrupted-section')}>
+              <div className="px-2 pt-1.5 pb-0.5 text-xs text-muted" title={t('interrupted-hint')}>{t('interrupted-section')}</div>
+              <ul className="m-0 list-none p-0">{g.agents.filter((a) => a.closed).map(stoppedRow)}</ul>
+            </div>}
+          </div>}
+        </section>;
+      })}
+      {by === 'machine' && [...tree.entries()].map(([machine, folders]) => {
         const m = machines.find(x => x.id === machine) ?? machines.find(x => x.name === machine);
         const count = [...folders.values()].reduce((n, l) => n + l.length, 0);
         const stopped = interrupted.get(machine) ?? [];
@@ -107,34 +166,15 @@ export function Explorer({ fleet, machines, open, current, projects, project, on
             {onStart && m?.online && <button type="button" className="ide-iconbtn size-6 opacity-0 focus-visible:opacity-100 group-hover:opacity-100 [@media(hover:none)]:opacity-100" onClick={() => onStart(machine)} aria-label={t('ide-add-here', { machine: name })} title={t('ide-add-here', { machine: name })}><Icon name="plus" className="size-3.5" /></button>}
           </div>
           {!closed && [...folders.entries()].map(([folder, list]) => <div key={folder} className="ms-3 border-s border-line ps-1">
-            <div className="flex items-center gap-1.5 px-2 pt-1.5 pb-0.5 text-xs text-muted"><Icon name="folder" className="size-3.5" /><span className="truncate">{list[0]?.project || folder}</span></div>
+            <div className="flex items-center gap-1.5 px-2 pt-1.5 pb-0.5 text-xs text-muted"><Icon name="folder" className="size-3.5" /><span className="truncate">{list[0]?.project || folder}</span>{(() => { const sp = list[0]?.projectId ? spread.get(list[0].projectId) : undefined; return sharedAcross(sp) ? <ProjectChip spread={sp} compact /> : null; })()}</div>
             <ul className="m-0 list-none p-0">
-              {helperTree(list).map(({ agent: a, depth }) => <li key={a.id} className={depth === 0 ? undefined : depth === 1 ? 'ms-3' : 'ms-6'}>
-                <button type="button" className="ide-row" aria-current={current === a.id ? 'true' : undefined} aria-pressed={open.includes(a.id)} onClick={() => onToggle(a.id)} title={`${a.machine} · ${a.workspace}${a.branch ? ` · ${a.branch}` : ''}${a.parentName ? ` · ${t('helper-started-by', { name: a.parentName })}` : ''}`}>
-                  <StateMark state={a.state} />
-                  <span className="min-w-0 flex-1 truncate">{a.name}{a.parentName && <span className="ms-1.5 text-xs text-muted">{t('helper-started-by', { name: a.parentName })}</span>}</span>
-                  <NoAskBadge agent={a} compact />
-                  {a.shared && <span className="flex-none text-xs text-muted" title={t('workspace-shared')}>{t('ide-shared')}</span>}
-                  {(a.filesChanged ?? 0) > 0 && <span className="font-mono text-xs text-needs-you">{a.filesChanged}</span>}
-                </button>
-              </li>)}
+              {helperTree(list).map(({ agent: a, depth }) => agentRow(a, depth, false))}
             </ul>
           </div>)}
           {!closed && stopped.length > 0 && <div className="ms-3 border-s border-line ps-1" role="group" aria-label={t('interrupted-section')}>
             <div className="px-2 pt-1.5 pb-0.5 text-xs text-muted" title={t('interrupted-hint')}>{t('interrupted-section')}</div>
             <ul className="m-0 list-none p-0">
-              {stopped.map((a) => <li key={a.id}>
-                <div className="flex items-center">
-                  <button type="button" className="ide-row flex-1 opacity-80" aria-current={current === a.id ? 'true' : undefined} aria-pressed={open.includes(a.id)} onClick={() => onToggle(a.id)} title={`${a.machine} · ${a.workspace}`}>
-                    <span className="[&_.state__mark]:!animate-none"><StateMark state="finished" /></span>
-                    <span className="min-w-0 flex-1 truncate">{a.name}</span>
-                  </button>
-                  {onResume && <button type="button" className="ide-chip me-1 flex-none hover:text-ink" disabled={resuming === a.id} onClick={() => onResume(a, a.interrupted?.stillRunning ? 'stop' : a.interrupted?.resumable ? 'resume' : 'again')}>
-                    {t(a.interrupted?.stillRunning ? 'action-stop-old' : a.interrupted?.resumable ? 'action-resume' : 'action-start-again')}
-                  </button>}
-                </div>
-                {resumeError?.id === a.id && <p role="alert" className="m-0 px-2 pb-1 text-xs text-needs-you">{t(resumeReasonKey(resumeError.code))}</p>}
-              </li>)}
+              {stopped.map(stoppedRow)}
             </ul>
           </div>}
         </section>;
@@ -159,7 +199,7 @@ export function Explorer({ fleet, machines, open, current, projects, project, on
           </li>)}
         </ul>}
       </section>}
-      {fleet.length > 0 && tree.size === 0 && closed.length === 0 && <p className="muted px-3 py-2">{t('filter-none')}</p>}
+      {fleet.length > 0 && (by === 'machine' ? tree.size === 0 : flat.length === 0) && closed.length === 0 && <p className="muted px-3 py-2">{t('filter-none')}</p>}
       {fleet.length === 0 && machines.length > 0 && <p className="muted px-3 py-2">{t('fleet-empty')}</p>}
     </nav>
   </aside>;

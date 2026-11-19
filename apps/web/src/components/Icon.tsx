@@ -35,6 +35,16 @@ const PATHS = {
   move: 'M2.5 8h10M9.5 5l3 3-3 3',
   think: 'M6 12.5h4M6.5 14h3M8 2a4 4 0 0 0-2.3 7.3c.5.4.8.9.8 1.5V11h3v-.2c0-.6.3-1.1.8-1.5A4 4 0 0 0 8 2z',
   step: 'M8 10a2 2 0 1 0 0-4 2 2 0 0 0 0 4z',
+  // The right panel's rail: what needs you, what changed, the shared board, messages, what was spent; plus a check, a down chevron, a clock.
+  bell: 'M4 11V7a4 4 0 0 1 8 0v4l1 1.5H3zM6.5 13.5a1.5 1.5 0 0 0 3 0',
+  diff: 'M5 2.5v7M5 12.5a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3zM11 13.5V6.5M11 3.5a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3zM8 4.5h-1M7.5 4.5L9 3M7.5 4.5L9 6',
+  board: 'M2.5 3h3.5v10H2.5zM6.5 3H10v6H6.5zM10.5 3H14v8h-3.5z',
+  chat: 'M2.5 3.5h11v7h-6l-3 2.5v-2.5h-2z',
+  coin: 'M8 14a6 6 0 1 0 0-12 6 6 0 0 0 0 12zM9.8 6.2c-.3-.7-1-1-1.8-1-1 0-1.8.5-1.8 1.3 0 1.8 3.8.8 3.8 2.6 0 .8-.8 1.4-1.9 1.4-.9 0-1.6-.4-1.9-1.1M8 4v1.2M8 10.8V12',
+  warn: 'M8 2.5l6 10.5H2zM8 6.5v3M8 11.2v.1',
+  check: 'M3.5 8.5l3 3 6-7',
+  chevronDown: 'M4 6l4 4 4-4',
+  clock: 'M8 14a6 6 0 1 0 0-12 6 6 0 0 0 0 12zM8 4.5V8l2.3 1.4',
 } as const;
 export type IconName = keyof typeof PATHS;
 

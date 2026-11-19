@@ -9,6 +9,8 @@ export interface MenuItem {
   checked?: boolean;
   disabled?: boolean;
   divider?: boolean; // a line above this item
+  lead?: ReactNode; // a mark before the label (a state)
+  hint?: string; // quiet words after the label (the state, in words)
   tile?: ReactNode; // drawn as a tile in a grid with the neighbouring tiles (a picture; the label is its name for tooltip and screen readers)
 }
 
@@ -113,8 +115,10 @@ export function Menu({ label, items, children, className = 'ide-iconbtn', align 
                 data-index={i} disabled={item.disabled} className="ide-row justify-between disabled:opacity-40" onClick={() => choose(item)}>
                 <span className="flex min-w-0 items-center gap-2">
                   {item.checked !== undefined && <span aria-hidden className={`size-1.5 flex-none rounded-full ${item.checked ? 'bg-accent' : ''}`} />}
+                  {item.lead}
                   <span className="truncate">{item.label}</span>
                 </span>
+                {item.hint && <span className="flex-none text-xs text-muted">{item.hint}</span>}
                 {item.items && <Icon name="chevron" className="size-3 rtl:rotate-180" />}
               </button>
             </div>
