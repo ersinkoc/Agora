@@ -36,6 +36,7 @@ import { loadAudit } from './net/audit';
 import { agentTarget } from './components/sessionChoice';
 import { usableId } from './components/launchChoice';
 import { launchSettingsField } from './components/launchSettings';
+import { rememberStarted } from './components/launchMemory';
 import { PhoneAgent, PhoneHome, PhoneTheme, usePhone } from './phone/Phone';
 import { approvalRedirect, phoneScreen } from './phone/nav';
 import { AttentionLayer } from './components/AttentionLayer';
@@ -148,6 +149,7 @@ export function App() {
       const ok = await api.command(node, { agentLaunch: { path: info.path, projectId: info.projectId, kind, separateWorktree, acceptIdentityChange, authorization, launchOptions: launch.ids, confirmedLaunchOptions: launch.confirmed, ...launchSettingsField(launch.settings) } });
       const id = ok.agentLaunch?.agentId;
       setStarting(false);
+      if (id) rememberStarted(`${node}/${id}`, launch.settings);
       if (id) window.location.hash = `#/agent/${encodeURIComponent(`${node}/${id}`)}`;
       return undefined;
     } catch (e) {
