@@ -206,6 +206,9 @@ pub(crate) fn named_node(body: &Body) -> Result<Option<&str>, &'static str> {
         | Body::AgentUsageReported(_)
         | Body::AgentExited(_)
         | Body::AgentSessionOptions(_)
+        // ADR-0090: stored and relayed like the options above; no node says them yet.
+        | Body::AgentSessionConfig(_)
+        | Body::AgentCommands(_)
         | Body::AgentInterrupted(_)
         | Body::TerminalTitleChanged(_)
         | Body::TerminalClosed(_)
@@ -577,6 +580,8 @@ impl View {
                 }
             }
             Body::AgentForgotten(_) => {}
+            // ADR-0090: the hub keeps nothing of them in its view yet (a later step puts the last report in the snapshot).
+            Body::AgentSessionConfig(_) | Body::AgentCommands(_) => {}
             Body::AgentExited(e) => {
                 if let Some(a) = self.agents.get_mut(&q(&e.agent_id)) {
                     a.running = false;

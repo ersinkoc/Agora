@@ -106,4 +106,6 @@ preview-limit = Bu makine izin verilen en çok önizlemeye ulaştı ({ $limit })
 preview-expired = { $forward_id } önizlemesi sona erdi. Devam etmek için yeniden açın.
 preview-unknown = Bu makinede { $forward_id } adlı bir önizleme yok.
 preview-unavailable = Önizleme bu kurulumda çalışmıyor ({ $reason }). Hub üzerinde kendine ait bir adres gerekir.
+agent-option_unknown = Ajanın bu değerle { $id } adlı bir ayarı yok.
+agent-queue_full = Bu ajan için zaten { $limit } mesaj bekliyor. Ajanın bitirmesini bekleyin ya da geçerli turunu durdurun.
 internal = Bir şeyler ters gitti. Olay numarası: { $incident_id }.

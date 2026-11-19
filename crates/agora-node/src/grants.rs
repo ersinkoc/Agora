@@ -79,6 +79,10 @@ impl SignedCommands {
                 "agent.prompt",
                 "agent.set_mode",
                 "agent.set_model",
+                // ADR-0090: not handled by any node yet; listed so a limited device's grant covers them the day it is (a MODE-category
+                // option is a mode switch).
+                "agent.set_config",
+                "agent.cancel_turn",
                 "terminal.open",
                 "terminal.input",
                 "files.write",
@@ -166,6 +170,8 @@ fn subject(c: &Cmd) -> Subject {
         Cmd::AgentPrompt(a) => s.agent = Some(a.agent_id.clone()),
         Cmd::AgentSetMode(a) => s.agent = Some(a.agent_id.clone()),
         Cmd::AgentSetModel(a) => s.agent = Some(a.agent_id.clone()),
+        Cmd::AgentSetConfig(a) => s.agent = Some(a.agent_id.clone()),
+        Cmd::AgentCancelTurn(a) => s.agent = Some(a.agent_id.clone()),
         Cmd::TerminalInput(t) => {
             s.agent = agent_of_terminal(&t.terminal_id).map(|a| a.as_str().to_string());
         }
@@ -1012,6 +1018,10 @@ mod tests {
             "agent.start",
             "agent.stop",
             "agent.prompt",
+            "agent.set_mode",
+            "agent.set_model",
+            "agent.set_config",
+            "agent.cancel_turn",
             "terminal.input",
             "files.write",
             "worktree.remove",

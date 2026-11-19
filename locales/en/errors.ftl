@@ -107,4 +107,6 @@ preview-limit = This machine already has the most previews it allows ({ $limit }
 preview-expired = The preview { $forward_id } has ended. Open it again to keep going.
 preview-unknown = There is no preview { $forward_id } on this machine.
 preview-unavailable = Previews do not work in this setup ({ $reason }). They need an address of their own on the hub.
+agent-option_unknown = The agent has no setting { $id } with that value.
+agent-queue_full = { $limit } messages are already waiting for this agent. Wait for it to finish or stop its current turn.
 internal = Something went wrong. Reference: { $incident_id }.

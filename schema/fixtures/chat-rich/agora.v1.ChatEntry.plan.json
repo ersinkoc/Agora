@@ -1,0 +1,19 @@
+{
+  "entryId": "8",
+  "atMs": "1700000001000",
+  "role": "CHAT_ROLE_AGENT",
+  "kind": "CHAT_KIND_PLAN",
+  "text": "read the code\nwrite the test",
+  "planSteps": [
+    {
+      "text": "read the code",
+      "status": "TOOL_STATUS_COMPLETED",
+      "priority": "PLAN_PRIORITY_HIGH"
+    },
+    {
+      "text": "write the test",
+      "status": "TOOL_STATUS_IN_PROGRESS",
+      "priority": "PLAN_PRIORITY_MEDIUM"
+    }
+  ]
+}

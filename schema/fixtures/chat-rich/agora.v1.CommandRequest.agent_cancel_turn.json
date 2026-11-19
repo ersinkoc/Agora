@@ -1,0 +1,9 @@
+{
+  "requestId": "r2",
+  "idempotencyKey": "k2",
+  "targetNode": "n1",
+  "agentCancelTurn": {
+    "agentId": "agent-1",
+    "dropQueue": true
+  }
+}

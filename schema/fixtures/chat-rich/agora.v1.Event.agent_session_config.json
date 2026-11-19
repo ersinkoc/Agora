@@ -1,0 +1,22 @@
+{
+  "producerId": "n1",
+  "seq": "40",
+  "atMs": "1700000005000",
+  "agentSessionConfig": {
+    "agentId": "agent-1",
+    "options": [
+      {
+        "id": "effort",
+        "name": "Reasoning effort",
+        "category": "SESSION_CONFIG_CATEGORY_THOUGHT_LEVEL",
+        "type": "SESSION_CONFIG_TYPE_SELECT",
+        "current": "medium",
+        "choices": [
+          { "id": "low", "name": "Low" },
+          { "id": "medium", "name": "Medium" },
+          { "id": "high", "name": "High" }
+        ]
+      }
+    ]
+  }
+}

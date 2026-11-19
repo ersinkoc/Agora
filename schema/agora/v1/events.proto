@@ -44,6 +44,10 @@ message Event {
     AgentSessionOptions agent_session_options = 37;
     // ADR-0060: an agent that was running when the node stopped, found in the node's session ledger after it started again.
     AgentInterrupted agent_interrupted = 38;
+    // ADR-0090: the options of the session the user may change (effort among them); replaces the previous report.
+    AgentSessionConfig agent_session_config = 39;
+    // ADR-0090: the slash commands the agent offers; replaces the previous list.
+    AgentCommands agent_commands = 66;
     // terminal
     TerminalOpened terminal_opened = 40;
     TerminalTitleChanged terminal_title_changed = 41;
@@ -198,6 +202,27 @@ message AgentSessionOptions {
   repeated SessionOption models = 3;
   string current_mode = 4;
   string current_model = 5;
+}
+
+// ADR-0090: replaces the previous report for this agent (at most 64 options of 64 choices). `AgentSessionOptions` is still sent
+// for the modes and models an agent offers, built from these when the agent gives them.
+message AgentSessionConfig {
+  string agent_id = 1;
+  repeated SessionConfigOption options = 2;
+}
+
+// ADR-0090: one slash command (ACP `AvailableCommand`). Choosing it sends the ordinary prompt text `/name args` through `AgentPrompt`.
+message AgentCommand {
+  string name = 1;
+  string description = 2;
+  // What the command takes after its name, as the agent describes it; empty when it takes nothing.
+  string input_hint = 3;
+}
+
+// ADR-0090: replaces the previous list for this agent (at most 100 commands).
+message AgentCommands {
+  string agent_id = 1;
+  repeated AgentCommand commands = 2;
 }
 
 message AgentExited {

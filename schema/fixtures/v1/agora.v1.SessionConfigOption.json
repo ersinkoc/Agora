@@ -1,0 +1,23 @@
+{
+  "id": "effort",
+  "name": "Reasoning effort",
+  "description": "How long the agent thinks before it answers",
+  "category": "SESSION_CONFIG_CATEGORY_THOUGHT_LEVEL",
+  "type": "SESSION_CONFIG_TYPE_SELECT",
+  "current": "medium",
+  "choices": [
+    {
+      "id": "low",
+      "name": "Low"
+    },
+    {
+      "id": "medium",
+      "name": "Medium"
+    },
+    {
+      "id": "high",
+      "name": "High",
+      "description": "Slower, more thorough"
+    }
+  ]
+}

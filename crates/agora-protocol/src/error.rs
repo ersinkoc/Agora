@@ -103,6 +103,8 @@ pub enum ErrorCode {
     PreviewExpired,
     PreviewUnknown,
     PreviewUnavailable,
+    AgentOptionUnknown,
+    AgentQueueFull,
     Internal,
     /// A code this build does not know (sent by a newer peer).
     Unknown(String),
@@ -200,6 +202,8 @@ impl ErrorCode {
         ErrorCode::PreviewExpired,
         ErrorCode::PreviewUnknown,
         ErrorCode::PreviewUnavailable,
+        ErrorCode::AgentOptionUnknown,
+        ErrorCode::AgentQueueFull,
         ErrorCode::Internal,
     ];
 
@@ -294,6 +298,8 @@ impl ErrorCode {
             ErrorCode::PreviewExpired => "preview.expired",
             ErrorCode::PreviewUnknown => "preview.unknown",
             ErrorCode::PreviewUnavailable => "preview.unavailable",
+            ErrorCode::AgentOptionUnknown => "agent.option_unknown",
+            ErrorCode::AgentQueueFull => "agent.queue_full",
             ErrorCode::Internal => "internal",
             ErrorCode::Unknown(s) => s,
         }
@@ -400,6 +406,8 @@ impl ErrorCode {
             ErrorCode::PreviewExpired => &["forward_id"],
             ErrorCode::PreviewUnknown => &["forward_id"],
             ErrorCode::PreviewUnavailable => &["reason"],
+            ErrorCode::AgentOptionUnknown => &["id"],
+            ErrorCode::AgentQueueFull => &["limit"],
             ErrorCode::Internal => &["incident_id"],
             ErrorCode::Unknown(_) => &[],
         }

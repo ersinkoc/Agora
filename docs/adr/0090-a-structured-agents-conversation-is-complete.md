@@ -166,3 +166,14 @@ Everything is additive (ADR-0006): new enum values, new fields and new messages 
 6. Web, in slices: tool cards and status; thinking and plan; Stop turn and queue; model and effort picker; `/` commands; usage line. Screenshots in both themes.
 7. TUI: the same views as far as they fit (can follow).
 8. Docs with each PR: `docs/specs/*`, `locales/en`, ADR status when built.
+
+## Status of the build
+- Step 1 (real-agent fixtures): not done; the maintainer's to approve.
+- Step 2 (schema and codegen): done in PR #771, schema only: `CommandRequest` 106 (`AgentSetConfig`) and 107 (`AgentCancelTurn`), `CommandOk` 29
+  (`AgentPromptResult`), `Event` 39 (`AgentSessionConfig`) and 66 (`AgentCommands`), `ChatEntry` fields 9-20, `ChatKind` 6 and 7, the errors
+  `agent.option_unknown` and `agent.queue_full`, golden fixtures (`schema/fixtures/chat-rich/` for the new fields and oneof arms). No capability is
+  advertised by any build; a node answers both commands with `protocol.capability_missing` and the hub never forwards them. Spec: `docs/specs/protocol.md`.
+- Same PR, node: a mode that skips permissions (`AgentSetMode`) now follows the node's `skip_permissions` policy (`agent.option_forbidden`); and
+  `agent.set_config` / `agent.cancel_turn` are in the team-default `signed_commands`.
+- Steps 3 to 8: not started.
+

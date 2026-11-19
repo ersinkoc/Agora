@@ -811,3 +811,46 @@ either as "previews are not available here" and never assumes an open worked fro
   NUL bytes cannot be shifted between the node and the nonce).
 - **Errors**: `preview.port_refused` (`port`, `reason`), `preview.limit` (`limit`), `preview.expired` (`forward_id`),
   `preview.unknown` (`forward_id`), `preview.unavailable` (`reason`); see `error-codes.md`.
+
+### A structured agent's conversation (ADR-0090, schema only)
+
+All additions; nothing published changed. **Schema only:** no node, bridge or window sends or reads these yet (build steps 3 to 7 of the
+ADR), and no capability below is advertised by any build. A node refuses `AgentSetConfig` and `AgentCancelTurn` with
+`protocol.capability_missing`, and the hub never forwards either to a node that did not offer its capability.
+
+- **Chat entries** (`ChatEntry`, `schema/agora/v1/commands.proto`). New `ChatKind` values `CHAT_KIND_THOUGHT` (6, the agent's thinking in
+  `text`) and `CHAT_KIND_PERMISSION` (7, a marker). New fields: `call_id` (9), `tool_kind` (10, `ToolKind`, the ACP names), `status` (11,
+  `ToolStatus`), `paths` (12, `ToolLocation { path, line }`), `output` (13) and `output_truncated` (14), `started_ms` (15) and `ended_ms`
+  (16, node clock; the duration is their difference, `ended_ms` is 0 while the call runs), `plan_steps` (17, `PlanStep { text, status,
+  priority }`), `queued` (18, a user entry waiting behind a turn), `approval_id` (19) and `permission_outcome` (20, `PermissionOutcome`).
+  `text` keeps its old meaning for every kind (tool name and arguments as JSON; plan lines joined by `"\n"`), so an old client still reads a
+  complete conversation. Unknown kinds and enum values read as `UNSPECIFIED`.
+- **An entry changes in place.** A tool call and a plan are ONE entry whose later versions carry the same `entry_id`. A client that knows the
+  node's capability `chat.rich` replaces the entry it holds; a client without it ignores the repeat (ADR-0038) and keeps the first version.
+  The existing fixtures are not touched: the new fields have fixtures of their own in `schema/fixtures/chat-rich/`.
+- **Events.** `AgentSessionConfig` (`Event` field 39: `agent_id`, `options[]` of `SessionConfigOption { id, name, description, category,
+  type, current, choices[], skips_permissions }`; replaces the previous report; the reasoning effort is the option with category
+  `SESSION_CONFIG_CATEGORY_THOUGHT_LEVEL`) and `AgentCommands` (`Event` field 66: `agent_id`, `commands[]` of `AgentCommand { name,
+  description, input_hint }`; replaces the previous list). The hub stores and relays both and keeps nothing of them in its view yet.
+- **Commands.** `AgentSetConfig` (request field 106: `agent_id`, `config_id`, `value`; capability `agent.set_config`) and `AgentCancelTurn`
+  (107: `agent_id`, `drop_queue`; capability `agent.cancel_turn`), both the user's own and unsigned. Distinct from `AgentStop`: cancelling
+  a turn ends no process. The hub audits and scopes them like `AgentSetModel`.
+- **Queued prompts.** `AgentPrompt` is unchanged. A node with `chat.rich` answers it with `AgentPromptResult` (`CommandOk` field 29:
+  `queued`, `queue_len`); a node without it answers `empty`, read as sent. The queue holds at most 8 prompts.
+- **A permission entry is a view, never an answer.** `ChatEntry.approval_id` of a `CHAT_KIND_PERMISSION` entry is minted by the node (the
+  id of the approval it queued, ADR-0020), never taken from agent text or from an adapter item; `permission_outcome` derives only from the
+  node's approval state (pending, or how the user's signed decision, a cancelled turn or the agent leaving ended it). A chat entry can never
+  answer an approval: approving and denying stay `ApprovalResolve`, signed and verified on the node.
+- **Size caps the node must enforce (ADR-0090 build step 4), before the hub sees anything:** `output` 16 KiB per tool call (head and tail
+  kept, `output_truncated` set), 8 KiB per thought entry, 64 plan steps of 512 bytes each, 64 `paths` per tool call, 100 commands, 64 config
+  options of 64 choices, at most 8 queued prompts per agent, and at most one entry update per call per 150 ms; the ring bound of ADR-0038 still
+  holds. Secret removal (ADR-0080) happens before an entry exists. The schema carries no limit itself: a peer that does not enforce them is
+  not conforming, and a client truncates what it shows.
+- **`skips_permissions` for options.** The determination rules for `SessionConfigOption.skips_permissions` (the node's own, not the agent's
+  category) and their enforcement for `AgentSetConfig` belong to node build step 4. Until then the only enforcement is today's: `AgentSetMode`
+  of a mode the adapter reported with `skips_permissions` is refused with `agent.option_forbidden` (`policy` `forbid` or `confined_only`) when
+  the node's `skip_permissions` policy does not allow it (`Supervisor::adapter_set_option`, as a launch option, ADR-0059). Both commands are in
+  the team-default `signed_commands` of a node with limited devices.
+- **Capabilities (not advertised yet):** `chat.rich`, `agent.set_config`, `agent.cancel_turn`, `agent.commands`.
+- **Errors:** `agent.option_unknown` (`id`), `agent.queue_full` (`limit`); a refusal by the agent itself is `adapter.option_refused`.
+

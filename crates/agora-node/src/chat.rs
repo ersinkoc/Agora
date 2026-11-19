@@ -155,6 +155,7 @@ impl ChatBoard {
                 path,
                 code: String::new(),
                 params: std::collections::HashMap::new(),
+                ..Default::default()
             },
         );
     }
@@ -204,6 +205,7 @@ impl ChatBoard {
                     path: String::new(),
                     code,
                     params,
+                    ..Default::default()
                 },
             );
             return;

@@ -1,0 +1,8 @@
+{
+  "entryId": "11",
+  "atMs": "1700000004000",
+  "role": "CHAT_ROLE_USER",
+  "kind": "CHAT_KIND_TEXT",
+  "text": "and then run the tests",
+  "queued": true
+}
