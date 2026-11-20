@@ -197,6 +197,26 @@ fn str_arg<'a>(a: &'a Value, k: &str) -> Option<&'a str> {
     a.get(k).and_then(Value::as_str)
 }
 
+/// `send_message`'s arguments, read as every path reads them (the broker, the node before it routes a shared `#channel` to the
+/// hub, and the hub's board).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SendMessageArgs<'a> {
+    pub to: &'a str,
+    pub body: &'a str,
+    pub refs: Vec<String>,
+    pub reply_to: Option<&'a str>,
+}
+
+/// `None` when an argument is missing or has the wrong type: an invalid call (-32602).
+pub fn send_message_args(a: &Value) -> Option<SendMessageArgs<'_>> {
+    Some(SendMessageArgs {
+        to: str_arg(a, "to")?,
+        body: str_arg(a, "body")?,
+        refs: strs_arg(a, "refs")?,
+        reply_to: optional_str_arg(a, "reply_to").ok()?,
+    })
+}
+
 /// An optional string argument as the tools read it: `Some(None)` when absent or null, `None` when it has another type (an
 /// invalid call, -32602, not an omission). The node uses it for the calls it answers before the broker.
 pub fn optional_str_param<'a>(a: &'a Value, k: &str) -> Option<Option<&'a str>> {
@@ -412,12 +432,13 @@ impl McpConnection {
             }
             "workspace_status" => done(crate::awareness::local_status(mesh, me, now)),
             "send_message" => {
-                let (Some(to), Some(body), Some(refs), Ok(reply_to)) = (
-                    str_arg(&args, "to"),
-                    str_arg(&args, "body"),
-                    strs_arg(&args, "refs"),
-                    optional_str_arg(&args, "reply_to"),
-                ) else {
+                let Some(SendMessageArgs {
+                    to,
+                    body,
+                    refs,
+                    reply_to,
+                }) = send_message_args(&args)
+                else {
                     return bad();
                 };
                 done(

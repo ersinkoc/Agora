@@ -10,7 +10,9 @@ use std::sync::Mutex;
 
 use agora_core::AgentId;
 use agora_mesh::broker::{AgentInfo, Limits, Mesh};
-use agora_mesh::mcp::{board_tool, protocol_error_result, strs_arg, BOARD_TOOLS};
+use agora_mesh::mcp::{
+    board_tool, protocol_error_result, send_message_args, SendMessageArgs, BOARD_TOOLS,
+};
 use agora_protocol::v1::event::Body;
 use agora_protocol::{Error, ErrorCode};
 use serde_json::{json, Value};
@@ -195,22 +197,18 @@ impl Boards {
                 Error::new(ErrorCode::ProtocolInvalidMessage).with("field", f),
             ))
         };
-        let (Some(to), Some(body)) = (
-            args.get("to").and_then(Value::as_str),
-            args.get("body").and_then(Value::as_str),
-        ) else {
-            return invalid("body");
+        // As the broker reads them (the node checks first; this is the last guard).
+        let Some(SendMessageArgs { to, body, refs, .. }) = send_message_args(args) else {
+            return invalid("arguments");
         };
         if !to.starts_with('#') || to.len() < 2 {
             return invalid("to");
         }
-        // As the broker reads them: a ref that is not a string is an invalid call, not dropped.
-        let Some(refs) = strs_arg(args, "refs") else {
-            return invalid("refs");
-        };
+        // Receivers get the channel's name in front of the text and refuse a body over the limit, so that text is what is checked,
+        // before any copy goes out.
+        let body = format!("[{to}] {body}");
         let done = |result: Value, is_error: bool| Verdict::Done { result, is_error };
-        // The broker's own check, before any copy goes out: receiving nodes would refuse each one and nobody would hear of it.
-        if let Err(e) = limits.check_content(body, &refs) {
+        if let Err(e) = limits.check_content(&body, &refs) {
             return answer(done(protocol_error_result(&e.to_error(&limits)), true));
         }
         let me = format!("{node}/{agent}");
@@ -239,7 +237,7 @@ impl Boards {
             from_node: node.to_string(),
             from_agent: agent.to_string(),
             targets,
-            body: format!("[{to}] {body}"),
+            body,
             refs,
         });
         a
@@ -1280,6 +1278,51 @@ mod tests {
             not_text.verdict
         );
         assert!(not_text.fanout.is_none());
+        // The hub is the last guard for the same argument types as the broker: a `reply_to` that is not a string is invalid.
+        let bad_reply = run(
+            &b,
+            &v,
+            "alpha",
+            "send_message",
+            json!({"to": "#all", "body": "hi", "reply_to": 5}),
+            4,
+        );
+        assert!(
+            matches!(bad_reply.verdict, Verdict::Invalid(_)),
+            "{:?}",
+            bad_reply.verdict
+        );
+        assert!(bad_reply.fanout.is_none());
+    }
+
+    /// Codex review of #793: receivers get `[#channel] body`, and each refuses a body over the limit, so the hub checks that text,
+    /// not the raw body: exactly at the limit it goes out, one byte over it is `mesh.body_too_large` with nothing fanned out.
+    #[test]
+    fn a_shared_channel_checks_the_body_receivers_will_see() {
+        let b = Boards::new();
+        let v = view(&["alpha", "beta"]);
+        let max = Limits::default().max_body_bytes;
+        let room = max - "[#all] ".len();
+        let at = run(
+            &b,
+            &v,
+            "alpha",
+            "send_message",
+            json!({"to": "#all", "body": "x".repeat(room)}),
+            1,
+        );
+        assert_eq!(code(&at), "", "{}", text(&at));
+        assert_eq!(at.fanout.expect("at the limit it is sent").body.len(), max);
+        let over = run(
+            &b,
+            &v,
+            "alpha",
+            "send_message",
+            json!({"to": "#all", "body": "x".repeat(room + 1)}),
+            2,
+        );
+        assert_eq!(code(&over), "mesh.body_too_large", "{}", text(&over));
+        assert!(over.fanout.is_none());
     }
 
     #[test]

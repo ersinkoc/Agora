@@ -229,6 +229,10 @@ fn board_reply(
     if method != "tools/call" || !(channel || BOARD_TOOLS.contains(&name)) {
         return None;
     }
+    // Malformed arguments go to the broker, which answers -32602, as for a local message; nothing goes to the hub.
+    if channel && agora_mesh::mcp::send_message_args(&args).is_none() {
+        return None;
+    }
     let project = mesh
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -1436,6 +1440,80 @@ mod tests {
                 reply: "kept".into(),
                 from: b
             }
+        );
+    }
+
+    /// Counts the board calls that reach the hub and answers as a hub that refused the call (the link's error).
+    struct CountingLink(std::sync::atomic::AtomicUsize);
+
+    impl RemoteLink for CountingLink {
+        fn post(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &[String],
+            done: Box<dyn FnOnce(Result<(), String>) + Send>,
+        ) {
+            done(Err("node.offline".into()));
+        }
+        fn board(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+            done: Box<dyn FnOnce(Result<BoardReply, String>) + Send>,
+        ) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            done(Err("protocol.invalid_message".into()));
+        }
+    }
+
+    /// Codex review of #793: on a project the node knows is shared, a `#channel` `send_message` with a ref or a `reply_to` that is
+    /// not a string is -32602 from the node, as on the local broker; it never goes to the hub (whose refusal would read as
+    /// `board.unavailable`). A well-formed one still goes to the hub.
+    #[test]
+    fn a_shared_channel_send_with_bad_arguments_is_refused_before_the_hub() {
+        let (mesh, a, _) = ask_fixture();
+        let link = Arc::new(CountingLink(std::sync::atomic::AtomicUsize::new(0)));
+        let remote: RemoteSlot = Mutex::new(Some(link.clone() as Arc<dyn RemoteLink>));
+        let shares = Shares::default();
+        shares.set("p", true);
+        let mut conn = McpConnection::new(a);
+        conn.handle(
+            r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}"#,
+            &mut mesh.lock().unwrap(),
+            now_ms(),
+        );
+        let call = |conn: &mut McpConnection, extra: &str| {
+            let line = format!(
+                r##"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"send_message","arguments":{{"to":"#dev","body":"hi"{extra}}}}}}}"##
+            );
+            board_reply(conn, &line, &mesh, &remote, &shares).unwrap_or_else(|| {
+                match conn.handle(&line, &mut mesh.lock().unwrap(), now_ms()) {
+                    Outcome::Reply(msg) => msg,
+                    _ => panic!("no reply"),
+                }
+            })
+        };
+        for bad in [
+            r#","refs":[1]"#,
+            r#","refs":"x""#,
+            r#","reply_to":5"#,
+            r#","reply_to":false"#,
+        ] {
+            match call(&mut conn, bad) {
+                Message::ErrorResponse { code, .. } => assert_eq!(code, -32602, "{bad}"),
+                other => panic!("{bad}: expected -32602, got {other:?}"),
+            }
+        }
+        assert_eq!(link.0.load(Ordering::SeqCst), 0, "nothing went to the hub");
+        call(&mut conn, r#","refs":["a"],"reply_to":null"#);
+        assert_eq!(
+            link.0.load(Ordering::SeqCst),
+            1,
+            "a good call goes to the hub"
         );
     }
 
