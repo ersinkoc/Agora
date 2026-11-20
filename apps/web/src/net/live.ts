@@ -148,7 +148,7 @@ export function connectLive(o: LiveOptions): Live {
   // (the node left) is also refused, and the two must not each start a retry that goes on by itself. The hub may send the two in
   // either order, so a request that is due sooner replaces the waiting one; a later one is dropped.
   const resubscribe = (entry: Due, ms: number, again: () => void) => {
-    const at = Date.now() + ms;
+    const at = performance.now() + ms; // monotonic: a wall clock set back must not delay a retry
     if (entry.due === generation && entry.at !== undefined && entry.at <= at) return;
     if (entry.due === generation) clearTimeout(entry.timer);
     entry.due = generation;

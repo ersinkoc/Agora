@@ -257,6 +257,29 @@ describe('live stream ownership', () => {
     });
   }
 
+  // Codex review of #792: retry deadlines are compared on a monotonic clock; a wall clock that steps back changes nothing.
+  it('keeps the earlier retry when the wall clock steps back between the two requests', async () => {
+    const t = setup();
+    const s = t.sockets[0]!;
+    s.onopen!();
+    t.live.terminal('n', 'x').connect(() => {});
+    ended(s, 3);
+    vi.setSystemTime(Date.now() - 10_000);
+    refuse(s, subscriptions(s)[0]!);
+    await flush();
+    await vi.advanceTimersByTimeAsync(500);
+    expect(subscriptions(s)).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(subscriptions(s)).toHaveLength(2);
+    t.live.close();
+  });
+
+  it('fake timers drive the monotonic clock the retries use', () => {
+    const before = performance.now();
+    vi.advanceTimersByTime(1234);
+    expect(performance.now() - before).toBe(1234);
+  });
+
   it('drops a retry due on a dropped connection and still retries on the new one', async () => {
     const t = setup();
     const old = t.sockets[0]!;
