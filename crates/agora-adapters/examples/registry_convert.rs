@@ -40,6 +40,12 @@ fn run(src: &Path, out: &Path) -> std::io::Result<()> {
             .to_string();
         match convert(&text) {
             Ok(c) => {
+                // The file is named by the id the converter validated; a directory that disagrees with it is refused.
+                let valid = c.package["source"]["id"].as_str().unwrap_or("");
+                if valid != id {
+                    println!("skipped {id} registry.id_mismatch");
+                    continue;
+                }
                 fs::write(out.join(format!("{id}.toml")), &c.manifest)?;
                 let json = serde_json::to_string_pretty(&c.package).unwrap_or_default();
                 fs::write(out.join(format!("{id}.package.json")), json + "\n")?;

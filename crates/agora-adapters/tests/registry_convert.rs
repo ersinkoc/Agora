@@ -59,3 +59,51 @@ fn not_json_and_bad_id() {
     let bad = r#"{"id":"../x","name":"X","version":"1.0.0","distribution":{}}"#;
     assert_eq!(convert(bad).unwrap_err().code(), "registry.bad_id");
 }
+
+fn doc(id: &str, name: &str, extra: &str) -> String {
+    format!(
+        r#"{{"id":"{id}","name":"{name}","version":"1.0.0"{extra},"distribution":{{"npx":{{"package":"ok@1.0.0","env":{{"TOKEN":"s3cr3t-value"}}}}}}}}"#
+    )
+}
+
+#[test]
+fn hostile_ids_and_text_are_refused() {
+    for id in ["../x", "a/b", "A B", "x\\u202ey", "", "-x"] {
+        assert_eq!(
+            convert(&doc(id, "X", "")).unwrap_err().code(),
+            "registry.bad_id",
+            "{id}"
+        );
+    }
+    // Bidi override, zero width space, line separator, control character.
+    for name in ["Evil\\u202etxt", "a\\u200bb", "a\\u2028b", "a\\u0007b"] {
+        assert_eq!(
+            convert(&doc("fine", name, "")).unwrap_err().code(),
+            "registry.bad_field",
+            "{name}"
+        );
+    }
+    for k in ["repository", "license"] {
+        let extra = format!(r#","{k}":"x\u202ey""#);
+        assert_eq!(
+            convert(&doc("fine", "X", &extra)).unwrap_err().code(),
+            "registry.bad_field",
+            "{k}"
+        );
+    }
+}
+
+#[test]
+fn env_values_are_never_present() {
+    let c = convert(&doc("fine", "X", "")).unwrap();
+    assert!(
+        !c.manifest.contains("s3cr3t-value") && !c.package.to_string().contains("s3cr3t-value")
+    );
+    assert!(c.package.to_string().contains("TOKEN"));
+}
+
+#[test]
+fn a_clean_entry_still_converts() {
+    let c = convert(&doc("fine", "Fine", r#","license":"MIT""#)).unwrap();
+    assert_eq!(c.kind, "registry-fine");
+}

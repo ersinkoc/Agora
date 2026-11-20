@@ -1,0 +1,1 @@
+{"id": "hostile-git", "name": "X", "version": "1.0.0", "distribution": {"npx": {"package": "git+https://evil.example/x@1.2.3"}}}

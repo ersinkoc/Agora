@@ -6,8 +6,8 @@
 
 use serde_json::{json, Map, Value};
 
-use crate::manifest::skips_permissions_flag;
 use crate::package::valid_name;
+use crate::perm::says_it_skips;
 
 /// First line of every generated file.
 pub const GENERATED: &str = "Generated from the ACP registry by agora-adapters registry_convert (ADR-0092). Do not edit; reviewed before it ships.";
@@ -24,6 +24,7 @@ pub enum Reason {
     SkipsPermissions,
     InsecureUrl,
     InconsistentCommand,
+    ForbiddenExecutable,
 }
 
 impl Reason {
@@ -38,6 +39,7 @@ impl Reason {
             Reason::SkipsPermissions => "registry.skips_permissions",
             Reason::InsecureUrl => "registry.insecure_url",
             Reason::InconsistentCommand => "registry.inconsistent_command",
+            Reason::ForbiddenExecutable => "registry.forbidden_executable",
         }
     }
 }
@@ -68,6 +70,36 @@ fn plain_token(s: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || "@._/:=+~^,-".contains(c))
 }
 
+/// Display text (name, licence, repository): no control, format, bidirectional, separator or private-use character (ADR-0057 list).
+fn clean_text(s: &str) -> bool {
+    !s.chars()
+        .any(|c| c.is_control() || agora_core::text::is_hidden(c))
+}
+
+/// An npm package name: `name` or `@scope/name`, lower-case letters, digits, `.`, `_`, `-`; no URL, path, alias or tag syntax.
+fn npm_name(n: &str) -> bool {
+    let part = |p: &str| {
+        !p.is_empty()
+            && !p.starts_with(['.', '_', '-'])
+            && p.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "._-".contains(c))
+    };
+    match n.strip_prefix('@') {
+        Some(rest) => rest
+            .split_once('/')
+            .is_some_and(|(a, b)| part(a) && part(b)),
+        None => part(n),
+    }
+}
+
+/// A PyPI project name: letters, digits, `.`, `_`, `-`.
+fn pypi_name(n: &str) -> bool {
+    !n.is_empty()
+        && !n.starts_with(['.', '_', '-'])
+        && n.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
+}
+
 fn exact_version(v: &str) -> bool {
     let core = v.split(['-', '+']).next().unwrap_or("");
     let parts: Vec<&str> = core.split('.').collect();
@@ -75,11 +107,38 @@ fn exact_version(v: &str) -> bool {
         && parts
             .iter()
             .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
-        && plain_token(v)
+        && v.chars()
+            .all(|c| c.is_ascii_alphanumeric() || ".-+".contains(c))
 }
 
 fn text<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
     v.get(key).and_then(Value::as_str)
+}
+
+/// Words (squashed) that mean an argument approves or trusts without asking, beyond what `perm::says_it_skips` knows.
+const EXTRA_SKIP_WORDS: &[&str] = &[
+    "approve",
+    "fullauto",
+    "alwaysallow",
+    "trust",
+    "autorun",
+    "force",
+];
+
+/// Whether an argument, as a whole or in any of its words (split on `-`, `=`, `_`, `/`, `:`, `.`), says the agent skips permissions:
+/// `--auto-approve`, `--full-auto`, `--allow-all-tools`, `--approval-mode=yolo`, `--permission-mode bypassPermissions`, a bare `yolo`.
+fn skips_permissions_arg(a: &str) -> bool {
+    let words = a
+        .split(|c: char| "-=_/:.,".contains(c))
+        .filter(|w| !w.is_empty());
+    std::iter::once(a).chain(words).any(|w| {
+        let squashed: String = w
+            .chars()
+            .filter(char::is_ascii_alphanumeric)
+            .flat_map(char::to_lowercase)
+            .collect();
+        says_it_skips(w, w, "", true) || EXTRA_SKIP_WORDS.iter().any(|x| squashed.contains(x))
+    })
 }
 
 /// The `args` of a distribution: plain tokens, none that skips permissions.
@@ -95,7 +154,7 @@ fn args(d: &Value) -> Result<Vec<String>, Reason> {
         if !plain_token(a) {
             return Err(Reason::BadToken);
         }
-        if skips_permissions_flag(a) {
+        if skips_permissions_arg(a) {
             return Err(Reason::SkipsPermissions);
         }
         out.push(a.to_string());
@@ -129,6 +188,9 @@ fn convert_npx(d: &Value, entry_version: &str) -> Result<Dist, Reason> {
         Some(i) if i > 0 => (&pkg[..i], &pkg[i + 1..]),
         _ => (pkg, entry_version),
     };
+    if !npm_name(name) {
+        return Err(Reason::BadToken);
+    }
     if !exact_version(version) {
         return Err(Reason::UnpinnedVersion);
     }
@@ -155,7 +217,10 @@ fn convert_uvx(d: &Value) -> Result<Dist, Reason> {
         return Err(Reason::BadToken);
     }
     let (name, version) = pkg.split_once("==").ok_or(Reason::UnpinnedVersion)?;
-    if name.is_empty() || !exact_version(version) {
+    if !pypi_name(name) {
+        return Err(Reason::BadToken);
+    }
+    if !exact_version(version) {
         return Err(Reason::UnpinnedVersion);
     }
     let args = args(d)?;
@@ -169,6 +234,40 @@ fn convert_uvx(d: &Value) -> Result<Dist, Reason> {
             "installable": false, "not_installable_reason": "no_integrity_hash",
         }),
     })
+}
+
+/// A shell or interpreter would run whatever its arguments say, so a registry entry may not name one as its executable.
+fn forbidden_executable(exe: &str) -> bool {
+    let e = exe.to_ascii_lowercase();
+    let e = e.strip_suffix(".bat").unwrap_or(&e);
+    [
+        "sh",
+        "bash",
+        "zsh",
+        "dash",
+        "fish",
+        "ksh",
+        "csh",
+        "tcsh",
+        "cmd",
+        "powershell",
+        "pwsh",
+        "node",
+        "nodejs",
+        "perl",
+        "ruby",
+        "env",
+        "deno",
+        "bun",
+        "php",
+        "lua",
+        "wscript",
+        "cscript",
+        "busybox",
+    ]
+    .contains(&e)
+        || e.starts_with("python")
+        || e.starts_with("pypy")
 }
 
 fn convert_binary(d: &Value) -> Result<Dist, Reason> {
@@ -192,7 +291,13 @@ fn convert_binary(d: &Value) -> Result<Dist, Reason> {
         }
         let cmd = text(p, "cmd").ok_or(Reason::BadField)?;
         // Windows commands use a backslash and an extension; the executable name is the same word without them.
-        if !plain_token(&cmd.replace('\\', "/")) || cmd.contains("..") {
+        let drive = cmd.chars().nth(1) == Some(':');
+        if !plain_token(&cmd.replace('\\', "/"))
+            || cmd.contains("..")
+            || cmd.contains(':')
+            || drive
+            || cmd.starts_with(['/', '\\'])
+        {
             return Err(Reason::BadToken);
         }
         let file = cmd.rsplit(['/', '\\']).next().unwrap_or(cmd);
@@ -201,15 +306,24 @@ fn convert_binary(d: &Value) -> Result<Dist, Reason> {
             .or_else(|| file.strip_suffix(".cmd"))
             .unwrap_or(file)
             .to_string();
+        if forbidden_executable(&exe) {
+            return Err(Reason::ForbiddenExecutable);
+        }
         let a = args(p)?;
         match &command {
             None => command = Some((exe, a.clone())),
             Some((e, ea)) if *e == exe && *ea == a => {}
             Some(_) => return Err(Reason::InconsistentCommand),
         }
-        let sha = text(p, "sha256")
-            .filter(|s| s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit()))
-            .map(str::to_ascii_lowercase);
+        // A hash that is there but is not 64 hex digits is a malformed entry, not a missing hash.
+        let sha = match text(p, "sha256") {
+            Some(s) if s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit()) => {
+                Some(s.to_ascii_lowercase())
+            }
+            Some(_) => return Err(Reason::BadField),
+            None if p.get("sha256").is_some() => return Err(Reason::BadField),
+            None => None,
+        };
         all_hashed &= sha.is_some();
         out.insert(
             platform.clone(),
@@ -241,8 +355,9 @@ pub fn convert(src: &str) -> Result<Converted, Reason> {
     let version = text(&v, "version").ok_or(Reason::BadField)?;
     if name.is_empty()
         || name.len() > 100
-        || name.chars().any(char::is_control)
+        || !clean_text(name)
         || !plain_token(version)
+        || !clean_text(version)
     {
         return Err(Reason::BadField);
     }
@@ -298,7 +413,10 @@ pub fn convert(src: &str) -> Result<Converted, Reason> {
         "license",
         "license_url",
     ] {
-        if let Some(s) = text(&v, k).filter(|s| !s.chars().any(char::is_control)) {
+        if let Some(s) = text(&v, k) {
+            if !clean_text(s) {
+                return Err(Reason::BadField);
+            }
             source.insert(k.to_string(), json!(s));
         }
     }

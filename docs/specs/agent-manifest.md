@@ -184,7 +184,7 @@ agent resumed after the node itself restarted (ADR-0060) starts with the tool's 
 turns one registry `agent.json` into `registry-<id>.toml` (an L2 `[structured] acp` manifest, never a launch option) and a package entry
 (`<id>.package.json`, ADR-0087 shape plus `tested = false`). `npx` becomes `npx --yes PKG@VERSION ARGS`, `uvx` becomes `uvx PKG==VERSION ARGS`,
 `binary` becomes a `binary-download` installer with per-platform URL and SHA-256 (`installable = false` when one is missing). Skips are
-reason codes (`registry.bad_token`, `registry.skips_permissions`, `registry.no_supported_distribution`, ...). Generated files start with a
+reason codes (`registry.bad_token`, `registry.skips_permissions`, `registry.forbidden_executable` (a shell or interpreter as the executable), `registry.bad_field`, `registry.no_supported_distribution`, ...). Generated files start with a
 header saying so and are never edited by hand. Nodes never read the registry.
 
 ## Launch options (ADR-0059)
