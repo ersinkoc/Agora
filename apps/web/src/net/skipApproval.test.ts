@@ -17,7 +17,7 @@ import { applyEvent, approvalList, emptyView } from './view';
 interface Vector { name: string; node: string; approval_id: string; approved: boolean; agent_id: string; option_id: string; value: string; detail: string; hex: string }
 const vectors = JSON.parse(readFileSync('../../schema/fixtures/signing/approval-skip-v1.json', 'utf8')) as { cases: Vector[] };
 
-const detail = (over: Record<string, unknown> = {}) => JSON.stringify({ node: 'laptop', agent: 'agent-1', agent_kind: 'claude-acp', folder: '/home/dev/code/login-fix', option_type: 'mode', option: 'mode', option_name: '', value: 'bypassPermissions', value_name: 'Bypass Permissions', scope: 'session', ...over });
+const detail = (over: Record<string, unknown> = {}) => JSON.stringify({ node: 'laptop', agent: 'agent-1', agent_kind: 'claude-acp', folder: '/home/dev/code/login-fix', option_type: 'mode', option: 'mode', option_name: '', value: 'bypassPermissions', value_name: 'Bypass Permissions', skips: true, scope: 'session', ...over });
 const ev = (producer: string, body: Record<string, unknown>) => agora.v1.Event.create({ producerId: producer, ...body });
 
 beforeEach(() => { setLanguage('en'); forgetSkipCapable(); });
@@ -71,7 +71,7 @@ describe('reading the node\'s card strictly', () => {
     expect(parseSkipDetail(detail({ option_type: 'config', option: 'auto_approve', option_name: 'Auto approve', value: 'true' }))?.optionType).toBe('config');
   });
   it('refuses anything else: not JSON, missing or non-string fields, another type or scope, a mode that names another option', () => {
-    for (const bad of ['', 'nope', '[]', 'null', detail({ option_type: 'toggle' }), detail({ scope: 'project' }), detail({ scope: undefined }), detail({ value: 1 }), detail({ folder: undefined }), detail({ agent: '' }),
+    for (const bad of ['', 'nope', '[]', 'null', detail({ option_type: 'toggle' }), detail({ scope: 'project' }), detail({ scope: undefined }), detail({ skips: undefined }), detail({ skips: false }), detail({ skips: 'true' }), detail({ value: 1 }), detail({ folder: undefined }), detail({ agent: '' }),
       detail({ option: 'effort' }), detail({ option: '', option_type: 'config' }), detail({ value_name: null })]) {
       expect(parseSkipDetail(bad), bad).toBeUndefined();
     }
@@ -83,6 +83,23 @@ describe('reading the node\'s card strictly', () => {
     expect(skipOf('agent.skip_permissions', detail(), 'laptop', 'laptop/agent-2')).toEqual({ unknown: true });
     expect(skipOf('agent.skip_permissions', '{}', 'laptop', 'laptop/agent-1')).toEqual({ unknown: true });
     expect(skipOf('agent.start', detail(), 'laptop', 'laptop/agent-1')).toBeUndefined();
+  });
+});
+
+describe('option and value are signed exactly as the node gave them', () => {
+  it('nothing is trimmed, cleaned or re-encoded between the card and the signed bytes', async () => {
+    const d = detail({ option_type: 'config', option: ' a:b ', value: 'é ü ', value_name: 'x' });
+    const r = parseSkipDetail(d);
+    expect([r?.option, r?.value]).toEqual([' a:b ', 'é ü ']);
+    const m = await skipSignedMessage('laptop', 'ap-1', true, r?.agent ?? '', r?.option ?? '', r?.value ?? '', d);
+    expect(new TextDecoder().decode(m)).toContain('5: a:b 6:é ü ');
+  });
+  it('the new refusals have plain words in both languages', async () => {
+    const { refusalKey, REFUSAL_KEYS } = await import('./refusal');
+    expect(refusalKey('agent.option_unknown')).toBe('refusal-unknown-option');
+    expect(refusalKey('node.resource_limit.skip_approvals_agent')).toBe('refusal-skip-agent-limit');
+    expect(refusalKey('node.resource_limit')).toBe('refusal-limit');
+    expect(REFUSAL_KEYS).toContain('refusal-limit');
   });
 });
 
@@ -124,6 +141,9 @@ describe('what the window heard from the machine', () => {
   it('only an agent.approval_needed answer, with its id, shows the machine offers it (and says which card)', () => {
     expect(isSkipCapable('laptop')).toBe(false);
     expect(failure('laptop', { code: 'agent.option_unconfirmed', params: {} })).toBe('agent.option_unconfirmed');
+    expect(failure('laptop', { code: 'node.resource_limit', params: { resource: 'skip_approvals_agent', limit: '2' } })).toBe('node.resource_limit.skip_approvals_agent');
+    expect(failure('laptop', { code: 'node.resource_limit', params: { resource: 'skip_approvals' } })).toBe('node.resource_limit');
+    expect(isSkipCapable('laptop')).toBe(false);
     expect(isSkipCapable('laptop')).toBe(false);
     expect(failure('laptop', { code: 'agent.approval_needed', params: {} })).toBe(false); // no id: nothing to wait for
     expect(isSkipCapable('laptop')).toBe(false);

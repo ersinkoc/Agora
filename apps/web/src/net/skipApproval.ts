@@ -14,6 +14,8 @@ export interface SkipRequest {
   node: string; agent: string; agentKind: string; folder: string;
   optionType: 'mode' | 'config'; option: string; optionName: string; value: string; valueName: string;
 }
+// `option` and `value` are signed exactly as the node gave them (never trimmed, cleaned or re-encoded here); the node already bounded and
+// cleaned every other string.
 
 /** The detail read strictly: every field a string, the type one the window knows, a mode's option the literal `mode`, the scope `session`.
  *  Anything else (a missing field, another type, another scope) is `undefined`: the window shows "update your window" and signs nothing. */
@@ -27,6 +29,8 @@ export function parseSkipDetail(detail: string): SkipRequest | undefined {
   const option = s('option'), optionName = s('option_name'), value = s('value'), valueName = s('value_name');
   if (node === undefined || !agent || agentKind === undefined || folder === undefined || option === undefined || optionName === undefined || value === undefined || valueName === undefined) return undefined;
   if (type !== 'mode' && type !== 'config') return undefined;
+  // `skips: true` is the node's own judgement that the choice makes the agent act without asking; a card without it is not what is expected.
+  if (o.skips !== true) return undefined;
   if (s('scope') !== 'session' || option === '' || (type === 'mode' && option !== 'mode')) return undefined;
   return { node, agent, agentKind, folder, optionType: type, option, optionName, value, valueName };
 }

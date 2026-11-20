@@ -1161,7 +1161,9 @@ chat-trimmed = { $count ->
 refusal-unsupported = Bu ajanın makinesi bunu henüz desteklemiyor.
 refusal-unconfirmed = Bu seçim ajanın sormadan işlem yapmasına izin verir ve bu makine henüz onayınızı isteyemiyor. Makineyi güncelleyin veya ajanı o şekilde başlatın.
 refusal-forbidden = Bu makinenin ayarları ajanın sormadan işlem yapmasına izin vermiyor.
-refusal-unknown-option = Ajan bu ayarı ya da değeri artık sunmuyor.
+refusal-unknown-option = Bu ayar ya da değer onayınıza sunulamıyor: ajan artık sunmuyor ya da adı güvenle gösterilemiyor.
+refusal-limit = Bu makinede çok fazla istek bekliyor. Birini yanıtlayın veya bekleyin, sonra yeniden deneyin.
+refusal-skip-agent-limit = Bu ajanın onayınızı bekleyen çok fazla isteği var. Bekleyeni yanıtlayın veya biraz bekleyin, sonra yeniden deneyin.
 
 # ADR-0091: plan limitleri. Sayılar aracın kendi bildirdiğidir; hiçbiri hesaplanmaz. Para yok.
 quota-window-five-hour = Beş saat

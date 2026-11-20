@@ -1218,7 +1218,9 @@ chat-trimmed = { $count ->
 refusal-unsupported = This agent's machine does not support that yet.
 refusal-unconfirmed = That choice lets the agent act without asking, and this machine cannot ask for your approval yet. Update it, or start the agent that way instead.
 refusal-forbidden = This machine's settings do not let the agent act without asking.
-refusal-unknown-option = The agent no longer offers that setting or value.
+refusal-unknown-option = This setting or value cannot be offered for your approval: the agent no longer offers it, or its name cannot be shown safely.
+refusal-limit = This machine has too many requests waiting. Answer or wait for one, then try again.
+refusal-skip-agent-limit = This agent already has too many requests waiting for your approval. Answer the waiting one, or wait a little, then try again.
 
 # ADR-0091: plan limits. The numbers are what the tool itself reported; nothing is worked out. No money.
 quota-window-five-hour = Five hours

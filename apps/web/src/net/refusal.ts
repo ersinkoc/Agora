@@ -18,6 +18,8 @@ export function failure(node: string, e: unknown): ActionResult {
     markSkipCapable(node); // only a node that offers `approval.skip_permissions` answers so (see skipApproval.ts)
     return { approvalNeeded: `${node}/${err.params.approval_id}` };
   }
+  // The one limit that has its own words: too many requests waiting for this agent (the others read as the machine's general limit).
+  if (err.code === 'node.resource_limit' && err.params?.resource === 'skip_approvals_agent') return 'node.resource_limit.skip_approvals_agent';
   return err.code ?? false;
 }
 
@@ -27,6 +29,9 @@ const KEYS: Record<string, string> = {
   'agent.option_unknown': 'refusal-unknown-option',
   'agent.queue_full': 'prompt-queue-full',
   'protocol.capability_missing': 'refusal-unsupported',
+  'node.resource_limit': 'refusal-limit',
+  // `node.resource_limit` with resource `skip_approvals_agent` (see `failure`).
+  'node.resource_limit.skip_approvals_agent': 'refusal-skip-agent-limit',
 };
 
 /** The locale key to say for a refusal code; undefined for none known (the caller uses its own general sentence). */
