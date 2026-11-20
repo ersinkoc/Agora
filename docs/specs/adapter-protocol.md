@@ -140,7 +140,10 @@ towards the node, so chat items, approvals, state and cancel work as for any L3 
 
 The bridge accepts updates with a session ID for the active session or a matching pending `session/load`. An update without a
 session ID uses the active session for compatibility. A successful change of session retires pending prompts from the previous
-session. Only a reply to an active prompt ends its turn.
+session. Only a reply to an active prompt ends its turn. When prompts overlap (the node sent one into a running turn: after its
+cancel grace, or to an adapter without `turns`), only the reply to the last of them ends the turn: an earlier reply reports its
+failure or stop as a notice but no `idle`, and the turn's permission requests stay open for the user. A permission request decided
+while no prompt runs (one that came after its turn ended) is followed by `idle`, not `working`.
 
 Node → bridge → agent: `session/start` → `session/new` (or `session/load` when the agent said it can and a resume id is known),
 with the node's `mcpServers` (the agent's mesh server) as ACP stdio servers `{name, command, args, env: []}` (at most 16; an entry

@@ -1006,6 +1006,13 @@ impl<W: Write> Bridge<W> {
         self.send_agent(&json!({"jsonrpc": "2.0", "method": method, "params": params}));
     }
 
+    /// Whether a `session/prompt` still waits for the agent's answer (a turn is running).
+    fn prompt_open(&self) -> bool {
+        self.waiting
+            .values()
+            .any(|w| matches!(w, Waiting::Prompt { .. }))
+    }
+
     fn cancel_permission(&mut self, request: Value) {
         self.send_agent(&json!({"jsonrpc": "2.0", "id": request,
             "result": {"outcome": {"outcome": "cancelled"}}}));
@@ -1456,7 +1463,14 @@ impl<W: Write> Bridge<W> {
                         &json!({"jsonrpc": "2.0", "id": p.request, "result": {"outcome": outcome}}),
                     );
                     if self.perms.is_empty() {
-                        self.state("WORKING")?;
+                        // Audit F1241: a request that came outside a turn (a straggler of a cancelled one) began what `blocked`
+                        // reported; with no prompt running, nothing else would end it.
+                        let now = if self.prompt_open() {
+                            "WORKING"
+                        } else {
+                            "IDLE"
+                        };
+                        self.state(now)?;
                     }
                 }
             }
@@ -1907,8 +1921,15 @@ impl<W: Write> Bridge<W> {
                     }
                     Some(Waiting::Prompt { .. }) => {
                         self.flush_text()?;
-                        self.perms.clear();
-                        match turn_outcome(msg, self.said) {
+                        // Audit F1240: prompts overlap when the node sends one into a running turn (after its cancel grace, a
+                        // spawned helper's request, a node without `turns`). Only the last reply ends the turn: until then the
+                        // permissions asked are kept and no `idle` is reported; this reply's own failure or stop is still reported
+                        // (whether it was empty cannot be told).
+                        let still_open = self.prompt_open();
+                        if !still_open {
+                            self.perms.clear();
+                        }
+                        match turn_outcome(msg, self.said || still_open) {
                             Some((code, mut params)) => {
                                 // A failed or empty turn says nothing about why; what the agent wrote to stderr meanwhile often does
                                 // (an expired login, a provider's refusal).
@@ -1920,9 +1941,12 @@ impl<W: Write> Bridge<W> {
                                 }
                                 self.notice(code, &params)?;
                                 self.log_reason("WARN", code, &params)?;
-                                self.state_because("IDLE", code)?;
+                                if !still_open {
+                                    self.state_because("IDLE", code)?;
+                                }
                             }
-                            None => self.state("IDLE")?,
+                            None if !still_open => self.state("IDLE")?,
+                            None => {}
                         }
                     }
                     Some(Waiting::SetConfig {
@@ -2552,5 +2576,79 @@ mod tests {
     fn long_details_are_cut_on_a_character_boundary() {
         let s = short(&json!({"x": "é".repeat(400)}));
         assert!(s.ends_with('…') && s.len() <= MAX_DETAIL + 4);
+    }
+
+    /// A bridge with an open session and no turn, whose agent input goes nowhere (what it is sent is read from its state).
+    fn bridge_in_session() -> std::io::Result<super::Bridge<Vec<u8>>> {
+        let mut b = bridge_with_buffered_chat()?;
+        b.text.clear();
+        Ok(b)
+    }
+
+    fn states(out: &[u8]) -> Vec<String> {
+        out.split(|b| *b == b'\n')
+            .filter_map(|l| serde_json::from_slice::<serde_json::Value>(l).ok())
+            .filter(|v| v["method"] == "state/update")
+            .filter_map(|v| v["params"]["state"].as_str().map(str::to_string))
+            .collect()
+    }
+
+    fn ask(b: &mut super::Bridge<Vec<u8>>, id: &str) -> std::io::Result<()> {
+        b.handle_agent(&serde_json::json!({"jsonrpc":"2.0","id":id,"method":"session/request_permission",
+            "params":{"sessionId":"s","toolCall":{"title":"edit"},"options":[{"optionId":"allow","kind":"allow_once"}]}}))
+    }
+
+    /// Audit F1240: prompts overlap when the node sends one into a running turn (after its cancel grace, or a spawned helper's
+    /// request). The reply to one of them must not end the other: no `idle` while it runs, and its pending permission still reaches
+    /// the agent when the user decides (before, it was dropped and the agent waited for it forever).
+    #[test]
+    fn the_reply_to_an_overlapping_prompt_does_not_end_the_running_turn(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use serde_json::json;
+        let mut b = bridge_in_session()?;
+        for id in [10, 11] {
+            let _ = b.handle_node(
+                &json!({"jsonrpc":"2.0","id":id,"method":"session/prompt","params":{"text":"t"}}),
+            )?;
+        }
+        ask(&mut b, "perm-1")?;
+        b.out.clear();
+        // The agent refuses the second prompt while the first waits for the user's decision.
+        b.handle_agent(&json!({"jsonrpc":"2.0","id":2,"error":{"code":-32603,"message":"busy"}}))?;
+        assert!(states(&b.out).is_empty(), "the first turn still runs");
+        assert!(b.perms.contains_key("acp-3"), "its permission is kept");
+        b.out.clear();
+        let _ = b.handle_node(&json!({"jsonrpc":"2.0","id":12,"method":"approval/resolve",
+            "params":{"approvalId":"acp-3","approved":true}}))?;
+        assert_eq!(states(&b.out), ["AGENT_STATE_WORKING"]);
+        b.out.clear();
+        b.handle_agent(&json!({"jsonrpc":"2.0","id":1,"result":{"stopReason":"end_turn"}}))?;
+        assert_eq!(
+            states(&b.out),
+            ["AGENT_STATE_IDLE"],
+            "the last reply ends the turn"
+        );
+        Ok(())
+    }
+
+    /// Audit F1241: a permission request that arrives after its turn ended (a straggler of a cancelled turn) reports `blocked`;
+    /// deciding it must end that with `idle`, or the node reads a turn that never ends and queues every later prompt behind it.
+    #[test]
+    fn a_permission_decided_outside_a_turn_returns_the_agent_to_idle(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use serde_json::json;
+        let mut b = bridge_in_session()?;
+        let _ = b.handle_node(
+            &json!({"jsonrpc":"2.0","id":10,"method":"session/prompt","params":{"text":"t"}}),
+        )?;
+        let _ =
+            b.handle_node(&json!({"jsonrpc":"2.0","id":11,"method":"session/cancel","params":{}}))?;
+        b.handle_agent(&json!({"jsonrpc":"2.0","id":1,"result":{"stopReason":"cancelled"}}))?;
+        b.out.clear();
+        ask(&mut b, "late")?;
+        let _ = b.handle_node(&json!({"jsonrpc":"2.0","id":12,"method":"approval/resolve",
+            "params":{"approvalId":"acp-2","approved":true}}))?;
+        assert_eq!(states(&b.out), ["AGENT_STATE_BLOCKED", "AGENT_STATE_IDLE"]);
+        Ok(())
     }
 }
