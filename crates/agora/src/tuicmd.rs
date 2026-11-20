@@ -679,6 +679,8 @@ fn with_grant<T>(
 
 /// What typing to one agent needs a grant for (what the web client asks for too).
 const TYPING: [&str; 3] = ["agent.stop", "agent.prompt", "terminal.input"];
+/// What the grant key (Ctrl-] then g) signs: typing only, the one thing its notice names.
+const TYPING_INPUT: [&str; 1] = ["terminal.input"];
 
 /// Ctrl-] : the key that leaves an opened terminal (the same one `agora terminal attach` uses).
 const DETACH: u8 = 0x1d;
@@ -1521,6 +1523,7 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                 },
                 typing_refused: None,
                 typing_notice: String::new(),
+                typing_allowed: None,
             }),
             Err(_) => None,
         }
@@ -2049,6 +2052,9 @@ struct Console {
     typing_refused: Option<TypingRefused>,
     /// The footer notice that said so, taken away with it.
     typing_notice: String,
+    /// The agent (`node/local`) typing was allowed for here, and the last request sent before: a refusal of that typing, read
+    /// later, is old news. Per session (request numbers start over on a reconnect).
+    typing_allowed: Option<(String, u64)>,
 }
 
 /// A notice too long for the footer is shown whole in a box above it until the next key (the trust command must be readable and
@@ -2150,10 +2156,12 @@ fn console(
     mouse_mode(c.app.mouse);
     let mut fresh = true;
     let mut typed_at: Option<Instant> = None;
-    // A refusal is matched by its session's request numbers: a new session (a reconnect) starts over.
-    if c.typing_refused.take().is_some() && c.notice == c.typing_notice {
-        c.notice.clear();
+    // A refusal is matched by its session's request numbers, which a new session (a reconnect, also a routine refresh) starts over:
+    // a pending refusal stays (typing is still refused there), and any typing the new session gets taken ends it.
+    if let Some(p) = c.typing_refused.as_mut() {
+        p.request = 0;
     }
+    c.typing_allowed = None;
     // ADR-0065: only the hub knows whether this session is the owner's (it answers `PairStatus` to the owner only).
     if c.pair.owner == agora_tui::pair::Owner::Unknown {
         if let Some(owner) = pair_owner(session) {
@@ -2495,10 +2503,15 @@ fn console(
                 }
             }
         }
+        // While typing stays refused, its notice stays (or comes back after another one) so the key that asks is never hidden.
+        if c.notice.is_empty() && c.typing_refused.is_some() {
+            c.notice = c.typing_notice.clone();
+        }
         if !c.notice.is_empty()
             && c.notice == c.note.seen
             && !c.note.open
             && c.notice_at.elapsed() >= NOTICE_FOR
+            && !(c.typing_refused.is_some() && c.notice == c.typing_notice)
         {
             // An old notice ("Allowed.") gives the footer back to the summary of machines, agents and what needs the user.
             c.notice.clear();
@@ -2613,6 +2626,7 @@ fn console(
             &refused,
             &taken,
             c.app.active_agent(),
+            c.typing_allowed.as_ref(),
         ) {
             Notice::Show => {
                 let agent = c
@@ -2696,6 +2710,7 @@ fn typing_refusal(
     refused: &[agora_tui::client::Refused],
     taken: &[(String, String, u64)],
     active: Option<&str>,
+    allowed: Option<&(String, u64)>,
 ) -> Notice {
     let taken_after = |node: &str, terminal: &str, request: u64| {
         taken
@@ -2719,6 +2734,8 @@ fn typing_refusal(
             .map(|local| format!("{}/{local}", r.node));
         agent.as_deref().is_some_and(|a| Some(a) == active)
             && !taken_after(&r.node, &r.terminal_id, r.request)
+            // Typing sent before it was allowed here, refused late: not a new refusal.
+            && !allowed.is_some_and(|(a, last)| agent.as_deref() == Some(a.as_str()) && r.request <= *last)
     });
     if let (Some(r), Some(agent)) = (in_front, active) {
         match pending {
@@ -3676,11 +3693,15 @@ fn command(
             };
             let scope = format!("agent:{local}");
             let asked = over_console(say, c, session, preview, None, rx, |s, ask| {
-                ask_grant(say, s, ask, &node, &scope, &TYPING)
+                ask_grant(say, s, ask, &node, &scope, &TYPING_INPUT)
             });
             match asked {
                 Ok(true) => {
+                    c.typing_allowed = Some((format!("{node}/{local}"), session.last_request()));
                     c.typing_refused = None;
+                    if c.notice == c.typing_notice {
+                        c.notice.clear();
+                    }
                     c.notice = say.text(key!("tui-granted"), &[]);
                 }
                 Ok(false) => {}
@@ -3810,6 +3831,63 @@ mod typing_grant_tests {
     use agora_tui::app::Key;
     use agora_tui::client::Refused;
 
+    fn typing_refusal_now(
+        pending: &mut Option<TypingRefused>,
+        refused: &[Refused],
+        taken: &[(String, String, u64)],
+        active: Option<&str>,
+    ) -> Notice {
+        typing_refusal(pending, refused, taken, active, None)
+    }
+
+    #[test]
+    fn a_refusal_of_typing_sent_before_it_was_allowed_is_old_news() {
+        // Codex review of #796: typing refused late, after the grant key allowed it, must not bring the notice back.
+        let front = Some("laptop/a1");
+        let allowed = ("laptop/a1".to_string(), 7);
+        let mut pending = None;
+        assert_eq!(
+            typing_refusal(
+                &mut pending,
+                &[refused("laptop", "a1", 7)],
+                &[],
+                front,
+                Some(&allowed)
+            ),
+            Notice::Same
+        );
+        assert_eq!(pending, None);
+        // Control: typing sent after it was allowed and refused again (the grant ended) is a new refusal.
+        assert_eq!(
+            typing_refusal(
+                &mut pending,
+                &[refused("laptop", "a1", 8)],
+                &[],
+                front,
+                Some(&allowed)
+            ),
+            Notice::Show
+        );
+        // Another agent's watermark changes nothing here.
+        let other = ("laptop/a2".to_string(), 99);
+        let mut pending = None;
+        assert_eq!(
+            typing_refusal(
+                &mut pending,
+                &[refused("laptop", "a1", 3)],
+                &[],
+                front,
+                Some(&other)
+            ),
+            Notice::Show
+        );
+    }
+
+    #[test]
+    fn the_grant_key_signs_typing_only() {
+        assert_eq!(TYPING_INPUT, ["terminal.input"]);
+    }
+
     fn refused(node: &str, local: &str, request: u64) -> Refused {
         Refused {
             node: node.into(),
@@ -3830,16 +3908,16 @@ mod typing_grant_tests {
         let mut pending = None;
         let front = Some("laptop/a1");
         assert_eq!(
-            typing_refusal(&mut pending, &[refused("laptop", "a2", 3)], &[], front),
+            typing_refusal_now(&mut pending, &[refused("laptop", "a2", 3)], &[], front),
             Notice::Same
         );
         assert_eq!(pending, None);
         assert_eq!(
-            typing_refusal(&mut pending, &[refused("mac", "a1", 3)], &[], front),
+            typing_refusal_now(&mut pending, &[refused("mac", "a1", 3)], &[], front),
             Notice::Same
         );
         assert_eq!(
-            typing_refusal(&mut pending, &[refused("laptop", "a1", 4)], &[], front),
+            typing_refusal_now(&mut pending, &[refused("laptop", "a1", 4)], &[], front),
             Notice::Show
         );
         assert_eq!(
@@ -3851,7 +3929,7 @@ mod typing_grant_tests {
         );
         // More of the same typing refused: the notice stands, nothing new is said.
         assert_eq!(
-            typing_refusal(&mut pending, &[refused("laptop", "a1", 6)], &[], front),
+            typing_refusal_now(&mut pending, &[refused("laptop", "a1", 6)], &[], front),
             Notice::Same
         );
         assert_eq!(pending.as_ref().map(|p| p.request), Some(6));
@@ -3875,18 +3953,18 @@ mod typing_grant_tests {
     #[test]
     fn the_notice_ends_with_a_new_tab_or_the_next_accepted_keystroke() {
         let mut pending = None;
-        typing_refusal(
+        typing_refusal_now(
             &mut pending,
             &[refused("laptop", "a1", 4)],
             &[],
             Some("laptop/a1"),
         );
         assert_eq!(
-            typing_refusal(&mut pending, &[], &[], Some("laptop/a2")),
+            typing_refusal_now(&mut pending, &[], &[], Some("laptop/a2")),
             Notice::End
         );
         assert_eq!(pending, None);
-        typing_refusal(
+        typing_refusal_now(
             &mut pending,
             &[refused("laptop", "a1", 5)],
             &[],
@@ -3894,7 +3972,7 @@ mod typing_grant_tests {
         );
         // Typing taken before the refusal does not end it; typing taken after does.
         assert_eq!(
-            typing_refusal(
+            typing_refusal_now(
                 &mut pending,
                 &[],
                 &[taken("laptop", "a1", 4)],
@@ -3903,7 +3981,7 @@ mod typing_grant_tests {
             Notice::Same
         );
         assert_eq!(
-            typing_refusal(
+            typing_refusal_now(
                 &mut pending,
                 &[],
                 &[taken("laptop", "a1", 7)],
@@ -3913,7 +3991,7 @@ mod typing_grant_tests {
         );
         assert_eq!(pending, None);
         assert_eq!(
-            typing_refusal(
+            typing_refusal_now(
                 &mut pending,
                 &[refused("laptop", "a1", 8)],
                 &[taken("laptop", "a1", 9)],
@@ -3923,14 +4001,14 @@ mod typing_grant_tests {
         );
         assert_eq!(pending, None);
         // Ended and refused again in one turn: said again.
-        typing_refusal(
+        typing_refusal_now(
             &mut pending,
             &[refused("laptop", "a1", 10)],
             &[],
             Some("laptop/a1"),
         );
         assert_eq!(
-            typing_refusal(
+            typing_refusal_now(
                 &mut pending,
                 &[refused("laptop", "a1", 12)],
                 &[taken("laptop", "a1", 11)],
