@@ -17,7 +17,7 @@ the node per MCP connection; agents cannot impersonate each other.
 | `lease_acquire` | `{ paths: [glob], ttl_s: number, reason }` | `{ lease_id, expires_at }` or `lease.held` |
 | `lease_release` | `{ lease_id }` | `{ ok }` |
 | `handoff` | `{ to, task_id?, summary, refs }` | `{ handoff_id }` |
-| `agent_start` | `{ kind, prompt?, folder?, worktree?: bool, node?, settings?: { id: value } }` | `{ agent_id }` after the user's decision (ADR-0057) |
+| `agent_start` | `{ kind, prompt?, folder?, worktree?: bool, node?, settings?: { id: value }, options?: [id] }` | `{ agent_id }` after the user's decision (ADR-0057) |
 | `agent_wait` | `{ agent_id, state: "idle"\|"working"\|"blocked"\|"done"\|"exited", timeout_s?: number (default 600, at most 3600) }` | `{ agent_id, state }` or `mesh.timeout` |
 | `agent_output` | `{ agent_id, lines?: number (default 40, at most 200) }` | `{ agent_id, source: "screen"\|"transcript", lines }` |
 
@@ -138,7 +138,13 @@ the node answers them itself (`agora-node::spawn`), not the broker. The caller i
   them against its manifest before anyone is asked (`agent.setting_unknown`, `agent.setting_invalid`; nothing is announced and nothing
   starts), the card lists every one next to the kind, folder and prompt, and the decision is signed over them (`agora-approval-start-v2`,
   `protocol.md`), so the helper starts with exactly what the user was shown. A request with settings offers no grant (`grant_allowed:
-  false`) and a start with settings is always asked, even under a grant. A helper never gets a launch option (ADR-0059).
+  false`) and a start with settings is always asked, even under a grant.
+- **Launch options (ADR-0059 decision 5).** `options` names launch options the kind declares by id (`skip-permissions`: the helper acts
+  without asking). A helper never inherits its parent's; it gets one only this way. The node checks the ids against its manifest and its
+  owner's `skip_permissions` policy before anyone is asked (`agent.option_invalid`, `agent.option_forbidden`; nothing is announced and
+  nothing starts), the card lists each with whether it skips permissions (the manifest's word) and asks for the same confirmation as a
+  start from the window, and the decision is signed over `agora-approval-start-v3` (`protocol.md`). Such a request offers no grant and
+  is always asked, even under one; the helper carries the "does not ask" badge.
 - **A grant.** The decision may allow "up to N helpers of this kind in this folder" (N at most 10, this start included) and, separately,
   that the helpers it starts may ask in turn. Later starts that match the grant (same asking agent, kind, folder and `worktree`
   choice) start at once. A grant ends when the asking agent exits or is stopped, or when revoked (`GrantRevoke` with the approval id;

@@ -1107,6 +1107,40 @@ impl Supervisor {
             .collect())
     }
 
+    /// ADR-0059 decision 5: the launch options an agent's `agent_start` asks for, checked against this node's manifest for `kind` and
+    /// the owner's `skip_permissions` policy before anyone is asked (an undeclared, repeated or malformed id is `agent.option_invalid`,
+    /// a policy refusal `agent.option_forbidden`), and returned as `(id, label, skips_permissions)` in the manifest's order: what the
+    /// approval card shows and the signature covers. Which options skip permissions is this manifest's word. The user's signed
+    /// decision naming them is their confirmation. Empty in, empty out.
+    pub fn checked_options(
+        &self,
+        kind: &str,
+        ids: &[String],
+    ) -> Result<Vec<(String, String, bool)>, SupervisorError> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.launch_choice(
+            kind,
+            &Requested {
+                ids: ids.to_vec(),
+                confirmed: ids.to_vec(),
+                ..Requested::default()
+            },
+        )?;
+        let k = self
+            .kinds
+            .get(kind)
+            .ok_or_else(|| SupervisorError::UnknownKind(kind.to_string()))?;
+        Ok(k.manifest
+            .launch
+            .option
+            .iter()
+            .filter(|o| ids.contains(&o.id))
+            .map(|o| (o.id.clone(), o.label.clone(), o.skips_permissions))
+            .collect())
+    }
+
     /// ADR-0057: `child` was started by `parent` (an agent's `agent_start`). Carried in every view of `child`.
     pub fn set_parent(&mut self, child: &AgentId, parent: &AgentId) {
         self.parents.insert(child.clone(), parent.clone());

@@ -977,7 +977,8 @@ impl EventSink {
         kind: &str,
         terminal: bool,
     ) {
-        self.helper_launched(agent, workspace, kind, terminal, "");
+        let none = crate::launch_options::LaunchChoice::default();
+        self.helper_launched(agent, workspace, kind, terminal, "", &none);
     }
 
     /// [`Self::directory_agent_launched`] with the launch options the agent was started with (ADR-0059).
@@ -1000,10 +1001,11 @@ impl EventSink {
         kind: &str,
         terminal: bool,
         parent: &str,
+        launch: &crate::launch_options::LaunchChoice,
     ) {
-        // ADR-0059: a helper never has launch options.
-        let none = crate::launch_options::LaunchChoice::default();
-        self.workspace_agent_launched(agent, workspace, kind, terminal, parent, &none);
+        // ADR-0059 decision 5: a helper has launch options only when the user's signed decision named them (never inherited); the
+        // event carries them, so every client shows the "does not ask" badge on it.
+        self.workspace_agent_launched(agent, workspace, kind, terminal, parent, launch);
     }
 
     fn workspace_agent_launched(

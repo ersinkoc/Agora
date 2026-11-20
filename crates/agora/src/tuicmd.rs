@@ -468,6 +468,29 @@ fn answer(
     }
 }
 
+/// ADR-0059 decision 5: before y allows the start request `selected` points at whose helper would act without asking, a confirmation
+/// answered with its own key, `s`: a held or repeated y (the key that opened it) never confirms but keeps asking, as does any other key
+/// and no key at all; nothing is answered then. `true` when there is nothing to confirm or the user pressed s.
+fn confirm_skipping_start(
+    say: &Say,
+    s: &Snapshot,
+    selected: &str,
+    text: agora_tui::render::Text<'_>,
+    ask: &mut dyn Asker,
+) -> bool {
+    let Some(a) = agora_tui::client::answered_approval(s, Some(selected)) else {
+        return true;
+    };
+    let Some(names) = agora_tui::render::start_skipping_options(&a.action, &a.detail, text) else {
+        return true;
+    };
+    let question = lines_of(&say.text(
+        key!("tui-start-approval-confirm-skip"),
+        &[("name", Arg::Str(names))],
+    ));
+    ask.key(&question, Duration::from_secs(60)) == Some(b's')
+}
+
 /// The `agent.start` request y would answer when it does not fit the split view at the terminal's size now and was not read whole in
 /// the reader (ADR-0057): y must not allow it yet.
 fn start_unread(
@@ -1789,6 +1812,19 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                                 .is_some()
                             {
                                 notice = say.text(key!("tui-split-read-first"), &[]);
+                                draw(&snapshot, &selected, &notice, cost, preview.as_ref());
+                                continue;
+                            }
+                            if k == b'y'
+                                && !confirm_skipping_start(
+                                    say,
+                                    s,
+                                    &selected,
+                                    &text,
+                                    &mut Plain(&rx),
+                                )
+                            {
+                                notice = String::new();
                                 draw(&snapshot, &selected, &notice, cost, preview.as_ref());
                                 continue;
                             }
@@ -3498,6 +3534,14 @@ fn command(
                 }
             }
             c.shown_request = None;
+            if allow
+                && !over_console(say, c, session, preview, None, rx, |_, ask| {
+                    confirm_skipping_start(say, &s, &selected, &text, ask)
+                })
+            {
+                c.notice = String::new();
+                return false;
+            }
             c.notice = answer(say, session, &s, &selected, allow);
             true
         }
@@ -4386,6 +4430,138 @@ mod adr0069_tests {
             "{general}"
         );
         assert!(general.contains(&device.public_key_hex()), "{general}");
+    }
+}
+
+#[cfg(test)]
+mod skipping_start_tests {
+    use super::*;
+    use agora_i18n::Catalog;
+
+    /// Answers each question with the next key, and keeps what it was shown.
+    struct Script {
+        rx: mpsc::Receiver<u8>,
+        shown: Vec<String>,
+    }
+
+    impl Asker for Script {
+        fn rx(&self) -> &mpsc::Receiver<u8> {
+            &self.rx
+        }
+        fn show(&mut self, lines: &[String]) {
+            self.shown.extend_from_slice(lines);
+        }
+        fn frame(&mut self, _: &[u8]) {}
+    }
+
+    fn script(keys: &[u8]) -> Script {
+        let (tx, rx) = mpsc::channel();
+        for k in keys {
+            tx.send(*k).unwrap_or_else(|_| panic!("send"));
+        }
+        Script {
+            rx,
+            shown: Vec::new(),
+        }
+    }
+
+    /// ADR-0059 decision 5: y allows a start whose helper would act without asking only after the confirmation, naming the option in
+    /// this terminal's words; any other key keeps asking. A start without such an option is not asked about.
+    #[test]
+    fn y_on_a_start_that_acts_without_asking_asks_for_the_confirmation_first() {
+        let snapshot = |detail: serde_json::Value| Snapshot {
+            approvals: vec![agora_protocol::v1::ApprovalSnapshot {
+                approval_id: "mac2/a1".into(),
+                agent_id: "mac2/agent-1".into(),
+                action: "agent.start".into(),
+                detail: detail.to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let skipping = snapshot(serde_json::json!({"kind": "codex", "prompt": "x",
+            "launch_options": [{"id": "skip-permissions", "label": "option-skip-permissions", "skips_permissions": true}]}));
+        let say = Say(Catalog::english());
+        let text = |id: &str, args: &[(&str, Arg)]| say.text(id, args);
+        let mut yes = script(b"s");
+        assert!(confirm_skipping_start(
+            &say,
+            &skipping,
+            "mac2/agent-1",
+            &text,
+            &mut yes
+        ));
+        let asked = yes.shown.join(" ");
+        assert!(
+            asked.contains("Let the helper act without asking? With \"Don't ask\""),
+            "{asked}"
+        );
+        assert!(asked.contains("Press s"), "{asked}");
+        // The key that opened it, held or repeated, keeps asking: a repeated y never confirms.
+        let mut repeated = script(b"yyyy");
+        assert!(!confirm_skipping_start(
+            &say,
+            &skipping,
+            "mac2/agent-1",
+            &text,
+            &mut repeated
+        ));
+        for key in [b'y', b'Y', b'S', b'n', b'\r', 0x1b] {
+            let mut other = script(&[key]);
+            assert!(!confirm_skipping_start(
+                &say,
+                &skipping,
+                "mac2/agent-1",
+                &text,
+                &mut other
+            ));
+        }
+        // The card says how it acts and what that means, before the prompt, in the lines y answers; an agent's own label is not used.
+        let lines = start_card_lines(&skipping.approvals[0], 80, &text).unwrap_or_default();
+        let at = |needle: &str| lines.iter().position(|l| l.contains(needle));
+        assert!(at("How it acts: Don't ask").is_some(), "{lines:?}");
+        assert!(
+            at("If you allow it, this helper runs commands").is_some(),
+            "{lines:?}"
+        );
+        let prompt = lines.iter().position(|l| l == "  x");
+        assert!(prompt.is_some() && at("How it acts") < prompt, "{lines:?}");
+        let odd = snapshot(serde_json::json!({"kind": "codex", "prompt": "x",
+            "launch_options": [{"id": "skip-permissions", "label": "Totally safe", "skips_permissions": true}]}));
+        let odd_lines = start_card_lines(&odd.approvals[0], 80, &text).unwrap_or_default();
+        assert!(
+            odd_lines
+                .iter()
+                .any(|l| l.contains("How it acts: skip-permissions")),
+            "{odd_lines:?}"
+        );
+        assert!(
+            !odd_lines.iter().any(|l| l.contains("Totally safe")),
+            "{odd_lines:?}"
+        );
+        // No key at all (the wait ran out) keeps asking too.
+        assert!(!confirm_skipping_start(
+            &say,
+            &skipping,
+            "mac2/agent-1",
+            &text,
+            &mut script(&[])
+        ));
+        // A start without options, and one whose options do not skip permissions, are answered as before.
+        for detail in [
+            serde_json::json!({"kind": "codex", "prompt": "x"}),
+            serde_json::json!({"kind": "codex", "launch_options": [{"id": "fast", "label": "option-fast", "skips_permissions": false}]}),
+        ] {
+            let mut none = script(&[]);
+            assert!(confirm_skipping_start(
+                &say,
+                &snapshot(detail),
+                "mac2/agent-1",
+                &text,
+                &mut none
+            ));
+            assert!(none.shown.is_empty());
+        }
     }
 }
 

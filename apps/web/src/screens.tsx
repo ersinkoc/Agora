@@ -32,7 +32,7 @@ import type { ApprovalModel, MachineModel, MessageModel, ProjectCost } from './n
 import type { Device } from './net/approval';
 import { deviceLabel } from './net/devices';
 import type { UsageSummary } from './net/usage';
-import { demoAgents, demoApprovals, demoHelper, demoSkipApproval, demoStartApproval, demoStartSettingsApproval } from './fixtures';
+import { demoAgents, demoApprovals, demoHelper, demoSkipApproval, demoStartApproval, demoStartSettingsApproval, demoStartNoAskApproval } from './fixtures';
 import { forgetSkipCapable, markSkipCapable } from './net/skipApproval';
 import { SessionBar } from './components/SessionBar';
 import { demoSource, type TerminalSource } from './terminal/source';
@@ -142,6 +142,7 @@ function Themed({ theme, onStart }: { theme: 'dark' | 'light'; onStart?: () => v
       <div data-skip-badge><SessionBar part="controls" agentKey="demo/rich" session={{ ...(demoRichAgent.session as NonNullable<AgentTileModel['session']>), config: (demoRichAgent.session?.config ?? []).map((o) => (o.id === 'mode' ? { ...o, current: 'yolo' } : o)) }} setConfig={async () => true} /></div>
       <StartApproval approval={demoStartApproval} start={demoStartApproval.start} onResolve={() => {}} />
       <StartApproval approval={demoStartSettingsApproval} start={demoStartSettingsApproval.start} onResolve={() => {}} />
+      <StartApproval approval={demoStartNoAskApproval} start={demoStartNoAskApproval.start} onResolve={() => {}} />
       <HelperGrants list={async () => [{ id: 'ap-1', kind: 'codex', folder: '/home/dev/code/login-fix', remaining: 2 }]} revoke={async () => {}} refresh={0} />
       <DeviceRequest inline request={{ id: 'web-3fa9c1d24e5b6a70', name: 'Firefox · Linux', fingerprint: 'f947-3cb5-e304-81be-ecf2-64cd' }}
         machines={[{ id: 'laptop', name: 'laptop' }, { id: 'vps-1', name: 'vps-1' }]} onApprove={async () => true} onLater={() => {}} />

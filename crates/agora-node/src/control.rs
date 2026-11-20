@@ -1418,6 +1418,16 @@ pub(crate) fn resume_agent(
                 &entry.kind,
                 has_terminal,
                 &entry.parent_agent_id,
+                // The options it was started with (ADR-0059: for its whole life, resumes included), so the badge stays on it.
+                &views
+                    .iter()
+                    .find(|v| v.id == id)
+                    .map(|v| crate::launch_options::LaunchChoice {
+                        ids: v.launch_options.clone(),
+                        args: Vec::new(),
+                        skips_permissions: v.skips_permissions,
+                    })
+                    .unwrap_or_default(),
             );
             // Its start is said above with its folder; the rest (its state, its session) as usual.
             let rest: Vec<SupervisorEvent> = events
