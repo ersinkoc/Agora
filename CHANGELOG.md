@@ -7,6 +7,10 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 - In the terminal client, a question over the console (such as the one-hour permission to type) no longer closes the open agent's terminal, is not answered by a `y` inside a paste or beside passive mouse motion, and a refresh no longer drops a refusal of a key you just typed; Ctrl-K lists `g`, the key that asks for that permission.
 - When a machine asks for your OK before you type into, message or stop an agent, the question now names the agent and that one action, and the one-hour permission covers only that action (before, it also covered stopping and sending messages), in the web window and the terminal client.
 
+### Session discovery checks for look-alike agents off the supervision thread
+
+When the node decides whether two agents could be mixed up, it looks at the disk on a thread of its own (reading the session files still happens on the supervision thread). A moved workspace or a changed manifest is noticed within 30 seconds, and until a lookup answers the agent is given no session.
+
 ## 0.3.31
 
 ### A board for a project's tasks
