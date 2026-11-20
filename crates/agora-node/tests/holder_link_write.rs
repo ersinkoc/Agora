@@ -5,24 +5,55 @@
 #![cfg(unix)]
 
 use std::io::{Read, Write};
+use std::process::Command;
 use std::time::{Duration, Instant};
 
-use agora_node::holder_link::{write_frame, FRAME_TIMEOUT, WRITE_SLICE};
+use agora_node::holder_link::{write_frame, LinkError, FRAME_TIMEOUT, WRITE_SLICE};
 use agora_platform::{HeldTerminal, ProcessLimits, PtyConfig};
+
+fn fake_agent() -> String {
+    let mut p = std::env::current_exe().expect("exe");
+    p.pop();
+    p.pop();
+    p.push(format!("agora-fake-agent{}", std::env::consts::EXE_SUFFIX));
+    // Built once per test binary, even when present: a binary left from an older checkout may lack newer flags.
+    static FRESH: std::sync::Once = std::sync::Once::new();
+    FRESH.call_once(|| {
+        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+        let ok = Command::new(cargo)
+            .args(["build", "-q", "-p", "agora-fake-agent"])
+            .status()
+            .expect("run cargo")
+            .success();
+        assert!(ok, "building agora-fake-agent failed");
+    });
+    p.to_string_lossy().into_owned()
+}
 
 #[test]
 fn a_terminal_frame_drained_in_part_at_its_deadline_still_ends_by_it() {
     let dir = std::env::temp_dir().join(format!("agora-hlw-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
+    // An agent that only waits, so the terminal stays open while it is sent.
+    let script = dir.join("wait.toml");
+    std::fs::write(
+        &script,
+        "name = \"wait\"\n\n[[frame]]\ntext = \"waiting\"\ndelay_ms = 60000\n",
+    )
+    .unwrap();
     let path = dir.join("s.sock");
     let listener = agora_platform::local_listen(&path).unwrap();
     let mut w = agora_platform::local_connect(&path).unwrap();
     let mut r = listener.accept().unwrap();
     let mut term = HeldTerminal::start(&PtyConfig {
-        argv: vec!["sleep".into(), "30".into()],
+        argv: vec![
+            fake_agent(),
+            "--script".into(),
+            script.to_string_lossy().into_owned(),
+        ],
         cwd: None,
-        env: vec![("PATH".into(), "/usr/bin:/bin".into())],
+        env: Vec::new(),
         cols: 80,
         rows: 24,
         limits: ProcessLimits::default(),
@@ -42,13 +73,14 @@ fn a_terminal_frame_drained_in_part_at_its_deadline_still_ends_by_it() {
     w.set_write_timeout(Some(WRITE_SLICE)).unwrap();
     // Larger than the socket's buffer, so it can only go in part.
     let payload = vec![1u8; 2 << 20];
+    let frame_len = 4 + payload.len();
     let writer = std::thread::spawn(move || {
         let began = Instant::now();
         let res = write_frame(&mut w, &payload, Some(&handle));
-        (res.is_ok(), began.elapsed(), w)
+        (res, began.elapsed(), w)
     });
-    // Half a second before the deadline the peer takes the filler (and so lets part of the frame in), then reads no more: the
-    // send blocked at that moment returns that part only when its slice ends, at the deadline.
+    // Half a second before the deadline the peer takes the filler (and so lets part of the frame in), then reads no more until
+    // the write has returned.
     std::thread::sleep(FRAME_TIMEOUT - Duration::from_millis(500));
     r.set_read_timeout(Some(Duration::from_millis(100)))
         .unwrap();
@@ -61,14 +93,34 @@ fn a_terminal_frame_drained_in_part_at_its_deadline_still_ends_by_it() {
             Ok(n) => got += n,
         }
     }
-    let (ok, elapsed, _w) = writer.join().unwrap();
+    assert_eq!(got, filler);
+    let (res, elapsed, _w) = writer.join().unwrap();
+    // What of the frame went: its first bytes, with the terminal.
+    let (mut part, mut terminal) = (0usize, false);
+    while let Ok((n, t)) = r.recv_with_terminal(&mut buf) {
+        if n == 0 {
+            break;
+        }
+        part += n;
+        terminal |= t.is_some();
+    }
     drop(r);
     drop(listener);
     term.kill_and_reap();
     let _ = std::fs::remove_dir_all(&dir);
-    assert!(!ok, "the frame cannot have gone whole");
+    println!("write_frame: {res:?} after {elapsed:?}; the peer got {part} of {frame_len} bytes, terminal={terminal}");
+    assert!(terminal, "the terminal went with the first part");
     assert!(
-        elapsed <= FRAME_TIMEOUT + Duration::from_millis(300),
+        part > 0 && part < frame_len,
+        "a part of the frame went: {part} of {frame_len}"
+    );
+    assert!(
+        matches!(&res, Err(LinkError::Io(e)) if e.kind() == std::io::ErrorKind::TimedOut),
+        "{res:?}"
+    );
+    assert!(
+        elapsed >= FRAME_TIMEOUT - Duration::from_millis(50)
+            && elapsed <= FRAME_TIMEOUT + Duration::from_millis(300),
         "write_frame took {elapsed:?}, its limit is {FRAME_TIMEOUT:?}"
     );
 }

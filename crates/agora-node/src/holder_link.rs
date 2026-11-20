@@ -815,10 +815,13 @@ fn send_frame(
     Ok(())
 }
 
-/// Most bytes one send is given. A blocking send waits its write timeout afresh for each kernel buffer it allocates (Linux Unix
-/// sockets: up to about 36 KiB each), so a send of a whole frame to a peer that takes it bit by bit could outlast the frame's time
-/// (measured: 5.4 s); a send of one piece smaller than that waits at most once.
-const SEND_PIECE: usize = 16 << 10;
+/// Most bytes one send is given, so that each send waits at most once and the frame's deadline holds whatever the socket's buffer.
+/// A blocking send waits its write timeout afresh for each kernel buffer it allocates (measured: a whole-frame send ran to 5.4 s
+/// against a 5 s limit). On Linux a Unix stream send splits into buffers of at most `SO_SNDBUF / 2 - 64` bytes, and `SO_SNDBUF` is
+/// never below `SOCK_MIN_SNDBUF` (2 * (2048 + sizeof(sk_buff)), about 4.5 KiB: buffers of at least about 2.2 KiB), so 2 KiB is one
+/// buffer even at the smallest size. (agora-platform has no wait-for-writable helper for a `LocalStream`; a poll here would need
+/// platform code.) A 4 MiB frame, the largest, is 2048 sends.
+const SEND_PIECE: usize = 2 << 10;
 
 fn piece(bytes: &[u8]) -> &[u8] {
     &bytes[..bytes.len().min(SEND_PIECE)]

@@ -77,8 +77,8 @@ next frame's.
   them but 0, 1 and 2 close-on-exec before `exec` (marked, not closed, so the pipe std uses to report a failed `exec` still works).
   Both are tested, the first with a holder started with extra non-close-on-exec descriptors.
 - A write to a node that does not read gives up after `FRAME_TIMEOUT` (5 s in all, each blocked send waits `WRITE_SLICE`, 1 s, or what
-  is left of the 5 s when that is less, and is given at most 16 KiB so it waits only once), and the holder drops that node: a node
-  that stops reading, or takes a frame bit by bit, cannot hang it (tested).
+  is left of the 5 s when that is less, and is given at most 2 KiB, one kernel buffer even at the smallest `SO_SNDBUF`, so it
+  waits only once), and the holder drops that node: a node that stops reading, or takes a frame bit by bit, cannot hang it (tested).
 - `agora hold` refuses to start (it exits 1, `hold-failed`) when it cannot become a session leader (`setsid` fails with `EPERM` in a
   process-group leader); it never runs on in its starter's session.
 
