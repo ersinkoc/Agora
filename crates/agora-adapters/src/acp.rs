@@ -1481,7 +1481,6 @@ impl<W: Write> Bridge<W> {
                 }
             }
             "approval/resolve" => {
-                done(self)?;
                 let approval = params
                     .get("approvalId")
                     .and_then(Value::as_str)
@@ -1490,27 +1489,35 @@ impl<W: Write> Bridge<W> {
                     .get("approved")
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
-                if let Some(p) = self.perms.remove(approval) {
-                    let want: &[&str] = if approved {
-                        &["allow_once", "allow_always"]
-                    } else {
-                        &["reject_once", "reject_always"]
-                    };
-                    let chosen = want
-                        .iter()
-                        .find_map(|k| p.options.iter().find(|(_, kind)| kind == k))
-                        .or_else(|| if approved { p.options.first() } else { None });
-                    let outcome = match chosen {
-                        Some((option, _)) => json!({"outcome": "selected", "optionId": option}),
-                        None => json!({"outcome": "cancelled"}),
-                    };
-                    self.send_agent(
-                        &json!({"jsonrpc": "2.0", "id": p.request, "result": {"outcome": outcome}}),
-                    );
-                    // Permissions are kept only while a prompt runs (one outside a turn is refused, any prompt's reply cancels them).
-                    if self.perms.is_empty() {
-                        self.state("WORKING")?;
+                let Some(p) = self.perms.remove(approval) else {
+                    // A permission the bridge already answered `cancelled` (a prompt's reply, a cancel, a change of session), or
+                    // never knew: the decision cannot reach the agent, so it is refused and the node cancels its entry.
+                    if let Some(id) = &id {
+                        self.send_node(&json!({"jsonrpc": "2.0", "id": id,
+                            "error": {"code": -32602, "message": "unknown approval"}}))?;
                     }
+                    return Ok(ControlFlow::Continue(()));
+                };
+                done(self)?;
+                let want: &[&str] = if approved {
+                    &["allow_once", "allow_always"]
+                } else {
+                    &["reject_once", "reject_always"]
+                };
+                let chosen = want
+                    .iter()
+                    .find_map(|k| p.options.iter().find(|(_, kind)| kind == k))
+                    .or_else(|| if approved { p.options.first() } else { None });
+                let outcome = match chosen {
+                    Some((option, _)) => json!({"outcome": "selected", "optionId": option}),
+                    None => json!({"outcome": "cancelled"}),
+                };
+                self.send_agent(
+                    &json!({"jsonrpc": "2.0", "id": p.request, "result": {"outcome": outcome}}),
+                );
+                // Permissions are kept only while a prompt runs (one outside a turn is refused, any prompt's reply cancels them).
+                if self.perms.is_empty() {
+                    self.state("WORKING")?;
                 }
             }
             "session/set_option" => self.set_option(id, &params)?,
@@ -2823,6 +2830,58 @@ mod tests {
         assert_eq!(
             answer_to(&sent.take(), "perm").as_deref(),
             Some("cancelled")
+        );
+        Ok(())
+    }
+
+    /// Codex review of #794: a decision for a permission the bridge no longer holds (it answered it `cancelled` itself, or never
+    /// knew it) is refused with an error and sends the agent nothing, so the node marks its entry cancelled instead of recording a
+    /// decision that never reached the agent. A decision it holds still succeeds.
+    #[test]
+    fn a_decision_the_bridge_cannot_deliver_is_refused() -> Result<(), Box<dyn std::error::Error>> {
+        use serde_json::json;
+        let answer = |out: &[u8], id: u64| -> Option<serde_json::Value> {
+            out.split(|b| *b == b'\n')
+                .filter_map(|l| serde_json::from_slice::<serde_json::Value>(l).ok())
+                .find(|v| v["id"] == id && v.get("method").is_none())
+        };
+        let resolve = |b: &mut super::Bridge<Vec<u8>>, id: u64, approval: &str| {
+            b.handle_node(&json!({"jsonrpc":"2.0","id":id,"method":"approval/resolve",
+                "params":{"approvalId":approval,"approved":true}}))
+                .map(drop)
+        };
+        let (mut b, sent) = bridge_with_agent()?;
+        prompt(&mut b, 10, "t")?;
+        prompt(&mut b, 11, "u")?;
+        ask(&mut b, "perm-1")?;
+        let approval = b.perms.keys().next().cloned().ok_or("no approval")?;
+        // The agent refuses the second prompt as busy: the bridge cancels the permission.
+        b.handle_agent(&json!({"jsonrpc":"2.0","id":2,"error":{"code":-32603,"message":"busy"}}))?;
+        let _ = sent.take();
+        for (id, approval) in [(20, approval.as_str()), (21, "acp-99")] {
+            b.out.clear();
+            resolve(&mut b, id, approval)?;
+            let reply = answer(&b.out, id).ok_or("no reply")?;
+            assert_eq!(reply["error"]["code"], -32602, "{approval}: {reply}");
+            assert!(reply.get("result").is_none(), "{approval}: {reply}");
+            assert!(states(&b.out).is_empty(), "{approval}");
+            assert!(
+                sent.take().is_empty(),
+                "{approval}: the agent is sent nothing"
+            );
+        }
+        // A decision the bridge holds is delivered and succeeds.
+        let (mut b, sent) = bridge_with_agent()?;
+        prompt(&mut b, 10, "t")?;
+        ask(&mut b, "perm-2")?;
+        let approval = b.perms.keys().next().cloned().ok_or("no approval")?;
+        b.out.clear();
+        resolve(&mut b, 22, &approval)?;
+        let reply = answer(&b.out, 22).ok_or("no reply")?;
+        assert_eq!(reply["result"], json!({}), "{reply}");
+        assert_eq!(
+            answer_to(&sent.take(), "perm-2").as_deref(),
+            Some("selected")
         );
         Ok(())
     }
