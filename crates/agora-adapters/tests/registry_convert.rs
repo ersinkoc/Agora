@@ -29,7 +29,10 @@ fn golden_fixtures() {
         let c = got.unwrap_or_else(|r| panic!("{id}: {}", r.code()));
         assert_eq!(
             c.manifest,
-            fs::read_to_string(dir.join(format!("{id}.manifest.toml"))).unwrap(),
+            // A checkout on Windows may turn line ends into CRLF; the converter always writes LF.
+            fs::read_to_string(dir.join(format!("{id}.manifest.toml")))
+                .unwrap()
+                .replace("\r\n", "\n"),
             "{id}"
         );
         let want: serde_json::Value = serde_json::from_str(
