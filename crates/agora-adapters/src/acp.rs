@@ -80,15 +80,15 @@ enum Ev {
 enum Waiting {
     /// The node's `initialize` is answered only when the ACP agent has answered its own: a strict agent refuses
     /// `session/new` before that.
-    Initialize {
-        node_id: Value,
-    },
+    Initialize { node_id: Value },
     NewSession {
         node_id: Value,
         resume_id: Option<String>,
     },
     Prompt {
         cancelling: bool,
+        /// Cancelled, and a newer prompt was sent since: its reply ends nothing.
+        superseded: bool,
     },
     /// ADR-0090: the node's `session/set_config`, until the agent answered `session/set_config_option`.
     SetConfig {
@@ -863,7 +863,8 @@ struct Rich {
 
 struct Bridge<W: Write> {
     out: W,
-    agent: std::process::ChildStdin,
+    /// The agent's stdin (a buffer in tests, so what the agent was sent can be read on every platform).
+    agent: Box<dyn Write>,
     next: u64,
     waiting: HashMap<u64, Waiting>,
     session: Option<String>,
@@ -1006,9 +1007,43 @@ impl<W: Write> Bridge<W> {
         self.send_agent(&json!({"jsonrpc": "2.0", "method": method, "params": params}));
     }
 
+    /// Whether a cancelled `session/prompt` still waits for the agent's answer. Until it answered, every permission request is
+    /// refused: ACP names the session in one, not the prompt, so it may be the stopped turn's.
+    fn cancel_open(&self) -> bool {
+        self.waiting.values().any(|w| {
+            matches!(
+                w,
+                Waiting::Prompt {
+                    cancelling: true,
+                    ..
+                }
+            )
+        })
+    }
+
+    /// Whether a `session/prompt` that was not cancelled still waits for the agent's answer (a turn is running).
+    fn prompt_open(&self) -> bool {
+        self.waiting.values().any(|w| {
+            matches!(
+                w,
+                Waiting::Prompt {
+                    cancelling: false,
+                    ..
+                }
+            )
+        })
+    }
+
     fn cancel_permission(&mut self, request: Value) {
         self.send_agent(&json!({"jsonrpc": "2.0", "id": request,
             "result": {"outcome": {"outcome": "cancelled"}}}));
+    }
+
+    /// Forgets every pending permission, answering each `cancelled` first: the agent still waits for those answers.
+    fn cancel_permissions(&mut self) {
+        for permission in std::mem::take(&mut self.perms).into_values() {
+            self.cancel_permission(permission.request);
+        }
     }
 
     /// The agent's output ended and it exited (`exit_code` when known). Every request the node still waits for is answered with
@@ -1407,29 +1442,45 @@ impl<W: Write> Bridge<W> {
                 done(self)?;
                 self.said = false;
                 self.turn_mark = self.stderr.lock().unwrap_or_else(|e| e.into_inner()).total;
-                self.state("WORKING")?;
+                // A permission still pending keeps the agent waiting for the user, whatever else it is sent.
+                self.state(if self.perms.is_empty() {
+                    "WORKING"
+                } else {
+                    "BLOCKED"
+                })?;
+                // A cancelled prompt still unanswered (the node's cancel grace passed) no longer counts for the turn: this one's
+                // reply ends it, and its own late reply ends nothing.
+                for request in self.waiting.values_mut() {
+                    if let Waiting::Prompt {
+                        cancelling: true,
+                        superseded,
+                    } = request
+                    {
+                        *superseded = true;
+                    }
+                }
                 self.ask_agent(
                     "session/prompt",
                     json!({"sessionId": sid, "prompt": [{"type": "text", "text": text}]}),
-                    Waiting::Prompt { cancelling: false },
+                    Waiting::Prompt {
+                        cancelling: false,
+                        superseded: false,
+                    },
                 );
             }
             "session/cancel" => {
                 done(self)?;
                 if let Some(sid) = self.session.clone() {
                     for request in self.waiting.values_mut() {
-                        if let Waiting::Prompt { cancelling } = request {
+                        if let Waiting::Prompt { cancelling, .. } = request {
                             *cancelling = true;
                         }
                     }
                     self.tell_agent("session/cancel", json!({"sessionId": sid}));
-                    for permission in std::mem::take(&mut self.perms).into_values() {
-                        self.cancel_permission(permission.request);
-                    }
+                    self.cancel_permissions();
                 }
             }
             "approval/resolve" => {
-                done(self)?;
                 let approval = params
                     .get("approvalId")
                     .and_then(Value::as_str)
@@ -1438,26 +1489,35 @@ impl<W: Write> Bridge<W> {
                     .get("approved")
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
-                if let Some(p) = self.perms.remove(approval) {
-                    let want: &[&str] = if approved {
-                        &["allow_once", "allow_always"]
-                    } else {
-                        &["reject_once", "reject_always"]
-                    };
-                    let chosen = want
-                        .iter()
-                        .find_map(|k| p.options.iter().find(|(_, kind)| kind == k))
-                        .or_else(|| if approved { p.options.first() } else { None });
-                    let outcome = match chosen {
-                        Some((option, _)) => json!({"outcome": "selected", "optionId": option}),
-                        None => json!({"outcome": "cancelled"}),
-                    };
-                    self.send_agent(
-                        &json!({"jsonrpc": "2.0", "id": p.request, "result": {"outcome": outcome}}),
-                    );
-                    if self.perms.is_empty() {
-                        self.state("WORKING")?;
+                let Some(p) = self.perms.remove(approval) else {
+                    // A permission the bridge already answered `cancelled` (a prompt's reply, a cancel, a change of session), or
+                    // never knew: the decision cannot reach the agent, so it is refused and the node cancels its entry.
+                    if let Some(id) = &id {
+                        self.send_node(&json!({"jsonrpc": "2.0", "id": id,
+                            "error": {"code": -32602, "message": "unknown approval"}}))?;
                     }
+                    return Ok(ControlFlow::Continue(()));
+                };
+                done(self)?;
+                let want: &[&str] = if approved {
+                    &["allow_once", "allow_always"]
+                } else {
+                    &["reject_once", "reject_always"]
+                };
+                let chosen = want
+                    .iter()
+                    .find_map(|k| p.options.iter().find(|(_, kind)| kind == k))
+                    .or_else(|| if approved { p.options.first() } else { None });
+                let outcome = match chosen {
+                    Some((option, _)) => json!({"outcome": "selected", "optionId": option}),
+                    None => json!({"outcome": "cancelled"}),
+                };
+                self.send_agent(
+                    &json!({"jsonrpc": "2.0", "id": p.request, "result": {"outcome": outcome}}),
+                );
+                // Permissions are kept only while a prompt runs (one outside a turn is refused, any prompt's reply cancels them).
+                if self.perms.is_empty() {
+                    self.state("WORKING")?;
                 }
             }
             "session/set_option" => self.set_option(id, &params)?,
@@ -1760,11 +1820,10 @@ impl<W: Write> Bridge<W> {
                 }
             }
             (Some("session/request_permission"), Some(request)) => {
-                if self
-                    .waiting
-                    .values()
-                    .any(|request| matches!(request, Waiting::Prompt { cancelling: true }))
-                {
+                // Fail closed: while a cancelled prompt is unanswered, a request may be the stopped turn's (a new turn's is refused
+                // too, until then). With no prompt running it belongs to no turn (Audit F1241, Codex review of #794): a `blocked`
+                // could be read by the node as the start of its next prompt, and the decision would end that turn early.
+                if self.cancel_open() || !self.prompt_open() {
                     self.cancel_permission(request);
                     return Ok(());
                 }
@@ -1854,7 +1913,7 @@ impl<W: Write> Bridge<W> {
                                     self.waiting.retain(|_, request| {
                                         !matches!(request, Waiting::Prompt { .. })
                                     });
-                                    self.perms.clear();
+                                    self.cancel_permissions();
                                 }
                                 let state = self.session_state.entry(sid.clone()).or_default();
                                 self.session = Some(sid.clone());
@@ -1905,10 +1964,20 @@ impl<W: Write> Bridge<W> {
                             }
                         }
                     }
+                    // A cancelled prompt a newer one replaced: the newer turn is not its business.
+                    Some(Waiting::Prompt {
+                        superseded: true, ..
+                    }) => {}
                     Some(Waiting::Prompt { .. }) => {
                         self.flush_text()?;
-                        self.perms.clear();
-                        match turn_outcome(msg, self.said) {
+                        // Audit F1240: prompts overlap when the node sends one into a running turn (a spawned helper's request,
+                        // a node without `turns`). Only the last reply ends the turn: until then no `idle` is reported; this reply's
+                        // own failure or stop is still reported (whether it was empty cannot be told). Cancelled prompts do not hold
+                        // the turn open. Any reply ends every pending permission (fail closed): ACP names the session in one, not the
+                        // prompt, so it may be this finished prompt's; the agent asks again if it still needs it.
+                        self.cancel_permissions();
+                        let still_open = self.prompt_open();
+                        match turn_outcome(msg, self.said || still_open) {
                             Some((code, mut params)) => {
                                 // A failed or empty turn says nothing about why; what the agent wrote to stderr meanwhile often does
                                 // (an expired login, a provider's refusal).
@@ -1920,9 +1989,15 @@ impl<W: Write> Bridge<W> {
                                 }
                                 self.notice(code, &params)?;
                                 self.log_reason("WARN", code, &params)?;
-                                self.state_because("IDLE", code)?;
+                                if !still_open {
+                                    self.state_because("IDLE", code)?;
+                                }
                             }
-                            None => self.state("IDLE")?,
+                            None if !still_open => self.state("IDLE")?,
+                            None => {}
+                        }
+                        if still_open {
+                            self.state("WORKING")?;
                         }
                     }
                     Some(Waiting::SetConfig {
@@ -2020,7 +2095,7 @@ where
     lines(stdout, Ev::Agent, Ev::AgentGone, tx);
     let mut b = Bridge {
         out: output,
-        agent: stdin,
+        agent: Box::new(stdin),
         next: 0,
         waiting: HashMap::new(),
         session: None,
@@ -2102,19 +2177,9 @@ mod tests {
     fn bridge_with_buffered_chat() -> std::io::Result<super::Bridge<Vec<u8>>> {
         use super::*;
 
-        let mut child = Command::new(std::env::current_exe()?)
-            .arg("--list")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .spawn()?;
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| io::Error::other("fixture stdin missing"))?;
-        assert!(child.wait()?.success());
         let mut bridge = Bridge {
             out: Vec::new(),
-            agent: stdin,
+            agent: Box::new(io::sink()),
             next: 0,
             waiting: HashMap::new(),
             session: Some("s".to_string()),
@@ -2552,5 +2617,330 @@ mod tests {
     fn long_details_are_cut_on_a_character_boundary() {
         let s = short(&json!({"x": "é".repeat(400)}));
         assert!(s.ends_with('…') && s.len() <= MAX_DETAIL + 4);
+    }
+
+    /// A bridge with an open session and no turn, whose agent input goes nowhere (what it is sent is read from its state).
+    fn bridge_in_session() -> std::io::Result<super::Bridge<Vec<u8>>> {
+        let mut b = bridge_with_buffered_chat()?;
+        b.text.clear();
+        Ok(b)
+    }
+
+    fn states(out: &[u8]) -> Vec<String> {
+        out.split(|b| *b == b'\n')
+            .filter_map(|l| serde_json::from_slice::<serde_json::Value>(l).ok())
+            .filter(|v| v["method"] == "state/update")
+            .filter_map(|v| v["params"]["state"].as_str().map(str::to_string))
+            .collect()
+    }
+
+    /// What the agent is sent, kept in memory.
+    #[derive(Clone, Default)]
+    struct Sent(std::rc::Rc<std::cell::RefCell<Vec<u8>>>);
+
+    impl std::io::Write for Sent {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.borrow_mut().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Sent {
+        /// The lines sent since the last call, as JSON.
+        fn take(&self) -> Vec<serde_json::Value> {
+            let bytes = std::mem::take(&mut *self.0.borrow_mut());
+            bytes
+                .split(|b| *b == b'\n')
+                .filter_map(|l| serde_json::from_slice(l).ok())
+                .collect()
+        }
+    }
+
+    /// [`bridge_in_session`] whose agent input is kept, so a test reads what the agent was sent.
+    fn bridge_with_agent() -> std::io::Result<(super::Bridge<Vec<u8>>, Sent)> {
+        let mut b = bridge_in_session()?;
+        let sent = Sent::default();
+        b.agent = Box::new(sent.clone());
+        Ok((b, sent))
+    }
+
+    /// The outcome the agent was sent for its permission request `id`, if any.
+    fn answer_to(sent: &[serde_json::Value], id: &str) -> Option<String> {
+        sent.iter()
+            .find(|v| v["id"] == id && v.get("method").is_none())
+            .and_then(|v| {
+                v["result"]["outcome"]["outcome"]
+                    .as_str()
+                    .map(str::to_string)
+            })
+    }
+
+    /// The texts of the prompts the agent was sent.
+    fn prompts(sent: &[serde_json::Value]) -> Vec<String> {
+        sent.iter()
+            .filter(|v| v["method"] == "session/prompt")
+            .filter_map(|v| {
+                v["params"]["prompt"][0]["text"]
+                    .as_str()
+                    .map(str::to_string)
+            })
+            .collect()
+    }
+
+    fn prompt(b: &mut super::Bridge<Vec<u8>>, id: u64, text: &str) -> std::io::Result<()> {
+        b.handle_node(&serde_json::json!({"jsonrpc":"2.0","id":id,"method":"session/prompt","params":{"text":text}}))
+            .map(drop)
+    }
+
+    fn cancel(b: &mut super::Bridge<Vec<u8>>) -> std::io::Result<()> {
+        b.handle_node(
+            &serde_json::json!({"jsonrpc":"2.0","id":99,"method":"session/cancel","params":{}}),
+        )
+        .map(drop)
+    }
+
+    fn ask(b: &mut super::Bridge<Vec<u8>>, id: &str) -> std::io::Result<()> {
+        b.handle_agent(&serde_json::json!({"jsonrpc":"2.0","id":id,"method":"session/request_permission",
+            "params":{"sessionId":"s","toolCall":{"title":"edit"},"options":[{"optionId":"allow","kind":"allow_once"}]}}))
+    }
+
+    /// Audit F1240: prompts overlap when the node sends one into a running turn (a spawned helper's request, a node without
+    /// `turns`). The reply to one of them must not end the other: no `idle` while it runs. Codex review of #794: a pending
+    /// permission cannot be told to be the running prompt's (ACP names the session, not the prompt), so any prompt's reply answers
+    /// it `cancelled` (fail closed; the agent asks again if it still needs it) and the state returns to `working`.
+    #[test]
+    fn the_reply_to_an_overlapping_prompt_does_not_end_the_running_turn(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use serde_json::json;
+        let (mut b, sent) = bridge_with_agent()?;
+        prompt(&mut b, 10, "t")?;
+        prompt(&mut b, 11, "t")?;
+        ask(&mut b, "perm-1")?;
+        b.out.clear();
+        let _ = sent.take();
+        // The agent refuses the second prompt while a permission waits for the user's decision.
+        b.handle_agent(&json!({"jsonrpc":"2.0","id":2,"error":{"code":-32603,"message":"busy"}}))?;
+        assert_eq!(
+            states(&b.out),
+            ["AGENT_STATE_WORKING"],
+            "the first turn still runs"
+        );
+        assert!(b.perms.is_empty());
+        assert_eq!(
+            answer_to(&sent.take(), "perm-1").as_deref(),
+            Some("cancelled")
+        );
+        b.out.clear();
+        let _ = b.handle_node(&json!({"jsonrpc":"2.0","id":12,"method":"approval/resolve",
+            "params":{"approvalId":"acp-3","approved":true}}))?;
+        assert!(states(&b.out).is_empty(), "a late decision changes nothing");
+        assert!(sent.take().is_empty(), "and sends the agent nothing");
+        b.handle_agent(&json!({"jsonrpc":"2.0","id":1,"result":{"stopReason":"end_turn"}}))?;
+        assert_eq!(
+            states(&b.out),
+            ["AGENT_STATE_IDLE"],
+            "the last reply ends the turn"
+        );
+        Ok(())
+    }
+
+    /// Codex review of #794: while a cancelled prompt is unanswered, every permission request is answered `cancelled` and never
+    /// shown (ACP names the session in it, not the prompt, so it may be the stopped turn's). A new prompt still goes to the agent
+    /// at once, its reply ends the turn with `idle` though the cancelled prompt never answered, and that prompt's late reply changes
+    /// nothing.
+    #[test]
+    fn a_cancelled_turns_permissions_stay_refused_and_a_new_prompt_is_not_held(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use serde_json::json;
+        let (mut b, sent) = bridge_with_agent()?;
+        prompt(&mut b, 10, "t")?;
+        cancel(&mut b)?;
+        assert_eq!(prompts(&sent.take()), ["t"]);
+        prompt(&mut b, 12, "u")?;
+        assert_eq!(
+            prompts(&sent.take()),
+            ["u"],
+            "the new prompt is sent at once"
+        );
+        b.out.clear();
+        ask(&mut b, "old-perm")?;
+        assert!(states(&b.out).is_empty(), "nobody is asked");
+        assert!(b.perms.is_empty());
+        assert_eq!(
+            answer_to(&sent.take(), "old-perm").as_deref(),
+            Some("cancelled")
+        );
+        b.handle_agent(&json!({"jsonrpc":"2.0","id":2,"result":{"stopReason":"end_turn"}}))?;
+        assert_eq!(
+            states(&b.out),
+            ["AGENT_STATE_IDLE"],
+            "the new prompt's reply ends the turn"
+        );
+        b.out.clear();
+        b.handle_agent(&json!({"jsonrpc":"2.0","id":1,"result":{"stopReason":"cancelled"}}))?;
+        assert!(b.out.is_empty(), "the late reply changes nothing");
+        Ok(())
+    }
+
+    /// Once the cancelled prompt answered, the new turn's permission requests are asked as usual.
+    #[test]
+    fn a_permission_after_the_cancelled_prompt_answered_is_asked(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use serde_json::json;
+        let (mut b, sent) = bridge_with_agent()?;
+        prompt(&mut b, 10, "t")?;
+        cancel(&mut b)?;
+        prompt(&mut b, 12, "u")?;
+        b.handle_agent(&json!({"jsonrpc":"2.0","id":1,"result":{"stopReason":"cancelled"}}))?;
+        b.out.clear();
+        let _ = sent.take();
+        ask(&mut b, "new-perm")?;
+        assert_eq!(states(&b.out), ["AGENT_STATE_BLOCKED"]);
+        let approval = b.perms.keys().next().cloned().ok_or("no approval")?;
+        b.out.clear();
+        let _ = b.handle_node(&json!({"jsonrpc":"2.0","id":13,"method":"approval/resolve",
+            "params":{"approvalId":approval,"approved":true}}))?;
+        assert_eq!(states(&b.out), ["AGENT_STATE_WORKING"]);
+        assert_eq!(
+            answer_to(&sent.take(), "new-perm").as_deref(),
+            Some("selected")
+        );
+        b.out.clear();
+        b.handle_agent(&json!({"jsonrpc":"2.0","id":2,"result":{"stopReason":"end_turn"}}))?;
+        assert_eq!(states(&b.out), ["AGENT_STATE_IDLE"]);
+        Ok(())
+    }
+
+    /// Codex review of #794: a permission the agent still waits for is answered `cancelled` before the bridge forgets it (here the
+    /// turn's reply came while the request was pending), so the agent never waits for an answer that cannot come.
+    #[test]
+    fn a_permission_dropped_when_the_turn_ends_is_answered_cancelled(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use serde_json::json;
+        let (mut b, sent) = bridge_with_agent()?;
+        prompt(&mut b, 10, "t")?;
+        ask(&mut b, "perm")?;
+        b.out.clear();
+        b.handle_agent(&json!({"jsonrpc":"2.0","id":1,"result":{"stopReason":"end_turn"}}))?;
+        assert_eq!(states(&b.out), ["AGENT_STATE_IDLE"]);
+        assert!(b.perms.is_empty());
+        assert_eq!(
+            answer_to(&sent.take(), "perm").as_deref(),
+            Some("cancelled")
+        );
+        Ok(())
+    }
+
+    /// Codex review of #794: a decision for a permission the bridge no longer holds (it answered it `cancelled` itself, or never
+    /// knew it) is refused with an error and sends the agent nothing, so the node marks its entry cancelled instead of recording a
+    /// decision that never reached the agent. A decision it holds still succeeds.
+    #[test]
+    fn a_decision_the_bridge_cannot_deliver_is_refused() -> Result<(), Box<dyn std::error::Error>> {
+        use serde_json::json;
+        let answer = |out: &[u8], id: u64| -> Option<serde_json::Value> {
+            out.split(|b| *b == b'\n')
+                .filter_map(|l| serde_json::from_slice::<serde_json::Value>(l).ok())
+                .find(|v| v["id"] == id && v.get("method").is_none())
+        };
+        let resolve = |b: &mut super::Bridge<Vec<u8>>, id: u64, approval: &str| {
+            b.handle_node(&json!({"jsonrpc":"2.0","id":id,"method":"approval/resolve",
+                "params":{"approvalId":approval,"approved":true}}))
+                .map(drop)
+        };
+        let (mut b, sent) = bridge_with_agent()?;
+        prompt(&mut b, 10, "t")?;
+        prompt(&mut b, 11, "u")?;
+        ask(&mut b, "perm-1")?;
+        let approval = b.perms.keys().next().cloned().ok_or("no approval")?;
+        // The agent refuses the second prompt as busy: the bridge cancels the permission.
+        b.handle_agent(&json!({"jsonrpc":"2.0","id":2,"error":{"code":-32603,"message":"busy"}}))?;
+        let _ = sent.take();
+        for (id, approval) in [(20, approval.as_str()), (21, "acp-99")] {
+            b.out.clear();
+            resolve(&mut b, id, approval)?;
+            let reply = answer(&b.out, id).ok_or("no reply")?;
+            assert_eq!(reply["error"]["code"], -32602, "{approval}: {reply}");
+            assert!(reply.get("result").is_none(), "{approval}: {reply}");
+            assert!(states(&b.out).is_empty(), "{approval}");
+            assert!(
+                sent.take().is_empty(),
+                "{approval}: the agent is sent nothing"
+            );
+        }
+        // A decision the bridge holds is delivered and succeeds.
+        let (mut b, sent) = bridge_with_agent()?;
+        prompt(&mut b, 10, "t")?;
+        ask(&mut b, "perm-2")?;
+        let approval = b.perms.keys().next().cloned().ok_or("no approval")?;
+        b.out.clear();
+        resolve(&mut b, 22, &approval)?;
+        let reply = answer(&b.out, 22).ok_or("no reply")?;
+        assert_eq!(reply["result"], json!({}), "{reply}");
+        assert_eq!(
+            answer_to(&sent.take(), "perm-2").as_deref(),
+            Some("selected")
+        );
+        Ok(())
+    }
+
+    /// Audit F1241, reworked in the Codex review of #794: a permission request with no prompt running (a straggler of a turn that
+    /// ended, or of a cancelled one) has no turn to belong to. It is answered `cancelled` at once and the node hears nothing: a
+    /// `blocked` here could be read as the start of the node's next prompt, and its decision would end that turn early.
+    #[test]
+    fn a_permission_asked_outside_a_turn_is_refused() -> Result<(), Box<dyn std::error::Error>> {
+        use serde_json::json;
+        let (mut b, sent) = bridge_with_agent()?;
+        let refused = |b: &mut super::Bridge<Vec<u8>>, id: &str| -> std::io::Result<()> {
+            b.out.clear();
+            let _ = sent.take();
+            ask(b, id)?;
+            assert!(b.out.is_empty(), "{id}: the node hears nothing");
+            assert!(b.perms.is_empty(), "{id}: nothing is kept");
+            assert_eq!(
+                answer_to(&sent.take(), id).as_deref(),
+                Some("cancelled"),
+                "{id}: the agent is answered at once"
+            );
+            Ok(())
+        };
+        refused(&mut b, "before-any-prompt")?;
+        prompt(&mut b, 10, "t")?;
+        cancel(&mut b)?;
+        b.handle_agent(&json!({"jsonrpc":"2.0","id":1,"result":{"stopReason":"cancelled"}}))?;
+        refused(&mut b, "after-a-cancelled-turn")?;
+        prompt(&mut b, 12, "u")?;
+        b.handle_agent(&json!({"jsonrpc":"2.0","id":2,"result":{"stopReason":"end_turn"}}))?;
+        refused(&mut b, "after-a-finished-turn")?;
+        Ok(())
+    }
+
+    /// Codex review of #794: a prompt that comes while a permission is pending does not report `working`: the agent still waits for
+    /// the user. Its refusal as busy is a prompt's reply, so it answers the permission `cancelled` (whose it was cannot be told) and
+    /// the state returns to `working` for the turn still open; the last reply reports `idle`.
+    #[test]
+    fn a_pending_permission_keeps_the_agent_blocked_when_another_prompt_comes(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use serde_json::json;
+        let (mut b, sent) = bridge_with_agent()?;
+        prompt(&mut b, 10, "t")?;
+        ask(&mut b, "perm-1")?;
+        b.out.clear();
+        prompt(&mut b, 11, "u")?;
+        assert_eq!(states(&b.out), ["AGENT_STATE_BLOCKED"]);
+        assert_eq!(prompts(&sent.take()), ["t", "u"]);
+        b.out.clear();
+        b.handle_agent(&json!({"jsonrpc":"2.0","id":3,"error":{"code":-32603,"message":"busy"}}))?;
+        assert_eq!(states(&b.out), ["AGENT_STATE_WORKING"]);
+        assert_eq!(
+            answer_to(&sent.take(), "perm-1").as_deref(),
+            Some("cancelled")
+        );
+        b.out.clear();
+        b.handle_agent(&json!({"jsonrpc":"2.0","id":1,"result":{"stopReason":"end_turn"}}))?;
+        assert_eq!(states(&b.out), ["AGENT_STATE_IDLE"]);
+        Ok(())
     }
 }
