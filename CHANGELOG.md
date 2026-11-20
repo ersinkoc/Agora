@@ -4,6 +4,9 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+### Close an agent from the window
+- A running agent, including a structured (chat) agent that has no terminal to type `exit` into, can now be closed from the window: choose Close agent in the **⋯** menu of its row in the agent list, in its pane or screen header (also on a phone) or in the command palette, or type `/exit` or `/quit` in a chat agent's message box (an agent's own command of that name still goes to the agent). A small confirm in the page says what happens and warns when the agent is working; one click closes an idle agent, and it then waits in the closed list until you remove it. A refusal says why in your language. Stop turn is unchanged and still keeps the agent.
+
 ### Settings and machines one click away
 - The title bar now has a Settings icon (a gear) and a Machines icon next to Lock, in place of the "This device" text; the one whose page is open is highlighted, and both are reachable with the keyboard.
 - Settings is one tidy page with a section list: This device (name and fingerprint, appearance and language, notifications, passkey, screen password, your other devices) and My machines (each machine's state, last seen, version and whether it trusts this browser, with a link to its card). Links such as `#/device/passkeys` open a section directly; the old addresses still work.
