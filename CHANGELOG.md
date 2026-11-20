@@ -4,6 +4,10 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+_Nothing yet._
+
+## 0.3.29
+
 ### Close an agent from the window
 - A running agent, including a structured (chat) agent that has no terminal to type `exit` into, can now be closed from the window: choose Close agent in the **⋯** menu of its row in the agent list, in its pane or screen header (also on a phone) or in the command palette, or type `/exit` or `/quit` in a chat agent's message box (an agent's own command of that name still goes to the agent). A small confirm in the page says what happens and warns when the agent is working; one click closes an idle agent, and it then waits in the closed list until you remove it. A refusal says why in your language. Stop turn is unchanged and still keeps the agent.
 
