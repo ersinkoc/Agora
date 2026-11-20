@@ -1339,6 +1339,52 @@ pub(crate) fn open_read_no_follow(path: &Path) -> io::Result<std::fs::File> {
         .open(path)
 }
 
+/// The folders a bare program name is looked up in, in the order the standard library looks (and `CreateProcess` would not):
+/// `child_path` (the child's own `PATH`, when it sets one), this program's folder, the system folders, then this process's `PATH`.
+/// A relative entry is dropped, so a name is never found in a current folder, which for an agent is its project folder.
+pub(crate) fn search_dirs(child_path: Option<&std::ffi::OsStr>) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    if let Some(path) = child_path {
+        dirs.extend(std::env::split_paths(path));
+    }
+    if let Some(own) = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(Path::to_path_buf))
+    {
+        dirs.push(own);
+    }
+    let root = PathBuf::from(
+        std::env::var_os("SystemRoot").unwrap_or_else(|| std::ffi::OsString::from(r"C:\Windows")),
+    );
+    dirs.push(root.join("System32"));
+    dirs.push(root);
+    if let Some(path) = std::env::var_os("PATH") {
+        dirs.extend(std::env::split_paths(&path));
+    }
+    dirs.retain(|d| d.is_absolute());
+    dirs
+}
+
+/// See [`crate::program_path`]. Only a bare name with no extension is looked at, and only when no `<name>.exe` exists in
+/// [`search_dirs`] (so whatever starts today starts the same): then the first `.com`, `.bat` or `.cmd` of that name, folder by folder.
+pub(crate) fn program_path(program: &str, child_path: Option<&std::ffi::OsStr>) -> PathBuf {
+    let unchanged = PathBuf::from(program);
+    if program.is_empty() || program.contains(['\\', '/', ':', '.', '\0']) {
+        return unchanged;
+    }
+    let dirs = search_dirs(child_path);
+    if dirs
+        .iter()
+        .any(|d| d.join(format!("{program}.exe")).is_file())
+    {
+        return unchanged;
+    }
+    dirs.iter()
+        .flat_map(|d| [".com", ".bat", ".cmd"].map(|ext| d.join(format!("{program}{ext}"))))
+        .find(|p| p.is_file())
+        .unwrap_or(unchanged)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -1718,5 +1764,63 @@ mod tests {
         assert_eq!(&b, b"hi");
         s.write_all(b"ok").unwrap();
         assert_eq!(&client.join().unwrap(), b"ok");
+    }
+
+    #[test]
+    fn a_bare_name_installed_as_a_cmd_shim_is_started_by_its_full_path() {
+        let root = std::env::temp_dir().join(format!("agora-program-path-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (a, b) = (root.join("a"), root.join("b"));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let name = format!("agoratool{}", std::process::id());
+        std::fs::write(
+            a.join(format!("{name}.cmd")),
+            "@echo off\r\necho got %1\r\n",
+        )
+        .unwrap();
+        std::fs::write(b.join(format!("{name}.bat")), "@echo off\r\nexit /b 9\r\n").unwrap();
+        let path = std::env::join_paths([&a, &b]).unwrap();
+
+        // The first folder wins, as in a shell; std alone would not find it at all.
+        let found = program_path(&name, Some(path.as_os_str()));
+        assert_eq!(found, a.join(format!("{name}.cmd")));
+        // Started through std, which quotes for cmd.exe: the argument is not a second command.
+        let out = std::process::Command::new(&found)
+            .arg("x&echo INJECTED")
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(out.status.success(), "{text}");
+        assert!(text.contains("got"), "{text}");
+        assert!(!text.lines().any(|l| l.trim() == "INJECTED"), "{text}");
+
+        // A `<name>.exe` anywhere keeps the name as it is: what starts today starts the same.
+        std::fs::write(b.join(format!("{name}.exe")), b"").unwrap();
+        assert_eq!(
+            program_path(&name, Some(path.as_os_str())),
+            PathBuf::from(&name)
+        );
+
+        // Names std already handles, and names found nowhere, are unchanged.
+        for n in [
+            "",
+            "npx.cmd",
+            r"C:\tools\npx",
+            "tools/npx",
+            "c:npx",
+            "definitely-not-installed-xyz",
+        ] {
+            assert_eq!(
+                program_path(n, Some(path.as_os_str())),
+                PathBuf::from(n),
+                "{n}"
+            );
+        }
+        // A relative PATH entry (a current folder) is never searched.
+        let dirs = search_dirs(Some(std::ffi::OsStr::new(r"relative;.;C:\abs")));
+        assert!(dirs.iter().all(|d| d.is_absolute()), "{dirs:?}");
+        assert_eq!(dirs[0], PathBuf::from(r"C:\abs"));
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
