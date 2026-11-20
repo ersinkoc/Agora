@@ -13,6 +13,7 @@ use agora_protocol::handshake::{negotiate, Support};
 use agora_protocol::v1::{Event, Hello, Resume, ResumeOk, Role, Welcome};
 use agora_protocol::{Error, ErrorCode};
 use prost::Message;
+use std::ops::Deref;
 
 use crate::store::{Append, EventStore, StoreError};
 
@@ -67,25 +68,29 @@ enum Phase {
     Ready,
 }
 
-pub struct NodeSession<'a, S: EventStore> {
-    store: &'a S,
+pub struct NodeSession<S> {
+    store: S,
     producer: String,
-    support: &'a Support,
+    support: Support,
     phase: Phase,
     /// When the node said it cannot replay (ADR-0054) and no event above the hub's ack has come since.
     resync_at_ms: Option<u64>,
 }
 
-impl<'a, S: EventStore> NodeSession<'a, S> {
+impl<S: Deref<Target: EventStore>> NodeSession<S> {
     /// `producer` is the node id from its client certificate.
-    pub fn new(store: &'a S, producer: &str, support: &'a Support) -> Self {
+    pub fn new(store: S, producer: &str, support: &Support) -> Self {
         Self {
             store,
             producer: producer.to_string(),
-            support,
+            support: support.clone(),
             phase: Phase::New,
             resync_at_ms: None,
         }
+    }
+
+    pub(crate) fn producer(&self) -> &str {
+        &self.producer
     }
 
     pub fn hello(&mut self, hello: &Hello, now_ms: u64) -> Result<Welcome, SessionError> {
@@ -95,7 +100,7 @@ impl<'a, S: EventStore> NodeSession<'a, S> {
         if hello.role != Role::Node as i32 {
             return Err(invalid("role"));
         }
-        let welcome = negotiate(hello, self.support, &self.producer, now_ms)?;
+        let welcome = negotiate(hello, &self.support, &self.producer, now_ms)?;
         self.phase = Phase::Negotiated;
         Ok(welcome)
     }
@@ -261,7 +266,7 @@ pub(crate) mod tests {
         store: &'a SqliteStore,
         support: &'a Support,
         id: &str,
-    ) -> NodeSession<'a, SqliteStore> {
+    ) -> NodeSession<&'a SqliteStore> {
         let mut s = NodeSession::new(store, id, support);
         s.hello(&node_hello(), 0).unwrap();
         s.resume(&Resume::default()).unwrap();
