@@ -111,5 +111,6 @@ Date: YYYY-MM-DD
 | 0091 | The plan limits of subscription agents are shown from the tools' own output | Accepted |
 | 0092 | The ACP registry is a source of agent kinds | Accepted |
 | 0093 | Structured (ACP) agents survive a node restart | Accepted |
+| 0094 | A plain terminal shows the agent program running in it | Accepted |
 | 0095 | A project has a kanban board, and a task can be dispatched to an agent | Accepted |
 | 0096 | Agora offers a ready helper agent instead of a coding-agent loop of its own | Accepted |
