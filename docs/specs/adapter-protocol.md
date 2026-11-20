@@ -140,10 +140,13 @@ towards the node, so chat items, approvals, state and cancel work as for any L3 
 
 The bridge accepts updates with a session ID for the active session or a matching pending `session/load`. An update without a
 session ID uses the active session for compatibility. A successful change of session retires pending prompts from the previous
-session. Only a reply to an active prompt ends its turn. A prompt sent after a `session/cancel` (the node's cancel grace passed
-without the cancelled turn's reply) retires the cancelled prompts: they no longer hold the turn open or cancel its permission
-requests, and their late replies are ignored. When other prompts overlap (the node sent one into a running turn that was not
-cancelled, such as to an adapter without `turns`), only the reply to the last of them ends the turn: an earlier reply reports its
+session. Only a reply to an active prompt ends its turn. A prompt the node sends while a cancelled prompt is still unanswered (the
+node's cancel grace passed) is answered and reported `working` at once but waits in the bridge: ACP permission requests name the
+session, not the prompt, so until the cancelled prompt's reply every permission request is the stopped turn's and is answered
+`cancelled`. That reply sends the waiting prompts to the agent in order (no `idle`); their own replies end the turn. A new
+`session/cancel` drops the waiting prompts (they never reached the agent) and reports `idle`; a change of session drops them too, and
+an agent that exits meanwhile is reported as exiting in the `turn` stage. When prompts overlap otherwise (the node sent one into a
+running turn, such as to an adapter without `turns`), only the reply to the last of them ends the turn: an earlier reply reports its
 failure or stop as a notice but no `idle`, and the turn's permission requests stay open for the user. A permission request decided
 while no prompt runs (one that came after its turn ended) is followed by `idle`, not `working`.
 
