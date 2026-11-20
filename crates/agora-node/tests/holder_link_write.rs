@@ -45,11 +45,12 @@ fn a_terminal_frame_drained_in_part_at_its_deadline_still_ends_by_it() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     // An agent that only waits, so the terminal stays open while it is sent. It writes nothing: output nobody reads can keep a
-    // killed child from finishing its exit on some systems (macOS), and the reap below would then wait for ever.
+    // killed child from finishing its exit on some systems (macOS), and the reap below would then wait for ever. `clear` is
+    // off too: by default the fake agent writes a clear-screen sequence even with empty text.
     let script = dir.join("wait.toml");
     std::fs::write(
         &script,
-        "name = \"wait\"\n\n[[frame]]\ntext = \"\"\ndelay_ms = 60000\n",
+        "name = \"wait\"\n\n[[frame]]\ntext = \"\"\nclear = false\ndelay_ms = 60000\n",
     )
     .unwrap();
     let path = dir.join("s.sock");
