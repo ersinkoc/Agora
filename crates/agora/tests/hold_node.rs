@@ -254,6 +254,57 @@ fn an_agent_outlives_its_node_and_the_next_node_takes_it_up_with_the_output_writ
     assert!(holder.is_some());
 }
 
+/// A held agent that stays idle and silent while no node is there: its screen no longer shows what a rule reads (it cleared it), so
+/// detection has nothing to speak from. The new node reports what the ledger knew (idle), not `unknown`.
+#[test]
+fn a_reattached_idle_agent_is_idle_not_unknown_even_when_its_screen_says_nothing() {
+    let _serial = serial();
+    let rig = Rig::new(
+        "idle",
+        &sh("echo ready-prompt; sleep 2; printf '\\033[2J\\033[H'; sleep 600"),
+    );
+    let manifest = rig.root.join("manifests/k.toml");
+    let mut text = std::fs::read_to_string(&manifest).expect("manifest");
+    text.push_str("[[rules]]\nid = \"prompt\"\nstate = \"idle\"\npriority = 100\nregion = \"bottom_non_empty_lines(12)\"\ncontains = \"ready-prompt\"\n");
+    std::fs::write(&manifest, text).expect("manifest");
+    let state_of = |node: &Node, id: &str| {
+        node.supervisor
+            .lock()
+            .unwrap()
+            .list()
+            .into_iter()
+            .find(|v| v.id.as_str() == id)
+            .map(|v| v.state)
+    };
+    let node = rig.node();
+    let id = rig.launch(&node);
+    wait_for("the idle state", || {
+        state_of(&node, &id) == Some(agora_core::AgentState::Idle)
+    });
+    wait_for("the ledger to know idle", || {
+        node.ledger.get(&id).is_some_and(|e| e.last_state == "idle")
+    });
+    drop(node);
+    // While no node is there the agent clears its screen: the rule has nothing to read.
+    std::thread::sleep(Duration::from_millis(3000));
+
+    let node = rig.node();
+    assert!(held(&node, &id));
+    assert_eq!(
+        state_of(&node, &id),
+        Some(agora_core::AgentState::Idle),
+        "a reattached idle agent lost its state"
+    );
+    // It stays so while the screen is blank (nothing replaces it without evidence).
+    std::thread::sleep(Duration::from_millis(1500));
+    assert!(!screen(&node, &id).contains("ready-prompt"));
+    assert_eq!(
+        state_of(&node, &id),
+        Some(agora_core::AgentState::Idle),
+        "the state was dropped while the agent stayed idle"
+    );
+}
+
 #[test]
 fn an_agent_started_by_a_node_without_a_holder_is_the_nodes_own_and_ends_with_it() {
     let _serial = serial();

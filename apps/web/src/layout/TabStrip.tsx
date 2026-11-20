@@ -24,6 +24,8 @@ export function TabStrip({ tabs, onPick, children, trailing }: { tabs: readonly 
     const spans = tabsRef.current.map((x) => { const r = document.getElementById(`tab-${x.id}`)?.getBoundingClientRect(); return { id: x.id, left: r?.left ?? 0, right: r?.right ?? 0 }; });
     const ids = hiddenTabs(box, spans);
     setHiddenIds((cur) => (cur.join('\n') === ids.join('\n') ? cur : ids));
+    // A tab that is only partly in view would show a fragment of its title: it is not drawn (the "more" menu lists it) until scrolled whole into view.
+    for (const x of tabsRef.current) { const n = document.getElementById(`tab-${x.id}`); if (n) n.toggleAttribute('data-cut', ids.includes(x.id) && !x.active); }
     const next = scrollEdges(el);
     setEdges((cur) => (cur.start === next.start && cur.end === next.end && cur.overflowing === next.overflowing ? cur : next));
   }, []);

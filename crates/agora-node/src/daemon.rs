@@ -2343,6 +2343,17 @@ pub fn load_manifests(dir: &Path) -> (Vec<Manifest>, Vec<(PathBuf, String)>) {
     (loaded.into_iter().map(|l| l.manifest).collect(), problems)
 }
 
+/// The state a ledger entry last knew (its `last_state` word), or `None` for one that is not a state worth showing again.
+fn ledger_state(word: &str) -> Option<agora_core::AgentState> {
+    match word {
+        "working" => Some(agora_core::AgentState::Working),
+        "blocked" => Some(agora_core::AgentState::Blocked),
+        "idle" => Some(agora_core::AgentState::Idle),
+        "done" => Some(agora_core::AgentState::Done),
+        _ => None,
+    }
+}
+
 /// ADR-0079 decisions 4 and 9: attaches to the node's holder if one runs, and puts back every agent it kept running that the ledger
 /// says it holds (the same holder, by pid and start time). Whatever is not put back is **ended through the holder**, never left
 /// attached and unread: the attach made the holder stop reading each terminal and forget its buffer, and the node drops what it does
@@ -2418,6 +2429,7 @@ fn take_up_held(
             });
             continue;
         }
+        sup.seed_reattached_state(&AgentId::new(id.clone()), ledger_state(&entry.last_state));
         if !entry.parent_agent_id.is_empty() {
             sup.set_parent(
                 &AgentId::new(id.clone()),
@@ -2478,13 +2490,7 @@ fn take_up_held(
         let reattach = crate::supervisor::Reattach {
             session_id: entry.adapter_session.clone(),
             capabilities: entry.adapter_capabilities.clone(),
-            state: match entry.last_state.as_str() {
-                "working" => Some(agora_core::AgentState::Working),
-                "blocked" => Some(agora_core::AgentState::Blocked),
-                "idle" => Some(agora_core::AgentState::Idle),
-                "done" => Some(agora_core::AgentState::Done),
-                _ => None,
-            },
+            state: ledger_state(&entry.last_state),
         };
         if sup
             .adopt_held_pipe(restore, reattach, p, &session, Instant::now())

@@ -1013,6 +1013,21 @@ impl Supervisor {
         Ok(())
     }
 
+    /// ADR-0079 decision 4: an agent taken up from the holder starts at `Unknown`, and an idle program writes nothing for screen detection
+    /// to read afresh (a terminal agent that waits for its next prompt may stay silent for hours). Until a screen rule speaks, it shows the
+    /// state the ledger last knew. The source stays `Screen`, so a real detection (and any reported state) replaces it on the next check,
+    /// and nothing is made up: `Unknown` stays when the ledger knew no state.
+    pub fn seed_reattached_state(&mut self, id: &AgentId, last: Option<AgentState>) {
+        let Some(state) = last.filter(|s| *s != AgentState::Unknown) else {
+            return;
+        };
+        if let Some(e) = self.agents.get_mut(id) {
+            if e.agent.state() == AgentState::Unknown {
+                e.agent.observe(state, StateSource::Screen);
+            }
+        }
+    }
+
     /// ADR-0060: agent ids start at `next` (the session ledger's), so an id is never given twice across the node's restarts.
     pub fn reserve_ids(&mut self, next: u64) {
         self.next_id = self.next_id.max(next);

@@ -14,7 +14,7 @@ export const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
 // and not all of them shown at once; any visible one opens the same window.
 export const openStart = (page, name = 'Start an agent') => page.getByRole('button', { name, exact: true }).locator('visible=true').first().click();
 
-export async function startStack({ viewport = { width: 1440, height: 900 }, hostname, binary, web = join(root, 'apps/web/dist'), projects = [] } = {}) {
+export async function startStack({ viewport = { width: 1440, height: 900 }, scale = 1, hostname, binary, web = join(root, 'apps/web/dist'), projects = [] } = {}) {
   const bin = binary ?? join(root, 'target/debug/agora');
   // The manifest names a file the node checks for, so it needs the `.exe` that Windows process creation would add.
   const fake = join(root, `target/debug/agora-fake-agent${process.platform === 'win32' ? '.exe' : ''}`);
@@ -61,7 +61,7 @@ export async function startStack({ viewport = { width: 1440, height: 900 }, host
     children.push(spawn(bin, ['node', 'run', '--project', proj, ...projects.flatMap(path => ['--project', path])], { env, stdio: 'ignore' }));
     await new Promise((r) => setTimeout(r, 3000));
     browser = await chromium.launch({ executablePath: exe, args: ['--no-sandbox'] });
-    const page = await (await browser.newContext({ ignoreHTTPSErrors: true, viewport })).newPage();
+    const page = await (await browser.newContext({ ignoreHTTPSErrors: true, viewport, deviceScaleFactor: scale })).newPage();
     const errors = [];
     page.on('pageerror', (e) => errors.push(e.message));
     page.on('console', m => { if (m.type() === 'error') console.log(m.text()); });
