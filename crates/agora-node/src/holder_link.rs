@@ -921,9 +921,17 @@ fn receive_budget(
             left.min(WRITE_SLICE).min(wait)
         }
     };
+    if timeout.is_zero() {
+        return Err(LinkError::Io(io::Error::from(io::ErrorKind::TimedOut)));
+    }
     if *set != Some(timeout) {
-        stream.set_read_timeout(Some(timeout))?;
-        *set = Some(timeout);
+        match stream.set_read_timeout(Some(timeout)) {
+            Ok(()) => *set = Some(timeout),
+            // macOS refuses a new timeout (EINVAL) once the peer has shut the connection, as the holder does right after a refusal.
+            // A receive then returns what is buffered or the end at once, so it cannot wait, and the frame's time is still checked.
+            Err(e) if e.kind() == io::ErrorKind::InvalidInput => {}
+            Err(e) => return Err(e.into()),
+        }
     }
     Ok(())
 }
