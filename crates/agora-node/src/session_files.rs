@@ -2,15 +2,16 @@
 //! agents whose id the node cannot choose (Codex: no flag sets it), so that Resume after a node restart can continue the conversation.
 //!
 //! A file is the agent's when it was written after the agent started, its first line passes `select`, names the agent's folder as its
-//! working directory, and its id is no other agent's. This is a guess that can be wrong, so it is made only when it cannot be confused:
-//! when two agents of one kind wait for their id in the same folder at once, when a fitting file would also fit an agent of another kind
-//! in that folder (its glob matches the same file, however spelled, and its `select` takes the first line), or when more than one new
-//! file fits, none of them gets one (the window then offers Start again, never a Resume into someone else's conversation). An agent
-//! that has no file after [`GIVE_UP_AFTER`] gets none.
+//! working directory, and its id is no other agent's. This is a guess that can be wrong, so it is made only when it cannot be confused.
+//! Two agents waiting in one folder are rivals when they are of one kind, or of kinds whose globs could match the same files (the fixed
+//! directory of one glob, before its first `*`, is the other's or holds it), unless both `select`s ask for different literal values at
+//! the same path. This is decided from the manifests, before any file is read: rivals get no id at all, so kinds that share a session
+//! folder lose Resume in that folder rather than risk continuing the wrong conversation. Neither does an agent for which more than one
+//! new file fits (the window then offers Start again). An agent that has no file after [`GIVE_UP_AFTER`] gets none.
 
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 use agora_adapters::manifest::SessionFile;
@@ -38,7 +39,6 @@ pub struct Target {
 }
 
 struct Waiting {
-    kind: String,
     folder: PathBuf,
     since: SystemTime,
     give_up_at: Instant,
@@ -131,13 +131,46 @@ fn session_of(v: &Value, spec: &SessionFile, folder: &Path) -> Option<String> {
     (argv_safe(id) && is_uuid(id)).then(|| id.to_string())
 }
 
-#[cfg(test)]
+/// The id in `file`'s first line when that line is a session's start in `folder`.
 fn session_in(file: &Path, spec: &SessionFile, folder: &Path) -> Option<String> {
     session_of(&first_line(file)?, spec, folder)
 }
 
-fn canon(p: &Path) -> PathBuf {
-    std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
+/// The fixed directory part of a session glob: its directories before the first one with a `*` (the file name never counts), with
+/// `{home}` replaced, `.` and `..` resolved, and canonicalized when it exists.
+fn session_root(glob: &str, home: &Path) -> PathBuf {
+    let glob = glob.replacen("{home}", &home.to_string_lossy(), 1);
+    let glob = Path::new(&glob);
+    let mut root = PathBuf::new();
+    for comp in glob.parent().map(Path::components).into_iter().flatten() {
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                root.pop();
+            }
+            c if c.as_os_str().to_string_lossy().contains('*') => break,
+            c => root.push(c),
+        }
+    }
+    std::fs::canonicalize(&root).unwrap_or(root)
+}
+
+/// Whether two agents in one folder could have written each other's session files: they are of one kind, or their globs' fixed
+/// directories are the same or one holds the other, unless both `select`s ask for different literal values at the same path.
+fn rivals(a: &Target, b: &Target, home: &Path) -> bool {
+    if a.kind == b.kind {
+        return true;
+    }
+    if let (Some(x), Some(y)) = (&a.spec.select, &b.spec.select) {
+        if x.path == y.path && x.equals != y.equals {
+            return false;
+        }
+    }
+    let (ra, rb) = (
+        session_root(&a.spec.glob, home),
+        session_root(&b.spec.glob, home),
+    );
+    ra.starts_with(&rb) || rb.starts_with(&ra)
 }
 
 impl SessionWatcher {
@@ -170,7 +203,6 @@ impl SessionWatcher {
             self.waiting
                 .entry(t.agent.clone())
                 .or_insert_with(|| Waiting {
-                    kind: t.kind.clone(),
                     folder: t.folder.clone(),
                     since: SystemTime::now(),
                     give_up_at: now + GIVE_UP_AFTER,
@@ -191,17 +223,20 @@ impl SessionWatcher {
             if now < w.next_scan {
                 continue;
             }
-            // A live agent can still write its file after discovery gave up on it.
-            let crowded = targets.iter().any(|other| {
-                other.agent != t.agent && other.kind == w.kind && same_dir(&other.folder, &w.folder)
-            });
-            if crowded {
-                let twins: Vec<AgentId> = targets
-                    .iter()
-                    .filter(|other| other.kind == w.kind && same_dir(&other.folder, &w.folder))
-                    .map(|other| other.agent.clone())
-                    .collect();
-                for a in twins {
+            // Rivals in this folder could have written each other's files: none of them gets one. Decided from the manifests alone,
+            // before any file is read, so the answer is the same in every target order. A live agent can still write its file after
+            // discovery gave up on it, so agents that gave up count too.
+            let rivals: Vec<AgentId> = targets
+                .iter()
+                .filter(|other| {
+                    other.agent != t.agent
+                        && same_dir(&other.folder, &w.folder)
+                        && rivals(t, other, &home)
+                })
+                .map(|other| other.agent.clone())
+                .collect();
+            if !rivals.is_empty() {
+                for a in rivals.into_iter().chain([t.agent.clone()]) {
                     self.waiting.remove(&a);
                     self.gave_up.insert(a);
                 }
@@ -209,59 +244,18 @@ impl SessionWatcher {
             }
             let since = w.since.checked_sub(SLACK).unwrap_or(SystemTime::UNIX_EPOCH);
             let glob = t.spec.glob.replacen("{home}", &home.to_string_lossy(), 1);
-            let fits: Vec<(PathBuf, Value, String)> = crate::usage_files::expand(Path::new(&glob))
+            let mut ids: Vec<String> = crate::usage_files::expand(Path::new(&glob))
                 .into_iter()
                 .filter(|p| {
                     std::fs::metadata(p)
                         .and_then(|m| m.created().or_else(|_| m.modified()))
                         .is_ok_and(|t| t >= since)
                 })
-                .filter_map(|p| {
-                    let v = first_line(&p)?;
-                    let id = session_of(&v, &t.spec, &t.folder)?;
-                    (!claimed.contains(&id)).then_some((p, v, id))
-                })
+                .filter_map(|p| session_in(&p, &t.spec, &t.folder))
+                .filter(|id| !claimed.contains(id))
                 .collect();
-            // Agents of other kinds in this folder could have written a fitting file too when their own manifest names it: its glob
-            // matches the same file (however it is spelled) and its `select` takes the first line (F1180, Codex review of #791).
-            // Their files are listed (bounded like this agent's) only when a file fits.
-            let mut rivals: Vec<AgentId> = Vec::new();
-            if !fits.is_empty() {
-                for other in targets
-                    .iter()
-                    .filter(|other| other.kind != w.kind && same_dir(&other.folder, &w.folder))
-                {
-                    let fits_other = fits.iter().any(|(_, v, _)| selected(v, &other.spec));
-                    if !fits_other {
-                        continue;
-                    }
-                    let glob = other
-                        .spec
-                        .glob
-                        .replacen("{home}", &home.to_string_lossy(), 1);
-                    let theirs: HashSet<PathBuf> = crate::usage_files::expand(Path::new(&glob))
-                        .iter()
-                        .map(|p| canon(p))
-                        .collect();
-                    if fits
-                        .iter()
-                        .any(|(p, v, _)| selected(v, &other.spec) && theirs.contains(&canon(p)))
-                    {
-                        rivals.push(other.agent.clone());
-                    }
-                }
-            }
-            let mut ids: Vec<String> = fits.into_iter().map(|(_, _, id)| id).collect();
             ids.sort();
             ids.dedup();
-            if !rivals.is_empty() {
-                // Neither can tell which agent wrote it; both give up, so the one left behind never takes the other's later.
-                for a in rivals.into_iter().chain([t.agent.clone()]) {
-                    self.waiting.remove(&a);
-                    self.gave_up.insert(a);
-                }
-                continue;
-            }
             if let Some(w) = self.waiting.get_mut(&t.agent) {
                 w.next_scan = now + SCAN_EVERY;
             }
@@ -695,6 +689,240 @@ mod tests {
             want.sort();
             assert_eq!(found, want);
         }
+    }
+
+    fn with_glob(t: Target, kind: &str, glob: &str) -> Target {
+        Target {
+            kind: kind.into(),
+            spec: SessionFile {
+                glob: glob.into(),
+                ..spec()
+            },
+            ..t
+        }
+    }
+
+    /// Polls `targets` once to register them, writes `files` (name relative to the home, id, folder) only then, and polls again.
+    fn found_after_gated_write(
+        root: &Path,
+        targets: &[Target],
+        files: &[(&str, &str, &str)],
+    ) -> Vec<(AgentId, String)> {
+        let mut w = SessionWatcher::new(Some(root.join("home")));
+        let now = Instant::now();
+        let (release, gate) = std::sync::mpsc::channel::<()>();
+        let writer_root = root.to_path_buf();
+        let files: Vec<(String, String, String)> = files
+            .iter()
+            .map(|(n, i, f)| (n.to_string(), i.to_string(), f.to_string()))
+            .collect();
+        let writer = std::thread::spawn(move || {
+            gate.recv().unwrap();
+            for (name, id, folder) in files {
+                let path = writer_root.join("home").join(&name);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                let line = serde_json::json!({"type": "session_meta",
+                    "payload": {"id": id, "cwd": writer_root.join(folder)}});
+                std::fs::write(path, format!("{line}\n")).unwrap();
+            }
+        });
+        assert!(w.poll(now, targets, &HashSet::new()).is_empty());
+        release.send(()).unwrap();
+        writer.join().unwrap();
+        let mut found = w.poll(now + SCAN_EVERY, targets, &HashSet::new());
+        found.sort();
+        found
+    }
+
+    #[test]
+    fn agents_whose_globs_differ_under_one_session_root_get_no_session() {
+        // Codex review of #791: `*/*.jsonl` and `*/rollout-*.jsonl` under one root can both match a file.
+        for reverse in [false, true] {
+            let root = tmp(if reverse {
+                "one-root-reversed"
+            } else {
+                "one-root"
+            });
+            let mut targets = vec![
+                with_glob(
+                    target("tool-1", root.join("work/a")),
+                    "tool",
+                    "{home}/.tool/s/*/rollout-*.jsonl",
+                ),
+                with_glob(
+                    target("variant-1", root.join("work/a")),
+                    "tool-variant",
+                    "{home}/.tool/s/*/*.jsonl",
+                ),
+            ];
+            if reverse {
+                targets.reverse();
+            }
+            let found = found_after_gated_write(
+                &root,
+                &targets,
+                &[(
+                    ".tool/s/2026/rollout-1.jsonl",
+                    "0199aaaa-0000-4000-8000-000000000101",
+                    "work/a",
+                )],
+            );
+            assert_eq!(found, vec![]);
+        }
+    }
+
+    #[test]
+    fn agents_whose_session_roots_are_nested_get_no_session() {
+        // One root inside the other: whether a file matches both depends on names the manifests do not fix, so neither gets one,
+        // even for a file only one glob matches.
+        for reverse in [false, true] {
+            let root = tmp(if reverse { "nested-reversed" } else { "nested" });
+            let mut targets = vec![
+                with_glob(
+                    target("tool-1", root.join("work/a")),
+                    "tool",
+                    "{home}/.tool/s/rollout-*.jsonl",
+                ),
+                with_glob(
+                    target("variant-1", root.join("work/a")),
+                    "tool-variant",
+                    "{home}/.tool/s/sub/*.jsonl",
+                ),
+            ];
+            if reverse {
+                targets.reverse();
+            }
+            let found = found_after_gated_write(
+                &root,
+                &targets,
+                &[
+                    (
+                        ".tool/s/rollout-1.jsonl",
+                        "0199aaaa-0000-4000-8000-000000000102",
+                        "work/a",
+                    ),
+                    (
+                        ".tool/s/sub/other-1.jsonl",
+                        "0199aaaa-0000-4000-8000-000000000103",
+                        "work/a",
+                    ),
+                ],
+            );
+            assert_eq!(found, vec![]);
+        }
+    }
+
+    #[test]
+    fn agents_whose_session_roots_are_disjoint_each_get_their_own() {
+        for reverse in [false, true] {
+            let root = tmp(if reverse {
+                "disjoint-reversed"
+            } else {
+                "disjoint"
+            });
+            let mut targets = vec![
+                with_glob(
+                    target("tool-1", root.join("work/a")),
+                    "tool",
+                    "{home}/.tool/s/rollout-*.jsonl",
+                ),
+                with_glob(
+                    target("variant-1", root.join("work/a")),
+                    "tool-variant",
+                    "{home}/.other/s/rollout-*.jsonl",
+                ),
+            ];
+            if reverse {
+                targets.reverse();
+            }
+            let found = found_after_gated_write(
+                &root,
+                &targets,
+                &[
+                    (
+                        ".tool/s/rollout-1.jsonl",
+                        "0199aaaa-0000-4000-8000-000000000104",
+                        "work/a",
+                    ),
+                    (
+                        ".other/s/rollout-1.jsonl",
+                        "0199aaaa-0000-4000-8000-000000000105",
+                        "work/a",
+                    ),
+                ],
+            );
+            assert_eq!(
+                found,
+                vec![
+                    (
+                        AgentId::new("tool-1"),
+                        "0199aaaa-0000-4000-8000-000000000104".to_string()
+                    ),
+                    (
+                        AgentId::new("variant-1"),
+                        "0199aaaa-0000-4000-8000-000000000105".to_string()
+                    ),
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn who_gets_a_session_does_not_depend_on_target_order() {
+        // Codex review of #791: the answer was decided while targets were walked, so their (HashMap) order could change it.
+        let mut results = Vec::new();
+        for reverse in [false, true] {
+            let root = tmp(if reverse { "order-reversed" } else { "order" });
+            let mut targets = vec![
+                with_glob(
+                    target("tool-1", root.join("work/a")),
+                    "tool",
+                    "{home}/.tool/s/rollout-*.jsonl",
+                ),
+                with_glob(
+                    target("variant-1", root.join("work/a")),
+                    "tool-variant",
+                    "{home}/.tool/s/sub/*.jsonl",
+                ),
+                with_glob(
+                    target("other-1", root.join("work/a")),
+                    "other",
+                    "{home}/.other/s/rollout-*.jsonl",
+                ),
+            ];
+            if reverse {
+                targets.reverse();
+            }
+            results.push(found_after_gated_write(
+                &root,
+                &targets,
+                &[
+                    (
+                        ".tool/s/rollout-1.jsonl",
+                        "0199aaaa-0000-4000-8000-000000000106",
+                        "work/a",
+                    ),
+                    (
+                        ".tool/s/sub/variant-1.jsonl",
+                        "0199aaaa-0000-4000-8000-000000000107",
+                        "work/a",
+                    ),
+                    (
+                        ".other/s/rollout-1.jsonl",
+                        "0199aaaa-0000-4000-8000-000000000108",
+                        "work/a",
+                    ),
+                ],
+            ));
+        }
+        assert_eq!(results[0], results[1]);
+        assert_eq!(
+            results[0],
+            vec![(
+                AgentId::new("other-1"),
+                "0199aaaa-0000-4000-8000-000000000108".to_string()
+            )]
+        );
     }
 
     #[test]

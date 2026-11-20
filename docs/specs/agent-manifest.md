@@ -268,11 +268,12 @@ The node holds a session id only when it learned one:
   `{"type":"session_meta","payload":{"id":...,"cwd":...}}`, checked on codex-cli 0.167.0 and 0.167.1): while a terminal agent runs
   without a session id, the node looks every 3 s, for at most 30 minutes, at the files the glob matches that were written after the
   agent started, and takes the id from the first line (at most 64 KiB) when it passes `select` and its `cwd` is the agent's folder.
-  It takes one only when exactly one new file fits and no other agent has that id. Two agents of one kind waiting in one folder at
-  once get none (a file cannot say which is whose); neither does an agent for which two files fit, nor agents of different kinds in one
-  folder when a file fits one and the other's manifest would read it too (its glob matches that file, however spelled, and its `select`
-  takes the first line). Kinds whose `select`s no line can pass at once each get their own. The first line counts without its `\n` or
-  `\r\n`. A session file's id must be a UUID. An agent without an id can only be started again in its folder, never resumed.
+  It takes one only when exactly one new file fits and no other agent has that id. Two agents in one folder are rivals, and both get
+  none (a file cannot say which is whose), when they are of one kind, or of kinds whose globs could match the same files: the fixed
+  directory of one glob (before its first `*`, with `{home}` replaced, `.` and `..` resolved) is the other's or holds it. They are not
+  rivals when both `select`s ask for different values at the same `path`. This is decided from the manifests before any file is read,
+  so kinds that share a session folder lose Resume in that folder rather than risk continuing the wrong conversation. An agent for
+  which two files fit gets none either. The first line counts without its `\n` or `\r\n`. A session file's id must be a UUID. An agent without an id can only be started again in its folder, never resumed.
 - **Every id that goes on a command line** (`[resume]`, `id_args`) must start with a letter or digit and hold only letters, digits,
   `.`, `_` and `-`, at most 128 characters (`agora_node::session_files::argv_safe`), so an id can never be read as an option such as
   `--dangerously-bypass-approvals-and-sandbox`. It is checked where an id is found (session file), reported (a terminal agent's hook),
