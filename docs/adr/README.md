@@ -109,3 +109,5 @@ Date: YYYY-MM-DD
 | 0089 | The chat history of a structured agent survives the node and is read in pages | Accepted |
 | 0090 | A structured agent's conversation is complete: thinking, tool calls with status, plan progress, effort, cancel and usage | Accepted |
 | 0091 | The plan limits of subscription agents are shown from the tools' own output | Accepted |
+| 0092 | The ACP registry is a source of agent kinds | Proposed |
+| 0093 | Structured (ACP) agents survive a node restart | Proposed |
