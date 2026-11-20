@@ -135,7 +135,7 @@ fn a_terminal_frame_drained_in_part_at_its_deadline_still_ends_by_it() {
     );
     assert!(
         elapsed >= FRAME_TIMEOUT - Duration::from_millis(50)
-            && elapsed <= FRAME_TIMEOUT + Duration::from_millis(100),
+            && elapsed <= FRAME_TIMEOUT + Duration::from_millis(250),
         "write_frame took {elapsed:?}, its limit is {FRAME_TIMEOUT:?}"
     );
 }

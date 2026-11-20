@@ -843,7 +843,12 @@ fn budget(stream: &LocalStream, began: Instant, capped: &mut bool) -> Result<boo
         if !stream.wait_writable(left)? {
             return Ok(false);
         }
-        stream.set_write_timeout(Some(left.max(Duration::from_millis(1))))?;
+        // What is left after the wait: the send's own bound is that, not what was left before it.
+        let left = FRAME_TIMEOUT.saturating_sub(began.elapsed());
+        if left.is_zero() {
+            return Err(LinkError::Io(io::Error::from(io::ErrorKind::TimedOut)));
+        }
+        stream.set_write_timeout(Some(left))?;
         *capped = true;
     }
     Ok(true)
@@ -919,6 +924,28 @@ fn receive_budget(
     began: Option<Instant>,
     set: &mut Option<Duration>,
 ) -> Result<(), LinkError> {
+    let timeout = receive_timeout(wait, began)?;
+    receive_budget_with(timeout, set, |t| stream.set_read_timeout_or_closed(Some(t)))
+}
+
+/// [`receive_budget`]'s last step, with the call that sets the stream's read timeout given (so a test can answer as macOS does).
+fn receive_budget_with(
+    timeout: Duration,
+    set: &mut Option<Duration>,
+    set_timeout: impl FnOnce(Duration) -> io::Result<ReadTimeout>,
+) -> Result<(), LinkError> {
+    if *set != Some(timeout) {
+        // A peer that has shut the connection (macOS refuses a new timeout then) is not an error here: a receive returns what is
+        // buffered or the end at once, so it cannot wait, and the frame's time is still checked. Any other failure is one.
+        if set_timeout(timeout)? == ReadTimeout::Set {
+            *set = Some(timeout);
+        }
+    }
+    Ok(())
+}
+
+/// The read timeout for the next receive (see [`receive_budget`]), or a timeout error when the frame's time is spent.
+fn receive_timeout(wait: Duration, began: Option<Instant>) -> Result<Duration, LinkError> {
     let timeout = match began {
         None => wait,
         Some(b) => {
@@ -932,14 +959,7 @@ fn receive_budget(
     if timeout.is_zero() {
         return Err(LinkError::Io(io::Error::from(io::ErrorKind::TimedOut)));
     }
-    if *set != Some(timeout) {
-        // A peer that has shut the connection (macOS refuses a new timeout then) is not an error here: a receive returns what is
-        // buffered or the end at once, so it cannot wait, and the frame's time is still checked. Any other failure is one.
-        if stream.set_read_timeout_or_closed(Some(timeout))? == ReadTimeout::Set {
-            *set = Some(timeout);
-        }
-    }
-    Ok(())
+    Ok(timeout)
 }
 
 /// A timeout error when the frame that began at `began` is past its [`FRAME_TIMEOUT`].
@@ -1144,5 +1164,51 @@ impl Client {
         self.expect_ok(&Request::Release {
             agent: agent.into(),
         })
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod budget_tests {
+    use super::*;
+
+    #[test]
+    fn a_frame_past_its_time_gets_no_receive() {
+        let long_ago = Instant::now() - FRAME_TIMEOUT - Duration::from_secs(1);
+        let r = receive_timeout(Duration::from_secs(10), Some(long_ago));
+        assert!(matches!(r, Err(LinkError::Io(e)) if e.kind() == io::ErrorKind::TimedOut));
+        let r = receive_timeout(Duration::from_secs(10), Some(Instant::now())).unwrap();
+        assert!(r <= WRITE_SLICE && !r.is_zero());
+        assert_eq!(
+            receive_timeout(Duration::from_secs(10), None).unwrap(),
+            Duration::from_secs(10)
+        );
+    }
+
+    #[test]
+    fn a_peer_closed_answer_goes_on_without_setting_the_timeout() {
+        let mut set = None;
+        let r = receive_budget_with(Duration::from_secs(1), &mut set, |_| {
+            Ok(ReadTimeout::PeerClosed)
+        });
+        assert!(r.is_ok());
+        assert_eq!(
+            set, None,
+            "not recorded as set, so the next receive asks again"
+        );
+    }
+
+    #[test]
+    fn any_other_failure_fails_the_receive_and_a_set_one_is_not_asked_twice() {
+        let mut set = None;
+        let r = receive_budget_with(Duration::from_secs(1), &mut set, |_| {
+            Err(io::Error::from(io::ErrorKind::PermissionDenied))
+        });
+        assert!(matches!(r, Err(LinkError::Io(e)) if e.kind() == io::ErrorKind::PermissionDenied));
+        let mut set = Some(Duration::from_secs(1));
+        let r = receive_budget_with(Duration::from_secs(1), &mut set, |_| {
+            panic!("an unchanged timeout is not set again")
+        });
+        assert!(r.is_ok());
     }
 }

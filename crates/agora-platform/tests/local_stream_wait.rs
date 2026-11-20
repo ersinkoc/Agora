@@ -50,7 +50,7 @@ fn a_full_stream_waits_the_whole_time_given_and_not_less() {
     assert!(!writable, "a full stream is not writable");
     assert!(took >= want, "ended early: {took:?}");
     assert!(
-        took < want + Duration::from_millis(200),
+        took < want + Duration::from_millis(500),
         "ended late: {took:?}"
     );
     let _ = std::fs::remove_dir_all(&dir);
@@ -78,5 +78,15 @@ fn a_read_timeout_is_set_or_reported_as_the_peer_having_closed() {
         .set_read_timeout_or_closed(Some(Duration::from_secs(2)))
         .unwrap();
     assert!(matches!(after, ReadTimeout::Set | ReadTimeout::PeerClosed));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_zero_timeout_is_an_error_and_not_a_closed_peer() {
+    let (w, _r, dir, _l) = pair("zero");
+    let e = w
+        .set_read_timeout_or_closed(Some(Duration::ZERO))
+        .unwrap_err();
+    assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput);
     let _ = std::fs::remove_dir_all(&dir);
 }

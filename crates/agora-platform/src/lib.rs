@@ -726,6 +726,10 @@ impl LocalStream {
         &self,
         timeout: Option<std::time::Duration>,
     ) -> io::Result<ReadTimeout> {
+        // std refuses a zero timeout with InvalidInput; that is an error of the caller, not the peer having closed.
+        if timeout.is_some_and(|t| t.is_zero()) {
+            return Err(io::Error::from(io::ErrorKind::InvalidInput));
+        }
         read_timeout_result(self.set_read_timeout(timeout))
     }
 
