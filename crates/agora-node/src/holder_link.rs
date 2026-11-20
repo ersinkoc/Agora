@@ -763,12 +763,24 @@ pub fn write_frame(
     let mut frame = Vec::with_capacity(4 + payload.len());
     frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
     frame.extend_from_slice(payload);
+    let began = Instant::now();
     let mut sent = 0;
     if terminal.is_some() {
-        // The terminal goes with the first byte that goes; the rest follows plainly.
-        sent = stream.send_with_terminal(&frame, terminal)?;
+        // The terminal goes with the first byte that goes; the rest follows plainly. A send that timed out sent nothing (nor the
+        // terminal): it is tried again until the frame's time is up, as a plain send is.
+        loop {
+            match stream.send_with_terminal(&frame, terminal) {
+                Ok(0) => return Err(LinkError::Closed),
+                Ok(n) => {
+                    sent = n;
+                    break;
+                }
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) if timed_out(&e) && began.elapsed() < FRAME_TIMEOUT => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
     }
-    let began = Instant::now();
     while sent < frame.len() {
         match stream.write(&frame[sent..]) {
             Ok(0) => return Err(LinkError::Closed),
@@ -807,8 +819,12 @@ pub fn read_frame(stream: &mut LocalStream) -> Result<Option<Frame>, LinkError> 
             Ok((0, _)) => return Err(LinkError::Closed),
             Ok((n, t)) => {
                 have += n;
-                began.get_or_insert_with(Instant::now);
+                let b = *began.get_or_insert_with(Instant::now);
                 terminal = terminal.or(t);
+                // A peer that trickles bytes, each within the read timeout, is held to the frame's time too.
+                if have < head.len() && b.elapsed() > FRAME_TIMEOUT {
+                    return Err(LinkError::Io(io::Error::from(io::ErrorKind::TimedOut)));
+                }
             }
             Err(e) if timed_out(&e) => {
                 let Some(b) = began else { return Ok(None) };
@@ -832,6 +848,9 @@ pub fn read_frame(stream: &mut LocalStream) -> Result<Option<Frame>, LinkError> 
             Ok((n, t)) => {
                 have += n;
                 terminal = terminal.or(t);
+                if have < len && began.elapsed() > FRAME_TIMEOUT {
+                    return Err(LinkError::Io(io::Error::from(io::ErrorKind::TimedOut)));
+                }
             }
             Err(e) if timed_out(&e) && began.elapsed() <= FRAME_TIMEOUT => {}
             Err(e) => return Err(e.into()),
