@@ -51,6 +51,13 @@ struct Waiting {
     next_scan: Instant,
 }
 
+/// What was looked up on disk for one agent, once, the first time a comparison needed it; kept until the agent leaves.
+#[derive(Default)]
+struct Looked {
+    folder: Option<PathBuf>,
+    root: Option<Option<PathBuf>>,
+}
+
 pub struct SessionWatcher {
     home: Option<PathBuf>,
     waiting: HashMap<AgentId, Waiting>,
@@ -59,6 +66,8 @@ pub struct SessionWatcher {
     /// How a workspace folder and a session root are looked at on disk ([`workspace`], [`resolve`]); replaced in tests to count them.
     probe: fn(&Path) -> PathBuf,
     resolver: fn(&Path) -> Option<PathBuf>,
+    /// Each live agent's workspace and session root as looked up on disk, so no agent is probed again in a later pass.
+    looked: HashMap<AgentId, Looked>,
 }
 
 impl Default for SessionWatcher {
@@ -171,11 +180,21 @@ fn session_root(glob: &str, home: &Path) -> (PathBuf, PathBuf) {
 /// Most links followed while resolving one root (as Linux's `MAXSYMLINKS`).
 const MAX_LINK_HOPS: usize = 40;
 
-/// `path` with its links resolved, one component at a time: a link is read and followed even when what it points to does not exist
-/// yet (a relative target from the link's folder), and the folders that do not exist yet are kept as written, so a root resolves
-/// through a link before its own folder is made (Codex review of #791). `None` when it cannot be known (more than [`MAX_LINK_HOPS`]
-/// links, or an error other than "not found"): the caller then fails closed.
+/// `path` with its links resolved. When it exists, the OS resolves it (`canonicalize`, with each platform's own rules, such as Windows
+/// taking `..` before a junction). When part of it does not exist yet, it is walked one component at a time instead: a link is read and
+/// followed even when what it points to does not exist yet (a relative target from the link's folder), and the folders that do not
+/// exist yet are kept as written, so a root resolves through a link before its own folder is made (Codex review of #791). Where the walk
+/// and the OS could differ (`..` after a link on Windows), the OS's answer is the lexical one, which is compared too. `None` when it
+/// cannot be known (more than [`MAX_LINK_HOPS`] links, or an error other than "not found"): the caller then fails closed.
 fn resolve(path: &Path) -> Option<PathBuf> {
+    match std::fs::canonicalize(path) {
+        Ok(c) => Some(c),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => walk(path),
+        Err(_) => None,
+    }
+}
+
+fn walk(path: &Path) -> Option<PathBuf> {
     // One component per entry, so a link's target can be put in front of what is left.
     let mut todo: VecDeque<PathBuf> = path
         .components()
@@ -259,9 +278,14 @@ fn nested(x: &Path, y: &Path) -> bool {
 /// still run on the calling (supervision) thread, as `same_dir` always did.
 #[cfg(test)]
 fn with_rivals(targets: &[Target], home: &Path) -> HashSet<AgentId> {
-    with_rivals_using(targets, home, &HashSet::new(), &mut workspace, &mut |p| {
-        resolve(p)
-    })
+    with_rivals_using(
+        targets,
+        home,
+        &HashSet::new(),
+        &mut HashMap::new(),
+        &mut workspace,
+        &mut |p| resolve(p),
+    )
 }
 
 /// A workspace folder as the filesystem names it (the comparison `same_dir` makes); probed only for agents that could contend.
@@ -273,6 +297,7 @@ fn with_rivals_using(
     targets: &[Target],
     home: &Path,
     settled: &HashSet<AgentId>,
+    looked: &mut HashMap<AgentId, Looked>,
     probe: &mut dyn FnMut(&Path) -> PathBuf,
     resolver: &mut dyn FnMut(&Path) -> Option<PathBuf>,
 ) -> HashSet<AgentId> {
@@ -280,8 +305,23 @@ fn with_rivals_using(
     // `same_dir` always compared: a lone agent, or one whose only neighbours have exclusive selectors, is never probed, so a stalled
     // mount under it never holds up discovery. Folders that are equal as written need no probe. A pair whose agents had both given up
     // (`settled`) is not compared again: neither gets an id anyway; each is still compared with the agents that wait.
-    let mut folders: HashMap<usize, PathBuf> = HashMap::new();
-    let mut resolved: HashMap<usize, Option<PathBuf>> = HashMap::new();
+    // Each agent's lookups are kept in `looked` across passes: an agent is probed at most once in its life.
+    let mut folder_of = |t: &Target, looked: &mut HashMap<AgentId, Looked>| {
+        looked
+            .entry(t.agent.clone())
+            .or_default()
+            .folder
+            .get_or_insert_with(|| probe(&t.folder))
+            .clone()
+    };
+    let mut root_of = |t: &Target, raw: &Path, looked: &mut HashMap<AgentId, Looked>| {
+        looked
+            .entry(t.agent.clone())
+            .or_default()
+            .root
+            .get_or_insert_with(|| resolver(raw))
+            .clone()
+    };
     let mut out = HashSet::new();
     for i in 0..targets.len() {
         for j in i + 1..targets.len() {
@@ -293,8 +333,8 @@ fn with_rivals_using(
                 continue;
             }
             let same_folder = a.folder == b.folder || {
-                let fa = folders.entry(i).or_insert_with(|| probe(&a.folder)).clone();
-                let fb = folders.entry(j).or_insert_with(|| probe(&b.folder)).clone();
+                let fa = folder_of(a, looked);
+                let fb = folder_of(b, looked);
                 fa == fb
             };
             if !same_folder {
@@ -306,8 +346,8 @@ fn with_rivals_using(
                     session_root(&b.spec.glob, home),
                 );
                 nested(&la, &lb) || {
-                    let ra = resolved.entry(i).or_insert_with(|| resolver(&wa)).clone();
-                    let rb = resolved.entry(j).or_insert_with(|| resolver(&wb)).clone();
+                    let ra = root_of(a, &wa, looked);
+                    let rb = root_of(b, &wb, looked);
                     match (ra, rb) {
                         (Some(ra), Some(rb)) => nested(&ra, &rb),
                         // Unknown: fail closed.
@@ -332,6 +372,7 @@ impl SessionWatcher {
             gave_up: HashSet::new(),
             probe: workspace,
             resolver: resolve,
+            looked: HashMap::new(),
         }
     }
 
@@ -346,6 +387,7 @@ impl SessionWatcher {
         let live: HashSet<&AgentId> = targets.iter().map(|t| &t.agent).collect();
         self.waiting.retain(|a, _| live.contains(a));
         self.gave_up.retain(|a| live.contains(a));
+        self.looked.retain(|a, _| live.contains(a));
         let Some(home) = self.home.clone() else {
             return Vec::new();
         };
@@ -370,8 +412,14 @@ impl SessionWatcher {
             .any(|w| now >= w.next_scan || now >= w.give_up_at)
         {
             let (mut probe, mut resolver) = (self.probe, self.resolver);
-            let rivals =
-                with_rivals_using(targets, &home, &self.gave_up, &mut probe, &mut resolver);
+            let rivals = with_rivals_using(
+                targets,
+                &home,
+                &self.gave_up,
+                &mut self.looked,
+                &mut probe,
+                &mut resolver,
+            );
             for a in rivals {
                 self.waiting.remove(&a);
                 self.gave_up.insert(a);
@@ -1237,6 +1285,7 @@ mod tests {
                     &targets,
                     &root.join("home"),
                     &HashSet::new(),
+                    &mut HashMap::new(),
                     &mut workspace,
                     &mut unknown
                 ),
@@ -1298,6 +1347,7 @@ mod tests {
                 &targets,
                 &root.join("home"),
                 &HashSet::new(),
+                &mut HashMap::new(),
                 &mut workspace,
                 &mut counting,
             );
@@ -1352,16 +1402,87 @@ mod tests {
 
     thread_local! {
         static PROBES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        static PROBED: std::cell::RefCell<Vec<PathBuf>> = const { std::cell::RefCell::new(Vec::new()) };
     }
 
     fn counting_probe(p: &Path) -> PathBuf {
         PROBES.with(|n| n.set(n.get() + 1));
+        PROBED.with(|v| v.borrow_mut().push(p.to_path_buf()));
         workspace(p)
     }
 
     fn counting_resolver(p: &Path) -> Option<PathBuf> {
         PROBES.with(|n| n.set(n.get() + 1));
+        PROBED.with(|v| v.borrow_mut().push(p.to_path_buf()));
         resolve(p)
+    }
+
+    #[test]
+    fn each_agents_folder_and_session_root_are_looked_up_at_most_once() {
+        // Codex review of #791: a stalled mount under one agent may delay at most the pass that first sees it, never every pass.
+        for reverse in [false, true] {
+            let root = tmp(if reverse { "once-reversed" } else { "once" });
+            let mut w = SessionWatcher::new(Some(root.join("home")));
+            w.probe = counting_probe;
+            w.resolver = counting_resolver;
+            PROBED.with(|v| v.borrow_mut().clear());
+            let now = Instant::now();
+            let mut targets: Vec<Target> = Vec::new();
+            // Agents of different kinds arrive one per pass, each in one folder spelled its own way and with its own session root,
+            // so every pair must be compared on disk.
+            for i in 0..6u32 {
+                let link = root.join(format!("work/l{i}"));
+                agora_platform::link_dir(&root.join("work/a"), &link).unwrap();
+                targets.push(with_glob(
+                    target(&format!("agent-{i}"), link),
+                    &format!("kind-{i}"),
+                    &format!("{{home}}/r{i}/*.jsonl"),
+                ));
+                let mut order = targets.clone();
+                if reverse {
+                    order.reverse();
+                }
+                assert!(w
+                    .poll(now + SCAN_EVERY * i, &order, &HashSet::new())
+                    .is_empty());
+            }
+            let probed = PROBED.with(|v| v.borrow().clone());
+            let mut counts: HashMap<PathBuf, usize> = HashMap::new();
+            for p in &probed {
+                *counts.entry(p.clone()).or_default() += 1;
+            }
+            assert!(
+                counts.values().all(|n| *n == 1),
+                "reverse={reverse}: {counts:?}"
+            );
+            // Every agent was looked at (its folder and its root). Their roots are disjoint, so none gave up: every pass compared
+            // every pair again, and only the per-agent lookups kept each probe to one.
+            assert_eq!(counts.len(), 12, "reverse={reverse}: {counts:?}");
+            assert!(w.gave_up.is_empty(), "reverse={reverse}");
+        }
+    }
+
+    #[test]
+    fn an_existing_session_root_is_resolved_by_the_os() {
+        // Codex review of #791: Windows takes `..` before a junction, Unix after a link; for a root that exists, the OS's own answer
+        // (`canonicalize`) is used on every platform. CI runs this on Linux, macOS and Windows.
+        let root = tmp("os-rules");
+        std::fs::create_dir_all(root.join("real/inner")).unwrap();
+        std::fs::create_dir_all(root.join("real/s")).unwrap();
+        std::fs::create_dir_all(root.join("h/s")).unwrap();
+        agora_platform::link_dir(&root.join("real/inner"), &root.join("h/link")).unwrap();
+        let raw = root.join("h").join("link").join("..").join("s");
+        assert_eq!(resolve(&raw), Some(std::fs::canonicalize(&raw).unwrap()));
+        // A root that does not exist yet is walked, through the link.
+        let missing = root.join("h").join("link").join("new");
+        assert_eq!(
+            resolve(&missing),
+            Some(
+                std::fs::canonicalize(root.join("real/inner"))
+                    .unwrap()
+                    .join("new")
+            )
+        );
     }
 
     #[test]
@@ -1528,6 +1649,7 @@ mod tests {
                     &targets,
                     &root.join("home"),
                     &HashSet::new(),
+                    &mut HashMap::new(),
                     &mut folder,
                     &mut roots,
                 );
