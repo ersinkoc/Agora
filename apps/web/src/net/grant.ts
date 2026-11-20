@@ -22,7 +22,8 @@ export function commandName(key: string): string {
   return `${words[0]}.${words.slice(1).join('_')}`;
 }
 
-export type GrantKind = 'typing' | 'start' | 'other';
+// What the dialog says it allows (#810): one kind per refused command, so the question is exactly what gets signed.
+export type GrantKind = 'typing' | 'prompt' | 'stop' | 'interrupt' | 'settings' | 'resize' | 'start' | 'other';
 
 export interface GrantAsk {
   scope: string;
@@ -30,19 +31,30 @@ export interface GrantAsk {
   kind: GrantKind;
 }
 
-const AGENT_COMMANDS = ['agentPrompt', 'agentSetMode', 'agentSetModel', 'agentSetConfig', 'agentCancelTurn', 'agentStop', 'terminalInput', 'terminalResize'];
+const AGENT_KINDS: { [key: string]: GrantKind | undefined } = {
+  agentPrompt: 'prompt',
+  agentSetMode: 'settings',
+  agentSetModel: 'settings',
+  agentSetConfig: 'settings',
+  agentCancelTurn: 'interrupt',
+  agentStop: 'stop',
+  terminalInput: 'typing',
+  terminalResize: 'resize',
+};
 
-// What to ask the owner for, given the command the node refused. One agent for typing, one project for starting, and the
+
+// What to ask the owner for, given the command the node refused: that command and nothing else (a grant for stopping an agent does
+// not let this window type into it). One agent for an agent command, one project for starting, and the
 // whole machine only for what names neither.
 export function grantFor(body: Record<string, unknown>): GrantAsk | undefined {
   const key = Object.keys(body).find((k) => body[k] !== undefined && k !== 'idempotencyKey');
   if (!key) return undefined;
   const name = commandName(key);
   const inner = (body[key] ?? {}) as { agentId?: string; terminalId?: string; projectId?: string };
-  if (AGENT_COMMANDS.includes(key)) {
+  const agentKind = AGENT_KINDS[key];
+  if (agentKind) {
     const agent = inner.agentId || (inner.terminalId?.startsWith('t-') ? inner.terminalId.slice(2) : '');
-    const commands = [...new Set([name, 'agent.prompt', 'terminal.input'])];
-    return { scope: agent ? `agent:${agent}` : 'node', commands, kind: 'typing' };
+    return { scope: agent ? `agent:${agent}` : 'node', commands: [name], kind: agentKind };
   }
   if (key === 'agentStart' && inner.projectId) return { scope: `project:${inner.projectId}`, commands: [name], kind: 'start' };
   return { scope: 'node', commands: [name], kind: 'other' };

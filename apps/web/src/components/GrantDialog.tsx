@@ -4,15 +4,16 @@ import type { GrantKind } from '../net/grant';
 
 // A machine wants the owner's say before this window drives its agents (ADR-0041). Says what it covers and for how long;
 // allowing signs it with this device's key.
-export function GrantDialog({ machine, kind, busy, failed, onAllow, onClose }: {
+export function GrantDialog({ machine, agent, kind, busy, failed, onAllow, onClose }: {
   machine: string;
+  agent: string;
   kind: GrantKind;
   busy?: boolean;
   failed?: boolean;
   onAllow: () => void;
   onClose: () => void;
 }) {
-  const title = kind === 'typing' ? t('grant-title-typing') : kind === 'start' ? t('grant-title-start') : t('grant-title-other', { machine });
+  const title = kind === 'start' ? t('grant-title-start') : kind === 'other' ? t('grant-title-other', { machine }) : t(`grant-title-${kind}`, { agent });
   return (
     <Dialog.Root open onOpenChange={(open) => { if (!open) onClose(); }}>
       <Dialog.Portal>
