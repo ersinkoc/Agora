@@ -21,7 +21,7 @@ export function passkeysSupported(): boolean {
   return typeof window !== 'undefined' && 'PublicKeyCredential' in window && !!navigator.credentials;
 }
 
-export type PasskeyResult = { ok: true; token?: string } | { ok: false; reason: 'too-many' | 'failed' | 'cancelled' };
+export type PasskeyResult = { ok: true; token?: string } | { ok: false; reason: 'too-many' | 'busy' | 'failed' | 'cancelled' };
 
 interface Env { fetcher: typeof fetch; credentials: Pick<CredentialsContainer, 'create' | 'get'> }
 
@@ -45,6 +45,7 @@ export async function addPasskey(session: string, env: Env = defaults(), passwor
   const pw = password ? { password } : {};
   try {
     const begin = await post(env, 'register-begin', pw, session);
+    if (begin.status === 503) return { ok: false, reason: 'busy' };
     if (!begin.ok) return { ok: false, reason: 'failed' };
     const { challenge, rpId } = (await begin.json()) as { challenge: string; rpId: string };
     const cred = (await env.credentials.create({
@@ -66,6 +67,7 @@ export async function addPasskey(session: string, env: Env = defaults(), passwor
       clientDataJSON: b64urlEncode(response.clientDataJSON),
       ...pw,
     }, session);
+    if (done.status === 503) return { ok: false, reason: 'busy' };
     return done.ok ? { ok: true } : { ok: false, reason: 'failed' };
   } catch (e) {
     return { ok: false, reason: cancelled(e) ? 'cancelled' : 'failed' };
@@ -76,6 +78,7 @@ export async function addPasskey(session: string, env: Env = defaults(), passwor
 export async function signInWithPasskey(env: Env = defaults()): Promise<PasskeyResult> {
   try {
     const begin = await post(env, 'login-begin', {});
+    if (begin.status === 503) return { ok: false, reason: 'busy' };
     if (!begin.ok) return { ok: false, reason: 'failed' };
     const { challenge, rpId, ids } = (await begin.json()) as { challenge: string; rpId: string; ids: string[] };
     if (ids.length === 0) return { ok: false, reason: 'failed' };
@@ -96,6 +99,7 @@ export async function signInWithPasskey(env: Env = defaults()): Promise<PasskeyR
       signature: b64urlEncode(r.signature),
     });
     if (done.status === 429) return { ok: false, reason: 'too-many' };
+    if (done.status === 503) return { ok: false, reason: 'busy' };
     if (!done.ok) return { ok: false, reason: 'failed' };
     const body = (await done.json()) as { token?: unknown };
     if (typeof body.token !== 'string') return { ok: false, reason: 'failed' };

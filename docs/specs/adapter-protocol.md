@@ -121,7 +121,8 @@ registry of installed adapters.
 An agent that speaks the Agent Client Protocol over stdio needs no adapter. Its manifest says `[structured] acp = { argv = [...] }`
 and the node runs `agora acp-bridge -- <argv>` as the adapter: the bridge is the ACP *client* towards the agent and an adapter
 towards the node, so chat items, approvals, state and cancel work as for any L3 agent and nothing else knows about ACP.
-`agora agent kinds` reports such a kind as level L2.
+`agora agent kinds` reports such a kind as level L2. On Windows the bridge starts a `.cmd` shim such as `npx` by its full path
+(`agora_platform::program_path`, see agent-manifest.md).
 
 | ACP (agent → client) | Adapter protocol (bridge → node) |
 | --- | --- |

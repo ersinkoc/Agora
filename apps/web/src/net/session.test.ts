@@ -46,6 +46,7 @@ describe('sign-in', () => {
   it('maps the hub answers', async () => {
     expect(await signIn('x', undefined, reply(401))).toEqual({ ok: false, reason: 'refused' });
     expect(await signIn('x', undefined, reply(429))).toEqual({ ok: false, reason: 'too-many' });
+    expect(await signIn('x', undefined, reply(503))).toEqual({ ok: false, reason: 'busy' });
     expect(await signIn('x', undefined, reply(500))).toEqual({ ok: false, reason: 'failed' });
     expect(await signIn('x', undefined, reply(200, {}))).toEqual({ ok: false, reason: 'failed' });
     expect(await signIn('x', undefined, (async () => { throw new Error('offline'); }) as unknown as typeof fetch)).toEqual({ ok: false, reason: 'failed' });
@@ -93,6 +94,7 @@ describe('screen password', () => {
   it('maps set-password answers', async () => {
     expect(await setPassword('t', 'x', undefined, reply(401))).toEqual({ ok: false, reason: 'refused' });
     expect(await setPassword('t', 'x', undefined, reply(429))).toEqual({ ok: false, reason: 'too-many' });
+    expect(await setPassword('t', 'x', undefined, reply(503))).toEqual({ ok: false, reason: 'busy' });
     calls.length = 0;
     expect(await setPassword('t', 'new password', 'old one', reply(200, { revoked: 2 }))).toEqual({ ok: true });
     expect(JSON.parse(calls[0]!.init!.body as string)).toEqual({ password: 'new password', current: 'old one' });

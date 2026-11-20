@@ -109,6 +109,7 @@ the supervisor reads the exit status without copying anything.
 
 ### Node and hub
 - PTY reads on dedicated threads (ADR-0013); detection runs on changed regions only, with an adaptive interval.
+- Terminal subscribe and resync capture the screen at the stream boundary and build the ANSI repaint after releasing the terminal lock.
 - Scrollback stored compressed in memory with a configurable cap.
 - Hub projections are in memory. A node event's SQLite write, projection update and fanout run together on a blocking worker.
   Each hub admits one job at a time. A connection groups up to 16 immediately available events or 64 KiB per job and then waits
@@ -118,6 +119,8 @@ the supervisor reads the exit status without copying anything.
 - The file watcher stops checked-handle enumeration after recording 50,000 non-directory entries. It does not first
   collect a whole directory into memory. This is a recorded-entry budget; traversed directories are not counted.
   Full directory requests still collect their requested level. [Watcher measurements](../reviews/0343-bounded-directory-visits.md).
+- HTTP requests that need a fresh proxy trust configuration share one file read on a blocking worker. Requests awaiting
+  that read apply its result before checking proxy trust, and the cache is rechecked after two seconds.
 
 ## 3. Measurement and enforcement
 - **Bench harness** (`just bench`): synthetic nodes and `agora-fake-agent` terminals producing scripted output,

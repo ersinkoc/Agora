@@ -191,6 +191,7 @@ password-change = Parolayı değiştir
 password-saved = Kaydedildi. Diğer tüm pencerelerden çıkış yapıldı.
 password-refused = Bu parola doğru değil.
 password-too-many = Çok fazla yanlış deneme. Bir süre bekleyip yeniden deneyin.
+password-busy = Hub şu anda yoğun. Birazdan yeniden deneyin.
 password-too-short = En az { $min } karakter kullanın.
 password-mismatch = İki parola aynı değil.
 password-failed = Hub'ınıza ulaşılamadı. Yeniden deneyin.

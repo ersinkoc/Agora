@@ -194,6 +194,7 @@ password-change = Change password
 password-saved = Saved. Every other window was signed out.
 password-refused = That password is not right.
 password-too-many = Too many wrong tries. Wait a while and try again.
+password-busy = The hub is busy. Try again in a moment.
 password-too-short = Use at least { $min } characters.
 password-mismatch = The two passwords do not match.
 password-failed = Could not reach your hub. Try again.

@@ -16,9 +16,11 @@ _Nothing yet._
 
 ### Steadier agents and connections
 - An agent that kept running while the node restarted comes back showing its last known state (such as idle) even when its state was first noted a moment before its start was recorded.
-- A machine whose clock is behind keeps its certificate renewal request instead of giving up and deleting its key (ADR-0085 Amendment A is accepted; the code follows).
 - The hub stays responsive for other machines while one machine's events are written to disk.
 - `agora join` never prints a refusal sentence a remote machine chose; a skip-permissions approval card is withdrawn when either switch of the same setting changes; two agents reading the same session files in one folder never take each other's session; the console asks for a grant when typing into an agent is refused.
+- Signing in with the screen password no longer ties up the hub's request workers: a busy sign-in answers "busy" instead of stalling other machines, and a sign-in on the machine itself keeps its own reserved slot.
+- The desktop app's local tunnel limits how many connections it serves at once and closes them when the app lets go of it.
+- On Windows, an agent whose command is installed as a `.cmd` file, such as `npx` or most npm global commands, is now shown as installed and starts, as a chat agent, a terminal agent or through an adapter. Before, it was shown as not installed, and a chat agent failed with "the adapter exited".
 
 ## 0.3.30
 

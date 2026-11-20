@@ -46,6 +46,11 @@ pub fn on_path(program: &str) -> bool {
     if p.components().count() > 1 {
         return p.is_file();
     }
+    // A name the node starts by another file's full path (on Windows, a `.cmd` shim such as `npx`) is installed when that file is.
+    let started_as = agora_platform::program_path(program, None);
+    if started_as != p {
+        return started_as.is_file();
+    }
     let Some(paths) = std::env::var_os("PATH") else {
         return false;
     };
