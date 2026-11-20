@@ -21,7 +21,7 @@
 //!   the `modes` and `models` of `session/new` (and `current_mode_update`) become `session/options`, and the node's
 //!   `session/set_option` becomes ACP `session/set_mode` or `session/set_model`.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::ops::ControlFlow;
 use std::process::{Child, ChildStderr, Command, Stdio};
@@ -80,15 +80,15 @@ enum Ev {
 enum Waiting {
     /// The node's `initialize` is answered only when the ACP agent has answered its own: a strict agent refuses
     /// `session/new` before that.
-    Initialize {
-        node_id: Value,
-    },
+    Initialize { node_id: Value },
     NewSession {
         node_id: Value,
         resume_id: Option<String>,
     },
     Prompt {
         cancelling: bool,
+        /// Cancelled, and a newer prompt was sent since: its reply ends nothing.
+        superseded: bool,
     },
     /// ADR-0090: the node's `session/set_config`, until the agent answered `session/set_config_option`.
     SetConfig {
@@ -869,9 +869,6 @@ struct Bridge<W: Write> {
     waiting: HashMap<u64, Waiting>,
     session: Option<String>,
     perms: HashMap<String, Permission>,
-    /// Prompts the node sent while a cancelled prompt was still unanswered, in order. They go to the agent once it answered: ACP
-    /// permission requests name the session, not the prompt, so until then any request is the stopped turn's and is refused.
-    held: VecDeque<String>,
     text: String,
     text_session: String,
     text_since: Instant,
@@ -1010,29 +1007,31 @@ impl<W: Write> Bridge<W> {
         self.send_agent(&json!({"jsonrpc": "2.0", "method": method, "params": params}));
     }
 
-    /// Sends a prompt to the agent: a turn begins.
-    fn send_prompt(&mut self, sid: &str, text: &str) {
-        self.said = false;
-        self.turn_mark = self.stderr.lock().unwrap_or_else(|e| e.into_inner()).total;
-        self.ask_agent(
-            "session/prompt",
-            json!({"sessionId": sid, "prompt": [{"type": "text", "text": text}]}),
-            Waiting::Prompt { cancelling: false },
-        );
-    }
-
-    /// Whether a cancelled `session/prompt` still waits for the agent's answer.
+    /// Whether a cancelled `session/prompt` still waits for the agent's answer. Until it answered, every permission request is
+    /// refused: ACP names the session in one, not the prompt, so it may be the stopped turn's.
     fn cancel_open(&self) -> bool {
-        self.waiting
-            .values()
-            .any(|w| matches!(w, Waiting::Prompt { cancelling: true }))
+        self.waiting.values().any(|w| {
+            matches!(
+                w,
+                Waiting::Prompt {
+                    cancelling: true,
+                    ..
+                }
+            )
+        })
     }
 
-    /// Whether a `session/prompt` still waits for the agent's answer (a turn is running).
+    /// Whether a `session/prompt` that was not cancelled still waits for the agent's answer (a turn is running).
     fn prompt_open(&self) -> bool {
-        self.waiting
-            .values()
-            .any(|w| matches!(w, Waiting::Prompt { .. }))
+        self.waiting.values().any(|w| {
+            matches!(
+                w,
+                Waiting::Prompt {
+                    cancelling: false,
+                    ..
+                }
+            )
+        })
     }
 
     fn cancel_permission(&mut self, request: Value) {
@@ -1054,8 +1053,6 @@ impl<W: Write> Bridge<W> {
         self.flush_text()?;
         let mut waiting: Vec<(u64, Waiting)> = self.waiting.drain().collect();
         waiting.sort_by_key(|(n, _)| *n);
-        // A prompt that waited behind a cancel was a turn too.
-        let held = !std::mem::take(&mut self.held).is_empty();
         let stage_of = |w: &Waiting| match w {
             Waiting::Initialize { .. } => "initialize",
             Waiting::NewSession { .. } => "session",
@@ -1064,7 +1061,7 @@ impl<W: Write> Bridge<W> {
         };
         let stage = ["initialize", "session", "turn", "option"]
             .into_iter()
-            .find(|s| waiting.iter().any(|(_, w)| stage_of(w) == *s) || (held && *s == "turn"))
+            .find(|s| waiting.iter().any(|(_, w)| stage_of(w) == *s))
             .unwrap_or(if self.session.is_some() {
                 "idle"
             } else if self.initialized {
@@ -1443,30 +1440,39 @@ impl<W: Write> Bridge<W> {
                     return Ok(ControlFlow::Continue(()));
                 };
                 done(self)?;
+                self.said = false;
+                self.turn_mark = self.stderr.lock().unwrap_or_else(|e| e.into_inner()).total;
                 self.state("WORKING")?;
-                // A prompt during an unfinished cancel (the node's cancel grace passed) waits for the cancelled turn's reply, so
-                // the stopped turn's permission requests stay refused; it is sent then.
-                if self.cancel_open() {
-                    self.held.push_back(text);
-                } else {
-                    self.send_prompt(&sid, &text);
+                // A cancelled prompt still unanswered (the node's cancel grace passed) no longer counts for the turn: this one's
+                // reply ends it, and its own late reply ends nothing.
+                for request in self.waiting.values_mut() {
+                    if let Waiting::Prompt {
+                        cancelling: true,
+                        superseded,
+                    } = request
+                    {
+                        *superseded = true;
+                    }
                 }
+                self.ask_agent(
+                    "session/prompt",
+                    json!({"sessionId": sid, "prompt": [{"type": "text", "text": text}]}),
+                    Waiting::Prompt {
+                        cancelling: false,
+                        superseded: false,
+                    },
+                );
             }
             "session/cancel" => {
                 done(self)?;
                 if let Some(sid) = self.session.clone() {
                     for request in self.waiting.values_mut() {
-                        if let Waiting::Prompt { cancelling } = request {
+                        if let Waiting::Prompt { cancelling, .. } = request {
                             *cancelling = true;
                         }
                     }
                     self.tell_agent("session/cancel", json!({"sessionId": sid}));
                     self.cancel_permissions();
-                    // The prompts waiting behind the earlier cancel never reached the agent: their turn ends here.
-                    if !self.held.is_empty() {
-                        self.held.clear();
-                        self.state("IDLE")?;
-                    }
                 }
             }
             "approval/resolve" => {
@@ -1808,11 +1814,9 @@ impl<W: Write> Bridge<W> {
                 }
             }
             (Some("session/request_permission"), Some(request)) => {
-                if self
-                    .waiting
-                    .values()
-                    .any(|request| matches!(request, Waiting::Prompt { cancelling: true }))
-                {
+                // Fail closed: while a cancelled prompt is unanswered, a request may be the stopped turn's (a new turn's is refused
+                // too, until then).
+                if self.cancel_open() {
                     self.cancel_permission(request);
                     return Ok(());
                 }
@@ -1902,7 +1906,6 @@ impl<W: Write> Bridge<W> {
                                     self.waiting.retain(|_, request| {
                                         !matches!(request, Waiting::Prompt { .. })
                                     });
-                                    self.held.clear();
                                     self.cancel_permissions();
                                 }
                                 let state = self.session_state.entry(sid.clone()).or_default();
@@ -1954,14 +1957,17 @@ impl<W: Write> Bridge<W> {
                             }
                         }
                     }
+                    // A cancelled prompt a newer one replaced: the newer turn is not its business.
+                    Some(Waiting::Prompt {
+                        superseded: true, ..
+                    }) => {}
                     Some(Waiting::Prompt { .. }) => {
                         self.flush_text()?;
                         // Audit F1240: prompts overlap when the node sends one into a running turn (a spawned helper's request,
                         // a node without `turns`). Only the last reply ends the turn: until then the permissions asked are kept and
                         // no `idle` is reported; this reply's own failure or stop is still reported (whether it was empty cannot be
-                        // told). The prompts that waited for the last cancelled reply are sent now and keep the turn open.
-                        let release = !self.held.is_empty() && !self.cancel_open();
-                        let still_open = self.prompt_open() || release;
+                        // told). Cancelled prompts do not hold the turn open.
+                        let still_open = self.prompt_open();
                         if !still_open {
                             self.cancel_permissions();
                         }
@@ -1983,13 +1989,6 @@ impl<W: Write> Bridge<W> {
                             }
                             None if !still_open => self.state("IDLE")?,
                             None => {}
-                        }
-                        if release {
-                            if let Some(sid) = self.session.clone() {
-                                while let Some(text) = self.held.pop_front() {
-                                    self.send_prompt(&sid, &text);
-                                }
-                            }
                         }
                     }
                     Some(Waiting::SetConfig {
@@ -2092,7 +2091,6 @@ where
         waiting: HashMap::new(),
         session: None,
         perms: HashMap::new(),
-        held: VecDeque::new(),
         text: String::new(),
         text_session: String::new(),
         text_since: Instant::now(),
@@ -2177,7 +2175,6 @@ mod tests {
             waiting: HashMap::new(),
             session: Some("s".to_string()),
             perms: HashMap::new(),
-            held: VecDeque::new(),
             text: String::new(),
             text_session: String::new(),
             text_since: Instant::now(),
@@ -2734,39 +2731,56 @@ mod tests {
         Ok(())
     }
 
-    /// Codex review of #794: a prompt the node sends while a cancelled turn is still unanswered (its cancel grace passed) waits in
-    /// the bridge until that turn's reply. Meanwhile the stopped turn's permission requests are still answered `cancelled`, never
-    /// shown to the user; then the waiting prompt goes to the agent, its permissions are asked as usual, and its own reply ends the
-    /// turn with `idle` (the turn is not held open by the cancelled prompt).
+    /// Codex review of #794: while a cancelled prompt is unanswered, every permission request is answered `cancelled` and never
+    /// shown (ACP names the session in it, not the prompt, so it may be the stopped turn's). A new prompt still goes to the agent
+    /// at once, its reply ends the turn with `idle` though the cancelled prompt never answered, and that prompt's late reply changes
+    /// nothing.
     #[test]
-    fn a_prompt_sent_during_an_unfinished_cancel_waits_for_the_cancelled_turn(
+    fn a_cancelled_turns_permissions_stay_refused_and_a_new_prompt_is_not_held(
     ) -> Result<(), Box<dyn std::error::Error>> {
         use serde_json::json;
         let (mut b, sent) = bridge_with_agent()?;
         prompt(&mut b, 10, "t")?;
         cancel(&mut b)?;
         assert_eq!(prompts(&sent.take()), ["t"]);
-        b.out.clear();
         prompt(&mut b, 12, "u")?;
-        assert_eq!(states(&b.out), ["AGENT_STATE_WORKING"]);
-        assert!(prompts(&sent.take()).is_empty(), "the new prompt waits");
+        assert_eq!(
+            prompts(&sent.take()),
+            ["u"],
+            "the new prompt is sent at once"
+        );
         b.out.clear();
         ask(&mut b, "old-perm")?;
-        assert!(states(&b.out).is_empty(), "the stopped turn asks nobody");
+        assert!(states(&b.out).is_empty(), "nobody is asked");
+        assert!(b.perms.is_empty());
         assert_eq!(
             answer_to(&sent.take(), "old-perm").as_deref(),
             Some("cancelled")
         );
-        b.handle_agent(&json!({"jsonrpc":"2.0","id":1,"result":{"stopReason":"cancelled"}}))?;
-        assert!(
-            states(&b.out).is_empty(),
-            "the waiting prompt's turn goes on"
-        );
+        b.handle_agent(&json!({"jsonrpc":"2.0","id":2,"result":{"stopReason":"end_turn"}}))?;
         assert_eq!(
-            prompts(&sent.take()),
-            ["u"],
-            "sent once the cancelled turn ended"
+            states(&b.out),
+            ["AGENT_STATE_IDLE"],
+            "the new prompt's reply ends the turn"
         );
+        b.out.clear();
+        b.handle_agent(&json!({"jsonrpc":"2.0","id":1,"result":{"stopReason":"cancelled"}}))?;
+        assert!(b.out.is_empty(), "the late reply changes nothing");
+        Ok(())
+    }
+
+    /// Once the cancelled prompt answered, the new turn's permission requests are asked as usual.
+    #[test]
+    fn a_permission_after_the_cancelled_prompt_answered_is_asked(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use serde_json::json;
+        let (mut b, sent) = bridge_with_agent()?;
+        prompt(&mut b, 10, "t")?;
+        cancel(&mut b)?;
+        prompt(&mut b, 12, "u")?;
+        b.handle_agent(&json!({"jsonrpc":"2.0","id":1,"result":{"stopReason":"cancelled"}}))?;
+        b.out.clear();
+        let _ = sent.take();
         ask(&mut b, "new-perm")?;
         assert_eq!(states(&b.out), ["AGENT_STATE_BLOCKED"]);
         let approval = b.perms.keys().next().cloned().ok_or("no approval")?;
@@ -2780,60 +2794,7 @@ mod tests {
         );
         b.out.clear();
         b.handle_agent(&json!({"jsonrpc":"2.0","id":2,"result":{"stopReason":"end_turn"}}))?;
-        assert_eq!(
-            states(&b.out),
-            ["AGENT_STATE_IDLE"],
-            "its own reply ends the turn"
-        );
-        Ok(())
-    }
-
-    /// The prompts waiting behind an unfinished cancel: several are sent in order when it ends; a new cancel drops them (they never
-    /// reached the agent) and ends their turn with `idle`; an agent that exits meanwhile is reported as exiting in a turn.
-    #[test]
-    fn prompts_waiting_behind_a_cancel_go_in_order_or_end_with_the_turn(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        use serde_json::json;
-        // In order.
-        let (mut b, sent) = bridge_with_agent()?;
-        prompt(&mut b, 10, "t")?;
-        cancel(&mut b)?;
-        prompt(&mut b, 11, "u")?;
-        prompt(&mut b, 12, "v")?;
-        assert_eq!(prompts(&sent.take()), ["t"]);
-        b.handle_agent(&json!({"jsonrpc":"2.0","id":1,"result":{"stopReason":"cancelled"}}))?;
-        assert_eq!(prompts(&sent.take()), ["u", "v"]);
-        // Cancelled again while waiting.
-        let (mut b, sent) = bridge_with_agent()?;
-        prompt(&mut b, 10, "t")?;
-        cancel(&mut b)?;
-        prompt(&mut b, 11, "u")?;
-        b.out.clear();
-        cancel(&mut b)?;
-        assert_eq!(
-            states(&b.out),
-            ["AGENT_STATE_IDLE"],
-            "the waiting turn ended"
-        );
-        b.out.clear();
-        b.handle_agent(&json!({"jsonrpc":"2.0","id":1,"result":{"stopReason":"cancelled"}}))?;
-        assert_eq!(
-            prompts(&sent.take()),
-            ["t"],
-            "the dropped prompt is never sent"
-        );
-        // The agent exits while a prompt waits.
-        let (mut b, _sent) = bridge_with_agent()?;
-        prompt(&mut b, 10, "t")?;
-        cancel(&mut b)?;
-        b.handle_agent(&json!({"jsonrpc":"2.0","id":1,"result":{"stopReason":"cancelled"}}))?;
-        prompt(&mut b, 11, "u")?;
-        cancel(&mut b)?;
-        prompt(&mut b, 12, "v")?;
-        b.out.clear();
-        b.agent_gone(Some(1), "")?;
-        let out = String::from_utf8_lossy(&b.out).to_string();
-        assert!(out.contains(r#""stage":"turn""#), "{out}");
+        assert_eq!(states(&b.out), ["AGENT_STATE_IDLE"]);
         Ok(())
     }
 
