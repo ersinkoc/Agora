@@ -4,7 +4,8 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
-_Nothing yet._
+### An older agent keeper is now explained
+- When the agent keeper running on a machine was started before 0.3.27, chat agents there are resumed after a node restart instead of kept running, and nothing said so. `agora doctor` now warns about it (it does not change doctor's exit status) and `agora status` shows a line under the node, in English and Turkish; the node's log also says why once. The keeper ends by itself when the agents it keeps have ended, and a new one then starts. Nothing is stopped or restarted for you.
 
 ## 0.3.29
 
