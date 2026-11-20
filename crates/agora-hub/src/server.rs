@@ -10,6 +10,7 @@
 //! Anything else is closed. The functions here take an established [`Conn`], so they are tested over plain WebSocket and
 //! run over TLS in production.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -20,6 +21,7 @@ use agora_protocol::handshake::Support;
 use agora_protocol::v1::{self, command_ok, command_request, command_response};
 use agora_protocol::ws::{Conn, TransportError};
 use agora_protocol::{Error, ErrorCode, Frame};
+use futures_util::FutureExt;
 use prost::Message;
 use tokio::io::{AsyncRead, AsyncWrite};
 
@@ -28,12 +30,15 @@ use crate::enroll::{EnrollError, Enrollment, Lockout};
 use crate::hub::Hub;
 use crate::projection::View;
 use crate::session::{Ingest, NodeSession, SessionError};
-use crate::store::StoreError;
+use crate::store::{SqliteStore, StoreError};
 
 /// Idle time after which pending acknowledgements are sent, and the longest an event waits for its ack.
 const ACK_IDLE: Duration = Duration::from_millis(50);
 /// Acknowledge at least every this many events while a node streams without pause.
 const ACK_BATCH: u32 = 64;
+/// Amortize dispatch when frames are already available, with a bounded turn on the writer.
+const WRITE_BATCH: usize = 16;
+const WRITE_BATCH_BYTES: usize = 64 << 10;
 /// How often live events are pushed to a client.
 const PUSH: Duration = Duration::from_millis(20);
 /// A node connection on which nothing at all arrived for this long is closed and the node recorded offline (`NodeLink { up: false,
@@ -48,6 +53,7 @@ pub enum ServeError {
     Transport(TransportError),
     Protocol(Error),
     Store(StoreError),
+    EventWriter(tokio::task::JoinError),
     /// The peer did something this role may not do.
     Refused,
     /// Nothing arrived from the peer for its deadline, or a frame could not be sent for as long (see [`NODE_SILENCE`]).
@@ -195,7 +201,7 @@ async fn converse_node<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let mut session = NodeSession::new(hub.store(), node_id, support);
+    let mut session = NodeSession::new(hub.shared_store(), node_id, support);
     let revoked = || {
         ServeError::Protocol(Error::new(ErrorCode::AuthDeviceRevoked).with("device_id", node_id))
     };
@@ -251,12 +257,20 @@ where
         give_device_changes(hub, node_id);
     }
     let mut last_heard = tokio::time::Instant::now();
+    let mut events = NodeEvents {
+        session: Some(session),
+        writing: None,
+    };
     // A certificate revoked while the connection is open ends it here, inside the conversation, so the end below still records the
     // node offline (it used to be cancelled from outside, and a revoked machine stayed online in every view).
     let result = tokio::select! {
-        r = stream_events(conn, &mut session, hub, node_id, (commands, &load), silence, &mut last_heard) => r,
+        r = stream_events(conn, &mut events, hub, node_id, (commands, &load), silence, &mut last_heard) => r,
         () = still(valid) => Err(revoked()),
     };
+    // The certificate check can cancel the stream while a write is running. Wait for that event before recording the link closed.
+    if events.writing.is_some() {
+        let _ = events.settle().await;
+    }
     // However it ended, the router now knows this node is not connected (commands to it fail with `node.offline` at once), unless
     // a newer connection of the node replaced this one: that one is live, and the node is not offline.
     let now = now_ms();
@@ -284,9 +298,186 @@ where
     }
 }
 
+#[derive(Default)]
+struct PersistedEvents {
+    acked: Option<u64>,
+    count: u32,
+    gap: Option<(u64, VecDeque<Vec<u8>>)>,
+}
+
+type WriteResult = (
+    NodeSession<Arc<SqliteStore>>,
+    Result<PersistedEvents, ServeError>,
+);
+
+/// A node waits for its current batch to finish before processing later frames. The session moves into the blocking job
+/// with its resync state. A hub-wide permit bounds the jobs sent to Tokio's blocking pool.
+struct NodeEvents {
+    session: Option<NodeSession<Arc<SqliteStore>>>,
+    writing: Option<tokio::task::JoinHandle<WriteResult>>,
+}
+
+impl NodeEvents {
+    async fn write(
+        &mut self,
+        hub: &Arc<Hub>,
+        batch: VecDeque<Vec<u8>>,
+    ) -> Result<PersistedEvents, ServeError> {
+        let slot = Arc::clone(&hub.event_writer)
+            .acquire_owned()
+            .await
+            .map_err(|_| StoreError("node event writer is closed".into()))?;
+        let mut session = self
+            .session
+            .take()
+            .ok_or_else(|| StoreError("node event session is unavailable".into()))?;
+        let hub = Arc::clone(hub);
+        self.writing = Some(tokio::task::spawn_blocking(move || {
+            let _slot = slot;
+            let result = persist_events(&hub, &mut session, batch);
+            (session, result)
+        }));
+        self.settle().await
+    }
+
+    async fn settle(&mut self) -> Result<PersistedEvents, ServeError> {
+        let writing = self
+            .writing
+            .as_mut()
+            .ok_or_else(|| StoreError("no node event write is pending".into()))?;
+        let finished = writing.await;
+        self.writing = None;
+        let (session, result) = finished.map_err(ServeError::EventWriter)?;
+        self.session = Some(session);
+        result
+    }
+
+    fn snapshot_required(&mut self, at_ms: u64) -> Result<(), ServeError> {
+        self.session
+            .as_mut()
+            .ok_or_else(|| StoreError("node event session is unavailable".into()))?
+            .snapshot_required(at_ms)?;
+        Ok(())
+    }
+}
+
+fn persist_events(
+    hub: &Arc<Hub>,
+    session: &mut NodeSession<Arc<SqliteStore>>,
+    mut batch: VecDeque<Vec<u8>>,
+) -> Result<PersistedEvents, ServeError> {
+    let mut persisted = PersistedEvents::default();
+    while let Some(payload) = batch.pop_front() {
+        match persist_event(hub, session, &payload)? {
+            Ingest::Applied { acked, .. }
+            | Ingest::Resynced { acked, .. }
+            | Ingest::Duplicate { acked } => {
+                persisted.acked = Some(acked);
+                persisted.count += 1;
+            }
+            Ingest::Gap { expected } => {
+                // The link must send ResumeOk before processing subsequent frames.
+                persisted.gap = Some((expected, batch));
+                break;
+            }
+        }
+    }
+    Ok(persisted)
+}
+
+fn persist_event(
+    hub: &Arc<Hub>,
+    session: &mut NodeSession<Arc<SqliteStore>>,
+    payload: &[u8],
+) -> Result<Ingest, ServeError> {
+    let outcome = hub.ingest(session, payload)?;
+    // ADR-0054: the skipped range is in the event store. Record it in the audit trail as well before acknowledging the event.
+    if let Ingest::Resynced {
+        from_seq, to_seq, ..
+    } = outcome
+    {
+        let node_id = session.producer();
+        eprintln!("node resync: {node_id} skipped {from_seq}..={to_seq}");
+        let _ = crate::audit::Audit::new(hub.store()).record(
+            now_ms(),
+            crate::ca::RESERVED_HUB_ID,
+            "node.resynced",
+            node_id,
+            &format!("{from_seq}..={to_seq}"),
+        );
+    }
+    if matches!(outcome, Ingest::Applied { .. } | Ingest::Resynced { .. }) {
+        for (node, project) in hub.board_membership(now_ms()) {
+            ask_board_join(hub, node, project);
+        }
+    }
+    Ok(outcome)
+}
+
+type ReceivedFrame = Result<Option<Frame>, TransportError>;
+
+#[derive(Default)]
+struct NodeFrames {
+    events: VecDeque<Vec<u8>>,
+    next: Option<ReceivedFrame>,
+}
+
+impl NodeFrames {
+    async fn recv<S: AsyncRead + AsyncWrite + Unpin>(
+        &mut self,
+        conn: &mut Conn<S>,
+    ) -> ReceivedFrame {
+        if let Some(payload) = self.events.pop_front() {
+            Ok(Some(frame(STREAM_EVENTS, kinds::EVENT, payload)))
+        } else if let Some(next) = self.next.take() {
+            next
+        } else {
+            conn.recv().await
+        }
+    }
+
+    /// Collect a bounded run of events that can be read immediately. Keep any following control or data frame for the
+    /// next iteration, in order. One event above the byte target is still accepted on its own.
+    fn batch<S: AsyncRead + AsyncWrite + Unpin>(
+        &mut self,
+        conn: &mut Conn<S>,
+        first: Vec<u8>,
+        limit: usize,
+    ) -> VecDeque<Vec<u8>> {
+        let mut bytes = first.len();
+        let mut batch = VecDeque::from([first]);
+        while batch.len() < limit && bytes < WRITE_BATCH_BYTES {
+            let payload = if let Some(payload) = self.events.pop_front() {
+                payload
+            } else {
+                if self.next.is_some() {
+                    break;
+                }
+                match conn.recv().now_or_never() {
+                    Some(Ok(Some(f))) if (f.stream_id, f.kind) == (STREAM_EVENTS, kinds::EVENT) => {
+                        f.payload
+                    }
+                    Some(next) => {
+                        self.next = Some(next);
+                        break;
+                    }
+                    None => break,
+                }
+            };
+            if bytes + payload.len() > WRITE_BATCH_BYTES {
+                self.events.push_front(payload);
+                break;
+            }
+            bytes += payload.len();
+            batch.push_back(payload);
+        }
+        batch
+    }
+}
+
 async fn stream_events<S>(
     conn: &mut Conn<S>,
-    session: &mut NodeSession<'_, crate::store::SqliteStore>,
+    events: &mut NodeEvents,
     hub: &Arc<Hub>,
     node_id: &str,
     // The commands queued for this node, and the connection's count of them (`GET /api/metrics`).
@@ -303,6 +494,7 @@ where
     // Every frame from the node counts as a sign of life; an idle node sends its pings (every 10 s; 15 s before ADR-0070).
     let mut acked: Option<u64> = None; // highest contiguous seq not yet acknowledged
     let mut since_ack = 0u32;
+    let mut frames = NodeFrames::default();
     // Commands sent to this node and not yet answered, by the request id the hub chose.
     let mut waiting: std::collections::HashMap<
         String,
@@ -319,7 +511,7 @@ where
         }
         let idle;
         let received = tokio::select! {
-            r = tokio::time::timeout(ACK_IDLE, conn.recv()) => r,
+            r = tokio::time::timeout(ACK_IDLE, frames.recv(conn)) => r,
             Some(answer) = posted.recv() => {
                 put(conn, &frame(STREAM_COMMANDS, 1, answer.encode_to_vec()), silence).await?;
                 continue;
@@ -350,42 +542,20 @@ where
                 idle = false;
                 *last_heard = tokio::time::Instant::now();
                 match (f.stream_id, f.kind) {
-                    (STREAM_EVENTS, kinds::EVENT) => match hub.ingest(session, &f.payload)? {
-                        Ingest::Applied { acked: a, .. } => {
-                            acked = Some(a);
-                            since_ack += 1;
-                            for (node, project) in hub.board_membership(now_ms()) {
-                                ask_board_join(hub, node, project);
-                            }
-                        }
-                        // The node could not replay (ADR-0054): this event is its new base and the numbers before it are lost.
-                        // Recorded in the store with the event; said in the log and the audit trail too, so it is never silent.
-                        Ingest::Resynced {
-                            acked: a,
-                            from_seq,
-                            to_seq,
-                            ..
-                        } => {
-                            acked = Some(a);
-                            since_ack += 1;
-                            eprintln!("node resync: {node_id} skipped {from_seq}..={to_seq}");
-                            let _ = crate::audit::Audit::new(hub.store()).record(
-                                now_ms(),
-                                crate::ca::RESERVED_HUB_ID,
-                                "node.resynced",
-                                node_id,
-                                &format!("{from_seq}..={to_seq}"),
-                            );
-                            for (node, project) in hub.board_membership(now_ms()) {
-                                ask_board_join(hub, node, project);
-                            }
-                        }
-                        Ingest::Duplicate { acked: a } => {
-                            acked = Some(a);
-                            since_ack += 1;
+                    (STREAM_EVENTS, kinds::EVENT) => {
+                        let limit = WRITE_BATCH.min((ACK_BATCH - since_ack) as usize);
+                        let batch = frames.batch(conn, f.payload, limit);
+                        let persisted = events.write(hub, batch).await?;
+                        if persisted.acked.is_some() {
+                            acked = persisted.acked;
+                            since_ack += persisted.count;
                         }
                         // Not the next event: tell the node where to start again (nothing was stored).
-                        Ingest::Gap { expected } => {
+                        if let Some((expected, mut remaining)) = persisted.gap {
+                            if !remaining.is_empty() {
+                                remaining.append(&mut frames.events);
+                                frames.events = remaining;
+                            }
                             let ok = v1::ResumeOk { from_seq: expected };
                             put(
                                 conn,
@@ -394,10 +564,10 @@ where
                             )
                             .await?;
                         }
-                    },
+                    }
                     // The node cannot replay from where the hub asked (ADR-0054): its next new event is the new base.
                     (STREAM_CONTROL, kinds::SNAPSHOT_REQUIRED) => {
-                        session.snapshot_required(now_ms())?
+                        events.snapshot_required(now_ms())?
                     }
                     (STREAM_CONTROL, kinds::PING) => {
                         put(
@@ -2166,6 +2336,228 @@ async fn run_with(
         tokio::spawn(async move {
             let _ = handle(&state, tcp, acceptor, leaf_hash).await;
         });
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod event_writer_tests {
+    use super::*;
+    use crate::store::EventStore;
+    use tokio::io::DuplexStream;
+    use tokio::sync::oneshot;
+
+    fn support() -> Support {
+        Support {
+            generations: vec![1],
+            capabilities: vec![],
+            required: vec![],
+        }
+    }
+
+    fn hello() -> v1::Hello {
+        v1::Hello {
+            role: v1::Role::Node as i32,
+            protocol_generations: vec![1],
+            ..Default::default()
+        }
+    }
+
+    fn online(node: &str, seq: u64) -> Vec<u8> {
+        v1::Event {
+            producer_id: node.into(),
+            seq,
+            at_ms: 1,
+            body: Some(v1::event::Body::NodeOnline(v1::NodeOnline {
+                node_id: node.into(),
+                ..Default::default()
+            })),
+        }
+        .encode_to_vec()
+    }
+
+    async fn recv(node: &mut Conn<DuplexStream>) -> Frame {
+        tokio::time::timeout(Duration::from_secs(2), node.recv())
+            .await
+            .expect("node reply")
+            .unwrap()
+            .expect("open node link")
+    }
+
+    async fn ping(node: &mut Conn<DuplexStream>) {
+        let payload = b"ping".to_vec();
+        node.send(&frame(STREAM_CONTROL, kinds::PING, payload.clone()))
+            .await
+            .unwrap();
+        let reply = recv(node).await;
+        assert_eq!((reply.stream_id, reply.kind), (STREAM_CONTROL, kinds::PONG));
+        assert_eq!(reply.payload, payload);
+    }
+
+    async fn connect(
+        hub: &Arc<Hub>,
+        node_id: &'static str,
+    ) -> (
+        Conn<DuplexStream>,
+        tokio::task::JoinHandle<Result<(), ServeError>>,
+    ) {
+        let (client, server) = tokio::io::duplex(8192);
+        let hub = Arc::clone(hub);
+        let link = tokio::spawn(async move {
+            let (conn, _) = agora_protocol::ws::accept_with_token(server).await.unwrap();
+            serve_node(conn, node_id, &hub, &support()).await
+        });
+        let mut node = agora_protocol::ws::connect(client, "ws://localhost/")
+            .await
+            .unwrap();
+        node.send(&frame(
+            STREAM_CONTROL,
+            kinds::HELLO,
+            hello().encode_to_vec(),
+        ))
+        .await
+        .unwrap();
+        assert_eq!(recv(&mut node).await.kind, kinds::WELCOME);
+        node.send(&frame(STREAM_CONTROL, kinds::RESUME, Vec::new()))
+            .await
+            .unwrap();
+        assert_eq!(recv(&mut node).await.kind, kinds::RESUME_OK);
+        // This comes after the hub has recorded the link open, which also writes to SQLite.
+        ping(&mut node).await;
+        (node, link)
+    }
+
+    async fn hold_store(
+        hub: &Arc<Hub>,
+    ) -> (std::sync::mpsc::Sender<()>, std::thread::JoinHandle<()>) {
+        let (release, held) = std::sync::mpsc::channel();
+        let (locked, ready) = oneshot::channel();
+        let hub = Arc::clone(hub);
+        let holder = std::thread::spawn(move || {
+            let _store = hub.store().lock().unwrap();
+            locked.send(()).unwrap();
+            // A test failure must release the connection mutex.
+            let _ = held.recv_timeout(Duration::from_secs(5));
+        });
+        ready.await.unwrap();
+        (release, holder)
+    }
+
+    #[tokio::test]
+    async fn a_node_waiting_for_sqlite_does_not_delay_another_nodes_ping() {
+        let hub = Arc::new(Hub::open(SqliteStore::open_in_memory().unwrap()).unwrap());
+        let (mut sender, sending) = connect(&hub, "sender").await;
+        let (mut peer, peering) = connect(&hub, "peer").await;
+        let (release, holder) = hold_store(&hub).await;
+
+        sender
+            .send(&frame(STREAM_EVENTS, kinds::EVENT, online("sender", 1)))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while hub.event_writer.available_permits() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("event write admitted");
+
+        ping(&mut peer).await;
+        // The write is still queued on the store while the other connection serves its ping.
+        assert_eq!(hub.event_writer.available_permits(), 0);
+        release.send(()).expect("store still held");
+        let ack = recv(&mut sender).await;
+        assert_eq!(ack.kind, kinds::EVENT_ACK);
+        assert_eq!(
+            v1::EventAck::decode(ack.payload.as_slice())
+                .unwrap()
+                .up_to_seq,
+            1
+        );
+        holder.join().unwrap();
+        sender.close().await;
+        peer.close().await;
+        sending.await.unwrap().unwrap();
+        peering.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_batch_preserves_gap_replies_and_resync_control_frames() {
+        let hub = Arc::new(Hub::open(SqliteStore::open_in_memory().unwrap()).unwrap());
+        let (mut node, link) = connect(&hub, "n").await;
+        // The gap has to be reported before the later valid events in the same burst are processed.
+        for seq in [2, 1, 2, 4] {
+            node.send(&frame(STREAM_EVENTS, kinds::EVENT, online("n", seq)))
+                .await
+                .unwrap();
+        }
+        node.send(&frame(STREAM_CONTROL, kinds::SNAPSHOT_REQUIRED, Vec::new()))
+            .await
+            .unwrap();
+        node.send(&frame(STREAM_EVENTS, kinds::EVENT, online("n", 4)))
+            .await
+            .unwrap();
+
+        for expected in [1, 3] {
+            let reply = recv(&mut node).await;
+            assert_eq!(reply.kind, kinds::RESUME_OK);
+            assert_eq!(
+                v1::ResumeOk::decode(reply.payload.as_slice())
+                    .unwrap()
+                    .from_seq,
+                expected
+            );
+        }
+        let reply = recv(&mut node).await;
+        assert_eq!(reply.kind, kinds::EVENT_ACK);
+        assert_eq!(
+            v1::EventAck::decode(reply.payload.as_slice())
+                .unwrap()
+                .up_to_seq,
+            4
+        );
+        let seqs: Vec<_> = hub
+            .store()
+            .events_after(0, 20)
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.producer == "n")
+            .map(|event| event.seq)
+            .collect();
+        assert_eq!(seqs, [1, 2, 4]);
+        assert_eq!(hub.store().resync_count().unwrap(), 1);
+        node.close().await;
+        link.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_wait_can_still_settle_its_admitted_event_before_link_cleanup() {
+        let hub = Arc::new(Hub::open(SqliteStore::open_in_memory().unwrap()).unwrap());
+        let mut session = NodeSession::new(hub.shared_store(), "n", &support());
+        session.hello(&hello(), 1).unwrap();
+        session.resume(&v1::Resume::default()).unwrap();
+        let (registration, _, generation) = hub.node_link_opened("n", vec![], 1);
+        let (release, holder) = hold_store(&hub).await;
+        let mut events = NodeEvents {
+            session: Some(session),
+            writing: None,
+        };
+        let mut waiting = Box::pin(events.write(&hub, VecDeque::from([online("n", 1)])));
+        tokio::select! {
+            biased;
+            _ = &mut waiting => panic!("write returned while the store is held"),
+            () = std::future::ready(()) => {}
+        }
+        drop(waiting);
+
+        assert!(events.writing.is_some());
+        assert_eq!(hub.event_writer.available_permits(), 0);
+        release.send(()).unwrap();
+        assert_eq!(events.settle().await.unwrap().acked, Some(1));
+        holder.join().unwrap();
+        assert!(hub.node_link_closed(registration, generation, false, 1, 2));
+        assert_eq!(hub.store().acked("n").unwrap(), 1);
+        assert!(!hub.view().0.nodes["n"].online);
     }
 }
 
