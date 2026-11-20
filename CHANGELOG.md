@@ -4,7 +4,9 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
-_Nothing yet._
+### Session discovery no longer waits on the disk
+
+The node looks at the disk for a Codex-style session id off its supervision thread, so a slow mount cannot hold up states or approvals. A moved workspace or a changed manifest is noticed within 30 seconds, and until a lookup answers the agent is given no session.
 
 ## 0.3.31
 

@@ -288,8 +288,10 @@ The node holds a session id only when it learned one:
   This is decided from the manifests before any file is read, for every waiting agent at once, so kinds that share a session folder
   lose Resume in that folder rather than risk continuing the wrong conversation. Folders are looked at on disk only for agents that
   could contend (of one kind, or of two kinds whose `select`s are not exclusive), session roots only for two such kinds; two agents that both
-  gave up already are not compared again, and each agent's folder and root are looked up on disk at most once while it runs (a root
-  that exists is resolved by the OS's own rules; one not made yet is walked through its links). An agent for which two files fit gets none
+  gave up already are not compared again, and each agent's folder and root are looked up again only after 30 s or when the path changed (a manifest reloaded under a running agent
+  gives a new root; a workspace moved and its old path made a link is found the same as the new one at the next look). A root that exists is resolved by the OS's own rules; one not
+  made yet is walked through its links. The lookups run on a thread of their own, never on the node's supervision thread, so a stalled mount cannot hold up state or approvals;
+  until the answer arrives the agents concerned get no session (and are not given up on). An agent for which two files fit gets none
   either. The first line counts without its `\n` or `\r\n`. A session file's id must be a UUID. An agent without an id can only be
   started again in its folder, never resumed. Known limit: this assumes no link inside a wildcard directory of a session glob points
   into another kind's session root (`logs/*/*.jsonl` with `logs/linked` pointing at `store`, against `store/*.jsonl`); such a setup

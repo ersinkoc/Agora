@@ -51,11 +51,55 @@ struct Waiting {
     next_scan: Instant,
 }
 
-/// What was looked up on disk for one agent, once, the first time a comparison needed it; kept until the agent leaves.
+/// A looked-up path is trusted this long; after it the path is resolved again (a workspace moved and its old path made a link would
+/// otherwise stay "another folder" for as long as the agent runs, F1180 follow-up). Bounded: one lookup per agent and path per period.
+const REVERIFY_AFTER: Duration = Duration::from_secs(30);
+
+/// Which lookup of an agent: its workspace folder, or its session root.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Which {
+    Folder,
+    Root,
+}
+
+/// One lookup of one path. `value` is `None` while the answer is outstanding (a background probe): the caller then fails closed.
+struct Slot {
+    /// What was asked: an answer is only good for the same path (a manifest reloaded under a running agent changes the root).
+    key: PathBuf,
+    at: Instant,
+    seq: u64,
+    value: Option<Option<PathBuf>>,
+}
+
+/// What was looked up on disk for one agent; kept until the agent leaves.
 #[derive(Default)]
 struct Looked {
-    folder: Option<PathBuf>,
-    root: Option<Option<PathBuf>>,
+    folder: Option<Slot>,
+    root: Option<Slot>,
+}
+
+/// Asks for a lookup: its sequence number, and the answer when it is there at once (inline probes).
+type Asker<'a> = dyn FnMut(&AgentId, Which, &Path) -> (u64, Option<Option<PathBuf>>) + 'a;
+
+struct Ask {
+    agent: AgentId,
+    which: Which,
+    seq: u64,
+    path: PathBuf,
+}
+
+struct Answer {
+    agent: AgentId,
+    which: Which,
+    seq: u64,
+    value: Option<PathBuf>,
+}
+
+/// The one thread that probes the disk for a watcher in the node: a probe on a stalled mount blocks only this thread, never the
+/// supervision thread, and its answer arrives as a message.
+struct Worker {
+    tx: std::sync::mpsc::Sender<Ask>,
+    rx: std::sync::mpsc::Receiver<Answer>,
 }
 
 pub struct SessionWatcher {
@@ -68,11 +112,14 @@ pub struct SessionWatcher {
     resolver: fn(&Path) -> Option<PathBuf>,
     /// Each live agent's workspace and session root as looked up on disk, so no agent is probed again in a later pass.
     looked: HashMap<AgentId, Looked>,
+    /// Probes run here when set (the node); without it they run inline in `poll` (tests).
+    worker: Option<Worker>,
+    seq: u64,
 }
 
 impl Default for SessionWatcher {
     fn default() -> Self {
-        Self::new(crate::usage_files::home_dir())
+        Self::new(crate::usage_files::home_dir()).background()
     }
 }
 
@@ -275,7 +322,8 @@ fn nested(x: &Path, y: &Path) -> bool {
 /// (Codex review of #791). Not closed transitively: an agent without a rival of its own shares no possible file with any live agent,
 /// and every rival of an agent in the set is in the set itself. Roots are resolved only for pairs that need it (two kinds in one
 /// folder, not exclusive, disjoint as written), so a root on a stalled mount never holds up an agent with no such neighbour. The probes
-/// still run on the calling (supervision) thread, as `same_dir` always did.
+/// run on a worker thread in the node (`SessionWatcher::background`), never on the supervision thread; until an answer is there the
+/// pair is left undecided and its agents get no session.
 #[cfg(test)]
 fn with_rivals(targets: &[Target], home: &Path) -> HashSet<AgentId> {
     with_rivals_using(
@@ -288,11 +336,8 @@ fn with_rivals(targets: &[Target], home: &Path) -> HashSet<AgentId> {
     )
 }
 
-/// A workspace folder as the filesystem names it (the comparison `same_dir` makes); probed only for agents that could contend.
-fn workspace(p: &Path) -> PathBuf {
-    std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
-}
-
+/// [`compare_rivals`] with the probes answered inline by the given functions.
+#[cfg(test)]
 fn with_rivals_using(
     targets: &[Target],
     home: &Path,
@@ -301,28 +346,69 @@ fn with_rivals_using(
     probe: &mut dyn FnMut(&Path) -> PathBuf,
     resolver: &mut dyn FnMut(&Path) -> Option<PathBuf>,
 ) -> HashSet<AgentId> {
+    compare_rivals(
+        targets,
+        home,
+        settled,
+        looked,
+        Instant::now(),
+        &mut |_, which, p| {
+            let v = match which {
+                Which::Folder => Some(probe(p)),
+                Which::Root => resolver(p),
+            };
+            (0, Some(v))
+        },
+    )
+    .0
+}
+
+/// A workspace folder as the filesystem names it (the comparison `same_dir` makes); probed only for agents that could contend.
+fn workspace(p: &Path) -> PathBuf {
+    std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
+}
+
+/// The answer for `key` in `slot`, asking again (through `ask`) when there is none for this path or it is older than
+/// [`REVERIFY_AFTER`]. `None` while the answer is outstanding.
+fn lookup(
+    slot: &mut Option<Slot>,
+    key: &Path,
+    now: Instant,
+    agent: &AgentId,
+    which: Which,
+    ask: &mut Asker<'_>,
+) -> Option<Option<PathBuf>> {
+    let fresh = matches!(slot, Some(s) if s.key == key
+        && (s.value.is_none() || now.saturating_duration_since(s.at) < REVERIFY_AFTER));
+    if !fresh {
+        let (seq, value) = ask(agent, which, key);
+        *slot = Some(Slot {
+            key: key.to_path_buf(),
+            at: now,
+            seq,
+            value,
+        });
+    }
+    slot.as_ref().and_then(|s| s.value.clone())
+}
+
+/// The rivals, and the agents whose comparison waits for an answer of the background probe (they get no session until it comes, and
+/// are not given up on).
+fn compare_rivals(
+    targets: &[Target],
+    home: &Path,
+    settled: &HashSet<AgentId>,
+    looked: &mut HashMap<AgentId, Looked>,
+    now: Instant,
+    ask: &mut Asker<'_>,
+) -> (HashSet<AgentId>, HashSet<AgentId>) {
     // A workspace is probed only for a pair that could contend (one kind, or two kinds whose `select`s are not exclusive), the pairs
     // `same_dir` always compared: a lone agent, or one whose only neighbours have exclusive selectors, is never probed, so a stalled
     // mount under it never holds up discovery. Folders that are equal as written need no probe. A pair whose agents had both given up
     // (`settled`) is not compared again: neither gets an id anyway; each is still compared with the agents that wait.
-    // Each agent's lookups are kept in `looked` across passes: an agent is probed at most once in its life.
-    let mut folder_of = |t: &Target, looked: &mut HashMap<AgentId, Looked>| {
-        looked
-            .entry(t.agent.clone())
-            .or_default()
-            .folder
-            .get_or_insert_with(|| probe(&t.folder))
-            .clone()
-    };
-    let mut root_of = |t: &Target, raw: &Path, looked: &mut HashMap<AgentId, Looked>| {
-        looked
-            .entry(t.agent.clone())
-            .or_default()
-            .root
-            .get_or_insert_with(|| resolver(raw))
-            .clone()
-    };
+    // Each agent's lookups are kept in `looked` and trusted for [`REVERIFY_AFTER`] and for the same path only.
     let mut out = HashSet::new();
+    let mut pending = HashSet::new();
     for i in 0..targets.len() {
         for j in i + 1..targets.len() {
             let (a, b) = (&targets[i], &targets[j]);
@@ -332,36 +418,89 @@ fn with_rivals_using(
             {
                 continue;
             }
-            let same_folder = a.folder == b.folder || {
-                let fa = folder_of(a, looked);
-                let fb = folder_of(b, looked);
-                fa == fb
+            let same_folder = if a.folder == b.folder {
+                Some(true)
+            } else {
+                let fa = lookup(
+                    &mut looked.entry(a.agent.clone()).or_default().folder,
+                    &a.folder,
+                    now,
+                    &a.agent,
+                    Which::Folder,
+                    ask,
+                );
+                let fb = lookup(
+                    &mut looked.entry(b.agent.clone()).or_default().folder,
+                    &b.folder,
+                    now,
+                    &b.agent,
+                    Which::Folder,
+                    ask,
+                );
+                match (fa, fb) {
+                    (Some(x), Some(y)) => Some(x == y),
+                    _ => None,
+                }
             };
-            if !same_folder {
-                continue;
+            let wait = |pending: &mut HashSet<AgentId>| {
+                pending.insert(a.agent.clone());
+                pending.insert(b.agent.clone());
+            };
+            match same_folder {
+                Some(false) => continue,
+                None => {
+                    wait(&mut pending);
+                    continue;
+                }
+                Some(true) => {}
             }
-            let rival = a.kind == b.kind || {
+            let rival = if a.kind == b.kind {
+                Some(true)
+            } else {
                 let ((la, wa), (lb, wb)) = (
                     session_root(&a.spec.glob, home),
                     session_root(&b.spec.glob, home),
                 );
-                nested(&la, &lb) || {
-                    let ra = root_of(a, &wa, looked);
-                    let rb = root_of(b, &wb, looked);
+                if nested(&la, &lb) {
+                    Some(true)
+                } else {
+                    let ra = lookup(
+                        &mut looked.entry(a.agent.clone()).or_default().root,
+                        &wa,
+                        now,
+                        &a.agent,
+                        Which::Root,
+                        ask,
+                    );
+                    let rb = lookup(
+                        &mut looked.entry(b.agent.clone()).or_default().root,
+                        &wb,
+                        now,
+                        &b.agent,
+                        Which::Root,
+                        ask,
+                    );
                     match (ra, rb) {
-                        (Some(ra), Some(rb)) => nested(&ra, &rb),
-                        // Unknown: fail closed.
-                        _ => true,
+                        (Some(Some(ra)), Some(Some(rb))) => Some(nested(&ra, &rb)),
+                        // Cannot be known: fail closed.
+                        (Some(None), Some(_)) | (Some(_), Some(None)) => Some(true),
+                        _ => None,
                     }
                 }
             };
-            if rival {
-                out.insert(a.agent.clone());
-                out.insert(b.agent.clone());
+            match rival {
+                Some(true) => {
+                    out.insert(a.agent.clone());
+                    out.insert(b.agent.clone());
+                }
+                Some(false) => {}
+                None => wait(&mut pending),
             }
         }
     }
-    out
+    // A rival is settled whatever else is outstanding.
+    pending.retain(|a| !out.contains(a));
+    (out, pending)
 }
 
 impl SessionWatcher {
@@ -373,6 +512,78 @@ impl SessionWatcher {
             probe: workspace,
             resolver: resolve,
             looked: HashMap::new(),
+            worker: None,
+            seq: 0,
+        }
+    }
+
+    /// Probes the disk on a thread of its own and delivers the answers by message (the node's supervision thread must never wait on
+    /// a filesystem). Until an answer is there the agents concerned get no session and are not given up on.
+    pub fn background(mut self) -> Self {
+        let (ask_tx, ask_rx) = std::sync::mpsc::channel::<Ask>();
+        let (answer_tx, answer_rx) = std::sync::mpsc::channel::<Answer>();
+        let (probe, resolver) = (self.probe, self.resolver);
+        let spawned = std::thread::Builder::new()
+            .name("agora-session-probe".into())
+            .spawn(move || {
+                for a in ask_rx {
+                    let value = match a.which {
+                        Which::Folder => Some(probe(&a.path)),
+                        Which::Root => resolver(&a.path),
+                    };
+                    let done = Answer {
+                        agent: a.agent,
+                        which: a.which,
+                        seq: a.seq,
+                        value,
+                    };
+                    if answer_tx.send(done).is_err() {
+                        break;
+                    }
+                }
+            });
+        if spawned.is_ok() {
+            self.worker = Some(Worker {
+                tx: ask_tx,
+                rx: answer_rx,
+            });
+        }
+        self
+    }
+
+    fn apply(&mut self, a: Answer) {
+        let Some(l) = self.looked.get_mut(&a.agent) else {
+            return;
+        };
+        let slot = match a.which {
+            Which::Folder => &mut l.folder,
+            Which::Root => &mut l.root,
+        };
+        if let Some(s) = slot.as_mut().filter(|s| s.seq == a.seq) {
+            s.value = Some(a.value);
+        }
+    }
+
+    fn drain_probes(&mut self) {
+        while let Some(a) = self.worker.as_ref().and_then(|w| w.rx.try_recv().ok()) {
+            self.apply(a);
+        }
+    }
+
+    /// Waits for every outstanding probe (tests).
+    #[cfg(test)]
+    fn settle_probes(&mut self) {
+        while self
+            .looked
+            .values()
+            .flat_map(|l| [&l.folder, &l.root])
+            .flatten()
+            .any(|s| s.value.is_none())
+        {
+            let Some(a) = self.worker.as_ref().and_then(|w| w.rx.recv().ok()) else {
+                return;
+            };
+            self.apply(a);
         }
     }
 
@@ -406,20 +617,47 @@ impl SessionWatcher {
         // Rivals in one folder could have written each other's files: none of them gets one. Decided from the manifests alone, before
         // any file is read, over every live target (a live agent can still write its file after discovery gave up on it), so the answer
         // is the same in every target order and whichever agents are due. Only worked out when some agent is due.
+        let mut pending: HashSet<AgentId> = HashSet::new();
         if self
             .waiting
             .values()
             .any(|w| now >= w.next_scan || now >= w.give_up_at)
         {
-            let (mut probe, mut resolver) = (self.probe, self.resolver);
-            let rivals = with_rivals_using(
+            self.drain_probes();
+            let (probe, resolver) = (self.probe, self.resolver);
+            let (worker, seq) = (&self.worker, &mut self.seq);
+            let mut ask = |agent: &AgentId, which: Which, path: &Path| {
+                *seq += 1;
+                match worker {
+                    Some(w) => {
+                        let sent = w.tx.send(Ask {
+                            agent: agent.clone(),
+                            which,
+                            seq: *seq,
+                            path: path.to_path_buf(),
+                        });
+                        // A probe that cannot even be sent stays unanswered: fail closed.
+                        let _ = sent;
+                        (*seq, None)
+                    }
+                    None => (
+                        *seq,
+                        Some(match which {
+                            Which::Folder => Some(probe(path)),
+                            Which::Root => resolver(path),
+                        }),
+                    ),
+                }
+            };
+            let (rivals, p) = compare_rivals(
                 targets,
                 &home,
                 &self.gave_up,
                 &mut self.looked,
-                &mut probe,
-                &mut resolver,
+                now,
+                &mut ask,
             );
+            pending = p;
             for a in rivals {
                 self.waiting.remove(&a);
                 self.gave_up.insert(a);
@@ -436,7 +674,7 @@ impl SessionWatcher {
                 self.gave_up.insert(t.agent.clone());
                 continue;
             }
-            if now < w.next_scan {
+            if now < w.next_scan || pending.contains(&t.agent) {
                 continue;
             }
             let since = w.since.checked_sub(SLACK).unwrap_or(SystemTime::UNIX_EPOCH);
@@ -1768,5 +2006,102 @@ mod tests {
         )
         .unwrap();
         assert_eq!(session_in(&file, &spec(), &folder), Some(id.to_string()));
+    }
+
+    #[test]
+    fn a_workspace_moved_under_a_running_agent_is_found_again_when_its_old_path_becomes_a_link() {
+        // #828: the first agent's folder was resolved while its path was a real folder; the folder was then moved and the old path
+        // made a link to the new place. A second agent of the same kind started at the new path is in the same workspace.
+        let root = tmp("moved");
+        let mut w = SessionWatcher::new(Some(root.join("home")));
+        let now = Instant::now();
+        let (a, b) = (root.join("work/a"), root.join("work/q"));
+        let alias = root.join("work/l");
+        link_dir(&a, &alias).unwrap();
+        let first = with_glob(target("first", a.clone()), "k1", "{home}/r1/*.jsonl");
+        let other = with_glob(target("other", alias), "k2", "{home}/r2/*.jsonl");
+        assert!(w
+            .poll(now, &[first.clone(), other.clone()], &HashSet::new())
+            .is_empty());
+        assert!(w.gave_up.is_empty());
+        std::fs::rename(&a, &b).unwrap();
+        link_dir(&b, &a).unwrap();
+        let second = with_glob(target("second", b), "k1", "{home}/r1/*.jsonl");
+        let all = [first, other, second];
+        w.poll(now + REVERIFY_AFTER + SCAN_EVERY, &all, &HashSet::new());
+        assert!(w.gave_up.contains(&AgentId::new("first")));
+        assert!(w.gave_up.contains(&AgentId::new("second")));
+        assert!(!w.gave_up.contains(&AgentId::new("other")));
+    }
+
+    #[test]
+    fn a_session_root_changed_by_a_reloaded_manifest_is_resolved_again() {
+        // #828: the cache is by the expanded root too; a reload that points an agent's glob at another root is not compared with
+        // the root it had before.
+        let root = tmp("reload");
+        let home = root.join("home");
+        std::fs::create_dir_all(home.join("ra")).unwrap();
+        std::fs::create_dir_all(home.join("rb")).unwrap();
+        link_dir(&home.join("ra"), &home.join("rb2")).unwrap();
+        let mut w = SessionWatcher::new(Some(home));
+        let now = Instant::now();
+        let a = with_glob(target("a", root.join("work/a")), "ka", "{home}/ra/*.jsonl");
+        let b = with_glob(target("b", root.join("work/a")), "kb", "{home}/rb/*.jsonl");
+        assert!(w.poll(now, &[a.clone(), b], &HashSet::new()).is_empty());
+        assert!(w.gave_up.is_empty());
+        let reloaded = with_glob(target("b", root.join("work/a")), "kb", "{home}/rb2/*.jsonl");
+        w.poll(now + SCAN_EVERY, &[a, reloaded], &HashSet::new());
+        assert_eq!(w.gave_up.len(), 2, "{:?}", w.gave_up);
+    }
+
+    static OPEN: (std::sync::Mutex<bool>, std::sync::Condvar) =
+        (std::sync::Mutex::new(false), std::sync::Condvar::new());
+
+    /// A probe of a mount that does not answer until the test opens the gate.
+    fn stalled(p: &Path) -> Option<PathBuf> {
+        let mut open = OPEN.0.lock().unwrap();
+        while !*open {
+            open = OPEN.1.wait(open).unwrap();
+        }
+        drop(open);
+        resolve(p)
+    }
+
+    #[test]
+    fn a_probe_that_does_not_answer_never_holds_up_the_caller_and_gives_no_session_meanwhile() {
+        // #828: probes run off the supervision thread. `poll` returns while the probe is stuck (the test would hang otherwise), the
+        // agents get no session although a file fits, and are not given up on; the answer arrives by message.
+        let root = tmp("stalled");
+        let home = root.join("home");
+        std::fs::create_dir_all(home.join("ra")).unwrap();
+        std::fs::create_dir_all(home.join("rb")).unwrap();
+        let mut w = SessionWatcher::new(Some(home.clone()));
+        w.resolver = stalled;
+        let mut w = w.background();
+        let now = Instant::now();
+        let folder = root.join("work/a");
+        let a = with_glob(target("a", folder.clone()), "ka", "{home}/ra/*.jsonl");
+        let b = with_glob(target("b", folder.clone()), "kb", "{home}/rb/*.jsonl");
+        let targets = [a, b];
+        assert!(w.poll(now, &targets, &HashSet::new()).is_empty());
+        let line = serde_json::json!({"type": "session_meta",
+            "payload": {"id": "0199aaaa-0000-4000-8000-00000000000a", "cwd": folder}});
+        std::fs::write(home.join("ra/x.jsonl"), format!("{line}\n")).unwrap();
+        assert!(w
+            .poll(now + SCAN_EVERY, &targets, &HashSet::new())
+            .is_empty());
+        assert!(w.gave_up.is_empty());
+        assert_eq!(w.waiting.len(), 2);
+        *OPEN.0.lock().unwrap() = true;
+        OPEN.1.notify_all();
+        w.settle_probes();
+        let found = w.poll(now + SCAN_EVERY * 2, &targets, &HashSet::new());
+        assert_eq!(
+            found,
+            vec![(
+                AgentId::new("a"),
+                "0199aaaa-0000-4000-8000-00000000000a".to_string()
+            )]
+        );
     }
 }
