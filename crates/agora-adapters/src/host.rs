@@ -882,7 +882,17 @@ impl Adapter {
     }
 
     pub fn spawn(cfg: &AdapterConfig) -> io::Result<Self> {
-        let mut cmd = Command::new(&cfg.program);
+        // A Windows `.cmd` shim (`npx`) is started by its full path; any other name, and every name elsewhere, is unchanged.
+        let child_path = cfg
+            .env
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("PATH"))
+            .map(|(_, v)| std::ffi::OsStr::new(v.as_str()));
+        let program = cfg.program.to_str().map_or_else(
+            || cfg.program.clone(),
+            |p| agora_platform::program_path(p, child_path),
+        );
+        let mut cmd = Command::new(&program);
         cmd.args(&cfg.args);
         // Confined first: on macOS this rewrites the command, which must happen before the streams are set.
         if let Some(sb) = &cfg.sandbox {

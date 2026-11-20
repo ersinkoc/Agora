@@ -86,7 +86,8 @@ fn same_dir(a: &str, b: &Path) -> bool {
     canon(Path::new(a)) == canon(b)
 }
 
-/// The files a glob matches: `*` stands for any one path component's characters, nothing else is special.
+/// The files a glob matches: `*` stands for any one path component's characters, nothing else is special. When a level has more
+/// than [`MAX_MATCHES`], the most recently modified are kept.
 pub fn expand(pattern: &Path) -> Vec<PathBuf> {
     let mut level: Vec<PathBuf> = vec![PathBuf::new()];
     for comp in pattern.components() {
@@ -113,7 +114,20 @@ pub fn expand(pattern: &Path) -> Vec<PathBuf> {
                 }
             }
         }
-        next.truncate(MAX_MATCHES);
+        if next.len() > MAX_MATCHES {
+            // More matches than are followed: keep the most recently written (a running agent's file is among them), not
+            // whichever the directory happened to list first (audit F1380).
+            let mut timed: Vec<_> = next
+                .into_iter()
+                .map(|p| (std::fs::metadata(&p).and_then(|m| m.modified()).ok(), p))
+                .collect();
+            timed.sort_by_key(|(t, _)| std::cmp::Reverse(*t));
+            next = timed
+                .into_iter()
+                .take(MAX_MATCHES)
+                .map(|(_, p)| p)
+                .collect();
+        }
         level = next;
     }
     level.retain(|p| p.is_file());
@@ -435,6 +449,49 @@ mod tests {
         std::fs::write(d.join("logs/p/a.txt"), "").unwrap();
         let found = expand(&d.join("logs/*/*.jsonl"));
         assert_eq!(found, vec![d.join("logs/p/a.jsonl")]);
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    /// Audit F1380: past the cap of matches the newest files are kept, so a running agent's file is never cut because the directory
+    /// happened to list it last (a user with thousands of old sessions).
+    #[test]
+    fn past_the_cap_of_matches_the_newest_files_are_kept() {
+        let d = tmp("cap");
+        let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1_577_836_800);
+        let mut i = 0;
+        for dir in 0..30 {
+            std::fs::create_dir_all(d.join(format!("logs/d{dir:02}"))).unwrap();
+            for k in 0..70 {
+                let f = std::fs::File::create(d.join(format!("logs/d{dir:02}/old-{k:02}.jsonl")))
+                    .unwrap();
+                f.set_modified(base + Duration::from_secs(i)).unwrap();
+                i += 1;
+            }
+        }
+        // The folder listed last, so without a choice its files are the ones past the cap.
+        let last = std::fs::read_dir(d.join("logs"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .last()
+            .unwrap();
+        let work = d.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let mut w = UsageWatcher::new(Some(d.clone()));
+        let t = [target("a1", &work)];
+        step(&mut w, &t, 0);
+        std::fs::write(
+            last.join("own.jsonl"),
+            format!("{}\n", line(&work.to_string_lossy(), "m1", 7, 3)),
+        )
+        .unwrap();
+        let found = expand(&d.join("logs/*/*.jsonl"));
+        assert_eq!(found.len(), MAX_MATCHES);
+        assert!(found.contains(&last.join("own.jsonl")));
+        // The oldest are the ones left out.
+        assert!(!found.contains(&d.join("logs/d00/old-00.jsonl")));
+        let got = step(&mut w, &t, 1);
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got[0].1.input, 7);
         let _ = std::fs::remove_dir_all(d);
     }
 

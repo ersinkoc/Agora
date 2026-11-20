@@ -32,7 +32,7 @@ export const demoProjects = [
 // ADR-0057: a helper the first demo agent started, and that agent's request to start another (for the gallery).
 export const demoHelper: AgentTileModel = { id: 'a8', name: 'codex · sky', accent: '#38bdf8', machine: 'Laptop', workspace: 'login-fix', state: 'working', preview: 'Writing tests…', parentId: 'a1', parentName: 'claude · amber' };
 const demoStartDetail = JSON.stringify({ node: 'laptop', agent: 'a1', agent_kind: 'claude', kind: 'codex', folder: '/home/dev/code/login-fix', inside: true, worktree: false, depth: 1, grant_allowed: true, prompt: 'Write unit tests for src/auth.rs.\nCover the expired-token and wrong-signature cases; do not change src/.' });
-export const demoStartApproval = { id: 'demo/2', node: 'demo', localId: '2', agentId: 'a1', agentName: 'claude · amber', machineName: 'Laptop', action: 'agent.start', detail: demoStartDetail, expiresAtMs: 0, start: { agent: 'a1', agentKind: 'claude', node: 'laptop', kind: 'codex', folder: '/home/dev/code/login-fix', prompt: 'Write unit tests for src/auth.rs.\nCover the expired-token and wrong-signature cases; do not change src/.', inside: true, worktree: false, depth: 1, grantAllowed: true, settings: [] } };
+export const demoStartApproval = { id: 'demo/2', node: 'demo', localId: '2', agentId: 'a1', agentName: 'claude · amber', machineName: 'Laptop', action: 'agent.start', detail: demoStartDetail, expiresAtMs: 0, start: { agent: 'a1', agentKind: 'claude', node: 'laptop', kind: 'codex', folder: '/home/dev/code/login-fix', prompt: 'Write unit tests for src/auth.rs.\nCover the expired-token and wrong-signature cases; do not change src/.', inside: true, worktree: false, depth: 1, grantAllowed: true, settings: [], options: [] } };
 
 // ADR-0090 Amendment A: a (clearly fake) request to switch the rich demo agent to a mode that skips permission questions, as the machine renders it.
 const demoSkipDetail = JSON.stringify({ node: 'demo', agent: 'rich', agent_kind: 'claude-acp', folder: '/home/dev/code/login-fix', option_type: 'config', option: 'mode', option_name: 'Mode', value: 'yolo', value_name: 'Bypass Permissions', skips: true, scope: 'session' });
@@ -56,6 +56,9 @@ export function demoList(path: string) {
 // ADR-0066: the same request asking for a model and an effort (no "more like this": a start with settings is always asked).
 const demoSettings = [{ id: 'model', label: 'setting-model', value: 'gpt-6.1-sol' }, { id: 'effort', label: 'setting-effort', value: 'high' }];
 export const demoStartSettingsApproval = { ...demoStartApproval, id: 'demo/3', localId: '3', detail: JSON.stringify({ ...JSON.parse(demoStartDetail), grant_allowed: false, settings: demoSettings }), start: { ...demoStartApproval.start, grantAllowed: false, settings: demoSettings } };
+// ADR-0059 decision 5: the same request asking for a helper that acts without asking (the card asks for the confirmation before it allows).
+const demoNoAsk = [{ id: 'skip-permissions', label: 'option-skip-permissions', skipsPermissions: true }];
+export const demoStartNoAskApproval = { ...demoStartApproval, id: 'demo/4', localId: '4', detail: JSON.stringify({ ...JSON.parse(demoStartDetail), grant_allowed: false, launch_options: [{ id: 'skip-permissions', label: 'option-skip-permissions', skips_permissions: true }] }), start: { ...demoStartApproval.start, grantAllowed: false, options: demoNoAsk } };
 
 // ADR-0091: plan-limit observations for the demo window (clearly fake). The Laptop's Codex is getting full, the Build server's almost
 // used up (and one older reading), the Windows PC's window just reset; Claude reports nothing, so it shows as unknown.

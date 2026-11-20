@@ -113,7 +113,7 @@ fn is_batch(program: &str) -> bool {
 /// bare name is looked up in the child's `PATH` when `env` sets one, then this program's folder, the system folders and this process's
 /// `PATH`, never in a current folder. `InvalidInput` for a NUL in the name, `NotFound` when no such file exists.
 fn resolve_batch(program: &str, env: &[(String, String)]) -> io::Result<std::path::PathBuf> {
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
     if program.contains('\0') {
         return Err(io::ErrorKind::InvalidInput.into());
     }
@@ -125,29 +125,18 @@ fn resolve_batch(program: &str, env: &[(String, String)]) -> io::Result<std::pat
             Err(io::ErrorKind::NotFound.into())
         };
     }
-    let mut dirs: Vec<PathBuf> = Vec::new();
-    if let Some((_, path)) = env.iter().find(|(k, _)| k.eq_ignore_ascii_case("PATH")) {
-        dirs.extend(std::env::split_paths(path));
-    }
-    if let Some(own) = std::env::current_exe()
-        .ok()
-        .and_then(|e| e.parent().map(Path::to_path_buf))
-    {
-        dirs.push(own);
-    }
-    let root = PathBuf::from(
-        std::env::var_os("SystemRoot").unwrap_or_else(|| OsString::from(r"C:\Windows")),
-    );
-    dirs.push(root.join("System32"));
-    dirs.push(root);
-    if let Some(path) = std::env::var_os("PATH") {
-        dirs.extend(std::env::split_paths(&path));
-    }
-    dirs.into_iter()
-        .filter(|d| d.is_absolute())
+    crate::windows::search_dirs(child_path(env))
+        .into_iter()
         .map(|d| d.join(program))
         .find(|p| p.is_file())
         .ok_or_else(|| io::ErrorKind::NotFound.into())
+}
+
+/// The child's own `PATH`, when its environment sets one.
+fn child_path(env: &[(String, String)]) -> Option<&std::ffi::OsStr> {
+    env.iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("PATH"))
+        .map(|(_, path)| std::ffi::OsStr::new(path.as_str()))
 }
 
 /// The command line for a batch file. `cmd.exe` reads it, not the C runtime, so [`quote_arg`]'s `\"` would end the quoting and a `&`
@@ -581,16 +570,22 @@ impl Drop for HeldTerminal {
 }
 
 fn start_process(config: &PtyConfig, hpc: HPCON) -> io::Result<(Handle, u32, Option<Confinement>)> {
-    let mut cmdline = wide(&match config.argv.first() {
+    // A bare name installed as a `.cmd` shim (`npx`) becomes its full path; `CreateProcess` alone adds only `.exe`.
+    let first = config.argv.first().map(|p| {
+        crate::windows::program_path(p, child_path(&config.env))
+            .to_str()
+            .map_or_else(|| p.clone(), str::to_string)
+    });
+    let mut cmdline = wide(&match first.as_deref() {
         Some(program) if is_batch(program) => {
             batch_command_line(&resolve_batch(program, &config.env)?, &config.argv[1..])?
         }
-        _ => config
-            .argv
-            .iter()
-            .map(|a| quote_arg(a))
+        Some(program) => std::iter::once(program)
+            .chain(config.argv[1..].iter().map(String::as_str))
+            .map(quote_arg)
             .collect::<Vec<_>>()
             .join(" "),
+        None => String::new(),
     });
     let confinement = config
         .sandbox
@@ -896,6 +891,20 @@ mod tests {
             spawn(&cfg).err().map(|e| e.kind()),
             Some(io::ErrorKind::NotFound)
         );
+        // A bare name with no extension, installed as a `.cmd` shim (`npx`): `CreateProcess` alone would add only `.exe`. It runs the
+        // shim on PATH, not one planted in the agent's folder, and its argument is quoted for `cmd.exe`.
+        let project = dir.join("project");
+        std::fs::write(tools.join("agora-conpty-shim.cmd"), "@exit /b 4\r\n").unwrap();
+        std::fs::write(project.join("agora-conpty-shim.cmd"), "@exit /b 9\r\n").unwrap();
+        let mut cfg = PtyConfig::new(vec![
+            "agora-conpty-shim".into(),
+            "a\"&type nul>shim-injected.txt&\"b".into(),
+        ]);
+        cfg.env = vec![("PATH".into(), tools.display().to_string())];
+        cfg.env_remove = vec!["NoDefaultCurrentDirectoryInExePath".into()];
+        cfg.cwd = Some(project.clone());
+        assert_eq!(spawn(&cfg).unwrap().wait().unwrap().code, Some(4));
+        assert!(!project.join("shim-injected.txt").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

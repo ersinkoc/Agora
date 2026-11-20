@@ -61,3 +61,27 @@ fn a_last_chunk_in_time_completes_the_frame() {
     let (got, _) = last_chunk_after("in-time", FRAME_TIMEOUT - Duration::from_millis(500));
     assert!(matches!(got, Ok(true)), "{got:?}");
 }
+
+#[test]
+fn a_peer_that_closed_ends_the_read_as_closed_at_once() {
+    let dir = std::env::temp_dir().join(format!("agora-hlr-{}-eof", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("s.sock");
+    let listener = agora_platform::local_listen(&path).unwrap();
+    let mut w = agora_platform::local_connect(&path).unwrap();
+    let mut r = listener.accept().unwrap();
+    // Half a frame, then the end.
+    w.write_all(&[0, 0, 0, 50, 1, 2, 3]).unwrap();
+    drop(w);
+    let began = Instant::now();
+    let got = read_frame(&mut r, Duration::from_secs(10));
+    assert!(
+        matches!(got, Err(LinkError::Closed)),
+        "{:?}",
+        got.map(|f| f.is_some())
+    );
+    assert!(began.elapsed() < Duration::from_secs(2));
+    drop(listener);
+    let _ = std::fs::remove_dir_all(&dir);
+}

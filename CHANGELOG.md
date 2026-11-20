@@ -4,7 +4,32 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
-_Nothing yet._
+- Settings has an Agents section (`#/device/agents`): for each machine, the agents it can start, installed ones first, how each runs (terminal or chat), and the model, effort and options each takes; a machine that is offline shows what it reported last, marked as older. It is read only for now: choices are still made when you start an agent.
+- In the terminal client, a question over the console (such as the one-hour permission to type) no longer closes the open agent's terminal, is not answered by a `y` inside a paste or beside passive mouse motion, and a refresh no longer drops a refusal of a key you just typed; Ctrl-K lists `g`, the key that asks for that permission.
+- When a machine asks for your OK before you type into, message or stop an agent, the question now names the agent and that one action, and the one-hour permission covers only that action (before, it also covered stopping and sending messages), in the web window and the terminal client.
+
+### Session discovery checks for look-alike agents off the supervision thread
+
+When the node decides whether two agents could be mixed up, it looks at the disk on a thread of its own (reading the session files still happens on the supervision thread). A moved workspace or a changed manifest is noticed within 30 seconds, and until a lookup answers the agent is given no session.
+
+## 0.3.31
+
+### A board for a project's tasks
+- A project's tasks can be opened as a board with Backlog, Doing and Done columns (read-only), from the project's card in the Board panel. Task text is shown as plain text.
+
+### Helpers that act without asking, only when you say so
+- An agent can start a helper that acts without asking only when your signed decision names that option; the approval card says so, and a grant never covers it.
+
+### Steadier agents and connections
+- An agent that kept running while the node restarted comes back showing its last known state (such as idle) even when its state was first noted a moment before its start was recorded.
+- The hub stays responsive for other machines while one machine's events are written to disk.
+- `agora join` never prints a refusal sentence a remote machine chose; a skip-permissions approval card is withdrawn when either switch of the same setting changes; two agents reading the same session files in one folder never take each other's session; the console asks for a grant when typing into an agent is refused.
+- Signing in with the screen password no longer ties up the hub's request workers: a busy sign-in answers "busy" instead of stalling other machines, and a sign-in on the machine itself keeps its own reserved slot.
+- The desktop app's local tunnel limits how many connections it serves at once and closes them when the app lets go of it.
+- On Windows, an agent whose command is installed as a `.cmd` file, such as `npx` or most npm global commands, is now shown as installed and starts, as a chat agent, a terminal agent or through an adapter. Before, it was shown as not installed, and a chat agent failed with "the adapter exited".
+
+### Agents from the ACP registry
+- Agora can now turn the ACP agent registry's entries into agent kinds and install records (a maintainer step; the list in the window and installing from it come next, and no machine ever reads the registry itself).
 
 ## 0.3.30
 

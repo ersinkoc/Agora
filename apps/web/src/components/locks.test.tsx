@@ -31,7 +31,7 @@ describe('screen password in the window', () => {
   });
 
   it('asks for the password before adding a passkey from another machine', () => {
-    const add = async () => true;
+    const add = async () => ({ ok: true as const });
     expect(renderToStaticMarkup(<DevicePage device={undefined} onBack={() => {}} onAddPasskey={add} />)).not.toContain('type="password"');
     const away = renderToStaticMarkup(<DevicePage device={undefined} onBack={() => {}} onAddPasskey={add} passkeyNeedsPassword />);
     expect(away).toContain('name="passkey-password"');

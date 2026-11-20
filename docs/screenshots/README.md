@@ -141,3 +141,13 @@ Home with the Needs you panel kept beside the console list, "Jump to latest" wit
 ![](home-terminal-palette/home-needs-you-panel-dark.png) ![](home-terminal-palette/home-needs-you-panel-light.png)
 ![](home-terminal-palette/terminal-jump-and-link-dark.png) ![](home-terminal-palette/terminal-jump-and-link-light.png)
 ![](home-terminal-palette/palette-machines-dark.png) ![](home-terminal-palette/palette-machines-light.png)
+
+## ADR-0059 decision 5: a helper that acts without asking
+
+The approval card an agent's `agent_start` with `options: ["skip-permissions"]` produces: how the helper acts and what that means, no
+"more like this", and Allow first shows the same confirmation as a start from the window, with Keep asking as the primary button
+(`apps/web/src/components/StartApproval.tsx`).
+
+![](helper-no-ask/helper-no-ask-card-dark.png) ![](helper-no-ask/helper-no-ask-card-light.png)
+
+![](helper-no-ask/helper-no-ask-confirm-dark.png) ![](helper-no-ask/helper-no-ask-confirm-light.png)

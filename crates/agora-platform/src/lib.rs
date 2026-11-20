@@ -118,6 +118,25 @@ pub struct LocalStream {
     inner: windows::Stream,
 }
 
+/// What [`LocalStream::set_read_timeout_or_closed`] found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadTimeout {
+    /// The read timeout is set.
+    Set,
+    /// The system refused a new timeout because the peer has shut the connection (macOS answers `EINVAL` then). A receive on it
+    /// returns what is buffered or the end at once, so it cannot wait; the timeout is not set.
+    PeerClosed,
+}
+
+/// Tells the peer-closed answer of a `set_read_timeout` apart from a real failure.
+fn read_timeout_result(r: io::Result<()>) -> io::Result<ReadTimeout> {
+    match r {
+        Ok(()) => Ok(ReadTimeout::Set),
+        Err(e) if e.kind() == io::ErrorKind::InvalidInput => Ok(ReadTimeout::PeerClosed),
+        Err(e) => Err(e),
+    }
+}
+
 /// A listening local socket. Removes its socket file when dropped.
 pub struct LocalListener {
     #[cfg(unix)]
@@ -698,6 +717,35 @@ impl LocalStream {
         #[cfg(windows)]
         {
             self.inner.set_read_timeout(timeout)
+        }
+    }
+
+    /// [`Self::set_read_timeout`] for a caller that can go on without the timeout once the peer has shut the connection: that case
+    /// (an `InvalidInput` answer, macOS) is `Ok(ReadTimeout::PeerClosed)`; every other failure is returned.
+    pub fn set_read_timeout_or_closed(
+        &self,
+        timeout: Option<std::time::Duration>,
+    ) -> io::Result<ReadTimeout> {
+        // std refuses a zero timeout with InvalidInput; that is an error of the caller, not the peer having closed.
+        if timeout.is_some_and(|t| t.is_zero()) {
+            return Err(io::Error::from(io::ErrorKind::InvalidInput));
+        }
+        read_timeout_result(self.set_read_timeout(timeout))
+    }
+
+    /// Waits until a send would not block, at most `timeout`; `Ok(false)` when the time ran out first. Unix: `poll(2)` for
+    /// writability (an error or hang-up counts as ready, so the send itself reports it). Windows: pipe writes are not polled, so
+    /// this returns `Ok(true)` at once and the caller keeps its own bound on the send.
+    pub fn wait_writable(&self, timeout: std::time::Duration) -> io::Result<bool> {
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            unixhold::wait_writable(self.inner.as_raw_fd(), timeout)
+        }
+        #[cfg(windows)]
+        {
+            let _ = timeout;
+            Ok(true)
         }
     }
 
@@ -1553,6 +1601,24 @@ pub fn no_console_window(cmd: &mut std::process::Command) -> &mut std::process::
     #[cfg(windows)]
     std::os::windows::process::CommandExt::creation_flags(cmd, winproc::NO_WINDOW_FLAGS);
     cmd
+}
+
+/// The program to give [`std::process::Command::new`] for an agent's `argv[0]`. On Windows, `Command` adds only `.exe` to a bare
+/// name, so a tool installed as a `.cmd` shim (`npx`, most npm global commands) would not be found: a bare name with no extension
+/// and no `<name>.exe` anywhere becomes the full path of the first `.com`, `.bat` or `.cmd` of that name, looked up where `Command`
+/// looks (`child_path`, the child's own `PATH` when it sets one, then this program's folder, the system folders and this process's
+/// `PATH`; never a current folder). `Command` then runs a `.bat`/`.cmd` through `cmd.exe` with its own safe quoting. Anything
+/// else, and every name elsewhere, comes back unchanged.
+pub fn program_path(program: &str, child_path: Option<&std::ffi::OsStr>) -> PathBuf {
+    #[cfg(windows)]
+    {
+        windows::program_path(program, child_path)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = child_path;
+        PathBuf::from(program)
+    }
 }
 
 /// Makes `cmd` start as the leader of a process group of its own (Unix), so [`kill_process_tree`] ends it and everything it started.
@@ -3024,5 +3090,26 @@ mod atomic_replace_tests {
             "a temporary file stayed behind"
         );
         let _ = std::fs::remove_dir_all(&d);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod read_timeout_tests {
+    use super::*;
+
+    #[test]
+    fn invalid_input_is_the_peer_closed_answer_and_others_are_errors() {
+        assert_eq!(read_timeout_result(Ok(())).unwrap(), ReadTimeout::Set);
+        let closed = read_timeout_result(Err(io::Error::from(io::ErrorKind::InvalidInput)));
+        assert_eq!(closed.unwrap(), ReadTimeout::PeerClosed);
+        for kind in [
+            io::ErrorKind::PermissionDenied,
+            io::ErrorKind::BrokenPipe,
+            io::ErrorKind::Other,
+        ] {
+            let e = read_timeout_result(Err(io::Error::from(kind))).unwrap_err();
+            assert_eq!(e.kind(), kind);
+        }
     }
 }

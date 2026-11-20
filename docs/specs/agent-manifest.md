@@ -18,8 +18,10 @@ and named by `agora doctor`, and the built-in kind it meant to replace stays. Th
 or started, so a new or changed file needs no restart. `agora doctor` lists each kind with where it came from (built in, or the
 folder) and the program it looks for. A kind is "installed" when that program (the L3 adapter command, else the ACP `argv[0]`,
 else `process.launch[0]`) is found in the node's own `PATH` (the environment the node was started in, not the user's current
-shell) or, when the manifest names a path, exists there. A new shipped manifest must be added to `BUILT_IN`; a test fails until
-it is.
+shell) or, when the manifest names a path, exists there. On Windows, a bare name with no extension that has no `.exe` but a
+`.com`, `.bat` or `.cmd` of that name (`npx`, most npm global commands) is started by that file's full path, for all three
+levels, looked up where the standard library looks and never in the agent's project folder; it is installed when that file
+exists. A new shipped manifest must be added to `BUILT_IN`; a test fails until it is.
 
 ```toml
 kind = "example-agent"          # stable id, lowercase, used in protocol and UI
@@ -179,6 +181,14 @@ declare `model` and `effort`, checked against those tools' own `--help`.
 A setting chosen at the start lasts while the node runs (a restart after a crash keeps it). It is not in the session ledger, so an
 agent resumed after the node itself restarted (ADR-0060) starts with the tool's defaults, as its launch options do.
 
+## Manifests converted from the ACP registry (ADR-0092)
+`registry_convert` (`crates/agora-adapters`, run through `cargo run -p agora-adapters --example registry_convert -- <registry clone> <dir>`)
+turns one registry `agent.json` into `registry-<id>.toml` (an L2 `[structured] acp` manifest, never a launch option) and a package entry
+(`<id>.package.json`, ADR-0087 shape plus `tested = false`). `npx` becomes `npx --yes PKG@VERSION ARGS`, `uvx` becomes `uvx PKG==VERSION ARGS`,
+`binary` becomes a `binary-download` installer with per-platform URL and SHA-256 (`installable = false` when one is missing). Skips are
+reason codes (`registry.bad_token`, `registry.skips_permissions`, `registry.forbidden_executable` (a shell or interpreter as the executable), `registry.bad_field`, `registry.no_supported_distribution`, ...). Generated files start with a
+header saying so and are never edited by hand. Nodes never read the registry.
+
 ## Launch options (ADR-0059)
 
 `[[launch.option]]` (engine 2, so a manifest with one says `min_engine = 2`) declares named choices the start window offers. A start
@@ -268,9 +278,24 @@ The node holds a session id only when it learned one:
   `{"type":"session_meta","payload":{"id":...,"cwd":...}}`, checked on codex-cli 0.167.0 and 0.167.1): while a terminal agent runs
   without a session id, the node looks every 3 s, for at most 30 minutes, at the files the glob matches that were written after the
   agent started, and takes the id from the first line (at most 64 KiB) when it passes `select` and its `cwd` is the agent's folder.
-  It takes one only when exactly one new file fits and no other agent has that id. Two agents of one kind waiting in one folder at
-  once get none (a file cannot say which is whose); neither does an agent for which two files fit. A session file's id must be a
-  UUID. An agent without an id can only be started again in its folder, never resumed.
+  It takes one only when exactly one new file fits and no other agent has that id. Two agents in one folder are rivals, and both get
+  none (a file cannot say which is whose), when they are of one kind, or of kinds whose globs could match the same files: the fixed
+  directory of one glob (before its first `*`, with `{home}` replaced, `.` and `..` resolved) is the other's or holds it, as written or
+  with links resolved (a link is followed even before what it points to exists, and a `..` after a link steps out of
+  where the link leads, as the filesystem does), compared without case (one folder on Windows and
+  macOS; on Linux this only adds rivals). A root that cannot be resolved, for example through more than 40 links, makes its agent a
+  rival of every other kind in the folder. They are not rivals when both `select`s ask for different values at the same `path`.
+  This is decided from the manifests before any file is read, for every waiting agent at once, so kinds that share a session folder
+  lose Resume in that folder rather than risk continuing the wrong conversation. Folders are looked at on disk only for agents that
+  could contend (of one kind, or of two kinds whose `select`s are not exclusive), session roots only for two such kinds; two agents that both
+  gave up already are not compared again, and each agent's folder and root are looked up again only after 30 s or when the path changed (a manifest reloaded under a running agent
+  gives a new root; a workspace moved and its old path made a link is found the same as the new one at the next look). A root that exists is resolved by the OS's own rules; one not
+  made yet is walked through its links. The lookups run on a thread of their own, never on the node's supervision thread, so a stalled mount cannot hold up state or approvals;
+  until the answer arrives the agents concerned get no session (and are not given up on). An agent for which two files fit gets none
+  either. The first line counts without its `\n` or `\r\n`. A session file's id must be a UUID. An agent without an id can only be
+  started again in its folder, never resumed. Known limit: this assumes no link inside a wildcard directory of a session glob points
+  into another kind's session root (`logs/*/*.jsonl` with `logs/linked` pointing at `store`, against `store/*.jsonl`); such a setup
+  can attribute a session to the wrong agent.
 - **Every id that goes on a command line** (`[resume]`, `id_args`) must start with a letter or digit and hold only letters, digits,
   `.`, `_` and `-`, at most 128 characters (`agora_node::session_files::argv_safe`), so an id can never be read as an option such as
   `--dangerously-bypass-approvals-and-sandbox`. It is checked where an id is found (session file), reported (a terminal agent's hook),

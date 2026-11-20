@@ -529,6 +529,33 @@ const SEND_FLAGS: libc::c_int = 0;
 /// Room for one `SCM_RIGHTS` message of one descriptor, aligned for `cmsghdr`.
 const CONTROL_WORDS: usize = 8;
 
+/// Waits until `sock` is writable (or in error or hung up), at most `timeout`. `Ok(false)` on the time running out.
+pub(crate) fn wait_writable(sock: RawFd, timeout: std::time::Duration) -> io::Result<bool> {
+    let end = std::time::Instant::now() + timeout;
+    loop {
+        let left = end.saturating_duration_since(std::time::Instant::now());
+        // Rounded up to a whole millisecond, so the wait never ends before the time given.
+        let ms = left.as_nanos().div_ceil(1_000_000).min(i32::MAX as u128) as libc::c_int;
+        let mut p = libc::pollfd {
+            fd: sock,
+            events: libc::POLLOUT,
+            revents: 0,
+        };
+        // SAFETY: one valid pollfd that lives through the call.
+        let r = unsafe { libc::poll(&mut p, 1, ms) };
+        if r > 0 {
+            return Ok(true);
+        }
+        if r == 0 {
+            return Ok(false);
+        }
+        let e = io::Error::last_os_error();
+        if e.kind() != io::ErrorKind::Interrupted {
+            return Err(e);
+        }
+    }
+}
+
 /// One `sendmsg` of `bytes`, with `fd` attached to them when given. Returns how many bytes went; the descriptor went with them
 /// when that is more than 0.
 pub(crate) fn send_with_fd(sock: RawFd, bytes: &[u8], fd: Option<RawFd>) -> io::Result<usize> {
@@ -1211,19 +1238,22 @@ impl HeldProcess {
             .map(|_| ())
     }
 
-    /// The agent's exit status once it ended, kept from then on. **When the leader's end is collected, whatever else it left in its
-    /// group is ended with it** (`SIGKILL`, at once, in this call): an adapter that ended or crashed must not leave processes the holder
-    /// can no longer name, which would also hold its output open for good. This is the one moment the group can be signalled safely:
-    /// its number is the leader's pid, which nothing else can have been given before the leader was collected, and the holder never
-    /// signals it again afterwards ([`Self::signal`] does nothing once the end is collected).
+    /// The agent's exit status once it ended, kept from then on. **When the leader has ended, whatever else it left in its group (and,
+    /// on Linux, in the rest of its session) is ended with it** (`SIGKILL`, at once, in this call): an adapter that ended or crashed must
+    /// not leave processes the holder can no longer name, which would also hold its output open for good. They are signalled while the
+    /// leader has ended but is **not yet collected** (`waitid` with `WNOWAIT`): until then its pid, which is also the number of its group
+    /// and its session, cannot be given to any other process, so nothing outside the agent can be signalled. Only then is the leader
+    /// collected, and the holder never signals it again afterwards ([`Self::signal`] does nothing once the end is collected).
     pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
         if self.exit.is_none() {
-            self.exit = self.child.try_wait()?.map(status);
-            if self.exit.is_some() {
-                // SAFETY: the group this child led (setsid), signalled in the same call that collected its leader. An error (no member
-                // left) is the usual case.
-                let _ = unsafe { libc::killpg(self.child.id() as libc::pid_t, libc::SIGKILL) };
+            let pid = self.child.id() as libc::pid_t;
+            if ended_unreaped(pid)? {
+                // SAFETY: the group this child led (setsid), whose leader has ended but is not collected: the number is still its own.
+                // An error (no member left) is the usual case.
+                let _ = unsafe { libc::killpg(pid, libc::SIGKILL) };
+                kill_rest_of_session(pid);
             }
+            self.exit = self.child.try_wait()?.map(status);
         }
         Ok(self.exit)
     }
@@ -1237,6 +1267,67 @@ impl HeldProcess {
             signal: Some(libc::SIGKILL),
         });
     }
+}
+
+/// Whether the child `pid` has ended, without collecting it (`waitid` with `WEXITED | WNOHANG | WNOWAIT`): an ended child stays a
+/// zombie, so its pid (and the group and session it led) stay its own until it is collected.
+fn ended_unreaped(pid: libc::pid_t) -> io::Result<bool> {
+    let Ok(id) = libc::id_t::try_from(pid) else {
+        return Ok(false);
+    };
+    loop {
+        // SAFETY: an all-zero siginfo_t is a valid out-buffer.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        // SAFETY: a valid out-pointer; WNOWAIT leaves the child to be collected by `Child::try_wait`.
+        let r = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                id,
+                &mut info,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        };
+        if r == 0 {
+            // SAFETY: filled in by a successful waitid; zero when the child has not ended (WNOHANG).
+            return Ok(unsafe { info.si_pid() } != 0);
+        }
+        let e = io::Error::last_os_error();
+        match e.raw_os_error() {
+            Some(libc::EINTR) => continue,
+            // Already collected (only `Child::try_wait` below does that): there is nothing left to signal safely.
+            Some(libc::ECHILD) => return Ok(false),
+            _ => return Err(e),
+        }
+    }
+}
+
+/// `SIGKILL` to every process still in the session `sid`: the session the holder made for a pipe agent (`setsid`), whose leader has
+/// ended but is not collected yet. What the agent moved into process groups of their own (job control, `setpgid`) is not in its group but is
+/// still in its session, and would otherwise run on unnamed and hold the agent's output open. The session's number is the uncollected
+/// leader's pid, so no other session can have it. Linux only (it reads `/proc`); elsewhere only the group is ended. A process
+/// that left the session (`setsid`) is not found.
+fn kill_rest_of_session(sid: libc::pid_t) {
+    #[cfg(target_os = "linux")]
+    {
+        let Ok(dir) = std::fs::read_dir("/proc") else {
+            return;
+        };
+        for entry in dir.flatten() {
+            let Some(pid) = entry
+                .file_name()
+                .to_str()
+                .and_then(|n| n.parse::<libc::pid_t>().ok())
+            else {
+                continue;
+            };
+            // SAFETY: plain system calls with integer arguments; a process that is gone is `ESRCH`, which is ignored.
+            if unsafe { libc::getsid(pid) } == sid {
+                let _ = unsafe { libc::kill(pid, libc::SIGKILL) };
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = sid;
 }
 
 impl Drop for HeldProcess {

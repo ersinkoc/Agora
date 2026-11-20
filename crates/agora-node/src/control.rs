@@ -11,12 +11,12 @@
 //!
 //! Retried requests (same `idempotency_key`) get the stored response and do not repeat their effect.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::RecvTimeoutError;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -87,12 +87,31 @@ pub struct ControlContext {
     control_token: Option<(crate::control_token::ControlToken, PathBuf)>,
     names: AtomicU64,
     seen: Mutex<IdempotencyCache>,
+    /// Signalled when an attempt claimed in `seen.running` ends (F1360).
+    settled: Condvar,
 }
 
 #[derive(Default)]
 struct IdempotencyCache {
     order: VecDeque<String>,
     responses: HashMap<String, v1::CommandResponse>,
+    /// Keys whose first attempt is still running (F1360): a retry on another connection waits for its answer instead of repeating it.
+    running: HashSet<String>,
+}
+
+/// The right to run the attempt for one idempotency key ([`ControlContext::claim`]); let go when dropped, answered or not.
+struct Claim<'a> {
+    ctx: &'a ControlContext,
+    key: &'a str,
+}
+
+impl Drop for Claim<'_> {
+    fn drop(&mut self) {
+        let mut c = self.ctx.seen.lock().unwrap_or_else(|e| e.into_inner());
+        c.running.remove(self.key);
+        drop(c);
+        self.ctx.settled.notify_all();
+    }
 }
 
 impl ControlContext {
@@ -127,6 +146,7 @@ impl ControlContext {
             show_secret: false,
             control_token: None,
             seen: Mutex::new(IdempotencyCache::default()),
+            settled: Condvar::new(),
         }
     }
 
@@ -201,9 +221,19 @@ impl ControlContext {
         self.supervisor.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn remembered(&self, key: &str) -> Option<v1::CommandResponse> {
-        let c = self.seen.lock().unwrap_or_else(|e| e.into_inner());
-        c.responses.get(key).cloned()
+    /// The stored answer for `key`, or the claim to run its attempt. An attempt with the same key that is still running (a retry that
+    /// came on another connection before the first answer) is waited for, so its effect is not repeated (F1360).
+    fn claim<'a>(&'a self, key: &'a str) -> Result<Claim<'a>, Box<v1::CommandResponse>> {
+        let mut c = self.seen.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            if let Some(prev) = c.responses.get(key) {
+                return Err(Box::new(prev.clone()));
+            }
+            if c.running.insert(key.to_string()) {
+                return Ok(Claim { ctx: self, key });
+            }
+            c = self.settled.wait(c).unwrap_or_else(|e| e.into_inner());
+        }
     }
 
     fn remember(&self, key: &str, resp: &v1::CommandResponse) {
@@ -244,21 +274,24 @@ fn ok_empty() -> v1::CommandOk {
 }
 
 /// ADR-0090 Amendment A: what a switch of a running agent's mode or config option came to. A call is made (outside the supervisor's lock)
-/// and settles the option: a card still waiting for another value of it is withdrawn. A choice that skips permissions under a policy that
-/// allows it is not applied and not refused: the node raises the owner's approval and answers `agent.approval_needed`.
+/// and settles the option: a card still waiting for another value of it is withdrawn. `settles` names the option and its twin (F1322: a
+/// mode and the config option of category `mode` an agent gives as its mode are one setting). A choice that skips permissions under a
+/// policy that allows it is not applied and not refused: the node raises the owner's approval and answers `agent.approval_needed`.
 fn switch(
     ctx: &ControlContext,
     agent: &AgentId,
-    option: Option<(SkipKind, &str)>,
+    settles: &[(SkipKind, String)],
     prepared: Result<Prepared, SupervisorError>,
 ) -> Result<v1::CommandOk, Error> {
     match prepared.map_err(sup_err)? {
         Prepared::Call(call) => {
             call.run().map_err(sup_err)?;
-            if let (Some(approvals), Some(option)) = (&ctx.approvals, option) {
-                for id in approvals.withdraw_skips(agent, Some(option)) {
-                    if let Some(ev) = &ctx.events {
-                        ev.approval_resolved(&id, false, "");
+            if let Some(approvals) = &ctx.approvals {
+                for (kind, option) in settles {
+                    for id in approvals.withdraw_skips(agent, Some((*kind, option))) {
+                        if let Some(ev) = &ctx.events {
+                            ev.approval_resolved(&id, false, "");
+                        }
                     }
                 }
             }
@@ -939,10 +972,15 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
         // The adapter's answer is waited for after the supervisor's lock is let go (`AdapterCall::run`).
         Cmd::AgentSetMode(a) => {
             let id = AgentId::new(a.agent_id.clone());
-            let prepared =
-                ctx.sup()
-                    .prepare_set_option(&id, agora_adapters::host::OptionKind::Mode, &a.mode);
-            switch(ctx, &id, Some((SkipKind::Mode, "mode")), prepared)
+            let (prepared, twins) = {
+                let sup = ctx.sup();
+                let prepared =
+                    sup.prepare_set_option(&id, agora_adapters::host::OptionKind::Mode, &a.mode);
+                (prepared, sup.mode_config_ids(&id))
+            };
+            let mut settles = vec![(SkipKind::Mode, "mode".to_string())];
+            settles.extend(twins.into_iter().map(|c| (SkipKind::Config, c)));
+            switch(ctx, &id, &settles, prepared)
         }
         Cmd::AgentSetModel(a) => {
             let id = AgentId::new(a.agent_id.clone());
@@ -951,14 +989,22 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                 agora_adapters::host::OptionKind::Model,
                 &a.model,
             );
-            switch(ctx, &id, None, prepared)
+            switch(ctx, &id, &[], prepared)
         }
         // ADR-0090: the user's own change of an option the agent reported (the reasoning effort is one). The supervisor checks the id and
         // the value against the report, and the node's `skip_permissions` policy against what the choice does.
         Cmd::AgentSetConfig(a) => {
             let id = AgentId::new(a.agent_id.clone());
-            let prepared = ctx.sup().prepare_set_config(&id, &a.config_id, &a.value);
-            switch(ctx, &id, Some((SkipKind::Config, &a.config_id)), prepared)
+            let (prepared, twins) = {
+                let sup = ctx.sup();
+                let prepared = sup.prepare_set_config(&id, &a.config_id, &a.value);
+                (prepared, sup.mode_config_ids(&id))
+            };
+            let mut settles = vec![(SkipKind::Config, a.config_id.clone())];
+            if twins.contains(&a.config_id) {
+                settles.push((SkipKind::Mode, "mode".to_string()));
+            }
+            switch(ctx, &id, &settles, prepared)
         }
         // ADR-0090: ends the agent's current turn; the agent and its process live on (`AgentStop` ends them). Permission requests of
         // the turn are withdrawn and shown as cancelled; queued prompts are kept unless `drop_queue` says to throw them away.
@@ -996,8 +1042,12 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
             let cols = u16::try_from(t.cols).map_err(|_| invalid("cols"))?;
             let rows = u16::try_from(t.rows).map_err(|_| invalid("rows"))?;
             // A terminal is at most a few thousand cells wide; the emulator allocates the whole grid.
-            if cols == 0 || rows == 0 || cols > MAX_TERMINAL_COLS || rows > MAX_TERMINAL_ROWS {
+            if cols == 0 || cols > MAX_TERMINAL_COLS {
                 return Err(invalid("cols"));
+            }
+            // F1361: a bad row count is named as such, as one that does not fit u16 is above.
+            if rows == 0 || rows > MAX_TERMINAL_ROWS {
+                return Err(invalid("rows"));
             }
             with_terminal(ctx, &t.terminal_id, |h| h.resize(Size { cols, rows }))?;
             Ok(ok_empty())
@@ -1368,6 +1418,16 @@ pub(crate) fn resume_agent(
                 &entry.kind,
                 has_terminal,
                 &entry.parent_agent_id,
+                // The options it was started with (ADR-0059: for its whole life, resumes included), so the badge stays on it.
+                &views
+                    .iter()
+                    .find(|v| v.id == id)
+                    .map(|v| crate::launch_options::LaunchChoice {
+                        ids: v.launch_options.clone(),
+                        args: Vec::new(),
+                        skips_permissions: v.skips_permissions,
+                    })
+                    .unwrap_or_default(),
             );
             // Its start is said above with its folder; the rest (its state, its session) as usual.
             let rest: Vec<SupervisorEvent> = events
@@ -1714,14 +1774,20 @@ fn handle_request(
         let _ = send(writer, STREAM_COMMANDS, KIND_RESPONSE, resp.encode_to_vec());
         return true;
     }
-    if !req.idempotency_key.is_empty() {
-        if let Some(mut prev) = ctx.remembered(&req.idempotency_key) {
-            // Same result, addressed to this attempt: the client matches responses by request id.
-            prev.request_id.clone_from(&req.request_id);
-            let _ = send(writer, STREAM_COMMANDS, KIND_RESPONSE, prev.encode_to_vec());
-            return true;
+    // F1360: held until this attempt's answer is stored, so a retry with the same key waits for it instead of running again.
+    let _claim = if req.idempotency_key.is_empty() {
+        None
+    } else {
+        match ctx.claim(&req.idempotency_key) {
+            Ok(claim) => Some(claim),
+            Err(mut prev) => {
+                // Same result, addressed to this attempt: the client matches responses by request id.
+                prev.request_id.clone_from(&req.request_id);
+                let _ = send(writer, STREAM_COMMANDS, KIND_RESPONSE, prev.encode_to_vec());
+                return true;
+            }
         }
-    }
+    };
     let Some(cmd) = &req.command else {
         let resp = response(&req.request_id, Err(invalid("command")));
         let _ = send(writer, STREAM_COMMANDS, KIND_RESPONSE, resp.encode_to_vec());
@@ -2192,5 +2258,122 @@ mod resolve_tests {
         assert_eq!(resolve_in(&c, "b").map(|p| p.id.as_str()).ok(), Some("b"));
         assert!(resolve_in(&c, "same").is_err());
         assert!(resolve_in(&c, "nope").is_err());
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod idempotency_tests {
+    use super::*;
+
+    fn git(dir: &Path, args: &[&str]) {
+        let ok = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@example.com")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@example.com")
+            .status()
+            .is_ok_and(|s| s.success());
+        assert!(ok, "git {args:?}");
+    }
+
+    fn agent_of(r: io::Result<Result<v1::CommandOk, v1::ErrorInfo>>) -> String {
+        match r {
+            Ok(Ok(v1::CommandOk {
+                result: Some(v1::command_ok::Result::AgentStart(s)),
+            })) => s.agent_id,
+            other => panic!("not a start: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_retry_that_overlaps_its_first_attempt_waits_for_its_answer() {
+        // Audit F1360: the cache was checked before and filled after the command ran, so a retry on another connection while the first
+        // attempt still ran (a client that timed out and reconnected) ran it again. Gated: the supervisor lock holds the first attempt
+        // inside `execute` (it has taken its name number, `names`); the retry is sent; then the lock is let go.
+        if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("agora-ctl-idem-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let repo = dir.join("proj");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("a.txt"), "x").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-q", "-m", "init"]);
+        let mut sup = Supervisor::new(crate::supervisor::SupervisorConfig {
+            node: agora_core::NodeId::new("n"),
+            restart: crate::supervisor::RestartPolicy::default(),
+            terminal: crate::terminal::TerminalOptions::default(),
+            limits: crate::supervisor::NodeLimits::default(),
+        });
+        sup.register(
+            agora_adapters::Manifest::parse(
+                "kind = \"shell\"\ndisplay_name = \"S\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [\"sh\"]\n",
+            )
+            .unwrap(),
+        );
+        let ctx = Arc::new(ControlContext::new(
+            Arc::new(Mutex::new(sup)),
+            vec![ProjectEntry {
+                id: "p".into(),
+                name: "proj".into(),
+                root: repo,
+            }],
+            dir.join("worktrees"),
+            "n".into(),
+            None,
+            None,
+            None,
+            Arc::new(crate::chat::ChatBoard::new()),
+        ));
+        let sock = dir.join("c.sock");
+        let server = ControlServer::start(&sock, Arc::clone(&ctx)).unwrap();
+        let attempt = |sock: PathBuf| {
+            std::thread::spawn(move || {
+                let mut c = Client::connect(&sock).unwrap();
+                let start = Cmd::AgentStart(v1::AgentStart {
+                    kind: "shell".into(),
+                    ..Default::default()
+                });
+                c.call_with_key("k", start)
+            })
+        };
+        let names_reach = |want: u64, limit: Duration| {
+            let end = Instant::now() + limit;
+            while ctx.names.load(Ordering::SeqCst) < want {
+                if Instant::now() >= end {
+                    return false;
+                }
+                std::thread::yield_now();
+            }
+            true
+        };
+        let held = ctx.supervisor.lock().unwrap();
+        let first = attempt(sock.clone());
+        assert!(
+            names_reach(1, Duration::from_secs(20)),
+            "the first attempt never ran"
+        );
+        let retry = attempt(sock.clone());
+        // Unfixed, the retry reaches `execute` too; fixed, it waits for the first answer and this times out.
+        let _ = names_reach(2, Duration::from_secs(3));
+        drop(held);
+        let (a, b) = (
+            agent_of(first.join().unwrap()),
+            agent_of(retry.join().unwrap()),
+        );
+        let started = ctx.sup().list();
+        for v in &started {
+            let _ = ctx.sup().stop(&v.id);
+        }
+        drop(server);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(started.len(), 1, "the retry started a second agent");
+        assert_eq!(a, b, "both attempts get the one answer");
     }
 }

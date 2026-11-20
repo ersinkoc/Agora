@@ -143,8 +143,121 @@ pub struct Session {
     /// A snapshot that arrived while something else was waiting (the hub's first one comes right after subscribing, often while
     /// the device registration waits for its answer): `next` hands it out first, so it is never lost.
     snapshot: Option<Box<Snapshot>>,
-    /// A machine refused something that was sent without waiting for the answer (typing) because it wants a grant first.
-    grant_wanted: bool,
+    /// Typing sent without waiting for the answer, and the newest of it a machine refused (per terminal) because it wants a grant first.
+    typing: Typing,
+}
+
+/// Typing a machine refused because it wants a grant first (ADR-0041): the terminal it was for, and its request's number (typing sent
+/// later has a larger one).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Refused {
+    pub node: String,
+    pub terminal_id: String,
+    pub request: u64,
+}
+
+impl Refused {
+    /// Whether this is typing into `terminal_id` on `node`.
+    pub fn is_for(&self, node: &str, terminal_id: &str) -> bool {
+        self.node == node && self.terminal_id == terminal_id
+    }
+}
+
+/// Typing waiting for its answer, by request (the hub answers under the client's request id), so a refusal names its terminal.
+#[derive(Default)]
+struct Typing {
+    /// By request: the terminal, and whether the user typed it (a focus report or pointer motion the console sends by itself is not
+    /// typing: its refusal asks nothing).
+    sent: std::collections::VecDeque<(u64, String, String, bool)>,
+    /// The newest refusal of each terminal not read yet (a console picks the one in front; two may come in one turn).
+    refused: Vec<Refused>,
+    /// The newest typing of each terminal a machine took, not read yet: (node, terminal, request).
+    taken: Vec<(String, String, u64)>,
+}
+
+impl Typing {
+    /// Typing waiting for its answer is kept until the answer is read: every key of a long paste is one request, and the hub answers
+    /// past its own limit of 256 waiting (docs/specs/protocol.md) at once, so this many are only reached when answers stop coming.
+    /// Beyond it the oldest is forgotten, and its refusal, should it still come, asks nothing (fails closed).
+    const KEPT: usize = 4096;
+    /// Terminals with a refusal not read yet; more is not a console a user types into.
+    const REFUSED: usize = 64;
+
+    fn sent(&mut self, request: u64, node: &str, terminal_id: &str) {
+        self.track(request, node, terminal_id, true);
+    }
+
+    fn track(&mut self, request: u64, node: &str, terminal_id: &str, typed: bool) {
+        if self.sent.len() >= Self::KEPT {
+            self.sent.pop_front();
+        }
+        self.sent
+            .push_back((request, node.to_string(), terminal_id.to_string(), typed));
+    }
+
+    /// A frame nobody waits for: when it is a command answer, the typing it answers is forgotten and a refusal for a missing grant
+    /// kept. Every reader of the link calls this, so no refusal is lost to whichever reader got it. Returns whether it was one.
+    fn answer(&mut self, f: &Frame) -> bool {
+        if (f.stream_id, f.kind) != (STREAM_COMMANDS, 1) {
+            return false;
+        }
+        if let Ok(r) = CommandResponse::decode(f.payload.as_slice()) {
+            self.reply(&r);
+        }
+        true
+    }
+
+    fn reply(&mut self, r: &CommandResponse) {
+        let Some(n) = r
+            .request_id
+            .strip_prefix('t')
+            .and_then(|n| n.parse::<u64>().ok())
+        else {
+            return;
+        };
+        let Some((request, node, terminal_id, typed)) = self
+            .sent
+            .iter()
+            .position(|(id, ..)| *id == n)
+            .and_then(|i| self.sent.remove(i))
+        else {
+            return;
+        };
+        if typed && matches!(r.result, Some(command_response::Result::Ok(_)) | None) {
+            let newer = self
+                .taken
+                .iter()
+                .any(|(n, t, req)| *n == node && *t == terminal_id && *req > request);
+            if !newer {
+                self.taken
+                    .retain(|(n, t, _)| !(*n == node && *t == terminal_id));
+                if self.taken.len() >= Self::REFUSED {
+                    self.taken.remove(0);
+                }
+                self.taken.push((node, terminal_id, request));
+            }
+            return;
+        }
+        if typed && refused_for_grant(r) {
+            // Answers may come out of order: a terminal keeps its newest typing's refusal, by request number.
+            if self
+                .refused
+                .iter()
+                .any(|old| old.is_for(&node, &terminal_id) && old.request > request)
+            {
+                return;
+            }
+            self.refused.retain(|old| !old.is_for(&node, &terminal_id));
+            if self.refused.len() >= Self::REFUSED {
+                self.refused.remove(0);
+            }
+            self.refused.push(Refused {
+                node,
+                terminal_id,
+                request,
+            });
+        }
+    }
 }
 
 /// An agent a machine offers (`agent.kinds`).
@@ -211,7 +324,7 @@ impl Session {
             changed: false,
             asked: false,
             snapshot: None,
-            grant_wanted: false,
+            typing: Typing::default(),
         })
     }
 
@@ -228,9 +341,12 @@ impl Session {
         let conn = &mut self.conn;
         let queue = &mut self.term_frames;
         let asked = &mut self.asked;
+        let typing = &mut self.typing;
         self.rt.block_on(async {
             match tokio::time::timeout(wait, conn.recv()).await {
                 Err(_) => Update::Quiet,
+                // The answer to something typed without waiting: only a missing grant matters.
+                Ok(Ok(Some(f))) if typing.answer(&f) => Update::Quiet,
                 // A terminal being watched alongside: kept for `terminal_next`, never dropped here.
                 Ok(Ok(Some(f))) if f.stream_id >= agora_protocol::frame::FIRST_DYNAMIC_STREAM => {
                     queue.push_back(f);
@@ -328,7 +444,7 @@ impl Session {
         let changed = &mut self.changed;
         let kept = &mut self.snapshot;
         let term_frames = &mut self.term_frames;
-        let grant_wanted = &mut self.grant_wanted;
+        let typing = &mut self.typing;
         let asked = &mut self.asked;
         self.rt.block_on(async {
             conn.send(&Frame {
@@ -352,9 +468,7 @@ impl Session {
                         continue;
                     };
                     if r.request_id != id {
-                        if refused_for_grant(&r) {
-                            *grant_wanted = true;
-                        }
+                        typing.reply(&r);
                         continue;
                     }
                     return match r.result {
@@ -456,6 +570,7 @@ impl Session {
         let kept = &mut self.snapshot;
         let term_frames = &mut self.term_frames;
         let asked = &mut self.asked;
+        let typing = &mut self.typing;
         self.rt.block_on(async {
             conn.send(&Frame {
                 stream_id: stream,
@@ -483,6 +598,7 @@ impl Session {
                             _ => Ok(stream),
                         };
                     }
+                    typing.reply(&r);
                 } else {
                     set_aside(f, changed, asked, kept, term_frames);
                 }
@@ -498,6 +614,7 @@ impl Session {
             }
             let p = &f.payload;
             match f.kind {
+                KIND_BEHIND => Some(TermEvent::Behind),
                 0 => Some(TermEvent::Data(p.clone())),
                 1 => Some(TermEvent::Screen(p.clone())),
                 2 if p.len() == 4 => Some(TermEvent::Resized(
@@ -519,21 +636,15 @@ impl Session {
         let changed = &mut self.changed;
         let kept = &mut self.snapshot;
         let queue = &mut self.term_frames;
-        let grant_wanted = &mut self.grant_wanted;
+        let typing = &mut self.typing;
         let asked = &mut self.asked;
         self.rt.block_on(async {
             match tokio::time::timeout(wait, conn.recv()).await {
                 Err(_) => TermEvent::Quiet,
                 Ok(Ok(Some(f))) if f.stream_id == stream => event(&f).unwrap_or(TermEvent::Quiet),
                 Ok(Ok(Some(f))) => {
-                    if (f.stream_id, f.kind) == (STREAM_COMMANDS, 1) {
-                        // The answer to something typed without waiting: only a missing grant matters.
-                        if CommandResponse::decode(f.payload.as_slice())
-                            .is_ok_and(|r| refused_for_grant(&r))
-                        {
-                            *grant_wanted = true;
-                        }
-                    } else {
+                    // The answer to something typed without waiting: only a missing grant matters.
+                    if !typing.answer(&f) {
                         set_aside(f, changed, asked, kept, queue);
                     }
                     TermEvent::Quiet
@@ -570,12 +681,15 @@ impl Session {
         let kept = &mut self.snapshot;
         let queue = &mut self.term_frames;
         let asked = &mut self.asked;
+        let typing = &mut self.typing;
         self.rt.block_on(async {
             match tokio::time::timeout(wait, conn.recv()).await {
                 Err(_) => ChatEvent::Quiet,
                 Ok(Ok(Some(f))) if f.stream_id == stream => take(&f).unwrap_or(ChatEvent::Quiet),
                 Ok(Ok(Some(f))) => {
-                    set_aside(f, changed, asked, kept, queue);
+                    if !typing.answer(&f) {
+                        set_aside(f, changed, asked, kept, queue);
+                    }
                     ChatEvent::Quiet
                 }
                 Ok(_) => ChatEvent::Lost,
@@ -1025,18 +1139,48 @@ impl Session {
 
     /// Keys typed into the terminal (an ordinary routed command; the machine runs them in the order sent). Fire and forget.
     pub fn terminal_input(&mut self, node: &str, terminal_id: &str, data: &[u8]) {
-        self.send_nowait(
+        let request = self.send_nowait(
             node,
             command_request::Command::TerminalInput(agora_protocol::v1::TerminalInput {
                 terminal_id: terminal_id.to_string(),
                 data: data.to_vec(),
             }),
         );
+        self.typing.sent(request, node, terminal_id);
     }
 
-    /// Was something typed refused because the machine wants a grant first (ADR-0041)? Reading it clears it.
-    pub fn take_grant_wanted(&mut self) -> bool {
-        std::mem::take(&mut self.grant_wanted)
+    /// What the console sends to a terminal by itself, not typed by the user (a focus report, pointer motion): sent like typing, but
+    /// a machine's refusal of it asks for no grant.
+    pub fn terminal_report(&mut self, node: &str, terminal_id: &str, data: &[u8]) {
+        let request = self.send_nowait(
+            node,
+            command_request::Command::TerminalInput(agora_protocol::v1::TerminalInput {
+                terminal_id: terminal_id.to_string(),
+                data: data.to_vec(),
+            }),
+        );
+        self.typing.track(request, node, terminal_id, false);
+    }
+
+    /// The typing machines refused because they want a grant first (ADR-0041) since the last call: the newest per terminal, oldest
+    /// first. Reading it clears it.
+    pub fn take_grant_wanted(&mut self) -> Vec<Refused> {
+        std::mem::take(&mut self.typing.refused)
+    }
+
+    /// The typing machines took since the last call, the newest per terminal: (node, terminal, request). Reading it clears it.
+    pub fn take_typing_taken(&mut self) -> Vec<(String, String, u64)> {
+        std::mem::take(&mut self.typing.taken)
+    }
+
+    /// The number of the last request sent: a [`Refused`] with a number up to it was typed before now.
+    pub fn last_request(&self) -> u64 {
+        self.requests
+    }
+
+    /// How much typing still waits for its answer (a caller that must know every refusal has been read waits for 0).
+    pub fn typing_unanswered(&self) -> usize {
+        self.typing.sent.len()
     }
 
     pub fn terminal_resize(&mut self, node: &str, terminal_id: &str, cols: u16, rows: u16) {
@@ -1062,7 +1206,7 @@ impl Session {
         self.term_frames.retain(|f| f.stream_id != stream);
     }
 
-    fn send_nowait(&mut self, node: &str, command: command_request::Command) {
+    fn send_nowait(&mut self, node: &str, command: command_request::Command) -> u64 {
         self.requests += 1;
         let req = CommandRequest {
             request_id: format!("t{}", self.requests),
@@ -1077,6 +1221,7 @@ impl Session {
             seq: None,
             payload: req.encode_to_vec(),
         }));
+        self.requests
     }
 }
 
@@ -1138,6 +1283,8 @@ pub enum TermEvent {
     /// A repaint of the whole screen (first, and after the viewer fell behind).
     Screen(Vec<u8>),
     Resized(u16, u16),
+    /// Output was dropped because nobody read it for long: watch the terminal again to get its screen.
+    Behind,
     /// The program ended with this status (negative: a signal).
     Exit(i32),
     /// The hub ended the relay.
@@ -1239,8 +1386,46 @@ fn set_aside(
     } else if f.stream_id == STREAM_EVENTS && is_pair_frame(&f) {
         keep_pair_frame(f, queue);
     } else if f.stream_id >= agora_protocol::frame::FIRST_DYNAMIC_STREAM {
-        queue.push_back(f);
+        queue_stream_frame(queue, f);
     }
+}
+
+/// Most bytes of one stream's frames kept for a reader that is busy elsewhere (ADR-0022: a slow reader never makes memory grow).
+const MAX_QUEUED_STREAM_BYTES: usize = 2 * 1024 * 1024;
+/// The queue is only measured once it is this long, so the usual push stays cheap.
+const MEASURE_QUEUE_AT: usize = 128;
+/// A frame the client makes itself: frames of this stream were dropped, the reader must watch it again (a fresh repaint).
+const KIND_BEHIND: u8 = 200;
+
+/// Queues a terminal or chat frame for its reader. Past [`MAX_QUEUED_STREAM_BYTES`] for its stream, that stream's queued frames are
+/// dropped and a [`KIND_BEHIND`] marker stands in for them (and for what comes after, until the reader takes it).
+fn queue_stream_frame(queue: &mut std::collections::VecDeque<Frame>, f: Frame) {
+    if queue.len() >= MEASURE_QUEUE_AT {
+        let id = f.stream_id;
+        if queue
+            .iter()
+            .any(|q| q.stream_id == id && q.kind == KIND_BEHIND)
+        {
+            return;
+        }
+        let bytes: usize = queue
+            .iter()
+            .filter(|q| q.stream_id == id)
+            .map(|q| q.payload.len())
+            .sum::<usize>()
+            + f.payload.len();
+        if bytes > MAX_QUEUED_STREAM_BYTES {
+            queue.retain(|q| q.stream_id != id);
+            queue.push_back(Frame {
+                stream_id: id,
+                kind: KIND_BEHIND,
+                seq: None,
+                payload: Vec::new(),
+            });
+            return;
+        }
+    }
+    queue.push_back(f);
 }
 
 /// ADR-0065: the hub's pairing notices to an owner's window (`PAIR_REQUESTED`, `PAIR_DECIDED`).
@@ -1260,6 +1445,135 @@ fn keep_pair_frame(f: Frame, queue: &mut std::collections::VecDeque<Frame>) {
         if let Some(pos) = queue.iter().position(is_pair_frame) {
             queue.remove(pos);
         }
+    }
+}
+
+#[cfg(test)]
+mod queue_tests {
+    use super::*;
+
+    fn frame(stream_id: u32, bytes: usize) -> Frame {
+        Frame {
+            stream_id,
+            kind: 0,
+            seq: None,
+            payload: vec![0; bytes],
+        }
+    }
+
+    /// A reader busy elsewhere does not make a stream's queue grow past its bound: the frames go, a marker says the reader is behind,
+    /// and another stream's frames are untouched.
+    #[test]
+    fn a_stream_nobody_reads_is_bounded_and_marked() {
+        let first = agora_protocol::frame::FIRST_DYNAMIC_STREAM;
+        let mut queue = std::collections::VecDeque::new();
+        queue.push_back(frame(first + 1, 10));
+        for _ in 0..(MAX_QUEUED_STREAM_BYTES / 4096 + 2 * MEASURE_QUEUE_AT) {
+            queue_stream_frame(&mut queue, frame(first, 4096));
+        }
+        let bytes: usize = queue
+            .iter()
+            .filter(|f| f.stream_id == first)
+            .map(|f| f.payload.len())
+            .sum();
+        assert!(bytes <= MAX_QUEUED_STREAM_BYTES);
+        assert_eq!(
+            queue
+                .iter()
+                .filter(|f| f.stream_id == first && f.kind == KIND_BEHIND)
+                .count(),
+            1
+        );
+        assert_eq!(queue.iter().filter(|f| f.stream_id == first + 1).count(), 1);
+    }
+}
+
+#[cfg(test)]
+mod typing_tests {
+    use super::*;
+
+    fn answer(n: u64, code: Option<&str>) -> CommandResponse {
+        CommandResponse {
+            request_id: format!("t{n}"),
+            result: code.map(|c| {
+                command_response::Result::Err(ErrorInfo {
+                    code: c.into(),
+                    ..Default::default()
+                })
+            }),
+        }
+    }
+    const GRANT: Option<&str> = Some("approval.grant_required");
+
+    /// Codex review of #796: two terminals' refusals before the console looks are both kept; a terminal keeps only its newest.
+    #[test]
+    fn each_terminal_keeps_its_newest_refusal() {
+        let mut t = Typing::default();
+        t.sent(1, "laptop", "t-b");
+        t.sent(2, "laptop", "t-a");
+        t.sent(3, "laptop", "t-a");
+        t.sent(4, "mac", "t-a");
+        t.reply(&answer(1, GRANT));
+        t.reply(&answer(2, GRANT));
+        t.reply(&answer(3, GRANT));
+        t.reply(&answer(4, Some("node.offline")));
+        let kept: Vec<_> = t
+            .refused
+            .iter()
+            .map(|r| (r.node.as_str(), r.terminal_id.as_str(), r.request))
+            .collect();
+        assert_eq!(kept, [("laptop", "t-b", 1), ("laptop", "t-a", 3)]);
+        assert!(t.sent.is_empty(), "every answer read forgets its typing");
+        // An answer to nothing typed (another reader's, or forgotten) asks nothing.
+        t.reply(&answer(9, GRANT));
+        assert_eq!(t.refused.len(), 2);
+        // Codex review of #796: a focus report or pointer motion the console sent by itself is answered, and its refusal asks nothing.
+        let mut t = Typing::default();
+        t.track(7, "laptop", "t-a", false);
+        t.reply(&answer(7, GRANT));
+        assert!(t.refused.is_empty() && t.sent.is_empty());
+        // Typing a machine took is told too, the newest per terminal (the console's notice goes after the next accepted key).
+        let mut t = Typing::default();
+        t.sent(10, "laptop", "t-a");
+        t.sent(11, "laptop", "t-a");
+        t.track(12, "laptop", "t-a", false);
+        t.reply(&answer(11, None));
+        t.reply(&answer(10, None));
+        t.reply(&answer(12, None));
+        assert_eq!(t.taken, [("laptop".to_string(), "t-a".to_string(), 11)]);
+        assert!(t.refused.is_empty());
+        // Answers out of order: the older typing's refusal, read last, does not replace the newer one.
+        let mut t = Typing::default();
+        t.sent(5, "laptop", "t-a");
+        t.sent(6, "laptop", "t-a");
+        t.reply(&answer(6, GRANT));
+        t.reply(&answer(5, GRANT));
+        assert_eq!(t.refused.len(), 1);
+        assert_eq!(t.refused[0].request, 6);
+    }
+
+    /// Codex review of #796: a long paste without markers is one request per key; the first key's refusal still names its terminal,
+    /// and past the hard cap the forgotten one fails closed (no refusal, so no question).
+    #[test]
+    fn a_long_paste_keeps_its_first_keys_terminal_and_the_cap_fails_closed() {
+        let mut t = Typing::default();
+        for n in 1..=300 {
+            t.sent(n, "laptop", "t-a");
+        }
+        t.reply(&answer(1, GRANT));
+        assert!(t
+            .refused
+            .iter()
+            .any(|r| r.is_for("laptop", "t-a") && r.request == 1));
+        let mut t = Typing::default();
+        for n in 1..=(Typing::KEPT as u64 + 1) {
+            t.sent(n, "laptop", "t-a");
+        }
+        assert_eq!(t.sent.len(), Typing::KEPT);
+        t.reply(&answer(1, GRANT));
+        assert!(t.refused.is_empty());
+        t.reply(&answer(2, GRANT));
+        assert_eq!(t.refused.len(), 1);
     }
 }
 
@@ -1439,7 +1753,16 @@ pub fn decision_message(
         return approval_message(node, local, approved);
     }
     let settings = start_settings(detail);
-    if settings.is_empty() {
+    // ADR-0059 decision 5: a start that lists launch options is decided only over `agora-approval-start-v3`, which names them.
+    let options: Vec<String> = start_option_rows(detail)
+        .into_iter()
+        .map(|(_, id, _)| id)
+        .collect();
+    if !options.is_empty() {
+        crate::device::start_message_v3(
+            node, local, approved, 0, false, &settings, &options, detail,
+        )
+    } else if settings.is_empty() {
         crate::device::start_message(node, local, approved, 0, false, detail)
     } else {
         crate::device::start_message_v2(node, local, approved, 0, false, &settings, detail)
@@ -1468,6 +1791,35 @@ pub(crate) fn start_setting_rows(detail: &str) -> Vec<(String, String, String)> 
         .collect()
 }
 
+/// ADR-0059 decision 5: the launch options an `agent.start` detail lists as `(label, id, skips_permissions)`, read as the node reads them
+/// (strings only; anything else is empty, and only `true` skips). The card shows exactly these and the v3 message signs their ids.
+pub(crate) fn start_option_rows(detail: &str) -> Vec<(String, String, bool)> {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(detail) else {
+        return Vec::new();
+    };
+    let Some(list) = v
+        .get("launch_options")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return Vec::new();
+    };
+    list.iter()
+        .map(|x| {
+            let get = |k: &str| {
+                x.get(k)
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_string()
+            };
+            let skips = x
+                .get("skips_permissions")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true);
+            (get("label"), get("id"), skips)
+        })
+        .collect()
+}
+
 /// The `(id, value)` pairs of [`start_setting_rows`]: what the v2 message signs.
 fn start_settings(detail: &str) -> Vec<(String, String)> {
     start_setting_rows(detail)
@@ -1480,7 +1832,7 @@ fn start_settings(detail: &str) -> Vec<(String, String)> {
 #[allow(clippy::unwrap_used)]
 mod decision_tests {
     use super::decision_message;
-    use crate::device::{approval_message, start_message, start_message_v2};
+    use crate::device::{approval_message, start_message, start_message_v2, start_message_v3};
 
     const PLAIN: &str = r#"{"kind":"codex","folder":"/w","prompt":"x","settings":[]}"#;
     const WITH: &str = r#"{"kind":"codex","folder":"/w","prompt":"x","settings":[{"id":"model","label":"setting-model","value":"gpt-6.1-sol"},{"id":"effort","label":"setting-effort","value":"high"}]}"#;
@@ -1554,6 +1906,77 @@ mod decision_tests {
             );
             assert_eq!(hex(&whole), c["hex"].as_str().unwrap(), "{}", c["name"]);
             // This terminal signs no grant and no nested permission: only the cases without either apply to it.
+            if c["helper_grant"].as_u64() != Some(0)
+                || c["helpers_may_start"].as_bool() != Some(false)
+            {
+                continue;
+            }
+            let m = decision_message(
+                c["node"].as_str().unwrap(),
+                c["approval_id"].as_str().unwrap(),
+                "agent.start",
+                c["detail"].as_str().unwrap(),
+                c["approved"].as_bool().unwrap(),
+            );
+            assert_eq!(hex(&m), c["hex"].as_str().unwrap(), "{}", c["name"]);
+        }
+    }
+    /// ADR-0059 decision 5: a start that lists launch options is only ever answered over v3, which names them (allow or deny).
+    #[test]
+    fn a_start_with_launch_options_is_only_ever_signed_over_v3() {
+        const OPTS: &str = r#"{"kind":"codex","prompt":"x","settings":[{"id":"effort","label":"setting-effort","value":"high"}],"launch_options":[{"id":"skip-permissions","label":"option-skip-permissions","skips_permissions":true}]}"#;
+        let settings = vec![("effort".to_string(), "high".to_string())];
+        let options = vec!["skip-permissions".to_string()];
+        for approved in [true, false] {
+            let m = decision_message("laptop", "7", "agent.start", OPTS, approved);
+            assert_eq!(
+                m,
+                start_message_v3("laptop", "7", approved, 0, false, &settings, &options, OPTS)
+            );
+            assert!(m.starts_with(b"agora-approval-start-v3\0"));
+            assert_ne!(
+                m,
+                start_message_v2("laptop", "7", approved, 0, false, &settings, OPTS)
+            );
+        }
+    }
+
+    /// The shared v3 vectors (`schema/fixtures/signing/approval-start-v3.json`, also checked by the node and the web window).
+    #[test]
+    fn the_shared_start_v3_vectors_are_what_this_terminal_signs() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../schema/fixtures/signing/approval-start-v3.json");
+        let v: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let hex = |m: &[u8]| -> String { m.iter().map(|b| format!("{b:02x}")).collect() };
+        for c in v["cases"].as_array().unwrap() {
+            let settings: Vec<(String, String)> = c["settings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|p| {
+                    (
+                        p[0].as_str().unwrap().to_string(),
+                        p[1].as_str().unwrap().to_string(),
+                    )
+                })
+                .collect();
+            let options: Vec<String> = c["options"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|o| o.as_str().unwrap().to_string())
+                .collect();
+            let whole = start_message_v3(
+                c["node"].as_str().unwrap(),
+                c["approval_id"].as_str().unwrap(),
+                c["approved"].as_bool().unwrap(),
+                u32::try_from(c["helper_grant"].as_u64().unwrap()).unwrap(),
+                c["helpers_may_start"].as_bool().unwrap(),
+                &settings,
+                &options,
+                c["detail"].as_str().unwrap(),
+            );
+            assert_eq!(hex(&whole), c["hex"].as_str().unwrap(), "{}", c["name"]);
             if c["helper_grant"].as_u64() != Some(0)
                 || c["helpers_may_start"].as_bool() != Some(false)
             {

@@ -6,6 +6,7 @@
 //! behind output processing and a flooding terminal only ever delays its own rendering. Terminal bytes never
 //! go through the event store (AGENTS.md).
 
+use std::fmt::Write as _;
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, SyncSender, TrySendError};
@@ -14,7 +15,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use agora_platform::{ExitStatus, Pty, PtyControl};
-use agora_vt::{AlacrittyTerminal, Cursor, Modes, Size, Terminal};
+use agora_vt::{AlacrittyTerminal, Cursor, Modes, Size, Style, Terminal};
 
 /// Settings for a terminal actor.
 #[derive(Debug, Clone, Copy)]
@@ -128,6 +129,7 @@ struct Shared {
     seq: u64,
     exit: Option<ExitStatus>,
     subscribers: Vec<Subscriber>,
+    waiters: usize,
 }
 
 /// Deliver to every subscriber without ever blocking the actor: a full queue marks that subscriber as
@@ -154,6 +156,15 @@ impl Inner {
         // A poisoned lock only means another thread panicked; the screen data is still usable.
         self.shared.lock().unwrap_or_else(|e| e.into_inner())
     }
+
+    fn advance(&self, mut shared: MutexGuard<'_, Shared>) {
+        shared.seq += 1;
+        let has_waiters = shared.waiters != 0;
+        drop(shared);
+        if has_waiters {
+            self.changed.notify_all();
+        }
+    }
 }
 
 fn snapshot_of(s: &Shared) -> Snapshot {
@@ -170,53 +181,90 @@ fn snapshot_of(s: &Shared) -> Snapshot {
     }
 }
 
-/// [`snapshot_of`] with the repaint a subscribing client is sent: every row positioned absolutely with the program's colours and
-/// attributes (so the client's own state does not matter), then the program's cursor, input modes and current style.
-fn subscribed_snapshot(s: &Shared) -> Snapshot {
-    let mut snap = snapshot_of(s);
-    let size = s.term.size();
-    let mut out = String::from("\x1b[0m\x1b[2J");
-    for row in 0..size.rows {
-        out.push_str(&format!("\x1b[{};1H", row + 1));
-        let mut current = agora_vt::Style::default();
-        for col in 0..size.cols {
-            let Some(cell) = s.term.cell(row, col) else {
-                break;
-            };
-            if cell.spacer {
-                continue;
-            }
-            if cell.style != current {
-                out.push_str(&cell.style.sgr());
-                current = cell.style;
-            }
-            out.push(cell.ch);
+struct PaintRow {
+    text: String,
+    /// Style changes at byte offsets in `text`.
+    styles: Vec<(usize, Style)>,
+}
+
+/// The subscriber's screen, captured at registration. Formatting the ANSI repaint only uses this owned data.
+struct Repaint {
+    snapshot: Snapshot,
+    rows: Vec<PaintRow>,
+    pen: Style,
+}
+
+impl Repaint {
+    fn capture(s: &Shared) -> Self {
+        let snapshot = snapshot_of(s);
+        let size = snapshot.size;
+        let rows = (0..size.rows)
+            .map(|row| {
+                let mut paint = PaintRow {
+                    text: String::with_capacity(usize::from(size.cols)),
+                    styles: Vec::new(),
+                };
+                let mut current = Style::default();
+                for col in 0..size.cols {
+                    let Some(cell) = s.term.cell(row, col) else {
+                        break;
+                    };
+                    if cell.spacer {
+                        continue;
+                    }
+                    if cell.style != current {
+                        paint.styles.push((paint.text.len(), cell.style));
+                        current = cell.style;
+                    }
+                    paint.text.push(cell.ch);
+                }
+                paint
+            })
+            .collect();
+        Self {
+            snapshot,
+            rows,
+            pen: s.term.pen(),
         }
-        out.push_str("\x1b[0m\x1b[K");
     }
-    let c = snap.cursor;
-    out.push_str(&format!(
-        "\x1b[{};{}H{}",
-        c.row + 1,
-        c.col + 1,
-        if c.visible { "\x1b[?25h" } else { "\x1b[?25l" }
-    ));
-    // What the program set before the client joined and the live output after this repaint relies on: the input modes the
-    // client's keys and pastes depend on, then the style the next character is drawn in.
-    let m = snap.modes;
-    out.push_str(if m.bracketed_paste {
-        "\x1b[?2004h"
-    } else {
-        "\x1b[?2004l"
-    });
-    out.push_str(if m.application_cursor {
-        "\x1b[?1h"
-    } else {
-        "\x1b[?1l"
-    });
-    out.push_str(&s.term.pen().sgr());
-    snap.repaint = Some(out.into_bytes());
-    snap
+
+    fn into_snapshot(mut self) -> Snapshot {
+        let mut out = String::from("\x1b[0m\x1b[2J");
+        for (row, paint) in self.rows.into_iter().enumerate() {
+            let _ = write!(out, "\x1b[{};1H", row + 1);
+            let mut start = 0;
+            for (offset, style) in paint.styles {
+                out.push_str(&paint.text[start..offset]);
+                style.append_sgr(&mut out);
+                start = offset;
+            }
+            out.push_str(&paint.text[start..]);
+            out.push_str("\x1b[0m\x1b[K");
+        }
+        let c = self.snapshot.cursor;
+        let _ = write!(
+            out,
+            "\x1b[{};{}H{}",
+            c.row + 1,
+            c.col + 1,
+            if c.visible { "\x1b[?25h" } else { "\x1b[?25l" }
+        );
+        // Live output continues from the captured cursor, input modes and pen.
+        let m = self.snapshot.modes;
+        out.push_str(if m.bracketed_paste {
+            "\x1b[?2004h"
+        } else {
+            "\x1b[?2004l"
+        });
+        out.push_str(if m.application_cursor {
+            "\x1b[?1h"
+        } else {
+            "\x1b[?1l"
+        });
+        self.pen.append_sgr(&mut out);
+        self.snapshot.repaint = Some(out.into_bytes());
+        self.snapshot
+    }
 }
 
 /// Handle to a running terminal actor. Dropping it kills the process and stops the actor.
@@ -254,6 +302,7 @@ impl TerminalHandle {
                 seq: 0,
                 exit: None,
                 subscribers: Vec::new(),
+                waiters: 0,
             }),
             changed: Condvar::new(),
         });
@@ -327,9 +376,7 @@ impl TerminalHandle {
         control.resize(size.cols, size.rows)?;
         g.term.resize(size);
         broadcast(&mut g, &Output::Resize(size));
-        g.seq += 1;
-        drop(g);
-        self.inner.changed.notify_all();
+        self.inner.advance(g);
         Ok(())
     }
 
@@ -350,22 +397,28 @@ impl TerminalHandle {
     pub fn subscribe(&self) -> (Snapshot, OutputSubscription) {
         let (tx, rx) = sync_channel(SUBSCRIBER_QUEUE);
         let lagged = Arc::new(AtomicBool::new(false));
-        let mut g = self.inner.lock();
-        let snap = subscribed_snapshot(&g);
-        g.subscribers.push(Subscriber {
-            tx,
-            lagged: Arc::clone(&lagged),
-        });
-        (snap, OutputSubscription { rx, lagged })
+        let repaint = {
+            let mut g = self.inner.lock();
+            let repaint = Repaint::capture(&g);
+            g.subscribers.push(Subscriber {
+                tx,
+                lagged: Arc::clone(&lagged),
+            });
+            repaint
+        };
+        (repaint.into_snapshot(), OutputSubscription { rx, lagged })
     }
 
     /// After [`Output::Lagged`]: discard what is queued, clear the lag, and return a fresh snapshot that
     /// the following items continue from.
     pub fn resync(&self, sub: &OutputSubscription) -> Snapshot {
-        let g = self.inner.lock();
-        while sub.rx.try_recv().is_ok() {}
-        sub.lagged.store(false, Ordering::Release);
-        subscribed_snapshot(&g)
+        let repaint = {
+            let g = self.inner.lock();
+            while sub.rx.try_recv().is_ok() {}
+            sub.lagged.store(false, Ordering::Release);
+            Repaint::capture(&g)
+        };
+        repaint.into_snapshot()
     }
 
     /// How the process ended, once it has. Cheap: no screen is copied (the supervisor polls this).
@@ -382,17 +435,21 @@ impl TerminalHandle {
     pub fn wait_change(&self, after: u64, timeout: Duration) -> Snapshot {
         let deadline = Instant::now() + timeout;
         let mut guard = self.inner.lock();
-        while guard.seq <= after {
-            let left = deadline.saturating_duration_since(Instant::now());
-            if left.is_zero() {
-                break;
+        if guard.seq <= after {
+            guard.waiters += 1;
+            while guard.seq <= after {
+                let left = deadline.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    break;
+                }
+                guard = self
+                    .inner
+                    .changed
+                    .wait_timeout(guard, left)
+                    .map(|(g, _)| g)
+                    .unwrap_or_else(|e| e.into_inner().0);
             }
-            guard = self
-                .inner
-                .changed
-                .wait_timeout(guard, left)
-                .map(|(g, _)| g)
-                .unwrap_or_else(|e| e.into_inner().0);
+            guard.waiters -= 1;
         }
         snapshot_of(&guard)
     }
@@ -414,9 +471,7 @@ impl Drop for TerminalHandle {
 fn bump(inner: &Inner, f: impl FnOnce(&mut Shared)) {
     let mut g = inner.lock();
     f(&mut g);
-    g.seq += 1;
-    drop(g);
-    inner.changed.notify_all();
+    inner.advance(g);
 }
 
 /// How often an idle actor checks that the child still exists. Normally the output channel closing ends the
@@ -449,4 +504,77 @@ fn run(mut pty: Box<dyn Pty>, inner: &Inner) {
             broadcast(s, &Output::Exited(st));
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn inner(term: AlacrittyTerminal) -> Arc<Inner> {
+        Arc::new(Inner {
+            shared: Mutex::new(Shared {
+                term: Box::new(term),
+                seq: 0,
+                exit: None,
+                subscribers: Vec::new(),
+                waiters: 0,
+            }),
+            changed: Condvar::new(),
+        })
+    }
+
+    #[test]
+    fn a_repaint_uses_the_capture_after_the_live_screen_changes() {
+        let size = Size { cols: 16, rows: 4 };
+        let mut live = AlacrittyTerminal::new(size);
+        live.feed("\x1b[?2004h\x1b[?1h\x1b[31m界\x1b[32mX".as_bytes());
+        let pen = live.pen();
+        let original = inner(live);
+        let captured = Repaint::capture(&original.lock());
+
+        bump(&original, |s| {
+            s.term.feed(b"\x1b[0m\x1b[2J\x1b[?2004l\x1b[?1l")
+        });
+        let snap = captured.into_snapshot();
+        let mut mirror = AlacrittyTerminal::new(size);
+        mirror.feed(&snap.to_ansi());
+        assert_eq!(mirror.line(0), snap.lines[0]);
+        assert_eq!(mirror.line(0), "界X");
+        assert_eq!(mirror.pen(), pen);
+        assert_eq!(mirror.cursor(), snap.cursor);
+        assert_eq!(mirror.modes(), snap.modes);
+        assert_ne!(mirror.modes(), original.lock().term.modes());
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn an_update_wakes_every_registered_snapshot_waiter() {
+        let handle = TerminalHandle {
+            inner: inner(AlacrittyTerminal::new(Size { cols: 16, rows: 4 })),
+            control: None,
+            pid: 0,
+            thread: None,
+            held: false,
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            for _ in 0..2 {
+                let (tx, handle) = (tx.clone(), &handle);
+                scope.spawn(move || {
+                    tx.send(handle.wait_change(0, Duration::from_secs(10)).seq)
+                        .unwrap();
+                });
+            }
+            let until = Instant::now() + Duration::from_secs(3);
+            while handle.inner.lock().waiters < 2 {
+                assert!(Instant::now() < until);
+                std::thread::yield_now();
+            }
+            bump(&handle.inner, |_| {});
+            for _ in 0..2 {
+                assert_eq!(rx.recv_timeout(Duration::from_secs(3)).unwrap(), 1);
+            }
+        });
+        assert_eq!(handle.inner.lock().waiters, 0);
+    }
 }

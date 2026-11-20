@@ -4,9 +4,25 @@ name: desktop
 on:
   push:
     branches: [main]
-    paths: ["apps/desktop/**", "crates/agora-desktop-tunnel/**", ".github/workflows/desktop.yml"]
+    paths:
+      - "apps/desktop/**"
+      - "crates/agora-desktop-tunnel/**"
+      - "crates/agora-i18n/**"
+      - "crates/agora-platform/**"
+      - "locales/**"
+      - "Cargo.toml"
+      - "rust-toolchain.toml"
+      - ".github/workflows/desktop.yml"
   pull_request:
-    paths: ["apps/desktop/**", "crates/agora-desktop-tunnel/**", ".github/workflows/desktop.yml"]
+    paths:
+      - "apps/desktop/**"
+      - "crates/agora-desktop-tunnel/**"
+      - "crates/agora-i18n/**"
+      - "crates/agora-platform/**"
+      - "locales/**"
+      - "Cargo.toml"
+      - "rust-toolchain.toml"
+      - ".github/workflows/desktop.yml"
   workflow_dispatch:
 
 env:
@@ -38,6 +54,7 @@ jobs:
           workspaces: apps/desktop/src-tauri
       - run: cargo fmt -- --check
       - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test --locked
 
   deny:
     runs-on: ubuntu-latest

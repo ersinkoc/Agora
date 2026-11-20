@@ -11,8 +11,9 @@
 //! - Facts only the hub can know (a node's connection dropped) are recorded as events from producer `hub`, in the
 //!   same log, so every client learns them the same way and a rebuilt view agrees with the live one.
 
+use std::ops::Deref;
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use agora_protocol::v1::event::Body;
 use agora_protocol::v1::{Event, NodeLink, NodeLinkReason, NodeOffline};
@@ -68,7 +69,9 @@ pub struct Hub {
     /// ADR-0065: pairing sessions, in memory only.
     pairing: crate::pairing_net::Shared,
     prices: std::sync::RwLock<(std::sync::Arc<crate::usage::Catalog>, u64)>,
-    store: SqliteStore,
+    store: Arc<SqliteStore>,
+    /// At most one node event job is scheduled on the blocking pool per hub.
+    pub(crate) event_writer: Arc<tokio::sync::Semaphore>,
     router: std::sync::Arc<crate::router::Router>,
     inner: Mutex<Inner>,
 }
@@ -158,7 +161,8 @@ impl Hub {
             boards: crate::board::Boards::new(),
             pairing: crate::pairing_net::Shared::new(),
             prices: std::sync::RwLock::new((crate::usage::Catalog::bundled(), 0)),
-            store,
+            store: Arc::new(store),
+            event_writer: Arc::new(tokio::sync::Semaphore::new(1)),
             router: crate::router::Router::new(),
             inner: Mutex::new(Inner {
                 view,
@@ -267,6 +271,10 @@ impl Hub {
         &self.store
     }
 
+    pub(crate) fn shared_store(&self) -> Arc<SqliteStore> {
+        Arc::clone(&self.store)
+    }
+
     fn lock(&self) -> MutexGuard<'_, Inner> {
         // A panic while holding the lock cannot leave the view half-applied (apply is the last step), so keep going.
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
@@ -331,7 +339,7 @@ impl Hub {
     /// Passes one payload from a node's session through the store, the view and the subscribers.
     pub fn ingest(
         &self,
-        session: &mut NodeSession<'_, SqliteStore>,
+        session: &mut NodeSession<impl Deref<Target = SqliteStore>>,
         payload: &[u8],
     ) -> Result<Ingest, SessionError> {
         let asked = std::time::Instant::now();
@@ -346,7 +354,7 @@ impl Hub {
     fn ingest_locked(
         &self,
         g: &mut MutexGuard<'_, Inner>,
-        session: &mut NodeSession<'_, SqliteStore>,
+        session: &mut NodeSession<impl Deref<Target = SqliteStore>>,
         payload: &[u8],
     ) -> Result<Ingest, SessionError> {
         let outcome = session.event(payload)?;
@@ -364,7 +372,7 @@ impl Hub {
                 let audit = spawn_audit(&g.view, &event);
                 Self::publish(g, Delivered { pos, event });
                 if let Some((who, action, node, outcome, at_ms)) = audit {
-                    let _ = crate::audit::Audit::new(&self.store)
+                    let _ = crate::audit::Audit::new(self.store())
                         .record(at_ms, &who, &action, &node, &outcome);
                 }
                 // A node announces itself only when its process starts (a resync re-states it only for a start the hub missed,
@@ -426,7 +434,7 @@ impl Hub {
             Some(_) => {}
         }
         if refuse_return {
-            crate::enroll::Enrollment::new(&self.store)
+            crate::enroll::Enrollment::new(self.store())
                 .revoke(node, now_ms)
                 .map_err(|_| Error::new(ErrorCode::Internal).with("incident_id", "node.forget"))?;
         }
@@ -915,7 +923,7 @@ mod tests {
         hub: &'a Hub,
         sup: &'a Support,
         node: &str,
-    ) -> NodeSession<'a, SqliteStore> {
+    ) -> NodeSession<&'a SqliteStore> {
         let mut s = NodeSession::new(hub.store(), node, sup);
         s.hello(&hello(), 0).unwrap();
         s.resume(&Resume::default()).unwrap();

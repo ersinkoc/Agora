@@ -1,0 +1,65 @@
+{
+ "about": "ADR-0059 decision 5 agora-approval-start-v3: the signed bytes of a decision on an agent.start approval whose detail carries launch_options. `detail` is the request exactly as announced (hashed byte for byte, SHA-256, lowercase hex); `settings` are its `settings` entries (id, value) and `options` its `launch_options` ids, in the order the detail lists them. Checked by the node (crates/agora-node/src/approvals.rs), the web window (apps/web/src/net/spawn.test.ts) and the terminal client (crates/agora-tui).",
+ "cases": [
+  {
+   "name": "approved, settings and an option",
+   "node": "laptop",
+   "approval_id": "ap-1",
+   "approved": true,
+   "helper_grant": 0,
+   "helpers_may_start": false,
+   "settings": [
+    [
+     "model",
+     "gpt-6.1-sol"
+    ],
+    [
+     "effort",
+     "high"
+    ]
+   ],
+   "options": [
+    "skip-permissions"
+   ],
+   "detail": "{\"node\":\"laptop\",\"agent\":\"agent-1\",\"agent_kind\":\"claude\",\"kind\":\"codex\",\"folder\":\"/home/dev/code/login-fix\",\"inside\":true,\"worktree\":false,\"depth\":1,\"grant_allowed\":false,\"prompt\":\"Write tests.\",\"settings\":[{\"id\":\"model\",\"label\":\"setting-model\",\"value\":\"gpt-6.1-sol\"},{\"id\":\"effort\",\"label\":\"setting-effort\",\"value\":\"high\"}],\"launch_options\":[{\"id\":\"skip-permissions\",\"label\":\"option-skip-permissions\",\"skips_permissions\":true}]}",
+   "hex": "61676f72612d617070726f76616c2d73746172742d7633006c6170746f700061702d3100310030003000323a353a6d6f64656c3a31313a6770742d362e312d736f6c3a363a6566666f72743a343a6869676800313a31363a736b69702d7065726d697373696f6e730031376162363931363532363566613634663736653331303831343937376664613138313436633234343465366135656236376134616230373138366664633131"
+  },
+  {
+   "name": "denied",
+   "node": "laptop",
+   "approval_id": "ap-1",
+   "approved": false,
+   "helper_grant": 0,
+   "helpers_may_start": false,
+   "settings": [
+    [
+     "model",
+     "gpt-6.1-sol"
+    ],
+    [
+     "effort",
+     "high"
+    ]
+   ],
+   "options": [
+    "skip-permissions"
+   ],
+   "detail": "{\"node\":\"laptop\",\"agent\":\"agent-1\",\"agent_kind\":\"claude\",\"kind\":\"codex\",\"folder\":\"/home/dev/code/login-fix\",\"inside\":true,\"worktree\":false,\"depth\":1,\"grant_allowed\":false,\"prompt\":\"Write tests.\",\"settings\":[{\"id\":\"model\",\"label\":\"setting-model\",\"value\":\"gpt-6.1-sol\"},{\"id\":\"effort\",\"label\":\"setting-effort\",\"value\":\"high\"}],\"launch_options\":[{\"id\":\"skip-permissions\",\"label\":\"option-skip-permissions\",\"skips_permissions\":true}]}",
+   "hex": "61676f72612d617070726f76616c2d73746172742d7633006c6170746f700061702d3100300030003000323a353a6d6f64656c3a31313a6770742d362e312d736f6c3a363a6566666f72743a343a6869676800313a31363a736b69702d7065726d697373696f6e730031376162363931363532363566613634663736653331303831343937376664613138313436633234343465366135656236376134616230373138366664633131"
+  },
+  {
+   "name": "an option without settings, non-ASCII prompt, a grant the node ignores",
+   "node": "laptop",
+   "approval_id": "ap-2",
+   "approved": true,
+   "helper_grant": 3,
+   "helpers_may_start": true,
+   "settings": [],
+   "options": [
+    "skip-permissions"
+   ],
+   "detail": "{\"node\":\"laptop\",\"agent\":\"agent-1\",\"agent_kind\":\"claude\",\"kind\":\"codex\",\"folder\":\"/home/dev/code/login-fix\",\"inside\":true,\"worktree\":false,\"depth\":1,\"grant_allowed\":false,\"prompt\":\"Grüße\\nçalış 🚀\",\"launch_options\":[{\"id\":\"skip-permissions\",\"label\":\"option-skip-permissions\",\"skips_permissions\":true}]}",
+   "hex": "61676f72612d617070726f76616c2d73746172742d7633006c6170746f700061702d32003100330031003000313a31363a736b69702d7065726d697373696f6e730061303639343334396530633132306332376137363062363336303837363066666638326330303766333834663836643064373062316433353063653761303634"
+  }
+ ]
+}

@@ -468,6 +468,29 @@ fn answer(
     }
 }
 
+/// ADR-0059 decision 5: before y allows the start request `selected` points at whose helper would act without asking, a confirmation
+/// answered with its own key, `s`: a held or repeated y (the key that opened it) never confirms but keeps asking, as does any other key
+/// and no key at all; nothing is answered then. `true` when there is nothing to confirm or the user pressed s.
+fn confirm_skipping_start(
+    say: &Say,
+    s: &Snapshot,
+    selected: &str,
+    text: agora_tui::render::Text<'_>,
+    ask: &mut dyn Asker,
+) -> bool {
+    let Some(a) = agora_tui::client::answered_approval(s, Some(selected)) else {
+        return true;
+    };
+    let Some(names) = agora_tui::render::start_skipping_options(&a.action, &a.detail, text) else {
+        return true;
+    };
+    let question = lines_of(&say.text(
+        key!("tui-start-approval-confirm-skip"),
+        &[("name", Arg::Str(names))],
+    ));
+    ask.key(&question, Duration::from_secs(60)) == Some(b's')
+}
+
 /// The `agent.start` request y would answer when it does not fit the split view at the terminal's size now and was not read whole in
 /// the reader (ADR-0057): y must not allow it yet.
 fn start_unread(
@@ -573,8 +596,8 @@ fn ask_grant(
     scope: &str,
     commands: &[&str],
 ) -> Result<bool, String> {
-    let question = lines_of(&say.text(key!("tui-grant-ask"), &[]));
-    if ask.key(&question, Duration::from_secs(30)) != Some(b'y') {
+    let question = lines_of(&grant_question(say, scope, commands));
+    if fresh_key(ask, &question, Duration::from_secs(30)) != Some(b'y') {
         return Ok(false);
     }
     let fail = |code: String| say.text(key!("tui-answer-failed"), &[("code", Arg::Str(code))]);
@@ -584,6 +607,102 @@ fn ask_grant(
         // No snapshot here: the general sentence.
         Err(code) if code == "approval.signature_invalid" => Err(not_trusted(say, &device, None)),
         Err(code) => Err(fail(code)),
+    }
+}
+
+/// The question for a grant of `commands` on `scope` (#810): it names the agent and what is allowed, and is the same set that gets
+/// signed. A set this table does not know is asked in the general words, so nothing is ever signed that no sentence names.
+fn grant_question(say: &Say, scope: &str, commands: &[&str]) -> String {
+    let agent = [(
+        "agent",
+        // Written to the screen as it is: no control character of an id reaches the terminal.
+        Arg::Str(plain(scope.strip_prefix("agent:").unwrap_or(scope)).replace('\n', " ")),
+    )];
+    match commands {
+        ["terminal.input"] => say.text(key!("tui-grant-ask-typing"), &agent),
+        ["agent.prompt"] => say.text(key!("tui-grant-ask-prompt"), &agent),
+        ["agent.stop"] => say.text(key!("tui-grant-ask-stop"), &agent),
+        ["agent.set_mode"] => say.text(key!("tui-grant-ask-mode"), &agent),
+        ["agent.set_model"] => say.text(key!("tui-grant-ask-model"), &agent),
+        _ => say.text(key!("tui-grant-ask"), &[]),
+    }
+}
+
+/// Asks `lines` once and waits up to `wait` for one key after it (ADR-0063): the question is drawn once, then every key typed until
+/// it was on the screen (meant for an agent, a `y` among them, also one that came while it was drawn) is set aside, so only an answer
+/// after it counts; the terminal frames pastes for as long as it is asked (whatever the console's mouse setting), and a paste never
+/// answers.
+fn fresh_key(ask: &mut dyn Asker, lines: &[String], wait: Duration) -> Option<u8> {
+    let framed = bracketed_paste(true);
+    let answer = ask.answer(lines, wait);
+    bracketed_paste(framed);
+    answer
+}
+
+/// Lets `tracker` see keys that were forwarded to an agent, so it knows whether a bracketed paste is open at the end of them.
+fn track_forwarded(tracker: &mut Parser, bytes: &[u8]) {
+    let _ = tracker.push(bytes);
+}
+
+/// Sets aside every key typed so far by reading it through `parser` and dropping what it makes: a bracketed paste that began
+/// before, or begins among them, keeps its framing (its text stays a paste, and the parser leaves paste mode at its end marker).
+fn set_aside_keys(parser: &mut Parser, rx: &mpsc::Receiver<u8>) {
+    let mut bytes = Vec::new();
+    while let Ok(b) = rx.try_recv() {
+        bytes.push(b);
+    }
+    let _ = parser.push(&bytes);
+}
+
+/// The answer in one read of the keyboard: only when it is exactly one key or click, never a paste nor several keys at once.
+fn one_answer(events: &[AppEvent], area: Area, lines: &[String]) -> Option<u8> {
+    // Pointer motion with no button is the terminal's report, not the user's answer: it neither answers nor spoils one that came
+    // in the same read.
+    let deliberate: Vec<&AppEvent> = events
+        .iter()
+        .filter(|e| {
+            !matches!(
+                e,
+                AppEvent::Mouse(agora_tui::app::Mouse {
+                    kind: agora_tui::app::MouseKind::Move,
+                    ..
+                })
+            )
+        })
+        .collect();
+    match deliberate.as_slice() {
+        [e] if !matches!(e, AppEvent::Paste(_)) => agora_tui::app::dialog_key(e, area, lines),
+        _ => None,
+    }
+}
+
+/// Reads the keyboard through `parser` (a paste keeps its framing) until [`one_answer`] gives an answer or `wait` is over.
+fn read_answer(
+    parser: &mut Parser,
+    rx: &mpsc::Receiver<u8>,
+    lines: &[String],
+    wait: Duration,
+) -> Option<u8> {
+    let end = Instant::now() + wait;
+    loop {
+        let left = end.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return None;
+        }
+        let events = match rx.recv_timeout(left.min(Duration::from_millis(50))) {
+            Ok(b) => {
+                let mut bytes = vec![b];
+                while let Ok(b) = rx.try_recv() {
+                    bytes.push(b);
+                }
+                parser.push(&bytes)
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => parser.flush(),
+            Err(mpsc::RecvTimeoutError::Disconnected) => return None,
+        };
+        if let Some(k) = one_answer(&events, window_area(), lines) {
+            return Some(k);
+        }
     }
 }
 
@@ -618,8 +737,40 @@ fn with_grant<T>(
     }
 }
 
-/// What typing to one agent needs a grant for (what the web client asks for too).
-const TYPING: [&str; 3] = ["agent.stop", "agent.prompt", "terminal.input"];
+// What a grant asks for is the least the refused action needs, never more (#810, what the web client asks for too): one command each.
+/// Keys typed into an agent's terminal (`attach`, and the grant key Ctrl-] then g, whose notice names typing).
+const TYPING_INPUT: [&str; 1] = ["terminal.input"];
+/// A message sent to an agent in a chat pane.
+const PROMPT: [&str; 1] = ["agent.prompt"];
+/// Stopping an agent.
+const STOP: [&str; 1] = ["agent.stop"];
+
+/// The places that ask for a grant (#810): each one's command set comes from here, so a test can say what every place signs.
+#[derive(Clone, Copy, Debug)]
+enum Site {
+    /// The split view's attached terminal.
+    AttachTyping,
+    /// The grant key (Ctrl-] then g) in the console.
+    GrantKey,
+    /// A message from the split view's chat.
+    SplitPrompt,
+    /// A message from the console's chat tab.
+    ChatPrompt,
+    /// Stopping from the split view.
+    SplitStop,
+    /// Stopping from the console.
+    ConsoleStop,
+}
+
+impl Site {
+    fn commands(self) -> &'static [&'static str] {
+        match self {
+            Site::AttachTyping | Site::GrantKey => &TYPING_INPUT,
+            Site::SplitPrompt | Site::ChatPrompt => &PROMPT,
+            Site::SplitStop | Site::ConsoleStop => &STOP,
+        }
+    }
+}
 
 /// Ctrl-] : the key that leaves an opened terminal (the same one `agora terminal attach` uses).
 const DETACH: u8 = 0x1d;
@@ -648,6 +799,9 @@ fn attach(
     let _ = write!(out, "\x1b[2J\x1b[H");
     let _ = out.flush();
     let mut lost = false;
+    // Follows the paste framing of what was forwarded, so a question asked after a paste's opening marker went out reads the rest
+    // of that paste as a paste (its `y` answers nothing).
+    let mut forwarded = Parser::default();
     'watch: loop {
         match session.terminal_next(stream, Duration::from_millis(50)) {
             TermEvent::Data(b) | TermEvent::Screen(b) => {
@@ -659,12 +813,32 @@ fn attach(
                 lost = true;
                 break;
             }
+            // Output was dropped while a question waited: the screen is asked for again.
+            TermEvent::Behind => {
+                session.terminal_close(stream);
+                stream = session.terminal_open(node, &terminal)?;
+                let _ = write!(out, "\x1b[2J\x1b[H");
+                let _ = out.flush();
+            }
             TermEvent::Resized(..) | TermEvent::Quiet => {}
         }
         // What was typed was refused until the owner allows it: ask, and show the screen again either way (the typed keys are lost).
-        if session.take_grant_wanted() {
+        if session
+            .take_grant_wanted()
+            .iter()
+            .any(|r| r.is_for(node, &terminal))
+        {
             let scope = format!("agent:{local}");
-            let _ = ask_grant(say, session, &mut Plain(rx), node, &scope, &TYPING);
+            let mut plain = Plain::with(rx, std::mem::take(&mut forwarded));
+            let _ = ask_grant(
+                say,
+                session,
+                &mut plain,
+                node,
+                &scope,
+                Site::AttachTyping.commands(),
+            );
+            forwarded = plain.1;
             session.terminal_close(stream);
             stream = session.terminal_open(node, &terminal)?;
             if let Some((cols, rows)) = size {
@@ -689,6 +863,7 @@ fn attach(
             typed.push(k);
         }
         if !typed.is_empty() {
+            track_forwarded(&mut forwarded, &typed);
             session.terminal_input(node, &terminal, &typed);
         }
         // The terminal closed (window gone, SSH lost): stop watching instead of running on unseen.
@@ -776,7 +951,7 @@ fn chat(
                             note = match with_grant(
                                 say,
                                 session,
-                                &mut Plain(rx),
+                                &mut Plain::new(rx),
                                 (node, &scope, &[command]),
                                 |s| s.set_option(node, local, model, &id),
                             ) {
@@ -801,8 +976,8 @@ fn chat(
                         note = match with_grant(
                             say,
                             session,
-                            &mut Plain(rx),
-                            (node, &scope, &TYPING),
+                            &mut Plain::new(rx),
+                            (node, &scope, Site::SplitPrompt.commands()),
                             |s| s.prompt(node, local, &line),
                         ) {
                             Tried::Done(Ok(())) | Tried::Declined => String::new(),
@@ -1456,6 +1631,11 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                 } else {
                     ColorMode::Mono
                 },
+                typing_refused: None,
+                typing_notice: String::new(),
+                typing_allowed: None,
+                asked: false,
+                typing_taken: std::collections::HashMap::new(),
             }),
             Err(_) => None,
         }
@@ -1722,6 +1902,19 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                                 draw(&snapshot, &selected, &notice, cost, preview.as_ref());
                                 continue;
                             }
+                            if k == b'y'
+                                && !confirm_skipping_start(
+                                    say,
+                                    s,
+                                    &selected,
+                                    &text,
+                                    &mut Plain::new(&rx),
+                                )
+                            {
+                                notice = String::new();
+                                draw(&snapshot, &selected, &notice, cost, preview.as_ref());
+                                continue;
+                            }
                             notice = answer(say, &mut session, s, &selected, k == b'y');
                             dirty_since.get_or_insert_with(Instant::now);
                             draw(&snapshot, &selected, &notice, cost, preview.as_ref());
@@ -1738,7 +1931,7 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                                 &mut session,
                                 sn,
                                 &selected,
-                                &mut Plain(&rx),
+                                &mut Plain::new(&rx),
                                 color,
                             );
                             dirty_since.get_or_insert_with(Instant::now);
@@ -1753,14 +1946,18 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                         if let Some(p) = preview.take() {
                             p.close(&mut session);
                         }
-                        notice =
-                            approve_device(say, &mut session, snapshot.as_ref(), &mut Plain(&rx));
+                        notice = approve_device(
+                            say,
+                            &mut session,
+                            snapshot.as_ref(),
+                            &mut Plain::new(&rx),
+                        );
                         dirty_since.get_or_insert_with(Instant::now);
                         draw(&snapshot, &selected, &notice, cost, preview.as_ref());
                     }
                     b's' => {
                         if let Some(sn) = &snapshot {
-                            notice = start(say, &mut session, sn, &selected, &mut Plain(&rx));
+                            notice = start(say, &mut session, sn, &selected, &mut Plain::new(&rx));
                             dirty_since.get_or_insert_with(Instant::now);
                             draw(&snapshot, &selected, &notice, cost, preview.as_ref());
                         }
@@ -1826,14 +2023,14 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                                     key!("tui-stop-helpers"),
                                     &[("count", Arg::Num(helpers as i64))],
                                 );
-                                Plain(&rx).key(&lines_of(&question), Duration::from_secs(30))
+                                Plain::new(&rx).key(&lines_of(&question), Duration::from_secs(30))
                                     != Some(b'n')
                             };
                             notice = match with_grant(
                                 say,
                                 &mut session,
-                                &mut Plain(&rx),
-                                (node, &scope, &TYPING),
+                                &mut Plain::new(&rx),
+                                (node, &scope, Site::SplitStop.commands()),
                                 |s| s.stop_agent_with(node, local, helpers > 0 && with_helpers),
                             ) {
                                 Tried::Done(Ok(())) => say.text(key!("tui-stopped"), &[]),
@@ -1873,7 +2070,7 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                                 agora_platform::terminal_size().unwrap_or((100, 30)),
                             )
                         }) {
-                            if read_start(&a, &mut Plain(&rx), &text) {
+                            if read_start(&a, &mut Plain::new(&rx), &text) {
                                 read_whole.insert(a.approval_id.clone());
                             }
                         }
@@ -1918,7 +2115,8 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                 std::thread::sleep(Duration::from_secs(2));
                 break;
             }
-            if dirty_since.is_some() && last_refresh.elapsed() >= Duration::from_millis(REFRESH_MS)
+            if dirty_since.is_some()
+                && refresh_due(last_refresh.elapsed(), session.typing_unanswered())
             {
                 // The hub answers a new subscription with a fresh snapshot; a live feed applying single events is later work.
                 break;
@@ -1932,6 +2130,18 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
 
 /// The console's shortest time between two frames: 60 a second, the ADR-0022 budget for a keystroke's echo.
 const FRAME: Duration = Duration::from_millis(16);
+
+/// A routine refresh replaces the session, and with it the numbers that match a keystroke to its reply: a refusal (and the hint to
+/// allow typing) of a keystroke still in flight would be lost. So it waits until every typing reply has arrived, at most
+/// [`REFRESH_PATIENCE`] longer than usual (a reply that never comes must not stop refreshing for good).
+fn refresh_due(since_dirty: Duration, typing_unanswered: usize) -> bool {
+    since_dirty >= Duration::from_millis(REFRESH_MS)
+        && (typing_unanswered == 0
+            || since_dirty >= Duration::from_millis(REFRESH_MS) + REFRESH_PATIENCE)
+}
+
+/// How much longer a refresh waits for typing replies.
+const REFRESH_PATIENCE: Duration = Duration::from_secs(3);
 
 /// What the console does after its loop ends.
 enum Next {
@@ -1980,6 +2190,19 @@ struct Console {
     /// ADR-0065: the machines that ask to join, for an owner's session. Memory only.
     pair: agora_tui::pair::Book,
     colors: ColorMode,
+    /// ADR-0041: typing into the agent in front was refused until its owner allows it; `g` (from the list: Ctrl-] then g) asks.
+    typing_refused: Option<TypingRefused>,
+    /// The footer notice that said so, taken away with it.
+    typing_notice: String,
+    /// The agent (`node/local`) typing was allowed for here, and the last request sent before: a refusal of that typing, read
+    /// later, is old news. Per session (request numbers start over on a reconnect).
+    typing_allowed: Option<(String, u64)>,
+    /// A question was asked over the console ([`over_console`]) while a batch of input was handled: the rest of that batch was
+    /// typed before the question was seen, so none of it may answer anything (ADR-0063).
+    asked: bool,
+    /// The newest typing each terminal's machine took in this session, (node, terminal) to request: a refusal read in a later turn
+    /// for typing sent before it is old news (answers can come out of order).
+    typing_taken: Taken,
 }
 
 /// A notice too long for the footer is shown whole in a box above it until the next key (the trust command must be readable and
@@ -2000,18 +2223,47 @@ fn trust_command() -> Option<String> {
     device().map(|d| format!("agora node trust {} {}", d.id, d.public_key_hex()))
 }
 
-/// The terminal reports mouse presses, drags and the wheel (SGR encoding) while the console holds the mouse, and pastes come
-/// bracketed; both are switched off while a question is asked, which reads plain bytes.
+/// The terminal reports mouse presses, drags and the wheel (SGR encoding) while the console holds the mouse, and not while a screen a
+/// question draws itself reads plain bytes. Pastes are framed independently of this ([`bracketed_paste`]), so a paste that began
+/// before a question stays one while the mouse is off.
 fn mouse_mode(on: bool) {
     let mut out = std::io::stdout();
     // Motion with no button (1003) is only switched on while the open program asked for it (`mouse_motion`): never by this.
     HOST_MOTION.store(false, std::sync::atomic::Ordering::Relaxed);
-    let _ = out.write_all(if on {
-        b"\x1b[?1003l\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?2004h"
-    } else {
-        b"\x1b[?1003l\x1b[?1000l\x1b[?1002l\x1b[?1006l\x1b[?2004l"
-    });
+    write_mouse(&mut out, on);
+}
+
+/// Writes [`mouse_sequence`] to `out`.
+fn write_mouse(out: &mut impl Write, on: bool) {
+    let _ = out.write_all(mouse_sequence(on));
     let _ = out.flush();
+}
+
+/// What [`mouse_mode`] writes: the mouse modes only, never the paste framing (DECSET 2004).
+fn mouse_sequence(on: bool) -> &'static [u8] {
+    if on {
+        b"\x1b[?1003l\x1b[?1000h\x1b[?1002h\x1b[?1006h"
+    } else {
+        b"\x1b[?1003l\x1b[?1000l\x1b[?1002l\x1b[?1006l"
+    }
+}
+
+/// Whether this terminal frames pastes (DECSET 2004) right now.
+static HOST_PASTE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Asks this terminal to frame pastes (2004) or not; returns whether it did before, to put back.
+fn bracketed_paste(on: bool) -> bool {
+    set_paste(&mut std::io::stdout(), &HOST_PASTE, on)
+}
+
+/// [`bracketed_paste`] on any writer and state: writes DECSET 2004 only when `on` differs from what `state` says it is.
+fn set_paste(out: &mut impl Write, state: &std::sync::atomic::AtomicBool, on: bool) -> bool {
+    let was = state.swap(on, std::sync::atomic::Ordering::Relaxed);
+    if was != on {
+        let _ = out.write_all(if on { b"\x1b[?2004h" } else { b"\x1b[?2004l" });
+        let _ = out.flush();
+    }
+    was
 }
 
 /// Whether this terminal is reporting motion with no button (DECSET 1003) right now.
@@ -2064,8 +2316,17 @@ fn console(
     // The agent whose terminal was last sized to the pane, so a tab brought to the front is sized once.
     let mut sized: Option<(String, u16, u16)> = None;
     mouse_mode(c.app.mouse);
+    // The console can ask at any time, so pastes are framed for as long as it runs (never tied to the mouse).
+    bracketed_paste(true);
     let mut fresh = true;
     let mut typed_at: Option<Instant> = None;
+    // A refusal is matched by its session's request numbers, which a new session (a reconnect, also a routine refresh) starts over:
+    // a pending refusal stays (typing is still refused there), and any typing the new session gets taken ends it.
+    carry_refusal(
+        &mut c.typing_refused,
+        &mut c.typing_allowed,
+        &mut c.typing_taken,
+    );
     // ADR-0065: only the hub knows whether this session is the owner's (it answers `PairStatus` to the owner only).
     if c.pair.owner == agora_tui::pair::Owner::Unknown {
         if let Some(owner) = pair_owner(session) {
@@ -2183,7 +2444,14 @@ fn console(
             c.note.open = false;
             redraw = true;
         }
-        for (index, ev) in events.into_iter().enumerate() {
+        c.asked = false;
+        'batch: for (index, ev) in events.into_iter().enumerate() {
+            // Keys typed with the one that opened a question (a command, a chat send) came before it was seen: they are dropped,
+            // not handled after it closes (a `y` among them could otherwise answer another request in view).
+            if std::mem::take(&mut c.asked) {
+                redraw = true;
+                break 'batch;
+            }
             // A key that only goes to the agent changes nothing on screen until the agent answers: drawing for it would hold the
             // echo back by up to a frame (ADR-0022). Anything else is drawn.
             let before = c.app.clone();
@@ -2209,6 +2477,8 @@ fn console(
                 _ if ctrl_click => {}
                 _ => c.links.other(),
             }
+            // Pointer motion the program asked for is passed on by the console, not typed: a refusal of it asks nothing.
+            let passive = passive_input(&ev);
             let acts = c.app.handle(
                 ev,
                 &Ctx {
@@ -2230,7 +2500,7 @@ fn console(
                     .filter(|p| p.agent == agent)
                     .and_then(|p| agora_tui::termio::focus_bytes(&p.program_modes(), gained));
                 if let (Some(bytes), Some((node, local))) = (asked, agent.split_once('/')) {
-                    session.terminal_input(node, &format!("t-{local}"), bytes);
+                    session.terminal_report(node, &format!("t-{local}"), bytes);
                 }
             }
             if c.app != before || acts.iter().any(|a| !matches!(a, Action::Input(_))) {
@@ -2249,7 +2519,7 @@ fn console(
                             // Typing in a chat never answers a request, whatever letters it holds (the TUI review: `maybe`
                             // allowed one): a waiting request is answered with Alt+Y / Alt+N only, and the draft is kept.
                             Some(pane) => {
-                                chat_input(say, session, rx, c, &mut preview, pane, &b);
+                                chat_input(say, session, rx, c, pane, &b);
                                 if pane.typed.is_empty() {
                                     c.drafts.remove(&pane.agent);
                                 } else {
@@ -2262,7 +2532,12 @@ fn console(
                                 if let Some((node, local)) =
                                     active.as_deref().and_then(|a| a.split_once('/'))
                                 {
-                                    session.terminal_input(node, &format!("t-{local}"), &b);
+                                    let t = format!("t-{local}");
+                                    if passive {
+                                        session.terminal_report(node, &t, &b);
+                                    } else {
+                                        session.terminal_input(node, &t, &b);
+                                    }
                                 }
                             }
                         }
@@ -2367,10 +2642,11 @@ fn console(
                             p.close(session);
                         }
                         mouse_mode(false);
+                        bracketed_paste(false);
                         return Next::Quit;
                     }
                     Action::CleanUpOld => {
-                        c.notice = clean_up_old(say, session, c, &mut preview, rx);
+                        c.notice = clean_up_old(say, session, c, rx);
                         dirty_since.get_or_insert_with(Instant::now);
                     }
                     Action::Command(k) => {
@@ -2391,7 +2667,7 @@ fn console(
                                     .map(|a| a.approval_id.clone());
                             }
                         }
-                        if command(say, session, rx, color, c, &mut preview, area, k)
+                        if command(say, session, rx, color, c, area, k)
                             | std::mem::take(&mut c.stale)
                         {
                             dirty_since.get_or_insert_with(Instant::now);
@@ -2400,10 +2676,16 @@ fn console(
                 }
             }
         }
+        // While typing stays refused, its notice stays (or comes back after another one) so the key that asks is never hidden.
+        if c.notice.is_empty() && c.typing_refused.is_some() {
+            c.notice = c.typing_notice.clone();
+        }
         if !c.notice.is_empty()
             && c.notice == c.note.seen
-            && !c.note.open
+            // A short notice never gets a box to close (`drawn` stays false): it ends with its time too.
+            && (!c.note.open || !c.note.drawn)
             && c.notice_at.elapsed() >= NOTICE_FOR
+            && !(c.typing_refused.is_some() && c.notice == c.typing_notice)
         {
             // An old notice ("Allowed.") gives the footer back to the summary of machines, agents and what needs the user.
             c.notice.clear();
@@ -2508,6 +2790,46 @@ fn console(
                 }
             }
         }
+        // ADR-0041: typing into the agent in front was refused until its owner allows it. The footer says so and names the key
+        // that asks (Ctrl-] then g); nothing opens by itself, so no key typed to the agent can answer a question. The typed keys are
+        // lost. Another tab's refusal is dropped (typing into it again says it there).
+        let refused = session.take_grant_wanted();
+        for (node, terminal, request) in session.take_typing_taken() {
+            let newest = c.typing_taken.entry((node, terminal)).or_insert(request);
+            *newest = (*newest).max(request);
+        }
+        match typing_refusal(
+            &mut c.typing_refused,
+            &refused,
+            &c.typing_taken,
+            c.app.active_agent(),
+            c.typing_allowed.as_ref(),
+        ) {
+            Notice::Show => {
+                let agent = c
+                    .typing_refused
+                    .as_ref()
+                    .map(|p| p.agent.clone())
+                    .unwrap_or_default();
+                let name = c.snapshot.as_ref().map_or_else(
+                    || agent.clone(),
+                    |s| agora_tui::split::agent_label(s, &agent),
+                );
+                c.typing_notice =
+                    say.text(key!("tui-typing-needs-ok"), &[("agent", Arg::Str(name))]);
+                c.notice = c.typing_notice.clone();
+                // Said again even when the same words were said before (a new refusal after the last one ended).
+                c.note.seen.clear();
+                redraw = true;
+            }
+            Notice::End => {
+                if c.notice == c.typing_notice {
+                    c.notice.clear();
+                    redraw = true;
+                }
+            }
+            Notice::Same => {}
+        }
         // At most one frame per FRAME (ADR-0022: an echo within 16 ms), however fast the agent writes; input was handled before this.
         // The first frame of a run is drawn over a cleared screen: lines written meanwhile ("connecting…", a lost link) must not stay
         // under it.
@@ -2519,7 +2841,8 @@ fn console(
             last_draw = Instant::now();
             redraw = false;
         }
-        if dirty_since.is_some() && last_refresh.elapsed() >= Duration::from_millis(REFRESH_MS) {
+        if dirty_since.is_some() && refresh_due(last_refresh.elapsed(), session.typing_unanswered())
+        {
             // The hub answers a new subscription with a fresh snapshot; a live feed applying single events is later work.
             if let Some(p) = preview.take() {
                 p.close(session);
@@ -2530,6 +2853,115 @@ fn console(
             last_refresh = Instant::now();
         }
     }
+}
+
+/// What a new session (a reconnect, also a routine refresh) keeps of the typing refusals: the pending one stays, renumbered, since
+/// typing is still refused there; what was allowed or taken was counted in the old session's numbers and ends.
+fn carry_refusal(
+    refused: &mut Option<TypingRefused>,
+    allowed: &mut Option<(String, u64)>,
+    taken: &mut Taken,
+) {
+    if let Some(p) = refused.as_mut() {
+        p.request = 0;
+    }
+    *allowed = None;
+    taken.clear();
+}
+
+/// Typing into `agent` (`node/local`), the agent in front, was refused for want of a grant (its newest refused `request`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TypingRefused {
+    agent: String,
+    request: u64,
+}
+
+impl TypingRefused {
+    fn is_for(&self, node: &str, terminal_id: &str) -> bool {
+        terminal_id
+            .strip_prefix("t-")
+            .is_some_and(|local| self.agent.split_once('/') == Some((node, local)))
+    }
+}
+
+/// The newest typing each terminal's machine took: (node, terminal) to request.
+type Taken = std::collections::HashMap<(String, String), u64>;
+
+/// What the footer does about a typing refusal this turn.
+#[derive(Debug, PartialEq, Eq)]
+enum Notice {
+    /// Say that typing into the agent in front needs the user's OK, and which key asks.
+    Show,
+    /// The refusal no longer holds: take the notice away.
+    End,
+    Same,
+}
+
+/// ADR-0041: what this turn's answers to typing change. A refusal for the agent in front starts the notice; it ends when another tab
+/// comes to the front or that agent's machine takes typing sent after the refusal (the grant was given, here or elsewhere). Nothing
+/// is ever asked from here: the question opens only on its own key ([`grant_key_target`]).
+fn typing_refusal(
+    pending: &mut Option<TypingRefused>,
+    refused: &[agora_tui::client::Refused],
+    taken: &Taken,
+    active: Option<&str>,
+    allowed: Option<&(String, u64)>,
+) -> Notice {
+    let taken_after = |node: &str, terminal: &str, request: u64| {
+        taken
+            .iter()
+            .any(|((n, t), r)| n == node && t == terminal && *r > request)
+    };
+    let mut out = Notice::Same;
+    if pending.as_ref().is_some_and(|p| {
+        Some(p.agent.as_str()) != active
+            || taken
+                .iter()
+                .any(|((n, t), r)| p.is_for(n, t) && *r > p.request)
+    }) {
+        *pending = None;
+        out = Notice::End;
+    }
+    let in_front = refused.iter().rev().find(|r| {
+        let agent = r
+            .terminal_id
+            .strip_prefix("t-")
+            .map(|local| format!("{}/{local}", r.node));
+        agent.as_deref().is_some_and(|a| Some(a) == active)
+            && !taken_after(&r.node, &r.terminal_id, r.request)
+            // Typing sent before it was allowed here, refused late: not a new refusal.
+            && !allowed.is_some_and(|(a, last)| agent.as_deref() == Some(a.as_str()) && r.request <= *last)
+    });
+    if let (Some(r), Some(agent)) = (in_front, active) {
+        match pending {
+            Some(p) => p.request = p.request.max(r.request),
+            None => {
+                *pending = Some(TypingRefused {
+                    agent: agent.to_string(),
+                    request: r.request,
+                });
+                out = Notice::Show;
+            }
+        }
+    }
+    out
+}
+
+/// The agent (node, local id) the grant key asks for: the one in front, and only while its typing is refused. `None`: the key does
+/// nothing (no grant is wanted there).
+fn grant_key_target(
+    pending: Option<&TypingRefused>,
+    active: Option<&str>,
+) -> Option<(String, String)> {
+    let p = pending.filter(|p| Some(p.agent.as_str()) == active)?;
+    let (node, local) = p.agent.split_once('/')?;
+    Some((node.to_string(), local.to_string()))
+}
+
+/// Whether what `ev` sends to the program is passed on by the console rather than typed: pointer motion with no button (a press, a
+/// drag, the wheel, keys and pastes are the user's).
+fn passive_input(ev: &AppEvent) -> bool {
+    matches!(ev, AppEvent::Mouse(m) if m.kind == agora_tui::app::MouseKind::Move)
 }
 
 /// How long after its last byte an unfinished escape sequence is read as the keys typed (a lone ESC as Esc). The reader thread hands
@@ -2838,7 +3270,6 @@ fn chat_input(
     session: &mut Session,
     rx: &mpsc::Receiver<u8>,
     c: &mut Console,
-    preview: &mut Option<Preview>,
     pane: &mut ChatPane,
     bytes: &[u8],
 ) {
@@ -2860,7 +3291,7 @@ fn chat_input(
             {
                 pane.note = say.text(key!("tui-chat-answer-first"), &[]);
             }
-            b'\r' | b'\n' => chat_send(say, session, rx, c, preview, pane),
+            b'\r' | b'\n' => chat_send(say, session, rx, c, pane),
             0x7f | 0x08 => {
                 // Backspace removes one character, not one byte.
                 while pane.typed.pop().is_some_and(|b| b & 0xC0 == 0x80) {}
@@ -2876,7 +3307,6 @@ fn chat_send(
     session: &mut Session,
     rx: &mpsc::Receiver<u8>,
     c: &mut Console,
-    preview: &mut Option<Preview>,
     pane: &mut ChatPane,
 ) {
     let line = String::from_utf8_lossy(&pane.typed).trim().to_string();
@@ -2902,7 +3332,7 @@ fn chat_send(
             } else {
                 "agent.set_mode"
             };
-            let tried = over_console(say, c, session, preview, Some(pane), rx, |session, ask| {
+            let tried = over_console(say, c, session, Some(pane), rx, |session, ask| {
                 with_grant(say, session, ask, (&node, &scope, &[command]), |s| {
                     s.set_option(&node, &local, model, &id)
                 })
@@ -2923,10 +3353,14 @@ fn chat_send(
         }
         ChatCommand::Prompt if line.is_empty() => String::new(),
         ChatCommand::Prompt => {
-            let tried = over_console(say, c, session, preview, Some(pane), rx, |session, ask| {
-                with_grant(say, session, ask, (&node, &scope, &TYPING), |s| {
-                    s.prompt(&node, &local, &line)
-                })
+            let tried = over_console(say, c, session, Some(pane), rx, |session, ask| {
+                with_grant(
+                    say,
+                    session,
+                    ask,
+                    (&node, &scope, Site::ChatPrompt.commands()),
+                    |s| s.prompt(&node, &local, &line),
+                )
             });
             match tried {
                 Tried::Done(Ok(())) | Tried::Declined => String::new(),
@@ -2953,6 +3387,17 @@ trait Asker {
         self.show(lines);
         read_key(self.rx(), wait)
     }
+    /// Sets aside every key typed so far.
+    fn discard(&mut self) {
+        while self.rx().try_recv().is_ok() {}
+    }
+    /// Shows `lines` once, sets aside what was typed until then, and waits up to `wait` for the answer to a question whose `y` signs
+    /// something: one key or click, never a paste ([`one_answer`]).
+    fn answer(&mut self, lines: &[String], wait: Duration) -> Option<u8> {
+        self.show(lines);
+        self.discard();
+        read_answer(&mut Parser::default(), self.rx(), lines, wait)
+    }
 }
 
 /// The text of a question as lines.
@@ -2960,12 +3405,34 @@ fn lines_of(text: &str) -> Vec<String> {
     text.split('\n').map(str::to_string).collect()
 }
 
-/// The earlier split view's questions: each takes the whole screen.
-struct Plain<'a>(&'a mpsc::Receiver<u8>);
+/// The earlier split view's questions: each takes the whole screen. Its parser reads both the keys set aside and the answer, so a
+/// paste around the question keeps its framing there too.
+struct Plain<'a>(&'a mpsc::Receiver<u8>, Parser);
+
+impl<'a> Plain<'a> {
+    fn new(rx: &'a mpsc::Receiver<u8>) -> Self {
+        Self(rx, Parser::default())
+    }
+
+    /// With a parser that already saw the keys forwarded before (a paste that began there goes on as a paste).
+    fn with(rx: &'a mpsc::Receiver<u8>, parser: Parser) -> Self {
+        Self(rx, parser)
+    }
+}
 
 impl Asker for Plain<'_> {
     fn rx(&self) -> &mpsc::Receiver<u8> {
         self.0
+    }
+
+    fn discard(&mut self) {
+        set_aside_keys(&mut self.1, self.0);
+    }
+
+    fn answer(&mut self, lines: &[String], wait: Duration) -> Option<u8> {
+        self.show(lines);
+        self.discard();
+        read_answer(&mut self.1, self.0, lines, wait)
     }
 
     fn show(&mut self, lines: &[String]) {
@@ -2998,6 +3465,8 @@ impl Asker for Over<'_> {
     }
 
     fn show(&mut self, lines: &[String]) {
+        // A question is on the screen: the rest of the console's batch was typed before it (`Console::asked`).
+        self.c.asked = true;
         if std::mem::take(&mut self.stale) {
             let _ = self.c.window.invalidate();
         }
@@ -3005,6 +3474,7 @@ impl Asker for Over<'_> {
             mouse_mode(true);
             self.mouse = true;
         }
+        bracketed_paste(true);
         let text = |id: &str, args: &[(&str, Arg)]| self.say.text(id, args);
         let rows = self
             .c
@@ -3024,17 +3494,48 @@ impl Asker for Over<'_> {
     }
 
     fn frame(&mut self, bytes: &[u8]) {
+        self.c.asked = true;
         if std::mem::take(&mut self.mouse) {
             mouse_mode(false);
         }
+        // A screen a question draws itself reads plain bytes: no framing there.
+        bracketed_paste(false);
         self.stale = true;
-        Plain(self.rx).frame(bytes);
+        Plain::new(self.rx).frame(bytes);
+    }
+
+    /// Sets aside every key typed so far through the console's parser, so a paste around the question keeps its framing.
+    fn discard(&mut self) {
+        set_aside_keys(&mut self.c.parser, self.rx);
     }
 
     /// Keys and clicks through the console's own reader: a click on a numbered line is its number, a click outside the box cancels
     /// (`dialog_key`). A window resized meanwhile gets the box drawn again for its size.
     fn key(&mut self, lines: &[String], wait: Duration) -> Option<u8> {
         self.show(lines);
+        self.read(lines, wait, |events, area, lines| {
+            events
+                .iter()
+                .find_map(|e| agora_tui::app::dialog_key(e, area, lines))
+        })
+    }
+
+    /// One key or click ([`one_answer`]) through the console's parser: a paste never answers.
+    fn answer(&mut self, lines: &[String], wait: Duration) -> Option<u8> {
+        self.show(lines);
+        self.discard();
+        self.read(lines, wait, one_answer)
+    }
+}
+
+impl Over<'_> {
+    fn read(
+        &mut self,
+        lines: &[String],
+        wait: Duration,
+        pick: fn(&[AppEvent], Area, &[String]) -> Option<u8>,
+    ) -> Option<u8> {
+        // `lines` is on the screen already.
         let end = Instant::now() + wait;
         let mut area = window_area();
         loop {
@@ -3053,10 +3554,7 @@ impl Asker for Over<'_> {
                 Err(mpsc::RecvTimeoutError::Timeout) => self.c.parser.flush(),
                 Err(mpsc::RecvTimeoutError::Disconnected) => return None,
             };
-            if let Some(k) = events
-                .iter()
-                .find_map(|e| agora_tui::app::dialog_key(e, area, lines))
-            {
+            if let Some(k) = pick(&events, area, lines) {
                 return Some(k);
             }
             if window_area() != area {
@@ -3068,21 +3566,18 @@ impl Asker for Over<'_> {
     }
 }
 
-/// Asks over the console (`run` shows its questions with the [`Over`] it is given): the panel's terminal is let go meanwhile, the
+/// Asks over the console (`run` shows its questions with the [`Over`] it is given): the panel's terminal stays open meanwhile (its
+/// frames wait in the session and are applied afterwards, so its scrollback and the modes it learned are kept, ADR-0063), the
 /// mouse is reported only while a box is open, and the console is drawn again afterwards. Returns what `run` said.
 #[allow(clippy::too_many_arguments)]
 fn over_console<T>(
     say: &Say,
     c: &mut Console,
     session: &mut Session,
-    preview: &mut Option<Preview>,
     chat: Option<&ChatPane>,
     rx: &mpsc::Receiver<u8>,
     run: impl FnOnce(&mut Session, &mut Over<'_>) -> T,
 ) -> T {
-    if let Some(p) = preview.take() {
-        p.close(session);
-    }
     // The mouse stays as the console had it while a box is open; a screen the question draws itself switches it off.
     let mouse = c.app.mouse;
     let mut ask = Over {
@@ -3096,6 +3591,7 @@ fn over_console<T>(
     let out = run(session, &mut ask);
     let stale = ask.stale;
     mouse_mode(c.app.mouse);
+    bracketed_paste(true);
     if stale {
         let _ = c.window.invalidate();
     }
@@ -3110,7 +3606,6 @@ fn command(
     rx: &mpsc::Receiver<u8>,
     color: bool,
     c: &mut Console,
-    preview: &mut Option<Preview>,
     area: Area,
     k: char,
 ) -> bool {
@@ -3127,7 +3622,7 @@ fn command(
             if let Some((id, false)) = details.start.clone() {
                 if k == 'y' && !c.read_whole.contains(&id) {
                     if let Some(a) = s.approvals.iter().find(|a| a.approval_id == id).cloned() {
-                        let read = over_console(say, c, session, preview, None, rx, |_, ask| {
+                        let read = over_console(say, c, session, None, rx, |_, ask| {
                             read_start(&a, ask, &text)
                         });
                         if read {
@@ -3164,7 +3659,7 @@ fn command(
                     ));
                     lines.push(String::new());
                     lines.push(say.text(key!("tui-request-answer"), &[]));
-                    let key = over_console(say, c, session, preview, None, rx, |_, ask| {
+                    let key = over_console(say, c, session, None, rx, |_, ask| {
                         ask.key(&lines, Duration::from_secs(120))
                     });
                     match key {
@@ -3178,6 +3673,14 @@ fn command(
                 }
             }
             c.shown_request = None;
+            if allow
+                && !over_console(say, c, session, None, rx, |_, ask| {
+                    confirm_skipping_start(say, &s, &selected, &text, ask)
+                })
+            {
+                c.notice = String::new();
+                return false;
+            }
             c.notice = answer(say, session, &s, &selected, allow);
             true
         }
@@ -3188,26 +3691,26 @@ fn command(
         }
         // ADR-0065: the first machine that asks to join, read whole and answered with two deliberate keys.
         'p' => {
-            c.notice = over_console(say, c, session, preview, None, rx, |session, ask| {
+            c.notice = over_console(say, c, session, None, rx, |session, ask| {
                 answer_pair(say, session, ask)
             });
             true
         }
         'v' => {
             let snapshot = c.snapshot.clone();
-            c.notice = over_console(say, c, session, preview, None, rx, |session, ask| {
+            c.notice = over_console(say, c, session, None, rx, |session, ask| {
                 approve_device(say, session, snapshot.as_ref(), ask)
             });
             true
         }
         'f' => {
-            c.notice = over_console(say, c, session, preview, None, rx, |session, ask| {
+            c.notice = over_console(say, c, session, None, rx, |session, ask| {
                 start_in_folder(say, session, &s, &selected, ask, color)
             });
             true
         }
         's' => {
-            c.notice = over_console(say, c, session, preview, None, rx, |session, ask| {
+            c.notice = over_console(say, c, session, None, rx, |session, ask| {
                 start(say, session, &s, &selected, ask)
             });
             true
@@ -3249,7 +3752,7 @@ fn command(
                 .iter()
                 .filter(|a| a.running && a.parent_agent_id == selected)
                 .count();
-            c.notice = over_console(say, c, session, preview, None, rx, |session, ask| {
+            c.notice = over_console(say, c, session, None, rx, |session, ask| {
                 let with_helpers = helpers == 0 || {
                     let question = say.text(
                         key!("tui-stop-helpers"),
@@ -3257,9 +3760,13 @@ fn command(
                     );
                     ask.key(&lines_of(&question), Duration::from_secs(30)) != Some(b'n')
                 };
-                match with_grant(say, session, ask, (&node, &scope, &TYPING), |s| {
-                    s.stop_agent_with(&node, &local, helpers > 0 && with_helpers)
-                }) {
+                match with_grant(
+                    say,
+                    session,
+                    ask,
+                    (&node, &scope, Site::ConsoleStop.commands()),
+                    |s| s.stop_agent_with(&node, &local, helpers > 0 && with_helpers),
+                ) {
                     Tried::Done(Ok(())) => say.text(key!("tui-stopped"), &[]),
                     Tried::Done(Err(code)) => {
                         say.text(key!("tui-stop-failed"), &[("code", Arg::Str(code))])
@@ -3278,7 +3785,7 @@ fn command(
                 return false;
             };
             let title = agora_tui::split::agent_label(&s, &selected);
-            c.notice = over_console(say, c, session, preview, None, rx, |session, ask| {
+            c.notice = over_console(say, c, session, None, rx, |session, ask| {
                 let diff = match session.diff(&node, &target) {
                     Ok(d) => d,
                     Err(code) => {
@@ -3320,7 +3827,7 @@ fn command(
                 return false;
             };
             let title = agora_tui::split::agent_label(&s, &selected);
-            c.notice = over_console(say, c, session, preview, None, rx, |session, ask| {
+            c.notice = over_console(say, c, session, None, rx, |session, ask| {
                 use agora_tui::files;
                 let mut path = String::new();
                 let mut notice = String::new();
@@ -3414,6 +3921,32 @@ fn command(
             let _ = c.window.invalidate();
             false
         }
+        // ADR-0041: the grant the footer asked for when typing into the agent in front was refused. Only this key opens the question
+        // (from the list, Ctrl-] then g): what follows is meant for it. Without such a refusal it does nothing.
+        'g' => {
+            let Some((node, local)) =
+                grant_key_target(c.typing_refused.as_ref(), c.app.active_agent())
+            else {
+                return false;
+            };
+            let scope = format!("agent:{local}");
+            let asked = over_console(say, c, session, None, rx, |s, ask| {
+                ask_grant(say, s, ask, &node, &scope, Site::GrantKey.commands())
+            });
+            match asked {
+                Ok(true) => {
+                    c.typing_allowed = Some((format!("{node}/{local}"), session.last_request()));
+                    c.typing_refused = None;
+                    if c.notice == c.typing_notice {
+                        c.notice.clear();
+                    }
+                    c.notice = say.text(key!("tui-granted"), &[]);
+                }
+                Ok(false) => {}
+                Err(line) => c.notice = line,
+            }
+            false
+        }
         'c' => {
             if let Some(cmd) = c.note.copy.clone() {
                 let mut out = std::io::stdout();
@@ -3433,7 +3966,6 @@ fn clean_up_old(
     say: &Say,
     session: &mut Session,
     c: &mut Console,
-    preview: &mut Option<Preview>,
     rx: &mpsc::Receiver<u8>,
 ) -> String {
     let now = now_ms();
@@ -3475,7 +4007,7 @@ fn clean_up_old(
     lines.push(String::new());
     lines.push(say.text(key!("tui-cleanup-explain"), &[]));
     lines.push(say.text(key!("tui-cleanup-keys"), &[]));
-    let answer = over_console(say, c, session, preview, None, rx, |_, ask| {
+    let answer = over_console(say, c, session, None, rx, |_, ask| {
         ask.key(&lines, Duration::from_secs(120))
     });
     let refuse = match answer {
@@ -3528,6 +4060,495 @@ fn split_kinds(
         )
     });
     (installed, line)
+}
+
+#[cfg(test)]
+mod typing_grant_tests {
+    use super::*;
+    use agora_tui::app::Key;
+    use agora_tui::client::Refused;
+
+    fn typing_refusal_now(
+        pending: &mut Option<TypingRefused>,
+        refused: &[Refused],
+        taken: &[(String, String, u64)],
+        active: Option<&str>,
+    ) -> Notice {
+        typing_refusal(pending, refused, &taken_map(taken), active, None)
+    }
+
+    fn taken_map(taken: &[(String, String, u64)]) -> Taken {
+        let mut map = Taken::new();
+        for (n, t, r) in taken {
+            let newest = map.entry((n.clone(), t.clone())).or_insert(*r);
+            *newest = (*newest).max(*r);
+        }
+        map
+    }
+
+    #[test]
+    fn a_refusal_of_typing_sent_before_it_was_allowed_is_old_news() {
+        // Codex review of #796: typing refused late, after the grant key allowed it, must not bring the notice back.
+        let front = Some("laptop/a1");
+        let allowed = ("laptop/a1".to_string(), 7);
+        let mut pending = None;
+        assert_eq!(
+            typing_refusal(
+                &mut pending,
+                &[refused("laptop", "a1", 7)],
+                &Taken::new(),
+                front,
+                Some(&allowed)
+            ),
+            Notice::Same
+        );
+        assert_eq!(pending, None);
+        // Control: typing sent after it was allowed and refused again (the grant ended) is a new refusal.
+        assert_eq!(
+            typing_refusal(
+                &mut pending,
+                &[refused("laptop", "a1", 8)],
+                &Taken::new(),
+                front,
+                Some(&allowed)
+            ),
+            Notice::Show
+        );
+        // Another agent's watermark changes nothing here.
+        let other = ("laptop/a2".to_string(), 99);
+        let mut pending = None;
+        assert_eq!(
+            typing_refusal(
+                &mut pending,
+                &[refused("laptop", "a1", 3)],
+                &Taken::new(),
+                front,
+                Some(&other)
+            ),
+            Notice::Show
+        );
+    }
+
+    #[test]
+    fn the_grant_key_signs_typing_only() {
+        assert_eq!(TYPING_INPUT, ["terminal.input"]);
+    }
+
+    /// #810: each place that asks signs the least its action needs, and the question names exactly that and the agent.
+    /// A stop grant does not authorize typing (and the other way round).
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn every_place_that_asks_signs_the_command_it_names() {
+        for (site, want) in [
+            (Site::AttachTyping, "terminal.input"),
+            (Site::GrantKey, "terminal.input"),
+            (Site::SplitPrompt, "agent.prompt"),
+            (Site::ChatPrompt, "agent.prompt"),
+            (Site::SplitStop, "agent.stop"),
+            (Site::ConsoleStop, "agent.stop"),
+        ] {
+            assert_eq!(site.commands(), [want], "{site:?}");
+        }
+        // Every call goes through the table: no place names a set of its own.
+        // A Windows checkout may turn line ends into CRLF; the searches below use LF.
+        let src = include_str!("tuicmd.rs").replace("\r\n", "\n");
+        let code = &src[..src.find("#[cfg(test)]").unwrap()];
+        assert_eq!(code.matches(".commands()").count(), 6);
+    }
+
+    /// An agent's id is written to the terminal: no control character of it gets there.
+    #[test]
+    fn the_question_shows_no_control_character_of_the_id() {
+        let say = Say(agora_i18n::Catalog::english());
+        for c in [&TYPING_INPUT, &PROMPT, &STOP] {
+            let q = grant_question(&say, "agent:a\x1b[2Jb\nc", c);
+            assert!(!q.contains('\x1b') && !q.contains('\n'), "{q:?}");
+            assert!(q.contains("a[2Jb c"), "{q:?}");
+        }
+    }
+
+    #[test]
+    fn each_grant_covers_only_what_its_question_says() {
+        let say = Say(agora_i18n::Catalog::english());
+        // attach() and the grant key; both chat prompts; both stops; the option switches; a start (the general words).
+        let sites: [(&[&str], &str); 6] = [
+            (&TYPING_INPUT, "type into"),
+            (&PROMPT, "send messages to"),
+            (&STOP, "stop"),
+            (&["agent.set_mode"], "mode"),
+            (&["agent.set_model"], "model"),
+            (&["agent.start"], "wants your OK"),
+        ];
+        for (commands, words) in sites {
+            let q = grant_question(&say, "agent:a1", commands);
+            assert!(q.contains(words), "{commands:?}: {q}");
+            if commands != ["agent.start"] {
+                assert!(q.contains("a1"), "{q}");
+            }
+        }
+        for (a, b) in [
+            (&STOP, &TYPING_INPUT),
+            (&PROMPT, &STOP),
+            (&TYPING_INPUT, &PROMPT),
+        ] {
+            assert!(a.iter().all(|c| !b.contains(c)));
+            assert_ne!(
+                grant_question(&say, "agent:a1", a),
+                grant_question(&say, "agent:a1", b)
+            );
+        }
+        // The Turkish questions name the agent too.
+        let tr = Say(agora_i18n::Catalog::turkish());
+        for c in [&TYPING_INPUT, &PROMPT, &STOP] {
+            assert!(grant_question(&tr, "agent:a1", c).contains("a1"));
+        }
+    }
+
+    fn refused(node: &str, local: &str, request: u64) -> Refused {
+        Refused {
+            node: node.into(),
+            terminal_id: format!("t-{local}"),
+            request,
+        }
+    }
+
+    fn taken(node: &str, local: &str, request: u64) -> (String, String, u64) {
+        (node.into(), format!("t-{local}"), request)
+    }
+
+    /// Codex review of #796 (fourth): a refused keystroke into the agent in front shows the notice and opens nothing; another tab's
+    /// refusal shows nothing; more refusals while it shows say nothing new.
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn a_refused_keystroke_shows_the_notice_and_opens_nothing() {
+        let mut pending = None;
+        let front = Some("laptop/a1");
+        assert_eq!(
+            typing_refusal_now(&mut pending, &[refused("laptop", "a2", 3)], &[], front),
+            Notice::Same
+        );
+        assert_eq!(pending, None);
+        assert_eq!(
+            typing_refusal_now(&mut pending, &[refused("mac", "a1", 3)], &[], front),
+            Notice::Same
+        );
+        assert_eq!(
+            typing_refusal_now(&mut pending, &[refused("laptop", "a1", 4)], &[], front),
+            Notice::Show
+        );
+        assert_eq!(
+            pending,
+            Some(TypingRefused {
+                agent: "laptop/a1".into(),
+                request: 4
+            })
+        );
+        // More of the same typing refused: the notice stands, nothing new is said.
+        assert_eq!(
+            typing_refusal_now(&mut pending, &[refused("laptop", "a1", 6)], &[], front),
+            Notice::Same
+        );
+        assert_eq!(pending.as_ref().map(|p| p.request), Some(6));
+        // Nothing in this path asks: the question opens only through `command`'s `g`.
+        // A Windows checkout may turn line ends into CRLF; the searches below use LF.
+        let src = include_str!("tuicmd.rs").replace("\r\n", "\n");
+        let c0 = src.find("\nfn console(").unwrap();
+        let console = &src[c0..c0 + src[c0..].find("\nfn read_keys(").unwrap()];
+        let t0 = console.find("session.take_grant_wanted()").unwrap();
+        let path = &console[t0..t0
+            + console[t0..]
+                .find("// At most one frame per FRAME")
+                .unwrap()];
+        assert!(
+            !path.contains("ask_grant") && !path.contains("over_console"),
+            "{path}"
+        );
+    }
+
+    /// The notice ends when another tab comes to the front, or when the agent's machine takes typing sent after the refusal; a
+    /// refusal older than typing already taken never shows it.
+    #[test]
+    fn the_notice_ends_with_a_new_tab_or_the_next_accepted_keystroke() {
+        let mut pending = None;
+        typing_refusal_now(
+            &mut pending,
+            &[refused("laptop", "a1", 4)],
+            &[],
+            Some("laptop/a1"),
+        );
+        assert_eq!(
+            typing_refusal_now(&mut pending, &[], &[], Some("laptop/a2")),
+            Notice::End
+        );
+        assert_eq!(pending, None);
+        typing_refusal_now(
+            &mut pending,
+            &[refused("laptop", "a1", 5)],
+            &[],
+            Some("laptop/a1"),
+        );
+        // Typing taken before the refusal does not end it; typing taken after does.
+        assert_eq!(
+            typing_refusal_now(
+                &mut pending,
+                &[],
+                &[taken("laptop", "a1", 4)],
+                Some("laptop/a1")
+            ),
+            Notice::Same
+        );
+        assert_eq!(
+            typing_refusal_now(
+                &mut pending,
+                &[],
+                &[taken("laptop", "a1", 7)],
+                Some("laptop/a1")
+            ),
+            Notice::End
+        );
+        assert_eq!(pending, None);
+        assert_eq!(
+            typing_refusal_now(
+                &mut pending,
+                &[refused("laptop", "a1", 8)],
+                &[taken("laptop", "a1", 9)],
+                Some("laptop/a1")
+            ),
+            Notice::Same
+        );
+        assert_eq!(pending, None);
+        // Ended and refused again in one turn: said again.
+        typing_refusal_now(
+            &mut pending,
+            &[refused("laptop", "a1", 10)],
+            &[],
+            Some("laptop/a1"),
+        );
+        assert_eq!(
+            typing_refusal_now(
+                &mut pending,
+                &[refused("laptop", "a1", 12)],
+                &[taken("laptop", "a1", 11)],
+                Some("laptop/a1")
+            ),
+            Notice::Show
+        );
+    }
+
+    /// The key asks for the agent in front, only while its typing is refused; without such a refusal it does nothing.
+    #[test]
+    fn the_grant_key_asks_for_the_agent_in_front_only() {
+        let p = TypingRefused {
+            agent: "laptop/a1".into(),
+            request: 4,
+        };
+        assert_eq!(
+            grant_key_target(Some(&p), Some("laptop/a1")),
+            Some(("laptop".into(), "a1".into()))
+        );
+        assert_eq!(grant_key_target(Some(&p), Some("laptop/a2")), None);
+        assert_eq!(grant_key_target(Some(&p), None), None);
+        assert_eq!(grant_key_target(None, Some("laptop/a1")), None);
+    }
+
+    /// The key cannot come from typing to an agent: in the pane every key, `g` and a paste included, goes to the agent; the
+    /// console's own `g` is reached from the list (Ctrl-] then g). A paste starting with `y` while the notice shows is typing too.
+    #[test]
+    fn typing_in_the_pane_never_opens_the_question_and_ctrl_bracket_g_does() {
+        let rows = vec![Row {
+            id: "laptop/a1".into(),
+            label: "a1".into(),
+            state: String::new(),
+            needs_you: false,
+            terminal: true,
+            header: false,
+            group: false,
+            request: false,
+        }];
+        let text = |id: &str, _: &[(&str, Arg)]| id.to_string();
+        let cx = Ctx {
+            rows: &rows,
+            area: Area::new(0, 0, 120, 40),
+            modes: Default::default(),
+            prog: Default::default(),
+            covered: false,
+            t: &text,
+        };
+        let mut app = App::default();
+        let _ = app.handle(AppEvent::Key(Key::Enter), &cx);
+        assert_eq!(app.active_agent(), Some("laptop/a1"));
+        let typed = [
+            app.handle(AppEvent::Key(Key::Char('g')), &cx),
+            app.handle(AppEvent::Paste("yes".into()), &cx),
+            app.handle(AppEvent::Key(Key::Char('y')), &cx),
+        ];
+        for acts in &typed {
+            assert!(
+                acts.iter().all(|a| matches!(a, Action::Input(_))),
+                "{acts:?}"
+            );
+            assert!(!acts.is_empty());
+        }
+        let _ = app.handle(AppEvent::Key(Key::Ctrl(']')), &cx);
+        assert_eq!(
+            app.handle(AppEvent::Key(Key::Char('g')), &cx),
+            vec![Action::Command('g')]
+        );
+    }
+
+    /// Inside the question (opened on its key), a bracketed paste keeps its framing around the keys set aside and never answers.
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn a_paste_around_the_grant_question_never_answers_it_and_keys_after_it_still_do() {
+        let area = Area::new(0, 0, 80, 24);
+        let q = ["q".to_string()];
+        let (tx, rx) = mpsc::channel();
+        let send = |bytes: &[u8]| bytes.iter().for_each(|b| tx.send(*b).unwrap());
+        let mut p = Parser::default();
+        send(b"\x1b[200~ab");
+        set_aside_keys(&mut p, &rx);
+        assert_eq!(one_answer(&p.push(b"y\x1b[201~"), area, &q), None);
+        assert_eq!(one_answer(&p.push(b"y"), area, &q), Some(b'y'));
+        let mut p = Parser::default();
+        assert!(p.push(b"\x1b[200~ab").is_empty());
+        send(b"cd\x1b[201~");
+        set_aside_keys(&mut p, &rx);
+        assert_eq!(one_answer(&p.push(b"n"), area, &q), Some(b'n'));
+        let mut p = Parser::default();
+        send(b"\x1b[20");
+        set_aside_keys(&mut p, &rx);
+        assert_eq!(one_answer(&p.push(b"0~y\x1b[201~"), area, &q), None);
+        assert_eq!(one_answer(&p.push(b"yes"), area, &q), None);
+    }
+
+    /// An asker over a key queue: `while_drawn` arrives while the question is drawn (typed before it could be seen), `on_show` once
+    /// it is on the screen (after the keys typed until then were set aside).
+    struct Keys<'a> {
+        rx: &'a mpsc::Receiver<u8>,
+        tx: &'a mpsc::Sender<u8>,
+        while_drawn: &'a [u8],
+        on_show: &'a [u8],
+        drawn: usize,
+    }
+    impl Asker for Keys<'_> {
+        fn rx(&self) -> &mpsc::Receiver<u8> {
+            self.rx
+        }
+        fn show(&mut self, _: &[String]) {
+            if self.drawn == 0 {
+                self.while_drawn.iter().for_each(|k| {
+                    let _ = self.tx.send(*k);
+                });
+            }
+            self.drawn += 1;
+        }
+        fn discard(&mut self) {
+            while self.rx.try_recv().is_ok() {}
+            self.on_show.iter().for_each(|k| {
+                let _ = self.tx.send(*k);
+            });
+        }
+        fn frame(&mut self, _: &[u8]) {}
+    }
+
+    /// A key queued before the question never answers it; the one answer after its one draw does; a framed paste never does.
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn only_a_key_pressed_after_the_grant_question_answers_it() {
+        let (tx, rx) = mpsc::channel();
+        let wait = Duration::from_millis(5);
+        for k in *b"yyy" {
+            tx.send(k).unwrap();
+        }
+        let mut ask = Keys {
+            rx: &rx,
+            tx: &tx,
+            while_drawn: b"",
+            on_show: b"",
+            drawn: 0,
+        };
+        assert_eq!(fresh_key(&mut ask, &["q".into()], wait), None);
+        let mut ask = Keys {
+            rx: &rx,
+            tx: &tx,
+            while_drawn: b"",
+            on_show: b"y",
+            drawn: 0,
+        };
+        assert_eq!(fresh_key(&mut ask, &["q".into()], wait), Some(b'y'));
+        assert_eq!(ask.drawn, 1, "the question is drawn once");
+        let mut ask = Keys {
+            rx: &rx,
+            tx: &tx,
+            while_drawn: b"",
+            on_show: b"\x1b[200~y\x1b[201~",
+            drawn: 0,
+        };
+        assert_eq!(
+            fresh_key(&mut ask, &["q".into()], Duration::from_millis(20)),
+            None
+        );
+        // Codex review of #796: a `y` that came while the question was being drawn was typed before it could be seen.
+        let mut ask = Keys {
+            rx: &rx,
+            tx: &tx,
+            while_drawn: b"y",
+            on_show: b"",
+            drawn: 0,
+        };
+        assert_eq!(fresh_key(&mut ask, &["q".into()], wait), None);
+    }
+
+    /// Codex review of #796: in the split view's questions too, a paste that began before the question and ends after it was drawn
+    /// keeps its framing, so its text never answers.
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn a_paste_across_a_split_view_question_never_answers_it() {
+        let q = ["q".to_string()];
+        let wait = Duration::from_millis(20);
+        let (tx, rx) = mpsc::channel();
+        b"\x1b[200~ab".iter().for_each(|b| tx.send(*b).unwrap());
+        let mut plain = Plain::new(&rx);
+        plain.discard();
+        // The paste's next byte, on its own after the question: still the paste.
+        tx.send(b'y').unwrap();
+        assert_eq!(read_answer(&mut plain.1, &rx, &q, wait), None);
+        // What the old fallback did (raw bytes dropped, a fresh parser for the answer): that `y` signed.
+        tx.send(b'y').unwrap();
+        assert_eq!(
+            read_answer(&mut Parser::default(), &rx, &q, wait),
+            Some(b'y')
+        );
+        // Once the paste ended, a key answers.
+        b"\x1b[201~".iter().for_each(|b| tx.send(*b).unwrap());
+        assert_eq!(read_answer(&mut plain.1, &rx, &q, wait), None);
+        tx.send(b'y').unwrap();
+        assert_eq!(read_answer(&mut plain.1, &rx, &q, wait), Some(b'y'));
+    }
+
+    /// Pointer motion the console passes on is not typing (its refusal asks nothing); presses, drags, the wheel, keys and pastes are.
+    #[test]
+    fn only_motion_with_no_button_is_passed_on_rather_than_typed() {
+        use agora_tui::app::{Mouse, MouseKind};
+        let mouse = |kind| {
+            AppEvent::Mouse(Mouse {
+                kind,
+                ..Default::default()
+            })
+        };
+        assert!(passive_input(&mouse(MouseKind::Move)));
+        for kind in [
+            MouseKind::Down,
+            MouseKind::Up,
+            MouseKind::Drag,
+            MouseKind::ScrollUp,
+            MouseKind::ScrollDown,
+        ] {
+            assert!(!passive_input(&mouse(kind)), "{kind:?}");
+        }
+        assert!(!passive_input(&AppEvent::Key(Key::Char('y'))));
+        assert!(!passive_input(&AppEvent::Paste("y".into())));
+    }
 }
 
 #[cfg(test)]
@@ -3622,6 +4643,138 @@ mod adr0069_tests {
             "{general}"
         );
         assert!(general.contains(&device.public_key_hex()), "{general}");
+    }
+}
+
+#[cfg(test)]
+mod skipping_start_tests {
+    use super::*;
+    use agora_i18n::Catalog;
+
+    /// Answers each question with the next key, and keeps what it was shown.
+    struct Script {
+        rx: mpsc::Receiver<u8>,
+        shown: Vec<String>,
+    }
+
+    impl Asker for Script {
+        fn rx(&self) -> &mpsc::Receiver<u8> {
+            &self.rx
+        }
+        fn show(&mut self, lines: &[String]) {
+            self.shown.extend_from_slice(lines);
+        }
+        fn frame(&mut self, _: &[u8]) {}
+    }
+
+    fn script(keys: &[u8]) -> Script {
+        let (tx, rx) = mpsc::channel();
+        for k in keys {
+            tx.send(*k).unwrap_or_else(|_| panic!("send"));
+        }
+        Script {
+            rx,
+            shown: Vec::new(),
+        }
+    }
+
+    /// ADR-0059 decision 5: y allows a start whose helper would act without asking only after the confirmation, naming the option in
+    /// this terminal's words; any other key keeps asking. A start without such an option is not asked about.
+    #[test]
+    fn y_on_a_start_that_acts_without_asking_asks_for_the_confirmation_first() {
+        let snapshot = |detail: serde_json::Value| Snapshot {
+            approvals: vec![agora_protocol::v1::ApprovalSnapshot {
+                approval_id: "mac2/a1".into(),
+                agent_id: "mac2/agent-1".into(),
+                action: "agent.start".into(),
+                detail: detail.to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let skipping = snapshot(serde_json::json!({"kind": "codex", "prompt": "x",
+            "launch_options": [{"id": "skip-permissions", "label": "option-skip-permissions", "skips_permissions": true}]}));
+        let say = Say(Catalog::english());
+        let text = |id: &str, args: &[(&str, Arg)]| say.text(id, args);
+        let mut yes = script(b"s");
+        assert!(confirm_skipping_start(
+            &say,
+            &skipping,
+            "mac2/agent-1",
+            &text,
+            &mut yes
+        ));
+        let asked = yes.shown.join(" ");
+        assert!(
+            asked.contains("Let the helper act without asking? With \"Don't ask\""),
+            "{asked}"
+        );
+        assert!(asked.contains("Press s"), "{asked}");
+        // The key that opened it, held or repeated, keeps asking: a repeated y never confirms.
+        let mut repeated = script(b"yyyy");
+        assert!(!confirm_skipping_start(
+            &say,
+            &skipping,
+            "mac2/agent-1",
+            &text,
+            &mut repeated
+        ));
+        for key in [b'y', b'Y', b'S', b'n', b'\r', 0x1b] {
+            let mut other = script(&[key]);
+            assert!(!confirm_skipping_start(
+                &say,
+                &skipping,
+                "mac2/agent-1",
+                &text,
+                &mut other
+            ));
+        }
+        // The card says how it acts and what that means, before the prompt, in the lines y answers; an agent's own label is not used.
+        let lines = start_card_lines(&skipping.approvals[0], 80, &text).unwrap_or_default();
+        let at = |needle: &str| lines.iter().position(|l| l.contains(needle));
+        assert!(at("How it acts: Don't ask").is_some(), "{lines:?}");
+        assert!(
+            at("If you allow it, this helper runs commands").is_some(),
+            "{lines:?}"
+        );
+        let prompt = lines.iter().position(|l| l == "  x");
+        assert!(prompt.is_some() && at("How it acts") < prompt, "{lines:?}");
+        let odd = snapshot(serde_json::json!({"kind": "codex", "prompt": "x",
+            "launch_options": [{"id": "skip-permissions", "label": "Totally safe", "skips_permissions": true}]}));
+        let odd_lines = start_card_lines(&odd.approvals[0], 80, &text).unwrap_or_default();
+        assert!(
+            odd_lines
+                .iter()
+                .any(|l| l.contains("How it acts: skip-permissions")),
+            "{odd_lines:?}"
+        );
+        assert!(
+            !odd_lines.iter().any(|l| l.contains("Totally safe")),
+            "{odd_lines:?}"
+        );
+        // No key at all (the wait ran out) keeps asking too.
+        assert!(!confirm_skipping_start(
+            &say,
+            &skipping,
+            "mac2/agent-1",
+            &text,
+            &mut script(&[])
+        ));
+        // A start without options, and one whose options do not skip permissions, are answered as before.
+        for detail in [
+            serde_json::json!({"kind": "codex", "prompt": "x"}),
+            serde_json::json!({"kind": "codex", "launch_options": [{"id": "fast", "label": "option-fast", "skips_permissions": false}]}),
+        ] {
+            let mut none = script(&[]);
+            assert!(confirm_skipping_start(
+                &say,
+                &snapshot(detail),
+                "mac2/agent-1",
+                &text,
+                &mut none
+            ));
+            assert!(none.shown.is_empty());
+        }
     }
 }
 
@@ -4248,5 +5401,161 @@ mod escape_key_tests {
             }
         }
         assert!(failed.is_empty(), "differed: {failed:?}");
+    }
+}
+
+/// Follow-up #829: the console's question path (paste framing, refresh, answers).
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod question_path_tests {
+    use super::*;
+    use agora_tui::app::{Key, Mouse, MouseKind};
+
+    const PASTE_ON: &[u8] = b"\x1b[200~";
+
+    fn area() -> Area {
+        Area::new(0, 0, 100, 30)
+    }
+
+    fn key(c: char) -> AppEvent {
+        AppEvent::Key(Key::Char(c))
+    }
+
+    fn moved() -> AppEvent {
+        AppEvent::Mouse(Mouse {
+            kind: MouseKind::Move,
+            col: 3,
+            row: 4,
+            ..Mouse::default()
+        })
+    }
+
+    /// P1: turning the mouse off or on writes no paste framing (DECSET 2004), so a paste that began before a question stays framed
+    /// while the mouse is released; the framing is written by its own function, once per change.
+    #[test]
+    fn the_mouse_never_writes_paste_framing() {
+        for on in [true, false] {
+            let mut out = Vec::new();
+            write_mouse(&mut out, on);
+            assert!(!String::from_utf8_lossy(&out).contains("2004"), "{on}");
+        }
+        let state = std::sync::atomic::AtomicBool::new(false);
+        let mut out = Vec::new();
+        assert!(!set_paste(&mut out, &state, true));
+        write_mouse(&mut out, false);
+        // Still on after the mouse went off: nothing switched it off, and asking again writes nothing.
+        assert!(set_paste(&mut out, &state, true));
+        let text = String::from_utf8_lossy(&out).to_string();
+        assert_eq!(text.matches("\x1b[?2004h").count(), 1, "{text:?}");
+        assert!(!text.contains("2004l"));
+        assert!(set_paste(&mut out, &state, false));
+        assert!(String::from_utf8_lossy(&out).ends_with("\x1b[?2004l"));
+    }
+
+    /// A refusal still pending when a routine refresh replaces the session stays (renumbered); what was counted in the old session's
+    /// numbers ends.
+    #[test]
+    fn a_refusal_is_kept_across_a_refresh() {
+        let mut refused = Some(TypingRefused {
+            agent: "laptop/a1".into(),
+            request: 7,
+        });
+        let mut allowed = Some(("laptop/a1".to_string(), 5));
+        let mut taken = Taken::new();
+        taken.insert(("laptop".into(), "t-a1".into()), 6);
+        carry_refusal(&mut refused, &mut allowed, &mut taken);
+        assert_eq!(
+            refused,
+            Some(TypingRefused {
+                agent: "laptop/a1".into(),
+                request: 0
+            })
+        );
+        assert!(allowed.is_none() && taken.is_empty());
+    }
+
+    /// P2: a routine refresh waits for typing replies still in flight, but not for ever.
+    #[test]
+    fn a_refresh_waits_for_typing_replies() {
+        let due = Duration::from_millis(REFRESH_MS);
+        assert!(!refresh_due(due - Duration::from_millis(1), 0));
+        assert!(refresh_due(due, 0));
+        assert!(!refresh_due(due, 2), "a keystroke is still in flight");
+        assert!(!refresh_due(
+            due + REFRESH_PATIENCE - Duration::from_millis(1),
+            1
+        ));
+        assert!(refresh_due(due + REFRESH_PATIENCE, 1));
+    }
+
+    /// P2: the question after a refused keystroke reads the rest of a paste, whose opening marker was forwarded, as a paste.
+    #[test]
+    fn a_paste_forwarded_before_the_question_goes_on_as_a_paste() {
+        let lines = vec!["Allow?".to_string()];
+        // Control: a fresh parser takes the pasted `y` for an answer.
+        let (tx, rx) = mpsc::channel();
+        tx.send(b'y').unwrap();
+        assert_eq!(
+            read_answer(
+                &mut Parser::default(),
+                &rx,
+                &lines,
+                Duration::from_millis(200)
+            ),
+            Some(b'y')
+        );
+        // The forwarded batch ended inside a paste: its `y` is text, and the end marker closes it.
+        let mut tracker = Parser::default();
+        track_forwarded(&mut tracker, [PASTE_ON, b"abc"].concat().as_slice());
+        let (tx, rx) = mpsc::channel();
+        let mut plain = Plain::with(&rx, tracker);
+        for b in b"y\x1b[201~" {
+            tx.send(*b).unwrap();
+        }
+        assert_eq!(
+            read_answer(&mut plain.1, plain.0, &lines, Duration::from_millis(200)),
+            None
+        );
+        // The paste is over: now a deliberate `y` answers.
+        tx.send(b'y').unwrap();
+        assert_eq!(
+            read_answer(&mut plain.1, plain.0, &lines, Duration::from_millis(200)),
+            Some(b'y')
+        );
+    }
+
+    /// P2: a question over the console keeps the open terminal (and with it its scrollback and learned modes). A source check, since
+    /// `over_console` needs a live `Session` (a TLS connection to a hub), which a unit test cannot make.
+    #[test]
+    fn a_question_does_not_close_the_preview() {
+        // A Windows checkout may turn line ends into CRLF; the searches below use LF.
+        let src = include_str!("tuicmd.rs").replace("\r\n", "\n");
+        let a = src.find("\nfn over_console<").unwrap();
+        let body = &src[a..a + src[a..].find("\n}\n").unwrap()];
+        assert!(
+            !body.contains("preview") && !body.contains(".close("),
+            "{body}"
+        );
+    }
+
+    /// P3: pointer motion with no button in the same read neither answers nor spoils a deliberate key.
+    #[test]
+    fn passive_motion_does_not_spoil_an_answer() {
+        let lines = vec!["Allow?".to_string()];
+        assert_eq!(one_answer(&[key('y')], area(), &lines), Some(b'y'));
+        assert_eq!(
+            one_answer(&[moved(), key('y'), moved()], area(), &lines),
+            Some(b'y')
+        );
+        assert_eq!(one_answer(&[moved(), moved()], area(), &lines), None);
+        // Still never several keys, nor a paste.
+        assert_eq!(
+            one_answer(&[moved(), key('y'), key('y')], area(), &lines),
+            None
+        );
+        assert_eq!(
+            one_answer(&[moved(), AppEvent::Paste("y".into())], area(), &lines),
+            None
+        );
     }
 }

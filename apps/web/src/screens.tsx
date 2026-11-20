@@ -15,6 +15,7 @@ import { themeName } from './themes/messages';
 import { PromptBox } from './components/PromptBox';
 import type { PromptSend } from './components/chatActions';
 import type { ActionResult } from './net/refusal';
+import type { PasskeyResult } from './net/passkey';
 import type { ChatSource } from './net/chat';
 import { demoConversation, demoRichConversation } from './demoChat';
 import { ChatActionsContext } from './components/chatActions';
@@ -31,8 +32,9 @@ import { NoAskBadge } from './components/NoAskBadge';
 import type { ApprovalModel, MachineModel, MessageModel, ProjectCost } from './net/view';
 import type { Device } from './net/approval';
 import { deviceLabel } from './net/devices';
+import { AgentsSettings } from './components/AgentsSettings';
 import type { UsageSummary } from './net/usage';
-import { demoAgents, demoApprovals, demoHelper, demoSkipApproval, demoStartApproval, demoStartSettingsApproval } from './fixtures';
+import { demoAgents, demoApprovals, demoHelper, demoSkipApproval, demoStartApproval, demoStartSettingsApproval, demoStartNoAskApproval } from './fixtures';
 import { forgetSkipCapable, markSkipCapable } from './net/skipApproval';
 import { SessionBar } from './components/SessionBar';
 import { demoSource, type TerminalSource } from './terminal/source';
@@ -142,6 +144,7 @@ function Themed({ theme, onStart }: { theme: 'dark' | 'light'; onStart?: () => v
       <div data-skip-badge><SessionBar part="controls" agentKey="demo/rich" session={{ ...(demoRichAgent.session as NonNullable<AgentTileModel['session']>), config: (demoRichAgent.session?.config ?? []).map((o) => (o.id === 'mode' ? { ...o, current: 'yolo' } : o)) }} setConfig={async () => true} /></div>
       <StartApproval approval={demoStartApproval} start={demoStartApproval.start} onResolve={() => {}} />
       <StartApproval approval={demoStartSettingsApproval} start={demoStartSettingsApproval.start} onResolve={() => {}} />
+      <StartApproval approval={demoStartNoAskApproval} start={demoStartNoAskApproval.start} onResolve={() => {}} />
       <HelperGrants list={async () => [{ id: 'ap-1', kind: 'codex', folder: '/home/dev/code/login-fix', remaining: 2 }]} revoke={async () => {}} refresh={0} />
       <DeviceRequest inline request={{ id: 'web-3fa9c1d24e5b6a70', name: 'Firefox · Linux', fingerprint: 'f947-3cb5-e304-81be-ecf2-64cd' }}
         machines={[{ id: 'laptop', name: 'laptop' }, { id: 'vps-1', name: 'vps-1' }]} onApprove={async () => true} onLater={() => {}} />
@@ -264,14 +267,14 @@ export interface MyDevice { id: string; name: string; fingerprint: string; lastU
 // or the command to run on the machine. Fingerprints are what people compare, so every device is shown with its own. The screen
 // password and the idle lock live here too (ADR-0067). `passkeyNeedsPassword`: this browser is on another machine and a screen
 // password is set, so adding a passkey needs it (ADR-0067).
-export function DevicePage({ device, onBack, onTheme, section, onAddPasskey, passkeyNeedsPassword = false, security, fingerprint, machines, trustedOn, others, asked, onAsk, onRemove }: {
+export function DevicePage({ device, onBack, onTheme, section, onAddPasskey, passkeyNeedsPassword = false, security, fingerprint, machines, trustedOn, others, asked, onAsk, onRemove, loadKinds }: {
   device: Device | undefined;
   onBack: () => void;
   // Opens the theme editor in the window (ADR-0068).
   onTheme?: () => void;
   // The section of the page to bring into view (#/device/<section>).
   section?: string;
-  onAddPasskey?: (password?: string) => Promise<boolean>;
+  onAddPasskey?: (password?: string) => Promise<PasskeyResult>;
   passkeyNeedsPassword?: boolean;
   security?: ReactNode;
   fingerprint?: string;
@@ -283,9 +286,11 @@ export function DevicePage({ device, onBack, onTheme, section, onAddPasskey, pas
   asked?: boolean;
   onAsk?: () => Promise<boolean>;
   onRemove?: (id: string) => Promise<boolean>;
+  // What a machine can start (Settings → Agents); without it (no live hub) the section is not offered.
+  loadKinds?: (node: string) => Promise<KindChoice[]>;
 }) {
   useSyncExternalStore(themeStore.subscribe, themeStore.state, themeStore.state); // the theme's name below follows a change
-  const [passkey, setPasskey] = useState<'added' | 'failed' | undefined>();
+  const [passkeyNotice, setPasskeyNotice] = useState<string | undefined>();
   const [password, setPassword] = useState('');
   const [ask, setAsk] = useState<'asked' | 'failed' | undefined>();
   const [removing, setRemoving] = useState<{ id: string; failed?: boolean } | undefined>();
@@ -301,7 +306,7 @@ export function DevicePage({ device, onBack, onTheme, section, onAddPasskey, pas
       { id: 'lock', label: 'password-title', show: !!security },
       { id: 'devices', label: 'device-others', show: !!others && others.length > 0 },
     ] },
-    { group: 'settings-group-machines', items: [{ id: 'machines', label: 'settings-machines', show: true }] },
+    { group: 'settings-group-machines', items: [{ id: 'machines', label: 'settings-machines', show: true }, { id: 'agents', label: 'settings-agents', show: !!loadKinds }] },
   ];
   // A deep link (#/device/passkeys) brings its section to the top; the page's own links change the hash, which lands here.
   useEffect(() => { if (section) document.getElementById(`settings-${section}`)?.scrollIntoView?.({ block: 'start' }); }, [section]);
@@ -364,8 +369,14 @@ export function DevicePage({ device, onBack, onTheme, section, onAddPasskey, pas
                     <input type="password" name="passkey-password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" />
                   </label>
                 )}
-                <button type="button" className="button justify-self-start" disabled={passkeyNeedsPassword && !password} onClick={() => { void onAddPasskey(passkeyNeedsPassword ? password : undefined).then((ok) => { setPasskey(ok ? 'added' : 'failed'); setPassword(''); }); }}>{t('device-passkey-add')}</button>
-                {passkey && <p role="status" className="m-0">{t(passkey === 'added' ? 'device-passkey-added' : 'device-passkey-failed')}</p>}
+                <button type="button" className="button justify-self-start" disabled={passkeyNeedsPassword && !password} onClick={() => {
+                  void onAddPasskey(passkeyNeedsPassword ? password : undefined).then((result) => {
+                    if (!result.ok && result.reason === 'busy') { setPasskeyNotice('password-busy'); return; }
+                    setPasskeyNotice(result.ok ? 'device-passkey-added' : 'device-passkey-failed');
+                    setPassword('');
+                  });
+                }}>{t('device-passkey-add')}</button>
+                {passkeyNotice && <p role="status" className="m-0">{t(passkeyNotice)}</p>}
               </section>
             )}
             {security && <div {...anchor('lock')}>{security}</div>}
@@ -410,6 +421,12 @@ export function DevicePage({ device, onBack, onTheme, section, onAddPasskey, pas
               ) : <p className="muted m-0">{t('machines-empty')}</p>}
               <p className="m-0"><a className="button" href="#/machines">{t('settings-machines-manage')}</a></p>
             </section>
+            {loadKinds && (
+              <section {...anchor('agents')}>
+                <h2 className="m-0">{t('settings-agents')}</h2>
+                <AgentsSettings machines={machines ?? []} loadKinds={loadKinds} />
+              </section>
+            )}
           </div>
         </div>
       </div>

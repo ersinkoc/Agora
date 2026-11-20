@@ -74,6 +74,9 @@ pub struct StartArgs {
     pub node: Option<String>,
     /// ADR-0066: the launch settings asked for (`(id, value)`, at most one per id); the node checks them against its manifest.
     pub settings: Vec<(String, String)>,
+    /// ADR-0059 decision 5: the launch options asked for by id (`skip-permissions`, ...); the node checks them against its manifest and
+    /// its owner's policy, and only the user's signed decision naming them gives them to the helper.
+    pub options: Vec<String>,
 }
 
 /// The helper a start produced, or why it did not.
@@ -1020,6 +1023,21 @@ fn spawn_call(
                 }
                 Some(_) => return bad(),
             };
+            // ADR-0059 decision 5: `options` is a list of option ids (strings only); anything else is a malformed call.
+            let options = match args.get("options") {
+                None | Some(Value::Null) => Vec::new(),
+                Some(Value::Array(list)) => {
+                    let mut out = Vec::with_capacity(list.len());
+                    for v in list {
+                        let Some(v) = v.as_str() else {
+                            return bad();
+                        };
+                        out.push(v.to_string());
+                    }
+                    out
+                }
+                Some(_) => return bad(),
+            };
             let a = StartArgs {
                 kind: kind.to_string(),
                 prompt: prompt.unwrap_or_default(),
@@ -1027,6 +1045,7 @@ fn spawn_call(
                 worktree,
                 node,
                 settings,
+                options,
             };
             match helpers.start(me, &a) {
                 Ok(ticket) => {

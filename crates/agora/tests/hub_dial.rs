@@ -777,6 +777,17 @@ fn the_terminal_console_learns_that_typing_was_refused_for_want_of_a_grant() {
     let Some(v1::command_ok::Result::AgentStart(s)) = started.result else {
         panic!("not started");
     };
+    // A second agent, whose typing stays refused.
+    let other = local
+        .call(Cmd::AgentStart(v1::AgentStart {
+            kind: "shell".into(),
+            ..Default::default()
+        }))
+        .unwrap()
+        .unwrap();
+    let Some(v1::command_ok::Result::AgentStart(other)) = other.result else {
+        panic!("not started");
+    };
 
     let console = ConsoleHub {
         addr: addr.to_string(),
@@ -799,13 +810,65 @@ fn the_terminal_console_learns_that_typing_was_refused_for_want_of_a_grant() {
     };
     let terminal = format!("t-{}", s.agent_id);
     let stream = session.terminal_open("laptop", &terminal).unwrap();
+    // Each refusal names the terminal whose typing was refused (the console asks only for the agent in front).
+    let refused_here =
+        |r: Vec<agora_tui::client::Refused>, t: &str| r.iter().any(|r| r.is_for("laptop", t));
     // Typing is sent without waiting for an answer; the refusal is noticed all the same.
     session.terminal_input("laptop", &terminal, b"echo first-try\n");
     let end = Instant::now() + D::from_secs(10);
-    while !session.take_grant_wanted() {
+    while !refused_here(session.take_grant_wanted(), &terminal) {
         let _ = session.terminal_next(stream, D::from_millis(100));
         assert!(Instant::now() < end, "the refusal was never noticed");
     }
+    // F1160: the console reads the link with `next` first on every turn; a refusal it reads is noticed too, so the console asks.
+    session.terminal_input("laptop", &terminal, b"echo console-try\n");
+    let end = Instant::now() + D::from_secs(10);
+    while !refused_here(session.take_grant_wanted(), &terminal) {
+        let _ = session.next(D::from_millis(100));
+        assert!(
+            Instant::now() < end,
+            "the refusal read by the console's reader was never noticed"
+        );
+    }
+    // Codex review of #796: a refusal that arrives while a stream opens (a tab opened in the turn the key was typed) is kept too.
+    session.terminal_input("laptop", &terminal, b"echo while-opening\n");
+    let reopened = session.terminal_open("laptop", &terminal).unwrap();
+    session.terminal_close(reopened);
+    let end = Instant::now() + D::from_secs(10);
+    while !refused_here(session.take_grant_wanted(), &terminal) {
+        let _ = session.next(D::from_millis(100));
+        assert!(
+            Instant::now() < end,
+            "the refusal read while a stream opened was lost"
+        );
+    }
+    // Codex review of #796: two terminals' refusals read before the console looks are both kept (it picks the one in front).
+    // Gate: every typing answered (read), and only then looked at.
+    let other_terminal = format!("t-{}", other.agent_id);
+    session.terminal_input("laptop", &other_terminal, b"echo other-first\n");
+    session.terminal_input("laptop", &terminal, b"echo this-second\n");
+    let end = Instant::now() + D::from_secs(10);
+    while session.typing_unanswered() > 0 {
+        let _ = session.next(D::from_millis(100));
+        assert!(Instant::now() < end, "the typing was never answered");
+    }
+    let both = session.take_grant_wanted();
+    assert!(
+        refused_here(both.clone(), &terminal) && refused_here(both.clone(), &other_terminal),
+        "a refusal was replaced by another terminal's: {both:?}"
+    );
+    // Codex review of #796: a focus report or pointer motion the console passes on by itself is refused too, but asks nothing.
+    session.terminal_report("laptop", &terminal, b"\x1b[I");
+    session.terminal_report("laptop", &terminal, b"\x1b[<35;3;4M");
+    let end = Instant::now() + D::from_secs(10);
+    while session.typing_unanswered() > 0 {
+        let _ = session.next(D::from_millis(100));
+        assert!(Instant::now() < end, "the reports were never answered");
+    }
+    assert!(
+        session.take_grant_wanted().is_empty(),
+        "a refused report asked for a grant"
+    );
     // After a grant the same typing reaches the shell.
     let scope = format!("agent:{}", s.agent_id);
     let commands = ["agent.stop", "agent.prompt", "terminal.input"];
@@ -827,7 +890,46 @@ fn the_terminal_console_learns_that_typing_was_refused_for_want_of_a_grant() {
             "typing after the grant never arrived: {seen}"
         );
     }
-    assert!(!session.take_grant_wanted());
+    assert!(session.take_grant_wanted().is_empty());
+    // Codex review of #796 (fourth): typing the machine took is told too (the console's notice goes after the next accepted key).
+    let end = Instant::now() + D::from_secs(10);
+    while session.typing_unanswered() > 0 {
+        let _ = session.next(D::from_millis(100));
+        assert!(Instant::now() < end, "the typing was never answered");
+    }
+    assert!(session
+        .take_typing_taken()
+        .iter()
+        .any(|(n, t, _)| n == "laptop" && *t == terminal));
+    // Codex review of #796: the other agent's typing is refused, then typing into the allowed one is taken (its echo seen): the
+    // refusal still names the other agent's terminal, never the one typed into last.
+    session.terminal_input("laptop", &other_terminal, b"echo refused\n");
+    session.terminal_input("laptop", &terminal, b"echo third-try\n");
+    let mut seen = String::new();
+    let end = Instant::now() + D::from_secs(10);
+    while !seen.contains("third-try") {
+        if let agora_tui::client::TermEvent::Data(b) | agora_tui::client::TermEvent::Screen(b) =
+            session.terminal_next(stream, D::from_millis(100))
+        {
+            seen.push_str(&String::from_utf8_lossy(&b));
+        }
+        assert!(
+            Instant::now() < end,
+            "typing after the grant never arrived: {seen}"
+        );
+    }
+    let end = Instant::now() + D::from_secs(10);
+    let refused = loop {
+        if let Some(r) = session.take_grant_wanted().pop() {
+            break r;
+        }
+        let _ = session.next(D::from_millis(100));
+        assert!(
+            Instant::now() < end,
+            "the other agent's refusal was never noticed"
+        );
+    };
+    assert_eq!(refused.terminal_id, other_terminal);
     drop(node);
 }
 

@@ -29,6 +29,8 @@ pub struct Preview {
     /// Reflowing that output here, size after size, mangled it until the tab was opened again (TUI review); the machine's own
     /// screen at the new size is the truth.
     repaint_at: Option<std::time::Instant>,
+    /// Output was dropped while nothing read it (a question was open): watch again at the next pump, for the machine's own screen.
+    behind: bool,
 }
 
 /// How long after a resize the fresh repaint is asked for: the agent has redrawn for its new size by then, and a burst of resizes
@@ -86,16 +88,19 @@ impl Preview {
             output_since_screen: false,
             scanner: ModeScanner::default(),
             repaint_at: None,
+            behind: false,
         })
     }
 
     /// Applies what arrived for this terminal, without waiting.
     pub fn pump(&mut self, session: &mut Session) -> Pumped {
         let mut seen = Pumped::Nothing;
-        if self
-            .repaint_at
-            .is_some_and(|at| at.elapsed() >= REPAINT_AFTER)
+        if self.behind
+            || self
+                .repaint_at
+                .is_some_and(|at| at.elapsed() >= REPAINT_AFTER)
         {
+            self.behind = false;
             self.repaint_at = None;
             // Watching again starts with the machine's full screen at its current size.
             let (node, local) = self.agent.split_once('/').unwrap_or(("", &self.agent));
@@ -109,6 +114,10 @@ impl Preview {
         for _ in 0..BATCH {
             match session.terminal_next(self.stream, Duration::ZERO) {
                 TermEvent::Quiet => break,
+                TermEvent::Behind => {
+                    self.behind = true;
+                    break;
+                }
                 TermEvent::Data(b) => {
                     self.scanner.feed(&b);
                     self.term.feed(&b);

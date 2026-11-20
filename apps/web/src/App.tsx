@@ -85,6 +85,7 @@ export function App() {
   const trySignIn = useCallback(async (code: string, password?: string) => {
     const r = await signIn(code, password);
     if (r.ok) { setSignInNotice(undefined); setHub(hubConnection()); return; }
+    if (r.reason === 'busy') { setSignInNotice('password-busy'); return; }
     setSignInNotice(r.reason === 'refused' ? (password ? 'signin-refused-password' : 'signin-refused') : r.reason === 'too-many' ? 'signin-too-many' : 'signin-failed');
   }, []);
   // A code from a `#code=` link that still needs the screen password: kept in the form, not submitted.
@@ -93,6 +94,7 @@ export function App() {
   const trySignInPasskey = useCallback(async () => {
     const r = await signInWithPasskey();
     if (r.ok) { setSignInNotice(undefined); setHub(hubConnection()); return; }
+    if (r.reason === 'busy') { setSignInNotice('password-busy'); return; }
     if (r.reason !== 'cancelled') setSignInNotice(r.reason === 'too-many' ? 'signin-too-many' : 'signin-passkey-failed');
   }, []);
   // A code in the address (`#code=...`) is removed from the address at once. It signs in at once unless the hub wants the screen
@@ -126,7 +128,7 @@ export function App() {
   const loadKinds = useCallback(async (node: string): Promise<KindChoice[]> => {
     const ok = await api!.command(node, { agentKinds: {} });
     return (ok.agentKinds?.kinds ?? []).map((k) => ({
-      kind: k.kind ?? '', name: k.displayName || (k.kind ?? ''), installed: !!k.installed,
+      kind: k.kind ?? '', name: k.displayName || (k.kind ?? ''), installed: !!k.installed, level: Number(k.level ?? 0),
       // ADR-0069: the program the machine looks for in its PATH (empty from an older machine).
       program: k.program ?? '',
       // ADR-0059: the kind's launch options (the machine keeps their arguments).
@@ -468,6 +470,9 @@ export function App() {
   }, [api]);
 
   const selectedAgent = agents.find(a => a.id === current);
+  // The agent a grant question names: its tile's name, or its id before the list has it.
+  const grantAgentId = grantAsk?.ask.scope.startsWith('agent:') ? `${grantAsk.node}/${grantAsk.ask.scope.slice('agent:'.length)}` : '';
+  const grantAgentName = agents.find((a) => a.id === grantAgentId)?.name ?? grantAgentId.slice(grantAgentId.indexOf('/') + 1);
 
   const open = useCallback((id: string) => go(`#/agent/${encodeURIComponent(id)}`), [go]);
   const next = useCallback(() => {
@@ -544,9 +549,9 @@ export function App() {
     <QuotaProvider obs={quotaList} machines={quotaMachines}>
     <CloseAgentContext.Provider value={hub && api ? closeAgent : undefined}>
     <ChatActionsContext.Provider value={chatActions}>
-      {hash === '#/gallery' ? <Gallery /> : isMachinesHash(hash) ? <MachinesPage focus={machineOfHash(hash)} machines={live ? machines(live) : hub ? [] : demoMachines} agents={agents} usage={usage} projects={live && usage ? costByProject(live, usage.perAgent) : []} onBack={() => go('#/')} onForget={hub ? forgetMachines : undefined} /> : hash === '#/audit' && hub ? <AuditPage load={(who) => loadAudit(hub.token, who)} onBack={() => go('#/')} /> : isSettingsHash(hash) ? <DevicePage section={settingsSectionOf(hash)} device={device} onBack={() => go('#/')} onTheme={editTheme} onAddPasskey={hub && passkeysSupported() ? async (password) => (await addPasskey(hub.token, undefined, password)).ok : undefined} passkeyNeedsPassword={info.passwordRequired}
+      {hash === '#/gallery' ? <Gallery /> : isMachinesHash(hash) ? <MachinesPage focus={machineOfHash(hash)} machines={live ? machines(live) : hub ? [] : demoMachines} agents={agents} usage={usage} projects={live && usage ? costByProject(live, usage.perAgent) : []} onBack={() => go('#/')} onForget={hub ? forgetMachines : undefined} /> : hash === '#/audit' && hub ? <AuditPage load={(who) => loadAudit(hub.token, who)} onBack={() => go('#/')} /> : isSettingsHash(hash) ? <DevicePage section={settingsSectionOf(hash)} device={device} onBack={() => go('#/')} onTheme={editTheme} onAddPasskey={hub && passkeysSupported() ? (password) => addPasskey(hub.token, undefined, password) : undefined} passkeyNeedsPassword={info.passwordRequired}
           fingerprint={device ? prints.get(device.id) : undefined} machines={live ? machines(live) : undefined} trustedOn={trustedOn} others={hub ? others : undefined}
-          asked={asked} onAsk={hub && api ? askApproval : undefined} onRemove={hub && api ? removeDevice : undefined}
+          loadKinds={hub && api && live ? loadKinds : undefined} asked={asked} onAsk={hub && api ? askApproval : undefined} onRemove={hub && api ? removeDevice : undefined}
           security={hub ? <ScreenPasswordSettings passwordSet={info.passwordSet} idle={idle} onIdle={(m) => { setIdleMinutes(m); setIdle(m); }}
             onSet={async (password, current) => { const r = await setPassword(hub.token, password, current); if (r.ok) refreshInfo(); return r; }} /> : undefined} /> : hash === '#/theme' && phone ? <PhoneTheme onBack={() => go('#/')} />
         : current !== undefined && phone
@@ -564,7 +569,7 @@ export function App() {
           onStart={hub && api && live ? (node) => openStart(node) : (!hub && import.meta.env.DEV ? (node) => openStart(node) : undefined)}
           onNewTerminal={hub && api && live ? (node) => openStart(node, true) : (!hub && import.meta.env.DEV ? (node) => openStart(node, true) : undefined)} onCommand={() => setPalette(true)} onForget={hub && api ? forgetAgent : undefined} onResume={hub && api ? resumeAgent : (!hub && import.meta.env.DEV ? async () => undefined : undefined)} onLock={hub ? lockNow : undefined}
           start={startWindow} pairing={pairing.ui} />}
-      {grantAsk && <GrantDialog machine={live?.nodes.get(grantAsk.node)?.hostname || grantAsk.node} kind={grantAsk.ask.kind} busy={grantAsk.busy} failed={grantAsk.failed} onAllow={() => void allowGrant()} onClose={() => setGrantAsk(undefined)} />}
+      {grantAsk && <GrantDialog machine={live?.nodes.get(grantAsk.node)?.hostname || grantAsk.node} agent={grantAgentName} kind={grantAsk.ask.kind} busy={grantAsk.busy} failed={grantAsk.failed} onAllow={() => void allowGrant()} onClose={() => setGrantAsk(undefined)} />}
       {/* Away from Home (an agent, a page) a request to join still reaches the owner: the first card floats over the window. */}
       {pairing.ui && pairing.ui.cards[0] && !showsHome && <PairRequest key={pairing.ui.cards[0].id} request={pairing.ui.cards[0]} offline={pairing.ui.offline} onAnswer={(a, r) => pairing.ui!.onAnswer(pairing.ui!.cards[0]!, a, r)} />}
       <AttentionLayer items={attention} stale={hub ? link !== 'live' : false} phone={phone} onResolve={resolve} onReview={reviewAttention} />

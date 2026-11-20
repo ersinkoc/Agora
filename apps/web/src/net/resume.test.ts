@@ -28,7 +28,7 @@ it('keeps an interrupted agent closed under its machine until it starts again, a
   applyEvent(v, 6, { producerId: 'n', body: 'agentStarted', agentStarted: { agentId: 'agent-1', nodeId: 'n', projectId: 'p', kind: 'claude-code', worktreeId: '' } });
   expect(tiles(v)[0]).toMatchObject({ closed: false });
   expect(tiles(v)[0]?.interrupted).toBeUndefined();
-  const snap = fromSnapshot(agora.v1.Snapshot.fromObject({ pos: 7, nodes: [{ nodeId: 'n', online: true }], agents: [{ agentId: 'n/agent-2', nodeId: 'n', kind: 'codex', running: false, interrupted: true, resumable: false, interruptedAtMs: 99, folder: '/work/b' }] }));
+  const snap = fromSnapshot(agora.v1.Snapshot.create({ pos: 7, nodes: [{ nodeId: 'n', online: true }], agents: [{ agentId: 'n/agent-2', nodeId: 'n', kind: 'codex', running: false, interrupted: true, resumable: false, interruptedAtMs: 99, folder: '/work/b' }] }));
   expect(tiles(snap)[0]).toMatchObject({ closed: true, workspace: '/work/b', interrupted: { resumable: false } });
 });
 
