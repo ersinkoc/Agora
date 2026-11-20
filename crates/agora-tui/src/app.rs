@@ -701,6 +701,7 @@ impl App {
             ('d', key!("tui-app-cmd-remove")),
             ('a', key!("tui-app-cmd-ask")),
             ('v', key!("tui-app-cmd-devices")),
+            ('g', key!("tui-app-cmd-grant")),
             ('p', key!("tui-app-cmd-pair")),
         ] {
             all.push((Command::Letter(c), t(label, &[])));
@@ -2387,6 +2388,19 @@ mod tests {
         assert_eq!(app.commands(&cx(&rows)).len(), 1);
         assert_eq!(key(&mut app, &rows, Key::Enter), vec![Action::Command('x')]);
         assert!(app.palette.is_none());
+    }
+
+    /// #829: the grant key is in the command list (Ctrl-K) and runs as the letter `g`.
+    #[test]
+    fn the_palette_lists_the_grant_key() {
+        let rows = rows();
+        let mut app = App::default();
+        key(&mut app, &rows, Key::Ctrl('k'));
+        for c in "cmd-grant".chars() {
+            key(&mut app, &rows, Key::Char(c));
+        }
+        assert_eq!(app.commands(&cx(&rows)).len(), 1);
+        assert_eq!(key(&mut app, &rows, Key::Enter), vec![Action::Command('g')]);
     }
 
     #[test]

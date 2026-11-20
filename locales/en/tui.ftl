@@ -236,6 +236,7 @@ tui-review-nowhere = This agent has no folder or worktree to show changes for.
 tui-review-failed = Could not read its changes ({ $code }).
 tui-app-cmd-ask = Ask your other devices to approve this terminal (a)
 tui-app-cmd-devices = Approve a device that waits (v)
+tui-app-cmd-grant = Allow typing into the agent in front for one hour, after its machine refused it (g)
 tui-app-cmd-mouse = Turn the mouse on or off
 tui-app-cmd-inspector = Show or hide the details
 tui-app-cmd-close = Close this tab
