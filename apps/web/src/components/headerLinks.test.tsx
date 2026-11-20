@@ -80,7 +80,7 @@ describe('the Settings page', () => {
     { id: 'vps', name: 'VPS', os: 'linux', online: false, agentsRunning: 0, lastSeenMs: Date.now() - 3 * 86_400_000 },
   ];
   it('has a section list with an anchor per section and lists the machines with a link to each', () => {
-    const html = renderToStaticMarkup(<DevicePage device={undefined} onBack={() => {}} section="machines" machines={machines} trustedOn={['laptop']} security={<p>lock</p>} onAddPasskey={async () => true} />);
+    const html = renderToStaticMarkup(<DevicePage device={undefined} onBack={() => {}} section="machines" machines={machines} trustedOn={['laptop']} security={<p>lock</p>} onAddPasskey={async () => ({ ok: true })} />);
     for (const id of ['appearance', 'notifications', 'passkeys', 'lock', 'machines']) {
       expect(html).toContain(`href="#/device/${id}"`);
       expect(html).toContain(`id="settings-${id}"`);

@@ -50,6 +50,18 @@ describe('passkey', () => {
       .toEqual({ ok: false, reason: 'too-many' });
   });
 
+  it.each(['register-begin', 'register-finish'])('reports temporary overload at %s', async (busyAt) => {
+    const fetcher = (async (url: string) =>
+      String(url).endsWith(busyAt)
+        ? reply(503)
+        : reply(200, { challenge: 'AQID', rpId: 'hub.test' })) as unknown as typeof fetch;
+    const credentials = {
+      create: async () => ({ id: 'cred_1', response: { getPublicKey: () => bytes(9), clientDataJSON: bytes(7) } }),
+      get: async () => null,
+    } as unknown as CredentialsContainer;
+    expect(await addPasskey('sess', { fetcher, credentials }, 'test password')).toEqual({ ok: false, reason: 'busy' });
+  });
+
   it('does not ask the authenticator when the hub knows no passkey', async () => {
     const fetcher = (async () => reply(200, { challenge: 'AQID', rpId: 'h', ids: [] })) as unknown as typeof fetch;
     const credentials = { create: async () => null, get: async () => { throw new Error('should not be called'); } } as unknown as CredentialsContainer;

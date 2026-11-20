@@ -15,6 +15,7 @@ import { themeName } from './themes/messages';
 import { PromptBox } from './components/PromptBox';
 import type { PromptSend } from './components/chatActions';
 import type { ActionResult } from './net/refusal';
+import type { PasskeyResult } from './net/passkey';
 import type { ChatSource } from './net/chat';
 import { demoConversation, demoRichConversation } from './demoChat';
 import { ChatActionsContext } from './components/chatActions';
@@ -271,7 +272,7 @@ export function DevicePage({ device, onBack, onTheme, section, onAddPasskey, pas
   onTheme?: () => void;
   // The section of the page to bring into view (#/device/<section>).
   section?: string;
-  onAddPasskey?: (password?: string) => Promise<boolean>;
+  onAddPasskey?: (password?: string) => Promise<PasskeyResult>;
   passkeyNeedsPassword?: boolean;
   security?: ReactNode;
   fingerprint?: string;
@@ -285,7 +286,7 @@ export function DevicePage({ device, onBack, onTheme, section, onAddPasskey, pas
   onRemove?: (id: string) => Promise<boolean>;
 }) {
   useSyncExternalStore(themeStore.subscribe, themeStore.state, themeStore.state); // the theme's name below follows a change
-  const [passkey, setPasskey] = useState<'added' | 'failed' | undefined>();
+  const [passkeyNotice, setPasskeyNotice] = useState<string | undefined>();
   const [password, setPassword] = useState('');
   const [ask, setAsk] = useState<'asked' | 'failed' | undefined>();
   const [removing, setRemoving] = useState<{ id: string; failed?: boolean } | undefined>();
@@ -364,8 +365,14 @@ export function DevicePage({ device, onBack, onTheme, section, onAddPasskey, pas
                     <input type="password" name="passkey-password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" />
                   </label>
                 )}
-                <button type="button" className="button justify-self-start" disabled={passkeyNeedsPassword && !password} onClick={() => { void onAddPasskey(passkeyNeedsPassword ? password : undefined).then((ok) => { setPasskey(ok ? 'added' : 'failed'); setPassword(''); }); }}>{t('device-passkey-add')}</button>
-                {passkey && <p role="status" className="m-0">{t(passkey === 'added' ? 'device-passkey-added' : 'device-passkey-failed')}</p>}
+                <button type="button" className="button justify-self-start" disabled={passkeyNeedsPassword && !password} onClick={() => {
+                  void onAddPasskey(passkeyNeedsPassword ? password : undefined).then((result) => {
+                    if (!result.ok && result.reason === 'busy') { setPasskeyNotice('password-busy'); return; }
+                    setPasskeyNotice(result.ok ? 'device-passkey-added' : 'device-passkey-failed');
+                    setPassword('');
+                  });
+                }}>{t('device-passkey-add')}</button>
+                {passkeyNotice && <p role="status" className="m-0">{t(passkeyNotice)}</p>}
               </section>
             )}
             {security && <div {...anchor('lock')}>{security}</div>}
