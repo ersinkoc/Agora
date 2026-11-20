@@ -412,6 +412,8 @@ fn open(setup: &HolderSetup, lose_reply: &Arc<AtomicBool>) -> Result<Opened, Why
     let held = client.attach().map_err(|_| Why::Other)?;
     // An older holder is never sent what it cannot read (it would close the link): it has no pipe agents either.
     let pipes_ok = client.version >= LINK_VERSION_PIPES;
+    // What `agora doctor` and `agora status` cannot ask (the holder admits only the node): the version agreed, as a note.
+    crate::holder_note::write(&setup.home, client.version, pid, start);
     let pipes = if pipes_ok {
         client.attach_pipes().map_err(|_| Why::Other)?
     } else {

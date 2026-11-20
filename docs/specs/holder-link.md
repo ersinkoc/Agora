@@ -268,3 +268,13 @@ wants to write that cannot fit one frame fails that write on the node's side, be
   A node of this build never does this to itself.
 - Confinement (ADR-0093 decision 6) is as for terminals: a confined adapter is the node's own.
 - Windows has no holder (step 3).
+
+### Telling the person about an older holder (ADR-0093 "Build status")
+A holder started before link version 2 keeps running until every agent it keeps has ended, so a node of this build can negotiate down to
+version 1 and then runs structured agents itself: a node restart ends them (automatic resume brings them back). `agora doctor` and
+`agora status` are not the node, so the holder does not answer them (admission above) and they never connect to it. Instead the node writes
+what its own `Hello` agreed to `<home>/run/hold.link` (`version pid start`, owner-only, replaced atomically; `agora_node::holder_note`).
+A reader names a holder as older only when the note says version 1 **and** that pid still has that start time; the number of agents it keeps
+comes from the holder's own `run/hold.pid`. `agora doctor` then prints a warning (exit status unchanged) and `agora status` a line under the
+node; there is nothing to print without a holder, with a version 2 holder, or on Windows. The node logs `holder.link_v1: ...` once, the first
+time it starts a structured agent itself for this reason. Nothing here stops, restarts or signals the holder or reads an agent.
