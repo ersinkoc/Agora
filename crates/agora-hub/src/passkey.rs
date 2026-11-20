@@ -503,8 +503,8 @@ mod tests {
 
     /// A passkey belongs to the person whose session added it: signing in with it gives that person's session, never the owner's.
     /// (An audit found that a member could add a passkey and sign in as the owner with it.)
-    #[test]
-    fn a_members_passkey_signs_in_as_that_member_and_never_as_the_owner() {
+    #[tokio::test]
+    async fn a_members_passkey_signs_in_as_that_member_and_never_as_the_owner() {
         use crate::signin::{HubSessions, SignIn};
         use crate::users::{Role, Users};
         use crate::web::SessionApi;
@@ -526,18 +526,22 @@ mod tests {
             .unwrap();
         let owner_tok = si.redeem(&si.create_code(now).unwrap(), now).unwrap();
         let b = |v: &[u8]| b64url_encode(v);
-        let register_with = |tok: &str, id: &str, d: &Device| {
+        let register_with = async |tok: &str, id: &str, d: &Device| {
             // From another machine with a password set, a session alone cannot add a passkey.
-            let (st, _) = api.passkey(
-                "register-begin",
-                Some(tok),
-                HOST,
-                &away,
-                &serde_json::json!({}),
-            );
+            let (st, _) = api
+                .passkey(
+                    "register-begin",
+                    Some(tok),
+                    HOST,
+                    &away,
+                    &serde_json::json!({}),
+                )
+                .await;
             assert_eq!(st, 401);
             let pw = serde_json::json!({ "password": "a long screen password" });
-            let (st, out) = api.passkey("register-begin", Some(tok), HOST, &away, &pw);
+            let (st, out) = api
+                .passkey("register-begin", Some(tok), HOST, &away, &pw)
+                .await;
             assert_eq!(st, 200);
             let ch = serde_json::from_str::<serde_json::Value>(&out).unwrap()["challenge"]
                 .as_str()
@@ -550,11 +554,13 @@ mod tests {
                 HOST,
                 &away,
                 &serde_json::json!({"id": id, "publicKey": b(&d.spki()), "clientDataJSON": b(&cd), "password": "a long screen password"}),
-            );
+            ).await;
             assert_eq!(st, 200);
         };
-        let sign_in_with = |id: &str, d: &Device, count: u32| -> String {
-            let (_, out) = api.passkey("login-begin", None, HOST, &away, &serde_json::json!({}));
+        let sign_in_with = async |id: &str, d: &Device, count: u32| -> String {
+            let (_, out) = api
+                .passkey("login-begin", None, HOST, &away, &serde_json::json!({}))
+                .await;
             let ch = serde_json::from_str::<serde_json::Value>(&out).unwrap()["challenge"]
                 .as_str()
                 .unwrap()
@@ -568,7 +574,7 @@ mod tests {
                 HOST,
                 &away,
                 &serde_json::json!({"id": id, "authenticatorData": b(&auth), "clientDataJSON": b(&cd), "signature": b(&sig)}),
-            );
+            ).await;
             assert_eq!(st, 200);
             serde_json::from_str::<serde_json::Value>(&out).unwrap()["token"]
                 .as_str()
@@ -576,11 +582,11 @@ mod tests {
                 .to_string()
         };
         let (dm, dow) = (Device::new(), Device::new());
-        register_with(&tok, "cred-member", &dm);
-        register_with(&owner_tok, "cred-owner", &dow);
+        register_with(&tok, "cred-member", &dm).await;
+        register_with(&owner_tok, "cred-owner", &dow).await;
 
         let m = si
-            .access(&sign_in_with("cred-member", &dm, 1), now)
+            .access(&sign_in_with("cred-member", &dm, 1).await, now)
             .unwrap();
         assert_eq!(
             (m.role, m.user.as_str()),
@@ -592,13 +598,15 @@ mod tests {
             "and keeps only the projects they were given"
         );
         let o = si
-            .access(&sign_in_with("cred-owner", &dow, 1), now)
+            .access(&sign_in_with("cred-owner", &dow, 1).await, now)
             .unwrap();
         assert_eq!((o.role, o.user.as_str()), (Role::Owner, "owner"));
 
         // Removing the person removes their passkey with them.
         Users::new(hub.store()).remove(&member.id).unwrap();
-        let (_, out) = api.passkey("login-begin", None, HOST, &away, &serde_json::json!({}));
+        let (_, out) = api
+            .passkey("login-begin", None, HOST, &away, &serde_json::json!({}))
+            .await;
         assert!(!out.contains("cred-member"), "{out}");
     }
 }

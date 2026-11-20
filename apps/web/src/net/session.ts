@@ -34,7 +34,7 @@ export function hubConnection(): HubConnection | undefined {
   return { url: `${scheme}://${window.location.host}/`, token };
 }
 
-export type SignInResult = { ok: true; token: string } | { ok: false; reason: 'refused' | 'too-many' | 'failed' };
+export type SignInResult = { ok: true; token: string } | { ok: false; reason: 'refused' | 'too-many' | 'busy' | 'failed' };
 
 // Trades a one-time code (and, from another machine, the screen password: ADR-0067) for a session token and remembers it in this browser.
 export async function signIn(code: string, password?: string, fetcher: typeof fetch = fetch): Promise<SignInResult> {
@@ -46,6 +46,7 @@ export async function signIn(code: string, password?: string, fetcher: typeof fe
     });
     if (r.status === 401) return { ok: false, reason: 'refused' };
     if (r.status === 429) return { ok: false, reason: 'too-many' };
+    if (r.status === 503) return { ok: false, reason: 'busy' };
     if (!r.ok) return { ok: false, reason: 'failed' };
     const body = (await r.json()) as { token?: unknown };
     if (typeof body.token !== 'string') return { ok: false, reason: 'failed' };
@@ -99,12 +100,13 @@ export async function endSession(token: string, fetcher: typeof fetch = fetch): 
   } catch { /* the hub is unreachable: the session ends when it expires */ }
 }
 
-export type PasswordResult = { ok: true } | { ok: false; reason: 'refused' | 'too-many' | 'too-short' | 'failed' };
+export type PasswordResult = { ok: true } | { ok: false; reason: 'refused' | 'too-many' | 'too-short' | 'busy' | 'failed' };
 
 const passwordReply = async (r: Response): Promise<PasswordResult> => {
   if (r.ok) return { ok: true };
   if (r.status === 401) return { ok: false, reason: 'refused' };
   if (r.status === 429) return { ok: false, reason: 'too-many' };
+  if (r.status === 503) return { ok: false, reason: 'busy' };
   if (r.status === 400) return { ok: false, reason: 'too-short' };
   return { ok: false, reason: 'failed' };
 };

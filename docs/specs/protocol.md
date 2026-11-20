@@ -243,6 +243,10 @@ without it, counted like a sign-in); changing or clearing the password deletes p
 not in the setting `passkeys_vouched`; a passkey added from elsewhere without it under the id of a removed passkey first takes that
 id off the list). Passkey `login-finish` counts only toward the per-address limit. The idle lock of a window
 uses `DELETE /api/session`. The hash is a setting (`screen_password`: `pbkdf2-sha256$<rounds>$<salt hex>$<hash hex>`), not a schema change.
+Remote password work shares two blocking-work slots per hub. Code sign-in and passkey registration need a slot when they
+have a screen password to verify. Password settings and passkey registration validate their session first. Password settings
+for the owner on loopback use a reserved slot. A request that requires a busy slot gets HTTP 503 with an empty body before it
+counts as an authentication attempt.
 
 Passkeys (`agora-hub::passkey`, WebAuthn, ES256 only, no attestation): a signed-in session adds one with
 `POST /api/passkey/register-begin` (`{}` → `{"challenge","rpId"}`, `Authorization: Bearer <session>`) and `register-finish`

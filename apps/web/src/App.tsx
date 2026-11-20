@@ -85,6 +85,7 @@ export function App() {
   const trySignIn = useCallback(async (code: string, password?: string) => {
     const r = await signIn(code, password);
     if (r.ok) { setSignInNotice(undefined); setHub(hubConnection()); return; }
+    if (r.reason === 'busy') { setSignInNotice('password-busy'); return; }
     setSignInNotice(r.reason === 'refused' ? (password ? 'signin-refused-password' : 'signin-refused') : r.reason === 'too-many' ? 'signin-too-many' : 'signin-failed');
   }, []);
   // A code from a `#code=` link that still needs the screen password: kept in the form, not submitted.
@@ -93,6 +94,7 @@ export function App() {
   const trySignInPasskey = useCallback(async () => {
     const r = await signInWithPasskey();
     if (r.ok) { setSignInNotice(undefined); setHub(hubConnection()); return; }
+    if (r.reason === 'busy') { setSignInNotice('password-busy'); return; }
     if (r.reason !== 'cancelled') setSignInNotice(r.reason === 'too-many' ? 'signin-too-many' : 'signin-passkey-failed');
   }, []);
   // A code in the address (`#code=...`) is removed from the address at once. It signs in at once unless the hub wants the screen
@@ -544,7 +546,7 @@ export function App() {
     <QuotaProvider obs={quotaList} machines={quotaMachines}>
     <CloseAgentContext.Provider value={hub && api ? closeAgent : undefined}>
     <ChatActionsContext.Provider value={chatActions}>
-      {hash === '#/gallery' ? <Gallery /> : isMachinesHash(hash) ? <MachinesPage focus={machineOfHash(hash)} machines={live ? machines(live) : hub ? [] : demoMachines} agents={agents} usage={usage} projects={live && usage ? costByProject(live, usage.perAgent) : []} onBack={() => go('#/')} onForget={hub ? forgetMachines : undefined} /> : hash === '#/audit' && hub ? <AuditPage load={(who) => loadAudit(hub.token, who)} onBack={() => go('#/')} /> : isSettingsHash(hash) ? <DevicePage section={settingsSectionOf(hash)} device={device} onBack={() => go('#/')} onTheme={editTheme} onAddPasskey={hub && passkeysSupported() ? async (password) => (await addPasskey(hub.token, undefined, password)).ok : undefined} passkeyNeedsPassword={info.passwordRequired}
+      {hash === '#/gallery' ? <Gallery /> : isMachinesHash(hash) ? <MachinesPage focus={machineOfHash(hash)} machines={live ? machines(live) : hub ? [] : demoMachines} agents={agents} usage={usage} projects={live && usage ? costByProject(live, usage.perAgent) : []} onBack={() => go('#/')} onForget={hub ? forgetMachines : undefined} /> : hash === '#/audit' && hub ? <AuditPage load={(who) => loadAudit(hub.token, who)} onBack={() => go('#/')} /> : isSettingsHash(hash) ? <DevicePage section={settingsSectionOf(hash)} device={device} onBack={() => go('#/')} onTheme={editTheme} onAddPasskey={hub && passkeysSupported() ? (password) => addPasskey(hub.token, undefined, password) : undefined} passkeyNeedsPassword={info.passwordRequired}
           fingerprint={device ? prints.get(device.id) : undefined} machines={live ? machines(live) : undefined} trustedOn={trustedOn} others={hub ? others : undefined}
           asked={asked} onAsk={hub && api ? askApproval : undefined} onRemove={hub && api ? removeDevice : undefined}
           security={hub ? <ScreenPasswordSettings passwordSet={info.passwordSet} idle={idle} onIdle={(m) => { setIdleMinutes(m); setIdle(m); }}

@@ -3,6 +3,7 @@
 //! The first request head of every connection is read before anything else. A WebSocket upgrade is replayed
 //! to the WebSocket handshake unchanged (`Rewind`); any other `GET` is answered from `Assets`.
 
+use std::future::Future;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
@@ -19,10 +20,12 @@ pub struct SignInRequest<'a> {
     pub client: &'a Client,
 }
 
+pub type SessionReply<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
 /// What the sign-in routes need from the hub: `POST /api/session` trades a one-time code (and, from another machine, the screen
 /// password) for a session token; `GET /api/session` says whether the password is needed; `DELETE /api/session` signs out.
 pub trait SessionApi: Send + Sync {
-    fn sign_in(&self, req: &SignInRequest<'_>) -> SignInReply;
+    fn sign_in<'a>(&'a self, req: &'a SignInRequest<'a>) -> SessionReply<'a, SignInReply>;
 
     /// `GET /api/session`: what the sign-in screen needs to know before it asks (`passwordRequired`, `passwordSet`). Additive JSON.
     fn info(&self, _client: &Client) -> serde_json::Value {
@@ -40,27 +43,27 @@ pub trait SessionApi: Send + Sync {
     }
 
     /// `POST /api/password` (`op` = `password`: set or change the screen password). Returns the status and the JSON body.
-    fn account(
-        &self,
-        _op: &str,
-        _bearer: Option<&str>,
-        _client: &Client,
-        _body: &serde_json::Value,
-    ) -> (u16, String) {
-        (404, String::new())
+    fn account<'a>(
+        &'a self,
+        _op: &'a str,
+        _bearer: Option<&'a str>,
+        _client: &'a Client,
+        _body: &'a serde_json::Value,
+    ) -> SessionReply<'a, (u16, String)> {
+        Box::pin(async { (404, String::new()) })
     }
 
     /// `POST /api/passkey/<op>` (WebAuthn, ADR-0015): `bearer` is the session token of the request, `host` its `Host`
     /// header. Returns the status and the JSON body. Hubs without passkeys answer 404.
-    fn passkey(
-        &self,
-        _op: &str,
-        _bearer: Option<&str>,
-        _host: &str,
-        _client: &Client,
-        _body: &serde_json::Value,
-    ) -> (u16, String) {
-        (404, String::new())
+    fn passkey<'a>(
+        &'a self,
+        _op: &'a str,
+        _bearer: Option<&'a str>,
+        _host: &'a str,
+        _client: &'a Client,
+        _body: &'a serde_json::Value,
+    ) -> SessionReply<'a, (u16, String)> {
+        Box::pin(async { (404, String::new()) })
     }
 
     /// `GET /api/audit?since=<ms>&who=<id>&limit=<n>` (ADR-0049): the audit trail as a JSON array, for the owner only. Hubs without
@@ -88,6 +91,8 @@ pub enum SignInReply {
     Refused,
     /// Too many wrong tries from here (or from everywhere); try later.
     TooMany,
+    /// All screen-password workers for this client are occupied.
+    Busy,
     /// The hub could not do it (its store failed).
     Failed,
 }
@@ -490,11 +495,12 @@ where
         let (status, out) = if let Some(op) = passkey_op.or(account_op) {
             match (sessions, json) {
                 (Some(api), Some(j)) if account_op.is_some() => {
-                    api.account(op, bearer().as_deref(), &client, &j)
+                    api.account(op, bearer().as_deref(), &client, &j).await
                 }
                 (Some(api), Some(j)) => {
                     let host = header("host").unwrap_or_default();
                     api.passkey(op, bearer().as_deref(), &host, &client, &j)
+                        .await
                 }
                 (None, _) => (404, String::new()),
                 _ => (400, String::new()),
@@ -512,12 +518,13 @@ where
                         password: field("password"),
                         client: &client,
                     };
-                    match api.sign_in(&req) {
+                    match api.sign_in(&req).await {
                         SignInReply::Token(t) => {
                             (200, serde_json::json!({ "token": t }).to_string())
                         }
                         SignInReply::Refused => (401, String::new()),
                         SignInReply::TooMany => (429, String::new()),
+                        SignInReply::Busy => (503, String::new()),
                         SignInReply::Failed => (500, String::new()),
                     }
                 }
@@ -525,7 +532,7 @@ where
                 _ => (400, String::new()),
             }
         };
-        // Every refusal costs the same short wait, whatever was wrong.
+        // Every authentication refusal costs the same short wait, whatever was wrong.
         if status == 401 || status == 429 {
             tokio::time::sleep(FAILURE_DELAY).await;
         }
@@ -609,6 +616,7 @@ async fn respond<S: AsyncWrite + Unpin>(
         403 => "Forbidden",
         409 => "Conflict",
         500 => "Internal Server Error",
+        503 => "Service Unavailable",
         404 => "Not Found",
         405 => "Method Not Allowed",
         421 => "Misdirected Request",
