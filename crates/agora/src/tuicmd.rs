@@ -639,6 +639,11 @@ fn fresh_key(ask: &mut dyn Asker, lines: &[String], wait: Duration) -> Option<u8
     answer
 }
 
+/// Lets `tracker` see keys that were forwarded to an agent, so it knows whether a bracketed paste is open at the end of them.
+fn track_forwarded(tracker: &mut Parser, bytes: &[u8]) {
+    let _ = tracker.push(bytes);
+}
+
 /// Sets aside every key typed so far by reading it through `parser` and dropping what it makes: a bracketed paste that began
 /// before, or begins among them, keeps its framing (its text stays a paste, and the parser leaves paste mode at its end marker).
 fn set_aside_keys(parser: &mut Parser, rx: &mpsc::Receiver<u8>) {
@@ -651,7 +656,21 @@ fn set_aside_keys(parser: &mut Parser, rx: &mpsc::Receiver<u8>) {
 
 /// The answer in one read of the keyboard: only when it is exactly one key or click, never a paste nor several keys at once.
 fn one_answer(events: &[AppEvent], area: Area, lines: &[String]) -> Option<u8> {
-    match events {
+    // Pointer motion with no button is the terminal's report, not the user's answer: it neither answers nor spoils one that came
+    // in the same read.
+    let deliberate: Vec<&AppEvent> = events
+        .iter()
+        .filter(|e| {
+            !matches!(
+                e,
+                AppEvent::Mouse(agora_tui::app::Mouse {
+                    kind: agora_tui::app::MouseKind::Move,
+                    ..
+                })
+            )
+        })
+        .collect();
+    match deliberate.as_slice() {
         [e] if !matches!(e, AppEvent::Paste(_)) => agora_tui::app::dialog_key(e, area, lines),
         _ => None,
     }
@@ -780,6 +799,9 @@ fn attach(
     let _ = write!(out, "\x1b[2J\x1b[H");
     let _ = out.flush();
     let mut lost = false;
+    // Follows the paste framing of what was forwarded, so a question asked after a paste's opening marker went out reads the rest
+    // of that paste as a paste (its `y` answers nothing).
+    let mut forwarded = Parser::default();
     'watch: loop {
         match session.terminal_next(stream, Duration::from_millis(50)) {
             TermEvent::Data(b) | TermEvent::Screen(b) => {
@@ -791,6 +813,13 @@ fn attach(
                 lost = true;
                 break;
             }
+            // Output was dropped while a question waited: the screen is asked for again.
+            TermEvent::Behind => {
+                session.terminal_close(stream);
+                stream = session.terminal_open(node, &terminal)?;
+                let _ = write!(out, "\x1b[2J\x1b[H");
+                let _ = out.flush();
+            }
             TermEvent::Resized(..) | TermEvent::Quiet => {}
         }
         // What was typed was refused until the owner allows it: ask, and show the screen again either way (the typed keys are lost).
@@ -800,14 +829,16 @@ fn attach(
             .any(|r| r.is_for(node, &terminal))
         {
             let scope = format!("agent:{local}");
+            let mut plain = Plain::with(rx, std::mem::take(&mut forwarded));
             let _ = ask_grant(
                 say,
                 session,
-                &mut Plain::new(rx),
+                &mut plain,
                 node,
                 &scope,
                 Site::AttachTyping.commands(),
             );
+            forwarded = plain.1;
             session.terminal_close(stream);
             stream = session.terminal_open(node, &terminal)?;
             if let Some((cols, rows)) = size {
@@ -832,6 +863,7 @@ fn attach(
             typed.push(k);
         }
         if !typed.is_empty() {
+            track_forwarded(&mut forwarded, &typed);
             session.terminal_input(node, &terminal, &typed);
         }
         // The terminal closed (window gone, SSH lost): stop watching instead of running on unseen.
@@ -2083,7 +2115,8 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                 std::thread::sleep(Duration::from_secs(2));
                 break;
             }
-            if dirty_since.is_some() && last_refresh.elapsed() >= Duration::from_millis(REFRESH_MS)
+            if dirty_since.is_some()
+                && refresh_due(last_refresh.elapsed(), session.typing_unanswered())
             {
                 // The hub answers a new subscription with a fresh snapshot; a live feed applying single events is later work.
                 break;
@@ -2097,6 +2130,18 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
 
 /// The console's shortest time between two frames: 60 a second, the ADR-0022 budget for a keystroke's echo.
 const FRAME: Duration = Duration::from_millis(16);
+
+/// A routine refresh replaces the session, and with it the numbers that match a keystroke to its reply: a refusal (and the hint to
+/// allow typing) of a keystroke still in flight would be lost. So it waits until every typing reply has arrived, at most
+/// [`REFRESH_PATIENCE`] longer than usual (a reply that never comes must not stop refreshing for good).
+fn refresh_due(since_dirty: Duration, typing_unanswered: usize) -> bool {
+    since_dirty >= Duration::from_millis(REFRESH_MS)
+        && (typing_unanswered == 0
+            || since_dirty >= Duration::from_millis(REFRESH_MS) + REFRESH_PATIENCE)
+}
+
+/// How much longer a refresh waits for typing replies.
+const REFRESH_PATIENCE: Duration = Duration::from_secs(3);
 
 /// What the console does after its loop ends.
 enum Next {
@@ -2178,19 +2223,29 @@ fn trust_command() -> Option<String> {
     device().map(|d| format!("agora node trust {} {}", d.id, d.public_key_hex()))
 }
 
-/// The terminal reports mouse presses, drags and the wheel (SGR encoding) while the console holds the mouse, and pastes come
-/// bracketed; both are switched off while a question is asked, which reads plain bytes.
+/// The terminal reports mouse presses, drags and the wheel (SGR encoding) while the console holds the mouse, and not while a screen a
+/// question draws itself reads plain bytes. Pastes are framed independently of this ([`bracketed_paste`]), so a paste that began
+/// before a question stays one while the mouse is off.
 fn mouse_mode(on: bool) {
     let mut out = std::io::stdout();
     // Motion with no button (1003) is only switched on while the open program asked for it (`mouse_motion`): never by this.
     HOST_MOTION.store(false, std::sync::atomic::Ordering::Relaxed);
-    HOST_PASTE.store(on, std::sync::atomic::Ordering::Relaxed);
-    let _ = out.write_all(if on {
-        b"\x1b[?1003l\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?2004h"
-    } else {
-        b"\x1b[?1003l\x1b[?1000l\x1b[?1002l\x1b[?1006l\x1b[?2004l"
-    });
+    write_mouse(&mut out, on);
+}
+
+/// Writes [`mouse_sequence`] to `out`.
+fn write_mouse(out: &mut impl Write, on: bool) {
+    let _ = out.write_all(mouse_sequence(on));
     let _ = out.flush();
+}
+
+/// What [`mouse_mode`] writes: the mouse modes only, never the paste framing (DECSET 2004).
+fn mouse_sequence(on: bool) -> &'static [u8] {
+    if on {
+        b"\x1b[?1003l\x1b[?1000h\x1b[?1002h\x1b[?1006h"
+    } else {
+        b"\x1b[?1003l\x1b[?1000l\x1b[?1002l\x1b[?1006l"
+    }
 }
 
 /// Whether this terminal frames pastes (DECSET 2004) right now.
@@ -2198,9 +2253,13 @@ static HOST_PASTE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool
 
 /// Asks this terminal to frame pastes (2004) or not; returns whether it did before, to put back.
 fn bracketed_paste(on: bool) -> bool {
-    let was = HOST_PASTE.swap(on, std::sync::atomic::Ordering::Relaxed);
+    set_paste(&mut std::io::stdout(), &HOST_PASTE, on)
+}
+
+/// [`bracketed_paste`] on any writer and state: writes DECSET 2004 only when `on` differs from what `state` says it is.
+fn set_paste(out: &mut impl Write, state: &std::sync::atomic::AtomicBool, on: bool) -> bool {
+    let was = state.swap(on, std::sync::atomic::Ordering::Relaxed);
     if was != on {
-        let mut out = std::io::stdout();
         let _ = out.write_all(if on { b"\x1b[?2004h" } else { b"\x1b[?2004l" });
         let _ = out.flush();
     }
@@ -2257,15 +2316,17 @@ fn console(
     // The agent whose terminal was last sized to the pane, so a tab brought to the front is sized once.
     let mut sized: Option<(String, u16, u16)> = None;
     mouse_mode(c.app.mouse);
+    // The console can ask at any time, so pastes are framed for as long as it runs (never tied to the mouse).
+    bracketed_paste(true);
     let mut fresh = true;
     let mut typed_at: Option<Instant> = None;
     // A refusal is matched by its session's request numbers, which a new session (a reconnect, also a routine refresh) starts over:
     // a pending refusal stays (typing is still refused there), and any typing the new session gets taken ends it.
-    if let Some(p) = c.typing_refused.as_mut() {
-        p.request = 0;
-    }
-    c.typing_allowed = None;
-    c.typing_taken.clear();
+    carry_refusal(
+        &mut c.typing_refused,
+        &mut c.typing_allowed,
+        &mut c.typing_taken,
+    );
     // ADR-0065: only the hub knows whether this session is the owner's (it answers `PairStatus` to the owner only).
     if c.pair.owner == agora_tui::pair::Owner::Unknown {
         if let Some(owner) = pair_owner(session) {
@@ -2458,7 +2519,7 @@ fn console(
                             // Typing in a chat never answers a request, whatever letters it holds (the TUI review: `maybe`
                             // allowed one): a waiting request is answered with Alt+Y / Alt+N only, and the draft is kept.
                             Some(pane) => {
-                                chat_input(say, session, rx, c, &mut preview, pane, &b);
+                                chat_input(say, session, rx, c, pane, &b);
                                 if pane.typed.is_empty() {
                                     c.drafts.remove(&pane.agent);
                                 } else {
@@ -2581,10 +2642,11 @@ fn console(
                             p.close(session);
                         }
                         mouse_mode(false);
+                        bracketed_paste(false);
                         return Next::Quit;
                     }
                     Action::CleanUpOld => {
-                        c.notice = clean_up_old(say, session, c, &mut preview, rx);
+                        c.notice = clean_up_old(say, session, c, rx);
                         dirty_since.get_or_insert_with(Instant::now);
                     }
                     Action::Command(k) => {
@@ -2605,7 +2667,7 @@ fn console(
                                     .map(|a| a.approval_id.clone());
                             }
                         }
-                        if command(say, session, rx, color, c, &mut preview, area, k)
+                        if command(say, session, rx, color, c, area, k)
                             | std::mem::take(&mut c.stale)
                         {
                             dirty_since.get_or_insert_with(Instant::now);
@@ -2779,7 +2841,8 @@ fn console(
             last_draw = Instant::now();
             redraw = false;
         }
-        if dirty_since.is_some() && last_refresh.elapsed() >= Duration::from_millis(REFRESH_MS) {
+        if dirty_since.is_some() && refresh_due(last_refresh.elapsed(), session.typing_unanswered())
+        {
             // The hub answers a new subscription with a fresh snapshot; a live feed applying single events is later work.
             if let Some(p) = preview.take() {
                 p.close(session);
@@ -2790,6 +2853,20 @@ fn console(
             last_refresh = Instant::now();
         }
     }
+}
+
+/// What a new session (a reconnect, also a routine refresh) keeps of the typing refusals: the pending one stays, renumbered, since
+/// typing is still refused there; what was allowed or taken was counted in the old session's numbers and ends.
+fn carry_refusal(
+    refused: &mut Option<TypingRefused>,
+    allowed: &mut Option<(String, u64)>,
+    taken: &mut Taken,
+) {
+    if let Some(p) = refused.as_mut() {
+        p.request = 0;
+    }
+    *allowed = None;
+    taken.clear();
 }
 
 /// Typing into `agent` (`node/local`), the agent in front, was refused for want of a grant (its newest refused `request`).
@@ -3193,7 +3270,6 @@ fn chat_input(
     session: &mut Session,
     rx: &mpsc::Receiver<u8>,
     c: &mut Console,
-    preview: &mut Option<Preview>,
     pane: &mut ChatPane,
     bytes: &[u8],
 ) {
@@ -3215,7 +3291,7 @@ fn chat_input(
             {
                 pane.note = say.text(key!("tui-chat-answer-first"), &[]);
             }
-            b'\r' | b'\n' => chat_send(say, session, rx, c, preview, pane),
+            b'\r' | b'\n' => chat_send(say, session, rx, c, pane),
             0x7f | 0x08 => {
                 // Backspace removes one character, not one byte.
                 while pane.typed.pop().is_some_and(|b| b & 0xC0 == 0x80) {}
@@ -3231,7 +3307,6 @@ fn chat_send(
     session: &mut Session,
     rx: &mpsc::Receiver<u8>,
     c: &mut Console,
-    preview: &mut Option<Preview>,
     pane: &mut ChatPane,
 ) {
     let line = String::from_utf8_lossy(&pane.typed).trim().to_string();
@@ -3257,7 +3332,7 @@ fn chat_send(
             } else {
                 "agent.set_mode"
             };
-            let tried = over_console(say, c, session, preview, Some(pane), rx, |session, ask| {
+            let tried = over_console(say, c, session, Some(pane), rx, |session, ask| {
                 with_grant(say, session, ask, (&node, &scope, &[command]), |s| {
                     s.set_option(&node, &local, model, &id)
                 })
@@ -3278,7 +3353,7 @@ fn chat_send(
         }
         ChatCommand::Prompt if line.is_empty() => String::new(),
         ChatCommand::Prompt => {
-            let tried = over_console(say, c, session, preview, Some(pane), rx, |session, ask| {
+            let tried = over_console(say, c, session, Some(pane), rx, |session, ask| {
                 with_grant(
                     say,
                     session,
@@ -3338,6 +3413,11 @@ impl<'a> Plain<'a> {
     fn new(rx: &'a mpsc::Receiver<u8>) -> Self {
         Self(rx, Parser::default())
     }
+
+    /// With a parser that already saw the keys forwarded before (a paste that began there goes on as a paste).
+    fn with(rx: &'a mpsc::Receiver<u8>, parser: Parser) -> Self {
+        Self(rx, parser)
+    }
 }
 
 impl Asker for Plain<'_> {
@@ -3394,6 +3474,7 @@ impl Asker for Over<'_> {
             mouse_mode(true);
             self.mouse = true;
         }
+        bracketed_paste(true);
         let text = |id: &str, args: &[(&str, Arg)]| self.say.text(id, args);
         let rows = self
             .c
@@ -3417,6 +3498,8 @@ impl Asker for Over<'_> {
         if std::mem::take(&mut self.mouse) {
             mouse_mode(false);
         }
+        // A screen a question draws itself reads plain bytes: no framing there.
+        bracketed_paste(false);
         self.stale = true;
         Plain::new(self.rx).frame(bytes);
     }
@@ -3483,21 +3566,18 @@ impl Over<'_> {
     }
 }
 
-/// Asks over the console (`run` shows its questions with the [`Over`] it is given): the panel's terminal is let go meanwhile, the
+/// Asks over the console (`run` shows its questions with the [`Over`] it is given): the panel's terminal stays open meanwhile (its
+/// frames wait in the session and are applied afterwards, so its scrollback and the modes it learned are kept, ADR-0063), the
 /// mouse is reported only while a box is open, and the console is drawn again afterwards. Returns what `run` said.
 #[allow(clippy::too_many_arguments)]
 fn over_console<T>(
     say: &Say,
     c: &mut Console,
     session: &mut Session,
-    preview: &mut Option<Preview>,
     chat: Option<&ChatPane>,
     rx: &mpsc::Receiver<u8>,
     run: impl FnOnce(&mut Session, &mut Over<'_>) -> T,
 ) -> T {
-    if let Some(p) = preview.take() {
-        p.close(session);
-    }
     // The mouse stays as the console had it while a box is open; a screen the question draws itself switches it off.
     let mouse = c.app.mouse;
     let mut ask = Over {
@@ -3511,6 +3591,7 @@ fn over_console<T>(
     let out = run(session, &mut ask);
     let stale = ask.stale;
     mouse_mode(c.app.mouse);
+    bracketed_paste(true);
     if stale {
         let _ = c.window.invalidate();
     }
@@ -3525,7 +3606,6 @@ fn command(
     rx: &mpsc::Receiver<u8>,
     color: bool,
     c: &mut Console,
-    preview: &mut Option<Preview>,
     area: Area,
     k: char,
 ) -> bool {
@@ -3542,7 +3622,7 @@ fn command(
             if let Some((id, false)) = details.start.clone() {
                 if k == 'y' && !c.read_whole.contains(&id) {
                     if let Some(a) = s.approvals.iter().find(|a| a.approval_id == id).cloned() {
-                        let read = over_console(say, c, session, preview, None, rx, |_, ask| {
+                        let read = over_console(say, c, session, None, rx, |_, ask| {
                             read_start(&a, ask, &text)
                         });
                         if read {
@@ -3579,7 +3659,7 @@ fn command(
                     ));
                     lines.push(String::new());
                     lines.push(say.text(key!("tui-request-answer"), &[]));
-                    let key = over_console(say, c, session, preview, None, rx, |_, ask| {
+                    let key = over_console(say, c, session, None, rx, |_, ask| {
                         ask.key(&lines, Duration::from_secs(120))
                     });
                     match key {
@@ -3594,7 +3674,7 @@ fn command(
             }
             c.shown_request = None;
             if allow
-                && !over_console(say, c, session, preview, None, rx, |_, ask| {
+                && !over_console(say, c, session, None, rx, |_, ask| {
                     confirm_skipping_start(say, &s, &selected, &text, ask)
                 })
             {
@@ -3611,26 +3691,26 @@ fn command(
         }
         // ADR-0065: the first machine that asks to join, read whole and answered with two deliberate keys.
         'p' => {
-            c.notice = over_console(say, c, session, preview, None, rx, |session, ask| {
+            c.notice = over_console(say, c, session, None, rx, |session, ask| {
                 answer_pair(say, session, ask)
             });
             true
         }
         'v' => {
             let snapshot = c.snapshot.clone();
-            c.notice = over_console(say, c, session, preview, None, rx, |session, ask| {
+            c.notice = over_console(say, c, session, None, rx, |session, ask| {
                 approve_device(say, session, snapshot.as_ref(), ask)
             });
             true
         }
         'f' => {
-            c.notice = over_console(say, c, session, preview, None, rx, |session, ask| {
+            c.notice = over_console(say, c, session, None, rx, |session, ask| {
                 start_in_folder(say, session, &s, &selected, ask, color)
             });
             true
         }
         's' => {
-            c.notice = over_console(say, c, session, preview, None, rx, |session, ask| {
+            c.notice = over_console(say, c, session, None, rx, |session, ask| {
                 start(say, session, &s, &selected, ask)
             });
             true
@@ -3672,7 +3752,7 @@ fn command(
                 .iter()
                 .filter(|a| a.running && a.parent_agent_id == selected)
                 .count();
-            c.notice = over_console(say, c, session, preview, None, rx, |session, ask| {
+            c.notice = over_console(say, c, session, None, rx, |session, ask| {
                 let with_helpers = helpers == 0 || {
                     let question = say.text(
                         key!("tui-stop-helpers"),
@@ -3705,7 +3785,7 @@ fn command(
                 return false;
             };
             let title = agora_tui::split::agent_label(&s, &selected);
-            c.notice = over_console(say, c, session, preview, None, rx, |session, ask| {
+            c.notice = over_console(say, c, session, None, rx, |session, ask| {
                 let diff = match session.diff(&node, &target) {
                     Ok(d) => d,
                     Err(code) => {
@@ -3747,7 +3827,7 @@ fn command(
                 return false;
             };
             let title = agora_tui::split::agent_label(&s, &selected);
-            c.notice = over_console(say, c, session, preview, None, rx, |session, ask| {
+            c.notice = over_console(say, c, session, None, rx, |session, ask| {
                 use agora_tui::files;
                 let mut path = String::new();
                 let mut notice = String::new();
@@ -3850,7 +3930,7 @@ fn command(
                 return false;
             };
             let scope = format!("agent:{local}");
-            let asked = over_console(say, c, session, preview, None, rx, |s, ask| {
+            let asked = over_console(say, c, session, None, rx, |s, ask| {
                 ask_grant(say, s, ask, &node, &scope, Site::GrantKey.commands())
             });
             match asked {
@@ -3886,7 +3966,6 @@ fn clean_up_old(
     say: &Say,
     session: &mut Session,
     c: &mut Console,
-    preview: &mut Option<Preview>,
     rx: &mpsc::Receiver<u8>,
 ) -> String {
     let now = now_ms();
@@ -3928,7 +4007,7 @@ fn clean_up_old(
     lines.push(String::new());
     lines.push(say.text(key!("tui-cleanup-explain"), &[]));
     lines.push(say.text(key!("tui-cleanup-keys"), &[]));
-    let answer = over_console(say, c, session, preview, None, rx, |_, ask| {
+    let answer = over_console(say, c, session, None, rx, |_, ask| {
         ask.key(&lines, Duration::from_secs(120))
     });
     let refuse = match answer {
@@ -4071,7 +4150,8 @@ mod typing_grant_tests {
             assert_eq!(site.commands(), [want], "{site:?}");
         }
         // Every call goes through the table: no place names a set of its own.
-        let src = include_str!("tuicmd.rs");
+        // A Windows checkout may turn line ends into CRLF; the searches below use LF.
+        let src = include_str!("tuicmd.rs").replace("\r\n", "\n");
         let code = &src[..src.find("#[cfg(test)]").unwrap()];
         assert_eq!(code.matches(".commands()").count(), 6);
     }
@@ -4170,7 +4250,8 @@ mod typing_grant_tests {
         );
         assert_eq!(pending.as_ref().map(|p| p.request), Some(6));
         // Nothing in this path asks: the question opens only through `command`'s `g`.
-        let src = include_str!("tuicmd.rs");
+        // A Windows checkout may turn line ends into CRLF; the searches below use LF.
+        let src = include_str!("tuicmd.rs").replace("\r\n", "\n");
         let c0 = src.find("\nfn console(").unwrap();
         let console = &src[c0..c0 + src[c0..].find("\nfn read_keys(").unwrap()];
         let t0 = console.find("session.take_grant_wanted()").unwrap();
@@ -5320,5 +5401,161 @@ mod escape_key_tests {
             }
         }
         assert!(failed.is_empty(), "differed: {failed:?}");
+    }
+}
+
+/// Follow-up #829: the console's question path (paste framing, refresh, answers).
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod question_path_tests {
+    use super::*;
+    use agora_tui::app::{Key, Mouse, MouseKind};
+
+    const PASTE_ON: &[u8] = b"\x1b[200~";
+
+    fn area() -> Area {
+        Area::new(0, 0, 100, 30)
+    }
+
+    fn key(c: char) -> AppEvent {
+        AppEvent::Key(Key::Char(c))
+    }
+
+    fn moved() -> AppEvent {
+        AppEvent::Mouse(Mouse {
+            kind: MouseKind::Move,
+            col: 3,
+            row: 4,
+            ..Mouse::default()
+        })
+    }
+
+    /// P1: turning the mouse off or on writes no paste framing (DECSET 2004), so a paste that began before a question stays framed
+    /// while the mouse is released; the framing is written by its own function, once per change.
+    #[test]
+    fn the_mouse_never_writes_paste_framing() {
+        for on in [true, false] {
+            let mut out = Vec::new();
+            write_mouse(&mut out, on);
+            assert!(!String::from_utf8_lossy(&out).contains("2004"), "{on}");
+        }
+        let state = std::sync::atomic::AtomicBool::new(false);
+        let mut out = Vec::new();
+        assert!(!set_paste(&mut out, &state, true));
+        write_mouse(&mut out, false);
+        // Still on after the mouse went off: nothing switched it off, and asking again writes nothing.
+        assert!(set_paste(&mut out, &state, true));
+        let text = String::from_utf8_lossy(&out).to_string();
+        assert_eq!(text.matches("\x1b[?2004h").count(), 1, "{text:?}");
+        assert!(!text.contains("2004l"));
+        assert!(set_paste(&mut out, &state, false));
+        assert!(String::from_utf8_lossy(&out).ends_with("\x1b[?2004l"));
+    }
+
+    /// A refusal still pending when a routine refresh replaces the session stays (renumbered); what was counted in the old session's
+    /// numbers ends.
+    #[test]
+    fn a_refusal_is_kept_across_a_refresh() {
+        let mut refused = Some(TypingRefused {
+            agent: "laptop/a1".into(),
+            request: 7,
+        });
+        let mut allowed = Some(("laptop/a1".to_string(), 5));
+        let mut taken = Taken::new();
+        taken.insert(("laptop".into(), "t-a1".into()), 6);
+        carry_refusal(&mut refused, &mut allowed, &mut taken);
+        assert_eq!(
+            refused,
+            Some(TypingRefused {
+                agent: "laptop/a1".into(),
+                request: 0
+            })
+        );
+        assert!(allowed.is_none() && taken.is_empty());
+    }
+
+    /// P2: a routine refresh waits for typing replies still in flight, but not for ever.
+    #[test]
+    fn a_refresh_waits_for_typing_replies() {
+        let due = Duration::from_millis(REFRESH_MS);
+        assert!(!refresh_due(due - Duration::from_millis(1), 0));
+        assert!(refresh_due(due, 0));
+        assert!(!refresh_due(due, 2), "a keystroke is still in flight");
+        assert!(!refresh_due(
+            due + REFRESH_PATIENCE - Duration::from_millis(1),
+            1
+        ));
+        assert!(refresh_due(due + REFRESH_PATIENCE, 1));
+    }
+
+    /// P2: the question after a refused keystroke reads the rest of a paste, whose opening marker was forwarded, as a paste.
+    #[test]
+    fn a_paste_forwarded_before_the_question_goes_on_as_a_paste() {
+        let lines = vec!["Allow?".to_string()];
+        // Control: a fresh parser takes the pasted `y` for an answer.
+        let (tx, rx) = mpsc::channel();
+        tx.send(b'y').unwrap();
+        assert_eq!(
+            read_answer(
+                &mut Parser::default(),
+                &rx,
+                &lines,
+                Duration::from_millis(200)
+            ),
+            Some(b'y')
+        );
+        // The forwarded batch ended inside a paste: its `y` is text, and the end marker closes it.
+        let mut tracker = Parser::default();
+        track_forwarded(&mut tracker, [PASTE_ON, b"abc"].concat().as_slice());
+        let (tx, rx) = mpsc::channel();
+        let mut plain = Plain::with(&rx, tracker);
+        for b in b"y\x1b[201~" {
+            tx.send(*b).unwrap();
+        }
+        assert_eq!(
+            read_answer(&mut plain.1, plain.0, &lines, Duration::from_millis(200)),
+            None
+        );
+        // The paste is over: now a deliberate `y` answers.
+        tx.send(b'y').unwrap();
+        assert_eq!(
+            read_answer(&mut plain.1, plain.0, &lines, Duration::from_millis(200)),
+            Some(b'y')
+        );
+    }
+
+    /// P2: a question over the console keeps the open terminal (and with it its scrollback and learned modes). A source check, since
+    /// `over_console` needs a live `Session` (a TLS connection to a hub), which a unit test cannot make.
+    #[test]
+    fn a_question_does_not_close_the_preview() {
+        // A Windows checkout may turn line ends into CRLF; the searches below use LF.
+        let src = include_str!("tuicmd.rs").replace("\r\n", "\n");
+        let a = src.find("\nfn over_console<").unwrap();
+        let body = &src[a..a + src[a..].find("\n}\n").unwrap()];
+        assert!(
+            !body.contains("preview") && !body.contains(".close("),
+            "{body}"
+        );
+    }
+
+    /// P3: pointer motion with no button in the same read neither answers nor spoils a deliberate key.
+    #[test]
+    fn passive_motion_does_not_spoil_an_answer() {
+        let lines = vec!["Allow?".to_string()];
+        assert_eq!(one_answer(&[key('y')], area(), &lines), Some(b'y'));
+        assert_eq!(
+            one_answer(&[moved(), key('y'), moved()], area(), &lines),
+            Some(b'y')
+        );
+        assert_eq!(one_answer(&[moved(), moved()], area(), &lines), None);
+        // Still never several keys, nor a paste.
+        assert_eq!(
+            one_answer(&[moved(), key('y'), key('y')], area(), &lines),
+            None
+        );
+        assert_eq!(
+            one_answer(&[moved(), AppEvent::Paste("y".into())], area(), &lines),
+            None
+        );
     }
 }

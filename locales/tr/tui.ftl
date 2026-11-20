@@ -218,6 +218,7 @@ tui-review-nowhere = Bu ajanın değişikliklerini gösterecek bir klasörü ya 
 tui-review-failed = Değişiklikleri okunamadı ({ $code }).
 tui-app-cmd-ask = Bu terminalin onayını diğer cihazlarından iste (a)
 tui-app-cmd-devices = Bekleyen bir cihazı onayla (v)
+tui-app-cmd-grant = Makinesi reddettikten sonra, öndeki ajana bir saat boyunca yazmaya izin ver (g)
 tui-app-cmd-mouse = Fareyi aç ya da kapat
 tui-app-cmd-inspector = Ayrıntıları göster ya da gizle
 tui-app-cmd-close = Bu sekmeyi kapat
