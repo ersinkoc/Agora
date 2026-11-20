@@ -220,10 +220,27 @@ fn helper_entry() {
     match role.as_str() {
         "node" => {
             let script = std::env::var("AGORA_HOLD_SCRIPT").expect("script");
-            let mut c = Client::connect(&socket).expect("helper connect");
-            c.attach().expect("helper attach");
-            let (pid, _terminal) = c.start(&start_request("a1", &script)).expect("start");
-            println!("\nHELPER started {pid}");
+            // A failure is printed as the helper's line (its stderr is not kept), so the test that waits for it says why.
+            let started = Client::connect(&socket)
+                .map_err(|e| format!("connect: {e}"))
+                .and_then(|mut c| {
+                    c.attach().map_err(|e| format!("attach: {e}"))?;
+                    let (pid, _terminal) = c
+                        .start(&start_request("a1", &script))
+                        .map_err(|e| format!("start: {e}"))?;
+                    Ok((c, pid))
+                });
+            let _link = match started {
+                Ok((c, pid)) => {
+                    println!("\nHELPER started {pid}");
+                    c
+                }
+                Err(e) => {
+                    println!("\nHELPER failed {e}");
+                    std::io::stdout().flush().ok();
+                    std::process::exit(1);
+                }
+            };
             std::io::stdout().flush().ok();
             // Keeps the link and the terminal until killed.
             let mut rest = String::new();
@@ -282,6 +299,7 @@ fn helper_line(child: &mut Child) -> String {
             "the helper ended"
         );
         if let Some(rest) = line.trim().strip_prefix("HELPER ") {
+            assert!(!rest.starts_with("failed "), "the helper {rest}");
             return rest.to_string();
         }
     }

@@ -120,6 +120,15 @@ fn a_terminal_frame_drained_in_part_at_its_deadline_still_ends_by_it() {
     term.kill_and_reap();
     let _ = std::fs::remove_dir_all(&dir);
     println!("write_frame: {res:?} after {elapsed:?}; the peer got {part} of {frame_len} bytes, terminal={terminal}");
+    // macOS refuses a send that carries a descriptor at once (EMSGSIZE, os error 40) while the peer's buffer is full, where Linux
+    // waits: nothing of the frame went and it ended well within its time, which is what this test guards (measured on a Mac, #789).
+    if std::env::consts::OS == "macos"
+        && part == 0
+        && matches!(&res, Err(LinkError::Io(e)) if e.raw_os_error() == Some(40))
+        && elapsed < FRAME_TIMEOUT
+    {
+        return;
+    }
     assert!(terminal, "the terminal went with the first part");
     assert!(
         part > 0 && part < frame_len,
