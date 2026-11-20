@@ -190,7 +190,8 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
     case 'nodeOnline': {
       const b = e.nodeOnline;
       // The node's process started: what it ran before is gone, and its waiting approvals are lost.
-      for (const a of v.agents.values()) if (a.nodeId === b.nodeId && a.running) { a.running = false; a.state = 4 /* done */; }
+      // F1421: an ended agent can be asked nothing; its settings and commands go, as after `agentExited` (a later snapshot has none).
+      for (const a of v.agents.values()) if (a.nodeId === b.nodeId && a.running) { a.running = false; a.state = 4 /* done */; if (a.session) a.session = { ...a.session, config: undefined, commands: undefined }; }
       for (const k of [...v.approvals.keys()]) if (k.startsWith(`${b.nodeId}/`)) v.approvals.delete(k);
       for (const k of [...v.withTerminal]) if (k.startsWith(`${b.nodeId}/`)) v.withTerminal.delete(k);
       const was = v.nodes.get(b.nodeId);
@@ -363,6 +364,7 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
       a.state = 4 /* done */;
       a.sinceMs = num(b.interruptedAtMs) || at;
       a.interrupted = { resumable: !!b.resumable, atMs: num(b.interruptedAtMs), folder: b.folder ?? '', stillRunning: !!b.stillRunning };
+      if (a.session) a.session = { ...a.session, config: undefined, commands: undefined }; // F1421: ended, as the hub drops them
       v.agents.set(key, a);
       dropSkipCards(v, key);
       break;
@@ -691,18 +693,21 @@ export function boards(v: View): BoardModel[] {
 
 export interface ProjectCost { label: string; microUsd: number }
 
-// Estimated spend per project (the folder name of its checkout), biggest first. Only agents the hub had a price for
+// Estimated spend per project (the folder name of its checkout or selected folder), biggest first. Only agents the hub had a price for
 // count; `perAgent` is the hub's answer keyed by agent. Agents whose project is not known add to no row.
 export function costByProject(v: View, perAgent: ReadonlyMap<string, number>): ProjectCost[] {
   const byProject = new Map<string, ProjectCost>();
   for (const [id, a] of v.agents) {
     const micro = perAgent.get(id);
     if (micro === undefined) continue;
-    const checkout = v.checkouts.get(v.worktrees.get(a.worktreeId)?.checkoutId ?? '');
-    if (!checkout) continue;
-    const row = byProject.get(checkout.projectId) ?? { label: lastSegment(checkout.path) || checkout.projectId, microUsd: 0 };
+    // F1420: an agent started in a folder belongs to that folder's project, as its tile says; one in a worktree, to its checkout's.
+    const ws = v.workspaces.get(v.agentWorkspaces.get(id) ?? '');
+    const checkout = ws ? undefined : v.checkouts.get(v.worktrees.get(a.worktreeId)?.checkoutId ?? '');
+    const project = ws ? { projectId: ws.projectId, path: ws.gitRoot || ws.path } : checkout;
+    if (!project) continue;
+    const row = byProject.get(project.projectId) ?? { label: lastSegment(project.path) || project.projectId, microUsd: 0 };
     row.microUsd += micro;
-    byProject.set(checkout.projectId, row);
+    byProject.set(project.projectId, row);
   }
   return [...byProject.values()].sort((a, b) => b.microUsd - a.microUsd || a.label.localeCompare(b.label));
 }
