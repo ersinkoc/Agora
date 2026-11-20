@@ -981,7 +981,7 @@ forwards either to a node that did not offer it.
     rendered and stored when it raised the request, never anything in the decision. A denial, an expiry and a withdrawal change nothing.
   - Scope is the agent's session: the waiting request is withdrawn (announced as `ApprovalResolved { approved: false }` with no signer)
     when the agent ends, is stopped or its adapter crashes, when the option is set to any value by another command, and when it
-    is superseded; an approval decided after the adapter restarted applies nothing (the session it named is gone, and the node's
+    is superseded; an approval decided after the adapter restarted applies nothing and is answered `agent.not_found` (the run it named is gone, and the node's
     own check of what the agent offers fails). A node restart forgets every waiting request and every approval: the agent that comes
     back asks again. At most 8 requests wait on a node and at most 6 are raised per minute (`node.resource_limit { resource:
     "skip_approvals", limit }`). Policy `forbid` and `confined_only` (not confined) refuse with `agent.option_forbidden` before any request

@@ -1,0 +1,693 @@
+//! ADR-0090 Amendment A through a real node: switching a running agent to a mode or option that skips permission questions is an
+//! approval the owner signs, and the node applies exactly what it rendered. The agent is `agora-fake-agent --adapter --modes`, never a
+//! real one; a device "signs" by sending the bytes themselves (`EchoVerifier`), so the node's whole approval path runs.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::{Duration, Instant};
+
+use agora_node::approvals::{skip_signed_message, SkipBinding};
+use agora_node::control::Client;
+use agora_node::daemon::{Node, NodeConfig};
+use agora_node::supervisor::NodeLimits;
+use agora_protocol::v1::{self, command_ok::Result as Ok_, command_request::Command as Cmd};
+
+type Reply = std::io::Result<Result<v1::CommandOk, v1::ErrorInfo>>;
+
+struct EchoVerifier;
+
+impl agora_node::approvals::Verifier for EchoVerifier {
+    fn verify(&self, device: &str, message: &[u8], signature: &[u8]) -> bool {
+        device == "phone" && message == signature
+    }
+}
+
+fn git(dir: &Path, args: &[&str]) {
+    let ok = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("GIT_AUTHOR_NAME", "t")
+        .env("GIT_AUTHOR_EMAIL", "t@example.com")
+        .env("GIT_COMMITTER_NAME", "t")
+        .env("GIT_COMMITTER_EMAIL", "t@example.com")
+        .status()
+        .expect("git")
+        .success();
+    assert!(ok, "git {args:?}");
+}
+
+fn fake_adapter_path() -> String {
+    let mut p = std::env::current_exe().unwrap();
+    p.pop();
+    p.pop();
+    p.push(format!("agora-fake-agent{}", std::env::consts::EXE_SUFFIX));
+    // Built once per test binary, even when present: a binary left from an older checkout may lack newer flags.
+    static FRESH: std::sync::Once = std::sync::Once::new();
+    FRESH.call_once(|| {
+        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+        assert!(Command::new(cargo)
+            .args(["build", "-q", "-p", "agora-fake-agent"])
+            .status()
+            .unwrap()
+            .success());
+    });
+    p.to_string_lossy().into_owned()
+}
+
+struct Env {
+    dir: PathBuf,
+    repo: PathBuf,
+}
+
+/// A repository, a manifest for the adapter kind `modal` and, when given, the node's policy file.
+fn env(name: &str, policy: Option<&str>) -> Env {
+    let dir = std::env::temp_dir().join(format!("agora-skip-{}-{name}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let repo = dir.join("myproject");
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("a.txt"), "x").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "init"]);
+    let manifests = dir.join("manifests");
+    std::fs::create_dir_all(&manifests).unwrap();
+    std::fs::write(
+        manifests.join("modal.toml"),
+        format!("kind = \"modal\"\ndisplay_name = \"M\"\nversion = \"1\"\nmin_engine = 1\n[adapter]\ncommand = [{:?}, \"--adapter\", \"--modes\"]\n", fake_adapter_path()),
+    )
+    .unwrap();
+    if let Some(policy) = policy {
+        std::fs::create_dir_all(dir.join("data")).unwrap();
+        std::fs::write(dir.join("data/policy"), policy).unwrap();
+    }
+    Env { dir, repo }
+}
+
+fn node(e: &Env, resume_all: bool) -> Node {
+    let n = Node::start(&NodeConfig {
+        resume_all,
+        node_id: "node-test".into(),
+        socket: e.dir.join("c.sock"),
+        data_dir: e.dir.join("data"),
+        worktree_root: e.dir.join("worktrees"),
+        manifests_dir: e.dir.join("manifests"),
+        projects: vec![e.repo.clone()],
+        limits: NodeLimits::default(),
+    })
+    .expect("start node");
+    n.approvals.set_verifier(Box::new(EchoVerifier));
+    n
+}
+
+fn ok(r: Reply) -> v1::CommandOk {
+    r.expect("io").expect("command failed")
+}
+
+fn error(r: Reply) -> v1::ErrorInfo {
+    r.expect("io").expect_err("expected an error")
+}
+
+fn param(e: &v1::ErrorInfo, key: &str) -> String {
+    match e.params.get(key).and_then(|p| p.value.clone()) {
+        Some(v1::param_value::Value::Str(s)) => s,
+        other => panic!("no string param {key}: {other:?}"),
+    }
+}
+
+/// A started agent whose adapter has reported its modes and options.
+fn agent(n: &Node, c: &mut Client) -> (String, PathBuf) {
+    let r = ok(c.call(Cmd::AgentStart(v1::AgentStart {
+        kind: "modal".into(),
+        ..Default::default()
+    })));
+    let Some(Ok_::AgentStart(s)) = r.result else {
+        panic!("not a start")
+    };
+    let view = n
+        .supervisor
+        .lock()
+        .unwrap()
+        .list()
+        .into_iter()
+        .find(|v| v.id.as_str() == s.agent_id)
+        .unwrap();
+    // The reports arrive just after the start: a mode that asks is accepted once they are in.
+    let end = Instant::now() + Duration::from_secs(15);
+    while c
+        .call(Cmd::AgentSetMode(v1::AgentSetMode {
+            agent_id: s.agent_id.clone(),
+            mode: "default".into(),
+        }))
+        .unwrap()
+        .is_err()
+    {
+        assert!(Instant::now() < end, "the modes were never reported");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // The config report comes with it; wait until a safe change is accepted.
+    while c
+        .call(Cmd::AgentSetConfig(v1::AgentSetConfig {
+            agent_id: s.agent_id.clone(),
+            config_id: "auto_approve".into(),
+            value: "false".into(),
+        }))
+        .unwrap()
+        .is_err()
+    {
+        assert!(Instant::now() < end, "the config was never reported");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // Start from a clean record of what the agent was told.
+    let _ = std::fs::remove_file(view.worktree.join("applied.txt"));
+    (s.agent_id, view.worktree)
+}
+
+fn set_mode(c: &mut Client, agent: &str, mode: &str) -> Reply {
+    c.call(Cmd::AgentSetMode(v1::AgentSetMode {
+        agent_id: agent.into(),
+        mode: mode.into(),
+    }))
+}
+
+fn set_config(c: &mut Client, agent: &str, id: &str, value: &str) -> Reply {
+    c.call(Cmd::AgentSetConfig(v1::AgentSetConfig {
+        agent_id: agent.into(),
+        config_id: id.into(),
+        value: value.into(),
+    }))
+}
+
+/// What the agent was told, line by line.
+fn applied(worktree: &Path) -> Vec<String> {
+    // The adapter writes the line after it answers the node: give it a moment.
+    std::thread::sleep(Duration::from_millis(300));
+    std::fs::read_to_string(worktree.join("applied.txt"))
+        .map(|t| t.lines().map(str::to_string).collect())
+        .unwrap_or_default()
+}
+
+fn skip_requests(n: &Node) -> Vec<v1::ApprovalRequested> {
+    n.events
+        .events_after(0)
+        .into_iter()
+        .filter_map(|e| match e.body {
+            Some(v1::event::Body::ApprovalRequested(a)) if a.action == "agent.skip_permissions" => {
+                Some(a)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn resolved(n: &Node, id: &str) -> Vec<v1::ApprovalResolved> {
+    n.events
+        .events_after(0)
+        .into_iter()
+        .filter_map(|e| match e.body {
+            Some(v1::event::Body::ApprovalResolved(r)) if r.approval_id == id => Some(r),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The decision a trusted device sends for `request`: signed over the skip domain, naming `agent`, `option` and `value`.
+fn decision(
+    request: &v1::ApprovalRequested,
+    approved: bool,
+    agent: &str,
+    option: &str,
+    value: &str,
+) -> v1::ApprovalResolve {
+    let binding = SkipBinding {
+        agent: agent.into(),
+        option: option.into(),
+        value: value.into(),
+    };
+    v1::ApprovalResolve {
+        approval_id: request.approval_id.clone(),
+        approved,
+        signer_device_id: "phone".into(),
+        signature: skip_signed_message(
+            "node-test",
+            &request.approval_id,
+            approved,
+            &binding,
+            &request.detail,
+        ),
+        helper_grant: 0,
+        helpers_may_start: false,
+    }
+}
+
+/// The honest decision for what the card shows.
+fn honest(request: &v1::ApprovalRequested, approved: bool) -> v1::ApprovalResolve {
+    let d: serde_json::Value = serde_json::from_str(&request.detail).unwrap();
+    decision(
+        request,
+        approved,
+        d["agent"].as_str().unwrap(),
+        d["option"].as_str().unwrap(),
+        d["value"].as_str().unwrap(),
+    )
+}
+
+fn local() -> bool {
+    agora_platform::LOCAL_SOCKETS_SUPPORTED
+}
+
+/// The whole path: the switch is not applied and not refused, the card is the node's own text, the owner's signed decision applies exactly
+/// the mode the node rendered, and a second use of the decision is refused.
+#[test]
+fn an_approved_switch_applies_exactly_the_rendered_mode_once() {
+    if !local() {
+        return;
+    }
+    let e = env("approve", None);
+    let n = node(&e, false);
+    let mut c = Client::connect(n.socket().unwrap()).unwrap();
+    let (id, worktree) = agent(&n, &mut c);
+
+    let err = error(set_mode(&mut c, &id, "bypassPermissions"));
+    assert_eq!(err.code, "agent.approval_needed");
+    let approval = param(&err, "approval_id");
+    assert!(
+        applied(&worktree).is_empty(),
+        "nothing is applied before the owner decides"
+    );
+    // The card: the node's own rendering of agent, folder, machine, option and value.
+    let requests = skip_requests(&n);
+    assert_eq!(requests.len(), 1);
+    let card = &requests[0];
+    assert_eq!(card.approval_id, approval);
+    assert_eq!(card.agent_id, id);
+    let d: serde_json::Value = serde_json::from_str(&card.detail).unwrap();
+    assert_eq!(d["node"], "node-test");
+    assert_eq!(d["agent"], id.as_str());
+    assert_eq!(d["agent_kind"], "modal");
+    assert_eq!(d["option_type"], "mode");
+    assert_eq!(d["option"], "mode");
+    assert_eq!(d["value"], "bypassPermissions");
+    assert_eq!(d["value_name"], "Bypass Permissions");
+    assert_eq!(d["scope"], "session");
+    let folder = d["folder"].as_str().unwrap();
+    assert!(
+        Path::new(folder).ends_with(worktree.file_name().unwrap()),
+        "{folder}"
+    );
+
+    let r = ok(c.call(Cmd::ApprovalResolve(honest(card, true))));
+    assert!(matches!(r.result, Some(Ok_::Empty(_))));
+    assert_eq!(applied(&worktree), ["applied mode:bypassPermissions"]);
+    let done = resolved(&n, &approval);
+    assert_eq!(done.len(), 1);
+    assert!(done[0].approved && done[0].signer_device_id == "phone");
+    // Single use: the same decision again is not an approval of anything.
+    let again = error(c.call(Cmd::ApprovalResolve(honest(card, true))));
+    assert_eq!(again.code, "protocol.invalid_message");
+    assert_eq!(applied(&worktree).len(), 1);
+}
+
+/// A decision that names another option or value than the card, another agent, the wrong domain, a device the node does not trust, or a
+/// grant is refused, changes nothing, and leaves the card waiting for the right one.
+#[test]
+fn a_decision_that_does_not_match_the_card_is_refused() {
+    if !local() {
+        return;
+    }
+    let e = env("mismatch", None);
+    let n = node(&e, false);
+    let mut c = Client::connect(n.socket().unwrap()).unwrap();
+    let (id, worktree) = agent(&n, &mut c);
+    let err = error(set_mode(&mut c, &id, "bypassPermissions"));
+    assert_eq!(err.code, "agent.approval_needed");
+    let card = skip_requests(&n).remove(0);
+
+    let mut refused = |what: &str, d: v1::ApprovalResolve| {
+        assert_eq!(
+            error(c.call(Cmd::ApprovalResolve(d))).code,
+            "approval.signature_invalid",
+            "{what}"
+        );
+    };
+    // Signed for another value, another option, another agent.
+    refused("value", decision(&card, true, &id, "mode", "default"));
+    refused(
+        "option",
+        decision(&card, true, &id, "auto_approve", "bypassPermissions"),
+    );
+    refused(
+        "agent",
+        decision(&card, true, "agent-99", "mode", "bypassPermissions"),
+    );
+    // The bytes of the right decision with the verdict flipped.
+    let mut flipped = honest(&card, false);
+    flipped.approved = true;
+    refused("verdict", flipped);
+    // A device the node does not trust, even over the right bytes.
+    let mut stranger = honest(&card, true);
+    stranger.signer_device_id = "stranger".into();
+    refused("device", stranger);
+    // The plain approval message of every other request: not this card's domain.
+    let mut plain = honest(&card, true);
+    plain.signature = agora_node::approvals::signed_message("node-test", &card.approval_id, true);
+    refused("domain", plain);
+    // A signature over another card's detail.
+    let mut other_detail = card.clone();
+    other_detail.detail = card.detail.replace("Bypass Permissions", "Harmless");
+    refused(
+        "detail",
+        decision(&other_detail, true, &id, "mode", "bypassPermissions"),
+    );
+    // A grant means nothing here.
+    let mut grant = honest(&card, true);
+    grant.helper_grant = 3;
+    refused("grant", grant);
+    assert!(applied(&worktree).is_empty());
+    assert_eq!(n.approvals.pending_count(), 1, "the card still waits");
+
+    // The right decision still works.
+    ok(c.call(Cmd::ApprovalResolve(honest(&card, true))));
+    assert_eq!(applied(&worktree), ["applied mode:bypassPermissions"]);
+}
+
+/// A denial applies nothing and ends the card.
+#[test]
+fn a_denied_switch_applies_nothing() {
+    if !local() {
+        return;
+    }
+    let e = env("deny", None);
+    let n = node(&e, false);
+    let mut c = Client::connect(n.socket().unwrap()).unwrap();
+    let (id, worktree) = agent(&n, &mut c);
+    assert_eq!(
+        error(set_mode(&mut c, &id, "bypassPermissions")).code,
+        "agent.approval_needed"
+    );
+    let card = skip_requests(&n).remove(0);
+    ok(c.call(Cmd::ApprovalResolve(honest(&card, false))));
+    assert!(applied(&worktree).is_empty());
+    let done = resolved(&n, &card.approval_id);
+    assert!(!done[0].approved && done[0].signer_device_id == "phone");
+    assert_eq!(n.approvals.pending_count(), 0);
+}
+
+/// `forbid` refuses before any card exists, as it refused before this amendment; a mode that asks stays possible.
+#[test]
+fn a_forbidding_policy_refuses_before_any_card() {
+    if !local() {
+        return;
+    }
+    let e = env("forbid", Some("skip_permissions = forbid\n"));
+    let n = node(&e, false);
+    let mut c = Client::connect(n.socket().unwrap()).unwrap();
+    let (id, worktree) = agent(&n, &mut c);
+    let err = error(set_mode(&mut c, &id, "bypassPermissions"));
+    assert_eq!(err.code, "agent.option_forbidden");
+    assert_eq!(param(&err, "policy"), "forbid");
+    let err = error(set_config(&mut c, &id, "auto_approve", "true"));
+    assert_eq!(err.code, "agent.option_forbidden");
+    assert!(skip_requests(&n).is_empty());
+    assert_eq!(n.approvals.pending_count(), 0);
+    ok(set_mode(&mut c, &id, "plan"));
+    assert_eq!(applied(&worktree), ["applied mode:plan"]);
+}
+
+/// Values that keep protection are never asked about, and switching back to one needs no approval, with a card waiting or not.
+#[test]
+fn safe_values_and_switching_back_never_need_approval() {
+    if !local() {
+        return;
+    }
+    let e = env("safe", None);
+    let n = node(&e, false);
+    let mut c = Client::connect(n.socket().unwrap()).unwrap();
+    let (id, worktree) = agent(&n, &mut c);
+    ok(set_mode(&mut c, &id, "plan"));
+    ok(set_config(&mut c, &id, "auto_approve", "false"));
+    // An approved bypass, then back to a mode that asks.
+    assert_eq!(
+        error(set_mode(&mut c, &id, "bypassPermissions")).code,
+        "agent.approval_needed"
+    );
+    let card = skip_requests(&n).remove(0);
+    ok(c.call(Cmd::ApprovalResolve(honest(&card, true))));
+    ok(set_mode(&mut c, &id, "default"));
+    assert_eq!(
+        applied(&worktree),
+        [
+            "applied mode:plan",
+            "applied config:auto_approve=false",
+            "applied mode:bypassPermissions",
+            "applied mode:default"
+        ]
+    );
+    assert_eq!(
+        skip_requests(&n).len(),
+        1,
+        "only the bypass was asked about"
+    );
+}
+
+/// A boolean option that makes the agent act without asking is asked about like a mode, and its card names the option and the value.
+#[test]
+fn a_config_option_that_skips_is_asked_about_and_applied_as_rendered() {
+    if !local() {
+        return;
+    }
+    let e = env("config", None);
+    let n = node(&e, false);
+    let mut c = Client::connect(n.socket().unwrap()).unwrap();
+    let (id, worktree) = agent(&n, &mut c);
+    let err = error(set_config(&mut c, &id, "auto_approve", "true"));
+    assert_eq!(err.code, "agent.approval_needed");
+    let card = skip_requests(&n).remove(0);
+    let d: serde_json::Value = serde_json::from_str(&card.detail).unwrap();
+    assert_eq!(d["option_type"], "config");
+    assert_eq!(d["option"], "auto_approve");
+    assert_eq!(d["option_name"], "Auto approve");
+    assert_eq!(d["value"], "true");
+    // A decision signed as a mode switch to the same value is another message.
+    assert_eq!(
+        error(c.call(Cmd::ApprovalResolve(decision(
+            &card, true, &id, "mode", "true"
+        ))))
+        .code,
+        "approval.signature_invalid"
+    );
+    ok(c.call(Cmd::ApprovalResolve(honest(&card, true))));
+    assert_eq!(applied(&worktree), ["applied config:auto_approve=true"]);
+}
+
+/// A mode the node cannot place (nothing in its words says it asks, `turbo`) counts as skipping, so it is asked about too, whatever the
+/// adapter's own flag said.
+#[test]
+fn a_mode_the_classifier_cannot_place_is_asked_about() {
+    if !local() {
+        return;
+    }
+    let e = env("unknown", None);
+    let n = node(&e, false);
+    let mut c = Client::connect(n.socket().unwrap()).unwrap();
+    let (id, worktree) = agent(&n, &mut c);
+    assert_eq!(
+        error(set_mode(&mut c, &id, "turbo")).code,
+        "agent.approval_needed"
+    );
+    let card = skip_requests(&n).remove(0);
+    assert!(
+        card.detail.contains("\"value\":\"turbo\""),
+        "{}",
+        card.detail
+    );
+    assert!(applied(&worktree).is_empty());
+}
+
+/// One card per agent, option and value: asking again gets the same card; another value of the same option replaces it, and the replaced
+/// card can no longer be decided.
+#[test]
+fn asking_again_gets_the_same_card_and_another_value_replaces_it() {
+    if !local() {
+        return;
+    }
+    let e = env("dedupe", None);
+    let n = node(&e, false);
+    let mut c = Client::connect(n.socket().unwrap()).unwrap();
+    let (id, worktree) = agent(&n, &mut c);
+    let first = param(
+        &error(set_mode(&mut c, &id, "bypassPermissions")),
+        "approval_id",
+    );
+    let again = param(
+        &error(set_mode(&mut c, &id, "bypassPermissions")),
+        "approval_id",
+    );
+    assert_eq!(first, again);
+    assert_eq!(skip_requests(&n).len(), 1, "announced once");
+    assert_eq!(n.approvals.pending_count(), 1);
+    // Another value of the same option.
+    let second = param(&error(set_mode(&mut c, &id, "turbo")), "approval_id");
+    assert_ne!(first, second);
+    assert_eq!(n.approvals.pending_count(), 1);
+    let replaced = resolved(&n, &first);
+    assert_eq!(replaced.len(), 1);
+    assert!(!replaced[0].approved && replaced[0].signer_device_id.is_empty());
+    let old = skip_requests(&n)
+        .into_iter()
+        .find(|r| r.approval_id == first)
+        .unwrap();
+    assert_eq!(
+        error(c.call(Cmd::ApprovalResolve(honest(&old, true)))).code,
+        "protocol.invalid_message"
+    );
+    assert!(applied(&worktree).is_empty());
+    // A different option is a different card.
+    let third = param(
+        &error(set_config(&mut c, &id, "auto_approve", "true")),
+        "approval_id",
+    );
+    assert_ne!(second, third);
+    assert_eq!(n.approvals.pending_count(), 2);
+}
+
+/// Setting the option by another command settles it: the waiting card for it is withdrawn and can no longer be decided.
+#[test]
+fn another_switch_of_the_option_withdraws_its_card() {
+    if !local() {
+        return;
+    }
+    let e = env("supersede", None);
+    let n = node(&e, false);
+    let mut c = Client::connect(n.socket().unwrap()).unwrap();
+    let (id, worktree) = agent(&n, &mut c);
+    let approval = param(
+        &error(set_mode(&mut c, &id, "bypassPermissions")),
+        "approval_id",
+    );
+    let card = skip_requests(&n).remove(0);
+    ok(set_mode(&mut c, &id, "plan"));
+    assert_eq!(n.approvals.pending_count(), 0);
+    let done = resolved(&n, &approval);
+    assert!(!done[0].approved && done[0].signer_device_id.is_empty());
+    assert_eq!(
+        error(c.call(Cmd::ApprovalResolve(honest(&card, true)))).code,
+        "protocol.invalid_message"
+    );
+    assert_eq!(applied(&worktree), ["applied mode:plan"]);
+}
+
+/// The permission is the agent's session: when the agent ends, its waiting card is withdrawn and a late decision applies nothing.
+#[test]
+fn the_end_of_the_agent_withdraws_its_card() {
+    if !local() {
+        return;
+    }
+    let e = env("ends", None);
+    let n = node(&e, false);
+    let mut c = Client::connect(n.socket().unwrap()).unwrap();
+    let (id, worktree) = agent(&n, &mut c);
+    let approval = param(
+        &error(set_mode(&mut c, &id, "bypassPermissions")),
+        "approval_id",
+    );
+    let card = skip_requests(&n).remove(0);
+    ok(c.call(Cmd::AgentStop(v1::AgentStop {
+        agent_id: id.clone(),
+        ..Default::default()
+    })));
+    let end = Instant::now() + Duration::from_secs(15);
+    while n.approvals.pending_count() > 0 {
+        assert!(Instant::now() < end, "the card was never withdrawn");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let done = resolved(&n, &approval);
+    assert_eq!(done.len(), 1);
+    assert!(!done[0].approved && done[0].signer_device_id.is_empty());
+    let late = error(c.call(Cmd::ApprovalResolve(honest(&card, true))));
+    assert_eq!(late.code, "protocol.invalid_message");
+    assert!(applied(&worktree).is_empty());
+}
+
+/// A crash of the adapter ends the session too.
+#[test]
+fn a_crash_of_the_adapter_withdraws_its_card() {
+    if !local() {
+        return;
+    }
+    let e = env("crash", None);
+    let n = node(&e, false);
+    let mut c = Client::connect(n.socket().unwrap()).unwrap();
+    let (id, _worktree) = agent(&n, &mut c);
+    assert_eq!(
+        error(set_mode(&mut c, &id, "bypassPermissions")).code,
+        "agent.approval_needed"
+    );
+    ok(c.call(Cmd::AgentPrompt(v1::AgentPrompt {
+        agent_id: id.clone(),
+        text: "crash".into(),
+    })));
+    let end = Instant::now() + Duration::from_secs(20);
+    while n.approvals.pending_count() > 0 {
+        assert!(Instant::now() < end, "the card was never withdrawn");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// A node restart forgets every card and every approval: an old card's decision is not an approval of anything, and the agent that
+/// comes back asks again.
+#[test]
+fn a_restart_does_not_restore_a_card_or_an_approval() {
+    if !local() {
+        return;
+    }
+    let e = env("restart", None);
+    let (id, old_card) = {
+        let n = node(&e, false);
+        let mut c = Client::connect(n.socket().unwrap()).unwrap();
+        let (id, _) = agent(&n, &mut c);
+        assert_eq!(
+            error(set_mode(&mut c, &id, "bypassPermissions")).code,
+            "agent.approval_needed"
+        );
+        let card = skip_requests(&n).remove(0);
+        // An approved switch, too: the session of this node run.
+        ok(c.call(Cmd::ApprovalResolve(honest(&card, true))));
+        assert_eq!(
+            error(set_mode(&mut c, &id, "turbo")).code,
+            "agent.approval_needed"
+        );
+        (id, skip_requests(&n).remove(1))
+    };
+    let n = node(&e, true);
+    let mut c = Client::connect(n.socket().unwrap()).unwrap();
+    assert_eq!(n.approvals.pending_count(), 0, "no card comes back");
+    assert_eq!(
+        error(c.call(Cmd::ApprovalResolve(honest(&old_card, true)))).code,
+        "protocol.invalid_message"
+    );
+    // The agent comes back (resumed) and asks again; an agent that is not back yet is started afresh and asks too.
+    let end = Instant::now() + Duration::from_secs(30);
+    let back = loop {
+        let list = n.supervisor.lock().unwrap().list();
+        if list.iter().any(|v| v.id.as_str() == id && v.running) {
+            break id.clone();
+        }
+        if Instant::now() > end {
+            break agent(&n, &mut c).0;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    let end = Instant::now() + Duration::from_secs(15);
+    loop {
+        let r = set_mode(&mut c, &back, "bypassPermissions").unwrap();
+        match r {
+            Err(e) if e.code == "agent.approval_needed" => break,
+            Err(_) => {}
+            Ok(_) => panic!("a restarted agent took a mode that skips without asking"),
+        }
+        assert!(Instant::now() < end, "never asked again");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}

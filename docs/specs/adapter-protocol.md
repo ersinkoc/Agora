@@ -82,8 +82,9 @@ described before ADR-0090, byte for byte: the ACP bridge sends the new items onl
   or the node's rule; the event `AgentSessionConfig` is recorded when it changed. `session/commands` is bounded (100) and recorded as
   `AgentCommands`. `agent.set_config` is refused with `protocol.capability_missing` for a terminal agent or an adapter that did not
   declare `config`, with `agent.option_unknown` (`id`: the option, or the value) for what was not reported, and with
-  `agent.option_forbidden` for a choice that skips permissions when the node's `skip_permissions` policy forbids it; only then is
-  `session/set_config` sent. `agent.cancel_turn` sends `session/cancel` to an adapter that declared `cancel`. A prompt that arrives while
+  `agent.option_forbidden` for a choice that skips permissions when the node's `skip_permissions` policy forbids it; a choice that skips
+  under a policy that allows it is not sent either until the owner's signed approval arrives (`agent.approval_needed`, ADR-0090
+  Amendment A); only then is `session/set_config` sent. `agent.cancel_turn` sends `session/cancel` to an adapter that declared `cancel`. A prompt that arrives while
   an adapter that declared `turns` has a turn open (a prompt was sent and no `idle` came after) is queued, at most 8 (`agent.queue_full`),
   and sent, one per `idle`, in order. Chat items: a tool item with a `callId` of more than 256 bytes is dropped; the others are described
   in `docs/specs/protocol.md` ("A structured agent's conversation").

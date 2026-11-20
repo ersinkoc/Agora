@@ -266,4 +266,4 @@ for a skipping mode; a stale card after the agent ended), the "Temporarily unava
   as "needs your approval" instead of switched off; its `session-unasked-unavailable` text and tests still describe the old state until then.
 - **Left open by the amendment, decided here:** for `AgentSetMode` the signed `option_id` is the literal `mode` (a mode has no option id of its own) and
   the detail's `option_type` says mode or config; the wait is the standard 10 minutes; the limits above are the node's own numbers; a decision for a
-  card whose adapter restarted is refused with the adapter's error and changes nothing.
+  card whose adapter restarted is refused (`agent.not_found`: the run it named is gone) and changes nothing.

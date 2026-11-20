@@ -1920,6 +1920,17 @@ impl Node {
                             {
                                 spawner.agent_ended(agent);
                             }
+                            // ADR-0090 Amendment A: a card to switch an agent to a mode that skips permission questions names this agent's
+                            // session; when it ends, crashes or is stopped, no decision may apply it later.
+                            if let SupervisorEvent::Exited { agent, .. }
+                            | SupervisorEvent::GaveUp { agent }
+                            | SupervisorEvent::Stopped { agent }
+                            | SupervisorEvent::AdapterCrashed { agent } = e
+                            {
+                                for id in approvals.withdraw_skips(agent, None) {
+                                    ev.approval_resolved(&id, false, "");
+                                }
+                            }
                         }
                         spawner.tick();
                         // ADR-0090: versions of chat entries held back to keep to one per 150 ms go out once they are due.
@@ -2002,6 +2013,11 @@ impl Node {
                             }
                         }
                         for (node_approval, agent, adapter_id) in approvals.expire(now) {
+                            // ADR-0090 Amendment A: nobody decided a switch in time: nothing is applied, and no adapter asked.
+                            if approvals.forget_skip(&node_approval) {
+                                ev.approval_resolved(&node_approval, false, "");
+                                continue;
+                            }
                             if spawner.expired(&node_approval) {
                                 continue;
                             }
