@@ -53,3 +53,7 @@ section, append-only). Tests: node kill with a structured agent mid-turn, with a
 - Open question answered as proposed: 1 MiB per agent, oldest dropped (whole lines).
 - Not built: step 3 (Windows), step 4 (the window's "kept" and "continued" words and the doctor line; the snapshot has no field that says "survived a
   node restart" without a schema change, so that step needs one), and decision 5 (the default of `resume.kinds`).
+- Doctor line, node-local (no schema change): a holder that speaks only link version 1 (built before 0.3.27) cannot keep structured agents, so a node restart ends
+  them and resume brings them back. The node records the version it agreed in `<home>/run/hold.link`; `agora doctor` (a warning, same exit status) and
+  `agora status` read it and say so, and the node logs `holder.link_v1` once. See `docs/specs/holder-link.md`. Still not built: the window's "kept" and
+  "continued" words (needs a field in the agent snapshot, so a schema change and its own ADR step), Windows, and decision 5.

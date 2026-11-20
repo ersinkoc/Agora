@@ -121,6 +121,10 @@ doctor-policy-problems = { $detail ->
 } of the node's policy file could not be understood; until they are fixed, no agent may skip its permission questions.
 doctor-show-secret = The file browser and the review screen show secret files (.env files, private keys, ...) in full to everyone who may look at a project (policy: files.show_secret = true).
 doctor-manifest-older = The manifests folder holds an older description of { $detail } (version { $from }; this program has { $shipped } built in) and it replaces the built-in one, so agents of this kind may not resume after a restart. Remove the file { $file } from the manifests folder: the shipped descriptions are built in.
+doctor-holder-old = Chat agents on this machine are resumed after a node restart, not kept running, because this machine's agent keeper is older than this program. It ends when the agents it keeps have ended ({ $detail ->
+    [one] 1 agent now
+   *[other] { $detail } agents now
+}), and a new one then starts.
 doctor-manifest-invalid = The agent description { $detail } could not be read.
 doctor-cert-node = This machine's hub certificate is valid for { $detail ->
     [one] one more day
@@ -331,7 +335,11 @@ status-node-link-hub-refused = not connected to { $hub }: the hub refused this m
 status-node-link-closed = not connected to { $hub }: the hub ended the connection; the node is trying again
 status-node-link-other = not connected to { $hub }: { $reason }
 status-agents = agents running: { $count }
-status-agents-kept = agents still running without the node: { $count } (`agora` brings them back, `agora down --agents` stops them)
+status-holder-old = chat agents are resumed, not kept, after a node restart: this machine's agent keeper is older ({ $count ->
+    [one] it keeps 1 agent
+   *[other] it keeps { $count } agents
+}; a new one starts when they have ended)
+status-agents-kept =agents still running without the node: { $count } (`agora` brings them back, `agora down --agents` stops them)
 status-log = log: { $log }
 down-stopped = Stopped the { $role } (process { $pid }).
 down-stopped-supervised = Stopped the { $role } and its supervisor (process { $pid }).
