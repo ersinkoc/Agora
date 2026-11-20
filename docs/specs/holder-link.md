@@ -217,7 +217,7 @@ wants to write that cannot fit one frame fails that write on the node's side, be
    sent into a socket nobody reads is the one unavoidable loss"): a reply that is written to a node that dies before using it is lost. `eof` is true when the
    agent's output has ended; with the agent's state `Exited` and no line left, nothing more will come.
 6. **Input.** `PipeWrite` queues one line (the holder adds the newline) for a thread of its own, up to 256 lines, so an agent that does not read never holds
-   the holder. A full queue or a closed input is `Refused(Failed)`; an unknown agent `Refused(UnknownAgent)`. `Resize` of a pipe agent is `BadRequest`.
+   the holder. A full queue, a closed input or an agent whose end the holder collected is `Refused(Failed)`; an unknown agent `Refused(UnknownAgent)`. `Resize` of a pipe agent is `BadRequest`.
 7. **Ending.** `Signal`, `Stop`, `List` and `Release` work on pipe agents as on terminals (a pipe agent is in `List`). `Release` of an ended agent forgets it;
    a running one is `BadRequest`. A holder with no agent left ends (decision 2). `SIGTERM` to the holder (`agora down --agents`) ends the pipe agents too.
    If the holder dies, the agent's stdin reaches end of file (nothing guarantees more; there is no `PDEATHSIG` on pipe agents).
@@ -259,9 +259,11 @@ wants to write that cannot fit one frame fails that write on the node's side, be
   need a new field in `PipeData`, a new tag; not done.)
 - **The bound is on encoded size** (each line costs its bytes plus 4), so everything kept, as `seen` and `fresh` together, fits one `PipeData` frame
   whatever the lengths of the lines (a flood of one-byte lines is tested).
-- **An ended agent's group:** when the holder collects a pipe agent's end it sends `SIGKILL` to what is left of the agent's process group, at that
-  moment (the one moment the group's number is certainly still the agent's), so a crashed adapter cannot leave processes running that hold its output
-  open.
+- **An ended agent's group:** when a pipe agent has ended, the holder sends `SIGKILL` to what is left of the agent's process group **before it
+  collects the agent's end** (`waitid` with `WNOWAIT`: until then the ended agent keeps its pid, so the group's number is certainly still the agent's),
+  and only then collects it, so a crashed adapter cannot leave processes running that hold its output open. On Linux it also ends what is left of the agent's **session** (what the agent moved into process groups of their own: job control,
+  `setpgid`); elsewhere only the group. A process that left the session (`setsid`) is not found and can keep the output open: the node then
+  counts the agent ended after a short grace without output.
 - **A node that went back to link version 1** still sees pipe agents in `List` (they are agents of the holder) but does not end them: a version 1 node ends only
   what `Attach` handed it, and `Attach` never lists pipe agents (a `Stop` it sent by name would work, but it never knows the names); they run until the
   holder gets `SIGTERM` (`agora down --agents`).
