@@ -32,6 +32,7 @@ import { NoAskBadge } from './components/NoAskBadge';
 import type { ApprovalModel, MachineModel, MessageModel, ProjectCost } from './net/view';
 import type { Device } from './net/approval';
 import { deviceLabel } from './net/devices';
+import { AgentsSettings } from './components/AgentsSettings';
 import type { UsageSummary } from './net/usage';
 import { demoAgents, demoApprovals, demoHelper, demoSkipApproval, demoStartApproval, demoStartSettingsApproval, demoStartNoAskApproval } from './fixtures';
 import { forgetSkipCapable, markSkipCapable } from './net/skipApproval';
@@ -266,7 +267,7 @@ export interface MyDevice { id: string; name: string; fingerprint: string; lastU
 // or the command to run on the machine. Fingerprints are what people compare, so every device is shown with its own. The screen
 // password and the idle lock live here too (ADR-0067). `passkeyNeedsPassword`: this browser is on another machine and a screen
 // password is set, so adding a passkey needs it (ADR-0067).
-export function DevicePage({ device, onBack, onTheme, section, onAddPasskey, passkeyNeedsPassword = false, security, fingerprint, machines, trustedOn, others, asked, onAsk, onRemove }: {
+export function DevicePage({ device, onBack, onTheme, section, onAddPasskey, passkeyNeedsPassword = false, security, fingerprint, machines, trustedOn, others, asked, onAsk, onRemove, loadKinds }: {
   device: Device | undefined;
   onBack: () => void;
   // Opens the theme editor in the window (ADR-0068).
@@ -285,6 +286,8 @@ export function DevicePage({ device, onBack, onTheme, section, onAddPasskey, pas
   asked?: boolean;
   onAsk?: () => Promise<boolean>;
   onRemove?: (id: string) => Promise<boolean>;
+  // What a machine can start (Settings → Agents); without it (no live hub) the section is not offered.
+  loadKinds?: (node: string) => Promise<KindChoice[]>;
 }) {
   useSyncExternalStore(themeStore.subscribe, themeStore.state, themeStore.state); // the theme's name below follows a change
   const [passkeyNotice, setPasskeyNotice] = useState<string | undefined>();
@@ -303,7 +306,7 @@ export function DevicePage({ device, onBack, onTheme, section, onAddPasskey, pas
       { id: 'lock', label: 'password-title', show: !!security },
       { id: 'devices', label: 'device-others', show: !!others && others.length > 0 },
     ] },
-    { group: 'settings-group-machines', items: [{ id: 'machines', label: 'settings-machines', show: true }] },
+    { group: 'settings-group-machines', items: [{ id: 'machines', label: 'settings-machines', show: true }, { id: 'agents', label: 'settings-agents', show: !!loadKinds }] },
   ];
   // A deep link (#/device/passkeys) brings its section to the top; the page's own links change the hash, which lands here.
   useEffect(() => { if (section) document.getElementById(`settings-${section}`)?.scrollIntoView?.({ block: 'start' }); }, [section]);
@@ -418,6 +421,12 @@ export function DevicePage({ device, onBack, onTheme, section, onAddPasskey, pas
               ) : <p className="muted m-0">{t('machines-empty')}</p>}
               <p className="m-0"><a className="button" href="#/machines">{t('settings-machines-manage')}</a></p>
             </section>
+            {loadKinds && (
+              <section {...anchor('agents')}>
+                <h2 className="m-0">{t('settings-agents')}</h2>
+                <AgentsSettings machines={machines ?? []} loadKinds={loadKinds} />
+              </section>
+            )}
           </div>
         </div>
       </div>

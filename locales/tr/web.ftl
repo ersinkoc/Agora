@@ -1249,3 +1249,23 @@ close-failed-timeout = o makine zamanında yanıt vermedi
 close-failed-gone = makine bu ajanı artık tanımıyor
 close-failed-unsupported = o makine bunu henüz yapamıyor. Güncelleyin
 close-failed-hub = hub'a ulaşılamadı
+
+# Ayarlar → Ajanlar: her makinenin başlatabildiği ajanlar, hangilerinin kurulu olduğu ve başlatırken ne seçilebildiği.
+settings-agents = Ajanlar
+agents-intro = Her makinenin başlatabildiği ajanlar. Model, çaba ve diğer seçimler bir ajanı başlatırken yapılır; her birinin neler sunduğunu görmeniz için burada listelenir.
+agents-loading = Bu makineye soruluyor…
+agents-none-known = Bu makine çevrimdışı ve hangi ajanlara sahip olduğunu bu tarayıcıya bildirmedi.
+agents-empty = Bu makine hiç ajan listelemiyor.
+agents-stale = Çevrimdışı · { $when } itibarıyla
+agents-installed = Kurulu
+agents-not-installed = Kurulu değil
+agents-state-installed = kurulu
+agents-state-missing = kurulu değil
+agents-runs-terminal = Terminalde çalışır
+agents-runs-chat = Sohbet
+agents-runs-adapter = Adaptör üzerinden sohbet
+agents-program-missing = Bu makine PATH içinde { $program } programını bulamıyor.
+agents-setting-any = ajanın kabul ettiği herhangi bir değer
+agents-setting-default = varsayılan { $value }
+agents-options = Seçenekler
+agents-option-skips = izin sorularını atlar

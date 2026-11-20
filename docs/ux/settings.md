@@ -3,7 +3,11 @@
 - **Account:** profile, passkeys, devices (revoke), language, time format.
 - **Machines:** nodes, health, version, update channel, local policy (view; changes require signed approval),
   resource limits, agent accounts per kind.
-- **Agents:** installed kinds, integration level per kind, default mode (terminal or chat), registry sources.
+- **Agents:** installed kinds, integration level per kind, default mode (terminal or chat), registry sources. In the web window today:
+  This device → Agents (`#/device/agents`) lists, per machine, the agents it can start (installed first, then not installed), how each
+  runs (terminal, chat, chat through an adapter) and the settings and options each takes, read only: they are chosen when an agent
+  starts, an option that skips permission questions is labelled and never a default, and an offline machine shows what it reported
+  last, marked older. Not built yet: installing from the list (ADR-0087), the "Add an agent" list (ADR-0092), saved defaults per agent.
 - **Projects:** default base branch, merge policy, approval policy, retention.
 - **Notifications:** per trigger and channel, quiet hours.
 - **Appearance:** theme (`themes.md`: a theme for light and one for dark, the theme editor), density, terminal font. In
