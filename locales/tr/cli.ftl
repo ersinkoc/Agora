@@ -328,7 +328,11 @@ status-node-link-hub-refused = { $hub } adresine bağlı değil: hub bu makineyi
 status-node-link-closed = { $hub } adresine bağlı değil: hub bağlantıyı kapattı; düğüm yeniden deniyor
 status-node-link-other = { $hub } adresine bağlı değil: { $reason }
 status-agents = çalışan ajan: { $count }
-status-agents-kept = node olmadan çalışmaya devam eden ajan: { $count } (`agora` onları geri alır, `agora down --agents` durdurur)
+status-holder-old = sohbet ajanları node yeniden başlayınca sürdürülür, çalışır halde tutulmaz: bu makinenin ajan koruyucusu daha eski ({ $count ->
+    [one] 1 ajan tutuyor
+   *[other] { $count } ajan tutuyor
+}; onlar bitince yenisi başlar)
+status-agents-kept =node olmadan çalışmaya devam eden ajan: { $count } (`agora` onları geri alır, `agora down --agents` durdurur)
 status-log = günlük: { $log }
 down-stopped = { $role } durduruldu (süreç { $pid }).
 down-stopped-supervised = { $role } ve gözeticisi durduruldu (süreç { $pid }).
@@ -441,7 +445,11 @@ doctor-credential = { $detail } başlarken bu düğümden { $names } alır (sakl
 doctor-credential-none = { $detail } için kimlik bilgisi bulunamadı: düğümün ona verecek bir şeyi yok. "Giriş yapılmadı" derse (kapalı modda çalışan bir ajan Anahtar Zinciri'nde duran girişi göremez), onun için bir jeton üretin ve şunu çalıştırın: agora node secret set { $name }; sonra düğümün politikasına "credentials.{ $detail } = { $name }" satırını ekleyin.
 doctor-credential-unlisted = Bu düğümde { $names } için bir değer var, ama politikada { $detail } türünün onu almasına izin veren "credentials.{ $detail }" satırı yok; bu yüzden geçirilmez. Başka ajanlar da onu hiç almaz.
 doctor-credential-refused = Politika { $detail } için { $names } adlarını listeliyor, ama türün tanımı bunları bildirmiyor: geçirilmezler.
-doctor-credential-malformed = Politikadaki "credentials.{ $detail }" satırı bozuk (virgülle ayrılmış düz adlar, değer yok): { $detail } türüne hiçbir şey geçirilmez.
+doctor-holder-old = Bu makinedeki sohbet ajanları node yeniden başlayınca çalışır halde tutulmaz, sürdürülür; çünkü bu makinenin ajan koruyucusu bu programdan daha eski. Tuttuğu ajanlar bitince kendisi de biter ({ $detail ->
+    [one] şu an 1 ajan
+   *[other] şu an { $detail } ajan
+}) ve ardından yenisi başlar.
+doctor-credential-malformed =Politikadaki "credentials.{ $detail }" satırı bozuk (virgülle ayrılmış düz adlar, değer yok): { $detail } türüne hiçbir şey geçirilmez.
 cli-secret-prompt = { $name } değeri (gösterilmez):
 cli-secret-set = { $name } bu makinede saklandı. Değer burada kalır: hub'a asla gönderilmez. Bir ajan türünün onu almasını istiyorsanız düğümün politikasına "credentials.TUR = { $name }" satırını ekleyin ve düğümü yeniden başlatın.
 cli-secret-removed = { $name } silindi.

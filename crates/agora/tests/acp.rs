@@ -684,9 +684,11 @@ fn a_structured_agents_conversation_has_thinking_tool_status_and_plan_steps() {
         tool.text,
         "{\"tool\":\"read a.rs\",\"arguments\":{\"path\":\"a.rs\"}}"
     );
-    // The node's clock measured it: the fake agent waited 400 ms between the first sight and the end.
+    // The node's clock measured it: the fake agent waited 400 ms between the first sight and the end. The node may see the first
+    // update a little after the agent sent it (a loaded CI machine measured 201 ms), so the test asks for a clearly positive
+    // duration, not for nearly all of the wait.
     assert!(
-        tool.started_ms > 0 && tool.ended_ms >= tool.started_ms + 300,
+        tool.started_ms > 0 && tool.ended_ms >= tool.started_ms + 100,
         "{tool:?}"
     );
     // The plan: one entry, replaced; its last version has the later status; old clients read the lines.

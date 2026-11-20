@@ -53,18 +53,125 @@ enum St {
     /// After an intermediate (`ESC SP`, `ESC (`): the next final byte ends the sequence and is not a reset.
     EscI,
     Csi,
+    /// Inside a CSI sequence that can no longer switch a mode or reset (most cursor moves and colours): only its end matters.
+    CsiSkip,
 }
 
 /// Reads `CSI ? Pm h` / `CSI ? Pm l` (and the resets `ESC c`, `CSI ! p`) from the program's output.
 #[derive(Clone, Debug, Default)]
 pub struct ModeScanner {
     st: St,
-    params: Vec<u8>,
+    params: CsiParams,
     modes: ProgramModes,
 }
 
-/// Longest parameter list kept; a longer one is not a mode switch.
-const MAX_PARAMS: usize = 64;
+/// Most numbers (parameters and `:` sub-parameters together) in one sequence, as the emulator's parser (`vte`) keeps them; a
+/// sequence with more is dropped there, so it is no mode switch here either.
+const MAX_PARAMS: usize = 32;
+
+/// The sequence being read after `ESC [`, kept the way the emulator's parser keeps it: numbers rather than bytes (each saturating
+/// at 65535), so a list of any length the emulator acts on is read here too, and one it drops changes nothing.
+#[derive(Clone, Debug, Default)]
+struct CsiParams {
+    /// A byte has been read since `ESC [` (a private marker counts only as the first one).
+    started: bool,
+    /// The private marker (`<`, `=`, `>`, `?`) when it was the first byte.
+    private: Option<u8>,
+    /// How many intermediate bytes (`SP` to `/`), and whether they are exactly one `!`.
+    inter: u8,
+    bang: bool,
+    /// A parameter byte (digit, `:`, `;`) has been read.
+    any_param: bool,
+    /// Numbers stored so far, as the emulator's parser counts them.
+    stored: usize,
+    /// The first number of each parameter (what a mode switch reads), `firsts` of them: fixed storage, so reading output never
+    /// allocates (it runs for every byte of every pane).
+    first: [u16; MAX_PARAMS],
+    firsts: usize,
+    /// The number being read, and whether it is a sub-parameter (after `:`).
+    cur: u16,
+    sub: bool,
+    /// The emulator ignores this sequence.
+    ignore: bool,
+}
+
+impl CsiParams {
+    /// A new sequence. The stored numbers are left as they are: only the first `firsts` are read.
+    fn reset(&mut self) {
+        self.started = false;
+        self.private = None;
+        self.inter = 0;
+        self.bang = false;
+        self.any_param = false;
+        self.stored = 0;
+        self.firsts = 0;
+        self.cur = 0;
+        self.sub = false;
+        self.ignore = false;
+    }
+
+    fn byte(&mut self, b: u8) {
+        let first = !self.started;
+        self.started = true;
+        if self.ignore {
+            return;
+        }
+        match b {
+            0x3c..=0x3f if first => self.private = Some(b),
+            0x3c..=0x3f => self.ignore = true,
+            0x20..=0x2f => {
+                self.inter = self.inter.saturating_add(1);
+                self.bang = self.inter == 1 && b == b'!';
+            }
+            // Only a `?` list switches a mode: in any other sequence (cursor moves, colours: most of the output) a parameter only
+            // matters as being there (it rules out the `CSI ! p` reset), so its numbers are not read.
+            _ if self.private != Some(b'?') => self.any_param = true,
+            // A parameter after an intermediate: the emulator ignores the sequence.
+            _ if self.inter > 0 => self.ignore = true,
+            _ if self.stored == MAX_PARAMS => self.ignore = true,
+            b'0'..=b'9' => {
+                self.any_param = true;
+                self.cur = self
+                    .cur
+                    .saturating_mul(10)
+                    .saturating_add(u16::from(b - b'0'));
+            }
+            _ => {
+                self.any_param = true;
+                self.end_number();
+                self.sub = b == b':';
+            }
+        }
+    }
+
+    /// Whether the sequence can no longer be a mode switch (a `?` list the emulator acts on) or the `CSI ! p` reset (no
+    /// parameter): what [`ModeScanner::csi`] would do with it at its final byte is nothing.
+    fn dead(&self) -> bool {
+        self.ignore || (self.any_param && self.private != Some(b'?'))
+    }
+
+    /// Stores the number being read (at a `:`, a `;` or the final byte).
+    fn end_number(&mut self) {
+        if !self.sub {
+            // Never full here: a number is stored only while fewer than MAX_PARAMS are.
+            if let Some(slot) = self.first.get_mut(self.firsts) {
+                *slot = self.cur;
+                self.firsts += 1;
+            }
+        }
+        self.stored += 1;
+        self.cur = 0;
+    }
+
+    /// The final byte: whether the emulator acts on the sequence, the last number stored.
+    fn finish(&mut self) -> bool {
+        if self.ignore || self.stored == MAX_PARAMS {
+            return false;
+        }
+        self.end_number();
+        true
+    }
+}
 
 impl ModeScanner {
     pub fn modes(&self) -> ProgramModes {
@@ -82,7 +189,7 @@ impl ModeScanner {
                 }
                 St::Esc => match b {
                     b'[' => {
-                        self.params.clear();
+                        self.params.reset();
                         self.st = St::Csi;
                     }
                     b'c' => {
@@ -103,12 +210,9 @@ impl ModeScanner {
                     0x1b => self.st = St::Esc,
                     0x18 | 0x1a => self.st = St::Ground,
                     0x20..=0x3f => {
-                        if self.params.len() < MAX_PARAMS {
-                            self.params.push(b);
-                        } else {
-                            // Too long to be a mode switch: its final byte changes nothing.
-                            self.params.clear();
-                            self.params.push(b'#');
+                        self.params.byte(b);
+                        if self.params.dead() {
+                            self.st = St::CsiSkip;
                         }
                     }
                     0x40..=0x7e => {
@@ -117,12 +221,18 @@ impl ModeScanner {
                     }
                     _ => {}
                 },
+                St::CsiSkip => match b {
+                    0x1b => self.st = St::Esc,
+                    0x18 | 0x1a | 0x40..=0x7e => self.st = St::Ground,
+                    _ => {}
+                },
             }
         }
     }
 
     fn csi(&mut self, fin: u8) {
-        if self.params == b"!" && fin == b'p' {
+        let p = &self.params;
+        if p.bang && p.private.is_none() && !p.any_param && !p.ignore && fin == b'p' {
             self.modes = ProgramModes::default();
             return;
         }
@@ -131,17 +241,11 @@ impl ModeScanner {
             b'l' => false,
             _ => return,
         };
-        let Some(list) = self.params.strip_prefix(b"?") else {
+        if p.private != Some(b'?') || p.inter > 0 || !self.params.finish() {
             return;
-        };
-        let list = list.to_vec();
-        for n in list.split(|&c| c == b';') {
-            let Some(n) = std::str::from_utf8(n)
-                .ok()
-                .and_then(|s| s.parse::<u16>().ok())
-            else {
-                continue;
-            };
+        }
+        let (first, firsts) = (self.params.first, self.params.firsts);
+        for &n in first.iter().take(firsts) {
             self.mode(n, set);
         }
     }
@@ -647,8 +751,8 @@ mod tests {
         let mut s = ModeScanner::default();
         s.feed(b"\x1b[?");
         for _ in 0..10_000 {
-            s.feed(b"1111111111");
-            assert!(s.params.len() <= 64, "{}", s.params.len());
+            s.feed(b"1111111111;");
+            assert!(s.params.firsts <= MAX_PARAMS, "{}", s.params.firsts);
         }
         // The sequence that ended an over-long list changes nothing.
         s.feed(b"h");

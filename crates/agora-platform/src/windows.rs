@@ -1035,12 +1035,15 @@ pub(crate) fn opened_path(file: &std::fs::File) -> io::Result<PathBuf> {
     }
 }
 
-/// See [`crate::link_dir`]: a junction, made by `cmd`'s own `mklink /J` (no privilege needed, unlike a symbolic link).
+/// See [`crate::link_dir`]: a junction, made by `cmd`'s own `mklink /J` (no privilege needed, unlike a symbolic link). Both paths
+/// are spelled with `\\`: `mklink` reads a `/` inside one (`h/link`) as a switch. `cmd` also parses `&`, `^` and `%…%` in its
+/// arguments, so this serves test folders only; a real path would need `FSCTL_SET_REPARSE_POINT` instead.
 pub(crate) fn junction(target: &Path, link: &Path) -> io::Result<()> {
+    let native = |p: &Path| p.as_os_str().to_string_lossy().replace('/', "\\");
     let out = std::process::Command::new("cmd")
         .args(["/d", "/c", "mklink", "/J"])
-        .arg(link)
-        .arg(target)
+        .arg(native(link))
+        .arg(native(target))
         .output()?;
     if out.status.success() {
         Ok(())

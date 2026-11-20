@@ -15,6 +15,9 @@ export function TabStrip({ tabs, onPick, children, trailing }: { tabs: readonly 
   const strip = useRef<HTMLDivElement>(null);
   const [edges, setEdges] = useState({ start: false, end: false, overflowing: false });
   const [hiddenIds, setHiddenIds] = useState<string[]>([]);
+  const front = tabs.find((x) => x.active)?.id;
+  const frontRef = useRef(front);
+  frontRef.current = front;
   const tabsRef = useRef(tabs);
   tabsRef.current = tabs;
   const measure = useCallback(() => {
@@ -33,11 +36,11 @@ export function TabStrip({ tabs, onPick, children, trailing }: { tabs: readonly 
   useEffect(() => {
     const el = strip.current;
     if (!el || typeof ResizeObserver === 'undefined') return;
-    const ro = new ResizeObserver(measure);
+    // A strip that got narrower keeps the tab in front in view, so the others (cut off, drawn in the "more" menu) are what leave.
+    const ro = new ResizeObserver(() => { measure(); document.getElementById(`tab-${frontRef.current}`)?.scrollIntoView?.({ inline: 'nearest', block: 'nearest' }); });
     ro.observe(el);
     return () => ro.disconnect();
   }, [measure]);
-  const front = tabs.find((x) => x.active)?.id;
   useEffect(() => { if (front) document.getElementById(`tab-${front}`)?.scrollIntoView?.({ inline: 'nearest', block: 'nearest' }); }, [front, tabs.length]);
 
   // The menu lists the tabs that are cut off, each with its state (a mark and in words), so one that needs you is never out of reach unseen.
