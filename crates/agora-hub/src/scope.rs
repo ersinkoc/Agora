@@ -152,6 +152,12 @@ impl Scope {
                 out.approvals.insert(k.clone(), a.clone());
             }
         }
+        // ADR-0091: plan limits belong to a machine; a window sees those of machines it may see.
+        for (k, q) in &view.quota {
+            if self.node_visible(&k.0) {
+                out.quota.insert(k.clone(), q.clone());
+            }
+        }
         for (k, l) in &view.leases {
             if self.granted(self.agents.get(&l.0)) {
                 out.leases.insert(k.clone(), l.clone());
@@ -424,6 +430,28 @@ mod tests {
         ] {
             full.apply(&event);
             assert_eq!(s.admit(&event), visible);
+        }
+        assert_eq!(full.session_replay().len(), 2);
+        let replay = s.filter_view(&full).session_replay();
+        assert_eq!(replay.len(), 1);
+        assert_eq!(replay[0].producer_id, "n1");
+    }
+
+    #[test]
+    fn a_member_is_replayed_the_plan_limits_of_only_the_machines_they_may_see() {
+        let mut full = View::default();
+        let s = scope(&["n1/id:shared"]);
+        for node in ["n1", "n2"] {
+            full.apply(&ev(
+                node,
+                Body::AgentQuotaObserved(v1::AgentQuotaObserved {
+                    node_id: node.into(),
+                    tool: "codex".into(),
+                    window: "five_hour".into(),
+                    used_percent: 40,
+                    ..Default::default()
+                }),
+            ));
         }
         assert_eq!(full.session_replay().len(), 2);
         let replay = s.filter_view(&full).session_replay();
