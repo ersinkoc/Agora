@@ -509,6 +509,7 @@ pub fn notice_text(e: &ChatEntry, t: Text<'_>) -> String {
                 ("detail", p("detail")),
             ],
         ),
+        "adapter.output_dropped" => t(key!("tui-notice-output_dropped"), &[("bytes", p("bytes"))]),
         other => t(
             key!("tui-notice-other"),
             &[("code", Arg::Str(plain(other)))],

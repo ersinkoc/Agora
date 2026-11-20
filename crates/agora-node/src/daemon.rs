@@ -1821,7 +1821,16 @@ impl Node {
                     // ADR-0060: the process each agent runs as, as last written to the ledger.
                     let mut processes: std::collections::HashMap<AgentId, u32> = Default::default();
                     while !stop.load(Ordering::Acquire) {
-                        let (events, views, usage_targets, ended, session_targets, pids, held) = {
+                        let (
+                            events,
+                            views,
+                            usage_targets,
+                            ended,
+                            session_targets,
+                            pids,
+                            held,
+                            adapter_states,
+                        ) = {
                             let mut s = sup.lock().unwrap_or_else(|e| e.into_inner());
                             let events = s.tick(Instant::now());
                             (
@@ -1832,6 +1841,7 @@ impl Node {
                                 s.session_file_targets(),
                                 s.agent_pids(),
                                 s.held_agents(),
+                                s.held_adapter_states(),
                             )
                         };
                         // ADR-0079 decision 9: which holder each running agent is in, so the next node attaches instead of calling
@@ -1839,6 +1849,15 @@ impl Node {
                         for v in views.iter().filter(|v| v.running) {
                             let holder = held.1.filter(|_| held.0.contains(&v.id));
                             ledger_tick.set_holder(v.id.as_str(), holder, now_ms());
+                        }
+                        // ADR-0093: what a later node needs to take up an adapter agent the holder runs (it cannot ask the adapter again).
+                        for (agent, session, capabilities) in &adapter_states {
+                            ledger_tick.set_adapter_state(
+                                agent.as_str(),
+                                session,
+                                capabilities,
+                                now_ms(),
+                            );
                         }
                         // ADR-0060: a new process (a start, a restart, a resume) is written to the ledger with its start time, so one
                         // that outlives a crashed node is recognised at the next start. Read only when the pid changed.
@@ -1993,6 +2012,9 @@ impl Node {
                                 }
                                 SupervisorEvent::PromptsDropped { agent, tags } => {
                                     chat.drop_queued(agent, tags, now);
+                                }
+                                SupervisorEvent::OutputDropped { agent, bytes } => {
+                                    chat.output_dropped(agent, *bytes, now);
                                 }
                                 SupervisorEvent::Stopped { agent }
                                 | SupervisorEvent::AdapterCrashed { agent } => {
@@ -2334,7 +2356,7 @@ fn take_up_held(
     cfg: &NodeConfig,
 ) {
     use crate::holder_link::AgentState as Held;
-    let Some((session, held)) = hub.attach_existing() else {
+    let Some((session, held, pipes)) = hub.attach_existing() else {
         return;
     };
     let mut ended = Vec::new();
@@ -2404,7 +2426,82 @@ fn take_up_held(
         }
         ledger.reclaim(&id, (session.pid, session.start), now_ms());
     }
-    if !crate::holder::HolderHub::end_unadopted(&session, ended) {
+    let mut ended_pipes = Vec::new();
+    for p in pipes {
+        let id = p.info.agent.clone();
+        let running = matches!(p.info.state, Held::Running);
+        let entry = ledger.get(&id);
+        let theirs = entry
+            .as_ref()
+            .is_some_and(|e| (e.holder_pid, e.holder_started) == (session.pid, session.start));
+        let adoptable = entry.filter(|e| running && theirs && e.interrupted());
+        // A pipe agent this node does not take up is ended through the holder, like a terminal: an agent nobody reads is one nobody
+        // answers.
+        let gone = |id: &str| crate::holder_link::HeldPipe {
+            info: crate::holder_link::AgentInfo {
+                agent: id.to_string(),
+                pid: 0,
+                state: Held::Running,
+            },
+            dropped: 0,
+            eof: false,
+            seen: Vec::new(),
+            fresh: Vec::new(),
+        };
+        let Some(entry) = adoptable else {
+            ended_pipes.push(p);
+            continue;
+        };
+        let folder = PathBuf::from(&entry.folder);
+        let project = if entry.directory {
+            crate::directory::inspect(&entry.folder, &cfg.node_id, false)
+                .ok()
+                .map(|(_, p)| p)
+        } else {
+            git::discover_checkout(&folder).ok().map(|c| c.project)
+        };
+        let Some(project) = project else {
+            ended_pipes.push(p);
+            continue;
+        };
+        let restore = crate::supervisor::Restore {
+            id: AgentId::new(id.clone()),
+            kind: entry.kind.clone(),
+            project,
+            folder,
+            directory: entry.directory,
+            branch: entry.branch.clone(),
+            session: (!entry.session_id.is_empty()).then(|| entry.session_id.clone()),
+            carry_on: false,
+            private_config: None,
+        };
+        let reattach = crate::supervisor::Reattach {
+            session_id: entry.adapter_session.clone(),
+            capabilities: entry.adapter_capabilities.clone(),
+            state: match entry.last_state.as_str() {
+                "working" => Some(agora_core::AgentState::Working),
+                "blocked" => Some(agora_core::AgentState::Blocked),
+                "idle" => Some(agora_core::AgentState::Idle),
+                "done" => Some(agora_core::AgentState::Done),
+                _ => None,
+            },
+        };
+        if sup
+            .adopt_held_pipe(restore, reattach, p, &session, Instant::now())
+            .is_err()
+        {
+            ended_pipes.push(gone(&id));
+            continue;
+        }
+        if !entry.parent_agent_id.is_empty() {
+            sup.set_parent(
+                &AgentId::new(id.clone()),
+                &AgentId::new(entry.parent_agent_id.clone()),
+            );
+        }
+        ledger.reclaim(&id, (session.pid, session.start), now_ms());
+    }
+    if !crate::holder::HolderHub::end_unadopted_all(&session, ended, ended_pipes) {
         hub.retire_session();
     }
 }

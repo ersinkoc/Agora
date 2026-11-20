@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdout, Command, Stdio};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, sync_channel, Receiver, Sender, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -292,8 +292,40 @@ type Pending = Arc<Mutex<PendingState>>;
 /// first ones, so the queue only fills when the adapter has stopped reading its input.
 const WRITE_QUEUE: usize = 64;
 
+/// ADR-0093: how the process behind an [`Adapter`] is held and ended.
+enum Proc {
+    /// The node's own child, on pipes the node holds.
+    Child(Child),
+    /// A process the terminal holder runs (Unix): the node talks to it through the holder, and the holder ends it.
+    Held {
+        pid: u32,
+        control: Arc<dyn agora_platform::HeldControl>,
+        /// Ends the reading of its output (an end, a detach).
+        stop: Arc<AtomicBool>,
+        /// Let go of, not ended: the process keeps running for the next node.
+        detached: bool,
+        /// Bytes the holder dropped from its output that the node has not been told about yet.
+        dropped: Arc<AtomicU64>,
+        /// The node has read everything the holder kept (the replay is over): only then is the loss told, so that the notice is
+        /// newer than what the replay put in the conversation and a long replay cannot push it out.
+        ready: Arc<AtomicBool>,
+    },
+}
+
+/// ADR-0093: the two ends of an adapter process the holder runs, and what ends it.
+pub struct HeldIo {
+    pub pid: u32,
+    pub input: Box<dyn Write + Send>,
+    pub output: Box<dyn Read + Send>,
+    pub control: Arc<dyn agora_platform::HeldControl>,
+    pub stop: Arc<AtomicBool>,
+    pub dropped: Arc<AtomicU64>,
+    /// Set by `output` once the output the holder kept has been read to its end.
+    pub ready: Arc<AtomicBool>,
+}
+
 pub struct Adapter {
-    child: Child,
+    proc: Proc,
     /// Lines for the adapter's stdin with the id of the call each one belongs to. A thread of its own writes them, so a
     /// caller never blocks on an adapter that stops reading (the call's timeout holds, and the caller's locks are freed).
     writer: Option<SyncSender<(u64, String)>>,
@@ -747,7 +779,106 @@ fn inheritable(name: &str, confined: bool) -> bool {
 impl Adapter {
     /// The adapter process's id (the agent it hosts runs below it).
     pub fn pid(&self) -> u32 {
-        self.child.id()
+        match &self.proc {
+            Proc::Child(c) => c.id(),
+            Proc::Held { pid, .. } => *pid,
+        }
+    }
+
+    /// ADR-0093: whether the process is the holder's.
+    pub fn is_held(&self) -> bool {
+        matches!(self.proc, Proc::Held { .. })
+    }
+
+    /// ADR-0093: bytes the holder dropped from the adapter's output since this was last asked (it kept only the newest 1 MiB while no
+    /// node read it). Always 0 for a process the node runs itself.
+    pub fn take_dropped(&self) -> u64 {
+        match &self.proc {
+            Proc::Held { dropped, ready, .. } if ready.load(Ordering::Acquire) => {
+                dropped.swap(0, Ordering::AcqRel)
+            }
+            Proc::Held { .. } => 0,
+            Proc::Child(_) => 0,
+        }
+    }
+
+    /// ADR-0093: lets go of a process the holder runs: it keeps running, for the next node. The node stops reading and writing
+    /// (what it had asked for and not yet had is the holder's to keep). `false` for a process the node runs itself, which is left as
+    /// it was (it ends with this value, as before).
+    pub fn detach(&mut self) -> bool {
+        let Proc::Held { stop, detached, .. } = &mut self.proc else {
+            return false;
+        };
+        *detached = true;
+        stop.store(true, Ordering::Release);
+        self.writer = None;
+        if let Some(t) = self.reader.take() {
+            let _ = t.join();
+        }
+        true
+    }
+
+    /// ADR-0093: an adapter whose process the holder runs, over the link the node has to it. `replay` are events the node rebuilt from
+    /// what the holder kept (a request still waiting for the person); they come first, before anything the process says from now.
+    pub fn attach_held(io: HeldIo, replay: Vec<AdapterEvent>) -> io::Result<Self> {
+        let (tx, events) = channel();
+        for e in replay {
+            let _ = tx.send(e);
+        }
+        let mut adapter = Self {
+            proc: Proc::Held {
+                pid: io.pid,
+                control: io.control,
+                stop: Arc::clone(&io.stop),
+                detached: false,
+                dropped: io.dropped,
+                ready: io.ready,
+            },
+            writer: None,
+            pending: Arc::default(),
+            events,
+            next_id: Arc::new(AtomicU64::new(1)),
+            ignored: Arc::new(AtomicUsize::new(0)),
+            reader: None,
+        };
+        let (writer, lines) = sync_channel(WRITE_QUEUE);
+        let pending = Arc::clone(&adapter.pending);
+        let input = io.input;
+        std::thread::Builder::new()
+            .name("agora-adapter-write".into())
+            .spawn(move || write_loop(input, &lines, &pending))?;
+        adapter.writer = Some(writer);
+        let (pending, ignored, output) = (
+            Arc::clone(&adapter.pending),
+            Arc::clone(&adapter.ignored),
+            io.output,
+        );
+        adapter.reader = Some(
+            std::thread::Builder::new()
+                .name("agora-adapter-read".into())
+                .spawn(move || read_loop(output, &pending, &ignored, &tx))?,
+        );
+        Ok(adapter)
+    }
+
+    /// ADR-0093: the complete environment [`Self::spawn`] gives the process (the node's `inheritable` variables plus the config's), as
+    /// text, for a holder that passes on nothing of its own. `None` when a variable is not UTF-8: the link carries text, so the node
+    /// then runs the adapter itself, never with a smaller environment.
+    pub fn held_env(cfg: &AdapterConfig) -> Option<Vec<(String, String)>> {
+        let mut env: Vec<(String, String)> = Vec::new();
+        for (name, value) in std::env::vars_os() {
+            if name
+                .to_str()
+                .is_some_and(|n| inheritable(n, cfg.sandbox.is_some()))
+            {
+                env.push((name.into_string().ok()?, value.into_string().ok()?));
+            }
+        }
+        for (k, v) in &cfg.env {
+            env.retain(|(n, _)| n != k);
+            env.push((k.clone(), v.clone()));
+        }
+        Some(env)
     }
 
     pub fn spawn(cfg: &AdapterConfig) -> io::Result<Self> {
@@ -799,7 +930,7 @@ impl Adapter {
         let (tx, events) = channel();
         // Own the child before starting workers so early errors use the same cleanup as a normal drop.
         let mut adapter = Self {
-            child,
+            proc: Proc::Child(child),
             writer: None,
             pending: Arc::default(),
             events,
@@ -807,11 +938,13 @@ impl Adapter {
             ignored: Arc::new(AtomicUsize::new(0)),
             reader: None,
         };
-        let (stdin, stdout) = adapter
-            .child
+        let Proc::Child(child) = &mut adapter.proc else {
+            return Err(io::Error::other("adapter pipes missing"));
+        };
+        let (stdin, stdout) = child
             .stdin
             .take()
-            .zip(adapter.child.stdout.take())
+            .zip(child.stdout.take())
             .ok_or_else(|| io::Error::other("adapter pipes missing"))?;
         let (writer, lines) = sync_channel(WRITE_QUEUE);
         let pending = Arc::clone(&adapter.pending);
@@ -1001,8 +1134,30 @@ impl Adapter {
         // Closing stdin lets a well-behaved adapter finish; kill covers the rest. The writer ends once its queue is closed
         // and its pipe is gone; it is not waited for (a descendant still holding the pipe must not hang the caller).
         self.writer = None;
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        match &mut self.proc {
+            Proc::Child(child) => {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            Proc::Held {
+                control,
+                stop,
+                detached,
+                ..
+            } => {
+                if !*detached {
+                    // Ended in the holder, and collected there (so it forgets the agent and can end with its last).
+                    let _ = control.signal(agora_platform::HeldSignal::Kill);
+                    let end = std::time::Instant::now() + Duration::from_secs(3);
+                    while matches!(control.exit_status(), Ok(None))
+                        && std::time::Instant::now() < end
+                    {
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                }
+                stop.store(true, Ordering::Release);
+            }
+        }
         if let Some(t) = self.reader.take() {
             let _ = t.join();
         }
@@ -1013,6 +1168,33 @@ impl Drop for Adapter {
     fn drop(&mut self) {
         self.kill_and_reap();
     }
+}
+
+/// ADR-0093 decision 3: what a holder kept of an adapter's output that an earlier node had already taken tells what was still waiting on
+/// the person: the approval requests with no sign after them that the agent went on (a state other than `blocked`). Nothing else is
+/// taken from those lines (the earlier node showed the rest), so a request is asked again, never answered, and nothing shows twice.
+pub fn pending_approvals(lines: &[Vec<u8>]) -> Vec<AdapterEvent> {
+    let mut pending: Vec<AdapterEvent> = Vec::new();
+    for raw in lines {
+        let Ok(text) = std::str::from_utf8(raw) else {
+            continue;
+        };
+        let Ok(Message::Notification { method, params }) = parse_line(text) else {
+            continue;
+        };
+        match method.as_str() {
+            "approval/request" => {
+                if let Some(e @ AdapterEvent::ApprovalRequest { .. }) = to_event(&method, &params) {
+                    pending.push(e);
+                }
+            }
+            "state/update" if agent_state(params.get("state")) != AgentState::Blocked => {
+                pending.clear();
+            }
+            _ => {}
+        }
+    }
+    pending
 }
 
 fn read_loop<R: Read>(
@@ -1216,6 +1398,67 @@ mod tests {
         }
         assert!(!alive, "the child is still present after startup failed");
         assert!(matches!(result, Err(e) if e.kind() == io::ErrorKind::WouldBlock));
+    }
+
+    fn line(method: &str, params: Value) -> Vec<u8> {
+        json!({"jsonrpc": "2.0", "method": method, "params": params})
+            .to_string()
+            .into_bytes()
+    }
+
+    /// ADR-0093 decision 3: of the lines an earlier node had, only a request with no sign after it that the agent went on is asked
+    /// again; nothing else is taken from them, and what is not a message is ignored.
+    #[test]
+    fn only_a_request_the_agent_has_not_moved_past_is_rebuilt_from_the_lines_an_earlier_node_had() {
+        let blocked = || {
+            line(
+                "state/update",
+                json!({"sessionId": "s", "state": "AGENT_STATE_BLOCKED"}),
+            )
+        };
+        let ask = |id: &str| {
+            line(
+                "approval/request",
+                json!({"sessionId": "s", "approvalId": id, "action": "run", "detail": "ls"}),
+            )
+        };
+        let working = line(
+            "state/update",
+            json!({"sessionId": "s", "state": "AGENT_STATE_WORKING"}),
+        );
+        let chat = line(
+            "chat/append",
+            json!({"sessionId": "s", "text": {"text": "hello"}}),
+        );
+        let ids = |lines: &[Vec<u8>]| -> Vec<String> {
+            pending_approvals(lines)
+                .into_iter()
+                .filter_map(|e| match e {
+                    AdapterEvent::ApprovalRequest { approval_id, .. } => Some(approval_id),
+                    _ => None,
+                })
+                .collect()
+        };
+        // Waiting: asked, and nothing since but words.
+        assert_eq!(
+            ids(&[blocked(), ask("a1"), chat.clone(), b"not json".to_vec()]),
+            ["a1"]
+        );
+        // Two waiting at once are both asked again.
+        assert_eq!(
+            ids(&[blocked(), ask("a1"), blocked(), ask("a2")]),
+            ["a1", "a2"]
+        );
+        // The agent went on after it: it was answered (or given up), so it is not asked again.
+        assert!(ids(&[blocked(), ask("a1"), working.clone()]).is_empty());
+        // One answered, a later one waiting.
+        assert_eq!(
+            ids(&[blocked(), ask("a1"), working, blocked(), ask("a2")]),
+            ["a2"]
+        );
+        // Words are not requests, a request is not read from anything else, and bytes that are not text are skipped.
+        assert!(ids(&[chat, vec![0xff, 0xfe]]).is_empty());
+        assert!(ids(&[]).is_empty());
     }
 
     #[test]

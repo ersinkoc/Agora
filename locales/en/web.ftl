@@ -429,6 +429,7 @@ notice-adapter-turn_empty = The agent ended its turn without saying anything. It
 notice-adapter-agent_exited = The agent stopped (step { $stage }, exit code { $exit_code }). Its last output: { $stderr_tail }
 notice-adapter-agent_refused = The agent refused to start (step { $stage }, error { $rpc_code }): { $detail }
 notice-adapter-queue_dropped = { $count } waiting prompts were not sent: the turn was cancelled with the queue dropped, or the agent ended.
+notice-adapter-output_dropped = The agent kept running while Agora was restarting. { $bytes } bytes of what it said in that time were lost, so part of the conversation from that time may be missing.
 notice-other = The agent reported something this window cannot show ({ $code }).
 session-header = Agent settings
 session-elapsed-hint = How long it has been running

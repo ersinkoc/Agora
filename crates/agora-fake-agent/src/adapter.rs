@@ -7,6 +7,10 @@
 //! - `hang`: does not answer the prompt for 30 s (an adapter that is stuck).
 //! - `ask-error`: like `ask`, but answers the decision with a JSON-RPC error.
 //! - `ask-reserved`: like `ask`, but the request's action is `agent.start` (a name only the node may use); the answer is written to `applied.txt`.
+//! - `later-ask`: answers the prompt, waits 1.5 s, then behaves like `ask` (a request that comes while the node may be away, ADR-0093),
+//!   and writes `later.txt` in its folder once the request is out.
+//! - `later-flood`: answers the prompt, waits 1.5 s, then says 3000 chat items of 1000 bytes each and `flood-end` (output that fills
+//!   what a holder keeps while no node reads, ADR-0093), then writes `later.txt` in its folder.
 //! - `crash`: exits abruptly with status 3 (a crashing adapter).
 //! - `env`: appends a chat item saying whether the variable `AGORA_TEST_SECRET` is visible to the adapter.
 //! - `mcp-servers`: appends a chat item with the `mcpServers` of `session/start`, as JSON (`[]` when there were none).
@@ -183,7 +187,30 @@ pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
                         state(out, &session, "WORKING")?;
                         state(out, &session, "IDLE")?;
                     }
-                    "ask" | "ask-error" | "ask-reserved" => {
+                    "later-flood" => {
+                        std::thread::sleep(std::time::Duration::from_millis(1500));
+                        state(out, &session, "WORKING")?;
+                        let filler = "x".repeat(1000);
+                        for i in 0..3000 {
+                            note(
+                                out,
+                                "chat/append",
+                                json!({"sessionId": session, "text": {"text": format!("f{i}:{filler}")}}),
+                            )?;
+                        }
+                        note(
+                            out,
+                            "chat/append",
+                            json!({"sessionId": session, "text": {"text": "flood-end"}}),
+                        )?;
+                        state(out, &session, "IDLE")?;
+                        // A marker in the agent's folder, so a test waits for it instead of guessing how long 1.5 s took.
+                        std::fs::write("later.txt", "done")?;
+                    }
+                    "ask" | "ask-error" | "ask-reserved" | "later-ask" => {
+                        if text == "later-ask" {
+                            std::thread::sleep(std::time::Duration::from_millis(1500));
+                        }
                         state(out, &session, "BLOCKED")?;
                         note(
                             out,
@@ -191,6 +218,9 @@ pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
                             json!({"sessionId": session, "approvalId": "ap-1",
                                    "action": if text == "ask-reserved" { "agent.start" } else { "run_command" }, "detail": "ls"}),
                         )?;
+                        if text == "later-ask" {
+                            std::fs::write("later.txt", "asked")?;
+                        }
                         // Wait for the decision; everything else is answered normally meanwhile.
                         for next in lines.by_ref() {
                             let next = next?;

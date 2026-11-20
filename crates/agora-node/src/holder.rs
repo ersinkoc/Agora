@@ -9,16 +9,19 @@
 //! says so and the supervisor runs the agent itself exactly as before. A holder is started by the first agent that needs one, never at
 //! the node's start, so a node that never starts an agent never leaves an idle holder behind.
 
-use std::io;
+use std::io::{self, Read, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use agora_platform::{ExitStatus, HeldControl, HeldSignal, ProcessWatch, TerminalHandle};
 
-pub use crate::holder_link::StartRequest;
-use crate::holder_link::{socket_path, AgentInfo, AgentState, Client, Held, LinkError, Refusal};
+use crate::holder_link::{
+    socket_path, AgentInfo, AgentState, Client, Held, LinkError, Refusal, LINK_VERSION_PIPES,
+    MAX_FRAME,
+};
+pub use crate::holder_link::{HeldPipe, StartPipeRequest, StartRequest};
 
 /// How long a start waits for a holder it started to listen. Together with [`BUSY_WAIT`] this bounds what a start can hold the
 /// supervisor for, once per [`BACKOFF`] when the holder cannot be had.
@@ -49,6 +52,9 @@ pub struct HolderSession {
     /// The holder's process, as the ledger records it (ADR-0079 decision 9).
     pub pid: u32,
     pub start: u64,
+    /// ADR-0093: the holder keeps structured agents on pipes (it spoke link version 2 or later). An older holder does not, and is
+    /// never sent what it cannot read.
+    pub pipes: bool,
 }
 
 fn to_io(e: LinkError) -> io::Error {
@@ -90,6 +96,65 @@ impl HolderSession {
             return Err(LinkError::Io(io::Error::from(io::ErrorKind::TimedOut)));
         }
         started
+    }
+
+    /// ADR-0093: starts a program on pipes in the holder; its pid.
+    pub fn start_pipe(&self, request: &StartPipeRequest) -> Result<u32, LinkError> {
+        if !self.pipes {
+            return Err(LinkError::Refused(Refusal::BadRequest, 0));
+        }
+        self.call(|c| c.start_pipe(request))
+    }
+
+    fn pipe_read(&self, agent: &str) -> Result<crate::holder_link::PipeData, LinkError> {
+        self.call(|c| c.pipe_read(agent))
+    }
+
+    fn pipe_write(&self, agent: &str, line: &[u8]) -> Result<(), LinkError> {
+        self.call(|c| c.pipe_write(agent, line))
+    }
+
+    /// ADR-0093: the two ends of a pipe agent the holder runs, as the adapter host reads and writes them. `fresh` and `dropped` are what
+    /// `AttachPipes` said no node had: the output starts with those lines.
+    pub fn pipe_io(
+        self: &Arc<Self>,
+        agent: &str,
+        fresh: Vec<Vec<u8>>,
+        dropped: u64,
+        pid: u32,
+    ) -> agora_adapters::host::HeldIo {
+        let stop = Arc::new(AtomicBool::new(false));
+        let dropped = Arc::new(AtomicU64::new(dropped));
+        let ready = Arc::new(AtomicBool::new(false));
+        let mut first = Vec::new();
+        for l in fresh {
+            first.extend_from_slice(&l);
+            first.push(b'\n');
+        }
+        agora_adapters::host::HeldIo {
+            pid,
+            input: Box::new(PipeWriter {
+                session: Arc::clone(self),
+                agent: agent.to_string(),
+                line: Vec::new(),
+            }),
+            output: Box::new(PipeReader {
+                session: Arc::clone(self),
+                agent: agent.to_string(),
+                buf: first,
+                pos: 0,
+                stop: Arc::clone(&stop),
+                dropped: Arc::clone(&dropped),
+                ready: Arc::clone(&ready),
+                wait: PIPE_POLL_MIN,
+                exited_idle: None,
+                failures: 0,
+            }),
+            control: self.control_of(agent),
+            stop,
+            dropped,
+            ready,
+        }
     }
 
     /// Ends `agent` for good: stops its group, waits until the holder reports it ended, and releases it (so the holder forgets it,
@@ -143,6 +208,138 @@ impl HolderSession {
     }
 }
 
+/// The shortest and the longest wait between two reads of an idle pipe agent's output. Every line waits at most the longest.
+const PIPE_POLL_MIN: Duration = Duration::from_millis(2);
+const PIPE_POLL_MAX: Duration = Duration::from_millis(40);
+/// An agent that ended and whose output stays open (something it started holds it) is over after this long without a line.
+const PIPE_EXIT_GRACE: Duration = Duration::from_millis(500);
+
+/// The output of a pipe agent in the holder, as a stream of lines for the adapter host's reader: what the holder kept first, then what
+/// it writes. A holder or a link that cannot be asked is the end of the stream (the adapter then counts as ended).
+struct PipeReader {
+    session: Arc<HolderSession>,
+    agent: String,
+    buf: Vec<u8>,
+    pos: usize,
+    stop: Arc<AtomicBool>,
+    dropped: Arc<AtomicU64>,
+    /// Set once what the holder kept has been handed to the reader.
+    ready: Arc<AtomicBool>,
+    wait: Duration,
+    exited_idle: Option<Instant>,
+    /// Reads in a row the holder refused for a passing reason.
+    failures: u32,
+}
+
+/// How many times in a row a refusal that may pass (the holder could not do it just now) is tried again before the agent counts as gone,
+/// and the wait between them: a hiccup must not end an agent and have it restarted.
+const PIPE_RETRIES: u32 = 20;
+const PIPE_RETRY_WAIT: Duration = Duration::from_millis(50);
+
+/// Whether a failed read of a pipe agent's output is its end. A link that failed, a holder that no longer knows the agent or does not
+/// serve this node are final (the session is broken for good, or there is nothing to read); any other refusal is retried.
+fn read_error_ends(e: &LinkError, failures: u32) -> bool {
+    match e {
+        LinkError::Refused(Refusal::Failed | Refusal::Busy, _) => failures > PIPE_RETRIES,
+        _ => true,
+    }
+}
+
+impl Read for PipeReader {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        if out.is_empty() {
+            return Ok(0);
+        }
+        loop {
+            if self.pos < self.buf.len() {
+                let n = out.len().min(self.buf.len() - self.pos);
+                out[..n].copy_from_slice(&self.buf[self.pos..self.pos + n]);
+                self.pos += n;
+                if self.pos == self.buf.len() {
+                    self.buf.clear();
+                    self.pos = 0;
+                }
+                return Ok(n);
+            }
+            self.ready.store(true, Ordering::Release);
+            if self.stop.load(Ordering::Acquire) {
+                return Ok(0);
+            }
+            let data = match self.session.pipe_read(&self.agent) {
+                Ok(d) => {
+                    self.failures = 0;
+                    d
+                }
+                Err(e) => {
+                    self.failures += 1;
+                    if read_error_ends(&e, self.failures) {
+                        return Ok(0);
+                    }
+                    std::thread::sleep(PIPE_RETRY_WAIT);
+                    continue;
+                }
+            };
+            if data.dropped > 0 {
+                self.dropped.fetch_add(data.dropped, Ordering::AcqRel);
+            }
+            if !data.fresh.is_empty() {
+                for l in &data.fresh {
+                    self.buf.extend_from_slice(l);
+                    self.buf.push(b'\n');
+                }
+                self.wait = PIPE_POLL_MIN;
+                self.exited_idle = None;
+                continue;
+            }
+            if data.eof {
+                return Ok(0);
+            }
+            if matches!(data.info.state, AgentState::Exited { .. })
+                && self.exited_idle.get_or_insert_with(Instant::now).elapsed() >= PIPE_EXIT_GRACE
+            {
+                return Ok(0);
+            }
+            std::thread::sleep(self.wait);
+            self.wait = (self.wait * 2).min(PIPE_POLL_MAX);
+        }
+    }
+}
+
+/// The input of a pipe agent in the holder: each complete line is one frame. A line too large for a frame fails that write only, never
+/// the link.
+struct PipeWriter {
+    session: Arc<HolderSession>,
+    agent: String,
+    line: Vec<u8>,
+}
+
+impl Write for PipeWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.line.extend_from_slice(buf);
+        while let Some(i) = self.line.iter().position(|b| *b == b'\n') {
+            let rest = self.line.split_off(i + 1);
+            let mut line = std::mem::replace(&mut self.line, rest);
+            line.pop();
+            if line.len() >= MAX_FRAME - 4096 {
+                self.line.clear();
+                return Err(io::Error::from(io::ErrorKind::InvalidInput));
+            }
+            if self.session.pipe_write(&self.agent, &line).is_err() {
+                return Err(io::Error::from(io::ErrorKind::BrokenPipe));
+            }
+        }
+        if self.line.len() >= MAX_FRAME - 4096 {
+            self.line.clear();
+            return Err(io::Error::from(io::ErrorKind::InvalidInput));
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 /// [`HeldControl`] of one agent: signals and its end, asked of the holder.
 struct AgentLink {
     session: Arc<HolderSession>,
@@ -181,10 +378,14 @@ enum Why {
     Other,
 }
 
-fn open(
-    setup: &HolderSetup,
-    lose_reply: &Arc<AtomicBool>,
-) -> Result<(Arc<HolderSession>, Vec<Held>), Why> {
+/// What a new connection handed over: terminals and (ADR-0093) pipe agents.
+struct Opened {
+    session: Arc<HolderSession>,
+    held: Vec<Held>,
+    pipes: Vec<HeldPipe>,
+}
+
+fn open(setup: &HolderSetup, lose_reply: &Arc<AtomicBool>) -> Result<Opened, Why> {
     let socket = socket_path(&setup.home);
     let end = Instant::now() + BUSY_WAIT;
     // `Busy` is "try again" (the holder has not noticed that the node before this one is gone yet), never "a second node exists".
@@ -209,6 +410,13 @@ fn open(
     let watch = ProcessWatch::open(pid, start).map_err(|_| Why::Other)?;
     // Everything but `List` waits for `Attach`; a new holder has nothing to hand over.
     let held = client.attach().map_err(|_| Why::Other)?;
+    // An older holder is never sent what it cannot read (it would close the link): it has no pipe agents either.
+    let pipes_ok = client.version >= LINK_VERSION_PIPES;
+    let pipes = if pipes_ok {
+        client.attach_pipes().map_err(|_| Why::Other)?
+    } else {
+        Vec::new()
+    };
     let session = Arc::new(HolderSession {
         client: Mutex::new(client),
         watch,
@@ -216,8 +424,13 @@ fn open(
         lose_reply: Arc::clone(lose_reply),
         pid,
         start,
+        pipes: pipes_ok,
     });
-    Ok((session, held))
+    Ok(Opened {
+        session,
+        held,
+        pipes,
+    })
 }
 
 /// Starts `agora hold` detached, in a session of its own: never bound to its starter (a holder that died with the node would defeat
@@ -279,7 +492,25 @@ impl HolderHub {
     /// is left attached and unread: the holder stopped reading it at the attach, and the node drops the master. `false` when one could
     /// not be settled; the session is then not to be used.
     pub fn end_unadopted(session: &HolderSession, held: Vec<Held>) -> bool {
+        Self::end_unadopted_all(session, held, Vec::new())
+    }
+
+    /// [`Self::end_unadopted`] with the pipe agents (ADR-0093) a new attach handed over and this node does not track: ended too, since
+    /// an agent nobody reads is an agent nobody answers.
+    pub fn end_unadopted_all(
+        session: &HolderSession,
+        held: Vec<Held>,
+        pipes: Vec<HeldPipe>,
+    ) -> bool {
         let mut all = true;
+        for p in pipes {
+            let id = p.info.agent.clone();
+            let settled = match p.info.state {
+                AgentState::Running => session.end_agent(&id),
+                AgentState::Exited { .. } => session.release(&id).map_err(to_io),
+            };
+            all &= settled.is_ok();
+        }
         for h in held {
             let id = h.info.info.agent.clone();
             let settled = match h.info.info.state {
@@ -297,16 +528,20 @@ impl HolderHub {
 
     /// At the node's start: attaches to the holder that is already running (what a node before this one left), with the terminals and
     /// output it holds. `None` when no holder runs or it cannot be used (then agents run in the node).
-    pub fn attach_existing(&self) -> Option<(Arc<HolderSession>, Vec<Held>)> {
+    pub fn attach_existing(&self) -> Option<(Arc<HolderSession>, Vec<Held>, Vec<HeldPipe>)> {
         if !agora_platform::HOLDER_BUILT {
             return None;
         }
         let mut st = self.st();
         match open(&self.setup, &self.lose_reply) {
-            Ok((session, held)) => {
+            Ok(Opened {
+                session,
+                held,
+                pipes,
+            }) => {
                 st.session = Some(Arc::clone(&session));
                 self.set_current(Some(Arc::clone(&session)));
-                Some((session, held))
+                Some((session, held, pipes))
             }
             Err(_) => None,
         }
@@ -328,10 +563,14 @@ impl HolderHub {
             return None;
         }
         let session = match open(&self.setup, &self.lose_reply) {
-            Ok((s, held)) => {
+            Ok(Opened {
+                session: s,
+                held,
+                pipes,
+            }) => {
                 // A holder that still holds agents this node does not track (its own link broke while the holder lived: the node
                 // already counts them ended): they are ended, not left attached and unread, and the session is used only if all were.
-                if Self::end_unadopted(&s, held) {
+                if Self::end_unadopted_all(&s, held, pipes) {
                     Some(s)
                 } else {
                     None
@@ -359,7 +598,11 @@ impl HolderHub {
         let end = Instant::now() + START_WAIT;
         loop {
             match open(&self.setup, &self.lose_reply) {
-                Ok((s, held)) if held.is_empty() => return Some(s),
+                Ok(Opened {
+                    session: s,
+                    held,
+                    pipes,
+                }) if held.is_empty() && pipes.is_empty() => return Some(s),
                 Err(Why::NoHolder) if Instant::now() < end => {
                     std::thread::sleep(Duration::from_millis(50));
                 }
@@ -380,5 +623,26 @@ impl HolderHub {
             .as_ref()
             .filter(|s| !s.gone())
             .map(|s| (s.pid, s.start))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_final_error_ends_a_pipe_agent_and_a_passing_refusal_is_tried_again_a_while() {
+        let io = LinkError::Io(io::Error::from(io::ErrorKind::TimedOut));
+        assert!(read_error_ends(&io, 1));
+        assert!(read_error_ends(&LinkError::Closed, 1));
+        assert!(read_error_ends(&LinkError::Malformed("x"), 1));
+        assert!(read_error_ends(
+            &LinkError::Refused(Refusal::UnknownAgent, 1),
+            1
+        ));
+        let hiccup = LinkError::Refused(Refusal::Failed, 1);
+        assert!(!read_error_ends(&hiccup, 1));
+        assert!(!read_error_ends(&hiccup, PIPE_RETRIES));
+        assert!(read_error_ends(&hiccup, PIPE_RETRIES + 1));
     }
 }

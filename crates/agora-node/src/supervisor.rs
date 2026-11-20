@@ -24,7 +24,7 @@ use agora_vt::Size;
 
 use crate::git::{self, GitError};
 use crate::holder::{HolderHub, HolderSession};
-use crate::holder_link::{Held, LinkError, Refusal as HolderRefusal};
+use crate::holder_link::{Held, HeldPipe, LinkError, Refusal as HolderRefusal};
 use crate::launch_options::{LaunchChoice, Refusal, Requested, SkipPermissions};
 use crate::terminal::{TerminalHandle, TerminalOptions};
 
@@ -203,6 +203,23 @@ pub enum SupervisorEvent {
         agent: AgentId,
         tags: Vec<u64>,
     },
+    /// ADR-0093: the holder kept only the newest 1 MiB of what an adapter wrote while no node read it; `bytes` were dropped.
+    OutputDropped {
+        agent: AgentId,
+        bytes: u64,
+    },
+}
+
+/// ADR-0093: what a node needs to take up an adapter agent the holder kept, beyond what [`Restore`] says: what the adapter told the
+/// node when it started (the node cannot ask again), and the agent's last state.
+#[derive(Debug, Clone, Default)]
+pub struct Reattach {
+    /// The adapter's own session id (`session/start`'s answer).
+    pub session_id: String,
+    /// The capabilities it declared in `initialize`.
+    pub capabilities: Vec<String>,
+    /// The state the ledger last saw it in.
+    pub state: Option<AgentState>,
 }
 
 /// ADR-0090: the most prompts that wait behind a turn, per agent (`agent.queue_full`).
@@ -873,8 +890,75 @@ impl Supervisor {
             .iter()
             .filter(|(_, e)| e.terminal.as_ref().is_some_and(TerminalHandle::is_held))
             .map(|(id, _)| id.clone())
+            // ADR-0093: an adapter's process the holder runs.
+            .chain(
+                self.adapters
+                    .iter()
+                    .filter(|(_, e)| e.running && e.adapter.as_ref().is_some_and(Adapter::is_held))
+                    .map(|(id, _)| id.clone()),
+            )
             .collect();
         (ids, self.holder.as_ref().and_then(|h| h.identity()))
+    }
+
+    /// ADR-0093: for each adapter agent that runs in the holder, what a later node needs to take it up and cannot ask: the adapter's
+    /// own session id and the capabilities it declared. The node writes them to the ledger.
+    pub fn held_adapter_states(&self) -> Vec<(AgentId, String, Vec<String>)> {
+        self.adapters
+            .iter()
+            .filter(|(_, e)| e.running && e.adapter.as_ref().is_some_and(Adapter::is_held))
+            .map(|(id, e)| (id.clone(), e.session_id.clone(), e.capabilities.clone()))
+            .collect()
+    }
+
+    /// ADR-0093 decisions 1 and 3: takes an adapter agent the holder kept running while the node was away. Nothing is started and the
+    /// adapter is not initialised again (it still has its session): the node talks to the process it left, through the holder.
+    /// `pipe` is what the holder kept of its output: lines an earlier node was given (what was still waiting on a person is asked again,
+    /// never answered), then lines no node had, which are read as if they had just arrived. On failure nothing is left behind and the
+    /// agent stays in the holder (the caller ends it).
+    pub fn adopt_held_pipe(
+        &mut self,
+        r: Restore,
+        reattach: Reattach,
+        pipe: HeldPipe,
+        session: &Arc<HolderSession>,
+        now: Instant,
+    ) -> Result<(), SupervisorError> {
+        let _ = now;
+        if reattach.session_id.is_empty() {
+            return Err(SupervisorError::Spawn("no session".into()));
+        }
+        let id = r.id.clone();
+        let (kind, project, worktree) = (r.kind.clone(), r.project.to_string(), r.folder.clone());
+        self.restore(r)?;
+        if !self.adapters.contains_key(&id) {
+            // A kind that is not hosted by an adapter was not started on pipes.
+            self.unrestore(&id);
+            return Err(SupervisorError::UnknownKind(kind));
+        }
+        let replay = agora_adapters::host::pending_approvals(&pipe.seen);
+        let io = session.pipe_io(id.as_str(), pipe.fresh, pipe.dropped, pipe.info.pid);
+        let adapter = match Adapter::attach_held(io, replay) {
+            Ok(a) => a,
+            Err(e) => {
+                self.unrestore(&id);
+                return Err(SupervisorError::Spawn(e.to_string()));
+            }
+        };
+        // The agent's mesh endpoint was the old node's: made again at the same path, so its configuration keeps working.
+        let mesh = self.adapter_mesh(&id, &kind, &project, &worktree);
+        let Some(e) = self.adapters.get_mut(&id) else {
+            return Err(SupervisorError::NotFound(id));
+        };
+        e.adapter = Some(adapter);
+        e.session_id = reattach.session_id;
+        e.capabilities = reattach.capabilities;
+        e.mesh = mesh;
+        e.running = true;
+        if let Some(state) = reattach.state {
+            e.agent.observe(state, StateSource::Reported);
+        }
+        Ok(())
     }
 
     /// ADR-0079 decision 4: takes an agent the holder kept running while the node was away: it is put back as `r.id` with its terminal,
@@ -1536,6 +1620,8 @@ impl Supervisor {
                 .adapter_sandbox(&req.kind, &worktree, &spec.command[0])
                 .and_then(|profile| {
                     launch_adapter(
+                        &id,
+                        self.holder.as_ref(),
                         &spec,
                         &root,
                         &worktree,
@@ -1784,6 +1870,8 @@ impl Supervisor {
             .adapter_sandbox(&req.kind, &worktree, &spec.command[0])
             .and_then(|profile| {
                 launch_adapter(
+                    &id,
+                    self.holder.as_ref(),
                     spec,
                     &checkout.root,
                     &worktree,
@@ -1881,6 +1969,8 @@ impl Supervisor {
                 Some(adapter) if e.running => adapter.poll(),
                 _ => continue,
             };
+            // ADR-0093: the holder kept only the newest of what the adapter wrote while no node read it: the person is told.
+            let lost = e.adapter.as_ref().map_or(0, Adapter::take_dropped);
             for ev in polled {
                 match ev {
                     AdapterEvent::State { state, .. } => {
@@ -1974,6 +2064,13 @@ impl Supervisor {
                     }),
                 }
             }
+            // After what the adapter said, so the notice is the newest entry and a long reply cannot push it out of the conversation.
+            if lost > 0 {
+                events.push(SupervisorEvent::OutputDropped {
+                    agent: id.clone(),
+                    bytes: lost,
+                });
+            }
         }
     }
 
@@ -1999,14 +2096,19 @@ impl Supervisor {
             .get(id)
             .map(|e| self.credential_vars(&e.agent.kind))
             .unwrap_or_default();
+        let holder = self.holder.clone();
         let Some(e) = self.adapters.get_mut(id) else {
             return;
         };
         e.restart_at = None;
         e.restarts += 1;
+        // The process that ended is let go before the next starts: a held one is collected from the holder, which frees its id.
+        e.adapter = None;
         // A crash keeps the agent in the mesh: the restarted session gets the same endpoint.
         let launched = held.and_then(|held| {
             launch_adapter(
+                id,
+                holder.as_ref(),
                 &e.spec,
                 &e.checkout_root,
                 &e.worktree,
@@ -3152,6 +3254,8 @@ impl Supervisor {
                 &entry.worktree,
             );
             let launched = launch_adapter(
+                id,
+                self.holder.as_ref(),
                 &entry.spec,
                 &entry.checkout_root,
                 &entry.worktree,
@@ -3331,8 +3435,11 @@ impl Supervisor {
         for e in self.adapters.values_mut() {
             e.restart_at = None;
             e.running = false;
-            if let Some(adapter) = e.adapter.take() {
-                adapter.shutdown(Duration::from_secs(1));
+            if let Some(mut adapter) = e.adapter.take() {
+                // ADR-0093: an adapter's process in the holder keeps running (it is let go, not ended); any other ends.
+                if !adapter.detach() {
+                    adapter.shutdown(Duration::from_secs(1));
+                }
             }
         }
     }
@@ -3804,6 +3911,8 @@ fn held_again(
 /// or the adapter is ended ([`discard_adapter`]), and the start is refused ([`SupervisorError::FolderMoved`]).
 #[allow(clippy::too_many_arguments)] // each is one part of the start the caller made
 fn launch_adapter(
+    agent: &AgentId,
+    holder: Option<&Arc<HolderHub>>,
     spec: &agora_adapters::manifest::AdapterSpec,
     checkout_root: &Path,
     worktree: &Path,
@@ -3844,14 +3953,19 @@ fn launch_adapter(
     if moved() {
         return Err(SupervisorError::FolderMoved);
     }
-    let adapter = Adapter::spawn(&AdapterConfig {
+    let config = AdapterConfig {
         program: program.into(),
         args: args.to_vec(),
         env,
         cwd: Some(worktree.to_path_buf()),
         sandbox,
-    })
-    .map_err(|e| SupervisorError::Spawn(e.to_string()))?;
+    };
+    // ADR-0093: an adapter the node does not confine is run by the holder when this node has one (so it outlives the node), and by the
+    // node itself when it cannot be: exactly as before.
+    let adapter = match launch_held_adapter(agent, &config, holder) {
+        Some(started) => started?,
+        None => Adapter::spawn(&config).map_err(|e| SupervisorError::Spawn(e.to_string()))?,
+    };
     match open_session(&adapter, checkout_root, worktree, resume, mesh) {
         Ok(_) if moved() => {
             discard_adapter(adapter);
@@ -3863,6 +3977,69 @@ fn launch_adapter(
             Err(e)
         }
     }
+}
+
+/// ADR-0093: starts `cfg` through the holder, on pipes. `None` means "not through the holder": the caller runs it itself (a confined
+/// adapter, no holder or an older one, a program or id the holder refuses, a variable that is not text). The environment is complete (the
+/// holder passes nothing of its own).
+fn launch_held_adapter(
+    agent: &AgentId,
+    cfg: &AdapterConfig,
+    holder: Option<&Arc<HolderHub>>,
+) -> Option<Result<Adapter, SupervisorError>> {
+    let hub = holder?;
+    if cfg.sandbox.is_some() {
+        return None;
+    }
+    let cwd = cfg.cwd.as_ref()?.to_str()?.to_string();
+    let env = Adapter::held_env(cfg)?;
+    let mut argv = vec![cfg.program.to_str()?.to_string()];
+    argv.extend(cfg.args.iter().cloned());
+    let request = crate::holder::StartPipeRequest {
+        agent: agent.as_str().to_string(),
+        argv,
+        cwd: Some(cwd),
+        env,
+    };
+    // A second try with a fresh session: the holder may have ended between the check and the start (it ends with its last agent).
+    for _ in 0..2 {
+        let session = hub.session()?;
+        if !session.pipes {
+            return None;
+        }
+        let pid = match session.start_pipe(&request) {
+            Ok(pid) => pid,
+            // It does not know how to start this (a program that is not there): the node's own start says why.
+            Err(LinkError::Refused(HolderRefusal::Failed, _)) => return None,
+            // An earlier run of this agent is still in the holder (its end was not collected): it is ended, then started again.
+            Err(LinkError::Refused(HolderRefusal::AgentExists, _)) => {
+                if session.end_agent(agent.as_str()).is_ok() {
+                    continue;
+                }
+                return None;
+            }
+            Err(LinkError::Refused(..)) => continue,
+            // The link failed: the holder may have started it all the same. Ask before anything else is done: one it has is ended and
+            // only then is another start made, so two copies never run; when that cannot be settled the start fails, unless the holder
+            // itself is gone.
+            Err(_) => {
+                if session.end_agent(agent.as_str()).is_ok() || session.holder_ended() {
+                    continue;
+                }
+                return Some(Err(SupervisorError::Spawn("holder link failed".into())));
+            }
+        };
+        let io = session.pipe_io(agent.as_str(), Vec::new(), 0, pid);
+        return match Adapter::attach_held(io, Vec::new()) {
+            Ok(adapter) => Some(Ok(adapter)),
+            Err(_) => {
+                // It runs in the holder but the node cannot read it: ended, and the node runs it itself.
+                let _ = session.stop(agent.as_str(), true);
+                None
+            }
+        };
+    }
+    None
 }
 
 /// Ends an adapter that is not kept (its start failed or was refused after the process began): the processes below it first, then the

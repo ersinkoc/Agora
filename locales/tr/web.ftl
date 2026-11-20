@@ -411,6 +411,7 @@ notice-adapter-turn_empty = Ajan hiçbir şey söylemeden sırasını bitirdi. S
 notice-adapter-agent_exited = Ajan durdu (adım { $stage }, çıkış kodu { $exit_code }). Son çıktısı: { $stderr_tail }
 notice-adapter-agent_refused = Ajan başlamayı reddetti (adım { $stage }, hata { $rpc_code }): { $detail }
 notice-adapter-queue_dropped = Bekleyen { $count } istem gönderilmedi: sıra kuyruk atılarak iptal edildi ya da ajan sona erdi.
+notice-adapter-output_dropped = Agora yeniden başlarken ajan çalışmaya devam etti. O sırada söylediklerinin { $bytes } baytı kaybedildi; bu yüzden konuşmanın o zamana ait bir kısmı eksik olabilir.
 notice-other = Ajan bu pencerenin gösteremediği bir şey bildirdi ({ $code }).
 session-header = Ajan ayarları
 session-elapsed-hint = Ne kadar süredir çalışıyor

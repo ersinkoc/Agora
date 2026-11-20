@@ -1136,3 +1136,113 @@ mod tests {
         );
     }
 }
+
+// ----- a program on pipes (ADR-0093) -----
+
+/// A program the holder runs on a pair of pipes instead of a terminal (a structured agent: an adapter or an ACP bridge): its input,
+/// its output, its child (so its exit status) and nothing else. It leads a session and so a process group of its own, like a terminal
+/// agent. Its stderr is the holder's own (the holder's log). The holder is the child's parent.
+#[derive(Debug)]
+pub struct HeldProcess {
+    child: Child,
+    io: Option<(std::process::ChildStdin, std::process::ChildStdout)>,
+    exit: Option<ExitStatus>,
+}
+
+impl HeldProcess {
+    /// Starts `argv` with exactly `env` (the holder's own environment is a stale snapshot of whoever started it and is never passed
+    /// on), in `cwd` when given. Every descriptor the holder was handed beyond 0, 1 and 2 is closed on exec.
+    pub fn start(
+        argv: &[String],
+        cwd: Option<&std::path::Path>,
+        env: &[(String, String)],
+    ) -> io::Result<Self> {
+        let Some((program, args)) = argv.split_first() else {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "argv is empty"));
+        };
+        let mut cmd = std::process::Command::new(program);
+        cmd.args(args);
+        if let Some(cwd) = cwd {
+            cmd.current_dir(cwd);
+        }
+        cmd.env_clear();
+        cmd.envs(env.iter().map(|(k, v)| (k, v)));
+        cmd.stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::inherit());
+        // SAFETY: runs between fork and exec and only calls async-signal-safe functions (the descriptor marking, setsid).
+        unsafe {
+            std::os::unix::process::CommandExt::pre_exec(&mut cmd, || {
+                crate::unix::cloexec_from(3);
+                cvt(libc::setsid())?;
+                Ok(())
+            });
+        }
+        let mut child = cmd.spawn()?;
+        let io = child.stdin.take().zip(child.stdout.take());
+        let Some(io) = io else {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(io::Error::other("pipes missing"));
+        };
+        Ok(Self {
+            child,
+            io: Some(io),
+            exit: None,
+        })
+    }
+
+    /// The pipes, once: the agent's input and output.
+    pub fn take_io(&mut self) -> Option<(std::process::ChildStdin, std::process::ChildStdout)> {
+        self.io.take()
+    }
+
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
+    /// Sends `signal` to the agent's process group. Nothing once the leader's end was collected ([`Self::try_wait`]).
+    pub fn signal(&self, signal: HeldSignal) -> io::Result<()> {
+        if self.exit.is_some() {
+            return Ok(());
+        }
+        // SAFETY: signalling the group this child leads (setsid), whose leader is not reaped yet.
+        cvt(unsafe { libc::killpg(self.child.id() as libc::pid_t, signal_number(signal)) })
+            .map(|_| ())
+    }
+
+    /// The agent's exit status once it ended, kept from then on. **When the leader's end is collected, whatever else it left in its
+    /// group is ended with it** (`SIGKILL`, at once, in this call): an adapter that ended or crashed must not leave processes the holder
+    /// can no longer name, which would also hold its output open for good. This is the one moment the group can be signalled safely:
+    /// its number is the leader's pid, which nothing else can have been given before the leader was collected, and the holder never
+    /// signals it again afterwards ([`Self::signal`] does nothing once the end is collected).
+    pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+        if self.exit.is_none() {
+            self.exit = self.child.try_wait()?.map(status);
+            if self.exit.is_some() {
+                // SAFETY: the group this child led (setsid), signalled in the same call that collected its leader. An error (no member
+                // left) is the usual case.
+                let _ = unsafe { libc::killpg(self.child.id() as libc::pid_t, libc::SIGKILL) };
+            }
+        }
+        Ok(self.exit)
+    }
+
+    /// Ends the agent's process group with `SIGKILL` and reaps its leader, so that no zombie is left.
+    pub fn kill_and_reap(&mut self) {
+        let _ = self.signal(HeldSignal::Kill);
+        let _ = self.child.wait();
+        self.exit = Some(ExitStatus {
+            code: None,
+            signal: Some(libc::SIGKILL),
+        });
+    }
+}
+
+impl Drop for HeldProcess {
+    fn drop(&mut self) {
+        if self.exit.is_none() {
+            self.kill_and_reap();
+        }
+    }
+}
