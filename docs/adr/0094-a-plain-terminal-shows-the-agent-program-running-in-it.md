@@ -3,7 +3,7 @@ Status: Accepted
 Date: 2026-11-20
 Accepted: 2026-11-20 (the maintainer's explicit message in the merger chat: "ADR-0094 ve ADR-0085 Ek A'yı kabul ediyorum"). The open questions' proposed answers stand.
 
-Not accepted. Nothing here may be built until the maintainer names this ADR in an acceptance message.
+Accepted by the maintainer (see the Accepted line above): this may now be built.
 
 Builds on ADR-0004 (agents are data), ADR-0079 (the terminal holder), ADR-0091 (plan limits) and the invariant "detection never reads the
 user-visible viewport". Touches the threat model (a program name is untrusted data).
