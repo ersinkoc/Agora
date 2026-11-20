@@ -267,8 +267,12 @@ pub struct HubSessions {
     guard: Guard,
     challenges: crate::passkey::Challenges,
     password_rounds: u32,
+    password_slots: Arc<tokio::sync::Semaphore>,
     proxy: Option<Arc<crate::proxy::ProxyHandle>>,
 }
+
+/// The most HTTP operations that may hash a screen password at once on this hub.
+const PASSWORD_JOBS: usize = 2;
 
 /// What a failed sign-in step leaves in the audit trail (the owner sees why; the client never does).
 const WRONG_CODE: &str = "signin.wrong_code";
@@ -283,6 +287,7 @@ impl HubSessions {
             guard: Guard::new(),
             challenges: crate::passkey::Challenges::new(),
             password_rounds: crate::password::ITERATIONS,
+            password_slots: Arc::new(tokio::sync::Semaphore::new(PASSWORD_JOBS)),
             proxy: None,
         }
     }
@@ -320,6 +325,10 @@ impl HubSessions {
 }
 
 impl crate::web::SessionApi for HubSessions {
+    fn password_slots(&self) -> &Arc<tokio::sync::Semaphore> {
+        &self.password_slots
+    }
+
     fn proxy(&self) -> Option<Arc<crate::proxy::ProxyTrust>> {
         self.proxy.as_ref().and_then(|p| p.current())
     }

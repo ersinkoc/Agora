@@ -9,6 +9,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
+use tokio::sync::Semaphore;
 
 pub use crate::password::Client;
 
@@ -22,6 +23,9 @@ pub struct SignInRequest<'a> {
 /// What the sign-in routes need from the hub: `POST /api/session` trades a one-time code (and, from another machine, the screen
 /// password) for a session token; `GET /api/session` says whether the password is needed; `DELETE /api/session` signs out.
 pub trait SessionApi: Send + Sync {
+    /// Shared admission for HTTP operations that may hash the screen password.
+    fn password_slots(&self) -> &Arc<Semaphore>;
+
     fn sign_in(&self, req: &SignInRequest<'_>) -> SignInReply;
 
     /// `GET /api/session`: what the sign-in screen needs to know before it asks (`passwordRequired`, `passwordSet`). Additive JSON.
@@ -333,12 +337,33 @@ fn forwarded(head: &str) -> bool {
         })
 }
 
+async fn session_post(
+    api: &Arc<dyn SessionApi>,
+    may_hash: bool,
+    work: impl FnOnce(&dyn SessionApi) -> (u16, String) + Send + 'static,
+) -> (u16, String) {
+    if !may_hash {
+        return work(api.as_ref());
+    }
+    let Ok(slot) = Arc::clone(api.password_slots()).try_acquire_owned() else {
+        return (503, String::new());
+    };
+    let api = Arc::clone(api);
+    tokio::task::spawn_blocking(move || {
+        // A request can go away before this job finishes. The job still owns the slot.
+        let _slot = slot;
+        work(api.as_ref())
+    })
+    .await
+    .unwrap_or((500, String::new()))
+}
+
 /// Reads the request head. A WebSocket upgrade is handed back untouched; other requests are answered here.
 pub async fn route<S>(
     stream: S,
     peer: Option<std::net::IpAddr>,
     assets: Option<&dyn Assets>,
-    sessions: Option<&dyn SessionApi>,
+    sessions: Option<&Arc<dyn SessionApi>>,
 ) -> io::Result<First<S>>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -353,7 +378,7 @@ pub async fn route_within<S>(
     mut stream: S,
     peer: Option<std::net::IpAddr>,
     assets: Option<&dyn Assets>,
-    sessions: Option<&dyn SessionApi>,
+    sessions: Option<&Arc<dyn SessionApi>>,
     read: std::time::Duration,
 ) -> io::Result<First<S>>
 where
@@ -485,12 +510,23 @@ where
         let json = serde_json::from_slice::<serde_json::Value>(&body).ok();
         let (status, out) = if let Some(op) = passkey_op.or(account_op) {
             match (sessions, json) {
-                (Some(api), Some(j)) if account_op.is_some() => {
-                    api.account(op, bearer().as_deref(), &client, &j)
-                }
                 (Some(api), Some(j)) => {
+                    let account = account_op.is_some();
+                    let token = bearer();
+                    let may_hash = token.is_some()
+                        && (account
+                            || (!client.is_local()
+                                && matches!(op, "register-begin" | "register-finish")));
+                    let op = op.to_owned();
                     let host = header("host").unwrap_or_default();
-                    api.passkey(op, bearer().as_deref(), &host, &client, &j)
+                    session_post(api, may_hash, move |api| {
+                        if account {
+                            api.account(&op, token.as_deref(), &client, &j)
+                        } else {
+                            api.passkey(&op, token.as_deref(), &host, &client, &j)
+                        }
+                    })
+                    .await
                 }
                 (None, _) => (404, String::new()),
                 _ => (400, String::new()),
@@ -503,25 +539,30 @@ where
             };
             match (sessions, field("code")) {
                 (Some(api), Some(code)) => {
-                    let req = SignInRequest {
-                        code,
-                        password: field("password"),
-                        client: &client,
-                    };
-                    match api.sign_in(&req) {
-                        SignInReply::Token(t) => {
-                            (200, serde_json::json!({ "token": t }).to_string())
+                    let may_hash = !client.is_local();
+                    let code = code.to_owned();
+                    let password = field("password").map(str::to_owned);
+                    session_post(api, may_hash, move |api| {
+                        match api.sign_in(&SignInRequest {
+                            code: &code,
+                            password: password.as_deref(),
+                            client: &client,
+                        }) {
+                            SignInReply::Token(t) => {
+                                (200, serde_json::json!({ "token": t }).to_string())
+                            }
+                            SignInReply::Refused => (401, String::new()),
+                            SignInReply::TooMany => (429, String::new()),
+                            SignInReply::Failed => (500, String::new()),
                         }
-                        SignInReply::Refused => (401, String::new()),
-                        SignInReply::TooMany => (429, String::new()),
-                        SignInReply::Failed => (500, String::new()),
-                    }
+                    })
+                    .await
                 }
                 (None, _) => (404, String::new()),
                 _ => (400, String::new()),
             }
         };
-        // Every refusal costs the same short wait, whatever was wrong.
+        // Every authentication refusal costs the same short wait, whatever was wrong.
         if status == 401 || status == 429 {
             tokio::time::sleep(FAILURE_DELAY).await;
         }
@@ -605,6 +646,7 @@ async fn respond<S: AsyncWrite + Unpin>(
         403 => "Forbidden",
         409 => "Conflict",
         500 => "Internal Server Error",
+        503 => "Service Unavailable",
         404 => "Not Found",
         405 => "Method Not Allowed",
         421 => "Misdirected Request",
@@ -759,7 +801,7 @@ mod tests {
     }
 
     async fn ask(
-        api: &dyn SessionApi,
+        api: &Arc<dyn SessionApi>,
         peer: &str,
         request: String,
     ) -> (String, std::time::Duration) {
@@ -783,11 +825,100 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn password_work_is_bounded_and_keeps_its_slot_after_the_request_is_dropped() {
+        use std::sync::{mpsc, Mutex};
+        use std::time::Duration;
+
+        struct GatedSignIn {
+            slots: Arc<Semaphore>,
+            started: tokio::sync::mpsc::UnboundedSender<()>,
+            release: Mutex<mpsc::Receiver<()>>,
+        }
+
+        impl SessionApi for GatedSignIn {
+            fn password_slots(&self) -> &Arc<Semaphore> {
+                &self.slots
+            }
+
+            fn sign_in(&self, req: &SignInRequest<'_>) -> SignInReply {
+                if !req.client.is_local() {
+                    self.started.send(()).unwrap();
+                    self.release
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(10))
+                        .unwrap();
+                }
+                SignInReply::Token("test".into())
+            }
+        }
+
+        let (started, mut starts) = tokio::sync::mpsc::unbounded_channel();
+        let (release, wait_for_release) = mpsc::channel();
+        let api: Arc<dyn SessionApi> = Arc::new(GatedSignIn {
+            slots: Arc::new(Semaphore::new(1)),
+            started,
+            release: Mutex::new(wait_for_release),
+        });
+        let sign_in = post("/api/session", &serde_json::json!({"code":"test"}));
+        let first = tokio::spawn({
+            let api = Arc::clone(&api);
+            let request = sign_in.clone();
+            async move { ask(&api, "192.0.2.1", request).await }
+        });
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), starts.recv())
+                .await
+                .unwrap(),
+            Some(())
+        );
+        first.abort();
+        assert!(first.await.unwrap_err().is_cancelled());
+        let (out, _) = ask(&api, "192.0.2.2", sign_in.clone()).await;
+        assert!(out.starts_with("HTTP/1.1 503"), "{out}");
+
+        for (path, peer) in [
+            ("/api/password", "127.0.0.1"),
+            ("/api/passkey/register-begin", "192.0.2.2"),
+            ("/api/passkey/register-finish", "192.0.2.2"),
+        ] {
+            let request = post(path, &serde_json::json!({})).replacen(
+                "\r\n",
+                "\r\nAuthorization: Bearer test\r\n",
+                1,
+            );
+            let (out, _) = ask(&api, peer, request).await;
+            assert!(out.starts_with("HTTP/1.1 503"), "{path}: {out}");
+        }
+        let (out, _) = ask(&api, "127.0.0.1", sign_in).await;
+        assert!(out.starts_with("HTTP/1.1 200"), "{out}");
+        let (out, _) = ask(
+            &api,
+            "192.0.2.2",
+            post("/api/passkey/login-begin", &serde_json::json!({})),
+        )
+        .await;
+        assert!(out.starts_with("HTTP/1.1 404"), "{out}");
+        assert!(matches!(
+            starts.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+        release.send(()).unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), api.password_slots().acquire())
+                .await
+                .unwrap()
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
     async fn the_screen_password_is_asked_of_another_machine_over_http_and_not_of_this_one() {
         let hub = Arc::new(
             crate::hub::Hub::open(crate::store::SqliteStore::open_in_memory().unwrap()).unwrap(),
         );
-        let api = crate::signin::HubSessions::new(Arc::clone(&hub)).with_password_rounds(1_000);
+        let api: Arc<dyn SessionApi> =
+            Arc::new(crate::signin::HubSessions::new(Arc::clone(&hub)).with_password_rounds(1_000));
         crate::password::ScreenPassword::with_iterations(hub.store(), 1_000)
             .set("long enough")
             .unwrap();
@@ -855,7 +986,8 @@ mod tests {
         let hub = Arc::new(
             crate::hub::Hub::open(crate::store::SqliteStore::open_in_memory().unwrap()).unwrap(),
         );
-        let api = crate::signin::HubSessions::new(Arc::clone(&hub)).with_password_rounds(1_000);
+        let api: Arc<dyn SessionApi> =
+            Arc::new(crate::signin::HubSessions::new(Arc::clone(&hub)).with_password_rounds(1_000));
         crate::password::ScreenPassword::with_iterations(hub.store(), 1_000)
             .set("long enough")
             .unwrap();
@@ -925,7 +1057,7 @@ mod tests {
     const PUBLIC: &str = "agora.example.com";
 
     /// A hub with a screen password and the proxy trusted as the owner would turn it on (`None`: never turned on).
-    fn proxied(on: bool) -> (Arc<crate::hub::Hub>, crate::signin::HubSessions) {
+    fn proxied(on: bool) -> (Arc<crate::hub::Hub>, Arc<dyn SessionApi>) {
         let hub = Arc::new(
             crate::hub::Hub::open(crate::store::SqliteStore::open_in_memory().unwrap()).unwrap(),
         );
@@ -942,7 +1074,7 @@ mod tests {
             .unwrap();
             api = api.with_proxy(Arc::new(crate::proxy::ProxyHandle::fixed(Some(trust))));
         }
-        (hub, api)
+        (hub, Arc::new(api))
     }
 
     fn info(headers: &[&str]) -> String {
@@ -958,7 +1090,7 @@ mod tests {
     }
 
     /// Sign-in with a wrong password; true when the answer is the lockout (429) and not an ordinary refusal (401).
-    async fn locked(api: &dyn SessionApi, peer: &str, headers: &[&str]) -> bool {
+    async fn locked(api: &Arc<dyn SessionApi>, peer: &str, headers: &[&str]) -> bool {
         let body = serde_json::json!({ "code": "AAAA-AAAA", "password": "wrong one!" }).to_string();
         let request = format!(
             "POST /api/session HTTP/1.1\r\n{}\r\nContent-Length: {}\r\n\r\n{body}",
@@ -1092,8 +1224,10 @@ mod tests {
             .unwrap();
         let trust =
             crate::proxy::ProxyTrust::new("X-Edge-Addr", &[PUBLIC.to_string()], &[]).unwrap();
-        let api = crate::signin::HubSessions::new(Arc::clone(&hub))
-            .with_proxy(Arc::new(crate::proxy::ProxyHandle::fixed(Some(trust))));
+        let api: Arc<dyn SessionApi> = Arc::new(
+            crate::signin::HubSessions::new(Arc::clone(&hub))
+                .with_proxy(Arc::new(crate::proxy::ProxyHandle::fixed(Some(trust)))),
+        );
         for value in ["127.0.0.1", "::1", "::ffff:127.0.0.1", "203.0.113.9", ""] {
             let (out, _) = ask(
                 &api,
