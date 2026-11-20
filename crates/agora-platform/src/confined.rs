@@ -170,12 +170,22 @@ impl ConfinedDir {
     }
 
     /// Renames the file `file` (just made by [`Self::create_new`] as `from`) to `to` inside this folder, replacing a file already
-    /// there (a link at `to` is replaced as itself, never followed). Atomic on both systems.
+    /// there (a link at `to` is replaced as itself, never followed). Atomic on both systems. On Unix `from` must still be the file `file`
+    /// (device and inode compared, regular file), else [`not_confined`] and nothing is renamed.
     pub fn rename_over(&self, file: &File, from: &OsStr, to: &OsStr) -> io::Result<()> {
         if !valid_component(from) || !valid_component(to) {
             return Err(refused());
         }
         imp::rename_over(&self.dir, file, from, to)
+    }
+
+    /// Removes `name` only if it is still the file `file` (made by [`Self::create_new`]) has open: on Unix the name is compared with
+    /// the handle (device, inode, regular file) and anything else is left alone; on Windows the handle itself is deleted.
+    pub fn remove_owned(&self, file: &File, name: &OsStr) -> io::Result<()> {
+        if !valid_component(name) {
+            return Err(refused());
+        }
+        imp::remove_owned(&self.dir, file, name)
     }
 
     /// Removes the file (or link, as itself) `name`. Close any handle to it first.
@@ -289,12 +299,41 @@ mod imp {
         Ok(file)
     }
 
-    pub(super) fn rename_over(
-        dir: &File,
-        _file: &File,
-        from: &OsStr,
-        to: &OsStr,
-    ) -> io::Result<()> {
+    /// Whether `name` in `dir` is still the very file `file` has open: same device and inode, and a regular file (not followed).
+    // `st_dev` and `st_ino` widths differ between Linux and macOS.
+    #[allow(clippy::unnecessary_cast)]
+    fn is_same_file(dir: &File, file: &File, name: &OsStr) -> io::Result<bool> {
+        use std::os::unix::fs::MetadataExt;
+        let c = cname(name)?;
+        // SAFETY: zeroed `stat` is a valid out-parameter; descriptor and name are live.
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        let r = unsafe {
+            libc::fstatat(
+                dir.as_raw_fd(),
+                c.as_ptr(),
+                &mut st,
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        if r < 0 {
+            let e = io::Error::last_os_error();
+            return if e.kind() == io::ErrorKind::NotFound {
+                Ok(false)
+            } else {
+                Err(e)
+            };
+        }
+        let mine = file.metadata()?;
+        Ok(st.st_mode & libc::S_IFMT == libc::S_IFREG
+            && st.st_ino as u64 == mine.ino()
+            && st.st_dev as u64 == mine.dev())
+    }
+
+    pub(super) fn rename_over(dir: &File, file: &File, from: &OsStr, to: &OsStr) -> io::Result<()> {
+        // The temporary name must still be the file this process made: a name swapped for a link or another file is not renamed.
+        if !is_same_file(dir, file, from)? {
+            return Err(refused());
+        }
         let (f, t) = (cname(from)?, cname(to)?);
         // SAFETY: one live directory descriptor for both sides and NUL-terminated names; `renameat` replaces `to` itself, never
         // what a link there points at.
@@ -303,6 +342,14 @@ mod imp {
             return Err(io::Error::last_os_error());
         }
         Ok(())
+    }
+
+    pub(super) fn remove_owned(dir: &File, file: &File, name: &OsStr) -> io::Result<()> {
+        // Only what this process made: anything else under the name is not ours to remove.
+        if !is_same_file(dir, file, name)? {
+            return Ok(());
+        }
+        remove_file(dir, name)
     }
 
     pub(super) fn remove_file(dir: &File, name: &OsStr) -> io::Result<()> {
@@ -531,6 +578,16 @@ mod imp {
             FILE_OPEN,
             FILE_NON_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT,
         )?;
+        set_delete(&file)
+    }
+
+    /// Deletes through the handle this process made (opened with DELETE, not shared): no name is looked up, so nothing else can
+    /// be removed.
+    pub(super) fn remove_owned(_dir: &File, file: &File, _name: &OsStr) -> io::Result<()> {
+        set_delete(file)
+    }
+
+    fn set_delete(file: &File) -> io::Result<()> {
         let info = FILE_DISPOSITION_INFORMATION { DeleteFile: true };
         let mut block = IO_STATUS_BLOCK::default();
         // SAFETY: a live handle with DELETE access and a correctly sized information structure.
@@ -575,6 +632,9 @@ mod imp {
     pub(super) fn remove_file(_: &File, _: &OsStr) -> io::Result<()> {
         unsupported()
     }
+    pub(super) fn remove_owned(_: &File, _: &File, _: &OsStr) -> io::Result<()> {
+        unsupported()
+    }
 }
 
 #[cfg(test)]
@@ -609,6 +669,16 @@ mod name_tests {
             "q\"",
             "a|b",
             "tab\tname",
+            "CON",
+            "con.txt",
+            "COM9",
+            "LPT1",
+            "AUX",
+            "PRN.x",
+            "CONIN$",
+            "a<b",
+            "a>b",
+            "PROGRA~1",
         ] {
             assert!(!windows_valid(bad), "{bad:?}");
         }

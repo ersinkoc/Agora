@@ -157,6 +157,31 @@ enum WriteStep {
     BeforeFolder(usize),
     /// After the temporary file is written, before it is renamed over the target.
     BeforeCommit,
+    /// After the last folder is opened, before its real path is checked.
+    AfterFolders,
+}
+
+/// The temporary file of a write: removed when dropped (an error or a panic) unless the rename happened, and only if the name still
+/// is the file this write made.
+struct PendingFile<'a> {
+    dir: &'a agora_platform::ConfinedDir,
+    name: std::ffi::OsString,
+    file: Option<std::fs::File>,
+}
+
+impl PendingFile<'_> {
+    fn committed(&mut self) {
+        self.file = None;
+        self.name = std::ffi::OsString::new();
+    }
+}
+
+impl Drop for PendingFile<'_> {
+    fn drop(&mut self) {
+        if let Some(file) = self.file.take() {
+            let _ = self.dir.remove_owned(&file, &self.name);
+        }
+    }
 }
 
 /// Why [`visit_inside`] gave nothing.
@@ -394,11 +419,15 @@ impl Files {
     /// - the root is opened once and every folder is then opened relative to the one before it, never following a link, so a
     ///   folder swapped for a link between steps is refused, or the write lands in the folder that was verified, never elsewhere;
     /// - the file is written to a temporary name in that verified folder and renamed over the target, so a failure leaves nothing
-    ///   behind and a link at the target is replaced, never followed; a folder, FIFO or device there is refused;
+    ///   behind (a guard removes the temporary file even on a panic, and only if the name still is the file this call made); a link, folder,
+    ///   FIFO or device at the target is refused (a folder, FIFO or device reads as `files.not_found`, as a read of one does: the
+    ///   protocol has no code for "not a regular file"); a link swapped in for the target after the check is replaced as itself;
     /// - the secret-name policy of reads applies to the requested path, to each folder prefix, and to where the folder really is;
     /// - `max_read` is also the largest write, checked before anything is created.
     ///
     /// A folder inside the worktree that is itself a link is refused for writes (reads follow it): a write never goes through one.
+    /// A new file is `0o600`; a replaced file keeps its owner permission bits and read/execute for others, never write for group or
+    /// other. Owner, group and extended attributes are not preserved. Folders created for the path stay if a later step fails.
     pub fn write(
         &self,
         rel: &str,
@@ -476,6 +505,7 @@ impl Files {
             hook(WriteStep::BeforeFolder(i));
             dir = dir.subdir(name, true).map_err(confined)?;
         }
+        hook(WriteStep::AfterFolders);
         // Where the verified folder really is (the kernel's spelling), with the secret policy once more.
         let real = dir.real_path().map_err(|e| io_err(rel, &e))?;
         if !real.starts_with(&self.root) {
@@ -486,22 +516,29 @@ impl Files {
         }
 
         let mode = match dir.entry(file_name).map_err(confined)? {
-            None => 0o666,
-            Some(e) if e.kind == agora_platform::EntryKind::File => e.mode & 0o777,
+            None => 0o600,
+            // Group and other never get write, whatever the old file had (or the umask allows).
+            Some(e) if e.kind == agora_platform::EntryKind::File => e.mode & 0o755,
             Some(e) if e.kind == agora_platform::EntryKind::Link => return Err(outside()),
             Some(_) => return Err(FilesError::NotFound(rel.to_string())),
         };
 
         static TEMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let mut attempt = 0;
-        let (temp, mut file) = loop {
+        let mut pending = loop {
             let temp = std::ffi::OsString::from(format!(
                 ".agora-write-{}-{}",
                 std::process::id(),
                 TEMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             ));
             match dir.create_new(&temp, mode) {
-                Ok(f) => break (temp, f),
+                Ok(file) => {
+                    break PendingFile {
+                        dir: &dir,
+                        name: temp,
+                        file: Some(file),
+                    }
+                }
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && attempt < 8 => {
                     attempt += 1;
                 }
@@ -510,16 +547,14 @@ impl Files {
         };
         let result = (|| {
             use std::io::Write;
+            let file = pending.file.as_mut().ok_or(std::io::ErrorKind::Other)?;
             file.write_all(bytes)?;
             file.sync_all()?;
             hook(WriteStep::BeforeCommit);
-            dir.rename_over(&file, &temp, file_name)
+            dir.rename_over(file, &pending.name, file_name)
         })();
-        drop(file);
-        if let Err(e) = result {
-            let _ = dir.remove_file(&temp);
-            return Err(confined(e));
-        }
+        result.map_err(confined)?;
+        pending.committed();
         Ok(())
     }
 
@@ -1040,15 +1075,120 @@ mod tests {
         write_plain(&shown, ".env", b"K=1").unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
-    fn a_secret_folder_found_through_the_real_path_is_refused() {
-        // A folder whose own name is fine but which really is `.ssh` is not reachable: links are refused outright, so the
-        // second line of defence (the real path's names) is exercised with the spelling the kernel reports.
-        let (_d, f) = setup();
-        assert!(matches!(
-            write_plain(&f, ".SSH/x", b"x"),
-            Err(FilesError::Secret(_))
-        ));
+    fn a_folder_that_really_is_secret_is_refused_by_the_real_path_check() {
+        // The names asked for pass the first check; the folder is moved to a secret name after it was opened, so only the check of
+        // where the handle really is can catch it.
+        let (d, f) = setup();
+        let root = d.join("wt");
+        fs::create_dir_all(root.join("sub")).unwrap();
+        let e = f
+            .write_with(
+                "sub/x.txt",
+                b"x",
+                &AgentId::new("a"),
+                &LeaseTable::new(),
+                0,
+                &mut |step| {
+                    if matches!(step, WriteStep::AfterFolders) {
+                        fs::rename(root.join("sub"), root.join(".ssh")).unwrap();
+                    }
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(e, FilesError::Secret(_)), "{e:?}");
+        assert!(only_files_under(&root.join(".ssh")).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_temporary_name_swapped_for_a_link_is_neither_renamed_nor_removed() {
+        let (d, f) = setup();
+        let root = d.join("wt");
+        let outside = d.join("secret.txt");
+        let e = f
+            .write_with(
+                "src/a.rs",
+                b"mine",
+                &AgentId::new("a"),
+                &LeaseTable::new(),
+                0,
+                &mut |step| {
+                    if matches!(step, WriteStep::BeforeCommit) {
+                        let temp = fs::read_dir(root.join("src"))
+                            .unwrap()
+                            .map(|e| e.unwrap().path())
+                            .find(|p| {
+                                p.file_name()
+                                    .unwrap()
+                                    .to_string_lossy()
+                                    .starts_with(".agora-write-")
+                            })
+                            .unwrap();
+                        fs::remove_file(&temp).unwrap();
+                        std::os::unix::fs::symlink(&outside, &temp).unwrap();
+                    }
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(e, FilesError::OutsideRoot(_)), "{e:?}");
+        assert_eq!(fs::read(&outside).unwrap(), b"top secret");
+        assert_eq!(fs::read(root.join("src/a.rs")).unwrap(), b"fn a() {}");
+        // The planted link is not ours: it stays.
+        let left: Vec<_> = fs::read_dir(root.join("src"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        assert!(left
+            .iter()
+            .any(|p| fs::symlink_metadata(p).unwrap().file_type().is_symlink()));
+    }
+
+    #[test]
+    fn a_panic_in_the_middle_removes_the_temporary_file() {
+        let (d, f) = setup();
+        let root = d.join("wt");
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = f.write_with(
+                "src/a.rs",
+                b"x",
+                &AgentId::new("a"),
+                &LeaseTable::new(),
+                0,
+                &mut |step| {
+                    if matches!(step, WriteStep::BeforeCommit) {
+                        panic!("injected");
+                    }
+                },
+            );
+        }));
+        assert!(r.is_err());
+        assert_eq!(only_files_under(&root), vec!["README.md", "src/a.rs"]);
+        assert_eq!(fs::read(root.join("src/a.rs")).unwrap(), b"fn a() {}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn modes_never_give_group_or_other_write() {
+        use std::os::unix::fs::PermissionsExt;
+        let (d, f) = setup();
+        let p = d.join("wt/src/a.rs");
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o666)).unwrap();
+        write_plain(&f, "src/a.rs", b"x").unwrap();
+        assert_eq!(
+            fs::metadata(&p).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+        write_plain(&f, "src/new.rs", b"x").unwrap();
+        assert_eq!(
+            fs::metadata(d.join("wt/src/new.rs"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
     }
 
     #[test]
