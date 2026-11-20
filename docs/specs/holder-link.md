@@ -251,5 +251,20 @@ wants to write that cannot fit one frame fails that write on the node's side, be
 - Mode, model and configuration lists an adapter reported before the restart and not within the last 1 MiB are not known until it reports them again.
 - "Kept" against "continued" in the window (ADR-0093 decision 4) is **not built**: the snapshot has no field that says it without a schema change (`still_running`
   says the process runs, not that it survived a node). Left for build-order step 4.
+- **Delivered is forgotten as new.** A line is marked given when the holder takes it for a reply, before the reply is written. A reply that then
+  fails (the link broke) loses those lines as `fresh`; they stay available as `seen`, from which only `approval/request` lines are rebuilt. Anything
+  else in them (chat, state, usage) is lost to the next node.
+- **Evicted but delivered is not counted.** `dropped` counts only bytes pushed out of the buffer before any node was given them. An
+  `approval/request` that a node had been given and that 1 MiB of newer output then pushed out is neither rebuilt nor counted. (Counting it would
+  need a new field in `PipeData`, a new tag; not done.)
+- **The bound is on encoded size** (each line costs its bytes plus 4), so everything kept, as `seen` and `fresh` together, fits one `PipeData` frame
+  whatever the lengths of the lines (a flood of one-byte lines is tested).
+- **An ended agent's group:** when the holder collects a pipe agent's end it sends `SIGKILL` to what is left of the agent's process group, at that
+  moment (the one moment the group's number is certainly still the agent's), so a crashed adapter cannot leave processes running that hold its output
+  open.
+- **A node that went back to link version 1** still sees pipe agents in `List` (they are agents of the holder) but does not end them: a version 1 node ends only
+  what `Attach` handed it, and `Attach` never lists pipe agents (a `Stop` it sent by name would work, but it never knows the names); they run until the
+  holder gets `SIGTERM` (`agora down --agents`).
+  A node of this build never does this to itself.
 - Confinement (ADR-0093 decision 6) is as for terminals: a confined adapter is the node's own.
 - Windows has no holder (step 3).

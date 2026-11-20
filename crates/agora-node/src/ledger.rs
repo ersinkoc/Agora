@@ -37,6 +37,11 @@ const VERSION: u64 = 1;
 /// Session ids held for agents whose start is not recorded yet.
 const MAX_EARLY: usize = 64;
 
+/// ADR-0093: what is kept of an adapter's session id and capabilities, on write and on read alike.
+const ADAPTER_SESSION_MAX: usize = 256;
+const ADAPTER_CAPS_MAX: usize = 64;
+const ADAPTER_CAP_MAX: usize = 64;
+
 /// One agent in the ledger.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Entry {
@@ -220,7 +225,7 @@ impl Entry {
             holder_pid: u32::try_from(number(v, "holder_pid")).unwrap_or(0),
             holder_started: number(v, "holder_started"),
             adapter_session: Some(field(v, "adapter_session"))
-                .filter(|s| s.len() <= 256)
+                .filter(|s| s.len() <= ADAPTER_SESSION_MAX)
                 .unwrap_or_default(),
             adapter_capabilities: v
                 .get("adapter_capabilities")
@@ -228,8 +233,8 @@ impl Entry {
                 .map(|a| {
                     a.iter()
                         .filter_map(Value::as_str)
-                        .filter(|s| s.len() <= 64)
-                        .take(64)
+                        .filter(|s| s.len() <= ADAPTER_CAP_MAX)
+                        .take(ADAPTER_CAPS_MAX)
                         .map(str::to_string)
                         .collect()
                 })
@@ -482,6 +487,16 @@ impl Ledger {
         capabilities: &[String],
         now_ms: u64,
     ) -> bool {
+        // The same bounds the file is read with: a value that would read back empty or cut is not written at all (an empty session
+        // makes the next node end the agent instead of taking it up with something it was never told).
+        let (session, capabilities) = if session.len() <= ADAPTER_SESSION_MAX
+            && capabilities.len() <= ADAPTER_CAPS_MAX
+            && capabilities.iter().all(|c| c.len() <= ADAPTER_CAP_MAX)
+        {
+            (session, capabilities)
+        } else {
+            ("", &[][..])
+        };
         let mut st = self.st();
         let Some(e) = st.entries.get_mut(agent_id) else {
             return false;
@@ -1153,6 +1168,30 @@ mod carry_on_tests {
             }),
             now,
         );
+    }
+
+    /// ADR-0093: what is written is what reads back: a session id or capability list beyond the bounds is not written (never half).
+    #[test]
+    fn an_adapter_state_beyond_the_bounds_is_not_written_and_one_within_them_is() {
+        let l = Ledger::in_memory();
+        agent(&l, "a1", 1_000);
+        let caps = vec!["chat".to_string(), "approvals".to_string()];
+        assert!(l.set_adapter_state("a1", "s-1", &caps, 1_100));
+        let e = l.get("a1").unwrap();
+        assert_eq!(
+            (e.adapter_session.as_str(), e.adapter_capabilities.clone()),
+            ("s-1", caps.clone())
+        );
+        let long = "s".repeat(ADAPTER_SESSION_MAX + 1);
+        assert!(l.set_adapter_state("a1", &long, &caps, 1_200));
+        let e = l.get("a1").unwrap();
+        assert!(e.adapter_session.is_empty() && e.adapter_capabilities.is_empty());
+        let many: Vec<String> = (0..=ADAPTER_CAPS_MAX).map(|i| i.to_string()).collect();
+        assert!(l.set_adapter_state("a1", "s-1", &many, 1_300));
+        assert!(l.get("a1").unwrap().adapter_session.is_empty());
+        // And what is written survives the file.
+        let e = Entry::from_json(&e.to_json()).unwrap();
+        assert_eq!(e.adapter_session, "");
     }
 
     /// ADR-0060 Amendment A: the "carry on" message is for an agent that was working, once for each interruption.

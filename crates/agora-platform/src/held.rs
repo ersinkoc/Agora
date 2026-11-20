@@ -103,7 +103,12 @@ pub struct Collected {
 // ----- lines of a pipe-based agent (ADR-0093) -----
 
 /// ADR-0093 decision 1: the longest line the holder keeps of a pipe agent: a whole buffer. A longer line is dropped and counted.
-pub const HELD_LINE_MAX: usize = HELD_BUFFER;
+pub const HELD_LINE_MAX: usize = HELD_BUFFER - LINE_COST;
+
+/// What a line costs the bound beyond its bytes: the length the link puts before it. The bound is on the **encoded** size, so a hand-over of
+/// everything kept (`seen` and `fresh` together) is never larger than the bound plus a few bytes, whatever the lines' lengths: a flood of
+/// one-byte lines cannot make a reply larger than a frame may be.
+pub const LINE_COST: usize = 4;
 
 /// The newest lines of a pipe agent's output, at most `cap` bytes (the oldest dropped first, whole lines only, so what is kept always
 /// begins at a line). Lines already handed to a node stay until pushed out: a node that restarts is given them again, marked as seen,
@@ -154,20 +159,20 @@ impl HeldLines {
         if line.is_empty() {
             return;
         }
-        if line.len() > self.cap {
+        if line.len() + LINE_COST > self.cap {
             self.dropped += line.len() as u64;
             return;
         }
-        while self.bytes + line.len() > self.cap {
+        while self.bytes + line.len() + LINE_COST > self.cap {
             let Some((seq, old)) = self.lines.pop_front() else {
                 break;
             };
-            self.bytes -= old.len();
+            self.bytes -= old.len() + LINE_COST;
             if seq > self.delivered {
                 self.dropped += old.len() as u64;
             }
         }
-        self.bytes += line.len();
+        self.bytes += line.len() + LINE_COST;
         self.lines.push_back((self.next_seq, line));
         self.next_seq += 1;
     }
@@ -366,7 +371,7 @@ mod line_tests {
 
     #[test]
     fn the_oldest_whole_lines_go_first_and_unseen_bytes_are_counted_once() {
-        let mut l = HeldLines::with_capacity(10);
+        let mut l = HeldLines::with_capacity(16);
         for s in ["aaaa", "bbbb"] {
             l.push(s.as_bytes().to_vec());
         }
@@ -395,8 +400,22 @@ mod line_tests {
     }
 
     #[test]
+    fn a_flood_of_tiny_lines_keeps_the_encoded_size_within_the_bound() {
+        // One-byte lines cost five each: the kept lines, encoded, never exceed the bound.
+        let mut l = HeldLines::with_capacity(100);
+        for _ in 0..1000 {
+            l.push(b"y".to_vec());
+        }
+        let c = l.replay();
+        let encoded: usize = c.fresh.iter().map(|x| x.len() + LINE_COST).sum();
+        assert!(encoded <= 100, "{encoded}");
+        assert_eq!(c.fresh.len(), 20);
+        assert_eq!(c.dropped, 980);
+    }
+
+    #[test]
     fn a_line_longer_than_the_bound_is_dropped_and_counted() {
-        let mut l = HeldLines::with_capacity(4);
+        let mut l = HeldLines::with_capacity(8);
         l.push(b"toolong".to_vec());
         l.push(Vec::new());
         let c = l.take_fresh();

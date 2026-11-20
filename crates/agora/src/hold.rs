@@ -5,7 +5,8 @@
 //! no node there until a node takes them. It serves one node at a time, and only the process that holds this home's node lock, by
 //! pid and start time (ADR-0062 item 8). The link is `agora_node::holder_link`; `docs/specs/holder-link.md` describes it.
 //!
-//! One thread does everything, so the process that starts each agent lives as long as the holder (on Linux the agent's first process
+//! One thread serves the node and starts every agent (a thread of its own per pipe agent only reads its output and writes its input,
+//! ADR-0093; none of them decides anything), so the process that starts each agent lives as long as the holder (on Linux the agent's first process
 //! gets `SIGHUP` when it ends, which the kernel ties to the thread that forked). The node starts it and starts its agents through it
 //! (W2 step 2, `agora_node::holder`). It writes `run/hold.pid` (its pid, start time and how many agents run), which `agora down` and
 //! `agora status` read, and on `SIGTERM` (`agora down --agents`) it ends its agents and itself.

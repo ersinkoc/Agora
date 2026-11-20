@@ -379,3 +379,145 @@ fn oversize_and_garbage_frames_are_refused_and_the_holder_keeps_serving() {
     c.pipe_write("p1", b"after").expect("write after");
     read_until(&mut c, "p1", "got:after");
 }
+
+/// A flood of one-byte lines fills the buffer with more than a million lines: the hand-over of what is kept must still fit a frame, so
+/// the link stays whole (it used to be closed for every agent, on every reconnect), and another agent keeps working.
+#[test]
+fn a_flood_of_tiny_lines_cannot_make_a_reply_larger_than_a_frame() {
+    let rig = Rig::new("tiny");
+    let mut c = rig.connect();
+    c.attach().expect("attach");
+    c.attach_pipes().expect("attach pipes");
+    c.start_pipe(&pipe("calm", "while read l; do echo \"got:$l\"; done"))
+        .expect("start calm");
+    // `yes` writes "y" lines as fast as the pipe takes them; 1.5 million of them.
+    c.start_pipe(&pipe(
+        "flood",
+        "yes | head -n 1500000; echo done-writing; sleep 600",
+    ))
+    .expect("start flood");
+    drop(c);
+    std::thread::sleep(Duration::from_millis(1500));
+    let end = Instant::now() + Duration::from_secs(30);
+    loop {
+        let mut c = rig.connect();
+        c.attach().expect("attach");
+        let held = c.attach_pipes().expect("the hand-over must be sendable");
+        assert_eq!(held.len(), 2);
+        let flood = held.iter().find(|p| p.info.agent == "flood").unwrap();
+        let encoded: usize = flood
+            .seen
+            .iter()
+            .chain(&flood.fresh)
+            .map(|l| l.len() + agora_platform::LINE_COST)
+            .sum();
+        assert!(encoded <= agora_platform::HELD_BUFFER, "{encoded}");
+        let finished = flood
+            .fresh
+            .last()
+            .is_some_and(|l| l.as_slice() == b"done-writing");
+        // The other agent still works, on this link.
+        c.pipe_write("calm", b"hello").expect("write");
+        read_until(&mut c, "calm", "got:hello");
+        if finished {
+            break;
+        }
+        drop(c);
+        assert!(Instant::now() < end, "the flood never finished");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// A process the agent started and left behind does not outlive it: when the holder collects the agent's end it ends what is left of
+/// the agent's group, so the output closes and nothing runs on unseen.
+#[test]
+fn what_an_ended_agent_left_in_its_group_is_ended_with_it() {
+    let rig = Rig::new("orphan");
+    let mut c = rig.connect();
+    c.attach().expect("attach");
+    c.attach_pipes().expect("attach pipes");
+    // The child holds the agent's output open and would run for ten minutes; the agent says its pid and ends.
+    c.start_pipe(&pipe("p1", "sleep 600 & echo $!; exit 0"))
+        .expect("start");
+    let lines = read_until_any(&mut c, "p1");
+    let child: u32 = lines[0].parse().expect("the child's pid");
+    let end = Instant::now() + Duration::from_secs(10);
+    // A killed process that nobody has collected yet may still show; what counts is that it is no longer running.
+    let running = |pid: u32| {
+        let out = Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+            .expect("ps");
+        let stat = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        !stat.is_empty() && !stat.starts_with('Z')
+    };
+    while running(child) {
+        assert!(Instant::now() < end, "the agent's child still runs");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // And the holder reports the agent ended, with its output closed.
+    let end = Instant::now() + Duration::from_secs(10);
+    loop {
+        let d = c.pipe_read("p1").expect("read");
+        if matches!(d.info.state, AgentState::Exited { .. }) && d.eof {
+            break;
+        }
+        assert!(Instant::now() < end, "the output never closed");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn read_until_any(c: &mut Client, agent: &str) -> Vec<String> {
+    let end = Instant::now() + Duration::from_secs(20);
+    loop {
+        let d = c.pipe_read(agent).expect("read");
+        let lines = text(&d.fresh);
+        if !lines.is_empty() {
+            return lines;
+        }
+        assert!(Instant::now() < end, "nothing was written");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// A node that speaks the newest version meets a holder built before pipe agents (it answers `Hello(2)` with `VersionMismatch` and its own
+/// version 1): it says `Hello(1)` again on a new connection and works at version 1.
+#[test]
+fn a_new_node_falls_back_to_version_one_against_a_holder_that_only_speaks_it() {
+    let home = temp_home("v1holder");
+    let socket = home.join("old.sock");
+    let listener = agora_platform::local_listen(&socket).expect("listen");
+    let server = std::thread::spawn(move || {
+        let mut seen = Vec::new();
+        for _ in 0..2 {
+            let mut s = listener.accept().expect("accept");
+            s.set_read_timeout(Some(Duration::from_secs(5))).expect("t");
+            let (payload, _) = read_frame(&mut s).expect("frame").expect("hello");
+            let Request::Hello { version } = Request::decode(&payload).expect("hello") else {
+                panic!("not a hello");
+            };
+            seen.push(version);
+            let reply = if version == LINK_VERSION {
+                Reply::HelloOk {
+                    version: LINK_VERSION,
+                    holder_pid: 1,
+                    holder_start: 2,
+                }
+            } else {
+                Reply::Refused {
+                    code: Refusal::VersionMismatch,
+                    holder_version: LINK_VERSION,
+                }
+            };
+            write_frame(&mut s, &reply.encode(), None).expect("reply");
+        }
+        seen
+    });
+    let c = Client::connect(&socket).expect("falls back");
+    assert_eq!(c.version, LINK_VERSION);
+    assert_eq!(
+        server.join().expect("server"),
+        [LINK_VERSION_PIPES, LINK_VERSION]
+    );
+    let _ = std::fs::remove_dir_all(home);
+}

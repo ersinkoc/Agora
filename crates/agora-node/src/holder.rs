@@ -148,6 +148,7 @@ impl HolderSession {
                 ready: Arc::clone(&ready),
                 wait: PIPE_POLL_MIN,
                 exited_idle: None,
+                failures: 0,
             }),
             control: self.control_of(agent),
             stop,
@@ -226,6 +227,22 @@ struct PipeReader {
     ready: Arc<AtomicBool>,
     wait: Duration,
     exited_idle: Option<Instant>,
+    /// Reads in a row the holder refused for a passing reason.
+    failures: u32,
+}
+
+/// How many times in a row a refusal that may pass (the holder could not do it just now) is tried again before the agent counts as gone,
+/// and the wait between them: a hiccup must not end an agent and have it restarted.
+const PIPE_RETRIES: u32 = 20;
+const PIPE_RETRY_WAIT: Duration = Duration::from_millis(50);
+
+/// Whether a failed read of a pipe agent's output is its end. A link that failed, a holder that no longer knows the agent or does not
+/// serve this node are final (the session is broken for good, or there is nothing to read); any other refusal is retried.
+fn read_error_ends(e: &LinkError, failures: u32) -> bool {
+    match e {
+        LinkError::Refused(Refusal::Failed | Refusal::Busy, _) => failures > PIPE_RETRIES,
+        _ => true,
+    }
 }
 
 impl Read for PipeReader {
@@ -248,8 +265,19 @@ impl Read for PipeReader {
             if self.stop.load(Ordering::Acquire) {
                 return Ok(0);
             }
-            let Ok(data) = self.session.pipe_read(&self.agent) else {
-                return Ok(0);
+            let data = match self.session.pipe_read(&self.agent) {
+                Ok(d) => {
+                    self.failures = 0;
+                    d
+                }
+                Err(e) => {
+                    self.failures += 1;
+                    if read_error_ends(&e, self.failures) {
+                        return Ok(0);
+                    }
+                    std::thread::sleep(PIPE_RETRY_WAIT);
+                    continue;
+                }
             };
             if data.dropped > 0 {
                 self.dropped.fetch_add(data.dropped, Ordering::AcqRel);
@@ -595,5 +623,26 @@ impl HolderHub {
             .as_ref()
             .filter(|s| !s.gone())
             .map(|s| (s.pid, s.start))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_final_error_ends_a_pipe_agent_and_a_passing_refusal_is_tried_again_a_while() {
+        let io = LinkError::Io(io::Error::from(io::ErrorKind::TimedOut));
+        assert!(read_error_ends(&io, 1));
+        assert!(read_error_ends(&LinkError::Closed, 1));
+        assert!(read_error_ends(&LinkError::Malformed("x"), 1));
+        assert!(read_error_ends(
+            &LinkError::Refused(Refusal::UnknownAgent, 1),
+            1
+        ));
+        let hiccup = LinkError::Refused(Refusal::Failed, 1);
+        assert!(!read_error_ends(&hiccup, 1));
+        assert!(!read_error_ends(&hiccup, PIPE_RETRIES));
+        assert!(read_error_ends(&hiccup, PIPE_RETRIES + 1));
     }
 }

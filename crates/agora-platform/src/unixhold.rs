@@ -1211,10 +1211,19 @@ impl HeldProcess {
             .map(|_| ())
     }
 
-    /// The agent's exit status once it ended, kept from then on.
+    /// The agent's exit status once it ended, kept from then on. **When the leader's end is collected, whatever else it left in its
+    /// group is ended with it** (`SIGKILL`, at once, in this call): an adapter that ended or crashed must not leave processes the holder
+    /// can no longer name, which would also hold its output open for good. This is the one moment the group can be signalled safely:
+    /// its number is the leader's pid, which nothing else can have been given before the leader was collected, and the holder never
+    /// signals it again afterwards ([`Self::signal`] does nothing once the end is collected).
     pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
         if self.exit.is_none() {
             self.exit = self.child.try_wait()?.map(status);
+            if self.exit.is_some() {
+                // SAFETY: the group this child led (setsid), signalled in the same call that collected its leader. An error (no member
+                // left) is the usual case.
+                let _ = unsafe { libc::killpg(self.child.id() as libc::pid_t, libc::SIGKILL) };
+            }
         }
         Ok(self.exit)
     }

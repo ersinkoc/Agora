@@ -68,7 +68,7 @@ pub fn default_shell() -> String {
 
 pub use held::{
     Collected, HeldBuffer, HeldControl, HeldLines, HeldSignal, LineChunk, LineWriter, PipeLines,
-    QueueError, HELD_BUFFER, HELD_LINE_MAX, LINE_QUEUE,
+    QueueError, HELD_BUFFER, HELD_LINE_MAX, LINE_COST, LINE_QUEUE,
 };
 #[cfg(not(unix))]
 pub use nohold::{

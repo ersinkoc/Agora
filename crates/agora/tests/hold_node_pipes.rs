@@ -295,8 +295,10 @@ fn a_request_made_while_no_node_ran_is_waiting_for_the_next_node() {
     prompt(&node, &id, "later-ask");
     let pid = pid_of(&node, &id);
     drop(node);
-    // The adapter asks 1.5 s after the prompt, with the node gone.
-    std::thread::sleep(Duration::from_millis(2300));
+    // The adapter asks 1.5 s after the prompt, with the node gone: it says so by writing a file (no guess at how long that took).
+    wait_for("the adapter to have asked", || {
+        rig.folder.join("later.txt").exists()
+    });
     assert!(alive(pid));
 
     let node = rig.node();
@@ -324,8 +326,10 @@ fn output_beyond_what_the_holder_keeps_shows_a_notice_with_the_dropped_bytes() {
     let id = started(&rig, &node);
     prompt(&node, &id, "later-flood");
     drop(node);
-    // 3 MB written 1.5 s after the prompt, with no node there.
-    std::thread::sleep(Duration::from_millis(3500));
+    // 3 MB written 1.5 s after the prompt, with no node there; the adapter writes a file when it is done.
+    wait_for("the adapter to have written it all", || {
+        rig.folder.join("later.txt").exists()
+    });
 
     let node = rig.node();
     wait_for("the newest output", || said(&node, &id, "flood-end"));
