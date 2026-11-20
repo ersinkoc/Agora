@@ -79,10 +79,12 @@ fn a_terminal_frame_drained_in_part_at_its_deadline_still_ends_by_it() {
     // descriptor into a full buffer outright, EMSGSIZE, where Linux waits; measured on a Mac, #789.)
     let payload = vec![1u8; 2 << 20];
     let frame_len = 4 + payload.len();
+    let (done, result) = std::sync::mpsc::channel();
     let writer = std::thread::spawn(move || {
         let began = Instant::now();
         let res = write_frame(&mut w, &payload, Some(&handle));
-        (res, began.elapsed(), w)
+        let _ = done.send((res, began.elapsed()));
+        w
     });
     // Half a second before the deadline the peer takes a part of the frame (and so lets more of it in), then reads no more until
     // the write has returned.
@@ -102,7 +104,13 @@ fn a_terminal_frame_drained_in_part_at_its_deadline_still_ends_by_it() {
             }
         }
     }
-    let (res, elapsed, _w) = writer.join().unwrap();
+    // A write that never gives up fails the test instead of hanging it: closing the peer ends it.
+    let Ok((res, elapsed)) = result.recv_timeout(Duration::from_secs(5)) else {
+        drop(r);
+        let _ = writer.join();
+        panic!("write_frame did not return within {FRAME_TIMEOUT:?} and 4.5 s more");
+    };
+    let _w = writer.join().unwrap();
     // The rest of what went.
     while let Ok((n, t)) = r.recv_with_terminal(&mut buf) {
         if n == 0 {
