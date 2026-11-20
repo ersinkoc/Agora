@@ -1,8 +1,7 @@
 # 0092. The ACP registry is a source of agent kinds
-Status: Proposed
+Status: Accepted
 Date: 2026-11-20
-
-Not accepted. Nothing here may be built until the maintainer names this ADR in an acceptance message.
+Accepted: 2026-11-20 (the maintainer's explicit message in the merger chat: "ADR-0092 ve ADR-0093'ü kabul ediyorum"). The open questions' proposed answers stand.
 
 Builds on ADR-0004 (agents are data), ADR-0044 (the signed registry), ADR-0059 (skipping permissions), ADR-0069 (a missing kind says why),
 ADR-0087 (install agents from the window) and ADR-0090 (a complete structured conversation). Touches the threat model.

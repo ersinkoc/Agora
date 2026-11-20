@@ -1,8 +1,7 @@
 # 0093. Structured (ACP) agents survive a node restart
-Status: Proposed
+Status: Accepted
 Date: 2026-11-20
-
-Not accepted. Nothing here may be built until the maintainer names this ADR in an acceptance message.
+Accepted: 2026-11-20 (the maintainer's explicit message in the merger chat: "ADR-0092 ve ADR-0093'ü kabul ediyorum"). The open questions' proposed answers stand.
 
 Refines ADR-0060 (resume), ADR-0079 (the terminal holder) and ADR-0090 (a complete structured conversation). Touches ADR-0075 and ADR-0089.
 
