@@ -1,10 +1,10 @@
 # 0095. A project has a kanban board, and a task can be dispatched to an agent
-Status: Proposed
+Status: Accepted
 Date: 2026-11-20
+Accepted: 2026-11-20 (the maintainer's explicit message in the merger chat: "ADR-0095 ve ADR-0096'yı kabul ediyorum"). The open questions' proposed answers stand; the Review column's "accepted by" field (a schema step) stays deferred.
 
 Builds on ADR-0031 and ADR-0039/0040 (the mesh task board, shared across machines), ADR-0020 (approvals), ADR-0057 (agents start agents,
-parent and helper links), ADR-0059 (skipping permissions) and ADR-0092 (more agent kinds). Touches the threat model. Not final: nothing
-here is built on until the maintainer names this ADR.
+parent and helper links), ADR-0059 (skipping permissions) and ADR-0092 (more agent kinds). Touches the threat model. Accepted: it may be built on.
 
 Origin: the maintainer, 2026-11-20: a kanban board per project, with tasks on it, and tasks handed to agents, even to sub-agents one by one.
 
