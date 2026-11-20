@@ -147,11 +147,13 @@ cancelled prompt is unanswered, every ACP permission request is answered `cancel
 session, not the prompt, and may be the stopped turn's. This also refuses a new turn's permission requests in that window; it ends
 when the cancelled prompt answers, the session changes, or the agent exits. When prompts overlap otherwise (the node sent one into a
 running turn, such as to an adapter without `turns`), only the reply to the last of them ends the turn: an earlier reply reports its
-failure or stop as a notice but no `idle`, and the turn's permission requests stay open for the user. A new prompt that comes while
-a permission request is pending reports `blocked`, not `working`: the agent still waits for the user. A permission request that
-arrives while no prompt runs (none at all, or only cancelled ones; for example a straggler of a turn that ended) belongs to no turn:
-it fails closed, answered `cancelled` at once, never shown to the user and never reported as `blocked`, so the node cannot read it
-as the start of its next prompt.
+failure or stop as a notice but no `idle`, and the state returns to `working`. Any prompt's reply (success, error, or a refusal as
+busy) answers every pending permission request `cancelled` first: ACP names the session in one, not the prompt, so it may be the
+finished prompt's. This fails closed: an overlapping prompt's own request made before that reply is cancelled too, and the agent
+asks again if it still needs it. A new prompt that comes while a permission request is pending reports `blocked`, not `working`:
+the agent still waits for the user. A permission request that arrives while no prompt runs (none at all, or only cancelled ones;
+for example a straggler of a turn that ended) belongs to no turn: it fails closed, answered `cancelled` at once, never shown to the
+user and never reported as `blocked`, so the node cannot read it as the start of its next prompt.
 
 Node → bridge → agent: `session/start` → `session/new` (or `session/load` when the agent said it can and a resume id is known),
 with the node's `mcpServers` (the agent's mesh server) as ACP stdio servers `{name, command, args, env: []}` (at most 16; an entry
