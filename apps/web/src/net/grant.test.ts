@@ -56,6 +56,11 @@ describe('grants', () => {
     }
   });
 
+  it('asks the machine-wide question when the command names no agent', () => {
+    expect(grantFor({ agentStop: {} })).toEqual({ scope: 'node', commands: ['agent.stop'], kind: 'other' });
+    expect(grantFor({ terminalInput: { terminalId: 'x' } })).toEqual({ scope: 'node', commands: ['terminal.input'], kind: 'other' });
+  });
+
   it('signs with the device key and the signature verifies over that message', async () => {
     const keys = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign', 'verify']);
     const device: Device = { id: 'web-1', keys, publicKeyHex: '' };

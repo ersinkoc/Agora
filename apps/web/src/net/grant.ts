@@ -54,7 +54,8 @@ export function grantFor(body: Record<string, unknown>): GrantAsk | undefined {
   const agentKind = AGENT_KINDS[key];
   if (agentKind) {
     const agent = inner.agentId || (inner.terminalId?.startsWith('t-') ? inner.terminalId.slice(2) : '');
-    return { scope: agent ? `agent:${agent}` : 'node', commands: [name], kind: agentKind };
+    // No agent to name: the question is the machine-wide one, since that is the scope signed.
+    return agent ? { scope: `agent:${agent}`, commands: [name], kind: agentKind } : { scope: 'node', commands: [name], kind: 'other' };
   }
   if (key === 'agentStart' && inner.projectId) return { scope: `project:${inner.projectId}`, commands: [name], kind: 'start' };
   return { scope: 'node', commands: [name], kind: 'other' };
