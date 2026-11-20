@@ -2074,7 +2074,8 @@ where
     let (program, args) = agent
         .split_first()
         .ok_or_else(|| io::Error::other("no agent command"))?;
-    let mut child = Command::new(program)
+    // A Windows `.cmd` shim (`npx`, which registry agents use) is started by its full path; elsewhere the name is unchanged.
+    let mut child = Command::new(agora_platform::program_path(program, None))
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

@@ -5,6 +5,7 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 ## Next
 
 - An agent that kept running while the node restarted comes back showing its last known state (such as idle) even when its state was first noted a moment before its start was recorded.
+- On Windows, an agent whose command is installed as a `.cmd` file, such as `npx` or most npm global commands, is now shown as installed and starts, as a chat agent, a terminal agent or through an adapter. Before, it was shown as not installed, and a chat agent failed with "the adapter exited".
 
 ## 0.3.30
 

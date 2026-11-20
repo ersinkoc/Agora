@@ -1555,6 +1555,24 @@ pub fn no_console_window(cmd: &mut std::process::Command) -> &mut std::process::
     cmd
 }
 
+/// The program to give [`std::process::Command::new`] for an agent's `argv[0]`. On Windows, `Command` adds only `.exe` to a bare
+/// name, so a tool installed as a `.cmd` shim (`npx`, most npm global commands) would not be found: a bare name with no extension
+/// and no `<name>.exe` anywhere becomes the full path of the first `.com`, `.bat` or `.cmd` of that name, looked up where `Command`
+/// looks (`child_path`, the child's own `PATH` when it sets one, then this program's folder, the system folders and this process's
+/// `PATH`; never a current folder). `Command` then runs a `.bat`/`.cmd` through `cmd.exe` with its own safe quoting. Anything
+/// else, and every name elsewhere, comes back unchanged.
+pub fn program_path(program: &str, child_path: Option<&std::ffi::OsStr>) -> PathBuf {
+    #[cfg(windows)]
+    {
+        windows::program_path(program, child_path)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = child_path;
+        PathBuf::from(program)
+    }
+}
+
 /// Makes `cmd` start as the leader of a process group of its own (Unix), so [`kill_process_tree`] ends it and everything it started.
 /// Windows: nothing changes.
 pub fn own_process_group(cmd: &mut std::process::Command) -> &mut std::process::Command {
