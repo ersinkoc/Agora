@@ -5,6 +5,9 @@ import type { AgentTileModel } from '../model';
 // The route of the machines page, and of one machine on it.
 export const machinesHash = (id?: string) => (id ? `#/machines/${encodeURIComponent(id)}` : '#/machines');
 export const isMachinesHash = (hash: string) => hash === '#/machines' || hash.startsWith('#/machines/');
+// Settings keeps its old address (#/device); #/settings is the same page. A section is one more segment: #/device/passkeys.
+export const isSettingsHash = (hash: string) => ['#/device', '#/settings'].some((r) => hash === r || hash.startsWith(`${r}/`));
+export const settingsSectionOf = (hash: string): string | undefined => (isSettingsHash(hash) ? hash.split('/')[2] || undefined : undefined);
 export const machineOfHash = (hash: string): string | undefined => (hash.startsWith('#/machines/') ? decodeURIComponent(hash.slice('#/machines/'.length)) || undefined : undefined);
 
 // The projects the fleet has agents in, once each, by name.

@@ -90,7 +90,7 @@ device-title = Bu cihaz
 device-intro = Makineler yalnızca güvendikleri bir cihazın yanıtını kabul eder. Bu tarayıcıyı şununla tanırlar:
 device-name = Cihaz adı
 device-key = Cihaz anahtarı
-device-link = Bu cihaz
+device-link = Ayarlar
 device-fingerprint = Parmak izi
 device-trusted-here = bu tarayıcıya güveniyor
 device-not-trusted-here = bu tarayıcıya henüz güvenmiyor
@@ -1192,3 +1192,17 @@ quota-span-days = { $days } gün { $hours } sa
 quota-span-hours = { $hours } sa { $minutes } dk
 quota-span-minutes = { $minutes } dk
 quota-hint = { $kind }: { $what } limiti neredeyse doldu (%{ $percent }). Yine de başlatabilirsiniz.
+
+# Başlık çubuğu simgeleri ve Ayarlar sayfası ("Bu cihaz" ve "Makinelerim" bölümleri).
+settings-link = Ayarlar
+machines-link = Makineler
+header-links = Ayarlar ve makineler
+settings-title = Ayarlar
+settings-sections = Ayar bölümleri
+settings-group-device = Bu cihaz
+settings-group-machines = Makinelerim
+settings-device = Ad ve parmak izi
+settings-passkeys = Geçiş anahtarı
+settings-machines = Makineler
+settings-machines-intro = Bu hub'a bağlı her makine ve bu tarayıcıya güvenip güvenmediği.
+settings-machines-manage = Makineleri yönet

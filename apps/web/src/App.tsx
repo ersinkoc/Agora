@@ -47,7 +47,7 @@ import { AttentionLayer } from './components/AttentionLayer';
 import { attentionList } from './net/fleet';
 import { requestPanel, requestProject, requestTool } from './layout/requests';
 import { TOOL_PANELS } from './net/paneTools';
-import { isMachinesHash, machineOfHash, paletteExtras, projectsOf } from './net/paletteExtras';
+import { isMachinesHash, isSettingsHash, machineOfHash, settingsSectionOf, paletteExtras, projectsOf } from './net/paletteExtras';
 import { themeStore } from './themes/store';
 import { themeName } from './themes/messages';
 
@@ -478,7 +478,7 @@ export function App() {
   // A phone has no panels: there the editor is a screen of its own (ADR-0067 rung 2).
   const editTheme = useCallback(() => { if (phone) { go('#/theme'); return; } if (!['', '#/', '#/demo'].includes(hash)) go('#/'); requestPanel('theme'); }, [go, hash, phone]);
   // Home is what Console / PhoneHome draw (the chain below); any other page gets the first request as a floating card.
-  const showsHome = current === undefined && !['#/gallery', '#/device'].includes(hash) && !isMachinesHash(hash) && !(hash === '#/audit' && hub) && !(hash === '#/theme' && phone);
+  const showsHome = current === undefined && hash !== '#/gallery' && !isSettingsHash(hash) && !isMachinesHash(hash) && !(hash === '#/audit' && hub) && !(hash === '#/theme' && phone);
   // "Allow a new machine to join": back to Home, where the window for new machines is; its own button asks, this only brings it into view.
   const showPairing = useCallback(() => {
     go('#/');
@@ -532,7 +532,7 @@ export function App() {
   return (
     <QuotaProvider obs={quotaList} machines={quotaMachines}>
     <ChatActionsContext.Provider value={chatActions}>
-      {hash === '#/gallery' ? <Gallery /> : isMachinesHash(hash) ? <MachinesPage focus={machineOfHash(hash)} machines={live ? machines(live) : hub ? [] : demoMachines} agents={agents} usage={usage} projects={live && usage ? costByProject(live, usage.perAgent) : []} onBack={() => go('#/')} onForget={hub ? forgetMachines : undefined} /> : hash === '#/audit' && hub ? <AuditPage load={(who) => loadAudit(hub.token, who)} onBack={() => go('#/')} /> : hash === '#/device' ? <DevicePage device={device} onBack={() => go('#/')} onTheme={editTheme} onAddPasskey={hub && passkeysSupported() ? async (password) => (await addPasskey(hub.token, undefined, password)).ok : undefined} passkeyNeedsPassword={info.passwordRequired}
+      {hash === '#/gallery' ? <Gallery /> : isMachinesHash(hash) ? <MachinesPage focus={machineOfHash(hash)} machines={live ? machines(live) : hub ? [] : demoMachines} agents={agents} usage={usage} projects={live && usage ? costByProject(live, usage.perAgent) : []} onBack={() => go('#/')} onForget={hub ? forgetMachines : undefined} /> : hash === '#/audit' && hub ? <AuditPage load={(who) => loadAudit(hub.token, who)} onBack={() => go('#/')} /> : isSettingsHash(hash) ? <DevicePage section={settingsSectionOf(hash)} device={device} onBack={() => go('#/')} onTheme={editTheme} onAddPasskey={hub && passkeysSupported() ? async (password) => (await addPasskey(hub.token, undefined, password)).ok : undefined} passkeyNeedsPassword={info.passwordRequired}
           fingerprint={device ? prints.get(device.id) : undefined} machines={live ? machines(live) : undefined} trustedOn={trustedOn} others={hub ? others : undefined}
           asked={asked} onAsk={hub && api ? askApproval : undefined} onRemove={hub && api ? removeDevice : undefined}
           security={hub ? <ScreenPasswordSettings passwordSet={info.passwordSet} idle={idle} onIdle={(m) => { setIdleMinutes(m); setIdle(m); }}
