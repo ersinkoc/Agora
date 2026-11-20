@@ -171,6 +171,8 @@ struct Typing {
     sent: std::collections::VecDeque<(u64, String, String, bool)>,
     /// The newest refusal of each terminal not read yet (a console picks the one in front; two may come in one turn).
     refused: Vec<Refused>,
+    /// The newest typing of each terminal a machine took, not read yet: (node, terminal, request).
+    taken: Vec<(String, String, u64)>,
 }
 
 impl Typing {
@@ -221,6 +223,21 @@ impl Typing {
         else {
             return;
         };
+        if typed && matches!(r.result, Some(command_response::Result::Ok(_)) | None) {
+            let newer = self
+                .taken
+                .iter()
+                .any(|(n, t, req)| *n == node && *t == terminal_id && *req > request);
+            if !newer {
+                self.taken
+                    .retain(|(n, t, _)| !(*n == node && *t == terminal_id));
+                if self.taken.len() >= Self::REFUSED {
+                    self.taken.remove(0);
+                }
+                self.taken.push((node, terminal_id, request));
+            }
+            return;
+        }
         if typed && refused_for_grant(r) {
             // Answers may come out of order: a terminal keeps its newest typing's refusal, by request number.
             if self
@@ -1150,6 +1167,11 @@ impl Session {
         std::mem::take(&mut self.typing.refused)
     }
 
+    /// The typing machines took since the last call, the newest per terminal: (node, terminal, request). Reading it clears it.
+    pub fn take_typing_taken(&mut self) -> Vec<(String, String, u64)> {
+        std::mem::take(&mut self.typing.taken)
+    }
+
     /// The number of the last request sent: a [`Refused`] with a number up to it was typed before now.
     pub fn last_request(&self) -> u64 {
         self.requests
@@ -1429,6 +1451,16 @@ mod typing_tests {
         t.track(7, "laptop", "t-a", false);
         t.reply(&answer(7, GRANT));
         assert!(t.refused.is_empty() && t.sent.is_empty());
+        // Typing a machine took is told too, the newest per terminal (the console's notice goes after the next accepted key).
+        let mut t = Typing::default();
+        t.sent(10, "laptop", "t-a");
+        t.sent(11, "laptop", "t-a");
+        t.track(12, "laptop", "t-a", false);
+        t.reply(&answer(11, None));
+        t.reply(&answer(10, None));
+        t.reply(&answer(12, None));
+        assert_eq!(t.taken, [("laptop".to_string(), "t-a".to_string(), 11)]);
+        assert!(t.refused.is_empty());
         // Answers out of order: the older typing's refusal, read last, does not replace the newer one.
         let mut t = Typing::default();
         t.sent(5, "laptop", "t-a");

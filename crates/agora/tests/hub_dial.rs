@@ -891,6 +891,16 @@ fn the_terminal_console_learns_that_typing_was_refused_for_want_of_a_grant() {
         );
     }
     assert!(session.take_grant_wanted().is_empty());
+    // Codex review of #796 (fourth): typing the machine took is told too (the console's notice goes after the next accepted key).
+    let end = Instant::now() + D::from_secs(10);
+    while session.typing_unanswered() > 0 {
+        let _ = session.next(D::from_millis(100));
+        assert!(Instant::now() < end, "the typing was never answered");
+    }
+    assert!(session
+        .take_typing_taken()
+        .iter()
+        .any(|(n, t, _)| n == "laptop" && *t == terminal));
     // Codex review of #796: the other agent's typing is refused, then typing into the allowed one is taken (its echo seen): the
     // refusal still names the other agent's terminal, never the one typed into last.
     session.terminal_input("laptop", &other_terminal, b"echo refused\n");
