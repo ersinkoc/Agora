@@ -181,6 +181,14 @@ declare `model` and `effort`, checked against those tools' own `--help`.
 A setting chosen at the start lasts while the node runs (a restart after a crash keeps it). It is not in the session ledger, so an
 agent resumed after the node itself restarted (ADR-0060) starts with the tool's defaults, as its launch options do.
 
+## Manifests converted from the ACP registry (ADR-0092)
+`registry_convert` (`crates/agora-adapters`, run through `cargo run -p agora-adapters --example registry_convert -- <registry clone> <dir>`)
+turns one registry `agent.json` into `registry-<id>.toml` (an L2 `[structured] acp` manifest, never a launch option) and a package entry
+(`<id>.package.json`, ADR-0087 shape plus `tested = false`). `npx` becomes `npx --yes PKG@VERSION ARGS`, `uvx` becomes `uvx PKG==VERSION ARGS`,
+`binary` becomes a `binary-download` installer with per-platform URL and SHA-256 (`installable = false` when one is missing). Skips are
+reason codes (`registry.bad_token`, `registry.skips_permissions`, `registry.forbidden_executable` (a shell or interpreter as the executable), `registry.bad_field`, `registry.no_supported_distribution`, ...). Generated files start with a
+header saying so and are never edited by hand. Nodes never read the registry.
+
 ## Launch options (ADR-0059)
 
 `[[launch.option]]` (engine 2, so a manifest with one says `min_engine = 2`) declares named choices the start window offers. A start

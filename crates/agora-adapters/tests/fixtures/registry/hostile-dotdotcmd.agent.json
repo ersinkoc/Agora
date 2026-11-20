@@ -1,0 +1,1 @@
+{"id": "hostile-dotdotcmd", "name": "X", "version": "1.0.0", "distribution": {"binary": {"linux-x86_64": {"archive": "https://example.com/x.tar.gz", "cmd": "./../x", "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}}}
