@@ -197,6 +197,58 @@ fn str_arg<'a>(a: &'a Value, k: &str) -> Option<&'a str> {
     a.get(k).and_then(Value::as_str)
 }
 
+/// `send_message`'s arguments, read as every path reads them (the broker, the node before it routes a shared `#channel` to the
+/// hub, and the hub's board).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SendMessageArgs<'a> {
+    pub to: &'a str,
+    pub body: &'a str,
+    pub refs: Vec<String>,
+    pub reply_to: Option<&'a str>,
+}
+
+/// `handoff`'s arguments, read as every path reads them (the broker, and the node before it routes a shared project's handoff
+/// to the hub).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HandoffArgs<'a> {
+    pub to: &'a str,
+    pub task_id: Option<&'a str>,
+    pub summary: &'a str,
+    pub refs: Vec<String>,
+}
+
+/// `None` when an argument is missing or has the wrong type: an invalid call (-32602).
+pub fn handoff_args(a: &Value) -> Option<HandoffArgs<'_>> {
+    Some(HandoffArgs {
+        to: str_arg(a, "to")?,
+        task_id: optional_str_arg(a, "task_id").ok()?,
+        summary: str_arg(a, "summary")?,
+        refs: strs_arg(a, "refs")?,
+    })
+}
+
+/// The text each receiver of a shared project's `#channel` message gets: the channel's name in front of the body. The hub builds
+/// it for the copies; the node checks its size before it sends the call, so an older hub cannot send what receivers refuse.
+pub fn channel_text(to: &str, body: &str) -> String {
+    format!("[{to}] {body}")
+}
+
+/// `None` when an argument is missing or has the wrong type: an invalid call (-32602).
+pub fn send_message_args(a: &Value) -> Option<SendMessageArgs<'_>> {
+    Some(SendMessageArgs {
+        to: str_arg(a, "to")?,
+        body: str_arg(a, "body")?,
+        refs: strs_arg(a, "refs")?,
+        reply_to: optional_str_arg(a, "reply_to").ok()?,
+    })
+}
+
+/// An optional string argument as the tools read it: `Some(None)` when absent or null, `None` when it has another type (an
+/// invalid call, -32602, not an omission). The node uses it for the calls it answers before the broker.
+pub fn optional_str_param<'a>(a: &'a Value, k: &str) -> Option<Option<&'a str>> {
+    optional_str_arg(a, k).ok()
+}
+
 fn optional_str_arg<'a>(a: &'a Value, k: &str) -> Result<Option<&'a str>, ()> {
     match a.get(k) {
         None | Some(Value::Null) => Ok(None),
@@ -205,7 +257,8 @@ fn optional_str_arg<'a>(a: &'a Value, k: &str) -> Result<Option<&'a str>, ()> {
     }
 }
 
-fn strs_arg(a: &Value, k: &str) -> Option<Vec<String>> {
+/// A list of strings: absent or null is empty; anything else that is not an array of strings is an invalid call.
+pub fn strs_arg(a: &Value, k: &str) -> Option<Vec<String>> {
     match a.get(k) {
         None | Some(Value::Null) => Some(Vec::new()),
         Some(Value::Array(v)) => v.iter().map(|x| x.as_str().map(str::to_string)).collect(),
@@ -393,7 +446,10 @@ impl McpConnection {
         };
         match name {
             "agents_list" => {
-                let list = mesh.agents_list(str_arg(&args, "project"));
+                let Ok(project) = optional_str_arg(&args, "project") else {
+                    return bad();
+                };
+                let list = mesh.agents_list(project);
                 let rows: Vec<Value> = list
                     .iter()
                     .map(|a| crate::awareness::list_row(mesh, a, now))
@@ -402,15 +458,17 @@ impl McpConnection {
             }
             "workspace_status" => done(crate::awareness::local_status(mesh, me, now)),
             "send_message" => {
-                let (Some(to), Some(body), Some(refs)) = (
-                    str_arg(&args, "to"),
-                    str_arg(&args, "body"),
-                    strs_arg(&args, "refs"),
-                ) else {
+                let Some(SendMessageArgs {
+                    to,
+                    body,
+                    refs,
+                    reply_to,
+                }) = send_message_args(&args)
+                else {
                     return bad();
                 };
                 done(
-                    mesh.send_message(me, to, body, &refs, str_arg(&args, "reply_to"), now)
+                    mesh.send_message(me, to, body, &refs, reply_to, now)
                         .map(|m| json!({"message_id": m})),
                 )
             }
@@ -518,12 +576,13 @@ impl McpConnection {
                 done(mesh.lease_release(me, l, now).map(|()| json!({"ok": true})))
             }
             "handoff" => {
-                let (Some(to), Ok(task_id), Some(summary), Some(refs)) = (
-                    str_arg(&args, "to"),
-                    optional_str_arg(&args, "task_id"),
-                    str_arg(&args, "summary"),
-                    strs_arg(&args, "refs"),
-                ) else {
+                let Some(HandoffArgs {
+                    to,
+                    task_id,
+                    summary,
+                    refs,
+                }) = handoff_args(&args)
+                else {
                     return bad();
                 };
                 done(
