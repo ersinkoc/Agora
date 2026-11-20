@@ -33,6 +33,25 @@ fn acp_child_fails_at_start() {
     std::process::exit(code);
 }
 
+/// An agent that sends an oversized line instead of answering initialize, then leaves stdout open.
+#[test]
+fn acp_child_sends_an_oversized_line() {
+    if std::env::var_os("AGORA_TEST_ACP").is_none()
+        || !std::env::args().any(|a| a == "acp_child_sends_an_oversized_line")
+    {
+        return;
+    }
+    println!();
+    let mut input = std::io::stdin().lock();
+    let mut request = String::new();
+    input.read_line(&mut request).unwrap();
+    let mut output = std::io::stdout().lock();
+    let mut bytes = io::repeat(b' ').take((agora_adapters::host::MAX_LINE + 1) as u64);
+    if io::copy(&mut bytes, &mut output).is_ok() && output.flush().is_ok() {
+        let _ = io::copy(&mut input, &mut io::sink());
+    }
+}
+
 /// The fake agent that refuses `session/new`.
 #[test]
 fn acp_child_refuses_session() {
@@ -309,6 +328,39 @@ fn an_agent_that_dies_ends_the_bridge_so_the_node_sees_the_adapter_exit() {
         json!({"sessionId": "acp-s1", "text": "crash"}),
     );
     assert!(n.done.take().unwrap().join().unwrap().is_err());
+}
+
+#[test]
+fn an_oversized_agent_line_ends_initialize_with_the_agent_exit_reason() {
+    let mut n = Node::start_with("acp_child_sends_an_oversized_line");
+    let reply = n.call("initialize", json!({}));
+    assert_eq!(reply["error"]["data"]["code"], "adapter.agent_exited");
+    assert_eq!(reply["error"]["data"]["params"]["stage"], "initialize");
+    assert_eq!(reply["error"]["data"]["params"]["stderr_tail"], "");
+    let bridge = n.done.take().unwrap();
+    drop(n);
+    let error = bridge.join().unwrap().unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+}
+
+#[test]
+fn an_oversized_node_line_ends_the_bridge_while_input_is_open() {
+    let mut n = Node::start();
+    assert_eq!(
+        n.call("initialize", json!({}))["result"]["adapterName"],
+        "acp-bridge"
+    );
+    n.to_bridge
+        .send(vec![b' '; agora_adapters::host::MAX_LINE + 1])
+        .unwrap();
+    let bridge = n.done.take().unwrap();
+    let end = Instant::now() + Duration::from_secs(10);
+    while !bridge.is_finished() {
+        assert!(Instant::now() < end, "bridge did not close");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let error = bridge.join().unwrap().unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
 }
 
 fn started() -> Node {

@@ -123,6 +123,12 @@ and the node runs `agora acp-bridge -- <argv>` as the adapter: the bridge is the
 towards the node, so chat items, approvals, state and cancel work as for any L3 agent and nothing else knows about ACP.
 `agora agent kinds` reports such a kind as level L2.
 
+Each input accepts lines up to 4 MiB, excluding the line feed. The two readers share an eight-entry queue of raw lines and
+wait for space when it fills. The bridge parses lines as it dispatches them, preserving each sender's order. Malformed JSON
+and invalid UTF-8 within the limit are ignored. A line over the limit closes that input as soon as the extra byte is detected.
+On the agent side the bridge stops the agent and uses the existing `adapter.agent_exited` reason with the current stage.
+On the node side the bridge stops the agent and exits with an invalid-input error, which the host sees as an adapter exit.
+
 | ACP (agent → client) | Adapter protocol (bridge → node) |
 | --- | --- |
 | `session/update` `agent_message_chunk` | `chat/append` text, chunks joined for up to 150 ms (or 4 KiB). An explicit stop or the end of the node's request stream flushes buffered text while the reply stream remains open |

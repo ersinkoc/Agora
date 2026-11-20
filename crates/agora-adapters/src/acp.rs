@@ -25,14 +25,17 @@ use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::ops::ControlFlow;
 use std::process::{Child, ChildStderr, Command, Stdio};
-use std::sync::mpsc::{channel, Receiver, RecvTimeoutError};
+use std::sync::mpsc::{channel, sync_channel, Receiver, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
+use crate::host::MAX_LINE;
 use crate::perm::{self, Category};
 
+/// Both readers share this queue. Store line bytes so queued JSON has not expanded into values.
+const INPUT_QUEUE: usize = 8;
 /// How long agent text chunks are joined into one chat item.
 const JOIN: Duration = Duration::from_millis(150);
 /// The most text one joined item holds before it is sent anyway.
@@ -71,10 +74,14 @@ const OPTION_ID_MAX: usize = 200;
 const OPTION_NAME_MAX: usize = 200;
 const OPTION_DESCRIPTION_MAX: usize = 500;
 enum Ev {
-    Node(Value),
-    Agent(Value),
-    NodeGone,
-    AgentGone,
+    Node(Input),
+    Agent(Input),
+}
+
+enum Input {
+    Line(Box<[u8]>),
+    Gone,
+    TooLong,
 }
 
 enum Waiting {
@@ -112,24 +119,31 @@ struct Permission {
     options: Vec<(String, String)>, // (option id, kind)
 }
 
-fn lines<R: Read + Send + 'static>(
-    r: R,
-    wrap: fn(Value) -> Ev,
-    gone: Ev,
-    tx: std::sync::mpsc::Sender<Ev>,
-) {
+fn lines<R: Read + Send + 'static>(r: R, wrap: fn(Input) -> Ev, tx: SyncSender<Ev>) {
     std::thread::spawn(move || {
-        // Lines as bytes: one that is not UTF-8 must not read as the end of the stream.
-        for line in BufReader::new(r).split(b'\n') {
-            let Ok(line) = line else { break };
-            // A line that is not JSON (or not UTF-8) is the agent's own noise; it is ignored like any unknown message.
-            if let Ok(v) = serde_json::from_slice::<Value>(&line) {
-                if tx.send(wrap(v)).is_err() {
-                    return;
-                }
+        let mut reader = BufReader::new(r);
+        let end = loop {
+            let mut line = Vec::new();
+            // One extra byte distinguishes a full line followed by LF from a line that exceeds the limit.
+            match (&mut reader)
+                .take((MAX_LINE + 1) as u64)
+                .read_until(b'\n', &mut line)
+            {
+                Ok(0) | Err(_) => break Input::Gone,
+                Ok(_) => {}
             }
-        }
-        let _ = tx.send(gone);
+            if line.last() == Some(&b'\n') {
+                line.pop();
+            }
+            if line.len() > MAX_LINE {
+                break Input::TooLong;
+            }
+            if tx.send(wrap(Input::Line(line.into_boxed_slice()))).is_err() {
+                return;
+            }
+        };
+        drop(reader);
+        let _ = tx.send(wrap(end));
     });
 }
 
@@ -2090,9 +2104,9 @@ where
         };
     let kept = Arc::new(Mutex::new(Kept::default()));
     let stderr_done = keep_stderr(stderr, Arc::clone(&kept));
-    let (tx, rx) = channel();
-    lines(input, Ev::Node, Ev::NodeGone, tx.clone());
-    lines(stdout, Ev::Agent, Ev::AgentGone, tx);
+    let (tx, rx) = sync_channel(INPUT_QUEUE);
+    lines(input, Ev::Node, tx.clone());
+    lines(stdout, Ev::Agent, tx);
     let mut b = Bridge {
         out: output,
         agent: Box::new(stdin),
@@ -2120,14 +2134,26 @@ where
     let result = (|| -> io::Result<Option<Value>> {
         loop {
             match rx.recv_timeout(Duration::from_millis(50)) {
-                Ok(Ev::Node(m)) => {
-                    if let ControlFlow::Break(id) = b.handle_node(&m)? {
-                        return Ok(id);
+                Ok(Ev::Node(Input::Line(line))) => {
+                    if let Ok(m) = serde_json::from_slice(&line) {
+                        if let ControlFlow::Break(id) = b.handle_node(&m)? {
+                            return Ok(id);
+                        }
                     }
                 }
-                Ok(Ev::Agent(m)) => b.handle_agent(&m)?,
-                Ok(Ev::NodeGone) => return Ok(None),
-                Ok(Ev::AgentGone) => {
+                Ok(Ev::Agent(Input::Line(line))) => {
+                    // The agent can print noise on stdout. Malformed JSON and non-UTF-8 lines are ignored.
+                    if let Ok(m) = serde_json::from_slice(&line) {
+                        b.handle_agent(&m)?;
+                    }
+                }
+                Ok(Ev::Node(Input::Gone)) => return Ok(None),
+                Ok(Ev::Node(Input::TooLong)) => return Err(io::ErrorKind::InvalidData.into()),
+                Ok(Ev::Agent(end @ (Input::Gone | Input::TooLong))) => {
+                    let oversized = matches!(end, Input::TooLong);
+                    if oversized {
+                        let _ = child.kill();
+                    }
                     let code = wait_briefly(&mut child);
                     // The rest of its stderr, unless something it started still holds the stream open.
                     let _ = stderr_done.recv_timeout(Duration::from_millis(500));
@@ -2142,9 +2168,11 @@ where
                         let end = Instant::now() + LATE_REQUEST_WAIT;
                         while let Some(left) = end.checked_duration_since(Instant::now()) {
                             match rx.recv_timeout(left) {
-                                Ok(Ev::Node(m)) => {
-                                    if b.answer_late(&m, code, &tail)? {
-                                        break;
+                                Ok(Ev::Node(Input::Line(line))) => {
+                                    if let Ok(m) = serde_json::from_slice(&line) {
+                                        if b.answer_late(&m, code, &tail)? {
+                                            break;
+                                        }
                                     }
                                 }
                                 Ok(_) => {}
@@ -2152,7 +2180,11 @@ where
                             }
                         }
                     }
-                    return Err(io::Error::other("the agent exited"));
+                    return Err(if oversized {
+                        io::ErrorKind::InvalidData.into()
+                    } else {
+                        io::Error::other("the agent exited")
+                    });
                 }
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => return Ok(None),
@@ -2162,6 +2194,7 @@ where
             }
         }
     })();
+    drop(rx);
     let _ = child.kill();
     let reaped = child.wait();
     let Some(id) = result? else {
@@ -2337,19 +2370,69 @@ mod tests {
     /// A line that is not UTF-8 used to end the reader as if the agent had exited (audit F044).
     #[test]
     fn a_line_that_is_not_utf8_is_noise_not_the_end_of_the_agent() {
-        let (tx, rx) = channel();
+        let (tx, rx) = sync_channel(INPUT_QUEUE);
         let data = b"\xff\xfe noise\n{\"text\":\"\xff\"}\n{\"id\":1}\r\n{\"id\":2}".to_vec();
-        lines(std::io::Cursor::new(data), Ev::Agent, Ev::AgentGone, tx);
+        lines(std::io::Cursor::new(data), Ev::Agent, tx);
         let mut ids = Vec::new();
         loop {
             match rx.recv_timeout(Duration::from_secs(10)) {
-                Ok(Ev::Agent(v)) => ids.push(v["id"].clone()),
-                Ok(Ev::AgentGone) => break,
+                Ok(Ev::Agent(Input::Line(line))) => {
+                    if let Ok(v) = serde_json::from_slice::<Value>(&line) {
+                        ids.push(v["id"].clone());
+                    }
+                }
+                Ok(Ev::Agent(Input::Gone)) => break,
                 Ok(_) => {}
                 Err(e) => panic!("reader stalled: {e}"),
             }
         }
         assert_eq!(ids, vec![json!(1), json!(2)]);
+    }
+
+    #[test]
+    fn the_bridge_accepts_a_full_line_and_refuses_the_next_line_before_its_newline() {
+        let (tx, rx) = sync_channel(INPUT_QUEUE);
+        let mut data = b"{}".to_vec();
+        data.resize(MAX_LINE, b' ');
+        data.push(b'\n');
+        data.resize(data.len() + MAX_LINE + 1, b' ');
+        lines(std::io::Cursor::new(data), Ev::Node, tx);
+        let wait = Duration::from_secs(10);
+        let Ok(Ev::Node(Input::Line(line))) = rx.recv_timeout(wait) else {
+            panic!("the full line should be accepted");
+        };
+        assert_eq!(line.len(), MAX_LINE);
+        assert_eq!(serde_json::from_slice::<Value>(&line).ok(), Some(json!({})));
+        assert!(matches!(
+            rx.recv_timeout(wait),
+            Ok(Ev::Node(Input::TooLong))
+        ));
+        assert!(matches!(
+            rx.recv_timeout(wait),
+            Err(RecvTimeoutError::Disconnected)
+        ));
+    }
+
+    #[test]
+    fn a_burst_larger_than_the_queue_is_delivered_in_order() {
+        let (tx, rx) = sync_channel(INPUT_QUEUE);
+        let count = INPUT_QUEUE * 2;
+        let mut data = Vec::new();
+        for id in 0..count {
+            assert!(writeln!(data, "{}", json!({"id": id})).is_ok());
+        }
+        lines(std::io::Cursor::new(data), Ev::Agent, tx);
+        let wait = Duration::from_secs(10);
+        for id in 0..count {
+            let Ok(Ev::Agent(Input::Line(line))) = rx.recv_timeout(wait) else {
+                panic!("missing frame {id}");
+            };
+            assert_eq!(
+                serde_json::from_slice::<Value>(&line).ok(),
+                Some(json!({"id": id}))
+            );
+        }
+        assert!(matches!(rx.recv_timeout(wait), Ok(Ev::Agent(Input::Gone))));
     }
 
     #[test]
