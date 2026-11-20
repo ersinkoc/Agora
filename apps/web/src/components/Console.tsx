@@ -22,6 +22,7 @@ import { LiveSummary } from './LiveSummary';
 import { Explorer } from './Explorer';
 import { FleetConsole } from './FleetConsole';
 import type { PairingUi } from './Pairing';
+import { HeaderLinks } from './HeaderLinks';
 import { Icon } from './Icon';
 import { Inspector } from './Inspector';
 import { saveGroupBy, useGroupBy } from '../net/fleetPrefs';
@@ -388,7 +389,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
         <LayoutMenu ws={ws} dispatch={dispatch} agents={presetAgents} onReset={resetLayout} narrow={narrow} />
         <span className="hidden sm:block"><LanguagePicker compact /></span>
         <ThemePicker />
-        <a className="ide-chip hidden whitespace-nowrap hover:text-ink md:inline-flex" href="#/device">{t('device-link')}</a>
+        <HeaderLinks />
         {onLock && <button type="button" className="ide-chip whitespace-nowrap hover:text-ink" onClick={onLock} title={t('lock-now-hint')}><Icon name="lock" className="size-3.5" />{t('lock-now')}</button>}
       </header>
 

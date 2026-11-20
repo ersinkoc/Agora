@@ -245,8 +245,8 @@ export function PhoneHome({ agents, machines, approvals, onResolve, untrusted, n
       bottom={<>
         <NavButton icon="search" label={t('phone-search')} onClick={onCommand} />
         <NavButton icon="plus" label={t('phone-start')} onClick={onStart} primary />
-        <NavButton icon="machine" label={t('phone-machines')} href="#/machines" />
-        <NavButton icon="lock" label={t('device-link')} href="#/device" />
+        <NavButton icon="stack" label={t('phone-machines')} href="#/machines" />
+        <NavButton icon="settings" label={t('device-link')} href="#/device" />
       </>}>
       {notice && <p role="alert" className="phone-notice">{notice}</p>}
       {/* The state of the link has a row of its own (in the title bar it pushed the buttons off a 390 px screen): one notice, what it means and Retry. */}

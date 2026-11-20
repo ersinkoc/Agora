@@ -90,7 +90,7 @@ device-title = This device
 device-intro = Machines only accept an answer from a device they trust. This is what they know this browser by:
 device-name = Device name
 device-key = Device key
-device-link = This device
+device-link = Settings
 device-fingerprint = Fingerprint
 device-trusted-here = trusts this browser
 device-not-trusted-here = does not trust this browser yet
@@ -1252,3 +1252,17 @@ quota-span-days = { $days } d { $hours } h
 quota-span-hours = { $hours } h { $minutes } min
 quota-span-minutes = { $minutes } min
 quota-hint = { $kind }: the { $what } limit is almost used ({ $percent } %). You can still start.
+
+# Title bar icons and the Settings page (sections of "This device" and "My machines").
+settings-link = Settings
+machines-link = Machines
+header-links = Settings and machines
+settings-title = Settings
+settings-sections = Settings sections
+settings-group-device = This device
+settings-group-machines = My machines
+settings-device = Name and fingerprint
+settings-passkeys = Passkey
+settings-machines = Machines
+settings-machines-intro = Every machine that is connected to this hub, and whether it trusts this browser.
+settings-machines-manage = Manage machines

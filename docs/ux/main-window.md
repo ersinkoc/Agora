@@ -104,6 +104,8 @@ Screenshots in both themes: `docs/screenshots/needs-you-modal/`. Tests: `apps/we
 - Scope selector (all machines or one project); connected node count.
 - Approvals indicator with count; opens the approvals queue (`approvals.md`).
 - Global kill switch (stop all agents) behind a confirmation.
+- Right end of the bar, in this order: layout, language, theme, then two icon links, **Settings** (a gear, `#/device`, also `#/settings`) and **Machines** (stacked servers, `#/machines`), then **Lock**. Each is a link with a tooltip and an accessible name (no visible text); the one whose page is open is marked (`aria-current="page"`, accent colour and an underline). The same icons end the title bar of Settings and Machines. On a phone the bottom bar has the same two entries.
+- **Settings** is one page with a section list on the left (a row of chips above the content on a narrow screen). Group **This device**: Name and fingerprint, Appearance (theme, language, Edit theme), Needs you (notifications), Passkey, Screen password and idle lock, Your other devices. Group **My machines**: every machine with its state, when it was last heard, its version, whether it trusts this browser and a link to its card on Machines; **Manage machines** opens `#/machines` (forget and clean up are there). A section has an address: `#/device/<section>` (`device`, `appearance`, `notifications`, `passkeys`, `lock`, `devices`, `machines`). The web window has no notion of "the machine this hub runs on", so there is no "This machine" section.
 
 ## Left column: navigation
 - **Projects** tree. Each project expands to its agents and non-agent terminals (servers, tests, logs).

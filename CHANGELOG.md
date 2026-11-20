@@ -4,7 +4,9 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
-_Nothing yet._
+### Settings and machines one click away
+- The title bar now has a Settings icon (a gear) and a Machines icon next to Lock, in place of the "This device" text; the one whose page is open is highlighted, and both are reachable with the keyboard.
+- Settings is one tidy page with a section list: This device (name and fingerprint, appearance and language, notifications, passkey, screen password, your other devices) and My machines (each machine's state, last seen, version and whether it trusts this browser, with a link to its card). Links such as `#/device/passkeys` open a section directly; the old addresses still work.
 
 ## 0.3.28
 
