@@ -650,15 +650,31 @@ impl View {
                     && !e.window.is_empty()
                     && e.tool.len() <= MAX_QUOTA_LABEL
                     && e.window.len() <= MAX_QUOTA_LABEL;
+                // The receiving session already cut a time ahead of the hub's clock; this is the second, deterministic bound for
+                // history: never more than the event's own time plus a little skew (when it has one).
+                let mut e = e.clone();
+                if ev.at_ms > 0 {
+                    e.observed_at_ms = e
+                        .observed_at_ms
+                        .min(ev.at_ms.saturating_add(crate::session::QUOTA_SKEW_MS));
+                }
                 let key = (e.node_id.clone(), e.tool.clone(), e.window.clone());
-                if fits && self.quota.get(&key).is_none_or(|old| e.observed_at_ms >= old.observed_at_ms) {
-                    self.quota.insert(key, e.clone());
-                    let mine: Vec<_> = self
+                if fits
+                    && self
                         .quota
-                        .iter()
-                        .filter(|((n, _, _), _)| *n == e.node_id)
+                        .get(&key)
+                        .is_none_or(|old| e.observed_at_ms >= old.observed_at_ms)
+                {
+                    let node = e.node_id.clone();
+                    self.quota.insert(key, e);
+                    // Keys sort by machine first, so one machine's windows are a slice, not a scan of every machine's.
+                    let lo = (node.clone(), String::new(), String::new());
+                    let mine = self
+                        .quota
+                        .range(lo..)
+                        .take_while(|(k, _)| k.0 == node)
                         .map(|(k, v)| (v.observed_at_ms, k.clone()))
-                        .collect();
+                        .collect::<Vec<_>>();
                     if mine.len() > MAX_QUOTA_PER_NODE {
                         if let Some((_, oldest)) = mine.into_iter().min() {
                             self.quota.remove(&oldest);
@@ -912,6 +928,36 @@ mod tests {
         );
         assert_eq!(replayed_percent(&v).len(), 2);
         assert_eq!(v.quota.len(), 3);
+    }
+
+    #[test]
+    fn a_future_dated_reading_is_cut_back_and_cannot_win_forever() {
+        let at = |t: u64| {
+            let mut e = quota_ev("n1", "codex", "five_hour", 10, t);
+            e.at_ms = 1_000_000;
+            e
+        };
+        // The session cuts a time ahead of the hub's clock; the stored event carries the cut.
+        let future = at(1_000_000 + 86_400_000);
+        let cut = crate::session::bound_quota_time(&future, 1_000_000).expect("cut");
+        let back = <Event as prost::Message>::decode(cut.as_slice()).unwrap();
+        match back.body {
+            Some(Body::AgentQuotaObserved(q)) => assert_eq!(q.observed_at_ms, 1_000_000 + 120_000),
+            other => panic!("{other:?}"),
+        }
+        assert!(crate::session::bound_quota_time(&at(1_000_000 + 60_000), 1_000_000).is_none());
+        // History is bounded by the event's own time too: a day ahead counts as two minutes ahead.
+        let mut v = View::default();
+        v.apply(&future);
+        assert_eq!(
+            v.quota.values().next().unwrap().observed_at_ms,
+            1_000_000 + 120_000
+        );
+        // A node whose clock was corrected backwards is read again: a later honest reading is newer than the cut one.
+        let mut honest = quota_ev("n1", "codex", "five_hour", 70, 1_000_000 + 200_000);
+        honest.at_ms = 1_000_000 + 200_000;
+        v.apply(&honest);
+        assert_eq!(v.quota.values().next().unwrap().used_percent, 70);
     }
 
     #[test]

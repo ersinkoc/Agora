@@ -89,4 +89,10 @@ untrusted, clamped; the reporter rung: a settings file the agent trusts).
   draws it from one provider with one clock (30 s): bars in the Usage panel per machine, "Reset" after the reset time, "Out of date" past the
   window's own length, "Unknown" with a reason, the card and row chip from 80 percent (fresh readings only), the start hint from 95 percent
   that never blocks. The tool's name is the agent kind with a capital. No schema change.
+- Review follow-ups (same PR): `observed_at_ms` is cut to the receiver's clock plus 2 minutes (hub at the session, web at apply; comparing the cut
+  times), and a window with no reset time is "reset", never fresh for ever. "Unknown" became one quiet line ("No limit information from this tool:
+  kinds"), only for kinds known to have plan limits (`PLAN_TOOLS` in `net/quota.ts`: codex, claude-code, claude), never one block per machine; an
+  agent is matched to its machine by id only, never by display name. Privacy: plan limits go to windows with no project scope only, not to project
+  members (`scope.rs`). Bounds are 64 per machine on both sides, found per machine. Units of time are locale strings. Forgotten machines keep their
+  last readings until they return (`docs/specs/protocol.md`).
 - Step 4 (Claude Code reporter: needs its own acceptance): not done.

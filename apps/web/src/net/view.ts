@@ -94,11 +94,12 @@ export interface View {
   forgottenAgents?: Set<string>;
   // ADR-0061: node id -> the devices it says it trusts (its last `NodeTrustedDevices`).
   trusted?: Map<string, string[]>;
-  // ADR-0091: the newest plan-limit observation per machine, tool and window (key `<node>\0<tool>\0<window>`); bounded.
-  quota?: Map<string, QuotaV>;
+  // ADR-0091: the newest plan-limit observation per machine, tool and window (node, then `<tool>\0<window>`); at most `MAX_QUOTA` windows per machine.
+  quota?: Map<string, Map<string, QuotaV>>;
 }
 export interface QuotaV { nodeId: string; tool: string; window: string; usedPercent: number; resetsAtMs: number; observedAtMs: number }
-const MAX_QUOTA = 256;
+const MAX_QUOTA = 64; // per machine, as the hub
+const QUOTA_SKEW_MS = 120_000;
 
 const MAX_MESSAGES = 50;
 
@@ -318,9 +319,12 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
     case 'agentQuotaObserved': {
       const b = e.agentQuotaObserved;
       if ((b.nodeId ?? '') !== producer || !b.tool || !b.window) break;
-      const key = `${producer}\u0000${b.tool}\u0000${b.window}`;
-      const table = (v.quota ??= new Map());
-      const observedAtMs = num(b.observedAtMs);
+      const key = `${b.tool}\u0000${b.window}`;
+      const table = ((v.quota ??= new Map()).get(producer) ?? new Map<string, QuotaV>());
+      v.quota.set(producer, table);
+      // Never newer than this window's own clock (plus skew): a machine whose clock runs ahead cannot win a window for good. The
+      // comparison with the stored reading is made on the cut time.
+      const observedAtMs = Math.min(num(b.observedAtMs), Date.now() + QUOTA_SKEW_MS);
       const old = table.get(key);
       if (old && old.observedAtMs > observedAtMs) break;
       table.set(key, { nodeId: producer, tool: b.tool, window: b.window, usedPercent: Math.min(100, num(b.usedPercent)), resetsAtMs: num(b.resetsAtMs), observedAtMs });
@@ -587,13 +591,13 @@ export function shown(v: View): View {
     approvals: keep(v.approvals, (k) => !under(k)),
     withTerminal: new Set([...v.withTerminal].filter((k) => !under(k))),
     trusted: v.trusted && keep(v.trusted, (id) => !hidden.has(id)),
-    quota: v.quota && keep(v.quota, (_k, q) => !hidden.has(q.nodeId)),
+    quota: v.quota && keep(v.quota, (node) => !hidden.has(node)),
   };
 }
 
 /** ADR-0091: the plan-limit observations the window holds, for the Usage panel, the cards and the start window. */
 export function quotaObs(v: View): QuotaObs[] {
-  return [...(v.quota?.values() ?? [])].map((q) => ({ machineId: q.nodeId, tool: q.tool, window: q.window, usedPercent: q.usedPercent, resetsAtMs: q.resetsAtMs, observedAtMs: q.observedAtMs }));
+  return [...(v.quota?.values() ?? [])].flatMap((m) => [...m.values()]).map((q) => ({ machineId: q.nodeId, tool: q.tool, window: q.window, usedPercent: q.usedPercent, resetsAtMs: q.resetsAtMs, observedAtMs: q.observedAtMs }));
 }
 
 export interface MachineModel { id: string; name: string; os: string; online: boolean; agentsRunning: number; lastSeenMs: number; memoryBytes?: number; build?: string; terminalsOpen?: number; binary?: string }

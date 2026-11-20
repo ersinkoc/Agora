@@ -2,7 +2,7 @@ import { createContext, useContext, useEffect, useMemo, useState, type ReactNode
 import { t } from '../i18n';
 import type { AgentTileModel } from '../model';
 import { ago } from '../net/time';
-import { chipFor, quotaView, resetsText, resetAtText, startHint, toolName, windowLabel, type QuotaBar, type QuotaObs, type QuotaTool, CRITICAL_PERCENT } from '../net/quota';
+import { chipFor, quotaView, resetsText, resetAtText, startHint, toolName, windowLabel, type QuotaBar, type QuotaObs, CRITICAL_PERCENT } from '../net/quota';
 import { agentKindOf } from '../net/fleet';
 import { Icon } from './Icon';
 
@@ -52,12 +52,6 @@ export function StartLimitHint({ tool, machineId }: { tool: string; machineId: s
 
 function Bar({ b, now, showMachine }: { b: QuotaBar; now: number; showMachine: boolean }) {
   const where = showMachine ? `${b.machine}, ` : '';
-  if (b.state === 'unknown') {
-    return <li className="grid gap-0.5 py-1.5" data-state="unknown">
-      <div className="flex min-w-0 items-baseline gap-2"><span className="min-w-0 flex-1 truncate text-muted">{t('quota-unknown')}</span></div>
-      <p className="m-0 text-xs text-muted">{t('quota-unknown-why')}</p>
-    </li>;
-  }
   const label = windowLabel(b.window);
   const observed = t('quota-observed', { when: ago(now - b.ageMs, now) });
   if (b.state === 'reset') {
@@ -78,7 +72,7 @@ function Bar({ b, now, showMachine }: { b: QuotaBar; now: number; showMachine: b
       {(stale || b.level === 'normal') && <span className="flex-none text-xs text-muted">{t('quota-percent', { percent })}</span>}
     </div>
     <span role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent} aria-valuetext={text} aria-label={`${where}${toolName(b.tool)}, ${label}`} className="relative block h-1.5 w-full overflow-hidden rounded-full border border-line bg-surface-2">
-      <span className={`absolute inset-y-0 start-0 rounded-full ${fill}`} style={{ width: `${Math.max(percent, 2)}%` }} />
+      <span className={`absolute inset-y-0 start-0 rounded-full ${fill}`} style={{ width: `${percent === 0 ? 0 : Math.max(percent, 2)}%` }} />
     </span>
     <p className="m-0 text-xs text-muted">{b.resetsAtMs > now ? resetsText(b.resetsAtMs, now) : t('quota-reset-unknown')} · {stale ? t('quota-stale-note') : observed}</p>
   </li>;
@@ -87,19 +81,22 @@ function Bar({ b, now, showMachine }: { b: QuotaBar; now: number; showMachine: b
 /** The "Plan limits" section of the Usage panel. */
 export function QuotaSection({ fleet }: { fleet: readonly AgentTileModel[] }) {
   const { obs, machines, now } = useQuota();
-  const tools: QuotaTool[] = useMemo(() => quotaView(obs, fleet, machines, now), [obs, fleet, machines, now]);
+  const view = useMemo(() => quotaView(obs, fleet, machines, now), [obs, fleet, machines, now]);
+  const empty = view.tools.length === 0 && view.unknown.length === 0;
   return <section className="grid gap-1" aria-label={t('usage-limits-title')}>
     <h3 className="m-0 text-xs font-semibold tracking-wider text-muted uppercase">{t('usage-limits-title')}</h3>
-    {tools.length === 0 ? <p className="muted m-0 rounded-s border border-dashed border-line px-3 py-2">{t('usage-limits-empty')}</p>
-      : tools.map((tool) => {
-        const several = tool.machines.length > 1 || machines.size > 1;
-        return <div key={tool.tool} className="rounded-s border border-line bg-surface-0 px-3 py-1.5">
-          <strong className="font-medium">{toolName(tool.tool)}</strong>
-          {tool.machines.map((m) => <div key={m.machineId} className="grid">
-            {several && <span className="mt-1 text-xs text-muted">{m.machine}</span>}
-            <ul className="m-0 grid list-none divide-y divide-line p-0">{m.bars.map((b) => <Bar key={b.key} b={b} now={now} showMachine={several} />)}</ul>
-          </div>)}
-        </div>;
-      })}
+    {empty && <p className="muted m-0 rounded-s border border-dashed border-line px-3 py-2">{t('usage-limits-empty')}</p>}
+    {view.tools.map((tool) => {
+      const several = tool.machines.length > 1 || machines.size > 1;
+      const name = toolName(tool.tool);
+      return <div key={tool.tool} className="rounded-s border border-line bg-surface-0 px-3 py-1.5">
+        <strong className="block truncate font-medium" title={name}>{name}</strong>
+        {tool.machines.map((m) => <div key={m.machineId} className="grid">
+          {several && <span className="mt-1 truncate text-xs text-muted" title={m.machine}>{m.machine}</span>}
+          <ul className="m-0 grid list-none divide-y divide-line p-0">{m.bars.map((b) => <Bar key={b.key} b={b} now={now} showMachine={several} />)}</ul>
+        </div>)}
+      </div>;
+    })}
+    {view.unknown.length > 0 && <p className="m-0 text-xs text-muted" data-state="unknown">{t('quota-unknown-line', { kinds: view.unknown.map(toolName).join(', ') })}</p>}
   </section>;
 }

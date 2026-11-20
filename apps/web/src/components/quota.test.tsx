@@ -35,9 +35,11 @@ describe('plan limits in the window', () => {
     expect(reset).toContain('Reset');
     expect(reset).not.toContain('88');
     expect(reset).not.toContain('role="progressbar"');
-    const unknown = draw([], <QuotaSection fleet={[agent({ kind: 'claude' })]} />);
-    expect(unknown).toContain('Unknown');
-    expect(unknown).toContain('This tool did not report its limits yet.');
+    const unknown = draw([], <QuotaSection fleet={[agent({ kind: 'claude' }), agent({ id: 'n2/a', kind: 'claude-code', machineId: 'n2' }), agent({ id: 'n1/s', kind: 'gemini' })]} />);
+    expect(unknown).toContain('No limit information from this tool: Claude, Claude-code');
+    expect(unknown.match(/data-state="unknown"/g)).toHaveLength(1);
+    expect(unknown).not.toContain('Gemini');
+    expect(unknown).not.toContain('role="progressbar"');
     expect(draw([], <QuotaSection fleet={[]} />)).toContain('Plan limits appear here');
   });
 
@@ -78,11 +80,18 @@ describe('plan limits in the window', () => {
     expect(draw([obs({ usedPercent: 97 })], <StartLimitHint tool="claude" machineId="n1" />)).toBe('');
   });
 
+  it('draws a 0 % bar with no fill and a 1 % bar with a visible one, and truncates long names', () => {
+    expect(draw([obs({ usedPercent: 0 })], <QuotaSection fleet={[]} />)).toContain('width:0%');
+    expect(draw([obs({ usedPercent: 1 })], <QuotaSection fleet={[]} />)).toContain('width:2%');
+    expect(draw([obs({ tool: 'a'.repeat(80) })], <QuotaSection fleet={[]} />)).toMatch(/class="block truncate[^"]*" title="A/);
+  });
+
   it('says the same in Turkish', () => {
     setLanguage('tr');
     const html = draw([obs({ usedPercent: 82 })], <QuotaSection fleet={[agent({ kind: 'claude' })]} />);
     expect(html).toContain('Beş saat');
-    expect(html).toContain('Bilinmiyor');
+    expect(html).toContain('Limit %82');
+    expect(draw([], <QuotaSection fleet={[agent({ kind: 'claude' })]} />)).toContain('Bu araçtan limit bilgisi yok');
     expect(html).toContain('Limit %82');
     setLanguage('en');
   });

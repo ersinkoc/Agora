@@ -1,7 +1,6 @@
 import { getLanguage, t } from '../i18n';
 import type { AgentTileModel } from '../model';
 import { agentKindOf } from './fleet';
-import { duration } from './time';
 
 // ADR-0091: the plan limits of subscription tools, as the nodes read them from the tools' own files. Pure: the window's clock is a
 // parameter, nothing here reads it. A limit is only ever what a tool reported: with no observation the answer is "unknown", never a
@@ -55,7 +54,7 @@ export function toolName(tool: string): string {
 // fresh: observed, its window still running, and not older than the window is long. stale: observed longer ago than the window is
 // long, so the number may no longer be true. reset: the window's reset time has passed; the old percentage is not shown until a new
 // observation arrives. unknown: nothing was ever observed.
-export type QuotaState = 'fresh' | 'stale' | 'reset' | 'unknown';
+export type QuotaState = 'fresh' | 'stale' | 'reset';
 
 /**
  * The state of one observation at `now` (the window's own clock, milliseconds since the epoch).
@@ -65,9 +64,10 @@ export type QuotaState = 'fresh' | 'stale' | 'reset' | 'unknown';
  * wrong by that much at most, and an age is never negative (an observation "from the future" counts as just now). The reset check has
  * no tolerance on purpose: a reset time that has passed on this clock is a reset.
  */
-export function classify(o: Pick<QuotaObs, 'resetsAtMs' | 'observedAtMs' | 'window'>, now: number): { state: Exclude<QuotaState, 'unknown'>; ageMs: number } {
+export function classify(o: Pick<QuotaObs, 'resetsAtMs' | 'observedAtMs' | 'window'>, now: number): { state: QuotaState; ageMs: number } {
   const ageMs = Math.max(0, now - o.observedAtMs);
-  if (o.resetsAtMs > 0 && now >= o.resetsAtMs) return { state: 'reset', ageMs };
+  // No reset time, or one that has passed: a reset. A window is never fresh "forever" for lack of a reset time.
+  if (o.resetsAtMs <= 0 || now >= o.resetsAtMs) return { state: 'reset', ageMs };
   const length = (windowMinutes(o.window) ?? FALLBACK_WINDOW_MS / 60_000) * 60_000;
   return { state: ageMs > length ? 'stale' : 'fresh', ageMs };
 }
@@ -88,43 +88,52 @@ export interface QuotaBar {
 export interface QuotaMachine { machineId: string; machine: string; bars: QuotaBar[] }
 export interface QuotaTool { tool: string; machines: QuotaMachine[] }
 
-/** The machine an agent runs on, as the nodes name it in an observation. */
-export const machineKeyOf = (a: AgentTileModel): string => a.machineId ?? a.workspaceRef?.node ?? a.machine;
+/** The machine an agent runs on, as the nodes name it in an observation. Never the display name (two machines can share one): an agent without an id is left out. */
+export const machineKeyOf = (a: AgentTileModel): string | undefined => a.machineId ?? a.workspaceRef?.node;
+
+/** The kinds known to have plan limits a tool can report. Any other kind (an API key, a shell, a tool with no plan) is shown nothing about. */
+export const PLAN_TOOLS: readonly string[] = ['codex', 'claude-code', 'claude'];
+
+
+export interface QuotaView {
+  tools: QuotaTool[];
+  /** Kinds known to have plan limits that have agents here and no reading from any machine: one quiet line, never a row each. */
+  unknown: string[];
+}
 
 /**
  * What the Usage panel draws: per tool, per machine (a machine's own plan state; two machines on one account may disagree for a moment),
- * one bar per window shortest first. A tool on a machine that has agents here but no observation gets one "unknown" row.
+ * one bar per window shortest first; and the kinds with plan limits that reported nothing.
  */
-export function quotaView(obs: readonly QuotaObs[], fleet: readonly AgentTileModel[], machineNames: ReadonlyMap<string, string>, now: number): QuotaTool[] {
+export function quotaView(obs: readonly QuotaObs[], fleet: readonly AgentTileModel[], machineNames: ReadonlyMap<string, string>, now: number): QuotaView {
   const tools = new Map<string, Map<string, QuotaMachine>>();
-  const machineOf = (tool: string, machineId: string, fallback?: string): QuotaMachine => {
-    const byMachine = tools.get(tool) ?? new Map<string, QuotaMachine>();
-    tools.set(tool, byMachine);
-    const m = byMachine.get(machineId) ?? { machineId, machine: machineNames.get(machineId) ?? fallback ?? machineId, bars: [] };
-    byMachine.set(machineId, m);
-    return m;
-  };
   for (const o of obs) {
+    const byMachine = tools.get(o.tool) ?? new Map<string, QuotaMachine>();
+    tools.set(o.tool, byMachine);
+    const m = byMachine.get(o.machineId) ?? { machineId: o.machineId, machine: machineNames.get(o.machineId) ?? o.machineId, bars: [] };
+    byMachine.set(o.machineId, m);
     const { state, ageMs } = classify(o, now);
     const percent = clampPercent(o.usedPercent);
-    machineOf(o.tool, o.machineId).bars.push({
-      key: `${o.machineId}\u0000${o.tool}\u0000${o.window}`, machineId: o.machineId, machine: '', tool: o.tool, window: o.window, state,
+    m.bars.push({
+      key: `${o.machineId}\u0000${o.tool}\u0000${o.window}`, machineId: o.machineId, machine: m.machine, tool: o.tool, window: o.window, state,
       ...(state === 'reset' ? {} : { percent }), level: state === 'reset' ? 'normal' : levelOf(percent), resetsAtMs: o.resetsAtMs, ageMs,
     });
   }
+  const unknown = new Set<string>();
   for (const a of fleet) {
     const tool = agentKindOf(a);
-    if (!tool || tool === 'shell' || tool === 'agent') continue;
-    const m = machineOf(tool, machineKeyOf(a), a.machine);
-    if (m.bars.length === 0) m.bars.push({ key: `${m.machineId}\u0000${tool}\u0000`, machineId: m.machineId, machine: m.machine, tool, window: '', state: 'unknown', level: 'normal', resetsAtMs: 0, ageMs: 0 });
+    if (machineKeyOf(a) !== undefined && PLAN_TOOLS.includes(tool) && !tools.has(tool)) unknown.add(tool);
   }
   const length = (w: string) => windowMinutes(w) ?? Number.MAX_SAFE_INTEGER;
-  return [...tools].sort(([x], [y]) => x.localeCompare(y)).map(([tool, byMachine]) => ({
-    tool,
-    machines: [...byMachine.values()].sort((x, y) => x.machine.localeCompare(y.machine)).map((m) => ({
-      ...m, bars: m.bars.map((b) => ({ ...b, machine: m.machine })).sort((x, y) => length(x.window) - length(y.window) || x.window.localeCompare(y.window)),
+  return {
+    unknown: [...unknown].sort(),
+    tools: [...tools].sort(([x], [y]) => x.localeCompare(y)).map(([tool, byMachine]) => ({
+      tool,
+      machines: [...byMachine.values()].sort((x, y) => x.machine.localeCompare(y.machine)).map((m) => ({
+        ...m, bars: [...m.bars].sort((x, y) => length(x.window) - length(y.window) || x.window.localeCompare(y.window)),
+      })),
     })),
-  }));
+  };
 }
 
 interface Full { percent: number; level: QuotaLevel; window: string; resetsAtMs: number }
@@ -141,17 +150,20 @@ function fullest(tool: string, machineId: string, obs: readonly QuotaObs[], now:
 }
 
 /** The chip on an agent's card or row: only from `WARN_PERCENT`. */
-export const chipFor = (a: AgentTileModel, obs: readonly QuotaObs[], now: number): Full | undefined => fullest(agentKindOf(a), machineKeyOf(a), obs, now, WARN_PERCENT);
+export const chipFor = (a: AgentTileModel, obs: readonly QuotaObs[], now: number): Full | undefined => {
+  const machine = machineKeyOf(a);
+  return machine === undefined ? undefined : fullest(agentKindOf(a), machine, obs, now, WARN_PERCENT);
+};
 
 /** The start window's hint for a chosen kind on a chosen machine, from `CRITICAL_PERCENT`. It never blocks anything. */
 export const startHint = (tool: string, machineId: string, obs: readonly QuotaObs[], now: number): Full | undefined => fullest(tool, machineId, obs, now, CRITICAL_PERCENT);
 
-/** "1 h 20 min", "3 d 4 h": the time until a reset (never seconds: the figure is only read at a glance). */
+/** "1 h 20 min", "3 d 4 h" (Turkish: "1 sa 20 dk", "3 gün 4 sa"): the time until a reset, never seconds. The unit words are locale strings. */
 export function untilText(ms: number): string {
   const min = Math.max(1, Math.ceil(ms / 60_000));
-  if (min >= 2880) return `${Math.floor(min / 1440)} d ${Math.floor((min % 1440) / 60)} h`;
-  if (min < 60) return `${min} min`;
-  return duration(min * 60_000);
+  if (min >= 2880) return t('quota-span-days', { days: Math.floor(min / 1440), hours: Math.floor((min % 1440) / 60) });
+  if (min < 60) return t('quota-span-minutes', { minutes: min });
+  return t('quota-span-hours', { hours: Math.floor(min / 60), minutes: min % 60 });
 }
 
 /** The reset time in the window's own timezone ("14:30 CET", with the day when it is not today). */
