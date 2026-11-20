@@ -3,14 +3,16 @@ import { readFileSync } from 'node:fs';
 import { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import { createElement } from 'react';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { agora } from '../gen/agora.js';
 import { setLanguage } from '../i18n';
 import { ApprovalBanner } from '../components/ApprovalBanner';
 import { approvalFailureKey, thisDevice, toHex, type KeyStore } from './approval';
 import { failure } from './refusal';
-import { forgetSkipCapable, isSkipCapable, markSkipCapable, parseSkipDetail, signSkip, skipOf, skipSignedMessage } from './skipApproval';
+import { approvedHere, forgetSkipCapable, isSkipCapable, markSkipCapable, recordSkipAnswer, skipAnswerOf, parseSkipDetail, signSkip, skipOf, skipSignedMessage } from './skipApproval';
 import { applyEvent, approvalList, emptyView } from './view';
+import { decidableInline } from './fleet';
+import { modalKind } from './attention';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -169,7 +171,10 @@ describe('the card', () => {
     return { ...(approvalList(v)[0] as ReturnType<typeof approvalList>[number]), agentName: name, machineName: 'Laptop' };
   };
   const buttons = () => [...host.querySelectorAll('button')];
-  it('shows the machine\'s own rendering with the real ids beside the agent\'s names, and Allow and Deny', () => {
+  const dwell = (ms = 650) => act(async () => { await vi.advanceTimersByTimeAsync(ms); });
+  const named = (text: string) => buttons().find((b) => b.textContent === text) as HTMLButtonElement;
+  it('shows the machine\'s own rendering with the real ids beside the agent\'s names, and Allow and Deny', async () => {
+    vi.useFakeTimers();
     markSkipCapable('laptop');
     const answers: boolean[] = [];
     act(() => root.render(createElement(ApprovalBanner, { approval: card(), onResolve: (_a, ok) => { answers.push(ok); } })));
@@ -179,10 +184,44 @@ describe('the card', () => {
     expect(text).toContain('Bypass Permissions');
     expect(text).toContain('bypassPermissions'); // the real value id
     expect(text).toContain('session only');
-    expect(buttons().map((b) => b.textContent)).toEqual(['Allow', 'Deny']);
-    act(() => buttons()[0]?.click());
-    act(() => buttons()[1]?.click());
-    expect(answers).toEqual([true, false]);
+    expect(buttons().map((b) => b.textContent?.replace('Read it first, then you can allow.', ''))).toEqual(['Allow', 'Deny']);
+    expect(host.contains(document.activeElement) && document.activeElement?.tagName === 'BUTTON').toBe(false); // nothing is focused for you
+    await dwell();
+    act(() => named('Allow').click());
+    expect(answers).toEqual([true]);
+    vi.useRealTimers();
+  });
+  it('Allow stays off for the dwell (with a visible reason), Deny does not, and one click sends one decision', async () => {
+    vi.useFakeTimers();
+    markSkipCapable('laptop');
+    const answers: boolean[] = [];
+    act(() => root.render(createElement(ApprovalBanner, { approval: card(), onResolve: (_a, ok) => { answers.push(ok); } })));
+    expect(named('Allow').disabled).toBe(true);
+    expect(named('Deny').disabled).toBe(false);
+    expect(host.textContent).toContain('Read it first');
+    act(() => named('Allow').click()); // a click inside the dwell does nothing
+    expect(answers).toEqual([]);
+    await dwell(300);
+    expect(named('Allow').disabled).toBe(true);
+    await dwell(400);
+    expect(named('Allow').disabled).toBe(false);
+    expect(host.textContent).not.toContain('Read it first');
+    act(() => { named('Allow').click(); named('Allow').click(); });
+    expect(answers).toEqual([true]);
+    expect(named('Allow').disabled && named('Deny').disabled).toBe(true); // after a click both wait
+    await dwell(4100);
+    expect(named('Allow').disabled).toBe(false); // a failed answer can be tried again
+    vi.useRealTimers();
+  });
+  it('the dwell starts again when the card says something else', async () => {
+    vi.useFakeTimers();
+    markSkipCapable('laptop');
+    act(() => root.render(createElement(ApprovalBanner, { approval: card(), onResolve: () => {} })));
+    await dwell();
+    expect(named('Allow').disabled).toBe(false);
+    act(() => root.render(createElement(ApprovalBanner, { approval: card(detail({ value: 'other' })), onResolve: () => {} })));
+    expect(named('Allow').disabled).toBe(true);
+    vi.useRealTimers();
   });
   it('a config option shows its own id too, and hidden characters in the agent\'s words are written out', () => {
     markSkipCapable('laptop');
@@ -197,11 +236,46 @@ describe('the card', () => {
     expect(buttons().every((b) => b.disabled)).toBe(true);
     expect(host.textContent).toContain('has not heard this machine offer it');
   });
-  it('an unknown shape says to update the window, has no buttons and never reaches onResolve', () => {
+  it('an unknown shape says to update the window and can only be dismissed here: nothing is signed or sent', () => {
     markSkipCapable('laptop');
-    act(() => root.render(createElement(ApprovalBanner, { approval: card(detail({ scope: 'forever' })), onResolve: () => { throw new Error('answered'); } })));
-    expect(buttons()).toHaveLength(0);
+    const onResolve = vi.fn();
+    act(() => root.render(createElement(ApprovalBanner, { approval: card(detail({ skips: false })), onResolve })));
+    expect(buttons().map((b) => b.textContent)).toEqual(['Dismiss']);
     expect(host.textContent).toContain('Update your window');
     expect(host.textContent).toContain('Nothing was signed');
+    act(() => buttons()[0]?.click());
+    expect(onResolve).not.toHaveBeenCalled();
+    expect(host.textContent).toBe('');
+  });
+});
+
+describe('the attention dialog and the phone bar never answer it', () => {
+  it('a skip card (known or not) is read in its own card, never decided inline', () => {
+    const v = emptyView();
+    applyEvent(v, 1, ev('laptop', { approvalRequested: { approvalId: 'ap-1', agentId: 'agent-1', action: 'agent.skip_permissions', detail: detail(), expiresAtMs: 1 } }));
+    applyEvent(v, 2, ev('laptop', { approvalRequested: { approvalId: 'ap-2', agentId: 'agent-1', action: 'agent.skip_permissions', detail: '{}', expiresAtMs: 1 } }));
+    for (const a of approvalList(v)) {
+      expect(decidableInline(a)).toBe(false);
+      expect(modalKind({ kind: 'approval', approval: a } as never)).toBe('review');
+    }
+  });
+});
+
+describe('what is remembered belongs to one connection', () => {
+  it('forgetting one machine leaves the others; forgetting all also drops the answers given here', () => {
+    markSkipCapable('a'); markSkipCapable('b');
+    recordSkipAnswer('a/ap-1', { approved: true, agent: 'a/agent-1', option: 'mode', value: 'yolo' });
+    forgetSkipCapable('a');
+    expect([isSkipCapable('a'), isSkipCapable('b')]).toEqual([false, true]);
+    expect(skipAnswerOf('a/ap-1')).toBe('approved');
+    expect(approvedHere('a/agent-1', 'mode', 'yolo')).toBe(true);
+    expect(approvedHere('a/agent-1', 'mode', 'other')).toBe(false);
+    forgetSkipCapable();
+    expect([isSkipCapable('b'), skipAnswerOf('a/ap-1'), approvedHere('a/agent-1', 'mode', 'yolo')]).toEqual([false, undefined, false]);
+  });
+  it('importing the gallery does not make a machine called "demo" capable', async () => {
+    forgetSkipCapable();
+    await import('../screens');
+    expect(isSkipCapable('demo')).toBe(false);
   });
 });

@@ -18,7 +18,7 @@ import { StartAgent, type KindChoice } from './components/StartAgent';
 import { quotaObs, approvalList, boards, costByProject, projectChoices, recentMessages, machines, machinesOnline, shown, tiles, type ApprovalModel, type View } from './net/view';
 import { approvalFailureKey, indexedDbStore, signApproval, signStart, thisDevice, type Device } from './net/approval';
 import type { StartChoice } from './components/StartApproval';
-import { isSkipCapable, signSkip, SKIP_ACTION } from './net/skipApproval';
+import { forgetSkipAnswer, forgetSkipCapable, isSkipCapable, recordSkipAnswer, signSkip, SKIP_ACTION } from './net/skipApproval';
 import type { HelperGrant } from './components/HelperGrants';
 import { addPasskey, passkeysSupported, signInWithPasskey } from './net/passkey';
 import { summarize, type UsageSummary } from './net/usage';
@@ -220,8 +220,11 @@ export function App() {
         : a.start
           ? await signStart(device, a.node, a.localId, approved, helperGrant, helpersMayStart, a.detail)
           : await signApproval(device, a.node, a.localId, approved);
+      // What this window answered, kept before the answer goes so a switch applied at once is still known as approved here.
+      if (a.skip) recordSkipAnswer(a.id, { approved, agent: `${a.node}/${a.skip.agent}`, option: a.skip.option, value: a.skip.value });
       await api.command(a.node, { approvalResolve: { approvalId: a.localId, approved, signerDeviceId: device.id, signature, helperGrant, helpersMayStart } });
     } catch (e) {
+      forgetSkipAnswer(a.id);
       const code = (e as { code?: string }).code;
       setNotice(approvalFailureKey(code));
     }
@@ -312,6 +315,8 @@ export function App() {
   }, [api, live !== undefined]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (!hub) return;
+    // What was heard of machines and answered here belongs to one connection: another hub, or this one again, starts from nothing.
+    forgetSkipCapable();
     const c = connectLive({ url: hub.url, token: hub.token, onView: (v) => setLive(shown(v)), onState: setLink, onPair: pairing.dispatch,
       onRejected: () => { forgetToken(); setLive(undefined); setHub(undefined); },
       onGrantRequired: (node, body) => {

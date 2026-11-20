@@ -30,7 +30,7 @@ import type { Device } from './net/approval';
 import { deviceLabel } from './net/devices';
 import type { UsageSummary } from './net/usage';
 import { demoAgents, demoApprovals, demoHelper, demoSkipApproval, demoStartApproval, demoStartSettingsApproval } from './fixtures';
-import { markSkipCapable } from './net/skipApproval';
+import { forgetSkipCapable, markSkipCapable } from './net/skipApproval';
 import { SessionBar } from './components/SessionBar';
 import { demoSource, type TerminalSource } from './terminal/source';
 import { Suspense, lazy, useEffect, useMemo, useState, useSyncExternalStore, type ReactNode } from 'react';
@@ -63,7 +63,6 @@ function Messages({ messages }: { messages: readonly MessageModel[] }) {
   );
 }
 
-markSkipCapable('demo'); // the gallery's demo machine counts as having offered `approval.skip_permissions`
 const STATES: UiState[] = ['working', 'needs-you', 'finished', 'idle', 'unknown'];
 
 // ADR-0058: a chat agent that reported its modes, models, context and cost, and a conversation with a notice in it.
@@ -170,6 +169,8 @@ function Themed({ theme, onStart }: { theme: 'dark' | 'light'; onStart?: () => v
 // Every component in every state, both themes: the review surface for UI pull requests.
 export function Gallery() {
   const [starting, setStarting] = useState(false);
+  // The gallery's demo machine counts as having offered `approval.skip_permissions`, only while the gallery is shown (never at import).
+  useEffect(() => { markSkipCapable('demo'); return () => forgetSkipCapable('demo'); }, []);
   return (
     <main className="page gallery">
       <h1>{t('gallery-title')}</h1>

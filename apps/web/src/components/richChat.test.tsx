@@ -13,6 +13,7 @@ import { ChatActionsContext, type ChatActions } from './chatActions';
 import { Item, ToolSteps } from './ChatEntry';
 import { PromptBox } from './PromptBox';
 import { SessionBar } from './SessionBar';
+import { forgetSkipCapable, recordSkipAnswer } from '../net/skipApproval';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -344,6 +345,82 @@ describe('the agent\'s own settings', () => {
       expect(host.textContent).toContain('Not switched: the request was declined, ran out of time or was withdrawn.');
       expect(host.textContent).not.toContain('Waiting for your approval');
     } finally { vi.useRealTimers(); }
+  });
+  it('the badge says "with your approval" only when THIS window approved that exact value', () => {
+    forgetSkipCapable();
+    const draw = () => act(() => root.render(<SessionBar part="controls" agentKey="n/a" session={{ ...base, config: [{ ...mode, current: 'yolo' }] }} />));
+    draw();
+    const label = () => host.querySelector('[role=img]')?.getAttribute('aria-label') ?? '';
+    expect(label()).toContain('Acts without asking you first');
+    expect(label()).not.toContain('with your approval'); // a restart, a resume or the agent's own switch: no approval was seen
+    recordSkipAnswer('n/ap-1', { approved: true, agent: 'n/a', option: 'mode', value: 'other' });
+    draw();
+    expect(label()).not.toContain('with your approval'); // another value
+    recordSkipAnswer('n/ap-2', { approved: true, agent: 'n/a', option: 'mode', value: 'yolo' });
+    draw();
+    expect(label()).toContain('with your approval');
+    forgetSkipCapable();
+  });
+  describe('a switch approved here whose report comes later', () => {
+    const run = async (ids: string[] | undefined, steps: (draw: (cur: string, ids: string[] | undefined) => void) => Promise<void>) => {
+      vi.useFakeTimers();
+      forgetSkipCapable();
+      try {
+        const setConfig = vi.fn(async () => ({ approvalNeeded: 'n/ap-1' }));
+        const draw = (cur: string, a: string[] | undefined) => act(() => root.render(<SessionBar part="controls" agentKey="n/a" session={{ ...base, config: [{ ...mode, current: cur }] }} setConfig={setConfig} approvals={a ? new Set(a) : undefined} />));
+        draw('plan', ids);
+        await pickYolo();
+        await steps(draw);
+      } finally { vi.useRealTimers(); forgetSkipCapable(); }
+    };
+    const advance = (ms: number) => act(async () => { await vi.advanceTimersByTimeAsync(ms); });
+    const chip = () => host.querySelector('button[aria-haspopup=menu][aria-label^="Mode:"]')?.getAttribute('aria-label');
+    it('says nothing false while it waits, and no failure when the report arrives late', async () => {
+      await run(['n/ap-1'], async (draw) => {
+        draw('plan', ['n/ap-1']);
+        recordSkipAnswer('n/ap-1', { approved: true, agent: 'n/a', option: 'mode', value: 'yolo' });
+        draw('plan', []); // the card goes: approved here, the agent has not reported yet
+        await advance(7000);
+        expect(host.textContent).not.toContain('Not switched');
+        expect(chip()).toBe('Mode: Waiting for the agent');
+        draw('yolo', []);
+        await advance(30_000);
+        expect(host.textContent).not.toContain('Not switched');
+        expect(host.textContent).not.toContain('Waiting for');
+        expect(chip()).toContain('Bypass');
+      });
+    });
+    it('after a long wait says it was approved and not yet confirmed, then clears that when the agent reports', async () => {
+      await run(['n/ap-1'], async (draw) => {
+        draw('plan', ['n/ap-1']);
+        recordSkipAnswer('n/ap-1', { approved: true, agent: 'n/a', option: 'mode', value: 'yolo' });
+        draw('plan', []);
+        await advance(21_000);
+        expect(host.textContent).toContain('Approved. The agent has not confirmed the change yet');
+        expect(host.textContent).not.toContain('Not switched');
+        expect(chip()).toBe('Mode: Plan');
+        draw('yolo', []);
+        expect(host.textContent).not.toContain('has not confirmed');
+      });
+    });
+    it('a denial given here puts it back at once', async () => {
+      await run(['n/ap-1'], async (draw) => {
+        draw('plan', ['n/ap-1']);
+        recordSkipAnswer('n/ap-1', { approved: false, agent: 'n/a', option: 'mode', value: 'yolo' });
+        draw('plan', []);
+        await advance(500);
+        expect(host.textContent).toContain('Not switched');
+        expect(chip()).toBe('Mode: Plan');
+      });
+    });
+    it('with no view of the cards (approvals undefined) the wait does not last forever', async () => {
+      await run(undefined, async () => {
+        expect(chip()).toBe('Mode: Waiting for your approval');
+        await advance(31_000);
+        expect(host.textContent).toContain('The agent has not reported the change yet');
+        expect(chip()).toBe('Mode: Plan');
+      });
+    });
   });
   it('policy that forbids it refuses in words and keeps the choice unavailable with the reason', async () => {
     const setConfig = vi.fn(async () => 'agent.option_forbidden');

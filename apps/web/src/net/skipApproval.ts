@@ -83,8 +83,31 @@ export function markSkipCapable(node: string): void {
   changed();
 }
 export const isSkipCapable = (node: string): boolean => capable.has(node);
-/** Forgets what was heard (a new connection to the hub starts again; tests). */
-export function forgetSkipCapable(): void { capable.clear(); changed(); }
+/** Forgets what was heard: of one machine, or (no argument) of all, and every answer given here. A new connection or another hub starts again; tests. */
+export function forgetSkipCapable(node?: string): void {
+  if (node === undefined) { capable.clear(); answers.clear(); } else capable.delete(node);
+  changed();
+}
+
+// What THIS window answered in this session, by the card's hub-wide key `<node>/<approval id>`: so the window says "with your approval" only
+// for a value it saw approved, and tells an approved switch (the report may come later) from one that was denied.
+interface Answer { approved: boolean; agent: string; option: string; value: string }
+const answers = new Map<string, Answer>();
+export function recordSkipAnswer(key: string, a: Answer): void { answers.set(key, a); changed(); }
+export function forgetSkipAnswer(key: string): void { answers.delete(key); changed(); }
+export const skipAnswerOf = (key: string): 'approved' | 'denied' | undefined => { const a = answers.get(key); return a ? (a.approved ? 'approved' : 'denied') : undefined; };
+/** Whether this window approved exactly this value of this option for this agent (`<node>/<agent>`) in this session. */
+export function approvedHere(agentKey: string, option: string, value: string): boolean {
+  for (const a of answers.values()) if (a.approved && a.agent === agentKey && a.option === option && a.value === value) return true;
+  return false;
+}
+
+// An unknown-shape card is dismissed locally only: nothing is sent, because a decision in a shape the window does not understand is never signed.
+const dismissedUnknown = new Set<string>();
+export function dismissUnknown(id: string): void { dismissedUnknown.add(id); changed(); }
+export const isDismissedUnknown = (id: string): boolean => dismissedUnknown.has(id);
+
+/** Re-renders on any change of what is remembered here; the value is whether the machine was heard to offer it. */
 export function useSkipCapable(node: string): boolean {
   useSyncExternalStore((l) => { listeners.add(l); return () => { listeners.delete(l); }; }, () => version, () => version);
   return capable.has(node);

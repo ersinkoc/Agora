@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { refusalKey, type ActionResult } from '../net/refusal';
 import { NoAskBadge } from './NoAskBadge';
+import { approvedHere, skipAnswerOf } from '../net/skipApproval';
 import { settingName } from './launchSettings';
 import { startedWith } from './launchMemory';
 import { Icon } from './Icon';
@@ -9,7 +10,7 @@ import { duration } from '../net/time';
 import { t } from '../i18n';
 import type { SessionModel, SessionOptionModel, UiState } from '../model';
 import type { ConfigOptionModel } from '../model';
-import { actsFreely, choices, choiceState, configChoices, configGroups, contextFill, contextLabel, contextPercent, isChange, needsPlaceholder, shortCount, type OptionKind } from './sessionChoice';
+import { actsFreely, skippingNow, choices, choiceState, configChoices, configGroups, contextFill, contextLabel, contextPercent, isChange, needsPlaceholder, shortCount, type OptionKind } from './sessionChoice';
 
 // ADR-0090: the word a setting is called in the window. The three the window knows get its own words (the agent's name for them is its
 // own and untrusted); any other keeps the agent's name.
@@ -24,7 +25,13 @@ const PILL: Record<UiState, string> = {
   working: 'border-working/40 text-working', 'needs-you': 'border-needs-you/50 text-needs-you', finished: 'border-finished/40 text-finished', idle: 'border-line text-muted', unknown: 'border-line text-muted',
 };
 // A switch the machine holds until the owner signs the card: which control, the value asked for and the card (`<node>/<approval id>`).
-interface Wait { control: string; value: string; approval: string }
+// `asking`: the card waits; `confirming`: this window approved it and the agent has not reported it yet; `late`: that took long, the control shows what the agent reports.
+interface Wait { control: string; value: string; approval: string; state: 'asking' | 'confirming' | 'late'; at: number }
+// The messages about a held switch that go away once the agent reports the value.
+const HELD_NOTES = ['session-skip-approved-pending', 'session-skip-unconfirmed'];
+const CONFIRM_MS = 20_000; // how long an approved switch may take to be reported before the window says so
+const waitWord = (w: Wait): string => t(w.state === 'confirming' ? 'session-waiting-confirm' : 'session-waiting-approval');
+const NOBODY_MS = 30_000; // how long a switch is held when the window has no view of the cards at all
 const refusedKey = (control: string, value: string) => `${control}|${value}`;
 
 export function SessionBar({ agentKey, session, choose, setConfig, disabled, startedMs, state, tokens, approvals, launchedFree, part = 'all' }: { part?: 'all' | 'controls' | 'status'; agentKey: string; session: SessionModel; startedMs?: number; state?: UiState; tokens?: number; choose?: (agentKey: string, kind: OptionKind, id: string) => Promise<ActionResult>; setConfig?: (agentKey: string, configId: string, value: string) => Promise<ActionResult>; disabled?: boolean; approvals?: ReadonlySet<string>; launchedFree?: boolean }) {
@@ -44,7 +51,7 @@ export function SessionBar({ agentKey, session, choose, setConfig, disabled, sta
   // What the machine answered to a choice: applied, refused (by its own policy or otherwise), or held until the owner signs the card.
   const settle = (r: ActionResult, control: string, value: string) => {
     if (r === true) { setFailed(false); return; }
-    if (typeof r === 'object') { setFailed(false); setWaits((w) => [...w.filter((x) => x.control !== control), { control, value, approval: r.approvalNeeded }]); return; }
+    if (typeof r === 'object') { setFailed(false); setWaits((w) => [...w.filter((x) => x.control !== control), { control, value, approval: r.approvalNeeded, state: 'asking' as const, at: Date.now() }]); return; }
     const code = typeof r === 'string' ? r : '';
     if (code === 'agent.option_forbidden') setRefused((c) => new Set(c).add(refusedKey(control, value)));
     setFailed(refusalKey(code) ?? 'session-change-failed');
@@ -57,21 +64,30 @@ export function SessionBar({ agentKey, session, choose, setConfig, disabled, sta
   };
   const sessionNow = useRef(session);
   sessionNow.current = session;
-  // A held switch ends when the machine reports the value (applied), or when its card is gone without that (declined, ran out of time,
-  // withdrawn): the control goes back to what it was and says so. A short grace covers the report arriving after the card goes.
+  // A held switch ends when the agent reports the value (applied). When its card is gone without that: a denial put the control back at once; an
+  // approval made here waits for the agent's report (said plainly if it takes long, and cleared when it comes); an outcome this window did not see
+  // (answered elsewhere, ran out, withdrawn) gets a short grace, then the control says it was not switched. With no view of the cards at all the wait is bounded.
   useEffect(() => {
     if (waits.length === 0) return;
     const timers: ReturnType<typeof setTimeout>[] = [];
     const done = waits.filter((w) => disabled || reported(session, w.control) === w.value);
+    const change = new Map<Wait, Wait | null>();
     for (const w of waits) {
-      if (done.includes(w) || !approvals) continue;
-      if (approvals.has(w.approval)) { seen.current.add(w.approval); continue; }
-      timers.push(setTimeout(() => {
-        setWaits((cur) => cur.filter((x) => x !== w));
-        if (reported(sessionNow.current, w.control) !== w.value) setFailed('session-skip-not-applied');
-      }, seen.current.has(w.approval) ? 2000 : 6000));
+      if (done.includes(w)) continue;
+      const later = (ms: number, f: () => void) => timers.push(setTimeout(() => { if (reported(sessionNow.current, w.control) !== w.value) f(); }, ms));
+      if (!approvals) { if (w.state !== 'late') later(NOBODY_MS, () => { setWaits((cur) => cur.filter((x) => x !== w)); setFailed('session-skip-unconfirmed'); }); continue; }
+      if (approvals.has(w.approval)) { seen.current.add(w.approval); if (w.state !== 'asking') change.set(w, { ...w, state: 'asking' }); continue; }
+      const outcome = skipAnswerOf(w.approval);
+      if (outcome === 'approved') {
+        if (w.state === 'asking') change.set(w, { ...w, state: 'confirming', at: Date.now() });
+        else if (w.state === 'confirming') later(Math.max(0, w.at + CONFIRM_MS - Date.now()), () => { setWaits((cur) => cur.map((x) => (x === w ? { ...w, state: 'late' } : x))); setFailed('session-skip-approved-pending'); });
+      } else later(outcome === 'denied' ? 300 : seen.current.has(w.approval) ? 2000 : 6000, () => { setWaits((cur) => cur.filter((x) => x !== w)); setFailed('session-skip-not-applied'); });
     }
-    if (done.length > 0) setWaits((cur) => cur.filter((x) => !done.includes(x)));
+    if (done.length > 0 || change.size > 0) {
+      setWaits((cur) => cur.filter((x) => !done.includes(x)).map((x) => change.get(x) ?? x));
+      // The agent reported it after the window had said it was still waiting: that note no longer holds.
+      if (done.length > 0) setFailed((f) => (f && HELD_NOTES.includes(f) ? false : f));
+    }
     return () => timers.forEach(clearTimeout);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [waits, approvals, session, disabled]);
@@ -94,8 +110,8 @@ export function SessionBar({ agentKey, session, choose, setConfig, disabled, sta
     const word = t(kind === 'mode' ? 'session-mode' : 'session-model');
     const name = (o: SessionOptionModel) => (o.skipsPermissions ? t('session-mode-unasked', { name: o.name || o.id }) : (o.name || o.id));
     const now = list.find((o) => o.id === current);
-    const waiting = waits.some((x) => x.control === kind);
-    const shown = waiting ? t('session-waiting-approval') : now ? name(now) : needsPlaceholder(current) ? t('session-not-reported') : current;
+    const wait = waits.find((x) => x.control === kind);
+    const shown = wait && wait.state !== 'late' ? waitWord(wait) : now ? name(now) : needsPlaceholder(current) ? t('session-not-reported') : current;
     // A choice this machine's settings refuse stays marked unavailable with the reason; any other is sent, a skipping one waits for the owner's card.
     const items: MenuItem[] = choices(list, current).map((o) => { const no = refused.has(refusedKey(kind, o.id)); return { label: name(o), checked: o.id === current, disabled: disabled || busy || !choose || no, hint: no ? t('session-forbidden-hint') : undefined, run: () => pick(kind, o.id) }; });
     return (
@@ -126,7 +142,8 @@ export function SessionBar({ agentKey, session, choose, setConfig, disabled, sta
     return { label: choiceName(o, c), checked: st === 'current', disabled: disabled || busy || !setConfig || no, hint: no ? t('session-forbidden-hint') : undefined, run: () => void applyConfig(o, c.id) };
   });
   const configShown = (o: ConfigOptionModel): string => {
-    if (waits.some((x) => x.control === o.id)) return t('session-waiting-approval');
+    const w = waits.find((x) => x.control === o.id);
+    if (w && w.state !== 'late') return waitWord(w);
     const now = configChoices(o).find((c) => c.id === o.current);
     return now ? choiceName(o, now) : o.current || t('session-not-reported');
   };
@@ -146,8 +163,8 @@ export function SessionBar({ agentKey, session, choose, setConfig, disabled, sta
     {groups.chips.map(configChip)}
     {moreItems.length > 0 && <Menu label={t('session-more')} items={moreItems} align="start" className="ide-chip h-7 cursor-pointer rounded-s px-2.5 hover:border-accent hover:text-ink"><span>{t('session-more')}</span><Icon name="chevronDown" className="size-3" /></Menu>}
     {started.map(([id, value]) =><span key={id} className="ide-chip h-7 rounded-s px-2.5" title={t('session-started-hint')}>{t('session-started-with', { name: settingName({ id, label: `setting-${id}`, values: [], defaultValue: '' }, t), value })}</span>)}
-    {!disabled && !launchedFree && actsFreely(session) && <NoAskBadge agent={{ skipsPermissions: true }} session />}
-    {waits.length > 0 && <span role="status" className="text-xs text-needs-you">{t('session-waiting-approval-note')}</span>}
+    {!disabled && !launchedFree && actsFreely(session) && <NoAskBadge agent={{ skipsPermissions: true }} session approved={skippingNow(session).every((x) => approvedHere(agentKey, x.option, x.value))} />}
+    {waits.some((w) => w.state === 'asking') && <span role="status" className="text-xs text-needs-you">{t('session-waiting-approval-note')}</span>}
     {failed && <span role="status" className="text-xs text-needs-you">{t(failed)}</span>}
   </>;
   const word = state ? t(`state-${state}`) : '';

@@ -79,6 +79,14 @@ export function actsFreely(s: SessionModel | undefined): boolean {
   return (s.config ?? []).some((o) => choiceSkips(o, o.current));
 }
 
+/** Every option and value the agent is on now that makes it act without asking: `option` as a switch to it names it (`mode` for the older mode picker). */
+export function skippingNow(s: SessionModel | undefined): { option: string; value: string }[] {
+  if (!s) return [];
+  const out = s.modes.filter((o) => o.skipsPermissions && o.id === s.currentMode).map((o) => ({ option: 'mode', value: o.id }));
+  for (const o of s.config ?? []) if (choiceSkips(o, o.current)) out.push({ option: o.id, value: o.current });
+  return out;
+}
+
 /** The values a setting offers: a boolean's two, else its choices (the one in use first when the agent named it and does not list it). */
 export function configChoices(o: ConfigOptionModel): SessionOptionModel[] {
   if (o.type === 'boolean') return ['true', 'false'].map((id) => ({ id, name: id, description: '', skipsPermissions: false }));

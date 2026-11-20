@@ -1,6 +1,8 @@
+import { useEffect, useId, useRef, useState } from 'react';
 import { t } from '../i18n';
+import { ATTENTION_DWELL_MS } from '../net/attention';
 import { approvalName } from '../net/approvalText';
-import { useSkipCapable } from '../net/skipApproval';
+import { dismissUnknown, isDismissedUnknown, useSkipCapable } from '../net/skipApproval';
 import { visible, type ApprovalModel } from '../net/view';
 import { StateMark } from './StateBadge';
 
@@ -17,11 +19,35 @@ export function SkipApproval({ approval, busy, onResolve }: {
 }) {
   const capable = useSkipCapable(approval.node);
   const skip = approval.skip;
+  // Allow stays off for a short dwell (as the attention dialog and the phone bar do), restarted whenever what the card says changes, so a
+  // click meant for something else never allows it. After a click both answers are off for a few seconds: one click sends one decision.
+  const wait = `skip-wait-${useId()}`;
+  const [ready, setReady] = useState(false);
+  const [sent, setSent] = useState(false);
+  const once = useRef(false); // set at once by the first click: state alone would let two clicks in one frame both go
+  const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useEffect(() => {
+    setReady(false); setSent(false); once.current = false;
+    const h = setTimeout(() => setReady(true), ATTENTION_DWELL_MS);
+    return () => clearTimeout(h);
+  }, [approval.id, approval.detail]);
+  useEffect(() => () => clearTimeout(timer.current), []);
+  const answer = (ok: boolean) => {
+    if (once.current || !onResolve) return;
+    once.current = true;
+    setSent(true);
+    clearTimeout(timer.current);
+    timer.current = setTimeout(() => { once.current = false; setSent(false); }, 4000); // a failed answer can be tried again
+    onResolve(ok);
+  };
   if (!skip) {
+    if (isDismissedUnknown(approval.id)) return null;
     return (
       <article role="alert" aria-label={t('skip-approval-unknown-title')} className="flex flex-col gap-1 border-b border-needs-you/60 bg-surface-2 px-3 py-2">
         <div className="flex items-center gap-2"><StateMark state="needs-you" /><strong className="min-w-0 flex-1 break-words">{t('skip-approval-unknown-title')}</strong></div>
         <p className="m-0 text-xs text-muted">{t('skip-approval-unknown')}</p>
+        {/* Only hides the card in this window: a decision in a shape this window does not understand is never signed or sent. */}
+        <div><button type="button" className="button px-3 py-1 text-xs" onClick={() => dismissUnknown(approval.id)}>{t('skip-approval-dismiss')}</button></div>
       </article>
     );
   }
@@ -47,9 +73,13 @@ export function SkipApproval({ approval, busy, onResolve }: {
       </dl>
       <p className="m-0 text-xs text-muted">{t('skip-approval-scope')}</p>
       {!capable && <p role="note" className="m-0 text-xs text-needs-you">{t('skip-approval-other-window')}</p>}
-      <div className="flex gap-2">
-        <button type="button" className="button button--primary px-3 py-1 text-xs" disabled={busy || !answerable} onClick={() => onResolve?.(true)}>{t('approval-allow')}</button>
-        <button type="button" className="button px-3 py-1 text-xs" disabled={busy || !answerable} onClick={() => onResolve?.(false)}>{t('approval-deny')}</button>
+      <div className="flex flex-wrap items-center gap-2">
+        <button type="button" className="button button--primary relative overflow-hidden px-3 py-1 text-xs" disabled={sent || !answerable || !ready} aria-describedby={!ready ? `${wait}` : undefined} onClick={() => answer(true)}>
+          {t('approval-allow')}
+          {answerable && <span aria-hidden className={`absolute inset-x-0 bottom-0 h-0.5 origin-left bg-current opacity-60 transition-transform ease-linear motion-reduce:transition-none ${ready ? 'scale-x-100' : 'scale-x-0'}`} style={{ transitionDuration: `${ATTENTION_DWELL_MS}ms` }} />}
+        </button>
+        <button type="button" className="button px-3 py-1 text-xs" disabled={sent || !answerable} onClick={() => answer(false)}>{t('approval-deny')}</button>
+        {answerable && !ready && <span id={wait} className="text-xs text-muted">{t('skip-approval-read-first')}</span>}
       </div>
     </article>
   );
