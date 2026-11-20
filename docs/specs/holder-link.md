@@ -66,8 +66,9 @@ next frame's.
 ## Limits of the holder itself
 - Connections are checked and closed (a peer that is not the lock holder gets no answer and no read) at most 16 per pass of the holder's
   loop, and the node is served first in every pass, so a flood of connections from the same user slows the node by those checks at
-  most. A peer that is the lock holder and starts a frame then stalls holds the holder for up to `FRAME_TIMEOUT` (5 s); sends have a
-  write timeout of the same length, so a node that never reads cannot hang the holder.
+  most. A peer that is the lock holder and starts a frame then stalls holds the holder for up to `FRAME_TIMEOUT` (5 s): once a frame
+  has begun each receive waits at most `WRITE_SLICE` (1 s) or what is left of the 5 s, and a frame whose last bytes come later is
+  refused (tested); sends have a write timeout of the same length, so a node that never reads cannot hang the holder.
 - A holder agent starts with **exactly** the environment in `Start` (the holder runs it with an empty environment plus that list; the
   holder's own environment is a stale snapshot of whoever started it and is never passed on). `env_remove` is therefore redundant for
   the holder and kept only for the format.
@@ -76,8 +77,9 @@ next frame's.
   starter, a log): `agora hold` closes every descriptor but 0, 1 and 2 first thing, and the child of each started agent marks all of
   them but 0, 1 and 2 close-on-exec before `exec` (marked, not closed, so the pipe std uses to report a failed `exec` still works).
   Both are tested, the first with a holder started with extra non-close-on-exec descriptors.
-- A write to a node that does not read gives up after `FRAME_TIMEOUT` (5 s in all, each blocked send waits `WRITE_SLICE`, 1 s), and the
-  holder drops that node: a node that stops reading cannot hang it (tested).
+- A write to a node that does not read gives up after `FRAME_TIMEOUT` (5 s in all, each blocked send waits `WRITE_SLICE`, 1 s, or what
+  is left of the 5 s when that is less, and is given at most 2 KiB, one kernel buffer even at the smallest `SO_SNDBUF`, so it
+  waits only once), and the holder drops that node: a node that stops reading, or takes a frame bit by bit, cannot hang it (tested).
 - `agora hold` refuses to start (it exits 1, `hold-failed`) when it cannot become a session leader (`setsid` fails with `EPERM` in a
   process-group leader); it never runs on in its starter's session.
 
@@ -217,7 +219,7 @@ wants to write that cannot fit one frame fails that write on the node's side, be
    sent into a socket nobody reads is the one unavoidable loss"): a reply that is written to a node that dies before using it is lost. `eof` is true when the
    agent's output has ended; with the agent's state `Exited` and no line left, nothing more will come.
 6. **Input.** `PipeWrite` queues one line (the holder adds the newline) for a thread of its own, up to 256 lines, so an agent that does not read never holds
-   the holder. A full queue or a closed input is `Refused(Failed)`; an unknown agent `Refused(UnknownAgent)`. `Resize` of a pipe agent is `BadRequest`.
+   the holder. A full queue, a closed input or an agent whose end the holder collected is `Refused(Failed)`; an unknown agent `Refused(UnknownAgent)`. `Resize` of a pipe agent is `BadRequest`.
 7. **Ending.** `Signal`, `Stop`, `List` and `Release` work on pipe agents as on terminals (a pipe agent is in `List`). `Release` of an ended agent forgets it;
    a running one is `BadRequest`. A holder with no agent left ends (decision 2). `SIGTERM` to the holder (`agora down --agents`) ends the pipe agents too.
    If the holder dies, the agent's stdin reaches end of file (nothing guarantees more; there is no `PDEATHSIG` on pipe agents).
@@ -259,9 +261,11 @@ wants to write that cannot fit one frame fails that write on the node's side, be
   need a new field in `PipeData`, a new tag; not done.)
 - **The bound is on encoded size** (each line costs its bytes plus 4), so everything kept, as `seen` and `fresh` together, fits one `PipeData` frame
   whatever the lengths of the lines (a flood of one-byte lines is tested).
-- **An ended agent's group:** when the holder collects a pipe agent's end it sends `SIGKILL` to what is left of the agent's process group, at that
-  moment (the one moment the group's number is certainly still the agent's), so a crashed adapter cannot leave processes running that hold its output
-  open.
+- **An ended agent's group:** when a pipe agent has ended, the holder sends `SIGKILL` to what is left of the agent's process group **before it
+  collects the agent's end** (`waitid` with `WNOWAIT`: until then the ended agent keeps its pid, so the group's number is certainly still the agent's),
+  and only then collects it, so a crashed adapter cannot leave processes running that hold its output open. On Linux it also ends what is left of the agent's **session** (what the agent moved into process groups of their own: job control,
+  `setpgid`); elsewhere only the group. A process that left the session (`setsid`) is not found and can keep the output open: the node then
+  counts the agent ended after a short grace without output.
 - **A node that went back to link version 1** still sees pipe agents in `List` (they are agents of the holder) but does not end them: a version 1 node ends only
   what `Attach` handed it, and `Attach` never lists pipe agents (a `Stop` it sent by name would work, but it never knows the names); they run until the
   holder gets `SIGTERM` (`agora down --agents`).

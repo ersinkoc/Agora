@@ -28,7 +28,8 @@ not must be sure no agent can be started that way by accident, by the hub, or by
    configuration, never over the hub). The node refuses a start that violates it with a stable error code (`agent.option_forbidden`), and
    `confined_only` requires the agent's confinement (ADR-0047/0050) to be active, so a "don't ask" agent still cannot write outside its folder.
 5. **Helpers never inherit it.** An agent started by `agent_start` (ADR-0057) gets no `skips_permissions` option unless the signed approval names it
-   explicitly; a grant never covers it.
+   explicitly; a grant never covers it. (Built: `agent_start { options }`, the card's confirmation and `agora-approval-start-v3`; see
+   `docs/specs/mesh-tools.md` and `docs/specs/protocol.md`.)
 6. **Per-kind defaults** ("always start Codex like this") are a later, separate decision; this ADR only adds the per-start choice.
 
 ## Notes from the macOS review (2026-11-13)

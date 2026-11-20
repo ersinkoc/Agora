@@ -142,6 +142,64 @@ pub fn start_signed_message_v2(
     m
 }
 
+/// ADR-0059 decision 5: the launch option ids an `agent.start` request's detail announces (`launch_options`: a list of `{id, label,
+/// skips_permissions}`, in the order they were shown). Empty for a detail without any, and for one that does not parse (the node wrote
+/// the detail itself; a start request without options is signed as it always was).
+pub fn detail_launch_options(detail: &str) -> Vec<String> {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(detail) else {
+        return Vec::new();
+    };
+    let Some(list) = v
+        .get("launch_options")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return Vec::new();
+    };
+    list.iter()
+        .map(|o| {
+            o.get("id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        })
+        .collect()
+}
+
+/// ADR-0059 decision 5: what a device signs to decide an `agent.start` request that carries launch options (a helper that acts without
+/// asking): the fields of [`start_signed_message_v2`] under the domain `agora-approval-start-v3`, then the option ids as a
+/// length-prefixed list ([`crate::directory::signed_list`]) before the hash of the detail. A request with options verifies only over
+/// this message (a v1 or v2 signature, which does not name them, is refused); one without keeps v1 or v2. Shared vectors:
+/// `schema/fixtures/signing/approval-start-v3.json`.
+#[allow(clippy::too_many_arguments)]
+pub fn start_signed_message_v3(
+    node_id: &str,
+    approval_id: &str,
+    approved: bool,
+    helper_grant: u32,
+    helpers_may_start: bool,
+    settings: &[(String, String)],
+    options: &[String],
+    detail: &str,
+) -> Vec<u8> {
+    let digest = ring::digest::digest(&ring::digest::SHA256, detail.as_bytes());
+    let hash: String = digest.as_ref().iter().map(|b| format!("{b:02x}")).collect();
+    let mut m = b"agora-approval-start-v3".to_vec();
+    for part in [
+        node_id,
+        approval_id,
+        if approved { "1" } else { "0" },
+        &helper_grant.to_string(),
+        if helpers_may_start { "1" } else { "0" },
+        &crate::directory::signed_pairs(settings),
+        &crate::directory::signed_list(options),
+        &hash,
+    ] {
+        m.push(0);
+        m.extend_from_slice(part.as_bytes());
+    }
+    m
+}
+
 /// ADR-0090 Amendment A: the action of a request to switch a running agent to a mode or option that skips permission questions. Only
 /// the node raises it ([`NodeApprovals::request_skip`]); a request an adapter makes under this name is refused.
 pub const SKIP_ACTION: &str = "agent.skip_permissions";
@@ -333,10 +391,10 @@ impl<V: Verifier> Approvals<V> {
         };
         // Verify before anything changes, and before saying whether the request expired: a peer without a trusted
         // key cannot learn the state of a request it can name (ids are 128 random bits, so it cannot guess one).
-        let settings = if p.action == START_ACTION {
-            detail_settings(&p.detail)
+        let (settings, options) = if p.action == START_ACTION {
+            (detail_settings(&p.detail), detail_launch_options(&p.detail))
         } else {
-            Vec::new()
+            (Vec::new(), Vec::new())
         };
         let msg = if p.action == SKIP_ACTION {
             // Only the skip domain decides it, and it carries no grant: anything else on it is refused. A request without a binding
@@ -352,6 +410,17 @@ impl<V: Verifier> Approvals<V> {
                 &r.approval_id,
                 r.approved,
                 binding,
+                &p.detail,
+            )
+        } else if p.action == START_ACTION && !options.is_empty() {
+            start_signed_message_v3(
+                &self.node_id,
+                &r.approval_id,
+                r.approved,
+                r.helper_grant,
+                r.helpers_may_start,
+                &settings,
+                &options,
                 &p.detail,
             )
         } else if p.action == START_ACTION && !settings.is_empty() {
@@ -2017,6 +2086,91 @@ mod tests {
             let hex: String = m.iter().map(|b| format!("{b:02x}")).collect();
             assert_eq!(hex, c["hex"].as_str().unwrap(), "{}", c["name"]);
         }
+    }
+
+    /// The v3 vectors the web client's and the terminal client's tests use too (`schema/fixtures/signing/approval-start-v3.json`).
+    #[test]
+    fn the_shared_start_v3_vectors_match() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../schema/fixtures/signing/approval-start-v3.json");
+        let v: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        for c in v["cases"].as_array().unwrap() {
+            let detail = c["detail"].as_str().unwrap();
+            // The settings and the options are read out of the detail the way the node reads them.
+            let settings = detail_settings(detail);
+            let options = detail_launch_options(detail);
+            let listed: Vec<(String, String)> = c["settings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|p| {
+                    (
+                        p[0].as_str().unwrap().to_string(),
+                        p[1].as_str().unwrap().to_string(),
+                    )
+                })
+                .collect();
+            let listed_options: Vec<String> = c["options"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|o| o.as_str().unwrap().to_string())
+                .collect();
+            assert_eq!(settings, listed, "{}", c["name"]);
+            assert_eq!(options, listed_options, "{}", c["name"]);
+            let m = start_signed_message_v3(
+                c["node"].as_str().unwrap(),
+                c["approval_id"].as_str().unwrap(),
+                c["approved"].as_bool().unwrap(),
+                u32::try_from(c["helper_grant"].as_u64().unwrap()).unwrap(),
+                c["helpers_may_start"].as_bool().unwrap(),
+                &settings,
+                &options,
+                detail,
+            );
+            let hex: String = m.iter().map(|b| format!("{b:02x}")).collect();
+            assert_eq!(hex, c["hex"].as_str().unwrap(), "{}", c["name"]);
+        }
+    }
+
+    /// ADR-0059 decision 5: a start whose detail names launch options is decided only over `agora-approval-start-v3`; the v1 and v2
+    /// messages (what a client that does not know options signs) do not decide it, nor v3 without the options or with others.
+    #[test]
+    fn a_start_with_launch_options_is_decided_only_over_the_options_it_shows() {
+        let shown = r#"{"kind":"codex","prompt":"fix","launch_options":[{"id":"skip-permissions","label":"option-skip-permissions","skips_permissions":true}]}"#;
+        let options = detail_launch_options(shown);
+        assert_eq!(options, ["skip-permissions"]);
+        let decide = |over: &dyn Fn(&str) -> Vec<u8>| {
+            let mut a = approvals();
+            let p = a.request("agent-1", START_ACTION, shown, 0, 0).unwrap();
+            let mut r = resolve_msg(&p.id, true, "phone", "s3cret", "node-1");
+            r.signature = sign("s3cret", &over(&p.id));
+            a.resolve(&r, 1).map(|(_, v)| v)
+        };
+        let v3 = |options: Vec<String>| {
+            move |id: &str| {
+                start_signed_message_v3("node-1", id, true, 0, false, &[], &options, shown)
+            }
+        };
+        assert_eq!(decide(&v3(options.clone())), Ok(Verdict::Approved));
+        for wrong in [
+            Vec::new(),
+            vec![
+                "skip-permissions".to_string(),
+                "skip-permissions".to_string(),
+            ],
+            vec!["plan".to_string()],
+        ] {
+            assert_eq!(decide(&v3(wrong)), Err(ApprovalError::BadSignature));
+        }
+        assert_eq!(
+            decide(&|id| start_signed_message("node-1", id, true, 0, false, shown)),
+            Err(ApprovalError::BadSignature)
+        );
+        assert_eq!(
+            decide(&|id| start_signed_message_v2("node-1", id, true, 0, false, &[], shown)),
+            Err(ApprovalError::BadSignature)
+        );
     }
 
     /// ADR-0066: a start whose detail carries settings is decided only over `agora-approval-start-v2`; the v1 message (what a client

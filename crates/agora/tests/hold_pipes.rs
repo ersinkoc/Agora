@@ -320,7 +320,9 @@ fn oversize_and_garbage_frames_are_refused_and_the_holder_keeps_serving() {
             .expect("hello");
             s.set_read_timeout(Some(Duration::from_secs(5)))
                 .expect("timeout");
-            let (payload, _) = read_frame(&mut s).expect("frame").expect("an answer");
+            let (payload, _) = read_frame(&mut s, Duration::from_secs(5))
+                .expect("frame")
+                .expect("an answer");
             match Reply::decode(&payload).expect("reply") {
                 Reply::HelloOk { .. } => return s,
                 Reply::Refused {
@@ -335,7 +337,7 @@ fn oversize_and_garbage_frames_are_refused_and_the_holder_keeps_serving() {
         // The holder closes a link it will not serve: what is read next is the end of it, or an error, never an answer.
         let end = Instant::now() + Duration::from_secs(5);
         loop {
-            match read_frame(s) {
+            match read_frame(s, Duration::from_millis(200)) {
                 Err(_) => return true,
                 Ok(Some(_)) => return false,
                 Ok(None) if Instant::now() < end => {}
@@ -467,6 +469,100 @@ fn what_an_ended_agent_left_in_its_group_is_ended_with_it() {
     }
 }
 
+/// F1301: what the agent moved into a process group of its own (job control, `setpgid`) is still in the session the holder made for
+/// it, and is ended with it too, so it neither runs on unnamed nor holds the agent's output open. Where the holder cannot see sessions
+/// (not Linux) only the group is ended, and this is not checked.
+#[test]
+fn what_an_ended_agent_moved_to_a_group_of_its_own_is_ended_with_it() {
+    if std::env::consts::OS != "linux" {
+        return;
+    }
+    let rig = Rig::new("session");
+    let mut c = rig.connect();
+    c.attach().expect("attach");
+    c.attach_pipes().expect("attach pipes");
+    // The child moves to a group of its own and only then lets the agent go on (a pipe it closes), so the agent's end is collected
+    // after the move; it holds the agent's output open and would run for ten minutes.
+    let perl = "pipe(R,W); my $p=fork(); if($p==0){ close R; setpgrp(0,0); close W; exec('sleep','600'); } close W; my $x=<R>; print \"$p\\n\";";
+    c.start_pipe(&StartPipeRequest {
+        agent: "p1".into(),
+        argv: vec!["/bin/sh".into(), "-c".into(), "perl -e \"$P\"".into()],
+        cwd: None,
+        env: vec![
+            ("PATH".into(), "/usr/bin:/bin".into()),
+            ("P".into(), perl.into()),
+        ],
+    })
+    .expect("start");
+    let lines = read_until_any(&mut c, "p1");
+    let child: u32 = lines[0].parse().expect("the child's pid");
+    let running = |pid: u32| {
+        let out = Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+            .expect("ps");
+        let stat = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        !stat.is_empty() && !stat.starts_with('Z')
+    };
+    let end = Instant::now() + Duration::from_secs(10);
+    loop {
+        let d = c.pipe_read("p1").expect("read");
+        if matches!(d.info.state, AgentState::Exited { .. }) && d.eof && !running(child) {
+            break;
+        }
+        if Instant::now() >= end {
+            let survived = running(child);
+            if survived {
+                // The test's own leftover, never anything else.
+                let _ = Command::new("kill")
+                    .args(["-KILL", &child.to_string()])
+                    .status();
+            }
+            panic!("the agent's moved child still runs ({survived}) or its output never closed");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// F1300: once the holder collected an agent's end its input is closed: a line written to it is `Failed` (the first one too), never
+/// queued for nobody and lost; a released one is unknown, and a running one still gets its lines.
+#[test]
+fn a_line_for_an_agent_that_ended_is_refused_never_queued_and_lost() {
+    let rig = Rig::new("ended-input");
+    let mut c = rig.connect();
+    c.attach().expect("attach");
+    c.attach_pipes().expect("attach pipes");
+    c.start_pipe(&pipe("live", "while read l; do echo \"got:$l\"; done"))
+        .expect("start live");
+    c.start_pipe(&pipe("gone", "echo bye")).expect("start gone");
+    let end = Instant::now() + Duration::from_secs(20);
+    loop {
+        let d = c.pipe_read("gone").expect("read");
+        if d.eof && matches!(d.info.state, AgentState::Exited { .. }) {
+            break;
+        }
+        assert!(Instant::now() < end, "it never ended");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    for i in 0..3 {
+        assert!(
+            matches!(
+                c.pipe_write("gone", format!("l{i}").as_bytes()),
+                Err(LinkError::Refused(Refusal::Failed, _))
+            ),
+            "write {i} to an ended agent was not refused"
+        );
+    }
+    c.release("gone").expect("release");
+    assert!(matches!(
+        c.pipe_write("gone", b"x"),
+        Err(LinkError::Refused(Refusal::UnknownAgent, _))
+    ));
+    c.pipe_write("live", b"still")
+        .expect("a running agent's write");
+    read_until(&mut c, "live", "got:still");
+}
+
 fn read_until_any(c: &mut Client, agent: &str) -> Vec<String> {
     let end = Instant::now() + Duration::from_secs(20);
     loop {
@@ -492,7 +588,9 @@ fn a_new_node_falls_back_to_version_one_against_a_holder_that_only_speaks_it() {
         for _ in 0..2 {
             let mut s = listener.accept().expect("accept");
             s.set_read_timeout(Some(Duration::from_secs(5))).expect("t");
-            let (payload, _) = read_frame(&mut s).expect("frame").expect("hello");
+            let (payload, _) = read_frame(&mut s, Duration::from_secs(5))
+                .expect("frame")
+                .expect("hello");
             let Request::Hello { version } = Request::decode(&payload).expect("hello") else {
                 panic!("not a hello");
             };

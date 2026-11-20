@@ -4,7 +4,8 @@
 import { agora } from '../gen/agora.js';
 import type { QuotaObs } from './quota';
 import { SKIP_ACTION, skipOf, type SkipRequest } from './skipApproval';
-import { type AgentTileModel, type CommandModel, type ConfigCategory, type ConfigOptionModel, type SessionModel, type SessionOptionModel, uiState } from '../model';
+import { detailLaunchOptions, type StartOption } from './approval';
+import { type AgentTileModel, type CommandModel, type ConfigCategory, type ConfigOptionModel, type SessionModel, type SessionOptionModel, type UiState, uiState } from '../model';
 
 type Ev = agora.v1.Event.$Properties;
 type Num = number | bigint | { toString(): string } | null | undefined;
@@ -190,7 +191,8 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
     case 'nodeOnline': {
       const b = e.nodeOnline;
       // The node's process started: what it ran before is gone, and its waiting approvals are lost.
-      for (const a of v.agents.values()) if (a.nodeId === b.nodeId && a.running) { a.running = false; a.state = 4 /* done */; }
+      // F1421: an ended agent can be asked nothing; its settings and commands go, as after `agentExited` (a later snapshot has none).
+      for (const a of v.agents.values()) if (a.nodeId === b.nodeId && a.running) { a.running = false; a.state = 4 /* done */; if (a.session) a.session = { ...a.session, config: undefined, commands: undefined }; }
       for (const k of [...v.approvals.keys()]) if (k.startsWith(`${b.nodeId}/`)) v.approvals.delete(k);
       for (const k of [...v.withTerminal]) if (k.startsWith(`${b.nodeId}/`)) v.withTerminal.delete(k);
       const was = v.nodes.get(b.nodeId);
@@ -363,6 +365,7 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
       a.state = 4 /* done */;
       a.sinceMs = num(b.interruptedAtMs) || at;
       a.interrupted = { resumable: !!b.resumable, atMs: num(b.interruptedAtMs), folder: b.folder ?? '', stillRunning: !!b.stillRunning };
+      if (a.session) a.session = { ...a.session, config: undefined, commands: undefined }; // F1421: ended, as the hub drops them
       v.agents.set(key, a);
       dropSkipCards(v, key);
       break;
@@ -505,7 +508,7 @@ export interface ApprovalModel {
 
 // An agent's request to start another (ADR-0057), read from the approval's detail. Every field is the asking agent's text: shown, never
 // interpreted. The detail itself is what the decision is signed over, so it is kept as it came.
-export interface StartRequest { agent: string; agentKind: string; node: string; kind: string; folder: string; prompt: string; inside: boolean; worktree: boolean; depth: number; grantAllowed: boolean; settings: StartSetting[] }
+export interface StartRequest { agent: string; agentKind: string; node: string; kind: string; folder: string; prompt: string; inside: boolean; worktree: boolean; depth: number; grantAllowed: boolean; settings: StartSetting[]; options: StartOption[] }
 // ADR-0066: a launch setting the request asks for (`label` is the machine's Fluent id for it, `value` the agent's text: shown, never interpreted).
 export interface StartSetting { id: string; label: string; value: string }
 
@@ -543,7 +546,7 @@ export function startRequest(action: string, detail: string): StartRequest | und
     const d = JSON.parse(detail) as Record<string, unknown>;
     const s = (k: string) => (typeof d[k] === 'string' ? (d[k] as string) : '');
     // `grant_allowed` (a scoped grant may be given: not for a shell or plain terminal program); a node that does not say so offers none.
-    return { agent: s('agent'), agentKind: s('agent_kind'), node: s('node'), kind: s('kind'), folder: s('folder'), prompt: s('prompt'), inside: d.inside === true, worktree: d.worktree === true, depth: typeof d.depth === 'number' ? d.depth : 1, grantAllowed: d.grant_allowed === true, settings: startSettings(d.settings) };
+    return { agent: s('agent'), agentKind: s('agent_kind'), node: s('node'), kind: s('kind'), folder: s('folder'), prompt: s('prompt'), inside: d.inside === true, worktree: d.worktree === true, depth: typeof d.depth === 'number' ? d.depth : 1, grantAllowed: d.grant_allowed === true, settings: startSettings(d.settings), options: detailLaunchOptions(detail) };
   } catch {
     return undefined;
   }
@@ -648,7 +651,7 @@ export function recentMessages(v: View, limit = 5): MessageModel[] {
   }));
 }
 
-export interface BoardTaskModel { id: string; title: string; status: 'open' | 'claimed' | 'done'; owner: string }
+export interface BoardTaskModel { id: string; title: string; status: 'open' | 'claimed' | 'done'; owner: string; ownerState?: UiState; ownerSkips?: boolean; held?: string[] }
 export interface BoardLeaseModel { path: string; holder: string; expiresAtMs: number }
 export interface BoardFolderModel { nodeId: string; machine: string; path: string }
 export interface BoardModel { projectId: string; project: string; folders: BoardFolderModel[]; tasks: BoardTaskModel[]; leases: BoardLeaseModel[] }
@@ -677,8 +680,11 @@ export function boards(v: View): BoardModel[] {
     }
     return b;
   };
+  const heldBy = new Map<string, string[]>();
+  for (const l of v.leases.values()) { const list = heldBy.get(l.agentId); if (list) list.push(l.path); else heldBy.set(l.agentId, [l.path]); }
   for (const [id, t] of v.tasks) {
-    board(t.projectId).tasks.push({ id, title: t.title, status: t.done ? 'done' : t.ownerId ? 'claimed' : 'open', owner: t.ownerId ? label(t.ownerId) : '' });
+    const owner = t.ownerId ? agents.get(t.ownerId) : undefined;
+    board(t.projectId).tasks.push({ id, title: t.title, status: t.done ? 'done' : t.ownerId ? 'claimed' : 'open', owner: t.ownerId ? label(t.ownerId) : '', ownerState: owner?.state, ownerSkips: owner?.skipsPermissions, held: t.ownerId ? heldBy.get(t.ownerId) ?? [] : [] });
   }
   // A lease belongs to its holder's project.
   for (const l of v.leases.values()) {
@@ -691,18 +697,21 @@ export function boards(v: View): BoardModel[] {
 
 export interface ProjectCost { label: string; microUsd: number }
 
-// Estimated spend per project (the folder name of its checkout), biggest first. Only agents the hub had a price for
+// Estimated spend per project (the folder name of its checkout or selected folder), biggest first. Only agents the hub had a price for
 // count; `perAgent` is the hub's answer keyed by agent. Agents whose project is not known add to no row.
 export function costByProject(v: View, perAgent: ReadonlyMap<string, number>): ProjectCost[] {
   const byProject = new Map<string, ProjectCost>();
   for (const [id, a] of v.agents) {
     const micro = perAgent.get(id);
     if (micro === undefined) continue;
-    const checkout = v.checkouts.get(v.worktrees.get(a.worktreeId)?.checkoutId ?? '');
-    if (!checkout) continue;
-    const row = byProject.get(checkout.projectId) ?? { label: lastSegment(checkout.path) || checkout.projectId, microUsd: 0 };
+    // F1420: an agent started in a folder belongs to that folder's project, as its tile says; one in a worktree, to its checkout's.
+    const ws = v.workspaces.get(v.agentWorkspaces.get(id) ?? '');
+    const checkout = ws ? undefined : v.checkouts.get(v.worktrees.get(a.worktreeId)?.checkoutId ?? '');
+    const project = ws ? { projectId: ws.projectId, path: ws.gitRoot || ws.path } : checkout;
+    if (!project) continue;
+    const row = byProject.get(project.projectId) ?? { label: lastSegment(project.path) || project.projectId, microUsd: 0 };
     row.microUsd += micro;
-    byProject.set(checkout.projectId, row);
+    byProject.set(project.projectId, row);
   }
   return [...byProject.values()].sort((a, b) => b.microUsd - a.microUsd || a.label.localeCompare(b.label));
 }

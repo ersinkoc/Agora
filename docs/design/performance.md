@@ -110,7 +110,10 @@ the supervisor reads the exit status without copying anything.
 ### Node and hub
 - PTY reads on dedicated threads (ADR-0013); detection runs on changed regions only, with an adaptive interval.
 - Scrollback stored compressed in memory with a configurable cap.
-- Hub projections are in memory with write-behind to storage; reads never hit disk on the hot path.
+- Hub projections are in memory. A node event's SQLite write, projection update and fanout run together on a blocking worker.
+  Each hub admits one job at a time. A connection groups up to 16 immediately available events or 64 KiB per job and then waits
+  for that batch before processing later frames. A larger event runs alone. Control frames, sequence gaps and acknowledgement
+  boundaries preserve stream order.
 - Event fanout uses subscription indexes (by project, node, agent) instead of filtering every event per client.
 - The file watcher stops checked-handle enumeration after recording 50,000 non-directory entries. It does not first
   collect a whole directory into memory. This is a recorded-entry budget; traversed directories are not counted.

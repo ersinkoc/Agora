@@ -16,7 +16,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use agora_core::AgentId;
 use agora_mesh::broker::{AgentInfo, AskStatus, Limits, Mesh};
-use agora_mesh::mcp::{McpConnection, Outcome, BOARD_TOOLS};
+use agora_mesh::mcp::{HandoffArgs, McpConnection, Outcome, SendMessageArgs, BOARD_TOOLS};
 use agora_platform::{local_listen_agent, LocalStream};
 use agora_protocol::jsonrpc::{to_line, Message};
 use agora_protocol::v1::event::Body;
@@ -74,6 +74,9 @@ pub struct StartArgs {
     pub node: Option<String>,
     /// ADR-0066: the launch settings asked for (`(id, value)`, at most one per id); the node checks them against its manifest.
     pub settings: Vec<(String, String)>,
+    /// ADR-0059 decision 5: the launch options asked for by id (`skip-permissions`, ...); the node checks them against its manifest and
+    /// its owner's policy, and only the user's signed decision naming them gives them to the helper.
+    pub options: Vec<String>,
 }
 
 /// The helper a start produced, or why it did not.
@@ -229,13 +232,33 @@ fn board_reply(
     if method != "tools/call" || !(channel || BOARD_TOOLS.contains(&name)) {
         return None;
     }
-    let project = mesh
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .agent_info(conn.agent())?
-        .project
-        .clone();
+    let (project, limits) = {
+        let m = mesh.lock().unwrap_or_else(|e| e.into_inner());
+        (m.agent_info(conn.agent())?.project.clone(), m.limits())
+    };
     let known = shares.get(&project);
+    // The calls that carry a message: malformed arguments go to the broker, which answers -32602, as for a local call; nothing
+    // goes to the hub. Then the broker's limits that do not depend on the route, checked here too: an older hub does not check the
+    // refs' size, and receivers would refuse every copy it sends (or a handoff's message after the task moved). A channel's
+    // `[#channel] ` prefix is the hub's to check: only it knows whether the project is still shared (the local broker delivers
+    // the body unprefixed), and `known` may be stale.
+    let content = if channel {
+        let SendMessageArgs { body, refs, .. } = agora_mesh::mcp::send_message_args(&args)?;
+        Some((body, refs))
+    } else if name == "handoff" {
+        let HandoffArgs { summary, refs, .. } = agora_mesh::mcp::handoff_args(&args)?;
+        Some((summary, refs))
+    } else {
+        None
+    };
+    if let Some((body, refs)) = content {
+        if let Err(e) = limits.check_content(body, &refs) {
+            return Some(Message::Response {
+                id,
+                result: agora_mesh::mcp::protocol_error_result(&e.to_error(&limits)),
+            });
+        }
+    }
     let unavailable = || {
         let text =
             json!({"error": {"code": "board.unavailable", "params": {"project_id": project}}});
@@ -420,7 +443,8 @@ fn list_reply(
     {
         return None;
     }
-    let filter = args.get("project").and_then(Value::as_str);
+    // A `project` that is not a string goes to the broker, which refuses it (-32602) rather than listing every agent.
+    let filter = agora_mesh::mcp::optional_str_param(&args, "project")?;
     let (mut rows, node) = {
         let m = mesh.lock().unwrap_or_else(|e| e.into_inner());
         let node = m.agent_info(conn.agent())?.node.clone();
@@ -999,6 +1023,21 @@ fn spawn_call(
                 }
                 Some(_) => return bad(),
             };
+            // ADR-0059 decision 5: `options` is a list of option ids (strings only); anything else is a malformed call.
+            let options = match args.get("options") {
+                None | Some(Value::Null) => Vec::new(),
+                Some(Value::Array(list)) => {
+                    let mut out = Vec::with_capacity(list.len());
+                    for v in list {
+                        let Some(v) = v.as_str() else {
+                            return bad();
+                        };
+                        out.push(v.to_string());
+                    }
+                    out
+                }
+                Some(_) => return bad(),
+            };
             let a = StartArgs {
                 kind: kind.to_string(),
                 prompt: prompt.unwrap_or_default(),
@@ -1006,6 +1045,7 @@ fn spawn_call(
                 worktree,
                 node,
                 settings,
+                options,
             };
             match helpers.start(me, &a) {
                 Ok(ticket) => {
@@ -1436,6 +1476,250 @@ mod tests {
                 from: b
             }
         );
+    }
+
+    /// Counts the board calls that reach the hub and answers as a hub that refused the call (the link's error).
+    struct CountingLink(std::sync::atomic::AtomicUsize);
+
+    impl RemoteLink for CountingLink {
+        fn post(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &[String],
+            done: Box<dyn FnOnce(Result<(), String>) + Send>,
+        ) {
+            done(Err("node.offline".into()));
+        }
+        fn board(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+            done: Box<dyn FnOnce(Result<BoardReply, String>) + Send>,
+        ) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            done(Err("protocol.invalid_message".into()));
+        }
+    }
+
+    /// Codex review of #793: on a project the node knows is shared, a `#channel` `send_message` with a ref or a `reply_to` that is
+    /// not a string is -32602 from the node, as on the local broker; it never goes to the hub (whose refusal would read as
+    /// `board.unavailable`). A well-formed one still goes to the hub.
+    #[test]
+    fn a_shared_channel_send_with_bad_arguments_is_refused_before_the_hub() {
+        let (mesh, a, _) = ask_fixture();
+        let link = Arc::new(CountingLink(std::sync::atomic::AtomicUsize::new(0)));
+        let remote: RemoteSlot = Mutex::new(Some(link.clone() as Arc<dyn RemoteLink>));
+        let shares = Shares::default();
+        shares.set("p", true);
+        let mut conn = McpConnection::new(a);
+        conn.handle(
+            r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}"#,
+            &mut mesh.lock().unwrap(),
+            now_ms(),
+        );
+        let call = |conn: &mut McpConnection, extra: &str| {
+            let line = format!(
+                r##"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"send_message","arguments":{{"to":"#dev","body":"hi"{extra}}}}}}}"##
+            );
+            board_reply(conn, &line, &mesh, &remote, &shares).unwrap_or_else(|| {
+                match conn.handle(&line, &mut mesh.lock().unwrap(), now_ms()) {
+                    Outcome::Reply(msg) => msg,
+                    _ => panic!("no reply"),
+                }
+            })
+        };
+        for bad in [
+            r#","refs":[1]"#,
+            r#","refs":"x""#,
+            r#","reply_to":5"#,
+            r#","reply_to":false"#,
+        ] {
+            match call(&mut conn, bad) {
+                Message::ErrorResponse { code, .. } => assert_eq!(code, -32602, "{bad}"),
+                other => panic!("{bad}: expected -32602, got {other:?}"),
+            }
+        }
+        assert_eq!(link.0.load(Ordering::SeqCst), 0, "nothing went to the hub");
+        call(&mut conn, r#","refs":["a"],"reply_to":null"#);
+        assert_eq!(
+            link.0.load(Ordering::SeqCst),
+            1,
+            "a good call goes to the hub"
+        );
+    }
+
+    /// Codex review of #793: an older hub does not check a `#channel`'s refs size, and upgraded receivers would refuse every copy,
+    /// so before the call goes to the hub the node checks what does not depend on the route: the refs' count and total size and
+    /// the raw body (`mesh.body_too_large` / `mesh.too_many_refs`, nothing reaches the hub; exactly at the limit it is forwarded).
+    /// The `[#channel] ` prefix is the hub's to check: its cache may say "shared" after the project went back to one node, where
+    /// the local broker delivers the body unprefixed, so a body that fits only without the prefix is forwarded, not refused.
+    #[test]
+    fn a_shared_channel_send_over_the_size_limits_is_refused_by_the_node() {
+        let (mesh, a, _) = ask_fixture();
+        let link = Arc::new(CountingLink(std::sync::atomic::AtomicUsize::new(0)));
+        let remote: RemoteSlot = Mutex::new(Some(link.clone() as Arc<dyn RemoteLink>));
+        let shares = Shares::default();
+        shares.set("p", true);
+        let mut conn = McpConnection::new(a);
+        conn.handle(
+            r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}"#,
+            &mut mesh.lock().unwrap(),
+            now_ms(),
+        );
+        let max = Limits::default().max_body_bytes;
+        let send = |conn: &McpConnection, args: Value| {
+            let line = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": "send_message", "arguments": args}})
+            .to_string();
+            board_reply(conn, &line, &mesh, &remote, &shares)
+        };
+        let code = |m: Option<Message>| match m {
+            Some(Message::Response { result, .. }) => agora_mesh::mcp::tool_result_value(&result)
+                .unwrap()["error"]["code"]
+                .as_str()
+                .unwrap_or("")
+                .to_string(),
+            other => panic!("expected a tool result, got {other:?}"),
+        };
+        let refs = |total: usize| json!(["x".repeat(total - max / 2), "y".repeat(max / 2)]);
+        for over in [
+            json!({"to": "#dev", "body": "hi", "refs": refs(max + 1)}),
+            json!({"to": "#dev", "body": "x".repeat(max + 1)}),
+        ] {
+            assert_eq!(code(send(&conn, over)), "mesh.body_too_large");
+            assert_eq!(link.0.load(Ordering::SeqCst), 0, "nothing reached the hub");
+        }
+        let n = json!(vec!["r"; Limits::default().max_refs + 1]);
+        assert_eq!(
+            code(send(&conn, json!({"to": "#dev", "body": "hi", "refs": n}))),
+            "mesh.too_many_refs"
+        );
+        assert_eq!(link.0.load(Ordering::SeqCst), 0, "nothing reached the hub");
+        // At the limits the call goes to the hub (whose refusal this fake link reports as `board.unavailable`).
+        send(
+            &conn,
+            json!({"to": "#dev", "body": "hi", "refs": refs(max)}),
+        );
+        assert_eq!(link.0.load(Ordering::SeqCst), 1);
+        send(&conn, json!({"to": "#dev", "body": "x".repeat(max)}));
+        assert_eq!(link.0.load(Ordering::SeqCst), 2);
+        // A body that fits but not with the prefix: the hub, which knows the current route, decides.
+        let room = max - "[#dev] ".len();
+        send(&conn, json!({"to": "#dev", "body": "x".repeat(room + 1)}));
+        assert_eq!(link.0.load(Ordering::SeqCst), 3, "forwarded to the hub");
+    }
+
+    /// Codex review of #793: a `handoff` on a shared project gets the same route-independent checks before the hub as a channel
+    /// message (an older hub does not check the refs' total size and could move the task before the receiver refuses it): argument
+    /// types (-32602), the refs' count and size and the summary (`mesh.body_too_large` / `mesh.too_many_refs`), nothing reaching the
+    /// hub; exactly at the limits it is forwarded.
+    #[test]
+    fn a_shared_handoff_over_the_size_limits_is_refused_by_the_node() {
+        let (mesh, a, _) = ask_fixture();
+        let link = Arc::new(CountingLink(std::sync::atomic::AtomicUsize::new(0)));
+        let remote: RemoteSlot = Mutex::new(Some(link.clone() as Arc<dyn RemoteLink>));
+        let shares = Shares::default();
+        shares.set("p", true);
+        let mut conn = McpConnection::new(a);
+        conn.handle(
+            r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}"#,
+            &mut mesh.lock().unwrap(),
+            now_ms(),
+        );
+        let max = Limits::default().max_body_bytes;
+        let handoff = |conn: &mut McpConnection, args: Value| {
+            let line = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": "handoff", "arguments": args}})
+            .to_string();
+            board_reply(conn, &line, &mesh, &remote, &shares).unwrap_or_else(|| {
+                match conn.handle(&line, &mut mesh.lock().unwrap(), now_ms()) {
+                    Outcome::Reply(msg) => msg,
+                    _ => panic!("no reply"),
+                }
+            })
+        };
+        let code = |m: Message| match m {
+            Message::Response { result, .. } => agora_mesh::mcp::tool_result_value(&result)
+                .unwrap()["error"]["code"]
+                .as_str()
+                .unwrap_or("")
+                .to_string(),
+            Message::ErrorResponse { code, .. } => code.to_string(),
+            other => panic!("unexpected {other:?}"),
+        };
+        let refs = |total: usize| json!(["x".repeat(total - max / 2), "y".repeat(max / 2)]);
+        let to = "beta/a";
+        for (case, (args, want)) in [
+            (json!({"to": to, "summary": "s", "refs": refs(max + 1)}), "mesh.body_too_large"),
+            (json!({"to": to, "summary": "x".repeat(max + 1)}), "mesh.body_too_large"),
+            (
+                json!({"to": to, "summary": "s", "refs": vec!["r"; Limits::default().max_refs + 1]}),
+                "mesh.too_many_refs",
+            ),
+            (json!({"to": to, "summary": "s", "refs": [1]}), "-32602"),
+            (json!({"to": to, "summary": "s", "task_id": 5}), "-32602"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(code(handoff(&mut conn, args)), want, "case {case}");
+            assert_eq!(link.0.load(Ordering::SeqCst), 0, "case {case}: nothing reached the hub");
+        }
+        // At the limits the call goes to the hub (whose refusal this fake link reports as `board.unavailable`).
+        handoff(
+            &mut conn,
+            json!({"to": to, "summary": "s", "refs": refs(max)}),
+        );
+        assert_eq!(link.0.load(Ordering::SeqCst), 1);
+        handoff(&mut conn, json!({"to": to, "summary": "x".repeat(max)}));
+        assert_eq!(link.0.load(Ordering::SeqCst), 2);
+    }
+
+    /// Codex review of #793: the node answers `agents_list` itself (before the broker), so it must refuse a `project` that is not a
+    /// string with -32602 as the broker does, not treat it as omitted and list every agent. A string or no `project` still lists.
+    #[test]
+    fn the_nodes_agents_list_refuses_a_project_that_is_not_a_string() {
+        let (mesh, a, _) = ask_fixture();
+        let remote: RemoteSlot = Mutex::new(None);
+        let shares = Shares::default();
+        let mut conn = McpConnection::new(a);
+        {
+            let mut m = mesh.lock().unwrap();
+            conn.handle(
+                r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}"#,
+                &mut m,
+                now_ms(),
+            );
+        }
+        let call = |conn: &mut McpConnection, project: &str| {
+            let line = format!(
+                r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"agents_list","arguments":{{{project}}}}}}}"#
+            );
+            list_reply(conn, &line, &mesh, &remote, &shares).unwrap_or_else(|| {
+                let mut m = mesh.lock().unwrap();
+                match conn.handle(&line, &mut m, now_ms()) {
+                    Outcome::Reply(msg) => msg,
+                    _ => panic!("no reply"),
+                }
+            })
+        };
+        for bad in [r#""project":false"#, r#""project":5"#, r#""project":{}"#] {
+            match call(&mut conn, bad) {
+                Message::ErrorResponse { code, .. } => assert_eq!(code, -32602, "{bad}"),
+                other => panic!("{bad}: expected -32602, got {other:?}"),
+            }
+        }
+        for good in ["", r#""project":"p""#, r#""project":null"#] {
+            let Message::Response { result, .. } = call(&mut conn, good) else {
+                panic!("{good}: expected a list");
+            };
+            let rows = agora_mesh::mcp::tool_result_value(&result).unwrap();
+            assert_eq!(rows.as_array().unwrap().len(), 2, "{good}");
+        }
     }
 
     #[test]

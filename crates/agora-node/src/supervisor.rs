@@ -1107,6 +1107,40 @@ impl Supervisor {
             .collect())
     }
 
+    /// ADR-0059 decision 5: the launch options an agent's `agent_start` asks for, checked against this node's manifest for `kind` and
+    /// the owner's `skip_permissions` policy before anyone is asked (an undeclared, repeated or malformed id is `agent.option_invalid`,
+    /// a policy refusal `agent.option_forbidden`), and returned as `(id, label, skips_permissions)` in the manifest's order: what the
+    /// approval card shows and the signature covers. Which options skip permissions is this manifest's word. The user's signed
+    /// decision naming them is their confirmation. Empty in, empty out.
+    pub fn checked_options(
+        &self,
+        kind: &str,
+        ids: &[String],
+    ) -> Result<Vec<(String, String, bool)>, SupervisorError> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.launch_choice(
+            kind,
+            &Requested {
+                ids: ids.to_vec(),
+                confirmed: ids.to_vec(),
+                ..Requested::default()
+            },
+        )?;
+        let k = self
+            .kinds
+            .get(kind)
+            .ok_or_else(|| SupervisorError::UnknownKind(kind.to_string()))?;
+        Ok(k.manifest
+            .launch
+            .option
+            .iter()
+            .filter(|o| ids.contains(&o.id))
+            .map(|o| (o.id.clone(), o.label.clone(), o.skips_permissions))
+            .collect())
+    }
+
     /// ADR-0057: `child` was started by `parent` (an agent's `agent_start`). Carried in every view of `child`.
     pub fn set_parent(&mut self, child: &AgentId, parent: &AgentId) {
         self.parents.insert(child.clone(), parent.clone());
@@ -2481,6 +2515,23 @@ impl Supervisor {
         }
     }
 
+    /// ADR-0090 Amendment A: the ids of the select config options of category `mode` an adapter agent reported. An agent that gives its
+    /// mode as such an option (ACP config options: the bridge builds the mode list from it and sets a mode through it) has ONE setting
+    /// behind `AgentSetMode` and `AgentSetConfig` of that id, so a switch through either settles the waiting cards of both (F1322).
+    pub fn mode_config_ids(&self, id: &AgentId) -> Vec<String> {
+        self.adapters
+            .get(id)
+            .map(|e| {
+                e.rich
+                    .config
+                    .iter()
+                    .filter(|o| !o.boolean && o.category == "mode")
+                    .map(|o| o.id.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// [`prepare_set_config`](Self::prepare_set_config) and run, under the caller's lock (tests).
     ///
     /// `Ok(Some(ask))`: the choice skips permissions and waits for the owner's approval; nothing was applied.
@@ -2517,6 +2568,11 @@ impl Supervisor {
                 SupervisorError::NotFound(id.clone())
             });
         };
+        // A stopped agent keeps the modes it last reported, but it has no session to switch: nothing is applied or asked about for
+        // it (F1320: a mode that skips would otherwise raise a card for an agent that ended).
+        if !e.running {
+            return Err(SupervisorError::NotFound(id.clone()));
+        }
         if !e.capabilities.iter().any(|c| c == kind.capability()) {
             return Err(SupervisorError::OptionUnsupported(capability));
         }

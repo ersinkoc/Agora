@@ -1204,3 +1204,134 @@ fn a_request_with_settings_is_never_granted_even_when_the_decision_says_so() {
     assert!(!is_error, "started under the grant without asking: {v}");
     e.stop(&parent, true);
 }
+
+/// ADR-0059 decision 5: an agent's `agent_start` may name launch options, so a helper acts without asking, but only when the user's
+/// signed decision names them. They are checked against the node's manifest and the owner's policy before anyone is asked, shown on the
+/// card with whether each skips permissions, signed under `agora-approval-start-v3`, never covered by a grant, and the helper carries
+/// the "does not ask" badge.
+#[test]
+fn a_helper_acts_without_asking_only_when_the_signed_decision_names_it() {
+    if !supported() {
+        return;
+    }
+    let e = Env::new("helper-options");
+    let parent = e.launch(&e.folder, "probe");
+    let mut m = e.mcp(&parent);
+    // Refused before the user is asked: an option the kind does not declare, one that is not a string, one the owner forbids.
+    let id = m.call(
+        "agent_start",
+        json!({"kind": "probe", "options": ["no-such-option"]}),
+    );
+    assert_eq!(m.error_code(id), "agent.option_invalid");
+    let _ = m.call("agent_start", json!({"kind": "probe", "options": [5]}));
+    assert_eq!(m.reply()["error"]["code"], -32602);
+    e.node()
+        .supervisor
+        .lock()
+        .unwrap()
+        .set_skip_permissions(agora_node::launch_options::SkipPermissions::Forbid);
+    let id = m.call(
+        "agent_start",
+        json!({"kind": "probe", "options": ["skip-permissions"]}),
+    );
+    assert_eq!(m.error_code(id), "agent.option_forbidden");
+    assert!(
+        e.node().approvals.waiting().is_empty(),
+        "nothing was asked about"
+    );
+    e.node()
+        .supervisor
+        .lock()
+        .unwrap()
+        .set_skip_permissions(agora_node::launch_options::SkipPermissions::Allow);
+
+    // The card names the option and that it skips permissions; no grant is offered.
+    let call = m.call(
+        "agent_start",
+        json!({"kind": "probe", "options": ["skip-permissions"], "settings": {"effort": "high"}}),
+    );
+    let p = e.request_of(&parent);
+    let detail: Value = serde_json::from_str(&p.detail).unwrap();
+    assert_eq!(
+        detail["launch_options"],
+        json!([{"id": "skip-permissions", "label": "option-skip-permissions", "skips_permissions": true}])
+    );
+    assert_eq!(detail["grant_allowed"], false);
+    let settings = agora_node::approvals::detail_settings(&p.detail);
+    let options = agora_node::approvals::detail_launch_options(&p.detail);
+    assert_eq!(options, ["skip-permissions"]);
+    let v3 = |settings: &[(String, String)], options: &[String], detail: &str| {
+        e.sign(&agora_node::approvals::start_signed_message_v3(
+            NODE, &p.id, true, 0, false, settings, options, detail,
+        ))
+    };
+    // What a client that does not know options signs (v1, v2), and v3 over anything but what was shown: all refused.
+    let attempts = [
+        e.sign(&start_signed_message(
+            NODE, &p.id, true, 0, false, &p.detail,
+        )),
+        e.sign(&agora_node::approvals::start_signed_message_v2(
+            NODE, &p.id, true, 0, false, &settings, &p.detail,
+        )),
+        v3(&settings, &[], &p.detail),
+        v3(&[], &options, &p.detail),
+        v3(
+            &settings,
+            &["skip-permissions".into(), "x".into()],
+            &p.detail,
+        ),
+        v3(
+            &settings,
+            &options,
+            &p.detail
+                .replace("\"skips_permissions\":true", "\"skips_permissions\":false"),
+        ),
+    ];
+    for sig in attempts {
+        assert_eq!(
+            e.resolve(&p, true, 0, false, sig).unwrap_err().code,
+            "approval.signature_invalid"
+        );
+    }
+    assert_eq!(probe_args(&e.root).len(), 1, "only the parent runs");
+    // The decision over exactly what was shown starts the helper with the option; a grant signed with it is ignored.
+    let sig = e.sign(&agora_node::approvals::start_signed_message_v3(
+        NODE, &p.id, true, 3, true, &settings, &options, &p.detail,
+    ));
+    e.resolve(&p, true, 3, true, sig).unwrap();
+    let (v, is_error) = m.result(call);
+    assert!(!is_error, "{v}");
+    let helper = v["agent_id"].as_str().unwrap().to_string();
+    wait_until("helper report", || probe_args(&e.root).len() == 2);
+    let with_flag: Vec<_> = probe_args(&e.root)
+        .into_iter()
+        .filter(|a| a.contains(&"--fake-skip-permissions".to_string()))
+        .collect();
+    assert_eq!(with_flag.len(), 1, "only the helper runs with the flag");
+    assert!(with_flag[0].contains(&"--fake-effort".to_string()));
+    let view = e
+        .node()
+        .supervisor
+        .lock()
+        .unwrap()
+        .list()
+        .into_iter()
+        .find(|v| v.id.as_str() == helper)
+        .unwrap();
+    assert!(view.skips_permissions);
+    assert_eq!(view.launch_options, ["skip-permissions"]);
+    let events = e.node().events.events_after(0);
+    assert!(events.iter().any(|ev| matches!(&ev.body, Some(Body::AgentStarted(s)) if s.agent_id == helper && s.skips_permissions && s.launch_options == ["skip-permissions"] && s.parent_agent_id == parent)));
+    // No grant came with it: the next start, with or without the option, is asked about, and the helper may not ask in turn.
+    let mut h = e.mcp(&helper);
+    let id = h.call("agent_start", json!({"kind": "probe"}));
+    assert_eq!(h.error_code(id), "mesh.helper_limit");
+    let call = m.call(
+        "agent_start",
+        json!({"kind": "probe", "options": ["skip-permissions"]}),
+    );
+    let p2 = e.request_of(&parent);
+    assert_ne!(p2.id, p.id, "asked again: no grant covers an option");
+    e.stop(&parent, true);
+    let _ = call;
+}

@@ -25,10 +25,16 @@ export async function startSignedMessage(
   const hash = toHex(new Uint8Array(await subtle.digest('SHA-256', enc.encode(detail) as BufferSource)));
   // ADR-0066: a request that lists settings is decided only over `agora-approval-start-v2`, which names them (length-prefixed) before the
   // hash; one without keeps v1 exactly. The settings are read from the same detail that is shown and hashed.
+  // ADR-0059 decision 5: one that lists launch options (a helper that acts without asking) is decided only over
+  // `agora-approval-start-v3`, which names the settings and then the option ids (length-prefixed) before the hash.
   const settings = detailSettings(detail);
-  const parts = settings.length > 0
-    ? ['agora-approval-start-v2', nodeId, approvalId, approved ? '1' : '0', String(helperGrant), helpersMayStart ? '1' : '0', signedPairs(settings), hash]
-    : ['agora-approval-start-v1', nodeId, approvalId, approved ? '1' : '0', String(helperGrant), helpersMayStart ? '1' : '0', hash];
+  const options = detailLaunchOptions(detail).map((o) => o.id);
+  const head = [nodeId, approvalId, approved ? '1' : '0', String(helperGrant), helpersMayStart ? '1' : '0'];
+  const parts = options.length > 0
+    ? ['agora-approval-start-v3', ...head, signedPairs(settings), signedList(options), hash]
+    : settings.length > 0
+      ? ['agora-approval-start-v2', ...head, signedPairs(settings), hash]
+      : ['agora-approval-start-v1', ...head, hash];
   const out: number[] = [];
   parts.forEach((p, i) => {
     if (i > 0) out.push(0);
@@ -42,6 +48,33 @@ export async function startSignedMessage(
 export function signedPairs(items: readonly (readonly [string, string])[]): string {
   const n = (x: string) => new TextEncoder().encode(x).length;
   return String(items.length) + items.map(([id, value]) => `:${n(id)}:${id}:${n(value)}:${value}`).join('');
+}
+
+/** ADR-0059: ids as signed: the count, then `:<byte length>:<id>` per id in the order given (UTF-8 lengths). */
+export function signedList(items: readonly string[]): string {
+  const n = (x: string) => new TextEncoder().encode(x).length;
+  return String(items.length) + items.map((id) => `:${n(id)}:${id}`).join('');
+}
+
+export interface StartOption { id: string; label: string; skipsPermissions: boolean }
+
+/** ADR-0059 decision 5: the launch options a start request's detail lists, read as the node reads them (a `launch_options` list of
+ * `{id, label, skips_permissions}`). Whether one skips permissions is the node's word, bound by the signed hash of the detail. */
+export function detailLaunchOptions(detail: string): StartOption[] {
+  try {
+    const d = JSON.parse(detail) as { launch_options?: unknown };
+    if (!Array.isArray(d.launch_options)) return [];
+    return d.launch_options.map((x) => {
+      const o = (typeof x === 'object' && x !== null ? x : {}) as Record<string, unknown>;
+      return {
+        id: typeof o.id === 'string' ? o.id : '',
+        label: typeof o.label === 'string' ? o.label : '',
+        skipsPermissions: o.skips_permissions === true,
+      };
+    });
+  } catch {
+    return [];
+  }
 }
 
 /** ADR-0066: the settings a start request's detail lists, read as the node reads them (a `settings` list of `{id, value}`). */

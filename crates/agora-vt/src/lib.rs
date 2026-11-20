@@ -76,8 +76,15 @@ pub struct Modes {
 impl Style {
     /// The SGR sequence that draws this style from a reset state (`ESC [ 0 ; … m`): attributes, then the palette or 24-bit colours.
     pub fn sgr(&self) -> String {
+        let mut out = String::new();
+        self.append_sgr(&mut out);
+        out
+    }
+
+    /// Append this style's SGR sequence to a repaint buffer.
+    pub fn append_sgr(&self, out: &mut String) {
         use std::fmt::Write as _;
-        let mut out = String::from("\x1b[0");
+        out.push_str("\x1b[0");
         for (on, code) in [
             (self.bold, "1"),
             (self.dim, "2"),
@@ -110,7 +117,6 @@ impl Style {
         color(self.fg, 30, 90, 38);
         color(self.bg, 40, 100, 48);
         out.push('m');
-        out
     }
 }
 
@@ -192,5 +198,27 @@ pub trait Terminal: Send {
             .collect();
         v.reverse();
         v
+    }
+}
+
+#[cfg(test)]
+mod style_tests {
+    use super::{Color, Style};
+
+    #[test]
+    fn append_sgr_preserves_the_prefix_and_emits_a_complete_style() {
+        let style = Style {
+            fg: Color::Rgb(24, 120, 250),
+            bg: Color::Indexed(13),
+            underline: true,
+            inverse: true,
+            ..Style::default()
+        };
+        let mut repaint = String::from("prefix");
+        style.append_sgr(&mut repaint);
+        Style::default().append_sgr(&mut repaint);
+
+        assert_eq!(repaint, "prefix\x1b[0;4;7;38;2;24;120;250;105m\x1b[0m");
+        assert_eq!(style.sgr(), "\x1b[0;4;7;38;2;24;120;250;105m");
     }
 }

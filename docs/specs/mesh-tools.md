@@ -17,7 +17,7 @@ the node per MCP connection; agents cannot impersonate each other.
 | `lease_acquire` | `{ paths: [glob], ttl_s: number, reason }` | `{ lease_id, expires_at }` or `lease.held` |
 | `lease_release` | `{ lease_id }` | `{ ok }` |
 | `handoff` | `{ to, task_id?, summary, refs }` | `{ handoff_id }` |
-| `agent_start` | `{ kind, prompt?, folder?, worktree?: bool, node?, settings?: { id: value } }` | `{ agent_id }` after the user's decision (ADR-0057) |
+| `agent_start` | `{ kind, prompt?, folder?, worktree?: bool, node?, settings?: { id: value }, options?: [id] }` | `{ agent_id }` after the user's decision (ADR-0057) |
 | `agent_wait` | `{ agent_id, state: "idle"\|"working"\|"blocked"\|"done"\|"exited", timeout_s?: number (default 600, at most 3600) }` | `{ agent_id, state }` or `mesh.timeout` |
 | `agent_output` | `{ agent_id, lines?: number (default 40, at most 200) }` | `{ agent_id, source: "screen"\|"transcript", lines }` |
 
@@ -28,7 +28,7 @@ the node per MCP connection; agents cannot impersonate each other.
   authority; sensitive actions still go through approvals (see `security/threat-model.md`).
 - Rate limits per agent (messages per minute, open asks) prevent loops between agents.
 - Message bodies are size-limited; large content is passed by reference (path, commit, task). A task's title, detail and
-  summary have the same limit (`mesh.body_too_large`).
+  summary have the same limit (`mesh.body_too_large`), and so do a message's or handoff's `refs` taken together.
 - All mesh traffic is in the audit log.
 
 ## MCP conversation (`agora-mesh::mcp`)
@@ -47,7 +47,7 @@ and `summary`; `inbox` items carry `kind` (`message`, `ask`, `reply`, `handoff`)
 Tool errors are results with `isError: true` whose text is JSON `{"error": {"code", "params"}}` using the codes in
 `error-codes.md` (new: `mesh.rate_limited`, `mesh.body_too_large`, `mesh.too_many_refs`, `mesh.too_many_asks`, `mesh.timeout`,
 `task.not_found`, `task.not_open`, `task.blocked`, `task.not_owner`, `lease.not_found`, `lease.invalid_path`). Bad arguments are
-JSON-RPC `-32602`. `ask` does not block the library: the connection returns `Waiting { ask_id, deadline }` and the caller polls
+JSON-RPC `-32602`; an optional argument a tool uses that has the wrong type is a bad argument, never taken as omitted. `ask` does not block the library: the connection returns `Waiting { ask_id, deadline }` and the caller polls
 the broker and calls `finish_ask`. If the originating transport ends first, its runtime calls the caller-bound
 `Mesh::cancel_ask` for the asks it owns; another agent cannot cancel them.
 
@@ -117,11 +117,11 @@ broker, so a project that lives on one machine never needs the hub. The board's 
 hub's view; one that ended gives its tasks and leases back, and a lease also ends at its TTL if its node vanishes.
 
 A `handoff` that names a task goes only to an agent of the task's own project (an agent of another project could neither see nor finish the task): to any other it fails with `mesh.recipient_unknown` and nothing moves; a `handoff` without a task is a message and may cross projects. A `handoff` to `<node>/<agent>` moves the task and sends the receiver a message from the giver in one step; if the receiving node
-is offline it fails with `node.offline` and the task does not move. When the hub cannot be reached, a project this node knows to
+is offline it fails with `node.offline` and the task does not move. The node checks a shared project's `handoff` as it does a `#channel` message before it sends the call to the hub: wrong-type arguments are -32602, and a summary or refs over the limits are `mesh.body_too_large` / `mesh.too_many_refs`, so the task never moves on a hub that would not check them. When the hub cannot be reached, a project this node knows to
 be shared fails with `board.unavailable` (the agent's other tools and its worktree keep working); a project it does not know to be
 shared stays on the local broker. When a project becomes shared (gains its second online node with a checkout) the hub sends each such node `BoardJoin`: the node hands over its open and claimed tasks and its live leases for the project and stops keeping them; the hub puts them on the board (each task gets a board id and its owner a notice `{"board":"task_moved","from":...,"to":...}` from `hub/board`; a lease the board already holds for another agent is refused, and both holders get `lease_refused` / `lease_conflict`). Until the nodes answered, or 5 s passed, `lease_acquire` and `task_claim` on that project answer `board.unavailable` (ADR-0039 amendment B). Done tasks stay in the node's local history. A node with `mesh.remote = false` answers `node.policy_denied` and keeps its work; a late answer is still applied (only the 5 s hold ends). A node hands over at most 500 tasks and 500 leases (leases by whole grant; what does not fit stays on its broker and keeps working there), the hub takes no more from one answer, cuts titles and details to the message size limit, and runs a handed-over lease at most one hour; a task whose creator or owner no longer runs lands open, made by `hub/board`. `BoardJoin` is answered where the hub's commands enter the node; the local control socket refuses it. Not done yet: boards
 keep their tasks in the hub's SQLite file (settings key `board.<project>`, so they are in its backup); a change (create, claim, complete, lease, release, handoff) is answered as done only after the board and its audit events are written, together in one transaction (all or nothing), and only then published to the view, windows and nodes; when the hub cannot write them the call fails with `internal` (`incident_id: board.store`) and the board in memory is put back as it was, so an acknowledged claim or handoff survives a restart and a refused one never appears; leases are stored with them (ADR-0040) and a restart keeps those whose TTL has not passed (a restored lease gets a new id its holder does not know, so the holder cannot release it, but it ends at its TTL, when its holder ends or when its machine restarts, like a live one), a task claimed by an agent that is gone after a restart is given back, and when a machine restarted before its board was restored (boards are restored on first use) its earlier agents' tasks and leases are given back as the board is restored, so a new agent that reuses a local id (`agent-1`) inherits nothing; a message to a
-`#channel` is sent as `BoardCall{tool: "send_message"}`; the hub makes one copy per other running agent of the project (any online node), each arriving as a message from the sender with the channel name in front of the text (`[#dev] ...`), best effort and at most once, within the usual body and ref limits (the tool returns `{ delivered_to }` instead of `{ message_id }` in this case). Channel history is not kept and `inbox` on the receiver is how it is read. The web console shows each project's board (tasks with their owner, held paths) in its right column, built from the hub's
+`#channel` is sent as `BoardCall{tool: "send_message"}`; the hub makes one copy per other running agent of the project (any online node), each arriving as a message from the sender with the channel name in front of the text (`[#dev] ...`), best effort and at most once, within the usual body and ref limits, which the hub checks before any copy goes out on the text receivers get (`[#dev] ` plus the body; `mesh.body_too_large` / `mesh.too_many_refs` with nothing sent). Arguments of the wrong type (a ref or `reply_to` that is not a string) are -32602 from the node, as for a local message, and never reach the hub; before it sends the call the node also checks the limits that do not depend on the route (the refs' count and total size and the body as written), so an older hub cannot fan out copies that receivers refuse; the prefixed text is checked by the hub, which knows whether the project is still shared (the tool returns `{ delivered_to }` instead of `{ message_id }` in this case). Channel history is not kept and `inbox` on the receiver is how it is read. The web console shows each project's board (tasks with their owner, held paths) in its right column, built from the hub's
 `TaskChanged`/`LeaseGranted`/`LeaseReleased` events; a window that opens or reloads gets the boards in its `Snapshot` (`tasks`, `leases`, ADR-0040).
 
 ## Agents that start agents (ADR-0057)
@@ -138,7 +138,13 @@ the node answers them itself (`agora-node::spawn`), not the broker. The caller i
   them against its manifest before anyone is asked (`agent.setting_unknown`, `agent.setting_invalid`; nothing is announced and nothing
   starts), the card lists every one next to the kind, folder and prompt, and the decision is signed over them (`agora-approval-start-v2`,
   `protocol.md`), so the helper starts with exactly what the user was shown. A request with settings offers no grant (`grant_allowed:
-  false`) and a start with settings is always asked, even under a grant. A helper never gets a launch option (ADR-0059).
+  false`) and a start with settings is always asked, even under a grant.
+- **Launch options (ADR-0059 decision 5).** `options` names launch options the kind declares by id (`skip-permissions`: the helper acts
+  without asking). A helper never inherits its parent's; it gets one only this way. The node checks the ids against its manifest and its
+  owner's `skip_permissions` policy before anyone is asked (`agent.option_invalid`, `agent.option_forbidden`; nothing is announced and
+  nothing starts), the card lists each with whether it skips permissions (the manifest's word) and asks for the same confirmation as a
+  start from the window, and the decision is signed over `agora-approval-start-v3` (`protocol.md`). Such a request offers no grant and
+  is always asked, even under one; the helper carries the "does not ask" badge.
 - **A grant.** The decision may allow "up to N helpers of this kind in this folder" (N at most 10, this start included) and, separately,
   that the helpers it starts may ask in turn. Later starts that match the grant (same asking agent, kind, folder and `worktree`
   choice) start at once. A grant ends when the asking agent exits or is stopped, or when revoked (`GrantRevoke` with the approval id;

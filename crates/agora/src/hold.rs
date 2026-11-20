@@ -358,6 +358,10 @@ impl Holder {
         for a in &mut self.pipes {
             if a.exit.is_none() {
                 a.exit = a.proc.try_wait().unwrap_or(None);
+                if a.exit.is_some() {
+                    // Its input is closed with it: a line written to an ended agent is `Failed`, never queued and lost.
+                    a.input = None;
+                }
             }
         }
         let now = Instant::now();
@@ -403,7 +407,7 @@ impl Holder {
         if stream.set_read_timeout(Some(HELLO_WAIT)).is_err() {
             return;
         }
-        let Ok(Some((payload, _))) = read_frame(&mut stream) else {
+        let Ok(Some((payload, _))) = read_frame(&mut stream, HELLO_WAIT) else {
             return;
         };
         let Ok(Request::Hello { version }) = Request::decode(&payload) else {
@@ -454,7 +458,7 @@ impl Holder {
             self.detach();
             return Some(false);
         }
-        let (payload, _) = match read_frame(&mut node.stream) {
+        let (payload, _) = match read_frame(&mut node.stream, TICK) {
             Ok(Some(f)) => f,
             Ok(None) => return Some(false),
             Err(_) => {

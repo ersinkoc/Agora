@@ -116,6 +116,38 @@ pub fn start_message_v2(
     m
 }
 
+/// ADR-0059 decision 5: the bytes a device signs to decide an `agent.start` request whose detail lists launch options (a helper that
+/// acts without asking; `agora-node::approvals::start_signed_message_v3`, which a test compares against): the v2 fields under the domain
+/// `agora-approval-start-v3`, then the option ids as a length-prefixed list before the hash. Such a request is decided only over this.
+#[allow(clippy::too_many_arguments)]
+pub fn start_message_v3(
+    node_id: &str,
+    approval_id: &str,
+    approved: bool,
+    helper_grant: u32,
+    helpers_may_start: bool,
+    settings: &[(String, String)],
+    options: &[String],
+    detail: &str,
+) -> Vec<u8> {
+    let hash = hex(ring::digest::digest(&ring::digest::SHA256, detail.as_bytes()).as_ref());
+    let mut m = b"agora-approval-start-v3".to_vec();
+    for part in [
+        node_id,
+        approval_id,
+        if approved { "1" } else { "0" },
+        &helper_grant.to_string(),
+        if helpers_may_start { "1" } else { "0" },
+        &signed_pairs(settings),
+        &signed_list(options),
+        &hash,
+    ] {
+        m.push(0);
+        m.extend_from_slice(part.as_bytes());
+    }
+    m
+}
+
 /// The exact bytes a device signs for a grant (ADR-0041): a domain tag, then node id, grant id, scope, the commands joined by commas and
 /// the expiry in decimal milliseconds, NUL-separated.
 pub fn grant_message(

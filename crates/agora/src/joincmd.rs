@@ -354,17 +354,21 @@ fn say_failure(say: &Say, e: &PairError, dial: &str, host: &str) {
             state,
             seconds,
         } => {
+            let (code, sentence, state) = refusal(code, state.as_deref());
             let mut args: Vec<(&str, agora_i18n::Arg)> = Vec::new();
             if let Some(s) = state {
-                args.push(("state", s.as_str().into()));
+                args.push(("state", s.into()));
             }
             if let Some(s) = seconds {
                 args.push(("seconds", (*s).into()));
             }
-            let message = say.text(&code.replace('.', "-"), &args);
+            let message = match sentence {
+                Some(k) => say.text(&k, &args),
+                None => say.text(key!("join-unexpected"), &[]),
+            };
             say.err(
                 key!("cli-error"),
-                &[("code", code.as_str().into()), ("message", message.into())],
+                &[("code", code.into()), ("message", message.into())],
             );
         }
         PairError::CaMismatch => say.err(key!("pair-ca_mismatch"), &[]),
@@ -385,6 +389,23 @@ fn say_failure(say: &Say, e: &PairError, dial: &str, host: &str) {
             );
         }
     }
+}
+
+/// How a refusal from the hub is shown: its code and `state` with every control, escape, bidi and hidden character removed and at most
+/// 64 characters each, and the key of its sentence only for a code this machine knows. Until the owner approved, the other end is
+/// whoever answered at the address (the pairing check accepts any leaf until then), so neither may repaint the terminal nor pick
+/// another sentence of the catalogue, such as the one that says the machine joined (audit F1400).
+fn refusal(code: &str, state: Option<&str>) -> (String, Option<String>, Option<String>) {
+    use agora_node::device_trust::shown;
+    let known = !matches!(
+        agora_protocol::ErrorCode::parse(code),
+        agora_protocol::ErrorCode::Unknown(_)
+    );
+    (
+        shown(code, 64),
+        known.then(|| code.replace('.', "-")),
+        state.map(|s| shown(s, 64)),
+    )
 }
 
 /// What an approved join does with the link folder `link`, whose guard it holds, given what the hub delivered.
@@ -473,6 +494,37 @@ mod tests {
             );
         }
         assert_eq!(pick(3, true, |_| None), Pick::None);
+    }
+
+    /// Audit F1400: a refusal comes from whoever answered at the address, before anything is trusted. Its code and state reached the
+    /// terminal byte for byte (escapes, carriage returns, bells), and its code chose any sentence of the catalogue, the success one too.
+    #[test]
+    fn a_refusal_from_the_hub_can_neither_repaint_the_terminal_nor_choose_a_sentence() {
+        let hostile = "\u{1b}[2J\u{1b}[H\u{1b}]0;owned\u{7}\r\u{202e}x";
+        let (code, sentence, state) = refusal(&format!("pair.state{hostile}"), Some(hostile));
+        assert!(!code.chars().any(char::is_control), "{code:?}");
+        assert!(!state
+            .as_deref()
+            .unwrap_or_default()
+            .chars()
+            .any(char::is_control));
+        assert!(!state.unwrap_or_default().contains('\u{202e}'));
+        assert_eq!(sentence, None);
+        // Another sentence of the catalogue is not the hub's to choose.
+        assert_eq!(refusal("join.done", None).1, None);
+        // Oversized: bounded.
+        let (code, _, state) = refusal(&"a".repeat(100_000), Some(&"b".repeat(100_000)));
+        assert!(code.chars().count() <= 65 && state.unwrap_or_default().chars().count() <= 65);
+        // A real code keeps its sentence and a plain state.
+        assert_eq!(
+            refusal("pair.state", Some("reveal")),
+            (
+                "pair.state".to_string(),
+                Some("pair-state".to_string()),
+                Some("reveal".to_string())
+            )
+        );
+        assert_eq!(refusal("pair.limit", None).1.as_deref(), Some("pair-limit"));
     }
 
     /// Codex review of F1030: an approved join got its certificate when the owner approved, then waited for the link folder; if `agora`

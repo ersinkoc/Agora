@@ -1,0 +1,54 @@
+import { beforeEach, describe, expect, it } from 'vitest';
+import { renderToStaticMarkup } from 'react-dom/server';
+import { setLanguage } from '../i18n';
+import type { BoardModel, BoardTaskModel } from '../net/view';
+import { COLUMN_PAGE, TITLE_MAX, columnsOf, plain } from './boardColumns';
+import { BoardColumns } from './BoardView';
+
+const task = (id: string, status: BoardTaskModel['status'], extra: Partial<BoardTaskModel> = {}): BoardTaskModel => ({ id, title: `T${id}`, status, owner: status === 'open' ? '' : 'Ada', ...extra });
+const board = (tasks: BoardTaskModel[]): BoardModel => ({ projectId: 'p', project: 'proj', folders: [], tasks, leases: [] });
+
+describe('board columns', () => {
+  it('maps open, claimed and done to Backlog, Doing and Done in that order', () => {
+    const cols = columnsOf([task('1', 'done'), task('2', 'open'), task('3', 'claimed'), task('4', 'open')]);
+    expect(cols.map((c) => [c.id, c.cards.map((x) => x.id)])).toEqual([['backlog', ['2', '4']], ['doing', ['3']], ['done', ['1']]]);
+  });
+  it('caps a spammed column and counts the rest', () => {
+    const many = Array.from({ length: 5000 }, (_, i) => task(String(i), 'open'));
+    const backlog = columnsOf(many)[0]!;
+    expect(backlog.total).toBe(5000);
+    expect(backlog.cards).toHaveLength(COLUMN_PAGE);
+    expect(columnsOf(many, { backlog: 400 })[0]!.cards).toHaveLength(400);
+    const html = renderToStaticMarkup(<BoardColumns board={board(many)} />);
+    expect((html.match(/data-task-id/g) ?? []).length).toBeLessThanOrEqual(COLUMN_PAGE);
+  });
+});
+
+describe('untrusted task text', () => {
+  it('cuts to a short plain line and removes control and bidirectional characters', () => {
+    expect(plain('a‮b\u0007c\n\nd', 50)).toBe('abc d');
+    const cut = plain('x'.repeat(10_000), TITLE_MAX);
+    expect(Array.from(cut)).toHaveLength(TITLE_MAX);
+    expect(cut.endsWith('…')).toBe(true);
+  });
+  for (const lang of ['en', 'tr'] as const) {
+    it(`renders markup and links as text (${lang})`, () => {
+      setLanguage(lang);
+      const evil = task('1', 'open', { title: '<img src=x onerror=alert(1)> [click](https://evil.example) <b>hi</b>' });
+      const html = renderToStaticMarkup(<BoardColumns board={board([evil, task('2', 'claimed', { owner: '<script>x</script>', held: ['a', 'b', 'c', 'd', 'e'], ownerSkips: true, ownerState: 'working' })])} />);
+      expect(html).not.toContain('<img');
+      expect(html).not.toContain('<script');
+      expect(html).not.toContain('<b>');
+      expect(html).not.toContain('<a ');
+      expect(html).toContain('&lt;img');
+      expect(html).not.toMatch(/>board-[a-z-]+</); // no message id leaks through
+    });
+  }
+  it('says so when the board has no tasks, in the UI vocabulary', () => {
+    setLanguage('en');
+    const html = renderToStaticMarkup(<BoardColumns board={board([])} />);
+    expect(html).toContain('No tasks yet');
+    expect(html).not.toMatch(/claim|lease|mesh/i);
+  });
+});
+beforeEach(() => setLanguage('en'));

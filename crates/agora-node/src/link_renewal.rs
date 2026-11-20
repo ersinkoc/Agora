@@ -363,7 +363,8 @@ pub enum Outcome {
     Renewed,
     /// The hub refused (or a refusal from earlier still rests): the code of the state recorded.
     Refused(String),
-    /// The hub could not be reached, answered something else, or the answer was rejected: tried again after a wait.
+    /// The hub could not be reached, answered something else, or the answer was rejected, or the link folder's guard could not be
+    /// had: tried again after a wait.
     Failed,
 }
 
@@ -493,10 +494,14 @@ impl Renewer {
             .clone()
     }
 
-    /// The link folder's files, read whole under its guard (recovering a stopped install first). `None`: no link here, or the guard
-    /// or a file could not be had.
-    fn snapshot(&self) -> Option<Snapshot> {
-        let _guard = (self.hold)().ok()?;
+    /// The link folder's files, read whole under its guard (recovering a stopped install first). `Ok(None)`: no link here, or a file
+    /// could not be had. `Err`: the guard could not be had, which is not "nothing to do" (audit F1341).
+    fn snapshot(&self) -> io::Result<Option<Snapshot>> {
+        let _guard = (self.hold)()?;
+        Ok(self.snapshot_held())
+    }
+
+    fn snapshot_held(&self) -> Option<Snapshot> {
         recover(&self.dir, self.ops.as_ref());
         let node_id = read(&self.dir, "node-id")?.trim().to_string();
         let (cert_pem, key_pem) = usable(&self.dir)?;
@@ -587,8 +592,18 @@ impl Renewer {
     /// Never waits on the network while holding the folder's guard, and never touches the agents.
     pub fn tick(&self) -> (Outcome, Duration) {
         let now = (self.clock)();
-        let Some(snap) = self.snapshot() else {
-            return (Outcome::Idle, self.timing.check_every);
+        let snap = match self.snapshot() {
+            Ok(Some(snap)) => snap,
+            Ok(None) => return (Outcome::Idle, self.timing.check_every),
+            Err(e) => {
+                // The folder cannot be looked at, so whether the certificate is due is unknown: a failed look, said once, and tried
+                // again with the growing wait (audit F1341: it was a silent "nothing to do").
+                self.log(format!(
+                    "cert renewal: the link folder could not be locked: {}",
+                    e.kind()
+                ));
+                return (Outcome::Failed, self.backoff());
+            }
         };
         let Some((_, ends)) = validity(&snap.link.cert_pem) else {
             return (Outcome::Idle, self.timing.check_every);
@@ -1357,6 +1372,56 @@ mod tests {
         );
         assert_eq!(r.tick().0, Outcome::Failed);
         assert!(state(&j.dir, ends(&j)).is_none());
+        let _ = std::fs::remove_dir_all(&j.dir);
+    }
+
+    /// Audit F1341: a guard that cannot be had (a read-only folder, another user's lock file, a holder that hangs) is a failed look that
+    /// is said and backed off, never a silent "nothing to do" while the certificate runs out.
+    #[test]
+    fn a_link_folder_that_cannot_be_locked_is_a_failed_look_that_is_logged() {
+        let j = joined("noguard");
+        let asked = Arc::new(AtomicU32::new(0));
+        let guard_ok = Arc::new(AtomicBool::new(false));
+        let g = Arc::clone(&guard_ok);
+        let r = Renewer::with_parts(
+            j.dir.clone(),
+            timing(),
+            || Some(request()),
+            move || {
+                if g.load(Ordering::Relaxed) {
+                    Ok(Box::new(()) as Box<dyn std::any::Any + Send>)
+                } else {
+                    Err(io::Error::from(io::ErrorKind::PermissionDenied))
+                }
+            },
+            counting(&asked, away()),
+            || real_now() + DUE,
+            Arc::new(Real),
+        );
+        r.set_hub_offers(true);
+        let waits: Vec<(Outcome, u64)> = (0..3)
+            .map(|_| {
+                let (o, w) = r.tick();
+                (o, w.as_secs())
+            })
+            .collect();
+        assert_eq!(
+            waits,
+            [
+                (Outcome::Failed, 60),
+                (Outcome::Failed, 120),
+                (Outcome::Failed, 240)
+            ]
+        );
+        let lines = r.log_lines();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("could not be locked"), "{lines:?}");
+        assert_eq!(asked.load(Ordering::Relaxed), 0);
+        // The guard comes back: the next look asks the hub.
+        guard_ok.store(true, Ordering::Relaxed);
+        assert_eq!(r.tick().0, Outcome::Failed);
+        assert_eq!(asked.load(Ordering::Relaxed), 1);
+        assert_old_pair_kept(&j);
         let _ = std::fs::remove_dir_all(&j.dir);
     }
 

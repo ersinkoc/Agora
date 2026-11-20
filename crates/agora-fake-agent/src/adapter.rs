@@ -20,6 +20,9 @@
 //! With `--modes` the adapter also declares `set_mode` and `config`, reports four modes (`default`, `plan`, `turbo` whose words do not say
 //! whether it asks, and `bypassPermissions`) and a boolean option `auto_approve`, and says what it was told to apply by appending
 //! `applied mode:ID` or `applied config:ID=VALUE` as a line to `applied.txt` in its folder (ADR-0090 Amendment A tests).
+//! With `--mode-config` as well, it is an agent whose mode is a config option of category `mode` (what `agora acp-bridge` reports for
+//! an ACP agent that gives its mode as a config option): it also reports an option `approvals` with the four modes as its choices,
+//! and a mode switch is the switch of that option, recorded as `applied config:approvals=ID` (audit F1322).
 //!
 //! JSON uses the proto3 JSON mapping (lowerCamelCase, enum names), as `docs/specs/adapter-protocol.md` says.
 
@@ -50,6 +53,7 @@ fn state<W: Write>(out: &mut W, sid: &str, s: &str) -> io::Result<()> {
 /// Runs until `shutdown` or end of input.
 pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
     let modes = std::env::args().any(|a| a == "--modes");
+    let mode_config = modes && std::env::args().any(|a| a == "--mode-config");
     let mut session = String::new();
     let mut selected_cwd = Value::Null;
     let mut servers = Value::Array(Vec::new());
@@ -105,29 +109,44 @@ pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
                 state(out, &session, "IDLE")?;
                 if modes {
                     let mode = |id: &str, name: &str, skips: bool| json!({"id": id, "name": name, "description": "", "skipsPermissions": skips});
+                    let all_modes = json!([
+                        mode("default", "Ask first", false),
+                        mode("plan", "Plan", false),
+                        mode("turbo", "Turbo", false),
+                        mode("bypassPermissions", "Bypass Permissions", true),
+                    ]);
                     note(
                         out,
                         "session/options",
-                        json!({"sessionId": session, "modes": [
-                            mode("default", "Ask first", false),
-                            mode("plan", "Plan", false),
-                            mode("turbo", "Turbo", false),
-                            mode("bypassPermissions", "Bypass Permissions", true),
-                        ], "models": [], "currentMode": "default", "currentModel": ""}),
+                        json!({"sessionId": session, "modes": all_modes.clone(),
+                               "models": [], "currentMode": "default", "currentModel": ""}),
                     )?;
+                    let mut options = vec![json!({
+                        "id": "auto_approve", "name": "Auto approve", "description": "",
+                        "category": "other", "type": "boolean", "current": "false",
+                        "choices": [], "skipsPermissions": false})];
+                    if mode_config {
+                        options.push(json!({
+                            "id": "approvals", "name": "Approvals", "description": "",
+                            "category": "mode", "type": "select", "current": "default",
+                            "choices": all_modes, "skipsPermissions": false}));
+                    }
                     note(
                         out,
                         "session/config",
-                        json!({"sessionId": session, "options": [{
-                            "id": "auto_approve", "name": "Auto approve", "description": "",
-                            "category": "other", "type": "boolean", "current": "false",
-                            "choices": [], "skipsPermissions": false}]}),
+                        json!({"sessionId": session, "options": options}),
                     )?;
                 }
             }
             "session/set_option" | "session/set_config" if modes => {
                 reply(out, json!({}))?;
-                let text = if method == "session/set_option" {
+                let text = if method == "session/set_option" && mode_config {
+                    // The mode is the `approvals` option: switching one is switching the other.
+                    format!(
+                        "applied config:approvals={}",
+                        params["id"].as_str().unwrap_or("")
+                    )
+                } else if method == "session/set_option" {
                     format!("applied mode:{}", params["id"].as_str().unwrap_or(""))
                 } else {
                     format!(
