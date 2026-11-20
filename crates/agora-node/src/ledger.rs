@@ -111,6 +111,9 @@ struct State {
     /// Session ids reported before their agent's `AgentStarted` was recorded (an adapter reports its session while it starts, and the
     /// node's tick can record that before the start is recorded): applied when the start comes.
     early_sessions: BTreeMap<String, String>,
+    /// The same for the last state: a state change can be recorded (by the supervision tick) before the control thread records the
+    /// agent's `AgentStarted`, and an idle agent reports no further change, so a dropped one would leave `last_state` empty for good.
+    early_states: BTreeMap<String, String>,
     /// Something changed that is not on disk yet.
     dirty: bool,
 }
@@ -702,6 +705,9 @@ fn apply(st: &mut State, body: &Body, now: u64) -> bool {
             if let Some(session) = st.early_sessions.remove(&a.agent_id) {
                 e.session_id = session;
             }
+            if let Some(state) = st.early_states.remove(&a.agent_id) {
+                e.last_state = state;
+            }
             // Running again (a restart after a crash, a resume): neither ended nor interrupted.
             e.ended = false;
             e.interrupted_at_ms = 0;
@@ -736,12 +742,23 @@ fn apply(st: &mut State, body: &Body, now: u64) -> bool {
             _ => false,
         },
         Body::AgentStateChanged(s) => {
-            if let Some(e) = st.entries.get_mut(&s.agent_id) {
-                let word = state_word(s.state);
-                if e.last_state != word {
-                    e.last_state = word.to_string();
-                    st.dirty = true;
+            let word = state_word(s.state);
+            match st.entries.get_mut(&s.agent_id) {
+                Some(e) => {
+                    if e.last_state != word {
+                        e.last_state = word.to_string();
+                        st.dirty = true;
+                    }
                 }
+                // Before the agent's start is recorded: held for it, never creating an entry (an entry is a running agent).
+                None if !s.agent_id.is_empty()
+                    && s.agent_id.len() <= MAX_FIELD
+                    && (st.early_states.len() < MAX_EARLY
+                        || st.early_states.contains_key(&s.agent_id)) =>
+                {
+                    st.early_states.insert(s.agent_id.clone(), word.to_string());
+                }
+                None => {}
             }
             false
         }
@@ -820,6 +837,39 @@ mod tests {
             parent_agent_id: parent.into(),
             ..Default::default()
         })
+    }
+
+    fn state_event(id: &str, state: v1::AgentState) -> Body {
+        Body::AgentStateChanged(v1::AgentStateChanged {
+            agent_id: id.into(),
+            state: state as i32,
+            reported: false,
+        })
+    }
+
+    #[test]
+    fn a_state_recorded_before_the_agent_started_is_kept_for_it() {
+        let l = Ledger::in_memory();
+        l.observe(&state_event("agent-1", v1::AgentState::Working), 10);
+        l.observe(&state_event("agent-1", v1::AgentState::Idle), 11);
+        assert!(l.get("agent-1").is_none(), "a state alone made an entry");
+        l.observe(&started("agent-1", "/wt/a", ""), 12);
+        assert_eq!(l.get("agent-1").unwrap().last_state, "idle");
+        // After the start, changes apply as before.
+        l.observe(&state_event("agent-1", v1::AgentState::Blocked), 13);
+        assert_eq!(l.get("agent-1").unwrap().last_state, "blocked");
+        // The held state is used once: a later start of the same id does not bring it back.
+        l.observe(&started("agent-1", "/wt/a", ""), 14);
+        assert_eq!(l.get("agent-1").unwrap().last_state, "blocked");
+    }
+
+    #[test]
+    fn states_held_for_agents_not_yet_started_are_bounded() {
+        let l = Ledger::in_memory();
+        for n in 0..(MAX_EARLY + 10) {
+            l.observe(&state_event(&format!("agent-{n}"), v1::AgentState::Idle), 1);
+        }
+        assert_eq!(l.st().early_states.len(), MAX_EARLY);
     }
 
     fn directory_start(l: &Ledger, id: &str, path: &str, now: u64) {

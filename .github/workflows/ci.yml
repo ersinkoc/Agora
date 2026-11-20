@@ -88,6 +88,34 @@ jobs:
         working-directory: apps/web
       - run: npm run build
         working-directory: apps/web
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: 1.99.1
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - name: Build the hub, node and fake agent for Chromium
+        env:
+          AGORA_NO_EMBED_WEB: "1"
+        run: cargo build --locked -p agora -p agora-fake-agent
+      - name: Install Chromium
+        env:
+          PW_DIR: ${{ runner.temp }}/agora-playwright
+        run: |
+          npm install --prefix "$PW_DIR" --no-save --no-package-lock playwright-core@1.64.0
+          "$PW_DIR/node_modules/.bin/playwright-core" install --with-deps --no-shell chromium
+          chrome=$(node -p 'require(process.env.PW_DIR + "/node_modules/playwright-core").chromium.executablePath()')
+          echo "PW_DIR=$PW_DIR" >> "$GITHUB_ENV"
+          echo "CHROME=$chrome" >> "$GITHUB_ENV"
+      - name: Browser sign-in, terminal and signed approval
+        run: node scripts/e2e-browser.mjs
+        timeout-minutes: 5
+      - name: Browser and nodes reconnect after a hub restart
+        env:
+          ROUNDS: "2"
+          HUB_DOWN_MS: "0,15000"
+          # Check that events reach the open browser after a restart with room for runner scheduling.
+          LIMIT_MS: "60000"
+        run: node scripts/e2e-hub-restart.mjs
+        timeout-minutes: 5
 
   schema-breaking:
     # A published message never changes (ADR-0006): compare schema/ with the target branch.

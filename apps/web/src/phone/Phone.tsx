@@ -10,6 +10,7 @@ import type { ChatSource } from '../net/chat';
 import { dismiss, dismissedIds, subscribeDismissed } from '../net/dismissed';
 import type { UsageSummary } from '../net/usage';
 import { Icon, type IconName } from '../components/Icon';
+import { CloseAgentMenu, CloseConfirm } from '../components/CloseAgent';
 import { StateBadge, StateMark } from '../components/StateBadge';
 import { NoAskBadge } from '../components/NoAskBadge';
 import { ThemePicker } from '../components/ThemePicker';
@@ -323,10 +324,12 @@ export function PhoneAgent({ agent, agents, approvals, machines, onResolve, untr
           {agent && <span className="flex min-w-0 items-center gap-2 text-xs text-muted"><StateBadge state={agent.state} /><span className="truncate">{agent.machine}</span></span>}
         </div>
         {agent && <NoAskBadge agent={agent} />}
+        {agent && <CloseAgentMenu agent={agent} />}
         {next && <button type="button" className="phone-chipbtn text-needs-you" onClick={() => onOpen(next)}>{t('phone-next', { count: elsewhere.length })}</button>}
       </>}>
       {notice && <p role="alert" className="phone-notice">{notice}</p>}
       {!agent ? <div className="grid justify-items-start gap-3 p-4"><p className="m-0">{t('focus-not-found')}</p><button type="button" className="button" onClick={onBack}>{t('phone-back')}</button></div> : <>
+        <CloseConfirm agent={agent} where="pane" />
         {!agent.closed && (changed > 0 && loadDiff || files) && (
           <div className="phone-tools">
             {changed > 0 && loadDiff && <button type="button" className="phone-chipbtn text-needs-you" onClick={() => setShown('changes')}>{t('changes-files', { count: changed })}</button>}

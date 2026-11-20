@@ -23,6 +23,7 @@ import { StartAgent, type KindChoice } from './components/StartAgent';
 import { AttentionStrip } from './components/AttentionStrip';
 import { HeaderLinks } from './components/HeaderLinks';
 import { Icon } from './components/Icon';
+import { CloseAgentMenu, CloseConfirm } from './components/CloseAgent';
 import { ago } from './net/time';
 import { NetworkView } from './components/NetworkView';
 import { StateBadge } from './components/StateBadge';
@@ -219,10 +220,12 @@ export function Focus({ agent, approvals = [], onResolve, source: live, chatSour
         <span className="hidden min-w-0 items-center gap-1.5 truncate text-xs text-muted md:flex"><Icon name="machine" className="size-3.5" />{agent.machine}<Icon name="chevron" className="size-3 rtl:rotate-180" /><Icon name="folder" className="size-3.5" />{agent.project || agent.workspace}{agent.branch && <><Icon name="branch" className="ms-1 size-3.5" /><span className="font-mono">{agent.branch}</span></>}</span>
         <span className="flex-1" />
         {agent.tokens ? <span className="ide-chip">{t('agent-tokens', { count: agent.tokens })}</span> : null}
+        <CloseAgentMenu agent={agent} />
         <span className="hidden sm:block"><LanguagePicker compact /></span>
         <ThemePicker />
       </header>
       <main className="flex min-h-0 min-w-0 flex-col">
+        <CloseConfirm agent={agent} where="pane" />
         {agent.terminal === false ? null : approvals.filter((x) => x.agentId === agent.id).map((x) => <ApprovalBanner key={x.id} approval={x} onResolve={onResolve} />)}
         <AgentAddress key={agent.id} agent={agent} />
         <div className="pane min-h-0 flex-1 bg-surface-0 p-1.5" aria-label={agent.terminal === false ? t('chat-log') : t('focus-terminal')}>
