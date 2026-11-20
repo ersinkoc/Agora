@@ -33,7 +33,9 @@ copies bytes and holds no credential; it reads only the first request's head, an
 the tunnel itself (`127.0.0.1:<port>` or `localhost:<port>`), so a page on another name cannot reach the hub through it by DNS
 rebinding (threat model T22). The fingerprint to confirm is printed by `agora hub fingerprint` (not `agora hub code`, which
 does not print one). The webview's origin includes the port, and the page's storage (the device key of decision 4, the sign-in)
-is per origin, so the shell keeps one fixed port per hub in its settings.
+is per origin, so the shell keeps one fixed port per hub in its settings. The tunnel admits up to 64 concurrent connections, including
+ones still opening. At capacity, new connections wait in the operating system's listen queue. Dropping the tunnel closes its
+listener and cancels active connections, including WebSocket streams.
 
 ## Consequences
 - One client, one translation set; desktop quality is web quality plus a small native layer.

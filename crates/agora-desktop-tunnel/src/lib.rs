@@ -20,6 +20,7 @@ use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, ServerName};
 use tokio::io::{copy_bidirectional, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::task::JoinSet;
 use tokio_rustls::TlsConnector;
 
 /// The most of a request's head the tunnel reads before it decides. A browser's request head is a few hundred bytes to a few KiB
@@ -33,6 +34,9 @@ const MISDIRECTED: &[u8] =
 /// How long the tunnel waits after a failed accept before it accepts again. The wait keeps a listener that stays ready (a
 /// connection still queued while no file handle is free) from turning the loop into a busy one.
 const ACCEPT_RETRY: Duration = Duration::from_millis(100);
+
+/// Accepted connections per tunnel, including those still reading a request head or connecting to the hub.
+const MAX_CONNECTIONS: usize = 64;
 
 /// Reads from `s` until the end of the first request's head (the blank line), at most [`MAX_HEAD`] bytes. Returns everything read,
 /// which can run past the head (the start of a body, a pipelined request), and the head's length; `None` when the connection
@@ -265,7 +269,7 @@ fn connector(ca_pem: &str) -> Result<TlsConnector, TunnelError> {
     Ok(TlsConnector::from(Arc::new(cfg)))
 }
 
-/// A running tunnel. Dropping it closes the loopback port; connections already open finish on their own.
+/// A running tunnel. Dropping it stops the listener and cancels its active connections.
 pub struct Tunnel {
     /// The loopback address the webview loads.
     pub local: SocketAddr,
@@ -281,6 +285,15 @@ impl Drop for Tunnel {
 /// Opens a tunnel on `127.0.0.1:port` (0 picks a free one) to the hub at `hub` (`host:port`), trusting only `ca_pem`. Must be called
 /// inside a Tokio runtime.
 pub async fn open(hub: &str, ca_pem: &str, port: u16) -> Result<Tunnel, TunnelError> {
+    open_with_limit(hub, ca_pem, port, MAX_CONNECTIONS).await
+}
+
+async fn open_with_limit(
+    hub: &str,
+    ca_pem: &str,
+    port: u16,
+    connection_limit: usize,
+) -> Result<Tunnel, TunnelError> {
     let name = server_name(hub)?;
     let tls = connector(ca_pem)?;
     // Only the loopback interface: the tunnel is for this machine's webview, never for the network.
@@ -290,7 +303,14 @@ pub async fn open(hub: &str, ca_pem: &str, port: u16) -> Result<Tunnel, TunnelEr
     let local = listener.local_addr().map_err(|_| TunnelError::Listen)?;
     let hub = hub.to_string();
     let task = tokio::spawn(async move {
+        // The listener owns the connections. Aborting it drops the set and cancels both ends of each connection.
+        let mut connections = JoinSet::new();
         loop {
+            while connections.try_join_next().is_some() {}
+            if connections.len() == connection_limit {
+                // Leave pending connections in the OS listen queue until a slot becomes available.
+                let _ = connections.join_next().await;
+            }
             // A failed accept passes (no free file handle while other connections hold them, a connection reset before it was
             // taken), so it ends neither the loop nor the port: the shell still holds the tunnel as open, and a closed port would
             // turn every later page load away and leave the fixed port free for another program to take (threat model T27).
@@ -302,7 +322,7 @@ pub async fn open(hub: &str, ca_pem: &str, port: u16) -> Result<Tunnel, TunnelEr
                 }
             };
             let (hub, name, tls) = (hub.clone(), name.clone(), tls.clone());
-            tokio::spawn(async move {
+            connections.spawn(async move {
                 // The first request must be addressed to this tunnel (DNS rebinding, see the crate docs), checked before the hub is
                 // dialed, so a refused page never opens a connection to it. A head that does not arrive in time ends the connection.
                 let Ok(Some((first, head_len))) =
@@ -491,15 +511,58 @@ mod tests {
         assert_eq!(send(t.local, &parts).await, PAGE);
     }
 
-    /// The page's WebSocket: after the hub answers the upgrade, bytes flow both ways through the tunnel unread.
     #[tokio::test]
-    async fn a_websocket_upgrade_passes_and_then_carries_bytes_both_ways() {
+    async fn the_tunnel_admits_a_waiting_connection_when_a_slot_opens() {
+        let ca = Ca::generate("hub CA").unwrap();
+        let (cert, key) = ca.issue_server(&["localhost".to_string()]).unwrap();
+        let acceptor = agora_hub::tls::acceptor_with(&cert, &key, ca.cert_pem(), true).unwrap();
+        let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = upstream.local_addr().unwrap();
+        let t = open_with_limit(&addr.to_string(), ca.cert_pem(), 0, 1)
+            .await
+            .unwrap();
+        let request = format!("GET /page HTTP/1.1\r\nHost: {}\r\n\r\n", t.local);
+
+        let mut first = TcpStream::connect(t.local).await.unwrap();
+        first.write_all(request.as_bytes()).await.unwrap();
+        let (socket, _) = tokio::time::timeout(Duration::from_secs(5), upstream.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut first_hub = acceptor.accept(socket).await.unwrap();
+        let mut received = vec![0; request.len()];
+        first_hub.read_exact(&mut received).await.unwrap();
+        assert_eq!(received, request.as_bytes());
+
+        let mut second = TcpStream::connect(t.local).await.unwrap();
+        second.write_all(request.as_bytes()).await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), upstream.accept())
+                .await
+                .is_err(),
+            "the waiting connection reached the hub while the first held the only slot"
+        );
+
+        first.shutdown().await.unwrap();
+        first_hub.shutdown().await.unwrap();
+        let (socket, _) = tokio::time::timeout(Duration::from_secs(5), upstream.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut second_hub = acceptor.accept(socket).await.unwrap();
+        second_hub.read_exact(&mut received).await.unwrap();
+        assert_eq!(received, request.as_bytes());
+    }
+
+    /// The page's WebSocket: after the hub answers the upgrade, bytes flow both ways while the tunnel is open.
+    #[tokio::test]
+    async fn a_websocket_carries_bytes_both_ways_and_closes_when_its_tunnel_drops() {
         let ca = Ca::generate("hub CA").unwrap();
         let (cert, key) = ca.issue_server(&["localhost".to_string()]).unwrap();
         let acceptor = agora_hub::tls::acceptor_with(&cert, &key, ca.cert_pem(), true).unwrap();
         let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = l.local_addr().unwrap();
-        tokio::spawn(async move {
+        let hub_task = tokio::spawn(async move {
             let (s, _) = l.accept().await.unwrap();
             let mut s = acceptor.accept(s).await.unwrap();
             // Read the upgrade head, answer 101, then echo every frame back with a prefix.
@@ -544,6 +607,21 @@ mod tests {
                 .unwrap();
             assert_eq!(&buf[..n], format!("echo:{frame}").as_bytes());
         }
+        drop(t);
+        let end = tokio::time::timeout(Duration::from_secs(5), c.read(&mut b))
+            .await
+            .expect("dropping the tunnel should close the webview socket");
+        match end {
+            Ok(n) => assert_eq!(n, 0),
+            Err(error) => assert!(matches!(
+                error.kind(),
+                std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted
+            )),
+        }
+        tokio::time::timeout(Duration::from_secs(5), hub_task)
+            .await
+            .expect("dropping the tunnel should also close its hub socket")
+            .unwrap();
     }
 
     #[tokio::test]
