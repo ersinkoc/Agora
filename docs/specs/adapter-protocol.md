@@ -130,8 +130,10 @@ On the agent side the bridge stops the agent and uses the existing `adapter.agen
 On the node side the bridge stops the agent and exits with an invalid-input error, which the host sees as an adapter exit.
 
 The bridge writes to the agent on a separate thread so it can continue dispatching updates while the agent reads a
-command. The writer holds eight queued commands in addition to the current write. If this queue fills, the bridge
-stops the agent and uses `adapter.agent_exited`. The node's adapter host reads bridge replies independently of its
+command. The writer holds up to 64 queued commands, and at most 8 MiB of queued bytes (one line is always accepted into an empty
+queue), in addition to the current write of at most 4 MiB, so its worst-case memory is about 12 MiB (ADR-0022). A healthy agent
+that is busy and not reading stdin therefore survives a burst of permission answers, cancels and mode switches. If either
+limit is hit, the bridge stops the agent and uses `adapter.agent_exited`. The node's adapter host reads bridge replies independently of its
 command writes.
 
 | ACP (agent → client) | Adapter protocol (bridge → node) |

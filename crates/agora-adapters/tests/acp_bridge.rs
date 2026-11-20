@@ -148,6 +148,33 @@ fn acp_child_no_stdio_mcp() {
     let _ = agora_fake_agent::acp::run(std::io::stdin().lock(), &mut std::io::stdout().lock());
 }
 
+/// The fake agent that is slow to initialize.
+#[test]
+fn acp_child_init_delay() {
+    if std::env::var_os("AGORA_TEST_ACP").is_none()
+        || !std::env::args().any(|a| a == "acp_child_init_delay")
+    {
+        return;
+    }
+    println!();
+    std::env::set_var("AGORA_FAKE_ACP_INIT_DELAY_MS", "400");
+    let _ = agora_fake_agent::acp::run(std::io::stdin().lock(), &mut std::io::stdout().lock());
+}
+
+/// The fake agent that offers a bypass mode and refuses a model switch.
+#[test]
+fn acp_child_bypass() {
+    if std::env::var_os("AGORA_TEST_ACP").is_none()
+        || !std::env::args().any(|a| a == "acp_child_bypass")
+    {
+        return;
+    }
+    println!();
+    std::env::set_var("AGORA_FAKE_ACP_BYPASS_MODE", "1");
+    std::env::set_var("AGORA_FAKE_ACP_REFUSE_MODEL", "1");
+    let _ = agora_fake_agent::acp::run(std::io::stdin().lock(), &mut std::io::stdout().lock());
+}
+
 struct ChanReader(Receiver<Vec<u8>>, Vec<u8>);
 impl Read for ChanReader {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
@@ -361,8 +388,7 @@ fn an_acp_agent_looks_like_an_adapter_to_the_node() {
 
 #[test]
 fn the_node_is_told_the_bridge_is_ready_only_after_the_agent_finished_initializing() {
-    std::env::set_var("AGORA_FAKE_ACP_INIT_DELAY_MS", "400");
-    let n = Node::start();
+    let n = Node::start_with("acp_child_init_delay");
     n.to_bridge
         .send(
             format!(
@@ -381,7 +407,6 @@ fn the_node_is_told_the_bridge_is_ready_only_after_the_agent_finished_initializi
     );
     let reply = n.wait(|m| m.get("id") == Some(&json!(1)));
     assert_eq!(reply["result"]["adapterName"], "acp-bridge");
-    std::env::remove_var("AGORA_FAKE_ACP_INIT_DELAY_MS");
 }
 
 #[test]
@@ -713,9 +738,7 @@ fn options(n: &Node) -> Vec<Value> {
 
 #[test]
 fn the_agents_modes_and_models_are_reported_and_can_be_switched() {
-    std::env::set_var("AGORA_FAKE_ACP_BYPASS_MODE", "1");
-    std::env::set_var("AGORA_FAKE_ACP_REFUSE_MODEL", "1");
-    let mut n = Node::start();
+    let mut n = Node::start_with("acp_child_bypass");
     let init = n.call("initialize", json!({}));
     let caps = init["result"]["capabilities"].as_array().unwrap().clone();
     assert!(caps.contains(&json!("set_mode")) && caps.contains(&json!("set_model")));

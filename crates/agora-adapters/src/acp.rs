@@ -25,6 +25,7 @@ use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::ops::ControlFlow;
 use std::process::{Child, ChildStderr, ChildStdin, Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{
     channel, sync_channel, Receiver, RecvTimeoutError, SyncSender, TrySendError,
 };
@@ -38,8 +39,13 @@ use crate::perm::{self, Category};
 
 /// Both readers share this queue. Store line bytes so queued JSON has not expanded into values.
 const INPUT_QUEUE: usize = 8;
-/// Commands waiting behind the one being written to the agent.
-const AGENT_WRITE_QUEUE: usize = 8;
+/// Commands waiting behind the one being written to the agent. A busy agent that is not reading stdin must survive a burst of
+/// permission answers, cancels and mode switches, so the count is generous; the byte budget below is what bounds memory.
+const AGENT_WRITE_QUEUE: usize = 64;
+/// The most bytes waiting in the writer queue (ADR-0022). Commands are small, but a prompt line can be up to `MAX_LINE`, so the
+/// queue also stops at this many bytes; one line over the budget is still accepted when the queue is empty. Worst case memory of
+/// the writer: this budget (or one `MAX_LINE` line if larger) queued, plus the line being written, which is at most `MAX_LINE`.
+const AGENT_WRITE_BYTES: usize = 8 * 1024 * 1024;
 /// How long agent text chunks are joined into one chat item.
 const JOIN: Duration = Duration::from_millis(150);
 /// The most text one joined item holds before it is sent anyway.
@@ -159,13 +165,18 @@ fn write_line<W: Write>(w: &mut W, v: &Value) -> io::Result<()> {
 struct AgentWriter {
     line: Vec<u8>,
     pending: SyncSender<Box<[u8]>>,
+    /// Bytes queued and not yet taken by the writer thread.
+    queued: Arc<AtomicUsize>,
 }
 
 impl AgentWriter {
     fn start(mut stdin: ChildStdin) -> Self {
         let (pending, lines) = sync_channel::<Box<[u8]>>(AGENT_WRITE_QUEUE);
+        let queued = Arc::new(AtomicUsize::new(0));
+        let taken = Arc::clone(&queued);
         std::thread::spawn(move || {
             while let Ok(line) = lines.recv() {
+                taken.fetch_sub(line.len(), Ordering::SeqCst);
                 if stdin.write_all(&line).and_then(|()| stdin.flush()).is_err() {
                     break;
                 }
@@ -174,6 +185,7 @@ impl AgentWriter {
         Self {
             line: Vec::new(),
             pending,
+            queued,
         }
     }
 }
@@ -186,7 +198,15 @@ impl Write for AgentWriter {
 
     fn flush(&mut self) -> io::Result<()> {
         let line = std::mem::take(&mut self.line).into_boxed_slice();
+        let len = line.len();
+        // Only this thread adds, so the check cannot race another add; the writer thread only subtracts.
+        let held = self.queued.load(Ordering::SeqCst);
+        if held > 0 && held.saturating_add(len) > AGENT_WRITE_BYTES {
+            return Err(io::ErrorKind::WouldBlock.into());
+        }
+        self.queued.fetch_add(len, Ordering::SeqCst);
         self.pending.try_send(line).map_err(|error| {
+            self.queued.fetch_sub(len, Ordering::SeqCst);
             match error {
                 TrySendError::Full(_) => io::ErrorKind::WouldBlock,
                 TrySendError::Disconnected(_) => io::ErrorKind::BrokenPipe,
@@ -2473,6 +2493,43 @@ mod tests {
         ));
     }
 
+    /// ADR-0022: the writer queue is bounded by bytes as well as by count.
+    #[test]
+    fn the_writer_queue_is_bounded_by_count_and_by_bytes() {
+        use std::io::Write;
+        let writer = |count: usize| {
+            let (pending, rx) = sync_channel(count);
+            (
+                super::AgentWriter {
+                    line: Vec::new(),
+                    pending,
+                    queued: Default::default(),
+                },
+                rx,
+            )
+        };
+        let put = |w: &mut super::AgentWriter, n: usize| {
+            w.write_all(&vec![b'x'; n]).and_then(|()| w.flush())
+        };
+        let (mut w, _rx) = writer(super::AGENT_WRITE_QUEUE);
+        for _ in 0..super::AGENT_WRITE_QUEUE {
+            assert!(put(&mut w, 10).is_ok());
+        }
+        assert_eq!(
+            put(&mut w, 10).err().map(|e| e.kind()),
+            Some(io::ErrorKind::WouldBlock)
+        );
+        let (mut w, _rx) = writer(super::AGENT_WRITE_QUEUE);
+        assert!(
+            put(&mut w, super::AGENT_WRITE_BYTES + 1).is_ok(),
+            "a lone big line"
+        );
+        assert_eq!(
+            put(&mut w, 1).err().map(|e| e.kind()),
+            Some(io::ErrorKind::WouldBlock)
+        );
+    }
+
     #[test]
     fn a_burst_larger_than_the_queue_is_delivered_in_order() {
         let (tx, rx) = sync_channel(INPUT_QUEUE);
@@ -3030,6 +3087,7 @@ mod tests {
             b.agent = Box::new(super::AgentWriter {
                 line: Vec::new(),
                 pending,
+                queued: Default::default(),
             });
             resolve(&mut b, 23, &approval)?;
             let reply = answer(&b.out, 23).ok_or("no reply")?;
