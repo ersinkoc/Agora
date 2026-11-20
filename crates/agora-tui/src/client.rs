@@ -1439,7 +1439,16 @@ pub fn decision_message(
         return approval_message(node, local, approved);
     }
     let settings = start_settings(detail);
-    if settings.is_empty() {
+    // ADR-0059 decision 5: a start that lists launch options is decided only over `agora-approval-start-v3`, which names them.
+    let options: Vec<String> = start_option_rows(detail)
+        .into_iter()
+        .map(|(_, id, _)| id)
+        .collect();
+    if !options.is_empty() {
+        crate::device::start_message_v3(
+            node, local, approved, 0, false, &settings, &options, detail,
+        )
+    } else if settings.is_empty() {
         crate::device::start_message(node, local, approved, 0, false, detail)
     } else {
         crate::device::start_message_v2(node, local, approved, 0, false, &settings, detail)
@@ -1468,6 +1477,35 @@ pub(crate) fn start_setting_rows(detail: &str) -> Vec<(String, String, String)> 
         .collect()
 }
 
+/// ADR-0059 decision 5: the launch options an `agent.start` detail lists as `(label, id, skips_permissions)`, read as the node reads them
+/// (strings only; anything else is empty, and only `true` skips). The card shows exactly these and the v3 message signs their ids.
+pub(crate) fn start_option_rows(detail: &str) -> Vec<(String, String, bool)> {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(detail) else {
+        return Vec::new();
+    };
+    let Some(list) = v
+        .get("launch_options")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return Vec::new();
+    };
+    list.iter()
+        .map(|x| {
+            let get = |k: &str| {
+                x.get(k)
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_string()
+            };
+            let skips = x
+                .get("skips_permissions")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true);
+            (get("label"), get("id"), skips)
+        })
+        .collect()
+}
+
 /// The `(id, value)` pairs of [`start_setting_rows`]: what the v2 message signs.
 fn start_settings(detail: &str) -> Vec<(String, String)> {
     start_setting_rows(detail)
@@ -1480,7 +1518,7 @@ fn start_settings(detail: &str) -> Vec<(String, String)> {
 #[allow(clippy::unwrap_used)]
 mod decision_tests {
     use super::decision_message;
-    use crate::device::{approval_message, start_message, start_message_v2};
+    use crate::device::{approval_message, start_message, start_message_v2, start_message_v3};
 
     const PLAIN: &str = r#"{"kind":"codex","folder":"/w","prompt":"x","settings":[]}"#;
     const WITH: &str = r#"{"kind":"codex","folder":"/w","prompt":"x","settings":[{"id":"model","label":"setting-model","value":"gpt-6.1-sol"},{"id":"effort","label":"setting-effort","value":"high"}]}"#;
@@ -1554,6 +1592,77 @@ mod decision_tests {
             );
             assert_eq!(hex(&whole), c["hex"].as_str().unwrap(), "{}", c["name"]);
             // This terminal signs no grant and no nested permission: only the cases without either apply to it.
+            if c["helper_grant"].as_u64() != Some(0)
+                || c["helpers_may_start"].as_bool() != Some(false)
+            {
+                continue;
+            }
+            let m = decision_message(
+                c["node"].as_str().unwrap(),
+                c["approval_id"].as_str().unwrap(),
+                "agent.start",
+                c["detail"].as_str().unwrap(),
+                c["approved"].as_bool().unwrap(),
+            );
+            assert_eq!(hex(&m), c["hex"].as_str().unwrap(), "{}", c["name"]);
+        }
+    }
+    /// ADR-0059 decision 5: a start that lists launch options is only ever answered over v3, which names them (allow or deny).
+    #[test]
+    fn a_start_with_launch_options_is_only_ever_signed_over_v3() {
+        const OPTS: &str = r#"{"kind":"codex","prompt":"x","settings":[{"id":"effort","label":"setting-effort","value":"high"}],"launch_options":[{"id":"skip-permissions","label":"option-skip-permissions","skips_permissions":true}]}"#;
+        let settings = vec![("effort".to_string(), "high".to_string())];
+        let options = vec!["skip-permissions".to_string()];
+        for approved in [true, false] {
+            let m = decision_message("laptop", "7", "agent.start", OPTS, approved);
+            assert_eq!(
+                m,
+                start_message_v3("laptop", "7", approved, 0, false, &settings, &options, OPTS)
+            );
+            assert!(m.starts_with(b"agora-approval-start-v3\0"));
+            assert_ne!(
+                m,
+                start_message_v2("laptop", "7", approved, 0, false, &settings, OPTS)
+            );
+        }
+    }
+
+    /// The shared v3 vectors (`schema/fixtures/signing/approval-start-v3.json`, also checked by the node and the web window).
+    #[test]
+    fn the_shared_start_v3_vectors_are_what_this_terminal_signs() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../schema/fixtures/signing/approval-start-v3.json");
+        let v: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let hex = |m: &[u8]| -> String { m.iter().map(|b| format!("{b:02x}")).collect() };
+        for c in v["cases"].as_array().unwrap() {
+            let settings: Vec<(String, String)> = c["settings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|p| {
+                    (
+                        p[0].as_str().unwrap().to_string(),
+                        p[1].as_str().unwrap().to_string(),
+                    )
+                })
+                .collect();
+            let options: Vec<String> = c["options"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|o| o.as_str().unwrap().to_string())
+                .collect();
+            let whole = start_message_v3(
+                c["node"].as_str().unwrap(),
+                c["approval_id"].as_str().unwrap(),
+                c["approved"].as_bool().unwrap(),
+                u32::try_from(c["helper_grant"].as_u64().unwrap()).unwrap(),
+                c["helpers_may_start"].as_bool().unwrap(),
+                &settings,
+                &options,
+                c["detail"].as_str().unwrap(),
+            );
+            assert_eq!(hex(&whole), c["hex"].as_str().unwrap(), "{}", c["name"]);
             if c["helper_grant"].as_u64() != Some(0)
                 || c["helpers_may_start"].as_bool() != Some(false)
             {

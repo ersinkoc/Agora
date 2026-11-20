@@ -352,9 +352,57 @@ pub(crate) fn start_card(
                 ],
             )
         })
-        .collect();
+        .collect::<Vec<_>>();
+    // ADR-0059 decision 5: the launch options, and what "acts without asking" means, in the same lines y / n answers.
+    let mut settings = settings;
+    let options = crate::client::start_option_rows(detail);
+    if !options.is_empty() {
+        let names: Vec<String> = options
+            .iter()
+            .map(|(label, id, _)| option_name(label, id, t))
+            .collect();
+        settings.push(t(
+            key!("tui-start-setting"),
+            &[
+                ("name", Arg::Str(t(key!("tui-start-how-it-acts"), &[]))),
+                ("value", Arg::Str(names.join(", "))),
+            ],
+        ));
+        if options.iter().any(|(_, _, skips)| *skips) {
+            settings.push(t(key!("tui-start-does-not-ask"), &[]));
+        }
+    }
     let prompt = visible(&start.prompt).lines().map(str::to_string).collect();
     Some((line, settings, prompt))
+}
+
+/// ADR-0059 decision 5: the names of the launch options of an `agent.start` request that make the helper act without asking, in this
+/// terminal's words; `None` when it has none (or it is not a start). Allowing such a request asks for the confirmation first.
+pub fn start_skipping_options(action: &str, detail: &str, t: Text<'_>) -> Option<String> {
+    start_request(action, detail)?;
+    let names: Vec<String> = crate::client::start_option_rows(detail)
+        .iter()
+        .filter(|(_, _, skips)| *skips)
+        .map(|(label, id, _)| option_name(label, id, t))
+        .collect();
+    (!names.is_empty()).then(|| names.join(", "))
+}
+
+/// ADR-0059: an option's name in this terminal's words: the machine's label when it is one of this terminal's option texts
+/// (`option-skip-permissions`), else the option's id. Never the requesting agent's words.
+fn option_name(label: &str, id: &str, t: Text<'_>) -> String {
+    let own = label.starts_with("option-")
+        && label.len() <= 40
+        && label
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+    if own {
+        let said = t(label, &[]);
+        if said != label {
+            return said;
+        }
+    }
+    visible(id)
 }
 
 /// ADR-0066: a setting's name in this terminal's words: the machine's label when it is one of this terminal's setting texts

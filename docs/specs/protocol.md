@@ -582,7 +582,23 @@ All additions; nothing published changed.
   with `settings` as above (read from the detail's `settings`, the pairs `(id, value)` in the order listed). A request whose detail has
   settings is decided only over v2 (a client that signs the v1 message does not name the settings and is refused with
   `approval.signature_invalid`); one without keeps `agora-approval-start-v1`. Vectors: `schema/fixtures/signing/approval-start-v2.json`
-  (node and web window). The helper starts with exactly the settings shown and signed, and never with a launch option. The node enforces "no grant" itself: a signed `helper_grant` or `helpers_may_start` on a request with settings is ignored.
+  (node and web window). The helper starts with exactly the settings shown and signed, and with a launch option only as below. The node enforces "no grant" itself: a signed `helper_grant` or `helpers_may_start` on a request with settings is ignored.
+- **Launch options from an agent (ADR-0059 decision 5).** The mesh tool takes `options: [<id>]`. The node checks them as a window's
+  `AgentStart.launch_options` (`agent.option_invalid`, `agent.option_forbidden` from its own manifest and `skip_permissions` policy)
+  before anyone is asked, and the `agent.start` detail gains `launch_options`: a list of `{id, label, skips_permissions}` in the
+  manifest's order (`label` is the manifest's Fluent id; `skips_permissions` the manifest's word; present only when there are options)
+  and `grant_allowed: false`. The decision on such a request is signed over
+
+  ```
+  agora-approval-start-v3\0node_id\0approval_id\0verdict\0helper_grant\0helpers_may_start\0settings\0launch_options\0sha256(detail)
+  ```
+
+  with `settings` as for v2 (`0` when there are none) and `launch_options` the ids as a length-prefixed list (`1:16:skip-permissions`),
+  read from the detail in the order listed. A request with options is decided only over v3 (a v1 or v2 signature is refused with
+  `approval.signature_invalid`). Vectors: `schema/fixtures/signing/approval-start-v3.json` (node, web window, terminal client). The
+  signed decision is the confirmation of each option that skips permissions; clients show the same "act without asking?" confirmation
+  before they sign an approval. The helper launches with exactly those ids, its `AgentStarted` carries `launch_options` and
+  `skips_permissions`, and the node ignores a signed grant or `helpers_may_start` on it.
 - **Clients.** The web start window and the TUI's approval card are built. The window offers each `AgentKind.settings` entry (a list only
   among its `values`; with no list a text box limited to the node's plain-token rule), sends nothing for "the agent's own default" (that
   `AgentLaunch` has no `settings` and is signed over `directory-action-v1`/`v3` as before) and signs the chosen pairs in the kind's order
@@ -618,7 +634,8 @@ All additions; nothing published changed. Node capability `agent.launch_options`
   An `AgentLaunch` without either list keeps `directory-action-v1` exactly as published, so a hub can neither add, remove or swap an
   option nor add or strip a confirmation. A routed `AgentStart` with options carries no signature and is refused
   (`agent.option_forbidden` `{kind, option, policy: signature}`); a grant (ADR-0041) never covers one. On the node's own control
-  socket (the owner) no signature is needed. An agent's `agent_start` helper (ADR-0057) never gets an option.
+  socket (the owner) no signature is needed. An agent's `agent_start` helper (ADR-0057) never inherits an option; it gets one only
+  when the user's signed decision names it (ADR-0059 decision 5, above).
 - **Node policy.** `skip_permissions = forbid | allow | confined_only` (quoted or not) in the node's own policy file (default `allow`
   when there is no file; any other value, an unknown key, a line without `=`, or an existing file that cannot be read counts as
   `forbid`, and the node says `node.policy_not_understood` when it starts; the hub cannot change it). A start with a `skips_permissions` option that the policy does not allow is refused

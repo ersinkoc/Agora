@@ -2,7 +2,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { helperTree } from '../model';
-import { signStart, startSignedMessage, thisDevice, toHex, type KeyStore } from './approval';
+import { detailLaunchOptions, signStart, startSignedMessage, thisDevice, toHex, type KeyStore } from './approval';
 import { HIDDEN_RANGES, applyEvent, approvalList, emptyView, fromSnapshot, startRequest, tiles, visible } from './view';
 
 function memoryStore(): KeyStore {
@@ -48,7 +48,7 @@ describe('agents that start agents', () => {
 
   it('reads a start request and leaves other approvals alone', () => {
     const detail = JSON.stringify({ kind: 'codex', folder: '/w', prompt: 'fix it', inside: true, worktree: false, depth: 1, grant_allowed: true });
-    expect(startRequest('agent.start', detail)).toEqual({ agent: '', agentKind: '', node: '', kind: 'codex', folder: '/w', prompt: 'fix it', inside: true, worktree: false, depth: 1, grantAllowed: true, settings: [] });
+    expect(startRequest('agent.start', detail)).toEqual({ agent: '', agentKind: '', node: '', kind: 'codex', folder: '/w', prompt: 'fix it', inside: true, worktree: false, depth: 1, grantAllowed: true, settings: [], options: [] });
     // A shell (or an older node) offers no grant.
     expect(startRequest('agent.start', JSON.stringify({ kind: 'shell', inside: true }))?.grantAllowed).toBe(false);
     expect(startRequest('shell', detail)).toBeUndefined();
@@ -129,5 +129,37 @@ describe('settings on a start request', () => {
     // Multi-byte text is counted in bytes, as the node does.
     expect(await sign(d([{ id: 'model', value: 'é' }]))).toContain('5:model:2:é');
     expect(base.settings.length).toBe(2);
+  });
+});
+
+// ADR-0059 decision 5: a start request that lists launch options (a helper that acts without asking) is decided over
+// `agora-approval-start-v3`.
+describe('launch options on a start request', () => {
+  const vectors = JSON.parse(readFileSync('../../schema/fixtures/signing/approval-start-v3.json', 'utf8')) as { cases: { name: string; node: string; approval_id: string; approved: boolean; helper_grant: number; helpers_may_start: boolean; settings: [string, string][]; options: string[]; detail: string; hex: string }[] };
+
+  it('signs the vectors the node checks too', async () => {
+    for (const c of vectors.cases) {
+      const m = await startSignedMessage(c.node, c.approval_id, c.approved, c.helper_grant, c.helpers_may_start, c.detail);
+      expect(toHex(m), c.name).toBe(c.hex);
+      expect(detailLaunchOptions(c.detail).map((o) => o.id), c.name).toEqual(c.options);
+    }
+  });
+
+  it('reads them for the card with whether each skips permissions, the node\'s word', () => {
+    const detail = JSON.stringify({ kind: 'codex', launch_options: [{ id: 'skip-permissions', label: 'option-skip-permissions', skips_permissions: true }, { id: 'x', label: 1 }] });
+    expect(startRequest('agent.start', detail)?.options).toEqual([
+      { id: 'skip-permissions', label: 'option-skip-permissions', skipsPermissions: true },
+      { id: 'x', label: '', skipsPermissions: false },
+    ]);
+    expect(startRequest('agent.start', '{"kind":"codex"}')?.options).toEqual([]);
+    expect(startRequest('agent.start', '{"launch_options":"x"}')?.options).toEqual([]);
+  });
+
+  it('is never the v1 or v2 message', async () => {
+    const enc = (m: Uint8Array) => new TextDecoder().decode(m);
+    const d = JSON.stringify({ kind: 'codex', settings: [{ id: 'effort', value: 'high' }], launch_options: [{ id: 'skip-permissions', skips_permissions: true }] });
+    const m = enc(await startSignedMessage('n', 'ap', true, 0, false, d));
+    expect(m.startsWith('agora-approval-start-v3\0')).toBe(true);
+    expect(m).toContain('\x001:6:effort:4:high\x001:16:skip-permissions\x00');
   });
 });
