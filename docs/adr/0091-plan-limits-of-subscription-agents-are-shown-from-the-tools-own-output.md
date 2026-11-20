@@ -67,3 +67,20 @@ untrusted, clamped; the reporter rung: a settings file the agent trusts).
 2. Node reader and the Codex manifest mapping.
 3. Hub snapshot table and the web Usage bars, chip and start hint.
 4. Optional, separately accepted: the Claude Code reporter rung.
+
+## Status of the build
+- Step 1 (schema): done. `AgentQuotaObserved` is `Event` arm 67 with `node_id`, `tool`, `window`, `used_percent`, `resets_at_ms`, `source`,
+  `observed_at_ms` (the record of decision 1 plus the machine it belongs to, which decision 5's table needs as a key), capability
+  `usage.quota` (passed by the hub), golden fixtures, `docs/specs/protocol.md`. The hub only routes the event (visible with its machine).
+- Step 2 (node reader, Codex mapping): done. Manifest `[quota]` (`[[quota.window]]` with `percent`, `minutes`, `resets` paths; `ENGINE_VERSION` 5, so
+  a manifest with it says `min_engine = 5`; only with `[usage.file]`), the shipped `codex` manifest maps `rate_limits.primary` and `.secondary`
+  (the label comes from `window_minutes`: 300 five_hour, 10080 seven_day, else `minutes:<n>`; `resets_at` is read as seconds, or as milliseconds
+  from 100 000 000 000 up). The reader is `agora-adapters::usage` (an allow-list of three numbers by construction, values must be numbers); the
+  node's `usage_quota::QuotaGate` bounds them (percentage clamped, reset time within a day back and 31 days ahead, else dropped), sends on change
+  only, at most one per tool and window every 5 seconds (the newest waits and is sent when due), at most 32 windows; only the agent's own file
+  counts. The node advertises `usage.quota`. Threat model T50. The Codex mapping was written from this ADR's description and community sources;
+  it was not checked against a real rollout file here (no real user data was read), so the first run on a real Codex is the check.
+- Review follow-ups (same PR): a file read from its start sends only the newest report per window, stamped with the line's own time (`[quota] at`, RFC 3339) or
+  the file's, never later than now; an observation older than the newest of its window is dropped; `five_hour` and `seven_day` are never evicted by invented
+  `minutes:<n>` windows (30 of those, oldest offered goes first); the node prints a line at start when a folder manifest replaces a built-in kind.
+- Steps 3 (hub table, web Usage bars, chip, start hint) and 4 (Claude Code reporter: needs its own acceptance): not done.

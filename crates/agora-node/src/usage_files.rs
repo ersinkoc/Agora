@@ -8,8 +8,8 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
-use agora_adapters::manifest::UsageFile;
-use agora_adapters::usage::{FileReader, Sample, MAX_LINE};
+use agora_adapters::manifest::{QuotaSpec, UsageFile};
+use agora_adapters::usage::{FileReader, QuotaRaw, Sample, MAX_LINE};
 use agora_core::AgentId;
 
 /// Files followed per agent.
@@ -23,6 +23,8 @@ const MAX_PENDING: usize = 1000;
 /// Files looked at, and entries read per directory, when expanding a glob.
 const MAX_MATCHES: usize = 2000;
 const MAX_ENTRIES: usize = 5000;
+/// Plan windows held back while a file's directory is not known yet.
+const MAX_PENDING_QUOTA: usize = 16;
 /// A file may have been created this long before the node noticed the agent.
 const SLACK: Duration = Duration::from_secs(2);
 
@@ -31,6 +33,9 @@ pub struct Target {
     pub agent: AgentId,
     pub worktree: PathBuf,
     pub spec: UsageFile,
+    /// ADR-0091: the agent kind the plan windows of this file belong to, and how to read them (`[quota]`).
+    pub tool: String,
+    pub quota: Option<QuotaSpec>,
 }
 
 struct FileState {
@@ -39,6 +44,11 @@ struct FileState {
     /// `None` until a line has said which directory the file belongs to.
     owned: Option<bool>,
     pending: Vec<Sample>,
+    /// Plan windows read before the directory was known (at most [`MAX_PENDING_QUOTA`]: the newest).
+    pending_quota: Vec<QuotaRaw>,
+    /// Set once a read has reached the end of the file. Until then the file is being replayed from its start: its plan windows are
+    /// old news, so only the newest of each is sent and it is stamped with the line's (or the file's) time, not the read time.
+    caught_up: bool,
     /// The end of the file when it has no newline yet.
     partial: Vec<u8>,
 }
@@ -54,6 +64,8 @@ struct AgentUsage {
 pub struct UsageWatcher {
     home: Option<PathBuf>,
     agents: HashMap<AgentId, AgentUsage>,
+    /// ADR-0091: plan windows read from files that are an agent's own, as `(tool, window)` in file order, for [`Self::take_quota`].
+    quota_out: Vec<(String, QuotaRaw)>,
 }
 
 pub fn home_dir() -> Option<PathBuf> {
@@ -133,7 +145,13 @@ impl UsageWatcher {
         Self {
             home,
             agents: HashMap::new(),
+            quota_out: Vec::new(),
         }
+    }
+
+    /// The plan windows the last steps read, oldest first (ADR-0091). Only files that are an agent's own count, as for tokens.
+    pub fn take_quota(&mut self) -> Vec<(String, QuotaRaw)> {
+        std::mem::take(&mut self.quota_out)
     }
 
     /// One step: follows the targets and returns what new lines added, per agent. Cheap when nothing is due.
@@ -195,10 +213,12 @@ impl UsageWatcher {
                     a.files.insert(
                         path,
                         FileState {
-                            reader: FileReader::new(t.spec.clone()),
+                            reader: FileReader::new(t.spec.clone()).with_quota(t.quota.clone()),
                             offset: 0,
                             owned: None,
                             pending: Vec::new(),
+                            pending_quota: Vec::new(),
+                            caught_up: false,
                             partial: Vec::new(),
                         },
                     );
@@ -215,7 +235,10 @@ impl UsageWatcher {
             if budget == 0 {
                 break;
             }
-            let samples = read_new(path, f, &mut budget, &t.worktree, &t.spec);
+            let mut quota = Vec::new();
+            let samples = read_new(path, f, &mut budget, t, &mut quota);
+            self.quota_out
+                .extend(quota.into_iter().map(|q| (t.tool.clone(), q)));
             if f.owned == Some(false) {
                 drop_files.push(path.clone());
             }
@@ -235,9 +258,10 @@ fn read_new(
     path: &Path,
     f: &mut FileState,
     budget: &mut u64,
-    worktree: &Path,
-    spec: &UsageFile,
+    target: &Target,
+    quota_out: &mut Vec<QuotaRaw>,
 ) -> Vec<Sample> {
+    let (worktree, spec) = (&target.worktree, &target.spec);
     let Ok(mut file) = std::fs::File::open(path) else {
         return Vec::new();
     };
@@ -245,10 +269,12 @@ fn read_new(
     if len < f.offset {
         // Truncated or replaced: start over.
         *f = FileState {
-            reader: FileReader::new(spec.clone()),
+            reader: FileReader::new(spec.clone()).with_quota(target.quota.clone()),
             offset: 0,
             owned: None,
             pending: Vec::new(),
+            pending_quota: Vec::new(),
+            caught_up: false,
             partial: Vec::new(),
         };
     }
@@ -261,6 +287,13 @@ fn read_new(
         return Vec::new();
     }
     f.offset += buf.len() as u64;
+    let replaying = !f.caught_up;
+    f.caught_up = f.offset >= len;
+    let first_window = quota_out.len();
+    let now_ms = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64);
+    let file_ms = file_time_ms(path).unwrap_or(now_ms).min(now_ms);
     *budget = budget.saturating_sub(buf.len() as u64);
     let mut data = std::mem::take(&mut f.partial);
     data.extend_from_slice(&buf);
@@ -273,13 +306,37 @@ fn read_new(
             continue;
         };
         let sample = f.reader.line(line);
+        // Stamped when read: a replayed line with the time it says (or the file's), a live line with now; never later than now.
+        let windows: Vec<QuotaRaw> = f
+            .reader
+            .take_quota()
+            .into_iter()
+            .map(|mut w| {
+                w.line_ms = Some(if replaying {
+                    w.line_ms.unwrap_or(file_ms).min(now_ms)
+                } else {
+                    now_ms
+                });
+                w
+            })
+            .collect();
         if f.owned.is_none() {
             if let Some(cwd) = f.reader.cwd() {
                 f.owned = Some(same_dir(cwd, worktree));
                 if f.owned == Some(true) {
                     out.append(&mut f.pending);
+                    quota_out.append(&mut f.pending_quota);
                 }
             }
+        }
+        match f.owned {
+            Some(true) => quota_out.extend(windows),
+            None => {
+                f.pending_quota.extend(windows);
+                let extra = f.pending_quota.len().saturating_sub(MAX_PENDING_QUOTA);
+                f.pending_quota.drain(..extra);
+            }
+            Some(false) => {}
         }
         match (f.owned, sample) {
             (Some(true), Some(s)) => out.push(s),
@@ -292,7 +349,24 @@ fn read_new(
     if data.len() - start <= MAX_LINE {
         f.partial = data[start..].to_vec();
     }
+    if replaying {
+        // Only the last report of each window is news; the ones before it were superseded in the file.
+        let mut last: Vec<QuotaRaw> = Vec::new();
+        for w in quota_out.drain(first_window..) {
+            match last.iter_mut().find(|l| l.minutes == w.minutes) {
+                Some(l) => *l = w,
+                None => last.push(w),
+            }
+        }
+        quota_out.extend(last);
+    }
     out
+}
+
+/// When the file was last written, in milliseconds since the Unix epoch.
+fn file_time_ms(path: &Path) -> Option<u64> {
+    let t = std::fs::metadata(path).ok()?.modified().ok()?;
+    Some(t.duration_since(SystemTime::UNIX_EPOCH).ok()?.as_millis() as u64)
 }
 
 #[cfg(test)]
@@ -339,6 +413,8 @@ mod tests {
             agent: AgentId::new(agent),
             worktree: worktree.to_path_buf(),
             spec: spec(),
+            tool: "t".into(),
+            quota: None,
         }
     }
 
@@ -464,5 +540,149 @@ mod tests {
         assert_eq!(got.len(), 1, "{got:?}");
         assert_eq!(got[0].1.input, 3);
         let _ = std::fs::remove_dir_all(d);
+    }
+
+    fn quota_target(agent: &str, worktree: &Path) -> Target {
+        let mut t = target(agent, worktree);
+        t.tool = "tool-x".into();
+        t.quota = Some(QuotaSpec {
+            at: Some("ts".into()),
+            window: vec![agora_adapters::manifest::QuotaWindow {
+                percent: "q.p".into(),
+                minutes: "q.m".into(),
+                resets: "q.r".into(),
+            }],
+        });
+        t
+    }
+
+    fn qline(cwd: Option<&str>, p: u64) -> String {
+        let mut v = serde_json::json!({"type":"assistant","q":{"p":p,"m":300,"r":1795000000u64}});
+        if let Some(c) = cwd {
+            v["cwd"] = c.into();
+        }
+        v.to_string()
+    }
+
+    /// ADR-0091: plan windows come only from the agent's own file, also when the line that says the directory comes later, and a file
+    /// of another directory never gives one.
+    #[test]
+    fn plan_windows_are_read_from_the_agents_own_file_only() {
+        let d = tmp("quota");
+        let (mine, other) = (d.join("mine"), d.join("other"));
+        std::fs::create_dir_all(&mine).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        let mut w = UsageWatcher::new(Some(d.clone()));
+        let t = [quota_target("a1", &mine)];
+        step(&mut w, &t, 0);
+        // The first window is read before any line says the directory; the later line does.
+        let own = format!(
+            "{}\n{}\n{}\n",
+            qline(None, 10),
+            qline(Some(&mine.to_string_lossy()), 11),
+            qline(Some(&mine.to_string_lossy()), 12)
+        );
+        std::fs::write(d.join("logs/p/mine.jsonl"), own).unwrap();
+        std::fs::write(
+            d.join("logs/p/other.jsonl"),
+            format!("{}\n", qline(Some(&other.to_string_lossy()), 99)),
+        )
+        .unwrap();
+        step(&mut w, &t, 1);
+        let got = w.take_quota();
+        let seen: Vec<_> = got.iter().map(|(t, q)| (t.as_str(), q.percent)).collect();
+        // The file is read from its start: only the newest report of the window is news.
+        assert_eq!(seen, [("tool-x", 12.0)]);
+        assert!(w.take_quota().is_empty());
+        // Lines appended after that are live: each is reported, stamped with the read time.
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(d.join("logs/p/mine.jsonl"))
+            .unwrap();
+        writeln!(f, "{}", qline(Some(&mine.to_string_lossy()), 13)).unwrap();
+        writeln!(f, "{}", qline(Some(&mine.to_string_lossy()), 14)).unwrap();
+        step(&mut w, &t, 2);
+        let seen: Vec<_> = w.take_quota().iter().map(|(_, q)| q.percent).collect();
+        assert_eq!(seen, [13.0, 14.0]);
+        // A manifest without `[quota]` reads none.
+        let mut w = UsageWatcher::new(Some(d.clone()));
+        let t = [target("a1", &mine)];
+        step(&mut w, &t, 0);
+        step(&mut w, &t, 1);
+        assert!(w.take_quota().is_empty());
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    /// ADR-0091 decision 4: a resumed session's file is read from its start, and what it said hours ago is not "observed now".
+    #[test]
+    fn an_old_file_replays_one_report_per_window_with_its_old_time() {
+        let d = tmp("replay");
+        let work = d.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let cwd = work.to_string_lossy().into_owned();
+        let now_ms = || {
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64
+        };
+        let mut w = UsageWatcher::new(Some(d.clone()));
+        let t = [quota_target("a1", &work)];
+        step(&mut w, &t, 0);
+        let hours = |h: u64| h * 3600 * 1000;
+        let rfc = |ms: u64| {
+            // Whole seconds; the days come from the standard formula the reader inverts.
+            let secs = ms / 1000;
+            let (days, rem) = (secs / 86_400, secs % 86_400);
+            let (y, m, d) = civil(days as i64);
+            format!(
+                "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+                rem / 3600,
+                rem % 3600 / 60,
+                rem % 60
+            )
+        };
+        let (old, older) = (now_ms() - hours(20), now_ms() - hours(21));
+        let line = |ts: Option<&str>, p: u64| {
+            let mut v = serde_json::json!({"type":"assistant","cwd":cwd,"q":{"p":p,"m":300,"r":(now_ms()/1000)+3600}});
+            if let Some(ts) = ts {
+                v["ts"] = ts.into();
+            }
+            v.to_string()
+        };
+        // A file whose lines carry their time: the last line's time is the stamp.
+        let file = d.join("logs/p/old.jsonl");
+        std::fs::write(
+            &file,
+            format!(
+                "{}\n{}\n",
+                line(Some(&rfc(older)), 20),
+                line(Some(&rfc(old)), 21)
+            ),
+        )
+        .unwrap();
+        step(&mut w, &t, 1);
+        let got = w.take_quota();
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got[0].1.percent, 21.0);
+        let stamp = got[0].1.line_ms.unwrap();
+        assert!(
+            stamp.abs_diff(old) < 1000,
+            "the line's own time, not now: {stamp} vs {old}"
+        );
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    /// Civil date from days since 1970-01-01 (the inverse of the reader's formula), for building test timestamps.
+    fn civil(z: i64) -> (i64, i64, i64) {
+        let z = z + 719_468;
+        let era = z.div_euclid(146_097);
+        let doe = z - era * 146_097;
+        let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let d = doy - (153 * mp + 2) / 5 + 1;
+        let m = if mp < 10 { mp + 3 } else { mp - 9 };
+        (yoe + era * 400 + i64::from(m <= 2), m, d)
     }
 }
