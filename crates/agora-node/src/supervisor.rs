@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::approvals::{SkipAsk, SkipKind};
 use agora_adapters::host::{
     Adapter, AdapterCommand, AdapterConfig, AdapterEvent, Caller, ConfigOption, HostError,
     McpServer, OptionKind, SessionOption, SessionOptions,
@@ -23,7 +24,7 @@ use agora_vt::Size;
 
 use crate::git::{self, GitError};
 use crate::holder::{HolderHub, HolderSession};
-use crate::holder_link::{Held, LinkError, Refusal as HolderRefusal};
+use crate::holder_link::{Held, HeldPipe, LinkError, Refusal as HolderRefusal};
 use crate::launch_options::{LaunchChoice, Refusal, Requested, SkipPermissions};
 use crate::terminal::{TerminalHandle, TerminalOptions};
 
@@ -202,6 +203,23 @@ pub enum SupervisorEvent {
         agent: AgentId,
         tags: Vec<u64>,
     },
+    /// ADR-0093: the holder kept only the newest 1 MiB of what an adapter wrote while no node read it; `bytes` were dropped.
+    OutputDropped {
+        agent: AgentId,
+        bytes: u64,
+    },
+}
+
+/// ADR-0093: what a node needs to take up an adapter agent the holder kept, beyond what [`Restore`] says: what the adapter told the
+/// node when it started (the node cannot ask again), and the agent's last state.
+#[derive(Debug, Clone, Default)]
+pub struct Reattach {
+    /// The adapter's own session id (`session/start`'s answer).
+    pub session_id: String,
+    /// The capabilities it declared in `initialize`.
+    pub capabilities: Vec<String>,
+    /// The state the ledger last saw it in.
+    pub state: Option<AgentState>,
 }
 
 /// ADR-0090: the most prompts that wait behind a turn, per agent (`agent.queue_full`).
@@ -223,6 +241,14 @@ pub struct AdapterCall {
     session: String,
     op: CallOp,
     generation: u64,
+}
+
+/// What preparing a switch of a running agent's mode or config option came to (ADR-0090 Amendment A).
+pub enum Prepared {
+    /// Nothing to ask: make this call after the lock is let go.
+    Call(AdapterCall),
+    /// The choice makes the agent act without asking and the policy allows it: it is NOT applied; the owner's signed decision is.
+    Ask(SkipAsk),
 }
 
 enum CallOp {
@@ -589,6 +615,9 @@ struct AdapterRich {
     /// Counts the turns and the restarts of this adapter. Everything that was started in one turn (a send, a cancel) carries the
     /// generation it began in and is ignored when it comes back to another: a late answer cannot touch a newer turn.
     generation: u64,
+    /// ADR-0090 Amendment A: counts the runs of this adapter (a restart, a resume): a switch the user approved for one run is never
+    /// applied to another.
+    epoch: u64,
     queue: VecDeque<Queued>,
 }
 
@@ -736,6 +765,7 @@ impl AdapterRich {
         self.commands.clear();
         self.turn = Turn::Idle;
         self.generation += 1;
+        self.epoch += 1;
         self.queue.drain(..).map(|q| q.tag).collect()
     }
 }
@@ -860,8 +890,75 @@ impl Supervisor {
             .iter()
             .filter(|(_, e)| e.terminal.as_ref().is_some_and(TerminalHandle::is_held))
             .map(|(id, _)| id.clone())
+            // ADR-0093: an adapter's process the holder runs.
+            .chain(
+                self.adapters
+                    .iter()
+                    .filter(|(_, e)| e.running && e.adapter.as_ref().is_some_and(Adapter::is_held))
+                    .map(|(id, _)| id.clone()),
+            )
             .collect();
         (ids, self.holder.as_ref().and_then(|h| h.identity()))
+    }
+
+    /// ADR-0093: for each adapter agent that runs in the holder, what a later node needs to take it up and cannot ask: the adapter's
+    /// own session id and the capabilities it declared. The node writes them to the ledger.
+    pub fn held_adapter_states(&self) -> Vec<(AgentId, String, Vec<String>)> {
+        self.adapters
+            .iter()
+            .filter(|(_, e)| e.running && e.adapter.as_ref().is_some_and(Adapter::is_held))
+            .map(|(id, e)| (id.clone(), e.session_id.clone(), e.capabilities.clone()))
+            .collect()
+    }
+
+    /// ADR-0093 decisions 1 and 3: takes an adapter agent the holder kept running while the node was away. Nothing is started and the
+    /// adapter is not initialised again (it still has its session): the node talks to the process it left, through the holder.
+    /// `pipe` is what the holder kept of its output: lines an earlier node was given (what was still waiting on a person is asked again,
+    /// never answered), then lines no node had, which are read as if they had just arrived. On failure nothing is left behind and the
+    /// agent stays in the holder (the caller ends it).
+    pub fn adopt_held_pipe(
+        &mut self,
+        r: Restore,
+        reattach: Reattach,
+        pipe: HeldPipe,
+        session: &Arc<HolderSession>,
+        now: Instant,
+    ) -> Result<(), SupervisorError> {
+        let _ = now;
+        if reattach.session_id.is_empty() {
+            return Err(SupervisorError::Spawn("no session".into()));
+        }
+        let id = r.id.clone();
+        let (kind, project, worktree) = (r.kind.clone(), r.project.to_string(), r.folder.clone());
+        self.restore(r)?;
+        if !self.adapters.contains_key(&id) {
+            // A kind that is not hosted by an adapter was not started on pipes.
+            self.unrestore(&id);
+            return Err(SupervisorError::UnknownKind(kind));
+        }
+        let replay = agora_adapters::host::pending_approvals(&pipe.seen);
+        let io = session.pipe_io(id.as_str(), pipe.fresh, pipe.dropped, pipe.info.pid);
+        let adapter = match Adapter::attach_held(io, replay) {
+            Ok(a) => a,
+            Err(e) => {
+                self.unrestore(&id);
+                return Err(SupervisorError::Spawn(e.to_string()));
+            }
+        };
+        // The agent's mesh endpoint was the old node's: made again at the same path, so its configuration keeps working.
+        let mesh = self.adapter_mesh(&id, &kind, &project, &worktree);
+        let Some(e) = self.adapters.get_mut(&id) else {
+            return Err(SupervisorError::NotFound(id));
+        };
+        e.adapter = Some(adapter);
+        e.session_id = reattach.session_id;
+        e.capabilities = reattach.capabilities;
+        e.mesh = mesh;
+        e.running = true;
+        if let Some(state) = reattach.state {
+            e.agent.observe(state, StateSource::Reported);
+        }
+        Ok(())
     }
 
     /// ADR-0079 decision 4: takes an agent the holder kept running while the node was away: it is put back as `r.id` with its terminal,
@@ -1523,6 +1620,8 @@ impl Supervisor {
                 .adapter_sandbox(&req.kind, &worktree, &spec.command[0])
                 .and_then(|profile| {
                     launch_adapter(
+                        &id,
+                        self.holder.as_ref(),
                         &spec,
                         &root,
                         &worktree,
@@ -1771,6 +1870,8 @@ impl Supervisor {
             .adapter_sandbox(&req.kind, &worktree, &spec.command[0])
             .and_then(|profile| {
                 launch_adapter(
+                    &id,
+                    self.holder.as_ref(),
                     spec,
                     &checkout.root,
                     &worktree,
@@ -1868,6 +1969,8 @@ impl Supervisor {
                 Some(adapter) if e.running => adapter.poll(),
                 _ => continue,
             };
+            // ADR-0093: the holder kept only the newest of what the adapter wrote while no node read it: the person is told.
+            let lost = e.adapter.as_ref().map_or(0, Adapter::take_dropped);
             for ev in polled {
                 match ev {
                     AdapterEvent::State { state, .. } => {
@@ -1961,6 +2064,13 @@ impl Supervisor {
                     }),
                 }
             }
+            // After what the adapter said, so the notice is the newest entry and a long reply cannot push it out of the conversation.
+            if lost > 0 {
+                events.push(SupervisorEvent::OutputDropped {
+                    agent: id.clone(),
+                    bytes: lost,
+                });
+            }
         }
     }
 
@@ -1986,14 +2096,19 @@ impl Supervisor {
             .get(id)
             .map(|e| self.credential_vars(&e.agent.kind))
             .unwrap_or_default();
+        let holder = self.holder.clone();
         let Some(e) = self.adapters.get_mut(id) else {
             return;
         };
         e.restart_at = None;
         e.restarts += 1;
+        // The process that ended is let go before the next starts: a held one is collected from the holder, which frees its id.
+        e.adapter = None;
         // A crash keeps the agent in the mesh: the restarted session gets the same endpoint.
         let launched = held.and_then(|held| {
             launch_adapter(
+                id,
+                holder.as_ref(),
                 &e.spec,
                 &e.checkout_root,
                 &e.worktree,
@@ -2043,12 +2158,12 @@ impl Supervisor {
         })
     }
 
-    /// The `skip_permissions` policy's refusal of something that makes an agent act without asking, with the confirmation it needs.
+    /// The `skip_permissions` policy's refusal of a MODEL that makes an agent act without asking (modes and config options are asked
+    /// about instead, [`skip_ask`](Self::skip_ask)).
     ///
-    /// A launch option needs the user's confirmation (`Requested::confirmed`, signed), and so does a mode or a config option that
-    /// skips permissions. The schema has no field to carry it on `AgentSetMode` or `AgentSetConfig` yet, so the node cannot be shown
-    /// one: it refuses with `agent.option_unconfirmed`, after the policy (`agent.option_forbidden`) has had its say. (Missing: a
-    /// `confirmed` field on those two commands, signed like the launch's; adding it is a schema change that needs an ADR.)
+    /// A launch option needs the user's confirmation (`Requested::confirmed`, signed). A model has no approval card (ADR-0090
+    /// Amendment A names modes and config options), so a model that skips is refused with `agent.option_unconfirmed`, after the policy
+    /// (`agent.option_forbidden`) has had its say.
     fn skip_refusal(&self, kind: &str, option: &str) -> Option<SupervisorError> {
         let confined =
             self.sandbox.level != crate::sandbox::Level::Off && self.sandbox.enforceable();
@@ -2167,15 +2282,15 @@ impl Supervisor {
     /// ADR-0090: sets one of the config options an adapter agent reported (the reasoning effort is one). The id and the value are
     /// checked against the last report. Whether the choice makes the agent act without asking is the node's own judgement
     /// (`perm`, on top of what the adapter said); one that does is refused by the owner's `skip_permissions` policy
-    /// (`agent.option_forbidden`) and otherwise for want of the user's confirmation (`agent.option_unconfirmed`, see
-    /// [`skip_refusal`](Self::skip_refusal)), whatever the window or the hub said. A change to the value that keeps protection
-    /// (turning an `auto_approve` off) is never refused for it. The call is made by [`AdapterCall::run`] after the lock is let go.
+    /// (`agent.option_forbidden`) and otherwise NOT applied: it becomes an approval the owner signs ([`Prepared::Ask`], ADR-0090
+    /// Amendment A), whatever the window or the hub said. A change to the value that keeps protection (turning an `auto_approve`
+    /// off) is never asked about. The call is made by [`AdapterCall::run`] after the lock is let go.
     pub fn prepare_set_config(
         &self,
         id: &AgentId,
         config_id: &str,
         value: &str,
-    ) -> Result<AdapterCall, SupervisorError> {
+    ) -> Result<Prepared, SupervisorError> {
         const CAPABILITY: &str = "agent.set_config";
         let Some(e) = self.adapters.get(id) else {
             return Err(if self.agents.contains_key(id) {
@@ -2198,19 +2313,20 @@ impl Supervisor {
         else {
             return Err(SupervisorError::ConfigUnknown(config_id.to_string()));
         };
-        let skips = if option.boolean {
+        let (skips, value_name) = if option.boolean {
             let on = match value {
                 "true" => true,
                 "false" => false,
                 _ => return Err(SupervisorError::ConfigUnknown(value.to_string())),
             };
-            perm::boolean_value_skips(
+            let skips = perm::boolean_value_skips(
                 Category::from_acp(Some(option.category.as_str())),
                 (&option.id, &option.name),
                 &option.description,
                 option.skips_permissions,
                 on,
-            )
+            );
+            (skips, String::new())
         } else {
             let Some(choice) = option
                 .choices
@@ -2219,12 +2335,15 @@ impl Supervisor {
             else {
                 return Err(SupervisorError::ConfigUnknown(value.to_string()));
             };
-            choice.skips_permissions
+            (choice.skips_permissions, choice.name.clone())
         };
         if skips {
-            if let Some(err) = self.skip_refusal(&e.agent.kind, config_id) {
-                return Err(err);
-            }
+            return self.skip_ask(
+                e,
+                SkipKind::Config,
+                (config_id, &option.name),
+                (value, &value_name),
+            );
         }
         self.call_of(
             id,
@@ -2233,16 +2352,133 @@ impl Supervisor {
                 value: value.to_string(),
             },
         )
+        .map(Prepared::Call)
+    }
+
+    /// ADR-0090 Amendment A: the choice skips permissions. Under a policy that does not allow it the answer is the refusal of the policy
+    /// (`agent.option_forbidden`, nothing is asked); under one that does, the node does not apply it and does not refuse it: it
+    /// describes it for the owner's approval ([`Prepared::Ask`]), with the agent, folder, option and value as the node knows them.
+    fn skip_ask(
+        &self,
+        e: &AdapterEntry,
+        kind: SkipKind,
+        option: (&str, &str),
+        value: (&str, &str),
+    ) -> Result<Prepared, SupervisorError> {
+        let confined =
+            self.sandbox.level != crate::sandbox::Level::Off && self.sandbox.enforceable();
+        let (option_id, option_name) = option;
+        let (value_id, value_name) = value;
+        // A mode's id is the value, as before; a config option's is its own.
+        let refused = match kind {
+            SkipKind::Mode => value_id,
+            SkipKind::Config => option_id,
+        };
+        if let Some(policy) = self.skip_permissions.refusal(confined) {
+            return Err(SupervisorError::OptionForbidden(
+                e.agent.kind.clone(),
+                refused.to_string(),
+                policy,
+            ));
+        }
+        Ok(Prepared::Ask(SkipAsk {
+            agent: e.agent.id.clone(),
+            agent_kind: e.agent.kind.clone(),
+            folder: e
+                .folder
+                .as_deref()
+                .unwrap_or(&e.worktree)
+                .to_string_lossy()
+                .into_owned(),
+            kind,
+            option_id: option_id.to_string(),
+            option_name: option_name.to_string(),
+            value: value_id.to_string(),
+            value_name: value_name.to_string(),
+            epoch: e.rich.epoch,
+        }))
+    }
+
+    /// ADR-0090 Amendment A: applies a switch the owner approved, exactly as the node rendered it (`ask` is the node's own record, never
+    /// anything the decision carried). Everything that could have changed while the card waited is checked again: the agent still runs
+    /// in the run the card named, the agent still offers that option and value, and the policy still allows it. The call is made by
+    /// [`AdapterCall::run`] after the lock is let go.
+    pub fn prepare_skip_apply(&self, ask: &SkipAsk) -> Result<AdapterCall, SupervisorError> {
+        let id = &ask.agent;
+        let Some(e) = self.adapters.get(id) else {
+            return Err(SupervisorError::NotFound(id.clone()));
+        };
+        if !e.running || e.rich.epoch != ask.epoch {
+            return Err(SupervisorError::NotFound(id.clone()));
+        }
+        let confined =
+            self.sandbox.level != crate::sandbox::Level::Off && self.sandbox.enforceable();
+        if let Some(policy) = self.skip_permissions.refusal(confined) {
+            return Err(SupervisorError::OptionForbidden(
+                e.agent.kind.clone(),
+                ask.option_id.clone(),
+                policy,
+            ));
+        }
+        match ask.kind {
+            SkipKind::Mode => {
+                if !e
+                    .capabilities
+                    .iter()
+                    .any(|c| c == OptionKind::Mode.capability())
+                {
+                    return Err(SupervisorError::OptionUnsupported("agent.set_mode"));
+                }
+                if !e.options.modes.iter().any(|o| o.id == ask.value) {
+                    return Err(SupervisorError::OptionUnknown("mode"));
+                }
+                self.call_of(
+                    id,
+                    CallOp::SetOption {
+                        kind: OptionKind::Mode,
+                        value: ask.value.clone(),
+                    },
+                )
+            }
+            SkipKind::Config => {
+                if !e.capabilities.iter().any(|c| c == "config") {
+                    return Err(SupervisorError::OptionUnsupported("agent.set_config"));
+                }
+                let offered = e.rich.config.iter().any(|o| {
+                    o.id == ask.option_id
+                        && if o.boolean {
+                            ask.value == "true" || ask.value == "false"
+                        } else {
+                            o.choices.iter().any(|c| c.id == ask.value)
+                        }
+                });
+                if !offered {
+                    return Err(SupervisorError::ConfigUnknown(ask.option_id.clone()));
+                }
+                self.call_of(
+                    id,
+                    CallOp::SetConfig {
+                        id: ask.option_id.clone(),
+                        value: ask.value.clone(),
+                    },
+                )
+            }
+        }
     }
 
     /// [`prepare_set_config`](Self::prepare_set_config) and run, under the caller's lock (tests).
+    ///
+    /// `Ok(Some(ask))`: the choice skips permissions and waits for the owner's approval; nothing was applied.
     pub fn adapter_set_config(
         &self,
         id: &AgentId,
         config_id: &str,
         value: &str,
-    ) -> Result<(), SupervisorError> {
-        self.prepare_set_config(id, config_id, value)?.run()
+    ) -> Result<Option<SkipAsk>, SupervisorError> {
+        match self.prepare_set_config(id, config_id, value)? {
+            Prepared::Call(call) => call.run().map(|()| None),
+            Prepared::Ask(ask) => Ok(Some(ask)),
+        }
     }
 
     /// ADR-0058: switches an adapter agent to one of the modes or models it reported. Only the user's own command reaches this (an
@@ -2254,7 +2490,7 @@ impl Supervisor {
         id: &AgentId,
         kind: OptionKind,
         value: &str,
-    ) -> Result<AdapterCall, SupervisorError> {
+    ) -> Result<Prepared, SupervisorError> {
         let (capability, field) = match kind {
             OptionKind::Mode => ("agent.set_mode", "mode"),
             OptionKind::Model => ("agent.set_model", "model"),
@@ -2279,6 +2515,10 @@ impl Supervisor {
         // A mode that makes the agent act without asking is a launch option's twin (ADR-0059): the owner's `skip_permissions` policy
         // decides it here, on the node, whatever the window or the hub said, and it needs the user's confirmation too.
         if chosen.skips_permissions {
+            // ADR-0090 Amendment A: a mode is asked about (the owner's signed approval applies it); a model that skips stays refused.
+            if kind == OptionKind::Mode {
+                return self.skip_ask(e, SkipKind::Mode, ("mode", ""), (&chosen.id, &chosen.name));
+            }
             if let Some(err) = self.skip_refusal(&e.agent.kind, &chosen.id) {
                 return Err(err);
             }
@@ -2290,16 +2530,22 @@ impl Supervisor {
                 value: value.to_string(),
             },
         )
+        .map(Prepared::Call)
     }
 
     /// [`prepare_set_option`](Self::prepare_set_option) and run, under the caller's lock (tests).
+    ///
+    /// `Ok(Some(ask))`: the mode skips permissions and waits for the owner's approval; nothing was applied.
     pub fn adapter_set_option(
         &self,
         id: &AgentId,
         kind: OptionKind,
         value: &str,
-    ) -> Result<(), SupervisorError> {
-        self.prepare_set_option(id, kind, value)?.run()
+    ) -> Result<Option<SkipAsk>, SupervisorError> {
+        match self.prepare_set_option(id, kind, value)? {
+            Prepared::Call(call) => call.run().map(|()| None),
+            Prepared::Ask(ask) => Ok(Some(ask)),
+        }
     }
 
     /// Delivers a decision the node has already verified (ADR-0020) to the adapter that asked: the call to make after the lock is
@@ -3008,6 +3254,8 @@ impl Supervisor {
                 &entry.worktree,
             );
             let launched = launch_adapter(
+                id,
+                self.holder.as_ref(),
                 &entry.spec,
                 &entry.checkout_root,
                 &entry.worktree,
@@ -3037,6 +3285,8 @@ impl Supervisor {
             entry.running = true;
             entry.restart_at = None;
             entry.restarts = 0;
+            // A resume is a new run: nothing approved for the last one carries over (ADR-0090 Amendment A).
+            entry.rich.epoch += 1;
             entry.agent.process_restarted();
             let mut events = vec![SupervisorEvent::Resumed {
                 agent: id.clone(),
@@ -3185,8 +3435,11 @@ impl Supervisor {
         for e in self.adapters.values_mut() {
             e.restart_at = None;
             e.running = false;
-            if let Some(adapter) = e.adapter.take() {
-                adapter.shutdown(Duration::from_secs(1));
+            if let Some(mut adapter) = e.adapter.take() {
+                // ADR-0093: an adapter's process in the holder keeps running (it is let go, not ended); any other ends.
+                if !adapter.detach() {
+                    adapter.shutdown(Duration::from_secs(1));
+                }
             }
         }
     }
@@ -3658,6 +3911,8 @@ fn held_again(
 /// or the adapter is ended ([`discard_adapter`]), and the start is refused ([`SupervisorError::FolderMoved`]).
 #[allow(clippy::too_many_arguments)] // each is one part of the start the caller made
 fn launch_adapter(
+    agent: &AgentId,
+    holder: Option<&Arc<HolderHub>>,
     spec: &agora_adapters::manifest::AdapterSpec,
     checkout_root: &Path,
     worktree: &Path,
@@ -3698,14 +3953,19 @@ fn launch_adapter(
     if moved() {
         return Err(SupervisorError::FolderMoved);
     }
-    let adapter = Adapter::spawn(&AdapterConfig {
+    let config = AdapterConfig {
         program: program.into(),
         args: args.to_vec(),
         env,
         cwd: Some(worktree.to_path_buf()),
         sandbox,
-    })
-    .map_err(|e| SupervisorError::Spawn(e.to_string()))?;
+    };
+    // ADR-0093: an adapter the node does not confine is run by the holder when this node has one (so it outlives the node), and by the
+    // node itself when it cannot be: exactly as before.
+    let adapter = match launch_held_adapter(agent, &config, holder) {
+        Some(started) => started?,
+        None => Adapter::spawn(&config).map_err(|e| SupervisorError::Spawn(e.to_string()))?,
+    };
     match open_session(&adapter, checkout_root, worktree, resume, mesh) {
         Ok(_) if moved() => {
             discard_adapter(adapter);
@@ -3717,6 +3977,69 @@ fn launch_adapter(
             Err(e)
         }
     }
+}
+
+/// ADR-0093: starts `cfg` through the holder, on pipes. `None` means "not through the holder": the caller runs it itself (a confined
+/// adapter, no holder or an older one, a program or id the holder refuses, a variable that is not text). The environment is complete (the
+/// holder passes nothing of its own).
+fn launch_held_adapter(
+    agent: &AgentId,
+    cfg: &AdapterConfig,
+    holder: Option<&Arc<HolderHub>>,
+) -> Option<Result<Adapter, SupervisorError>> {
+    let hub = holder?;
+    if cfg.sandbox.is_some() {
+        return None;
+    }
+    let cwd = cfg.cwd.as_ref()?.to_str()?.to_string();
+    let env = Adapter::held_env(cfg)?;
+    let mut argv = vec![cfg.program.to_str()?.to_string()];
+    argv.extend(cfg.args.iter().cloned());
+    let request = crate::holder::StartPipeRequest {
+        agent: agent.as_str().to_string(),
+        argv,
+        cwd: Some(cwd),
+        env,
+    };
+    // A second try with a fresh session: the holder may have ended between the check and the start (it ends with its last agent).
+    for _ in 0..2 {
+        let session = hub.session()?;
+        if !session.pipes {
+            return None;
+        }
+        let pid = match session.start_pipe(&request) {
+            Ok(pid) => pid,
+            // It does not know how to start this (a program that is not there): the node's own start says why.
+            Err(LinkError::Refused(HolderRefusal::Failed, _)) => return None,
+            // An earlier run of this agent is still in the holder (its end was not collected): it is ended, then started again.
+            Err(LinkError::Refused(HolderRefusal::AgentExists, _)) => {
+                if session.end_agent(agent.as_str()).is_ok() {
+                    continue;
+                }
+                return None;
+            }
+            Err(LinkError::Refused(..)) => continue,
+            // The link failed: the holder may have started it all the same. Ask before anything else is done: one it has is ended and
+            // only then is another start made, so two copies never run; when that cannot be settled the start fails, unless the holder
+            // itself is gone.
+            Err(_) => {
+                if session.end_agent(agent.as_str()).is_ok() || session.holder_ended() {
+                    continue;
+                }
+                return Some(Err(SupervisorError::Spawn("holder link failed".into())));
+            }
+        };
+        let io = session.pipe_io(agent.as_str(), Vec::new(), 0, pid);
+        return match Adapter::attach_held(io, Vec::new()) {
+            Ok(adapter) => Some(Ok(adapter)),
+            Err(_) => {
+                // It runs in the holder but the node cannot read it: ended, and the node runs it itself.
+                let _ = session.stop(agent.as_str(), true);
+                None
+            }
+        };
+    }
+    None
 }
 
 /// Ends an adapter that is not kept (its start failed or was refused after the process began): the processes below it first, then the

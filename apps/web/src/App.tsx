@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { approvalName } from './net/approvalText';
 import { CommandPalette, type PaletteItem } from './components/CommandPalette';
-import { demoAgents, demoApprovals, demoList, demoMachines, demoProjects } from './fixtures';
+import { demoAgents, demoApprovals, demoList, demoMachines, demoProjects, demoQuota } from './fixtures';
+import { QuotaProvider } from './components/Quota';
 import { demoDiff, demoFiles } from './demoWorkspace';
 import { chooseLanguage, getLanguage, subscribeLanguage, t } from './i18n';
 import { nextNeedingMe, type AgentTileModel, type ResumeAction } from './model';
@@ -14,9 +15,10 @@ import { grantFor, signGrant, type GrantAsk } from './net/grant';
 import type { TerminalSource } from './terminal/source';
 import { signDirectory, type DirectoryInfo, type DirectoryListing } from './net/directory';
 import { StartAgent, type KindChoice } from './components/StartAgent';
-import { approvalList, boards, costByProject, projectChoices, recentMessages, machines, machinesOnline, shown, tiles, type ApprovalModel, type View } from './net/view';
+import { quotaObs, approvalList, boards, costByProject, projectChoices, recentMessages, machines, machinesOnline, shown, tiles, type ApprovalModel, type View } from './net/view';
 import { approvalFailureKey, indexedDbStore, signApproval, signStart, thisDevice, type Device } from './net/approval';
 import type { StartChoice } from './components/StartApproval';
+import { forgetSkipAnswer, forgetSkipCapable, isSkipCapable, recordSkipAnswer, signSkip, SKIP_ACTION } from './net/skipApproval';
 import type { HelperGrant } from './components/HelperGrants';
 import { addPasskey, passkeysSupported, signInWithPasskey } from './net/passkey';
 import { summarize, type UsageSummary } from './net/usage';
@@ -35,7 +37,7 @@ import { num } from './net/view';
 import { loadAudit } from './net/audit';
 import { agentTarget } from './components/sessionChoice';
 import { ChatActionsContext, type ChatActions, type PromptResult } from './components/chatActions';
-import type { ActionResult } from './net/refusal';
+import { failure, type ActionResult } from './net/refusal';
 import { usableId } from './components/launchChoice';
 import { launchSettingsField } from './components/launchSettings';
 import { rememberStarted } from './components/launchMemory';
@@ -209,11 +211,20 @@ export function App() {
       // ADR-0057: a start is decided over the request exactly as shown, with the grant chosen.
       const helperGrant = a.start && approved ? choice?.grant ?? 0 : 0;
       const helpersMayStart = !!(a.start && approved && choice?.nested);
-      const signature = a.start
-        ? await signStart(device, a.node, a.localId, approved, helperGrant, helpersMayStart, a.detail)
-        : await signApproval(device, a.node, a.localId, approved);
+      // ADR-0090 Amendment A: a switch to a mode that skips permission questions is signed over its own domain, only for a machine heard
+      // to offer it and only in the shape the window expects; any other shape is never signed.
+      if (a.skipUnknown || (a.action === SKIP_ACTION && !a.skip)) { setNotice('skip-approval-unknown'); return; }
+      if (a.skip && !isSkipCapable(a.node)) { setNotice('skip-approval-other-window'); return; }
+      const signature = a.skip
+        ? await signSkip(device, a.node, a.localId, approved, a.skip, a.detail)
+        : a.start
+          ? await signStart(device, a.node, a.localId, approved, helperGrant, helpersMayStart, a.detail)
+          : await signApproval(device, a.node, a.localId, approved);
+      // What this window answered, kept before the answer goes so a switch applied at once is still known as approved here.
+      if (a.skip) recordSkipAnswer(a.id, { approved, agent: `${a.node}/${a.skip.agent}`, option: a.skip.option, value: a.skip.value });
       await api.command(a.node, { approvalResolve: { approvalId: a.localId, approved, signerDeviceId: device.id, signature, helperGrant, helpersMayStart } });
     } catch (e) {
+      forgetSkipAnswer(a.id);
       const code = (e as { code?: string }).code;
       setNotice(approvalFailureKey(code));
     }
@@ -304,6 +315,8 @@ export function App() {
   }, [api, live !== undefined]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (!hub) return;
+    // What was heard of machines and answered here belongs to one connection: another hub, or this one again, starts from nothing.
+    forgetSkipCapable();
     const c = connectLive({ url: hub.url, token: hub.token, onView: (v) => setLive(shown(v)), onState: setLink, onPair: pairing.dispatch,
       onRejected: () => { forgetToken(); setLive(undefined); setHub(undefined); },
       onGrantRequired: (node, body) => {
@@ -326,6 +339,9 @@ export function App() {
     if (!hub || idle === 0) return;
     return watchIdle(idle, lockNow, window);
   }, [hub, idle, lockNow]);
+  // ADR-0091: plan limits as the machines reported them (the demo data when there is no hub).
+  const quotaList = useMemo(() => (hub ? (live ? quotaObs(live) : []) : demoQuota), [hub, live]);
+  const quotaMachines = useMemo(() => new Map((live ? machines(live) : hub ? [] : demoMachines).map((m) => [m.id, m.name] as const)), [hub, live]);
   const agents = useMemo(() => (hub ? (live ? tiles(live) : []) : demoAgents), [hub, live]);
   const current = hash.startsWith('#/agent/') ? decodeURIComponent(hash.slice('#/agent/'.length)) : undefined;
   const approvalsNow = live ? approvalList(live) : hub ? [] : demoApprovals;
@@ -400,25 +416,27 @@ export function App() {
   const setConfig = useCallback(async (agentKey: string, configId: string, value: string): Promise<ActionResult> => {
     const to = agentTarget(agentKey);
     if (!api || !to) return false;
-    try { await api.command(to.node, { agentSetConfig: { agentId: to.agentId, configId, value } }); return true; } catch (e) { return (e as { code?: string }).code ?? false; }
+    try { await api.command(to.node, { agentSetConfig: { agentId: to.agentId, configId, value } }); return true; } catch (e) { return failure(to.node, e); }
   }, [api]);
   const cancelTurn = useCallback(async (agentKey: string, dropQueue: boolean): Promise<ActionResult> => {
     const to = agentTarget(agentKey);
     if (!api || !to) return false;
     try { await api.command(to.node, { agentCancelTurn: { agentId: to.agentId, dropQueue } }); return true; } catch (e) { return (e as { code?: string }).code ?? false; }
   }, [api]);
-  const chatActions = useMemo<ChatActions>(() => (hub && api ? { setConfig, cancelTurn, rich } : {}), [hub, api, setConfig, cancelTurn, rich]);
+  // The approvals that wait now (hub-wide keys), so a control that sent a switch knows when its card is gone.
+  const waitingApprovals = useMemo<ReadonlySet<string>>(() => new Set(live ? [...live.approvals.keys()] : []), [live]);
+  const chatActions = useMemo<ChatActions>(() => (hub && api ? { setConfig, cancelTurn, rich, approvals: waitingApprovals } : {}), [hub, api, setConfig, cancelTurn, rich, waitingApprovals]);
 
   // ADR-0058: the user's own switch of a chat agent's mode or model, among what the agent offered.
   // ADR-0058: the user's own switch of a chat agent's mode or model, among what the agent offered. Addressed by the hub-wide key the
   // choice was made for (never by whichever agent is on screen when the request goes out).
-  const chooseOption = useCallback(async (agentKey: string, kind: 'mode' | 'model', id: string): Promise<boolean> => {
+  const chooseOption = useCallback(async (agentKey: string, kind: 'mode' | 'model', id: string): Promise<ActionResult> => {
     const to = agentTarget(agentKey);
     if (!api || !to) return false;
     try {
       await api.command(to.node, kind === 'mode' ? { agentSetMode: { agentId: to.agentId, mode: id } } : { agentSetModel: { agentId: to.agentId, model: id } });
       return true;
-    } catch { return false; }
+    } catch (e) { return failure(to.node, e); }
   }, [api]);
 
   const loadHistory = useCallback(async (a: AgentTileModel): Promise<CommitItem[]> => {
@@ -512,6 +530,7 @@ export function App() {
   }
 
   return (
+    <QuotaProvider obs={quotaList} machines={quotaMachines}>
     <ChatActionsContext.Provider value={chatActions}>
       {hash === '#/gallery' ? <Gallery /> : isMachinesHash(hash) ? <MachinesPage focus={machineOfHash(hash)} machines={live ? machines(live) : hub ? [] : demoMachines} agents={agents} usage={usage} projects={live && usage ? costByProject(live, usage.perAgent) : []} onBack={() => go('#/')} onForget={hub ? forgetMachines : undefined} /> : hash === '#/audit' && hub ? <AuditPage load={(who) => loadAudit(hub.token, who)} onBack={() => go('#/')} /> : hash === '#/device' ? <DevicePage device={device} onBack={() => go('#/')} onTheme={editTheme} onAddPasskey={hub && passkeysSupported() ? async (password) => (await addPasskey(hub.token, undefined, password)).ok : undefined} passkeyNeedsPassword={info.passwordRequired}
           fingerprint={device ? prints.get(device.id) : undefined} machines={live ? machines(live) : undefined} trustedOn={trustedOn} others={hub ? others : undefined}
@@ -544,6 +563,7 @@ export function App() {
         onApprove={(nodes) => approveDevice(waiting[0]!, nodes)}
         onLater={() => setLater((l) => new Set(l).add(waiting[0]?.deviceId ?? ''))} />}
     </ChatActionsContext.Provider>
+    </QuotaProvider>
   );
 }
 

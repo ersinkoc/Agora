@@ -37,6 +37,24 @@ const home = (approvals: ApprovalModel[], over: Partial<Parameters<typeof PhoneH
   return onResolve;
 };
 
+describe('a switch to a mode that skips permissions on the phone', () => {
+  it('is read in the node\'s own rendering, never as raw JSON, and the bar never answers it', async () => {
+    const { markSkipCapable, forgetSkipCapable } = await import('../net/skipApproval');
+    const detail = JSON.stringify({ node: 'n1', agent: 'a1', agent_kind: 'claude-acp', folder: '/home/dev/p', option_type: 'mode', option: 'mode', option_name: '', value: 'yolo', value_name: 'Bypass', skips: true, scope: 'session' });
+    const r = ask('s1', { action: 'agent.skip_permissions', detail, skip: { node: 'n1', agent: 'a1', agentKind: 'claude-acp', folder: '/home/dev/p', optionType: 'mode', option: 'mode', optionName: '', value: 'yolo', valueName: 'Bypass' } });
+    markSkipCapable('n1');
+    const onResolve = home([r]);
+    await dwell(DOCK_DWELL_MS + 700);
+    expect(host.textContent).toContain('act without asking?');
+    expect(host.textContent).toContain('/home/dev/p');
+    expect(host.textContent).not.toContain('"option_type"');
+    expect(dock()?.textContent ?? '').not.toContain('Allow'); // the bar never answers it
+    press(host, 'Allow');
+    expect(onResolve.mock.calls.map((c) => c.slice(0, 2))).toEqual([[r, true]]);
+    forgetSkipCapable();
+  });
+});
+
 describe('the phone bar for what needs you', () => {
   it('answers a short plain request with one press, and the card does not repeat the buttons', async () => {
     const r = ask('p1');

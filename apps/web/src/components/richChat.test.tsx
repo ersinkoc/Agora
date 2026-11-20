@@ -13,6 +13,7 @@ import { ChatActionsContext, type ChatActions } from './chatActions';
 import { Item, ToolSteps } from './ChatEntry';
 import { PromptBox } from './PromptBox';
 import { SessionBar } from './SessionBar';
+import { forgetSkipCapable, recordSkipAnswer } from '../net/skipApproval';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -293,30 +294,152 @@ describe('the agent\'s own settings', () => {
     await act(async () => { high.click(); });
     expect(setConfig).not.toHaveBeenCalled();
   });
-  // ADR-0058's "Switch anyway" confirmation is INTENTIONALLY GONE for a mode that skips permissions: the node refuses the switch
-  // (`agent.option_unconfirmed`) because the schema has no signed field to carry the user's confirmation, so a dialog could never succeed.
-  // The choice is disabled with why, and nothing is sent. (e2e-session-options.mjs asserts the same in a real browser.)
-  it('a choice the node marks as acting without asking is shown DISABLED with why, and is never sent', async () => {
-    const setConfig = vi.fn(async () => true);
+  // ADR-0090 Amendment A: a choice the node marks as acting without asking is an ordinary choice in the menu. It is sent like any other; the
+  // machine answers that it waits for the owner's approval card, and the control then says so and shows no new value.
+  const pickYolo = async () => {
+    open(/Mode/);
+    const yolo = [...document.querySelectorAll<HTMLButtonElement>('[role=menuitemradio]')].find((b) => b.textContent?.includes('Bypass')) as HTMLButtonElement;
+    expect(yolo.disabled).toBe(false);
+    expect(yolo.textContent).toContain('does not ask');
+    expect(yolo.textContent).not.toContain('not available');
+    await act(async () => { yolo.click(); });
+  };
+  it('a choice that skips permissions is sent, and while the machine waits for the card the control says so without changing its value', async () => {
+    const setConfig = vi.fn(async () => ({ approvalNeeded: 'n/ap-1' }));
+    act(() => root.render(<SessionBar part="controls" agentKey="n/a" session={{ ...base, config: [mode] }} setConfig={setConfig} approvals={new Set(['n/ap-1'])} />));
+    await pickYolo();
+    expect(setConfig).toHaveBeenCalledWith('n/a', 'mode', 'yolo');
+    expect(host.querySelector('button[aria-label="Mode: Waiting for your approval"]')).not.toBeNull();
+    expect(host.textContent).toContain('Nothing has changed yet.');
+    expect(host.textContent).not.toContain('Acts freely');
+    expect(host.querySelector('[role=alertdialog]')).toBeNull();
+  });
+  it('when the machine reports the value the wait ends and "Acts freely" shows; switching back drops the badge and asks nothing', async () => {
+    const setConfig = vi.fn(async (_a: string, _c: string, v: string) => (v === 'yolo' ? { approvalNeeded: 'n/ap-1' } : true));
+    const draw = (cur: string, ids: string[]) => act(() => root.render(<SessionBar part="controls" agentKey="n/a" session={{ ...base, config: [{ ...mode, current: cur }] }} setConfig={setConfig} approvals={new Set(ids)} />));
+    draw('plan', ['n/ap-1']);
+    await pickYolo();
+    draw('yolo', []); // approved: the machine reports the new mode and the card is gone
+    expect(host.querySelector('button[aria-label^="Mode: Bypass"]')).not.toBeNull();
+    expect(host.textContent).toContain('Acts freely');
+    expect(host.textContent).not.toContain('Waiting for your approval');
+    open(/Mode/);
+    const plan = [...document.querySelectorAll<HTMLButtonElement>('[role=menuitemradio]')].find((b) => b.textContent?.includes('Plan')) as HTMLButtonElement;
+    await act(async () => { plan.click(); });
+    expect(setConfig).toHaveBeenLastCalledWith('n/a', 'mode', 'plan');
+    draw('plan', []);
+    expect(host.textContent).not.toContain('Acts freely');
+    expect(host.textContent).not.toContain('Waiting');
+  });
+  it('a card that goes without the value being reported (denied, ran out of time, withdrawn) puts the control back and says so', async () => {
+    vi.useFakeTimers();
+    try {
+      const setConfig = vi.fn(async () => ({ approvalNeeded: 'n/ap-1' }));
+      const draw = (ids: string[]) => act(() => root.render(<SessionBar part="controls" agentKey="n/a" session={{ ...base, config: [mode] }} setConfig={setConfig} approvals={new Set(ids)} />));
+      draw(['n/ap-1']);
+      await pickYolo();
+      draw(['n/ap-1']); // the card arrives
+      draw([]); // and is gone, the agent still on Plan
+      await act(async () => { vi.advanceTimersByTime(2500); });
+      expect(host.querySelector('button[aria-label="Mode: Plan"]')).not.toBeNull();
+      expect(host.textContent).toContain('Not switched: the request was declined, ran out of time or was withdrawn.');
+      expect(host.textContent).not.toContain('Waiting for your approval');
+    } finally { vi.useRealTimers(); }
+  });
+  it('the badge says "with your approval" only when THIS window approved that exact value', () => {
+    forgetSkipCapable();
+    const draw = () => act(() => root.render(<SessionBar part="controls" agentKey="n/a" session={{ ...base, config: [{ ...mode, current: 'yolo' }] }} />));
+    draw();
+    const label = () => host.querySelector('[role=img]')?.getAttribute('aria-label') ?? '';
+    expect(label()).toContain('Acts without asking you first');
+    expect(label()).not.toContain('with your approval'); // a restart, a resume or the agent's own switch: no approval was seen
+    recordSkipAnswer('n/ap-1', { approved: true, agent: 'n/a', option: 'mode', value: 'other' });
+    draw();
+    expect(label()).not.toContain('with your approval'); // another value
+    recordSkipAnswer('n/ap-2', { approved: true, agent: 'n/a', option: 'mode', value: 'yolo' });
+    draw();
+    expect(label()).toContain('with your approval');
+    forgetSkipCapable();
+  });
+  describe('a switch approved here whose report comes later', () => {
+    const run = async (ids: string[] | undefined, steps: (draw: (cur: string, ids: string[] | undefined) => void) => Promise<void>) => {
+      vi.useFakeTimers();
+      forgetSkipCapable();
+      try {
+        const setConfig = vi.fn(async () => ({ approvalNeeded: 'n/ap-1' }));
+        const draw = (cur: string, a: string[] | undefined) => act(() => root.render(<SessionBar part="controls" agentKey="n/a" session={{ ...base, config: [{ ...mode, current: cur }] }} setConfig={setConfig} approvals={a ? new Set(a) : undefined} />));
+        draw('plan', ids);
+        await pickYolo();
+        await steps(draw);
+      } finally { vi.useRealTimers(); forgetSkipCapable(); }
+    };
+    const advance = (ms: number) => act(async () => { await vi.advanceTimersByTimeAsync(ms); });
+    const chip = () => host.querySelector('button[aria-haspopup=menu][aria-label^="Mode:"]')?.getAttribute('aria-label');
+    it('says nothing false while it waits, and no failure when the report arrives late', async () => {
+      await run(['n/ap-1'], async (draw) => {
+        draw('plan', ['n/ap-1']);
+        recordSkipAnswer('n/ap-1', { approved: true, agent: 'n/a', option: 'mode', value: 'yolo' });
+        draw('plan', []); // the card goes: approved here, the agent has not reported yet
+        await advance(7000);
+        expect(host.textContent).not.toContain('Not switched');
+        expect(chip()).toBe('Mode: Waiting for the agent');
+        draw('yolo', []);
+        await advance(30_000);
+        expect(host.textContent).not.toContain('Not switched');
+        expect(host.textContent).not.toContain('Waiting for');
+        expect(chip()).toContain('Bypass');
+      });
+    });
+    it('after a long wait says it was approved and not yet confirmed, then clears that when the agent reports', async () => {
+      await run(['n/ap-1'], async (draw) => {
+        draw('plan', ['n/ap-1']);
+        recordSkipAnswer('n/ap-1', { approved: true, agent: 'n/a', option: 'mode', value: 'yolo' });
+        draw('plan', []);
+        await advance(21_000);
+        expect(host.textContent).toContain('Approved. The agent has not confirmed the change yet');
+        expect(host.textContent).not.toContain('Not switched');
+        expect(chip()).toBe('Mode: Plan');
+        draw('yolo', []);
+        expect(host.textContent).not.toContain('has not confirmed');
+      });
+    });
+    it('a denial given here puts it back at once', async () => {
+      await run(['n/ap-1'], async (draw) => {
+        draw('plan', ['n/ap-1']);
+        recordSkipAnswer('n/ap-1', { approved: false, agent: 'n/a', option: 'mode', value: 'yolo' });
+        draw('plan', []);
+        await advance(500);
+        expect(host.textContent).toContain('Not switched');
+        expect(chip()).toBe('Mode: Plan');
+      });
+    });
+    it('with no view of the cards (approvals undefined) the wait does not last forever', async () => {
+      await run(undefined, async () => {
+        expect(chip()).toBe('Mode: Waiting for your approval');
+        await advance(31_000);
+        expect(host.textContent).toContain('The agent has not reported the change yet');
+        expect(chip()).toBe('Mode: Plan');
+      });
+    });
+  });
+  it('policy that forbids it refuses in words and keeps the choice unavailable with the reason', async () => {
+    const setConfig = vi.fn(async () => 'agent.option_forbidden');
     act(() => root.render(<SessionBar part="controls" agentKey="n/a" session={{ ...base, config: [mode] }} setConfig={setConfig} />));
+    await pickYolo();
+    expect(host.textContent).toContain("This machine's settings do not let the agent act without asking.");
     open(/Mode/);
     const yolo = [...document.querySelectorAll<HTMLButtonElement>('[role=menuitemradio]')].find((b) => b.textContent?.includes('Bypass')) as HTMLButtonElement;
     expect(yolo.disabled).toBe(true);
-    expect(yolo.textContent).toContain('not available yet');
-    expect(yolo.textContent).toContain('does not ask');
-    await act(async () => { yolo.click(); });
-    expect(setConfig).not.toHaveBeenCalled();
-    expect(host.textContent).toContain('not available yet from here. Start the agent that way instead.');
-    expect(host.querySelector('[role=alertdialog]')).toBeNull(); // no confirmation could make it succeed
+    expect(yolo.textContent).toContain('not allowed on this machine');
   });
-  it('a boolean the node marks as skipping: turning it ON is disabled (never sent)', () => {
+  it('a boolean the node marks as skipping: turning it ON is enabled (the machine asks the owner), never disabled', () => {
     const auto: ConfigOptionModel = { id: 'auto', name: 'Auto approve', description: '', category: 'custom', type: 'boolean', current: 'false', skipsPermissions: true, choices: [] };
     act(() => root.render(<SessionBar part="controls" agentKey="n/a" session={{ ...base, config: [auto] }} setConfig={async () => true} />));
     open(/More settings/);
     act(() => (document.querySelector('[role=menuitem]') as HTMLElement).click()); // the submenu of the option
     const items = [...document.querySelectorAll<HTMLButtonElement>('[role=menuitemradio]')];
     expect(items.map((b) => b.textContent)).toEqual(expect.arrayContaining([expect.stringContaining('On'), expect.stringContaining('Off')]));
-    expect(items.filter((b) => b.textContent?.includes('On')).every((b) => b.disabled)).toBe(true);
+    expect(items.every((b) => !b.disabled)).toBe(true);
   });
   it('other settings go behind one "More settings" menu', () => {
     const html = renderToStaticMarkup(<SessionBar part="controls" agentKey="n/a" session={{ ...base, config: [effort, { ...effort, id: 'x', category: 'custom', name: 'Verbosity' }] }} />);

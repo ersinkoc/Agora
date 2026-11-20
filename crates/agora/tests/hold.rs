@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use agora_node::holder_link::{
     socket_path, write_frame, AgentState, Client, LinkError, Refusal, Reply, Request, StartRequest,
-    LINK_VERSION,
+    LINK_VERSION, LINK_VERSION_PIPES,
 };
 
 const AGORA: &str = env!("CARGO_BIN_EXE_agora");
@@ -488,7 +488,7 @@ fn a_version_mismatch_changes_nothing() {
     // Waits out the holder noticing that the first connection closed.
     std::thread::sleep(Duration::from_millis(400));
 
-    match Client::connect_with_version(&rig.socket(), LINK_VERSION + 1) {
+    match Client::connect_with_version(&rig.socket(), LINK_VERSION_PIPES + 1) {
         Err(LinkError::Refused(Refusal::VersionMismatch, v)) => assert_eq!(v, LINK_VERSION),
         other => panic!("expected a version refusal, got {:?}", other.map(|_| ())),
     }

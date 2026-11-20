@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
 import { t } from '../i18n';
 import { NoAskBadge } from './NoAskBadge';
+import { LimitChip } from './Quota';
 import { forgetReasonKey } from '../net/forget';
 import { resumeReasonKey } from '../net/directory';
 import { endedWithError, helperTree, machineKey, sharesName, type AgentTileModel, type ResumeAction } from '../model';
@@ -98,6 +99,7 @@ export function Explorer({ by, onBy, spread, fleet, machines, open, current, pro
       <StateMark state={a.state} />
       <span className="min-w-0 flex-1 truncate">{a.name}{a.parentName && <span className="ms-1.5 text-xs text-muted">{t('helper-started-by', { name: a.parentName })}</span>}{withMachine && <span className="ms-1.5 text-xs text-muted">{a.machine}</span>}</span>
       <NoAskBadge agent={a} compact nested />
+      <LimitChip agent={a} compact />
       {(by === 'kind' || by === 'state') && a.projectId && sharedAcross(spread.get(a.projectId)) && <ProjectChip spread={spread.get(a.projectId) as ProjectSpread} compact />}
       {a.shared && <span className="flex-none text-xs text-muted" title={t('workspace-shared')}>{t('ide-shared')}</span>}
       {(a.filesChanged ?? 0) > 0 && <span className="font-mono text-xs text-needs-you">{a.filesChanged}</span>}

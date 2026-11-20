@@ -7,9 +7,11 @@ import { Icon } from './Icon';
 // The whole meaning ("Runs without asking: Started so that it acts without asking you first") is its name for screen readers and its
 // tooltip; where the badge is not inside another control it can be focused (and so tapped on a touch screen) to show that text.
 // `nested`: it sits inside a button or a tab, which must stay the one stop, so it is not focusable there and keeps title and name only.
-export function NoAskBadge({ agent, compact, icon, nested }: { agent: { skipsPermissions?: boolean }; compact?: boolean; icon?: boolean; nested?: boolean }) {
+export function NoAskBadge({ agent, compact, icon, nested, session, approved }: { agent: { skipsPermissions?: boolean }; compact?: boolean; icon?: boolean; nested?: boolean; session?: boolean; approved?: boolean }) {
   if (!agent.skipsPermissions) return null;
-  const full = `${t('agent-does-not-ask')}: ${t('agent-does-not-ask-explain')}`;
+  // `session` (ADR-0090 Amendment A): it runs so after a switch and holds until it ends or is switched back. "With your approval" is said only when
+  // this window saw that exact value approved (`approved`); after a restart, a resume or the agent's own switch it says only what is so.
+  const full = `${t('agent-does-not-ask')}: ${t(session ? (approved ? 'agent-does-not-ask-session-explain' : 'agent-does-not-ask-session-neutral-explain') : 'agent-does-not-ask-explain')}`;
   const tone = `tip ide-chip w-fit flex-none self-center justify-self-start border-needs-you/60 text-needs-you ${icon ? 'px-1' : ''} ${compact ? 'text-xs' : ''}`;
   const props = nested ? { title: full } : { tabIndex: 0, 'data-tip': full };
   return (

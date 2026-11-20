@@ -49,7 +49,7 @@ pub const FOLLOWER_QUEUE: usize = 1024;
 /// cannot make the node spend more than a bounded pass on one item.
 const PRE_BOUND: usize = 64 * 1024;
 /// Notice codes only the node makes. An adapter's item with one of them is dropped: it could otherwise forge the node's own words.
-pub const NODE_NOTICES: &[&str] = &["adapter.queue_dropped"];
+pub const NODE_NOTICES: &[&str] = &["adapter.queue_dropped", "adapter.output_dropped"];
 /// ADR-0058: a notice's code is at most this long and has this many parameters at most, each key at most `MAX_PARAM_KEY` bytes and
 /// each value at most `MAX_PARAM_BYTES` (more is cut). An adapter is untrusted; a notice that does not fit the shape is dropped.
 pub const MAX_CODE: usize = 64;
@@ -819,6 +819,17 @@ impl ChatBoard {
         let mut n = entry(ChatRole::Agent, ChatKind::Notice, String::new(), now_ms);
         n.code = "adapter.queue_dropped".into();
         n.params = HashMap::from([("count".to_string(), entry_ids.len().to_string())]);
+        t.add(n, now_ms);
+    }
+
+    /// ADR-0093: the holder kept only the newest of what the agent wrote while no node read it. A notice with the stable code
+    /// `adapter.output_dropped` and the count of bytes says so to everyone following.
+    pub fn output_dropped(&self, agent: &AgentId, bytes: u64, now_ms: u64) {
+        let mut g = self.lock();
+        let t = g.entry(agent.clone()).or_default();
+        let mut n = entry(ChatRole::Agent, ChatKind::Notice, String::new(), now_ms);
+        n.code = "adapter.output_dropped".into();
+        n.params = HashMap::from([("bytes".to_string(), bytes.to_string())]);
         t.add(n, now_ms);
     }
 

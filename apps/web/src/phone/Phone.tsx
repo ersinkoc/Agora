@@ -1,4 +1,6 @@
 import { Suspense, lazy, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
+import type { ActionResult } from '../net/refusal';
+import { SkipApproval } from '../components/SkipApproval';
 import { approvalName } from '../net/approvalText';
 import { t } from '../i18n';
 import { endedWithError, type AgentTileModel } from '../model';
@@ -89,6 +91,8 @@ function ApprovalCard({ approval: x, machine, untrusted: notTrusted, onResolve, 
   const untrusted = notTrusted && <div className="phone-card__hint"><p className="m-0">{t('phone-untrusted', { machine })}</p><a className="phone-chipbtn justify-self-start" href="#/device">{t('device-link')}</a></div>;
   // A request to start an agent is never answered from the bar: it is read whole in its card (it carries a folder, a prompt and settings).
   if (x.start) return <div id={`phone-ask-${x.id}`} className="phone-card phone-card--needs">{untrusted}<StartApproval approval={x} start={x.start} busy={busy || !onResolve || stale} onResolve={(ok, choice) => answer(ok, choice)} />{stale && <p className="phone-card__why m-0">{t('fleet-stale-no-answer')}</p>}</div>;
+  // ADR-0090 Amendment A: a switch to a mode that skips permissions is read in the node's own rendering, never as raw text.
+  if (x.skip || x.skipUnknown) return <div id={`phone-ask-${x.id}`} className="phone-card phone-card--needs">{untrusted}<SkipApproval approval={x} busy={busy || stale} onResolve={onResolve ? (ok) => answer(ok) : undefined} />{stale && <p className="phone-card__why m-0">{t('fleet-stale-no-answer')}</p>}</div>;
   return (
     <article id={`phone-ask-${x.id}`} className="phone-card phone-card--needs" aria-label={t('approval-title', { name: approvalName(x) })}>
       <button type="button" className="phone-card__head" onClick={onOpen} disabled={!onOpen}>
@@ -288,7 +292,7 @@ export function PhoneAgent({ agent, agents, approvals, machines, onResolve, untr
   source?: TerminalSource;
   chatSource?: ChatSource;
   sendPrompt?: PromptSend;
-  chooseOption?: (agentKey: string, kind: 'mode' | 'model', id: string) => Promise<boolean>;
+  chooseOption?: (agentKey: string, kind: 'mode' | 'model', id: string) => Promise<ActionResult>;
   /** What the agent changed (the review screen) and its files (the file browser), as on the desktop; absent without a hub. */
   loadDiff?: (agent: AgentTileModel, path?: string) => Promise<DiffSource>;
   filesOf?: (agent: AgentTileModel) => WorkspaceFiles | undefined;

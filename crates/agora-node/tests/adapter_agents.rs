@@ -409,6 +409,77 @@ fn a_stop_cancels_a_pending_adapter_restart() {
     assert!(!s.list().iter().find(|v| v.id == id).unwrap().running);
 }
 
+/// ADR-0090 Amendment A: a switch the owner approved names one run of the agent's adapter. After the adapter restarted (a crash), the same
+/// approval applies nothing, even though the new run reports the same mode; a request made in the new run applies.
+#[test]
+fn an_approval_for_one_run_of_an_adapter_is_not_applied_to_the_next() {
+    use agora_adapters::host::OptionKind;
+    use agora_node::supervisor::SupervisorError;
+    let e = env("epoch");
+    let mut s = supervisor_with(RestartPolicy {
+        max_restarts: 2,
+        base_delay: Duration::from_millis(50),
+        max_delay: Duration::from_millis(100),
+    });
+    s.register(
+        Manifest::parse(&format!(
+            "kind = \"modal\"\ndisplay_name = \"M\"\nversion = \"1\"\nmin_engine = 1\n[adapter]\ncommand = [{:?}, \"--adapter\", \"--modes\"]\n",
+            fake_agent()
+        ))
+        .unwrap(),
+    );
+    let id = s
+        .start(
+            &StartRequest {
+                kind: "modal".into(),
+                checkout: e.repo.clone(),
+                worktree_root: e.dir.join("worktrees"),
+                name: "modal".into(),
+                base: None,
+            },
+            Instant::now(),
+        )
+        .expect("start");
+    // The modes arrive just after the start.
+    let reported = |s: &mut Supervisor| {
+        let end = Instant::now() + Duration::from_secs(15);
+        while s.adapter_set_option(&id, OptionKind::Mode, "default") != Ok(None) {
+            assert!(Instant::now() < end, "the modes were never reported");
+            s.tick(Instant::now());
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    reported(&mut s);
+    let ask = s
+        .adapter_set_option(&id, OptionKind::Mode, "bypassPermissions")
+        .unwrap()
+        .expect("a mode that skips is asked about, not applied");
+    assert_eq!(
+        (ask.value.as_str(), ask.option_id.as_str()),
+        ("bypassPermissions", "mode")
+    );
+    assert!(
+        s.prepare_skip_apply(&ask).is_ok(),
+        "the same run applies it"
+    );
+
+    let _ = s.adapter_prompt(&id, "crash", false);
+    until(&mut s, |e| matches!(e, SupervisorEvent::Started { .. }));
+    reported(&mut s);
+    assert!(
+        matches!(
+            s.prepare_skip_apply(&ask),
+            Err(SupervisorError::NotFound(_))
+        ),
+        "an approval for the last run applies nothing in this one"
+    );
+    let fresh = s
+        .adapter_set_option(&id, OptionKind::Mode, "bypassPermissions")
+        .unwrap()
+        .unwrap();
+    assert!(s.prepare_skip_apply(&fresh).is_ok());
+}
+
 /// ADR-0082 decision 4 and ADR-0084 (audit F840): an adapter agent whose confinement reaches the control token file, or the folder of
 /// stored secrets once it holds one, is refused at the start, as a terminal agent is. The adapter and the agent below it run with that
 /// profile, so starting it would hand them the token (and the node's control socket) or every stored secret.

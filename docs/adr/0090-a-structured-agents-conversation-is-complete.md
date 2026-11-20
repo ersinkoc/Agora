@@ -252,3 +252,30 @@ Schema: a new approval kind and its signing domain, the error code `agent.approv
 request path in `adapter_set_option` / `adapter_set_config`, applying exactly what was rendered, forgetting on end/restart/resume; web: the existing
 approval card and the SessionBar showing the choice as "needs your approval" instead of switched off; docs: protocol.md, threat model (an approval card
 for a skipping mode; a stale card after the agent ended), the "Temporarily unavailable" notice of step 4 is removed. Build: schema, node, web, as small PRs.
+
+### Status of the build (Amendment A)
+- **Schema** (this PR, first commit): additive and without a new message. The existing `ApprovalRequested` / `ApprovalResolve` /
+  `ApprovalResolved` carry the new kind `agent.skip_permissions`; the new signing domain `agora-approval-skip-v1` (length-prefixed fields,
+  vectors in `schema/fixtures/signing/approval-skip-v1.json`, checked by `crates/agora-protocol/tests/approval_skip_signing.rs`); the error code
+  `agent.approval_needed { approval_id }` (en, tr); `docs/specs/protocol.md`, `docs/specs/error-codes.md`, threat-model row T51.
+- **Node** (same PR, second commit): `AgentSetMode` / `AgentSetConfig` of a skipping value under a policy that allows it raise the approval and
+  answer `agent.approval_needed`; the owner's signed decision applies exactly the rendered option and value; withdrawal on agent end, supersession
+  and restart; limits (8 waiting, 6 per minute); node capability `approval.skip_permissions`. The "Temporarily unavailable" notice of step 4 no longer holds
+  for the node. `AgentSetModel` of a skipping model stays refused (the amendment names modes and config options).
+- **Review of #795 (security):** the detail carries the node's own `skips: true`; every agent- or machine-supplied string is shown without
+  control and format characters and bounded, and an id or value that cannot be signed as shown gets no card (`agent.option_unknown`); adapters
+  can raise no `agent.*` request (closes the `agent.start` forgery); per-agent limits (2 waiting, 3 per minute) beside the node's.
+- **Known dead end, documented:** `AgentSetModel` of a model the node judges as skipping stays `agent.option_unconfirmed` (no card exists for models; the
+  amendment names modes and config options). **Known gap:** P2-16 (`docs/backlog/phase-2.md`): the node never checks an adapter's CURRENT mode or
+  config value at start or resume, so an agent whose own session comes back in a bypass mode is not asked.
+- **Web** (built): `SkipApproval` draws the card for the new kind from the node's `detail` (the window writes its own words, shows the real `option` and
+  `value` ids beside the agent's names, strict shape check, anything else says "update your window" and signs nothing); the decision is signed over
+  `agora-approval-skip-v1` (`apps/web/src/net/skipApproval.ts`, vectors reproduced in `skipApproval.test.ts`). The SessionBar sends a skipping choice like any
+  other, shows "Waiting for your approval" on the control with no value applied, an "Acts freely" badge while the current value skips (gone when the
+  node reports a safe one), and returns to the previous value with a plain message when the card is declined, expires or is withdrawn; a policy refusal
+  (`agent.option_forbidden`) keeps the choice marked unavailable. A card whose agent ended is dropped at once; `agent.not_found` on a decision says the
+  request is no longer valid. The window cannot read node capabilities (the snapshot carries none): it treats `agent.approval_needed` from a node as the
+  evidence that it advertises `approval.skip_permissions`, and answers (signs) only for such a node. The old "not available yet" texts are gone (en, tr).
+- **Left open by the amendment, decided here:** for `AgentSetMode` the signed `option_id` is the literal `mode` (a mode has no option id of its own) and
+  the detail's `option_type` says mode or config; the wait is the standard 10 minutes; the limits above are the node's own numbers; a decision for a
+  card whose adapter restarted is refused (`agent.not_found`: the run it named is gone) and changes nothing.

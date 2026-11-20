@@ -7,6 +7,7 @@ import { ago } from '../net/time';
 import { Icon } from './Icon';
 import { StateBadge } from './StateBadge';
 import { NoAskBadge } from './NoAskBadge';
+import { LimitChip } from './Quota';
 
 // What the fleet console adds to a tile: where it is drawn (the group already names the machine or the project, so the tile names the
 // other one), what the agent asks for, and the time. Without it the tile is the plain one of the gallery.
@@ -71,6 +72,7 @@ function Tile({ agent, onOpen, context }: { agent: AgentTileModel; onOpen?: (id:
         <StateBadge state={agent.state} failed={failed} />
       </span>
       <NoAskBadge agent={agent} nested />
+      <LimitChip agent={agent} />
       {context.same && <ProjectChip spread={context.same} />}
       {line ? <span className={`tile__activity${agent.preview && !agent.closed && !(context.ask && agent.state === 'needs-you') ? ' tile__activity--line' : ''}${agent.state === 'needs-you' && !agent.closed ? ' tile__activity--ask' : ''}`} dir="auto">{line}</span> : null}
       <span className="tile__meta">

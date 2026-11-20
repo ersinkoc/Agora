@@ -1,0 +1,49 @@
+{
+ "about": "ADR-0090 Amendment A agora-approval-skip-v1: the signed bytes of a decision on an `agent.skip_permissions` approval (a running agent switched to a mode or option that skips permission questions). The domain `agora-approval-skip-v1`, one NUL byte, then F(node_id) F(approval_id) F(verdict) F(agent_id) F(option_id) F(value) F(sha256(detail)), concatenated, where F(x) is the decimal byte length of x, `:`, then x (no separators between fields). verdict is `1` (approved) or `0`; the hash is SHA-256 of `detail` exactly as announced, lowercase hex. For a mode `option_id` is the literal `mode` and `value` the mode id; for a config option `option_id` is the config id (the detail's `option_type` says which, and is covered by the hash). `agent_id`, `option_id` and `value` are the detail's `agent`, `option` and `value`. Checked by crates/agora-protocol/tests/approval_skip_signing.rs and the node (crates/agora-node/src/approvals.rs).",
+ "cases": [
+  {
+   "name": "approved, a mode",
+   "node": "laptop",
+   "approval_id": "ap-1",
+   "approved": true,
+   "agent_id": "agent-1",
+   "option_id": "mode",
+   "value": "bypassPermissions",
+   "detail": "{\"node\":\"laptop\",\"agent\":\"agent-1\",\"agent_kind\":\"claude-acp\",\"folder\":\"/home/dev/code/login-fix\",\"option_type\":\"mode\",\"option\":\"mode\",\"option_name\":\"\",\"value\":\"bypassPermissions\",\"value_name\":\"Bypass Permissions\",\"skips\":true,\"scope\":\"session\"}",
+   "hex": "61676f72612d617070726f76616c2d736b69702d763100363a6c6170746f70343a61702d31313a31373a6167656e742d31343a6d6f646531373a6279706173735065726d697373696f6e7336343a65336266646536386237373938313565643466626462323836623130343937313666363731313263346239373264366130303837353663613962356537356265"
+  },
+  {
+   "name": "denied, the same card",
+   "node": "laptop",
+   "approval_id": "ap-1",
+   "approved": false,
+   "agent_id": "agent-1",
+   "option_id": "mode",
+   "value": "bypassPermissions",
+   "detail": "{\"node\":\"laptop\",\"agent\":\"agent-1\",\"agent_kind\":\"claude-acp\",\"folder\":\"/home/dev/code/login-fix\",\"option_type\":\"mode\",\"option\":\"mode\",\"option_name\":\"\",\"value\":\"bypassPermissions\",\"value_name\":\"Bypass Permissions\",\"skips\":true,\"scope\":\"session\"}",
+   "hex": "61676f72612d617070726f76616c2d736b69702d763100363a6c6170746f70343a61702d31313a30373a6167656e742d31343a6d6f646531373a6279706173735065726d697373696f6e7336343a65336266646536386237373938313565643466626462323836623130343937313666363731313263346239373264366130303837353663613962356537356265"
+  },
+  {
+   "name": "approved, a config option",
+   "node": "laptop",
+   "approval_id": "ap-2",
+   "approved": true,
+   "agent_id": "agent-1",
+   "option_id": "auto_approve",
+   "value": "true",
+   "detail": "{\"node\":\"laptop\",\"agent\":\"agent-1\",\"agent_kind\":\"opencode-acp\",\"folder\":\"/home/dev/code/login-fix\",\"option_type\":\"config\",\"option\":\"auto_approve\",\"option_name\":\"Auto approve\",\"value\":\"true\",\"value_name\":\"On\",\"skips\":true,\"scope\":\"session\"}",
+   "hex": "61676f72612d617070726f76616c2d736b69702d763100363a6c6170746f70343a61702d32313a31373a6167656e742d3131323a6175746f5f617070726f7665343a7472756536343a61306461353364623436306537356137396236643930346365336665343335613238646461333832373036333665396131353637373566643666633135663764"
+  },
+  {
+   "name": "fields with a colon, a space, a non-ASCII letter and an empty value",
+   "node": "my:box 1",
+   "approval_id": "ap-3",
+   "approved": true,
+   "agent_id": "agent-é",
+   "option_id": "a:b",
+   "value": "",
+   "detail": "{\"node\":\"my:box 1\",\"agent\":\"agent-é\",\"agent_kind\":\"wrongstack-acp\",\"folder\":\"C:\\\\work\\\\a b\",\"option_type\":\"config\",\"option\":\"a:b\",\"option_name\":\"x\",\"value\":\"\",\"value_name\":\"\",\"skips\":true,\"scope\":\"session\"}",
+   "hex": "61676f72612d617070726f76616c2d736b69702d763100383a6d793a626f782031343a61702d33313a31383a6167656e742dc3a9333a613a62303a36343a33343335363365616331356633396565393837356231646164393138316161653664616437346230363363346633396364313066633338386565323164353464"
+  }
+ ]
+}

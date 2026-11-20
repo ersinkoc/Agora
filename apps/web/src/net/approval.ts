@@ -64,6 +64,9 @@ export function approvalFailureKey(code: string | undefined): string {
   switch (code) {
     case 'approval.signature_invalid': return 'approval-not-trusted';
     case 'auth.forbidden': return 'approval-forbidden';
+    // ADR-0090 Amendment A: the run the request named is gone (the agent ended or restarted), or the request ran out of time.
+    case 'agent.not_found': return 'approval-no-longer-valid';
+    case 'approval.expired': return 'approval-ran-out';
     default: return 'approval-failed';
   }
 }

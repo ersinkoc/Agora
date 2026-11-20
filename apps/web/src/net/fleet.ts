@@ -74,7 +74,7 @@ export function attentionList(approvals: readonly ApprovalModel[], fleet: readon
 export const INLINE_MAX = 120;
 export const askLine = (action: string, detail: string): string => (detail ? `${action} · ${detail}` : action);
 export function decidableInline(a: ApprovalModel): boolean {
-  if (a.start) return false;
+  if (a.start || a.skip || a.skipUnknown) return false; // read whole in its own card (ADR-0090 Amendment A)
   // Whitespace tricks (a tab, a no-break or wide space) can lay out text differently from how it reads: not plain.
   const oneLine = (s: string) => !/[\r\n\t\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000]/.test(s) && visible(s) === s;
   if (!a.action.trim() || !oneLine(a.action)) return false;
@@ -91,7 +91,7 @@ const kindOf = (name: string): string => (name.split(' · ')[0] ?? name).trim();
 // project and the agent's kind. A request to start an agent is never the same as another (its folder, prompt and settings are read in the
 // full card), and neither is anything whose machine is not known (the label could not say where). `undefined`: it stands alone.
 function sameKey(it: AttentionItem): { key: string; agentKind: string; machine: string; ask: string } | undefined {
-  if (it.kind === 'pair' || (it.kind === 'approval' && it.approval.start)) return undefined;
+  if (it.kind === 'pair' || (it.kind === 'approval' && (it.approval.start || it.approval.skip || it.approval.skipUnknown))) return undefined;
   const agent = it.agent;
   const machine = (agent?.machine || (it.kind === 'approval' ? it.approval.machineName : '') || '').trim();
   if (!machine) return undefined;

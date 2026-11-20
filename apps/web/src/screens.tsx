@@ -6,6 +6,7 @@ import { PairCardView, PairRequest } from './components/PairRequest';
 import { SignInWaiting } from './components/SignInWaiting';
 import type { SignInApprovalModel } from './components/pairChoice';
 import { ApprovalBanner } from './components/ApprovalBanner';
+import { SkipApproval } from './components/SkipApproval';
 import { AgentAddress } from './components/AgentAddress';
 import { LanguagePicker } from './components/LanguagePicker';
 import { ThemePicker } from './components/ThemePicker';
@@ -13,6 +14,7 @@ import { themeStore } from './themes/store';
 import { themeName } from './themes/messages';
 import { PromptBox } from './components/PromptBox';
 import type { PromptSend } from './components/chatActions';
+import type { ActionResult } from './net/refusal';
 import type { ChatSource } from './net/chat';
 import { demoConversation, demoRichConversation } from './demoChat';
 import { ChatActionsContext } from './components/chatActions';
@@ -27,7 +29,9 @@ import type { ApprovalModel, MachineModel, MessageModel, ProjectCost } from './n
 import type { Device } from './net/approval';
 import { deviceLabel } from './net/devices';
 import type { UsageSummary } from './net/usage';
-import { demoAgents, demoApprovals, demoHelper, demoStartApproval, demoStartSettingsApproval } from './fixtures';
+import { demoAgents, demoApprovals, demoHelper, demoSkipApproval, demoStartApproval, demoStartSettingsApproval } from './fixtures';
+import { forgetSkipCapable, markSkipCapable } from './net/skipApproval';
+import { SessionBar } from './components/SessionBar';
 import { demoSource, type TerminalSource } from './terminal/source';
 import { Suspense, lazy, useEffect, useMemo, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { actionKey, outcomeKind, type AuditResult } from './net/audit';
@@ -125,11 +129,14 @@ function Themed({ theme, onStart }: { theme: 'dark' | 'light'; onStart?: () => v
       <div className="fleet">{demoAgents.map((a) => <AgentTile key={a.id} agent={a} />)}</div>
       <Messages messages={demoMessages} />
       <div className="h-[44rem] max-w-2xl"><PromptBox agent={demoChatAgent} source={demoChat} choose={async () => true} approvals={<ApprovalBanner approval={demoApprovals[0] as ApprovalModel} onResolve={() => {}} pinned />} /></div>
-      <ChatActionsContext.Provider value={{ setConfig: async () => true, cancelTurn: async () => true }}>
+      <ChatActionsContext.Provider value={{ setConfig: async (_a, _c, v) => (v === 'yolo' ? { approvalNeeded: 'demo/9' } : true), cancelTurn: async () => true, approvals: new Set(['demo/9']) }}>
         <div className="h-[52rem] max-w-2xl"><PromptBox agent={demoRichAgent} source={demoRich} send={async () => true} choose={async () => true} approvals={<ApprovalBanner approval={demoApprovals[0] as ApprovalModel} onResolve={() => {}} pinned />} /></div>
       </ChatActionsContext.Provider>
       <div className="fleet"><AgentTile agent={demoHelper} /></div>
       <AgentAddress agent={{ ...demoHelper, machineId: 'laptop', id: 'laptop/a8' }} />
+      {/* ADR-0090 Amendment A: the card for a switch to a mode that skips permissions (the demo machine "has been heard"), and the badge of an agent that now runs so. */}
+      <SkipApproval approval={demoSkipApproval as ApprovalModel} onResolve={() => {}} />
+      <div data-skip-badge><SessionBar part="controls" agentKey="demo/rich" session={{ ...(demoRichAgent.session as NonNullable<AgentTileModel['session']>), config: (demoRichAgent.session?.config ?? []).map((o) => (o.id === 'mode' ? { ...o, current: 'yolo' } : o)) }} setConfig={async () => true} /></div>
       <StartApproval approval={demoStartApproval} start={demoStartApproval.start} onResolve={() => {}} />
       <StartApproval approval={demoStartSettingsApproval} start={demoStartSettingsApproval.start} onResolve={() => {}} />
       <HelperGrants list={async () => [{ id: 'ap-1', kind: 'codex', folder: '/home/dev/code/login-fix', remaining: 2 }]} revoke={async () => {}} refresh={0} />
@@ -162,6 +169,8 @@ function Themed({ theme, onStart }: { theme: 'dark' | 'light'; onStart?: () => v
 // Every component in every state, both themes: the review surface for UI pull requests.
 export function Gallery() {
   const [starting, setStarting] = useState(false);
+  // The gallery's demo machine counts as having offered `approval.skip_permissions`, only while the gallery is shown (never at import).
+  useEffect(() => { markSkipCapable('demo'); return () => forgetSkipCapable('demo'); }, []);
   return (
     <main className="page gallery">
       <h1>{t('gallery-title')}</h1>
@@ -181,7 +190,7 @@ export function Focus({ agent, approvals = [], onResolve, source: live, chatSour
   source?: TerminalSource;
   chatSource?: ChatSource;
   sendPrompt?: PromptSend;
-  chooseOption?: (agentKey: string, kind: 'mode' | 'model', id: string) => Promise<boolean>;
+  chooseOption?: (agentKey: string, kind: 'mode' | 'model', id: string) => Promise<ActionResult>;
   onBack: () => void;
 }) {
   const preview = agent?.preview ?? '';
