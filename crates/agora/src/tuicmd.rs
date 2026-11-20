@@ -2066,7 +2066,7 @@ struct Console {
     asked: bool,
     /// The newest typing each terminal's machine took in this session, (node, terminal) to request: a refusal read in a later turn
     /// for typing sent before it is old news (answers can come out of order).
-    typing_taken: std::collections::HashMap<(String, String), u64>,
+    typing_taken: Taken,
 }
 
 /// A notice too long for the footer is shown whole in a box above it until the next key (the trust command must be readable and
@@ -2294,6 +2294,12 @@ fn console(
         }
         c.asked = false;
         'batch: for (index, ev) in events.into_iter().enumerate() {
+            // Keys typed with the one that opened a question (a command, a chat send) came before it was seen: they are dropped,
+            // not handled after it closes (a `y` among them could otherwise answer another request in view).
+            if std::mem::take(&mut c.asked) {
+                redraw = true;
+                break 'batch;
+            }
             // A key that only goes to the agent changes nothing on screen until the agent answers: drawing for it would hold the
             // echo back by up to a frame (ADR-0022). Anything else is drawn.
             let before = c.app.clone();
@@ -2513,12 +2519,6 @@ fn console(
                         {
                             dirty_since.get_or_insert_with(Instant::now);
                         }
-                        // Keys typed with the one that opened a question came before it was seen: they are dropped, not
-                        // handled after it closes (a `y` among them could otherwise answer another request in view).
-                        if std::mem::take(&mut c.asked) {
-                            redraw = true;
-                            break 'batch;
-                        }
                     }
                 }
             }
@@ -2529,7 +2529,8 @@ fn console(
         }
         if !c.notice.is_empty()
             && c.notice == c.note.seen
-            && !c.note.open
+            // A short notice never gets a box to close (`drawn` stays false): it ends with its time too.
+            && (!c.note.open || !c.note.drawn)
             && c.notice_at.elapsed() >= NOTICE_FOR
             && !(c.typing_refused.is_some() && c.notice == c.typing_notice)
         {
@@ -2644,15 +2645,10 @@ fn console(
             let newest = c.typing_taken.entry((node, terminal)).or_insert(request);
             *newest = (*newest).max(request);
         }
-        let taken: Vec<(String, String, u64)> = c
-            .typing_taken
-            .iter()
-            .map(|((n, t), r)| (n.clone(), t.clone(), *r))
-            .collect();
         match typing_refusal(
             &mut c.typing_refused,
             &refused,
-            &taken,
+            &c.typing_taken,
             c.app.active_agent(),
             c.typing_allowed.as_ref(),
         ) {
@@ -2720,6 +2716,9 @@ impl TypingRefused {
     }
 }
 
+/// The newest typing each terminal's machine took: (node, terminal) to request.
+type Taken = std::collections::HashMap<(String, String), u64>;
+
 /// What the footer does about a typing refusal this turn.
 #[derive(Debug, PartialEq, Eq)]
 enum Notice {
@@ -2736,21 +2735,21 @@ enum Notice {
 fn typing_refusal(
     pending: &mut Option<TypingRefused>,
     refused: &[agora_tui::client::Refused],
-    taken: &[(String, String, u64)],
+    taken: &Taken,
     active: Option<&str>,
     allowed: Option<&(String, u64)>,
 ) -> Notice {
     let taken_after = |node: &str, terminal: &str, request: u64| {
         taken
             .iter()
-            .any(|(n, t, r)| n == node && t == terminal && *r > request)
+            .any(|((n, t), r)| n == node && t == terminal && *r > request)
     };
     let mut out = Notice::Same;
     if pending.as_ref().is_some_and(|p| {
         Some(p.agent.as_str()) != active
             || taken
                 .iter()
-                .any(|(n, t, r)| p.is_for(n, t) && *r > p.request)
+                .any(|((n, t), r)| p.is_for(n, t) && *r > p.request)
     }) {
         *pending = None;
         out = Notice::End;
@@ -3291,6 +3290,8 @@ impl Asker for Over<'_> {
     }
 
     fn show(&mut self, lines: &[String]) {
+        // A question is on the screen: the rest of the console's batch was typed before it (`Console::asked`).
+        self.c.asked = true;
         if std::mem::take(&mut self.stale) {
             let _ = self.c.window.invalidate();
         }
@@ -3317,6 +3318,7 @@ impl Asker for Over<'_> {
     }
 
     fn frame(&mut self, bytes: &[u8]) {
+        self.c.asked = true;
         if std::mem::take(&mut self.mouse) {
             mouse_mode(false);
         }
@@ -3413,7 +3415,6 @@ fn over_console<T>(
     };
     let out = run(session, &mut ask);
     let stale = ask.stale;
-    c.asked = true;
     mouse_mode(c.app.mouse);
     if stale {
         let _ = c.window.invalidate();
@@ -3887,7 +3888,16 @@ mod typing_grant_tests {
         taken: &[(String, String, u64)],
         active: Option<&str>,
     ) -> Notice {
-        typing_refusal(pending, refused, taken, active, None)
+        typing_refusal(pending, refused, &taken_map(taken), active, None)
+    }
+
+    fn taken_map(taken: &[(String, String, u64)]) -> Taken {
+        let mut map = Taken::new();
+        for (n, t, r) in taken {
+            let newest = map.entry((n.clone(), t.clone())).or_insert(*r);
+            *newest = (*newest).max(*r);
+        }
+        map
     }
 
     #[test]
@@ -3900,7 +3910,7 @@ mod typing_grant_tests {
             typing_refusal(
                 &mut pending,
                 &[refused("laptop", "a1", 7)],
-                &[],
+                &Taken::new(),
                 front,
                 Some(&allowed)
             ),
@@ -3912,7 +3922,7 @@ mod typing_grant_tests {
             typing_refusal(
                 &mut pending,
                 &[refused("laptop", "a1", 8)],
-                &[],
+                &Taken::new(),
                 front,
                 Some(&allowed)
             ),
@@ -3925,7 +3935,7 @@ mod typing_grant_tests {
             typing_refusal(
                 &mut pending,
                 &[refused("laptop", "a1", 3)],
-                &[],
+                &Taken::new(),
                 front,
                 Some(&other)
             ),
