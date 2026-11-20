@@ -179,13 +179,26 @@ fn set_config(c: &mut Client, agent: &str, id: &str, value: &str) -> Reply {
     }))
 }
 
-/// What the agent was told, line by line.
-fn applied(worktree: &Path) -> Vec<String> {
-    // The adapter writes the line after it answers the node: give it a moment.
-    std::thread::sleep(Duration::from_millis(300));
-    std::fs::read_to_string(worktree.join("applied.txt"))
-        .map(|t| t.lines().map(str::to_string).collect())
-        .unwrap_or_default()
+/// The line a harmless switch leaves, used to know the adapter has handled everything sent before it (it handles them in order).
+const MARK: &str = "applied config:auto_approve=false";
+
+/// Sends the harmless switch: whatever the adapter was told before it is in `applied.txt` once this line is.
+fn marker(c: &mut Client, agent: &str) {
+    ok(set_config(c, agent, "auto_approve", "false"));
+}
+
+/// Waits (up to 20 s) until what the agent was told, line by line, is exactly `want`, then says so; a mismatch shows what it was.
+fn applied(worktree: &Path, want: &[&str]) {
+    let read = || -> Vec<String> {
+        std::fs::read_to_string(worktree.join("applied.txt"))
+            .map(|t| t.lines().map(str::to_string).collect())
+            .unwrap_or_default()
+    };
+    let end = Instant::now() + Duration::from_secs(20);
+    while read() != want && Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(read(), want);
 }
 
 fn skip_requests(n: &Node) -> Vec<v1::ApprovalRequested> {
@@ -272,10 +285,9 @@ fn an_approved_switch_applies_exactly_the_rendered_mode_once() {
     let err = error(set_mode(&mut c, &id, "bypassPermissions"));
     assert_eq!(err.code, "agent.approval_needed");
     let approval = param(&err, "approval_id");
-    assert!(
-        applied(&worktree).is_empty(),
-        "nothing is applied before the owner decides"
-    );
+    // Nothing is applied before the owner decides: the adapter has handled the marker and holds no other line.
+    marker(&mut c, &id);
+    applied(&worktree, &[MARK]);
     // The card: the node's own rendering of agent, folder, machine, option and value.
     let requests = skip_requests(&n);
     assert_eq!(requests.len(), 1);
@@ -299,14 +311,15 @@ fn an_approved_switch_applies_exactly_the_rendered_mode_once() {
 
     let r = ok(c.call(Cmd::ApprovalResolve(honest(card, true))));
     assert!(matches!(r.result, Some(Ok_::Empty(_))));
-    assert_eq!(applied(&worktree), ["applied mode:bypassPermissions"]);
+    applied(&worktree, &[MARK, "applied mode:bypassPermissions"]);
     let done = resolved(&n, &approval);
     assert_eq!(done.len(), 1);
     assert!(done[0].approved && done[0].signer_device_id == "phone");
     // Single use: the same decision again is not an approval of anything.
     let again = error(c.call(Cmd::ApprovalResolve(honest(card, true))));
     assert_eq!(again.code, "protocol.invalid_message");
-    assert_eq!(applied(&worktree).len(), 1);
+    marker(&mut c, &id);
+    applied(&worktree, &[MARK, "applied mode:bypassPermissions", MARK]);
 }
 
 /// A decision that names another option or value than the card, another agent, the wrong domain, a device the node does not trust, or a
@@ -364,12 +377,13 @@ fn a_decision_that_does_not_match_the_card_is_refused() {
     let mut grant = honest(&card, true);
     grant.helper_grant = 3;
     refused("grant", grant);
-    assert!(applied(&worktree).is_empty());
+    marker(&mut c, &id);
+    applied(&worktree, &[MARK]);
     assert_eq!(n.approvals.pending_count(), 1, "the card still waits");
 
     // The right decision still works.
     ok(c.call(Cmd::ApprovalResolve(honest(&card, true))));
-    assert_eq!(applied(&worktree), ["applied mode:bypassPermissions"]);
+    applied(&worktree, &[MARK, "applied mode:bypassPermissions"]);
 }
 
 /// A denial applies nothing and ends the card.
@@ -388,7 +402,8 @@ fn a_denied_switch_applies_nothing() {
     );
     let card = skip_requests(&n).remove(0);
     ok(c.call(Cmd::ApprovalResolve(honest(&card, false))));
-    assert!(applied(&worktree).is_empty());
+    marker(&mut c, &id);
+    applied(&worktree, &[MARK]);
     let done = resolved(&n, &card.approval_id);
     assert!(!done[0].approved && done[0].signer_device_id == "phone");
     assert_eq!(n.approvals.pending_count(), 0);
@@ -412,7 +427,7 @@ fn a_forbidding_policy_refuses_before_any_card() {
     assert!(skip_requests(&n).is_empty());
     assert_eq!(n.approvals.pending_count(), 0);
     ok(set_mode(&mut c, &id, "plan"));
-    assert_eq!(applied(&worktree), ["applied mode:plan"]);
+    applied(&worktree, &["applied mode:plan"]);
 }
 
 /// Values that keep protection are never asked about, and switching back to one needs no approval, with a card waiting or not.
@@ -435,14 +450,14 @@ fn safe_values_and_switching_back_never_need_approval() {
     let card = skip_requests(&n).remove(0);
     ok(c.call(Cmd::ApprovalResolve(honest(&card, true))));
     ok(set_mode(&mut c, &id, "default"));
-    assert_eq!(
-        applied(&worktree),
-        [
+    applied(
+        &worktree,
+        &[
             "applied mode:plan",
             "applied config:auto_approve=false",
             "applied mode:bypassPermissions",
-            "applied mode:default"
-        ]
+            "applied mode:default",
+        ],
     );
     assert_eq!(
         skip_requests(&n).len(),
@@ -478,7 +493,7 @@ fn a_config_option_that_skips_is_asked_about_and_applied_as_rendered() {
         "approval.signature_invalid"
     );
     ok(c.call(Cmd::ApprovalResolve(honest(&card, true))));
-    assert_eq!(applied(&worktree), ["applied config:auto_approve=true"]);
+    applied(&worktree, &["applied config:auto_approve=true"]);
 }
 
 /// A mode the node cannot place (nothing in its words says it asks, `turbo`) counts as skipping, so it is asked about too, whatever the
@@ -502,7 +517,8 @@ fn a_mode_the_classifier_cannot_place_is_asked_about() {
         "{}",
         card.detail
     );
-    assert!(applied(&worktree).is_empty());
+    marker(&mut c, &id);
+    applied(&worktree, &[MARK]);
 }
 
 /// One card per agent, option and value: asking again gets the same card; another value of the same option replaces it, and the replaced
@@ -542,7 +558,8 @@ fn asking_again_gets_the_same_card_and_another_value_replaces_it() {
         error(c.call(Cmd::ApprovalResolve(honest(&old, true)))).code,
         "protocol.invalid_message"
     );
-    assert!(applied(&worktree).is_empty());
+    marker(&mut c, &id);
+    applied(&worktree, &[MARK]);
     // A different option is a different card.
     let third = param(
         &error(set_config(&mut c, &id, "auto_approve", "true")),
@@ -575,7 +592,7 @@ fn another_switch_of_the_option_withdraws_its_card() {
         error(c.call(Cmd::ApprovalResolve(honest(&card, true)))).code,
         "protocol.invalid_message"
     );
-    assert_eq!(applied(&worktree), ["applied mode:plan"]);
+    applied(&worktree, &["applied mode:plan"]);
 }
 
 /// The permission is the agent's session: when the agent ends, its waiting card is withdrawn and a late decision applies nothing.
@@ -607,7 +624,8 @@ fn the_end_of_the_agent_withdraws_its_card() {
     assert!(!done[0].approved && done[0].signer_device_id.is_empty());
     let late = error(c.call(Cmd::ApprovalResolve(honest(&card, true))));
     assert_eq!(late.code, "protocol.invalid_message");
-    assert!(applied(&worktree).is_empty());
+    // The agent is gone: its adapter was told nothing, and the decision found no card to apply.
+    assert!(!worktree.join("applied.txt").exists());
 }
 
 /// A crash of the adapter ends the session too.
@@ -690,4 +708,29 @@ fn a_restart_does_not_restore_a_card_or_an_approval() {
         assert!(Instant::now() < end, "never asked again");
         std::thread::sleep(Duration::from_millis(100));
     }
+}
+
+/// An adapter that raises a request under a name only the node uses (`agent.start`) gets no card and is answered "denied" at once;
+/// nothing is announced and nothing waits.
+#[test]
+fn an_adapter_that_names_a_node_action_is_denied_without_a_card() {
+    if !local() {
+        return;
+    }
+    let e = env("reserved", None);
+    let n = node(&e, false);
+    let mut c = Client::connect(n.socket().unwrap()).unwrap();
+    let (id, worktree) = agent(&n, &mut c);
+    ok(c.call(Cmd::AgentPrompt(v1::AgentPrompt {
+        agent_id: id.clone(),
+        text: "ask-reserved".into(),
+    })));
+    applied(&worktree, &["answered:denied"]);
+    assert_eq!(n.approvals.pending_count(), 0);
+    let announced = n
+        .events
+        .events_after(0)
+        .into_iter()
+        .any(|e| matches!(e.body, Some(v1::event::Body::ApprovalRequested(_))));
+    assert!(!announced, "no card was announced");
 }

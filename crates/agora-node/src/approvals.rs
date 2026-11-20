@@ -146,6 +146,11 @@ pub fn start_signed_message_v2(
 /// the node raises it ([`NodeApprovals::request_skip`]); a request an adapter makes under this name is refused.
 pub const SKIP_ACTION: &str = "agent.skip_permissions";
 
+/// Actions only the node raises: the whole `agent.` namespace (an adapter cannot dress its own request as one of them).
+pub fn is_reserved_action(action: &str) -> bool {
+    action == START_ACTION || action == SKIP_ACTION || action.starts_with("agent.")
+}
+
 /// `F(x)`: the decimal byte length of `x`, `:`, then `x` (the field form of the newer signing domains).
 fn framed(out: &mut Vec<u8>, x: &str) {
     out.extend_from_slice(x.len().to_string().as_bytes());
@@ -617,6 +622,14 @@ pub const MAX_SKIP_PENDING: usize = 8;
 /// At most this many are raised per [`SKIP_WINDOW_MS`] on a node, so a client that keeps asking cannot bury the owner in cards.
 pub const MAX_SKIP_PER_WINDOW: usize = 6;
 pub const SKIP_WINDOW_MS: u64 = 60_000;
+/// One agent may have this many cards waiting, and raise this many per [`SKIP_WINDOW_MS`], whatever else the node holds: one agent's flood
+/// never keeps another agent's card from being raised.
+pub const MAX_SKIP_PER_AGENT: usize = 2;
+pub const MAX_SKIP_PER_AGENT_WINDOW: usize = 3;
+/// Longest option id or value a card is raised for (bytes), and the longest agent kind, name and folder shown (characters).
+pub const MAX_SKIP_ID_BYTES: usize = 128;
+const MAX_KIND_CHARS: usize = 64;
+const MAX_FOLDER_CHARS: usize = 256;
 /// How long a skip request waits.
 const SKIP_TTL_MS: u64 = 10 * 60 * 1000;
 
@@ -660,12 +673,34 @@ pub struct SkipAsk {
 
 const MAX_NAME_CHARS: usize = 64;
 
-/// Untrusted text for a card: control characters removed, at most [`MAX_NAME_CHARS`] characters.
-fn card_text(s: &str) -> String {
-    s.chars()
-        .filter(|c| !c.is_control())
-        .take(MAX_NAME_CHARS)
+/// A character that must never reach a card: a control character (Cc), a format character (Cf: bidirectional controls and isolates,
+/// zero-width characters, the byte order mark, tags) or a line or paragraph separator.
+fn is_hidden(c: char) -> bool {
+    c.is_control()
+        || matches!(c,
+            '\u{ad}' | '\u{600}'..='\u{605}' | '\u{61c}' | '\u{6dd}' | '\u{70f}' | '\u{180e}'
+            | '\u{200b}'..='\u{200f}' | '\u{2028}' | '\u{2029}' | '\u{202a}'..='\u{202e}'
+            | '\u{2060}'..='\u{206f}' | '\u{feff}' | '\u{fff9}'..='\u{fffb}' | '\u{110bd}'
+            | '\u{e0001}' | '\u{e0020}'..='\u{e007f}')
+}
+
+/// Untrusted text for a card: hidden characters removed, at most `max` characters, and a cut is marked with `…` (inside the bound).
+pub(crate) fn card_text(s: &str, max: usize) -> String {
+    let clean: Vec<char> = s.chars().filter(|c| !is_hidden(*c)).collect();
+    if clean.len() <= max {
+        return clean.into_iter().collect();
+    }
+    clean
+        .into_iter()
+        .take(max.saturating_sub(1))
+        .chain(['\u{2026}'])
         .collect()
+}
+
+/// Is `s` fit to be signed as it is (an option id or a value): not empty, no hidden character, within [`MAX_SKIP_ID_BYTES`]? What is
+/// signed is what the card shows, so such a string is refused, never altered.
+fn signable(s: &str) -> bool {
+    !s.is_empty() && s.len() <= MAX_SKIP_ID_BYTES && !s.chars().any(is_hidden)
 }
 
 impl SkipAsk {
@@ -674,13 +709,16 @@ impl SkipAsk {
         serde_json::json!({
             "node": node,
             "agent": self.agent.as_str(),
-            "agent_kind": self.agent_kind,
-            "folder": self.folder,
+            "agent_kind": card_text(&self.agent_kind, MAX_KIND_CHARS),
+            "folder": card_text(&self.folder, MAX_FOLDER_CHARS),
             "option_type": self.kind.word(),
             "option": self.option_id,
-            "option_name": card_text(&self.option_name),
+            "option_name": card_text(&self.option_name, MAX_NAME_CHARS),
             "value": self.value,
-            "value_name": card_text(&self.value_name),
+            "value_name": card_text(&self.value_name, MAX_NAME_CHARS),
+            // The node's own judgement (its classifier), never the agent's word: every card is for a choice the node judged as
+            // making the agent act without asking.
+            "skips": true,
             "scope": "session",
         })
         .to_string()
@@ -703,7 +741,7 @@ impl SkipAsk {
 struct SkipState {
     asks: std::collections::HashMap<String, SkipAsk>,
     /// When the requests of the last [`SKIP_WINDOW_MS`] were raised.
-    raised: VecDeque<u64>,
+    raised: VecDeque<(u64, String)>,
 }
 
 /// Why a skip request was not raised.
@@ -713,6 +751,12 @@ pub enum SkipRefusal {
     TooManyWaiting,
     /// [`MAX_SKIP_PER_WINDOW`] were raised in the last minute.
     TooOften,
+    /// This agent already has [`MAX_SKIP_PER_AGENT`] cards waiting.
+    AgentTooMany,
+    /// This agent raised [`MAX_SKIP_PER_AGENT_WINDOW`] cards in the last minute.
+    AgentTooOften,
+    /// The option id or the value is empty, longer than [`MAX_SKIP_ID_BYTES`] or holds a hidden character: no card, `agent.option_unknown`.
+    Unsignable,
     /// No safe id could be made.
     NoId,
 }
@@ -1011,8 +1055,10 @@ impl NodeApprovals {
         detail: &str,
         now_ms: u64,
     ) -> Option<Pending> {
-        // ADR-0090 Amendment A: an adapter's words never make this card (its decision would apply a switch the agent named in text).
-        if action == SKIP_ACTION {
+        // The `agent.*` actions are the node's own (`agent.start`, `agent.skip_permissions`): their cards come from the node's own
+        // records and their decisions are applied from them. An adapter that names one gets no card and nothing is consumed; the
+        // caller answers it "denied" at once. An adapter's own actions (`run_command`, `write_file`) are not in that namespace.
+        if is_reserved_action(action) {
             return None;
         }
         let p = self
@@ -1038,6 +1084,9 @@ impl NodeApprovals {
         ask: SkipAsk,
         now_ms: u64,
     ) -> Result<SkipRaised, SkipRefusal> {
+        if !signable(&ask.option_id) || !signable(&ask.value) {
+            return Err(SkipRefusal::Unsignable);
+        }
         let mut st = self.sk();
         // A request that ran out of time without being swept is not one that waits.
         let alive: std::collections::HashSet<String> =
@@ -1059,19 +1108,31 @@ impl NodeApprovals {
                 });
             }
         }
-        let replaced = same.iter().filter(|(_, equal)| !*equal).count();
-        if st.asks.len() - replaced >= MAX_SKIP_PENDING {
+        // A replacement counts like any other card here (it is withdrawn only once the new one exists), and in the rate below.
+        if st.asks.len() >= MAX_SKIP_PENDING {
             return Err(SkipRefusal::TooManyWaiting);
+        }
+        if st.asks.values().filter(|a| a.agent == ask.agent).count() >= MAX_SKIP_PER_AGENT {
+            return Err(SkipRefusal::AgentTooMany);
         }
         while st
             .raised
             .front()
-            .is_some_and(|t| now_ms.saturating_sub(*t) >= SKIP_WINDOW_MS)
+            .is_some_and(|(t, _)| now_ms.saturating_sub(*t) >= SKIP_WINDOW_MS)
         {
             st.raised.pop_front();
         }
         if st.raised.len() >= MAX_SKIP_PER_WINDOW {
             return Err(SkipRefusal::TooOften);
+        }
+        if st
+            .raised
+            .iter()
+            .filter(|(_, a)| a == ask.agent.as_str())
+            .count()
+            >= MAX_SKIP_PER_AGENT_WINDOW
+        {
+            return Err(SkipRefusal::AgentTooOften);
         }
         let detail = ask.detail(node);
         let pending = self
@@ -1093,7 +1154,8 @@ impl NodeApprovals {
             self.withdraw(id);
             superseded.push(id.clone());
         }
-        st.raised.push_back(now_ms);
+        st.raised
+            .push_back((now_ms, ask.agent.as_str().to_string()));
         st.asks.insert(pending.id.clone(), ask);
         Ok(SkipRaised {
             pending,
@@ -1638,7 +1700,7 @@ mod tests {
             .unwrap_err(),
             SkipRefusal::TooManyWaiting
         );
-        // A repeat and a replacement are still answered.
+        // A repeat is still answered (it is the card that waits); a replacement counts as a new card and waits for room too.
         assert!(
             !n.request_skip(
                 "node-1",
@@ -1648,14 +1710,14 @@ mod tests {
             .unwrap()
             .fresh
         );
-        assert!(
+        assert_eq!(
             n.request_skip(
                 "node-1",
                 skip_ask("agent-0", SkipKind::Mode, "mode", "turbo"),
                 t
             )
-            .unwrap()
-            .fresh
+            .unwrap_err(),
+            SkipRefusal::TooManyWaiting
         );
         // The rate: six in a minute, the seventh waits for the window.
         let n = node_approvals();
@@ -1681,6 +1743,188 @@ mod tests {
                 "node-1",
                 skip_ask("agent-7", SkipKind::Mode, "mode", "bypass"),
                 5_000 + SKIP_WINDOW_MS
+            )
+            .is_ok());
+    }
+
+    /// Adapters raise their own requests (`run_command`); every name in the node's own `agent.` namespace is refused, `agent.start` too:
+    /// no card, nothing consumed, so the caller answers the adapter at once.
+    #[test]
+    fn an_adapter_cannot_use_any_name_of_the_nodes_own() {
+        let n = node_approvals();
+        let agent = agora_core::AgentId::new("agent-1");
+        for action in [
+            START_ACTION,
+            SKIP_ACTION,
+            "agent.stop",
+            "agent.anything",
+            "agent.",
+        ] {
+            assert!(
+                n.request(&agent, "ap-1", action, "{}", 1_000).is_none(),
+                "{action}"
+            );
+        }
+        assert_eq!(n.pending_count(), 0);
+        // Its own requests are cards as before.
+        for action in ["run_command", "write_file", "agentic", "Agent.start"] {
+            assert!(
+                n.request(&agent, "ap-1", action, "ls", 1_000).is_some(),
+                "{action}"
+            );
+        }
+    }
+
+    /// What an agent or a path can put in a card: hidden characters (controls, bidirectional and zero-width format characters, line
+    /// separators) never reach the detail, long text is cut and marked; an id or value that cannot be signed as shown gets no card.
+    #[test]
+    fn a_card_shows_no_hidden_characters_and_is_bounded() {
+        let hidden = "\u{202e}\u{2066}\u{200b}\u{200f}\u{2028}\u{feff}\u{1b}\u{85}";
+        let mut a = skip_ask("agent-1", SkipKind::Mode, "mode", "bypass");
+        a.agent_kind = format!("cl{hidden}aude{}", "k".repeat(200));
+        a.folder = format!("/work/{hidden}login{}", "f".repeat(1000));
+        a.option_name = format!("{hidden}Mode");
+        a.value_name = format!("Safe{hidden} mode{}", "n".repeat(300));
+        let detail = a.detail("laptop");
+        let d: serde_json::Value = serde_json::from_str(&detail).unwrap();
+        for k in ["agent_kind", "folder", "option_name", "value_name"] {
+            let shown = d[k].as_str().unwrap();
+            assert!(!shown.chars().any(is_hidden), "{k}: {shown:?}");
+        }
+        assert_eq!(d["option_name"], "Mode");
+        assert!(d["agent_kind"].as_str().unwrap().starts_with("claude"));
+        assert_eq!(
+            d["agent_kind"].as_str().unwrap().chars().count(),
+            MAX_KIND_CHARS
+        );
+        assert!(d["agent_kind"].as_str().unwrap().ends_with('\u{2026}'));
+        assert_eq!(
+            d["folder"].as_str().unwrap().chars().count(),
+            MAX_FOLDER_CHARS
+        );
+        assert_eq!(
+            d["value_name"].as_str().unwrap().chars().count(),
+            MAX_NAME_CHARS
+        );
+        assert!(d["value_name"].as_str().unwrap().starts_with("Safe mode"));
+        // The node's own judgement is in the card, apart from the agent's names.
+        assert_eq!(d["skips"], true);
+        // An option id or a value that would have to be altered to be shown, or is too long or empty, is never signed.
+        let n = node_approvals();
+        let refused = |kind: SkipKind, option: &str, value: &str| {
+            n.request_skip("node-1", skip_ask("agent-1", kind, option, value), 1_000)
+                .unwrap_err()
+        };
+        assert_eq!(
+            refused(SkipKind::Mode, "mode", "by\u{202e}pass"),
+            SkipRefusal::Unsignable
+        );
+        assert_eq!(
+            refused(SkipKind::Mode, "mode", "by\u{200b}pass"),
+            SkipRefusal::Unsignable
+        );
+        assert_eq!(
+            refused(SkipKind::Mode, "mode", "bypass\n"),
+            SkipRefusal::Unsignable
+        );
+        assert_eq!(refused(SkipKind::Mode, "mode", ""), SkipRefusal::Unsignable);
+        assert_eq!(
+            refused(SkipKind::Mode, "mode", &"v".repeat(MAX_SKIP_ID_BYTES + 1)),
+            SkipRefusal::Unsignable
+        );
+        assert_eq!(
+            refused(SkipKind::Config, &"o".repeat(MAX_SKIP_ID_BYTES + 1), "true"),
+            SkipRefusal::Unsignable
+        );
+        assert_eq!(
+            refused(SkipKind::Config, "a\u{2029}b", "true"),
+            SkipRefusal::Unsignable
+        );
+        assert_eq!(n.pending_count(), 0, "nothing was raised");
+        // The bound itself is fine.
+        assert!(n
+            .request_skip(
+                "node-1",
+                skip_ask(
+                    "agent-1",
+                    SkipKind::Mode,
+                    "mode",
+                    &"v".repeat(MAX_SKIP_ID_BYTES)
+                ),
+                1_000
+            )
+            .is_ok());
+    }
+
+    /// One agent's flood (waiting cards, cards per minute) is stopped by its own limits and never keeps another agent's card from being
+    /// raised.
+    #[test]
+    fn one_agents_flood_does_not_block_another_agents_card() {
+        let n = node_approvals();
+        let ask = |a: &str, k: SkipKind, o: &str, v: &str| skip_ask(a, k, o, v);
+        // Two waiting at most per agent.
+        n.request_skip("node-1", ask("agent-1", SkipKind::Mode, "mode", "a"), 1_000)
+            .unwrap();
+        n.request_skip(
+            "node-1",
+            ask("agent-1", SkipKind::Config, "x", "true"),
+            1_001,
+        )
+        .unwrap();
+        assert_eq!(
+            n.request_skip(
+                "node-1",
+                ask("agent-1", SkipKind::Config, "y", "true"),
+                1_002
+            )
+            .unwrap_err(),
+            SkipRefusal::AgentTooMany
+        );
+        // A replacement of one of them is a new card and waits for room too.
+        assert_eq!(
+            n.request_skip("node-1", ask("agent-1", SkipKind::Mode, "mode", "b"), 1_003)
+                .unwrap_err(),
+            SkipRefusal::AgentTooMany
+        );
+        // Another agent is not affected.
+        assert!(
+            n.request_skip("node-1", ask("agent-2", SkipKind::Mode, "mode", "a"), 1_004)
+                .unwrap()
+                .fresh
+        );
+        // Three raised a minute at most per agent: agent-3 raises and withdraws three times, the fourth in the window is refused.
+        let agent = agora_core::AgentId::new("agent-3");
+        for i in 0..MAX_SKIP_PER_AGENT_WINDOW {
+            n.request_skip(
+                "node-1",
+                ask("agent-3", SkipKind::Mode, "mode", &format!("v{i}")),
+                200_000 + i as u64,
+            )
+            .unwrap();
+            n.withdraw_skips(&agent, None);
+        }
+        assert_eq!(
+            n.request_skip(
+                "node-1",
+                ask("agent-3", SkipKind::Mode, "mode", "v9"),
+                200_100
+            )
+            .unwrap_err(),
+            SkipRefusal::AgentTooOften
+        );
+        // Still not blocking another agent, nor agent-3 once its window passed.
+        assert!(n
+            .request_skip(
+                "node-1",
+                ask("agent-4", SkipKind::Mode, "mode", "a"),
+                200_100
+            )
+            .is_ok());
+        assert!(n
+            .request_skip(
+                "node-1",
+                ask("agent-3", SkipKind::Mode, "mode", "v9"),
+                200_000 + SKIP_WINDOW_MS
             )
             .is_ok());
     }

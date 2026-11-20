@@ -150,6 +150,7 @@ fn approval_skip_v1_vectors_follow_the_documented_layout() {
         assert_eq!(detail["option"], c["option_id"], "{}", s("name"));
         assert_eq!(detail["value"], c["value"], "{}", s("name"));
         assert_eq!(detail["node"], c["node"], "{}", s("name"));
+        assert_eq!(detail["skips"], true, "{}", s("name"));
     }
 }
 

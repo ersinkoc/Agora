@@ -264,6 +264,12 @@ for a skipping mode; a stale card after the agent ended), the "Temporarily unava
   for the node. `AgentSetModel` of a skipping model stays refused (the amendment names modes and config options).
 - **Web** (next PR): the existing approval card for the new kind (the window writes its own words from `detail`) and the SessionBar showing the choice
   as "needs your approval" instead of switched off; its `session-unasked-unavailable` text and tests still describe the old state until then.
+- **Review of #795 (security):** the detail carries the node's own `skips: true`; every agent- or machine-supplied string is shown without
+  control and format characters and bounded, and an id or value that cannot be signed as shown gets no card (`agent.option_unknown`); adapters
+  can raise no `agent.*` request (closes the `agent.start` forgery); per-agent limits (2 waiting, 3 per minute) beside the node's.
+- **Known dead end, documented:** `AgentSetModel` of a model the node judges as skipping stays `agent.option_unconfirmed` (no card exists for models; the
+  amendment names modes and config options). **Known gap:** P2-16 (`docs/backlog/phase-2.md`): the node never checks an adapter's CURRENT mode or
+  config value at start or resume, so an agent whose own session comes back in a bypass mode is not asked.
 - **Left open by the amendment, decided here:** for `AgentSetMode` the signed `option_id` is the literal `mode` (a mode has no option id of its own) and
   the detail's `option_type` says mode or config; the wait is the standard 10 minutes; the limits above are the node's own numbers; a decision for a
   card whose adapter restarted is refused (`agent.not_found`: the run it named is gone) and changes nothing.

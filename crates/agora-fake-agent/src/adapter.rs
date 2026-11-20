@@ -6,6 +6,7 @@
 //! - `first:TEXT`: says TEXT, then answers the prompt 300 ms later.
 //! - `hang`: does not answer the prompt for 30 s (an adapter that is stuck).
 //! - `ask-error`: like `ask`, but answers the decision with a JSON-RPC error.
+//! - `ask-reserved`: like `ask`, but the request's action is `agent.start` (a name only the node may use); the answer is written to `applied.txt`.
 //! - `crash`: exits abruptly with status 3 (a crashing adapter).
 //! - `env`: appends a chat item saying whether the variable `AGORA_TEST_SECRET` is visible to the adapter.
 //! - `mcp-servers`: appends a chat item with the `mcpServers` of `session/start`, as JSON (`[]` when there were none).
@@ -182,12 +183,13 @@ pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
                         state(out, &session, "WORKING")?;
                         state(out, &session, "IDLE")?;
                     }
-                    "ask" | "ask-error" => {
+                    "ask" | "ask-error" | "ask-reserved" => {
                         state(out, &session, "BLOCKED")?;
                         note(
                             out,
                             "approval/request",
-                            json!({"sessionId": session, "approvalId": "ap-1", "action": "run_command", "detail": "ls"}),
+                            json!({"sessionId": session, "approvalId": "ap-1",
+                                   "action": if text == "ask-reserved" { "agent.start" } else { "run_command" }, "detail": "ls"}),
                         )?;
                         // Wait for the decision; everything else is answered normally meanwhile.
                         for next in lines.by_ref() {
@@ -208,6 +210,18 @@ pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
                                     send(out, &json!({"jsonrpc": "2.0", "id": id, "result": {}}))?;
                                 }
                                 let approved = m["params"]["approved"].as_bool().unwrap_or(false);
+                                if text == "ask-reserved" {
+                                    // What the node answered the request, for a test to read.
+                                    let mut file = std::fs::OpenOptions::new()
+                                        .create(true)
+                                        .append(true)
+                                        .open("applied.txt")?;
+                                    writeln!(
+                                        file,
+                                        "answered:{}",
+                                        if approved { "approved" } else { "denied" }
+                                    )?;
+                                }
                                 state(out, &session, "WORKING")?;
                                 note(
                                     out,

@@ -962,8 +962,13 @@ forwards either to a node that did not offer it.
     request. `detail` is the node's own rendering, a JSON object: `node`, `agent` (the agent id), `agent_kind`, `folder` (the agent's
     folder on that machine), `option_type` (`mode` or `config`), `option` (for a mode the literal `mode`, otherwise the config id),
     `option_name` (the agent's own name for the option, untrusted, at most 64 characters, `""` for a mode), `value` (the mode id or the
-    value chosen), `value_name` (the agent's own name for it, untrusted, same bounds) and `scope` (`session`: the choice lasts until the
-    agent ends, restarts or is switched back). A window writes its own words from these fields (UI vocabulary, ADR-0024) and shows the
+    value chosen), `value_name` (the agent's own name for it, untrusted, same bounds), `skips` (always `true`: the node's own judgement
+    that the choice makes the agent act without asking, never the agent's word) and `scope` (`session`: the choice lasts until the
+    agent ends, restarts or is switched back). Every string that came from the agent or the machine is shown without control and
+    format characters (Cc, Cf: bidirectional controls, zero-width characters, the byte order mark, line and paragraph separators);
+    `agent_kind` is cut at 64 characters, `folder` at 256, the two names at 64, a cut marked by a final `…` inside the bound. `option` and
+    `value` are never altered (they are signed as shown): a choice whose option id or value is empty, longer than 128 bytes or holds such a
+    character gets no card and the command is answered `agent.option_unknown`. A window writes its own words from these fields (UI vocabulary, ADR-0024) and shows the
     ids `option` and `value` beside the agent's names, which are text a model chose.
   - The command is answered with the error `agent.approval_needed { approval_id }`; the choice is not applied. A repeat of the same
     command while that request waits gets the same id (one card per agent, option and value); a command naming another value of the same
@@ -984,8 +989,12 @@ forwards either to a node that did not offer it.
     is superseded; an approval decided after the adapter restarted applies nothing and is answered `agent.not_found` (the run it named is gone, and the node's
     own check of what the agent offers fails). A node restart forgets every waiting request and every approval: the agent that comes
     back asks again. At most 8 requests wait on a node and at most 6 are raised per minute (`node.resource_limit { resource:
-    "skip_approvals", limit }`). Policy `forbid` and `confined_only` (not confined) refuse with `agent.option_forbidden` before any request
+    "skip_approvals", limit }`), and one agent may have at most 2 waiting and raise at most 3 per minute (`resource:
+    "skip_approvals_agent"`), so one agent's flood never keeps another agent's card from being raised; a replacement counts as a new card
+    for these limits. Policy `forbid` and `confined_only` (not confined) refuse with `agent.option_forbidden` before any request
     exists. Switching back to a value that keeps protection needs no approval.
+  - An adapter can never raise this card or any other node-made one: an approval request from an adapter whose action is in the `agent.`
+    namespace (`agent.start`, `agent.skip_permissions`, ...) gets no card, consumes nothing and is answered "denied" at once.
   - Node capability `approval.skip_permissions`, advertised only by a node that handles the above and passed by the hub. A client that
     sees `agent.approval_needed` shows the card of the `ApprovalRequested` it already receives; against a node without the capability
     the command is still refused with `agent.option_unconfirmed`.

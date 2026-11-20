@@ -278,6 +278,15 @@ fn raise_skip(ctx: &ControlContext, ask: SkipAsk) -> Error {
         };
         return SupervisorError::OptionUnconfirmed(ask.agent_kind.clone(), option).to_protocol();
     };
+    let unsignable_id = match ask.kind {
+        SkipKind::Mode => "mode".to_string(),
+        SkipKind::Config => crate::approvals::card_text(&ask.option_id, 64),
+    };
+    let per_agent = |what: usize| {
+        Error::new(ErrorCode::NodeResourceLimit)
+            .with("resource", "skip_approvals_agent")
+            .with("limit", i64::try_from(what).unwrap_or(i64::MAX))
+    };
     let limit = |what: usize| {
         Error::new(ErrorCode::NodeResourceLimit)
             .with("resource", "skip_approvals")
@@ -298,6 +307,12 @@ fn raise_skip(ctx: &ControlContext, ask: SkipAsk) -> Error {
         }
         Err(SkipRefusal::TooManyWaiting) => limit(crate::approvals::MAX_SKIP_PENDING),
         Err(SkipRefusal::TooOften) => limit(crate::approvals::MAX_SKIP_PER_WINDOW),
+        Err(SkipRefusal::AgentTooMany) => per_agent(crate::approvals::MAX_SKIP_PER_AGENT),
+        Err(SkipRefusal::AgentTooOften) => per_agent(crate::approvals::MAX_SKIP_PER_AGENT_WINDOW),
+        // An id or a value the card could not show as it is signed: nothing is raised, and the agent is told it has no such setting.
+        Err(SkipRefusal::Unsignable) => {
+            Error::new(ErrorCode::AgentOptionUnknown).with("id", unsignable_id.as_str())
+        }
         Err(SkipRefusal::NoId) => {
             Error::new(ErrorCode::Internal).with("incident_id", "approval-id")
         }
