@@ -320,8 +320,8 @@ impl HubSessions {
 }
 
 impl crate::web::SessionApi for HubSessions {
-    fn proxy(&self) -> Option<Arc<crate::proxy::ProxyTrust>> {
-        self.proxy.as_ref().and_then(|p| p.current())
+    fn proxy(&self) -> Option<&crate::proxy::ProxyHandle> {
+        self.proxy.as_deref()
     }
 
     fn passkey(

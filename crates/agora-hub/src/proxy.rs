@@ -12,8 +12,11 @@
 
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
 
 /// The file in the hub's folder that says the proxy is trusted.
 pub const FILE: &str = "remote-proxy";
@@ -385,8 +388,16 @@ pub fn read_from(path: &Path, open: Opener) -> Stored {
 /// `agora remote off` take effect without a restart.
 pub struct ProxyHandle {
     file: Option<(PathBuf, Opener)>,
-    cache: Mutex<(Option<Instant>, Option<Arc<ProxyTrust>>)>,
+    cache: Mutex<ProxyCache>,
     reload: Duration,
+}
+
+#[derive(Default)]
+struct ProxyCache {
+    checked: Option<Instant>,
+    trust: Option<Arc<ProxyTrust>>,
+    // Keep the job here when the request waiting for it is dropped. The next request can finish the same refresh.
+    loading: Option<JoinHandle<Stored>>,
 }
 
 impl ProxyHandle {
@@ -394,7 +405,7 @@ impl ProxyHandle {
     pub fn watch(file: PathBuf, open: Opener) -> Self {
         Self {
             file: Some((file, open)),
-            cache: Mutex::new((None, None)),
+            cache: Mutex::new(ProxyCache::default()),
             reload: RELOAD,
         }
     }
@@ -410,26 +421,36 @@ impl ProxyHandle {
     pub fn fixed(trust: Option<ProxyTrust>) -> Self {
         Self {
             file: None,
-            cache: Mutex::new((Some(Instant::now()), trust.map(Arc::new))),
+            cache: Mutex::new(ProxyCache {
+                trust: trust.map(Arc::new),
+                ..ProxyCache::default()
+            }),
             reload: RELOAD,
         }
     }
 
-    /// The proxy that is trusted now, if any. A file that turns damaged while the hub runs keeps the last good settings (so the Host
-    /// and Origin checks do not switch off); a hub that starts with a damaged file trusts nothing. A removed file is off.
-    pub fn current(&self) -> Option<Arc<ProxyTrust>> {
-        let mut c = self.cache.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(file) = &self.file {
-            if c.0.is_none_or(|t| t.elapsed() >= self.reload) {
-                match read_from(&file.0, file.1) {
-                    Stored::On(t) => c.1 = Some(Arc::new(t)),
-                    Stored::Off => c.1 = None,
+    /// Requests await a due refresh so they use its trust rules. A damaged file keeps the last good settings, and a
+    /// hub starting with a damaged file trusts no proxy. Removing the file turns trust off.
+    pub async fn current(&self) -> std::io::Result<Option<Arc<ProxyTrust>>> {
+        let mut c = self.cache.lock().await;
+        if let Some((file, open)) = &self.file {
+            if c.checked.is_none_or(|t| t.elapsed() >= self.reload) {
+                let loading = c.loading.get_or_insert_with(|| {
+                    let file = file.clone();
+                    let open = *open;
+                    tokio::task::spawn_blocking(move || read_from(&file, open))
+                });
+                let result = loading.await;
+                c.loading = None;
+                match result.map_err(std::io::Error::other)? {
+                    Stored::On(t) => c.trust = Some(Arc::new(t)),
+                    Stored::Off => c.trust = None,
                     Stored::Damaged => {}
                 }
-                c.0 = Some(Instant::now());
+                c.checked = Some(Instant::now());
             }
         }
-        c.1.clone()
+        Ok(c.trust.clone())
     }
 }
 
@@ -789,42 +810,140 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[test]
-    fn a_link_in_place_of_the_file_is_refused_even_when_it_points_at_a_good_one() {
+    #[tokio::test]
+    async fn a_link_in_place_of_the_file_is_refused_even_when_it_points_at_a_good_one() {
         let dir = tmp("link");
         std::fs::write(dir.join("real"), trust().render()).unwrap();
         std::os::unix::fs::symlink(dir.join("real"), dir.join(FILE)).unwrap();
         assert_eq!(read_file(&dir.join(FILE)), Stored::Damaged);
         let handle = ProxyHandle::watch(dir.join(FILE), |p| std::fs::File::open(p)).always_fresh();
-        assert!(handle.current().is_none(), "a link trusts nothing");
+        assert!(
+            handle.current().await.unwrap().is_none(),
+            "a link trusts nothing"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    #[test]
-    fn a_running_handle_follows_the_file_and_keeps_the_last_good_settings_when_it_turns_damaged() {
+    #[tokio::test]
+    async fn a_running_handle_follows_the_file_and_keeps_the_last_good_settings_when_it_turns_damaged(
+    ) {
         let dir = tmp("handle");
         let file = dir.join(FILE);
         let handle = ProxyHandle::watch(file.clone(), |p| std::fs::File::open(p)).always_fresh();
-        assert!(handle.current().is_none(), "no file: off");
+        assert!(handle.current().await.unwrap().is_none(), "no file: off");
         std::fs::write(&file, trust().render()).unwrap();
-        assert_eq!(handle.current().as_deref(), Some(&trust()));
+        assert_eq!(handle.current().await.unwrap().as_deref(), Some(&trust()));
         // Damaged while running: the Host and Origin checks do not switch off.
         std::fs::write(&file, "header=x\nbogus\n").unwrap();
-        assert_eq!(handle.current().as_deref(), Some(&trust()));
+        assert_eq!(handle.current().await.unwrap().as_deref(), Some(&trust()));
         std::fs::write(&file, vec![b'a'; 5000]).unwrap();
-        assert_eq!(handle.current().as_deref(), Some(&trust()));
+        assert_eq!(handle.current().await.unwrap().as_deref(), Some(&trust()));
         // A new good file replaces it; a removed file is off.
         let other = ProxyTrust::new("x-ip", &["b.example.com".into()], &[]).unwrap();
         std::fs::write(&file, other.render()).unwrap();
-        assert_eq!(handle.current().as_deref(), Some(&other));
+        assert_eq!(handle.current().await.unwrap().as_deref(), Some(&other));
         std::fs::remove_file(&file).unwrap();
-        assert!(handle.current().is_none());
+        assert!(handle.current().await.unwrap().is_none());
         // A hub that starts with a damaged file trusts nothing.
         std::fs::write(&file, "bogus\n").unwrap();
         let fresh = ProxyHandle::watch(file, |p| std::fs::File::open(p)).always_fresh();
-        assert!(fresh.current().is_none());
+        assert!(fresh.current().await.unwrap().is_none());
         std::fs::remove_dir_all(&dir).unwrap();
-        assert!(ProxyHandle::fixed(Some(trust())).current().is_some());
-        assert!(ProxyHandle::fixed(None).current().is_none());
+        assert!(ProxyHandle::fixed(Some(trust()))
+            .current()
+            .await
+            .unwrap()
+            .is_some());
+        assert!(ProxyHandle::fixed(None).current().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn requests_share_a_blocked_refresh_even_after_the_first_waiter_is_cancelled() {
+        use std::sync::mpsc;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        struct OpenGate {
+            started: tokio::sync::mpsc::UnboundedSender<()>,
+            release: Option<mpsc::Receiver<()>>,
+        }
+        static GATE: std::sync::Mutex<Option<OpenGate>> = std::sync::Mutex::new(None);
+        fn gated_open(path: &Path) -> std::io::Result<std::fs::File> {
+            let release = {
+                let mut gate = GATE.lock().unwrap();
+                let gate = gate.as_mut().unwrap();
+                gate.started.send(()).unwrap();
+                gate.release.take()
+            };
+            if let Some(release) = release {
+                let _ = release.recv_timeout(Duration::from_secs(5));
+            }
+            std::fs::File::open(path)
+        }
+
+        async fn request(api: Option<&dyn crate::web::SessionApi>) -> String {
+            let (mut client, server) = tokio::io::duplex(4096);
+            client
+                .write_all(b"GET / HTTP/1.1\r\nHost: outside.example.org\r\n\r\n")
+                .await
+                .unwrap();
+            crate::web::route(server, Some("127.0.0.1".parse().unwrap()), None, api)
+                .await
+                .unwrap();
+            let mut response = String::new();
+            client.read_to_string(&mut response).await.unwrap();
+            response
+        }
+
+        let dir = tmp("blocked-reload");
+        let file = dir.join(FILE);
+        std::fs::write(&file, trust().render()).unwrap();
+        let (release, held) = mpsc::channel();
+        let (started, mut opens) = tokio::sync::mpsc::unbounded_channel();
+        *GATE.lock().unwrap() = Some(OpenGate {
+            started,
+            release: Some(held),
+        });
+        let proxy = Arc::new(ProxyHandle::watch(file, gated_open));
+        let load = {
+            let proxy = Arc::clone(&proxy);
+            tokio::spawn(async move { proxy.current().await })
+        };
+        tokio::time::timeout(Duration::from_secs(2), opens.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        load.abort();
+        assert!(load.await.unwrap_err().is_cancelled());
+
+        let store = crate::store::SqliteStore::open_in_memory().unwrap();
+        let hub = Arc::new(crate::hub::Hub::open(store).unwrap());
+        let sessions = crate::signin::HubSessions::new(hub).with_proxy(proxy);
+        let mut one = Box::pin(request(Some(&sessions)));
+        let mut two = Box::pin(request(Some(&sessions)));
+        tokio::select! {
+            biased;
+            _ = &mut one => panic!("the first request decided before the policy was loaded"),
+            _ = &mut two => panic!("the second request decided before the policy was loaded"),
+            () = std::future::ready(()) => {}
+        }
+        let other = tokio::time::timeout(Duration::from_secs(2), request(None))
+            .await
+            .unwrap();
+        assert!(other.starts_with("HTTP/1.1 404"), "{other}");
+        release.send(()).unwrap();
+        let (one, two) =
+            tokio::time::timeout(Duration::from_secs(2), async { tokio::join!(one, two) })
+                .await
+                .unwrap();
+        for response in [one, two] {
+            assert!(response.starts_with("HTTP/1.1 421"), "{response}");
+            assert!(response.contains("proxy.host_not_allowed"), "{response}");
+        }
+        assert!(matches!(
+            opens.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+        *GATE.lock().unwrap() = None;
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

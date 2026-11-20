@@ -29,8 +29,8 @@ pub trait SessionApi: Send + Sync {
         serde_json::json!({})
     }
 
-    /// ADR-0067 rung 4: the reverse proxy the owner trusts, if any. Read for every request; `None` (the default) trusts no header.
-    fn proxy(&self) -> Option<std::sync::Arc<crate::proxy::ProxyTrust>> {
+    /// ADR-0067 rung 4: the proxy trust source, consulted for every request.
+    fn proxy(&self) -> Option<&crate::proxy::ProxyHandle> {
         None
     }
 
@@ -384,7 +384,11 @@ where
     // WebSocket upgrade included: its Host and Origin must be ours, and its client address is the one the owner's header carries
     // (or unknown). A peer that is not the proxy is an ordinary client: no header it sends counts.
     let mut peer = peer;
-    if let (Some(ip), Some(trust)) = (peer, sessions.and_then(|s| s.proxy())) {
+    let trust = match sessions.and_then(SessionApi::proxy) {
+        Some(proxy) => proxy.current().await?,
+        None => None,
+    };
+    if let (Some(ip), Some(trust)) = (peer, trust) {
         if trust.trusts_peer(ip) {
             match trust.judge(&text) {
                 crate::proxy::Verdict::Refuse { status, code } => {

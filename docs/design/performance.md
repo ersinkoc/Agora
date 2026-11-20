@@ -115,6 +115,8 @@ the supervisor reads the exit status without copying anything.
 - The file watcher stops checked-handle enumeration after recording 50,000 non-directory entries. It does not first
   collect a whole directory into memory. This is a recorded-entry budget; traversed directories are not counted.
   Full directory requests still collect their requested level. [Watcher measurements](../reviews/0343-bounded-directory-visits.md).
+- HTTP requests that need a fresh proxy trust configuration share one file read on a blocking worker. Requests awaiting
+  that read apply its result before checking proxy trust, and the cache is rechecked after two seconds.
 
 ## 3. Measurement and enforcement
 - **Bench harness** (`just bench`): synthetic nodes and `agora-fake-agent` terminals producing scripted output,
