@@ -208,3 +208,47 @@ Everything is additive (ADR-0006): new enum values, new fields and new messages 
   them; adding one is a schema change and needs an ADR), so it goes by what the node sent (rich entries, settings or commands, or an
   `AgentPromptResult`); a node's capabilities in the snapshot would make this exact. Step 7 (TUI): not started.
 
+
+## Amendment A (Accepted, 2026-11-20): switching a running agent to a mode that skips permission questions needs the owner's signed approval, and then it works
+Accepted: 2026-11-20 (the maintainer's explicit message in the merger chat: "ADR-0090 Ek A, kabul ediyorum", naming ADR-0090 Amendment A). The open questions' proposed answers stand: one approval covers one agent session only (no project-wide or timed cover), and "always for agents of this kind on this machine" is a later node policy the owner edits on the machine, never a card.
+
+Origin: the maintainer: "in ACP mode the agent keeps asking me for approval: isn't there a yolo mode?" Today there is one when an agent is STARTED with it
+(`--dangerously-skip-permissions` and the like, a launch option signed by the owner, ADR-0059), but for a structured agent that reports a bypass
+mode of its own (an ACP session mode such as `bypassPermissions`), switching to it from the window is **refused** since step 4 (the node answers
+`agent.option_unconfirmed`, the window shows the choice switched off): the schema has no signed confirmation for it, and a blanket device grant
+(`signed_commands`) names the command but not the mode, so it cannot stand for the owner's confirmation. Some kinds (`wrongstack-acp`, `opencode-acp`)
+have no launch flag at all, so for them a bypass mode the agent reports in its session is the only way. This amendment gives that switch the same
+protection a launch has and turns the feature back on.
+
+### Decision
+1. **The node turns the switch into an approval, not a silent command.** When a client sends `AgentSetMode` or `AgentSetConfig` for a value the node
+   judges as skipping permissions (the classifier of step 3-4 stays the judge, never the client) and node policy allows it
+   (`skip_permissions = allow`; `forbid` and `confined_only` rules unchanged), the node does NOT apply it and does NOT refuse it: it raises an
+   **approval request** of a new kind `agent.skip_permissions` (ADR-0020), exactly like a start approval: the card shows, in the node's own words,
+   the agent, its folder, the machine, the option and the value, and that the agent will then run tools and change files without asking until it
+   ends or is switched back. The request answers the command with `agent.approval_needed { approval_id }` (a new code, append-only) so the window
+   can show the card at once.
+2. **The owner's signed decision applies it.** The decision is signed over a new domain, length-prefixed like every approval domain:
+   `agora-approval-skip-v1` `F(node_id) F(approval_id) F(verdict) F(agent_id) F(option_id) F(value) F(sha256(detail))`, verified by the node against
+   `trusted-devices`, single use, expiring in minutes. Only an `approved` verdict applies the choice; the node applies exactly the option and value it
+   rendered, never anything the decision carries.
+3. **Scope: this agent's session.** The permission lasts until the agent ends, is restarted or is switched back to a safe value. A resume after a
+   node restart does NOT restore it (the agent comes back asking again), because the approval named a session. The window shows the "Acts freely" badge
+   for as long as it holds. Switching back to a safe value never needs approval.
+4. **Standing yolo is a start choice, as today** (ADR-0059): an owner who always wants an agent kind to skip asking keeps using the launch option
+   (and, later, a per-kind default in the owner's settings). Nothing in this amendment lets an agent or the hub widen it. An agent cannot request this
+   switch for itself: the request comes from a window command; mesh messages and agent text never produce one (T-rows of ADR-0090).
+5. **Approvals stay on the node and signed**, the hub only relays the request and the decision; a hub that invents an approval cannot sign it.
+   The decision text is the node's rendering, and a device that has not been trusted cannot sign it (`agora node trust`).
+
+### Open questions for the maintainer
+- Should one approval be able to cover a whole project's agents of a kind for a time (e.g. "this project, 8 hours")? (Proposed: no, per agent session
+  only; a per-kind default belongs in launch settings.)
+- Should the card offer "always for agents of this kind on this machine"? (Proposed: later, as a node policy the owner edits on the machine, never from
+  a card.)
+
+### Consequences
+Schema: a new approval kind and its signing domain, the error code `agent.approval_needed`, fixtures (append-only, ADR-gated); node: the approval
+request path in `adapter_set_option` / `adapter_set_config`, applying exactly what was rendered, forgetting on end/restart/resume; web: the existing
+approval card and the SessionBar showing the choice as "needs your approval" instead of switched off; docs: protocol.md, threat model (an approval card
+for a skipping mode; a stale card after the agent ended), the "Temporarily unavailable" notice of step 4 is removed. Build: schema, node, web, as small PRs.
