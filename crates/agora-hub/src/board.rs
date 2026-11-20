@@ -11,7 +11,8 @@ use std::sync::Mutex;
 use agora_core::AgentId;
 use agora_mesh::broker::{AgentInfo, Limits, Mesh};
 use agora_mesh::mcp::{
-    board_tool, protocol_error_result, send_message_args, SendMessageArgs, BOARD_TOOLS,
+    board_tool, channel_text, protocol_error_result, send_message_args, SendMessageArgs,
+    BOARD_TOOLS,
 };
 use agora_protocol::v1::event::Body;
 use agora_protocol::{Error, ErrorCode};
@@ -206,7 +207,7 @@ impl Boards {
         }
         // Receivers get the channel's name in front of the text and refuse a body over the limit, so that text is what is checked,
         // before any copy goes out.
-        let body = format!("[{to}] {body}");
+        let body = channel_text(to, body);
         let done = |result: Value, is_error: bool| Verdict::Done { result, is_error };
         if let Err(e) = limits.check_content(&body, &refs) {
             return answer(done(protocol_error_result(&e.to_error(&limits)), true));

@@ -207,6 +207,12 @@ pub struct SendMessageArgs<'a> {
     pub reply_to: Option<&'a str>,
 }
 
+/// The text each receiver of a shared project's `#channel` message gets: the channel's name in front of the body. The hub builds
+/// it for the copies; the node checks its size before it sends the call, so an older hub cannot send what receivers refuse.
+pub fn channel_text(to: &str, body: &str) -> String {
+    format!("[{to}] {body}")
+}
+
 /// `None` when an argument is missing or has the wrong type: an invalid call (-32602).
 pub fn send_message_args(a: &Value) -> Option<SendMessageArgs<'_>> {
     Some(SendMessageArgs {

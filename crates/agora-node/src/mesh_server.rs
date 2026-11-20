@@ -16,7 +16,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use agora_core::AgentId;
 use agora_mesh::broker::{AgentInfo, AskStatus, Limits, Mesh};
-use agora_mesh::mcp::{McpConnection, Outcome, BOARD_TOOLS};
+use agora_mesh::mcp::{McpConnection, Outcome, SendMessageArgs, BOARD_TOOLS};
 use agora_platform::{local_listen_agent, LocalStream};
 use agora_protocol::jsonrpc::{to_line, Message};
 use agora_protocol::v1::event::Body;
@@ -229,17 +229,28 @@ fn board_reply(
     if method != "tools/call" || !(channel || BOARD_TOOLS.contains(&name)) {
         return None;
     }
-    // Malformed arguments go to the broker, which answers -32602, as for a local message; nothing goes to the hub.
-    if channel && agora_mesh::mcp::send_message_args(&args).is_none() {
-        return None;
-    }
-    let project = mesh
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .agent_info(conn.agent())?
-        .project
-        .clone();
+    let (project, limits) = {
+        let m = mesh.lock().unwrap_or_else(|e| e.into_inner());
+        (m.agent_info(conn.agent())?.project.clone(), m.limits())
+    };
     let known = shares.get(&project);
+    if channel {
+        // Malformed arguments go to the broker, which answers -32602, as for a local message; nothing goes to the hub.
+        let SendMessageArgs { to, body, refs, .. } = agora_mesh::mcp::send_message_args(&args)?;
+        // The broker's limits, checked here too: an older hub does not check the refs' size, and receivers would refuse every
+        // copy it sends. On a project known to be shared receivers get `[#channel] body`, so that is what is checked; otherwise
+        // the local broker may still deliver the body as it is.
+        let text = match known {
+            Some((true, _)) => agora_mesh::mcp::channel_text(to, body),
+            _ => body.to_string(),
+        };
+        if let Err(e) = limits.check_content(&text, &refs) {
+            return Some(Message::Response {
+                id,
+                result: agora_mesh::mcp::protocol_error_result(&e.to_error(&limits)),
+            });
+        }
+    }
     let unavailable = || {
         let text =
             json!({"error": {"code": "board.unavailable", "params": {"project_id": project}}});
@@ -1515,6 +1526,69 @@ mod tests {
             1,
             "a good call goes to the hub"
         );
+    }
+
+    /// Codex review of #793: an older hub does not check a `#channel`'s refs size, and upgraded receivers would refuse every copy,
+    /// so the node checks the content limits (on the text receivers get, `[#channel] body`) before the call goes to the hub:
+    /// one byte over is `mesh.body_too_large` and never reaches the hub; exactly at the limit it is forwarded.
+    #[test]
+    fn a_shared_channel_send_over_the_size_limits_is_refused_by_the_node() {
+        let (mesh, a, _) = ask_fixture();
+        let link = Arc::new(CountingLink(std::sync::atomic::AtomicUsize::new(0)));
+        let remote: RemoteSlot = Mutex::new(Some(link.clone() as Arc<dyn RemoteLink>));
+        let shares = Shares::default();
+        shares.set("p", true);
+        let mut conn = McpConnection::new(a);
+        conn.handle(
+            r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}"#,
+            &mut mesh.lock().unwrap(),
+            now_ms(),
+        );
+        let max = Limits::default().max_body_bytes;
+        let send = |conn: &McpConnection, args: Value| {
+            let line = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": "send_message", "arguments": args}})
+            .to_string();
+            board_reply(conn, &line, &mesh, &remote, &shares)
+        };
+        let code = |m: Option<Message>| match m {
+            Some(Message::Response { result, .. }) => agora_mesh::mcp::tool_result_value(&result)
+                .unwrap()["error"]["code"]
+                .as_str()
+                .unwrap_or("")
+                .to_string(),
+            other => panic!("expected a tool result, got {other:?}"),
+        };
+        let refs = |total: usize| json!(["x".repeat(total - max / 2), "y".repeat(max / 2)]);
+        let room = max - "[#dev] ".len();
+        for over in [
+            json!({"to": "#dev", "body": "hi", "refs": refs(max + 1)}),
+            json!({"to": "#dev", "body": "x".repeat(room + 1)}),
+        ] {
+            assert_eq!(code(send(&conn, over)), "mesh.body_too_large");
+            assert_eq!(link.0.load(Ordering::SeqCst), 0, "nothing reached the hub");
+        }
+        let n = json!(vec!["r"; Limits::default().max_refs + 1]);
+        assert_eq!(
+            code(send(&conn, json!({"to": "#dev", "body": "hi", "refs": n}))),
+            "mesh.too_many_refs"
+        );
+        assert_eq!(link.0.load(Ordering::SeqCst), 0, "nothing reached the hub");
+        // At the limits the call goes to the hub (whose refusal this fake link reports as `board.unavailable`).
+        send(
+            &conn,
+            json!({"to": "#dev", "body": "hi", "refs": refs(max)}),
+        );
+        assert_eq!(link.0.load(Ordering::SeqCst), 1);
+        send(&conn, json!({"to": "#dev", "body": "x".repeat(room)}));
+        assert_eq!(link.0.load(Ordering::SeqCst), 2);
+        // Not known to be shared: no prefix is added locally, so a body that fits the broker's limit is not refused by the node.
+        let local = Shares::default();
+        let line = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "send_message",
+            "arguments": {"to": "#dev", "body": "x".repeat(room + 1)}}})
+        .to_string();
+        let none: RemoteSlot = Mutex::new(None);
+        assert!(board_reply(&conn, &line, &mesh, &none, &local).is_none());
     }
 
     /// Codex review of #793: the node answers `agents_list` itself (before the broker), so it must refuse a `project` that is not a
