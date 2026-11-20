@@ -37,6 +37,8 @@ import { num } from './net/view';
 import { loadAudit } from './net/audit';
 import { agentTarget } from './components/sessionChoice';
 import { ChatActionsContext, type ChatActions, type PromptResult } from './components/chatActions';
+import { CloseAgentContext } from './components/CloseAgent';
+import { closeAsk } from './net/closeAgent';
 import { failure, type ActionResult } from './net/refusal';
 import { usableId } from './components/launchChoice';
 import { launchSettingsField } from './components/launchSettings';
@@ -190,6 +192,13 @@ export function App() {
       return undefined;
     } catch (e) { return (e as { code?: string }).code ?? 'internal'; }
   }, [api, device]);
+  // Ends a running agent (`AgentStop`, as `agora agent stop` does) for exactly the agent it is given; undefined when it was sent, else the error
+  // code. The node may ask for a grant first (the dialog then repeats this command once it is allowed); the agent then lands in the closed list.
+  const closeAgent = useCallback(async (agent: AgentTileModel): Promise<string | undefined> => {
+    if (!api || !agent.machineId) return 'hub.unreachable';
+    const local = agent.id.slice(agent.id.indexOf('/') + 1);
+    try { await api.command(agent.machineId, { agentStop: { agentId: local, stopHelpers: false } }); return undefined; } catch (e) { return (e as { code?: string }).code ?? 'hub.unreachable'; }
+  }, [api]);
   // Asks the hub to forget a closed agent for every client (ADR-0053). The answer is undefined when it did, else the error code.
   const forgetAgent = useCallback(async (agentId: string): Promise<string | undefined> => {
     if (!api) return 'hub.unreachable';
@@ -505,7 +514,9 @@ export function App() {
     { id: 'theme-editor', label: t('palette-theme-editor'), run: editTheme },
     ...themeStore.themes().map((x) => ({ id: `theme-${x.id}`, label: t('palette-theme', { name: themeName(x) }), run: () => themeStore.choose(x.id) })),
     ...agents.map((a) => ({ id: `agent-${a.id}`, label: t('palette-open-agent', { name: a.name }), run: () => open(a.id) })),
-  ], [agents, go, toWindow, hub, next, open, openStart, language, editTheme, palette, phone, live, info.passwordSet, pairing.ui, lockNow, showPairing]);
+    // Close agent: opens that agent and asks for the confirm there; nothing is closed from the palette itself.
+    ...(hub && api ? agents.filter((a) => !a.closed && a.machineId).map((a) => ({ id: `close-${a.id}`, label: t('palette-close-agent', { name: a.name }), run: () => { open(a.id); closeAsk.ask(a.id, 'pane'); } })) : []),
+  ], [api, agents, go, toWindow, hub, next, open, openStart, language, editTheme, palette, phone, live, info.passwordSet, pairing.ui, lockNow, showPairing]);
 
   useEffect(() => {
     const on = (e: KeyboardEvent) => {
@@ -531,6 +542,7 @@ export function App() {
 
   return (
     <QuotaProvider obs={quotaList} machines={quotaMachines}>
+    <CloseAgentContext.Provider value={hub && api ? closeAgent : undefined}>
     <ChatActionsContext.Provider value={chatActions}>
       {hash === '#/gallery' ? <Gallery /> : isMachinesHash(hash) ? <MachinesPage focus={machineOfHash(hash)} machines={live ? machines(live) : hub ? [] : demoMachines} agents={agents} usage={usage} projects={live && usage ? costByProject(live, usage.perAgent) : []} onBack={() => go('#/')} onForget={hub ? forgetMachines : undefined} /> : hash === '#/audit' && hub ? <AuditPage load={(who) => loadAudit(hub.token, who)} onBack={() => go('#/')} /> : isSettingsHash(hash) ? <DevicePage section={settingsSectionOf(hash)} device={device} onBack={() => go('#/')} onTheme={editTheme} onAddPasskey={hub && passkeysSupported() ? async (password) => (await addPasskey(hub.token, undefined, password)).ok : undefined} passkeyNeedsPassword={info.passwordRequired}
           fingerprint={device ? prints.get(device.id) : undefined} machines={live ? machines(live) : undefined} trustedOn={trustedOn} others={hub ? others : undefined}
@@ -563,6 +575,7 @@ export function App() {
         onApprove={(nodes) => approveDevice(waiting[0]!, nodes)}
         onLater={() => setLater((l) => new Set(l).add(waiting[0]?.deviceId ?? ''))} />}
     </ChatActionsContext.Provider>
+    </CloseAgentContext.Provider>
     </QuotaProvider>
   );
 }

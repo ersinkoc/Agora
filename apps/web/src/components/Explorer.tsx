@@ -8,6 +8,7 @@ import { endedWithError, helperTree, machineKey, sharesName, type AgentTileModel
 import { bytesLabel, type MachineModel } from '../net/view';
 import { ago } from '../net/time';
 import { Icon } from './Icon';
+import { CloseAgentMenu, CloseConfirm } from './CloseAgent';
 import { StateMark } from './StateBadge';
 import { GroupByControl, groupTitle } from './GroupByControl';
 import { ProjectChip, ProjectHint } from './ProjectMark';
@@ -95,7 +96,8 @@ export function Explorer({ by, onBy, spread, fleet, machines, open, current, pro
                 {resumeError?.id === a.id && <p role="alert" className="m-0 px-2 pb-1 text-xs text-needs-you">{t(resumeReasonKey(resumeError.code))}</p>}
               </li>;
   const agentRow = (a: AgentTileModel, depth: number, withMachine: boolean) => <li key={a.id} className={depth === 0 ? undefined : depth === 1 ? 'ms-3' : 'ms-6'}>
-    <button type="button" className="ide-row" aria-current={current === a.id ? 'true' : undefined} aria-pressed={open.includes(a.id)} onClick={() => onToggle(a.id)} title={`${a.machine} · ${a.workspace}${a.branch ? ` · ${a.branch}` : ''}${a.parentName ? ` · ${t('helper-started-by', { name: a.parentName })}` : ''}`}>
+    <div className="group flex items-center">
+    <button type="button" className="ide-row flex-1" aria-current={current === a.id ? 'true' : undefined} aria-pressed={open.includes(a.id)} onClick={() => onToggle(a.id)} title={`${a.machine} · ${a.workspace}${a.branch ? ` · ${a.branch}` : ''}${a.parentName ? ` · ${t('helper-started-by', { name: a.parentName })}` : ''}`}>
       <StateMark state={a.state} />
       <span className="min-w-0 flex-1 truncate">{a.name}{a.parentName && <span className="ms-1.5 text-xs text-muted">{t('helper-started-by', { name: a.parentName })}</span>}{withMachine && <span className="ms-1.5 text-xs text-muted">{a.machine}</span>}</span>
       <NoAskBadge agent={a} compact nested />
@@ -104,6 +106,10 @@ export function Explorer({ by, onBy, spread, fleet, machines, open, current, pro
       {a.shared && <span className="flex-none text-xs text-muted" title={t('workspace-shared')}>{t('ide-shared')}</span>}
       {(a.filesChanged ?? 0) > 0 && <span className="font-mono text-xs text-needs-you">{a.filesChanged}</span>}
     </button>
+    {/* Close agent: the target is this row's agent. Shown on hover or focus; always on a touch screen. */}
+    <span className="flex-none opacity-0 focus-within:opacity-100 group-hover:opacity-100 [@media(hover:none)]:opacity-100"><CloseAgentMenu agent={a} where="row" /></span>
+    </div>
+    <CloseConfirm agent={a} where="row" />
   </li>;
 
   return <aside className="flex min-h-0 flex-col border-line bg-surface-1 lg:border-e" aria-label={t('console-agents')}>
