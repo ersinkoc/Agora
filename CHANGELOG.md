@@ -4,8 +4,21 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
-- A project's tasks can be opened as a board with Backlog, Doing and Done columns (read-only), from the project's card in the Board panel.
+_Nothing yet._
+
+## 0.3.31
+
+### A board for a project's tasks
+- A project's tasks can be opened as a board with Backlog, Doing and Done columns (read-only), from the project's card in the Board panel. Task text is shown as plain text.
+
+### Helpers that act without asking, only when you say so
+- An agent can start a helper that acts without asking only when your signed decision names that option; the approval card says so, and a grant never covers it.
+
+### Steadier agents and connections
 - An agent that kept running while the node restarted comes back showing its last known state (such as idle) even when its state was first noted a moment before its start was recorded.
+- A machine whose clock is behind keeps its certificate renewal request instead of giving up and deleting its key (ADR-0085 Amendment A is accepted; the code follows).
+- The hub stays responsive for other machines while one machine's events are written to disk.
+- `agora join` never prints a refusal sentence a remote machine chose; a skip-permissions approval card is withdrawn when either switch of the same setting changes; two agents reading the same session files in one folder never take each other's session; the console asks for a grant when typing into an agent is refused.
 
 ## 0.3.30
 
