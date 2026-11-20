@@ -1051,10 +1051,16 @@ impl<W: Write> Bridge<W> {
 
     /// Queue a line to the agent. If its writer has fallen behind, the dispatcher ends the agent via the normal exit path.
     /// A broken pipe is reported when the agent's output ends, with its own exit status and stderr.
-    fn send_agent(&mut self, v: &Value) {
-        if !self.agent_writer_full {
-            self.agent_writer_full = write_line(&mut self.agent, v)
-                .is_err_and(|e| e.kind() == io::ErrorKind::WouldBlock);
+    fn send_agent(&mut self, v: &Value) -> bool {
+        if self.agent_writer_full {
+            return false;
+        }
+        match write_line(&mut self.agent, v) {
+            Ok(()) => true,
+            Err(e) => {
+                self.agent_writer_full = e.kind() == io::ErrorKind::WouldBlock;
+                false
+            }
         }
     }
 
@@ -1560,7 +1566,6 @@ impl<W: Write> Bridge<W> {
                     }
                     return Ok(ControlFlow::Continue(()));
                 };
-                done(self)?;
                 let want: &[&str] = if approved {
                     &["allow_once", "allow_always"]
                 } else {
@@ -1574,9 +1579,16 @@ impl<W: Write> Bridge<W> {
                     Some((option, _)) => json!({"outcome": "selected", "optionId": option}),
                     None => json!({"outcome": "cancelled"}),
                 };
-                self.send_agent(
+                if !self.send_agent(
                     &json!({"jsonrpc": "2.0", "id": p.request, "result": {"outcome": outcome}}),
-                );
+                ) {
+                    if let Some(id) = &id {
+                        self.send_node(&json!({"jsonrpc": "2.0", "id": id,
+                            "error": {"code": -32603, "message": "adapter.approval_undelivered"}}))?;
+                    }
+                    return Ok(ControlFlow::Continue(()));
+                }
+                done(self)?;
                 // Permissions are kept only while a prompt runs (one outside a turn is refused, any prompt's reply cancels them).
                 if self.perms.is_empty() {
                     self.state("WORKING")?;
@@ -3000,6 +3012,35 @@ mod tests {
                 sent.take().is_empty(),
                 "{approval}: the agent is sent nothing"
             );
+        }
+        for full in [true, false] {
+            let (mut b, _) = bridge_with_agent()?;
+            prompt(&mut b, 10, "t")?;
+            ask(&mut b, "perm-unavailable")?;
+            let approval = b.perms.keys().next().cloned().ok_or("no approval")?;
+            b.out.clear();
+            let (pending, rx) = std::sync::mpsc::sync_channel(1);
+            let queued = if full {
+                pending.try_send(Box::from(&b"pending\n"[..]))?;
+                Some(rx)
+            } else {
+                drop(rx);
+                None
+            };
+            b.agent = Box::new(super::AgentWriter {
+                line: Vec::new(),
+                pending,
+            });
+            resolve(&mut b, 23, &approval)?;
+            let reply = answer(&b.out, 23).ok_or("no reply")?;
+            assert_eq!(reply["error"]["code"], -32603, "{reply}");
+            assert!(reply.get("result").is_none(), "{reply}");
+            assert!(states(&b.out).is_empty());
+            assert_eq!(b.agent_writer_full, full);
+            if let Some(rx) = queued {
+                assert_eq!(&*rx.try_recv()?, b"pending\n");
+                assert!(rx.try_recv().is_err());
+            }
         }
         // A decision the bridge holds is delivered and succeeds.
         let (mut b, sent) = bridge_with_agent()?;

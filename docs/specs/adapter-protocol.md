@@ -185,7 +185,8 @@ answered and followed by `session/config` from the agent's full reply;
 `reject_once`, else `reject_always`, else `cancelled` for a denial). A decision for an approval the bridge no longer holds (it
 answered the request `cancelled` itself, by the rules above, or never knew it) is refused with a JSON-RPC error (`-32602`) and the
 agent is sent nothing; the node then marks the conversation's entry cancelled and publishes the approval as resolved, not approved
-and unsigned (as when a turn is cancelled), so the hub clears it; it does so for any decision it cannot deliver. The node learns of a
+and unsigned (as when a turn is cancelled), so the hub clears it. The bridge acknowledges the decision once it is queued for the
+agent. A full or disconnected writer queue gets a JSON-RPC error (`-32603`); the node cancels its entry in this case too. The node learns of a
 cancelled permission when its decision is refused, and clears it: telling it the moment the bridge cancels would need a new adapter
 → node notification (follow-up). The bridge offers no capabilities: `fs/*` and `terminal/*`
 requests from the agent are refused (the agent works in its own worktree), and mesh delivery to ACP agents goes through the mesh MCP
