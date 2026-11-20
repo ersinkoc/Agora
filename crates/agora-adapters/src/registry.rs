@@ -14,6 +14,7 @@
 use std::collections::BTreeMap;
 
 use ring::signature::{UnparsedPublicKey, ED25519};
+use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
@@ -88,6 +89,36 @@ fn verify(key_hex: &str, message: &[u8], sig_hex: &str) -> Result<(), RegistryEr
         .map_err(|_| RegistryError::BadSignature)
 }
 
+/// What every signed list says about itself, whatever else it carries: checked before anything else is read from it.
+#[derive(Deserialize)]
+struct Header {
+    version: u64,
+    expires_ms: u64,
+}
+
+/// The one check of every signed list (the adapter index here, the agent-package list of ADR-0087 in `agent_packages`): the
+/// envelope's signature under the pinned root key, then expiry, then the rollback rule, and only then the payload's own shape.
+pub(crate) fn open_signed<T: DeserializeOwned>(
+    signed: &str,
+    root_key_hex: &str,
+    now_ms: u64,
+    last_seen_version: u64,
+) -> Result<T, RegistryError> {
+    let env: Envelope = serde_json::from_str(signed).map_err(|_| RegistryError::Malformed)?;
+    verify(root_key_hex, env.payload.as_bytes(), &env.sig)?;
+    let head: Header = serde_json::from_str(&env.payload).map_err(|_| RegistryError::Malformed)?;
+    if now_ms >= head.expires_ms {
+        return Err(RegistryError::Expired);
+    }
+    if head.version < last_seen_version {
+        return Err(RegistryError::Rollback {
+            seen: last_seen_version,
+            offered: head.version,
+        });
+    }
+    serde_json::from_str(&env.payload).map_err(|_| RegistryError::Malformed)
+}
+
 /// Verifies a signed index against the registry's root key and returns it. `last_seen_version` is the newest index
 /// version this node accepted before (0 for none); anything older is refused.
 pub fn verify_index(
@@ -96,19 +127,7 @@ pub fn verify_index(
     now_ms: u64,
     last_seen_version: u64,
 ) -> Result<Index, RegistryError> {
-    let env: Envelope = serde_json::from_str(signed).map_err(|_| RegistryError::Malformed)?;
-    verify(root_key_hex, env.payload.as_bytes(), &env.sig)?;
-    let index: Index = serde_json::from_str(&env.payload).map_err(|_| RegistryError::Malformed)?;
-    if now_ms >= index.expires_ms {
-        return Err(RegistryError::Expired);
-    }
-    if index.version < last_seen_version {
-        return Err(RegistryError::Rollback {
-            seen: last_seen_version,
-            offered: index.version,
-        });
-    }
-    Ok(index)
+    open_signed(signed, root_key_hex, now_ms, last_seen_version)
 }
 
 /// The publishers a stored (already verified) index marks as revoked, for `agora adapter list`. Unreadable input gives none.

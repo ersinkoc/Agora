@@ -1,0 +1,137 @@
+[
+  {
+    "name": "fake-claude",
+    "display": "Fake Claude",
+    "changelog": "https://example.invalid/fake-claude/changes",
+    "homepage": "https://example.invalid/fake-claude",
+    "publisher": "fake-official",
+    "version_policy": "pin",
+    "version": "2.1.0",
+    "provides": [
+      "fake-claude"
+    ],
+    "verify": {
+      "args": [
+        "--version"
+      ],
+      "regex": "^fake-claude [0-9]+\\.[0-9]+\\.[0-9]+"
+    },
+    "installer": {
+      "kind": "npm-global",
+      "package": "@fake/claude-code",
+      "integrity": "sha512-Zm9yIHRlc3RzIG9ubHkhZm9yIHRlc3RzIG9ubHkhZm9yIHRlc3RzIG9ubHkhZm9yIHRlc3RzIG9ubHkhZm9yIH=="
+    }
+  },
+  {
+    "name": "fake-goose",
+    "display": "Fake Goose",
+    "changelog": "https://example.invalid/fake-goose/changes",
+    "homepage": "https://example.invalid/fake-goose",
+    "publisher": "fake-official",
+    "version_policy": "range",
+    "version": "1.60.1",
+    "provides": [
+      "fake-goose"
+    ],
+    "verify": {
+      "args": [
+        "--version"
+      ],
+      "regex": "fake-goose [0-9]+"
+    },
+    "installer": {
+      "kind": "binary-download",
+      "platforms": {
+        "linux-x86_64": {
+          "url": "https://example.invalid/fake-goose/linux-x86_64.tar.bz2",
+          "sha256": "f1b477e531c11e74b82761367e0284c7817908efe30a842889959713820584d8",
+          "cmd": "./fake-goose"
+        },
+        "windows-x86_64": {
+          "url": "https://example.invalid/fake-goose/windows-x86_64.zip",
+          "sha256": "f1b477e531c11e74b82761367e0284c7817908efe30a842889959713820584d8",
+          "cmd": "./pkg\\fake-goose.exe"
+        }
+      }
+    },
+    "min": "1.60.0",
+    "max": "1.99.99"
+  },
+  {
+    "name": "fake-node",
+    "display": "Node runtime (user level)",
+    "changelog": "https://example.invalid/fake-node/changes",
+    "homepage": "https://example.invalid/fake-node",
+    "publisher": "fake-official",
+    "version_policy": "track",
+    "version": "22.11.0",
+    "provides": [
+      "fake-node-bin"
+    ],
+    "verify": {
+      "args": [
+        "--version"
+      ],
+      "regex": "^v[0-9]+\\.[0-9]+\\.[0-9]+"
+    },
+    "installer": {
+      "kind": "binary-download",
+      "platforms": {
+        "linux-x86_64": {
+          "url": "https://example.invalid/fake-node/linux-x64.tar.xz",
+          "sha256": "f1b477e531c11e74b82761367e0284c7817908efe30a842889959713820584d8",
+          "cmd": "bin/fake-node-bin",
+          "signature_url": "https://example.invalid/fake-node/linux-x64.tar.xz.sig",
+          "signature_key": "fake-release"
+        }
+      }
+    }
+  },
+  {
+    "name": "fake-codex",
+    "display": "Fake Codex",
+    "changelog": "https://example.invalid/fake-codex/changes",
+    "homepage": "https://example.invalid/fake-codex",
+    "publisher": "fake-official",
+    "version_policy": "pin",
+    "version": "0.9.0",
+    "provides": [
+      "fake-codex"
+    ],
+    "verify": {
+      "args": [
+        "--version"
+      ],
+      "regex": "fake-codex [0-9]+"
+    },
+    "installer": {
+      "kind": "package-manager",
+      "manager": "brew",
+      "package": "fake/tap/fake-codex"
+    }
+  },
+  {
+    "name": "fake-script",
+    "display": "Fake Script Agent",
+    "changelog": "https://example.invalid/fake-script/changes",
+    "homepage": "https://example.invalid/fake-script",
+    "publisher": "fake-second",
+    "version_policy": "pin",
+    "version": "3.0.0-rc.1",
+    "provides": [
+      "fake-script"
+    ],
+    "verify": {
+      "args": [
+        "version"
+      ],
+      "regex": "fake-script [0-9]+"
+    },
+    "installer": {
+      "kind": "vendor-script",
+      "url": "https://example.invalid/fake-script/install.sh",
+      "sha256": "f1b477e531c11e74b82761367e0284c7817908efe30a842889959713820584d8",
+      "interpreter": "sh"
+    }
+  }
+]

@@ -182,6 +182,7 @@ A setting chosen at the start lasts while the node runs (a restart after a crash
 agent resumed after the node itself restarted (ADR-0060) starts with the tool's defaults, as its launch options do.
 
 ## Manifests converted from the ACP registry (ADR-0092)
+The package entry it writes is a draft of an entry in the signed agent-package list; the differences are in `docs/specs/agent-packages.md`.
 `registry_convert` (`crates/agora-adapters`, run through `cargo run -p agora-adapters --example registry_convert -- <registry clone> <dir>`)
 turns one registry `agent.json` into `registry-<id>.toml` (an L2 `[structured] acp` manifest, never a launch option) and a package entry
 (`<id>.package.json`, ADR-0087 shape plus `tested = false`). `npx` becomes `npx --yes PKG@VERSION ARGS`, `uvx` becomes `uvx PKG==VERSION ARGS`,
