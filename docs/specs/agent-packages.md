@@ -11,7 +11,7 @@ The file is the same envelope as the adapter index: `{"payload": "<json text>", 
 `version >= last seen` (rollback). The first-party list is signed by the release key of ADR-0019/0034; a third-party list is a source added
 only on the node (`agora agent source add`, a later rung), never from the hub. The envelope text is at most 1 MiB.
 
-Payload (unknown fields refuse the list):
+Payload (unknown fields refuse the list; so do duplicate publisher ids, unknown publisher fields, and the same key twice anywhere inside an entry, because two readers of a signed entry must see the same entry):
 ```json
 { "version": 7, "expires_ms": 2000000000000,
   "publishers": [ { "id": "official", "key": "<64 hex>", "revoked": false } ],
@@ -25,18 +25,18 @@ installer kinds (the node picks by platform in a later rung).
 
 ## Entry
 One entry per agent program and installer kind. Unknown fields are refused. `name` is the agent kind and must equal a manifest's `kind`
-(`AgentList::without_manifest` lists the ones that do not; the user-level Node entry is the expected exception, decided by the caller).
+(`AgentList::without_manifest` lists the ones that do not; the entries are private to `AgentList`: read them with `names()` and `offer()`, which is the revoked-publisher gate; the user-level Node entry is the expected exception, decided by the caller).
 
 | Field | Rule |
 |---|---|
 | `name` | `a-z`, `0-9`, `-`, `_`, at most 64 (the same rule as adapter names) |
 | `display` | 1 to 80 characters, no control, format, bidirectional, separator or private-use character |
-| `changelog`, `homepage` | `https://` only, at most 500 bytes, a host with no userinfo, no whitespace, quote, backslash, angle bracket or non-ASCII |
+| `changelog`, `homepage` (and every download URL) | `https://` only, at most 500 bytes; the host is a DNS name of at least two labels (`a-z`, `0-9`, `-`), whose last label is not all digits, and not `localhost`, `*.local`, `*.internal`; no IP literal, no userinfo, an optional port 1 to 65535; no whitespace, quote, backslash, angle bracket or non-ASCII. **This is syntax only.** Rung 3, which downloads, MUST also refuse a name that resolves to a private, loopback or link-local address, validate the port again, and refuse a redirect to a non-https scheme or to another host |
 | `publisher` | an id declared in `publishers` |
 | `version` | the one exact version this entry installs: `major.minor.patch`, optional `-pre`/`+build`; no tags, ranges or carets |
 | `version_policy` | `pin`: exactly `version`. `track`: `version` is the newest the list names (a new list moves it). `range`: also `min` and `max` (exact), and `min <= version <= max` compared on major.minor.patch. `min`/`max` on `pin` or `track` are refused |
-| `provides` | 1 to 4 executable names left on the agent's path: `A-Za-z0-9._-`, no leading `.` or `-`, never a shell or interpreter name |
-| `verify` | `{ "args": [...], "regex": "..." }`. `args`: at most 4, each at most 32 characters of `A-Za-z0-9._=-` (so `--version` is fine; a space, quote, `$`, `;`, `|`, `&`, `/` is not). `regex`: at most 200 bytes, compiled by the `regex` crate (linear-time, no backreferences) with a 100 000-byte compile limit and nest limit 20; a pattern that matches the empty string is refused because it would verify nothing. The version output is matched on its first 4096 bytes only |
+| `provides` | 1 to 4 executable names left on the agent's path: `A-Za-z0-9._-`, no leading `.` or `-`, never a shell or interpreter name under any extension (`.exe`, `.cmd`, `.bat`, `.ps1`, `.com`, case-insensitive, repeated: `node.exe`, `pwsh.ps1`, `bash.exe.bat`), and the same rule applies to `cmd` and to the converter |
+| `verify` | `{ "args": [...], "regex": "..." }`. `args`: at most 4, each at most 32 characters of `A-Za-z0-9._=-` (so `--version` is fine; a space, quote, `$`, `;`, `|`, `&`, `/` is not). `regex`: at most 200 bytes, compiled by the `regex` crate (linear-time, no backreferences) with a 100 000-byte compile limit and nest limit 20; a pattern that matches the empty string is refused because it would verify nothing. A pattern that matches any non-empty output is still allowed, so a `verify` match alone proves little: a passing `verify` also requires the executable named in `provides` to exist in the agent directory (rung 3 checks both). The version output is matched on its first 4096 bytes only |
 | `installer` | one of the four below |
 
 Installers (a closed set; an entry never carries a script the node runs):

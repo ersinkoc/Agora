@@ -46,6 +46,7 @@ struct Envelope {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Publisher {
     pub id: String,
     /// Hex Ed25519 public key (32 bytes).

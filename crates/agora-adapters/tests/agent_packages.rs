@@ -64,7 +64,11 @@ fn signed_fixture() -> String {
 fn the_fake_list_opens_and_every_kind_is_read() {
     let l = verify_list(&signed_fixture(), &pubhex(&key(1)), 1, 7).unwrap();
     assert_eq!(l.version, 7);
-    let kinds: Vec<_> = l.agents.iter().map(|a| a.installer.kind()).collect();
+    let kinds: Vec<_> = l
+        .names()
+        .iter()
+        .map(|n| l.offer(n).unwrap()[0].installer.kind())
+        .collect();
     assert_eq!(
         kinds,
         [
@@ -130,7 +134,7 @@ fn converter_output_fits_the_entry_format_after_review() {
         p.as_object_mut().unwrap().remove("env_names_not_copied");
     }
     let entry = json!({
-        "name": "goose", "display": draft["display"], "publisher": "fake-official",
+        "name": "registry-goose", "display": draft["display"], "publisher": "fake-official",
         "changelog": "https://example.invalid/goose/changes",
         "homepage": draft["source"]["website"],
         "version_policy": "pin", "version": draft["source"]["version"],
@@ -145,7 +149,8 @@ fn converter_output_fits_the_entry_format_after_review() {
     }))
     .unwrap();
     let l = verify_list(&sign(&key(1), &p), &pubhex(&key(1)), 1, 0).unwrap();
-    let Installer::BinaryDownload { platforms } = &l.agents[0].installer else {
+    let Installer::BinaryDownload { platforms } = &l.offer("registry-goose").unwrap()[0].installer
+    else {
         panic!("not a binary download")
     };
     assert_eq!(platforms.len(), 7);

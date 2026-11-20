@@ -238,8 +238,15 @@ fn convert_uvx(d: &Value) -> Result<Dist, Reason> {
 
 /// A shell or interpreter would run whatever its arguments say, so a registry entry may not name one as its executable.
 pub(crate) fn forbidden_executable(exe: &str) -> bool {
-    let e = exe.to_ascii_lowercase();
-    let e = e.strip_suffix(".bat").unwrap_or(&e);
+    // Whatever extension a platform runs it by is the same program: `node.exe`, `bash.exe`, `powershell.exe -c` are a shell too.
+    let mut e = exe.to_ascii_lowercase();
+    while let Some(bare) = [".exe", ".cmd", ".bat", ".ps1", ".com"]
+        .iter()
+        .find_map(|x| e.strip_suffix(x))
+    {
+        e = bare.to_string();
+    }
+    let e = e.as_str();
     [
         "sh",
         "bash",

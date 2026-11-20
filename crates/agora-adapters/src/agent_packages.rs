@@ -196,7 +196,8 @@ pub struct AgentList {
     pub version: u64,
     pub expires_ms: u64,
     pub publishers: Vec<Publisher>,
-    pub agents: Vec<AgentPackage>,
+    /// Private on purpose: every consumer goes through `offer`, which is the revoked-publisher gate, or `names`.
+    agents: Vec<AgentPackage>,
 }
 
 #[derive(Deserialize)]
@@ -205,7 +206,62 @@ struct Raw {
     version: u64,
     expires_ms: u64,
     publishers: Vec<Publisher>,
-    agents: Vec<Value>,
+    agents: Vec<Strict>,
+}
+
+/// A JSON value read so that an object with the same key twice is an error, not "the last one wins": two readers of a signed
+/// entry must never see different entries.
+struct Strict(Value);
+
+impl<'de> Deserialize<'de> for Strict {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::{Error, MapAccess, SeqAccess, Visitor};
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = Value;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a JSON value without duplicate keys")
+            }
+            fn visit_bool<E>(self, v: bool) -> Result<Value, E> {
+                Ok(Value::Bool(v))
+            }
+            fn visit_i64<E>(self, v: i64) -> Result<Value, E> {
+                Ok(v.into())
+            }
+            fn visit_u64<E>(self, v: u64) -> Result<Value, E> {
+                Ok(v.into())
+            }
+            fn visit_f64<E>(self, v: f64) -> Result<Value, E> {
+                Ok(serde_json::Number::from_f64(v).map_or(Value::Null, Value::Number))
+            }
+            fn visit_str<E>(self, v: &str) -> Result<Value, E> {
+                Ok(Value::String(v.to_string()))
+            }
+            fn visit_unit<E>(self) -> Result<Value, E> {
+                Ok(Value::Null)
+            }
+            fn visit_none<E>(self) -> Result<Value, E> {
+                Ok(Value::Null)
+            }
+            fn visit_seq<A: SeqAccess<'de>>(self, mut a: A) -> Result<Value, A::Error> {
+                let mut out = Vec::new();
+                while let Some(Strict(v)) = a.next_element()? {
+                    out.push(v);
+                }
+                Ok(Value::Array(out))
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut a: A) -> Result<Value, A::Error> {
+                let mut out = Map::new();
+                while let Some((k, Strict(v))) = a.next_entry::<String, Strict>()? {
+                    if out.insert(k.clone(), v).is_some() {
+                        return Err(A::Error::custom(format!("duplicate key {k}")));
+                    }
+                }
+                Ok(Value::Object(out))
+            }
+        }
+        d.deserialize_any(V).map(Strict)
+    }
 }
 
 /// Opens a signed agent-package list. `last_seen_version` is the newest list version this node accepted (0 for none).
@@ -223,14 +279,17 @@ pub fn verify_list(
     if raw.agents.len() > MAX_ENTRIES || raw.publishers.len() > MAX_ENTRIES {
         return Err(ListError::TooLarge);
     }
-    for p in &raw.publishers {
+    for (i, p) in raw.publishers.iter().enumerate() {
+        if raw.publishers[..i].iter().any(|q| q.id == p.id) {
+            return Err(ListError::Signed(RegistryError::Malformed));
+        }
         let key_ok = p.key.len() == 64 && p.key.chars().all(|c| c.is_ascii_hexdigit());
         if !valid_name(&p.id) || !key_ok {
             return Err(ListError::Signed(RegistryError::Malformed));
         }
     }
     let mut agents: Vec<AgentPackage> = Vec::new();
-    for (index, v) in raw.agents.iter().enumerate() {
+    for (index, Strict(v)) in raw.agents.iter().enumerate() {
         let name = v
             .get("name")
             .and_then(Value::as_str)
@@ -285,6 +344,17 @@ impl AgentList {
         Ok(all)
     }
 
+    /// The distinct agent kinds the list has entries for, in list order. Names only: the entries come from `offer`.
+    pub fn names(&self) -> Vec<&str> {
+        let mut out: Vec<&str> = Vec::new();
+        for a in &self.agents {
+            if !out.contains(&a.name.as_str()) {
+                out.push(&a.name);
+            }
+        }
+        out
+    }
+
     /// Entry names that are no manifest's `kind` (ADR-0087 refuses an entry whose `name` differs from the manifest). The caller
     /// decides what to do with the user-level Node entry, which has no manifest.
     pub fn without_manifest<'a>(&'a self, kinds: &[&str]) -> Vec<&'a str> {
@@ -335,10 +405,32 @@ fn display(s: &str) -> R<String> {
     Ok(s.to_string())
 }
 
-/// An `https://` URL with a host and nothing a shell, a header or a log could misread.
+/// An `https://` URL a vendor could really serve from: a DNS name (letters, digits, `-`, at least two labels, a last label that is not
+/// all digits, so no IPv4 or IPv6 literal, and not `localhost`, `.local`, `.internal`), no userinfo, an optional port 1 to 65535, and
+/// nothing a shell, a header or a log could misread. This is syntax only: rung 3, which downloads, MUST still refuse private and
+/// loopback addresses a name resolves to, validate the port again, and refuse redirects to a non-https scheme or another host.
 fn https_url(s: &str) -> R<String> {
     let rest = s.strip_prefix("https://").ok_or(Reason::BadUrl)?;
-    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let (host, port) = match authority.split_once(':') {
+        Some((h, p)) => (h, Some(p)),
+        None => (authority, None),
+    };
+    let port_ok = port.is_none_or(|p| {
+        !p.is_empty()
+            && p.len() <= 5
+            && p.chars().all(|c| c.is_ascii_digit())
+            && p.parse::<u32>().is_ok_and(|n| (1..=65535).contains(&n))
+    });
+    let host = host.to_ascii_lowercase();
+    let labels: Vec<&str> = host.split('.').collect();
+    let label_ok = |l: &&str| {
+        !l.is_empty()
+            && l.len() <= 63
+            && !l.starts_with('-')
+            && !l.ends_with('-')
+            && l.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+    };
     let bad_char = |c: char| {
         c.is_whitespace()
             || c.is_control()
@@ -346,13 +438,15 @@ fn https_url(s: &str) -> R<String> {
             || "\"'\\<>`{}|^".contains(c)
             || !c.is_ascii()
     };
+    let last = labels.last().copied().unwrap_or("");
     if s.len() > 500
-        || host.is_empty()
-        || host.contains('@')
-        || host.starts_with(['.', ':'])
-        || !host
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || ".-:".contains(c))
+        || !port_ok
+        || host.len() > 253
+        || labels.len() < 2
+        || !labels.iter().all(label_ok)
+        || last.chars().all(|c| c.is_ascii_digit())
+        || host == "localhost"
+        || ["localhost", "local", "internal"].contains(&last)
         || s.chars().any(bad_char)
     {
         return Err(Reason::BadUrl);
@@ -664,8 +758,7 @@ fn command(c: &str) -> R<String> {
         return Err(Reason::BadCommand);
     }
     let file = unix.rsplit('/').next().unwrap_or("");
-    let exe = file.strip_suffix(".exe").unwrap_or(file);
-    if exe.is_empty() || forbidden_executable(exe) {
+    if file.is_empty() || forbidden_executable(file) {
         return Err(Reason::ForbiddenExecutable);
     }
     Ok(c.to_string())
@@ -840,14 +933,16 @@ mod tests {
             }})
         });
         assert!(matches!(
-            open_with(bin).unwrap().agents[0].installer,
+            open_with(bin).unwrap().offer("demo-agent").unwrap()[0].installer,
             Installer::BinaryDownload { ref platforms } if platforms.len() == 2
         ));
         let script = with(
             |e| e["installer"] = json!({"kind": "vendor-script", "url": "https://example.invalid/i.sh", "sha256": sha, "interpreter": "sh"}),
         );
         assert_eq!(
-            open_with(script).unwrap().agents[0].installer.kind(),
+            open_with(script).unwrap().offer("demo-agent").unwrap()[0]
+                .installer
+                .kind(),
             "vendor-script"
         );
         let pm = with(|e| e["installer"] = json!({"kind": "winget", "x": 1}));
@@ -1172,6 +1267,123 @@ mod tests {
     }
 
     #[test]
+    fn shells_and_interpreters_are_refused_under_every_extension() {
+        for n in [
+            "node.exe",
+            "NODE.EXE",
+            "powershell.exe",
+            "cmd.exe",
+            "cmd.com",
+            "bash.exe",
+            "sh.exe",
+            "pwsh.exe",
+            "env.exe",
+            "pwsh.ps1",
+            "bash.bat",
+            "bash.exe.bat",
+            "sh.cmd",
+            "python3.exe",
+            "perl.com",
+        ] {
+            assert_eq!(
+                refused(with(|e| e["provides"] = json!([n]))),
+                Reason::ForbiddenExecutable,
+                "provides {n}"
+            );
+            let cmd = format!("./pkg/{n}");
+            let bin = with(|e| {
+                e["installer"] = json!({"kind": "binary-download", "platforms": {"linux-x86_64": {
+                    "url": "https://example.invalid/d.tar.gz", "sha256": "a".repeat(64), "cmd": cmd}}})
+            });
+            assert_eq!(refused(bin), Reason::ForbiddenExecutable, "cmd {cmd}");
+        }
+        assert!(open_with(with(|e| e["provides"] = json!(["demo.exe"]))).is_ok());
+    }
+
+    #[test]
+    fn duplicate_keys_inside_an_entry_refuse_the_list() {
+        let (root, publisher) = (key(), key());
+        let good = payload(1, &publisher, false, vec![entry()]);
+        // Same key twice, at the top of an entry and deeper: serde_json::Value would silently keep the last.
+        for dup in [
+            good.replacen(
+                "\"version\":\"1.2.3\"",
+                "\"version\":\"1.2.3\",\"version\":\"9.9.9\"",
+                1,
+            ),
+            good.replacen(
+                "\"kind\":\"npm-global\"",
+                "\"kind\":\"npm-global\",\"kind\":\"vendor-script\"",
+                1,
+            ),
+        ] {
+            assert_ne!(dup, good);
+            assert_eq!(
+                verify_list(&sign(&root, &dup), &pubhex(&root), 0, 0),
+                Err(ListError::Signed(RegistryError::Malformed))
+            );
+        }
+    }
+
+    #[test]
+    fn publishers_are_unique_and_closed() {
+        let (root, p1) = (key(), key());
+        let one = json!({"id": "official", "key": pubhex(&p1)});
+        let mut p: Value = serde_json::from_str(&payload(1, &p1, false, vec![entry()])).unwrap();
+        p["publishers"] = json!([one.clone(), one.clone()]);
+        assert_eq!(
+            verify_list(&sign(&root, &p.to_string()), &pubhex(&root), 0, 0),
+            Err(ListError::Signed(RegistryError::Malformed))
+        );
+        p["publishers"] = json!([{"id": "official", "key": pubhex(&p1), "role": "root"}]);
+        assert_eq!(
+            verify_list(&sign(&root, &p.to_string()), &pubhex(&root), 0, 0),
+            Err(ListError::Signed(RegistryError::Malformed))
+        );
+    }
+
+    #[test]
+    fn urls_must_be_names_a_vendor_could_serve_from() {
+        for bad in [
+            "https://localhost/x",
+            "https://127.0.0.1/x",
+            "https://127.0.0.1:99999/x",
+            "https://a:b:c/",
+            "https://example.invalid:0/x",
+            "https://example.invalid:/x",
+            "https://example.invalid:80a/x",
+            "https://[::1]/x",
+            "https://10.0.0.1/",
+            "https://intranet/x",
+            "https://printer.local/x",
+            "https://svc.internal/x",
+            "https://-a.example.invalid/",
+            "https://a..invalid/",
+            "https://exa mple.invalid/",
+            "https://u:p@example.invalid/",
+            "https://example.invalid@evil.invalid/",
+            "https://1.2.3.4.5/",
+            "https://.invalid/",
+        ] {
+            assert_eq!(
+                refused(with(|e| e["homepage"] = json!(bad))),
+                Reason::BadUrl,
+                "{bad}"
+            );
+        }
+        for good in [
+            "https://example.invalid/x",
+            "https://Example.invalid:8443/x?y=1#z",
+            "https://a-b.c.example.invalid",
+        ] {
+            assert!(
+                open_with(with(|e| e["homepage"] = json!(good))).is_ok(),
+                "{good}"
+            );
+        }
+    }
+
+    #[test]
     fn one_bad_entry_refuses_the_whole_list_and_is_named() {
         let (root, publisher) = (key(), key());
         let bad = with(|e| {
@@ -1190,16 +1402,17 @@ mod tests {
     }
 
     #[test]
-    fn a_pathological_regex_cannot_hang_verification() {
+    fn a_regex_that_would_explode_a_backtracking_engine_is_answered_in_bounded_time_and_output_is_cut(
+    ) {
         let l = open_with(with(|e| e["verify"]["regex"] = json!("(a+)+b$"))).unwrap();
         let hostile = format!("{}!", "a".repeat(MAX_VERIFY_OUTPUT * 4));
         let t = std::time::Instant::now();
-        assert!(!l.agents[0].verify.matches(&hostile));
+        assert!(!l.offer("demo-agent").unwrap()[0].verify.matches(&hostile));
         assert!(t.elapsed().as_secs() < 5, "linear-time engine");
         // Output past the limit is not read: a match placed after it is not seen.
         let late = format!("{}demo 1.0.0", " ".repeat(MAX_VERIFY_OUTPUT));
         let l = open_with(entry()).unwrap();
-        assert!(!l.agents[0].verify.matches(&late));
+        assert!(!l.offer("demo-agent").unwrap()[0].verify.matches(&late));
     }
 
     #[test]

@@ -1,0 +1,1 @@
+{"id": "hostile-pwsh-ps1", "name": "X", "version": "1.0.0", "distribution": {"binary": {"linux-x86_64": {"archive": "https://example.com/x.tar.gz", "cmd": "./pwsh.ps1", "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}}}
