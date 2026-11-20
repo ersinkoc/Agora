@@ -962,11 +962,23 @@ fn a_real_hub_follows_remote_proxy_and_remote_off() {
             .unwrap()
             .with_root_certificates(roots)
             .with_no_client_auth();
-            let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
-            let mut tls = tokio_rustls::TlsConnector::from(std::sync::Arc::new(cfg))
-                .connect(ServerName::try_from("localhost").unwrap(), tcp)
-                .await
-                .unwrap();
+            // The hub has written its address a moment before it answers TLS: ask again until it does.
+            let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(cfg));
+            let mut tries = 0;
+            let mut tls = loop {
+                tries += 1;
+                let attempt = async {
+                    let tcp = tokio::net::TcpStream::connect(addr).await?;
+                    connector
+                        .connect(ServerName::try_from("localhost").unwrap(), tcp)
+                        .await
+                };
+                match attempt.await {
+                    Ok(tls) => break tls,
+                    Err(e) if tries >= 40 => panic!("hub did not answer TLS: {e}"),
+                    Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+                }
+            };
             tls.write_all(request.as_bytes()).await.unwrap();
             let mut out = Vec::new();
             let _ = tokio::time::timeout(Duration::from_secs(5), tls.read_to_end(&mut out)).await;
