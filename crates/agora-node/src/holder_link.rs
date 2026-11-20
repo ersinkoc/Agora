@@ -768,10 +768,10 @@ pub fn write_frame(
     let mut capped = false;
     let result = send_frame(stream, &frame, terminal, began, &mut capped);
     if capped {
-        let restored = stream.set_write_timeout(Some(WRITE_SLICE));
-        if result.is_ok() {
-            restored?;
-        }
+        // A frame that went whole is not failed for this: the peer may have closed right after taking it (macOS then refuses the
+        // option, EINVAL). A timeout left short only makes the next frame's sends wake more often; each still waits for its frame's
+        // time (`budget`).
+        let _ = stream.set_write_timeout(Some(WRITE_SLICE));
     }
     result
 }

@@ -225,15 +225,16 @@ fn helper_entry() {
                 .map_err(|e| format!("connect: {e}"))
                 .and_then(|mut c| {
                     c.attach().map_err(|e| format!("attach: {e}"))?;
-                    let (pid, _terminal) = c
+                    let (pid, terminal) = c
                         .start(&start_request("a1", &script))
                         .map_err(|e| format!("start: {e}"))?;
-                    Ok((c, pid))
+                    Ok((c, pid, terminal))
                 });
-            let _link = match started {
-                Ok((c, pid)) => {
+            // The link and this node's copy of the terminal are kept until the helper is killed.
+            let _held = match started {
+                Ok((c, pid, terminal)) => {
                     println!("\nHELPER started {pid}");
-                    c
+                    (c, terminal)
                 }
                 Err(e) => {
                     println!("\nHELPER failed {e}");

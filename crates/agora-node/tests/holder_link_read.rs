@@ -25,8 +25,10 @@ fn last_chunk_after(tag: &str, late: Duration) -> (Result<bool, LinkError>, Dura
     frame.extend_from_slice(&payload);
     let split = frame.len() - 10;
     let (head, tail) = (frame[..split].to_vec(), frame[split..].to_vec());
+    // The frame's first bytes are queued before the clock starts (the read's own clock starts at them), so a slow start of the
+    // peer's thread cannot count against it.
+    w.write_all(&head).unwrap();
     let peer = std::thread::spawn(move || {
-        w.write_all(&head).unwrap();
         std::thread::sleep(late);
         let _ = w.write_all(&tail);
         w
