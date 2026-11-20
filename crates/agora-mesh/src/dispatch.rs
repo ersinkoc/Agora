@@ -11,10 +11,20 @@ use agora_core::text::is_hidden;
 /// The longest title the prompt carries, in bytes.
 pub const MAX_TITLE_BYTES: usize = 512;
 
+/// The longest run of backticks the cleaned text keeps; a longer run loses its extra backticks, so the fence stays short.
+const MAX_BACKTICK_RUN: usize = 8;
+/// The longest fence: the longest kept run plus three.
+const MAX_FENCE: usize = MAX_BACKTICK_RUN + 3;
+/// Agent-facing marker (template text, not UI text) written inside the fence when the detail was cut.
+const CUT_MARKER: (&str, &str) = ("[cut: ", " more bytes]");
+/// Room kept for the marker line.
+const MARKER_ROOM: usize = 48;
+
 /// `text` without control characters (a line break and a tab stay in `keep_lines`; with it off every line break becomes a space)
-/// and without the hidden and bidirectional characters of `agora_core::text`, cut to at most `max` bytes on a character boundary.
-fn clean(text: &str, keep_lines: bool, max: usize) -> String {
+/// and without the hidden and bidirectional characters of `agora_core::text`; runs of backticks are cut to `MAX_BACKTICK_RUN`.
+fn clean(text: &str, keep_lines: bool) -> String {
     let mut out = String::new();
+    let mut run = 0;
     for c in text.chars() {
         let c = match c {
             '\r' => continue,
@@ -23,12 +33,22 @@ fn clean(text: &str, keep_lines: bool, max: usize) -> String {
             c if c.is_control() || is_hidden(c) => continue,
             c => c,
         };
-        if out.len() + c.len_utf8() > max {
-            break;
+        run = if c == '`' { run + 1 } else { 0 };
+        if run > MAX_BACKTICK_RUN {
+            continue;
         }
         out.push(c);
     }
     out
+}
+
+/// `s` cut to at most `max` bytes on a character boundary.
+fn cut(s: &str, max: usize) -> &str {
+    let mut end = max.min(s.len());
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
 }
 
 /// The longest run of `ch` in `text`.
@@ -54,16 +74,27 @@ pub fn build_prompt(
     max_bytes: usize,
 ) -> String {
     const FIXED: usize = 1400;
-    let title = clean(title, false, MAX_TITLE_BYTES);
-    let budget = max_bytes
-        .saturating_sub(FIXED + title.len() + project.len() + task_id.len())
-        .min(max_bytes);
-    let detail = clean(detail, true, budget);
+    let title = clean(title, false);
+    let title = cut(&title, MAX_TITLE_BYTES);
     // The source line is Agora's own; ids are cleaned too so a hostile project name cannot add lines.
-    let project = clean(project, false, 128);
-    let task_id = clean(task_id, false, 64);
+    let project = clean(project, false);
+    let project = cut(&project, 128);
+    let task_id = clean(task_id, false);
+    let task_id = cut(&task_id, 64);
+    // The fence is written twice, so both copies, the marker line and the fixed template come off the budget.
+    let budget = max_bytes.saturating_sub(
+        FIXED + MARKER_ROOM + 2 * MAX_FENCE + title.len() + project.len() + task_id.len(),
+    );
+    let full = clean(detail, true);
+    let kept = cut(&full, budget);
+    let more = full.len() - kept.len();
+    let detail = if more > 0 {
+        format!("{kept}\n{}{more}{}", CUT_MARKER.0, CUT_MARKER.1)
+    } else {
+        kept.to_string()
+    };
     let fence = "`".repeat(
-        longest_run(&title, '`')
+        longest_run(title, '`')
             .max(longest_run(&detail, '`'))
             .max(2)
             + 3,
@@ -104,7 +135,7 @@ mod tests {
             .position(|l| l.ends_with("untrusted-task-data"))
             .unwrap();
         let fence = lines[open].trim_end_matches("untrusted-task-data");
-        assert!(fence.len() >= 12);
+        assert!(fence.len() >= 11);
         // The fence line appears exactly twice: it opens and closes, and no line of the text equals it.
         let closes: Vec<_> = lines
             .iter()
@@ -113,6 +144,37 @@ mod tests {
             .collect();
         assert_eq!(closes.len(), 1);
         assert_eq!(closes[0].0, lines.len() - 1);
+    }
+
+    #[test]
+    fn backticks_cannot_make_the_prompt_longer_than_the_limit() {
+        for max in [3000, 16 * 1024] {
+            let p = build_prompt("p", "t1", &"`".repeat(600), &"`".repeat(100_000), max);
+            assert!(p.len() <= max, "{} > {max}", p.len());
+            let fence = p
+                .lines()
+                .find(|l| l.ends_with("untrusted-task-data"))
+                .unwrap();
+            assert!(fence.len() - "untrusted-task-data".len() <= MAX_FENCE);
+        }
+    }
+
+    #[test]
+    fn a_cut_detail_says_how_much_was_cut() {
+        let detail = "x".repeat(20_000);
+        let p = build_prompt("p", "t1", "t", &detail, 4000);
+        assert!(p.len() <= 4000);
+        let marker = p.lines().find(|l| l.starts_with("[cut: ")).unwrap();
+        let n: usize = marker
+            .trim_start_matches("[cut: ")
+            .trim_end_matches(" more bytes]")
+            .parse()
+            .unwrap();
+        let after = p.split("detail:\n").nth(1).unwrap();
+        let kept = after.split("\n[cut: ").next().unwrap().len();
+        assert_eq!(kept + n, 20_000);
+        // Nothing cut, no marker.
+        assert!(!build_prompt("p", "t1", "t", "short", 4000).contains("[cut:"));
     }
 
     #[test]

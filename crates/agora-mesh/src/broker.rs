@@ -1537,6 +1537,17 @@ mod tests {
     }
 
     #[test]
+    fn an_agent_that_holds_a_task_may_be_given_another_and_it_queues() {
+        // Pinned on purpose: `task_claim` has no one-task limit and no existing error says "busy"; the prompt queues behind the
+        // running turn (docs/specs/mesh-tools.md, dispatch).
+        let mut m = mesh();
+        let t1 = m.task_create(&id("a"), "one", "", &[]).unwrap();
+        let t2 = m.task_create(&id("a"), "two", "", &[]).unwrap();
+        m.dispatch("p", &id("b"), t1.as_str()).unwrap();
+        assert!(m.dispatch("p", &id("b"), t2.as_str()).is_ok());
+    }
+
+    #[test]
     fn dispatch_refuses_a_blocked_task_and_an_agent_of_another_project() {
         let mut m = mesh();
         let dep = m.task_create(&id("a"), "first", "", &[]).unwrap();
