@@ -16,7 +16,7 @@ it('keeps workspace binding through reload and identifies shared folders without
   applyEvent(v,2,{producerId:'n',body:'workspaceRegistered',workspaceRegistered:{workspaceId:'d',nodeId:'n',projectId:'id:p',path:'/selected',gitRoot:'/selected',filesChanged:2}});
   for (const [at,id] of [[3,'a'],[5,'b']] as const) {applyEvent(v,at,{producerId:'n',body:'agentWorkspaceBound',agentWorkspaceBound:{agentId:id,workspaceId:'d'}});applyEvent(v,at+1,{producerId:'n',body:'agentStarted',agentStarted:{agentId:id,nodeId:'n',projectId:'id:p',kind:'codex'}});}
   expect(v.worktrees.size).toBe(0);expect(tiles(v).every(a=>a.shared&&a.workspace==='/selected'&&a.projectId==='id:p')).toBe(true);expect(projectChoices(v)[0]?.path).toBe('/selected');
-  const restored=fromSnapshot(agora.v1.Snapshot.fromObject({pos:6,nodes:[{nodeId:'n',online:true}],workspaces:[{workspaceId:'n/d',nodeId:'n',path:'/selected',projectId:'id:p'}],agentWorkspaces:[{agentId:'n/a',workspaceId:'n/d'}],agents:[{agentId:'n/a',nodeId:'n',kind:'codex',running:true}]}));expect(tiles(restored)[0]?.workspace).toBe('/selected');
+  const restored=fromSnapshot(agora.v1.Snapshot.create({pos:6,nodes:[{nodeId:'n',online:true}],workspaces:[{workspaceId:'n/d',nodeId:'n',path:'/selected',projectId:'id:p'}],agentWorkspaces:[{agentId:'n/a',workspaceId:'n/d'}],agents:[{agentId:'n/a',nodeId:'n',kind:'codex',running:true}]}));expect(tiles(restored)[0]?.workspace).toBe('/selected');
 });
 
 it('groups portable copies across machines by project without merging their sessions or folders', () => {
@@ -36,7 +36,7 @@ it('groups portable copies across machines by project without merging their sess
 });
 
 it('preserves distinct enrolled machine identities when their host names and local agent ids match', () => {
-  const view = fromSnapshot(agora.v1.Snapshot.fromObject({ pos: 1,
+  const view = fromSnapshot(agora.v1.Snapshot.create({ pos: 1,
     nodes: [{ nodeId: 'laptop', hostname: 'same-host', online: true }, { nodeId: 'desktop', hostname: 'same-host', online: true }],
     workspaces: [{ workspaceId: 'laptop/d', nodeId: 'laptop', projectId: 'id:shared', path: '/one' },
       { workspaceId: 'desktop/d', nodeId: 'desktop', projectId: 'id:shared', path: '/two' }],
@@ -75,7 +75,7 @@ it('carries the "does not ask" badge from the start event and the snapshot (ADR-
   const byId = new Map(tiles(v).map((t) => [t.id, t]));
   expect(byId.get('n/a')?.skipsPermissions).toBe(true);
   expect(byId.get('n/b')?.skipsPermissions).toBe(false);
-  const restored = fromSnapshot(agora.v1.Snapshot.fromObject({ pos: 3, nodes: [{ nodeId: 'n', online: true }], agents: [{ agentId: 'n/a', nodeId: 'n', kind: 'codex', running: true, launchOptions: ['skip-permissions'], skipsPermissions: true }] }));
+  const restored = fromSnapshot(agora.v1.Snapshot.create({ pos: 3, nodes: [{ nodeId: 'n', online: true }], agents: [{ agentId: 'n/a', nodeId: 'n', kind: 'codex', running: true, launchOptions: ['skip-permissions'], skipsPermissions: true }] }));
   expect(tiles(restored)[0]?.skipsPermissions).toBe(true);
 });
 it('says a device limited to other projects is refused, not that the folder or the start failed', () => {
