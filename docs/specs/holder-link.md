@@ -66,8 +66,9 @@ next frame's.
 ## Limits of the holder itself
 - Connections are checked and closed (a peer that is not the lock holder gets no answer and no read) at most 16 per pass of the holder's
   loop, and the node is served first in every pass, so a flood of connections from the same user slows the node by those checks at
-  most. A peer that is the lock holder and starts a frame then stalls holds the holder for up to `FRAME_TIMEOUT` (5 s); sends have a
-  write timeout of the same length, so a node that never reads cannot hang the holder.
+  most. A peer that is the lock holder and starts a frame then stalls holds the holder for up to `FRAME_TIMEOUT` (5 s): once a frame
+  has begun each receive waits at most `WRITE_SLICE` (1 s) or what is left of the 5 s, and a frame whose last bytes come later is
+  refused (tested); sends have a write timeout of the same length, so a node that never reads cannot hang the holder.
 - A holder agent starts with **exactly** the environment in `Start` (the holder runs it with an empty environment plus that list; the
   holder's own environment is a stale snapshot of whoever started it and is never passed on). `env_remove` is therefore redundant for
   the holder and kept only for the format.
@@ -76,8 +77,9 @@ next frame's.
   starter, a log): `agora hold` closes every descriptor but 0, 1 and 2 first thing, and the child of each started agent marks all of
   them but 0, 1 and 2 close-on-exec before `exec` (marked, not closed, so the pipe std uses to report a failed `exec` still works).
   Both are tested, the first with a holder started with extra non-close-on-exec descriptors.
-- A write to a node that does not read gives up after `FRAME_TIMEOUT` (5 s in all, each blocked send waits `WRITE_SLICE`, 1 s), and the
-  holder drops that node: a node that stops reading cannot hang it (tested).
+- A write to a node that does not read gives up after `FRAME_TIMEOUT` (5 s in all, each blocked send waits `WRITE_SLICE`, 1 s, or what
+  is left of the 5 s when that is less, and is given at most 2 KiB, one kernel buffer even at the smallest `SO_SNDBUF`, so it
+  waits only once), and the holder drops that node: a node that stops reading, or takes a frame bit by bit, cannot hang it (tested).
 - `agora hold` refuses to start (it exits 1, `hold-failed`) when it cannot become a session leader (`setsid` fails with `EPERM` in a
   process-group leader); it never runs on in its starter's session.
 
@@ -268,3 +270,13 @@ wants to write that cannot fit one frame fails that write on the node's side, be
   A node of this build never does this to itself.
 - Confinement (ADR-0093 decision 6) is as for terminals: a confined adapter is the node's own.
 - Windows has no holder (step 3).
+
+### Telling the person about an older holder (ADR-0093 "Build status")
+A holder started before link version 2 keeps running until every agent it keeps has ended, so a node of this build can negotiate down to
+version 1 and then runs structured agents itself: a node restart ends them (automatic resume brings them back). `agora doctor` and
+`agora status` are not the node, so the holder does not answer them (admission above) and they never connect to it. Instead the node writes
+what its own `Hello` agreed to `<home>/run/hold.link` (`version pid start`, owner-only, replaced atomically; `agora_node::holder_note`).
+A reader names a holder as older only when the note says version 1 **and** that pid still has that start time; the number of agents it keeps
+comes from the holder's own `run/hold.pid`. `agora doctor` then prints a warning (exit status unchanged) and `agora status` a line under the
+node; there is nothing to print without a holder, with a version 2 holder, or on Windows. The node logs `holder.link_v1: ...` once, the first
+time it starts a structured agent itself for this reason. Nothing here stops, restarts or signals the holder or reads an agent.

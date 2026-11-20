@@ -17,6 +17,7 @@ pub mod gitconfig;
 pub mod grants;
 pub mod holder;
 pub mod holder_link;
+pub mod holder_note;
 pub mod launch_options;
 pub mod ledger;
 pub mod limits;

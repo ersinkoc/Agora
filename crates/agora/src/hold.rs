@@ -403,7 +403,7 @@ impl Holder {
         if stream.set_read_timeout(Some(HELLO_WAIT)).is_err() {
             return;
         }
-        let Ok(Some((payload, _))) = read_frame(&mut stream) else {
+        let Ok(Some((payload, _))) = read_frame(&mut stream, HELLO_WAIT) else {
             return;
         };
         let Ok(Request::Hello { version }) = Request::decode(&payload) else {
@@ -454,7 +454,7 @@ impl Holder {
             self.detach();
             return Some(false);
         }
-        let (payload, _) = match read_frame(&mut node.stream) {
+        let (payload, _) = match read_frame(&mut node.stream, TICK) {
             Ok(Some(f)) => f,
             Ok(None) => return Some(false),
             Err(_) => {

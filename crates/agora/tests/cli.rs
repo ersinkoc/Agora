@@ -282,6 +282,56 @@ fn without_a_node_the_cli_says_so_and_bad_arguments_print_usage() {
     assert!(err.contains("interactive terminal"), "{err}");
 }
 
+/// ADR-0093: a holder that speaks only link version 1 cannot keep structured agents across a node restart; doctor says so from the note
+/// the node leaves, as a warning (the exit status is the same), and never attaches to the holder or ends anything.
+#[test]
+fn doctor_notes_a_holder_that_speaks_only_link_version_1() {
+    if !agora_platform::HOLDER_BUILT {
+        return;
+    }
+    let s = setup("doctor-old-holder");
+    let (base_code, base_out, _) = cli(&s, &["doctor"]);
+    assert!(!base_out.contains("agent keeper"), "{base_out}");
+
+    // A stand-in for the old holder: a process of ours that only sleeps. Nothing listens on a socket for it.
+    let mut fake = Command::new("sleep").arg("600").spawn().unwrap();
+    let start = agora_platform::process_start_time(fake.id()).unwrap();
+    std::fs::create_dir_all(s.home.join("run")).unwrap();
+    let note = s.home.join("run/hold.link");
+    std::fs::write(&note, format!("1 {} {start}\n", fake.id())).unwrap();
+    std::fs::write(
+        s.home.join("run/hold.pid"),
+        format!("{} {start} 2\n", fake.id()),
+    )
+    .unwrap();
+
+    let (code, out, err) = cli(&s, &["doctor"]);
+    assert_eq!(code, base_code, "{out}{err}");
+    assert!(
+        out.contains(
+            "Chat agents on this machine are resumed after a node restart, not kept running"
+        ),
+        "{out}"
+    );
+    assert!(out.contains("2 agents now"), "{out}");
+    // Read only: no socket was made or used, and the holder still runs.
+    assert!(!s.home.join("run/hold.sock").exists());
+    assert!(agora_platform::process_start_time(fake.id()).is_some());
+
+    // A version 2 holder: nothing.
+    std::fs::write(&note, format!("2 {} {start}\n", fake.id())).unwrap();
+    let (_, out, _) = cli(&s, &["doctor"]);
+    assert!(!out.contains("agent keeper"), "{out}");
+
+    // Version 1 but the holder has ended: nothing.
+    std::fs::write(&note, format!("1 {} {start}\n", fake.id())).unwrap();
+    let _ = fake.kill();
+    let _ = fake.wait();
+    let (_, out, _) = cli(&s, &["doctor"]);
+    assert!(!out.contains("agent keeper"), "{out}");
+    let _ = std::fs::remove_dir_all(&s.home);
+}
+
 #[test]
 fn doctor_reports_agents_and_exits_zero_on_a_healthy_machine() {
     let s = setup("doctor");
