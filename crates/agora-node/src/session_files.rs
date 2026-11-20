@@ -3,9 +3,9 @@
 //!
 //! A file is the agent's when it was written after the agent started, its first line passes `select`, names the agent's folder as its
 //! working directory, and its id is no other agent's. This is a guess that can be wrong, so it is made only when it cannot be confused:
-//! when two agents of one kind wait for their id in the same folder at once, or more than one new file fits, neither gets one (the
-//! window then offers Start again, never a Resume into someone else's conversation). An agent that has no file after
-//! [`GIVE_UP_AFTER`] gets none.
+//! when two agents of one kind (or of kinds whose manifests name the same session files) wait for their id in the same folder at once,
+//! or more than one new file fits, neither gets one (the window then offers Start again, never a Resume into someone else's
+//! conversation). An agent that has no file after [`GIVE_UP_AFTER`] gets none.
 
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read};
@@ -98,7 +98,8 @@ fn session_in(file: &Path, spec: &SessionFile, folder: &Path) -> Option<String> 
     BufReader::new(f.take(FIRST_LINE_MAX + 1))
         .read_line(&mut line)
         .ok()?;
-    if line.len() as u64 > FIRST_LINE_MAX {
+    // The newline ends the line and is not part of it (F1181): a line of exactly the cap is accepted whether or not it is written yet.
+    if line.strip_suffix('\n').unwrap_or(&line).len() as u64 > FIRST_LINE_MAX {
         return None;
     }
     let v: Value = serde_json::from_str(line.trim_end()).ok()?;
@@ -166,14 +167,16 @@ impl SessionWatcher {
             if now < w.next_scan {
                 continue;
             }
-            // A live agent can still write its file after discovery gave up on it.
+            // A live agent can still write its file after discovery gave up on it. Agents of different kinds whose manifests name the
+            // same session files cannot be told apart by a file either (F1180).
+            let shares = |other: &Target| other.kind == w.kind || other.spec.glob == t.spec.glob;
             let crowded = targets.iter().any(|other| {
-                other.agent != t.agent && other.kind == w.kind && same_dir(&other.folder, &w.folder)
+                other.agent != t.agent && shares(other) && same_dir(&other.folder, &w.folder)
             });
             if crowded {
                 let twins: Vec<AgentId> = targets
                     .iter()
-                    .filter(|other| other.kind == w.kind && same_dir(&other.folder, &w.folder))
+                    .filter(|other| shares(other) && same_dir(&other.folder, &w.folder))
                     .map(|other| other.agent.clone())
                     .collect();
                 for a in twins {
@@ -450,6 +453,62 @@ mod tests {
                 "0199aaaa-0000-4000-8000-000000000093".into()
             )]
         );
+    }
+
+    #[test]
+    fn agents_of_two_kinds_reading_the_same_session_files_in_one_folder_get_no_session() {
+        // F1180: a user's manifest copied from another kind names the same session files; a file cannot say which agent wrote it.
+        for reverse in [false, true] {
+            let root = tmp(if reverse { "kinds-reversed" } else { "kinds" });
+            let mut w = SessionWatcher::new(Some(root.join("home")));
+            let now = Instant::now();
+            let mut targets = vec![
+                target("tool-1", root.join("work/a")),
+                Target {
+                    kind: "tool-variant".into(),
+                    ..target("variant-1", root.join("work/a"))
+                },
+            ];
+            if reverse {
+                targets.reverse();
+            }
+            let (release, gate) = std::sync::mpsc::channel();
+            let writer_root = root.clone();
+            let writer = std::thread::spawn(move || {
+                gate.recv().unwrap();
+                write(
+                    &writer_root,
+                    "rollout-1.jsonl",
+                    "0199aaaa-0000-4000-8000-000000000095",
+                    &writer_root.join("work/a"),
+                );
+            });
+            assert!(w.poll(now, &targets, &HashSet::new()).is_empty());
+            // The file appears only after both agents are registered.
+            release.send(()).unwrap();
+            writer.join().unwrap();
+            assert!(w
+                .poll(now + SCAN_EVERY, &targets, &HashSet::new())
+                .is_empty());
+            // In different folders each still gets its own.
+            let mut w = SessionWatcher::new(Some(root.join("home")));
+            targets[1].folder = root.join("work/b");
+            let (a, b) = (targets[0].agent.clone(), targets[1].agent.clone());
+            write(
+                &root,
+                "rollout-2.jsonl",
+                "0199aaaa-0000-4000-8000-000000000096",
+                &root.join("work/b"),
+            );
+            let mut found = w.poll(now, &targets, &HashSet::new());
+            found.sort();
+            let mut want = vec![
+                (a, "0199aaaa-0000-4000-8000-000000000095".to_string()),
+                (b, "0199aaaa-0000-4000-8000-000000000096".to_string()),
+            ];
+            want.sort();
+            assert_eq!(found, want);
+        }
     }
 
     #[test]
