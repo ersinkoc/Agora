@@ -120,6 +120,10 @@ doctor-policy-problems = { $detail ->
    *[other] { $detail } lines
 } of the node's policy file could not be understood; until they are fixed, no agent may skip its permission questions.
 doctor-show-secret = The file browser and the review screen show secret files (.env files, private keys, ...) in full to everyone who may look at a project (policy: files.show_secret = true).
+doctor-agent-broken = { $detail } ({ $from ->
+        [built-in] built in
+       *[folder] from the manifests folder
+    }): `{ $program }` is there but this account may not run it. Make the file executable, or reinstall it.
 doctor-manifest-older = The manifests folder holds an older description of { $detail } (version { $from }; this program has { $shipped } built in) and it replaces the built-in one, so agents of this kind may not resume after a restart. Remove the file { $file } from the manifests folder: the shipped descriptions are built in.
 doctor-holder-old = Chat agents on this machine are resumed after a node restart, not kept running, because this machine's agent keeper is older than this program. It ends when the agents it keeps have ended ({ $detail ->
     [one] 1 agent now

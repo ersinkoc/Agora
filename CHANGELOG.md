@@ -4,6 +4,7 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+- `agora doctor` now tells an agent program that is on the machine but cannot be run (no execute permission) apart from one that is missing.
 - In the terminal client, a question over the console (such as the one-hour permission to type) no longer closes the open agent's terminal, is not answered by a `y` inside a paste or beside passive mouse motion, and a refresh no longer drops a refusal of a key you just typed; Ctrl-K lists `g`, the key that asks for that permission.
 - When a machine asks for your OK before you type into, message or stop an agent, the question now names the agent and that one action, and the one-hour permission covers only that action (before, it also covered stopping and sending messages), in the web window and the terminal client.
 

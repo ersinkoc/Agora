@@ -17,11 +17,11 @@ it, a file with a new `kind` adds one. A built-in kind cannot be removed, only r
 and named by `agora doctor`, and the built-in kind it meant to replace stays. The folder is read again before agents are listed
 or started, so a new or changed file needs no restart. `agora doctor` lists each kind with where it came from (built in, or the
 folder) and the program it looks for. A kind is "installed" when that program (the L3 adapter command, else the ACP `argv[0]`,
-else `process.launch[0]`) is found in the node's own `PATH` (the environment the node was started in, not the user's current
+else `process.launch[0]`) is found as a file in the node's own `PATH` (the environment the node was started in, not the user's current
 shell) or, when the manifest names a path, exists there. On Windows, a bare name with no extension that has no `.exe` but a
 `.com`, `.bat` or `.cmd` of that name (`npx`, most npm global commands) is started by that file's full path, for all three
 levels, looked up where the standard library looks and never in the agent's project folder; it is installed when that file
-exists. A new shipped manifest must be added to `BUILT_IN`; a test fails until it is.
+exists. A found file without the owner's execute bit is "broken" (`agent-broken`, ADR-0087 rung 1): there, but starting it would fail. Doctor runs nothing and reads nothing from the program, and shows no agent version because no manifest has a version command yet. A new shipped manifest must be added to `BUILT_IN`; a test fails until it is.
 
 ```toml
 kind = "example-agent"          # stable id, lowercase, used in protocol and UI

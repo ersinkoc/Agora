@@ -42,22 +42,39 @@ pub struct Inputs {
 
 /// Is `program` runnable: an existing path, or found in a `PATH` directory.
 pub fn on_path(program: &str) -> bool {
+    locate(program).is_some()
+}
+
+/// Where `program` is: an existing path, or the file a `PATH` directory holds under that name. Only looks at the file system:
+/// nothing is run and nothing is read from the file.
+pub fn locate(program: &str) -> Option<PathBuf> {
     let p = Path::new(program);
     if p.components().count() > 1 {
-        return p.is_file();
+        return p.is_file().then(|| p.to_path_buf());
     }
     // A name the node starts by another file's full path (on Windows, a `.cmd` shim such as `npx`) is installed when that file is.
     let started_as = agora_platform::program_path(program, None);
     if started_as != p {
-        return started_as.is_file();
+        return started_as.is_file().then_some(started_as);
     }
-    let Some(paths) = std::env::var_os("PATH") else {
-        return false;
-    };
-    std::env::split_paths(&paths).any(|dir| {
-        dir.join(program).is_file()
-            || (cfg!(windows) && dir.join(format!("{program}.exe")).is_file())
+    let paths = std::env::var_os("PATH")?;
+    std::env::split_paths(&paths).find_map(|dir| {
+        let plain = dir.join(program);
+        if plain.is_file() {
+            return Some(plain);
+        }
+        let exe = dir.join(format!("{program}.exe"));
+        (cfg!(windows) && exe.is_file()).then_some(exe)
     })
+}
+
+/// A file the owner may not run (ADR-0087 rung 1: "broken"): found, but without the execute bit. Where the platform has no such bit
+/// the file counts as runnable.
+fn runnable(file: &Path) -> bool {
+    cfg!(windows)
+        || std::fs::metadata(file)
+            .map(|m| agora_platform::is_executable(&m))
+            .unwrap_or(false)
 }
 
 pub fn run(inputs: &Inputs) -> Vec<Check> {
@@ -398,7 +415,8 @@ fn data_dir(dir: &Path) -> Check {
 }
 
 /// Every agent kind the node offers (the built-in ones and the folder's, `crate::manifests`): where it came from (`$from`: `built-in`
-/// or `folder`), the program looked for (`$program`) and whether it is found. A folder file that cannot be read is named; its
+/// or `folder`), the program looked for (`$program`) and whether it is found (`agent-installed`), not found (`agent-missing`) or found
+/// without the right to run it (`agent-broken`). The agent's own version is not shown: no manifest has a version command yet. A folder file that cannot be read is named; its
 /// built-in kind, if any, stays. A missing folder is fine: the built-in kinds still load.
 fn manifests(dir: &Path) -> Vec<Check> {
     let (loaded, problems) = crate::manifests::load(dir);
@@ -407,10 +425,20 @@ fn manifests(dir: &Path) -> Vec<Check> {
         let program = crate::manifests::program(&l.manifest)
             .unwrap_or_default()
             .to_string();
-        let installed = !program.is_empty() && on_path(&program);
+        let found = if program.is_empty() {
+            None
+        } else {
+            locate(&program)
+        };
+        // Found but not runnable is "broken": the program is there and starting it would fail (ADR-0087 rung 1). Nothing is run to
+        // find out, so a program that starts and then fails its own checks is not caught here.
+        let broken = found.as_deref().is_some_and(|f| !runnable(f));
+        let installed = found.is_some() && !broken;
         let mut c = check(
             if installed {
                 "agent-installed"
+            } else if broken {
+                "agent-broken"
             } else {
                 "agent-missing"
             },
@@ -771,6 +799,28 @@ mod tests {
         assert_eq!(of("codex").args[1].1, "built-in");
         assert_eq!(of("codex").args[0].1, "codex");
         assert_eq!(find(&checks, "manifest-invalid")[0].detail, "c.toml");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_program_without_the_right_to_run_is_broken_not_missing() {
+        if cfg!(windows) {
+            return; // no execute bit there
+        }
+        let d = tmp("broken");
+        let m = d.join("m");
+        std::fs::create_dir_all(&m).unwrap();
+        let prog = d.join("agent-bin");
+        std::fs::write(&prog, "#!/bin/sh\n").unwrap();
+        agora_platform::set_executable(&prog, false).unwrap();
+        let text = MANIFEST.replace("LAUNCH", &prog.display().to_string());
+        std::fs::write(m.join("a.toml"), &text).unwrap();
+        let of = |checks: &[Check]| checks.iter().find(|c| c.detail == "demo").unwrap().id;
+        assert_eq!(of(&manifests(&m)), "agent-broken");
+        agora_platform::set_executable(&prog, true).unwrap();
+        assert_eq!(of(&manifests(&m)), "agent-installed");
+        std::fs::remove_file(&prog).unwrap();
+        assert_eq!(of(&manifests(&m)), "agent-missing");
         let _ = std::fs::remove_dir_all(&d);
     }
 
