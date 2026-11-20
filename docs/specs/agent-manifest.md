@@ -275,8 +275,8 @@ The node holds a session id only when it learned one:
   macOS; on Linux this only adds rivals). A root that cannot be resolved, for example through more than 40 links, makes its agent a
   rival of every other kind in the folder. They are not rivals when both `select`s ask for different values at the same `path`.
   This is decided from the manifests before any file is read, for every waiting agent at once, so kinds that share a session folder
-  lose Resume in that folder rather than risk continuing the wrong conversation. Folders and session roots are looked at on disk only
-  when agents of two kinds are live; agents of one kind compare their folders as written. An agent for which two files fit gets none
+  lose Resume in that folder rather than risk continuing the wrong conversation. Folders are looked at on disk only for agents that
+  could contend (of one kind, or of two kinds whose `select`s are not exclusive), session roots only for two such kinds. An agent for which two files fit gets none
   either. The first line counts without its `\n` or `\r\n`. A session file's id must be a UUID. An agent without an id can only be
   started again in its folder, never resumed. Known limit: this assumes no link inside a wildcard directory of a session glob points
   into another kind's session root (`logs/*/*.jsonl` with `logs/linked` pointing at `store`, against `store/*.jsonl`); such a setup

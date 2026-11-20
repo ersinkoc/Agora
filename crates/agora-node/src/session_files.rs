@@ -254,7 +254,7 @@ fn with_rivals(targets: &[Target], home: &Path) -> HashSet<AgentId> {
     with_rivals_using(targets, home, &mut workspace, &mut |p| resolve(p))
 }
 
-/// A workspace folder as the filesystem names it (the comparison `same_dir` makes); probed only as [`with_rivals_using`] allows.
+/// A workspace folder as the filesystem names it (the comparison `same_dir` makes); probed only for agents that could contend.
 fn workspace(p: &Path) -> PathBuf {
     std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
 }
@@ -265,13 +265,9 @@ fn with_rivals_using(
     probe: &mut dyn FnMut(&Path) -> PathBuf,
     resolver: &mut dyn FnMut(&Path) -> Option<PathBuf>,
 ) -> HashSet<AgentId> {
-    // A workspace is probed only for a target whose kind differs from some other live target's: with one target, or all of one kind,
-    // nothing is probed (same-kind agents compare their folders as written), so a stalled mount never holds up an agent that has no
-    // agent of another kind beside it. Pairs whose `select`s are exclusive are skipped before any probe.
-    let mixed: Vec<bool> = targets
-        .iter()
-        .map(|t| targets.iter().any(|o| o.kind != t.kind))
-        .collect();
+    // A workspace is probed only for a pair that could contend (one kind, or two kinds whose `select`s are not exclusive), the pairs
+    // `same_dir` always compared: a lone agent, or one whose only neighbours have exclusive selectors, is never probed, so a stalled
+    // mount under it never holds up discovery. Folders that are equal as written need no probe.
     let mut folders: HashMap<usize, PathBuf> = HashMap::new();
     let mut resolved: HashMap<usize, Option<PathBuf>> = HashMap::new();
     let mut out = HashSet::new();
@@ -281,12 +277,11 @@ fn with_rivals_using(
             if a.agent == b.agent || (a.kind != b.kind && exclusive(&a.spec, &b.spec)) {
                 continue;
             }
-            let same_folder = a.folder == b.folder
-                || (mixed[i] && mixed[j] && {
-                    let fa = folders.entry(i).or_insert_with(|| probe(&a.folder)).clone();
-                    let fb = folders.entry(j).or_insert_with(|| probe(&b.folder)).clone();
-                    fa == fb
-                });
+            let same_folder = a.folder == b.folder || {
+                let fa = folders.entry(i).or_insert_with(|| probe(&a.folder)).clone();
+                let fb = folders.entry(j).or_insert_with(|| probe(&b.folder)).clone();
+                fa == fb
+            };
             if !same_folder {
                 continue;
             }
@@ -1325,8 +1320,39 @@ mod tests {
     }
 
     #[test]
-    fn no_folder_is_probed_unless_two_kinds_could_contend() {
-        // Codex review of #791: a stalled mount under a lone agent's folder must never block discovery.
+    fn agents_of_one_kind_in_one_folder_spelled_two_ways_get_no_session() {
+        // As on main (`same_dir`): `work/link` links to `work/a`, so an agent there and one in `work/a` share one folder.
+        for reverse in [false, true] {
+            let root = tmp(if reverse {
+                "twin-link-reversed"
+            } else {
+                "twin-link"
+            });
+            agora_platform::link_dir(&root.join("work/a"), &root.join("work/link")).unwrap();
+            let mut targets = vec![
+                target("tool-1", root.join("work/a")),
+                target("tool-2", root.join("work/link")),
+            ];
+            if reverse {
+                targets.reverse();
+            }
+            let found = found_after_gated_write(
+                &root,
+                &targets,
+                &[(
+                    ".tool/s/rollout-1.jsonl",
+                    "0199aaaa-0000-4000-8000-000000000111",
+                    "work/a",
+                )],
+            );
+            assert_eq!(found, vec![], "reverse={reverse}");
+        }
+    }
+
+    #[test]
+    fn no_folder_is_probed_unless_two_agents_could_contend() {
+        // Codex review of #791: a stalled mount under a lone agent's folder must never block discovery. Agents that could contend (one
+        // kind, or two kinds whose selectors are not exclusive) are probed, as `same_dir` always did.
         let root = tmp("no-probe");
         let lone = [target("lone-1", root.join("work/a"))];
         let same_kind = [
@@ -1348,10 +1374,10 @@ mod tests {
                 ..target("variant-1", root.join("work/b"))
             },
         ];
-        for (name, targets, want) in [
-            ("lone", &lone[..], vec![]),
-            ("same kind", &same_kind[..], vec!["tool-1", "tool-2"]),
-            ("exclusive", &exclusive[..], vec![]),
+        for (name, targets, want, probed) in [
+            ("lone", &lone[..], vec![], false),
+            ("same kind", &same_kind[..], vec!["tool-1", "tool-2"], true),
+            ("exclusive", &exclusive[..], vec![], false),
         ] {
             for reverse in [false, true] {
                 let mut targets = targets.to_vec();
@@ -1370,7 +1396,11 @@ mod tests {
                     with_rivals_using(&targets, &root.join("home"), &mut folder, &mut roots);
                 let want: HashSet<AgentId> = want.iter().map(|a| AgentId::new(*a)).collect();
                 assert_eq!(found, want, "{name} reverse={reverse}");
-                assert_eq!(probes, Vec::<PathBuf>::new(), "{name} reverse={reverse}");
+                assert_eq!(
+                    !probes.is_empty(),
+                    probed,
+                    "{name} reverse={reverse}: {probes:?}"
+                );
             }
         }
     }
