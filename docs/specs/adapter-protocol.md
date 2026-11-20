@@ -172,9 +172,10 @@ answered and followed by `session/config` from the agent's full reply;
 `approval/resolve` → the agent's own option (`allow_once`, else `allow_always`, else the first option for an approval;
 `reject_once`, else `reject_always`, else `cancelled` for a denial). A decision for an approval the bridge no longer holds (it
 answered the request `cancelled` itself, by the rules above, or never knew it) is refused with a JSON-RPC error (`-32602`) and the
-agent is sent nothing; the node then marks the conversation's entry cancelled, as for any decision it cannot deliver. The node learns
-of a cancelled permission only when its decision is refused: telling it the moment the bridge cancels would need a new adapter →
-node notification (follow-up). The bridge offers no capabilities: `fs/*` and `terminal/*`
+agent is sent nothing; the node then marks the conversation's entry cancelled and publishes the approval as resolved, not approved
+and unsigned (as when a turn is cancelled), so the hub clears it; it does so for any decision it cannot deliver. The node learns of a
+cancelled permission when its decision is refused, and clears it: telling it the moment the bridge cancels would need a new adapter
+→ node notification (follow-up). The bridge offers no capabilities: `fs/*` and `terminal/*`
 requests from the agent are refused (the agent works in its own worktree), and mesh delivery to ACP agents goes through the mesh MCP
 endpoint like for any agent (the server the bridge passed in `session/new`). If the agent exits the bridge exits, which the node sees as the adapter exiting (restart policy as
 for L3); before that the bridge reports why (below). The bridge declares `usage`, `set_mode` and `set_model` among its capabilities, and to a node that said `chat.rich` also `thought`, `tool_status`, `plan_status`, `config`, `commands` and `turns`. The fake ACP agent (`agora-fake-agent --acp`) is the test double; real agents (Claude Code, Codex, WrongStack) need their

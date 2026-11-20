@@ -933,14 +933,20 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                 .sup()
                 .prepare_resolve_approval(&agent, &adapter_id, approved);
             if let Err(e) = call.and_then(crate::supervisor::AdapterCall::run) {
-                // The decision was verified but the adapter could not be told (it is gone or did not answer): the request is over, and
-                // the entry in the conversation must not stay pending for good.
+                // The decision was verified but the adapter could not be told (it is gone, did not answer, or no longer holds the
+                // request, as when an ACP bridge already answered it `cancelled`): the request is over, and the entry in the
+                // conversation must not stay pending for good.
                 ctx.chat.set_permission(
                     &agent,
                     &r.approval_id,
                     v1::PermissionOutcome::Cancelled,
                     crate::daemon::now_ms(),
                 );
+                // The request already left the queue: the hub is told as for a cancelled turn (unsigned, not approved), or it
+                // would keep showing an approval the node no longer holds.
+                if let Some(ev) = &ctx.events {
+                    ev.approval_resolved(&r.approval_id, false, "");
+                }
                 return Err(sup_err(e));
             }
             // ADR-0090: the entry in the conversation shows the verified decision, never anything the agent said.
