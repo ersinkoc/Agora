@@ -1,0 +1,35 @@
+{
+  "_generated": "Generated from the ACP registry by agora-adapters registry_convert (ADR-0092). Do not edit; reviewed before it ships.",
+  "display": "Odd Tag",
+  "installers": [
+    {
+      "args": [],
+      "installable": false,
+      "kind": "binary-download",
+      "not_installable_reason": "missing_sha256",
+      "platforms": {
+        "linux-x86_64": {
+          "cmd": "./odd",
+          "env_names_not_copied": [],
+          "sha256": null,
+          "url": "https://example.com/odd.tar.gz"
+        }
+      },
+      "provides": [
+        "odd"
+      ]
+    }
+  ],
+  "name": "registry-odd-tag",
+  "skipped": [
+    {
+      "distribution": "npx",
+      "reason": "registry.unpinned_version"
+    }
+  ],
+  "source": {
+    "id": "odd-tag",
+    "version": "1.0.0"
+  },
+  "tested": false
+}

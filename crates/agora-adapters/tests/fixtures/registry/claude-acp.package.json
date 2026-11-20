@@ -1,0 +1,71 @@
+{
+  "_generated": "Generated from the ACP registry by agora-adapters registry_convert (ADR-0092). Do not edit; reviewed before it ships.",
+  "display": "Claude Agent",
+  "installers": [
+    {
+      "args": [],
+      "env_names_not_copied": [],
+      "installable": false,
+      "kind": "npx",
+      "not_installable_reason": "no_integrity_hash",
+      "package": "@agentclientprotocol/claude-agent-acp",
+      "version": "0.109.0"
+    },
+    {
+      "args": [],
+      "installable": true,
+      "kind": "binary-download",
+      "platforms": {
+        "darwin-aarch64": {
+          "cmd": "./claude-agent-acp",
+          "env_names_not_copied": [],
+          "sha256": "603fdb593f00335a996986f9ed9f8a84928dad4b20e08b25862782fd770b2a28",
+          "url": "https://github.com/agentclientprotocol/claude-agent-acp/releases/download/v0.109.0/claude-agent-acp-darwin-arm64.zip"
+        },
+        "darwin-x86_64": {
+          "cmd": "./claude-agent-acp",
+          "env_names_not_copied": [],
+          "sha256": "c8d7f0c4f11c951656c1c87add9faffd8036cd8cbcd9658057e3a6774535e4f2",
+          "url": "https://github.com/agentclientprotocol/claude-agent-acp/releases/download/v0.109.0/claude-agent-acp-darwin-x64.zip"
+        },
+        "linux-aarch64": {
+          "cmd": "./claude-agent-acp",
+          "env_names_not_copied": [],
+          "sha256": "0f0d9b0360b60937a93f4b9e1547f833584f75bcd4208740735fef19445e2edd",
+          "url": "https://github.com/agentclientprotocol/claude-agent-acp/releases/download/v0.109.0/claude-agent-acp-linux-arm64.tar.gz"
+        },
+        "linux-aarch64-musl": {
+          "cmd": "./claude-agent-acp",
+          "env_names_not_copied": [],
+          "sha256": "176e50da172e4271ef914ab429024b38f798611b4062dd0d8276090a532c807a",
+          "url": "https://github.com/agentclientprotocol/claude-agent-acp/releases/download/v0.109.0/claude-agent-acp-linux-arm64-musl.tar.gz"
+        },
+        "linux-x86_64": {
+          "cmd": "./claude-agent-acp",
+          "env_names_not_copied": [],
+          "sha256": "fb4b81b5aa630a917b6b0ad602dccf21a71ea88e3f59d7737da0acf7e11578ca",
+          "url": "https://github.com/agentclientprotocol/claude-agent-acp/releases/download/v0.109.0/claude-agent-acp-linux-x64.tar.gz"
+        },
+        "linux-x86_64-musl": {
+          "cmd": "./claude-agent-acp",
+          "env_names_not_copied": [],
+          "sha256": "58202cb3c605adc6e02a64aeffe0ded3ac9f3c7bafea1f734dd121ca6395604e",
+          "url": "https://github.com/agentclientprotocol/claude-agent-acp/releases/download/v0.109.0/claude-agent-acp-linux-x64-musl.tar.gz"
+        }
+      },
+      "provides": [
+        "claude-agent-acp"
+      ]
+    }
+  ],
+  "name": "registry-claude-acp",
+  "skipped": [],
+  "source": {
+    "id": "claude-acp",
+    "license": "proprietary",
+    "license_url": "https://github.com/agentclientprotocol/claude-agent-acp/blob/main/LICENSE",
+    "repository": "https://github.com/agentclientprotocol/claude-agent-acp",
+    "version": "0.109.0"
+  },
+  "tested": false
+}

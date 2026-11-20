@@ -1,0 +1,1 @@
+{"id": "hostile-file", "name": "X", "version": "1.0.0", "distribution": {"npx": {"package": "file:../x@1.2.3"}}}
