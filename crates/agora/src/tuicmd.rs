@@ -596,7 +596,7 @@ fn ask_grant(
     scope: &str,
     commands: &[&str],
 ) -> Result<bool, String> {
-    let question = lines_of(&say.text(key!("tui-grant-ask"), &[]));
+    let question = lines_of(&grant_question(say, scope, commands));
     if fresh_key(ask, &question, Duration::from_secs(30)) != Some(b'y') {
         return Ok(false);
     }
@@ -607,6 +607,24 @@ fn ask_grant(
         // No snapshot here: the general sentence.
         Err(code) if code == "approval.signature_invalid" => Err(not_trusted(say, &device, None)),
         Err(code) => Err(fail(code)),
+    }
+}
+
+/// The question for a grant of `commands` on `scope` (#810): it names the agent and what is allowed, and is the same set that gets
+/// signed. A set this table does not know is asked in the general words, so nothing is ever signed that no sentence names.
+fn grant_question(say: &Say, scope: &str, commands: &[&str]) -> String {
+    let agent = [(
+        "agent",
+        // Written to the screen as it is: no control character of an id reaches the terminal.
+        Arg::Str(plain(scope.strip_prefix("agent:").unwrap_or(scope)).replace('\n', " ")),
+    )];
+    match commands {
+        ["terminal.input"] => say.text(key!("tui-grant-ask-typing"), &agent),
+        ["agent.prompt"] => say.text(key!("tui-grant-ask-prompt"), &agent),
+        ["agent.stop"] => say.text(key!("tui-grant-ask-stop"), &agent),
+        ["agent.set_mode"] => say.text(key!("tui-grant-ask-mode"), &agent),
+        ["agent.set_model"] => say.text(key!("tui-grant-ask-model"), &agent),
+        _ => say.text(key!("tui-grant-ask"), &[]),
     }
 }
 
@@ -700,10 +718,40 @@ fn with_grant<T>(
     }
 }
 
-/// What typing to one agent needs a grant for (what the web client asks for too).
-const TYPING: [&str; 3] = ["agent.stop", "agent.prompt", "terminal.input"];
-/// What the grant key (Ctrl-] then g) signs: typing only, the one thing its notice names.
+// What a grant asks for is the least the refused action needs, never more (#810, what the web client asks for too): one command each.
+/// Keys typed into an agent's terminal (`attach`, and the grant key Ctrl-] then g, whose notice names typing).
 const TYPING_INPUT: [&str; 1] = ["terminal.input"];
+/// A message sent to an agent in a chat pane.
+const PROMPT: [&str; 1] = ["agent.prompt"];
+/// Stopping an agent.
+const STOP: [&str; 1] = ["agent.stop"];
+
+/// The places that ask for a grant (#810): each one's command set comes from here, so a test can say what every place signs.
+#[derive(Clone, Copy, Debug)]
+enum Site {
+    /// The split view's attached terminal.
+    AttachTyping,
+    /// The grant key (Ctrl-] then g) in the console.
+    GrantKey,
+    /// A message from the split view's chat.
+    SplitPrompt,
+    /// A message from the console's chat tab.
+    ChatPrompt,
+    /// Stopping from the split view.
+    SplitStop,
+    /// Stopping from the console.
+    ConsoleStop,
+}
+
+impl Site {
+    fn commands(self) -> &'static [&'static str] {
+        match self {
+            Site::AttachTyping | Site::GrantKey => &TYPING_INPUT,
+            Site::SplitPrompt | Site::ChatPrompt => &PROMPT,
+            Site::SplitStop | Site::ConsoleStop => &STOP,
+        }
+    }
+}
 
 /// Ctrl-] : the key that leaves an opened terminal (the same one `agora terminal attach` uses).
 const DETACH: u8 = 0x1d;
@@ -752,7 +800,14 @@ fn attach(
             .any(|r| r.is_for(node, &terminal))
         {
             let scope = format!("agent:{local}");
-            let _ = ask_grant(say, session, &mut Plain::new(rx), node, &scope, &TYPING);
+            let _ = ask_grant(
+                say,
+                session,
+                &mut Plain::new(rx),
+                node,
+                &scope,
+                Site::AttachTyping.commands(),
+            );
             session.terminal_close(stream);
             stream = session.terminal_open(node, &terminal)?;
             if let Some((cols, rows)) = size {
@@ -890,7 +945,7 @@ fn chat(
                             say,
                             session,
                             &mut Plain::new(rx),
-                            (node, &scope, &TYPING),
+                            (node, &scope, Site::SplitPrompt.commands()),
                             |s| s.prompt(node, local, &line),
                         ) {
                             Tried::Done(Ok(())) | Tried::Declined => String::new(),
@@ -1943,7 +1998,7 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                                 say,
                                 &mut session,
                                 &mut Plain::new(&rx),
-                                (node, &scope, &TYPING),
+                                (node, &scope, Site::SplitStop.commands()),
                                 |s| s.stop_agent_with(node, local, helpers > 0 && with_helpers),
                             ) {
                                 Tried::Done(Ok(())) => say.text(key!("tui-stopped"), &[]),
@@ -3224,9 +3279,13 @@ fn chat_send(
         ChatCommand::Prompt if line.is_empty() => String::new(),
         ChatCommand::Prompt => {
             let tried = over_console(say, c, session, preview, Some(pane), rx, |session, ask| {
-                with_grant(say, session, ask, (&node, &scope, &TYPING), |s| {
-                    s.prompt(&node, &local, &line)
-                })
+                with_grant(
+                    say,
+                    session,
+                    ask,
+                    (&node, &scope, Site::ChatPrompt.commands()),
+                    |s| s.prompt(&node, &local, &line),
+                )
             });
             match tried {
                 Tried::Done(Ok(())) | Tried::Declined => String::new(),
@@ -3621,9 +3680,13 @@ fn command(
                     );
                     ask.key(&lines_of(&question), Duration::from_secs(30)) != Some(b'n')
                 };
-                match with_grant(say, session, ask, (&node, &scope, &TYPING), |s| {
-                    s.stop_agent_with(&node, &local, helpers > 0 && with_helpers)
-                }) {
+                match with_grant(
+                    say,
+                    session,
+                    ask,
+                    (&node, &scope, Site::ConsoleStop.commands()),
+                    |s| s.stop_agent_with(&node, &local, helpers > 0 && with_helpers),
+                ) {
                     Tried::Done(Ok(())) => say.text(key!("tui-stopped"), &[]),
                     Tried::Done(Err(code)) => {
                         say.text(key!("tui-stop-failed"), &[("code", Arg::Str(code))])
@@ -3788,7 +3851,7 @@ fn command(
             };
             let scope = format!("agent:{local}");
             let asked = over_console(say, c, session, preview, None, rx, |s, ask| {
-                ask_grant(say, s, ask, &node, &scope, &TYPING_INPUT)
+                ask_grant(say, s, ask, &node, &scope, Site::GrantKey.commands())
             });
             match asked {
                 Ok(true) => {
@@ -3990,6 +4053,75 @@ mod typing_grant_tests {
     #[test]
     fn the_grant_key_signs_typing_only() {
         assert_eq!(TYPING_INPUT, ["terminal.input"]);
+    }
+
+    /// #810: each place that asks signs the least its action needs, and the question names exactly that and the agent.
+    /// A stop grant does not authorize typing (and the other way round).
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn every_place_that_asks_signs_the_command_it_names() {
+        for (site, want) in [
+            (Site::AttachTyping, "terminal.input"),
+            (Site::GrantKey, "terminal.input"),
+            (Site::SplitPrompt, "agent.prompt"),
+            (Site::ChatPrompt, "agent.prompt"),
+            (Site::SplitStop, "agent.stop"),
+            (Site::ConsoleStop, "agent.stop"),
+        ] {
+            assert_eq!(site.commands(), [want], "{site:?}");
+        }
+        // Every call goes through the table: no place names a set of its own.
+        let src = include_str!("tuicmd.rs");
+        let code = &src[..src.find("#[cfg(test)]").unwrap()];
+        assert_eq!(code.matches(".commands()").count(), 6);
+    }
+
+    /// An agent's id is written to the terminal: no control character of it gets there.
+    #[test]
+    fn the_question_shows_no_control_character_of_the_id() {
+        let say = Say(agora_i18n::Catalog::english());
+        for c in [&TYPING_INPUT, &PROMPT, &STOP] {
+            let q = grant_question(&say, "agent:a\x1b[2Jb\nc", c);
+            assert!(!q.contains('\x1b') && !q.contains('\n'), "{q:?}");
+            assert!(q.contains("a[2Jb c"), "{q:?}");
+        }
+    }
+
+    #[test]
+    fn each_grant_covers_only_what_its_question_says() {
+        let say = Say(agora_i18n::Catalog::english());
+        // attach() and the grant key; both chat prompts; both stops; the option switches; a start (the general words).
+        let sites: [(&[&str], &str); 6] = [
+            (&TYPING_INPUT, "type into"),
+            (&PROMPT, "send messages to"),
+            (&STOP, "stop"),
+            (&["agent.set_mode"], "mode"),
+            (&["agent.set_model"], "model"),
+            (&["agent.start"], "wants your OK"),
+        ];
+        for (commands, words) in sites {
+            let q = grant_question(&say, "agent:a1", commands);
+            assert!(q.contains(words), "{commands:?}: {q}");
+            if commands != ["agent.start"] {
+                assert!(q.contains("a1"), "{q}");
+            }
+        }
+        for (a, b) in [
+            (&STOP, &TYPING_INPUT),
+            (&PROMPT, &STOP),
+            (&TYPING_INPUT, &PROMPT),
+        ] {
+            assert!(a.iter().all(|c| !b.contains(c)));
+            assert_ne!(
+                grant_question(&say, "agent:a1", a),
+                grant_question(&say, "agent:a1", b)
+            );
+        }
+        // The Turkish questions name the agent too.
+        let tr = Say(agora_i18n::Catalog::turkish());
+        for c in [&TYPING_INPUT, &PROMPT, &STOP] {
+            assert!(grant_question(&tr, "agent:a1", c).contains("a1"));
+        }
     }
 
     fn refused(node: &str, local: &str, request: u64) -> Refused {

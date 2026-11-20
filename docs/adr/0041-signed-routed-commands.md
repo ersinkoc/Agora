@@ -34,6 +34,9 @@ a stretch of use.
 6. **Web client.** The console asks for a grant when a command is refused with `approval.grant_required`, shows what it covers and for
    how long, signs it with the device key already used for approvals, and then repeats the command. No UI text names internal terms: "Allow
    typing into this agent for 1 hour".
+   *Annotation (#810):* a grant asked after a refusal covers the refused command only, for the one agent and one hour, and the question
+   names that command and the agent (typing, sending messages, stopping and the like are asked separately). It is never wider than the
+   sentence the user answered.
 
 ## Security
 - Closes T1 for the listed commands: a compromised hub cannot create a grant, so it cannot start or drive an agent on a node whose policy
