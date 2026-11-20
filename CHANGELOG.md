@@ -4,7 +4,8 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
-_Nothing yet._
+### Agents from the ACP registry
+- Agora can now turn the ACP agent registry's entries into agent kinds and install records (a maintainer step; the list in the window and installing from it come next, and no machine ever reads the registry itself).
 
 ## 0.3.30
 

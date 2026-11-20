@@ -1,0 +1,1 @@
+{"id":"odd-tag","name":"Odd Tag","version":"1.0.0","distribution":{"npx":{"package":"odd@latest"},"binary":{"linux-x86_64":{"archive":"https://example.com/odd.tar.gz","cmd":"./odd"}}}}

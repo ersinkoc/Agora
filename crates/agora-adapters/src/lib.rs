@@ -8,6 +8,7 @@ pub mod pacer;
 pub mod package;
 pub mod perm;
 pub mod registry;
+pub mod registry_convert;
 pub mod rules;
 pub mod usage;
 
