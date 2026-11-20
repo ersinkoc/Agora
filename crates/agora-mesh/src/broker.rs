@@ -44,6 +44,24 @@ impl Default for Limits {
     }
 }
 
+impl Limits {
+    /// A message's body and refs within these limits. The hub's shared `#channel` checks the same, before its fanout.
+    pub fn check_content(&self, body: &str, refs: &[String]) -> Result<(), MeshError> {
+        if body.len() > self.max_body_bytes {
+            return Err(MeshError::BodyTooLarge);
+        }
+        if refs.len() > self.max_refs {
+            return Err(MeshError::TooManyRefs);
+        }
+        // F1221: refs together have the body's limit, so they cannot carry what the body may not.
+        let ref_bytes = refs.iter().fold(0usize, |n, r| n.saturating_add(r.len()));
+        if ref_bytes > self.max_body_bytes {
+            return Err(MeshError::BodyTooLarge);
+        }
+        Ok(())
+    }
+}
+
 /// Who an agent is, as the node knows it. The broker trusts this; senders cannot supply it per message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentInfo {
@@ -663,13 +681,7 @@ impl Mesh {
     }
 
     fn check_content(&self, body: &str, refs: &[String]) -> Result<(), MeshError> {
-        if body.len() > self.limits.max_body_bytes {
-            return Err(MeshError::BodyTooLarge);
-        }
-        if refs.len() > self.limits.max_refs {
-            return Err(MeshError::TooManyRefs);
-        }
-        Ok(())
+        self.limits.check_content(body, refs)
     }
 
     /// Recipients for `to`: one agent, or every other agent in the sender's project for `#channel`.

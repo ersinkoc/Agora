@@ -1379,6 +1379,14 @@ pub fn status(say: &Say, o_data: &Option<PathBuf>) -> ExitCode {
                         &[("count", (n as i64).into())],
                     );
                 }
+                // ADR-0093: a holder from before 0.3.27 cannot keep structured agents across a node restart.
+                if let Some(old) = agora_node::holder_note::old_holder(&h) {
+                    detail(
+                        say,
+                        key!("status-holder-old"),
+                        &[("count", (old.kept as i64).into())],
+                    );
+                }
             }
         }
         for line in crate::supervise::status_lines(say, &h, role, held.is_some(), answers) {
