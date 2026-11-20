@@ -13,7 +13,7 @@ import { chosenSettings, noSettings, settingName, usableSettings, type LaunchSet
 import { ASK, chosenIds, confirmedIds, confirmSkip, harmless, initialLaunch, keepAsking, labelOf, pickPermission, skipping, toggleHarmless, usableOptions, type LaunchOptionChoice } from './launchChoice';
 // ADR-0059: `options` are the kind's launch options as the machine lists them (none from an older machine).
 // ADR-0066: `settings` are the kind's launch settings as the machine lists them (none from an older machine).
-export interface KindChoice { kind: string; name: string; installed: boolean; options?: LaunchOptionChoice[]; program?: string; settings?: LaunchSettingChoice[] }
+export interface KindChoice { kind: string; name: string; installed: boolean; level?: number; options?: LaunchOptionChoice[]; program?: string; settings?: LaunchSettingChoice[] }
 
 // The command a machine's owner runs once so the machine trusts this device (ADR-0020), with a Copy button: no hunting for it on another page.
 function TrustCommand({ command }: { command: string }) {

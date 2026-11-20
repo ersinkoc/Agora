@@ -128,7 +128,7 @@ export function App() {
   const loadKinds = useCallback(async (node: string): Promise<KindChoice[]> => {
     const ok = await api!.command(node, { agentKinds: {} });
     return (ok.agentKinds?.kinds ?? []).map((k) => ({
-      kind: k.kind ?? '', name: k.displayName || (k.kind ?? ''), installed: !!k.installed,
+      kind: k.kind ?? '', name: k.displayName || (k.kind ?? ''), installed: !!k.installed, level: Number(k.level ?? 0),
       // ADR-0069: the program the machine looks for in its PATH (empty from an older machine).
       program: k.program ?? '',
       // ADR-0059: the kind's launch options (the machine keeps their arguments).
@@ -551,7 +551,7 @@ export function App() {
     <ChatActionsContext.Provider value={chatActions}>
       {hash === '#/gallery' ? <Gallery /> : isMachinesHash(hash) ? <MachinesPage focus={machineOfHash(hash)} machines={live ? machines(live) : hub ? [] : demoMachines} agents={agents} usage={usage} projects={live && usage ? costByProject(live, usage.perAgent) : []} onBack={() => go('#/')} onForget={hub ? forgetMachines : undefined} /> : hash === '#/audit' && hub ? <AuditPage load={(who) => loadAudit(hub.token, who)} onBack={() => go('#/')} /> : isSettingsHash(hash) ? <DevicePage section={settingsSectionOf(hash)} device={device} onBack={() => go('#/')} onTheme={editTheme} onAddPasskey={hub && passkeysSupported() ? (password) => addPasskey(hub.token, undefined, password) : undefined} passkeyNeedsPassword={info.passwordRequired}
           fingerprint={device ? prints.get(device.id) : undefined} machines={live ? machines(live) : undefined} trustedOn={trustedOn} others={hub ? others : undefined}
-          asked={asked} onAsk={hub && api ? askApproval : undefined} onRemove={hub && api ? removeDevice : undefined}
+          loadKinds={hub && api && live ? loadKinds : undefined} asked={asked} onAsk={hub && api ? askApproval : undefined} onRemove={hub && api ? removeDevice : undefined}
           security={hub ? <ScreenPasswordSettings passwordSet={info.passwordSet} idle={idle} onIdle={(m) => { setIdleMinutes(m); setIdle(m); }}
             onSet={async (password, current) => { const r = await setPassword(hub.token, password, current); if (r.ok) refreshInfo(); return r; }} /> : undefined} /> : hash === '#/theme' && phone ? <PhoneTheme onBack={() => go('#/')} />
         : current !== undefined && phone
