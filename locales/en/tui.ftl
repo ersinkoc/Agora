@@ -284,4 +284,4 @@ tui-app-cmd-pair = Read a machine's request to join (p)
 tui-link-confirm = Link: { $url } (Ctrl+click it again to open)
 tui-link-opened = Opened { $url }
 tui-link-failed = Could not open { $url }. Copy it from the terminal instead.
-tui-typing-needs-ok = Typing into { $agent } needs your OK first. Press Ctrl-] then g to allow it for one hour.
+tui-typing-needs-ok = Ctrl-] then g: allow typing into { $agent } for one hour. It needs your OK first.

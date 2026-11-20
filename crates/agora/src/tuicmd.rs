@@ -587,12 +587,12 @@ fn ask_grant(
     }
 }
 
-/// Asks `lines` once and waits up to `wait` for one key after it (ADR-0063): keys typed before (meant for an agent, a `y` among them)
-/// are set aside first, then the question is drawn once, so the first answer after it counts; the terminal frames pastes for as
-/// long as it is asked (whatever the console's mouse setting), and a paste never answers.
+/// Asks `lines` once and waits up to `wait` for one key after it (ADR-0063): the question is drawn once, then every key typed until
+/// it was on the screen (meant for an agent, a `y` among them, also one that came while it was drawn) is set aside, so only an answer
+/// after it counts; the terminal frames pastes for as long as it is asked (whatever the console's mouse setting), and a paste never
+/// answers.
 fn fresh_key(ask: &mut dyn Asker, lines: &[String], wait: Duration) -> Option<u8> {
     let framed = bracketed_paste(true);
-    ask.discard();
     let answer = ask.answer(lines, wait);
     bracketed_paste(framed);
     answer
@@ -729,7 +729,7 @@ fn attach(
             .any(|r| r.is_for(node, &terminal))
         {
             let scope = format!("agent:{local}");
-            let _ = ask_grant(say, session, &mut Plain(rx), node, &scope, &TYPING);
+            let _ = ask_grant(say, session, &mut Plain::new(rx), node, &scope, &TYPING);
             session.terminal_close(stream);
             stream = session.terminal_open(node, &terminal)?;
             if let Some((cols, rows)) = size {
@@ -841,7 +841,7 @@ fn chat(
                             note = match with_grant(
                                 say,
                                 session,
-                                &mut Plain(rx),
+                                &mut Plain::new(rx),
                                 (node, &scope, &[command]),
                                 |s| s.set_option(node, local, model, &id),
                             ) {
@@ -866,7 +866,7 @@ fn chat(
                         note = match with_grant(
                             say,
                             session,
-                            &mut Plain(rx),
+                            &mut Plain::new(rx),
                             (node, &scope, &TYPING),
                             |s| s.prompt(node, local, &line),
                         ) {
@@ -1524,6 +1524,8 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                 typing_refused: None,
                 typing_notice: String::new(),
                 typing_allowed: None,
+                asked: false,
+                typing_taken: std::collections::HashMap::new(),
             }),
             Err(_) => None,
         }
@@ -1806,7 +1808,7 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                                 &mut session,
                                 sn,
                                 &selected,
-                                &mut Plain(&rx),
+                                &mut Plain::new(&rx),
                                 color,
                             );
                             dirty_since.get_or_insert_with(Instant::now);
@@ -1821,14 +1823,18 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                         if let Some(p) = preview.take() {
                             p.close(&mut session);
                         }
-                        notice =
-                            approve_device(say, &mut session, snapshot.as_ref(), &mut Plain(&rx));
+                        notice = approve_device(
+                            say,
+                            &mut session,
+                            snapshot.as_ref(),
+                            &mut Plain::new(&rx),
+                        );
                         dirty_since.get_or_insert_with(Instant::now);
                         draw(&snapshot, &selected, &notice, cost, preview.as_ref());
                     }
                     b's' => {
                         if let Some(sn) = &snapshot {
-                            notice = start(say, &mut session, sn, &selected, &mut Plain(&rx));
+                            notice = start(say, &mut session, sn, &selected, &mut Plain::new(&rx));
                             dirty_since.get_or_insert_with(Instant::now);
                             draw(&snapshot, &selected, &notice, cost, preview.as_ref());
                         }
@@ -1894,13 +1900,13 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                                     key!("tui-stop-helpers"),
                                     &[("count", Arg::Num(helpers as i64))],
                                 );
-                                Plain(&rx).key(&lines_of(&question), Duration::from_secs(30))
+                                Plain::new(&rx).key(&lines_of(&question), Duration::from_secs(30))
                                     != Some(b'n')
                             };
                             notice = match with_grant(
                                 say,
                                 &mut session,
-                                &mut Plain(&rx),
+                                &mut Plain::new(&rx),
                                 (node, &scope, &TYPING),
                                 |s| s.stop_agent_with(node, local, helpers > 0 && with_helpers),
                             ) {
@@ -1941,7 +1947,7 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                                 agora_platform::terminal_size().unwrap_or((100, 30)),
                             )
                         }) {
-                            if read_start(&a, &mut Plain(&rx), &text) {
+                            if read_start(&a, &mut Plain::new(&rx), &text) {
                                 read_whole.insert(a.approval_id.clone());
                             }
                         }
@@ -2055,6 +2061,12 @@ struct Console {
     /// The agent (`node/local`) typing was allowed for here, and the last request sent before: a refusal of that typing, read
     /// later, is old news. Per session (request numbers start over on a reconnect).
     typing_allowed: Option<(String, u64)>,
+    /// A question was asked over the console ([`over_console`]) while a batch of input was handled: the rest of that batch was
+    /// typed before the question was seen, so none of it may answer anything (ADR-0063).
+    asked: bool,
+    /// The newest typing each terminal's machine took in this session, (node, terminal) to request: a refusal read in a later turn
+    /// for typing sent before it is old news (answers can come out of order).
+    typing_taken: std::collections::HashMap<(String, String), u64>,
 }
 
 /// A notice too long for the footer is shown whole in a box above it until the next key (the trust command must be readable and
@@ -2162,6 +2174,7 @@ fn console(
         p.request = 0;
     }
     c.typing_allowed = None;
+    c.typing_taken.clear();
     // ADR-0065: only the hub knows whether this session is the owner's (it answers `PairStatus` to the owner only).
     if c.pair.owner == agora_tui::pair::Owner::Unknown {
         if let Some(owner) = pair_owner(session) {
@@ -2279,7 +2292,8 @@ fn console(
             c.note.open = false;
             redraw = true;
         }
-        for (index, ev) in events.into_iter().enumerate() {
+        c.asked = false;
+        'batch: for (index, ev) in events.into_iter().enumerate() {
             // A key that only goes to the agent changes nothing on screen until the agent answers: drawing for it would hold the
             // echo back by up to a frame (ADR-0022). Anything else is drawn.
             let before = c.app.clone();
@@ -2499,6 +2513,12 @@ fn console(
                         {
                             dirty_since.get_or_insert_with(Instant::now);
                         }
+                        // Keys typed with the one that opened a question came before it was seen: they are dropped, not
+                        // handled after it closes (a `y` among them could otherwise answer another request in view).
+                        if std::mem::take(&mut c.asked) {
+                            redraw = true;
+                            break 'batch;
+                        }
                     }
                 }
             }
@@ -2620,7 +2640,15 @@ fn console(
         // that asks (Ctrl-] then g); nothing opens by itself, so no key typed to the agent can answer a question. The typed keys are
         // lost. Another tab's refusal is dropped (typing into it again says it there).
         let refused = session.take_grant_wanted();
-        let taken = session.take_typing_taken();
+        for (node, terminal, request) in session.take_typing_taken() {
+            let newest = c.typing_taken.entry((node, terminal)).or_insert(request);
+            *newest = (*newest).max(request);
+        }
+        let taken: Vec<(String, String, u64)> = c
+            .typing_taken
+            .iter()
+            .map(|((n, t), r)| (n.clone(), t.clone(), *r))
+            .collect();
         match typing_refusal(
             &mut c.typing_refused,
             &refused,
@@ -3194,10 +3222,11 @@ trait Asker {
     fn discard(&mut self) {
         while self.rx().try_recv().is_ok() {}
     }
-    /// Shows `lines` once and waits up to `wait` for the answer to a question whose `y` signs something: one key or click, never a
-    /// paste ([`one_answer`]).
+    /// Shows `lines` once, sets aside what was typed until then, and waits up to `wait` for the answer to a question whose `y` signs
+    /// something: one key or click, never a paste ([`one_answer`]).
     fn answer(&mut self, lines: &[String], wait: Duration) -> Option<u8> {
         self.show(lines);
+        self.discard();
         read_answer(&mut Parser::default(), self.rx(), lines, wait)
     }
 }
@@ -3207,12 +3236,29 @@ fn lines_of(text: &str) -> Vec<String> {
     text.split('\n').map(str::to_string).collect()
 }
 
-/// The earlier split view's questions: each takes the whole screen.
-struct Plain<'a>(&'a mpsc::Receiver<u8>);
+/// The earlier split view's questions: each takes the whole screen. Its parser reads both the keys set aside and the answer, so a
+/// paste around the question keeps its framing there too.
+struct Plain<'a>(&'a mpsc::Receiver<u8>, Parser);
+
+impl<'a> Plain<'a> {
+    fn new(rx: &'a mpsc::Receiver<u8>) -> Self {
+        Self(rx, Parser::default())
+    }
+}
 
 impl Asker for Plain<'_> {
     fn rx(&self) -> &mpsc::Receiver<u8> {
         self.0
+    }
+
+    fn discard(&mut self) {
+        set_aside_keys(&mut self.1, self.0);
+    }
+
+    fn answer(&mut self, lines: &[String], wait: Duration) -> Option<u8> {
+        self.show(lines);
+        self.discard();
+        read_answer(&mut self.1, self.0, lines, wait)
     }
 
     fn show(&mut self, lines: &[String]) {
@@ -3275,7 +3321,7 @@ impl Asker for Over<'_> {
             mouse_mode(false);
         }
         self.stale = true;
-        Plain(self.rx).frame(bytes);
+        Plain::new(self.rx).frame(bytes);
     }
 
     /// Sets aside every key typed so far through the console's parser, so a paste around the question keeps its framing.
@@ -3286,6 +3332,7 @@ impl Asker for Over<'_> {
     /// Keys and clicks through the console's own reader: a click on a numbered line is its number, a click outside the box cancels
     /// (`dialog_key`). A window resized meanwhile gets the box drawn again for its size.
     fn key(&mut self, lines: &[String], wait: Duration) -> Option<u8> {
+        self.show(lines);
         self.read(lines, wait, |events, area, lines| {
             events
                 .iter()
@@ -3295,6 +3342,8 @@ impl Asker for Over<'_> {
 
     /// One key or click ([`one_answer`]) through the console's parser: a paste never answers.
     fn answer(&mut self, lines: &[String], wait: Duration) -> Option<u8> {
+        self.show(lines);
+        self.discard();
         self.read(lines, wait, one_answer)
     }
 }
@@ -3306,7 +3355,7 @@ impl Over<'_> {
         wait: Duration,
         pick: fn(&[AppEvent], Area, &[String]) -> Option<u8>,
     ) -> Option<u8> {
-        self.show(lines);
+        // `lines` is on the screen already.
         let end = Instant::now() + wait;
         let mut area = window_area();
         loop {
@@ -3364,6 +3413,7 @@ fn over_console<T>(
     };
     let out = run(session, &mut ask);
     let stale = ask.stale;
+    c.asked = true;
     mouse_mode(c.app.mouse);
     if stale {
         let _ = c.window.invalidate();
@@ -4104,10 +4154,12 @@ mod typing_grant_tests {
         assert_eq!(one_answer(&p.push(b"yes"), area, &q), None);
     }
 
-    /// An asker over a key queue whose first draw sends `on_show` (keys arriving once the question is on the screen).
+    /// An asker over a key queue: `while_drawn` arrives while the question is drawn (typed before it could be seen), `on_show` once
+    /// it is on the screen (after the keys typed until then were set aside).
     struct Keys<'a> {
         rx: &'a mpsc::Receiver<u8>,
         tx: &'a mpsc::Sender<u8>,
+        while_drawn: &'a [u8],
         on_show: &'a [u8],
         drawn: usize,
     }
@@ -4117,11 +4169,17 @@ mod typing_grant_tests {
         }
         fn show(&mut self, _: &[String]) {
             if self.drawn == 0 {
-                self.on_show.iter().for_each(|k| {
+                self.while_drawn.iter().for_each(|k| {
                     let _ = self.tx.send(*k);
                 });
             }
             self.drawn += 1;
+        }
+        fn discard(&mut self) {
+            while self.rx.try_recv().is_ok() {}
+            self.on_show.iter().for_each(|k| {
+                let _ = self.tx.send(*k);
+            });
         }
         fn frame(&mut self, _: &[u8]) {}
     }
@@ -4138,6 +4196,7 @@ mod typing_grant_tests {
         let mut ask = Keys {
             rx: &rx,
             tx: &tx,
+            while_drawn: b"",
             on_show: b"",
             drawn: 0,
         };
@@ -4145,6 +4204,7 @@ mod typing_grant_tests {
         let mut ask = Keys {
             rx: &rx,
             tx: &tx,
+            while_drawn: b"",
             on_show: b"y",
             drawn: 0,
         };
@@ -4153,6 +4213,7 @@ mod typing_grant_tests {
         let mut ask = Keys {
             rx: &rx,
             tx: &tx,
+            while_drawn: b"",
             on_show: b"\x1b[200~y\x1b[201~",
             drawn: 0,
         };
@@ -4160,6 +4221,42 @@ mod typing_grant_tests {
             fresh_key(&mut ask, &["q".into()], Duration::from_millis(20)),
             None
         );
+        // Codex review of #796: a `y` that came while the question was being drawn was typed before it could be seen.
+        let mut ask = Keys {
+            rx: &rx,
+            tx: &tx,
+            while_drawn: b"y",
+            on_show: b"",
+            drawn: 0,
+        };
+        assert_eq!(fresh_key(&mut ask, &["q".into()], wait), None);
+    }
+
+    /// Codex review of #796: in the split view's questions too, a paste that began before the question and ends after it was drawn
+    /// keeps its framing, so its text never answers.
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn a_paste_across_a_split_view_question_never_answers_it() {
+        let q = ["q".to_string()];
+        let wait = Duration::from_millis(20);
+        let (tx, rx) = mpsc::channel();
+        b"\x1b[200~ab".iter().for_each(|b| tx.send(*b).unwrap());
+        let mut plain = Plain::new(&rx);
+        plain.discard();
+        // The paste's next byte, on its own after the question: still the paste.
+        tx.send(b'y').unwrap();
+        assert_eq!(read_answer(&mut plain.1, &rx, &q, wait), None);
+        // What the old fallback did (raw bytes dropped, a fresh parser for the answer): that `y` signed.
+        tx.send(b'y').unwrap();
+        assert_eq!(
+            read_answer(&mut Parser::default(), &rx, &q, wait),
+            Some(b'y')
+        );
+        // Once the paste ended, a key answers.
+        b"\x1b[201~".iter().for_each(|b| tx.send(*b).unwrap());
+        assert_eq!(read_answer(&mut plain.1, &rx, &q, wait), None);
+        tx.send(b'y').unwrap();
+        assert_eq!(read_answer(&mut plain.1, &rx, &q, wait), Some(b'y'));
     }
 
     /// Pointer motion the console passes on is not typing (its refusal asks nothing); presses, drags, the wheel, keys and pastes are.
