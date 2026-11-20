@@ -1442,7 +1442,12 @@ impl<W: Write> Bridge<W> {
                 done(self)?;
                 self.said = false;
                 self.turn_mark = self.stderr.lock().unwrap_or_else(|e| e.into_inner()).total;
-                self.state("WORKING")?;
+                // A permission still pending keeps the agent waiting for the user, whatever else it is sent.
+                self.state(if self.perms.is_empty() {
+                    "WORKING"
+                } else {
+                    "BLOCKED"
+                })?;
                 // A cancelled prompt still unanswered (the node's cancel grace passed) no longer counts for the turn: this one's
                 // reply ends it, and its own late reply ends nothing.
                 for request in self.waiting.values_mut() {
@@ -1502,15 +1507,9 @@ impl<W: Write> Bridge<W> {
                     self.send_agent(
                         &json!({"jsonrpc": "2.0", "id": p.request, "result": {"outcome": outcome}}),
                     );
+                    // Permissions are kept only while a prompt runs (one outside a turn is refused, a turn's end cancels them).
                     if self.perms.is_empty() {
-                        // Audit F1241: a request that came outside a turn (a straggler of a cancelled one) began what `blocked`
-                        // reported; with no prompt running, nothing else would end it.
-                        let now = if self.prompt_open() {
-                            "WORKING"
-                        } else {
-                            "IDLE"
-                        };
-                        self.state(now)?;
+                        self.state("WORKING")?;
                     }
                 }
             }
@@ -1815,8 +1814,9 @@ impl<W: Write> Bridge<W> {
             }
             (Some("session/request_permission"), Some(request)) => {
                 // Fail closed: while a cancelled prompt is unanswered, a request may be the stopped turn's (a new turn's is refused
-                // too, until then).
-                if self.cancel_open() {
+                // too, until then). With no prompt running it belongs to no turn (Audit F1241, Codex review of #794): a `blocked`
+                // could be read by the node as the start of its next prompt, and the decision would end that turn early.
+                if self.cancel_open() || !self.prompt_open() {
                     self.cancel_permission(request);
                     return Ok(());
                 }
@@ -2818,24 +2818,62 @@ mod tests {
         Ok(())
     }
 
-    /// Audit F1241: a permission request that arrives after its turn ended (a straggler of a cancelled turn) reports `blocked`;
-    /// deciding it must end that with `idle`, or the node reads a turn that never ends and queues every later prompt behind it.
+    /// Audit F1241, reworked in the Codex review of #794: a permission request with no prompt running (a straggler of a turn that
+    /// ended, or of a cancelled one) has no turn to belong to. It is answered `cancelled` at once and the node hears nothing: a
+    /// `blocked` here could be read as the start of the node's next prompt, and its decision would end that turn early.
     #[test]
-    fn a_permission_decided_outside_a_turn_returns_the_agent_to_idle(
+    fn a_permission_asked_outside_a_turn_is_refused() -> Result<(), Box<dyn std::error::Error>> {
+        use serde_json::json;
+        let (mut b, sent) = bridge_with_agent()?;
+        // No prompt ever.
+        ask(&mut b, "none")?;
+        // After a cancelled turn answered.
+        prompt(&mut b, 10, "t")?;
+        cancel(&mut b)?;
+        b.handle_agent(&json!({"jsonrpc":"2.0","id":1,"result":{"stopReason":"cancelled"}}))?;
+        // After a turn that ended normally.
+        prompt(&mut b, 12, "u")?;
+        b.handle_agent(&json!({"jsonrpc":"2.0","id":2,"result":{"stopReason":"end_turn"}}))?;
+        b.out.clear();
+        let _ = sent.take();
+        ask(&mut b, "late")?;
+        assert!(b.out.is_empty(), "the node hears nothing");
+        assert!(b.perms.is_empty());
+        assert_eq!(
+            answer_to(&sent.take(), "late").as_deref(),
+            Some("cancelled")
+        );
+        Ok(())
+    }
+
+    /// Codex review of #794: a prompt that comes while a permission is pending does not report `working`: the agent still waits for
+    /// the user. Its refusal as busy leaves the state at `blocked`; the decision reports `working`, the last reply `idle`.
+    #[test]
+    fn a_pending_permission_keeps_the_agent_blocked_when_another_prompt_comes(
     ) -> Result<(), Box<dyn std::error::Error>> {
         use serde_json::json;
-        let mut b = bridge_in_session()?;
-        let _ = b.handle_node(
-            &json!({"jsonrpc":"2.0","id":10,"method":"session/prompt","params":{"text":"t"}}),
-        )?;
-        let _ =
-            b.handle_node(&json!({"jsonrpc":"2.0","id":11,"method":"session/cancel","params":{}}))?;
-        b.handle_agent(&json!({"jsonrpc":"2.0","id":1,"result":{"stopReason":"cancelled"}}))?;
+        let (mut b, sent) = bridge_with_agent()?;
+        prompt(&mut b, 10, "t")?;
+        ask(&mut b, "perm-1")?;
         b.out.clear();
-        ask(&mut b, "late")?;
+        prompt(&mut b, 11, "u")?;
+        assert_eq!(states(&b.out), ["AGENT_STATE_BLOCKED"]);
+        assert_eq!(prompts(&sent.take()), ["t", "u"]);
+        b.out.clear();
+        b.handle_agent(&json!({"jsonrpc":"2.0","id":3,"error":{"code":-32603,"message":"busy"}}))?;
+        assert!(states(&b.out).is_empty(), "still blocked");
+        let approval = b.perms.keys().next().cloned().ok_or("no approval")?;
+        b.out.clear();
         let _ = b.handle_node(&json!({"jsonrpc":"2.0","id":12,"method":"approval/resolve",
-            "params":{"approvalId":"acp-2","approved":true}}))?;
-        assert_eq!(states(&b.out), ["AGENT_STATE_BLOCKED", "AGENT_STATE_IDLE"]);
+            "params":{"approvalId":approval,"approved":true}}))?;
+        assert_eq!(states(&b.out), ["AGENT_STATE_WORKING"]);
+        assert_eq!(
+            answer_to(&sent.take(), "perm-1").as_deref(),
+            Some("selected")
+        );
+        b.out.clear();
+        b.handle_agent(&json!({"jsonrpc":"2.0","id":1,"result":{"stopReason":"end_turn"}}))?;
+        assert_eq!(states(&b.out), ["AGENT_STATE_IDLE"]);
         Ok(())
     }
 }
