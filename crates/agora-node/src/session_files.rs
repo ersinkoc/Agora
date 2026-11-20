@@ -12,6 +12,10 @@
 //! agent for which more than one new file fits (the window then offers Start again). An agent that has no file after
 //! [`GIVE_UP_AFTER`] gets none.
 //!
+//! The disk lookups that comparison needs (an agent's folder, a session root) run on a worker thread in the node, never on the
+//! supervision thread; until an answer arrives the pair is undecided and its agents get no id (and are not given up on). An answer is
+//! trusted for 30 s ([`REVERIFY_AFTER`]), then looked up again. Reading the session files themselves still happens in `poll`.
+//!
 //! Known limit: discovery assumes that no link inside a *wildcard* directory of a session glob points into another kind's session root
 //! (for example `logs/*/*.jsonl` with `logs/linked` pointing at `store`, against `store/*.jsonl`); finding one would mean reading those
 //! directories on every poll. Such a setup can attribute a session to the wrong agent.
@@ -110,7 +114,7 @@ pub struct SessionWatcher {
     /// How a workspace folder and a session root are looked at on disk ([`workspace`], [`resolve`]); replaced in tests to count them.
     probe: fn(&Path) -> PathBuf,
     resolver: fn(&Path) -> Option<PathBuf>,
-    /// Each live agent's workspace and session root as looked up on disk, so no agent is probed again in a later pass.
+    /// Each live agent's workspace and session root as looked up on disk, trusted for [`REVERIFY_AFTER`] and for the same path only; a slot whose answer is outstanding is asked again after that time too.
     looked: HashMap<AgentId, Looked>,
     /// Probes run here when set (the node); without it they run inline in `poll` (tests).
     worker: Option<Worker>,
@@ -315,15 +319,6 @@ fn nested(x: &Path, y: &Path) -> bool {
     x.starts_with(&y) || y.starts_with(&x)
 }
 
-/// Every live target that has a rival in its folder. Two agents in one folder are rivals when they are of one kind, or when their
-/// globs' fixed directories are the same or one holds the other (as written or with links resolved: either is enough, since `expand`
-/// follows links below the fixed part; a root that cannot be resolved counts as holding every other), unless their `select`s are
-/// exclusive. Computed over all of them at once, whatever is due, so no pair is missed because one of its agents was already set aside
-/// (Codex review of #791). Not closed transitively: an agent without a rival of its own shares no possible file with any live agent,
-/// and every rival of an agent in the set is in the set itself. Roots are resolved only for pairs that need it (two kinds in one
-/// folder, not exclusive, disjoint as written), so a root on a stalled mount never holds up an agent with no such neighbour. The probes
-/// run on a worker thread in the node (`SessionWatcher::background`), never on the supervision thread; until an answer is there the
-/// pair is left undecided and its agents get no session.
 #[cfg(test)]
 fn with_rivals(targets: &[Target], home: &Path) -> HashSet<AgentId> {
     with_rivals_using(
@@ -378,8 +373,10 @@ fn lookup(
     which: Which,
     ask: &mut Asker<'_>,
 ) -> Option<Option<PathBuf>> {
+    // Seq 0 without an answer is an ask that could not be sent: asked again at the next look.
     let fresh = matches!(slot, Some(s) if s.key == key
-        && (s.value.is_none() || now.saturating_duration_since(s.at) < REVERIFY_AFTER));
+        && (s.value.is_some() || s.seq != 0)
+        && now.saturating_duration_since(s.at) < REVERIFY_AFTER);
     if !fresh {
         let (seq, value) = ask(agent, which, key);
         *slot = Some(Slot {
@@ -392,7 +389,16 @@ fn lookup(
     slot.as_ref().and_then(|s| s.value.clone())
 }
 
-/// The rivals, and the agents whose comparison waits for an answer of the background probe (they get no session until it comes, and
+/// Every live target that has a rival in its folder. Two agents in one folder are rivals when they are of one kind, or when their
+/// globs' fixed directories are the same or one holds the other (as written or with links resolved: either is enough, since `expand`
+/// follows links below the fixed part; a root that cannot be resolved counts as holding every other), unless their `select`s are
+/// exclusive. Computed over all of them at once, whatever is due, so no pair is missed because one of its agents was already set aside
+/// (Codex review of #791). Not closed transitively: an agent without a rival of its own shares no possible file with any live agent,
+/// and every rival of an agent in the set is in the set itself. Roots are resolved only for pairs that need it (two kinds in one
+/// folder, not exclusive, disjoint as written), so a root on a stalled mount never holds up an agent with no such neighbour. The probes
+/// run on a worker thread in the node (`SessionWatcher::background`), never on the supervision thread; until an answer is there the
+/// pair is left undecided and its agents get no session.
+/// Returns the rivals, and the agents whose comparison waits for an answer of the background probe (they get no session until it comes, and
 /// are not given up on).
 fn compare_rivals(
     targets: &[Target],
@@ -636,9 +642,8 @@ impl SessionWatcher {
                             seq: *seq,
                             path: path.to_path_buf(),
                         });
-                        // A probe that cannot even be sent stays unanswered: fail closed.
-                        let _ = sent;
-                        (*seq, None)
+                        // A probe that cannot be sent stays unanswered (fail closed) and is asked again at the next look.
+                        (if sent.is_ok() { *seq } else { 0 }, None)
                     }
                     None => (
                         *seq,
@@ -2103,5 +2108,90 @@ mod tests {
                 "0199aaaa-0000-4000-8000-00000000000a".to_string()
             )]
         );
+    }
+
+    fn watcher_with_dead_worker(home: PathBuf) -> SessionWatcher {
+        let mut w = SessionWatcher::new(Some(home));
+        let (ask_tx, ask_rx) = std::sync::mpsc::channel::<Ask>();
+        let (_answer_tx, answer_rx) = std::sync::mpsc::channel::<Answer>();
+        drop(ask_rx);
+        w.worker = Some(Worker {
+            tx: ask_tx,
+            rx: answer_rx,
+        });
+        w
+    }
+
+    fn pair_in_one_folder(root: &Path) -> [Target; 2] {
+        let folder = root.join("work/a");
+        [
+            with_glob(target("a", folder.clone()), "ka", "{home}/ra/*.jsonl"),
+            with_glob(target("b", folder), "kb", "{home}/rb/*.jsonl"),
+        ]
+    }
+
+    #[test]
+    fn a_lost_ask_is_asked_again_and_an_old_or_orphan_answer_is_dropped() {
+        let root = tmp("lost");
+        let mut w = watcher_with_dead_worker(root.join("home"));
+        let targets = pair_in_one_folder(&root);
+        let now = Instant::now();
+        assert!(w.poll(now, &targets, &HashSet::new()).is_empty());
+        let seq_of =
+            |w: &SessionWatcher, a: &str| w.looked[&AgentId::new(a)].root.as_ref().map(|s| s.seq);
+        // The send failed: the slot is marked to be asked again at the next look, with a new sequence number each time.
+        assert_eq!(seq_of(&w, "a"), Some(0));
+        // A live worker now: the next look asks again.
+        let (ask_tx, ask_rx) = std::sync::mpsc::channel::<Ask>();
+        let (answer_tx, answer_rx) = std::sync::mpsc::channel::<Answer>();
+        w.worker = Some(Worker {
+            tx: ask_tx,
+            rx: answer_rx,
+        });
+        assert!(w
+            .poll(now + SCAN_EVERY, &targets, &HashSet::new())
+            .is_empty());
+        let asked: Vec<Ask> = ask_rx.try_iter().collect();
+        assert_eq!(asked.len(), 2, "both roots asked");
+        let first = asked.iter().find(|a| a.agent == AgentId::new("a")).unwrap();
+        assert!(first.seq > 0);
+        // An answer of another sequence number is dropped; so is one for an agent that has left.
+        answer_tx
+            .send(Answer {
+                agent: AgentId::new("a"),
+                which: Which::Root,
+                seq: first.seq + 100,
+                value: Some(root.join("home/ra")),
+            })
+            .unwrap();
+        answer_tx
+            .send(Answer {
+                agent: AgentId::new("gone"),
+                which: Which::Root,
+                seq: 1,
+                value: None,
+            })
+            .unwrap();
+        w.poll(now + SCAN_EVERY * 2, &targets, &HashSet::new());
+        assert!(w.looked[&AgentId::new("a")]
+            .root
+            .as_ref()
+            .unwrap()
+            .value
+            .is_none());
+        assert!(!w.looked.contains_key(&AgentId::new("gone")));
+        // An ask that was sent but never answered is asked again after REVERIFY_AFTER, with a new sequence number.
+        let before = ask_rx.try_iter().count();
+        assert_eq!(before, 0, "not asked again within the period");
+        w.poll(
+            now + REVERIFY_AFTER + SCAN_EVERY * 2,
+            &targets,
+            &HashSet::new(),
+        );
+        let again: Vec<Ask> = ask_rx.try_iter().collect();
+        assert!(again
+            .iter()
+            .any(|a| a.agent == AgentId::new("a") && a.seq > first.seq));
+        assert!(w.gave_up.is_empty());
     }
 }

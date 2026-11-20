@@ -4,9 +4,9 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
-### Session discovery no longer waits on the disk
+### Session discovery checks for look-alike agents off the supervision thread
 
-The node looks at the disk for a Codex-style session id off its supervision thread, so a slow mount cannot hold up states or approvals. A moved workspace or a changed manifest is noticed within 30 seconds, and until a lookup answers the agent is given no session.
+When the node decides whether two agents could be mixed up, it looks at the disk on a thread of its own (reading the session files still happens on the supervision thread). A moved workspace or a changed manifest is noticed within 30 seconds, and until a lookup answers the agent is given no session.
 
 ## 0.3.31
 
