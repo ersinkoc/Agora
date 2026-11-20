@@ -1,6 +1,7 @@
 # 0094. A plain terminal shows the agent program running in it
-Status: Proposed
+Status: Accepted
 Date: 2026-11-20
+Accepted: 2026-11-20 (the maintainer's explicit message in the merger chat: "ADR-0094 ve ADR-0085 Ek A'yı kabul ediyorum"). The open questions' proposed answers stand.
 
 Not accepted. Nothing here may be built until the maintainer names this ADR in an acceptance message.
 
