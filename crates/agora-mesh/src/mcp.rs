@@ -393,7 +393,10 @@ impl McpConnection {
         };
         match name {
             "agents_list" => {
-                let list = mesh.agents_list(str_arg(&args, "project"));
+                let Ok(project) = optional_str_arg(&args, "project") else {
+                    return bad();
+                };
+                let list = mesh.agents_list(project);
                 let rows: Vec<Value> = list
                     .iter()
                     .map(|a| crate::awareness::list_row(mesh, a, now))
@@ -402,15 +405,16 @@ impl McpConnection {
             }
             "workspace_status" => done(crate::awareness::local_status(mesh, me, now)),
             "send_message" => {
-                let (Some(to), Some(body), Some(refs)) = (
+                let (Some(to), Some(body), Some(refs), Ok(reply_to)) = (
                     str_arg(&args, "to"),
                     str_arg(&args, "body"),
                     strs_arg(&args, "refs"),
+                    optional_str_arg(&args, "reply_to"),
                 ) else {
                     return bad();
                 };
                 done(
-                    mesh.send_message(me, to, body, &refs, str_arg(&args, "reply_to"), now)
+                    mesh.send_message(me, to, body, &refs, reply_to, now)
                         .map(|m| json!({"message_id": m})),
                 )
             }

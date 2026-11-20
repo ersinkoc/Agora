@@ -28,7 +28,7 @@ the node per MCP connection; agents cannot impersonate each other.
   authority; sensitive actions still go through approvals (see `security/threat-model.md`).
 - Rate limits per agent (messages per minute, open asks) prevent loops between agents.
 - Message bodies are size-limited; large content is passed by reference (path, commit, task). A task's title, detail and
-  summary have the same limit (`mesh.body_too_large`).
+  summary have the same limit (`mesh.body_too_large`), and so do a message's or handoff's `refs` taken together.
 - All mesh traffic is in the audit log.
 
 ## MCP conversation (`agora-mesh::mcp`)
@@ -47,7 +47,7 @@ and `summary`; `inbox` items carry `kind` (`message`, `ask`, `reply`, `handoff`)
 Tool errors are results with `isError: true` whose text is JSON `{"error": {"code", "params"}}` using the codes in
 `error-codes.md` (new: `mesh.rate_limited`, `mesh.body_too_large`, `mesh.too_many_refs`, `mesh.too_many_asks`, `mesh.timeout`,
 `task.not_found`, `task.not_open`, `task.blocked`, `task.not_owner`, `lease.not_found`, `lease.invalid_path`). Bad arguments are
-JSON-RPC `-32602`. `ask` does not block the library: the connection returns `Waiting { ask_id, deadline }` and the caller polls
+JSON-RPC `-32602`; an optional argument a tool uses that has the wrong type is a bad argument, never taken as omitted. `ask` does not block the library: the connection returns `Waiting { ask_id, deadline }` and the caller polls
 the broker and calls `finish_ask`. If the originating transport ends first, its runtime calls the caller-bound
 `Mesh::cancel_ask` for the asks it owns; another agent cannot cancel them.
 

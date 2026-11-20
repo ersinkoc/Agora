@@ -669,6 +669,11 @@ impl Mesh {
         if refs.len() > self.limits.max_refs {
             return Err(MeshError::TooManyRefs);
         }
+        // F1221: refs together have the body's limit, so they cannot carry what the body may not.
+        let ref_bytes = refs.iter().fold(0usize, |n, r| n.saturating_add(r.len()));
+        if ref_bytes > self.limits.max_body_bytes {
+            return Err(MeshError::BodyTooLarge);
+        }
         Ok(())
     }
 
