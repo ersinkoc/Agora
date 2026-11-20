@@ -949,21 +949,46 @@ forwards either to a node that did not offer it.
   adapter nor the node can clear the other's flag. For a select the flag is on each choice; for a boolean it is on the option and holds for
   both values in the flag, but the node judges each value: a change TO the value that keeps protection (turning `auto_approve` off,
   `ask_for_approval` on) is never refused, and where the option's words do not say which value protects, both count as risky.
-  `AgentSetMode`, `AgentSetModel` and `AgentSetConfig` of a choice that skips are refused with `agent.option_forbidden`
-  (`kind`, `option`: the mode, the model or the config id, `policy` `forbid` or `confined_only`) when the node's `skip_permissions` policy does
-  not allow it, and otherwise with `agent.option_unconfirmed` (same `kind` and `option`): a launch option that skips needs the user's
-  confirmation (ADR-0059) and so does a mode or a config option, but the schema has no field to carry it on `AgentSetMode` or
-  `AgentSetConfig`, so the node can never be shown one and refuses these always. **Missing:** a `confirmed` field on those two commands,
-  signed like the launch's; it is a schema change and needs an ADR (`Supervisor::prepare_set_option`, `prepare_set_config`).
-  **Switching a running agent to a mode that skips permissions from a client (the web `SessionBar`'s "acts freely" after its
-  confirmation dialog) is therefore temporarily unavailable** under every policy until that field exists. Why a verified signature
-  cannot stand in for it today: a grant (`docs/specs/protocol.md`, ADR-0041) is signed over the node id, a grant id, a scope, the
-  command NAMES (`agent.set_mode`) and an expiry of up to 8 hours; it names no mode, option or value, and the control dispatch (a
-  granted command reaches `execute` like any other, over the node's socket) cannot tell a granted call from an owner's. Taking it for
-  the user's confirmation would let one blanket grant switch any agent to any skipping mode for hours, which is weaker than a launch
-  (whose signature names each option, `directory-action-v4`). The `agent.launch` path with its signed options is unaffected. The check is on the node, whatever
-  the window or the hub said. The node forgets an adapter's reported options when it restarts, so a stale list cannot decide a choice.
-  Both commands are in the team-default `signed_commands` of a node with limited devices.
+  `AgentSetMode` and `AgentSetConfig` of a choice that skips follow the node's `skip_permissions`
+  policy: refused with `agent.option_forbidden` (`kind`, `option`: the mode, the model or the config id, `policy` `forbid` or
+  `confined_only`) when the policy does not allow it; when it does, the node neither applies nor refuses the choice: it raises an
+  `agent.skip_permissions` approval and answers `agent.approval_needed { approval_id }` (next item). A choice that keeps protection is
+  never held to any of this. (`AgentSetModel` of a model the node judges as skipping is still refused, `agent.option_forbidden` or
+  `agent.option_unconfirmed`: Amendment A covers modes and config options.) All three commands are in the team-default `signed_commands`
+  of a node with limited devices. The node forgets an adapter's reported options when it restarts, so a stale list cannot decide a choice.
+- **A running agent switched to a mode or option that skips permission questions (ADR-0090 Amendment A).** Raised by the node, from a
+  window's `AgentSetMode` or `AgentSetConfig` only (an agent, the mesh and the hub have no path to it); no schema message is new:
+  - `ApprovalRequested { action: "agent.skip_permissions", agent_id, detail, expires_at_ms }`, expiring after 10 minutes like every
+    request. `detail` is the node's own rendering, a JSON object: `node`, `agent` (the agent id), `agent_kind`, `folder` (the agent's
+    folder on that machine), `option_type` (`mode` or `config`), `option` (for a mode the literal `mode`, otherwise the config id),
+    `option_name` (the agent's own name for the option, untrusted, at most 64 characters, `""` for a mode), `value` (the mode id or the
+    value chosen), `value_name` (the agent's own name for it, untrusted, same bounds) and `scope` (`session`: the choice lasts until the
+    agent ends, restarts or is switched back). A window writes its own words from these fields (UI vocabulary, ADR-0024) and shows the
+    ids `option` and `value` beside the agent's names, which are text a model chose.
+  - The command is answered with the error `agent.approval_needed { approval_id }`; the choice is not applied. A repeat of the same
+    command while that request waits gets the same id (one card per agent, option and value); a command naming another value of the same
+    option withdraws the waiting card and raises a new one.
+  - The decision is the existing `ApprovalResolve { approval_id, approved, signer_device_id, signature }` (`helper_grant` 0 and
+    `helpers_may_start` false: anything else is refused), signed over the domain `agora-approval-skip-v1`, one NUL byte, then
+    `F(node_id) F(approval_id) F(verdict) F(agent_id) F(option_id) F(value) F(sha256(detail))`, concatenated with no separator, where
+    `F(x)` is the decimal byte length of `x`, `:`, then `x`; `verdict` is `1` or `0`; `agent_id`, `option_id` and `value` are the
+    detail's `agent`, `option` and `value`; the hash is SHA-256 of `detail` exactly as announced, lowercase hex. Lengths are
+    canonical decimal (no leading zeros, no sign); the fields are raw bytes (UTF-8 as given, no normalisation). Vectors:
+    `schema/fixtures/signing/approval-skip-v1.json` (checked in `crates/agora-protocol/tests/approval_skip_signing.rs` and by the node).
+  - The node verifies the signature against `trusted-devices` as for any approval (an untrusted device or a signature over other bytes is
+    `approval.signature_invalid`), the id is single use (a replay is `protocol.invalid_message`, `field: approval_id`) and a late
+    decision is `approval.expired`. Only an `approved` verdict applies anything, and it applies exactly the option and value the node
+    rendered and stored when it raised the request, never anything in the decision. A denial, an expiry and a withdrawal change nothing.
+  - Scope is the agent's session: the waiting request is withdrawn (announced as `ApprovalResolved { approved: false }` with no signer)
+    when the agent ends, is stopped or its adapter crashes, when the option is set to any value by another command, and when it
+    is superseded; an approval decided after the adapter restarted applies nothing (the session it named is gone, and the node's
+    own check of what the agent offers fails). A node restart forgets every waiting request and every approval: the agent that comes
+    back asks again. At most 8 requests wait on a node and at most 6 are raised per minute (`node.resource_limit { resource:
+    "skip_approvals", limit }`). Policy `forbid` and `confined_only` (not confined) refuse with `agent.option_forbidden` before any request
+    exists. Switching back to a value that keeps protection needs no approval.
+  - Node capability `approval.skip_permissions`, advertised only by a node that handles the above and passed by the hub. A client that
+    sees `agent.approval_needed` shows the card of the `ApprovalRequested` it already receives; against a node without the capability
+    the command is still refused with `agent.option_unconfirmed`.
 - **Capabilities:** `chat.rich` (entries that change in place, thinking, permission entries, queued prompts, `AgentPromptResult`),
   `agent.set_config`, `agent.cancel_turn` and `agent.commands` (`AgentCommands` events), advertised by every node of this build in
   `uplink_client.rs` and passed by the hub (`hubcli.rs`).

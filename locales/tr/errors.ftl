@@ -108,5 +108,6 @@ preview-unknown = Bu makinede { $forward_id } adlı bir önizleme yok.
 preview-unavailable = Önizleme bu kurulumda çalışmıyor ({ $reason }). Hub üzerinde kendine ait bir adres gerekir.
 agent-option_unknown = Ajanın bu değerle { $id } adlı bir ayarı yok.
 agent-queue_full = Bu ajan için zaten { $limit } mesaj bekliyor. Ajanın bitirmesini bekleyin ya da geçerli turunu durdurun.
+agent-approval_needed = Bu seçim ajanın sormadan çalışmasını sağlar, bu yüzden onayınızı bekliyor ({ $approval_id }). Henüz hiçbir şey değişmedi.
 enroll-renew_refused = Bu makinenin sertifikası yenilenemedi ({ $reason }). Elindeki geçerli kalır; iptal edildiyse ya da süresi dolduysa hub'a yeniden katılın.
 internal = Bir şeyler ters gitti. Olay numarası: { $incident_id }.

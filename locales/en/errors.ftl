@@ -109,5 +109,6 @@ preview-unknown = There is no preview { $forward_id } on this machine.
 preview-unavailable = Previews do not work in this setup ({ $reason }). They need an address of their own on the hub.
 agent-option_unknown = The agent has no setting { $id } with that value.
 agent-queue_full = { $limit } messages are already waiting for this agent. Wait for it to finish or stop its current turn.
+agent-approval_needed = This choice lets the agent act without asking, so it waits for your approval ({ $approval_id }). Nothing has changed yet.
 enroll-renew_refused = This machine's certificate could not be renewed ({ $reason }). It keeps the one it has; if that one is revoked or has ended, join the hub again.
 internal = Something went wrong. Reference: { $incident_id }.

@@ -308,6 +308,9 @@ message ApprovalRequested {
   string approval_id = 1;
   string agent_id = 2;
   // What the agent wants to do, for example "run_command" or "write_file".
+  // ADR-0090 Amendment A: `agent.skip_permissions` is raised only by the node, when a window asked to switch a running agent to a mode
+  // or option that makes it act without asking; `detail` is the node's own rendering (JSON, docs/specs/protocol.md) and the decision
+  // is signed over `agora-approval-skip-v1`. The same kind of request, decided as any other (`ApprovalResolve`, `ApprovalResolved`).
   string action = 3;
   string detail = 4;
   uint64 expires_at_ms = 5;
