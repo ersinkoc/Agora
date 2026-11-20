@@ -420,7 +420,8 @@ fn list_reply(
     {
         return None;
     }
-    let filter = args.get("project").and_then(Value::as_str);
+    // A `project` that is not a string goes to the broker, which refuses it (-32602) rather than listing every agent.
+    let filter = agora_mesh::mcp::optional_str_param(&args, "project")?;
     let (mut rows, node) = {
         let m = mesh.lock().unwrap_or_else(|e| e.into_inner());
         let node = m.agent_info(conn.agent())?.node.clone();
@@ -1436,6 +1437,49 @@ mod tests {
                 from: b
             }
         );
+    }
+
+    /// Codex review of #793: the node answers `agents_list` itself (before the broker), so it must refuse a `project` that is not a
+    /// string with -32602 as the broker does, not treat it as omitted and list every agent. A string or no `project` still lists.
+    #[test]
+    fn the_nodes_agents_list_refuses_a_project_that_is_not_a_string() {
+        let (mesh, a, _) = ask_fixture();
+        let remote: RemoteSlot = Mutex::new(None);
+        let shares = Shares::default();
+        let mut conn = McpConnection::new(a);
+        {
+            let mut m = mesh.lock().unwrap();
+            conn.handle(
+                r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}"#,
+                &mut m,
+                now_ms(),
+            );
+        }
+        let call = |conn: &mut McpConnection, project: &str| {
+            let line = format!(
+                r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"agents_list","arguments":{{{project}}}}}}}"#
+            );
+            list_reply(conn, &line, &mesh, &remote, &shares).unwrap_or_else(|| {
+                let mut m = mesh.lock().unwrap();
+                match conn.handle(&line, &mut m, now_ms()) {
+                    Outcome::Reply(msg) => msg,
+                    _ => panic!("no reply"),
+                }
+            })
+        };
+        for bad in [r#""project":false"#, r#""project":5"#, r#""project":{}"#] {
+            match call(&mut conn, bad) {
+                Message::ErrorResponse { code, .. } => assert_eq!(code, -32602, "{bad}"),
+                other => panic!("{bad}: expected -32602, got {other:?}"),
+            }
+        }
+        for good in ["", r#""project":"p""#, r#""project":null"#] {
+            let Message::Response { result, .. } = call(&mut conn, good) else {
+                panic!("{good}: expected a list");
+            };
+            let rows = agora_mesh::mcp::tool_result_value(&result).unwrap();
+            assert_eq!(rows.as_array().unwrap().len(), 2, "{good}");
+        }
     }
 
     #[test]

@@ -197,6 +197,12 @@ fn str_arg<'a>(a: &'a Value, k: &str) -> Option<&'a str> {
     a.get(k).and_then(Value::as_str)
 }
 
+/// An optional string argument as the tools read it: `Some(None)` when absent or null, `None` when it has another type (an
+/// invalid call, -32602, not an omission). The node uses it for the calls it answers before the broker.
+pub fn optional_str_param<'a>(a: &'a Value, k: &str) -> Option<Option<&'a str>> {
+    optional_str_arg(a, k).ok()
+}
+
 fn optional_str_arg<'a>(a: &'a Value, k: &str) -> Result<Option<&'a str>, ()> {
     match a.get(k) {
         None | Some(Value::Null) => Ok(None),
@@ -205,7 +211,8 @@ fn optional_str_arg<'a>(a: &'a Value, k: &str) -> Result<Option<&'a str>, ()> {
     }
 }
 
-fn strs_arg(a: &Value, k: &str) -> Option<Vec<String>> {
+/// A list of strings: absent or null is empty; anything else that is not an array of strings is an invalid call.
+pub fn strs_arg(a: &Value, k: &str) -> Option<Vec<String>> {
     match a.get(k) {
         None | Some(Value::Null) => Some(Vec::new()),
         Some(Value::Array(v)) => v.iter().map(|x| x.as_str().map(str::to_string)).collect(),

@@ -10,7 +10,7 @@ use std::sync::Mutex;
 
 use agora_core::AgentId;
 use agora_mesh::broker::{AgentInfo, Limits, Mesh};
-use agora_mesh::mcp::{board_tool, BOARD_TOOLS};
+use agora_mesh::mcp::{board_tool, protocol_error_result, strs_arg, BOARD_TOOLS};
 use agora_protocol::v1::event::Body;
 use agora_protocol::{Error, ErrorCode};
 use serde_json::{json, Value};
@@ -204,28 +204,14 @@ impl Boards {
         if !to.starts_with('#') || to.len() < 2 {
             return invalid("to");
         }
-        let refs: Vec<String> = args
-            .get("refs")
-            .and_then(Value::as_array)
-            .map(|r| {
-                r.iter()
-                    .filter_map(|x| x.as_str().map(str::to_string))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let done = |result: Value, is_error: bool| Verdict::Done { result, is_error };
-        let refuse = |code: ErrorCode, limit: usize| {
-            let text = json!({"error": {"code": code.as_str(), "params": {"limit": limit}}});
-            done(
-                json!({"content": [{"type": "text", "text": text.to_string()}], "isError": true}),
-                true,
-            )
+        // As the broker reads them: a ref that is not a string is an invalid call, not dropped.
+        let Some(refs) = strs_arg(args, "refs") else {
+            return invalid("refs");
         };
-        if body.len() > limits.max_body_bytes {
-            return answer(refuse(ErrorCode::MeshBodyTooLarge, limits.max_body_bytes));
-        }
-        if refs.len() > limits.max_refs {
-            return answer(refuse(ErrorCode::MeshTooManyRefs, limits.max_refs));
+        let done = |result: Value, is_error: bool| Verdict::Done { result, is_error };
+        // The broker's own check, before any copy goes out: receiving nodes would refuse each one and nobody would hear of it.
+        if let Err(e) = limits.check_content(body, &refs) {
+            return answer(done(protocol_error_result(&e.to_error(&limits)), true));
         }
         let me = format!("{node}/{agent}");
         let mut targets: Vec<(String, String)> = view
@@ -1247,6 +1233,53 @@ mod tests {
         assert!(matches!(a.verdict, Verdict::Invalid(_)));
         let a = b.call(&v, "alpha", "a", "p", "task_list", "[1]", 1);
         assert!(matches!(a.verdict, Verdict::Invalid(_)));
+    }
+
+    /// Codex review of #793 (F1221 on the hub): a shared project's `#channel` has the broker's content rules. Refs together over the
+    /// body limit are `mesh.body_too_large` with nothing fanned out (the receiving nodes would refuse every copy, unreported); refs
+    /// exactly at the limit go out; a ref that is not a string is an invalid call, not silently dropped.
+    #[test]
+    fn a_shared_channel_refuses_refs_over_the_body_limit_before_fanout() {
+        let b = Boards::new();
+        let v = view(&["alpha", "beta"]);
+        let max = Limits::default().max_body_bytes;
+        let refs = |total: usize| json!(["x".repeat(total - max / 2), "y".repeat(max / 2)]);
+        let over = run(
+            &b,
+            &v,
+            "alpha",
+            "send_message",
+            json!({"to": "#all", "body": "hi", "refs": refs(max + 1)}),
+            1,
+        );
+        assert_eq!(code(&over), "mesh.body_too_large", "{}", text(&over));
+        assert!(over.fanout.is_none());
+        let at = run(
+            &b,
+            &v,
+            "alpha",
+            "send_message",
+            json!({"to": "#all", "body": "hi", "refs": refs(max)}),
+            2,
+        );
+        assert_eq!(code(&at), "", "{}", text(&at));
+        let f = at.fanout.expect("refs at the limit are sent");
+        assert_eq!(f.refs.iter().map(String::len).sum::<usize>(), max);
+        assert_eq!(f.targets, [("beta".to_string(), "a".to_string())]);
+        let not_text = run(
+            &b,
+            &v,
+            "alpha",
+            "send_message",
+            json!({"to": "#all", "body": "hi", "refs": ["ok", 1]}),
+            3,
+        );
+        assert!(
+            matches!(not_text.verdict, Verdict::Invalid(_)),
+            "{:?}",
+            not_text.verdict
+        );
+        assert!(not_text.fanout.is_none());
     }
 
     #[test]
