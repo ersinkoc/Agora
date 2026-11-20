@@ -24,8 +24,10 @@
 use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::ops::ControlFlow;
-use std::process::{Child, ChildStderr, Command, Stdio};
-use std::sync::mpsc::{channel, sync_channel, Receiver, RecvTimeoutError, SyncSender};
+use std::process::{Child, ChildStderr, ChildStdin, Command, Stdio};
+use std::sync::mpsc::{
+    channel, sync_channel, Receiver, RecvTimeoutError, SyncSender, TrySendError,
+};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -36,6 +38,8 @@ use crate::perm::{self, Category};
 
 /// Both readers share this queue. Store line bytes so queued JSON has not expanded into values.
 const INPUT_QUEUE: usize = 8;
+/// Commands waiting behind the one being written to the agent.
+const AGENT_WRITE_QUEUE: usize = 8;
 /// How long agent text chunks are joined into one chat item.
 const JOIN: Duration = Duration::from_millis(150);
 /// The most text one joined item holds before it is sent anyway.
@@ -150,6 +154,46 @@ fn lines<R: Read + Send + 'static>(r: R, wrap: fn(Input) -> Ev, tx: SyncSender<E
 fn write_line<W: Write>(w: &mut W, v: &Value) -> io::Result<()> {
     writeln!(w, "{v}")?;
     w.flush()
+}
+
+struct AgentWriter {
+    line: Vec<u8>,
+    pending: SyncSender<Box<[u8]>>,
+}
+
+impl AgentWriter {
+    fn start(mut stdin: ChildStdin) -> Self {
+        let (pending, lines) = sync_channel::<Box<[u8]>>(AGENT_WRITE_QUEUE);
+        std::thread::spawn(move || {
+            while let Ok(line) = lines.recv() {
+                if stdin.write_all(&line).and_then(|()| stdin.flush()).is_err() {
+                    break;
+                }
+            }
+        });
+        Self {
+            line: Vec::new(),
+            pending,
+        }
+    }
+}
+
+impl Write for AgentWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.line.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        let line = std::mem::take(&mut self.line).into_boxed_slice();
+        self.pending.try_send(line).map_err(|error| {
+            match error {
+                TrySendError::Full(_) => io::ErrorKind::WouldBlock,
+                TrySendError::Disconnected(_) => io::ErrorKind::BrokenPipe,
+            }
+            .into()
+        })
+    }
 }
 
 /// A unified diff that replaces `old` by `new` as a whole (ACP gives both texts, not a patch).
@@ -879,6 +923,7 @@ struct Bridge<W: Write> {
     out: W,
     /// The agent's stdin (a buffer in tests, so what the agent was sent can be read on every platform).
     agent: Box<dyn Write>,
+    agent_writer_full: bool,
     next: u64,
     waiting: HashMap<u64, Waiting>,
     session: Option<String>,
@@ -1004,10 +1049,13 @@ impl<W: Write> Bridge<W> {
         }
     }
 
-    /// A line to the agent. A failed write means the agent is gone or going: the end of its output follows and is reported then
-    /// (with what was still waiting), so the failure itself is not an error of the bridge.
+    /// Queue a line to the agent. If its writer has fallen behind, the dispatcher ends the agent via the normal exit path.
+    /// A broken pipe is reported when the agent's output ends, with its own exit status and stderr.
     fn send_agent(&mut self, v: &Value) {
-        let _ = write_line(&mut self.agent, v);
+        if !self.agent_writer_full {
+            self.agent_writer_full = write_line(&mut self.agent, v)
+                .is_err_and(|e| e.kind() == io::ErrorKind::WouldBlock);
+        }
     }
 
     fn ask_agent(&mut self, method: &str, params: Value, waiting: Waiting) {
@@ -2109,7 +2157,8 @@ where
     lines(stdout, Ev::Agent, tx);
     let mut b = Bridge {
         out: output,
-        agent: Box::new(stdin),
+        agent: Box::new(AgentWriter::start(stdin)),
+        agent_writer_full: false,
         next: 0,
         waiting: HashMap::new(),
         session: None,
@@ -2132,7 +2181,7 @@ where
             .ok(),
     };
     let result = (|| -> io::Result<Option<Value>> {
-        loop {
+        let failure = loop {
             match rx.recv_timeout(Duration::from_millis(50)) {
                 Ok(Ev::Node(Input::Line(line))) => {
                     if let Ok(m) = serde_json::from_slice(&line) {
@@ -2149,50 +2198,48 @@ where
                 }
                 Ok(Ev::Node(Input::Gone)) => return Ok(None),
                 Ok(Ev::Node(Input::TooLong)) => return Err(io::ErrorKind::InvalidData.into()),
-                Ok(Ev::Agent(end @ (Input::Gone | Input::TooLong))) => {
-                    let oversized = matches!(end, Input::TooLong);
-                    if oversized {
-                        let _ = child.kill();
-                    }
-                    let code = wait_briefly(&mut child);
-                    // The rest of its stderr, unless something it started still holds the stream open.
-                    let _ = stderr_done.recv_timeout(Duration::from_millis(500));
-                    let raw = kept.lock().unwrap_or_else(|e| e.into_inner()).buf.clone();
-                    let home = std::env::var("HOME")
-                        .or_else(|_| std::env::var("USERPROFILE"))
-                        .ok();
-                    let tail = stderr_tail(&raw, home.as_deref());
-                    b.agent_gone(code, &tail)?;
-                    // The node's initialize or session/start may still be on its way. Give it the exit reason too.
-                    if b.session.is_none() {
-                        let end = Instant::now() + LATE_REQUEST_WAIT;
-                        while let Some(left) = end.checked_duration_since(Instant::now()) {
-                            match rx.recv_timeout(left) {
-                                Ok(Ev::Node(Input::Line(line))) => {
-                                    if let Ok(m) = serde_json::from_slice(&line) {
-                                        if b.answer_late(&m, code, &tail)? {
-                                            break;
-                                        }
-                                    }
-                                }
-                                Ok(_) => {}
-                                Err(_) => break,
-                            }
-                        }
-                    }
-                    return Err(if oversized {
-                        io::ErrorKind::InvalidData.into()
-                    } else {
-                        io::Error::other("the agent exited")
-                    });
-                }
+                Ok(Ev::Agent(Input::Gone)) => break None,
+                Ok(Ev::Agent(Input::TooLong)) => break Some(io::ErrorKind::InvalidData),
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => return Ok(None),
+            }
+            if b.agent_writer_full {
+                break Some(io::ErrorKind::WouldBlock);
             }
             if !b.text.is_empty() && b.text_since.elapsed() >= JOIN {
                 b.flush_text()?;
             }
+        };
+        if failure.is_some() {
+            let _ = child.kill();
         }
+        let code = wait_briefly(&mut child);
+        // The rest of its stderr, unless something it started still holds the stream open.
+        let _ = stderr_done.recv_timeout(Duration::from_millis(500));
+        let raw = kept.lock().unwrap_or_else(|e| e.into_inner()).buf.clone();
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .ok();
+        let tail = stderr_tail(&raw, home.as_deref());
+        b.agent_gone(code, &tail)?;
+        // The node's initialize or session/start may still be on its way. Give it the exit reason too.
+        if b.session.is_none() {
+            let end = Instant::now() + LATE_REQUEST_WAIT;
+            while let Some(left) = end.checked_duration_since(Instant::now()) {
+                match rx.recv_timeout(left) {
+                    Ok(Ev::Node(Input::Line(line))) => {
+                        if let Ok(m) = serde_json::from_slice(&line) {
+                            if b.answer_late(&m, code, &tail)? {
+                                break;
+                            }
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(_) => break,
+                }
+            }
+        }
+        Err(failure.map_or_else(|| io::Error::other("the agent exited"), io::Error::from))
     })();
     drop(rx);
     let _ = child.kill();
@@ -2213,6 +2260,7 @@ mod tests {
         let mut bridge = Bridge {
             out: Vec::new(),
             agent: Box::new(io::sink()),
+            agent_writer_full: false,
             next: 0,
             waiting: HashMap::new(),
             session: Some("s".to_string()),

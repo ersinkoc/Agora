@@ -9,6 +9,8 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
+const LARGE_PROMPT_BYTES: usize = 256 * 1024;
+
 #[test]
 fn acp_child() {
     // Only as the bridge's child: the harness running every test sees the variable too once another test set it, and would
@@ -50,6 +52,73 @@ fn acp_child_sends_an_oversized_line() {
     if io::copy(&mut bytes, &mut output).is_ok() && output.flush().is_ok() {
         let _ = io::copy(&mut input, &mut io::sink());
     }
+}
+
+/// An agent that emits progress while it is still reading a large prompt.
+#[test]
+fn acp_child_streams_before_reading_large_prompt() {
+    if std::env::var_os("AGORA_TEST_ACP").is_none()
+        || !std::env::args().any(|a| a == "acp_child_streams_before_reading_large_prompt")
+    {
+        return;
+    }
+    println!();
+    let mut input = io::stdin().lock();
+    let mut output = io::stdout().lock();
+    for (method, result) in [
+        (
+            "initialize",
+            json!({"protocolVersion": 1, "agentCapabilities": {}}),
+        ),
+        ("session/new", json!({"sessionId": "acp-s1"})),
+    ] {
+        let mut line = String::new();
+        input.read_line(&mut line).unwrap();
+        let request: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(request["method"], method);
+        let reply = json!({"jsonrpc": "2.0", "id": request["id"], "result": result});
+        writeln!(output, "{reply}").unwrap();
+        output.flush().unwrap();
+    }
+
+    // Read only one byte before emitting enough complete updates to fill the bridge's
+    // input queue and OS pipe. The rest of the prompt remains outstanding during the burst.
+    let mut first = [0];
+    input.read_exact(&mut first).unwrap();
+    let mut update = |text: &str| {
+        let message = json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {"sessionId": "acp-s1", "update": {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": text},
+            }},
+        });
+        writeln!(output, "{message}").unwrap();
+        output.flush().unwrap();
+    };
+    let progress = "p".repeat(16 * 1024);
+    for _ in 0..16 {
+        update(&progress);
+    }
+    let mut line = first.to_vec();
+    input.read_until(b'\n', &mut line).unwrap();
+    let prompt: Value = serde_json::from_slice(&line).unwrap();
+    assert_eq!(prompt["method"], "session/prompt");
+    assert_eq!(
+        prompt
+            .pointer("/params/prompt/0/text")
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .len(),
+        LARGE_PROMPT_BYTES,
+    );
+    update("fixture prompt received");
+    let reply = json!({"jsonrpc": "2.0", "id": prompt["id"], "result": {"stopReason": "end_turn"}});
+    writeln!(output, "{reply}").unwrap();
+    output.flush().unwrap();
+    let _ = io::copy(&mut input, &mut io::sink());
 }
 
 /// The fake agent that refuses `session/new`.
@@ -328,6 +397,37 @@ fn an_agent_that_dies_ends_the_bridge_so_the_node_sees_the_adapter_exit() {
         json!({"sessionId": "acp-s1", "text": "crash"}),
     );
     assert!(n.done.take().unwrap().join().unwrap().is_err());
+}
+
+#[test]
+fn an_agent_can_stream_updates_while_a_large_prompt_is_written() {
+    let mut n = Node::start_with("acp_child_streams_before_reading_large_prompt");
+    assert_eq!(
+        n.call("initialize", json!({}))["result"]["adapterName"],
+        "acp-bridge"
+    );
+    let started = n.call(
+        "session/start",
+        json!({"projectRoot": ".", "worktree": "."}),
+    );
+    assert_eq!(started["result"]["sessionId"], "acp-s1");
+    n.call(
+        "session/prompt",
+        json!({"sessionId": "acp-s1", "text": "x".repeat(LARGE_PROMPT_BYTES)}),
+    );
+    n.wait(|m| {
+        m["method"] == "chat/append" && m["params"]["text"]["text"] == "fixture prompt received"
+    });
+    assert!(chats(&n).iter().any(|m| {
+        m["text"]["text"]
+            .as_str()
+            .is_some_and(|text| text.starts_with("ppp"))
+    }));
+    n.call(
+        "session/stop",
+        json!({"sessionId": "acp-s1", "reason": "user"}),
+    );
+    assert!(n.done.take().unwrap().join().unwrap().is_ok());
 }
 
 #[test]

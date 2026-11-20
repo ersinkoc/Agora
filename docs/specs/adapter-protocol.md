@@ -129,6 +129,11 @@ and invalid UTF-8 within the limit are ignored. A line over the limit closes tha
 On the agent side the bridge stops the agent and uses the existing `adapter.agent_exited` reason with the current stage.
 On the node side the bridge stops the agent and exits with an invalid-input error, which the host sees as an adapter exit.
 
+The bridge writes to the agent on a separate thread so it can continue dispatching updates while the agent reads a
+command. The writer holds eight queued commands in addition to the current write. If this queue fills, the bridge
+stops the agent and uses `adapter.agent_exited`. The node's adapter host reads bridge replies independently of its
+command writes.
+
 | ACP (agent → client) | Adapter protocol (bridge → node) |
 | --- | --- |
 | `session/update` `agent_message_chunk` | `chat/append` text, chunks joined for up to 150 ms (or 4 KiB). An explicit stop or the end of the node's request stream flushes buffered text while the reply stream remains open |
