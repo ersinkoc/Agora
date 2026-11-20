@@ -468,9 +468,9 @@ fn answer(
     }
 }
 
-/// ADR-0059 decision 5: before y allows the start request `selected` points at whose helper would act without asking, the same
-/// confirmation a start from this terminal asks for (y starts it so; any other key keeps asking and nothing is answered). `true` when
-/// there is nothing to confirm or the user confirmed.
+/// ADR-0059 decision 5: before y allows the start request `selected` points at whose helper would act without asking, a confirmation
+/// answered with its own key, `s`: a held or repeated y (the key that opened it) never confirms but keeps asking, as does any other key
+/// and no key at all; nothing is answered then. `true` when there is nothing to confirm or the user pressed s.
 fn confirm_skipping_start(
     say: &Say,
     s: &Snapshot,
@@ -484,9 +484,11 @@ fn confirm_skipping_start(
     let Some(names) = agora_tui::render::start_skipping_options(&a.action, &a.detail, text) else {
         return true;
     };
-    let question =
-        lines_of(&say.text(key!("tui-start-confirm-skip"), &[("name", Arg::Str(names))]));
-    ask.key(&question, Duration::from_secs(60)) == Some(b'y')
+    let question = lines_of(&say.text(
+        key!("tui-start-approval-confirm-skip"),
+        &[("name", Arg::Str(names))],
+    ));
+    ask.key(&question, Duration::from_secs(60)) == Some(b's')
 }
 
 /// The `agent.start` request y would answer when it does not fit the split view at the terminal's size now and was not read whole in
@@ -3717,7 +3719,7 @@ mod skipping_start_tests {
             "launch_options": [{"id": "skip-permissions", "label": "option-skip-permissions", "skips_permissions": true}]}));
         let say = Say(Catalog::english());
         let text = |id: &str, args: &[(&str, Arg)]| say.text(id, args);
-        let mut yes = script(b"y");
+        let mut yes = script(b"s");
         assert!(confirm_skipping_start(
             &say,
             &skipping,
@@ -3725,11 +3727,22 @@ mod skipping_start_tests {
             &text,
             &mut yes
         ));
-        assert!(yes
-            .shown
-            .join(" ")
-            .contains("Let the agent act without asking? With \"Don't ask\""));
-        for key in [b'n', b'\r', 0x1b] {
+        let asked = yes.shown.join(" ");
+        assert!(
+            asked.contains("Let the helper act without asking? With \"Don't ask\""),
+            "{asked}"
+        );
+        assert!(asked.contains("Press s"), "{asked}");
+        // The key that opened it, held or repeated, keeps asking: a repeated y never confirms.
+        let mut repeated = script(b"yyyy");
+        assert!(!confirm_skipping_start(
+            &say,
+            &skipping,
+            "mac2/agent-1",
+            &text,
+            &mut repeated
+        ));
+        for key in [b'y', b'Y', b'S', b'n', b'\r', 0x1b] {
             let mut other = script(&[key]);
             assert!(!confirm_skipping_start(
                 &say,

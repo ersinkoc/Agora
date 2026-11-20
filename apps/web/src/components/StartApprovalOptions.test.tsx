@@ -33,7 +33,7 @@ describe('a request for a helper that acts without asking', () => {
     expect(text).toContain('How it acts');
     expect(text).toContain("Don't ask");
     expect(text).toContain('runs commands and changes files without asking you first');
-    expect(text).toContain('a start that acts without asking is always asked');
+    expect(text).toContain('your answer covers this start with exactly the launch options shown');
     expect(host.querySelector('input[type=radio]')).toBeNull();
   });
 
@@ -51,6 +51,17 @@ describe('a request for a helper that acts without asking', () => {
     expect(host.querySelector('[role=alertdialog]')).toBeNull();
     click('Allow');
     click('Start without asking');
+    expect(answers).toEqual([[true, { grant: 0, nested: false }]]);
+  });
+
+  it('says only what applies to an option that does not skip questions: no warning, no confirmation', () => {
+    const harmless = { ...demoStartNoAskApproval.start, options: [{ id: 'fast', label: 'option-fast', skipsPermissions: false }] };
+    const answers: [boolean, StartChoice][] = [];
+    act(() => root.render(<StartApproval approval={demoStartNoAskApproval} start={harmless} onResolve={(ok, c) => answers.push([ok, c])} />));
+    const text = host.textContent ?? '';
+    expect(text).toContain('your answer covers this start with exactly the launch options shown');
+    expect(text).not.toContain('without asking');
+    click('Allow');
     expect(answers).toEqual([[true, { grant: 0, nested: false }]]);
   });
 
