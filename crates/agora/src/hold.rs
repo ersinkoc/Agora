@@ -358,6 +358,10 @@ impl Holder {
         for a in &mut self.pipes {
             if a.exit.is_none() {
                 a.exit = a.proc.try_wait().unwrap_or(None);
+                if a.exit.is_some() {
+                    // Its input is closed with it: a line written to an ended agent is `Failed`, never queued and lost.
+                    a.input = None;
+                }
             }
         }
         let now = Instant::now();
