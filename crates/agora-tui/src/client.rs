@@ -614,6 +614,7 @@ impl Session {
             }
             let p = &f.payload;
             match f.kind {
+                KIND_BEHIND => Some(TermEvent::Behind),
                 0 => Some(TermEvent::Data(p.clone())),
                 1 => Some(TermEvent::Screen(p.clone())),
                 2 if p.len() == 4 => Some(TermEvent::Resized(
@@ -1282,6 +1283,8 @@ pub enum TermEvent {
     /// A repaint of the whole screen (first, and after the viewer fell behind).
     Screen(Vec<u8>),
     Resized(u16, u16),
+    /// Output was dropped because nobody read it for long: watch the terminal again to get its screen.
+    Behind,
     /// The program ended with this status (negative: a signal).
     Exit(i32),
     /// The hub ended the relay.
@@ -1383,8 +1386,46 @@ fn set_aside(
     } else if f.stream_id == STREAM_EVENTS && is_pair_frame(&f) {
         keep_pair_frame(f, queue);
     } else if f.stream_id >= agora_protocol::frame::FIRST_DYNAMIC_STREAM {
-        queue.push_back(f);
+        queue_stream_frame(queue, f);
     }
+}
+
+/// Most bytes of one stream's frames kept for a reader that is busy elsewhere (ADR-0022: a slow reader never makes memory grow).
+const MAX_QUEUED_STREAM_BYTES: usize = 2 * 1024 * 1024;
+/// The queue is only measured once it is this long, so the usual push stays cheap.
+const MEASURE_QUEUE_AT: usize = 128;
+/// A frame the client makes itself: frames of this stream were dropped, the reader must watch it again (a fresh repaint).
+const KIND_BEHIND: u8 = 200;
+
+/// Queues a terminal or chat frame for its reader. Past [`MAX_QUEUED_STREAM_BYTES`] for its stream, that stream's queued frames are
+/// dropped and a [`KIND_BEHIND`] marker stands in for them (and for what comes after, until the reader takes it).
+fn queue_stream_frame(queue: &mut std::collections::VecDeque<Frame>, f: Frame) {
+    if queue.len() >= MEASURE_QUEUE_AT {
+        let id = f.stream_id;
+        if queue
+            .iter()
+            .any(|q| q.stream_id == id && q.kind == KIND_BEHIND)
+        {
+            return;
+        }
+        let bytes: usize = queue
+            .iter()
+            .filter(|q| q.stream_id == id)
+            .map(|q| q.payload.len())
+            .sum::<usize>()
+            + f.payload.len();
+        if bytes > MAX_QUEUED_STREAM_BYTES {
+            queue.retain(|q| q.stream_id != id);
+            queue.push_back(Frame {
+                stream_id: id,
+                kind: KIND_BEHIND,
+                seq: None,
+                payload: Vec::new(),
+            });
+            return;
+        }
+    }
+    queue.push_back(f);
 }
 
 /// ADR-0065: the hub's pairing notices to an owner's window (`PAIR_REQUESTED`, `PAIR_DECIDED`).
@@ -1404,6 +1445,46 @@ fn keep_pair_frame(f: Frame, queue: &mut std::collections::VecDeque<Frame>) {
         if let Some(pos) = queue.iter().position(is_pair_frame) {
             queue.remove(pos);
         }
+    }
+}
+
+#[cfg(test)]
+mod queue_tests {
+    use super::*;
+
+    fn frame(stream_id: u32, bytes: usize) -> Frame {
+        Frame {
+            stream_id,
+            kind: 0,
+            seq: None,
+            payload: vec![0; bytes],
+        }
+    }
+
+    /// A reader busy elsewhere does not make a stream's queue grow past its bound: the frames go, a marker says the reader is behind,
+    /// and another stream's frames are untouched.
+    #[test]
+    fn a_stream_nobody_reads_is_bounded_and_marked() {
+        let first = agora_protocol::frame::FIRST_DYNAMIC_STREAM;
+        let mut queue = std::collections::VecDeque::new();
+        queue.push_back(frame(first + 1, 10));
+        for _ in 0..(MAX_QUEUED_STREAM_BYTES / 4096 + 2 * MEASURE_QUEUE_AT) {
+            queue_stream_frame(&mut queue, frame(first, 4096));
+        }
+        let bytes: usize = queue
+            .iter()
+            .filter(|f| f.stream_id == first)
+            .map(|f| f.payload.len())
+            .sum();
+        assert!(bytes <= MAX_QUEUED_STREAM_BYTES);
+        assert_eq!(
+            queue
+                .iter()
+                .filter(|f| f.stream_id == first && f.kind == KIND_BEHIND)
+                .count(),
+            1
+        );
+        assert_eq!(queue.iter().filter(|f| f.stream_id == first + 1).count(), 1);
     }
 }
 

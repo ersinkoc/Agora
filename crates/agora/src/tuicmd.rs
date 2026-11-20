@@ -813,6 +813,13 @@ fn attach(
                 lost = true;
                 break;
             }
+            // Output was dropped while a question waited: the screen is asked for again.
+            TermEvent::Behind => {
+                session.terminal_close(stream);
+                stream = session.terminal_open(node, &terminal)?;
+                let _ = write!(out, "\x1b[2J\x1b[H");
+                let _ = out.flush();
+            }
             TermEvent::Resized(..) | TermEvent::Quiet => {}
         }
         // What was typed was refused until the owner allows it: ask, and show the screen again either way (the typed keys are lost).
@@ -2223,6 +2230,11 @@ fn mouse_mode(on: bool) {
     let mut out = std::io::stdout();
     // Motion with no button (1003) is only switched on while the open program asked for it (`mouse_motion`): never by this.
     HOST_MOTION.store(false, std::sync::atomic::Ordering::Relaxed);
+    write_mouse(&mut out, on);
+}
+
+/// Writes [`mouse_sequence`] to `out`.
+fn write_mouse(out: &mut impl Write, on: bool) {
     let _ = out.write_all(mouse_sequence(on));
     let _ = out.flush();
 }
@@ -2241,9 +2253,13 @@ static HOST_PASTE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool
 
 /// Asks this terminal to frame pastes (2004) or not; returns whether it did before, to put back.
 fn bracketed_paste(on: bool) -> bool {
-    let was = HOST_PASTE.swap(on, std::sync::atomic::Ordering::Relaxed);
+    set_paste(&mut std::io::stdout(), &HOST_PASTE, on)
+}
+
+/// [`bracketed_paste`] on any writer and state: writes DECSET 2004 only when `on` differs from what `state` says it is.
+fn set_paste(out: &mut impl Write, state: &std::sync::atomic::AtomicBool, on: bool) -> bool {
+    let was = state.swap(on, std::sync::atomic::Ordering::Relaxed);
     if was != on {
-        let mut out = std::io::stdout();
         let _ = out.write_all(if on { b"\x1b[?2004h" } else { b"\x1b[?2004l" });
         let _ = out.flush();
     }
@@ -2306,11 +2322,11 @@ fn console(
     let mut typed_at: Option<Instant> = None;
     // A refusal is matched by its session's request numbers, which a new session (a reconnect, also a routine refresh) starts over:
     // a pending refusal stays (typing is still refused there), and any typing the new session gets taken ends it.
-    if let Some(p) = c.typing_refused.as_mut() {
-        p.request = 0;
-    }
-    c.typing_allowed = None;
-    c.typing_taken.clear();
+    carry_refusal(
+        &mut c.typing_refused,
+        &mut c.typing_allowed,
+        &mut c.typing_taken,
+    );
     // ADR-0065: only the hub knows whether this session is the owner's (it answers `PairStatus` to the owner only).
     if c.pair.owner == agora_tui::pair::Owner::Unknown {
         if let Some(owner) = pair_owner(session) {
@@ -2837,6 +2853,20 @@ fn console(
             last_refresh = Instant::now();
         }
     }
+}
+
+/// What a new session (a reconnect, also a routine refresh) keeps of the typing refusals: the pending one stays, renumbered, since
+/// typing is still refused there; what was allowed or taken was counted in the old session's numbers and ends.
+fn carry_refusal(
+    refused: &mut Option<TypingRefused>,
+    allowed: &mut Option<(String, u64)>,
+    taken: &mut Taken,
+) {
+    if let Some(p) = refused.as_mut() {
+        p.request = 0;
+    }
+    *allowed = None;
+    taken.clear();
 }
 
 /// Typing into `agent` (`node/local`), the agent in front, was refused for want of a grant (its newest refused `request`).
@@ -5398,19 +5428,48 @@ mod question_path_tests {
         })
     }
 
-    /// P1: turning the mouse off or on never touches the paste framing (DECSET 2004), so a paste that began before a question stays
-    /// framed while the mouse is released.
+    /// P1: turning the mouse off or on writes no paste framing (DECSET 2004), so a paste that began before a question stays framed
+    /// while the mouse is released; the framing is written by its own function, once per change.
     #[test]
-    fn the_mouse_sequences_leave_paste_framing_alone() {
+    fn the_mouse_never_writes_paste_framing() {
         for on in [true, false] {
-            let text = String::from_utf8_lossy(mouse_sequence(on)).to_string();
-            assert!(!text.contains("2004"), "{on}: {text:?}");
+            let mut out = Vec::new();
+            write_mouse(&mut out, on);
+            assert!(!String::from_utf8_lossy(&out).contains("2004"), "{on}");
         }
-        assert!(String::from_utf8_lossy(mouse_sequence(false)).contains("1000l"));
-        // The console switches framing on itself and asks again around every box.
-        let src = include_str!("tuicmd.rs");
-        let c0 = src.find("\nfn console(").unwrap();
-        assert!(src[c0..c0 + 4000].contains("bracketed_paste(true)"));
+        let state = std::sync::atomic::AtomicBool::new(false);
+        let mut out = Vec::new();
+        assert!(!set_paste(&mut out, &state, true));
+        write_mouse(&mut out, false);
+        // Still on after the mouse went off: nothing switched it off, and asking again writes nothing.
+        assert!(set_paste(&mut out, &state, true));
+        let text = String::from_utf8_lossy(&out).to_string();
+        assert_eq!(text.matches("\x1b[?2004h").count(), 1, "{text:?}");
+        assert!(!text.contains("2004l"));
+        assert!(set_paste(&mut out, &state, false));
+        assert!(String::from_utf8_lossy(&out).ends_with("\x1b[?2004l"));
+    }
+
+    /// A refusal still pending when a routine refresh replaces the session stays (renumbered); what was counted in the old session's
+    /// numbers ends.
+    #[test]
+    fn a_refusal_is_kept_across_a_refresh() {
+        let mut refused = Some(TypingRefused {
+            agent: "laptop/a1".into(),
+            request: 7,
+        });
+        let mut allowed = Some(("laptop/a1".to_string(), 5));
+        let mut taken = Taken::new();
+        taken.insert(("laptop".into(), "t-a1".into()), 6);
+        carry_refusal(&mut refused, &mut allowed, &mut taken);
+        assert_eq!(
+            refused,
+            Some(TypingRefused {
+                agent: "laptop/a1".into(),
+                request: 0
+            })
+        );
+        assert!(allowed.is_none() && taken.is_empty());
     }
 
     /// P2: a routine refresh waits for typing replies still in flight, but not for ever.
@@ -5463,7 +5522,8 @@ mod question_path_tests {
         );
     }
 
-    /// P2: a question over the console keeps the open terminal (and with it its scrollback and learned modes).
+    /// P2: a question over the console keeps the open terminal (and with it its scrollback and learned modes). A source check, since
+    /// `over_console` needs a live `Session` (a TLS connection to a hub), which a unit test cannot make.
     #[test]
     fn a_question_does_not_close_the_preview() {
         let src = include_str!("tuicmd.rs");
