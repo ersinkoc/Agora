@@ -4,7 +4,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 #![cfg(unix)]
 
-use std::io::{Read, Write};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
@@ -74,15 +73,10 @@ fn a_terminal_frame_drained_in_part_at_its_deadline_still_ends_by_it() {
     })
     .unwrap();
     let handle = term.handle().unwrap();
-    // The peer's buffer is full before the frame begins.
-    w.set_write_timeout(Some(Duration::from_millis(20)))
-        .unwrap();
-    let mut filler = 0usize;
-    while let Ok(n) = w.write(&[0u8; 4096]) {
-        filler += n;
-    }
     w.set_write_timeout(Some(WRITE_SLICE)).unwrap();
-    // Larger than the socket's buffer, so it can only go in part.
+    // Larger than the socket's buffer, so it can only go in part. The peer reads nothing at first: the frame's first piece, with
+    // the terminal, goes at once and the rest backs up. (The buffer is not filled beforehand: macOS refuses a send carrying a
+    // descriptor into a full buffer outright, EMSGSIZE, where Linux waits; measured on a Mac, #789.)
     let payload = vec![1u8; 2 << 20];
     let frame_len = 4 + payload.len();
     let writer = std::thread::spawn(move || {
@@ -90,24 +84,26 @@ fn a_terminal_frame_drained_in_part_at_its_deadline_still_ends_by_it() {
         let res = write_frame(&mut w, &payload, Some(&handle));
         (res, began.elapsed(), w)
     });
-    // Half a second before the deadline the peer takes the filler (and so lets part of the frame in), then reads no more until
+    // Half a second before the deadline the peer takes a part of the frame (and so lets more of it in), then reads no more until
     // the write has returned.
     std::thread::sleep(FRAME_TIMEOUT - Duration::from_millis(500));
     r.set_read_timeout(Some(Duration::from_millis(100)))
         .unwrap();
+    const DRAIN: usize = 256 << 10;
     let mut buf = vec![0u8; 64 * 1024];
-    let mut got = 0;
-    while got < filler {
-        let want = (filler - got).min(buf.len());
-        match r.read(&mut buf[..want]) {
-            Ok(0) | Err(_) => break,
-            Ok(n) => got += n,
+    let (mut part, mut terminal) = (0usize, false);
+    while part < DRAIN {
+        let want = (DRAIN - part).min(buf.len());
+        match r.recv_with_terminal(&mut buf[..want]) {
+            Ok((0, _)) | Err(_) => break,
+            Ok((n, t)) => {
+                part += n;
+                terminal |= t.is_some();
+            }
         }
     }
-    assert_eq!(got, filler);
     let (res, elapsed, _w) = writer.join().unwrap();
-    // What of the frame went: its first bytes, with the terminal.
-    let (mut part, mut terminal) = (0usize, false);
+    // The rest of what went.
     while let Ok((n, t)) = r.recv_with_terminal(&mut buf) {
         if n == 0 {
             break;
@@ -120,15 +116,6 @@ fn a_terminal_frame_drained_in_part_at_its_deadline_still_ends_by_it() {
     term.kill_and_reap();
     let _ = std::fs::remove_dir_all(&dir);
     println!("write_frame: {res:?} after {elapsed:?}; the peer got {part} of {frame_len} bytes, terminal={terminal}");
-    // macOS refuses a send that carries a descriptor at once (EMSGSIZE, os error 40) while the peer's buffer is full, where Linux
-    // waits: nothing of the frame went and it ended well within its time, which is what this test guards (measured on a Mac, #789).
-    if std::env::consts::OS == "macos"
-        && part == 0
-        && matches!(&res, Err(LinkError::Io(e)) if e.raw_os_error() == Some(40))
-        && elapsed < FRAME_TIMEOUT
-    {
-        return;
-    }
     assert!(terminal, "the terminal went with the first part");
     assert!(
         part > 0 && part < frame_len,
