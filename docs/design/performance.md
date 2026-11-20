@@ -109,6 +109,7 @@ the supervisor reads the exit status without copying anything.
 
 ### Node and hub
 - PTY reads on dedicated threads (ADR-0013); detection runs on changed regions only, with an adaptive interval.
+- Terminal subscribe and resync capture the screen at the stream boundary and build the ANSI repaint after releasing the terminal lock.
 - Scrollback stored compressed in memory with a configurable cap.
 - Hub projections are in memory. A node event's SQLite write, projection update and fanout run together on a blocking worker.
   Each hub admits one job at a time. A connection groups up to 16 immediately available events or 64 KiB per job and then waits
