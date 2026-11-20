@@ -53,6 +53,8 @@ enum St {
     /// After an intermediate (`ESC SP`, `ESC (`): the next final byte ends the sequence and is not a reset.
     EscI,
     Csi,
+    /// Inside a CSI sequence that can no longer switch a mode or reset (most cursor moves and colours): only its end matters.
+    CsiSkip,
 }
 
 /// Reads `CSI ? Pm h` / `CSI ? Pm l` (and the resets `ESC c`, `CSI ! p`) from the program's output.
@@ -96,10 +98,16 @@ struct CsiParams {
 impl CsiParams {
     /// A new sequence. The stored numbers are left as they are: only the first `firsts` are read.
     fn reset(&mut self) {
-        *self = CsiParams {
-            first: self.first,
-            ..CsiParams::default()
-        };
+        self.started = false;
+        self.private = None;
+        self.inter = 0;
+        self.bang = false;
+        self.any_param = false;
+        self.stored = 0;
+        self.firsts = 0;
+        self.cur = 0;
+        self.sub = false;
+        self.ignore = false;
     }
 
     fn byte(&mut self, b: u8) {
@@ -115,6 +123,9 @@ impl CsiParams {
                 self.inter = self.inter.saturating_add(1);
                 self.bang = self.inter == 1 && b == b'!';
             }
+            // Only a `?` list switches a mode: in any other sequence (cursor moves, colours: most of the output) a parameter only
+            // matters as being there (it rules out the `CSI ! p` reset), so its numbers are not read.
+            _ if self.private != Some(b'?') => self.any_param = true,
             // A parameter after an intermediate: the emulator ignores the sequence.
             _ if self.inter > 0 => self.ignore = true,
             _ if self.stored == MAX_PARAMS => self.ignore = true,
@@ -131,6 +142,12 @@ impl CsiParams {
                 self.sub = b == b':';
             }
         }
+    }
+
+    /// Whether the sequence can no longer be a mode switch (a `?` list the emulator acts on) or the `CSI ! p` reset (no
+    /// parameter): what [`ModeScanner::csi`] would do with it at its final byte is nothing.
+    fn dead(&self) -> bool {
+        self.ignore || (self.any_param && self.private != Some(b'?'))
     }
 
     /// Stores the number being read (at a `:`, a `;` or the final byte).
@@ -192,11 +209,21 @@ impl ModeScanner {
                 St::Csi => match b {
                     0x1b => self.st = St::Esc,
                     0x18 | 0x1a => self.st = St::Ground,
-                    0x20..=0x3f => self.params.byte(b),
+                    0x20..=0x3f => {
+                        self.params.byte(b);
+                        if self.params.dead() {
+                            self.st = St::CsiSkip;
+                        }
+                    }
                     0x40..=0x7e => {
                         self.csi(b);
                         self.st = St::Ground;
                     }
+                    _ => {}
+                },
+                St::CsiSkip => match b {
+                    0x1b => self.st = St::Esc,
+                    0x18 | 0x1a | 0x40..=0x7e => self.st = St::Ground,
                     _ => {}
                 },
             }
