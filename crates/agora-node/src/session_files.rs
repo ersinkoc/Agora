@@ -3,15 +3,18 @@
 //!
 //! A file is the agent's when it was written after the agent started, its first line passes `select`, names the agent's folder as its
 //! working directory, and its id is no other agent's. This is a guess that can be wrong, so it is made only when it cannot be confused.
-//! Two agents waiting in one folder are rivals when they are of one kind, or of kinds whose globs could match the same files (the fixed
-//! directory of one glob, before its first `*`, is the other's or holds it, as written or with links resolved, even links whose target
-//! does not exist yet; a root that cannot be resolved counts as holding every other), unless both `select`s
-//! ask for different literal values at the same path. Every live agent with a rival is found at once, whichever is due. Known limit:
-//! discovery assumes that no link inside a *wildcard* directory of a session glob points into another kind's session root (for example
-//! `logs/*/*.jsonl` with `logs/linked` pointing at `store`, against `store/*.jsonl`); finding one would mean reading those directories on
-//! every poll. Such a setup can attribute a session to the wrong agent. This is decided from the manifests, before any file is read: rivals get no id at all, so kinds that share a session
-//! folder lose Resume in that folder rather than risk continuing the wrong conversation. Neither does an agent for which more than one
-//! new file fits (the window then offers Start again). An agent that has no file after [`GIVE_UP_AFTER`] gets none.
+//! Two agents waiting in one folder are rivals when they are of one kind, or of kinds whose globs could match the same files: the fixed
+//! directory of one glob, before its first `*`, is the other's or holds it, as written or with links resolved (even links whose target
+//! does not exist yet), compared without case (one folder on Windows and macOS; elsewhere this only adds rivals). A root that cannot be
+//! resolved counts as holding every other. They are not rivals when both `select`s ask for different literal values at the same path.
+//! This is decided from the manifests, before any file is read, for every live agent at once whichever is due: rivals get no id at all,
+//! so kinds that share a session folder lose Resume in that folder rather than risk continuing the wrong conversation. Neither does an
+//! agent for which more than one new file fits (the window then offers Start again). An agent that has no file after
+//! [`GIVE_UP_AFTER`] gets none.
+//!
+//! Known limit: discovery assumes that no link inside a *wildcard* directory of a session glob points into another kind's session root
+//! (for example `logs/*/*.jsonl` with `logs/linked` pointing at `store`, against `store/*.jsonl`); finding one would mean reading those
+//! directories on every poll. Such a setup can attribute a session to the wrong agent.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{BufRead, BufReader, Read};
@@ -209,6 +212,15 @@ fn resolve(path: &Path) -> Option<PathBuf> {
             }
         }
     }
+    // The longest existing part in the filesystem's own spelling (case on Windows and macOS), the folders not made yet as written.
+    for ancestor in out.ancestors() {
+        if let Ok(c) = std::fs::canonicalize(ancestor) {
+            return Some(match out.strip_prefix(ancestor) {
+                Ok(rest) if !rest.as_os_str().is_empty() => c.join(rest),
+                _ => c,
+            });
+        }
+    }
     Some(out)
 }
 
@@ -217,8 +229,17 @@ fn exclusive(a: &SessionFile, b: &SessionFile) -> bool {
     matches!((&a.select, &b.select), (Some(x), Some(y)) if x.path == y.path && x.equals != y.equals)
 }
 
+/// Whether one path is the other or holds it, compared without case: on a case-insensitive filesystem (NTFS, APFS by default) two
+/// spellings are one folder, and the parts not made yet cannot be asked. Doing it everywhere needs no platform code and only adds
+/// rivals on a case-sensitive one (fails closed).
 fn nested(x: &Path, y: &Path) -> bool {
-    x.starts_with(y) || y.starts_with(x)
+    let fold = |p: &Path| -> Vec<String> {
+        p.components()
+            .map(|c| c.as_os_str().to_string_lossy().to_lowercase())
+            .collect()
+    };
+    let (x, y) = (fold(x), fold(y));
+    x.starts_with(&y) || y.starts_with(&x)
 }
 
 /// Every live target that has a rival in its folder. Two agents in one folder are rivals when they are of one kind, or when their
@@ -227,53 +248,66 @@ fn nested(x: &Path, y: &Path) -> bool {
 /// exclusive. Computed over all of them at once, whatever is due, so no pair is missed because one of its agents was already set aside
 /// (Codex review of #791). Not closed transitively: an agent without a rival of its own shares no possible file with any live agent,
 /// and every rival of an agent in the set is in the set itself. Roots are resolved only for pairs that need it (two kinds in one
-/// folder, not exclusive, disjoint as written), so a root on a stalled mount never holds up an agent with no such neighbour.
+/// folder, not exclusive, disjoint as written), so a root on a stalled mount never holds up an agent with no such neighbour. The probes
+/// still run on the calling (supervision) thread, as `same_dir` always did.
 fn with_rivals(targets: &[Target], home: &Path) -> HashSet<AgentId> {
-    with_rivals_using(targets, home, &mut |p| resolve(p))
+    with_rivals_using(targets, home, &mut workspace, &mut |p| resolve(p))
+}
+
+/// A workspace folder as the filesystem names it (the comparison `same_dir` makes); probed only as [`with_rivals_using`] allows.
+fn workspace(p: &Path) -> PathBuf {
+    std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
 }
 
 fn with_rivals_using(
     targets: &[Target],
     home: &Path,
+    probe: &mut dyn FnMut(&Path) -> PathBuf,
     resolver: &mut dyn FnMut(&Path) -> Option<PathBuf>,
 ) -> HashSet<AgentId> {
-    // Grouped by folder first (the comparison `same_dir` makes), so nothing is compared or resolved across folders.
-    let mut folders: HashMap<PathBuf, Vec<usize>> = HashMap::new();
-    for (i, t) in targets.iter().enumerate() {
-        let folder = std::fs::canonicalize(&t.folder).unwrap_or_else(|_| t.folder.clone());
-        folders.entry(folder).or_default().push(i);
-    }
+    // A workspace is probed only for a target whose kind differs from some other live target's: with one target, or all of one kind,
+    // nothing is probed (same-kind agents compare their folders as written), so a stalled mount never holds up an agent that has no
+    // agent of another kind beside it. Pairs whose `select`s are exclusive are skipped before any probe.
+    let mixed: Vec<bool> = targets
+        .iter()
+        .map(|t| targets.iter().any(|o| o.kind != t.kind))
+        .collect();
+    let mut folders: HashMap<usize, PathBuf> = HashMap::new();
     let mut resolved: HashMap<usize, Option<PathBuf>> = HashMap::new();
     let mut out = HashSet::new();
-    for group in folders.values().filter(|g| g.len() > 1) {
-        for (n, &i) in group.iter().enumerate() {
-            for &j in &group[n + 1..] {
-                let (a, b) = (&targets[i], &targets[j]);
-                let rival = if a.agent == b.agent {
-                    false
-                } else if a.kind == b.kind {
-                    true
-                } else if exclusive(&a.spec, &b.spec) {
-                    false
-                } else {
-                    let (la, lb) = (
-                        session_root(&a.spec.glob, home),
-                        session_root(&b.spec.glob, home),
-                    );
-                    nested(&la, &lb) || {
-                        let ra = resolved.entry(i).or_insert_with(|| resolver(&la)).clone();
-                        let rb = resolved.entry(j).or_insert_with(|| resolver(&lb)).clone();
-                        match (ra, rb) {
-                            (Some(ra), Some(rb)) => nested(&ra, &rb),
-                            // Unknown: fail closed.
-                            _ => true,
-                        }
+    for i in 0..targets.len() {
+        for j in i + 1..targets.len() {
+            let (a, b) = (&targets[i], &targets[j]);
+            if a.agent == b.agent || (a.kind != b.kind && exclusive(&a.spec, &b.spec)) {
+                continue;
+            }
+            let same_folder = a.folder == b.folder
+                || (mixed[i] && mixed[j] && {
+                    let fa = folders.entry(i).or_insert_with(|| probe(&a.folder)).clone();
+                    let fb = folders.entry(j).or_insert_with(|| probe(&b.folder)).clone();
+                    fa == fb
+                });
+            if !same_folder {
+                continue;
+            }
+            let rival = a.kind == b.kind || {
+                let (la, lb) = (
+                    session_root(&a.spec.glob, home),
+                    session_root(&b.spec.glob, home),
+                );
+                nested(&la, &lb) || {
+                    let ra = resolved.entry(i).or_insert_with(|| resolver(&la)).clone();
+                    let rb = resolved.entry(j).or_insert_with(|| resolver(&lb)).clone();
+                    match (ra, rb) {
+                        (Some(ra), Some(rb)) => nested(&ra, &rb),
+                        // Unknown: fail closed.
+                        _ => true,
                     }
-                };
-                if rival {
-                    out.insert(a.agent.clone());
-                    out.insert(b.agent.clone());
                 }
+            };
+            if rival {
+                out.insert(a.agent.clone());
+                out.insert(b.agent.clone());
             }
         }
     }
@@ -1184,7 +1218,7 @@ mod tests {
                 |p: &Path| (!p.to_string_lossy().contains(".lost")).then(|| p.to_path_buf());
             let want: HashSet<AgentId> = targets.iter().map(|t| t.agent.clone()).collect();
             assert_eq!(
-                with_rivals_using(&targets, &root.join("home"), &mut unknown),
+                with_rivals_using(&targets, &root.join("home"), &mut workspace, &mut unknown),
                 want,
                 "reverse={reverse}"
             );
@@ -1239,7 +1273,8 @@ mod tests {
                 seen.push(p.to_path_buf());
                 Some(p.to_path_buf())
             };
-            let found = with_rivals_using(&targets, &root.join("home"), &mut counting);
+            let found =
+                with_rivals_using(&targets, &root.join("home"), &mut workspace, &mut counting);
             let want: HashSet<AgentId> = [AgentId::new("twin-1"), AgentId::new("twin-2")].into();
             assert_eq!(found, want, "reverse={reverse}");
             let resolved: Vec<String> = seen
@@ -1256,6 +1291,87 @@ mod tests {
                 resolved.iter().any(|p| p.contains(".other")),
                 "reverse={reverse}: {resolved:?}"
             );
+        }
+    }
+
+    #[test]
+    fn session_roots_spelled_in_another_case_are_rivals() {
+        // Codex review of #791: on NTFS and APFS (case-insensitive by default) `Sessions` and `sessions` are one folder. Compared
+        // without case everywhere: on a case-sensitive filesystem this only adds rivals (fails closed).
+        for reverse in [false, true] {
+            let root = tmp(if reverse { "case-reversed" } else { "case" });
+            let mut targets = vec![
+                with_glob(
+                    target("tool-1", root.join("work/a")),
+                    "tool",
+                    "{home}/Sessions/*.jsonl",
+                ),
+                with_glob(
+                    target("variant-1", root.join("work/a")),
+                    "tool-variant",
+                    "{home}/sessions/new/*.jsonl",
+                ),
+            ];
+            if reverse {
+                targets.reverse();
+            }
+            let want: HashSet<AgentId> = targets.iter().map(|t| t.agent.clone()).collect();
+            assert_eq!(
+                with_rivals(&targets, &root.join("home")),
+                want,
+                "reverse={reverse}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_folder_is_probed_unless_two_kinds_could_contend() {
+        // Codex review of #791: a stalled mount under a lone agent's folder must never block discovery.
+        let root = tmp("no-probe");
+        let lone = [target("lone-1", root.join("work/a"))];
+        let same_kind = [
+            target("tool-1", root.join("work/a")),
+            target("tool-2", root.join("work/a")),
+            target("tool-3", root.join("work/b")),
+        ];
+        let exclusive = [
+            target("tool-1", root.join("work/a")),
+            Target {
+                kind: "tool-variant".into(),
+                spec: SessionFile {
+                    select: Some(UsageSelect {
+                        path: "type".into(),
+                        equals: "variant_meta".into(),
+                    }),
+                    ..spec()
+                },
+                ..target("variant-1", root.join("work/b"))
+            },
+        ];
+        for (name, targets, want) in [
+            ("lone", &lone[..], vec![]),
+            ("same kind", &same_kind[..], vec!["tool-1", "tool-2"]),
+            ("exclusive", &exclusive[..], vec![]),
+        ] {
+            for reverse in [false, true] {
+                let mut targets = targets.to_vec();
+                if reverse {
+                    targets.reverse();
+                }
+                let mut probes: Vec<PathBuf> = Vec::new();
+                let mut folder = |p: &Path| {
+                    probes.push(p.to_path_buf());
+                    p.to_path_buf()
+                };
+                let mut roots = |p: &Path| {
+                    panic!("{name}: root {p:?} resolved");
+                };
+                let found =
+                    with_rivals_using(&targets, &root.join("home"), &mut folder, &mut roots);
+                let want: HashSet<AgentId> = want.iter().map(|a| AgentId::new(*a)).collect();
+                assert_eq!(found, want, "{name} reverse={reverse}");
+                assert_eq!(probes, Vec::<PathBuf>::new(), "{name} reverse={reverse}");
+            }
         }
     }
 
