@@ -1815,6 +1815,8 @@ impl Node {
                     let mut reported_memory = 0u64;
                     let mut memory_checked = Instant::now();
                     let mut usage = crate::usage_files::UsageWatcher::default();
+                    // ADR-0091: the plan windows a tool reports in the same files, sent when they change.
+                    let mut quota = crate::usage_quota::QuotaGate::new(node_id.as_str());
                     let mut sessions = crate::session_files::SessionWatcher::default();
                     // ADR-0060: the process each agent runs as, as last written to the ledger.
                     let mut processes: std::collections::HashMap<AgentId, u32> = Default::default();
@@ -1881,6 +1883,18 @@ impl Node {
                                         })
                                     })
                                     .collect(),
+                            );
+                        }
+                        let (at, at_ms) = (Instant::now(), now_ms());
+                        let mut limits: Vec<_> = usage
+                            .take_quota()
+                            .iter()
+                            .filter_map(|(tool, raw)| quota.offer(at, at_ms, tool, raw))
+                            .collect();
+                        limits.extend(quota.due(at));
+                        if !limits.is_empty() {
+                            ev.record_bodies(
+                                limits.into_iter().map(Body::AgentQuotaObserved).collect(),
                             );
                         }
                         if !events.is_empty() {
@@ -2282,6 +2296,12 @@ impl Drop for Node {
 /// The node reads them at start and again before it lists or starts agents, so a manifest added later is seen without a restart.
 pub fn load_manifests(dir: &Path) -> (Vec<Manifest>, Vec<(PathBuf, String)>) {
     let (loaded, problems) = crate::manifests::load(dir);
+    for (kind, file) in crate::manifests::shadowing(&loaded) {
+        eprintln!(
+            "manifests: {} replaces the built-in kind {kind}; newer built-in features of it (such as plan limits) are not used",
+            file.display()
+        );
+    }
     (loaded.into_iter().map(|l| l.manifest).collect(), problems)
 }
 

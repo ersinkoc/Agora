@@ -204,6 +204,8 @@ pub(crate) fn named_node(body: &Body) -> Result<Option<&str>, &'static str> {
         Body::NodeOnline(e) => &e.node_id,
         Body::NodeOffline(e) => &e.node_id,
         Body::NodeResources(e) => &e.node_id,
+        // ADR-0091: names its machine, so a node cannot report another machine's limits.
+        Body::AgentQuotaObserved(e) => &e.node_id,
         Body::CheckoutDiscovered(e) => &e.node_id,
         Body::AgentStarted(e) => &e.node_id,
         Body::TerminalOpened(e) => &e.node_id,
@@ -621,6 +623,8 @@ impl View {
             }
             Body::AgentForgotten(_) => {}
             // ADR-0090: the last report of each is kept per agent (replaced, bounded) and replayed to a window that connects later.
+            // ADR-0091: relayed to windows; the hub keeps no table of it yet (a later step).
+            Body::AgentQuotaObserved(_) => {}
             Body::AgentSessionConfig(e) => {
                 if let Some(a) = self.agents.get_mut(&q(&e.agent_id)) {
                     let fits = e.options.len() <= MAX_CONFIG_OPTIONS
@@ -789,6 +793,28 @@ mod tests {
     use super::*;
     use crate::store::SqliteStore;
     use agora_protocol::v1::*;
+
+    /// ADR-0091: a node's plan-limit observation names its own machine, or it is forged; the view keeps nothing of it yet.
+    #[test]
+    fn a_quota_observation_naming_another_machine_is_forged() {
+        let quota = |producer: &str, node: &str| Event {
+            producer_id: producer.into(),
+            seq: 1,
+            body: Some(Body::AgentQuotaObserved(AgentQuotaObserved {
+                node_id: node.into(),
+                tool: "codex".into(),
+                window: "five_hour".into(),
+                used_percent: 10,
+                ..AgentQuotaObserved::default()
+            })),
+            ..Event::default()
+        };
+        assert!(!is_forged(&quota("n1", "n1")));
+        assert!(is_forged(&quota("n2", "n1")));
+        let mut v = View::default();
+        v.apply(&quota("n1", "n1"));
+        assert!(v.agents.is_empty());
+    }
 
     fn ev(producer: &str, seq: u64, body: Body) -> Event {
         Event {

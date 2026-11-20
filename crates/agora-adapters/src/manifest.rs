@@ -4,8 +4,8 @@ use std::collections::{BTreeMap, HashSet};
 
 use serde::Deserialize;
 
-/// Highest manifest `min_engine` this engine can run. 2: `[[launch.option]]` (ADR-0059). 3: `[[launch.setting]]` (ADR-0066). 4: `[accounts] credential_env` (ADR-0084).
-pub const ENGINE_VERSION: u32 = 4;
+/// Highest manifest `min_engine` this engine can run. 2: `[[launch.option]]` (ADR-0059). 3: `[[launch.setting]]` (ADR-0066). 4: `[accounts] credential_env` (ADR-0084). 5: `[quota]` (ADR-0091).
+pub const ENGINE_VERSION: u32 = 5;
 
 /// ADR-0066: most `[[launch.setting]]`s one manifest may declare, most allowed values one may list, and most arguments one may add.
 pub const MAX_LAUNCH_SETTINGS: usize = 8;
@@ -311,6 +311,35 @@ pub struct UsageSpec {
     pub file: Option<UsageFile>,
 }
 
+/// Most `[[quota.window]]` entries a manifest may list, and the longest JSON path in one.
+pub const MAX_QUOTA_WINDOWS: usize = 4;
+pub const MAX_QUOTA_PATH: usize = 128;
+
+/// ADR-0091: where one plan window sits in a selected line of the usage file. The three values are read, bounded and labelled by the
+/// node (`usage::quota`); the window's name comes from its length in minutes, never from the keys of the file.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QuotaWindow {
+    /// The share of the window used, 0 to 100 (a number; a fraction is rounded). Clamped by the node.
+    pub percent: String,
+    /// The window's length in minutes (a whole number, 1 or more).
+    pub minutes: String,
+    /// When the window resets, as a Unix time: seconds, or milliseconds when the value is 100 000 000 000 or more (both are accepted).
+    pub resets: String,
+}
+
+/// `[quota]` (ADR-0091): which values of a selected `[usage.file]` line say how much of a plan window is used. Only for a kind that has
+/// `[usage.file]`; the line's own `select` decides which lines count. Nothing else of the line is read for this.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QuotaSpec {
+    /// Optional path of the line's own time (an RFC 3339 string, as Codex's `timestamp`): when a file is read from its start, the
+    /// observation is stamped with it instead of with the time the node read it. Read defensively; never later than now.
+    pub at: Option<String>,
+    #[serde(default)]
+    pub window: Vec<QuotaWindow>,
+}
+
 /// ADR-0084: most names `[accounts] credential_env` may list, and the longest one.
 pub const MAX_CREDENTIAL_ENV: usize = 8;
 pub const MAX_CREDENTIAL_NAME: usize = 64;
@@ -416,6 +445,8 @@ pub struct Manifest {
     pub launch: Launch,
     /// ADR-0084: what the agent reads for its login (older engines ignore it).
     pub accounts: Option<Accounts>,
+    /// ADR-0091: the plan limits the tool reports in its usage file (`min_engine` 5).
+    pub quota: Option<QuotaSpec>,
 }
 
 /// Folders an agent asks to read or write when confined; `~/` stands for the home folder.
@@ -603,6 +634,25 @@ impl Manifest {
                 && !u.glob.contains('\0');
             if !paths_ok || !glob_ok || u.format.as_deref().is_some_and(|f| f != "jsonl") {
                 return Err(invalid("usage.file"));
+            }
+        }
+        if let Some(q) = &self.quota {
+            let path_ok = |p: &String| {
+                !p.is_empty()
+                    && p.len() <= MAX_QUOTA_PATH
+                    && !p.contains('\0')
+                    && p.split('.').all(|k| !k.is_empty())
+            };
+            let ok = self.min_engine >= 5
+                && self.usage.as_ref().is_some_and(|u| u.file.is_some())
+                && !q.window.is_empty()
+                && q.window.len() <= MAX_QUOTA_WINDOWS
+                && q.at.as_ref().is_none_or(path_ok)
+                && q.window
+                    .iter()
+                    .all(|w| [&w.percent, &w.minutes, &w.resets].into_iter().all(path_ok));
+            if !ok {
+                return Err(invalid("quota"));
             }
         }
         if let Some(m) = &self.mcp {
@@ -880,12 +930,12 @@ mod launch_tests {
 
     #[test]
     fn a_manifest_newer_than_this_engine_is_refused() {
-        let src = with(SKIP).replace("min_engine = 2", "min_engine = 5");
+        let src = with(SKIP).replace("min_engine = 2", "min_engine = 6");
         assert!(matches!(
             Manifest::parse(&src),
             Err(ManifestError::EngineTooOld {
-                required: 5,
-                supported: 4
+                required: 6,
+                supported: 5
             })
         ));
     }
@@ -970,6 +1020,62 @@ mod usage_tests {
     }
 
     const GOOD: &str = "glob = \"{home}/.k/*/*.jsonl\"\ncwd = \"cwd\"\nmodel = \"m\"\ninput = \"i\"\noutput = \"o\"\nmode = \"delta\"\n";
+
+    const QUOTA: &str =
+        "[[quota.window]]\npercent = \"a.used\"\nminutes = \"a.len\"\nresets = \"a.at\"\n";
+
+    fn quota(min_engine: u32, usage: bool, tail: &str) -> String {
+        let head = format!(
+            "kind = \"k\"\ndisplay_name = \"K\"\nversion = \"1\"\nmin_engine = {min_engine}\n"
+        );
+        let u = if usage {
+            format!("[usage]\nsource = \"file\"\n[usage.file]\n{GOOD}")
+        } else {
+            String::new()
+        };
+        format!("{head}{u}[quota]\n{tail}")
+    }
+
+    /// ADR-0091: `[quota]` is for a kind with `[usage.file]`, needs `min_engine` 5, and its paths are checked.
+    #[test]
+    fn a_quota_mapping_is_validated() {
+        let m = Manifest::parse(&quota(5, true, QUOTA)).unwrap();
+        let w = &m.quota.unwrap().window;
+        assert_eq!((w.len(), w[0].percent.as_str()), (1, "a.used"));
+        for (bad, why) in [
+            (quota(4, true, QUOTA), "min_engine below 5"),
+            (quota(5, false, QUOTA), "no usage file"),
+            (quota(5, true, ""), "no window"),
+            (quota(5, true, &QUOTA.replace("a.used", "")), "empty path"),
+            (
+                quota(5, true, &QUOTA.replace("a.used", "a..b")),
+                "empty key",
+            ),
+            (
+                quota(5, true, &QUOTA.replace("a.used", &"k".repeat(129))),
+                "long path",
+            ),
+            (
+                quota(5, true, &format!("{QUOTA}extra = 1\n")),
+                "unknown key",
+            ),
+            (
+                quota(5, true, &QUOTA.replace("resets = \"a.at\"\n", "")),
+                "missing resets",
+            ),
+            (quota(5, true, &QUOTA.repeat(5)), "too many windows"),
+            (
+                quota(5, true, &format!("at = \"\"\n{QUOTA}")),
+                "empty at path",
+            ),
+        ] {
+            assert!(Manifest::parse(&bad).is_err(), "{why}");
+        }
+        assert!(Manifest::parse(&quota(5, true, &QUOTA.repeat(4))).is_ok());
+        let with_at =
+            Manifest::parse(&quota(5, true, &format!("at = \"timestamp\"\n{QUOTA}"))).unwrap();
+        assert_eq!(with_at.quota.unwrap().at.as_deref(), Some("timestamp"));
+    }
 
     #[test]
     fn a_usage_file_needs_a_home_glob_real_paths_and_a_known_format() {

@@ -40,6 +40,8 @@ const HUB_CAPABILITIES: &[&str] = &[
     "agent.set_config",
     "agent.cancel_turn",
     "agent.commands",
+    // ADR-0091: `AgentQuotaObserved` (the plan windows of a subscription tool) is relayed to windows; the hub keeps nothing of it yet.
+    "usage.quota",
     // ADR-0060
     "agent.resume",
     // ADR-0059

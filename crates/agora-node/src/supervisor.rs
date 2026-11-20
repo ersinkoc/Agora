@@ -3262,18 +3262,14 @@ impl Supervisor {
 
     fn usage_target(&self, id: &AgentId) -> Option<crate::usage_files::Target> {
         let e = self.agents.get(id)?;
-        let spec = self
-            .kinds
-            .get(&e.agent.kind)?
-            .manifest
-            .usage
-            .as_ref()?
-            .file
-            .clone()?;
+        let manifest = &self.kinds.get(&e.agent.kind)?.manifest;
+        let spec = manifest.usage.as_ref()?.file.clone()?;
         Some(crate::usage_files::Target {
             agent: id.clone(),
             worktree: e.worktree.clone(),
             spec,
+            tool: manifest.kind.clone(),
+            quota: manifest.quota.clone(),
         })
     }
 
