@@ -207,6 +207,26 @@ pub struct SendMessageArgs<'a> {
     pub reply_to: Option<&'a str>,
 }
 
+/// `handoff`'s arguments, read as every path reads them (the broker, and the node before it routes a shared project's handoff
+/// to the hub).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HandoffArgs<'a> {
+    pub to: &'a str,
+    pub task_id: Option<&'a str>,
+    pub summary: &'a str,
+    pub refs: Vec<String>,
+}
+
+/// `None` when an argument is missing or has the wrong type: an invalid call (-32602).
+pub fn handoff_args(a: &Value) -> Option<HandoffArgs<'_>> {
+    Some(HandoffArgs {
+        to: str_arg(a, "to")?,
+        task_id: optional_str_arg(a, "task_id").ok()?,
+        summary: str_arg(a, "summary")?,
+        refs: strs_arg(a, "refs")?,
+    })
+}
+
 /// The text each receiver of a shared project's `#channel` message gets: the channel's name in front of the body. The hub builds
 /// it for the copies; the node checks its size before it sends the call, so an older hub cannot send what receivers refuse.
 pub fn channel_text(to: &str, body: &str) -> String {
@@ -556,12 +576,13 @@ impl McpConnection {
                 done(mesh.lease_release(me, l, now).map(|()| json!({"ok": true})))
             }
             "handoff" => {
-                let (Some(to), Ok(task_id), Some(summary), Some(refs)) = (
-                    str_arg(&args, "to"),
-                    optional_str_arg(&args, "task_id"),
-                    str_arg(&args, "summary"),
-                    strs_arg(&args, "refs"),
-                ) else {
+                let Some(HandoffArgs {
+                    to,
+                    task_id,
+                    summary,
+                    refs,
+                }) = handoff_args(&args)
+                else {
                     return bad();
                 };
                 done(

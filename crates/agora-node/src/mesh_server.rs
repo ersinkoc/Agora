@@ -16,7 +16,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use agora_core::AgentId;
 use agora_mesh::broker::{AgentInfo, AskStatus, Limits, Mesh};
-use agora_mesh::mcp::{McpConnection, Outcome, SendMessageArgs, BOARD_TOOLS};
+use agora_mesh::mcp::{HandoffArgs, McpConnection, Outcome, SendMessageArgs, BOARD_TOOLS};
 use agora_platform::{local_listen_agent, LocalStream};
 use agora_protocol::jsonrpc::{to_line, Message};
 use agora_protocol::v1::event::Body;
@@ -234,12 +234,21 @@ fn board_reply(
         (m.agent_info(conn.agent())?.project.clone(), m.limits())
     };
     let known = shares.get(&project);
-    if channel {
-        // Malformed arguments go to the broker, which answers -32602, as for a local message; nothing goes to the hub.
+    // The calls that carry a message: malformed arguments go to the broker, which answers -32602, as for a local call; nothing
+    // goes to the hub. Then the broker's limits that do not depend on the route, checked here too: an older hub does not check the
+    // refs' size, and receivers would refuse every copy it sends (or a handoff's message after the task moved). A channel's
+    // `[#channel] ` prefix is the hub's to check: only it knows whether the project is still shared (the local broker delivers
+    // the body unprefixed), and `known` may be stale.
+    let content = if channel {
         let SendMessageArgs { body, refs, .. } = agora_mesh::mcp::send_message_args(&args)?;
-        // The broker's limits that do not depend on the route, checked here too: an older hub does not check the refs' size, and
-        // receivers would refuse every copy it sends. The `[#channel] ` prefix is the hub's to check: only it knows whether the
-        // project is still shared (the local broker delivers the body unprefixed), and `known` may be stale.
+        Some((body, refs))
+    } else if name == "handoff" {
+        let HandoffArgs { summary, refs, .. } = agora_mesh::mcp::handoff_args(&args)?;
+        Some((summary, refs))
+    } else {
+        None
+    };
+    if let Some((body, refs)) = content {
         if let Err(e) = limits.check_content(body, &refs) {
             return Some(Message::Response {
                 id,
@@ -1583,6 +1592,72 @@ mod tests {
         let room = max - "[#dev] ".len();
         send(&conn, json!({"to": "#dev", "body": "x".repeat(room + 1)}));
         assert_eq!(link.0.load(Ordering::SeqCst), 3, "forwarded to the hub");
+    }
+
+    /// Codex review of #793: a `handoff` on a shared project gets the same route-independent checks before the hub as a channel
+    /// message (an older hub does not check the refs' total size and could move the task before the receiver refuses it): argument
+    /// types (-32602), the refs' count and size and the summary (`mesh.body_too_large` / `mesh.too_many_refs`), nothing reaching the
+    /// hub; exactly at the limits it is forwarded.
+    #[test]
+    fn a_shared_handoff_over_the_size_limits_is_refused_by_the_node() {
+        let (mesh, a, _) = ask_fixture();
+        let link = Arc::new(CountingLink(std::sync::atomic::AtomicUsize::new(0)));
+        let remote: RemoteSlot = Mutex::new(Some(link.clone() as Arc<dyn RemoteLink>));
+        let shares = Shares::default();
+        shares.set("p", true);
+        let mut conn = McpConnection::new(a);
+        conn.handle(
+            r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}"#,
+            &mut mesh.lock().unwrap(),
+            now_ms(),
+        );
+        let max = Limits::default().max_body_bytes;
+        let handoff = |conn: &mut McpConnection, args: Value| {
+            let line = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": "handoff", "arguments": args}})
+            .to_string();
+            board_reply(conn, &line, &mesh, &remote, &shares).unwrap_or_else(|| {
+                match conn.handle(&line, &mut mesh.lock().unwrap(), now_ms()) {
+                    Outcome::Reply(msg) => msg,
+                    _ => panic!("no reply"),
+                }
+            })
+        };
+        let code = |m: Message| match m {
+            Message::Response { result, .. } => agora_mesh::mcp::tool_result_value(&result)
+                .unwrap()["error"]["code"]
+                .as_str()
+                .unwrap_or("")
+                .to_string(),
+            Message::ErrorResponse { code, .. } => code.to_string(),
+            other => panic!("unexpected {other:?}"),
+        };
+        let refs = |total: usize| json!(["x".repeat(total - max / 2), "y".repeat(max / 2)]);
+        let to = "beta/a";
+        for (case, (args, want)) in [
+            (json!({"to": to, "summary": "s", "refs": refs(max + 1)}), "mesh.body_too_large"),
+            (json!({"to": to, "summary": "x".repeat(max + 1)}), "mesh.body_too_large"),
+            (
+                json!({"to": to, "summary": "s", "refs": vec!["r"; Limits::default().max_refs + 1]}),
+                "mesh.too_many_refs",
+            ),
+            (json!({"to": to, "summary": "s", "refs": [1]}), "-32602"),
+            (json!({"to": to, "summary": "s", "task_id": 5}), "-32602"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(code(handoff(&mut conn, args)), want, "case {case}");
+            assert_eq!(link.0.load(Ordering::SeqCst), 0, "case {case}: nothing reached the hub");
+        }
+        // At the limits the call goes to the hub (whose refusal this fake link reports as `board.unavailable`).
+        handoff(
+            &mut conn,
+            json!({"to": to, "summary": "s", "refs": refs(max)}),
+        );
+        assert_eq!(link.0.load(Ordering::SeqCst), 1);
+        handoff(&mut conn, json!({"to": to, "summary": "x".repeat(max)}));
+        assert_eq!(link.0.load(Ordering::SeqCst), 2);
     }
 
     /// Codex review of #793: the node answers `agents_list` itself (before the broker), so it must refuse a `project` that is not a
