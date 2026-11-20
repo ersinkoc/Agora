@@ -25,11 +25,10 @@ try {
   const desktop = await stack.addNode({ id: 'desktop', hostname: 'desktop-host', project: clone });
   await page.goto(`${origin}/#/`);
   await page.waitForFunction(() => document.querySelectorAll('aside section[data-machine-id]').length === 2, null, { timeout: 30000 });
-  // How many running agents the window lists for a machine (the rows under its folders, not the interrupted ones).
-  const count = machine => page.evaluate(m => [...document.querySelectorAll(`aside section[data-machine-id="${m}"] li > button[aria-pressed]`)]
-    .filter(b => !b.closest('[role=group]')).length, machine);
-  const shown = (machine, n) => page.waitForFunction(([m, k]) => [...document.querySelectorAll(`aside section[data-machine-id="${m}"] li > button[aria-pressed]`)]
-    .filter(b => !b.closest('[role=group]')).length >= k, [machine, n], { timeout: 60000, polling: 50 }).then(() => true, () => false);
+  // The running agents are listed under each machine's folders. The interrupted agents have their own group.
+  const runningRows = machine => page.locator(`aside section[data-machine-id="${machine}"] li button[aria-pressed]:not([role=group] *)`);
+  const shown = (machine, n) => runningRows(machine).nth(n - 1)
+    .waitFor({ state: 'visible', timeout: 60000 }).then(() => true, () => false);
   const machines = [
     { id: 'laptop', start: () => run(['agent', 'start', 'shell', '--cwd', proj]) },
     { id: 'desktop', start: () => desktop.run(['agent', 'start', 'shell', '--cwd', clone]) },
@@ -37,7 +36,7 @@ try {
   const times = { laptop: [], desktop: [] };
   for (let r = 0; r < rounds; r++) {
     const down = downs[r % downs.length];
-    const before = await Promise.all(machines.map(m => count(m.id)));
+    const before = await Promise.all(machines.map(m => runningRows(m.id).count()));
     await stack.stopHub();
     await wait(down);
     stack.startHub();
