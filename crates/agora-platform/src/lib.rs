@@ -66,11 +66,18 @@ pub fn default_shell() -> String {
     }
 }
 
-pub use held::{Collected, HeldBuffer, HeldControl, HeldSignal, HELD_BUFFER};
+pub use held::{
+    Collected, HeldBuffer, HeldControl, HeldLines, HeldSignal, LineChunk, LineWriter, PipeLines,
+    QueueError, HELD_BUFFER, HELD_LINE_MAX, LINE_QUEUE,
+};
 #[cfg(not(unix))]
-pub use nohold::{held_pty, HeldTerminal, ProcessWatch, TerminalHandle, TerminalReader};
+pub use nohold::{
+    held_pty, HeldProcess, HeldTerminal, ProcessWatch, TerminalHandle, TerminalReader,
+};
 #[cfg(unix)]
-pub use unixhold::{held_pty, HeldTerminal, ProcessWatch, TerminalHandle, TerminalReader};
+pub use unixhold::{
+    held_pty, HeldProcess, HeldTerminal, ProcessWatch, TerminalHandle, TerminalReader,
+};
 
 /// ADR-0079 decision 2: makes this process the leader of a session of its own, so nothing that ends its starter's session or group
 /// ends it. A process that already leads one is left as it is.

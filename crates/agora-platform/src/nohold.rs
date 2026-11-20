@@ -105,3 +105,30 @@ pub(crate) fn close_inherited_descriptors() {}
 pub(crate) fn start_new_session() -> io::Result<()> {
     Err(unsupported())
 }
+
+/// A program on pipes the holder owns (Unix only for now).
+#[derive(Debug)]
+pub struct HeldProcess(());
+
+impl HeldProcess {
+    pub fn start(
+        _argv: &[String],
+        _cwd: Option<&std::path::Path>,
+        _env: &[(String, String)],
+    ) -> io::Result<Self> {
+        Err(unsupported())
+    }
+    pub fn take_io(&mut self) -> Option<(std::process::ChildStdin, std::process::ChildStdout)> {
+        None
+    }
+    pub fn pid(&self) -> u32 {
+        0
+    }
+    pub fn signal(&self, _signal: HeldSignal) -> io::Result<()> {
+        Err(unsupported())
+    }
+    pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+        Err(unsupported())
+    }
+    pub fn kill_and_reap(&mut self) {}
+}

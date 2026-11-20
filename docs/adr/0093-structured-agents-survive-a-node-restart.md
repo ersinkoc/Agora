@@ -44,3 +44,12 @@ because their kind was not in the node's `resume.kinds`.
 ## Consequences
 Schema: none expected (agent snapshot already has `still_running`); a holder link message for pipe agents (ADR-0079's link spec gets a
 section, append-only). Tests: node kill with a structured agent mid-turn, with a pending permission, with a full buffer. Docs: `docs/specs/holder-link.md`.
+
+## Build status
+- Steps 1 and 2 are built for Unix (the change that adds "Pipe agents" to `docs/specs/holder-link.md`): the holder starts and keeps pipe agents, the node
+  reattaches, the replay is bounded to 1 MiB per agent with a "dropped N bytes" count, and the pending permission request is rebuilt from the replayed
+  line and asked again, never answered. Link version 2 carries it, negotiated by `Hello` so that a holder or a node built before this ADR keeps working
+  with the other. No schema change was needed.
+- Open question answered as proposed: 1 MiB per agent, oldest dropped (whole lines).
+- Not built: step 3 (Windows), step 4 (the window's "kept" and "continued" words and the doctor line; the snapshot has no field that says "survived a
+  node restart" without a schema change, so that step needs one), and decision 5 (the default of `resume.kinds`).

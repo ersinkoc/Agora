@@ -16,12 +16,13 @@ use std::time::{Duration, Instant};
 
 use agora_i18n::key;
 use agora_node::holder_link::{
-    read_frame, socket_path, write_frame, AgentInfo, AgentState, Refusal, Reply, Request,
-    StartRequest, TerminalInfo, LINK_VERSION, WRITE_SLICE,
+    read_frame, socket_path, write_frame, AgentInfo, AgentState, PipeData, Refusal, Reply, Request,
+    StartPipeRequest, StartRequest, TerminalInfo, LINK_VERSION, LINK_VERSION_PIPES, MAX_FRAME,
+    WRITE_SLICE,
 };
 use agora_platform::{
-    ExitStatus, HeldBuffer, HeldSignal, HeldTerminal, LocalListener, LocalStream, Peer,
-    ProcessWatch, PtyConfig, TerminalReader,
+    ExitStatus, HeldBuffer, HeldProcess, HeldSignal, HeldTerminal, LineWriter, LocalListener,
+    LocalStream, Peer, PipeLines, ProcessWatch, PtyConfig, QueueError, TerminalReader,
 };
 
 use crate::frontdoor::{read_lock, Role};
@@ -196,8 +197,42 @@ impl Agent {
     }
 }
 
+/// ADR-0093: a structured agent on a pair of pipes. The holder never reads what it writes beyond cutting it into lines (its output is
+/// read by a thread of its own into a bounded buffer, whether or not a node is there), and never parses a line: they are ACP's or an
+/// adapter's own JSON-RPC, the node's to understand.
+struct PipeAgent {
+    id: String,
+    proc: HeldProcess,
+    lines: PipeLines,
+    /// `None` once its input could not be taken or closed.
+    input: Option<LineWriter>,
+    exit: Option<ExitStatus>,
+}
+
+impl PipeAgent {
+    fn state(&self) -> AgentState {
+        match self.exit {
+            None => AgentState::Running,
+            Some(s) => AgentState::Exited {
+                code: s.code,
+                signal: s.signal,
+            },
+        }
+    }
+
+    fn info(&self) -> AgentInfo {
+        AgentInfo {
+            agent: self.id.clone(),
+            pid: self.proc.pid(),
+            state: self.state(),
+        }
+    }
+}
+
 struct Node {
     stream: LocalStream,
+    /// The link version this node speaks (ADR-0093: version 2 may use pipe agents; a node of version 1 is never sent them).
+    version: u16,
     watch: ProcessWatch,
     attached: bool,
 }
@@ -206,6 +241,8 @@ pub(crate) struct Holder {
     listener: LocalListener,
     admit: Admit,
     agents: Vec<Agent>,
+    /// ADR-0093: the structured agents.
+    pipes: Vec<PipeAgent>,
     node: Option<Node>,
     /// The node whose link dropped while its process runs: it still holds its copies of the terminals and reads them itself, so the
     /// holder reads none until that process has ended (a read of a terminal two processes read blocks, and ending it would never
@@ -235,6 +272,7 @@ impl Holder {
             listener,
             admit,
             agents: Vec::new(),
+            pipes: Vec::new(),
             node: None,
             departed: None,
             had_agents: false,
@@ -253,7 +291,8 @@ impl Holder {
 
     /// Says (in `run/hold.pid`) how many agents run, when that changed. A failed write is only a stale count.
     fn publish(&mut self) {
-        let running = self.agents.iter().filter(|a| a.exit.is_none()).count();
+        let running = self.agents.iter().filter(|a| a.exit.is_none()).count()
+            + self.pipes.iter().filter(|a| a.exit.is_none()).count();
         if self.published != Some(running) {
             let text = format!("{} {} {running}\n", self.pid, self.start);
             if agora_platform::write_private(&info_path(&self.home), text.as_bytes()).is_ok() {
@@ -267,16 +306,24 @@ impl Holder {
         for a in &self.agents {
             let _ = a.term.signal(HeldSignal::Terminate);
         }
+        for a in &self.pipes {
+            let _ = a.proc.signal(HeldSignal::Terminate);
+        }
         let end = Instant::now() + Duration::from_secs(3);
         while Instant::now() < end {
             self.reap();
-            if self.agents.iter().all(|a| a.exit.is_some()) {
+            if self.agents.iter().all(|a| a.exit.is_some())
+                && self.pipes.iter().all(|a| a.exit.is_some())
+            {
                 return;
             }
             std::thread::sleep(Duration::from_millis(20));
         }
         for a in &self.agents {
             let _ = a.term.signal(HeldSignal::Kill);
+        }
+        for a in &self.pipes {
+            let _ = a.proc.signal(HeldSignal::Kill);
         }
         // What is left is killed and collected as the agents are dropped.
     }
@@ -307,6 +354,11 @@ impl Holder {
 
     /// Notes agents that ended, and keeps what an ended agent's terminal still holds.
     fn reap(&mut self) {
+        for a in &mut self.pipes {
+            if a.exit.is_none() {
+                a.exit = a.proc.try_wait().unwrap_or(None);
+            }
+        }
         let now = Instant::now();
         let node_may_read = self.departed.is_some();
         for a in &mut self.agents {
@@ -364,7 +416,7 @@ impl Holder {
             }
             self.detach();
         }
-        if version != LINK_VERSION {
+        if !agora_node::holder_link::version_spoken(version) {
             refuse(&mut stream, Refusal::VersionMismatch);
             return;
         }
@@ -372,7 +424,7 @@ impl Holder {
             return;
         };
         let hello = Reply::HelloOk {
-            version: LINK_VERSION,
+            version,
             holder_pid: self.pid,
             holder_start: self.start,
         };
@@ -387,6 +439,7 @@ impl Holder {
         // A node that comes back takes over the terminals from the one before it: the holder reads none for it.
         self.departed = None;
         self.node = Some(Node {
+            version,
             stream,
             watch,
             attached: false,
@@ -468,7 +521,12 @@ impl Holder {
         match request {
             Request::Hello { .. } => self.refuse(Refusal::BadRequest),
             Request::List => {
-                let list = self.agents.iter().map(Agent::info).collect();
+                let list = self
+                    .agents
+                    .iter()
+                    .map(Agent::info)
+                    .chain(self.pipes.iter().map(PipeAgent::info))
+                    .collect();
                 self.send(&Reply::Agents(list), None);
             }
             _ if !attached && !matches!(request, Request::Attach) => {
@@ -477,13 +535,35 @@ impl Holder {
             Request::Attach if attached => self.refuse(Refusal::BadRequest),
             Request::Attach => return self.attach(),
             Request::Start(s) => self.start(&s),
-            Request::Resize { agent, cols, rows } => match self.agent(&agent) {
-                None => self.refuse(Refusal::UnknownAgent),
-                Some(a) => {
-                    let r = a.term.resize(cols, rows);
-                    self.answer(r);
+            Request::StartPipe(_)
+            | Request::AttachPipes
+            | Request::PipeRead { .. }
+            | Request::PipeWrite { .. }
+                if self
+                    .node
+                    .as_ref()
+                    .is_none_or(|n| n.version < LINK_VERSION_PIPES) =>
+            {
+                self.refuse(Refusal::BadRequest);
+            }
+            Request::StartPipe(s) => self.start_pipe(&s),
+            Request::AttachPipes => return self.attach_pipes(),
+            Request::PipeRead { agent } => self.pipe_read(&agent),
+            Request::PipeWrite { agent, line } => self.pipe_write(&agent, line),
+            Request::Resize { agent, cols, rows } => {
+                // A pipe agent has no window to resize.
+                if self.pipes.iter().any(|p| p.id == agent) {
+                    self.refuse(Refusal::BadRequest);
+                } else {
+                    match self.agent(&agent) {
+                        None => self.refuse(Refusal::UnknownAgent),
+                        Some(a) => {
+                            let r = a.term.resize(cols, rows);
+                            self.answer(r);
+                        }
+                    }
                 }
-            },
+            }
             Request::Signal { agent, signal } => self.signal(&agent, signal),
             Request::Stop { agent, force } => self.signal(
                 &agent,
@@ -507,7 +587,15 @@ impl Holder {
         }
     }
 
+    fn pipe(&mut self, id: &str) -> Option<&mut PipeAgent> {
+        self.pipes.iter_mut().find(|a| a.id == id)
+    }
+
     fn signal(&mut self, agent: &str, signal: HeldSignal) {
+        if let Some(p) = self.pipe(agent) {
+            let r = p.proc.signal(signal);
+            return self.answer(r);
+        }
         match self.agent(agent) {
             None => self.refuse(Refusal::UnknownAgent),
             Some(a) => {
@@ -524,7 +612,7 @@ impl Holder {
         if s.agent.is_empty() || s.argv.is_empty() {
             return self.refuse(Refusal::BadRequest);
         }
-        if self.agent(&s.agent).is_some() {
+        if self.agent(&s.agent).is_some() || self.pipe(&s.agent).is_some() {
             return self.refuse(Refusal::AgentExists);
         }
         let config = PtyConfig {
@@ -612,18 +700,130 @@ impl Holder {
             return false;
         }
         // A node that attaches and finds nothing left of what the holder held ends it (decision 2).
-        self.had_agents && self.agents.is_empty()
+        self.had_agents && self.agents.is_empty() && self.pipes.is_empty()
+    }
+
+    /// ADR-0093: starts a program on pipes. Its output is read from now on, by a thread of its own, into a bounded buffer.
+    fn start_pipe(&mut self, s: &StartPipeRequest) {
+        if s.agent.is_empty() || s.argv.is_empty() {
+            return self.refuse(Refusal::BadRequest);
+        }
+        if self.agent(&s.agent).is_some() || self.pipe(&s.agent).is_some() {
+            return self.refuse(Refusal::AgentExists);
+        }
+        let cwd = s.cwd.as_ref().map(PathBuf::from);
+        let Ok(mut proc) = HeldProcess::start(&s.argv, cwd.as_deref(), &s.env) else {
+            return self.refuse(Refusal::Failed);
+        };
+        let lines = PipeLines::default();
+        let wired = proc.take_io().and_then(|(stdin, stdout)| {
+            lines.spawn_reader(stdout).ok()?;
+            LineWriter::spawn(stdin).ok()
+        });
+        let Some(input) = wired else {
+            // Never handed to the node: ended and reaped, so no process and no zombie is left behind.
+            proc.kill_and_reap();
+            return self.refuse(Refusal::Failed);
+        };
+        let pid = proc.pid();
+        self.had_agents = true;
+        self.pipes.push(PipeAgent {
+            id: s.agent.clone(),
+            proc,
+            lines,
+            input: Some(input),
+            exit: None,
+        });
+        self.send(
+            &Reply::PipeStarted {
+                agent: s.agent.clone(),
+                pid,
+            },
+            None,
+        );
+    }
+
+    /// ADR-0093: hands over every pipe agent with all it kept (what an earlier node had and what no node had).
+    fn attach_pipes(&mut self) -> bool {
+        let count = self.pipes.len();
+        for i in 0..count {
+            let a = &self.pipes[i];
+            let (chunk, eof) = a.lines.replay();
+            let data = PipeData {
+                info: a.info(),
+                dropped: chunk.dropped,
+                eof,
+                seen: chunk.seen,
+                fresh: chunk.fresh,
+            };
+            if !self.send(&Reply::PipeData(data), None) {
+                return false;
+            }
+        }
+        self.send(
+            &Reply::AttachDone {
+                count: count as u32,
+            },
+            None,
+        );
+        false
+    }
+
+    /// ADR-0093: the output no node had. A reply that never reaches the node loses what it carried, as a terminal's does.
+    fn pipe_read(&mut self, agent: &str) {
+        let Some(a) = self.pipe(agent) else {
+            return self.refuse(Refusal::UnknownAgent);
+        };
+        let (chunk, eof) = a.lines.take_fresh();
+        let data = PipeData {
+            info: a.info(),
+            dropped: chunk.dropped,
+            eof,
+            seen: Vec::new(),
+            fresh: chunk.fresh,
+        };
+        self.send(&Reply::PipeData(data), None);
+    }
+
+    /// ADR-0093: queues one line for the agent's input; a thread of its own writes it, so an agent that does not read never holds the
+    /// holder. A full queue or a closed input is `Failed`.
+    fn pipe_write(&mut self, agent: &str, line: Vec<u8>) {
+        if line.len() >= MAX_FRAME {
+            return self.refuse(Refusal::BadRequest);
+        }
+        let Some(a) = self.pipe(agent) else {
+            return self.refuse(Refusal::UnknownAgent);
+        };
+        let queued = match &a.input {
+            Some(w) => w.queue(line),
+            None => Err(QueueError::Closed),
+        };
+        match queued {
+            Ok(()) => {
+                self.send(&Reply::Ok, None);
+            }
+            Err(_) => self.refuse(Refusal::Failed),
+        }
     }
 
     /// The node took an ended agent: it is forgotten. The holder ends when that was its last.
     fn release(&mut self, agent: &str) -> bool {
+        if let Some(i) = self.pipes.iter().position(|a| a.id == agent) {
+            if self.pipes[i].exit.is_none() {
+                self.refuse(Refusal::BadRequest);
+                return false;
+            }
+            self.pipes.remove(i);
+            self.send(&Reply::Ok, None);
+            return self.agents.is_empty() && self.pipes.is_empty();
+        }
         match self.agents.iter().position(|a| a.id == agent) {
             None => self.refuse(Refusal::UnknownAgent),
             Some(i) if self.agents[i].exit.is_none() => self.refuse(Refusal::BadRequest),
             Some(i) => {
                 self.agents.remove(i);
                 self.send(&Reply::Ok, None);
-                return self.agents.is_empty();
+                return self.agents.is_empty() && self.pipes.is_empty();
             }
         }
         false

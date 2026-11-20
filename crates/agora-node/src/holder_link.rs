@@ -17,6 +17,16 @@ use agora_platform::{HeldSignal, LocalStream, TerminalHandle};
 /// The version of the holder link this build speaks. A holder and a node that differ do nothing together (decision 5).
 pub const LINK_VERSION: u16 = 1;
 
+/// ADR-0093: the version that adds the pipe agents (tags 9 to 12 and 71, 72). A holder speaks both; a node speaks the newest the holder
+/// does, so a holder built before this version (which closes the link on a tag it does not know) is never sent one, and a node built
+/// before it keeps working with this holder (it speaks version 1, and the holder sends it none of the new tags).
+pub const LINK_VERSION_PIPES: u16 = 2;
+
+/// Whether this build speaks link version `v`.
+pub fn version_spoken(v: u16) -> bool {
+    v == LINK_VERSION || v == LINK_VERSION_PIPES
+}
+
 /// The largest frame either side accepts: a terminal's whole buffer (1 MiB, [`agora_platform::HELD_BUFFER`]) and generous room for the rest.
 pub const MAX_FRAME: usize = 4 << 20;
 
@@ -135,6 +145,34 @@ pub struct TerminalInfo {
     pub buffer: Vec<u8>,
 }
 
+/// ADR-0093: a program the node wants run on pipes (a structured agent: an adapter or an ACP bridge). Like [`StartRequest`] the launch
+/// is the node's, complete: the holder adds nothing, and passes on exactly this environment.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct StartPipeRequest {
+    pub agent: String,
+    pub argv: Vec<String>,
+    pub cwd: Option<String>,
+    pub env: Vec<(String, String)>,
+}
+
+/// ADR-0093: what a pipe agent wrote that the node has to take: lines (the holder never reads their content), what was lost, and
+/// whether more can come.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PipeData {
+    pub info: AgentInfo,
+    /// Bytes dropped before any node saw them since the last hand-over (the oldest were pushed out of the bounded buffer).
+    pub dropped: u64,
+    /// The agent's output ended: every process that held it closed it. With no lines left, nothing more will come.
+    pub eof: bool,
+    /// Lines an earlier node was given, oldest first (only in a replay at attach): what that node may have been waiting on.
+    pub seen: Vec<Vec<u8>>,
+    /// Lines no node had, oldest first.
+    pub fresh: Vec<Vec<u8>>,
+}
+
+/// One pipe agent as `AttachPipes` reports it.
+pub type HeldPipe = PipeData;
+
 /// What a node sends.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Request {
@@ -163,6 +201,19 @@ pub enum Request {
     Release {
         agent: String,
     },
+    /// ADR-0093: start a program on pipes. Answered `PipeStarted`.
+    StartPipe(StartPipeRequest),
+    /// ADR-0093: hand over every pipe agent with everything kept of its output (a replay); one `PipeData` each, then `AttachDone`.
+    AttachPipes,
+    /// ADR-0093: the pipe agent's output no node had yet. Answered `PipeData`.
+    PipeRead {
+        agent: String,
+    },
+    /// ADR-0093: one line (without its newline) for the pipe agent's input.
+    PipeWrite {
+        agent: String,
+        line: Vec<u8>,
+    },
 }
 
 /// What the holder answers.
@@ -189,6 +240,13 @@ pub enum Reply {
     AttachDone {
         count: u32,
     },
+    /// ADR-0093: a pipe agent started.
+    PipeStarted {
+        agent: String,
+        pid: u32,
+    },
+    /// ADR-0093: a pipe agent's output.
+    PipeData(PipeData),
 }
 
 // ----- encoding -----
@@ -201,6 +259,10 @@ const T_SIGNAL: u8 = 5;
 const T_STOP: u8 = 6;
 const T_LIST: u8 = 7;
 const T_RELEASE: u8 = 8;
+const T_START_PIPE: u8 = 9;
+const T_ATTACH_PIPES: u8 = 10;
+const T_PIPE_READ: u8 = 11;
+const T_PIPE_WRITE: u8 = 12;
 const T_HELLO_OK: u8 = 64;
 const T_REFUSED: u8 = 65;
 const T_OK: u8 = 66;
@@ -208,6 +270,8 @@ const T_STARTED: u8 = 67;
 const T_AGENTS: u8 = 68;
 const T_TERMINAL: u8 = 69;
 const T_ATTACH_DONE: u8 = 70;
+const T_PIPE_STARTED: u8 = 71;
+const T_PIPE_DATA: u8 = 72;
 
 #[derive(Default)]
 struct Enc(Vec<u8>);
@@ -280,6 +344,12 @@ impl Enc {
         self.str(&i.agent);
         self.u32(i.pid);
         self.state(i.state);
+    }
+    fn lines(&mut self, lines: &[Vec<u8>]) {
+        self.u32(u32::try_from(lines.len()).unwrap_or(u32::MAX));
+        for l in lines {
+            self.bytes(l);
+        }
     }
 }
 
@@ -375,6 +445,13 @@ impl<'a> Dec<'a> {
             state: self.state()?,
         })
     }
+    fn lines(&mut self) -> Result<Vec<Vec<u8>>, LinkError> {
+        let mut v = Vec::new();
+        for _ in 0..self.count()? {
+            v.push(self.bytes()?.to_vec());
+        }
+        Ok(v)
+    }
     fn done(&self) -> Result<(), LinkError> {
         if self.0.is_empty() {
             Ok(())
@@ -456,6 +533,30 @@ impl Request {
                 e.u8(T_RELEASE);
                 e.str(agent);
             }
+            Self::StartPipe(s) => {
+                e.u8(T_START_PIPE);
+                e.str(&s.agent);
+                e.u32(u32::try_from(s.argv.len()).unwrap_or(u32::MAX));
+                for a in &s.argv {
+                    e.str(a);
+                }
+                e.opt_str(&s.cwd);
+                e.u32(u32::try_from(s.env.len()).unwrap_or(u32::MAX));
+                for (k, v) in &s.env {
+                    e.str(k);
+                    e.str(v);
+                }
+            }
+            Self::AttachPipes => e.u8(T_ATTACH_PIPES),
+            Self::PipeRead { agent } => {
+                e.u8(T_PIPE_READ);
+                e.str(agent);
+            }
+            Self::PipeWrite { agent, line } => {
+                e.u8(T_PIPE_WRITE);
+                e.str(agent);
+                e.bytes(line);
+            }
         }
         e.0
     }
@@ -507,6 +608,30 @@ impl Request {
             },
             T_LIST => Self::List,
             T_RELEASE => Self::Release { agent: d.str()? },
+            T_START_PIPE => {
+                let agent = d.str()?;
+                let mut argv = Vec::new();
+                for _ in 0..d.count()? {
+                    argv.push(d.str()?);
+                }
+                let cwd = d.opt_str()?;
+                let mut env = Vec::new();
+                for _ in 0..d.count()? {
+                    env.push((d.str()?, d.str()?));
+                }
+                Self::StartPipe(StartPipeRequest {
+                    agent,
+                    argv,
+                    cwd,
+                    env,
+                })
+            }
+            T_ATTACH_PIPES => Self::AttachPipes,
+            T_PIPE_READ => Self::PipeRead { agent: d.str()? },
+            T_PIPE_WRITE => Self::PipeWrite {
+                agent: d.str()?,
+                line: d.bytes()?.to_vec(),
+            },
             _ => return Err(LinkError::Malformed("request (unknown tag)")),
         };
         d.done()?;
@@ -559,6 +684,19 @@ impl Reply {
                 e.u8(T_ATTACH_DONE);
                 e.u32(*count);
             }
+            Self::PipeStarted { agent, pid } => {
+                e.u8(T_PIPE_STARTED);
+                e.str(agent);
+                e.u32(*pid);
+            }
+            Self::PipeData(p) => {
+                e.u8(T_PIPE_DATA);
+                e.info(&p.info);
+                e.u64(p.dropped);
+                e.bool(p.eof);
+                e.lines(&p.seen);
+                e.lines(&p.fresh);
+            }
         }
         e.0
     }
@@ -593,6 +731,17 @@ impl Reply {
                 buffer: d.bytes()?.to_vec(),
             }),
             T_ATTACH_DONE => Self::AttachDone { count: d.u32()? },
+            T_PIPE_STARTED => Self::PipeStarted {
+                agent: d.str()?,
+                pid: d.u32()?,
+            },
+            T_PIPE_DATA => Self::PipeData(PipeData {
+                info: d.info()?,
+                dropped: d.u64()?,
+                eof: d.bool()?,
+                seen: d.lines()?,
+                fresh: d.lines()?,
+            }),
             _ => return Err(LinkError::Malformed("reply (unknown tag)")),
         };
         d.done()?;
@@ -706,12 +855,20 @@ pub struct Client {
     /// The holder's own process (pid and start time): what the ledger records (decision 9) and the node watches (decision 8).
     pub holder_pid: u32,
     pub holder_start: u64,
+    /// The version spoken on this link: [`LINK_VERSION_PIPES`] when the holder keeps pipe agents too, else [`LINK_VERSION`].
+    pub version: u16,
 }
 
 impl Client {
-    /// Connects and says hello with this build's [`LINK_VERSION`].
+    /// Connects and says hello with the newest version this build speaks; a holder that answers `VersionMismatch` with an older
+    /// version of its own (one built before ADR-0093) is greeted again with that one.
     pub fn connect(socket: &Path) -> Result<Self, LinkError> {
-        Self::connect_with_version(socket, LINK_VERSION)
+        match Self::connect_with_version(socket, LINK_VERSION_PIPES) {
+            Err(LinkError::Refused(Refusal::VersionMismatch, v)) if v == LINK_VERSION => {
+                Self::connect_with_version(socket, LINK_VERSION)
+            }
+            other => other,
+        }
     }
 
     /// As [`Self::connect`] with another version (tests of the mismatch rule). `Refused(VersionMismatch, v)` carries the holder's.
@@ -722,13 +879,14 @@ impl Client {
         write_frame(&mut stream, &Request::Hello { version }.encode(), None)?;
         match Self::read_reply(&mut stream)?.0 {
             Reply::HelloOk {
+                version: spoken,
                 holder_pid,
                 holder_start,
-                ..
-            } => Ok(Self {
+            } if spoken == version => Ok(Self {
                 stream,
                 holder_pid,
                 holder_start,
+                version: spoken,
             }),
             Reply::Refused {
                 code,
@@ -819,6 +977,52 @@ impl Client {
         self.expect_ok(&Request::Stop {
             agent: agent.into(),
             force,
+        })
+    }
+
+    /// ADR-0093: starts a program on pipes; returns its pid.
+    pub fn start_pipe(&mut self, request: &StartPipeRequest) -> Result<u32, LinkError> {
+        match self.call(&Request::StartPipe(request.clone()))?.0 {
+            Reply::PipeStarted { pid, .. } => Ok(pid),
+            _ => Err(LinkError::Malformed("answer to start (pipe)")),
+        }
+    }
+
+    /// ADR-0093: takes over the pipe agents: each with everything the holder kept of its output.
+    pub fn attach_pipes(&mut self) -> Result<Vec<HeldPipe>, LinkError> {
+        write_frame(&mut self.stream, &Request::AttachPipes.encode(), None)?;
+        let mut held = Vec::new();
+        loop {
+            match Self::read_reply(&mut self.stream)?.0 {
+                Reply::PipeData(p) => held.push(p),
+                Reply::AttachDone { count } if count as usize == held.len() => return Ok(held),
+                Reply::Refused {
+                    code,
+                    holder_version,
+                } => return Err(LinkError::Refused(code, holder_version)),
+                _ => return Err(LinkError::Malformed("answer to attach (pipes)")),
+            }
+        }
+    }
+
+    /// ADR-0093: the lines a pipe agent wrote that no node had.
+    pub fn pipe_read(&mut self, agent: &str) -> Result<PipeData, LinkError> {
+        match self
+            .call(&Request::PipeRead {
+                agent: agent.into(),
+            })?
+            .0
+        {
+            Reply::PipeData(p) => Ok(p),
+            _ => Err(LinkError::Malformed("answer to read (pipe)")),
+        }
+    }
+
+    /// ADR-0093: one line (without its newline) for a pipe agent's input.
+    pub fn pipe_write(&mut self, agent: &str, line: &[u8]) -> Result<(), LinkError> {
+        self.expect_ok(&Request::PipeWrite {
+            agent: agent.into(),
+            line: line.to_vec(),
         })
     }
 

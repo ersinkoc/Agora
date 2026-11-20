@@ -83,6 +83,10 @@ pub struct Entry {
     /// own. A node that starts and finds that holder alive attaches to the agent instead of reporting it interrupted.
     pub holder_pid: u32,
     pub holder_started: u64,
+    /// ADR-0093: for an agent an adapter hosts that runs in the holder: what a node that takes it up later must know and cannot ask
+    /// (the adapter's own session id, and the capabilities it declared in `initialize`). Empty otherwise.
+    pub adapter_session: String,
+    pub adapter_capabilities: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -168,6 +172,8 @@ impl Entry {
             "continue_sent_ms": self.continue_sent_ms,
             "holder_pid": self.holder_pid,
             "holder_started": self.holder_started,
+            "adapter_session": self.adapter_session,
+            "adapter_capabilities": self.adapter_capabilities,
         })
     }
 
@@ -213,6 +219,21 @@ impl Entry {
             continue_sent_ms: number(v, "continue_sent_ms"),
             holder_pid: u32::try_from(number(v, "holder_pid")).unwrap_or(0),
             holder_started: number(v, "holder_started"),
+            adapter_session: Some(field(v, "adapter_session"))
+                .filter(|s| s.len() <= 256)
+                .unwrap_or_default(),
+            adapter_capabilities: v
+                .get("adapter_capabilities")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(Value::as_str)
+                        .filter(|s| s.len() <= 64)
+                        .take(64)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default(),
         };
         (!e.agent_id.is_empty() && !e.kind.is_empty()).then_some(e)
     }
@@ -445,6 +466,31 @@ impl Ledger {
             return true;
         }
         (e.holder_pid, e.holder_started) = (pid, started);
+        e.updated_at_ms = now_ms;
+        st.dirty = true;
+        drop(st);
+        let _ = self.flush();
+        true
+    }
+
+    /// ADR-0093: what a later node needs to take up an adapter agent that runs in the holder. Written when it changed. `false` when the
+    /// ledger does not hold the agent yet (try again later), as [`Self::set_process`].
+    pub fn set_adapter_state(
+        &self,
+        agent_id: &str,
+        session: &str,
+        capabilities: &[String],
+        now_ms: u64,
+    ) -> bool {
+        let mut st = self.st();
+        let Some(e) = st.entries.get_mut(agent_id) else {
+            return false;
+        };
+        if e.adapter_session == session && e.adapter_capabilities == capabilities {
+            return true;
+        }
+        e.adapter_session = session.to_string();
+        e.adapter_capabilities = capabilities.to_vec();
         e.updated_at_ms = now_ms;
         st.dirty = true;
         drop(st);
