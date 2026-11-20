@@ -1821,7 +1821,7 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                                     s,
                                     &selected,
                                     &text,
-                                    &mut Plain(&rx),
+                                    &mut Plain::new(&rx),
                                 )
                             {
                                 notice = String::new();
