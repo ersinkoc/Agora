@@ -574,7 +574,7 @@ fn ask_grant(
     commands: &[&str],
 ) -> Result<bool, String> {
     let question = lines_of(&say.text(key!("tui-grant-ask"), &[]));
-    if fresh_key(ask, &question, Duration::from_secs(30)) != Some(b'y') {
+    if fresh_answer(ask, Some(session), &question, Duration::from_secs(30)) != Some(b'y') {
         return Ok(false);
     }
     let fail = |code: String| say.text(key!("tui-answer-failed"), &[("code", Arg::Str(code))]);
@@ -587,12 +587,26 @@ fn ask_grant(
     }
 }
 
-/// Shows `lines` and waits up to `wait` for a key pressed after they were shown: keys typed before (meant for an agent, a `y` among
-/// them) are set aside, and a paste never answers, so only a fresh key confirms (ADR-0063).
-fn fresh_key(ask: &mut dyn Asker, lines: &[String], wait: Duration) -> Option<u8> {
-    ask.show(lines);
+/// Asks `lines` once and waits up to `wait` for one key typed alone after it (ADR-0063): keys typed before (meant for an agent, a `y`
+/// among them) are set aside first, then the question is drawn, so the first answer after it counts; the terminal frames pastes for
+/// as long as it is asked (whatever the console's mouse setting), and a paste or a burst of keys never answers.
+fn fresh_answer(
+    ask: &mut dyn Asker,
+    session: Option<&mut Session>,
+    lines: &[String],
+    wait: Duration,
+) -> Option<u8> {
+    let framed = bracketed_paste(true);
     ask.discard();
-    ask.answer(lines, wait)
+    let answer = ask.answer(session, lines, wait);
+    bracketed_paste(framed);
+    answer
+}
+
+/// [`fresh_answer`] with no pane to feed.
+#[cfg(test)]
+fn fresh_key(ask: &mut dyn Asker, lines: &[String], wait: Duration) -> Option<u8> {
+    fresh_answer(ask, None, lines, wait)
 }
 
 /// Sets aside every key typed so far by reading it through `parser` and dropping what it makes: a bracketed paste that began
@@ -605,12 +619,59 @@ fn set_aside_keys(parser: &mut Parser, rx: &mpsc::Receiver<u8>) {
     let _ = parser.push(&bytes);
 }
 
-/// The answer in one read of the keyboard: only when it is exactly one key or click, never a paste nor several keys at once.
-fn one_answer(events: &[AppEvent], area: Area, lines: &[String]) -> Option<u8> {
+/// The answer in one read of the keyboard (`bytes`, which `parser` made `events` of): only when it is exactly one key or click,
+/// never a paste nor several keys at once; a typed letter only when the read was that letter and nothing else (no half of a paste).
+fn one_answer(events: &[AppEvent], bytes: &[u8], area: Area, lines: &[String]) -> Option<u8> {
     match events {
+        [e @ AppEvent::Key(agora_tui::app::Key::Char(c))] => {
+            (c.encode_utf8(&mut [0; 4]).as_bytes() == bytes)
+                .then(|| agora_tui::app::dialog_key(e, area, lines))
+                .flatten()
+        }
         [e] if !matches!(e, AppEvent::Paste(_)) => agora_tui::app::dialog_key(e, area, lines),
         _ => None,
     }
+}
+
+/// What one read of the keyboard said to a question whose `y` signs something.
+#[derive(Debug, PartialEq, Eq)]
+enum Heard {
+    Answer(u8),
+    /// Nothing yet, or something that is no answer (a paste, a burst, input still waiting behind it): set aside.
+    Waiting,
+    /// The keyboard is gone.
+    Gone,
+}
+
+/// Reads the keyboard once, waiting up to `wait`, through `parser` (a paste keeps its framing). The read is an answer only when it
+/// is one key alone and nothing more is already waiting behind it; otherwise everything is set aside and the question waits on.
+fn lone_key_step(
+    parser: &mut Parser,
+    rx: &mpsc::Receiver<u8>,
+    wait: Duration,
+    area: Area,
+    lines: &[String],
+) -> Heard {
+    let (events, bytes) = match rx.recv_timeout(wait) {
+        Ok(b) => {
+            let mut bytes = vec![b];
+            while let Ok(b) = rx.try_recv() {
+                bytes.push(b);
+            }
+            (parser.push(&bytes), bytes)
+        }
+        Err(mpsc::RecvTimeoutError::Timeout) => (parser.flush(), Vec::new()),
+        Err(mpsc::RecvTimeoutError::Disconnected) => return Heard::Gone,
+    };
+    let mut more = Vec::new();
+    while let Ok(b) = rx.try_recv() {
+        more.push(b);
+    }
+    if !more.is_empty() {
+        let _ = parser.push(&more);
+        return Heard::Waiting;
+    }
+    one_answer(&events, &bytes, area, lines).map_or(Heard::Waiting, Heard::Answer)
 }
 
 /// What `action` came to once a refusal for a missing grant was handled.
@@ -2036,12 +2097,27 @@ fn mouse_mode(on: bool) {
     let mut out = std::io::stdout();
     // Motion with no button (1003) is only switched on while the open program asked for it (`mouse_motion`): never by this.
     HOST_MOTION.store(false, std::sync::atomic::Ordering::Relaxed);
+    HOST_PASTE.store(on, std::sync::atomic::Ordering::Relaxed);
     let _ = out.write_all(if on {
         b"\x1b[?1003l\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?2004h"
     } else {
         b"\x1b[?1003l\x1b[?1000l\x1b[?1002l\x1b[?1006l\x1b[?2004l"
     });
     let _ = out.flush();
+}
+
+/// Whether this terminal frames pastes (DECSET 2004) right now.
+static HOST_PASTE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Asks this terminal to frame pastes (2004) or not; returns whether it did before, to put back.
+fn bracketed_paste(on: bool) -> bool {
+    let was = HOST_PASTE.swap(on, std::sync::atomic::Ordering::Relaxed);
+    if was != on {
+        let mut out = std::io::stdout();
+        let _ = out.write_all(if on { b"\x1b[?2004h" } else { b"\x1b[?2004l" });
+        let _ = out.flush();
+    }
+    was
 }
 
 /// Whether this terminal is reporting motion with no button (DECSET 1003) right now.
@@ -2241,6 +2317,8 @@ fn console(
                 _ if ctrl_click => {}
                 _ => c.links.other(),
             }
+            // Pointer motion the program asked for is passed on by the console, not typed: a refusal of it asks nothing.
+            let passive = passive_input(&ev);
             let acts = c.app.handle(
                 ev,
                 &Ctx {
@@ -2262,7 +2340,7 @@ fn console(
                     .filter(|p| p.agent == agent)
                     .and_then(|p| agora_tui::termio::focus_bytes(&p.program_modes(), gained));
                 if let (Some(bytes), Some((node, local))) = (asked, agent.split_once('/')) {
-                    session.terminal_input(node, &format!("t-{local}"), bytes);
+                    session.terminal_report(node, &format!("t-{local}"), bytes);
                 }
             }
             if c.app != before || acts.iter().any(|a| !matches!(a, Action::Input(_))) {
@@ -2294,7 +2372,12 @@ fn console(
                                 if let Some((node, local)) =
                                     active.as_deref().and_then(|a| a.split_once('/'))
                                 {
-                                    session.terminal_input(node, &format!("t-{local}"), &b);
+                                    let t = format!("t-{local}");
+                                    if passive {
+                                        session.terminal_report(node, &t, &b);
+                                    } else {
+                                        session.terminal_input(node, &t, &b);
+                                    }
                                 }
                             }
                         }
@@ -2551,9 +2634,9 @@ fn console(
         {
             asked_through = session.last_request();
             let scope = format!("agent:{local}");
-            // The pane stays open under the question (its scrollback and the program's modes), whatever the answer: its
-            // frames meanwhile wait in the session. `over_console` gets no preview to let go.
-            let asked = over_console(say, c, session, &mut None, None, rx, |s, ask| {
+            // The pane stays open under the question (its scrollback and the program's modes), whatever the answer, and is fed
+            // while the answer is awaited.
+            let asked = over_console_keeping_pane(say, c, session, &mut preview, rx, |s, ask| {
                 ask_grant(say, s, ask, &node, &scope, &TYPING)
             });
             c.notice = match asked {
@@ -2598,6 +2681,12 @@ fn typing_grant_for(
     let (node, agent) = active?.split_once('/')?;
     (refused.request > asked_through && node == refused.node && agent == local)
         .then(|| (node.to_string(), local.to_string()))
+}
+
+/// Whether what `ev` sends to the program is passed on by the console rather than typed: pointer motion with no button (a press, a
+/// drag, the wheel, keys and pastes are the user's).
+fn passive_input(ev: &AppEvent) -> bool {
+    matches!(ev, AppEvent::Mouse(m) if m.kind == agora_tui::app::MouseKind::Move)
 }
 
 /// How long after its last byte an unfinished escape sequence is read as the keys typed (a lone ESC as Esc). The reader thread hands
@@ -3025,11 +3114,39 @@ trait Asker {
     fn discard(&mut self) {
         while self.rx().try_recv().is_ok() {}
     }
-    /// Like [`Asker::key`], for a question whose `y` signs something: an answer must be one key, not part of a paste.
-    fn answer(&mut self, lines: &[String], wait: Duration) -> Option<u8> {
-        self.key(lines, wait)
+    /// Shows `lines` once and waits up to `wait` for the answer to a question whose `y` signs something: one key typed alone
+    /// ([`lone_key_step`]). `session` feeds a pane kept under the question, where there is one.
+    fn answer(
+        &mut self,
+        _session: Option<&mut Session>,
+        lines: &[String],
+        wait: Duration,
+    ) -> Option<u8> {
+        self.show(lines);
+        let mut parser = Parser::default();
+        let end = Instant::now() + wait;
+        loop {
+            let left = end.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return None;
+            }
+            match lone_key_step(
+                &mut parser,
+                self.rx(),
+                left.min(ANSWER_STEP),
+                window_area(),
+                lines,
+            ) {
+                Heard::Answer(k) => return Some(k),
+                Heard::Gone => return None,
+                Heard::Waiting => {}
+            }
+        }
     }
 }
+
+/// How long one read of the keyboard waits while a question is asked (the reads go on until its own wait is over).
+const ANSWER_STEP: Duration = Duration::from_millis(50);
 
 /// The text of a question as lines.
 fn lines_of(text: &str) -> Vec<String> {
@@ -3066,6 +3183,8 @@ struct Over<'a> {
     /// The terminal reports the mouse: while a box is open (when the console holds the mouse), never while a screen the question
     /// drew itself reads plain bytes.
     mouse: bool,
+    /// The agent's pane kept open under the question (the typing grant's), fed while it waits.
+    pane: Option<&'a mut Option<Preview>>,
 }
 
 impl Asker for Over<'_> {
@@ -3088,11 +3207,12 @@ impl Asker for Over<'_> {
             .as_ref()
             .map(|s| app_rows(s, now_ms(), &text))
             .unwrap_or_default();
+        let pane = self.pane.as_deref().and_then(Option::as_ref);
         draw_console(
             self.say,
             self.c,
             &rows,
-            None,
+            pane,
             self.chat,
             window_area(),
             Some(lines),
@@ -3122,9 +3242,49 @@ impl Asker for Over<'_> {
         })
     }
 
-    /// One key or click read alone ([`one_answer`]): a paste, or a burst of keys, never answers.
-    fn answer(&mut self, lines: &[String], wait: Duration) -> Option<u8> {
-        self.read(lines, wait, one_answer)
+    /// One key or click read alone ([`lone_key_step`]) through the console's parser; a window resized meanwhile gets the box drawn
+    /// again. Between reads (the keyboard first) the pane kept under the question is fed one bounded batch, so heavy output never
+    /// fills the hub's relay and the pane is not rebuilt afterwards.
+    fn answer(
+        &mut self,
+        mut session: Option<&mut Session>,
+        lines: &[String],
+        wait: Duration,
+    ) -> Option<u8> {
+        self.show(lines);
+        let end = Instant::now() + wait;
+        let mut area = window_area();
+        let mut step = ANSWER_STEP;
+        let mut feeding = true;
+        loop {
+            let left = end.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return None;
+            }
+            match lone_key_step(&mut self.c.parser, self.rx, left.min(step), area, lines) {
+                Heard::Answer(k) => return Some(k),
+                Heard::Gone => return None,
+                Heard::Waiting => {}
+            }
+            if window_area() != area {
+                area = window_area();
+                let _ = self.c.window.resized();
+                self.show(lines);
+            }
+            step = ANSWER_STEP;
+            if let (true, Some(s), Some(pane)) =
+                (feeding, session.as_deref_mut(), self.pane.as_deref_mut())
+            {
+                match pane.as_mut().map(|p| p.pump(s)) {
+                    // More may be waiting: the next read of the keyboard does not wait long.
+                    Some(Pumped::Changed) => step = Duration::from_millis(1),
+                    Some(Pumped::Ended) => *pane = None,
+                    // The console finds the link gone when the question is over.
+                    Some(Pumped::Lost) => feeding = false,
+                    Some(Pumped::Nothing) | None => {}
+                }
+            }
+        }
     }
 }
 
@@ -3181,6 +3341,31 @@ fn over_console<T>(
     if let Some(p) = preview.take() {
         p.close(session);
     }
+    ask_over(say, c, session, None, chat, rx, run)
+}
+
+/// [`over_console`] that keeps the agent's pane open under the question and feeds it while the answer is awaited (the typing
+/// grant's question: its scrollback and the program's modes survive whatever the answer).
+fn over_console_keeping_pane<T>(
+    say: &Say,
+    c: &mut Console,
+    session: &mut Session,
+    preview: &mut Option<Preview>,
+    rx: &mpsc::Receiver<u8>,
+    run: impl FnOnce(&mut Session, &mut Over<'_>) -> T,
+) -> T {
+    ask_over(say, c, session, Some(preview), None, rx, run)
+}
+
+fn ask_over<T>(
+    say: &Say,
+    c: &mut Console,
+    session: &mut Session,
+    pane: Option<&mut Option<Preview>>,
+    chat: Option<&ChatPane>,
+    rx: &mpsc::Receiver<u8>,
+    run: impl FnOnce(&mut Session, &mut Over<'_>) -> T,
+) -> T {
     // The mouse stays as the console had it while a box is open; a screen the question draws itself switches it off.
     let mouse = c.app.mouse;
     let mut ask = Over {
@@ -3190,6 +3375,7 @@ fn over_console<T>(
         rx,
         stale: false,
         mouse,
+        pane,
     };
     let out = run(session, &mut ask);
     let stale = ask.stale;
@@ -3671,20 +3857,25 @@ mod typing_grant_tests {
         assert_eq!(typing_grant_for(&odd, 0, Some("laptop/a1")), None);
     }
 
-    /// An asker over a key queue whose every `show` presses `on_show` (a key pressed once the question is on the screen).
+    /// An asker over a key queue whose `show` sends `on_show` (keys arriving from the terminal once the question is on the screen),
+    /// on the first draw only, and counts the draws.
     struct Keys<'a> {
         rx: &'a mpsc::Receiver<u8>,
         tx: &'a mpsc::Sender<u8>,
-        on_show: Option<u8>,
+        on_show: &'a [u8],
+        drawn: usize,
     }
     impl Asker for Keys<'_> {
         fn rx(&self) -> &mpsc::Receiver<u8> {
             self.rx
         }
         fn show(&mut self, _: &[String]) {
-            if let Some(k) = self.on_show {
-                let _ = self.tx.send(k);
+            if self.drawn == 0 {
+                self.on_show.iter().for_each(|k| {
+                    let _ = self.tx.send(*k);
+                });
             }
+            self.drawn += 1;
         }
         fn frame(&mut self, _: &[u8]) {}
     }
@@ -3698,31 +3889,96 @@ mod typing_grant_tests {
         let q = ["q".to_string()];
         let (tx, rx) = mpsc::channel();
         let send = |bytes: &[u8]| bytes.iter().for_each(|b| tx.send(*b).unwrap());
+        // One read of what arrived (all of it is queued before the read: no timing).
+        let read = |p: &mut Parser, bytes: &[u8]| {
+            send(bytes);
+            lone_key_step(p, &rx, Duration::from_millis(5), area, &q)
+        };
         // The paste's opener is queued before the question; its text and end come after.
         let mut p = Parser::default();
         send(b"\x1b[200~ab");
         set_aside_keys(&mut p, &rx);
-        assert_eq!(one_answer(&p.push(b"y\x1b[201~"), area, &q), None);
-        assert_eq!(one_answer(&p.push(b"y"), area, &q), Some(b'y'));
+        assert_eq!(read(&mut p, b"y\x1b[201~"), Heard::Waiting);
+        assert_eq!(read(&mut p, b"y"), Heard::Answer(b'y'));
         // The opener was read before (by the console); its end is among the keys set aside: the parser leaves paste mode.
         let mut p = Parser::default();
         assert!(p.push(b"\x1b[200~ab").is_empty());
         send(b"cd\x1b[201~");
         set_aside_keys(&mut p, &rx);
-        assert_eq!(one_answer(&p.push(b"n"), area, &q), Some(b'n'));
+        assert_eq!(read(&mut p, b"n"), Heard::Answer(b'n'));
         // Half an opener queued: the rest after the question still makes a paste, never a `y`.
         let mut p = Parser::default();
         send(b"\x1b[20");
         set_aside_keys(&mut p, &rx);
-        assert_eq!(one_answer(&p.push(b"0~y\x1b[201~"), area, &q), None);
-        // A paste without markers (a burst of keys) never answers; Esc alone does (it declines).
-        assert_eq!(one_answer(&p.push(b"yes"), area, &q), None);
-        assert_eq!(one_answer(&p.push(b"\x1b"), area, &q), None);
-        assert_eq!(one_answer(&p.flush(), area, &q), Some(0x1b));
+        assert_eq!(read(&mut p, b"0~y\x1b[201~"), Heard::Waiting);
+        // Esc alone declines once its sequence is over (the read after it).
+        assert_eq!(read(&mut p, b"\x1b"), Heard::Waiting);
+        assert_eq!(read(&mut p, b""), Heard::Answer(0x1b));
     }
 
-    /// Codex review of #796: a `y` typed for the agent and still queued when the grant question appears never answers it; only a key
-    /// pressed after the question was shown does.
+    /// Codex review of #796 (third): with the terminal framing no paste, a pasted "yes" (or any burst starting with `y`) never signs;
+    /// a `y` typed alone does. Nothing in the test depends on timing: every byte is queued before it is read.
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn an_unframed_paste_starting_with_y_never_answers_a_lone_y_does() {
+        let area = Area::new(0, 0, 80, 24);
+        let q = ["q".to_string()];
+        let (tx, rx) = mpsc::channel();
+        let wait = Duration::from_millis(5);
+        let mut p = Parser::default();
+        for b in b"yes" {
+            tx.send(*b).unwrap();
+        }
+        assert_eq!(lone_key_step(&mut p, &rx, wait, area, &q), Heard::Waiting);
+        // `y` and more already waiting behind it in the same read: no answer, all set aside.
+        for b in b"y\r" {
+            tx.send(*b).unwrap();
+        }
+        assert_eq!(lone_key_step(&mut p, &rx, wait, area, &q), Heard::Waiting);
+        assert!(
+            rx.try_recv().is_err(),
+            "what waited behind it was set aside"
+        );
+        // `y` and the start of a paste in one read: the parser makes one key of it (the rest is paste so far), still no answer.
+        for b in b"y\x1b[200~abc" {
+            tx.send(*b).unwrap();
+        }
+        assert_eq!(lone_key_step(&mut p, &rx, wait, area, &q), Heard::Waiting);
+        for b in b"\x1b[201~" {
+            tx.send(*b).unwrap();
+        }
+        assert_eq!(lone_key_step(&mut p, &rx, wait, area, &q), Heard::Waiting);
+        tx.send(b'y').unwrap();
+        assert_eq!(
+            lone_key_step(&mut p, &rx, wait, area, &q),
+            Heard::Answer(b'y')
+        );
+        // Through the whole question: an unframed paste after it never answers (the question runs out); a lone `y` does.
+        let mut ask = Keys {
+            rx: &rx,
+            tx: &tx,
+            on_show: b"yes",
+            drawn: 0,
+        };
+        assert_eq!(fresh_key(&mut ask, &q, Duration::from_millis(20)), None);
+        let mut ask = Keys {
+            rx: &rx,
+            tx: &tx,
+            on_show: b"y",
+            drawn: 0,
+        };
+        assert_eq!(
+            fresh_key(&mut ask, &q, Duration::from_millis(20)),
+            Some(b'y')
+        );
+        drop(rx);
+        let mut p = Parser::default();
+        let (_, gone) = mpsc::channel::<u8>();
+        assert_eq!(lone_key_step(&mut p, &gone, wait, area, &q), Heard::Gone);
+    }
+
+    /// Codex review of #796: a `y` typed for the agent and still queued when the grant question appears never answers it; the one
+    /// answer typed right after the question is drawn (once) does.
     #[test]
     #[allow(clippy::unwrap_used)]
     fn only_a_key_pressed_after_the_grant_question_answers_it() {
@@ -3734,22 +3990,50 @@ mod typing_grant_tests {
         let mut ask = Keys {
             rx: &rx,
             tx: &tx,
-            on_show: None,
+            on_show: b"",
+            drawn: 0,
         };
         assert_eq!(fresh_key(&mut ask, &["q".into()], wait), None);
-        tx.send(b'y').unwrap();
         let mut ask = Keys {
             rx: &rx,
             tx: &tx,
-            on_show: Some(b'y'),
+            on_show: b"y",
+            drawn: 0,
         };
         assert_eq!(fresh_key(&mut ask, &["q".into()], wait), Some(b'y'));
+        assert_eq!(ask.drawn, 1, "the question is drawn once");
         let mut ask = Keys {
             rx: &rx,
             tx: &tx,
-            on_show: Some(b'n'),
+            on_show: b"n",
+            drawn: 0,
         };
         assert_eq!(fresh_key(&mut ask, &["q".into()], wait), Some(b'n'));
+    }
+
+    /// Codex review of #796: pointer motion the console passes on is not typing (its refusal asks nothing); presses, drags, the
+    /// wheel, keys and pastes are.
+    #[test]
+    fn only_motion_with_no_button_is_passed_on_rather_than_typed() {
+        use agora_tui::app::{Key, Mouse, MouseKind};
+        let mouse = |kind| {
+            AppEvent::Mouse(Mouse {
+                kind,
+                ..Default::default()
+            })
+        };
+        assert!(passive_input(&mouse(MouseKind::Move)));
+        for kind in [
+            MouseKind::Down,
+            MouseKind::Up,
+            MouseKind::Drag,
+            MouseKind::ScrollUp,
+            MouseKind::ScrollDown,
+        ] {
+            assert!(!passive_input(&mouse(kind)), "{kind:?}");
+        }
+        assert!(!passive_input(&AppEvent::Key(Key::Char('y'))));
+        assert!(!passive_input(&AppEvent::Paste("y".into())));
     }
 }
 

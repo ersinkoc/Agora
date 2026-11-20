@@ -166,7 +166,9 @@ impl Refused {
 /// Typing waiting for its answer, by request (the hub answers under the client's request id), so a refusal names its terminal.
 #[derive(Default)]
 struct Typing {
-    sent: std::collections::VecDeque<(u64, String, String)>,
+    /// By request: the terminal, and whether the user typed it (a focus report or pointer motion the console sends by itself is not
+    /// typing: its refusal asks nothing).
+    sent: std::collections::VecDeque<(u64, String, String, bool)>,
     /// The newest refusal of each terminal not read yet (a console picks the one in front; two may come in one turn).
     refused: Vec<Refused>,
 }
@@ -180,11 +182,15 @@ impl Typing {
     const REFUSED: usize = 64;
 
     fn sent(&mut self, request: u64, node: &str, terminal_id: &str) {
+        self.track(request, node, terminal_id, true);
+    }
+
+    fn track(&mut self, request: u64, node: &str, terminal_id: &str, typed: bool) {
         if self.sent.len() >= Self::KEPT {
             self.sent.pop_front();
         }
         self.sent
-            .push_back((request, node.to_string(), terminal_id.to_string()));
+            .push_back((request, node.to_string(), terminal_id.to_string(), typed));
     }
 
     /// A frame nobody waits for: when it is a command answer, the typing it answers is forgotten and a refusal for a missing grant
@@ -207,7 +213,7 @@ impl Typing {
         else {
             return;
         };
-        let Some((request, node, terminal_id)) = self
+        let Some((request, node, terminal_id, typed)) = self
             .sent
             .iter()
             .position(|(id, ..)| *id == n)
@@ -215,7 +221,7 @@ impl Typing {
         else {
             return;
         };
-        if refused_for_grant(r) {
+        if typed && refused_for_grant(r) {
             // Answers may come out of order: a terminal keeps its newest typing's refusal, by request number.
             if self
                 .refused
@@ -1125,6 +1131,19 @@ impl Session {
         self.typing.sent(request, node, terminal_id);
     }
 
+    /// What the console sends to a terminal by itself, not typed by the user (a focus report, pointer motion): sent like typing, but
+    /// a machine's refusal of it asks for no grant.
+    pub fn terminal_report(&mut self, node: &str, terminal_id: &str, data: &[u8]) {
+        let request = self.send_nowait(
+            node,
+            command_request::Command::TerminalInput(agora_protocol::v1::TerminalInput {
+                terminal_id: terminal_id.to_string(),
+                data: data.to_vec(),
+            }),
+        );
+        self.typing.track(request, node, terminal_id, false);
+    }
+
     /// The typing machines refused because they want a grant first (ADR-0041) since the last call: the newest per terminal, oldest
     /// first. Reading it clears it.
     pub fn take_grant_wanted(&mut self) -> Vec<Refused> {
@@ -1405,6 +1424,11 @@ mod typing_tests {
         // An answer to nothing typed (another reader's, or forgotten) asks nothing.
         t.reply(&answer(9, GRANT));
         assert_eq!(t.refused.len(), 2);
+        // Codex review of #796: a focus report or pointer motion the console sent by itself is answered, and its refusal asks nothing.
+        let mut t = Typing::default();
+        t.track(7, "laptop", "t-a", false);
+        t.reply(&answer(7, GRANT));
+        assert!(t.refused.is_empty() && t.sent.is_empty());
         // Answers out of order: the older typing's refusal, read last, does not replace the newer one.
         let mut t = Typing::default();
         t.sent(5, "laptop", "t-a");

@@ -857,6 +857,18 @@ fn the_terminal_console_learns_that_typing_was_refused_for_want_of_a_grant() {
         refused_here(both.clone(), &terminal) && refused_here(both.clone(), &other_terminal),
         "a refusal was replaced by another terminal's: {both:?}"
     );
+    // Codex review of #796: a focus report or pointer motion the console passes on by itself is refused too, but asks nothing.
+    session.terminal_report("laptop", &terminal, b"\x1b[I");
+    session.terminal_report("laptop", &terminal, b"\x1b[<35;3;4M");
+    let end = Instant::now() + D::from_secs(10);
+    while session.typing_unanswered() > 0 {
+        let _ = session.next(D::from_millis(100));
+        assert!(Instant::now() < end, "the reports were never answered");
+    }
+    assert!(
+        session.take_grant_wanted().is_empty(),
+        "a refused report asked for a grant"
+    );
     // After a grant the same typing reaches the shell.
     let scope = format!("agent:{}", s.agent_id);
     let commands = ["agent.stop", "agent.prompt", "terminal.input"];
