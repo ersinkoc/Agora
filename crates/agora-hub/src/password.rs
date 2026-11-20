@@ -134,7 +134,7 @@ impl<'a> ScreenPassword<'a> {
         Self { store, iterations }
     }
 
-    fn stored(&self) -> Option<String> {
+    pub(crate) fn stored(&self) -> Option<String> {
         self.store
             .setting(SETTING)
             .ok()
@@ -150,6 +150,10 @@ impl<'a> ScreenPassword<'a> {
     pub fn set(&self, password: &str) -> Result<(), PasswordError> {
         check_new(password)?;
         let hashed = hash_with(password, self.iterations)?;
+        self.set_hash(&hashed)
+    }
+
+    pub(crate) fn set_hash(&self, hashed: &str) -> Result<(), PasswordError> {
         self.store.set_setting(SETTING, hashed.as_bytes())?;
         Ok(())
     }

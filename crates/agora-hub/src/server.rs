@@ -2113,7 +2113,7 @@ where
         stream,
         peer,
         state.assets.as_deref(),
-        state.sessions.as_ref(),
+        state.sessions.as_deref(),
         read,
     )
     .await

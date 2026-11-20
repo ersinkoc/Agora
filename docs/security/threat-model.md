@@ -85,10 +85,11 @@ phase exit.
 
 ### Screen-password work (T17)
 
-The hub admits at most two HTTP operations that may hash the screen password at once. Remote code sign-in, password settings
-with a bearer and remote passkey registration with a bearer run on blocking workers. When both slots are occupied these
-requests receive HTTP 503 before an authentication attempt starts. Admitted attempts use the sign-in limits, audit trail and
-failure delay described in T17. Loopback code sign-in and passkey sign-in use their usual paths.
+Remote password work uses two blocking-worker slots per hub. Code sign-in and passkey registration use a slot only when they
+have a screen password to verify. Password settings and passkey registration validate the session first. A separate slot is
+reserved for a password change by the owner on loopback. Remote requests that need a slot get HTTP 503 when both remote
+slots are occupied. A burst from several sources can leave those slots busy while active checks finish. The sign-in limits,
+audit trail and failure delay in T17 apply to admitted attempts.
 
 ## Kill switch
 
