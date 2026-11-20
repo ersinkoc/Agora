@@ -82,8 +82,10 @@ struct CsiParams {
     any_param: bool,
     /// Numbers stored so far, as the emulator's parser counts them.
     stored: usize,
-    /// The first number of each parameter: what a mode switch reads.
-    first: Vec<u16>,
+    /// The first number of each parameter (what a mode switch reads), `firsts` of them: fixed storage, so reading output never
+    /// allocates (it runs for every byte of every pane).
+    first: [u16; MAX_PARAMS],
+    firsts: usize,
     /// The number being read, and whether it is a sub-parameter (after `:`).
     cur: u16,
     sub: bool,
@@ -92,6 +94,14 @@ struct CsiParams {
 }
 
 impl CsiParams {
+    /// A new sequence. The stored numbers are left as they are: only the first `firsts` are read.
+    fn reset(&mut self) {
+        *self = CsiParams {
+            first: self.first,
+            ..CsiParams::default()
+        };
+    }
+
     fn byte(&mut self, b: u8) {
         let first = !self.started;
         self.started = true;
@@ -126,7 +136,11 @@ impl CsiParams {
     /// Stores the number being read (at a `:`, a `;` or the final byte).
     fn end_number(&mut self) {
         if !self.sub {
-            self.first.push(self.cur);
+            // Never full here: a number is stored only while fewer than MAX_PARAMS are.
+            if let Some(slot) = self.first.get_mut(self.firsts) {
+                *slot = self.cur;
+                self.firsts += 1;
+            }
         }
         self.stored += 1;
         self.cur = 0;
@@ -158,7 +172,7 @@ impl ModeScanner {
                 }
                 St::Esc => match b {
                     b'[' => {
-                        self.params = CsiParams::default();
+                        self.params.reset();
                         self.st = St::Csi;
                     }
                     b'c' => {
@@ -203,7 +217,8 @@ impl ModeScanner {
         if p.private != Some(b'?') || p.inter > 0 || !self.params.finish() {
             return;
         }
-        for n in std::mem::take(&mut self.params.first) {
+        let (first, firsts) = (self.params.first, self.params.firsts);
+        for &n in first.iter().take(firsts) {
             self.mode(n, set);
         }
     }
@@ -710,11 +725,7 @@ mod tests {
         s.feed(b"\x1b[?");
         for _ in 0..10_000 {
             s.feed(b"1111111111;");
-            assert!(
-                s.params.first.len() <= MAX_PARAMS,
-                "{}",
-                s.params.first.len()
-            );
+            assert!(s.params.firsts <= MAX_PARAMS, "{}", s.params.firsts);
         }
         // The sequence that ended an over-long list changes nothing.
         s.feed(b"h");
