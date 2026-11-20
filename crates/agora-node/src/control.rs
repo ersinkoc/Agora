@@ -28,9 +28,12 @@ use agora_protocol::{Decoder, Error, ErrorCode, Frame};
 use agora_vt::Size;
 use prost::Message;
 
+use crate::approvals::{SkipAsk, SkipKind, SkipRefusal};
 use crate::daemon::EventSink;
 use crate::git;
-use crate::supervisor::{StartRequest, Submit, Supervisor, SupervisorError, SupervisorEvent};
+use crate::supervisor::{
+    Prepared, StartRequest, Submit, Supervisor, SupervisorError, SupervisorEvent,
+};
 use crate::terminal::{Output, OutputSubscription, Snapshot};
 
 pub const KIND_REQUEST: u8 = 0;
@@ -238,6 +241,110 @@ fn ok_empty() -> v1::CommandOk {
     v1::CommandOk {
         result: Some(v1::command_ok::Result::Empty(v1::Empty {})),
     }
+}
+
+/// ADR-0090 Amendment A: what a switch of a running agent's mode or config option came to. A call is made (outside the supervisor's lock)
+/// and settles the option: a card still waiting for another value of it is withdrawn. A choice that skips permissions under a policy that
+/// allows it is not applied and not refused: the node raises the owner's approval and answers `agent.approval_needed`.
+fn switch(
+    ctx: &ControlContext,
+    agent: &AgentId,
+    option: Option<(SkipKind, &str)>,
+    prepared: Result<Prepared, SupervisorError>,
+) -> Result<v1::CommandOk, Error> {
+    match prepared.map_err(sup_err)? {
+        Prepared::Call(call) => {
+            call.run().map_err(sup_err)?;
+            if let (Some(approvals), Some(option)) = (&ctx.approvals, option) {
+                for id in approvals.withdraw_skips(agent, Some(option)) {
+                    if let Some(ev) = &ctx.events {
+                        ev.approval_resolved(&id, false, "");
+                    }
+                }
+            }
+            Ok(ok_empty())
+        }
+        Prepared::Ask(ask) => Err(raise_skip(ctx, ask)),
+    }
+}
+
+/// Raises the approval for `ask` (or finds the one already waiting) and returns the error that tells the window to show it.
+fn raise_skip(ctx: &ControlContext, ask: SkipAsk) -> Error {
+    let Some(approvals) = &ctx.approvals else {
+        // A node without an approvals queue cannot ask anyone: the switch stays refused, as it was before the approval existed.
+        let option = match ask.kind {
+            SkipKind::Mode => ask.value.clone(),
+            SkipKind::Config => ask.option_id.clone(),
+        };
+        return SupervisorError::OptionUnconfirmed(ask.agent_kind.clone(), option).to_protocol();
+    };
+    let unsignable_id = match ask.kind {
+        SkipKind::Mode => "mode".to_string(),
+        SkipKind::Config => crate::approvals::card_text(&ask.option_id, 64),
+    };
+    let per_agent = |what: usize| {
+        Error::new(ErrorCode::NodeResourceLimit)
+            .with("resource", "skip_approvals_agent")
+            .with("limit", i64::try_from(what).unwrap_or(i64::MAX))
+    };
+    let limit = |what: usize| {
+        Error::new(ErrorCode::NodeResourceLimit)
+            .with("resource", "skip_approvals")
+            .with("limit", i64::try_from(what).unwrap_or(i64::MAX))
+    };
+    match approvals.request_skip(&ctx.node_id, ask, crate::daemon::now_ms()) {
+        Ok(raised) => {
+            if let Some(ev) = &ctx.events {
+                for id in &raised.superseded {
+                    ev.approval_resolved(id, false, "");
+                }
+                if raised.fresh {
+                    ev.approval_requested(&raised.pending);
+                }
+            }
+            Error::new(ErrorCode::AgentApprovalNeeded)
+                .with("approval_id", raised.pending.id.as_str())
+        }
+        Err(SkipRefusal::TooManyWaiting) => limit(crate::approvals::MAX_SKIP_PENDING),
+        Err(SkipRefusal::TooOften) => limit(crate::approvals::MAX_SKIP_PER_WINDOW),
+        Err(SkipRefusal::AgentTooMany) => per_agent(crate::approvals::MAX_SKIP_PER_AGENT),
+        Err(SkipRefusal::AgentTooOften) => per_agent(crate::approvals::MAX_SKIP_PER_AGENT_WINDOW),
+        // An id or a value the card could not show as it is signed: nothing is raised, and the agent is told it has no such setting.
+        Err(SkipRefusal::Unsignable) => {
+            Error::new(ErrorCode::AgentOptionUnknown).with("id", unsignable_id.as_str())
+        }
+        Err(SkipRefusal::NoId) => {
+            Error::new(ErrorCode::Internal).with("incident_id", "approval-id")
+        }
+    }
+}
+
+/// The verified decision on a skip request: only `approved` applies anything, and only what the node rendered (`resolution.skip`).
+fn decide_skip(
+    ctx: &ControlContext,
+    r: &v1::ApprovalResolve,
+    resolution: &crate::approvals::Resolution,
+) -> Result<v1::CommandOk, Error> {
+    let approved = resolution.verdict == crate::approvals::Verdict::Approved;
+    let announce = |approved: bool, signer: &str| {
+        if let Some(ev) = &ctx.events {
+            ev.approval_resolved(&r.approval_id, approved, signer);
+        }
+    };
+    let Some(ask) = &resolution.skip else {
+        announce(false, "");
+        return Err(invalid("approval_id"));
+    };
+    if approved {
+        let call = ctx.sup().prepare_skip_apply(ask);
+        if let Err(e) = call.and_then(crate::supervisor::AdapterCall::run) {
+            // The decision was verified but the agent is no longer what the card named: nothing was applied, and the card is over.
+            announce(false, "");
+            return Err(sup_err(e));
+        }
+    }
+    announce(approved, &r.signer_device_id);
+    Ok(ok_empty())
 }
 
 fn capability_missing(what: &str) -> Error {
@@ -748,6 +855,13 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                 // ADR-0090: what its adapter still asked permission for is withdrawn, and its entries in the conversation say
                 // cancelled (the agent left before anyone decided).
                 if let Some(approvals) = &ctx.approvals {
+                    // ADR-0090 Amendment A: a card to switch this agent to a mode that skips permission questions named its session,
+                    // which ends here; no decision may apply it later.
+                    for approval in approvals.withdraw_skips(&id, None) {
+                        if let Some(ev) = &ctx.events {
+                            ev.approval_resolved(&approval, false, "");
+                        }
+                    }
                     for approval in approvals.cancel_adapter_requests(&id) {
                         ctx.chat.set_permission(
                             &id,
@@ -824,36 +938,27 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
         // agent did not offer.
         // The adapter's answer is waited for after the supervisor's lock is let go (`AdapterCall::run`).
         Cmd::AgentSetMode(a) => {
-            let call = ctx.sup().prepare_set_option(
-                &AgentId::new(a.agent_id.clone()),
-                agora_adapters::host::OptionKind::Mode,
-                &a.mode,
-            );
-            call.and_then(crate::supervisor::AdapterCall::run)
-                .map(|()| ok_empty())
-                .map_err(sup_err)
+            let id = AgentId::new(a.agent_id.clone());
+            let prepared =
+                ctx.sup()
+                    .prepare_set_option(&id, agora_adapters::host::OptionKind::Mode, &a.mode);
+            switch(ctx, &id, Some((SkipKind::Mode, "mode")), prepared)
         }
         Cmd::AgentSetModel(a) => {
-            let call = ctx.sup().prepare_set_option(
-                &AgentId::new(a.agent_id.clone()),
+            let id = AgentId::new(a.agent_id.clone());
+            let prepared = ctx.sup().prepare_set_option(
+                &id,
                 agora_adapters::host::OptionKind::Model,
                 &a.model,
             );
-            call.and_then(crate::supervisor::AdapterCall::run)
-                .map(|()| ok_empty())
-                .map_err(sup_err)
+            switch(ctx, &id, None, prepared)
         }
         // ADR-0090: the user's own change of an option the agent reported (the reasoning effort is one). The supervisor checks the id and
         // the value against the report, and the node's `skip_permissions` policy against what the choice does.
         Cmd::AgentSetConfig(a) => {
-            let call = ctx.sup().prepare_set_config(
-                &AgentId::new(a.agent_id.clone()),
-                &a.config_id,
-                &a.value,
-            );
-            call.and_then(crate::supervisor::AdapterCall::run)
-                .map(|()| ok_empty())
-                .map_err(sup_err)
+            let id = AgentId::new(a.agent_id.clone());
+            let prepared = ctx.sup().prepare_set_config(&id, &a.config_id, &a.value);
+            switch(ctx, &id, Some((SkipKind::Config, &a.config_id)), prepared)
         }
         // ADR-0090: ends the agent's current turn; the agent and its process live on (`AgentStop` ends them). Permission requests of
         // the turn are withdrawn and shown as cancelled; queued prompts are kept unless `drop_queue` says to throw them away.
@@ -922,6 +1027,11 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                     s.decided(&resolution.request, r)?;
                 }
                 return Ok(ok_empty());
+            }
+            // ADR-0090 Amendment A: a switch to a mode or option that skips permissions is the node's own request, decided over its own
+            // domain; its answer never goes to an adapter.
+            if resolution.request.action == crate::approvals::SKIP_ACTION {
+                return decide_skip(ctx, r, &resolution);
             }
             let (agent, adapter_id, verdict) = (
                 resolution.agent,

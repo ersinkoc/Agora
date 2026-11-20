@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::approvals::{SkipAsk, SkipKind};
 use agora_adapters::host::{
     Adapter, AdapterCommand, AdapterConfig, AdapterEvent, Caller, ConfigOption, HostError,
     McpServer, OptionKind, SessionOption, SessionOptions,
@@ -223,6 +224,14 @@ pub struct AdapterCall {
     session: String,
     op: CallOp,
     generation: u64,
+}
+
+/// What preparing a switch of a running agent's mode or config option came to (ADR-0090 Amendment A).
+pub enum Prepared {
+    /// Nothing to ask: make this call after the lock is let go.
+    Call(AdapterCall),
+    /// The choice makes the agent act without asking and the policy allows it: it is NOT applied; the owner's signed decision is.
+    Ask(SkipAsk),
 }
 
 enum CallOp {
@@ -589,6 +598,9 @@ struct AdapterRich {
     /// Counts the turns and the restarts of this adapter. Everything that was started in one turn (a send, a cancel) carries the
     /// generation it began in and is ignored when it comes back to another: a late answer cannot touch a newer turn.
     generation: u64,
+    /// ADR-0090 Amendment A: counts the runs of this adapter (a restart, a resume): a switch the user approved for one run is never
+    /// applied to another.
+    epoch: u64,
     queue: VecDeque<Queued>,
 }
 
@@ -736,6 +748,7 @@ impl AdapterRich {
         self.commands.clear();
         self.turn = Turn::Idle;
         self.generation += 1;
+        self.epoch += 1;
         self.queue.drain(..).map(|q| q.tag).collect()
     }
 }
@@ -2043,12 +2056,12 @@ impl Supervisor {
         })
     }
 
-    /// The `skip_permissions` policy's refusal of something that makes an agent act without asking, with the confirmation it needs.
+    /// The `skip_permissions` policy's refusal of a MODEL that makes an agent act without asking (modes and config options are asked
+    /// about instead, [`skip_ask`](Self::skip_ask)).
     ///
-    /// A launch option needs the user's confirmation (`Requested::confirmed`, signed), and so does a mode or a config option that
-    /// skips permissions. The schema has no field to carry it on `AgentSetMode` or `AgentSetConfig` yet, so the node cannot be shown
-    /// one: it refuses with `agent.option_unconfirmed`, after the policy (`agent.option_forbidden`) has had its say. (Missing: a
-    /// `confirmed` field on those two commands, signed like the launch's; adding it is a schema change that needs an ADR.)
+    /// A launch option needs the user's confirmation (`Requested::confirmed`, signed). A model has no approval card (ADR-0090
+    /// Amendment A names modes and config options), so a model that skips is refused with `agent.option_unconfirmed`, after the policy
+    /// (`agent.option_forbidden`) has had its say.
     fn skip_refusal(&self, kind: &str, option: &str) -> Option<SupervisorError> {
         let confined =
             self.sandbox.level != crate::sandbox::Level::Off && self.sandbox.enforceable();
@@ -2167,15 +2180,15 @@ impl Supervisor {
     /// ADR-0090: sets one of the config options an adapter agent reported (the reasoning effort is one). The id and the value are
     /// checked against the last report. Whether the choice makes the agent act without asking is the node's own judgement
     /// (`perm`, on top of what the adapter said); one that does is refused by the owner's `skip_permissions` policy
-    /// (`agent.option_forbidden`) and otherwise for want of the user's confirmation (`agent.option_unconfirmed`, see
-    /// [`skip_refusal`](Self::skip_refusal)), whatever the window or the hub said. A change to the value that keeps protection
-    /// (turning an `auto_approve` off) is never refused for it. The call is made by [`AdapterCall::run`] after the lock is let go.
+    /// (`agent.option_forbidden`) and otherwise NOT applied: it becomes an approval the owner signs ([`Prepared::Ask`], ADR-0090
+    /// Amendment A), whatever the window or the hub said. A change to the value that keeps protection (turning an `auto_approve`
+    /// off) is never asked about. The call is made by [`AdapterCall::run`] after the lock is let go.
     pub fn prepare_set_config(
         &self,
         id: &AgentId,
         config_id: &str,
         value: &str,
-    ) -> Result<AdapterCall, SupervisorError> {
+    ) -> Result<Prepared, SupervisorError> {
         const CAPABILITY: &str = "agent.set_config";
         let Some(e) = self.adapters.get(id) else {
             return Err(if self.agents.contains_key(id) {
@@ -2198,19 +2211,20 @@ impl Supervisor {
         else {
             return Err(SupervisorError::ConfigUnknown(config_id.to_string()));
         };
-        let skips = if option.boolean {
+        let (skips, value_name) = if option.boolean {
             let on = match value {
                 "true" => true,
                 "false" => false,
                 _ => return Err(SupervisorError::ConfigUnknown(value.to_string())),
             };
-            perm::boolean_value_skips(
+            let skips = perm::boolean_value_skips(
                 Category::from_acp(Some(option.category.as_str())),
                 (&option.id, &option.name),
                 &option.description,
                 option.skips_permissions,
                 on,
-            )
+            );
+            (skips, String::new())
         } else {
             let Some(choice) = option
                 .choices
@@ -2219,12 +2233,15 @@ impl Supervisor {
             else {
                 return Err(SupervisorError::ConfigUnknown(value.to_string()));
             };
-            choice.skips_permissions
+            (choice.skips_permissions, choice.name.clone())
         };
         if skips {
-            if let Some(err) = self.skip_refusal(&e.agent.kind, config_id) {
-                return Err(err);
-            }
+            return self.skip_ask(
+                e,
+                SkipKind::Config,
+                (config_id, &option.name),
+                (value, &value_name),
+            );
         }
         self.call_of(
             id,
@@ -2233,16 +2250,133 @@ impl Supervisor {
                 value: value.to_string(),
             },
         )
+        .map(Prepared::Call)
+    }
+
+    /// ADR-0090 Amendment A: the choice skips permissions. Under a policy that does not allow it the answer is the refusal of the policy
+    /// (`agent.option_forbidden`, nothing is asked); under one that does, the node does not apply it and does not refuse it: it
+    /// describes it for the owner's approval ([`Prepared::Ask`]), with the agent, folder, option and value as the node knows them.
+    fn skip_ask(
+        &self,
+        e: &AdapterEntry,
+        kind: SkipKind,
+        option: (&str, &str),
+        value: (&str, &str),
+    ) -> Result<Prepared, SupervisorError> {
+        let confined =
+            self.sandbox.level != crate::sandbox::Level::Off && self.sandbox.enforceable();
+        let (option_id, option_name) = option;
+        let (value_id, value_name) = value;
+        // A mode's id is the value, as before; a config option's is its own.
+        let refused = match kind {
+            SkipKind::Mode => value_id,
+            SkipKind::Config => option_id,
+        };
+        if let Some(policy) = self.skip_permissions.refusal(confined) {
+            return Err(SupervisorError::OptionForbidden(
+                e.agent.kind.clone(),
+                refused.to_string(),
+                policy,
+            ));
+        }
+        Ok(Prepared::Ask(SkipAsk {
+            agent: e.agent.id.clone(),
+            agent_kind: e.agent.kind.clone(),
+            folder: e
+                .folder
+                .as_deref()
+                .unwrap_or(&e.worktree)
+                .to_string_lossy()
+                .into_owned(),
+            kind,
+            option_id: option_id.to_string(),
+            option_name: option_name.to_string(),
+            value: value_id.to_string(),
+            value_name: value_name.to_string(),
+            epoch: e.rich.epoch,
+        }))
+    }
+
+    /// ADR-0090 Amendment A: applies a switch the owner approved, exactly as the node rendered it (`ask` is the node's own record, never
+    /// anything the decision carried). Everything that could have changed while the card waited is checked again: the agent still runs
+    /// in the run the card named, the agent still offers that option and value, and the policy still allows it. The call is made by
+    /// [`AdapterCall::run`] after the lock is let go.
+    pub fn prepare_skip_apply(&self, ask: &SkipAsk) -> Result<AdapterCall, SupervisorError> {
+        let id = &ask.agent;
+        let Some(e) = self.adapters.get(id) else {
+            return Err(SupervisorError::NotFound(id.clone()));
+        };
+        if !e.running || e.rich.epoch != ask.epoch {
+            return Err(SupervisorError::NotFound(id.clone()));
+        }
+        let confined =
+            self.sandbox.level != crate::sandbox::Level::Off && self.sandbox.enforceable();
+        if let Some(policy) = self.skip_permissions.refusal(confined) {
+            return Err(SupervisorError::OptionForbidden(
+                e.agent.kind.clone(),
+                ask.option_id.clone(),
+                policy,
+            ));
+        }
+        match ask.kind {
+            SkipKind::Mode => {
+                if !e
+                    .capabilities
+                    .iter()
+                    .any(|c| c == OptionKind::Mode.capability())
+                {
+                    return Err(SupervisorError::OptionUnsupported("agent.set_mode"));
+                }
+                if !e.options.modes.iter().any(|o| o.id == ask.value) {
+                    return Err(SupervisorError::OptionUnknown("mode"));
+                }
+                self.call_of(
+                    id,
+                    CallOp::SetOption {
+                        kind: OptionKind::Mode,
+                        value: ask.value.clone(),
+                    },
+                )
+            }
+            SkipKind::Config => {
+                if !e.capabilities.iter().any(|c| c == "config") {
+                    return Err(SupervisorError::OptionUnsupported("agent.set_config"));
+                }
+                let offered = e.rich.config.iter().any(|o| {
+                    o.id == ask.option_id
+                        && if o.boolean {
+                            ask.value == "true" || ask.value == "false"
+                        } else {
+                            o.choices.iter().any(|c| c.id == ask.value)
+                        }
+                });
+                if !offered {
+                    return Err(SupervisorError::ConfigUnknown(ask.option_id.clone()));
+                }
+                self.call_of(
+                    id,
+                    CallOp::SetConfig {
+                        id: ask.option_id.clone(),
+                        value: ask.value.clone(),
+                    },
+                )
+            }
+        }
     }
 
     /// [`prepare_set_config`](Self::prepare_set_config) and run, under the caller's lock (tests).
+    ///
+    /// `Ok(Some(ask))`: the choice skips permissions and waits for the owner's approval; nothing was applied.
     pub fn adapter_set_config(
         &self,
         id: &AgentId,
         config_id: &str,
         value: &str,
-    ) -> Result<(), SupervisorError> {
-        self.prepare_set_config(id, config_id, value)?.run()
+    ) -> Result<Option<SkipAsk>, SupervisorError> {
+        match self.prepare_set_config(id, config_id, value)? {
+            Prepared::Call(call) => call.run().map(|()| None),
+            Prepared::Ask(ask) => Ok(Some(ask)),
+        }
     }
 
     /// ADR-0058: switches an adapter agent to one of the modes or models it reported. Only the user's own command reaches this (an
@@ -2254,7 +2388,7 @@ impl Supervisor {
         id: &AgentId,
         kind: OptionKind,
         value: &str,
-    ) -> Result<AdapterCall, SupervisorError> {
+    ) -> Result<Prepared, SupervisorError> {
         let (capability, field) = match kind {
             OptionKind::Mode => ("agent.set_mode", "mode"),
             OptionKind::Model => ("agent.set_model", "model"),
@@ -2279,6 +2413,10 @@ impl Supervisor {
         // A mode that makes the agent act without asking is a launch option's twin (ADR-0059): the owner's `skip_permissions` policy
         // decides it here, on the node, whatever the window or the hub said, and it needs the user's confirmation too.
         if chosen.skips_permissions {
+            // ADR-0090 Amendment A: a mode is asked about (the owner's signed approval applies it); a model that skips stays refused.
+            if kind == OptionKind::Mode {
+                return self.skip_ask(e, SkipKind::Mode, ("mode", ""), (&chosen.id, &chosen.name));
+            }
             if let Some(err) = self.skip_refusal(&e.agent.kind, &chosen.id) {
                 return Err(err);
             }
@@ -2290,16 +2428,22 @@ impl Supervisor {
                 value: value.to_string(),
             },
         )
+        .map(Prepared::Call)
     }
 
     /// [`prepare_set_option`](Self::prepare_set_option) and run, under the caller's lock (tests).
+    ///
+    /// `Ok(Some(ask))`: the mode skips permissions and waits for the owner's approval; nothing was applied.
     pub fn adapter_set_option(
         &self,
         id: &AgentId,
         kind: OptionKind,
         value: &str,
-    ) -> Result<(), SupervisorError> {
-        self.prepare_set_option(id, kind, value)?.run()
+    ) -> Result<Option<SkipAsk>, SupervisorError> {
+        match self.prepare_set_option(id, kind, value)? {
+            Prepared::Call(call) => call.run().map(|()| None),
+            Prepared::Ask(ask) => Ok(Some(ask)),
+        }
     }
 
     /// Delivers a decision the node has already verified (ADR-0020) to the adapter that asked: the call to make after the lock is
@@ -3037,6 +3181,8 @@ impl Supervisor {
             entry.running = true;
             entry.restart_at = None;
             entry.restarts = 0;
+            // A resume is a new run: nothing approved for the last one carries over (ADR-0090 Amendment A).
+            entry.rich.epoch += 1;
             entry.agent.process_restarted();
             let mut events = vec![SupervisorEvent::Resumed {
                 agent: id.clone(),

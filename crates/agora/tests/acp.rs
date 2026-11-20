@@ -353,7 +353,7 @@ fn the_user_switches_an_acp_agents_mode_and_model() {
 }
 
 /// A mode in which the agent acts without asking follows the node's `skip_permissions` policy, as a launch option does (ADR-0059):
-/// `forbid` refuses it with `agent.option_forbidden`, `allow` takes it; a mode that asks stays possible under `forbid`.
+/// `forbid` refuses it with `agent.option_forbidden`, `allow` asks the owner (`agent.approval_needed`); a mode that asks stays possible under `forbid`.
 #[test]
 fn a_mode_that_skips_permissions_follows_the_nodes_policy() {
     for (policy, allowed) in [
@@ -381,9 +381,10 @@ fn a_mode_that_skips_permissions_follows_the_nodes_policy() {
         }
         let skipped = set_mode("bypassPermissions");
         if allowed {
-            // The policy allows it, but a launch option that skips permissions needs the user's confirmation and `AgentSetMode` has no
-            // field to carry one yet: refused as unconfirmed, never applied.
-            assert_eq!(skipped.unwrap_err().code, "agent.option_unconfirmed");
+            // The policy allows it: the node neither applies nor refuses it, it asks the owner (ADR-0090 Amendment A).
+            let asked = skipped.unwrap_err();
+            assert_eq!(asked.code, "agent.approval_needed");
+            assert!(param(&asked, "approval_id").is_some());
             assert!(set_mode("build").is_ok());
         } else {
             let err = skipped.unwrap_err();
@@ -972,13 +973,10 @@ fn a_config_option_is_set_checked_and_held_to_the_skip_permissions_policy() {
         for (config_id, value) in [("approvals", "turbo"), ("auto_approve", "true")] {
             let r = set(config_id, value);
             if allowed {
-                // Allowed by the policy; unconfirmed, for want of a confirmation field on the command.
+                // Allowed by the policy; not applied, asked about (ADR-0090 Amendment A).
                 let err = r.unwrap_err();
-                assert_eq!(err.code, "agent.option_unconfirmed", "{config_id}={value}");
-                assert_eq!(
-                    param(&err, "option"),
-                    Some(v1::param_value::Value::Str(config_id.into()))
-                );
+                assert_eq!(err.code, "agent.approval_needed", "{config_id}={value}");
+                assert!(param(&err, "approval_id").is_some());
             } else {
                 let err = r.unwrap_err();
                 assert_eq!(err.code, "agent.option_forbidden", "{config_id}={value}");

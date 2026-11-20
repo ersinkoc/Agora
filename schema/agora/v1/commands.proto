@@ -324,6 +324,10 @@ message ApprovalResolve {
   // `agora-approval-start-v1 NUL node_id NUL approval_id NUL verdict NUL helper_grant NUL helpers_may_start NUL
   // sha256(detail)` (verdict and helpers_may_start as ASCII `0`/`1`, helper_grant in decimal, the hash of the request's `detail` in lowercase hex): the decision binds what the user saw (kind, node, folder, asking agent,
   // the first prompt), so a hub can neither swap the prompt nor add or remove a grant.
+  // ADR-0090 Amendment A: for an `agent.skip_permissions` approval the signature is over the domain `agora-approval-skip-v1`, one NUL,
+  // then F(node_id) F(approval_id) F(verdict) F(agent_id) F(option_id) F(value) F(sha256(detail)), where F(x) is the decimal byte
+  // length of x, `:`, then x (docs/specs/protocol.md). `helper_grant` and `helpers_may_start` must be 0 and false there. The node
+  // applies the option and value it rendered, never anything the decision carries.
 }
 
 // ADR-0041. Signed by a trusted device (the same ES256 scheme as ApprovalResolve) over

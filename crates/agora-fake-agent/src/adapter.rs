@@ -6,11 +6,16 @@
 //! - `first:TEXT`: says TEXT, then answers the prompt 300 ms later.
 //! - `hang`: does not answer the prompt for 30 s (an adapter that is stuck).
 //! - `ask-error`: like `ask`, but answers the decision with a JSON-RPC error.
+//! - `ask-reserved`: like `ask`, but the request's action is `agent.start` (a name only the node may use); the answer is written to `applied.txt`.
 //! - `crash`: exits abruptly with status 3 (a crashing adapter).
 //! - `env`: appends a chat item saying whether the variable `AGORA_TEST_SECRET` is visible to the adapter.
 //! - `mcp-servers`: appends a chat item with the `mcpServers` of `session/start`, as JSON (`[]` when there were none).
 //! - `noise`: prints a line that is not JSON and a notification with an unknown method, then finishes normally.
 //! - anything else: works, appends the text back as a chat item, reports usage, goes idle.
+//!
+//! With `--modes` the adapter also declares `set_mode` and `config`, reports four modes (`default`, `plan`, `turbo` whose words do not say
+//! whether it asks, and `bypassPermissions`) and a boolean option `auto_approve`, and says what it was told to apply by appending
+//! `applied mode:ID` or `applied config:ID=VALUE` as a line to `applied.txt` in its folder (ADR-0090 Amendment A tests).
 //!
 //! JSON uses the proto3 JSON mapping (lowerCamelCase, enum names), as `docs/specs/adapter-protocol.md` says.
 
@@ -40,6 +45,7 @@ fn state<W: Write>(out: &mut W, sid: &str, s: &str) -> io::Result<()> {
 
 /// Runs until `shutdown` or end of input.
 pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
+    let modes = std::env::args().any(|a| a == "--modes");
     let mut session = String::new();
     let mut selected_cwd = Value::Null;
     let mut servers = Value::Array(Vec::new());
@@ -61,11 +67,17 @@ pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
             }
         };
         match method {
-            "initialize" => reply(
-                out,
-                json!({"adapterName": "fake-adapter", "version": "1", "agentKind": "fake",
-                       "capabilities": ["chat", "approvals", "usage", "cancel", "resume"]}),
-            )?,
+            "initialize" => {
+                let mut caps = vec!["chat", "approvals", "usage", "cancel", "resume"];
+                if modes {
+                    caps.extend(["set_mode", "config"]);
+                }
+                reply(
+                    out,
+                    json!({"adapterName": "fake-adapter", "version": "1", "agentKind": "fake",
+                           "capabilities": caps}),
+                )?
+            }
             "session/start" => {
                 selected_cwd = params
                     .get("worktree")
@@ -87,6 +99,45 @@ pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
                     json!({"sessionId": session, "nativeSessionId": native}),
                 )?;
                 state(out, &session, "IDLE")?;
+                if modes {
+                    let mode = |id: &str, name: &str, skips: bool| json!({"id": id, "name": name, "description": "", "skipsPermissions": skips});
+                    note(
+                        out,
+                        "session/options",
+                        json!({"sessionId": session, "modes": [
+                            mode("default", "Ask first", false),
+                            mode("plan", "Plan", false),
+                            mode("turbo", "Turbo", false),
+                            mode("bypassPermissions", "Bypass Permissions", true),
+                        ], "models": [], "currentMode": "default", "currentModel": ""}),
+                    )?;
+                    note(
+                        out,
+                        "session/config",
+                        json!({"sessionId": session, "options": [{
+                            "id": "auto_approve", "name": "Auto approve", "description": "",
+                            "category": "other", "type": "boolean", "current": "false",
+                            "choices": [], "skipsPermissions": false}]}),
+                    )?;
+                }
+            }
+            "session/set_option" | "session/set_config" if modes => {
+                reply(out, json!({}))?;
+                let text = if method == "session/set_option" {
+                    format!("applied mode:{}", params["id"].as_str().unwrap_or(""))
+                } else {
+                    format!(
+                        "applied config:{}={}",
+                        params["configId"].as_str().unwrap_or(""),
+                        params["value"].as_str().unwrap_or("")
+                    )
+                };
+                // One line per switch in the agent's own folder, so a test reads what the agent was told.
+                let mut file = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open("applied.txt")?;
+                writeln!(file, "{text}")?;
             }
             "session/prompt" => {
                 let text = params.get("text").and_then(Value::as_str).unwrap_or("");
@@ -132,12 +183,13 @@ pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
                         state(out, &session, "WORKING")?;
                         state(out, &session, "IDLE")?;
                     }
-                    "ask" | "ask-error" => {
+                    "ask" | "ask-error" | "ask-reserved" => {
                         state(out, &session, "BLOCKED")?;
                         note(
                             out,
                             "approval/request",
-                            json!({"sessionId": session, "approvalId": "ap-1", "action": "run_command", "detail": "ls"}),
+                            json!({"sessionId": session, "approvalId": "ap-1",
+                                   "action": if text == "ask-reserved" { "agent.start" } else { "run_command" }, "detail": "ls"}),
                         )?;
                         // Wait for the decision; everything else is answered normally meanwhile.
                         for next in lines.by_ref() {
@@ -158,6 +210,18 @@ pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
                                     send(out, &json!({"jsonrpc": "2.0", "id": id, "result": {}}))?;
                                 }
                                 let approved = m["params"]["approved"].as_bool().unwrap_or(false);
+                                if text == "ask-reserved" {
+                                    // What the node answered the request, for a test to read.
+                                    let mut file = std::fs::OpenOptions::new()
+                                        .create(true)
+                                        .append(true)
+                                        .open("applied.txt")?;
+                                    writeln!(
+                                        file,
+                                        "answered:{}",
+                                        if approved { "approved" } else { "denied" }
+                                    )?;
+                                }
                                 state(out, &session, "WORKING")?;
                                 note(
                                     out,
