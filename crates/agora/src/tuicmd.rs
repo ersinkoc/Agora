@@ -574,7 +574,7 @@ fn ask_grant(
     commands: &[&str],
 ) -> Result<bool, String> {
     let question = lines_of(&say.text(key!("tui-grant-ask"), &[]));
-    if ask.key(&question, Duration::from_secs(30)) != Some(b'y') {
+    if fresh_key(ask, &question, Duration::from_secs(30)) != Some(b'y') {
         return Ok(false);
     }
     let fail = |code: String| say.text(key!("tui-answer-failed"), &[("code", Arg::Str(code))]);
@@ -585,6 +585,14 @@ fn ask_grant(
         Err(code) if code == "approval.signature_invalid" => Err(not_trusted(say, &device, None)),
         Err(code) => Err(fail(code)),
     }
+}
+
+/// Shows `lines` and waits up to `wait` for a key pressed after they were shown: keys typed before (meant for an agent, a `y` among
+/// them) are set aside, so only a fresh answer confirms (ADR-0063).
+fn fresh_key(ask: &mut dyn Asker, lines: &[String], wait: Duration) -> Option<u8> {
+    ask.show(lines);
+    ask.discard();
+    ask.key(lines, wait)
 }
 
 /// What `action` came to once a refusal for a missing grant was handled.
@@ -662,7 +670,7 @@ fn attach(
             TermEvent::Resized(..) | TermEvent::Quiet => {}
         }
         // What was typed was refused until the owner allows it: ask, and show the screen again either way (the typed keys are lost).
-        if session.take_grant_wanted() {
+        if session.take_grant_wanted().is_some() {
             let scope = format!("agent:{local}");
             let _ = ask_grant(say, session, &mut Plain(rx), node, &scope, &TYPING);
             session.terminal_close(stream);
@@ -2066,8 +2074,8 @@ fn console(
     mouse_mode(c.app.mouse);
     let mut fresh = true;
     let mut typed_at: Option<Instant> = None;
-    // The agent whose terminal was last typed into: a refusal for a missing grant (ADR-0041) is asked about for it.
-    let mut typed_to: Option<String> = None;
+    // The last request sent when a typing grant was last asked for: refusals of typing sent up to then were answered by that question.
+    let mut asked_through = 0u64;
     // ADR-0065: only the hub knows whether this session is the owner's (it answers `PairStatus` to the owner only).
     if c.pair.owner == agora_tui::pair::Owner::Unknown {
         if let Some(owner) = pair_owner(session) {
@@ -2265,7 +2273,6 @@ fn console(
                                     active.as_deref().and_then(|a| a.split_once('/'))
                                 {
                                     session.terminal_input(node, &format!("t-{local}"), &b);
-                                    typed_to = active;
                                 }
                             }
                         }
@@ -2275,7 +2282,6 @@ fn console(
                         if let Some((node, local)) = agent.split_once('/') {
                             session.terminal_input(node, &format!("t-{local}"), &bytes);
                         }
-                        typed_to = Some(agent);
                     }
                     Action::PaneSize { .. } => sized = None,
                     Action::MouseCapture(on) => mouse_mode(on),
@@ -2512,10 +2518,14 @@ fn console(
                 }
             }
         }
-        // ADR-0041: what was typed was refused until the owner allows it. Asked once, over the console, and only for the agent in
-        // front (the question does not name one); the typed keys are lost, and the pane is opened again afterwards.
-        if session.take_grant_wanted() {
-            if let Some((node, local)) = typing_grant_for(typed_to.take(), c.app.active_agent()) {
+        // ADR-0041: what was typed was refused until the owner allows it. Asked over the console, once for everything typed before
+        // the question, and only when the refused agent is the one in front (the question does not name one; typing into it again
+        // asks there). The typed keys are lost, and the pane is opened again afterwards.
+        if let Some(refused) = session.take_grant_wanted() {
+            if let Some((node, local)) =
+                typing_grant_for(&refused, asked_through, c.app.active_agent())
+            {
+                asked_through = session.last_request();
                 let scope = format!("agent:{local}");
                 let asked = over_console(say, c, session, &mut preview, None, rx, |s, ask| {
                     ask_grant(say, s, ask, &node, &scope, &TYPING)
@@ -2552,11 +2562,17 @@ fn console(
     }
 }
 
-/// The agent (node, local id) to ask a typing grant for once a refusal came: the one last typed into, only while it is still in front.
-fn typing_grant_for(typed_to: Option<String>, active: Option<&str>) -> Option<(String, String)> {
-    let agent = typed_to.filter(|a| Some(a.as_str()) == active)?;
-    let (node, local) = agent.split_once('/')?;
-    Some((node.to_string(), local.to_string()))
+/// The agent (node, local id) to ask a typing grant for once `refused` came: the agent the refused typing went to, only while it is
+/// the one in front, and only for typing sent after the last question (`asked_through`).
+fn typing_grant_for(
+    refused: &agora_tui::client::Refused,
+    asked_through: u64,
+    active: Option<&str>,
+) -> Option<(String, String)> {
+    let local = refused.terminal_id.strip_prefix("t-")?;
+    let (node, agent) = active?.split_once('/')?;
+    (refused.request > asked_through && node == refused.node && agent == local)
+        .then(|| (node.to_string(), local.to_string()))
 }
 
 /// How long after its last byte an unfinished escape sequence is read as the keys typed (a lone ESC as Esc). The reader thread hands
@@ -2980,6 +2996,10 @@ trait Asker {
         self.show(lines);
         read_key(self.rx(), wait)
     }
+    /// Sets aside every key typed so far.
+    fn discard(&mut self) {
+        while self.rx().try_recv().is_ok() {}
+    }
 }
 
 /// The text of a question as lines.
@@ -3056,6 +3076,12 @@ impl Asker for Over<'_> {
         }
         self.stale = true;
         Plain(self.rx).frame(bytes);
+    }
+
+    /// Sets aside every key typed so far, with the console's half-read escape sequence.
+    fn discard(&mut self) {
+        while self.rx.try_recv().is_ok() {}
+        let _ = self.c.parser.flush();
     }
 
     /// Keys and clicks through the console's own reader: a click on a numbered line is its number, a click outside the box cancels
@@ -3563,17 +3589,90 @@ mod typing_grant_tests {
 
     #[test]
     fn a_refused_keystroke_asks_for_the_agent_in_front_only() {
-        let to = |a: &str| Some(a.to_string());
+        let refused = |node: &str, local: &str, request| agora_tui::client::Refused {
+            node: node.into(),
+            terminal_id: format!("t-{local}"),
+            request,
+        };
         assert_eq!(
-            typing_grant_for(to("laptop/a1"), Some("laptop/a1")),
+            typing_grant_for(&refused("laptop", "a1", 5), 0, Some("laptop/a1")),
             Some(("laptop".into(), "a1".into()))
         );
-        // Nothing typed since the last question (a second refusal for the same keys): not asked again.
-        assert_eq!(typing_grant_for(None, Some("laptop/a1")), None);
-        // Typed into another agent than the one in front: the question would not say which, so it is not asked.
-        assert_eq!(typing_grant_for(to("laptop/a2"), Some("laptop/a1")), None);
-        assert_eq!(typing_grant_for(to("laptop/a1"), None), None);
-        assert_eq!(typing_grant_for(to("no-slash"), Some("no-slash")), None);
+        // Codex review of #796: A's typing refused after the user went to B (and typed there): never a grant for B, nor for A unseen.
+        assert_eq!(
+            typing_grant_for(&refused("laptop", "a1", 5), 0, Some("laptop/a2")),
+            None
+        );
+        // The same agent id on another machine is another agent.
+        assert_eq!(
+            typing_grant_for(&refused("laptop", "a1", 5), 0, Some("mac/a1")),
+            None
+        );
+        // Typing sent before the last question (the rest of the refusals for the same keys): not asked again.
+        assert_eq!(
+            typing_grant_for(&refused("laptop", "a1", 5), 5, Some("laptop/a1")),
+            None
+        );
+        assert_eq!(
+            typing_grant_for(&refused("laptop", "a1", 6), 5, Some("laptop/a1")),
+            Some(("laptop".into(), "a1".into()))
+        );
+        assert_eq!(typing_grant_for(&refused("laptop", "a1", 5), 0, None), None);
+        let odd = agora_tui::client::Refused {
+            node: "laptop".into(),
+            terminal_id: "a1".into(),
+            request: 5,
+        };
+        assert_eq!(typing_grant_for(&odd, 0, Some("laptop/a1")), None);
+    }
+
+    /// An asker over a key queue whose every `show` presses `on_show` (a key pressed once the question is on the screen).
+    struct Keys<'a> {
+        rx: &'a mpsc::Receiver<u8>,
+        tx: &'a mpsc::Sender<u8>,
+        on_show: Option<u8>,
+    }
+    impl Asker for Keys<'_> {
+        fn rx(&self) -> &mpsc::Receiver<u8> {
+            self.rx
+        }
+        fn show(&mut self, _: &[String]) {
+            if let Some(k) = self.on_show {
+                let _ = self.tx.send(k);
+            }
+        }
+        fn frame(&mut self, _: &[u8]) {}
+    }
+
+    /// Codex review of #796: a `y` typed for the agent and still queued when the grant question appears never answers it; only a key
+    /// pressed after the question was shown does.
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn only_a_key_pressed_after_the_grant_question_answers_it() {
+        let (tx, rx) = mpsc::channel();
+        let wait = Duration::from_millis(5);
+        for k in *b"yyy" {
+            tx.send(k).unwrap();
+        }
+        let mut ask = Keys {
+            rx: &rx,
+            tx: &tx,
+            on_show: None,
+        };
+        assert_eq!(fresh_key(&mut ask, &["q".into()], wait), None);
+        tx.send(b'y').unwrap();
+        let mut ask = Keys {
+            rx: &rx,
+            tx: &tx,
+            on_show: Some(b'y'),
+        };
+        assert_eq!(fresh_key(&mut ask, &["q".into()], wait), Some(b'y'));
+        let mut ask = Keys {
+            rx: &rx,
+            tx: &tx,
+            on_show: Some(b'n'),
+        };
+        assert_eq!(fresh_key(&mut ask, &["q".into()], wait), Some(b'n'));
     }
 }
 

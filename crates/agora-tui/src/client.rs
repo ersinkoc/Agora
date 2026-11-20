@@ -143,8 +143,74 @@ pub struct Session {
     /// A snapshot that arrived while something else was waiting (the hub's first one comes right after subscribing, often while
     /// the device registration waits for its answer): `next` hands it out first, so it is never lost.
     snapshot: Option<Box<Snapshot>>,
-    /// A machine refused something that was sent without waiting for the answer (typing) because it wants a grant first.
-    grant_wanted: bool,
+    /// Typing sent without waiting for the answer, and the last of it a machine refused because it wants a grant first.
+    typing: Typing,
+}
+
+/// Typing a machine refused because it wants a grant first (ADR-0041): the terminal it was for, and its request's number (typing sent
+/// later has a larger one).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Refused {
+    pub node: String,
+    pub terminal_id: String,
+    pub request: u64,
+}
+
+/// Typing waiting for its answer, by request (the hub answers under the client's request id), so a refusal names its terminal.
+#[derive(Default)]
+struct Typing {
+    sent: std::collections::VecDeque<(u64, String, String)>,
+    refused: Option<Refused>,
+}
+
+impl Typing {
+    /// As many as a client may have waiting at the hub (docs/specs/protocol.md): an older one never gets an answer.
+    const KEPT: usize = 256;
+
+    fn sent(&mut self, request: u64, node: &str, terminal_id: &str) {
+        if self.sent.len() >= Self::KEPT {
+            self.sent.pop_front();
+        }
+        self.sent
+            .push_back((request, node.to_string(), terminal_id.to_string()));
+    }
+
+    /// A frame nobody waits for: when it is a command answer, the typing it answers is forgotten and a refusal for a missing grant
+    /// kept. Every reader of the link calls this, so no refusal is lost to whichever reader got it. Returns whether it was one.
+    fn answer(&mut self, f: &Frame) -> bool {
+        if (f.stream_id, f.kind) != (STREAM_COMMANDS, 1) {
+            return false;
+        }
+        if let Ok(r) = CommandResponse::decode(f.payload.as_slice()) {
+            self.reply(&r);
+        }
+        true
+    }
+
+    fn reply(&mut self, r: &CommandResponse) {
+        let Some(n) = r
+            .request_id
+            .strip_prefix('t')
+            .and_then(|n| n.parse::<u64>().ok())
+        else {
+            return;
+        };
+        let Some((request, node, terminal_id)) = self
+            .sent
+            .iter()
+            .position(|(id, ..)| *id == n)
+            .and_then(|i| self.sent.remove(i))
+        else {
+            return;
+        };
+        if refused_for_grant(r) {
+            self.refused = Some(Refused {
+                node,
+                terminal_id,
+                request,
+            });
+        }
+    }
 }
 
 /// An agent a machine offers (`agent.kinds`).
@@ -211,7 +277,7 @@ impl Session {
             changed: false,
             asked: false,
             snapshot: None,
-            grant_wanted: false,
+            typing: Typing::default(),
         })
     }
 
@@ -228,19 +294,12 @@ impl Session {
         let conn = &mut self.conn;
         let queue = &mut self.term_frames;
         let asked = &mut self.asked;
-        let grant_wanted = &mut self.grant_wanted;
+        let typing = &mut self.typing;
         self.rt.block_on(async {
             match tokio::time::timeout(wait, conn.recv()).await {
                 Err(_) => Update::Quiet,
-                // The answer to something typed without waiting: only a missing grant matters (as in `terminal_next`).
-                Ok(Ok(Some(f))) if (f.stream_id, f.kind) == (STREAM_COMMANDS, 1) => {
-                    if CommandResponse::decode(f.payload.as_slice())
-                        .is_ok_and(|r| refused_for_grant(&r))
-                    {
-                        *grant_wanted = true;
-                    }
-                    Update::Quiet
-                }
+                // The answer to something typed without waiting: only a missing grant matters.
+                Ok(Ok(Some(f))) if typing.answer(&f) => Update::Quiet,
                 // A terminal being watched alongside: kept for `terminal_next`, never dropped here.
                 Ok(Ok(Some(f))) if f.stream_id >= agora_protocol::frame::FIRST_DYNAMIC_STREAM => {
                     queue.push_back(f);
@@ -338,7 +397,7 @@ impl Session {
         let changed = &mut self.changed;
         let kept = &mut self.snapshot;
         let term_frames = &mut self.term_frames;
-        let grant_wanted = &mut self.grant_wanted;
+        let typing = &mut self.typing;
         let asked = &mut self.asked;
         self.rt.block_on(async {
             conn.send(&Frame {
@@ -362,9 +421,7 @@ impl Session {
                         continue;
                     };
                     if r.request_id != id {
-                        if refused_for_grant(&r) {
-                            *grant_wanted = true;
-                        }
+                        typing.reply(&r);
                         continue;
                     }
                     return match r.result {
@@ -466,6 +523,7 @@ impl Session {
         let kept = &mut self.snapshot;
         let term_frames = &mut self.term_frames;
         let asked = &mut self.asked;
+        let typing = &mut self.typing;
         self.rt.block_on(async {
             conn.send(&Frame {
                 stream_id: stream,
@@ -493,6 +551,7 @@ impl Session {
                             _ => Ok(stream),
                         };
                     }
+                    typing.reply(&r);
                 } else {
                     set_aside(f, changed, asked, kept, term_frames);
                 }
@@ -529,21 +588,15 @@ impl Session {
         let changed = &mut self.changed;
         let kept = &mut self.snapshot;
         let queue = &mut self.term_frames;
-        let grant_wanted = &mut self.grant_wanted;
+        let typing = &mut self.typing;
         let asked = &mut self.asked;
         self.rt.block_on(async {
             match tokio::time::timeout(wait, conn.recv()).await {
                 Err(_) => TermEvent::Quiet,
                 Ok(Ok(Some(f))) if f.stream_id == stream => event(&f).unwrap_or(TermEvent::Quiet),
                 Ok(Ok(Some(f))) => {
-                    if (f.stream_id, f.kind) == (STREAM_COMMANDS, 1) {
-                        // The answer to something typed without waiting: only a missing grant matters.
-                        if CommandResponse::decode(f.payload.as_slice())
-                            .is_ok_and(|r| refused_for_grant(&r))
-                        {
-                            *grant_wanted = true;
-                        }
-                    } else {
+                    // The answer to something typed without waiting: only a missing grant matters.
+                    if !typing.answer(&f) {
                         set_aside(f, changed, asked, kept, queue);
                     }
                     TermEvent::Quiet
@@ -580,12 +633,15 @@ impl Session {
         let kept = &mut self.snapshot;
         let queue = &mut self.term_frames;
         let asked = &mut self.asked;
+        let typing = &mut self.typing;
         self.rt.block_on(async {
             match tokio::time::timeout(wait, conn.recv()).await {
                 Err(_) => ChatEvent::Quiet,
                 Ok(Ok(Some(f))) if f.stream_id == stream => take(&f).unwrap_or(ChatEvent::Quiet),
                 Ok(Ok(Some(f))) => {
-                    set_aside(f, changed, asked, kept, queue);
+                    if !typing.answer(&f) {
+                        set_aside(f, changed, asked, kept, queue);
+                    }
                     ChatEvent::Quiet
                 }
                 Ok(_) => ChatEvent::Lost,
@@ -1035,18 +1091,24 @@ impl Session {
 
     /// Keys typed into the terminal (an ordinary routed command; the machine runs them in the order sent). Fire and forget.
     pub fn terminal_input(&mut self, node: &str, terminal_id: &str, data: &[u8]) {
-        self.send_nowait(
+        let request = self.send_nowait(
             node,
             command_request::Command::TerminalInput(agora_protocol::v1::TerminalInput {
                 terminal_id: terminal_id.to_string(),
                 data: data.to_vec(),
             }),
         );
+        self.typing.sent(request, node, terminal_id);
     }
 
-    /// Was something typed refused because the machine wants a grant first (ADR-0041)? Reading it clears it.
-    pub fn take_grant_wanted(&mut self) -> bool {
-        std::mem::take(&mut self.grant_wanted)
+    /// The last typing a machine refused because it wants a grant first (ADR-0041), if any since the last call. Reading it clears it.
+    pub fn take_grant_wanted(&mut self) -> Option<Refused> {
+        self.typing.refused.take()
+    }
+
+    /// The number of the last request sent: a [`Refused`] with a number up to it was typed before now.
+    pub fn last_request(&self) -> u64 {
+        self.requests
     }
 
     pub fn terminal_resize(&mut self, node: &str, terminal_id: &str, cols: u16, rows: u16) {
@@ -1072,7 +1134,7 @@ impl Session {
         self.term_frames.retain(|f| f.stream_id != stream);
     }
 
-    fn send_nowait(&mut self, node: &str, command: command_request::Command) {
+    fn send_nowait(&mut self, node: &str, command: command_request::Command) -> u64 {
         self.requests += 1;
         let req = CommandRequest {
             request_id: format!("t{}", self.requests),
@@ -1087,6 +1149,7 @@ impl Session {
             seq: None,
             payload: req.encode_to_vec(),
         }));
+        self.requests
     }
 }
 
