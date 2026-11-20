@@ -137,9 +137,18 @@ export function connectLive(o: LiveOptions): Live {
   const pending = new Map<string, { resolve: (ok: agora.v1.CommandOk.$Properties) => void; reject: (e: CommandError) => void; node: string; body: CommandBody }>();
   // `size`: what fits the window's view of the terminal, said again after every (re)subscription: the hub counts a window's size
   // only while it watches the terminal, and forgets it with the connection (docs/specs/protocol.md "Shared terminal size").
-  const terminals = new Map<number, { node: string; terminalId: string; onEvent: (e: TerminalEvent) => void; size?: { cols: number; rows: number } }>();
+  // `due`: the connection (generation) on which a resubscription is already scheduled for the stream.
+  const terminals = new Map<number, { node: string; terminalId: string; onEvent: (e: TerminalEvent) => void; size?: { cols: number; rows: number }; due?: number }>();
 
-  const chats = new Map<number, { node: string; agentId: string; onLines: (lines: ChatLine[], replace: boolean) => void }>();
+  const chats = new Map<number, { node: string; agentId: string; onLines: (lines: ChatLine[], replace: boolean) => void; due?: number }>();
+
+  // At most one resubscription waits per stream and connection: a relay the hub ended while its subscription was still in flight
+  // (the node left) is also refused, and the two must not each start a retry that goes on by itself.
+  const resubscribe = (entry: { due?: number }, ms: number, again: () => void) => {
+    if (entry.due === generation) return;
+    entry.due = generation;
+    later(ms, () => { entry.due = undefined; again(); });
+  };
 
   const request = (stream: number, node: string, body: CommandBody): Promise<agora.v1.CommandOk.$Properties> =>
     new Promise((resolve, reject) => {
@@ -155,7 +164,8 @@ export function connectLive(o: LiveOptions): Live {
     if (!t) return;
     request(stream, t.node, { terminalSubscribe: { terminalId: t.terminalId, format: '' } }).catch(() => {
       // The node may be away or the agent gone; try again a little later while someone is watching.
-      if (terminals.has(stream)) later(2000, () => subscribeTerminal(stream));
+      const again = terminals.get(stream);
+      if (again) resubscribe(again, 2000, () => subscribeTerminal(stream));
     });
     // Sent right behind the subscription, so the hub already counts this window as watching when it reads it.
     if (t.size) sendSize(t.node, t.terminalId, t.size);
@@ -169,7 +179,8 @@ export function connectLive(o: LiveOptions): Live {
     const c = chats.get(stream);
     if (!c) return;
     request(stream, c.node, { chatSubscribe: { agentId: c.agentId } }).catch(() => {
-      if (chats.has(stream)) later(2000, () => subscribeChat(stream));
+      const again = chats.get(stream);
+      if (again) resubscribe(again, 2000, () => subscribeChat(stream));
     });
   };
 
@@ -268,7 +279,7 @@ export function connectLive(o: LiveOptions): Live {
       if (f.streamId >= 3 && chats.has(f.streamId)) {
         const c = chats.get(f.streamId);
         if (!c) return;
-        if (f.kind === STREAM_CLOSE) { later(500, () => subscribeChat(f.streamId)); return; }
+        if (f.kind === STREAM_CLOSE) { resubscribe(c, 500, () => subscribeChat(f.streamId)); return; }
         try {
           if (f.kind === CHAT_KIND.SNAPSHOT) c.onLines((agora.v1.ChatSnapshot.decode(f.payload).entries ?? []).map(chatLine), true);
           else if (f.kind === CHAT_KIND.ENTRY) c.onLines([chatLine(agora.v1.ChatEntry.decode(f.payload))], false);
@@ -280,7 +291,7 @@ export function connectLive(o: LiveOptions): Live {
         if (!t) return;
         if (f.kind === STREAM_CLOSE) {
           // The hub ended the relay (slow client, node left, exit): ask again for a fresh snapshot.
-          later(500, () => subscribeTerminal(f.streamId));
+          resubscribe(t, 500, () => subscribeTerminal(f.streamId));
           return;
         }
         const e = decodeTerminalFrame(f.kind, f.payload);
@@ -341,16 +352,19 @@ export function connectLive(o: LiveOptions): Live {
         terminals.set(stream, { node, terminalId, onEvent });
         if (isOpen) subscribeTerminal(stream);
         return {
+          // A closed session is inert: a late keystroke or resize (a frame callback after the pane went) is not sent.
           sendInput(bytes) {
+            if (!terminals.has(stream)) return;
             request(STREAM_COMMANDS, node, { terminalInput: { terminalId, data: bytes } }).catch(() => {});
           },
           resize(cols, rows) {
             const t = terminals.get(stream);
-            if (t) t.size = { cols, rows };
+            if (!t) return;
+            t.size = { cols, rows };
             if (isOpen) sendSize(node, terminalId, { cols, rows });
           },
           close() {
-            terminals.delete(stream);
+            if (!terminals.delete(stream)) return;
             if (isOpen && sock) sock.send(encodeFrame({ streamId: stream, kind: STREAM_CLOSE, payload: new Uint8Array() }));
           },
         };
@@ -363,7 +377,7 @@ export function connectLive(o: LiveOptions): Live {
         if (isOpen) subscribeChat(stream);
         return {
           close() {
-            chats.delete(stream);
+            if (!chats.delete(stream)) return;
             if (isOpen && sock) sock.send(encodeFrame({ streamId: stream, kind: STREAM_CLOSE, payload: new Uint8Array() }));
           },
         };
