@@ -3,9 +3,10 @@
 //!
 //! A file is the agent's when it was written after the agent started, its first line passes `select`, names the agent's folder as its
 //! working directory, and its id is no other agent's. This is a guess that can be wrong, so it is made only when it cannot be confused:
-//! when two agents of one kind (or of kinds whose manifests name the same session files) wait for their id in the same folder at once,
-//! or more than one new file fits, neither gets one (the window then offers Start again, never a Resume into someone else's
-//! conversation). An agent that has no file after [`GIVE_UP_AFTER`] gets none.
+//! when two agents of one kind wait for their id in the same folder at once, when a fitting file would also fit an agent of another kind
+//! in that folder (its glob matches the same file, however spelled, and its `select` takes the first line), or when more than one new
+//! file fits, none of them gets one (the window then offers Start again, never a Resume into someone else's conversation). An agent
+//! that has no file after [`GIVE_UP_AFTER`] gets none.
 
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read};
@@ -90,30 +91,53 @@ fn same_dir(a: &Path, b: &Path) -> bool {
     canon(a) == canon(b)
 }
 
-/// The id in `file`'s first line when that line is a session's start in `folder`.
-fn session_in(file: &Path, spec: &SessionFile, folder: &Path) -> Option<String> {
+/// `file`'s first line as JSON, when it is complete within [`FIRST_LINE_MAX`].
+fn first_line(file: &Path) -> Option<Value> {
     let f = std::fs::File::open(file).ok()?;
     let mut line = String::new();
-    // One byte of lookahead distinguishes a complete line from a valid JSON prefix at the cap.
-    BufReader::new(f.take(FIRST_LINE_MAX + 1))
+    // Two bytes of lookahead tell a complete line (`\n` or `\r\n`) from a valid JSON prefix at the cap.
+    BufReader::new(f.take(FIRST_LINE_MAX + 2))
         .read_line(&mut line)
         .ok()?;
-    // The newline ends the line and is not part of it (F1181): a line of exactly the cap is accepted whether or not it is written yet.
-    if line.strip_suffix('\n').unwrap_or(&line).len() as u64 > FIRST_LINE_MAX {
+    // The terminator ends the line and is not part of it (F1181, Codex review of #791): a line of exactly the cap is accepted whether
+    // it ends in LF, in CRLF, or is not ended yet.
+    let body = line
+        .strip_suffix("\r\n")
+        .or_else(|| line.strip_suffix('\n'))
+        .unwrap_or(&line);
+    if body.len() as u64 > FIRST_LINE_MAX {
         return None;
     }
-    let v: Value = serde_json::from_str(line.trim_end()).ok()?;
-    if let Some(sel) = &spec.select {
-        if at(&v, &sel.path).and_then(Value::as_str) != Some(sel.equals.as_str()) {
-            return None;
-        }
+    serde_json::from_str(body.trim_end()).ok()
+}
+
+/// Whether a first line passes `spec`'s `select`.
+fn selected(v: &Value, spec: &SessionFile) -> bool {
+    spec.select
+        .as_ref()
+        .is_none_or(|sel| at(v, &sel.path).and_then(Value::as_str) == Some(sel.equals.as_str()))
+}
+
+/// The id in a first line when that line is a session's start in `folder`.
+fn session_of(v: &Value, spec: &SessionFile, folder: &Path) -> Option<String> {
+    if !selected(v, spec) {
+        return None;
     }
-    let cwd = at(&v, &spec.cwd)?.as_str()?;
+    let cwd = at(v, &spec.cwd)?.as_str()?;
     if !same_dir(Path::new(cwd), folder) {
         return None;
     }
-    let id = at(&v, &spec.id)?.as_str()?;
+    let id = at(v, &spec.id)?.as_str()?;
     (argv_safe(id) && is_uuid(id)).then(|| id.to_string())
+}
+
+#[cfg(test)]
+fn session_in(file: &Path, spec: &SessionFile, folder: &Path) -> Option<String> {
+    session_of(&first_line(file)?, spec, folder)
+}
+
+fn canon(p: &Path) -> PathBuf {
+    std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
 }
 
 impl SessionWatcher {
@@ -167,16 +191,14 @@ impl SessionWatcher {
             if now < w.next_scan {
                 continue;
             }
-            // A live agent can still write its file after discovery gave up on it. Agents of different kinds whose manifests name the
-            // same session files cannot be told apart by a file either (F1180).
-            let shares = |other: &Target| other.kind == w.kind || other.spec.glob == t.spec.glob;
+            // A live agent can still write its file after discovery gave up on it.
             let crowded = targets.iter().any(|other| {
-                other.agent != t.agent && shares(other) && same_dir(&other.folder, &w.folder)
+                other.agent != t.agent && other.kind == w.kind && same_dir(&other.folder, &w.folder)
             });
             if crowded {
                 let twins: Vec<AgentId> = targets
                     .iter()
-                    .filter(|other| shares(other) && same_dir(&other.folder, &w.folder))
+                    .filter(|other| other.kind == w.kind && same_dir(&other.folder, &w.folder))
                     .map(|other| other.agent.clone())
                     .collect();
                 for a in twins {
@@ -187,18 +209,59 @@ impl SessionWatcher {
             }
             let since = w.since.checked_sub(SLACK).unwrap_or(SystemTime::UNIX_EPOCH);
             let glob = t.spec.glob.replacen("{home}", &home.to_string_lossy(), 1);
-            let mut ids: Vec<String> = crate::usage_files::expand(Path::new(&glob))
+            let fits: Vec<(PathBuf, Value, String)> = crate::usage_files::expand(Path::new(&glob))
                 .into_iter()
                 .filter(|p| {
                     std::fs::metadata(p)
                         .and_then(|m| m.created().or_else(|_| m.modified()))
                         .is_ok_and(|t| t >= since)
                 })
-                .filter_map(|p| session_in(&p, &t.spec, &t.folder))
-                .filter(|id| !claimed.contains(id))
+                .filter_map(|p| {
+                    let v = first_line(&p)?;
+                    let id = session_of(&v, &t.spec, &t.folder)?;
+                    (!claimed.contains(&id)).then_some((p, v, id))
+                })
                 .collect();
+            // Agents of other kinds in this folder could have written a fitting file too when their own manifest names it: its glob
+            // matches the same file (however it is spelled) and its `select` takes the first line (F1180, Codex review of #791).
+            // Their files are listed (bounded like this agent's) only when a file fits.
+            let mut rivals: Vec<AgentId> = Vec::new();
+            if !fits.is_empty() {
+                for other in targets
+                    .iter()
+                    .filter(|other| other.kind != w.kind && same_dir(&other.folder, &w.folder))
+                {
+                    let fits_other = fits.iter().any(|(_, v, _)| selected(v, &other.spec));
+                    if !fits_other {
+                        continue;
+                    }
+                    let glob = other
+                        .spec
+                        .glob
+                        .replacen("{home}", &home.to_string_lossy(), 1);
+                    let theirs: HashSet<PathBuf> = crate::usage_files::expand(Path::new(&glob))
+                        .iter()
+                        .map(|p| canon(p))
+                        .collect();
+                    if fits
+                        .iter()
+                        .any(|(p, v, _)| selected(v, &other.spec) && theirs.contains(&canon(p)))
+                    {
+                        rivals.push(other.agent.clone());
+                    }
+                }
+            }
+            let mut ids: Vec<String> = fits.into_iter().map(|(_, _, id)| id).collect();
             ids.sort();
             ids.dedup();
+            if !rivals.is_empty() {
+                // Neither can tell which agent wrote it; both give up, so the one left behind never takes the other's later.
+                for a in rivals.into_iter().chain([t.agent.clone()]) {
+                    self.waiting.remove(&a);
+                    self.gave_up.insert(a);
+                }
+                continue;
+            }
             if let Some(w) = self.waiting.get_mut(&t.agent) {
                 w.next_scan = now + SCAN_EVERY;
             }
@@ -247,7 +310,11 @@ mod tests {
     }
 
     fn write(root: &Path, name: &str, id: &str, cwd: &Path) {
-        let line = serde_json::json!({"type": "session_meta", "payload": {"id": id, "cwd": cwd}});
+        write_typed(root, name, "session_meta", id, cwd);
+    }
+
+    fn write_typed(root: &Path, name: &str, ty: &str, id: &str, cwd: &Path) {
+        let line = serde_json::json!({"type": ty, "payload": {"id": id, "cwd": cwd}});
         std::fs::write(
             root.join("home/.tool/s").join(name),
             format!("{line}\n{{\"type\":\"other\"}}\n"),
@@ -509,6 +576,156 @@ mod tests {
             want.sort();
             assert_eq!(found, want);
         }
+    }
+
+    #[test]
+    fn agents_whose_globs_are_spelled_differently_but_match_the_same_file_get_no_session() {
+        // Codex review of #791: `sessions/*.jsonl` and `sessions/./*.jsonl` name the same files.
+        for reverse in [false, true] {
+            let root = tmp(if reverse {
+                "spelling-reversed"
+            } else {
+                "spelling"
+            });
+            let mut w = SessionWatcher::new(Some(root.join("home")));
+            let now = Instant::now();
+            let mut targets = vec![
+                target("tool-1", root.join("work/a")),
+                Target {
+                    kind: "tool-variant".into(),
+                    spec: SessionFile {
+                        glob: "{home}/.tool/s/./rollout-*.jsonl".into(),
+                        ..spec()
+                    },
+                    ..target("variant-1", root.join("work/a"))
+                },
+            ];
+            if reverse {
+                targets.reverse();
+            }
+            let (release, gate) = std::sync::mpsc::channel();
+            let writer_root = root.clone();
+            let writer = std::thread::spawn(move || {
+                gate.recv().unwrap();
+                write(
+                    &writer_root,
+                    "rollout-1.jsonl",
+                    "0199aaaa-0000-4000-8000-000000000097",
+                    &writer_root.join("work/a"),
+                );
+            });
+            assert!(w.poll(now, &targets, &HashSet::new()).is_empty());
+            // The file appears only after both agents are registered.
+            release.send(()).unwrap();
+            writer.join().unwrap();
+            assert!(w
+                .poll(now + SCAN_EVERY, &targets, &HashSet::new())
+                .is_empty());
+            // Neither takes it later either, even once the other agent has left.
+            let alone = [targets[0].clone()];
+            assert!(w
+                .poll(now + SCAN_EVERY * 2, &alone, &HashSet::new())
+                .is_empty());
+        }
+    }
+
+    #[test]
+    fn agents_reading_one_glob_with_exclusive_selectors_in_one_folder_each_get_their_own() {
+        // Codex review of #791: no first line can pass both `select`s, so each file can only be one of them.
+        for reverse in [false, true] {
+            let root = tmp(if reverse {
+                "selectors-reversed"
+            } else {
+                "selectors"
+            });
+            let mut w = SessionWatcher::new(Some(root.join("home")));
+            let now = Instant::now();
+            let mut targets = vec![
+                target("tool-1", root.join("work/a")),
+                Target {
+                    kind: "tool-variant".into(),
+                    spec: SessionFile {
+                        select: Some(UsageSelect {
+                            path: "type".into(),
+                            equals: "variant_meta".into(),
+                        }),
+                        ..spec()
+                    },
+                    ..target("variant-1", root.join("work/a"))
+                },
+            ];
+            if reverse {
+                targets.reverse();
+            }
+            let (release, gate) = std::sync::mpsc::channel();
+            let writer_root = root.clone();
+            let writer = std::thread::spawn(move || {
+                gate.recv().unwrap();
+                let folder = writer_root.join("work/a");
+                write_typed(
+                    &writer_root,
+                    "rollout-1.jsonl",
+                    "session_meta",
+                    "0199aaaa-0000-4000-8000-000000000098",
+                    &folder,
+                );
+                write_typed(
+                    &writer_root,
+                    "rollout-2.jsonl",
+                    "variant_meta",
+                    "0199aaaa-0000-4000-8000-000000000099",
+                    &folder,
+                );
+            });
+            assert!(w.poll(now, &targets, &HashSet::new()).is_empty());
+            release.send(()).unwrap();
+            writer.join().unwrap();
+            let mut found = w.poll(now + SCAN_EVERY, &targets, &HashSet::new());
+            found.sort();
+            let mut want = vec![
+                (
+                    AgentId::new("tool-1"),
+                    "0199aaaa-0000-4000-8000-000000000098".to_string(),
+                ),
+                (
+                    AgentId::new("variant-1"),
+                    "0199aaaa-0000-4000-8000-000000000099".to_string(),
+                ),
+            ];
+            want.sort();
+            assert_eq!(found, want);
+        }
+    }
+
+    #[test]
+    fn a_crlf_first_line_counts_like_an_lf_one_at_the_read_limit() {
+        // Codex review of #791: the terminator is not part of the line, whether it is `\n` or `\r\n`.
+        let root = tmp("crlf-limit");
+        let folder = root.join("work/a");
+        let id = "0199aaaa-0000-4000-8000-000000000100";
+        let file = root.join("home/.tool/s/rollout-crlf.jsonl");
+        let line =
+            serde_json::json!({"type":"session_meta","payload":{"id":id,"cwd":folder}}).to_string();
+        for length in [FIRST_LINE_MAX - 1, FIRST_LINE_MAX, FIRST_LINE_MAX + 1] {
+            for end in ["\n", "\r\n"] {
+                let mut padded = line.as_bytes().to_vec();
+                padded.resize(length as usize, b' ');
+                padded.extend_from_slice(end.as_bytes());
+                padded.extend_from_slice(b"{\"type\":\"other\"}\r\n");
+                std::fs::write(&file, &padded).unwrap();
+                assert_eq!(
+                    session_in(&file, &spec(), &folder),
+                    (length <= FIRST_LINE_MAX).then(|| id.to_string()),
+                    "{length} {end:?}"
+                );
+            }
+        }
+        // A carriage return that is not followed by a newline is part of an overlong line.
+        let mut padded = line.as_bytes().to_vec();
+        padded.resize(FIRST_LINE_MAX as usize, b' ');
+        padded.extend_from_slice(b"\rx\n");
+        std::fs::write(&file, &padded).unwrap();
+        assert!(session_in(&file, &spec(), &folder).is_none());
     }
 
     #[test]
