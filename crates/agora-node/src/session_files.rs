@@ -479,6 +479,12 @@ mod tests {
     use super::*;
     use agora_adapters::manifest::UsageSelect;
 
+    /// `agora_platform::link_dir` with `/` spelled as the system's separator: Windows' `mklink` reads `h/link` as the switch `/link`.
+    fn link_dir(target: &Path, link: &Path) -> std::io::Result<()> {
+        let native = |p: &Path| p.components().collect::<PathBuf>();
+        agora_platform::link_dir(&native(target), &native(link))
+    }
+
     fn tmp(name: &str) -> PathBuf {
         let p = std::env::temp_dir().join(format!("agora-sessions-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&p);
@@ -1193,7 +1199,7 @@ mod tests {
         for reverse in [false, true] {
             let root = tmp(if reverse { "alias-reversed" } else { "alias" });
             std::fs::create_dir_all(root.join("home/store")).unwrap();
-            agora_platform::link_dir(&root.join("home/store"), &root.join("home/alias")).unwrap();
+            link_dir(&root.join("home/store"), &root.join("home/alias")).unwrap();
             let mut targets = vec![
                 with_glob(
                     target("tool-1", root.join("work/a")),
@@ -1226,8 +1232,7 @@ mod tests {
                 "dangling"
             });
             std::fs::create_dir_all(root.join("home/store/new")).unwrap();
-            agora_platform::link_dir(&root.join("home/store/new"), &root.join("home/alias"))
-                .unwrap();
+            link_dir(&root.join("home/store/new"), &root.join("home/alias")).unwrap();
             std::fs::remove_dir(root.join("home/store/new")).unwrap();
             let mut targets = vec![
                 with_glob(
@@ -1432,7 +1437,7 @@ mod tests {
             // so every pair must be compared on disk.
             for i in 0..6u32 {
                 let link = root.join(format!("work/l{i}"));
-                agora_platform::link_dir(&root.join("work/a"), &link).unwrap();
+                link_dir(&root.join("work/a"), &link).unwrap();
                 targets.push(with_glob(
                     target(&format!("agent-{i}"), link),
                     &format!("kind-{i}"),
@@ -1470,7 +1475,7 @@ mod tests {
         std::fs::create_dir_all(root.join("real/inner")).unwrap();
         std::fs::create_dir_all(root.join("real/s")).unwrap();
         std::fs::create_dir_all(root.join("h/s")).unwrap();
-        agora_platform::link_dir(&root.join("real/inner"), &root.join("h/link")).unwrap();
+        link_dir(&root.join("real/inner"), &root.join("h/link")).unwrap();
         let raw = root.join("h").join("link").join("..").join("s");
         assert_eq!(resolve(&raw), Some(std::fs::canonicalize(&raw).unwrap()));
         // A root that does not exist yet is walked, through the link.
@@ -1494,7 +1499,7 @@ mod tests {
             } else {
                 "settled"
             });
-            agora_platform::link_dir(&root.join("work/a"), &root.join("work/link")).unwrap();
+            link_dir(&root.join("work/a"), &root.join("work/link")).unwrap();
             let mut w = SessionWatcher::new(Some(root.join("home")));
             w.probe = counting_probe;
             w.resolver = counting_resolver;
@@ -1549,7 +1554,7 @@ mod tests {
             let root = tmp(if reverse { "dotdot-reversed" } else { "dotdot" });
             std::fs::create_dir_all(root.join("real/inner")).unwrap();
             std::fs::create_dir_all(root.join("h")).unwrap();
-            agora_platform::link_dir(&root.join("real/inner"), &root.join("h/link")).unwrap();
+            link_dir(&root.join("real/inner"), &root.join("h/link")).unwrap();
             let home = root.join("h").join("link").join("..");
             let real = root.join("real").join("s").join("sub").join("*.jsonl");
             let mut targets = vec![
@@ -1581,7 +1586,7 @@ mod tests {
             } else {
                 "twin-link"
             });
-            agora_platform::link_dir(&root.join("work/a"), &root.join("work/link")).unwrap();
+            link_dir(&root.join("work/a"), &root.join("work/link")).unwrap();
             let mut targets = vec![
                 target("tool-1", root.join("work/a")),
                 target("tool-2", root.join("work/link")),
@@ -1672,8 +1677,7 @@ mod tests {
             let root = tmp(if reverse { "linked-reversed" } else { "linked" });
             std::fs::create_dir_all(root.join("home/logs")).unwrap();
             std::fs::create_dir_all(root.join("home/store")).unwrap();
-            agora_platform::link_dir(&root.join("home/store"), &root.join("home/logs/linked"))
-                .unwrap();
+            link_dir(&root.join("home/store"), &root.join("home/logs/linked")).unwrap();
             let mut targets = vec![
                 with_glob(
                     target("tool-1", root.join("work/a")),
