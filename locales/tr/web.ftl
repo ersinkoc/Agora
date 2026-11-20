@@ -1149,3 +1149,21 @@ refusal-unsupported = Bu ajanın makinesi bunu henüz desteklemiyor.
 refusal-unconfirmed = Bu seçim ajanın sormadan işlem yapmasına izin verir ve bu pencerenin henüz veremediği bir onay gerektirir. Ajanı o şekilde başlatın.
 refusal-forbidden = Bu makinenin ayarları ajanın sormadan işlem yapmasına izin vermiyor.
 refusal-unknown-option = Ajan bu ayarı ya da değeri artık sunmuyor.
+
+# ADR-0091: plan limitleri. Sayılar aracın kendi bildirdiğidir; hiçbiri hesaplanmaz. Para yok.
+quota-window-five-hour = Beş saat
+quota-window-seven-day = Yedi gün
+quota-window-minutes = { $minutes } dakika
+quota-percent = %{ $percent }
+quota-chip = Limit %{ $percent }
+quota-chip-title = { $kind }, { $what }: plan limitinin %{ $percent } kadarı kullanıldı.
+quota-resets = { $time } içinde sıfırlanır ({ $when })
+quota-reset-unknown = Sıfırlanma zamanı bildirilmedi
+quota-observed = Okunma: { $when }
+quota-stale = Güncel değil
+quota-stale-note = Pencerenin kendi süresinden eski, artık doğru olmayabilir
+quota-reset = Sıfırlandı
+quota-reset-note = Pencere { $when } saatinde sıfırlandı; henüz yeni okuma yok
+quota-unknown = Bilinmiyor
+quota-unknown-why = Bu araç limitlerini henüz bildirmedi.
+quota-hint = { $kind }: { $what } limiti neredeyse doldu (%{ $percent }). Yine de başlatabilirsiniz.

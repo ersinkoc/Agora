@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { approvalName } from './net/approvalText';
 import { CommandPalette, type PaletteItem } from './components/CommandPalette';
-import { demoAgents, demoApprovals, demoList, demoMachines, demoProjects } from './fixtures';
+import { demoAgents, demoApprovals, demoList, demoMachines, demoProjects, demoQuota } from './fixtures';
+import { QuotaProvider } from './components/Quota';
 import { demoDiff, demoFiles } from './demoWorkspace';
 import { chooseLanguage, getLanguage, subscribeLanguage, t } from './i18n';
 import { nextNeedingMe, type AgentTileModel, type ResumeAction } from './model';
@@ -14,7 +15,7 @@ import { grantFor, signGrant, type GrantAsk } from './net/grant';
 import type { TerminalSource } from './terminal/source';
 import { signDirectory, type DirectoryInfo, type DirectoryListing } from './net/directory';
 import { StartAgent, type KindChoice } from './components/StartAgent';
-import { approvalList, boards, costByProject, projectChoices, recentMessages, machines, machinesOnline, shown, tiles, type ApprovalModel, type View } from './net/view';
+import { quotaObs, approvalList, boards, costByProject, projectChoices, recentMessages, machines, machinesOnline, shown, tiles, type ApprovalModel, type View } from './net/view';
 import { approvalFailureKey, indexedDbStore, signApproval, signStart, thisDevice, type Device } from './net/approval';
 import type { StartChoice } from './components/StartApproval';
 import type { HelperGrant } from './components/HelperGrants';
@@ -326,6 +327,9 @@ export function App() {
     if (!hub || idle === 0) return;
     return watchIdle(idle, lockNow, window);
   }, [hub, idle, lockNow]);
+  // ADR-0091: plan limits as the machines reported them (the demo data when there is no hub).
+  const quotaList = useMemo(() => (hub ? (live ? quotaObs(live) : []) : demoQuota), [hub, live]);
+  const quotaMachines = useMemo(() => new Map((live ? machines(live) : hub ? [] : demoMachines).map((m) => [m.id, m.name] as const)), [hub, live]);
   const agents = useMemo(() => (hub ? (live ? tiles(live) : []) : demoAgents), [hub, live]);
   const current = hash.startsWith('#/agent/') ? decodeURIComponent(hash.slice('#/agent/'.length)) : undefined;
   const approvalsNow = live ? approvalList(live) : hub ? [] : demoApprovals;
@@ -512,6 +516,7 @@ export function App() {
   }
 
   return (
+    <QuotaProvider obs={quotaList} machines={quotaMachines}>
     <ChatActionsContext.Provider value={chatActions}>
       {hash === '#/gallery' ? <Gallery /> : isMachinesHash(hash) ? <MachinesPage focus={machineOfHash(hash)} machines={live ? machines(live) : hub ? [] : demoMachines} agents={agents} usage={usage} projects={live && usage ? costByProject(live, usage.perAgent) : []} onBack={() => go('#/')} onForget={hub ? forgetMachines : undefined} /> : hash === '#/audit' && hub ? <AuditPage load={(who) => loadAudit(hub.token, who)} onBack={() => go('#/')} /> : hash === '#/device' ? <DevicePage device={device} onBack={() => go('#/')} onTheme={editTheme} onAddPasskey={hub && passkeysSupported() ? async (password) => (await addPasskey(hub.token, undefined, password)).ok : undefined} passkeyNeedsPassword={info.passwordRequired}
           fingerprint={device ? prints.get(device.id) : undefined} machines={live ? machines(live) : undefined} trustedOn={trustedOn} others={hub ? others : undefined}
@@ -544,6 +549,7 @@ export function App() {
         onApprove={(nodes) => approveDevice(waiting[0]!, nodes)}
         onLater={() => setLater((l) => new Set(l).add(waiting[0]?.deviceId ?? ''))} />}
     </ChatActionsContext.Provider>
+    </QuotaProvider>
   );
 }
 

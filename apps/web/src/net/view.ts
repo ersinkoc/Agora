@@ -2,6 +2,7 @@
 // positioned events. Keys are hub-wide `<producer>/<local id>`. Pure: no sockets, no React.
 
 import { agora } from '../gen/agora.js';
+import type { QuotaObs } from './quota';
 import { type AgentTileModel, type CommandModel, type ConfigCategory, type ConfigOptionModel, type SessionModel, type SessionOptionModel, uiState } from '../model';
 
 type Ev = agora.v1.Event.$Properties;
@@ -93,7 +94,11 @@ export interface View {
   forgottenAgents?: Set<string>;
   // ADR-0061: node id -> the devices it says it trusts (its last `NodeTrustedDevices`).
   trusted?: Map<string, string[]>;
+  // ADR-0091: the newest plan-limit observation per machine, tool and window (key `<node>\0<tool>\0<window>`); bounded.
+  quota?: Map<string, QuotaV>;
 }
+export interface QuotaV { nodeId: string; tool: string; window: string; usedPercent: number; resetsAtMs: number; observedAtMs: number }
+const MAX_QUOTA = 256;
 
 const MAX_MESSAGES = 50;
 
@@ -165,7 +170,7 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
   // ADR-0090: the hub sends an agent's last settings and slash commands right after a snapshot, AT the snapshot's position (the snapshot
   // has no field for them). These two replace what is held, so they are applied at the window's own position too; every other event
   // at or before it was already seen.
-  const replacing = pos === v.pos && (ev.body === 'agentSessionConfig' || ev.body === 'agentCommands');
+  const replacing = pos === v.pos && (ev.body === 'agentSessionConfig' || ev.body === 'agentCommands' || ev.body === 'agentQuotaObserved');
   if (pos <= v.pos && !replacing) return;
   v.pos = pos;
   const producer = ev.producerId ?? '';
@@ -307,6 +312,23 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
     case 'agentSessionConfig': {
       const a = v.agents.get(q(e.agentSessionConfig.agentId));
       if (a) a.session = { ...(a.session ?? emptySession()), config: configOf(e.agentSessionConfig.options) };
+      break;
+    }
+    // ADR-0091: a machine speaks for itself only; the newest observation of a window wins; the table is bounded (the oldest goes).
+    case 'agentQuotaObserved': {
+      const b = e.agentQuotaObserved;
+      if ((b.nodeId ?? '') !== producer || !b.tool || !b.window) break;
+      const key = `${producer}\u0000${b.tool}\u0000${b.window}`;
+      const table = (v.quota ??= new Map());
+      const observedAtMs = num(b.observedAtMs);
+      const old = table.get(key);
+      if (old && old.observedAtMs > observedAtMs) break;
+      table.set(key, { nodeId: producer, tool: b.tool, window: b.window, usedPercent: Math.min(100, num(b.usedPercent)), resetsAtMs: num(b.resetsAtMs), observedAtMs });
+      if (table.size > MAX_QUOTA) {
+        let oldest: string | undefined;
+        for (const [k, x] of table) if (oldest === undefined || x.observedAtMs < (table.get(oldest)?.observedAtMs ?? 0)) oldest = k;
+        if (oldest !== undefined) table.delete(oldest);
+      }
       break;
     }
     case 'agentCommands': {
@@ -565,7 +587,13 @@ export function shown(v: View): View {
     approvals: keep(v.approvals, (k) => !under(k)),
     withTerminal: new Set([...v.withTerminal].filter((k) => !under(k))),
     trusted: v.trusted && keep(v.trusted, (id) => !hidden.has(id)),
+    quota: v.quota && keep(v.quota, (_k, q) => !hidden.has(q.nodeId)),
   };
+}
+
+/** ADR-0091: the plan-limit observations the window holds, for the Usage panel, the cards and the start window. */
+export function quotaObs(v: View): QuotaObs[] {
+  return [...(v.quota?.values() ?? [])].map((q) => ({ machineId: q.nodeId, tool: q.tool, window: q.window, usedPercent: q.usedPercent, resetsAtMs: q.resetsAtMs, observedAtMs: q.observedAtMs }));
 }
 
 export interface MachineModel { id: string; name: string; os: string; online: boolean; agentsRunning: number; lastSeenMs: number; memoryBytes?: number; build?: string; terminalsOpen?: number; binary?: string }

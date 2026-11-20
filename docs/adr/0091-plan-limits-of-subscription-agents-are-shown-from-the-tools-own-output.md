@@ -83,4 +83,10 @@ untrusted, clamped; the reporter rung: a settings file the agent trusts).
 - Review follow-ups (same PR): a file read from its start sends only the newest report per window, stamped with the line's own time (`[quota] at`, RFC 3339) or
   the file's, never later than now; an observation older than the newest of its window is dropped; `five_hour` and `seven_day` are never evicted by invented
   `minutes:<n>` windows (30 of those, oldest offered goes first); the node prints a line at start when a folder manifest replaces a built-in kind.
-- Steps 3 (hub table, web Usage bars, chip, start hint) and 4 (Claude Code reporter: needs its own acceptance): not done.
+- Step 3 (hub table, web Usage bars, chip, start hint): done. The hub keeps the newest `AgentQuotaObserved` per (machine, tool, window), at most 64 per
+  machine (the oldest goes), only for the machine that sent it, and replays it after a snapshot at the snapshot's position (as the settings and
+  commands of ADR-0090), scoped to the machines a window may see and left out for a forgotten one. The web client folds it into its view and
+  draws it from one provider with one clock (30 s): bars in the Usage panel per machine, "Reset" after the reset time, "Out of date" past the
+  window's own length, "Unknown" with a reason, the card and row chip from 80 percent (fresh readings only), the start hint from 95 percent
+  that never blocks. The tool's name is the agent kind with a capital. No schema change.
+- Step 4 (Claude Code reporter: needs its own acceptance): not done.

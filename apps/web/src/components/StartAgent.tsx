@@ -1,3 +1,4 @@
+import { StartLimitHint } from './Quota';
 import * as Dialog from '@radix-ui/react-dialog';
 import { useEffect, useRef, useState } from 'react';
 import { t } from '../i18n';
@@ -224,6 +225,7 @@ export function StartAgent({ projects, machines, initialNode, initialKind, trust
                     {k.name}{!k.installed && <span className="text-xs">— {t('start-not-installed')}</span>}
                   </button>)}
                 </div>}
+              {Array.isArray(kinds) && kind && <StartLimitHint tool={kind} machineId={node} />}
               {Array.isArray(kinds) && initialKind && !kinds.some(k => k.installed && k.kind === initialKind) && <p role="note" className="m-0 text-xs text-muted">{t('start-terminal-missing', { kind: initialKind })}</p>}
               {Array.isArray(kinds) && kinds.some(k => !k.installed) && (() => {
                 // ADR-0069: each missing program by name; the general sentence for a kind from an older machine that does not name it.
