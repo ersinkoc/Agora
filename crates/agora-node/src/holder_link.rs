@@ -12,7 +12,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use agora_platform::{HeldSignal, LocalStream, TerminalHandle};
+use agora_platform::{HeldSignal, LocalStream, ReadTimeout, TerminalHandle};
 
 /// The version of the holder link this build speaks. A holder and a node that differ do nothing together (decision 5).
 pub const LINK_VERSION: u16 = 1;
@@ -789,7 +789,9 @@ fn send_frame(
         // The terminal goes with the first byte that goes; the rest follows plainly. A send that timed out sent nothing (nor the
         // terminal): it is tried again until the frame's time is up, as a plain send is.
         loop {
-            budget(stream, began, capped)?;
+            if !budget(stream, began, capped)? {
+                continue;
+            }
             match stream.send_with_terminal(piece(frame), terminal) {
                 Ok(0) => return Err(LinkError::Closed),
                 Ok(n) => {
@@ -803,7 +805,9 @@ fn send_frame(
         }
     }
     while sent < frame.len() {
-        budget(stream, began, capped)?;
+        if !budget(stream, began, capped)? {
+            continue;
+        }
         match stream.write(piece(&frame[sent..])) {
             Ok(0) => return Err(LinkError::Closed),
             Ok(n) => sent += n,
@@ -819,26 +823,35 @@ fn send_frame(
 /// A blocking send waits its write timeout afresh for each kernel buffer it allocates (measured: a whole-frame send ran to 5.4 s
 /// against a 5 s limit). On Linux a Unix stream send splits into buffers of at most `SO_SNDBUF / 2 - 64` bytes, and `SO_SNDBUF` is
 /// never below `SOCK_MIN_SNDBUF` (2 * (2048 + sizeof(sk_buff)), about 4.5 KiB: buffers of at least about 2.2 KiB), so 2 KiB is one
-/// buffer even at the smallest size. (agora-platform has no wait-for-writable helper for a `LocalStream`; a poll here would need
-/// platform code.) A 4 MiB frame, the largest, is 2048 sends.
+/// buffer even at the smallest size. A 4 MiB frame, the largest, is 2048 sends.
 const SEND_PIECE: usize = 2 << 10;
 
 fn piece(bytes: &[u8]) -> &[u8] {
     &bytes[..bytes.len().min(SEND_PIECE)]
 }
 
-/// Before a send: a timeout error when the frame's [`FRAME_TIMEOUT`] is spent; otherwise, in its last [`WRITE_SLICE`], the stream's
-/// write timeout is cut to what is left.
-fn budget(stream: &LocalStream, began: Instant, capped: &mut bool) -> Result<(), LinkError> {
+/// Before a send: a timeout error when the frame's [`FRAME_TIMEOUT`] is spent; otherwise, in its last [`WRITE_SLICE`], the stream
+/// is waited on for writability for what is left (exact, by `poll`), and the stream's write timeout is cut to that as a bound where
+/// the wait cannot be done (Windows). `Ok(false)`: not writable yet, so no send now (the caller asks again, which ends the frame
+/// when its time is spent).
+fn budget(stream: &LocalStream, began: Instant, capped: &mut bool) -> Result<bool, LinkError> {
     let left = FRAME_TIMEOUT.saturating_sub(began.elapsed());
     if left.is_zero() {
         return Err(LinkError::Io(io::Error::from(io::ErrorKind::TimedOut)));
     }
     if left < WRITE_SLICE {
+        if !stream.wait_writable(left)? {
+            return Ok(false);
+        }
+        // What is left after the wait: the send's own bound is that, not what was left before it.
+        let left = FRAME_TIMEOUT.saturating_sub(began.elapsed());
+        if left.is_zero() {
+            return Err(LinkError::Io(io::Error::from(io::ErrorKind::TimedOut)));
+        }
         stream.set_write_timeout(Some(left))?;
         *capped = true;
     }
-    Ok(())
+    Ok(true)
 }
 
 fn timed_out(e: &io::Error) -> bool {
@@ -911,6 +924,28 @@ fn receive_budget(
     began: Option<Instant>,
     set: &mut Option<Duration>,
 ) -> Result<(), LinkError> {
+    let timeout = receive_timeout(wait, began)?;
+    receive_budget_with(timeout, set, |t| stream.set_read_timeout_or_closed(Some(t)))
+}
+
+/// [`receive_budget`]'s last step, with the call that sets the stream's read timeout given (so a test can answer as macOS does).
+fn receive_budget_with(
+    timeout: Duration,
+    set: &mut Option<Duration>,
+    set_timeout: impl FnOnce(Duration) -> io::Result<ReadTimeout>,
+) -> Result<(), LinkError> {
+    if *set != Some(timeout) {
+        // A peer that has shut the connection (macOS refuses a new timeout then) is not an error here: a receive returns what is
+        // buffered or the end at once, so it cannot wait, and the frame's time is still checked. Any other failure is one.
+        if set_timeout(timeout)? == ReadTimeout::Set {
+            *set = Some(timeout);
+        }
+    }
+    Ok(())
+}
+
+/// The read timeout for the next receive (see [`receive_budget`]), or a timeout error when the frame's time is spent.
+fn receive_timeout(wait: Duration, began: Option<Instant>) -> Result<Duration, LinkError> {
     let timeout = match began {
         None => wait,
         Some(b) => {
@@ -924,16 +959,7 @@ fn receive_budget(
     if timeout.is_zero() {
         return Err(LinkError::Io(io::Error::from(io::ErrorKind::TimedOut)));
     }
-    if *set != Some(timeout) {
-        match stream.set_read_timeout(Some(timeout)) {
-            Ok(()) => *set = Some(timeout),
-            // macOS refuses a new timeout (EINVAL) once the peer has shut the connection, as the holder does right after a refusal.
-            // A receive then returns what is buffered or the end at once, so it cannot wait, and the frame's time is still checked.
-            Err(e) if e.kind() == io::ErrorKind::InvalidInput => {}
-            Err(e) => return Err(e.into()),
-        }
-    }
-    Ok(())
+    Ok(timeout)
 }
 
 /// A timeout error when the frame that began at `began` is past its [`FRAME_TIMEOUT`].
@@ -1138,5 +1164,51 @@ impl Client {
         self.expect_ok(&Request::Release {
             agent: agent.into(),
         })
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod budget_tests {
+    use super::*;
+
+    #[test]
+    fn a_frame_past_its_time_gets_no_receive() {
+        let long_ago = Instant::now() - FRAME_TIMEOUT - Duration::from_secs(1);
+        let r = receive_timeout(Duration::from_secs(10), Some(long_ago));
+        assert!(matches!(r, Err(LinkError::Io(e)) if e.kind() == io::ErrorKind::TimedOut));
+        let r = receive_timeout(Duration::from_secs(10), Some(Instant::now())).unwrap();
+        assert!(r <= WRITE_SLICE && !r.is_zero());
+        assert_eq!(
+            receive_timeout(Duration::from_secs(10), None).unwrap(),
+            Duration::from_secs(10)
+        );
+    }
+
+    #[test]
+    fn a_peer_closed_answer_goes_on_without_setting_the_timeout() {
+        let mut set = None;
+        let r = receive_budget_with(Duration::from_secs(1), &mut set, |_| {
+            Ok(ReadTimeout::PeerClosed)
+        });
+        assert!(r.is_ok());
+        assert_eq!(
+            set, None,
+            "not recorded as set, so the next receive asks again"
+        );
+    }
+
+    #[test]
+    fn any_other_failure_fails_the_receive_and_a_set_one_is_not_asked_twice() {
+        let mut set = None;
+        let r = receive_budget_with(Duration::from_secs(1), &mut set, |_| {
+            Err(io::Error::from(io::ErrorKind::PermissionDenied))
+        });
+        assert!(matches!(r, Err(LinkError::Io(e)) if e.kind() == io::ErrorKind::PermissionDenied));
+        let mut set = Some(Duration::from_secs(1));
+        let r = receive_budget_with(Duration::from_secs(1), &mut set, |_| {
+            panic!("an unchanged timeout is not set again")
+        });
+        assert!(r.is_ok());
     }
 }
