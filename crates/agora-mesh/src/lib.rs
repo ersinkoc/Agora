@@ -7,4 +7,5 @@
 
 pub mod awareness;
 pub mod broker;
+pub mod dispatch;
 pub mod mcp;
