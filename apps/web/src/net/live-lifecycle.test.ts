@@ -280,6 +280,23 @@ describe('live stream ownership', () => {
     expect(performance.now() - before).toBe(1234);
   });
 
+  // Codex review of #792: a closed pane's pending retry is cancelled, so it neither fires nor keeps the pane's callbacks alive.
+  for (const kind of ['terminal', 'chat'] as const) {
+    it(`closing a ${kind} cancels its pending retry`, async () => {
+      const t = setup();
+      const s = t.sockets[0]!;
+      s.onopen!();
+      const session = kind === 'terminal' ? t.live.terminal('n', 'x').connect(() => {}) : t.live.chat('n', 'x').connect(() => {});
+      ended(s, 3);
+      const waiting = vi.getTimerCount();
+      session.close();
+      expect(vi.getTimerCount()).toBe(waiting - 1);
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(subscriptions(s)).toHaveLength(1);
+      t.live.close();
+    });
+  }
+
   it('drops a retry due on a dropped connection and still retries on the new one', async () => {
     const t = setup();
     const old = t.sockets[0]!;
