@@ -851,32 +851,30 @@ fn timed_out(e: &io::Error) -> bool {
 /// A frame's payload (tag and body) and the terminal that came with it.
 pub type Frame = (Vec<u8>, Option<TerminalHandle>);
 
-/// Reads one frame: its payload and the terminal that came with it. `Ok(None)` when nothing arrived within the stream's read
-/// timeout. A frame begun must end within [`FRAME_TIMEOUT`]. Reads are in exact sizes (the 4-byte length, then the payload), so a
-/// terminal sent with one frame is never taken for the next one's.
-pub fn read_frame(stream: &mut LocalStream) -> Result<Option<Frame>, LinkError> {
+/// Reads one frame: its payload and the terminal that came with it. `Ok(None)` when no frame began within `wait` (not zero). A frame
+/// begun must end within [`FRAME_TIMEOUT`]: each later receive waits at most what is left of that time and at most a
+/// [`WRITE_SLICE`] (and never more than `wait`), and a frame whose last bytes came after it is refused too. The read timeout is set here, so the stream's own is not
+/// used. Reads are in exact sizes (the 4-byte length, then the payload), so a terminal sent with one frame is never taken for the
+/// next one's.
+pub fn read_frame(stream: &mut LocalStream, wait: Duration) -> Result<Option<Frame>, LinkError> {
     let mut terminal: Option<TerminalHandle> = None;
+    let mut set = None;
     let mut head = [0u8; 4];
     let mut have = 0;
     let mut began: Option<Instant> = None;
     while have < head.len() {
+        receive_budget(stream, wait, began, &mut set)?;
         match stream.recv_with_terminal(&mut head[have..]) {
             Ok((0, _)) => return Err(LinkError::Closed),
             Ok((n, t)) => {
                 have += n;
                 let b = *began.get_or_insert_with(Instant::now);
                 terminal = terminal.or(t);
-                // A peer that trickles bytes, each within the read timeout, is held to the frame's time too.
-                if have < head.len() && b.elapsed() > FRAME_TIMEOUT {
-                    return Err(LinkError::Io(io::Error::from(io::ErrorKind::TimedOut)));
-                }
+                past_deadline(b)?;
             }
-            Err(e) if timed_out(&e) => {
-                let Some(b) = began else { return Ok(None) };
-                if b.elapsed() > FRAME_TIMEOUT {
-                    return Err(LinkError::Io(e));
-                }
-            }
+            // Before the frame: nothing came. Within it: the next receive's budget says whether there is time left.
+            Err(e) if timed_out(&e) && began.is_none() => return Ok(None),
+            Err(e) if timed_out(&e) => {}
             Err(e) => return Err(e.into()),
         }
     }
@@ -888,20 +886,54 @@ pub fn read_frame(stream: &mut LocalStream) -> Result<Option<Frame>, LinkError> 
     let mut payload = vec![0u8; len];
     let mut have = 0;
     while have < len {
+        receive_budget(stream, wait, Some(began), &mut set)?;
         match stream.recv_with_terminal(&mut payload[have..]) {
             Ok((0, _)) => return Err(LinkError::Closed),
             Ok((n, t)) => {
                 have += n;
                 terminal = terminal.or(t);
-                if have < len && began.elapsed() > FRAME_TIMEOUT {
-                    return Err(LinkError::Io(io::Error::from(io::ErrorKind::TimedOut)));
-                }
+                // Also after the receive that completes the frame: its last bytes must have come in time.
+                past_deadline(began)?;
             }
-            Err(e) if timed_out(&e) && began.elapsed() <= FRAME_TIMEOUT => {}
+            Err(e) if timed_out(&e) => {}
             Err(e) => return Err(e.into()),
         }
     }
     Ok(Some((payload, terminal)))
+}
+
+/// Before a receive: its read timeout is `wait` until the frame began, then what is left of the frame's time, at most a
+/// [`WRITE_SLICE`] as for a send (a long kernel timeout fires late: on Linux one of about 5 s ran up to 0.3 s past it) and at most
+/// `wait`; a timeout error once that time is spent. `set` is the timeout last set, so an unchanged one is not set again.
+fn receive_budget(
+    stream: &LocalStream,
+    wait: Duration,
+    began: Option<Instant>,
+    set: &mut Option<Duration>,
+) -> Result<(), LinkError> {
+    let timeout = match began {
+        None => wait,
+        Some(b) => {
+            let left = FRAME_TIMEOUT.saturating_sub(b.elapsed());
+            if left.is_zero() {
+                return Err(LinkError::Io(io::Error::from(io::ErrorKind::TimedOut)));
+            }
+            left.min(WRITE_SLICE).min(wait)
+        }
+    };
+    if *set != Some(timeout) {
+        stream.set_read_timeout(Some(timeout))?;
+        *set = Some(timeout);
+    }
+    Ok(())
+}
+
+/// A timeout error when the frame that began at `began` is past its [`FRAME_TIMEOUT`].
+fn past_deadline(began: Instant) -> Result<(), LinkError> {
+    if began.elapsed() > FRAME_TIMEOUT {
+        return Err(LinkError::Io(io::Error::from(io::ErrorKind::TimedOut)));
+    }
+    Ok(())
 }
 
 // ----- the node's client -----
@@ -912,6 +944,9 @@ pub struct Held {
     pub info: TerminalInfo,
     pub terminal: Option<TerminalHandle>,
 }
+
+/// How long the node waits for the holder's answer to begin.
+const REPLY_WAIT: Duration = Duration::from_secs(10);
 
 /// A node's connection to its holder.
 pub struct Client {
@@ -938,7 +973,7 @@ impl Client {
     /// As [`Self::connect`] with another version (tests of the mismatch rule). `Refused(VersionMismatch, v)` carries the holder's.
     pub fn connect_with_version(socket: &Path, version: u16) -> Result<Self, LinkError> {
         let mut stream = agora_platform::local_connect(socket)?;
-        stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+        stream.set_read_timeout(Some(REPLY_WAIT))?;
         stream.set_write_timeout(Some(WRITE_SLICE))?;
         write_frame(&mut stream, &Request::Hello { version }.encode(), None)?;
         match Self::read_reply(&mut stream)?.0 {
@@ -961,8 +996,8 @@ impl Client {
     }
 
     fn read_reply(stream: &mut LocalStream) -> Result<(Reply, Option<TerminalHandle>), LinkError> {
-        // A read timeout with nothing read is the holder not answering within the stream's timeout.
-        match read_frame(stream)? {
+        // Nothing read within the wait is the holder not answering.
+        match read_frame(stream, REPLY_WAIT)? {
             Some((payload, t)) => Ok((Reply::decode(&payload)?, t)),
             None => Err(LinkError::Io(io::Error::from(io::ErrorKind::TimedOut))),
         }

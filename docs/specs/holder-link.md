@@ -66,8 +66,9 @@ next frame's.
 ## Limits of the holder itself
 - Connections are checked and closed (a peer that is not the lock holder gets no answer and no read) at most 16 per pass of the holder's
   loop, and the node is served first in every pass, so a flood of connections from the same user slows the node by those checks at
-  most. A peer that is the lock holder and starts a frame then stalls holds the holder for up to `FRAME_TIMEOUT` (5 s); sends have a
-  write timeout of the same length, so a node that never reads cannot hang the holder.
+  most. A peer that is the lock holder and starts a frame then stalls holds the holder for up to `FRAME_TIMEOUT` (5 s): once a frame
+  has begun each receive waits at most `WRITE_SLICE` (1 s) or what is left of the 5 s, and a frame whose last bytes come later is
+  refused (tested); sends have a write timeout of the same length, so a node that never reads cannot hang the holder.
 - A holder agent starts with **exactly** the environment in `Start` (the holder runs it with an empty environment plus that list; the
   holder's own environment is a stale snapshot of whoever started it and is never passed on). `env_remove` is therefore redundant for
   the holder and kept only for the format.

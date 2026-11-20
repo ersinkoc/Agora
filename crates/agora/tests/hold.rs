@@ -601,7 +601,7 @@ fn a_buffer_is_not_lost_when_the_link_breaks_during_attach() {
             .expect("hello");
             s.set_read_timeout(Some(Duration::from_secs(5)))
                 .expect("timeout");
-            let (payload, _) = agora_node::holder_link::read_frame(&mut s)
+            let (payload, _) = agora_node::holder_link::read_frame(&mut s, Duration::from_secs(5))
                 .expect("frame")
                 .expect("an answer");
             match Reply::decode(&payload).expect("reply") {
@@ -747,7 +747,8 @@ fn a_node_that_stops_reading_cannot_hang_the_holder() {
     stuck
         .set_read_timeout(Some(Duration::from_secs(5)))
         .expect("timeout");
-    let _ = agora_node::holder_link::read_frame(&mut stuck).expect("answer");
+    let _ =
+        agora_node::holder_link::read_frame(&mut stuck, Duration::from_secs(5)).expect("answer");
     write_frame(&mut stuck, &Request::Attach.encode(), None).expect("attach");
     // It reads nothing and stays connected. After the holder's write timeout it lets this node go, and the next one is served.
     let began = Instant::now();

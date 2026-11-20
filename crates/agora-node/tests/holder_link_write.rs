@@ -11,22 +11,31 @@ use std::time::{Duration, Instant};
 use agora_node::holder_link::{write_frame, LinkError, FRAME_TIMEOUT, WRITE_SLICE};
 use agora_platform::{HeldTerminal, ProcessLimits, PtyConfig};
 
+/// The fake agent, built into this test's own target directory and profile (as `launch_options.rs` does).
 fn fake_agent() -> String {
-    let mut p = std::env::current_exe().expect("exe");
-    p.pop();
-    p.pop();
-    p.push(format!("agora-fake-agent{}", std::env::consts::EXE_SUFFIX));
-    // Built once per test binary, even when present: a binary left from an older checkout may lack newer flags.
-    static FRESH: std::sync::Once = std::sync::Once::new();
-    FRESH.call_once(|| {
+    let p = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join(format!("agora-fake-agent{}", std::env::consts::EXE_SUFFIX));
+    static BUILD: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    BUILD.get_or_init(|| {
         let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
-        let ok = Command::new(cargo)
-            .args(["build", "-q", "-p", "agora-fake-agent"])
-            .status()
-            .expect("run cargo")
-            .success();
-        assert!(ok, "building agora-fake-agent failed");
+        let mut command = Command::new(cargo);
+        command
+            .args(["build", "-q", "-p", "agora-fake-agent", "--target-dir"])
+            .arg(p.parent().unwrap().parent().unwrap());
+        if p.parent().unwrap().ends_with("release") {
+            command.arg("--release");
+        }
+        assert!(
+            command.status().unwrap().success(),
+            "building the fake agent failed"
+        );
     });
+    assert!(p.exists());
     p.to_string_lossy().into_owned()
 }
 
@@ -35,11 +44,12 @@ fn a_terminal_frame_drained_in_part_at_its_deadline_still_ends_by_it() {
     let dir = std::env::temp_dir().join(format!("agora-hlw-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    // An agent that only waits, so the terminal stays open while it is sent.
+    // An agent that only waits, so the terminal stays open while it is sent. It writes nothing: output nobody reads can keep a
+    // killed child from finishing its exit on some systems (macOS), and the reap below would then wait for ever.
     let script = dir.join("wait.toml");
     std::fs::write(
         &script,
-        "name = \"wait\"\n\n[[frame]]\ntext = \"waiting\"\ndelay_ms = 60000\n",
+        "name = \"wait\"\n\n[[frame]]\ntext = \"\"\ndelay_ms = 60000\n",
     )
     .unwrap();
     let path = dir.join("s.sock");
