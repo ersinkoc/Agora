@@ -3,6 +3,7 @@
 
 import { agora } from '../gen/agora.js';
 import type { QuotaObs } from './quota';
+import { SKIP_ACTION, skipOf, type SkipRequest } from './skipApproval';
 import { type AgentTileModel, type CommandModel, type ConfigCategory, type ConfigOptionModel, type SessionModel, type SessionOptionModel, uiState } from '../model';
 
 type Ev = agora.v1.Event.$Properties;
@@ -363,9 +364,11 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
       a.sinceMs = num(b.interruptedAtMs) || at;
       a.interrupted = { resumable: !!b.resumable, atMs: num(b.interruptedAtMs), folder: b.folder ?? '', stillRunning: !!b.stillRunning };
       v.agents.set(key, a);
+      dropSkipCards(v, key);
       break;
     }
     case 'agentExited': {
+      dropSkipCards(v, q(e.agentExited.agentId));
       const a = v.agents.get(q(e.agentExited.agentId));
       if (a) {
         a.running = false; a.state = 4 /* done */; a.sinceMs = at; a.exitCode = e.agentExited.exitCode ?? 0;
@@ -496,6 +499,8 @@ export interface ApprovalModel {
   detail: string;
   expiresAtMs: number;
   start?: StartRequest; // ADR-0057: what an `agent.start` request asks for
+  skip?: SkipRequest; // ADR-0090 Amendment A: what an `agent.skip_permissions` request says, read strictly
+  skipUnknown?: boolean; // the action is that kind but the card is not the shape this window expects: nothing is signed
 }
 
 // An agent's request to start another (ADR-0057), read from the approval's detail. Every field is the asking agent's text: shown, never
@@ -544,6 +549,14 @@ export function startRequest(action: string, detail: string): StartRequest | und
   }
 }
 
+const skipFields = (r: ReturnType<typeof skipOf>): Pick<ApprovalModel, 'skip' | 'skipUnknown'> => (r === undefined ? {} : 'ok' in r ? { skip: r.ok } : { skipUnknown: true });
+
+// ADR-0090 Amendment A: a card for a switch to a mode that skips permissions belongs to the agent's run; when the agent ends the node
+// withdraws it, and the window drops it at once too, so a stale card is never left to answer.
+function dropSkipCards(v: View, agentKey: string): void {
+  for (const [id, a] of v.approvals) if (a.agentId === agentKey && a.action === SKIP_ACTION) v.approvals.delete(id);
+}
+
 // What the approvals section shows: soonest to expire first.
 export function approvalList(v: View): ApprovalModel[] {
   const names = new Map(tiles(v).map((t) => [t.id, t.name]));
@@ -561,6 +574,7 @@ export function approvalList(v: View): ApprovalModel[] {
         detail: a.detail,
         expiresAtMs: a.expiresAtMs,
         start: startRequest(a.action, a.detail),
+        ...skipFields(skipOf(a.action, a.detail, at < 0 ? '' : id.slice(0, at), a.agentId)),
       };
     })
     .sort((a, b) => a.expiresAtMs - b.expiresAtMs);

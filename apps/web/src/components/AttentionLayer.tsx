@@ -210,7 +210,8 @@ function AttentionCard({ item, more, stale, onResolve, onReview, onLater }: {
           <div id="attention-what" className="min-h-0 overflow-auto">
             {kind === 'answer' && x && <p className="attention-ask m-0 whitespace-pre-wrap break-words font-mono text-sm text-ink">{visible(askLine(x.action, x.detail))}</p>}
             {kind === 'review' && x && x.start && <p className="m-0 text-sm text-ink">{t('attention-start', { name })}</p>}
-            {kind === 'review' && x && !x.start && <>
+            {kind === 'review' && x && (x.skip || x.skipUnknown) && <p className="m-0 text-sm text-ink">{t('attention-skip', { name })}</p>}
+            {kind === 'review' && x && !x.start && !x.skip && !x.skipUnknown && <>
               <p className="m-0 mb-2 text-sm text-ink">{t('attention-ask-review')}</p>
               <pre className="attention-ask m-0 whitespace-pre-wrap break-words font-mono text-sm text-ink">{visible(askLine(x.action, x.detail))}</pre>
             </>}

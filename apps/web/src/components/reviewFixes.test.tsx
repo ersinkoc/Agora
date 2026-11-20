@@ -12,7 +12,7 @@ import { commandsOf } from '../net/view';
 import { ChatActionsContext, type ChatActions } from './chatActions';
 import { PromptBox } from './PromptBox';
 import { SessionBar } from './SessionBar';
-import { choiceState } from './sessionChoice';
+import { choiceSkips, choiceState } from './sessionChoice';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 let host: HTMLElement;
@@ -27,15 +27,17 @@ const opt = (id: string, name: string, skips = false) => ({ id, name, descriptio
 const bool = (current: string, skips = true): ConfigOptionModel => ({ id: 'auto', name: 'Auto approve', description: '', category: 'custom', type: 'boolean', current, skipsPermissions: skips, choices: [] });
 const effort = (skipLow = false): ConfigOptionModel => ({ id: 'effort', name: 'Effort', description: '', category: 'thought_level', type: 'select', current: 'high', skipsPermissions: false, choices: [opt('low', 'Low', skipLow), opt('high', 'High')] });
 
-describe('1. a boolean that skips permissions: only turning it ON is held back', () => {
-  it('current=true: Off is available, On is the current; current=false: On is unavailable, Off is the current', () => {
+describe('1. a boolean that skips permissions: turning it ON asks the owner, turning it OFF never does', () => {
+  it('a value is the current one or one that can be sent (the machine decides whether it needs approval)', () => {
     expect(choiceState(bool('true'), 'false')).toBe('ok');
     expect(choiceState(bool('true'), 'true')).toBe('current');
-    expect(choiceState(bool('false'), 'true')).toBe('unavailable');
+    expect(choiceState(bool('false'), 'true')).toBe('ok');
     expect(choiceState(bool('false'), 'false')).toBe('current');
-    expect(choiceState(bool('false', false), 'true')).toBe('ok'); // a plain boolean is free
+    expect(choiceSkips(bool('false'), 'true')).toBe(true);
+    expect(choiceSkips(bool('false'), 'false')).toBe(false);
+    expect(choiceSkips(bool('false', false), 'true')).toBe(false); // a plain boolean is free
   });
-  it('the menu shows Off enabled and On disabled for auto_approve=true, and sends only the Off', async () => {
+  it('the menu shows Off and On both enabled for auto_approve=true, and sends the Off', async () => {
     const setConfig = vi.fn(async () => true);
     act(() => root.render(<SessionBar part="controls" agentKey="n/a" session={{ ...base, config: [bool('true')] }} setConfig={setConfig} />));
     act(() => (host.querySelector('button[aria-haspopup=menu][aria-label*="More settings"]') as HTMLElement).click());
@@ -138,19 +140,19 @@ describe('5. a command name that repeats is one row', () => {
   });
 });
 
-describe('6. a click is judged with the setting as it is now', () => {
-  it('a choice that turned into a skipping one while the menu was open is disabled, and a click does nothing', async () => {
-    const setConfig = vi.fn(async () => true);
-    const draw = (o: ConfigOptionModel) => act(() => root.render(<SessionBar part="controls" agentKey="n/a" session={{ ...base, config: [o] }} setConfig={setConfig} />));
-    draw(effort(false));
+describe('6. a choice this machine refuses by its own policy stays marked unavailable, with the reason', () => {
+  it('after agent.option_forbidden the choice is disabled with a hint, the refusal is said in words, and the others stay available', async () => {
+    const setConfig = vi.fn(async () => 'agent.option_forbidden');
+    act(() => root.render(<SessionBar part="controls" agentKey="n/a" session={{ ...base, config: [effort(true)] }} setConfig={setConfig} />));
     act(() => (host.querySelector('button[aria-haspopup=menu][aria-label*="Effort"]') as HTMLElement).click());
-    const low = [...document.querySelectorAll<HTMLButtonElement>('[role=menuitemradio]')].find((b) => b.textContent?.includes('Low')) as HTMLButtonElement;
-    expect(low.disabled).toBe(false);
-    draw(effort(true)); // the node now says Low skips permissions, with the menu still open
-    const again = [...document.querySelectorAll<HTMLButtonElement>('[role=menuitemradio]')].find((b) => b.textContent?.includes('Low')) as HTMLButtonElement;
-    expect(again.disabled).toBe(true);
-    await act(async () => { again.click(); low.click(); }); // a click on the new one, and one on the picture drawn before
-    expect(setConfig).not.toHaveBeenCalled();
+    const find = (name: string) => [...document.querySelectorAll<HTMLButtonElement>('[role=menuitemradio]')].find((b) => b.textContent?.includes(name)) as HTMLButtonElement;
+    expect(find('Low').disabled).toBe(false); // sent like any other: the machine decides
+    await act(async () => { find('Low').click(); });
+    expect(setConfig).toHaveBeenCalledWith('n/a', 'effort', 'low');
+    expect(host.textContent).toContain("This machine's settings do not let the agent act without asking.");
+    act(() => (host.querySelector('button[aria-haspopup=menu][aria-label*="Effort"]') as HTMLElement).click());
+    expect(find('Low').disabled).toBe(true);
+    expect(find('Low').textContent).toContain('not allowed on this machine');
   });
 });
 

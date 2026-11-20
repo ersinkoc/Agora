@@ -9,6 +9,8 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 - An agent's card and row show a small "Limit 82 %" chip from 80 percent (stronger from 95), and the start window hints when the chosen agent's limit is nearly used up and when it resets. The hint never stops you from starting.
 - The hub keeps the latest reading per machine, tool and window (a small, bounded table) and gives it to a window that opens later, only for machines that window may see.
 
+- Switching a running agent to a mode that skips permission questions works from the window again: choose it like any other mode, the machine asks for your approval with a card that shows the agent, folder, mode and value, you allow or deny it on this device, and while it holds the agent shows "Acts freely" (ADR-0090 Amendment A).
+
 ## 0.3.25
 
 ### Certificates renew themselves

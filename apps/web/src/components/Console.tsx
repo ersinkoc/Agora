@@ -1,3 +1,4 @@
+import type { ActionResult } from '../net/refusal';
 import { asksUnderHeader } from '../net/chatView';
 import { ApprovalBanner } from './ApprovalBanner';
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
@@ -81,7 +82,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   terminalFor: (agentId: string) => TerminalSource;
   chatOf?: (agent: AgentTileModel) => ChatSource | undefined;
   sendPrompt?: PromptSend;
-  chooseOption?: (agentKey: string, kind: 'mode' | 'model', id: string) => Promise<boolean>;
+  chooseOption?: (agentKey: string, kind: 'mode' | 'model', id: string) => Promise<ActionResult>;
   loadDiff?: (agent: AgentTileModel, path?: string) => Promise<DiffSource>;
   loadHistory?: (agent: AgentTileModel) => Promise<CommitItem[]>;
   filesOf?: (agent: AgentTileModel) => WorkspaceFiles | undefined;

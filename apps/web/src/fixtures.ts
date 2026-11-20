@@ -34,6 +34,11 @@ export const demoHelper: AgentTileModel = { id: 'a8', name: 'codex · sky', acce
 const demoStartDetail = JSON.stringify({ node: 'laptop', agent: 'a1', agent_kind: 'claude', kind: 'codex', folder: '/home/dev/code/login-fix', inside: true, worktree: false, depth: 1, grant_allowed: true, prompt: 'Write unit tests for src/auth.rs.\nCover the expired-token and wrong-signature cases; do not change src/.' });
 export const demoStartApproval = { id: 'demo/2', node: 'demo', localId: '2', agentId: 'a1', agentName: 'claude · amber', machineName: 'Laptop', action: 'agent.start', detail: demoStartDetail, expiresAtMs: 0, start: { agent: 'a1', agentKind: 'claude', node: 'laptop', kind: 'codex', folder: '/home/dev/code/login-fix', prompt: 'Write unit tests for src/auth.rs.\nCover the expired-token and wrong-signature cases; do not change src/.', inside: true, worktree: false, depth: 1, grantAllowed: true, settings: [] } };
 
+// ADR-0090 Amendment A: a (clearly fake) request to switch the rich demo agent to a mode that skips permission questions, as the machine renders it.
+const demoSkipDetail = JSON.stringify({ node: 'demo', agent: 'rich', agent_kind: 'claude-acp', folder: '/home/dev/code/login-fix', option_type: 'config', option: 'mode', option_name: 'Mode', value: 'yolo', value_name: 'Bypass Permissions', skips: true, scope: 'session' });
+export const demoSkipApproval = { id: 'demo/9', node: 'demo', localId: '9', agentId: 'demo/rich', agentName: 'claude · amber', machineName: 'Laptop', action: 'agent.skip_permissions', detail: demoSkipDetail, expiresAtMs: 0,
+  skip: { node: 'demo', agent: 'rich', agentKind: 'claude-acp', folder: '/home/dev/code/login-fix', optionType: 'config' as const, option: 'mode', optionName: 'Mode', value: 'yolo', valueName: 'Bypass Permissions' } };
+
 // The demo window's one waiting approval, for the first demo agent.
 export const demoApprovals = [{ id: 'demo/1', node: 'demo', localId: '1', agentId: 'a1', agentName: 'claude · amber', action: 'Edit src/auth.rs', detail: '+12 −3', expiresAtMs: 0 }];
 

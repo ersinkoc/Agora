@@ -55,7 +55,7 @@ try {
   const until = async (ok, ms = 10000) => { const end = Date.now() + ms; while (Date.now() < end) { if (await ok()) return true; await page.waitForTimeout(250); } return false; };
   const label = button => button.getAttribute('aria-label');
 
-  // 1. Pickers: the skipping mode is marked, is not the current one, and is disabled with why.
+  // 1. Pickers: the skipping mode is marked, is not the current one, and is an ordinary enabled choice (ADR-0090 Amendment A).
   await open(a);
   await mode.waitFor({ timeout: 30000 });
   const modeNow = await label(mode);
@@ -64,24 +64,25 @@ try {
   const bypassItem = items.filter({ hasText: 'does not ask' });
   check((await bypassItem.count()) === 1, `the permission-skipping mode is marked: ${JSON.stringify(modes)}`);
   check(!/does not ask/.test(modeNow ?? ''), `it is not preselected: ${modeNow}`);
-  check(await bypassItem.isDisabled(), 'it is shown disabled');
-  check(/not available yet/.test(await bypassItem.innerText()), 'and says why');
-  check(/Start the agent that way instead/.test(await page.locator('main').innerText()), 'the explanation says it can be started that way');
+  check(!(await bypassItem.isDisabled()), 'it is enabled, like any other choice');
+  check(!/not available/.test(await page.locator('main').innerText()), 'and nothing says it is not available');
   await closeMenu();
   await openMenu(model);
   check((await items.count()) >= 2, `the models are offered: ${JSON.stringify(await items.allTextContents())}`);
   await closeMenu();
 
-  // 2. A switch to it cannot succeed until a signed confirmation exists, so nothing is offered and nothing is sent.
+  // 2. Choosing it is sent like any other choice. Whether the machine asks for the owner's approval (a card) or refuses by its policy
+  // depends on how this node is configured, so what is asserted is what must hold either way: no dialog of the window's own, and the
+  // mode shown is never the skipping one until the machine reports it.
   await openMenu(mode);
-  await bypassItem.click({ force: true, timeout: 2000 }).catch(() => {});
+  await bypassItem.click({ timeout: 2000 }).catch(() => {});
   await page.waitForTimeout(800);
-  check((await dialog.count()) === 0, 'choosing it opens no confirmation that could not succeed');
-  check((await label(mode)) === modeNow, 'and the mode stays as it was');
+  check((await dialog.count()) === 0, 'choosing it opens no confirmation dialog of the window\'s own');
+  check(!/does not ask/.test((await label(mode)) ?? ''), `and the mode shown is not the skipping one before it is approved: ${await label(mode)}`);
   await closeMenu();
   await openMenu(mode);
   await items.filter({ hasText: /^Plan/ }).click();
-  check(await until(async () => /Plan/.test((await label(mode)) ?? '')), 'switching to an ordinary mode works');
+  check(await until(async () => /Plan/.test((await label(mode)) ?? '')), 'switching to an ordinary mode works and asks nothing');
 
   // 3. Each agent has its own menus: B shows its own mode, never A's.
   await open(b);
