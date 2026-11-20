@@ -764,34 +764,76 @@ pub fn write_frame(
     frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
     frame.extend_from_slice(payload);
     let began = Instant::now();
+    // In the frame's last slice each send waits only for what is left of its time (and the stream's own slice is put back after).
+    let mut capped = false;
+    let result = send_frame(stream, &frame, terminal, began, &mut capped);
+    if capped {
+        let restored = stream.set_write_timeout(Some(WRITE_SLICE));
+        if result.is_ok() {
+            restored?;
+        }
+    }
+    result
+}
+
+/// [`write_frame`]'s sends, each started only while the frame has time left and allowed to wait no longer than that time.
+fn send_frame(
+    stream: &mut LocalStream,
+    frame: &[u8],
+    terminal: Option<&TerminalHandle>,
+    began: Instant,
+    capped: &mut bool,
+) -> Result<(), LinkError> {
     let mut sent = 0;
     if terminal.is_some() {
         // The terminal goes with the first byte that goes; the rest follows plainly. A send that timed out sent nothing (nor the
         // terminal): it is tried again until the frame's time is up, as a plain send is.
         loop {
-            match stream.send_with_terminal(&frame, terminal) {
+            budget(stream, began, capped)?;
+            match stream.send_with_terminal(piece(frame), terminal) {
                 Ok(0) => return Err(LinkError::Closed),
                 Ok(n) => {
                     sent = n;
                     break;
                 }
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-                Err(e) if timed_out(&e) && began.elapsed() < FRAME_TIMEOUT => {}
+                Err(e) if timed_out(&e) => {}
                 Err(e) => return Err(e.into()),
             }
         }
     }
     while sent < frame.len() {
-        match stream.write(&frame[sent..]) {
+        budget(stream, began, capped)?;
+        match stream.write(piece(&frame[sent..])) {
             Ok(0) => return Err(LinkError::Closed),
             Ok(n) => sent += n,
             Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-            Err(e) if timed_out(&e) && began.elapsed() < FRAME_TIMEOUT => {}
+            Err(e) if timed_out(&e) => {}
             Err(e) => return Err(e.into()),
         }
-        if sent < frame.len() && began.elapsed() >= FRAME_TIMEOUT {
-            return Err(LinkError::Io(io::Error::from(io::ErrorKind::TimedOut)));
-        }
+    }
+    Ok(())
+}
+
+/// Most bytes one send is given. A blocking send waits its write timeout afresh for each kernel buffer it allocates (Linux Unix
+/// sockets: up to about 36 KiB each), so a send of a whole frame to a peer that takes it bit by bit could outlast the frame's time
+/// (measured: 5.4 s); a send of one piece smaller than that waits at most once.
+const SEND_PIECE: usize = 16 << 10;
+
+fn piece(bytes: &[u8]) -> &[u8] {
+    &bytes[..bytes.len().min(SEND_PIECE)]
+}
+
+/// Before a send: a timeout error when the frame's [`FRAME_TIMEOUT`] is spent; otherwise, in its last [`WRITE_SLICE`], the stream's
+/// write timeout is cut to what is left.
+fn budget(stream: &LocalStream, began: Instant, capped: &mut bool) -> Result<(), LinkError> {
+    let left = FRAME_TIMEOUT.saturating_sub(began.elapsed());
+    if left.is_zero() {
+        return Err(LinkError::Io(io::Error::from(io::ErrorKind::TimedOut)));
+    }
+    if left < WRITE_SLICE {
+        stream.set_write_timeout(Some(left))?;
+        *capped = true;
     }
     Ok(())
 }

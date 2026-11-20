@@ -76,8 +76,9 @@ next frame's.
   starter, a log): `agora hold` closes every descriptor but 0, 1 and 2 first thing, and the child of each started agent marks all of
   them but 0, 1 and 2 close-on-exec before `exec` (marked, not closed, so the pipe std uses to report a failed `exec` still works).
   Both are tested, the first with a holder started with extra non-close-on-exec descriptors.
-- A write to a node that does not read gives up after `FRAME_TIMEOUT` (5 s in all, each blocked send waits `WRITE_SLICE`, 1 s), and the
-  holder drops that node: a node that stops reading cannot hang it (tested).
+- A write to a node that does not read gives up after `FRAME_TIMEOUT` (5 s in all, each blocked send waits `WRITE_SLICE`, 1 s, or what
+  is left of the 5 s when that is less, and is given at most 16 KiB so it waits only once), and the holder drops that node: a node
+  that stops reading, or takes a frame bit by bit, cannot hang it (tested).
 - `agora hold` refuses to start (it exits 1, `hold-failed`) when it cannot become a session leader (`setsid` fails with `EPERM` in a
   process-group leader); it never runs on in its starter's session.
 
