@@ -56,6 +56,9 @@ pub struct SessionWatcher {
     waiting: HashMap<AgentId, Waiting>,
     /// Agents that will get no id from a file (ambiguous, or none came in time), until they end.
     gave_up: HashSet<AgentId>,
+    /// How a workspace folder and a session root are looked at on disk ([`workspace`], [`resolve`]); replaced in tests to count them.
+    probe: fn(&Path) -> PathBuf,
+    resolver: fn(&Path) -> Option<PathBuf>,
 }
 
 impl Default for SessionWatcher {
@@ -142,23 +145,27 @@ fn session_in(file: &Path, spec: &SessionFile, folder: &Path) -> Option<String> 
     session_of(&first_line(file)?, spec, folder)
 }
 
-/// The fixed directory part of a session glob, as written: its directories before the first one with a `*` (the file name never
-/// counts), with `{home}` replaced and `.` and `..` resolved without following links. No I/O.
-fn session_root(glob: &str, home: &Path) -> PathBuf {
+/// The fixed directory part of a session glob: its directories before the first one with a `*` (the file name never counts), with
+/// `{home}` replaced. Returned twice: with `.` and `..` resolved as written (no I/O), for the as-written comparison, and untouched, for
+/// [`resolve`], which follows a link before stepping to `..` the way the filesystem (and `expand`) does (Codex review of #791).
+fn session_root(glob: &str, home: &Path) -> (PathBuf, PathBuf) {
     let glob = glob.replacen("{home}", &home.to_string_lossy(), 1);
     let glob = Path::new(&glob);
-    let mut root = PathBuf::new();
+    let (mut lexical, mut raw) = (PathBuf::new(), PathBuf::new());
     for comp in glob.parent().map(Path::components).into_iter().flatten() {
+        if comp.as_os_str().to_string_lossy().contains('*') {
+            break;
+        }
+        raw.push(comp);
         match comp {
             Component::CurDir => {}
             Component::ParentDir => {
-                root.pop();
+                lexical.pop();
             }
-            c if c.as_os_str().to_string_lossy().contains('*') => break,
-            c => root.push(c),
+            c => lexical.push(c),
         }
     }
-    root
+    (lexical, raw)
 }
 
 /// Most links followed while resolving one root (as Linux's `MAXSYMLINKS`).
@@ -250,8 +257,11 @@ fn nested(x: &Path, y: &Path) -> bool {
 /// and every rival of an agent in the set is in the set itself. Roots are resolved only for pairs that need it (two kinds in one
 /// folder, not exclusive, disjoint as written), so a root on a stalled mount never holds up an agent with no such neighbour. The probes
 /// still run on the calling (supervision) thread, as `same_dir` always did.
+#[cfg(test)]
 fn with_rivals(targets: &[Target], home: &Path) -> HashSet<AgentId> {
-    with_rivals_using(targets, home, &mut workspace, &mut |p| resolve(p))
+    with_rivals_using(targets, home, &HashSet::new(), &mut workspace, &mut |p| {
+        resolve(p)
+    })
 }
 
 /// A workspace folder as the filesystem names it (the comparison `same_dir` makes); probed only for agents that could contend.
@@ -262,19 +272,24 @@ fn workspace(p: &Path) -> PathBuf {
 fn with_rivals_using(
     targets: &[Target],
     home: &Path,
+    settled: &HashSet<AgentId>,
     probe: &mut dyn FnMut(&Path) -> PathBuf,
     resolver: &mut dyn FnMut(&Path) -> Option<PathBuf>,
 ) -> HashSet<AgentId> {
     // A workspace is probed only for a pair that could contend (one kind, or two kinds whose `select`s are not exclusive), the pairs
     // `same_dir` always compared: a lone agent, or one whose only neighbours have exclusive selectors, is never probed, so a stalled
-    // mount under it never holds up discovery. Folders that are equal as written need no probe.
+    // mount under it never holds up discovery. Folders that are equal as written need no probe. A pair whose agents had both given up
+    // (`settled`) is not compared again: neither gets an id anyway; each is still compared with the agents that wait.
     let mut folders: HashMap<usize, PathBuf> = HashMap::new();
     let mut resolved: HashMap<usize, Option<PathBuf>> = HashMap::new();
     let mut out = HashSet::new();
     for i in 0..targets.len() {
         for j in i + 1..targets.len() {
             let (a, b) = (&targets[i], &targets[j]);
-            if a.agent == b.agent || (a.kind != b.kind && exclusive(&a.spec, &b.spec)) {
+            if a.agent == b.agent
+                || (settled.contains(&a.agent) && settled.contains(&b.agent))
+                || (a.kind != b.kind && exclusive(&a.spec, &b.spec))
+            {
                 continue;
             }
             let same_folder = a.folder == b.folder || {
@@ -286,13 +301,13 @@ fn with_rivals_using(
                 continue;
             }
             let rival = a.kind == b.kind || {
-                let (la, lb) = (
+                let ((la, wa), (lb, wb)) = (
                     session_root(&a.spec.glob, home),
                     session_root(&b.spec.glob, home),
                 );
                 nested(&la, &lb) || {
-                    let ra = resolved.entry(i).or_insert_with(|| resolver(&la)).clone();
-                    let rb = resolved.entry(j).or_insert_with(|| resolver(&lb)).clone();
+                    let ra = resolved.entry(i).or_insert_with(|| resolver(&wa)).clone();
+                    let rb = resolved.entry(j).or_insert_with(|| resolver(&wb)).clone();
                     match (ra, rb) {
                         (Some(ra), Some(rb)) => nested(&ra, &rb),
                         // Unknown: fail closed.
@@ -315,6 +330,8 @@ impl SessionWatcher {
             home,
             waiting: HashMap::new(),
             gave_up: HashSet::new(),
+            probe: workspace,
+            resolver: resolve,
         }
     }
 
@@ -352,7 +369,10 @@ impl SessionWatcher {
             .values()
             .any(|w| now >= w.next_scan || now >= w.give_up_at)
         {
-            for a in with_rivals(targets, &home) {
+            let (mut probe, mut resolver) = (self.probe, self.resolver);
+            let rivals =
+                with_rivals_using(targets, &home, &self.gave_up, &mut probe, &mut resolver);
+            for a in rivals {
                 self.waiting.remove(&a);
                 self.gave_up.insert(a);
             }
@@ -1213,7 +1233,13 @@ mod tests {
                 |p: &Path| (!p.to_string_lossy().contains(".lost")).then(|| p.to_path_buf());
             let want: HashSet<AgentId> = targets.iter().map(|t| t.agent.clone()).collect();
             assert_eq!(
-                with_rivals_using(&targets, &root.join("home"), &mut workspace, &mut unknown),
+                with_rivals_using(
+                    &targets,
+                    &root.join("home"),
+                    &HashSet::new(),
+                    &mut workspace,
+                    &mut unknown
+                ),
                 want,
                 "reverse={reverse}"
             );
@@ -1268,8 +1294,13 @@ mod tests {
                 seen.push(p.to_path_buf());
                 Some(p.to_path_buf())
             };
-            let found =
-                with_rivals_using(&targets, &root.join("home"), &mut workspace, &mut counting);
+            let found = with_rivals_using(
+                &targets,
+                &root.join("home"),
+                &HashSet::new(),
+                &mut workspace,
+                &mut counting,
+            );
             let want: HashSet<AgentId> = [AgentId::new("twin-1"), AgentId::new("twin-2")].into();
             assert_eq!(found, want, "reverse={reverse}");
             let resolved: Vec<String> = seen
@@ -1316,6 +1347,107 @@ mod tests {
                 want,
                 "reverse={reverse}"
             );
+        }
+    }
+
+    thread_local! {
+        static PROBES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    fn counting_probe(p: &Path) -> PathBuf {
+        PROBES.with(|n| n.set(n.get() + 1));
+        workspace(p)
+    }
+
+    fn counting_resolver(p: &Path) -> Option<PathBuf> {
+        PROBES.with(|n| n.set(n.get() + 1));
+        resolve(p)
+    }
+
+    #[test]
+    fn agents_that_gave_up_together_are_not_probed_again_when_another_agent_is_due() {
+        // Codex review of #791: a pair that already gave up must not be probed again (a stalled mount would block for nothing).
+        for reverse in [false, true] {
+            let root = tmp(if reverse {
+                "settled-reversed"
+            } else {
+                "settled"
+            });
+            agora_platform::link_dir(&root.join("work/a"), &root.join("work/link")).unwrap();
+            let mut w = SessionWatcher::new(Some(root.join("home")));
+            w.probe = counting_probe;
+            w.resolver = counting_resolver;
+            let now = Instant::now();
+            // One kind, one folder spelled two ways: they give up together (probed once, as on main).
+            let mut targets = vec![
+                target("tool-1", root.join("work/a")),
+                target("tool-2", root.join("work/link")),
+            ];
+            assert!(w.poll(now, &targets, &HashSet::new()).is_empty());
+            assert!(
+                w.gave_up.contains(&AgentId::new("tool-1"))
+                    && w.gave_up.contains(&AgentId::new("tool-2"))
+            );
+            // An unrelated agent (exclusive selector) arrives and is due: nothing is probed for the settled pair.
+            targets.push(Target {
+                kind: "tool-variant".into(),
+                spec: SessionFile {
+                    select: Some(UsageSelect {
+                        path: "type".into(),
+                        equals: "variant_meta".into(),
+                    }),
+                    ..spec()
+                },
+                ..target("variant-1", root.join("work/b"))
+            });
+            if reverse {
+                targets.reverse();
+            }
+            PROBES.with(|n| n.set(0));
+            assert!(w
+                .poll(now + SCAN_EVERY / 3, &targets, &HashSet::new())
+                .is_empty());
+            assert_eq!(PROBES.with(|n| n.get()), 0, "reverse={reverse}");
+            // The settled pair still counts against an agent that waits: a third of their kind in that folder gives up too.
+            targets.push(target("tool-3", root.join("work/a")));
+            assert!(w
+                .poll(now + SCAN_EVERY / 2, &targets, &HashSet::new())
+                .is_empty());
+            assert!(
+                w.gave_up.contains(&AgentId::new("tool-3")),
+                "reverse={reverse}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_home_with_a_link_then_dotdot_is_resolved_as_the_filesystem_walks_it() {
+        // Codex review of #791: `h/link/..` is `real` on disk (link -> real/inner), but `h` lexically. Two kinds whose roots meet only
+        // in the real tree must be rivals.
+        for reverse in [false, true] {
+            let root = tmp(if reverse { "dotdot-reversed" } else { "dotdot" });
+            std::fs::create_dir_all(root.join("real/inner")).unwrap();
+            std::fs::create_dir_all(root.join("h")).unwrap();
+            agora_platform::link_dir(&root.join("real/inner"), &root.join("h/link")).unwrap();
+            let home = root.join("h").join("link").join("..");
+            let real = root.join("real").join("s").join("sub").join("*.jsonl");
+            let mut targets = vec![
+                with_glob(
+                    target("tool-1", root.join("work/a")),
+                    "tool",
+                    "{home}/s/*.jsonl",
+                ),
+                with_glob(
+                    target("variant-1", root.join("work/a")),
+                    "tool-variant",
+                    &real.to_string_lossy(),
+                ),
+            ];
+            if reverse {
+                targets.reverse();
+            }
+            let want: HashSet<AgentId> = targets.iter().map(|t| t.agent.clone()).collect();
+            assert_eq!(with_rivals(&targets, &home), want, "reverse={reverse}");
         }
     }
 
@@ -1392,8 +1524,13 @@ mod tests {
                 let mut roots = |p: &Path| {
                     panic!("{name}: root {p:?} resolved");
                 };
-                let found =
-                    with_rivals_using(&targets, &root.join("home"), &mut folder, &mut roots);
+                let found = with_rivals_using(
+                    &targets,
+                    &root.join("home"),
+                    &HashSet::new(),
+                    &mut folder,
+                    &mut roots,
+                );
                 let want: HashSet<AgentId> = want.iter().map(|a| AgentId::new(*a)).collect();
                 assert_eq!(found, want, "{name} reverse={reverse}");
                 assert_eq!(

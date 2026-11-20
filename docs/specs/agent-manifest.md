@@ -271,12 +271,14 @@ The node holds a session id only when it learned one:
   It takes one only when exactly one new file fits and no other agent has that id. Two agents in one folder are rivals, and both get
   none (a file cannot say which is whose), when they are of one kind, or of kinds whose globs could match the same files: the fixed
   directory of one glob (before its first `*`, with `{home}` replaced, `.` and `..` resolved) is the other's or holds it, as written or
-  with links resolved (a link is followed even before what it points to exists), compared without case (one folder on Windows and
+  with links resolved (a link is followed even before what it points to exists, and a `..` after a link steps out of
+  where the link leads, as the filesystem does), compared without case (one folder on Windows and
   macOS; on Linux this only adds rivals). A root that cannot be resolved, for example through more than 40 links, makes its agent a
   rival of every other kind in the folder. They are not rivals when both `select`s ask for different values at the same `path`.
   This is decided from the manifests before any file is read, for every waiting agent at once, so kinds that share a session folder
   lose Resume in that folder rather than risk continuing the wrong conversation. Folders are looked at on disk only for agents that
-  could contend (of one kind, or of two kinds whose `select`s are not exclusive), session roots only for two such kinds. An agent for which two files fit gets none
+  could contend (of one kind, or of two kinds whose `select`s are not exclusive), session roots only for two such kinds; two agents that both
+  gave up already are not compared again. An agent for which two files fit gets none
   either. The first line counts without its `\n` or `\r\n`. A session file's id must be a UUID. An agent without an id can only be
   started again in its folder, never resumed. Known limit: this assumes no link inside a wildcard directory of a session glob points
   into another kind's session root (`logs/*/*.jsonl` with `logs/linked` pointing at `store`, against `store/*.jsonl`); such a setup
