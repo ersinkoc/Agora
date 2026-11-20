@@ -2066,6 +2066,8 @@ fn console(
     mouse_mode(c.app.mouse);
     let mut fresh = true;
     let mut typed_at: Option<Instant> = None;
+    // The agent whose terminal was last typed into: a refusal for a missing grant (ADR-0041) is asked about for it.
+    let mut typed_to: Option<String> = None;
     // ADR-0065: only the hub knows whether this session is the owner's (it answers `PairStatus` to the owner only).
     if c.pair.owner == agora_tui::pair::Owner::Unknown {
         if let Some(owner) = pair_owner(session) {
@@ -2263,6 +2265,7 @@ fn console(
                                     active.as_deref().and_then(|a| a.split_once('/'))
                                 {
                                     session.terminal_input(node, &format!("t-{local}"), &b);
+                                    typed_to = active;
                                 }
                             }
                         }
@@ -2272,6 +2275,7 @@ fn console(
                         if let Some((node, local)) = agent.split_once('/') {
                             session.terminal_input(node, &format!("t-{local}"), &bytes);
                         }
+                        typed_to = Some(agent);
                     }
                     Action::PaneSize { .. } => sized = None,
                     Action::MouseCapture(on) => mouse_mode(on),
@@ -2508,6 +2512,22 @@ fn console(
                 }
             }
         }
+        // ADR-0041: what was typed was refused until the owner allows it. Asked once, over the console, and only for the agent in
+        // front (the question does not name one); the typed keys are lost, and the pane is opened again afterwards.
+        if session.take_grant_wanted() {
+            if let Some((node, local)) = typing_grant_for(typed_to.take(), c.app.active_agent()) {
+                let scope = format!("agent:{local}");
+                let asked = over_console(say, c, session, &mut preview, None, rx, |s, ask| {
+                    ask_grant(say, s, ask, &node, &scope, &TYPING)
+                });
+                c.notice = match asked {
+                    Ok(true) => say.text(key!("tui-granted"), &[]),
+                    Ok(false) => String::new(),
+                    Err(line) => line,
+                };
+                redraw = true;
+            }
+        }
         // At most one frame per FRAME (ADR-0022: an echo within 16 ms), however fast the agent writes; input was handled before this.
         // The first frame of a run is drawn over a cleared screen: lines written meanwhile ("connecting…", a lost link) must not stay
         // under it.
@@ -2530,6 +2550,13 @@ fn console(
             last_refresh = Instant::now();
         }
     }
+}
+
+/// The agent (node, local id) to ask a typing grant for once a refusal came: the one last typed into, only while it is still in front.
+fn typing_grant_for(typed_to: Option<String>, active: Option<&str>) -> Option<(String, String)> {
+    let agent = typed_to.filter(|a| Some(a.as_str()) == active)?;
+    let (node, local) = agent.split_once('/')?;
+    Some((node.to_string(), local.to_string()))
 }
 
 /// How long after its last byte an unfinished escape sequence is read as the keys typed (a lone ESC as Esc). The reader thread hands
@@ -3528,6 +3555,26 @@ fn split_kinds(
         )
     });
     (installed, line)
+}
+
+#[cfg(test)]
+mod typing_grant_tests {
+    use super::*;
+
+    #[test]
+    fn a_refused_keystroke_asks_for_the_agent_in_front_only() {
+        let to = |a: &str| Some(a.to_string());
+        assert_eq!(
+            typing_grant_for(to("laptop/a1"), Some("laptop/a1")),
+            Some(("laptop".into(), "a1".into()))
+        );
+        // Nothing typed since the last question (a second refusal for the same keys): not asked again.
+        assert_eq!(typing_grant_for(None, Some("laptop/a1")), None);
+        // Typed into another agent than the one in front: the question would not say which, so it is not asked.
+        assert_eq!(typing_grant_for(to("laptop/a2"), Some("laptop/a1")), None);
+        assert_eq!(typing_grant_for(to("laptop/a1"), None), None);
+        assert_eq!(typing_grant_for(to("no-slash"), Some("no-slash")), None);
+    }
 }
 
 #[cfg(test)]

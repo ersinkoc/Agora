@@ -806,6 +806,16 @@ fn the_terminal_console_learns_that_typing_was_refused_for_want_of_a_grant() {
         let _ = session.terminal_next(stream, D::from_millis(100));
         assert!(Instant::now() < end, "the refusal was never noticed");
     }
+    // F1160: the console reads the link with `next` first on every turn; a refusal it reads is noticed too, so the console asks.
+    session.terminal_input("laptop", &terminal, b"echo console-try\n");
+    let end = Instant::now() + D::from_secs(10);
+    while !session.take_grant_wanted() {
+        let _ = session.next(D::from_millis(100));
+        assert!(
+            Instant::now() < end,
+            "the refusal read by the console's reader was never noticed"
+        );
+    }
     // After a grant the same typing reaches the shell.
     let scope = format!("agent:{}", s.agent_id);
     let commands = ["agent.stop", "agent.prompt", "terminal.input"];

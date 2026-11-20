@@ -228,9 +228,19 @@ impl Session {
         let conn = &mut self.conn;
         let queue = &mut self.term_frames;
         let asked = &mut self.asked;
+        let grant_wanted = &mut self.grant_wanted;
         self.rt.block_on(async {
             match tokio::time::timeout(wait, conn.recv()).await {
                 Err(_) => Update::Quiet,
+                // The answer to something typed without waiting: only a missing grant matters (as in `terminal_next`).
+                Ok(Ok(Some(f))) if (f.stream_id, f.kind) == (STREAM_COMMANDS, 1) => {
+                    if CommandResponse::decode(f.payload.as_slice())
+                        .is_ok_and(|r| refused_for_grant(&r))
+                    {
+                        *grant_wanted = true;
+                    }
+                    Update::Quiet
+                }
                 // A terminal being watched alongside: kept for `terminal_next`, never dropped here.
                 Ok(Ok(Some(f))) if f.stream_id >= agora_protocol::frame::FIRST_DYNAMIC_STREAM => {
                     queue.push_back(f);
