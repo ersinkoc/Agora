@@ -270,8 +270,9 @@ The node holds a session id only when it learned one:
   agent started, and takes the id from the first line (at most 64 KiB) when it passes `select` and its `cwd` is the agent's folder.
   It takes one only when exactly one new file fits and no other agent has that id. Two agents in one folder are rivals, and both get
   none (a file cannot say which is whose), when they are of one kind, or of kinds whose globs could match the same files: the fixed
-  directory of one glob (before its first `*`, with `{home}` replaced, `.` and `..` resolved) is the other's or holds it. They are not
-  rivals when both `select`s ask for different values at the same `path`. This is decided from the manifests before any file is read,
+  directory of one glob (before its first `*`, with `{home}` replaced, `.` and `..` resolved) is the other's or holds it, as written or
+  with links resolved. They are not rivals when both `select`s ask for different values at the same `path`. Every waiting agent with
+  a rival among the live agents gives up at once. This is decided from the manifests before any file is read,
   so kinds that share a session folder lose Resume in that folder rather than risk continuing the wrong conversation. An agent for
   which two files fit gets none either. The first line counts without its `\n` or `\r\n`. A session file's id must be a UUID. An agent without an id can only be started again in its folder, never resumed.
 - **Every id that goes on a command line** (`[resume]`, `id_args`) must start with a letter or digit and hold only letters, digits,

@@ -4,8 +4,8 @@
 //! A file is the agent's when it was written after the agent started, its first line passes `select`, names the agent's folder as its
 //! working directory, and its id is no other agent's. This is a guess that can be wrong, so it is made only when it cannot be confused.
 //! Two agents waiting in one folder are rivals when they are of one kind, or of kinds whose globs could match the same files (the fixed
-//! directory of one glob, before its first `*`, is the other's or holds it), unless both `select`s ask for different literal values at
-//! the same path. This is decided from the manifests, before any file is read: rivals get no id at all, so kinds that share a session
+//! directory of one glob, before its first `*`, is the other's or holds it, as written or with links resolved), unless both `select`s
+//! ask for different literal values at the same path. Every live agent with a rival is found at once, whichever is due. This is decided from the manifests, before any file is read: rivals get no id at all, so kinds that share a session
 //! folder lose Resume in that folder rather than risk continuing the wrong conversation. Neither does an agent for which more than one
 //! new file fits (the window then offers Start again). An agent that has no file after [`GIVE_UP_AFTER`] gets none.
 
@@ -39,7 +39,6 @@ pub struct Target {
 }
 
 struct Waiting {
-    folder: PathBuf,
     since: SystemTime,
     give_up_at: Instant,
     next_scan: Instant,
@@ -137,8 +136,8 @@ fn session_in(file: &Path, spec: &SessionFile, folder: &Path) -> Option<String> 
 }
 
 /// The fixed directory part of a session glob: its directories before the first one with a `*` (the file name never counts), with
-/// `{home}` replaced, `.` and `..` resolved, and canonicalized when it exists.
-fn session_root(glob: &str, home: &Path) -> PathBuf {
+/// `{home}` replaced and `.` and `..` resolved without following links, and the same directory with links resolved when it exists.
+fn session_root(glob: &str, home: &Path) -> (PathBuf, PathBuf) {
     let glob = glob.replacen("{home}", &home.to_string_lossy(), 1);
     let glob = Path::new(&glob);
     let mut root = PathBuf::new();
@@ -152,12 +151,14 @@ fn session_root(glob: &str, home: &Path) -> PathBuf {
             c => root.push(c),
         }
     }
-    std::fs::canonicalize(&root).unwrap_or(root)
+    let canonical = std::fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
+    (root, canonical)
 }
 
 /// Whether two agents in one folder could have written each other's session files: they are of one kind, or their globs' fixed
-/// directories are the same or one holds the other, unless both `select`s ask for different literal values at the same path.
-fn rivals(a: &Target, b: &Target, home: &Path) -> bool {
+/// directories are the same or one holds the other (as written or with links resolved: either is enough, since `expand` follows
+/// links below the fixed part), unless both `select`s ask for different literal values at the same path.
+fn rivals(a: &Target, ra: &(PathBuf, PathBuf), b: &Target, rb: &(PathBuf, PathBuf)) -> bool {
     if a.kind == b.kind {
         return true;
     }
@@ -166,11 +167,35 @@ fn rivals(a: &Target, b: &Target, home: &Path) -> bool {
             return false;
         }
     }
-    let (ra, rb) = (
-        session_root(&a.spec.glob, home),
-        session_root(&b.spec.glob, home),
-    );
-    ra.starts_with(&rb) || rb.starts_with(&ra)
+    let nested = |x: &Path, y: &Path| x.starts_with(y) || y.starts_with(x);
+    nested(&ra.0, &rb.0) || nested(&ra.1, &rb.1)
+}
+
+/// Every live target that has a rival in its folder. Computed over all of them at once, whatever is due, so no pair is missed because
+/// one of its agents was already set aside (Codex review of #791). Not closed transitively: an agent without a rival of its own shares
+/// no possible file with any live agent, and every rival of an agent in the set is in the set itself.
+fn with_rivals(targets: &[Target], home: &Path) -> HashSet<AgentId> {
+    let roots: Vec<(PathBuf, PathBuf)> = targets
+        .iter()
+        .map(|t| session_root(&t.spec.glob, home))
+        .collect();
+    let folders: Vec<PathBuf> = targets
+        .iter()
+        .map(|t| std::fs::canonicalize(&t.folder).unwrap_or_else(|_| t.folder.clone()))
+        .collect();
+    let mut out = HashSet::new();
+    for i in 0..targets.len() {
+        for j in i + 1..targets.len() {
+            if targets[i].agent != targets[j].agent
+                && folders[i] == folders[j]
+                && rivals(&targets[i], &roots[i], &targets[j], &roots[j])
+            {
+                out.insert(targets[i].agent.clone());
+                out.insert(targets[j].agent.clone());
+            }
+        }
+    }
+    out
 }
 
 impl SessionWatcher {
@@ -203,11 +228,23 @@ impl SessionWatcher {
             self.waiting
                 .entry(t.agent.clone())
                 .or_insert_with(|| Waiting {
-                    folder: t.folder.clone(),
                     since: SystemTime::now(),
                     give_up_at: now + GIVE_UP_AFTER,
                     next_scan: now,
                 });
+        }
+        // Rivals in one folder could have written each other's files: none of them gets one. Decided from the manifests alone, before
+        // any file is read, over every live target (a live agent can still write its file after discovery gave up on it), so the answer
+        // is the same in every target order and whichever agents are due. Only worked out when some agent is due.
+        if self
+            .waiting
+            .values()
+            .any(|w| now >= w.next_scan || now >= w.give_up_at)
+        {
+            for a in with_rivals(targets, &home) {
+                self.waiting.remove(&a);
+                self.gave_up.insert(a);
+            }
         }
         let mut found = Vec::new();
         let mut claimed: HashSet<String> = known.clone();
@@ -221,25 +258,6 @@ impl SessionWatcher {
                 continue;
             }
             if now < w.next_scan {
-                continue;
-            }
-            // Rivals in this folder could have written each other's files: none of them gets one. Decided from the manifests alone,
-            // before any file is read, so the answer is the same in every target order. A live agent can still write its file after
-            // discovery gave up on it, so agents that gave up count too.
-            let rivals: Vec<AgentId> = targets
-                .iter()
-                .filter(|other| {
-                    other.agent != t.agent
-                        && same_dir(&other.folder, &w.folder)
-                        && rivals(t, other, &home)
-                })
-                .map(|other| other.agent.clone())
-                .collect();
-            if !rivals.is_empty() {
-                for a in rivals.into_iter().chain([t.agent.clone()]) {
-                    self.waiting.remove(&a);
-                    self.gave_up.insert(a);
-                }
                 continue;
             }
             let since = w.since.checked_sub(SLACK).unwrap_or(SystemTime::UNIX_EPOCH);
@@ -923,6 +941,109 @@ mod tests {
                 "0199aaaa-0000-4000-8000-000000000108".to_string()
             )]
         );
+    }
+
+    #[test]
+    fn an_agent_not_due_is_still_found_a_rival_through_a_chain_of_rivals() {
+        // Codex review of #791: A rivals B and B rivals C, A and C have exclusive selectors. With A and B due and C not, removing B
+        // before it was compared with C let C later take B's session once B left.
+        for reverse in [false, true] {
+            let root = tmp(if reverse { "chain-reversed" } else { "chain" });
+            let typed = |agent: &str, kind: &str, select: Option<&str>| Target {
+                kind: kind.into(),
+                spec: SessionFile {
+                    select: select.map(|v| UsageSelect {
+                        path: "type".into(),
+                        equals: v.into(),
+                    }),
+                    ..spec()
+                },
+                ..target(agent, root.join("work/a"))
+            };
+            let (a, b, c) = (
+                typed("a-1", "kind-a", Some("a_meta")),
+                typed("b-1", "kind-b", None),
+                typed("c-1", "kind-c", Some("c_meta")),
+            );
+            let mut w = SessionWatcher::new(Some(root.join("home")));
+            let now = Instant::now();
+            // C alone first: it scans, finds nothing, and is not due again for SCAN_EVERY.
+            assert!(w
+                .poll(now, std::slice::from_ref(&c), &HashSet::new())
+                .is_empty());
+            let mut all = vec![a.clone(), b.clone(), c.clone()];
+            if reverse {
+                all.reverse();
+            }
+            // A and B join and are due at once; C is not.
+            assert!(w
+                .poll(now + SCAN_EVERY / 3, &all, &HashSet::new())
+                .is_empty());
+            let (release, gate) = std::sync::mpsc::channel();
+            let writer_root = root.clone();
+            let writer = std::thread::spawn(move || {
+                gate.recv().unwrap();
+                // B writes its session; its tool's first line happens to pass C's select.
+                write_typed(
+                    &writer_root,
+                    "rollout-b.jsonl",
+                    "c_meta",
+                    "0199aaaa-0000-4000-8000-000000000109",
+                    &writer_root.join("work/a"),
+                );
+            });
+            release.send(()).unwrap();
+            writer.join().unwrap();
+            // B leaves; C is due again and must not take B's session.
+            let mut left = vec![a.clone(), c.clone()];
+            if reverse {
+                left.reverse();
+            }
+            assert_eq!(
+                w.poll(now + SCAN_EVERY, &left, &HashSet::new()),
+                vec![],
+                "reverse={reverse}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn session_roots_that_meet_through_a_linked_folder_are_rivals() {
+        // Codex review of #791: `logs/linked` links to `store`; `logs/*/*.jsonl` and `logs/linked/*.jsonl` find the same file, but
+        // canonically the roots are `logs` and `store`.
+        for reverse in [false, true] {
+            let root = tmp(if reverse { "linked-reversed" } else { "linked" });
+            std::fs::create_dir_all(root.join("home/logs")).unwrap();
+            std::fs::create_dir_all(root.join("home/store")).unwrap();
+            std::os::unix::fs::symlink(root.join("home/store"), root.join("home/logs/linked"))
+                .unwrap();
+            let mut targets = vec![
+                with_glob(
+                    target("tool-1", root.join("work/a")),
+                    "tool",
+                    "{home}/logs/*/*.jsonl",
+                ),
+                with_glob(
+                    target("variant-1", root.join("work/a")),
+                    "tool-variant",
+                    "{home}/logs/linked/*.jsonl",
+                ),
+            ];
+            if reverse {
+                targets.reverse();
+            }
+            let found = found_after_gated_write(
+                &root,
+                &targets,
+                &[(
+                    "store/rollout-1.jsonl",
+                    "0199aaaa-0000-4000-8000-000000000110",
+                    "work/a",
+                )],
+            );
+            assert_eq!(found, vec![], "reverse={reverse}");
+        }
     }
 
     #[test]
