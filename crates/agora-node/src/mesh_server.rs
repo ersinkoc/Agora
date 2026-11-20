@@ -236,15 +236,11 @@ fn board_reply(
     let known = shares.get(&project);
     if channel {
         // Malformed arguments go to the broker, which answers -32602, as for a local message; nothing goes to the hub.
-        let SendMessageArgs { to, body, refs, .. } = agora_mesh::mcp::send_message_args(&args)?;
-        // The broker's limits, checked here too: an older hub does not check the refs' size, and receivers would refuse every
-        // copy it sends. On a project known to be shared receivers get `[#channel] body`, so that is what is checked; otherwise
-        // the local broker may still deliver the body as it is.
-        let text = match known {
-            Some((true, _)) => agora_mesh::mcp::channel_text(to, body),
-            _ => body.to_string(),
-        };
-        if let Err(e) = limits.check_content(&text, &refs) {
+        let SendMessageArgs { body, refs, .. } = agora_mesh::mcp::send_message_args(&args)?;
+        // The broker's limits that do not depend on the route, checked here too: an older hub does not check the refs' size, and
+        // receivers would refuse every copy it sends. The `[#channel] ` prefix is the hub's to check: only it knows whether the
+        // project is still shared (the local broker delivers the body unprefixed), and `known` may be stale.
+        if let Err(e) = limits.check_content(body, &refs) {
             return Some(Message::Response {
                 id,
                 result: agora_mesh::mcp::protocol_error_result(&e.to_error(&limits)),
@@ -1529,8 +1525,10 @@ mod tests {
     }
 
     /// Codex review of #793: an older hub does not check a `#channel`'s refs size, and upgraded receivers would refuse every copy,
-    /// so the node checks the content limits (on the text receivers get, `[#channel] body`) before the call goes to the hub:
-    /// one byte over is `mesh.body_too_large` and never reaches the hub; exactly at the limit it is forwarded.
+    /// so before the call goes to the hub the node checks what does not depend on the route: the refs' count and total size and
+    /// the raw body (`mesh.body_too_large` / `mesh.too_many_refs`, nothing reaches the hub; exactly at the limit it is forwarded).
+    /// The `[#channel] ` prefix is the hub's to check: its cache may say "shared" after the project went back to one node, where
+    /// the local broker delivers the body unprefixed, so a body that fits only without the prefix is forwarded, not refused.
     #[test]
     fn a_shared_channel_send_over_the_size_limits_is_refused_by_the_node() {
         let (mesh, a, _) = ask_fixture();
@@ -1560,10 +1558,9 @@ mod tests {
             other => panic!("expected a tool result, got {other:?}"),
         };
         let refs = |total: usize| json!(["x".repeat(total - max / 2), "y".repeat(max / 2)]);
-        let room = max - "[#dev] ".len();
         for over in [
             json!({"to": "#dev", "body": "hi", "refs": refs(max + 1)}),
-            json!({"to": "#dev", "body": "x".repeat(room + 1)}),
+            json!({"to": "#dev", "body": "x".repeat(max + 1)}),
         ] {
             assert_eq!(code(send(&conn, over)), "mesh.body_too_large");
             assert_eq!(link.0.load(Ordering::SeqCst), 0, "nothing reached the hub");
@@ -1580,15 +1577,12 @@ mod tests {
             json!({"to": "#dev", "body": "hi", "refs": refs(max)}),
         );
         assert_eq!(link.0.load(Ordering::SeqCst), 1);
-        send(&conn, json!({"to": "#dev", "body": "x".repeat(room)}));
+        send(&conn, json!({"to": "#dev", "body": "x".repeat(max)}));
         assert_eq!(link.0.load(Ordering::SeqCst), 2);
-        // Not known to be shared: no prefix is added locally, so a body that fits the broker's limit is not refused by the node.
-        let local = Shares::default();
-        let line = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "send_message",
-            "arguments": {"to": "#dev", "body": "x".repeat(room + 1)}}})
-        .to_string();
-        let none: RemoteSlot = Mutex::new(None);
-        assert!(board_reply(&conn, &line, &mesh, &none, &local).is_none());
+        // A body that fits but not with the prefix: the hub, which knows the current route, decides.
+        let room = max - "[#dev] ".len();
+        send(&conn, json!({"to": "#dev", "body": "x".repeat(room + 1)}));
+        assert_eq!(link.0.load(Ordering::SeqCst), 3, "forwarded to the hub");
     }
 
     /// Codex review of #793: the node answers `agents_list` itself (before the broker), so it must refuse a `project` that is not a
