@@ -5,7 +5,7 @@ import { agora } from '../gen/agora.js';
 import type { QuotaObs } from './quota';
 import { SKIP_ACTION, skipOf, type SkipRequest } from './skipApproval';
 import { detailLaunchOptions, type StartOption } from './approval';
-import { type AgentTileModel, type CommandModel, type ConfigCategory, type ConfigOptionModel, type SessionModel, type SessionOptionModel, uiState } from '../model';
+import { type AgentTileModel, type CommandModel, type ConfigCategory, type ConfigOptionModel, type SessionModel, type SessionOptionModel, type UiState, uiState } from '../model';
 
 type Ev = agora.v1.Event.$Properties;
 type Num = number | bigint | { toString(): string } | null | undefined;
@@ -651,7 +651,7 @@ export function recentMessages(v: View, limit = 5): MessageModel[] {
   }));
 }
 
-export interface BoardTaskModel { id: string; title: string; status: 'open' | 'claimed' | 'done'; owner: string }
+export interface BoardTaskModel { id: string; title: string; status: 'open' | 'claimed' | 'done'; owner: string; ownerState?: UiState; ownerSkips?: boolean; held?: string[] }
 export interface BoardLeaseModel { path: string; holder: string; expiresAtMs: number }
 export interface BoardFolderModel { nodeId: string; machine: string; path: string }
 export interface BoardModel { projectId: string; project: string; folders: BoardFolderModel[]; tasks: BoardTaskModel[]; leases: BoardLeaseModel[] }
@@ -680,8 +680,11 @@ export function boards(v: View): BoardModel[] {
     }
     return b;
   };
+  const heldBy = new Map<string, string[]>();
+  for (const l of v.leases.values()) { const list = heldBy.get(l.agentId); if (list) list.push(l.path); else heldBy.set(l.agentId, [l.path]); }
   for (const [id, t] of v.tasks) {
-    board(t.projectId).tasks.push({ id, title: t.title, status: t.done ? 'done' : t.ownerId ? 'claimed' : 'open', owner: t.ownerId ? label(t.ownerId) : '' });
+    const owner = t.ownerId ? agents.get(t.ownerId) : undefined;
+    board(t.projectId).tasks.push({ id, title: t.title, status: t.done ? 'done' : t.ownerId ? 'claimed' : 'open', owner: t.ownerId ? label(t.ownerId) : '', ownerState: owner?.state, ownerSkips: owner?.skipsPermissions, held: t.ownerId ? heldBy.get(t.ownerId) ?? [] : [] });
   }
   // A lease belongs to its holder's project.
   for (const l of v.leases.values()) {

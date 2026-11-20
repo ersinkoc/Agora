@@ -1,8 +1,11 @@
+import { useState } from 'react';
 import { t } from '../i18n';
+import { BoardView } from './BoardView';
 import { sharesName } from '../model';
 import type { BoardModel } from '../net/view';
 
 export function ProjectBoard({ board: b, machines = [] }: { board: BoardModel; machines?: readonly { id: string; name: string }[] }) {
+  const [open, setOpen] = useState(false);
   return (
     <div data-project-id={b.projectId} className="grid min-w-0 gap-1.5 rounded-s border border-line bg-surface-0 p-2.5">
       <strong className="break-words text-xs">{b.project}</strong>
@@ -17,6 +20,8 @@ export function ProjectBoard({ board: b, machines = [] }: { board: BoardModel; m
           </li>)}
         </ul>
       </details>}
+      {b.tasks.length > 0 && <button type="button" className="button w-fit" onClick={() => setOpen(true)}>{t('board-open-view', { count: b.tasks.length })}</button>}
+      {open && <BoardView board={b} onClose={() => setOpen(false)} />}
       <ul className="m-0 grid list-none gap-1 p-0 text-[0.8125rem]">
         {b.tasks.map(task => <li key={task.id} className="flex items-baseline justify-between gap-2">
           <span className={`min-w-0 break-words ${task.status === 'done' ? 'text-muted line-through' : ''}`}>{task.title}</span>

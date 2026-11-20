@@ -4,6 +4,7 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+- A project's tasks can be opened as a board with Backlog, Doing and Done columns (read-only), from the project's card in the Board panel.
 - An agent that kept running while the node restarted comes back showing its last known state (such as idle) even when its state was first noted a moment before its start was recorded.
 
 ## 0.3.30
