@@ -1309,3 +1309,23 @@ close-failed-timeout = that machine did not answer in time
 close-failed-gone = the machine no longer knows this agent
 close-failed-unsupported = that machine cannot do it yet. Update it
 close-failed-hub = the hub could not be reached
+
+# Settings → Agents: the agents each machine can start, which are installed, and what each takes when started.
+settings-agents = Agents
+agents-intro = The agents each machine can start. Model, effort and other choices are made when you start an agent; they are listed here so you can see what each one offers.
+agents-loading = Asking this machine…
+agents-none-known = This machine is offline and has not told this browser which agents it has.
+agents-empty = This machine lists no agents.
+agents-stale = Offline · as of { $when }
+agents-installed = Installed
+agents-not-installed = Not installed
+agents-state-installed = installed
+agents-state-missing = not installed
+agents-runs-terminal = Runs in a terminal
+agents-runs-chat = Chat
+agents-runs-adapter = Chat through an adapter
+agents-program-missing = This machine cannot find { $program } in its PATH.
+agents-setting-any = any value the agent accepts
+agents-setting-default = default { $value }
+agents-options = Options
+agents-option-skips = skips permission questions
