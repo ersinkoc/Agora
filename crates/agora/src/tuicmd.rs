@@ -4150,7 +4150,8 @@ mod typing_grant_tests {
             assert_eq!(site.commands(), [want], "{site:?}");
         }
         // Every call goes through the table: no place names a set of its own.
-        let src = include_str!("tuicmd.rs");
+        // A Windows checkout may turn line ends into CRLF; the searches below use LF.
+        let src = include_str!("tuicmd.rs").replace("\r\n", "\n");
         let code = &src[..src.find("#[cfg(test)]").unwrap()];
         assert_eq!(code.matches(".commands()").count(), 6);
     }
@@ -4249,7 +4250,8 @@ mod typing_grant_tests {
         );
         assert_eq!(pending.as_ref().map(|p| p.request), Some(6));
         // Nothing in this path asks: the question opens only through `command`'s `g`.
-        let src = include_str!("tuicmd.rs");
+        // A Windows checkout may turn line ends into CRLF; the searches below use LF.
+        let src = include_str!("tuicmd.rs").replace("\r\n", "\n");
         let c0 = src.find("\nfn console(").unwrap();
         let console = &src[c0..c0 + src[c0..].find("\nfn read_keys(").unwrap()];
         let t0 = console.find("session.take_grant_wanted()").unwrap();
@@ -5526,7 +5528,8 @@ mod question_path_tests {
     /// `over_console` needs a live `Session` (a TLS connection to a hub), which a unit test cannot make.
     #[test]
     fn a_question_does_not_close_the_preview() {
-        let src = include_str!("tuicmd.rs");
+        // A Windows checkout may turn line ends into CRLF; the searches below use LF.
+        let src = include_str!("tuicmd.rs").replace("\r\n", "\n");
         let a = src.find("\nfn over_console<").unwrap();
         let body = &src[a..a + src[a..].find("\n}\n").unwrap()];
         assert!(
