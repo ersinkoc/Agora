@@ -220,10 +220,28 @@ fn helper_entry() {
     match role.as_str() {
         "node" => {
             let script = std::env::var("AGORA_HOLD_SCRIPT").expect("script");
-            let mut c = Client::connect(&socket).expect("helper connect");
-            c.attach().expect("helper attach");
-            let (pid, _terminal) = c.start(&start_request("a1", &script)).expect("start");
-            println!("\nHELPER started {pid}");
+            // A failure is printed as the helper's line (its stderr is not kept), so the test that waits for it says why.
+            let started = Client::connect(&socket)
+                .map_err(|e| format!("connect: {e}"))
+                .and_then(|mut c| {
+                    c.attach().map_err(|e| format!("attach: {e}"))?;
+                    let (pid, terminal) = c
+                        .start(&start_request("a1", &script))
+                        .map_err(|e| format!("start: {e}"))?;
+                    Ok((c, pid, terminal))
+                });
+            // The link and this node's copy of the terminal are kept until the helper is killed.
+            let _held = match started {
+                Ok((c, pid, terminal)) => {
+                    println!("\nHELPER started {pid}");
+                    (c, terminal)
+                }
+                Err(e) => {
+                    println!("\nHELPER failed {e}");
+                    std::io::stdout().flush().ok();
+                    std::process::exit(1);
+                }
+            };
             std::io::stdout().flush().ok();
             // Keeps the link and the terminal until killed.
             let mut rest = String::new();
@@ -282,6 +300,7 @@ fn helper_line(child: &mut Child) -> String {
             "the helper ended"
         );
         if let Some(rest) = line.trim().strip_prefix("HELPER ") {
+            assert!(!rest.starts_with("failed "), "the helper {rest}");
             return rest.to_string();
         }
     }
@@ -601,7 +620,7 @@ fn a_buffer_is_not_lost_when_the_link_breaks_during_attach() {
             .expect("hello");
             s.set_read_timeout(Some(Duration::from_secs(5)))
                 .expect("timeout");
-            let (payload, _) = agora_node::holder_link::read_frame(&mut s)
+            let (payload, _) = agora_node::holder_link::read_frame(&mut s, Duration::from_secs(5))
                 .expect("frame")
                 .expect("an answer");
             match Reply::decode(&payload).expect("reply") {
@@ -747,7 +766,8 @@ fn a_node_that_stops_reading_cannot_hang_the_holder() {
     stuck
         .set_read_timeout(Some(Duration::from_secs(5)))
         .expect("timeout");
-    let _ = agora_node::holder_link::read_frame(&mut stuck).expect("answer");
+    let _ =
+        agora_node::holder_link::read_frame(&mut stuck, Duration::from_secs(5)).expect("answer");
     write_frame(&mut stuck, &Request::Attach.encode(), None).expect("attach");
     // It reads nothing and stays connected. After the holder's write timeout it lets this node go, and the next one is served.
     let began = Instant::now();

@@ -465,6 +465,8 @@ fn doctor(say: &Say, o: &Opts) -> ExitCode {
     checks.extend(certs::checks_now(&hubcli::link_dir(), &hubcli::hub_dir(o)));
     // ADR-0067 rung 3: how the hub is reached from outside this machine, and whether the screen password protects it.
     checks.extend(remotecmd::checks(o));
+    // ADR-0093: a holder that speaks only link version 1 cannot keep structured agents across a node restart.
+    checks.extend(agora_node::doctor::holder_checks(&h));
     for c in &checks {
         let sentence = match (c.id, c.status) {
             ("version", _) => key!("doctor-version"),
@@ -528,6 +530,7 @@ fn doctor(say: &Say, o: &Opts) -> ExitCode {
             ("remote-proxy-on", _) => key!("doctor-remote-proxy-on"),
             ("remote-proxy-listen", _) => key!("doctor-remote-proxy-listen"),
             ("remote-proxy-damaged", _) => key!("doctor-remote-proxy-damaged"),
+            ("holder-old", _) => key!("doctor-holder-old"),
             ("credential", _) => key!("doctor-credential"),
             ("credential-none", _) => key!("doctor-credential-none"),
             ("credential-unlisted", _) => key!("doctor-credential-unlisted"),
@@ -536,9 +539,11 @@ fn doctor(say: &Say, o: &Opts) -> ExitCode {
             _ => key!("doctor-manifest-invalid"),
         };
         let detail: Arg = match (c.id, c.detail.parse::<i64>()) {
-            ("manifests" | "devices" | "policy-problems" | "cert-node" | "cert-hub", Ok(n)) => {
-                Arg::Num(n)
-            }
+            (
+                "manifests" | "devices" | "policy-problems" | "cert-node" | "cert-hub"
+                | "holder-old",
+                Ok(n),
+            ) => Arg::Num(n),
             _ => c.detail.as_str().into(),
         };
         let mut args = vec![("detail", detail)];

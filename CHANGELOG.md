@@ -4,6 +4,30 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+_Nothing yet._
+
+## 0.3.30
+
+### Steadier tabs in a split
+- The tab you are on keeps room for its icon, the start of its name with an ellipsis, and its close button, even in a narrow split or at a high display zoom; the other tabs step aside into the tab menu, and a pane title that is too long ends in an ellipsis instead of a cut-off word.
+
+### An older agent keeper is now explained
+- When the agent keeper running on a machine was started before 0.3.27, chat agents there are resumed after a node restart instead of kept running, and nothing said so. `agora doctor` now warns about it (it does not change doctor's exit status) and `agora status` shows a line under the node, in English and Turkish; the node's log also says why once. The keeper ends by itself when the agents it keeps have ended, and a new one then starts. Nothing is stopped or restarted for you.
+
+## 0.3.29
+
+### Close an agent from the window
+- A running agent, including a structured (chat) agent that has no terminal to type `exit` into, can now be closed from the window: choose Close agent in the **⋯** menu of its row in the agent list, in its pane or screen header (also on a phone) or in the command palette, or type `/exit` or `/quit` in a chat agent's message box (an agent's own command of that name still goes to the agent). A small confirm in the page says what happens and warns when the agent is working; one click closes an idle agent, and it then waits in the closed list until you remove it. A refusal says why in your language. Stop turn is unchanged and still keeps the agent.
+
+### Settings and machines one click away
+- The title bar now has a Settings icon (a gear) and a Machines icon next to Lock, in place of the "This device" text; the one whose page is open is highlighted, and both are reachable with the keyboard.
+- Settings is one tidy page with a section list: This device (name and fingerprint, appearance and language, notifications, passkey, screen password, your other devices) and My machines (each machine's state, last seen, version and whether it trusts this browser, with a link to its card). Links such as `#/device/passkeys` open a section directly; the old addresses still work.
+
+## 0.3.28
+
+### Structured agents: overlapping messages
+- When two messages to a structured agent overlap (the next queued one is sent after a cancel, or a helper asks while you wait), the first reply no longer ends the running turn or drops its waiting permission request: the agent keeps working and your decision still reaches it. A permission decided after its turn already ended returns the agent to idle instead of showing it as working.
+
 ### Steadier window layout and terminals
 - Tabs in a pane that is split beside another (Files next to an agent, for example) keep a readable title: a tab shrinks to a minimum width and shows an ellipsis with its full title as a tooltip, and a tab that does not fit is not drawn as a cut-off fragment; it is listed in the "more" menu next to the tabs instead.
 - "Group by" in the agents panel stays on one row in a narrow panel, in English and in Turkish: the "Group by" word gives way first, then the four buttons shrink.

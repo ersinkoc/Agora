@@ -90,7 +90,7 @@ device-title = Bu cihaz
 device-intro = Makineler yalnızca güvendikleri bir cihazın yanıtını kabul eder. Bu tarayıcıyı şununla tanırlar:
 device-name = Cihaz adı
 device-key = Cihaz anahtarı
-device-link = Bu cihaz
+device-link = Ayarlar
 device-fingerprint = Parmak izi
 device-trusted-here = bu tarayıcıya güveniyor
 device-not-trusted-here = bu tarayıcıya henüz güvenmiyor
@@ -1192,3 +1192,37 @@ quota-span-days = { $days } gün { $hours } sa
 quota-span-hours = { $hours } sa { $minutes } dk
 quota-span-minutes = { $minutes } dk
 quota-hint = { $kind }: { $what } limiti neredeyse doldu (%{ $percent }). Yine de başlatabilirsiniz.
+
+# Başlık çubuğu simgeleri ve Ayarlar sayfası ("Bu cihaz" ve "Makinelerim" bölümleri).
+settings-link = Ayarlar
+machines-link = Makineler
+header-links = Ayarlar ve makineler
+settings-title = Ayarlar
+settings-sections = Ayar bölümleri
+settings-group-device = Bu cihaz
+settings-group-machines = Makinelerim
+settings-device = Ad ve parmak izi
+settings-passkeys = Geçiş anahtarı
+settings-machines = Makineler
+settings-machines-intro = Bu hub'a bağlı her makine ve bu tarayıcıya güvenip güvenmediği.
+settings-machines-manage = Makineleri yönet
+
+# Çalışan bir ajanı kapatma (ajan menüsü, komut paleti, sohbet ajanının mesaj kutusunda /exit ve /quit)
+close-agent = Ajanı kapat
+agent-actions = { $name } için işlemler
+palette-close-agent = Ajanı kapat: { $name }
+close-title = { $name } kapatılsın mı?
+close-body = Bu ajanı sonlandırır. Konuşması, siz kaldırana kadar kapananlar listesinde kalır.
+close-working = Şu an çalışıyor: yürüttüğü tur kaybolur.
+close-keep = Çalışmaya devam etsin
+close-failed-prefix = Kapatılamadı: { $reason }
+close-failed = bir şeyler ters gitti. Yeniden deneyin.
+close-failed-forbidden = bu makinede ajan kapatma yetkiniz yok
+close-failed-policy = bu makine buna izin vermiyor
+close-failed-grant = bu makine önce izninizi istiyor. Açılan pencerede izin verin, kapanır
+close-failed-trust = bu makine henüz bu tarayıcıya güvenmiyor
+close-failed-offline = o makine çevrimdışı
+close-failed-timeout = o makine zamanında yanıt vermedi
+close-failed-gone = makine bu ajanı artık tanımıyor
+close-failed-unsupported = o makine bunu henüz yapamıyor. Güncelleyin
+close-failed-hub = hub'a ulaşılamadı

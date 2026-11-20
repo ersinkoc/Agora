@@ -90,7 +90,7 @@ device-title = This device
 device-intro = Machines only accept an answer from a device they trust. This is what they know this browser by:
 device-name = Device name
 device-key = Device key
-device-link = This device
+device-link = Settings
 device-fingerprint = Fingerprint
 device-trusted-here = trusts this browser
 device-not-trusted-here = does not trust this browser yet
@@ -1252,3 +1252,37 @@ quota-span-days = { $days } d { $hours } h
 quota-span-hours = { $hours } h { $minutes } min
 quota-span-minutes = { $minutes } min
 quota-hint = { $kind }: the { $what } limit is almost used ({ $percent } %). You can still start.
+
+# Title bar icons and the Settings page (sections of "This device" and "My machines").
+settings-link = Settings
+machines-link = Machines
+header-links = Settings and machines
+settings-title = Settings
+settings-sections = Settings sections
+settings-group-device = This device
+settings-group-machines = My machines
+settings-device = Name and fingerprint
+settings-passkeys = Passkey
+settings-machines = Machines
+settings-machines-intro = Every machine that is connected to this hub, and whether it trusts this browser.
+settings-machines-manage = Manage machines
+
+# Closing a running agent (the agent menu, the command palette, /exit and /quit in a chat agent's message box)
+close-agent = Close agent
+agent-actions = Actions for { $name }
+palette-close-agent = Close agent: { $name }
+close-title = Close { $name }?
+close-body = Ends this agent. Its conversation stays in the closed list until you remove it.
+close-working = It is working now: the current turn will be lost.
+close-keep = Keep it running
+close-failed-prefix = It was not closed: { $reason }
+close-failed = something went wrong. Try again.
+close-failed-forbidden = you are not allowed to close agents on this machine
+close-failed-policy = this machine does not allow it
+close-failed-grant = this machine needs your permission first. Allow it in the dialog and it closes
+close-failed-trust = this machine does not trust this browser yet
+close-failed-offline = that machine is offline
+close-failed-timeout = that machine did not answer in time
+close-failed-gone = the machine no longer knows this agent
+close-failed-unsupported = that machine cannot do it yet. Update it
+close-failed-hub = the hub could not be reached

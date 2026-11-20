@@ -21,7 +21,10 @@ import { ChatActionsContext } from './components/chatActions';
 import { AgentTile } from './components/AgentTile';
 import { StartAgent, type KindChoice } from './components/StartAgent';
 import { AttentionStrip } from './components/AttentionStrip';
+import { HeaderLinks } from './components/HeaderLinks';
 import { Icon } from './components/Icon';
+import { CloseAgentMenu, CloseConfirm } from './components/CloseAgent';
+import { ago } from './net/time';
 import { NetworkView } from './components/NetworkView';
 import { StateBadge } from './components/StateBadge';
 import { NoAskBadge } from './components/NoAskBadge';
@@ -217,10 +220,12 @@ export function Focus({ agent, approvals = [], onResolve, source: live, chatSour
         <span className="hidden min-w-0 items-center gap-1.5 truncate text-xs text-muted md:flex"><Icon name="machine" className="size-3.5" />{agent.machine}<Icon name="chevron" className="size-3 rtl:rotate-180" /><Icon name="folder" className="size-3.5" />{agent.project || agent.workspace}{agent.branch && <><Icon name="branch" className="ms-1 size-3.5" /><span className="font-mono">{agent.branch}</span></>}</span>
         <span className="flex-1" />
         {agent.tokens ? <span className="ide-chip">{t('agent-tokens', { count: agent.tokens })}</span> : null}
+        <CloseAgentMenu agent={agent} />
         <span className="hidden sm:block"><LanguagePicker compact /></span>
         <ThemePicker />
       </header>
       <main className="flex min-h-0 min-w-0 flex-col">
+        <CloseConfirm agent={agent} where="pane" />
         {agent.terminal === false ? null : approvals.filter((x) => x.agentId === agent.id).map((x) => <ApprovalBanner key={x.id} approval={x} onResolve={onResolve} />)}
         <AgentAddress key={agent.id} agent={agent} />
         <div className="pane min-h-0 flex-1 bg-surface-0 p-1.5" aria-label={agent.terminal === false ? t('chat-log') : t('focus-terminal')}>
@@ -245,6 +250,7 @@ function PageFrame({ title, onBack, children, wide }: { title: string; onBack: (
         <h1 className="m-0 min-w-0 flex-1 truncate text-[0.8125rem] font-semibold tracking-normal">{title}</h1>
         <span className="hidden sm:block"><LanguagePicker compact /></span>
         <ThemePicker />
+        <HeaderLinks />
       </header>
       <main className={`mx-auto grid gap-4 px-4 py-6 ${wide ? 'max-w-5xl' : 'max-w-3xl'}`}>{children}</main>
     </div>
@@ -258,11 +264,13 @@ export interface MyDevice { id: string; name: string; fingerprint: string; lastU
 // or the command to run on the machine. Fingerprints are what people compare, so every device is shown with its own. The screen
 // password and the idle lock live here too (ADR-0067). `passkeyNeedsPassword`: this browser is on another machine and a screen
 // password is set, so adding a passkey needs it (ADR-0067).
-export function DevicePage({ device, onBack, onTheme, onAddPasskey, passkeyNeedsPassword = false, security, fingerprint, machines, trustedOn, others, asked, onAsk, onRemove }: {
+export function DevicePage({ device, onBack, onTheme, section, onAddPasskey, passkeyNeedsPassword = false, security, fingerprint, machines, trustedOn, others, asked, onAsk, onRemove }: {
   device: Device | undefined;
   onBack: () => void;
   // Opens the theme editor in the window (ADR-0068).
   onTheme?: () => void;
+  // The section of the page to bring into view (#/device/<section>).
+  section?: string;
   onAddPasskey?: (password?: string) => Promise<boolean>;
   passkeyNeedsPassword?: boolean;
   security?: ReactNode;
@@ -284,80 +292,127 @@ export function DevicePage({ device, onBack, onTheme, onAddPasskey, passkeyNeeds
   const name = (id: string) => machines?.find((m) => m.id === id)?.name ?? id;
   const missing = (machines ?? []).filter((m) => !trustedOn?.includes(m.id));
   const canVouch = (trustedOn?.length ?? 0) > 0;
+  const sections: { group: string; items: { id: string; label: string; show: boolean }[] }[] = [
+    { group: 'settings-group-device', items: [
+      { id: 'device', label: 'settings-device', show: !!device },
+      { id: 'appearance', label: 'device-appearance', show: true },
+      { id: 'notifications', label: 'attention-settings-title', show: true },
+      { id: 'passkeys', label: 'settings-passkeys', show: !!onAddPasskey },
+      { id: 'lock', label: 'password-title', show: !!security },
+      { id: 'devices', label: 'device-others', show: !!others && others.length > 0 },
+    ] },
+    { group: 'settings-group-machines', items: [{ id: 'machines', label: 'settings-machines', show: true }] },
+  ];
+  // A deep link (#/device/passkeys) brings its section to the top; the page's own links change the hash, which lands here.
+  useEffect(() => { if (section) document.getElementById(`settings-${section}`)?.scrollIntoView?.({ block: 'start' }); }, [section]);
+  const now = Date.now();
+  const anchor = (id: string) => ({ id: `settings-${id}`, className: 'stack scroll-mt-24' });
   return (
-    <PageFrame title={t('device-title')} onBack={onBack}>
-      <p>{t('device-intro')}</p>
-      {device && (
-        <section className="stack">
-          <p><span className="muted">{t('device-name')}</span> <span className="mono">{device.id}</span></p>
-          {fingerprint && <p><span className="muted">{t('device-fingerprint')}</span> <span className="mono text-base tracking-wide">{fingerprint}</span></p>}
-          {machines && machines.length > 0 && (
-            <ul className="machines">
-              {machines.map((m) => (
-                <li key={m.id} className="machine">
-                  <strong>{m.name}</strong>
-                  <span className={trustedOn?.includes(m.id) ? 'muted' : 'text-needs-you'}>{t(trustedOn?.includes(m.id) ? 'device-trusted-here' : 'device-not-trusted-here')}</span>
-                </li>
+    <PageFrame wide title={t('settings-title')} onBack={onBack}>
+      <div className="grid items-start gap-6 md:grid-cols-[12rem_minmax(0,1fr)]">
+        <nav aria-label={t('settings-sections')} className="sticky top-10 z-[5] -mx-4 flex gap-x-4 overflow-x-auto border-b border-line bg-surface-0 px-4 py-2 md:top-16 md:mx-0 md:grid md:gap-1 md:overflow-visible md:border-b-0 md:p-0">
+          {sections.map((g) => (
+            <div key={g.group} className="flex flex-none items-center gap-1 md:grid md:items-stretch">
+              <span className="hidden px-2 pt-2 text-xs font-semibold uppercase tracking-wide text-muted md:block">{t(g.group)}</span>
+              {g.items.filter((i) => i.show).map((i) => (
+                <a key={i.id} href={`#/device/${i.id}`} aria-current={section === i.id ? 'true' : undefined} className="ide-row w-auto flex-none whitespace-nowrap text-[0.8125rem] text-muted hover:text-ink">{t(i.label)}</a>
               ))}
-            </ul>
-          )}
-          {onAsk && missing.length > 0 && (
-            <div className="stack">
-              <h2 className="m-0">{t('device-add-title')}</h2>
-              <p className="muted m-0">{t('device-add-intro', { fingerprint: fingerprint ?? '' })}</p>
-              <p className="m-0"><button type="button" className="button button--primary" onClick={() => { void onAsk().then((ok) => setAsk(ok ? 'asked' : 'failed')); }}>{t('device-ask')}</button></p>
-              {(ask === 'asked' || (asked && ask === undefined)) && <p role="status" className="m-0">{t('device-asked', { fingerprint: fingerprint ?? '' })}</p>}
-              {ask === 'failed' && <p role="alert" className="m-0">{t('device-ask-failed')}</p>}
             </div>
-          )}
-          {(missing.length > 0 || !machines?.length) && <>
-            <p className="m-0 muted">{t('device-command-intro')}</p>
-            <p className="mono codebox">agora node trust {device.id} {device.publicKeyHex}</p>
-          </>}
-        </section>
-      )}
-      {others && others.length > 0 && (
-        <section className="stack">
-          <h2 className="m-0">{t('device-others')}</h2>
-          <ul className="machines">
-            {others.map((d) => (
-              <li key={d.id} className="machine">
-                <strong>{deviceLabel(d.name, d.id)}</strong>
-                <span className="mono">{d.fingerprint}</span>
-                <span className="muted">{d.removed ? t('device-removed') : d.waiting ? t('device-waiting') : d.trustedOn.length ? t('device-trusted-on', { machines: d.trustedOn.map(name).join(', ') }) : t('device-trusted-nowhere')}</span>
-                {d.lastUsedMs > 0 && <span className="muted">{t('device-last-used', { when: new Date(d.lastUsedMs).toLocaleString() })}</span>}
-                {onRemove && canVouch && !d.removed && (
-                  <button type="button" className="button px-2 py-1 text-xs" disabled={removing?.id === d.id && !removing.failed}
-                    onClick={() => { setRemoving({ id: d.id }); void onRemove(d.id).then((ok) => setRemoving(ok ? undefined : { id: d.id, failed: true })); }}>{t('device-remove')}</button>
+          ))}
+        </nav>
+        <div className="grid min-w-0 max-w-3xl gap-8">
+          <div className="grid gap-6">
+            <h2 className="m-0 hidden text-base md:block">{t('settings-group-device')}</h2>
+            {device && (
+              <section {...anchor('device')}>
+                <h2 className="m-0">{t('settings-device')}</h2>
+                <p className="m-0">{t('device-intro')}</p>
+                <p className="m-0"><span className="muted">{t('device-name')}</span> <span className="mono">{device.id}</span></p>
+                {fingerprint && <p className="m-0"><span className="muted">{t('device-fingerprint')}</span> <span className="mono text-base tracking-wide">{fingerprint}</span></p>}
+                {onAsk && missing.length > 0 && (
+                  <div className="stack">
+                    <h3 className="m-0">{t('device-add-title')}</h3>
+                    <p className="muted m-0">{t('device-add-intro', { fingerprint: fingerprint ?? '' })}</p>
+                    <p className="m-0"><button type="button" className="button button--primary" onClick={() => { void onAsk().then((ok) => setAsk(ok ? 'asked' : 'failed')); }}>{t('device-ask')}</button></p>
+                    {(ask === 'asked' || (asked && ask === undefined)) && <p role="status" className="m-0">{t('device-asked', { fingerprint: fingerprint ?? '' })}</p>}
+                    {ask === 'failed' && <p role="alert" className="m-0">{t('device-ask-failed')}</p>}
+                  </div>
                 )}
-                {removing?.id === d.id && removing.failed && <span role="alert">{t('device-remove-failed')}</span>}
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
-      {onAddPasskey && (
-        <section className="stack">
-          <p>{t('device-passkey-intro')}</p>
-          {passkeyNeedsPassword && (
-            <label>
-              <span className="muted">{t('signin-password')}</span>{' '}
-              <input type="password" name="passkey-password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" />
-            </label>
-          )}
-          <button type="button" className="button" disabled={passkeyNeedsPassword && !password} onClick={() => { void onAddPasskey(passkeyNeedsPassword ? password : undefined).then((ok) => { setPasskey(ok ? 'added' : 'failed'); setPassword(''); }); }}>{t('device-passkey-add')}</button>
-          {passkey && <p role="status">{t(passkey === 'added' ? 'device-passkey-added' : 'device-passkey-failed')}</p>}
-        </section>
-      )}
-      <AttentionSettings />
-      {security}
-      {onTheme && (
-        <section className="stack">
-          <h2 className="m-0">{t('device-appearance')}</h2>
-          <p className="muted m-0">{t('device-appearance-intro', { name: themeName(themeStore.active()) })}</p>
-          <button type="button" className="button" onClick={onTheme}>{t('theme-edit')}</button>
-        </section>
-      )}
+                {(missing.length > 0 || !machines?.length) && <>
+                  <p className="m-0 muted">{t('device-command-intro')}</p>
+                  <p className="mono codebox">agora node trust {device.id} {device.publicKeyHex}</p>
+                </>}
+              </section>
+            )}
+            <section {...anchor('appearance')}>
+              <h2 className="m-0">{t('device-appearance')}</h2>
+              {onTheme && <p className="muted m-0">{t('device-appearance-intro', { name: themeName(themeStore.active()) })}</p>}
+              <div className="flex flex-wrap items-center gap-3">
+                <ThemePicker />
+                <LanguagePicker />
+                {onTheme && <button type="button" className="button" onClick={onTheme}>{t('theme-edit')}</button>}
+              </div>
+            </section>
+            <div {...anchor('notifications')}><AttentionSettings /></div>
+            {onAddPasskey && (
+              <section {...anchor('passkeys')}>
+                <h2 className="m-0">{t('settings-passkeys')}</h2>
+                <p className="m-0">{t('device-passkey-intro')}</p>
+                {passkeyNeedsPassword && (
+                  <label>
+                    <span className="muted">{t('signin-password')}</span>{' '}
+                    <input type="password" name="passkey-password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" />
+                  </label>
+                )}
+                <button type="button" className="button justify-self-start" disabled={passkeyNeedsPassword && !password} onClick={() => { void onAddPasskey(passkeyNeedsPassword ? password : undefined).then((ok) => { setPasskey(ok ? 'added' : 'failed'); setPassword(''); }); }}>{t('device-passkey-add')}</button>
+                {passkey && <p role="status" className="m-0">{t(passkey === 'added' ? 'device-passkey-added' : 'device-passkey-failed')}</p>}
+              </section>
+            )}
+            {security && <div {...anchor('lock')}>{security}</div>}
+            {others && others.length > 0 && (
+              <section {...anchor('devices')}>
+                <h2 className="m-0">{t('device-others')}</h2>
+                <ul className="machines">
+                  {others.map((d) => (
+                    <li key={d.id} className="machine">
+                      <strong>{deviceLabel(d.name, d.id)}</strong>
+                      <span className="mono">{d.fingerprint}</span>
+                      <span className="muted">{d.removed ? t('device-removed') : d.waiting ? t('device-waiting') : d.trustedOn.length ? t('device-trusted-on', { machines: d.trustedOn.map(name).join(', ') }) : t('device-trusted-nowhere')}</span>
+                      {d.lastUsedMs > 0 && <span className="muted">{t('device-last-used', { when: new Date(d.lastUsedMs).toLocaleString() })}</span>}
+                      {onRemove && canVouch && !d.removed && (
+                        <button type="button" className="button px-2 py-1 text-xs" disabled={removing?.id === d.id && !removing.failed}
+                          onClick={() => { setRemoving({ id: d.id }); void onRemove(d.id).then((ok) => setRemoving(ok ? undefined : { id: d.id, failed: true })); }}>{t('device-remove')}</button>
+                      )}
+                      {removing?.id === d.id && removing.failed && <span role="alert">{t('device-remove-failed')}</span>}
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            )}
+          </div>
+          <div className="grid gap-6">
+            <h2 className="m-0 hidden text-base md:block">{t('settings-group-machines')}</h2>
+            <section {...anchor('machines')}>
+              <h2 className="m-0">{t('settings-machines')}</h2>
+              <p className="muted m-0">{t('settings-machines-intro')}</p>
+              {machines && machines.length > 0 ? (
+                <ul className="machines">
+                  {machines.map((m) => (
+                    <li key={m.id} className="machine">
+                      <a className="font-semibold hover:underline" href={`#/machines/${encodeURIComponent(m.id)}`}>{m.name}</a>
+                      <span className={m.online ? 'text-finished' : 'muted'}>{t(m.online ? 'machine-online' : 'machine-offline')}</span>
+                      <span className="muted">{m.online ? t('network-heard', { when: ago(m.lastSeenMs, now) }) : t('network-last-seen', { when: ago(m.lastSeenMs, now) })}</span>
+                      {m.build && <span className="muted font-mono" title={t('network-build')}>{m.build}</span>}
+                      {trustedOn && <span className={trustedOn.includes(m.id) ? 'muted' : 'text-needs-you'}>{t(trustedOn.includes(m.id) ? 'device-trusted-here' : 'device-not-trusted-here')}</span>}
+                    </li>
+                  ))}
+                </ul>
+              ) : <p className="muted m-0">{t('machines-empty')}</p>}
+              <p className="m-0"><a className="button" href="#/machines">{t('settings-machines-manage')}</a></p>
+            </section>
+          </div>
+        </div>
+      </div>
     </PageFrame>
   );
 }
