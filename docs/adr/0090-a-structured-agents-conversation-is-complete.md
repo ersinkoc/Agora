@@ -209,8 +209,8 @@ Everything is additive (ADR-0006): new enum values, new fields and new messages 
   `AgentPromptResult`); a node's capabilities in the snapshot would make this exact. Step 7 (TUI): not started.
 
 
-## Amendment A (Proposed, 2026-11-20): switching a running agent to a mode that skips permission questions needs the owner's signed approval, and then it works
-This amendment is a proposal: it awaits the maintainer's acceptance by name, and nothing in it may be built before that.
+## Amendment A (Accepted, 2026-11-20): switching a running agent to a mode that skips permission questions needs the owner's signed approval, and then it works
+Accepted: 2026-11-20 (the maintainer's explicit message in the merger chat: "ADR-0090 Ek A, kabul ediyorum", naming ADR-0090 Amendment A). The open questions' proposed answers stand: one approval covers one agent session only (no project-wide or timed cover), and "always for agents of this kind on this machine" is a later node policy the owner edits on the machine, never a card.
 
 Origin: the maintainer: "in ACP mode the agent keeps asking me for approval: isn't there a yolo mode?" Today there is one when an agent is STARTED with it
 (`--dangerously-skip-permissions` and the like, a launch option signed by the owner, ADR-0059), but for a structured agent that reports a bypass
