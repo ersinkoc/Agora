@@ -806,7 +806,7 @@ fn attach(
                 &mut Plain::new(rx),
                 node,
                 &scope,
-                &Site::AttachTyping.commands(),
+                Site::AttachTyping.commands(),
             );
             session.terminal_close(stream);
             stream = session.terminal_open(node, &terminal)?;
@@ -945,7 +945,7 @@ fn chat(
                             say,
                             session,
                             &mut Plain::new(rx),
-                            (node, &scope, &Site::SplitPrompt.commands()),
+                            (node, &scope, Site::SplitPrompt.commands()),
                             |s| s.prompt(node, local, &line),
                         ) {
                             Tried::Done(Ok(())) | Tried::Declined => String::new(),
@@ -1998,7 +1998,7 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                                 say,
                                 &mut session,
                                 &mut Plain::new(&rx),
-                                (node, &scope, &Site::SplitStop.commands()),
+                                (node, &scope, Site::SplitStop.commands()),
                                 |s| s.stop_agent_with(node, local, helpers > 0 && with_helpers),
                             ) {
                                 Tried::Done(Ok(())) => say.text(key!("tui-stopped"), &[]),
@@ -3283,7 +3283,7 @@ fn chat_send(
                     say,
                     session,
                     ask,
-                    (&node, &scope, &Site::ChatPrompt.commands()),
+                    (&node, &scope, Site::ChatPrompt.commands()),
                     |s| s.prompt(&node, &local, &line),
                 )
             });
@@ -3684,7 +3684,7 @@ fn command(
                     say,
                     session,
                     ask,
-                    (&node, &scope, &Site::ConsoleStop.commands()),
+                    (&node, &scope, Site::ConsoleStop.commands()),
                     |s| s.stop_agent_with(&node, &local, helpers > 0 && with_helpers),
                 ) {
                     Tried::Done(Ok(())) => say.text(key!("tui-stopped"), &[]),
@@ -3851,7 +3851,7 @@ fn command(
             };
             let scope = format!("agent:{local}");
             let asked = over_console(say, c, session, preview, None, rx, |s, ask| {
-                ask_grant(say, s, ask, &node, &scope, &Site::GrantKey.commands())
+                ask_grant(say, s, ask, &node, &scope, Site::GrantKey.commands())
             });
             match asked {
                 Ok(true) => {
@@ -4058,6 +4058,7 @@ mod typing_grant_tests {
     /// #810: each place that asks signs the least its action needs, and the question names exactly that and the agent.
     /// A stop grant does not authorize typing (and the other way round).
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn every_place_that_asks_signs_the_command_it_names() {
         for (site, want) in [
             (Site::AttachTyping, "terminal.input"),
@@ -4072,7 +4073,7 @@ mod typing_grant_tests {
         // Every call goes through the table: no place names a set of its own.
         let src = include_str!("tuicmd.rs");
         let code = &src[..src.find("#[cfg(test)]").unwrap()];
-        assert_eq!(code.matches("&Site::").count(), 6);
+        assert_eq!(code.matches(".commands()").count(), 6);
     }
 
     /// An agent's id is written to the terminal: no control character of it gets there.
