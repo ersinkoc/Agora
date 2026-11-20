@@ -4,6 +4,10 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+_Nothing yet._
+
+## 0.3.27
+
 ### Structured agents survive a node restart (Linux and macOS)
 - An agent that works through an adapter or the ACP bridge (no terminal) is now run by the same background holder that keeps terminal agents, so restarting the machine's Agora node no longer ends it. The restarted node takes it up again with the same process: a turn that was running goes on, and a permission question that was waiting is asked again (it is never answered for you).
 - What the agent said while no node was reading is kept, up to 1 MiB per agent. When more was said than that, the oldest part is dropped and the conversation gets a notice saying how much was lost.
