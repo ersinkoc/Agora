@@ -159,8 +159,28 @@ fn agent(n: &Node, c: &mut Client) -> (String, PathBuf) {
         assert!(Instant::now() < end, "the config was never reported");
         std::thread::sleep(Duration::from_millis(50));
     }
-    // Start from a clean record of what the agent was told.
-    let _ = std::fs::remove_file(view.worktree.join("applied.txt"));
+    // The adapter writes its line AFTER it answers the node, so the two setup switches above are in the record only a moment later (on
+    // a slow machine, later than any clean-up made right here). Wait for exactly those two lines, then start from a clean record of
+    // what the agent is told from now on.
+    let record = view.worktree.join("applied.txt");
+    let setup = ["applied mode:default", "applied config:auto_approve=false"];
+    let read = || -> Vec<String> {
+        std::fs::read_to_string(&record)
+            .map(|t| t.lines().map(str::to_string).collect())
+            .unwrap_or_default()
+    };
+    while read() != setup {
+        assert!(
+            Instant::now() < end,
+            "the setup switches were never recorded"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    while record.exists() {
+        let _ = std::fs::remove_file(&record);
+        assert!(Instant::now() < end, "the record could not be cleared");
+        std::thread::sleep(Duration::from_millis(20));
+    }
     (s.agent_id, view.worktree)
 }
 
@@ -610,6 +630,9 @@ fn the_end_of_the_agent_withdraws_its_card() {
         "approval_id",
     );
     let card = skip_requests(&n).remove(0);
+    // The adapter has handled everything sent so far (it handles them in order): it holds the marker and nothing else.
+    marker(&mut c, &id);
+    applied(&worktree, &[MARK]);
     ok(c.call(Cmd::AgentStop(v1::AgentStop {
         agent_id: id.clone(),
         ..Default::default()
@@ -624,8 +647,8 @@ fn the_end_of_the_agent_withdraws_its_card() {
     assert!(!done[0].approved && done[0].signer_device_id.is_empty());
     let late = error(c.call(Cmd::ApprovalResolve(honest(&card, true))));
     assert_eq!(late.code, "protocol.invalid_message");
-    // The agent is gone: its adapter was told nothing, and the decision found no card to apply.
-    assert!(!worktree.join("applied.txt").exists());
+    // The agent is gone: the decision found no card to apply, so the adapter was told nothing more than the marker.
+    applied(&worktree, &[MARK]);
 }
 
 /// A crash of the adapter ends the session too.
