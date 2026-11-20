@@ -2481,6 +2481,23 @@ impl Supervisor {
         }
     }
 
+    /// ADR-0090 Amendment A: the ids of the select config options of category `mode` an adapter agent reported. An agent that gives its
+    /// mode as such an option (ACP config options: the bridge builds the mode list from it and sets a mode through it) has ONE setting
+    /// behind `AgentSetMode` and `AgentSetConfig` of that id, so a switch through either settles the waiting cards of both (F1322).
+    pub fn mode_config_ids(&self, id: &AgentId) -> Vec<String> {
+        self.adapters
+            .get(id)
+            .map(|e| {
+                e.rich
+                    .config
+                    .iter()
+                    .filter(|o| !o.boolean && o.category == "mode")
+                    .map(|o| o.id.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// [`prepare_set_config`](Self::prepare_set_config) and run, under the caller's lock (tests).
     ///
     /// `Ok(Some(ask))`: the choice skips permissions and waits for the owner's approval; nothing was applied.
@@ -2517,6 +2534,11 @@ impl Supervisor {
                 SupervisorError::NotFound(id.clone())
             });
         };
+        // A stopped agent keeps the modes it last reported, but it has no session to switch: nothing is applied or asked about for
+        // it (F1320: a mode that skips would otherwise raise a card for an agent that ended).
+        if !e.running {
+            return Err(SupervisorError::NotFound(id.clone()));
+        }
         if !e.capabilities.iter().any(|c| c == kind.capability()) {
             return Err(SupervisorError::OptionUnsupported(capability));
         }

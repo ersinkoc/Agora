@@ -61,7 +61,8 @@ struct Env {
     repo: PathBuf,
 }
 
-/// A repository, a manifest for the adapter kind `modal` and, when given, the node's policy file.
+/// A repository, manifests for the adapter kinds `modal` and `cfgmode` (whose mode is a config option of category `mode`) and, when
+/// given, the node's policy file.
 fn env(name: &str, policy: Option<&str>) -> Env {
     let dir = std::env::temp_dir().join(format!("agora-skip-{}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -76,6 +77,11 @@ fn env(name: &str, policy: Option<&str>) -> Env {
     std::fs::write(
         manifests.join("modal.toml"),
         format!("kind = \"modal\"\ndisplay_name = \"M\"\nversion = \"1\"\nmin_engine = 1\n[adapter]\ncommand = [{:?}, \"--adapter\", \"--modes\"]\n", fake_adapter_path()),
+    )
+    .unwrap();
+    std::fs::write(
+        manifests.join("cfgmode.toml"),
+        format!("kind = \"cfgmode\"\ndisplay_name = \"C\"\nversion = \"1\"\nmin_engine = 1\n[adapter]\ncommand = [{:?}, \"--adapter\", \"--modes\", \"--mode-config\"]\n", fake_adapter_path()),
     )
     .unwrap();
     if let Some(policy) = policy {
@@ -118,8 +124,13 @@ fn param(e: &v1::ErrorInfo, key: &str) -> String {
 
 /// A started agent whose adapter has reported its modes and options.
 fn agent(n: &Node, c: &mut Client) -> (String, PathBuf) {
+    agent_of(n, c, "modal")
+}
+
+/// A started agent of `kind` (`modal` or `cfgmode`) whose adapter has reported its modes and options, with a clean record.
+fn agent_of(n: &Node, c: &mut Client, kind: &str) -> (String, PathBuf) {
     let r = ok(c.call(Cmd::AgentStart(v1::AgentStart {
-        kind: "modal".into(),
+        kind: kind.into(),
         ..Default::default()
     })));
     let Some(Ok_::AgentStart(s)) = r.result else {
@@ -163,7 +174,12 @@ fn agent(n: &Node, c: &mut Client) -> (String, PathBuf) {
     // a slow machine, later than any clean-up made right here). Wait for exactly those two lines, then start from a clean record of
     // what the agent is told from now on.
     let record = view.worktree.join("applied.txt");
-    let setup = ["applied mode:default", "applied config:auto_approve=false"];
+    let first = if kind == "cfgmode" {
+        "applied config:approvals=default"
+    } else {
+        "applied mode:default"
+    };
+    let setup = [first, "applied config:auto_approve=false"];
     let read = || -> Vec<String> {
         std::fs::read_to_string(&record)
             .map(|t| t.lines().map(str::to_string).collect())
@@ -651,6 +667,65 @@ fn the_end_of_the_agent_withdraws_its_card() {
     applied(&worktree, &[MARK]);
 }
 
+/// A stopped agent has no session to switch (audit F1320): a mode that skips is not asked about for it (it keeps the modes it last
+/// reported, which must not raise a card), and once it is resumed the new run asks again and the approval applies there.
+#[test]
+fn a_stopped_agent_gets_no_card_and_its_resumed_run_asks_again() {
+    if !local() {
+        return;
+    }
+    let e = env("stopped", None);
+    let n = node(&e, false);
+    let mut c = Client::connect(n.socket().unwrap()).unwrap();
+    let (id, worktree) = agent(&n, &mut c);
+    ok(c.call(Cmd::AgentStop(v1::AgentStop {
+        agent_id: id.clone(),
+        ..Default::default()
+    })));
+    for mode in ["bypassPermissions", "turbo", "plan"] {
+        assert_eq!(
+            error(set_mode(&mut c, &id, mode)).code,
+            "agent.not_found",
+            "{mode}"
+        );
+    }
+    assert!(skip_requests(&n).is_empty(), "no card for a stopped agent");
+    assert_eq!(n.approvals.pending_count(), 0);
+    n.supervisor
+        .lock()
+        .unwrap()
+        .resume(&agora_core::AgentId::new(id.clone()), Instant::now())
+        .expect("resume");
+    let end = Instant::now() + Duration::from_secs(15);
+    let approval = loop {
+        match set_mode(&mut c, &id, "bypassPermissions").unwrap() {
+            Err(e) if e.code == "agent.approval_needed" => break param(&e, "approval_id"),
+            other => {
+                assert!(
+                    Instant::now() < end,
+                    "the resumed agent never asked: {other:?}"
+                );
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+    };
+    while set_config(&mut c, &id, "auto_approve", "false")
+        .unwrap()
+        .is_err()
+    {
+        assert!(Instant::now() < end, "the config was never reported again");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    applied(&worktree, &[MARK]);
+    let card = skip_requests(&n)
+        .into_iter()
+        .find(|r| r.approval_id == approval)
+        .unwrap();
+    ok(c.call(Cmd::ApprovalResolve(honest(&card, true))));
+    marker(&mut c, &id);
+    applied(&worktree, &[MARK, "applied mode:bypassPermissions", MARK]);
+}
+
 /// A crash of the adapter ends the session too.
 #[test]
 fn a_crash_of_the_adapter_withdraws_its_card() {
@@ -756,4 +831,77 @@ fn an_adapter_that_names_a_node_action_is_denied_without_a_card() {
         .into_iter()
         .any(|e| matches!(e.body, Some(v1::event::Body::ApprovalRequested(_))));
     assert!(!announced, "no card was announced");
+}
+
+/// When the agent's mode is a config option of category `mode` (an ACP agent through the bridge), the mode command and the config
+/// command switch ONE setting: switching it back through either withdraws a card raised through the other, so a late approval of the
+/// old card can no longer turn the agent to the mode that skips (audit F1322). An unrelated option keeps the card.
+#[test]
+fn switching_one_setting_back_through_the_other_command_withdraws_its_card() {
+    if !local() {
+        return;
+    }
+    let e = env("twin", None);
+    let n = node(&e, false);
+    let mut c = Client::connect(n.socket().unwrap()).unwrap();
+    let pending = |n: &Node, id: &str| n.approvals.waiting().iter().any(|p| p.id == id);
+
+    // A mode card; an unrelated option keeps it; the same setting switched back through config withdraws it, and a late decision
+    // is refused and applies nothing.
+    let (id, worktree) = agent_of(&n, &mut c, "cfgmode");
+    let mode_card = param(
+        &error(set_mode(&mut c, &id, "bypassPermissions")),
+        "approval_id",
+    );
+    ok(set_config(&mut c, &id, "auto_approve", "false"));
+    assert!(
+        pending(&n, &mode_card),
+        "an unrelated option keeps the card"
+    );
+    ok(set_config(&mut c, &id, "approvals", "default"));
+    assert!(
+        !pending(&n, &mode_card),
+        "the config switch withdraws the mode card"
+    );
+    let card = skip_requests(&n)
+        .into_iter()
+        .find(|r| r.approval_id == mode_card)
+        .unwrap();
+    assert_eq!(
+        error(c.call(Cmd::ApprovalResolve(honest(&card, true)))).code,
+        "protocol.invalid_message"
+    );
+    marker(&mut c, &id);
+    applied(
+        &worktree,
+        &[
+            "applied config:auto_approve=false",
+            "applied config:approvals=default",
+            MARK,
+        ],
+    );
+
+    // A config card; the same setting switched back through the mode command withdraws it.
+    let (id2, _) = agent_of(&n, &mut c, "cfgmode");
+    let cfg_card = param(
+        &error(set_config(&mut c, &id2, "approvals", "bypassPermissions")),
+        "approval_id",
+    );
+    ok(set_mode(&mut c, &id2, "default"));
+    assert!(
+        !pending(&n, &cfg_card),
+        "the mode switch withdraws the config card"
+    );
+
+    // An agent whose mode is not a config option: a config switch leaves its mode card alone.
+    let (m, _) = agent(&n, &mut c);
+    let m_card = param(
+        &error(set_mode(&mut c, &m, "bypassPermissions")),
+        "approval_id",
+    );
+    ok(set_config(&mut c, &m, "auto_approve", "false"));
+    assert!(
+        pending(&n, &m_card),
+        "a non-twin option keeps the mode card"
+    );
 }
