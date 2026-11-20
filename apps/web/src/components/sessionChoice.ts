@@ -4,12 +4,6 @@ import type { ConfigOptionModel, SessionModel, SessionOptionModel } from '../mod
 
 export type OptionKind = 'mode' | 'model';
 
-// Choosing this needs the user to confirm first: a mode in which the agent acts without asking. Never chosen by default: the bar
-// only ever shows what the agent reports as current and changes it on the user's own choice.
-export function needsConfirm(kind: OptionKind, option: SessionOptionModel | undefined): boolean {
-  return kind === 'mode' && !!option?.skipsPermissions;
-}
-
 // How full the context is, 0-100, or undefined when the agent did not say how big it is.
 export function contextPercent(s: SessionModel | undefined): number | undefined {
   if (!s || s.contextWindow <= 0) return undefined;
@@ -35,19 +29,6 @@ export function shortCount(n: number, locale?: string): string {
 export function choices(list: readonly SessionOptionModel[], current: string): SessionOptionModel[] {
   if (!current || list.some((o) => o.id === current)) return [...list];
   return [{ id: current, name: current, description: '', skipsPermissions: false }, ...list];
-}
-
-// A confirmation waiting for the user, bound to the agent it was opened for: its hub-wide key `<node>/<agent>` (a local id alone is
-// not unique: `n1/agent-1` and `n2/agent-1` are different agents).
-export interface PendingChoice { agentKey: string; option: SessionOptionModel }
-
-// The confirmation to show for the agent on screen now: none when it was opened for another one.
-export const pendingFor = (p: PendingChoice | undefined, agentKey: string): PendingChoice | undefined => (p && p.agentKey === agentKey ? p : undefined);
-
-// What "Switch anyway" sends: the mode to the agent the confirmation was opened for, and only while that agent is the one on screen.
-export function confirmed(p: PendingChoice | undefined, onScreen: string): { agentKey: string; kind: 'mode'; id: string } | undefined {
-  const bound = pendingFor(p, onScreen);
-  return bound ? { agentKey: bound.agentKey, kind: 'mode', id: bound.option.id } : undefined;
 }
 
 // Where a hub-wide agent key points: the node (the producer that named it) and the agent's id there.
@@ -78,16 +59,24 @@ export function configGroups(s: SessionModel | undefined): { chips: ConfigOption
   return { chips, more: all.filter((o) => !FIRST.includes(o.category)), replaces: { mode: chips.some((o) => o.category === 'mode'), model: chips.some((o) => o.category === 'model') } };
 }
 
-/** What the window may do with a choice of a setting. A choice (or, for a boolean, the option as a whole) that the node marked as making
- *  the agent act without asking is `unavailable`: shown, disabled and NEVER sent, because the node cannot be told the user confirmed it. */
-export type ChoiceState = 'current' | 'ok' | 'unavailable';
-export function choiceState(o: ConfigOptionModel, value: string): ChoiceState {
-  if (value === o.current) return 'current';
-  // A boolean the node marks as skipping: only turning it ON ("true") can make the agent act without asking; turning it OFF puts the
-  // protection back and the node never refuses that (supervisor `prepare_set_config`), so it stays available.
-  if (o.type === 'boolean') return o.skipsPermissions && value === 'true' ? 'unavailable' : 'ok';
-  const choice = o.choices.find((c) => c.id === value);
-  return o.skipsPermissions || choice?.skipsPermissions ? 'unavailable' : 'ok';
+/** What a choice of a setting is: the one in use, or one that can be sent. A choice that makes the agent act without asking is sent like any
+ *  other: the machine answers with an approval to sign (ADR-0090 Amendment A) or refuses it by its own policy. */
+export type ChoiceState = 'current' | 'ok';
+export const choiceState = (o: ConfigOptionModel, value: string): ChoiceState => (value === o.current ? 'current' : 'ok');
+
+/** Whether a choice of this setting makes the agent act without asking: for a select the flag is on the choice, for a boolean on the option
+ *  (and only turning it ON does). */
+export function choiceSkips(o: ConfigOptionModel, value: string): boolean {
+  if (o.type === 'boolean') return o.skipsPermissions && value === 'true';
+  return !!o.choices.find((c) => c.id === value)?.skipsPermissions;
+}
+
+/** "Acts freely": the agent's CURRENT mode or setting is one the node marks as acting without asking. It follows what the agent reports, so it
+ *  is gone as soon as the machine reports a safe value again. */
+export function actsFreely(s: SessionModel | undefined): boolean {
+  if (!s) return false;
+  if (s.modes.some((o) => o.skipsPermissions && o.id === s.currentMode)) return true;
+  return (s.config ?? []).some((o) => choiceSkips(o, o.current));
 }
 
 /** The values a setting offers: a boolean's two, else its choices (the one in use first when the agent named it and does not list it). */
@@ -95,6 +84,3 @@ export function configChoices(o: ConfigOptionModel): SessionOptionModel[] {
   if (o.type === 'boolean') return ['true', 'false'].map((id) => ({ id, name: id, description: '', skipsPermissions: false }));
   return choices(o.choices, o.current);
 }
-
-/** Whether any choice of a shown setting is held back, so the window says why once. */
-export const anyUnavailable = (list: readonly ConfigOptionModel[]): boolean => list.some((o) => configChoices(o).some((c) => choiceState(o, c.id) === 'unavailable'));

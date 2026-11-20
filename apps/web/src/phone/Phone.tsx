@@ -1,4 +1,5 @@
 import { Suspense, lazy, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
+import type { ActionResult } from '../net/refusal';
 import { approvalName } from '../net/approvalText';
 import { t } from '../i18n';
 import { endedWithError, type AgentTileModel } from '../model';
@@ -288,7 +289,7 @@ export function PhoneAgent({ agent, agents, approvals, machines, onResolve, untr
   source?: TerminalSource;
   chatSource?: ChatSource;
   sendPrompt?: PromptSend;
-  chooseOption?: (agentKey: string, kind: 'mode' | 'model', id: string) => Promise<boolean>;
+  chooseOption?: (agentKey: string, kind: 'mode' | 'model', id: string) => Promise<ActionResult>;
   /** What the agent changed (the review screen) and its files (the file browser), as on the desktop; absent without a hub. */
   loadDiff?: (agent: AgentTileModel, path?: string) => Promise<DiffSource>;
   filesOf?: (agent: AgentTileModel) => WorkspaceFiles | undefined;
