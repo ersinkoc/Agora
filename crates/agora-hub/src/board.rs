@@ -73,7 +73,7 @@ fn answer(verdict: Verdict) -> Answer {
 }
 
 /// Known `(node, project)` memberships from checkouts, selected workspaces and still-running agents.
-/// Facts can repeat and include offline nodes: transition discovery must still see a project after all its nodes disconnect.
+/// Facts can repeat and include offline nodes.
 pub fn project_memberships(view: &View) -> impl Iterator<Item = (&str, &str)> {
     view.checkouts
         .values()
@@ -685,24 +685,27 @@ impl Boards {
     /// `(node, project)` pairs that must now hand over their local work: every such node when a project becomes shared (reaches
     /// two nodes), and a node that joins an already shared project. Calls that grant something then wait (see [`JOIN_WAIT_MS`]).
     pub fn membership(&self, view: &View, now_ms: u64) -> Vec<(String, String)> {
-        let mut projects: BTreeSet<String> = project_memberships(view)
-            .map(|(_, project)| project.to_string())
-            .collect();
+        let mut members = BTreeMap::<String, BTreeSet<String>>::new();
+        for (node, project) in project_memberships(view) {
+            if view.nodes.get(node).is_some_and(|n| n.online) {
+                members
+                    .entry(project.to_string())
+                    .or_default()
+                    .insert(node.to_string());
+            }
+        }
         let mut j = self.joins.lock().unwrap_or_else(|e| e.into_inner());
-        // A reassigned folder and its last exiting agent can remove every current fact for a project.
-        projects.extend(j.members.keys().cloned());
         let mut out = Vec::new();
-        for project in projects {
-            let now: BTreeSet<String> = nodes_with(view, &project).into_iter().collect();
-            let before = j.members.get(&project).cloned().unwrap_or_default();
-            let join: Vec<String> = if now.len() < 2 {
-                Vec::new()
-            } else if before.len() < 2 {
-                now.iter().cloned().collect()
-            } else {
-                now.difference(&before).cloned().collect()
-            };
-            j.members.insert(project.clone(), now);
+        for (project, nodes) in &members {
+            if nodes.len() < 2 {
+                continue;
+            }
+            let join: Vec<String> =
+                if let Some(before) = j.members.get(project).filter(|p| p.len() >= 2) {
+                    nodes.difference(before).cloned().collect()
+                } else {
+                    nodes.iter().cloned().collect()
+                };
             if join.is_empty() {
                 continue;
             }
@@ -717,6 +720,8 @@ impl Boards {
             entry.1.extend(join.iter().cloned());
             out.extend(join.into_iter().map(|n| (n, project.clone())));
         }
+        // A project can lose its last fact when a folder is reassigned and its last agent ends.
+        j.members = members;
         out
     }
 
@@ -959,6 +964,21 @@ mod tests {
             b.membership(&view(&["alpha", "beta", "gamma"]), 3_000),
             [("gamma".to_string(), "p".to_string())]
         );
+    }
+
+    #[test]
+    fn a_project_that_loses_all_members_asks_both_nodes_when_shared_again() {
+        let boards = Boards::new();
+        let shared = view(&["alpha", "beta"]);
+        let expected = [
+            ("alpha".to_string(), "p".to_string()),
+            ("beta".to_string(), "p".to_string()),
+        ];
+        assert_eq!(boards.membership(&shared, 1_000), expected);
+        boards.join_settled("alpha", "p");
+        boards.join_settled("beta", "p");
+        assert!(boards.membership(&View::default(), 2_000).is_empty());
+        assert_eq!(boards.membership(&shared, 3_000), expected);
     }
 
     #[test]
