@@ -118,6 +118,25 @@ pub struct LocalStream {
     inner: windows::Stream,
 }
 
+/// What [`LocalStream::set_read_timeout_or_closed`] found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadTimeout {
+    /// The read timeout is set.
+    Set,
+    /// The system refused a new timeout because the peer has shut the connection (macOS answers `EINVAL` then). A receive on it
+    /// returns what is buffered or the end at once, so it cannot wait; the timeout is not set.
+    PeerClosed,
+}
+
+/// Tells the peer-closed answer of a `set_read_timeout` apart from a real failure.
+fn read_timeout_result(r: io::Result<()>) -> io::Result<ReadTimeout> {
+    match r {
+        Ok(()) => Ok(ReadTimeout::Set),
+        Err(e) if e.kind() == io::ErrorKind::InvalidInput => Ok(ReadTimeout::PeerClosed),
+        Err(e) => Err(e),
+    }
+}
+
 /// A listening local socket. Removes its socket file when dropped.
 pub struct LocalListener {
     #[cfg(unix)]
@@ -698,6 +717,31 @@ impl LocalStream {
         #[cfg(windows)]
         {
             self.inner.set_read_timeout(timeout)
+        }
+    }
+
+    /// [`Self::set_read_timeout`] for a caller that can go on without the timeout once the peer has shut the connection: that case
+    /// (an `InvalidInput` answer, macOS) is `Ok(ReadTimeout::PeerClosed)`; every other failure is returned.
+    pub fn set_read_timeout_or_closed(
+        &self,
+        timeout: Option<std::time::Duration>,
+    ) -> io::Result<ReadTimeout> {
+        read_timeout_result(self.set_read_timeout(timeout))
+    }
+
+    /// Waits until a send would not block, at most `timeout`; `Ok(false)` when the time ran out first. Unix: `poll(2)` for
+    /// writability (an error or hang-up counts as ready, so the send itself reports it). Windows: pipe writes are not polled, so
+    /// this returns `Ok(true)` at once and the caller keeps its own bound on the send.
+    pub fn wait_writable(&self, timeout: std::time::Duration) -> io::Result<bool> {
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            unixhold::wait_writable(self.inner.as_raw_fd(), timeout)
+        }
+        #[cfg(windows)]
+        {
+            let _ = timeout;
+            Ok(true)
         }
     }
 
@@ -3042,5 +3086,26 @@ mod atomic_replace_tests {
             "a temporary file stayed behind"
         );
         let _ = std::fs::remove_dir_all(&d);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod read_timeout_tests {
+    use super::*;
+
+    #[test]
+    fn invalid_input_is_the_peer_closed_answer_and_others_are_errors() {
+        assert_eq!(read_timeout_result(Ok(())).unwrap(), ReadTimeout::Set);
+        let closed = read_timeout_result(Err(io::Error::from(io::ErrorKind::InvalidInput)));
+        assert_eq!(closed.unwrap(), ReadTimeout::PeerClosed);
+        for kind in [
+            io::ErrorKind::PermissionDenied,
+            io::ErrorKind::BrokenPipe,
+            io::ErrorKind::Other,
+        ] {
+            let e = read_timeout_result(Err(io::Error::from(kind))).unwrap_err();
+            assert_eq!(e.kind(), kind);
+        }
     }
 }

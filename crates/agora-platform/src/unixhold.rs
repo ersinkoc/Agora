@@ -529,6 +529,33 @@ const SEND_FLAGS: libc::c_int = 0;
 /// Room for one `SCM_RIGHTS` message of one descriptor, aligned for `cmsghdr`.
 const CONTROL_WORDS: usize = 8;
 
+/// Waits until `sock` is writable (or in error or hung up), at most `timeout`. `Ok(false)` on the time running out.
+pub(crate) fn wait_writable(sock: RawFd, timeout: std::time::Duration) -> io::Result<bool> {
+    let end = std::time::Instant::now() + timeout;
+    loop {
+        let left = end.saturating_duration_since(std::time::Instant::now());
+        // Rounded up to a whole millisecond, so the wait never ends before the time given.
+        let ms = left.as_nanos().div_ceil(1_000_000).min(i32::MAX as u128) as libc::c_int;
+        let mut p = libc::pollfd {
+            fd: sock,
+            events: libc::POLLOUT,
+            revents: 0,
+        };
+        // SAFETY: one valid pollfd that lives through the call.
+        let r = unsafe { libc::poll(&mut p, 1, ms) };
+        if r > 0 {
+            return Ok(true);
+        }
+        if r == 0 {
+            return Ok(false);
+        }
+        let e = io::Error::last_os_error();
+        if e.kind() != io::ErrorKind::Interrupted {
+            return Err(e);
+        }
+    }
+}
+
 /// One `sendmsg` of `bytes`, with `fd` attached to them when given. Returns how many bytes went; the descriptor went with them
 /// when that is more than 0.
 pub(crate) fn send_with_fd(sock: RawFd, bytes: &[u8], fd: Option<RawFd>) -> io::Result<usize> {

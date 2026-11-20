@@ -79,7 +79,7 @@ next frame's.
   Both are tested, the first with a holder started with extra non-close-on-exec descriptors.
 - A write to a node that does not read gives up after `FRAME_TIMEOUT` (5 s in all, each blocked send waits `WRITE_SLICE`, 1 s, or what
   is left of the 5 s when that is less, and is given at most 2 KiB, one kernel buffer even at the smallest `SO_SNDBUF`, so it
-  waits only once), and the holder drops that node: a node that stops reading, or takes a frame bit by bit, cannot hang it (tested).
+  waits only once). In its last `WRITE_SLICE` a send is first waited for with `LocalStream::wait_writable` (`poll(2)` on Unix, rounded up to a millisecond), so the frame ends at `FRAME_TIMEOUT` and not a few ms after it; on Windows the pipe is not polled (the call returns at once) and the write bound above stays. A receive on a stream whose peer has already shut the connection (macOS refuses a new read timeout with `EINVAL`) goes on without the timeout, decided in `LocalStream::set_read_timeout_or_closed`, and every other failure of that call fails the read. The holder drops that node: a node that stops reading, or takes a frame bit by bit, cannot hang it (tested).
 - `agora hold` refuses to start (it exits 1, `hold-failed`) when it cannot become a session leader (`setsid` fails with `EPERM` in a
   process-group leader); it never runs on in its starter's session.
 

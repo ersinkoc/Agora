@@ -12,7 +12,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use agora_platform::{HeldSignal, LocalStream, TerminalHandle};
+use agora_platform::{HeldSignal, LocalStream, ReadTimeout, TerminalHandle};
 
 /// The version of the holder link this build speaks. A holder and a node that differ do nothing together (decision 5).
 pub const LINK_VERSION: u16 = 1;
@@ -789,7 +789,9 @@ fn send_frame(
         // The terminal goes with the first byte that goes; the rest follows plainly. A send that timed out sent nothing (nor the
         // terminal): it is tried again until the frame's time is up, as a plain send is.
         loop {
-            budget(stream, began, capped)?;
+            if !budget(stream, began, capped)? {
+                continue;
+            }
             match stream.send_with_terminal(piece(frame), terminal) {
                 Ok(0) => return Err(LinkError::Closed),
                 Ok(n) => {
@@ -803,7 +805,9 @@ fn send_frame(
         }
     }
     while sent < frame.len() {
-        budget(stream, began, capped)?;
+        if !budget(stream, began, capped)? {
+            continue;
+        }
         match stream.write(piece(&frame[sent..])) {
             Ok(0) => return Err(LinkError::Closed),
             Ok(n) => sent += n,
@@ -819,26 +823,30 @@ fn send_frame(
 /// A blocking send waits its write timeout afresh for each kernel buffer it allocates (measured: a whole-frame send ran to 5.4 s
 /// against a 5 s limit). On Linux a Unix stream send splits into buffers of at most `SO_SNDBUF / 2 - 64` bytes, and `SO_SNDBUF` is
 /// never below `SOCK_MIN_SNDBUF` (2 * (2048 + sizeof(sk_buff)), about 4.5 KiB: buffers of at least about 2.2 KiB), so 2 KiB is one
-/// buffer even at the smallest size. (agora-platform has no wait-for-writable helper for a `LocalStream`; a poll here would need
-/// platform code.) A 4 MiB frame, the largest, is 2048 sends.
+/// buffer even at the smallest size. A 4 MiB frame, the largest, is 2048 sends.
 const SEND_PIECE: usize = 2 << 10;
 
 fn piece(bytes: &[u8]) -> &[u8] {
     &bytes[..bytes.len().min(SEND_PIECE)]
 }
 
-/// Before a send: a timeout error when the frame's [`FRAME_TIMEOUT`] is spent; otherwise, in its last [`WRITE_SLICE`], the stream's
-/// write timeout is cut to what is left.
-fn budget(stream: &LocalStream, began: Instant, capped: &mut bool) -> Result<(), LinkError> {
+/// Before a send: a timeout error when the frame's [`FRAME_TIMEOUT`] is spent; otherwise, in its last [`WRITE_SLICE`], the stream
+/// is waited on for writability for what is left (exact, by `poll`), and the stream's write timeout is cut to that as a bound where
+/// the wait cannot be done (Windows). `Ok(false)`: not writable yet, so no send now (the caller asks again, which ends the frame
+/// when its time is spent).
+fn budget(stream: &LocalStream, began: Instant, capped: &mut bool) -> Result<bool, LinkError> {
     let left = FRAME_TIMEOUT.saturating_sub(began.elapsed());
     if left.is_zero() {
         return Err(LinkError::Io(io::Error::from(io::ErrorKind::TimedOut)));
     }
     if left < WRITE_SLICE {
-        stream.set_write_timeout(Some(left))?;
+        if !stream.wait_writable(left)? {
+            return Ok(false);
+        }
+        stream.set_write_timeout(Some(left.max(Duration::from_millis(1))))?;
         *capped = true;
     }
-    Ok(())
+    Ok(true)
 }
 
 fn timed_out(e: &io::Error) -> bool {
@@ -925,12 +933,10 @@ fn receive_budget(
         return Err(LinkError::Io(io::Error::from(io::ErrorKind::TimedOut)));
     }
     if *set != Some(timeout) {
-        match stream.set_read_timeout(Some(timeout)) {
-            Ok(()) => *set = Some(timeout),
-            // macOS refuses a new timeout (EINVAL) once the peer has shut the connection, as the holder does right after a refusal.
-            // A receive then returns what is buffered or the end at once, so it cannot wait, and the frame's time is still checked.
-            Err(e) if e.kind() == io::ErrorKind::InvalidInput => {}
-            Err(e) => return Err(e.into()),
+        // A peer that has shut the connection (macOS refuses a new timeout then) is not an error here: a receive returns what is
+        // buffered or the end at once, so it cannot wait, and the frame's time is still checked. Any other failure is one.
+        if stream.set_read_timeout_or_closed(Some(timeout))? == ReadTimeout::Set {
+            *set = Some(timeout);
         }
     }
     Ok(())
