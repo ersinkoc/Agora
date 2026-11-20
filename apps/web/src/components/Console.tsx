@@ -22,7 +22,9 @@ import { LiveSummary } from './LiveSummary';
 import { Explorer } from './Explorer';
 import { FleetConsole } from './FleetConsole';
 import type { PairingUi } from './Pairing';
+import { HeaderLinks } from './HeaderLinks';
 import { Icon } from './Icon';
+import { CloseAgentMenu, CloseConfirm } from './CloseAgent';
 import { Inspector } from './Inspector';
 import { saveGroupBy, useGroupBy } from '../net/fleetPrefs';
 import { projectSpread } from '../net/fleet';
@@ -308,6 +310,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
             ? <button type="button" className="ide-chip text-needs-you hover:brightness-125" onClick={() => openTool('changes', a.id)} title={t('pane-open-changes')}>{t('changes-files', { count: a.filesChanged ?? 0 })}</button>
             : <span className="ide-chip text-needs-you">{t('changes-files', { count: a.filesChanged ?? 0 })}</span>)}
           <StateBadge state={a.state} failed={endedWithError(a)} />
+          <CloseAgentMenu agent={a} />
           {a.terminal !== false && !a.closed && <span className="flex items-center" role="group" aria-label={t('terminal-size')}>
             <button type="button" className="ide-iconbtn w-6 text-xs font-semibold" onClick={() => setTerminalSize(terminalSize() - 1)} disabled={terminalSize() <= MIN_SIZE} aria-label={t('terminal-smaller')} title={t('terminal-smaller')}>A−</button>
             <button type="button" className="ide-iconbtn w-6 text-[0.8125rem] font-semibold" onClick={() => setTerminalSize(terminalSize() + 1)} disabled={terminalSize() >= MAX_SIZE} aria-label={t('terminal-larger')} title={t('terminal-larger')}>A+</button>
@@ -319,6 +322,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
           <button type="button" className="ide-iconbtn" onClick={() => onOpen(a.id)} aria-label={t('console-maximize')} title={t('console-maximize')}><Icon name="maximize" /></button>
         </div>
       </div>
+      <CloseConfirm agent={a} where="pane" />
       {!asksUnderHeader(a) ? null : approvals.filter((x) => x.agentId === a.id).map((x) => <ApprovalBanner key={x.id} approval={x} onResolve={onResolve} />)}
       <AgentAddress agent={a} />
       {helperGrants && revokeGrant && !a.closed && fleet.some((c) => c.parentId === a.id) &&
@@ -388,7 +392,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
         <LayoutMenu ws={ws} dispatch={dispatch} agents={presetAgents} onReset={resetLayout} narrow={narrow} />
         <span className="hidden sm:block"><LanguagePicker compact /></span>
         <ThemePicker />
-        <a className="ide-chip hidden whitespace-nowrap hover:text-ink md:inline-flex" href="#/device">{t('device-link')}</a>
+        <HeaderLinks />
         {onLock && <button type="button" className="ide-chip whitespace-nowrap hover:text-ink" onClick={onLock} title={t('lock-now-hint')}><Icon name="lock" className="size-3.5" />{t('lock-now')}</button>}
       </header>
 
