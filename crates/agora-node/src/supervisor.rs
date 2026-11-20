@@ -4016,6 +4016,17 @@ fn launch_adapter(
     }
 }
 
+/// The first time a structured agent is started by the node itself because the holder speaks only link version 1 (built before
+/// ADR-0093): one log line with a stable code, so that a person reading the log can see why a node restart ends such agents.
+fn log_old_holder_once(holder_pid: u32) {
+    static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        eprintln!(
+            "holder.link_v1: structured agent runs in the node, holder_pid={holder_pid} holder_link_version=1"
+        );
+    }
+}
+
 /// ADR-0093: starts `cfg` through the holder, on pipes. `None` means "not through the holder": the caller runs it itself (a confined
 /// adapter, no holder or an older one, a program or id the holder refuses, a variable that is not text). The environment is complete (the
 /// holder passes nothing of its own).
@@ -4042,6 +4053,7 @@ fn launch_held_adapter(
     for _ in 0..2 {
         let session = hub.session()?;
         if !session.pipes {
+            log_old_holder_once(session.pid);
             return None;
         }
         let pid = match session.start_pipe(&request) {
