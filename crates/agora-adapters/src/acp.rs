@@ -1415,6 +1415,10 @@ impl<W: Write> Bridge<W> {
                 self.said = false;
                 self.turn_mark = self.stderr.lock().unwrap_or_else(|e| e.into_inner()).total;
                 self.state("WORKING")?;
+                // A prompt after a cancel comes once the node stopped waiting for the cancelled turn (its cancel grace): that turn
+                // is retired, so it neither holds this one open nor cancels its permissions, and its late reply is ignored.
+                self.waiting
+                    .retain(|_, w| !matches!(w, Waiting::Prompt { cancelling: true }));
                 self.ask_agent(
                     "session/prompt",
                     json!({"sessionId": sid, "prompt": [{"type": "text", "text": text}]}),
@@ -1921,8 +1925,8 @@ impl<W: Write> Bridge<W> {
                     }
                     Some(Waiting::Prompt { .. }) => {
                         self.flush_text()?;
-                        // Audit F1240: prompts overlap when the node sends one into a running turn (after its cancel grace, a
-                        // spawned helper's request, a node without `turns`). Only the last reply ends the turn: until then the
+                        // Audit F1240: prompts overlap when the node sends one into a running turn (a spawned helper's request,
+                        // a node without `turns`; a cancelled one is retired by the next). Only the last reply ends the turn: until then the
                         // permissions asked are kept and no `idle` is reported; this reply's own failure or stop is still reported
                         // (whether it was empty cannot be told).
                         let still_open = self.prompt_open();
@@ -2598,8 +2602,8 @@ mod tests {
             "params":{"sessionId":"s","toolCall":{"title":"edit"},"options":[{"optionId":"allow","kind":"allow_once"}]}}))
     }
 
-    /// Audit F1240: prompts overlap when the node sends one into a running turn (after its cancel grace, or a spawned helper's
-    /// request). The reply to one of them must not end the other: no `idle` while it runs, and its pending permission still reaches
+    /// Audit F1240: prompts overlap when the node sends one into a running turn (a spawned helper's request, a node without
+    /// `turns`). The reply to one of them must not end the other: no `idle` while it runs, and its pending permission still reaches
     /// the agent when the user decides (before, it was dropped and the agent waited for it forever).
     #[test]
     fn the_reply_to_an_overlapping_prompt_does_not_end_the_running_turn(
@@ -2627,6 +2631,45 @@ mod tests {
             states(&b.out),
             ["AGENT_STATE_IDLE"],
             "the last reply ends the turn"
+        );
+        Ok(())
+    }
+
+    /// Codex review of F1240: a cancelled prompt the agent never answers must not hold the next turn open. The node sends its next
+    /// queued prompt once the cancel grace (ADR-0090) has passed; that prompt's reply ends the turn with `idle`, its permission
+    /// reaches the user, and a late reply to the cancelled prompt changes nothing.
+    #[test]
+    fn a_cancelled_prompt_that_never_replies_does_not_hold_the_next_turn_open(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use serde_json::json;
+        let mut b = bridge_in_session()?;
+        let _ = b.handle_node(
+            &json!({"jsonrpc":"2.0","id":10,"method":"session/prompt","params":{"text":"t"}}),
+        )?;
+        let _ =
+            b.handle_node(&json!({"jsonrpc":"2.0","id":11,"method":"session/cancel","params":{}}))?;
+        // No reply to prompt 1; the node's cancel grace ends and it sends the next prompt.
+        let _ = b.handle_node(
+            &json!({"jsonrpc":"2.0","id":12,"method":"session/prompt","params":{"text":"u"}}),
+        )?;
+        b.out.clear();
+        ask(&mut b, "perm-2")?;
+        assert_eq!(
+            states(&b.out),
+            ["AGENT_STATE_BLOCKED"],
+            "the new turn's permission is asked, not cancelled"
+        );
+        b.out.clear();
+        let _ = b.handle_node(&json!({"jsonrpc":"2.0","id":13,"method":"approval/resolve",
+            "params":{"approvalId":"acp-3","approved":true}}))?;
+        b.out.clear();
+        b.handle_agent(&json!({"jsonrpc":"2.0","id":2,"result":{"stopReason":"end_turn"}}))?;
+        assert_eq!(states(&b.out), ["AGENT_STATE_IDLE"], "the new turn ended");
+        b.out.clear();
+        b.handle_agent(&json!({"jsonrpc":"2.0","id":1,"result":{"stopReason":"cancelled"}}))?;
+        assert!(
+            states(&b.out).is_empty(),
+            "a late reply to the cancelled prompt changes nothing"
         );
         Ok(())
     }
