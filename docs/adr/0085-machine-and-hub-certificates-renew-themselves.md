@@ -93,7 +93,8 @@ What happens today. Kept only as the fallback for a machine that was offline pas
 - Adds one schema message pair and a capability; no new dependency.
 - Until it is accepted and built, machines must be joined again before day 90 (CHANGELOG, `docs/security/threat-model.md`).
 
-## Amendment A (Proposed, 2026-11-20): a node whose clock is behind keeps its answered request, and accepts a certificate that starts slightly in its future
+## Amendment A (Accepted, 2026-11-20): a node whose clock is behind keeps its answered request, and accepts a certificate that starts slightly in its future
+Accepted: 2026-11-20 (the maintainer's explicit message in the merger chat: "ADR-0094 ve ADR-0085 Ek A'yı kabul ediyorum"). The open questions' proposed answers stand.
 Status: Proposed. Waits for the maintainer; nothing below is built. The rest of ADR-0085 stays Accepted and unchanged.
 
 Origin: evidence audit round 10, finding F1340 (#816 describes the proofs). Two Accepted rules of this ADR, each sound alone, contradict each other
