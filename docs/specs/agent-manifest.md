@@ -271,7 +271,8 @@ The node holds a session id only when it learned one:
   It takes one only when exactly one new file fits and no other agent has that id. Two agents in one folder are rivals, and both get
   none (a file cannot say which is whose), when they are of one kind, or of kinds whose globs could match the same files: the fixed
   directory of one glob (before its first `*`, with `{home}` replaced, `.` and `..` resolved) is the other's or holds it, as written or
-  with links resolved. They are not rivals when both `select`s ask for different values at the same `path`. Every waiting agent with
+  with links resolved (a link is followed even before what it points to exists; a root that cannot be resolved, for example through
+  more than 40 links, makes its agent a rival of every other kind in the folder). They are not rivals when both `select`s ask for different values at the same `path`. Every waiting agent with
   a rival among the live agents gives up at once. Known limit: this assumes no link inside a wildcard directory of a session glob
   points into another kind's session root (`logs/*/*.jsonl` with `logs/linked` pointing at `store`, against `store/*.jsonl`); such a
   setup can attribute a session to the wrong agent. This is decided from the manifests before any file is read,

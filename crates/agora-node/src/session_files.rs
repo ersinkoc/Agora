@@ -4,7 +4,8 @@
 //! A file is the agent's when it was written after the agent started, its first line passes `select`, names the agent's folder as its
 //! working directory, and its id is no other agent's. This is a guess that can be wrong, so it is made only when it cannot be confused.
 //! Two agents waiting in one folder are rivals when they are of one kind, or of kinds whose globs could match the same files (the fixed
-//! directory of one glob, before its first `*`, is the other's or holds it, as written or with links resolved), unless both `select`s
+//! directory of one glob, before its first `*`, is the other's or holds it, as written or with links resolved, even links whose target
+//! does not exist yet; a root that cannot be resolved counts as holding every other), unless both `select`s
 //! ask for different literal values at the same path. Every live agent with a rival is found at once, whichever is due. Known limit:
 //! discovery assumes that no link inside a *wildcard* directory of a session glob points into another kind's session root (for example
 //! `logs/*/*.jsonl` with `logs/linked` pointing at `store`, against `store/*.jsonl`); finding one would mean reading those directories on
@@ -12,7 +13,7 @@
 //! folder lose Resume in that folder rather than risk continuing the wrong conversation. Neither does an agent for which more than one
 //! new file fits (the window then offers Start again). An agent that has no file after [`GIVE_UP_AFTER`] gets none.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
@@ -138,9 +139,9 @@ fn session_in(file: &Path, spec: &SessionFile, folder: &Path) -> Option<String> 
     session_of(&first_line(file)?, spec, folder)
 }
 
-/// The fixed directory part of a session glob: its directories before the first one with a `*` (the file name never counts), with
-/// `{home}` replaced and `.` and `..` resolved without following links, and the same directory with links resolved (see [`resolve`]).
-fn session_root(glob: &str, home: &Path) -> (PathBuf, PathBuf) {
+/// The fixed directory part of a session glob, as written: its directories before the first one with a `*` (the file name never
+/// counts), with `{home}` replaced and `.` and `..` resolved without following links. No I/O.
+fn session_root(glob: &str, home: &Path) -> PathBuf {
     let glob = glob.replacen("{home}", &home.to_string_lossy(), 1);
     let glob = Path::new(&glob);
     let mut root = PathBuf::new();
@@ -154,67 +155,125 @@ fn session_root(glob: &str, home: &Path) -> (PathBuf, PathBuf) {
             c => root.push(c),
         }
     }
-    let canonical = resolve(&root);
-    (root, canonical)
+    root
 }
 
-/// `path` with links resolved in its longest existing prefix and the rest (folders not made yet) appended as written, so a root below
-/// a link resolves through the link before its own folder exists (Codex review of #791).
-fn resolve(path: &Path) -> PathBuf {
-    let mut base = path;
-    let mut missing = Vec::new();
-    loop {
-        if let Ok(mut c) = std::fs::canonicalize(base) {
-            c.extend(missing.iter().rev());
-            return c;
-        }
-        match (base.parent(), base.file_name()) {
-            (Some(parent), Some(name)) => {
-                missing.push(name);
-                base = parent;
+/// Most links followed while resolving one root (as Linux's `MAXSYMLINKS`).
+const MAX_LINK_HOPS: usize = 40;
+
+/// `path` with its links resolved, one component at a time: a link is read and followed even when what it points to does not exist
+/// yet (a relative target from the link's folder), and the folders that do not exist yet are kept as written, so a root resolves
+/// through a link before its own folder is made (Codex review of #791). `None` when it cannot be known (more than [`MAX_LINK_HOPS`]
+/// links, or an error other than "not found"): the caller then fails closed.
+fn resolve(path: &Path) -> Option<PathBuf> {
+    // One component per entry, so a link's target can be put in front of what is left.
+    let mut todo: VecDeque<PathBuf> = path
+        .components()
+        .map(|c| PathBuf::from(c.as_os_str()))
+        .collect();
+    let mut out = PathBuf::new();
+    let mut hops = 0;
+    let mut exists = true;
+    while let Some(part) = todo.pop_front() {
+        match part.components().next() {
+            None | Some(Component::CurDir) => {}
+            // An absolute target starts again from its root (`push` replaces).
+            Some(Component::Prefix(_)) | Some(Component::RootDir) => out.push(&part),
+            Some(Component::ParentDir) => {
+                out.pop();
             }
-            _ => return path.to_path_buf(),
+            Some(Component::Normal(name)) => {
+                let candidate = out.join(name);
+                if !exists {
+                    out = candidate;
+                    continue;
+                }
+                match std::fs::symlink_metadata(&candidate) {
+                    Ok(m) if m.file_type().is_symlink() => {
+                        hops += 1;
+                        if hops > MAX_LINK_HOPS {
+                            return None;
+                        }
+                        let target = std::fs::read_link(&candidate).ok()?;
+                        for c in target.components().rev() {
+                            todo.push_front(PathBuf::from(c.as_os_str()));
+                        }
+                    }
+                    Ok(_) => out = candidate,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        exists = false;
+                        out = candidate;
+                    }
+                    Err(_) => return None,
+                }
+            }
         }
     }
+    Some(out)
 }
 
-/// Whether two agents in one folder could have written each other's session files: they are of one kind, or their globs' fixed
-/// directories are the same or one holds the other (as written or with links resolved: either is enough, since `expand` follows
-/// links below the fixed part), unless both `select`s ask for different literal values at the same path.
-fn rivals(a: &Target, ra: &(PathBuf, PathBuf), b: &Target, rb: &(PathBuf, PathBuf)) -> bool {
-    if a.kind == b.kind {
-        return true;
-    }
-    if let (Some(x), Some(y)) = (&a.spec.select, &b.spec.select) {
-        if x.path == y.path && x.equals != y.equals {
-            return false;
-        }
-    }
-    let nested = |x: &Path, y: &Path| x.starts_with(y) || y.starts_with(x);
-    nested(&ra.0, &rb.0) || nested(&ra.1, &rb.1)
+/// Whether two agents' `select`s ask for different literal values at the same path: no first line can pass both.
+fn exclusive(a: &SessionFile, b: &SessionFile) -> bool {
+    matches!((&a.select, &b.select), (Some(x), Some(y)) if x.path == y.path && x.equals != y.equals)
 }
 
-/// Every live target that has a rival in its folder. Computed over all of them at once, whatever is due, so no pair is missed because
-/// one of its agents was already set aside (Codex review of #791). Not closed transitively: an agent without a rival of its own shares
-/// no possible file with any live agent, and every rival of an agent in the set is in the set itself.
+fn nested(x: &Path, y: &Path) -> bool {
+    x.starts_with(y) || y.starts_with(x)
+}
+
+/// Every live target that has a rival in its folder. Two agents in one folder are rivals when they are of one kind, or when their
+/// globs' fixed directories are the same or one holds the other (as written or with links resolved: either is enough, since `expand`
+/// follows links below the fixed part; a root that cannot be resolved counts as holding every other), unless their `select`s are
+/// exclusive. Computed over all of them at once, whatever is due, so no pair is missed because one of its agents was already set aside
+/// (Codex review of #791). Not closed transitively: an agent without a rival of its own shares no possible file with any live agent,
+/// and every rival of an agent in the set is in the set itself. Roots are resolved only for pairs that need it (two kinds in one
+/// folder, not exclusive, disjoint as written), so a root on a stalled mount never holds up an agent with no such neighbour.
 fn with_rivals(targets: &[Target], home: &Path) -> HashSet<AgentId> {
-    let roots: Vec<(PathBuf, PathBuf)> = targets
-        .iter()
-        .map(|t| session_root(&t.spec.glob, home))
-        .collect();
-    let folders: Vec<PathBuf> = targets
-        .iter()
-        .map(|t| std::fs::canonicalize(&t.folder).unwrap_or_else(|_| t.folder.clone()))
-        .collect();
+    with_rivals_using(targets, home, &mut |p| resolve(p))
+}
+
+fn with_rivals_using(
+    targets: &[Target],
+    home: &Path,
+    resolver: &mut dyn FnMut(&Path) -> Option<PathBuf>,
+) -> HashSet<AgentId> {
+    // Grouped by folder first (the comparison `same_dir` makes), so nothing is compared or resolved across folders.
+    let mut folders: HashMap<PathBuf, Vec<usize>> = HashMap::new();
+    for (i, t) in targets.iter().enumerate() {
+        let folder = std::fs::canonicalize(&t.folder).unwrap_or_else(|_| t.folder.clone());
+        folders.entry(folder).or_default().push(i);
+    }
+    let mut resolved: HashMap<usize, Option<PathBuf>> = HashMap::new();
     let mut out = HashSet::new();
-    for i in 0..targets.len() {
-        for j in i + 1..targets.len() {
-            if targets[i].agent != targets[j].agent
-                && folders[i] == folders[j]
-                && rivals(&targets[i], &roots[i], &targets[j], &roots[j])
-            {
-                out.insert(targets[i].agent.clone());
-                out.insert(targets[j].agent.clone());
+    for group in folders.values().filter(|g| g.len() > 1) {
+        for (n, &i) in group.iter().enumerate() {
+            for &j in &group[n + 1..] {
+                let (a, b) = (&targets[i], &targets[j]);
+                let rival = if a.agent == b.agent {
+                    false
+                } else if a.kind == b.kind {
+                    true
+                } else if exclusive(&a.spec, &b.spec) {
+                    false
+                } else {
+                    let (la, lb) = (
+                        session_root(&a.spec.glob, home),
+                        session_root(&b.spec.glob, home),
+                    );
+                    nested(&la, &lb) || {
+                        let ra = resolved.entry(i).or_insert_with(|| resolver(&la)).clone();
+                        let rb = resolved.entry(j).or_insert_with(|| resolver(&lb)).clone();
+                        match (ra, rb) {
+                            (Some(ra), Some(rb)) => nested(&ra, &rb),
+                            // Unknown: fail closed.
+                            _ => true,
+                        }
+                    }
+                };
+                if rival {
+                    out.insert(a.agent.clone());
+                    out.insert(b.agent.clone());
+                }
             }
         }
     }
@@ -1056,6 +1115,147 @@ mod tests {
             let found = with_rivals(&targets, &root.join("home"));
             let want: HashSet<AgentId> = targets.iter().map(|t| t.agent.clone()).collect();
             assert_eq!(found, want, "reverse={reverse}");
+        }
+    }
+
+    #[test]
+    fn session_roots_follow_a_link_whose_target_does_not_exist_yet() {
+        // Codex review of #791: `alias` links to `store/new` before `new` exists; `alias/*.jsonl` will find what `store/*/*.jsonl`
+        // finds. The link is made while its target exists, then the target is removed (a dangling link on every platform).
+        for reverse in [false, true] {
+            let root = tmp(if reverse {
+                "dangling-reversed"
+            } else {
+                "dangling"
+            });
+            std::fs::create_dir_all(root.join("home/store/new")).unwrap();
+            agora_platform::link_dir(&root.join("home/store/new"), &root.join("home/alias"))
+                .unwrap();
+            std::fs::remove_dir(root.join("home/store/new")).unwrap();
+            let mut targets = vec![
+                with_glob(
+                    target("tool-1", root.join("work/a")),
+                    "tool",
+                    "{home}/alias/*.jsonl",
+                ),
+                with_glob(
+                    target("variant-1", root.join("work/a")),
+                    "tool-variant",
+                    "{home}/store/*/*.jsonl",
+                ),
+            ];
+            if reverse {
+                targets.reverse();
+            }
+            let want: HashSet<AgentId> = targets.iter().map(|t| t.agent.clone()).collect();
+            assert_eq!(
+                with_rivals(&targets, &root.join("home")),
+                want,
+                "reverse={reverse}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_root_that_cannot_be_resolved_makes_its_agent_a_rival_of_other_kinds_in_its_folder() {
+        // Fail closed: too many links, or an error, leaves the root unknown.
+        for reverse in [false, true] {
+            let root = tmp(if reverse {
+                "unknown-reversed"
+            } else {
+                "unknown"
+            });
+            let mut targets = vec![
+                with_glob(
+                    target("tool-1", root.join("work/a")),
+                    "tool",
+                    "{home}/.tool/s/*.jsonl",
+                ),
+                with_glob(
+                    target("variant-1", root.join("work/a")),
+                    "tool-variant",
+                    "{home}/.lost/s/*.jsonl",
+                ),
+            ];
+            if reverse {
+                targets.reverse();
+            }
+            let mut unknown =
+                |p: &Path| (!p.to_string_lossy().contains(".lost")).then(|| p.to_path_buf());
+            let want: HashSet<AgentId> = targets.iter().map(|t| t.agent.clone()).collect();
+            assert_eq!(
+                with_rivals_using(&targets, &root.join("home"), &mut unknown),
+                want,
+                "reverse={reverse}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_folders_shared_by_agents_of_different_kinds_have_their_roots_resolved() {
+        // Codex review of #791: a root on a stalled mount must not hold up discovery for unrelated folders.
+        for reverse in [false, true] {
+            let root = tmp(if reverse {
+                "resolve-reversed"
+            } else {
+                "resolve"
+            });
+            let mut targets = vec![
+                // Alone in its folder: never compared, never resolved.
+                with_glob(
+                    target("lone-1", root.join("work/b")),
+                    "lone",
+                    "{home}/.lone/s/*.jsonl",
+                ),
+                // Two of one kind: rivals by kind, nothing to resolve.
+                with_glob(
+                    target("twin-1", root.join("work/c")),
+                    "twin",
+                    "{home}/.twin/s/*.jsonl",
+                ),
+                with_glob(
+                    target("twin-2", root.join("work/c")),
+                    "twin",
+                    "{home}/.twin/s/*.jsonl",
+                ),
+                // Two kinds whose roots are disjoint as written: resolved to compare.
+                with_glob(
+                    target("tool-1", root.join("work/a")),
+                    "tool",
+                    "{home}/.tool/s/*.jsonl",
+                ),
+                with_glob(
+                    target("variant-1", root.join("work/a")),
+                    "tool-variant",
+                    "{home}/.other/s/*.jsonl",
+                ),
+            ];
+            std::fs::create_dir_all(root.join("work/c")).unwrap();
+            if reverse {
+                targets.reverse();
+            }
+            let mut seen: Vec<PathBuf> = Vec::new();
+            let mut counting = |p: &Path| {
+                seen.push(p.to_path_buf());
+                Some(p.to_path_buf())
+            };
+            let found = with_rivals_using(&targets, &root.join("home"), &mut counting);
+            let want: HashSet<AgentId> = [AgentId::new("twin-1"), AgentId::new("twin-2")].into();
+            assert_eq!(found, want, "reverse={reverse}");
+            let resolved: Vec<String> = seen
+                .iter()
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect();
+            assert!(
+                resolved
+                    .iter()
+                    .all(|p| !p.contains(".lone") && !p.contains(".twin")),
+                "reverse={reverse}: {resolved:?}"
+            );
+            assert!(
+                resolved.iter().any(|p| p.contains(".other")),
+                "reverse={reverse}: {resolved:?}"
+            );
         }
     }
 
