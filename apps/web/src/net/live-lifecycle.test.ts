@@ -235,6 +235,28 @@ describe('live stream ownership', () => {
     });
   }
 
+  // Codex review of #792: the hub may refuse the subscription before it ends the relay; the close's earlier retry still wins.
+  for (const kind of ['terminal', 'chat'] as const) {
+    it(`retries a ${kind} after 500 ms when its subscription was refused before its relay ended`, async () => {
+      const t = setup();
+      const s = t.sockets[0]!;
+      s.onopen!();
+      if (kind === 'terminal') t.live.terminal('n', 'x').connect(() => {});
+      else t.live.chat('n', 'x').connect(() => {});
+      refuse(s, subscriptions(s)[0]!);
+      await flush();
+      ended(s, 3);
+      await vi.advanceTimersByTimeAsync(499);
+      expect(subscriptions(s)).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(subscriptions(s)).toHaveLength(2);
+      // Still one retry: the refusal's later one was replaced, not added.
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(subscriptions(s)).toHaveLength(2);
+      t.live.close();
+    });
+  }
+
   it('drops a retry due on a dropped connection and still retries on the new one', async () => {
     const t = setup();
     const old = t.sockets[0]!;

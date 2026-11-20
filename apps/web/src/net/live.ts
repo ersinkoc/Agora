@@ -111,6 +111,8 @@ const browserWake = (poke: () => void): (() => void) => {
   };
 };
 
+type Due = { due?: number; at?: number; timer?: ReturnType<typeof setTimeout> };
+
 export function connectLive(o: LiveOptions): Live {
   const open = o.socket ?? browserSocket;
   const backoff = o.backoffMs ?? defaultBackoff;
@@ -132,22 +134,26 @@ export function connectLive(o: LiveOptions): Live {
   let generation = 0;
   const later = (ms: number, fn: () => void) => {
     const g = generation;
-    setTimeout(() => { if (g === generation && !closed) fn(); }, ms);
+    return setTimeout(() => { if (g === generation && !closed) fn(); }, ms);
   };
   const pending = new Map<string, { resolve: (ok: agora.v1.CommandOk.$Properties) => void; reject: (e: CommandError) => void; node: string; body: CommandBody }>();
   // `size`: what fits the window's view of the terminal, said again after every (re)subscription: the hub counts a window's size
   // only while it watches the terminal, and forgets it with the connection (docs/specs/protocol.md "Shared terminal size").
-  // `due`: the connection (generation) on which a resubscription is already scheduled for the stream.
-  const terminals = new Map<number, { node: string; terminalId: string; onEvent: (e: TerminalEvent) => void; size?: { cols: number; rows: number }; due?: number }>();
+  // `due`: the connection (generation) on which a resubscription is already scheduled for the stream, when it fires, and its timer.
+  const terminals = new Map<number, { node: string; terminalId: string; onEvent: (e: TerminalEvent) => void; size?: { cols: number; rows: number } } & Due>();
 
-  const chats = new Map<number, { node: string; agentId: string; onLines: (lines: ChatLine[], replace: boolean) => void; due?: number }>();
+  const chats = new Map<number, { node: string; agentId: string; onLines: (lines: ChatLine[], replace: boolean) => void } & Due>();
 
   // At most one resubscription waits per stream and connection: a relay the hub ended while its subscription was still in flight
-  // (the node left) is also refused, and the two must not each start a retry that goes on by itself.
-  const resubscribe = (entry: { due?: number }, ms: number, again: () => void) => {
-    if (entry.due === generation) return;
+  // (the node left) is also refused, and the two must not each start a retry that goes on by itself. The hub may send the two in
+  // either order, so a request that is due sooner replaces the waiting one; a later one is dropped.
+  const resubscribe = (entry: Due, ms: number, again: () => void) => {
+    const at = Date.now() + ms;
+    if (entry.due === generation && entry.at !== undefined && entry.at <= at) return;
+    if (entry.due === generation) clearTimeout(entry.timer);
     entry.due = generation;
-    later(ms, () => { entry.due = undefined; again(); });
+    entry.at = at;
+    entry.timer = later(ms, () => { entry.due = undefined; entry.at = undefined; entry.timer = undefined; again(); });
   };
 
   const request = (stream: number, node: string, body: CommandBody): Promise<agora.v1.CommandOk.$Properties> =>
