@@ -1018,6 +1018,13 @@ impl<W: Write> Bridge<W> {
             "result": {"outcome": {"outcome": "cancelled"}}}));
     }
 
+    /// Forgets every pending permission, answering each `cancelled` first: the agent still waits for those answers.
+    fn cancel_permissions(&mut self) {
+        for permission in std::mem::take(&mut self.perms).into_values() {
+            self.cancel_permission(permission.request);
+        }
+    }
+
     /// The agent's output ended and it exited (`exit_code` when known). Every request the node still waits for is answered with
     /// `adapter.agent_exited` and the stage it was in; a `log` line says the same, so an exit in the middle of a turn or while
     /// idle is reported too.
@@ -1434,9 +1441,7 @@ impl<W: Write> Bridge<W> {
                         }
                     }
                     self.tell_agent("session/cancel", json!({"sessionId": sid}));
-                    for permission in std::mem::take(&mut self.perms).into_values() {
-                        self.cancel_permission(permission.request);
-                    }
+                    self.cancel_permissions();
                 }
             }
             "approval/resolve" => {
@@ -1872,7 +1877,7 @@ impl<W: Write> Bridge<W> {
                                     self.waiting.retain(|_, request| {
                                         !matches!(request, Waiting::Prompt { .. })
                                     });
-                                    self.perms.clear();
+                                    self.cancel_permissions();
                                 }
                                 let state = self.session_state.entry(sid.clone()).or_default();
                                 self.session = Some(sid.clone());
@@ -1931,7 +1936,7 @@ impl<W: Write> Bridge<W> {
                         // (whether it was empty cannot be told).
                         let still_open = self.prompt_open();
                         if !still_open {
-                            self.perms.clear();
+                            self.cancel_permissions();
                         }
                         match turn_outcome(msg, self.said || still_open) {
                             Some((code, mut params)) => {
@@ -2670,6 +2675,55 @@ mod tests {
         assert!(
             states(&b.out).is_empty(),
             "a late reply to the cancelled prompt changes nothing"
+        );
+        Ok(())
+    }
+
+    /// Codex review of #794: a permission the agent still waits for is answered `cancelled` before the bridge forgets it. Here the
+    /// cancelled turn, retired by the next prompt, asks for a permission and then refuses that prompt as busy; that reply ends the
+    /// turn, and the agent must not be left waiting for an answer to its request. The agent is `cat`, so what it was sent is read
+    /// back (where there is no `cat`, there is nothing to prove).
+    #[test]
+    fn a_permission_dropped_when_the_turn_ends_is_answered_cancelled(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use serde_json::json;
+        use std::io::Read;
+        use std::process::{Command, Stdio};
+        let Ok(mut cat) = Command::new("cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+        else {
+            return Ok(());
+        };
+        let mut b = bridge_in_session()?;
+        b.agent = cat.stdin.take().ok_or("cat stdin")?;
+        let mut agent_out = cat.stdout.take().ok_or("cat stdout")?;
+        let _ = b.handle_node(
+            &json!({"jsonrpc":"2.0","id":10,"method":"session/prompt","params":{"text":"t"}}),
+        )?;
+        let _ =
+            b.handle_node(&json!({"jsonrpc":"2.0","id":11,"method":"session/cancel","params":{}}))?;
+        let _ = b.handle_node(
+            &json!({"jsonrpc":"2.0","id":12,"method":"session/prompt","params":{"text":"u"}}),
+        )?;
+        ask(&mut b, "old-perm")?;
+        b.out.clear();
+        b.handle_agent(&json!({"jsonrpc":"2.0","id":2,"error":{"code":-32603,"message":"busy"}}))?;
+        assert_eq!(states(&b.out), ["AGENT_STATE_IDLE"]);
+        assert!(b.perms.is_empty());
+        drop(b);
+        let mut sent = String::new();
+        agent_out.read_to_string(&mut sent)?;
+        let _ = cat.wait();
+        let answer = sent
+            .lines()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .find(|v| v["id"] == "old-perm" && v.get("method").is_none());
+        assert_eq!(
+            answer.map(|v| v["result"]["outcome"]["outcome"].clone()),
+            Some(json!("cancelled")),
+            "the agent's permission request is answered: {sent}"
         );
         Ok(())
     }

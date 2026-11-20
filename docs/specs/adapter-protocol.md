@@ -152,7 +152,9 @@ with the node's `mcpServers` (the agent's mesh server) as ACP stdio servers `{na
 without a name or command, or with an argument that is not a string, is dropped). ACP requires every agent to take stdio servers, so
 they are always sent unless the agent's `initialize` says `agentCapabilities.mcpCapabilities.stdio: false`;
 `session/prompt` → `session/prompt` with one text block. `session/cancel` sends the ACP `session/cancel` notification. The bridge
-replies `cancelled` to pending ACP permission requests and to requests that arrive before the cancelled turn completes.
+replies `cancelled` to pending ACP permission requests and to requests that arrive before the cancelled turn completes. A pending
+permission request the bridge drops for any other reason (the turn's last prompt was answered, the session changed) is answered
+`cancelled` too, so the agent never waits for an answer that cannot come.
 `session/set_option` → ACP `session/set_mode { sessionId, modeId }` or `session/set_model { sessionId, modelId }` for an id the
 agent offered (anything else is refused by the bridge without asking the agent), answered once the agent answered, and followed by
 `session/options` with the new current mode or model; an agent's error answer is `adapter.option_refused`;
