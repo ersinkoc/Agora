@@ -5,7 +5,10 @@
 //! working directory, and its id is no other agent's. This is a guess that can be wrong, so it is made only when it cannot be confused.
 //! Two agents waiting in one folder are rivals when they are of one kind, or of kinds whose globs could match the same files (the fixed
 //! directory of one glob, before its first `*`, is the other's or holds it, as written or with links resolved), unless both `select`s
-//! ask for different literal values at the same path. Every live agent with a rival is found at once, whichever is due. This is decided from the manifests, before any file is read: rivals get no id at all, so kinds that share a session
+//! ask for different literal values at the same path. Every live agent with a rival is found at once, whichever is due. Known limit:
+//! discovery assumes that no link inside a *wildcard* directory of a session glob points into another kind's session root (for example
+//! `logs/*/*.jsonl` with `logs/linked` pointing at `store`, against `store/*.jsonl`); finding one would mean reading those directories on
+//! every poll. Such a setup can attribute a session to the wrong agent. This is decided from the manifests, before any file is read: rivals get no id at all, so kinds that share a session
 //! folder lose Resume in that folder rather than risk continuing the wrong conversation. Neither does an agent for which more than one
 //! new file fits (the window then offers Start again). An agent that has no file after [`GIVE_UP_AFTER`] gets none.
 
@@ -136,7 +139,7 @@ fn session_in(file: &Path, spec: &SessionFile, folder: &Path) -> Option<String> 
 }
 
 /// The fixed directory part of a session glob: its directories before the first one with a `*` (the file name never counts), with
-/// `{home}` replaced and `.` and `..` resolved without following links, and the same directory with links resolved when it exists.
+/// `{home}` replaced and `.` and `..` resolved without following links, and the same directory with links resolved (see [`resolve`]).
 fn session_root(glob: &str, home: &Path) -> (PathBuf, PathBuf) {
     let glob = glob.replacen("{home}", &home.to_string_lossy(), 1);
     let glob = Path::new(&glob);
@@ -151,8 +154,28 @@ fn session_root(glob: &str, home: &Path) -> (PathBuf, PathBuf) {
             c => root.push(c),
         }
     }
-    let canonical = std::fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
+    let canonical = resolve(&root);
     (root, canonical)
+}
+
+/// `path` with links resolved in its longest existing prefix and the rest (folders not made yet) appended as written, so a root below
+/// a link resolves through the link before its own folder exists (Codex review of #791).
+fn resolve(path: &Path) -> PathBuf {
+    let mut base = path;
+    let mut missing = Vec::new();
+    loop {
+        if let Ok(mut c) = std::fs::canonicalize(base) {
+            c.extend(missing.iter().rev());
+            return c;
+        }
+        match (base.parent(), base.file_name()) {
+            (Some(parent), Some(name)) => {
+                missing.push(name);
+                base = parent;
+            }
+            _ => return path.to_path_buf(),
+        }
+    }
 }
 
 /// Whether two agents in one folder could have written each other's session files: they are of one kind, or their globs' fixed
@@ -1007,7 +1030,35 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
+    #[test]
+    fn session_roots_resolve_links_before_their_folder_exists() {
+        // Codex review of #791: `alias` links to `store`, `store/new` does not exist yet; `alias/new/*.jsonl` will find files that
+        // `store/*/*.jsonl` finds, so the two are rivals already.
+        for reverse in [false, true] {
+            let root = tmp(if reverse { "alias-reversed" } else { "alias" });
+            std::fs::create_dir_all(root.join("home/store")).unwrap();
+            agora_platform::link_dir(&root.join("home/store"), &root.join("home/alias")).unwrap();
+            let mut targets = vec![
+                with_glob(
+                    target("tool-1", root.join("work/a")),
+                    "tool",
+                    "{home}/alias/new/*.jsonl",
+                ),
+                with_glob(
+                    target("variant-1", root.join("work/a")),
+                    "tool-variant",
+                    "{home}/store/*/*.jsonl",
+                ),
+            ];
+            if reverse {
+                targets.reverse();
+            }
+            let found = with_rivals(&targets, &root.join("home"));
+            let want: HashSet<AgentId> = targets.iter().map(|t| t.agent.clone()).collect();
+            assert_eq!(found, want, "reverse={reverse}");
+        }
+    }
+
     #[test]
     fn session_roots_that_meet_through_a_linked_folder_are_rivals() {
         // Codex review of #791: `logs/linked` links to `store`; `logs/*/*.jsonl` and `logs/linked/*.jsonl` find the same file, but
@@ -1016,7 +1067,7 @@ mod tests {
             let root = tmp(if reverse { "linked-reversed" } else { "linked" });
             std::fs::create_dir_all(root.join("home/logs")).unwrap();
             std::fs::create_dir_all(root.join("home/store")).unwrap();
-            std::os::unix::fs::symlink(root.join("home/store"), root.join("home/logs/linked"))
+            agora_platform::link_dir(&root.join("home/store"), &root.join("home/logs/linked"))
                 .unwrap();
             let mut targets = vec![
                 with_glob(

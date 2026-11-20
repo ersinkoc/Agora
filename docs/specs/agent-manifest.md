@@ -272,7 +272,9 @@ The node holds a session id only when it learned one:
   none (a file cannot say which is whose), when they are of one kind, or of kinds whose globs could match the same files: the fixed
   directory of one glob (before its first `*`, with `{home}` replaced, `.` and `..` resolved) is the other's or holds it, as written or
   with links resolved. They are not rivals when both `select`s ask for different values at the same `path`. Every waiting agent with
-  a rival among the live agents gives up at once. This is decided from the manifests before any file is read,
+  a rival among the live agents gives up at once. Known limit: this assumes no link inside a wildcard directory of a session glob
+  points into another kind's session root (`logs/*/*.jsonl` with `logs/linked` pointing at `store`, against `store/*.jsonl`); such a
+  setup can attribute a session to the wrong agent. This is decided from the manifests before any file is read,
   so kinds that share a session folder lose Resume in that folder rather than risk continuing the wrong conversation. An agent for
   which two files fit gets none either. The first line counts without its `\n` or `\r\n`. A session file's id must be a UUID. An agent without an id can only be started again in its folder, never resumed.
 - **Every id that goes on a command line** (`[resume]`, `id_args`) must start with a letter or digit and hold only letters, digits,
