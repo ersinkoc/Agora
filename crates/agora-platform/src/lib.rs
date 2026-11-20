@@ -7,8 +7,10 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 
+mod confined;
 #[cfg(windows)]
 mod conpty;
+pub use confined::{not_confined, valid_component, ConfinedDir, Entry, EntryKind, NotConfined};
 mod held;
 #[cfg(not(unix))]
 mod nohold;
