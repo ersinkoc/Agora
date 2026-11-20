@@ -397,11 +397,19 @@ mod tests {
             }
         }
         // A program that closes its output and keeps running does not make the wait loop spin.
-        let p = script("closed", "exec >&-\nsleep 2");
-        LOOPS.store(0, std::sync::atomic::Ordering::Relaxed);
-        let t = Instant::now();
-        let _ = run_program(p.as_os_str(), &[], Duration::from_secs(5), 1024);
-        let turns = LOOPS.load(std::sync::atomic::Ordering::Relaxed);
+        // A start can fail for a moment with "text file busy" when another test forks while the
+        // script is still open for writing; that is not what this case checks, so try again.
+        let mut tries = 0;
+        let (t, turns) = loop {
+            let p = script("closed", "exec >&-\nsleep 2");
+            LOOPS.store(0, std::sync::atomic::Ordering::Relaxed);
+            let t = Instant::now();
+            let r = run_program(p.as_os_str(), &[], Duration::from_secs(5), 1024);
+            tries += 1;
+            if r != Err(Problem::Failed) || t.elapsed() >= Duration::from_secs(1) || tries >= 5 {
+                break (t, LOOPS.load(std::sync::atomic::Ordering::Relaxed));
+            }
+        };
         assert!(t.elapsed() >= Duration::from_secs(1));
         assert!(turns < 600, "{turns} turns in {:?}", t.elapsed());
         // Never ends, and prints nothing.

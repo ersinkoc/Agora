@@ -49,6 +49,9 @@ const PATHS = {
   code: 'M6 5L3 8l3 3M10 5l3 3-3 3',
   image: 'M2.5 3.5h11v9h-11zM2.5 11l3.5-3.5 3 3 2-2 2.5 2.5',
   chevronDown: 'M4 6l4 4 4-4',
+  // The title bar's Settings (a gear) and Machines (stacked servers).
+  settings: 'M6.9 3.2L7.1 1.7L8.9 1.7L9.1 3.2L10.6 3.8L11.9 2.9L13.1 4.1L12.2 5.4L12.8 6.9L14.3 7.1L14.3 8.9L12.8 9.1L12.2 10.6L13.1 11.9L11.9 13.1L10.6 12.2L9.1 12.8L8.9 14.3L7.1 14.3L6.9 12.8L5.4 12.2L4.1 13.1L2.9 11.9L3.8 10.6L3.2 9.1L1.7 8.9L1.7 7.1L3.2 6.9L3.8 5.4L2.9 4.1L4.1 2.9L5.4 3.8zM8 10.2a2.2 2.2 0 1 0 0-4.4 2.2 2.2 0 0 0 0 4.4z',
+  stack: 'M2.5 2.5h11v4h-11zM2.5 9.5h11v4h-11zM5 4.5h.01M5 11.5h.01M8 4.5h4M8 11.5h4',
   clock: 'M8 14a6 6 0 1 0 0-12 6 6 0 0 0 0 12zM8 4.5V8l2.3 1.4',
 } as const;
 export type IconName = keyof typeof PATHS;

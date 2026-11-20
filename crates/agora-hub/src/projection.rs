@@ -189,7 +189,16 @@ pub struct View {
     /// client whose position is at or before this one (the end of the log when the hub opened over such a record; 0 when there is none, which a position never is) is
     /// given a snapshot, not a replay. Stored events are never rewritten.
     pub distrusted_until: u64,
+    /// ADR-0091: the newest `AgentQuotaObserved` per (machine, tool, window), a small bounded table ([`MAX_QUOTA_PER_NODE`] per
+    /// machine). It carries no secret: percentage, reset time and labels only. Replayed to a window that connects later.
+    pub quota: BTreeMap<(String, String, String), agora_protocol::v1::AgentQuotaObserved>,
 }
+
+/// ADR-0091: the most windows the hub keeps per machine (a node holds to 32; this is the hub's own bound). Past it the oldest
+/// observation of that machine goes.
+pub const MAX_QUOTA_PER_NODE: usize = 64;
+/// The longest tool or window label the hub keeps (a longer one is not a label a node would send).
+const MAX_QUOTA_LABEL: usize = 64;
 
 /// What a node may say about machines (threat model T19): `Ok(Some(id))` is the node a fact names, which must be the sender;
 /// `Ok(None)` is a fact that names none; `Err(field)` is a fact only the hub writes (producer `hub`). Every body is listed, so a new
@@ -306,6 +315,15 @@ impl View {
     pub fn session_replay(&self) -> Vec<Event> {
         let shown = self.shown();
         let mut out = Vec::new();
+        // ADR-0091: the plan-limit observations of the shown machines, as the nodes sent them (each replaces its window's).
+        for q in shown.quota.values() {
+            out.push(Event {
+                producer_id: q.node_id.clone(),
+                seq: 0,
+                at_ms: 0,
+                body: Some(Body::AgentQuotaObserved(q.clone())),
+            });
+        }
         for a in shown.agents.values().filter(|a| a.running && !a.forgotten) {
             let one = |body| Event {
                 producer_id: a.node_id.clone(),
@@ -349,6 +367,8 @@ impl View {
         v.agents.retain(|k, _| keep(k));
         v.trusted_devices
             .retain(|id, _| !hidden.contains(id.as_str()));
+        v.quota
+            .retain(|(node, _, _), _| !hidden.contains(node.as_str()));
         std::borrow::Cow::Owned(v)
     }
 
@@ -623,8 +643,45 @@ impl View {
             }
             Body::AgentForgotten(_) => {}
             // ADR-0090: the last report of each is kept per agent (replaced, bounded) and replayed to a window that connects later.
-            // ADR-0091: relayed to windows; the hub keeps no table of it yet (a later step).
-            Body::AgentQuotaObserved(_) => {}
+            // ADR-0091: the newest observation per (machine, tool, window); bounded per machine, the oldest goes first.
+            Body::AgentQuotaObserved(e) => {
+                let fits = e.node_id == producer
+                    && !e.tool.is_empty()
+                    && !e.window.is_empty()
+                    && e.tool.len() <= MAX_QUOTA_LABEL
+                    && e.window.len() <= MAX_QUOTA_LABEL;
+                // The receiving session already cut a time ahead of the hub's clock; this is the second, deterministic bound for
+                // history: never more than the event's own time plus a little skew (when it has one).
+                let mut e = e.clone();
+                if ev.at_ms > 0 {
+                    e.observed_at_ms = e
+                        .observed_at_ms
+                        .min(ev.at_ms.saturating_add(crate::session::QUOTA_SKEW_MS));
+                }
+                let key = (e.node_id.clone(), e.tool.clone(), e.window.clone());
+                if fits
+                    && self
+                        .quota
+                        .get(&key)
+                        .is_none_or(|old| e.observed_at_ms >= old.observed_at_ms)
+                {
+                    let node = e.node_id.clone();
+                    self.quota.insert(key, e);
+                    // Keys sort by machine first, so one machine's windows are a slice, not a scan of every machine's.
+                    let lo = (node.clone(), String::new(), String::new());
+                    let mine = self
+                        .quota
+                        .range(lo..)
+                        .take_while(|(k, _)| k.0 == node)
+                        .map(|(k, v)| (v.observed_at_ms, k.clone()))
+                        .collect::<Vec<_>>();
+                    if mine.len() > MAX_QUOTA_PER_NODE {
+                        if let Some((_, oldest)) = mine.into_iter().min() {
+                            self.quota.remove(&oldest);
+                        }
+                    }
+                }
+            }
             Body::AgentSessionConfig(e) => {
                 if let Some(a) = self.agents.get_mut(&q(&e.agent_id)) {
                     let fits = e.options.len() <= MAX_CONFIG_OPTIONS
@@ -814,6 +871,131 @@ mod tests {
         let mut v = View::default();
         v.apply(&quota("n1", "n1"));
         assert!(v.agents.is_empty());
+    }
+
+    fn quota_ev(node: &str, tool: &str, window: &str, pct: u32, at: u64) -> Event {
+        Event {
+            producer_id: node.into(),
+            seq: 1,
+            body: Some(Body::AgentQuotaObserved(AgentQuotaObserved {
+                node_id: node.into(),
+                tool: tool.into(),
+                window: window.into(),
+                used_percent: pct,
+                observed_at_ms: at,
+                ..AgentQuotaObserved::default()
+            })),
+            ..Event::default()
+        }
+    }
+
+    fn replayed_percent(v: &View) -> Vec<(String, String, u32)> {
+        v.session_replay()
+            .iter()
+            .filter_map(|e| match &e.body {
+                Some(Body::AgentQuotaObserved(q)) => {
+                    Some((q.node_id.clone(), q.window.clone(), q.used_percent))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_newest_quota_observation_per_machine_tool_and_window_is_kept_and_replayed() {
+        let mut v = View::default();
+        v.apply(&quota_ev("n1", "codex", "five_hour", 10, 100));
+        v.apply(&quota_ev("n1", "codex", "five_hour", 30, 200));
+        // An older one (a late relay) does not replace the newer.
+        v.apply(&quota_ev("n1", "codex", "five_hour", 5, 150));
+        v.apply(&quota_ev("n1", "codex", "seven_day", 50, 100));
+        v.apply(&quota_ev("n2", "codex", "five_hour", 90, 100));
+        assert_eq!(
+            replayed_percent(&v),
+            [
+                ("n1".to_string(), "five_hour".to_string(), 30),
+                ("n1".to_string(), "seven_day".to_string(), 50),
+                ("n2".to_string(), "five_hour".to_string(), 90),
+            ]
+        );
+        // A forgotten machine is not replayed; its records stay for when it comes back.
+        v.nodes.insert(
+            "n2".into(),
+            NodeView {
+                forgotten: true,
+                ..NodeView::unknown(false)
+            },
+        );
+        assert_eq!(replayed_percent(&v).len(), 2);
+        assert_eq!(v.quota.len(), 3);
+    }
+
+    #[test]
+    fn a_future_dated_reading_is_cut_back_and_cannot_win_forever() {
+        let at = |t: u64| {
+            let mut e = quota_ev("n1", "codex", "five_hour", 10, t);
+            e.at_ms = 1_000_000;
+            e
+        };
+        // The session cuts a time ahead of the hub's clock; the stored event carries the cut.
+        let future = at(1_000_000 + 86_400_000);
+        let cut = crate::session::bound_quota_time(&future, 1_000_000).expect("cut");
+        let back = <Event as prost::Message>::decode(cut.as_slice()).unwrap();
+        match back.body {
+            Some(Body::AgentQuotaObserved(q)) => assert_eq!(q.observed_at_ms, 1_000_000 + 120_000),
+            other => panic!("{other:?}"),
+        }
+        assert!(crate::session::bound_quota_time(&at(1_000_000 + 60_000), 1_000_000).is_none());
+        // History is bounded by the event's own time too: a day ahead counts as two minutes ahead.
+        let mut v = View::default();
+        v.apply(&future);
+        assert_eq!(
+            v.quota.values().next().unwrap().observed_at_ms,
+            1_000_000 + 120_000
+        );
+        // A node whose clock was corrected backwards is read again: a later honest reading is newer than the cut one.
+        let mut honest = quota_ev("n1", "codex", "five_hour", 70, 1_000_000 + 200_000);
+        honest.at_ms = 1_000_000 + 200_000;
+        v.apply(&honest);
+        assert_eq!(v.quota.values().next().unwrap().used_percent, 70);
+    }
+
+    #[test]
+    fn the_quota_table_is_bounded_per_machine_and_refuses_labels_that_are_not_labels() {
+        let mut v = View::default();
+        for i in 0..(MAX_QUOTA_PER_NODE as u64 + 10) {
+            v.apply(&quota_ev(
+                "n1",
+                "codex",
+                &format!("minutes:{i}"),
+                1,
+                1000 + i,
+            ));
+        }
+        v.apply(&quota_ev("n2", "codex", "five_hour", 1, 1));
+        let n1 = v.quota.keys().filter(|k| k.0 == "n1").count();
+        assert_eq!(n1, MAX_QUOTA_PER_NODE);
+        assert!(
+            !v.quota
+                .contains_key(&("n1".into(), "codex".into(), "minutes:0".into())),
+            "the oldest went first"
+        );
+        assert!(
+            v.quota
+                .contains_key(&("n2".into(), "codex".into(), "five_hour".into())),
+            "another machine is not squeezed"
+        );
+        v.apply(&quota_ev("n3", "codex", &"w".repeat(65), 1, 1));
+        v.apply(&quota_ev("n3", "", "five_hour", 1, 1));
+        assert!(v.quota.keys().all(|k| k.0 != "n3"));
+        // A node speaking for another machine is not kept even if it got this far.
+        v.apply(&quota_ev("n3", "codex", "five_hour", 1, 1));
+        let mut forged = quota_ev("n3", "codex", "seven_day", 1, 1);
+        forged.producer_id = "n4".into();
+        v.apply(&forged);
+        assert!(!v
+            .quota
+            .contains_key(&("n3".into(), "codex".into(), "seven_day".into())));
     }
 
     fn ev(producer: &str, seq: u64, body: Body) -> Event {

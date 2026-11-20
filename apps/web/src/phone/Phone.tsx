@@ -1,4 +1,6 @@
 import { Suspense, lazy, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
+import type { ActionResult } from '../net/refusal';
+import { SkipApproval } from '../components/SkipApproval';
 import { approvalName } from '../net/approvalText';
 import { t } from '../i18n';
 import { endedWithError, type AgentTileModel } from '../model';
@@ -8,6 +10,7 @@ import type { ChatSource } from '../net/chat';
 import { dismiss, dismissedIds, subscribeDismissed } from '../net/dismissed';
 import type { UsageSummary } from '../net/usage';
 import { Icon, type IconName } from '../components/Icon';
+import { CloseAgentMenu, CloseConfirm } from '../components/CloseAgent';
 import { StateBadge, StateMark } from '../components/StateBadge';
 import { NoAskBadge } from '../components/NoAskBadge';
 import { ThemePicker } from '../components/ThemePicker';
@@ -89,6 +92,8 @@ function ApprovalCard({ approval: x, machine, untrusted: notTrusted, onResolve, 
   const untrusted = notTrusted && <div className="phone-card__hint"><p className="m-0">{t('phone-untrusted', { machine })}</p><a className="phone-chipbtn justify-self-start" href="#/device">{t('device-link')}</a></div>;
   // A request to start an agent is never answered from the bar: it is read whole in its card (it carries a folder, a prompt and settings).
   if (x.start) return <div id={`phone-ask-${x.id}`} className="phone-card phone-card--needs">{untrusted}<StartApproval approval={x} start={x.start} busy={busy || !onResolve || stale} onResolve={(ok, choice) => answer(ok, choice)} />{stale && <p className="phone-card__why m-0">{t('fleet-stale-no-answer')}</p>}</div>;
+  // ADR-0090 Amendment A: a switch to a mode that skips permissions is read in the node's own rendering, never as raw text.
+  if (x.skip || x.skipUnknown) return <div id={`phone-ask-${x.id}`} className="phone-card phone-card--needs">{untrusted}<SkipApproval approval={x} busy={busy || stale} onResolve={onResolve ? (ok) => answer(ok) : undefined} />{stale && <p className="phone-card__why m-0">{t('fleet-stale-no-answer')}</p>}</div>;
   return (
     <article id={`phone-ask-${x.id}`} className="phone-card phone-card--needs" aria-label={t('approval-title', { name: approvalName(x) })}>
       <button type="button" className="phone-card__head" onClick={onOpen} disabled={!onOpen}>
@@ -241,8 +246,8 @@ export function PhoneHome({ agents, machines, approvals, onResolve, untrusted, n
       bottom={<>
         <NavButton icon="search" label={t('phone-search')} onClick={onCommand} />
         <NavButton icon="plus" label={t('phone-start')} onClick={onStart} primary />
-        <NavButton icon="machine" label={t('phone-machines')} href="#/machines" />
-        <NavButton icon="lock" label={t('device-link')} href="#/device" />
+        <NavButton icon="stack" label={t('phone-machines')} href="#/machines" />
+        <NavButton icon="settings" label={t('device-link')} href="#/device" />
       </>}>
       {notice && <p role="alert" className="phone-notice">{notice}</p>}
       {/* The state of the link has a row of its own (in the title bar it pushed the buttons off a 390 px screen): one notice, what it means and Retry. */}
@@ -288,7 +293,7 @@ export function PhoneAgent({ agent, agents, approvals, machines, onResolve, untr
   source?: TerminalSource;
   chatSource?: ChatSource;
   sendPrompt?: PromptSend;
-  chooseOption?: (agentKey: string, kind: 'mode' | 'model', id: string) => Promise<boolean>;
+  chooseOption?: (agentKey: string, kind: 'mode' | 'model', id: string) => Promise<ActionResult>;
   /** What the agent changed (the review screen) and its files (the file browser), as on the desktop; absent without a hub. */
   loadDiff?: (agent: AgentTileModel, path?: string) => Promise<DiffSource>;
   filesOf?: (agent: AgentTileModel) => WorkspaceFiles | undefined;
@@ -319,10 +324,12 @@ export function PhoneAgent({ agent, agents, approvals, machines, onResolve, untr
           {agent && <span className="flex min-w-0 items-center gap-2 text-xs text-muted"><StateBadge state={agent.state} /><span className="truncate">{agent.machine}</span></span>}
         </div>
         {agent && <NoAskBadge agent={agent} />}
+        {agent && <CloseAgentMenu agent={agent} />}
         {next && <button type="button" className="phone-chipbtn text-needs-you" onClick={() => onOpen(next)}>{t('phone-next', { count: elsewhere.length })}</button>}
       </>}>
       {notice && <p role="alert" className="phone-notice">{notice}</p>}
       {!agent ? <div className="grid justify-items-start gap-3 p-4"><p className="m-0">{t('focus-not-found')}</p><button type="button" className="button" onClick={onBack}>{t('phone-back')}</button></div> : <>
+        <CloseConfirm agent={agent} where="pane" />
         {!agent.closed && (changed > 0 && loadDiff || files) && (
           <div className="phone-tools">
             {changed > 0 && loadDiff && <button type="button" className="phone-chipbtn text-needs-you" onClick={() => setShown('changes')}>{t('changes-files', { count: changed })}</button>}

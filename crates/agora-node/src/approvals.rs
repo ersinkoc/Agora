@@ -142,6 +142,58 @@ pub fn start_signed_message_v2(
     m
 }
 
+/// ADR-0090 Amendment A: the action of a request to switch a running agent to a mode or option that skips permission questions. Only
+/// the node raises it ([`NodeApprovals::request_skip`]); a request an adapter makes under this name is refused.
+pub const SKIP_ACTION: &str = "agent.skip_permissions";
+
+/// Actions only the node raises: the whole `agent.` namespace (an adapter cannot dress its own request as one of them).
+pub fn is_reserved_action(action: &str) -> bool {
+    action == START_ACTION || action == SKIP_ACTION || action.starts_with("agent.")
+}
+
+/// `F(x)`: the decimal byte length of `x`, `:`, then `x` (the field form of the newer signing domains).
+fn framed(out: &mut Vec<u8>, x: &str) {
+    out.extend_from_slice(x.len().to_string().as_bytes());
+    out.push(b':');
+    out.extend_from_slice(x.as_bytes());
+}
+
+/// ADR-0090 Amendment A: what a device signs to decide an `agent.skip_permissions` request: the domain `agora-approval-skip-v1`, one
+/// NUL, then `F(node_id) F(approval_id) F(verdict) F(agent_id) F(option_id) F(value) F(sha256(detail))` (verdict `1` or `0`, the hash
+/// of the detail exactly as announced in lowercase hex). The decision binds the agent, the option and the value as well as the
+/// words the user read. Shared vectors: `schema/fixtures/signing/approval-skip-v1.json`.
+pub fn skip_signed_message(
+    node_id: &str,
+    approval_id: &str,
+    approved: bool,
+    binding: &SkipBinding,
+    detail: &str,
+) -> Vec<u8> {
+    let digest = ring::digest::digest(&ring::digest::SHA256, detail.as_bytes());
+    let hash: String = digest.as_ref().iter().map(|b| format!("{b:02x}")).collect();
+    let mut m = b"agora-approval-skip-v1\0".to_vec();
+    for part in [
+        node_id,
+        approval_id,
+        if approved { "1" } else { "0" },
+        &binding.agent,
+        &binding.option,
+        &binding.value,
+        &hash,
+    ] {
+        framed(&mut m, part);
+    }
+    m
+}
+
+/// The agent, option and value a skip decision is bound to (the signed `agent_id`, `option_id` and `value`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkipBinding {
+    pub agent: String,
+    pub option: String,
+    pub value: String,
+}
+
 /// Which actions need a person. Patterns are exact action names, or a prefix ending in `*`; `*` alone is everything.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Policy {
@@ -167,6 +219,8 @@ pub struct Pending {
     pub detail: String,
     pub requested_ms: u64,
     pub expires_ms: u64,
+    /// Only for [`SKIP_ACTION`]: what the decision is bound to, taken from the node's own record of the request, never from the detail.
+    pub binding: Option<SkipBinding>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -233,6 +287,19 @@ impl<V: Verifier> Approvals<V> {
         now_ms: u64,
         ttl_ms: u64,
     ) -> Option<Pending> {
+        self.request_bound(agent_id, action, detail, now_ms, ttl_ms, None)
+    }
+
+    /// [`Self::request`] with the binding a skip decision is signed over.
+    pub fn request_bound(
+        &mut self,
+        agent_id: &str,
+        action: &str,
+        detail: &str,
+        now_ms: u64,
+        ttl_ms: u64,
+        binding: Option<SkipBinding>,
+    ) -> Option<Pending> {
         let id = random_id();
         if id.is_empty() {
             return None;
@@ -245,6 +312,7 @@ impl<V: Verifier> Approvals<V> {
             detail: detail.to_string(),
             requested_ms: now_ms,
             expires_ms: now_ms.saturating_add(ttl),
+            binding,
         };
         self.pending.insert(id, p.clone());
         Some(p)
@@ -270,7 +338,23 @@ impl<V: Verifier> Approvals<V> {
         } else {
             Vec::new()
         };
-        let msg = if p.action == START_ACTION && !settings.is_empty() {
+        let msg = if p.action == SKIP_ACTION {
+            // Only the skip domain decides it, and it carries no grant: anything else on it is refused. A request without a binding
+            // (it cannot exist: the node makes one only through `request_bound`) is never decided.
+            let Some(binding) = &p.binding else {
+                return Err(ApprovalError::BadSignature);
+            };
+            if r.helper_grant != 0 || r.helpers_may_start {
+                return Err(ApprovalError::BadSignature);
+            }
+            skip_signed_message(
+                &self.node_id,
+                &r.approval_id,
+                r.approved,
+                binding,
+                &p.detail,
+            )
+        } else if p.action == START_ACTION && !settings.is_empty() {
             start_signed_message_v2(
                 &self.node_id,
                 &r.approval_id,
@@ -529,6 +613,162 @@ pub struct NodeApprovals {
     helper_grants: std::sync::Mutex<Vec<LiveHelper>>,
     /// ADR-0061: renews an endorsed device's trust each time its signature is accepted here.
     devices: std::sync::Mutex<Option<std::sync::Arc<crate::device_trust::DeviceTrust>>>,
+    /// ADR-0090 Amendment A: what each waiting `agent.skip_permissions` request will apply, as the node rendered it.
+    skips: std::sync::Mutex<SkipState>,
+}
+
+/// At most this many `agent.skip_permissions` requests wait on a node at once (a node has few agents a person switches by hand).
+pub const MAX_SKIP_PENDING: usize = 8;
+/// At most this many are raised per [`SKIP_WINDOW_MS`] on a node, so a client that keeps asking cannot bury the owner in cards.
+pub const MAX_SKIP_PER_WINDOW: usize = 6;
+pub const SKIP_WINDOW_MS: u64 = 60_000;
+/// One agent may have this many cards waiting, and raise this many per [`SKIP_WINDOW_MS`], whatever else the node holds: one agent's flood
+/// never keeps another agent's card from being raised.
+pub const MAX_SKIP_PER_AGENT: usize = 2;
+pub const MAX_SKIP_PER_AGENT_WINDOW: usize = 3;
+/// Longest option id or value a card is raised for (bytes), and the longest agent kind, name and folder shown (characters).
+pub const MAX_SKIP_ID_BYTES: usize = 128;
+const MAX_KIND_CHARS: usize = 64;
+const MAX_FOLDER_CHARS: usize = 256;
+/// How long a skip request waits.
+const SKIP_TTL_MS: u64 = 10 * 60 * 1000;
+
+/// Which switch of a running agent a skip request is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkipKind {
+    /// `AgentSetMode`: the value is a mode id.
+    Mode,
+    /// `AgentSetConfig`: the option is a config id.
+    Config,
+}
+
+impl SkipKind {
+    fn word(self) -> &'static str {
+        match self {
+            Self::Mode => "mode",
+            Self::Config => "config",
+        }
+    }
+}
+
+/// What a waiting skip request will apply and what the card says: made only by the supervisor, from what the agent reported and the
+/// node's own judgement, never from a client's words. The decision applies exactly this, whatever it carries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkipAsk {
+    pub agent: agora_core::AgentId,
+    pub agent_kind: String,
+    /// The agent's folder on this machine, as the node knows it.
+    pub folder: String,
+    pub kind: SkipKind,
+    /// For a mode the literal `mode`, otherwise the config id (what is signed as `option_id`).
+    pub option_id: String,
+    /// The agent's own name for the option (untrusted text, bounded by [`Self::detail`]); empty for a mode.
+    pub option_name: String,
+    /// The mode id or the config value.
+    pub value: String,
+    pub value_name: String,
+    /// Which run of the agent's adapter it was in (`AdapterRich::epoch`); a decision after another one began applies nothing.
+    pub epoch: u64,
+}
+
+const MAX_NAME_CHARS: usize = 64;
+
+/// A character that must never reach a card: a control character (Cc), a format character (Cf: bidirectional controls and isolates,
+/// zero-width characters, the byte order mark, tags) or a line or paragraph separator.
+fn is_hidden(c: char) -> bool {
+    c.is_control()
+        || matches!(c,
+            '\u{ad}' | '\u{600}'..='\u{605}' | '\u{61c}' | '\u{6dd}' | '\u{70f}' | '\u{180e}'
+            | '\u{200b}'..='\u{200f}' | '\u{2028}' | '\u{2029}' | '\u{202a}'..='\u{202e}'
+            | '\u{2060}'..='\u{206f}' | '\u{feff}' | '\u{fff9}'..='\u{fffb}' | '\u{110bd}'
+            | '\u{e0001}' | '\u{e0020}'..='\u{e007f}')
+}
+
+/// Untrusted text for a card: hidden characters removed, at most `max` characters, and a cut is marked with `…` (inside the bound).
+pub(crate) fn card_text(s: &str, max: usize) -> String {
+    let clean: Vec<char> = s.chars().filter(|c| !is_hidden(*c)).collect();
+    if clean.len() <= max {
+        return clean.into_iter().collect();
+    }
+    clean
+        .into_iter()
+        .take(max.saturating_sub(1))
+        .chain(['\u{2026}'])
+        .collect()
+}
+
+/// Is `s` fit to be signed as it is (an option id or a value): not empty, no hidden character, within [`MAX_SKIP_ID_BYTES`]? What is
+/// signed is what the card shows, so such a string is refused, never altered.
+fn signable(s: &str) -> bool {
+    !s.is_empty() && s.len() <= MAX_SKIP_ID_BYTES && !s.chars().any(is_hidden)
+}
+
+impl SkipAsk {
+    /// The request's `detail`: the node's own rendering (docs/specs/protocol.md), which the decision's signature covers by hash.
+    pub fn detail(&self, node: &str) -> String {
+        serde_json::json!({
+            "node": node,
+            "agent": self.agent.as_str(),
+            "agent_kind": card_text(&self.agent_kind, MAX_KIND_CHARS),
+            "folder": card_text(&self.folder, MAX_FOLDER_CHARS),
+            "option_type": self.kind.word(),
+            "option": self.option_id,
+            "option_name": card_text(&self.option_name, MAX_NAME_CHARS),
+            "value": self.value,
+            "value_name": card_text(&self.value_name, MAX_NAME_CHARS),
+            // The node's own judgement (its classifier), never the agent's word: every card is for a choice the node judged as
+            // making the agent act without asking.
+            "skips": true,
+            "scope": "session",
+        })
+        .to_string()
+    }
+
+    fn binding(&self) -> SkipBinding {
+        SkipBinding {
+            agent: self.agent.as_str().to_string(),
+            option: self.option_id.clone(),
+            value: self.value.clone(),
+        }
+    }
+
+    fn same_option(&self, agent: &agora_core::AgentId, kind: SkipKind, option_id: &str) -> bool {
+        &self.agent == agent && self.kind == kind && self.option_id == option_id
+    }
+}
+
+#[derive(Default)]
+struct SkipState {
+    asks: std::collections::HashMap<String, SkipAsk>,
+    /// When the requests of the last [`SKIP_WINDOW_MS`] were raised.
+    raised: VecDeque<(u64, String)>,
+}
+
+/// Why a skip request was not raised.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkipRefusal {
+    /// [`MAX_SKIP_PENDING`] already wait.
+    TooManyWaiting,
+    /// [`MAX_SKIP_PER_WINDOW`] were raised in the last minute.
+    TooOften,
+    /// This agent already has [`MAX_SKIP_PER_AGENT`] cards waiting.
+    AgentTooMany,
+    /// This agent raised [`MAX_SKIP_PER_AGENT_WINDOW`] cards in the last minute.
+    AgentTooOften,
+    /// The option id or the value is empty, longer than [`MAX_SKIP_ID_BYTES`] or holds a hidden character: no card, `agent.option_unknown`.
+    Unsignable,
+    /// No safe id could be made.
+    NoId,
+}
+
+/// A skip request as [`NodeApprovals::request_skip`] gives it back.
+#[derive(Debug, Clone)]
+pub struct SkipRaised {
+    pub pending: Pending,
+    /// `false`: the same request (agent, option and value) was already waiting and this is it; nothing new is announced.
+    pub fresh: bool,
+    /// Requests this one replaced (the same agent and option, another value): announce each as withdrawn.
+    pub superseded: Vec<String>,
 }
 
 /// "This agent may start up to `remaining` more helpers of `kind` in `folder`" (ADR-0057), from a signed decision. It lives in memory
@@ -564,6 +804,8 @@ pub struct Resolution {
     pub adapter_approval_id: String,
     pub verdict: Verdict,
     pub request: Pending,
+    /// For a [`SKIP_ACTION`] request: what the node rendered and applies when it was approved.
+    pub skip: Option<SkipAsk>,
 }
 
 impl NodeApprovals {
@@ -702,6 +944,7 @@ impl NodeApprovals {
             late: std::sync::Mutex::new(Vec::new()),
             helper_grants: std::sync::Mutex::new(Vec::new()),
             devices: std::sync::Mutex::new(None),
+            skips: std::sync::Mutex::new(SkipState::default()),
         }
     }
 
@@ -812,6 +1055,12 @@ impl NodeApprovals {
         detail: &str,
         now_ms: u64,
     ) -> Option<Pending> {
+        // The `agent.*` actions are the node's own (`agent.start`, `agent.skip_permissions`): their cards come from the node's own
+        // records and their decisions are applied from them. An adapter that names one gets no card and nothing is consumed; the
+        // caller answers it "denied" at once. An adapter's own actions (`run_command`, `write_file`) are not in that namespace.
+        if is_reserved_action(action) {
+            return None;
+        }
         let p = self
             .q()
             .request(agent.as_str(), action, detail, now_ms, 0)?;
@@ -820,6 +1069,138 @@ impl NodeApprovals {
             (agent.clone(), adapter_approval_id.to_string()),
         );
         Some(p)
+    }
+
+    fn sk(&self) -> std::sync::MutexGuard<'_, SkipState> {
+        self.skips.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// ADR-0090 Amendment A: raises the request to switch a running agent as `ask` says, or finds the one that already waits for the
+    /// same agent, option and value (one card each). Another value of the same option replaces the waiting one. The caller announces
+    /// `pending` when `fresh` and each of `superseded` as withdrawn.
+    pub fn request_skip(
+        &self,
+        node: &str,
+        ask: SkipAsk,
+        now_ms: u64,
+    ) -> Result<SkipRaised, SkipRefusal> {
+        if !signable(&ask.option_id) || !signable(&ask.value) {
+            return Err(SkipRefusal::Unsignable);
+        }
+        let mut st = self.sk();
+        // A request that ran out of time without being swept is not one that waits.
+        let alive: std::collections::HashSet<String> =
+            self.q().pending().map(|p| p.id.clone()).collect();
+        st.asks.retain(|id, _| alive.contains(id));
+        let same: Vec<(String, bool)> = st
+            .asks
+            .iter()
+            .filter(|(_, a)| a.same_option(&ask.agent, ask.kind, &ask.option_id))
+            .map(|(id, a)| (id.clone(), a.value == ask.value))
+            .collect();
+        if let Some((id, _)) = same.iter().find(|(_, equal)| *equal) {
+            let pending = self.q().pending().find(|p| &p.id == id).cloned();
+            if let Some(pending) = pending {
+                return Ok(SkipRaised {
+                    pending,
+                    fresh: false,
+                    superseded: Vec::new(),
+                });
+            }
+        }
+        // A replacement counts like any other card here (it is withdrawn only once the new one exists), and in the rate below.
+        if st.asks.len() >= MAX_SKIP_PENDING {
+            return Err(SkipRefusal::TooManyWaiting);
+        }
+        if st.asks.values().filter(|a| a.agent == ask.agent).count() >= MAX_SKIP_PER_AGENT {
+            return Err(SkipRefusal::AgentTooMany);
+        }
+        while st
+            .raised
+            .front()
+            .is_some_and(|(t, _)| now_ms.saturating_sub(*t) >= SKIP_WINDOW_MS)
+        {
+            st.raised.pop_front();
+        }
+        if st.raised.len() >= MAX_SKIP_PER_WINDOW {
+            return Err(SkipRefusal::TooOften);
+        }
+        if st
+            .raised
+            .iter()
+            .filter(|(_, a)| a == ask.agent.as_str())
+            .count()
+            >= MAX_SKIP_PER_AGENT_WINDOW
+        {
+            return Err(SkipRefusal::AgentTooOften);
+        }
+        let detail = ask.detail(node);
+        let pending = self
+            .q()
+            .request_bound(
+                ask.agent.as_str(),
+                SKIP_ACTION,
+                &detail,
+                now_ms,
+                SKIP_TTL_MS,
+                Some(ask.binding()),
+            )
+            .ok_or(SkipRefusal::NoId)?;
+        self.r()
+            .insert(pending.id.clone(), (ask.agent.clone(), String::new()));
+        let mut superseded = Vec::new();
+        for (id, _) in same.iter().filter(|(_, equal)| !*equal) {
+            st.asks.remove(id);
+            self.withdraw(id);
+            superseded.push(id.clone());
+        }
+        st.raised
+            .push_back((now_ms, ask.agent.as_str().to_string()));
+        st.asks.insert(pending.id.clone(), ask);
+        Ok(SkipRaised {
+            pending,
+            fresh: true,
+            superseded,
+        })
+    }
+
+    /// Withdraws the waiting skip requests of `agent` (all, or those for one option) and returns their ids: the agent ended, or the
+    /// option was set by another command, so nothing may be applied for them later. The caller announces each as withdrawn.
+    pub fn withdraw_skips(
+        &self,
+        agent: &agora_core::AgentId,
+        only: Option<(SkipKind, &str)>,
+    ) -> Vec<String> {
+        let ids: Vec<String> = {
+            let mut st = self.sk();
+            let ids: Vec<String> = st
+                .asks
+                .iter()
+                .filter(|(_, a)| {
+                    &a.agent == agent
+                        && only.is_none_or(|(kind, option)| a.same_option(agent, kind, option))
+                })
+                .map(|(id, _)| id.clone())
+                .collect();
+            for id in &ids {
+                st.asks.remove(id);
+            }
+            ids
+        };
+        for id in &ids {
+            self.withdraw(id);
+        }
+        ids
+    }
+
+    /// Forgets the record of a skip request that ran out of time (the sweep found it); `true` when it was one, so its answer is
+    /// not sent to an adapter (it has none).
+    pub fn forget_skip(&self, id: &str) -> bool {
+        self.sk().asks.remove(id).is_some()
+    }
+
+    fn is_skip(&self, id: &str) -> bool {
+        self.sk().asks.contains_key(id)
     }
 
     /// A signed decision arrived. On success, the adapter's own approval id and agent to answer, and the verdict.
@@ -865,12 +1246,18 @@ impl NodeApprovals {
         };
         self.used(&r.signer_device_id);
         let route = self.r().remove(&r.approval_id);
+        let skip = if request.action == SKIP_ACTION {
+            self.sk().asks.remove(&r.approval_id)
+        } else {
+            None
+        };
         route
             .map(|(agent, adapter_approval_id)| Resolution {
                 agent,
                 adapter_approval_id,
                 verdict,
                 request,
+                skip,
             })
             .ok_or(ApprovalError::Unknown)
     }
@@ -912,12 +1299,15 @@ impl NodeApprovals {
     /// adapter) are withdrawn and their ids returned. Requests of another kind (an `agent.start` the agent waits for) stay: the agent
     /// is still alive and still waits for them.
     pub fn cancel_adapter_requests(&self, agent: &agora_core::AgentId) -> Vec<String> {
-        let ids: Vec<String> = self
+        // The routes are let go before the skip records are asked (their locks are taken the other way round elsewhere).
+        let routed: Vec<String> = self
             .r()
             .iter()
             .filter(|(_, (a, _))| a == agent)
             .map(|(id, _)| id.clone())
             .collect();
+        // A switch the user asked for is not a request of the turn that was cancelled: its card stays.
+        let ids: Vec<String> = routed.into_iter().filter(|id| !self.is_skip(id)).collect();
         for id in &ids {
             self.withdraw(id);
         }
@@ -986,6 +1376,557 @@ mod tests {
             helper_grant: 0,
             helpers_may_start: false,
         }
+    }
+
+    fn skip_ask(agent: &str, kind: SkipKind, option: &str, value: &str) -> SkipAsk {
+        SkipAsk {
+            agent: agora_core::AgentId::new(agent),
+            agent_kind: "claude-acp".into(),
+            folder: "/work/login-fix".into(),
+            kind,
+            option_id: option.into(),
+            option_name: "Mode".into(),
+            value: value.into(),
+            value_name: "Bypass Permissions".into(),
+            epoch: 0,
+        }
+    }
+
+    fn skip_resolve(
+        n: &NodeApprovals,
+        p: &Pending,
+        approved: bool,
+        binding: &SkipBinding,
+        now: u64,
+    ) -> Result<Resolution, ApprovalError> {
+        n.resolve_request(
+            &ApprovalResolve {
+                approval_id: p.id.clone(),
+                approved,
+                signer_device_id: "phone".into(),
+                signature: sign(
+                    "s3cret",
+                    &skip_signed_message("node-1", &p.id, approved, binding, &p.detail),
+                ),
+                helper_grant: 0,
+                helpers_may_start: false,
+            },
+            now,
+        )
+    }
+
+    fn node_approvals() -> NodeApprovals {
+        NodeApprovals::new("node-1", Box::new(Fake(vec![("phone", "s3cret")])))
+    }
+
+    /// The vectors every client signs by (`schema/fixtures/signing/approval-skip-v1.json`, also checked by agora-protocol).
+    #[test]
+    fn the_shared_skip_vectors_match() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../schema/fixtures/signing/approval-skip-v1.json");
+        let v: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        for c in v["cases"].as_array().unwrap() {
+            let s = |k: &str| c[k].as_str().unwrap().to_string();
+            let binding = SkipBinding {
+                agent: s("agent_id"),
+                option: s("option_id"),
+                value: s("value"),
+            };
+            let m = skip_signed_message(
+                &s("node"),
+                &s("approval_id"),
+                c["approved"].as_bool().unwrap(),
+                &binding,
+                &s("detail"),
+            );
+            let hex: String = m.iter().map(|b| format!("{b:02x}")).collect();
+            assert_eq!(hex, s("hex"), "{}", c["name"]);
+        }
+    }
+
+    /// The detail the node writes is the one the vectors show: the signed agent, option and value are the detail's own.
+    #[test]
+    fn the_card_detail_names_what_is_signed() {
+        let a = skip_ask("agent-1", SkipKind::Mode, "mode", "bypassPermissions");
+        let d: serde_json::Value = serde_json::from_str(&a.detail("laptop")).unwrap();
+        assert_eq!(d["agent"], a.binding().agent.as_str());
+        assert_eq!(d["option"], a.binding().option.as_str());
+        assert_eq!(d["value"], a.binding().value.as_str());
+        assert_eq!(d["node"], "laptop");
+        assert_eq!(d["folder"], "/work/login-fix");
+        // The agent's own words are bounded and carry no control characters.
+        let mut long = a.clone();
+        long.value_name = format!("x\u{1b}[31m{}", "y".repeat(500));
+        let d: serde_json::Value = serde_json::from_str(&long.detail("n")).unwrap();
+        let shown = d["value_name"].as_str().unwrap();
+        assert!(shown.chars().count() <= MAX_NAME_CHARS && !shown.contains('\u{1b}'));
+    }
+
+    /// A skip request is decided only over its own domain and the agent, option and value the node bound to it; the verdict is signed
+    /// and a grant means nothing on it.
+    #[test]
+    fn a_skip_decision_is_verified_over_its_domain_and_binding() {
+        let n = node_approvals();
+        let ask = skip_ask("agent-1", SkipKind::Mode, "mode", "bypassPermissions");
+        let binding = ask.binding();
+        let raised = n.request_skip("node-1", ask, 1_000).unwrap();
+        let p = raised.pending.clone();
+        let wrong = |binding: &SkipBinding| skip_resolve(&n, &p, true, binding, 2_000);
+        let other = |f: fn(&mut SkipBinding)| {
+            let mut b = binding.clone();
+            f(&mut b);
+            b
+        };
+        assert_eq!(
+            wrong(&other(|b| b.value = "default".into())).unwrap_err(),
+            ApprovalError::BadSignature
+        );
+        assert_eq!(
+            wrong(&other(|b| b.option = "auto".into())).unwrap_err(),
+            ApprovalError::BadSignature
+        );
+        assert_eq!(
+            wrong(&other(|b| b.agent = "agent-2".into())).unwrap_err(),
+            ApprovalError::BadSignature
+        );
+        // Another request's message, the verdict flipped, an unknown device and a grant are refused too.
+        let plain = ApprovalResolve {
+            approval_id: p.id.clone(),
+            approved: true,
+            signer_device_id: "phone".into(),
+            signature: sign("s3cret", &signed_message("node-1", &p.id, true)),
+            helper_grant: 0,
+            helpers_may_start: false,
+        };
+        assert_eq!(
+            n.resolve_request(&plain, 2_000).unwrap_err(),
+            ApprovalError::BadSignature
+        );
+        let mut flipped = ApprovalResolve {
+            signature: sign(
+                "s3cret",
+                &skip_signed_message("node-1", &p.id, false, &binding, &p.detail),
+            ),
+            ..plain.clone()
+        };
+        assert_eq!(
+            n.resolve_request(&flipped, 2_000).unwrap_err(),
+            ApprovalError::BadSignature
+        );
+        flipped.approved = false;
+        flipped.signer_device_id = "stranger".into();
+        assert_eq!(
+            n.resolve_request(&flipped, 2_000).unwrap_err(),
+            ApprovalError::BadSignature
+        );
+        let mut grant = ApprovalResolve {
+            signature: sign(
+                "s3cret",
+                &skip_signed_message("node-1", &p.id, true, &binding, &p.detail),
+            ),
+            ..plain
+        };
+        grant.helper_grant = 2;
+        assert_eq!(
+            n.resolve_request(&grant, 2_000).unwrap_err(),
+            ApprovalError::BadSignature
+        );
+        assert_eq!(n.pending_count(), 1, "nothing was consumed");
+        // The right decision gives back exactly what the node recorded.
+        let r = skip_resolve(&n, &p, true, &binding, 2_000).unwrap();
+        assert_eq!(r.verdict, Verdict::Approved);
+        let applied = r.skip.unwrap();
+        assert_eq!(
+            (applied.value.as_str(), applied.option_id.as_str()),
+            ("bypassPermissions", "mode")
+        );
+        // Single use.
+        assert_eq!(
+            skip_resolve(&n, &p, true, &binding, 2_001).unwrap_err(),
+            ApprovalError::Unknown
+        );
+    }
+
+    /// A decision after the request's time is refused, applies nothing, and the sweep then forgets the record.
+    #[test]
+    fn a_late_skip_decision_is_refused() {
+        let n = node_approvals();
+        let ask = skip_ask("agent-1", SkipKind::Mode, "mode", "bypassPermissions");
+        let binding = ask.binding();
+        let p = n.request_skip("node-1", ask, 1_000).unwrap().pending;
+        assert_eq!(p.expires_ms, 1_000 + SKIP_TTL_MS);
+        let late = p.expires_ms;
+        assert_eq!(
+            skip_resolve(&n, &p, true, &binding, late).unwrap_err(),
+            ApprovalError::Expired
+        );
+        assert_eq!(
+            skip_resolve(&n, &p, true, &binding, late).unwrap_err(),
+            ApprovalError::Unknown
+        );
+        // The sweep tells the node which request it was, and it has no adapter to answer.
+        let swept = n.expire(late);
+        assert_eq!(swept.len(), 1);
+        assert!(n.forget_skip(&swept[0].0));
+    }
+
+    /// The node alone raises this request: an adapter that names this action gets nothing (its decision would apply a switch the agent
+    /// asked for in text), and a plain request under the name can never be decided.
+    #[test]
+    fn an_adapter_cannot_raise_a_skip_request() {
+        let n = node_approvals();
+        let agent = agora_core::AgentId::new("agent-1");
+        assert!(n
+            .request(&agent, "ap-1", SKIP_ACTION, "{}", 1_000)
+            .is_none());
+        assert_eq!(n.pending_count(), 0);
+        let mut a = approvals();
+        let p = a.request("agent-1", SKIP_ACTION, "{}", 1_000, 0).unwrap();
+        let r = ApprovalResolve {
+            approval_id: p.id.clone(),
+            approved: true,
+            signer_device_id: "phone".into(),
+            signature: sign("s3cret", &signed_message("node-1", &p.id, true)),
+            helper_grant: 0,
+            helpers_may_start: false,
+        };
+        assert_eq!(a.resolve(&r, 2_000), Err(ApprovalError::BadSignature));
+    }
+
+    /// One card per agent, option and value; another value replaces it; another option or agent is its own card.
+    #[test]
+    fn skip_requests_are_deduplicated_and_replaced() {
+        let n = node_approvals();
+        let ask = |a: &str, v: &str| skip_ask(a, SkipKind::Mode, "mode", v);
+        let first = n
+            .request_skip("node-1", ask("agent-1", "bypass"), 1_000)
+            .unwrap();
+        assert!(first.fresh);
+        let again = n
+            .request_skip("node-1", ask("agent-1", "bypass"), 1_001)
+            .unwrap();
+        assert!(!again.fresh && again.pending.id == first.pending.id);
+        assert_eq!(n.pending_count(), 1);
+        let replaced = n
+            .request_skip("node-1", ask("agent-1", "turbo"), 1_002)
+            .unwrap();
+        assert!(replaced.fresh && replaced.superseded == [first.pending.id.clone()]);
+        assert_eq!(n.pending_count(), 1);
+        let binding = skip_ask("agent-1", SkipKind::Mode, "mode", "bypass").binding();
+        assert_eq!(
+            skip_resolve(&n, &first.pending, true, &binding, 2_000).unwrap_err(),
+            ApprovalError::Unknown,
+            "the replaced card is spent"
+        );
+        // Another agent, and another kind of option with the same id, are cards of their own.
+        n.request_skip("node-1", ask("agent-2", "turbo"), 1_003)
+            .unwrap();
+        n.request_skip(
+            "node-1",
+            skip_ask("agent-1", SkipKind::Config, "mode", "turbo"),
+            1_004,
+        )
+        .unwrap();
+        assert_eq!(n.pending_count(), 3);
+    }
+
+    /// Withdrawing: by agent, and by option; the turn's cancel leaves a card alone.
+    #[test]
+    fn skip_requests_are_withdrawn_with_their_agent_or_option() {
+        let n = node_approvals();
+        let agent = agora_core::AgentId::new("agent-1");
+        let a = n
+            .request_skip(
+                "node-1",
+                skip_ask("agent-1", SkipKind::Mode, "mode", "bypass"),
+                1_000,
+            )
+            .unwrap()
+            .pending;
+        let b = n
+            .request_skip(
+                "node-1",
+                skip_ask("agent-1", SkipKind::Config, "auto", "true"),
+                1_000,
+            )
+            .unwrap()
+            .pending;
+        // A cancelled turn withdraws what its adapter asked, not a switch the user asked for.
+        assert!(n.cancel_adapter_requests(&agent).is_empty());
+        assert_eq!(n.pending_count(), 2);
+        assert_eq!(
+            n.withdraw_skips(&agent, Some((SkipKind::Mode, "mode"))),
+            std::slice::from_ref(&a.id)
+        );
+        assert_eq!(n.pending_count(), 1);
+        // Not this agent's, not that option: nothing.
+        assert!(n
+            .withdraw_skips(&agora_core::AgentId::new("agent-2"), None)
+            .is_empty());
+        assert!(n
+            .withdraw_skips(&agent, Some((SkipKind::Mode, "mode")))
+            .is_empty());
+        assert_eq!(n.withdraw_skips(&agent, None), std::slice::from_ref(&b.id));
+        assert_eq!(n.pending_count(), 0);
+        // A withdrawn card is spent: its decision is nothing.
+        let binding = skip_ask("agent-1", SkipKind::Mode, "mode", "bypass").binding();
+        assert_eq!(
+            skip_resolve(&n, &a, true, &binding, 2_000).unwrap_err(),
+            ApprovalError::Unknown
+        );
+    }
+
+    /// At most eight wait, and at most six are raised a minute; a repeat is no new request and a replacement is not counted twice.
+    #[test]
+    fn skip_requests_are_bounded() {
+        let n = node_approvals();
+        // The count: eight waiting, spread over a long time so the rate does not matter.
+        for i in 0..MAX_SKIP_PENDING {
+            let t = 1_000 + i as u64 * SKIP_WINDOW_MS;
+            n.request_skip(
+                "node-1",
+                skip_ask(&format!("agent-{i}"), SkipKind::Mode, "mode", "bypass"),
+                t,
+            )
+            .unwrap();
+        }
+        let t = 1_000 + MAX_SKIP_PENDING as u64 * SKIP_WINDOW_MS;
+        assert_eq!(
+            n.request_skip(
+                "node-1",
+                skip_ask("agent-x", SkipKind::Mode, "mode", "bypass"),
+                t
+            )
+            .unwrap_err(),
+            SkipRefusal::TooManyWaiting
+        );
+        // A repeat is still answered (it is the card that waits); a replacement counts as a new card and waits for room too.
+        assert!(
+            !n.request_skip(
+                "node-1",
+                skip_ask("agent-0", SkipKind::Mode, "mode", "bypass"),
+                t
+            )
+            .unwrap()
+            .fresh
+        );
+        assert_eq!(
+            n.request_skip(
+                "node-1",
+                skip_ask("agent-0", SkipKind::Mode, "mode", "turbo"),
+                t
+            )
+            .unwrap_err(),
+            SkipRefusal::TooManyWaiting
+        );
+        // The rate: six in a minute, the seventh waits for the window.
+        let n = node_approvals();
+        for i in 0..MAX_SKIP_PER_WINDOW {
+            n.request_skip(
+                "node-1",
+                skip_ask(&format!("agent-{i}"), SkipKind::Mode, "mode", "bypass"),
+                5_000 + i as u64,
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            n.request_skip(
+                "node-1",
+                skip_ask("agent-7", SkipKind::Mode, "mode", "bypass"),
+                6_000
+            )
+            .unwrap_err(),
+            SkipRefusal::TooOften
+        );
+        assert!(n
+            .request_skip(
+                "node-1",
+                skip_ask("agent-7", SkipKind::Mode, "mode", "bypass"),
+                5_000 + SKIP_WINDOW_MS
+            )
+            .is_ok());
+    }
+
+    /// Adapters raise their own requests (`run_command`); every name in the node's own `agent.` namespace is refused, `agent.start` too:
+    /// no card, nothing consumed, so the caller answers the adapter at once.
+    #[test]
+    fn an_adapter_cannot_use_any_name_of_the_nodes_own() {
+        let n = node_approvals();
+        let agent = agora_core::AgentId::new("agent-1");
+        for action in [
+            START_ACTION,
+            SKIP_ACTION,
+            "agent.stop",
+            "agent.anything",
+            "agent.",
+        ] {
+            assert!(
+                n.request(&agent, "ap-1", action, "{}", 1_000).is_none(),
+                "{action}"
+            );
+        }
+        assert_eq!(n.pending_count(), 0);
+        // Its own requests are cards as before.
+        for action in ["run_command", "write_file", "agentic", "Agent.start"] {
+            assert!(
+                n.request(&agent, "ap-1", action, "ls", 1_000).is_some(),
+                "{action}"
+            );
+        }
+    }
+
+    /// What an agent or a path can put in a card: hidden characters (controls, bidirectional and zero-width format characters, line
+    /// separators) never reach the detail, long text is cut and marked; an id or value that cannot be signed as shown gets no card.
+    #[test]
+    fn a_card_shows_no_hidden_characters_and_is_bounded() {
+        let hidden = "\u{202e}\u{2066}\u{200b}\u{200f}\u{2028}\u{feff}\u{1b}\u{85}";
+        let mut a = skip_ask("agent-1", SkipKind::Mode, "mode", "bypass");
+        a.agent_kind = format!("cl{hidden}aude{}", "k".repeat(200));
+        a.folder = format!("/work/{hidden}login{}", "f".repeat(1000));
+        a.option_name = format!("{hidden}Mode");
+        a.value_name = format!("Safe{hidden} mode{}", "n".repeat(300));
+        let detail = a.detail("laptop");
+        let d: serde_json::Value = serde_json::from_str(&detail).unwrap();
+        for k in ["agent_kind", "folder", "option_name", "value_name"] {
+            let shown = d[k].as_str().unwrap();
+            assert!(!shown.chars().any(is_hidden), "{k}: {shown:?}");
+        }
+        assert_eq!(d["option_name"], "Mode");
+        assert!(d["agent_kind"].as_str().unwrap().starts_with("claude"));
+        assert_eq!(
+            d["agent_kind"].as_str().unwrap().chars().count(),
+            MAX_KIND_CHARS
+        );
+        assert!(d["agent_kind"].as_str().unwrap().ends_with('\u{2026}'));
+        assert_eq!(
+            d["folder"].as_str().unwrap().chars().count(),
+            MAX_FOLDER_CHARS
+        );
+        assert_eq!(
+            d["value_name"].as_str().unwrap().chars().count(),
+            MAX_NAME_CHARS
+        );
+        assert!(d["value_name"].as_str().unwrap().starts_with("Safe mode"));
+        // The node's own judgement is in the card, apart from the agent's names.
+        assert_eq!(d["skips"], true);
+        // An option id or a value that would have to be altered to be shown, or is too long or empty, is never signed.
+        let n = node_approvals();
+        let refused = |kind: SkipKind, option: &str, value: &str| {
+            n.request_skip("node-1", skip_ask("agent-1", kind, option, value), 1_000)
+                .unwrap_err()
+        };
+        assert_eq!(
+            refused(SkipKind::Mode, "mode", "by\u{202e}pass"),
+            SkipRefusal::Unsignable
+        );
+        assert_eq!(
+            refused(SkipKind::Mode, "mode", "by\u{200b}pass"),
+            SkipRefusal::Unsignable
+        );
+        assert_eq!(
+            refused(SkipKind::Mode, "mode", "bypass\n"),
+            SkipRefusal::Unsignable
+        );
+        assert_eq!(refused(SkipKind::Mode, "mode", ""), SkipRefusal::Unsignable);
+        assert_eq!(
+            refused(SkipKind::Mode, "mode", &"v".repeat(MAX_SKIP_ID_BYTES + 1)),
+            SkipRefusal::Unsignable
+        );
+        assert_eq!(
+            refused(SkipKind::Config, &"o".repeat(MAX_SKIP_ID_BYTES + 1), "true"),
+            SkipRefusal::Unsignable
+        );
+        assert_eq!(
+            refused(SkipKind::Config, "a\u{2029}b", "true"),
+            SkipRefusal::Unsignable
+        );
+        assert_eq!(n.pending_count(), 0, "nothing was raised");
+        // The bound itself is fine.
+        assert!(n
+            .request_skip(
+                "node-1",
+                skip_ask(
+                    "agent-1",
+                    SkipKind::Mode,
+                    "mode",
+                    &"v".repeat(MAX_SKIP_ID_BYTES)
+                ),
+                1_000
+            )
+            .is_ok());
+    }
+
+    /// One agent's flood (waiting cards, cards per minute) is stopped by its own limits and never keeps another agent's card from being
+    /// raised.
+    #[test]
+    fn one_agents_flood_does_not_block_another_agents_card() {
+        let n = node_approvals();
+        let ask = |a: &str, k: SkipKind, o: &str, v: &str| skip_ask(a, k, o, v);
+        // Two waiting at most per agent.
+        n.request_skip("node-1", ask("agent-1", SkipKind::Mode, "mode", "a"), 1_000)
+            .unwrap();
+        n.request_skip(
+            "node-1",
+            ask("agent-1", SkipKind::Config, "x", "true"),
+            1_001,
+        )
+        .unwrap();
+        assert_eq!(
+            n.request_skip(
+                "node-1",
+                ask("agent-1", SkipKind::Config, "y", "true"),
+                1_002
+            )
+            .unwrap_err(),
+            SkipRefusal::AgentTooMany
+        );
+        // A replacement of one of them is a new card and waits for room too.
+        assert_eq!(
+            n.request_skip("node-1", ask("agent-1", SkipKind::Mode, "mode", "b"), 1_003)
+                .unwrap_err(),
+            SkipRefusal::AgentTooMany
+        );
+        // Another agent is not affected.
+        assert!(
+            n.request_skip("node-1", ask("agent-2", SkipKind::Mode, "mode", "a"), 1_004)
+                .unwrap()
+                .fresh
+        );
+        // Three raised a minute at most per agent: agent-3 raises and withdraws three times, the fourth in the window is refused.
+        let agent = agora_core::AgentId::new("agent-3");
+        for i in 0..MAX_SKIP_PER_AGENT_WINDOW {
+            n.request_skip(
+                "node-1",
+                ask("agent-3", SkipKind::Mode, "mode", &format!("v{i}")),
+                200_000 + i as u64,
+            )
+            .unwrap();
+            n.withdraw_skips(&agent, None);
+        }
+        assert_eq!(
+            n.request_skip(
+                "node-1",
+                ask("agent-3", SkipKind::Mode, "mode", "v9"),
+                200_100
+            )
+            .unwrap_err(),
+            SkipRefusal::AgentTooOften
+        );
+        // Still not blocking another agent, nor agent-3 once its window passed.
+        assert!(n
+            .request_skip(
+                "node-1",
+                ask("agent-4", SkipKind::Mode, "mode", "a"),
+                200_100
+            )
+            .is_ok());
+        assert!(n
+            .request_skip(
+                "node-1",
+                ask("agent-3", SkipKind::Mode, "mode", "v9"),
+                200_000 + SKIP_WINDOW_MS
+            )
+            .is_ok());
     }
 
     #[test]

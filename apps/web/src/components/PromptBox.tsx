@@ -4,10 +4,12 @@ import type { AgentTileModel, SessionModel } from '../model';
 import { isRich, mergeLines, noticeText, queueState, trimLines, type ChatLine, type ChatSource } from '../net/chat';
 import { groupTurns, pairDiffs, type TurnItem } from '../net/chatView';
 import { atBottom, grew, jumped, keepPosition, scrolled, start, type Follow } from '../net/follow';
-import { refusalKey } from '../net/refusal';
+import { refusalKey, type ActionResult } from '../net/refusal';
 import { applyCommand, filterCommands, slashQuery, stepIndex, uniqueCommands } from '../net/slash';
 import { flagOf, transcript, windowed } from '../net/transcript';
 import { FilesChanged, Item, Turn } from './ChatEntry';
+import { CloseAgentContext } from './CloseAgent';
+import { closeAsk, isCloseCommand } from '../net/closeAgent';
 import { ChatActionsContext, type PromptResult, type PromptSend } from './chatActions';
 import { IME_GRACE_MS, sendsOnEnter } from './composer';
 import { Icon } from './Icon';
@@ -32,8 +34,9 @@ const PAGE = 120;
 
 // A chat agent has no terminal: you talk to it with requests and read its answers, as a conversation the node keeps (ADR-0038).
 // `approvals`: what this agent waits on, pinned above the composer (the caller draws them). `onReview`: the way into the review screen.
-export function PromptBox({ agent, send, source, choose, approvals, onReview }: { agent: AgentTileModel; send?: PromptSend; source?: ChatSource; choose?: (agentKey: string, kind: OptionKind, id: string) => Promise<boolean>; approvals?: ReactNode; onReview?: () => void }) {
+export function PromptBox({ agent, send, source, choose, approvals, onReview }: { agent: AgentTileModel; send?: PromptSend; source?: ChatSource; choose?: (agentKey: string, kind: OptionKind, id: string) => Promise<ActionResult>; approvals?: ReactNode; onReview?: () => void }) {
   const actions = useContext(ChatActionsContext);
+  const canClose = !!useContext(CloseAgentContext);
   const [text, setText] = useState('');
   const [sent, setSent] = useState<'ok' | 'queued' | 'full' | 'failed' | undefined>();
   const [busy, setBusy] = useState(false);
@@ -122,6 +125,8 @@ export function PromptBox({ agent, send, source, choose, approvals, onReview }: 
 
   const go = async () => {
     const body = text.trim();
+    // `/exit` and `/quit` end this agent (after a confirm in the page); they are never sent as text, unless the agent offers a command of that name.
+    if (canClose && !agent.closed && isCloseCommand(body, commands)) { closeAsk.ask(agent.id, 'pane'); setText(''); return; }
     if (!body || !send || busy || agent.closed) return;
     setBusy(true);
     const r = await send(agent, body);
@@ -244,7 +249,7 @@ export function PromptBox({ agent, send, source, choose, approvals, onReview }: 
           onKeyDown={(e) => {
             // The menu takes the arrows, Enter or Tab (to choose) and Escape; not while an input method is composing.
             const composing = e.nativeEvent.isComposing || e.keyCode === 229 || Date.now() - composedAt.current <= IME_GRACE_MS;
-            if (menuOpen && !composing) {
+            if (menuOpen && !composing && !(canClose && e.key === 'Enter' && isCloseCommand(text, commands))) {
               if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); setSlashAt(stepIndex(at, e.key === 'ArrowDown' ? 1 : -1, matches.length)); return; }
               if ((e.key === 'Enter' && !e.shiftKey) || (e.key === 'Tab' && !e.shiftKey)) { e.preventDefault(); take(at); return; }
               if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); setSlashOff(true); return; }
@@ -254,7 +259,7 @@ export function PromptBox({ agent, send, source, choose, approvals, onReview }: 
             if (sendsOnEnter({ key: e.key, shiftKey: e.shiftKey, isComposing: e.nativeEvent.isComposing, keyCode: e.keyCode }, Date.now() - composedAt.current)) void go();
           }} />
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
-          {agent.session && <SessionBar key={agent.id} part="controls" agentKey={agent.id} session={agent.session} disabled={agent.closed} choose={choose} setConfig={actions.setConfig} />}
+          {agent.session && <SessionBar key={agent.id} part="controls" agentKey={agent.id} session={agent.session} disabled={agent.closed} choose={choose} setConfig={actions.setConfig} approvals={actions.approvals} launchedFree={agent.skipsPermissions} />}
           <NoAskBadge agent={agent} />
           <span className="flex-1" />
           {sent && <span role="status" className={`text-xs ${sent === 'ok' || sent === 'queued' ? 'text-finished' : 'text-needs-you'}`}>{sentText}</span>}

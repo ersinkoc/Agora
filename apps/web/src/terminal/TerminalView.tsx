@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { binaryBytes, inputBytes } from './frames';
+import { binaryBytes, inputBytes, snapshotAfterSize } from './frames';
 import { TerminalFloat } from './TerminalFloat';
 import { FindBar } from './FindBar';
 import { OfferGate } from './clipboard';
@@ -64,11 +64,12 @@ export function TerminalView({ source, label }: { source: TerminalSource; label:
         el.toggleAttribute('data-smaller', sizing.smaller());
       },
     });
-    s = source.connect((e) => {
+    const ordered = snapshotAfterSize((e) => {
       if (e.type === 'data') r.write(e.bytes);
       else if (e.type === 'snapshot') r.reset(e.bytes);
       else if (e.type === 'resize') sizing.resized({ cols: e.cols, rows: e.rows });
     });
+    s = source.connect(ordered.push);
     const live = s;
     session.current = live;
     r.onInput((d, binary) => {
@@ -92,6 +93,7 @@ export function TerminalView({ source, label }: { source: TerminalSource; label:
       window.removeEventListener('agora-theme', onSize);
       observer.disconnect();
       live.close();
+      ordered.dispose();
       r.dispose();
       renderer.current = undefined;
       session.current = undefined;

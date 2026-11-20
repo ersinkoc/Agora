@@ -366,7 +366,7 @@ so it can be driven with no hub. Frames are the envelope above. `CommandRequest`
 opened by sending `TerminalSubscribe` on a dynamic stream id (3+) chosen by the client. After the response the
 node writes that terminal's frames on that stream: kind 1 snapshot (ANSI that repaints the screen, with its colours and
 attributes, then restores the program's bracketed-paste and application-cursor modes and its current style), each one followed by kind 2 with the size it was painted at, kind 0 raw
-output, kind 2 resize (cols, rows as u16 LE), kind 3 exit (i32 LE; negative = signal). A client that falls behind
+output, kind 2 resize (cols, rows as u16 LE), kind 3 exit (i32 LE; negative = signal). A client takes the size of the kind 2 frame that follows a snapshot before it paints the snapshot (a snapshot is made at the node's size; parsed at another width it wraps and scrolls its first rows away); the web window waits for that frame, at most 150 ms. A client that falls behind
 gets a fresh snapshot instead of the dropped output; it never slows the terminal. When the exit was among what it
 missed it still gets the exit frame, with `i32::MIN` (unknown) when the node no longer has the code. Input and resize are ordinary
 commands. Terminal ids are `t-<agent id>` (one terminal per agent). Implemented commands: `project.list`,
@@ -949,21 +949,55 @@ forwards either to a node that did not offer it.
   adapter nor the node can clear the other's flag. For a select the flag is on each choice; for a boolean it is on the option and holds for
   both values in the flag, but the node judges each value: a change TO the value that keeps protection (turning `auto_approve` off,
   `ask_for_approval` on) is never refused, and where the option's words do not say which value protects, both count as risky.
-  `AgentSetMode`, `AgentSetModel` and `AgentSetConfig` of a choice that skips are refused with `agent.option_forbidden`
-  (`kind`, `option`: the mode, the model or the config id, `policy` `forbid` or `confined_only`) when the node's `skip_permissions` policy does
-  not allow it, and otherwise with `agent.option_unconfirmed` (same `kind` and `option`): a launch option that skips needs the user's
-  confirmation (ADR-0059) and so does a mode or a config option, but the schema has no field to carry it on `AgentSetMode` or
-  `AgentSetConfig`, so the node can never be shown one and refuses these always. **Missing:** a `confirmed` field on those two commands,
-  signed like the launch's; it is a schema change and needs an ADR (`Supervisor::prepare_set_option`, `prepare_set_config`).
-  **Switching a running agent to a mode that skips permissions from a client (the web `SessionBar`'s "acts freely" after its
-  confirmation dialog) is therefore temporarily unavailable** under every policy until that field exists. Why a verified signature
-  cannot stand in for it today: a grant (`docs/specs/protocol.md`, ADR-0041) is signed over the node id, a grant id, a scope, the
-  command NAMES (`agent.set_mode`) and an expiry of up to 8 hours; it names no mode, option or value, and the control dispatch (a
-  granted command reaches `execute` like any other, over the node's socket) cannot tell a granted call from an owner's. Taking it for
-  the user's confirmation would let one blanket grant switch any agent to any skipping mode for hours, which is weaker than a launch
-  (whose signature names each option, `directory-action-v4`). The `agent.launch` path with its signed options is unaffected. The check is on the node, whatever
-  the window or the hub said. The node forgets an adapter's reported options when it restarts, so a stale list cannot decide a choice.
-  Both commands are in the team-default `signed_commands` of a node with limited devices.
+  `AgentSetMode` and `AgentSetConfig` of a choice that skips follow the node's `skip_permissions`
+  policy: refused with `agent.option_forbidden` (`kind`, `option`: the mode, the model or the config id, `policy` `forbid` or
+  `confined_only`) when the policy does not allow it; when it does, the node neither applies nor refuses the choice: it raises an
+  `agent.skip_permissions` approval and answers `agent.approval_needed { approval_id }` (next item). A choice that keeps protection is
+  never held to any of this. (`AgentSetModel` of a model the node judges as skipping is still refused, `agent.option_forbidden` or
+  `agent.option_unconfirmed`: Amendment A covers modes and config options.) All three commands are in the team-default `signed_commands`
+  of a node with limited devices. The node forgets an adapter's reported options when it restarts, so a stale list cannot decide a choice.
+- **A running agent switched to a mode or option that skips permission questions (ADR-0090 Amendment A).** Raised by the node, from a
+  window's `AgentSetMode` or `AgentSetConfig` only (an agent, the mesh and the hub have no path to it); no schema message is new:
+  - `ApprovalRequested { action: "agent.skip_permissions", agent_id, detail, expires_at_ms }`, expiring after 10 minutes like every
+    request. `detail` is the node's own rendering, a JSON object: `node`, `agent` (the agent id), `agent_kind`, `folder` (the agent's
+    folder on that machine), `option_type` (`mode` or `config`), `option` (for a mode the literal `mode`, otherwise the config id),
+    `option_name` (the agent's own name for the option, untrusted, at most 64 characters, `""` for a mode), `value` (the mode id or the
+    value chosen), `value_name` (the agent's own name for it, untrusted, same bounds), `skips` (always `true`: the node's own judgement
+    that the choice makes the agent act without asking, never the agent's word) and `scope` (`session`: the choice lasts until the
+    agent ends, restarts or is switched back). Every string that came from the agent or the machine is shown without control and
+    format characters (Cc, Cf: bidirectional controls, zero-width characters, the byte order mark, line and paragraph separators);
+    `agent_kind` is cut at 64 characters, `folder` at 256, the two names at 64, a cut marked by a final `…` inside the bound. `option` and
+    `value` are never altered (they are signed as shown): a choice whose option id or value is empty, longer than 128 bytes or holds such a
+    character gets no card and the command is answered `agent.option_unknown`. A window writes its own words from these fields (UI vocabulary, ADR-0024) and shows the
+    ids `option` and `value` beside the agent's names, which are text a model chose.
+  - The command is answered with the error `agent.approval_needed { approval_id }`; the choice is not applied. A repeat of the same
+    command while that request waits gets the same id (one card per agent, option and value); a command naming another value of the same
+    option withdraws the waiting card and raises a new one.
+  - The decision is the existing `ApprovalResolve { approval_id, approved, signer_device_id, signature }` (`helper_grant` 0 and
+    `helpers_may_start` false: anything else is refused), signed over the domain `agora-approval-skip-v1`, one NUL byte, then
+    `F(node_id) F(approval_id) F(verdict) F(agent_id) F(option_id) F(value) F(sha256(detail))`, concatenated with no separator, where
+    `F(x)` is the decimal byte length of `x`, `:`, then `x`; `verdict` is `1` or `0`; `agent_id`, `option_id` and `value` are the
+    detail's `agent`, `option` and `value`; the hash is SHA-256 of `detail` exactly as announced, lowercase hex. Lengths are
+    canonical decimal (no leading zeros, no sign); the fields are raw bytes (UTF-8 as given, no normalisation). Vectors:
+    `schema/fixtures/signing/approval-skip-v1.json` (checked in `crates/agora-protocol/tests/approval_skip_signing.rs` and by the node).
+  - The node verifies the signature against `trusted-devices` as for any approval (an untrusted device or a signature over other bytes is
+    `approval.signature_invalid`), the id is single use (a replay is `protocol.invalid_message`, `field: approval_id`) and a late
+    decision is `approval.expired`. Only an `approved` verdict applies anything, and it applies exactly the option and value the node
+    rendered and stored when it raised the request, never anything in the decision. A denial, an expiry and a withdrawal change nothing.
+  - Scope is the agent's session: the waiting request is withdrawn (announced as `ApprovalResolved { approved: false }` with no signer)
+    when the agent ends, is stopped or its adapter crashes, when the option is set to any value by another command, and when it
+    is superseded; an approval decided after the adapter restarted applies nothing and is answered `agent.not_found` (the run it named is gone, and the node's
+    own check of what the agent offers fails). A node restart forgets every waiting request and every approval: the agent that comes
+    back asks again. At most 8 requests wait on a node and at most 6 are raised per minute (`node.resource_limit { resource:
+    "skip_approvals", limit }`), and one agent may have at most 2 waiting and raise at most 3 per minute (`resource:
+    "skip_approvals_agent"`), so one agent's flood never keeps another agent's card from being raised; a replacement counts as a new card
+    for these limits. Policy `forbid` and `confined_only` (not confined) refuse with `agent.option_forbidden` before any request
+    exists. Switching back to a value that keeps protection needs no approval.
+  - An adapter can never raise this card or any other node-made one: an approval request from an adapter whose action is in the `agent.`
+    namespace (`agent.start`, `agent.skip_permissions`, ...) gets no card, consumes nothing and is answered "denied" at once.
+  - Node capability `approval.skip_permissions`, advertised only by a node that handles the above and passed by the hub. A client that
+    sees `agent.approval_needed` shows the card of the `ApprovalRequested` it already receives; against a node without the capability
+    the command is still refused with `agent.option_unconfirmed`.
 - **Capabilities:** `chat.rich` (entries that change in place, thinking, permission entries, queued prompts, `AgentPromptResult`),
   `agent.set_config`, `agent.cancel_turn` and `agent.commands` (`AgentCommands` events), advertised by every node of this build in
   `uplink_client.rs` and passed by the hub (`hubcli.rs`).
@@ -997,7 +1031,18 @@ forwards either to a node that did not offer it.
 - **`AgentQuotaObserved`** (`Event` arm 67, capability `usage.quota`): `node_id` (1, the producer's own id, checked like `NodeResources`; a
   node naming another machine is refused as forged), `tool` (2, the agent kind, `codex`), `window` (3), `used_percent` (4, 0 to 100),
   `resets_at_ms` (5), `source` (6, `file`), `observed_at_ms` (7, the node's clock when it read a live line; for what it replays from the start of a file, the line's own time or the file's, never later than the node's clock). One observation of one plan window of a tool on a
-  machine; the hub replaces the earlier one of the same `(node_id, tool, window)` (a later step: this build only relays it).
+  machine; the hub keeps the newest one per `(node_id, tool, window)`.
+- **Hub table (ADR-0091 step 3):** at most 64 windows per machine (the oldest `observed_at_ms` goes, found among that machine's own windows);
+  labels of 1 to 64 bytes; only for the machine that sent it. A reading replaces the stored one only when its `observed_at_ms` is not older.
+  The hub cuts `observed_at_ms` back to its own clock plus 2 minutes when a session receives it (the stored event carries the cut time), so a
+  node whose clock runs ahead cannot hold a window with a time in the future; the projection also never takes a time more than 2 minutes
+  after the event's own `at_ms`. Clients cut a time ahead of their own clock the same way, and a client treats a missing or passed
+  `resets_at_ms` as a reset.
+- **Retention:** a forgotten machine's last readings stay in the table (nothing is sent for it) until the machine returns, and are
+  rebuilt with the rest of the view when the hub restarts.
+- **Privacy rule:** a plan limit is the use of a whole machine, not of a project. It is replayed and routed only to a window with no
+  project scope (the owner's, full access). A member who was given some projects never receives it, even for a machine that hosts their
+  project.
 - **`window`** is `five_hour`, `seven_day`, or `minutes:<n>` (a length in minutes, `n` from 1), derived from the window's length and never
   from a field name such as "primary". A client must accept any `minutes:<n>`.
 - **Bounds, by the node:** `used_percent` is clamped to 0..100; `resets_at_ms` is not more than a day in the past and not more than 31 days

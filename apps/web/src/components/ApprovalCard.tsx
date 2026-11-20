@@ -3,6 +3,7 @@ import { approvalName } from '../net/approvalText';
 import { detailText } from '../net/tool';
 import type { ApprovalModel } from '../net/view';
 import { StartApproval, type StartChoice } from './StartApproval';
+import { SkipApproval } from './SkipApproval';
 
 // The short form names the command or file; what the agent asked for, in full, stays one click (or key) away before Allow.
 export function FullRequest({ detail }: { detail: string }) {
@@ -22,6 +23,8 @@ export function ApprovalCard({ approval, busy, onResolve }: {
 }) {
   // ADR-0057: a request to start an agent shows everything it asks for.
   if (approval.start) return <StartApproval approval={approval} start={approval.start} busy={busy} onResolve={onResolve} />;
+  // ADR-0090 Amendment A: a switch to a mode that skips permission questions, in the machine's own rendering.
+  if (approval.skip || approval.skipUnknown) return <SkipApproval approval={approval} busy={busy} onResolve={(ok) => onResolve(ok)} />;
   return (
     <article className="approval" aria-label={t('approval-title', { name: approvalName(approval) })}>
       <strong>{t('approval-title', { name: approvalName(approval) })}</strong>

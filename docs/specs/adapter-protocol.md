@@ -82,8 +82,9 @@ described before ADR-0090, byte for byte: the ACP bridge sends the new items onl
   or the node's rule; the event `AgentSessionConfig` is recorded when it changed. `session/commands` is bounded (100) and recorded as
   `AgentCommands`. `agent.set_config` is refused with `protocol.capability_missing` for a terminal agent or an adapter that did not
   declare `config`, with `agent.option_unknown` (`id`: the option, or the value) for what was not reported, and with
-  `agent.option_forbidden` for a choice that skips permissions when the node's `skip_permissions` policy forbids it; only then is
-  `session/set_config` sent. `agent.cancel_turn` sends `session/cancel` to an adapter that declared `cancel`. A prompt that arrives while
+  `agent.option_forbidden` for a choice that skips permissions when the node's `skip_permissions` policy forbids it; a choice that skips
+  under a policy that allows it is not sent either until the owner's signed approval arrives (`agent.approval_needed`, ADR-0090
+  Amendment A); only then is `session/set_config` sent. `agent.cancel_turn` sends `session/cancel` to an adapter that declared `cancel`. A prompt that arrives while
   an adapter that declared `turns` has a turn open (a prompt was sent and no `idle` came after) is queued, at most 8 (`agent.queue_full`),
   and sent, one per `idle`, in order. Chat items: a tool item with a `callId` of more than 256 bytes is dropped; the others are described
   in `docs/specs/protocol.md` ("A structured agent's conversation").
@@ -140,14 +141,29 @@ towards the node, so chat items, approvals, state and cancel work as for any L3 
 
 The bridge accepts updates with a session ID for the active session or a matching pending `session/load`. An update without a
 session ID uses the active session for compatibility. A successful change of session retires pending prompts from the previous
-session. Only a reply to an active prompt ends its turn.
+session. Only a reply to an active prompt ends its turn. A prompt whose cancel was sent does not count for the turn: a prompt the
+node sends while it is still unanswered (the node's cancel grace passed) goes to the agent at once, its reply ends the turn with
+`idle`, and the cancelled prompt's late reply ends and changes nothing. The cancelled turn's permissions fail closed: while any
+cancelled prompt is unanswered, every ACP permission request is answered `cancelled` and never shown to the user, since one names the
+session, not the prompt, and may be the stopped turn's. This also refuses a new turn's permission requests in that window; it ends
+when the cancelled prompt answers, the session changes, or the agent exits. When prompts overlap otherwise (the node sent one into a
+running turn, such as to an adapter without `turns`), only the reply to the last of them ends the turn: an earlier reply reports its
+failure or stop as a notice but no `idle`, and the state returns to `working`. Any prompt's reply (success, error, or a refusal as
+busy) answers every pending permission request `cancelled` first: ACP names the session in one, not the prompt, so it may be the
+finished prompt's. This fails closed: an overlapping prompt's own request made before that reply is cancelled too, and the agent
+asks again if it still needs it. A new prompt that comes while a permission request is pending reports `blocked`, not `working`:
+the agent still waits for the user. A permission request that arrives while no prompt runs (none at all, or only cancelled ones;
+for example a straggler of a turn that ended) belongs to no turn: it fails closed, answered `cancelled` at once, never shown to the
+user and never reported as `blocked`, so the node cannot read it as the start of its next prompt.
 
 Node → bridge → agent: `session/start` → `session/new` (or `session/load` when the agent said it can and a resume id is known),
 with the node's `mcpServers` (the agent's mesh server) as ACP stdio servers `{name, command, args, env: []}` (at most 16; an entry
 without a name or command, or with an argument that is not a string, is dropped). ACP requires every agent to take stdio servers, so
 they are always sent unless the agent's `initialize` says `agentCapabilities.mcpCapabilities.stdio: false`;
 `session/prompt` → `session/prompt` with one text block. `session/cancel` sends the ACP `session/cancel` notification. The bridge
-replies `cancelled` to pending ACP permission requests and to requests that arrive before the cancelled turn completes.
+replies `cancelled` to pending ACP permission requests and to requests that arrive before the cancelled turn completes. A pending
+permission request the bridge drops for any other reason (the turn's last prompt was answered, the session changed) is answered
+`cancelled` too, so the agent never waits for an answer that cannot come.
 `session/set_option` → ACP `session/set_mode { sessionId, modeId }` or `session/set_model { sessionId, modelId }` for an id the
 agent offered (anything else is refused by the bridge without asking the agent), answered once the agent answered, and followed by
 `session/options` with the new current mode or model; an agent's error answer is `adapter.option_refused`;
@@ -155,7 +171,12 @@ agent offered (anything else is refused by the bridge without asking the agent),
 reported (a boolean as `{type: "boolean", value}`; anything else is refused by the bridge with `adapter.option_refused`), answered once the agent
 answered and followed by `session/config` from the agent's full reply;
 `approval/resolve` → the agent's own option (`allow_once`, else `allow_always`, else the first option for an approval;
-`reject_once`, else `reject_always`, else `cancelled` for a denial). The bridge offers no capabilities: `fs/*` and `terminal/*`
+`reject_once`, else `reject_always`, else `cancelled` for a denial). A decision for an approval the bridge no longer holds (it
+answered the request `cancelled` itself, by the rules above, or never knew it) is refused with a JSON-RPC error (`-32602`) and the
+agent is sent nothing; the node then marks the conversation's entry cancelled and publishes the approval as resolved, not approved
+and unsigned (as when a turn is cancelled), so the hub clears it; it does so for any decision it cannot deliver. The node learns of a
+cancelled permission when its decision is refused, and clears it: telling it the moment the bridge cancels would need a new adapter
+→ node notification (follow-up). The bridge offers no capabilities: `fs/*` and `terminal/*`
 requests from the agent are refused (the agent works in its own worktree), and mesh delivery to ACP agents goes through the mesh MCP
 endpoint like for any agent (the server the bridge passed in `session/new`). If the agent exits the bridge exits, which the node sees as the adapter exiting (restart policy as
 for L3); before that the bridge reports why (below). The bridge declares `usage`, `set_mode` and `set_model` among its capabilities, and to a node that said `chat.rich` also `thought`, `tool_status`, `plan_status`, `config`, `commands` and `turns`. The fake ACP agent (`agora-fake-agent --acp`) is the test double; real agents (Claude Code, Codex, WrongStack) need their

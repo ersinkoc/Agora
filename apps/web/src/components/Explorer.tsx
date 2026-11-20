@@ -1,12 +1,14 @@
 import { useMemo, useState } from 'react';
 import { t } from '../i18n';
 import { NoAskBadge } from './NoAskBadge';
+import { LimitChip } from './Quota';
 import { forgetReasonKey } from '../net/forget';
 import { resumeReasonKey } from '../net/directory';
 import { endedWithError, helperTree, machineKey, sharesName, type AgentTileModel, type ResumeAction } from '../model';
 import { bytesLabel, type MachineModel } from '../net/view';
 import { ago } from '../net/time';
 import { Icon } from './Icon';
+import { CloseAgentMenu, CloseConfirm } from './CloseAgent';
 import { StateMark } from './StateBadge';
 import { GroupByControl, groupTitle } from './GroupByControl';
 import { ProjectChip, ProjectHint } from './ProjectMark';
@@ -94,14 +96,20 @@ export function Explorer({ by, onBy, spread, fleet, machines, open, current, pro
                 {resumeError?.id === a.id && <p role="alert" className="m-0 px-2 pb-1 text-xs text-needs-you">{t(resumeReasonKey(resumeError.code))}</p>}
               </li>;
   const agentRow = (a: AgentTileModel, depth: number, withMachine: boolean) => <li key={a.id} className={depth === 0 ? undefined : depth === 1 ? 'ms-3' : 'ms-6'}>
-    <button type="button" className="ide-row" aria-current={current === a.id ? 'true' : undefined} aria-pressed={open.includes(a.id)} onClick={() => onToggle(a.id)} title={`${a.machine} · ${a.workspace}${a.branch ? ` · ${a.branch}` : ''}${a.parentName ? ` · ${t('helper-started-by', { name: a.parentName })}` : ''}`}>
+    <div className="group flex items-center">
+    <button type="button" className="ide-row flex-1" aria-current={current === a.id ? 'true' : undefined} aria-pressed={open.includes(a.id)} onClick={() => onToggle(a.id)} title={`${a.machine} · ${a.workspace}${a.branch ? ` · ${a.branch}` : ''}${a.parentName ? ` · ${t('helper-started-by', { name: a.parentName })}` : ''}`}>
       <StateMark state={a.state} />
       <span className="min-w-0 flex-1 truncate">{a.name}{a.parentName && <span className="ms-1.5 text-xs text-muted">{t('helper-started-by', { name: a.parentName })}</span>}{withMachine && <span className="ms-1.5 text-xs text-muted">{a.machine}</span>}</span>
       <NoAskBadge agent={a} compact nested />
+      <LimitChip agent={a} compact />
       {(by === 'kind' || by === 'state') && a.projectId && sharedAcross(spread.get(a.projectId)) && <ProjectChip spread={spread.get(a.projectId) as ProjectSpread} compact />}
       {a.shared && <span className="flex-none text-xs text-muted" title={t('workspace-shared')}>{t('ide-shared')}</span>}
       {(a.filesChanged ?? 0) > 0 && <span className="font-mono text-xs text-needs-you">{a.filesChanged}</span>}
     </button>
+    {/* Close agent: the target is this row's agent. Shown on hover or focus; always on a touch screen. */}
+    <span className="flex-none opacity-0 focus-within:opacity-100 group-hover:opacity-100 [@media(hover:none)]:opacity-100"><CloseAgentMenu agent={a} where="row" /></span>
+    </div>
+    <CloseConfirm agent={a} where="row" />
   </li>;
 
   return <aside className="flex min-h-0 flex-col border-line bg-surface-1 lg:border-e" aria-label={t('console-agents')}>
@@ -120,7 +128,7 @@ export function Explorer({ by, onBy, spread, fleet, machines, open, current, pro
     {projects.length > 0 && <label className="flex-none px-2 pb-2 text-xs text-muted"><span className="sr-only">{t('filter-project')}</span>
       <select value={project} onChange={e => onProject(e.target.value)} className="w-full rounded-xs py-1 text-[0.8125rem]"><option value="">{t('filter-all-projects')}</option>{projects.map(([id, p]) => <option key={id} value={id}>{t('filter-project-machines', { name: p.name, count: p.machines.size })}</option>)}</select>
     </label>}
-    <div className="flex-none px-2 pb-2"><GroupByControl by={by} onChange={onBy} /></div>
+    <div className="@container flex-none px-2 pb-2"><GroupByControl by={by} onChange={onBy} /></div>
     <nav className="min-h-0 flex-1 overflow-y-auto px-1 pb-3">
       {machines.length === 0 && fleet.length === 0 && <p className="muted px-3 py-2">{t('machines-empty')}</p>}
       {by !== 'machine' && flat.map((g) => {

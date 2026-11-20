@@ -42,15 +42,17 @@ describe('choosing what is already in use', () => {
 });
 
 describe('a mode that skips permission questions', () => {
-  it('is shown disabled with why, and never behind a confirmation that could not succeed', () => {
+  it('is an ordinary choice in the menu: marked, enabled, with no "not available" text and no confirmation of its own', () => {
     const html = renderToStaticMarkup(<SessionBar agentKey="n/a" session={session} choose={async () => true} />);
-    expect(html).toContain('Switching a running agent to a mode that skips permission questions is not available yet');
+    expect(html).not.toContain('not available');
     expect(html).not.toContain('alertdialog');
     expect(html).not.toContain('Switch anyway');
   });
-  it('says nothing when no such mode is on offer', () => {
-    const html = renderToStaticMarkup(<SessionBar agentKey="n/a" session={{ ...session, modes: [opt('build', 'Build'), opt('plan', 'Plan')] }} choose={async () => true} />);
-    expect(html).not.toContain('not available yet');
+  it('says "Acts freely" while the current mode is one that skips, and not when it is a safe one', () => {
+    expect(renderToStaticMarkup(<SessionBar part="controls" agentKey="n/a" session={{ ...session, currentMode: 'yolo' }} />)).toContain('Acts freely');
+    expect(renderToStaticMarkup(<SessionBar part="controls" agentKey="n/a" session={session} />)).not.toContain('Acts freely');
+  });
+  it('does not repeat the badge of an agent that was started that way', () => {
+    expect(renderToStaticMarkup(<SessionBar part="controls" agentKey="n/a" session={{ ...session, currentMode: 'yolo' }} launchedFree />)).not.toContain('Acts freely');
   });
 });
-

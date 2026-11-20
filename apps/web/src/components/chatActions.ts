@@ -11,6 +11,8 @@ export interface ChatActions {
   cancelTurn?: (agentKey: string, dropQueue: boolean) => Promise<ActionResult>;
   // Hub-wide keys of agents whose node answered a prompt in the rich form (`AgentPromptResult`): the node speaks `chat.rich`.
   rich?: ReadonlySet<string>;
+  // Hub-wide keys `<node>/<approval id>` of the approvals that wait now: a control that sent a switch needing approval watches for its card to go.
+  approvals?: ReadonlySet<string>;
 }
 export const ChatActionsContext = createContext<ChatActions>({});
 

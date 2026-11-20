@@ -96,6 +96,8 @@ and typed through them.
      - **After a node crash** there is no snapshot. The new node has only what was written after the crash. A full-screen agent
        redraws on the nudge, but a quiet shell, or a tool waiting for input, shows a blank screen until it writes again (a key
        press, Enter at a prompt). Its process and its state are untouched.
+       The agent's state is untouched too: the node takes up the state the ledger last knew (source `Screen`, so a rule that matches
+       replaces it), and shows `unknown` only when the ledger knew none. Before this, a quiet agent stayed `unknown` until it wrote.
      - This is a v1 limit (Consequences). Keeping a periodic snapshot in the holder is open question 5.
    - **Windows clients** take a fresh snapshot, as after any reconnect (ADR-0075 decision 7).
 5. **The node-holder link.**

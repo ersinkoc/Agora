@@ -254,6 +254,74 @@ fn an_agent_outlives_its_node_and_the_next_node_takes_it_up_with_the_output_writ
     assert!(holder.is_some());
 }
 
+/// A held agent that stays idle and silent while no node is there: its screen no longer shows what a rule reads (it cleared it), so
+/// detection has nothing to speak from. The new node reports what the ledger knew (idle), not `unknown`.
+#[test]
+fn a_reattached_idle_agent_is_idle_not_unknown_even_when_its_screen_says_nothing() {
+    let _serial = serial();
+    // The agent clears its screen only when the test says so (a file appears), never after a fixed time: on a slow machine a timer
+    // could clear the screen before the state was detected or written, and the test would then wait for a state that never comes.
+    let go = std::env::temp_dir().join(format!("agora-hn-go-{}", std::process::id()));
+    let _ = std::fs::remove_file(&go);
+    let rig = Rig::new(
+        "idle",
+        &sh(&format!(
+            "echo ready-prompt; while [ ! -e '{}' ]; do sleep 0.1; done; printf '\\033[2J\\033[H'; sleep 600",
+            go.display()
+        )),
+    );
+    let manifest = rig.root.join("manifests/k.toml");
+    let mut text = std::fs::read_to_string(&manifest).expect("manifest");
+    text.push_str("[[rules]]\nid = \"prompt\"\nstate = \"idle\"\npriority = 100\nregion = \"bottom_non_empty_lines(12)\"\ncontains = \"ready-prompt\"\n");
+    std::fs::write(&manifest, text).expect("manifest");
+    let state_of = |node: &Node, id: &str| {
+        node.supervisor
+            .lock()
+            .unwrap()
+            .list()
+            .into_iter()
+            .find(|v| v.id.as_str() == id)
+            .map(|v| v.state)
+    };
+    let node = rig.node();
+    let id = rig.launch(&node);
+    wait_for("the idle state", || {
+        state_of(&node, &id) == Some(agora_core::AgentState::Idle)
+    });
+    // Not `wait_for`: when this times out, say what the ledger did know.
+    let end = Instant::now() + Duration::from_secs(60);
+    while !node.ledger.get(&id).is_some_and(|e| e.last_state == "idle") {
+        assert!(
+            Instant::now() < end,
+            "timed out waiting for the ledger to know idle; it knew {:?} while the supervisor said {:?}",
+            node.ledger.get(&id).map(|e| e.last_state),
+            state_of(&node, &id)
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    std::fs::write(&go, b"go").expect("go file");
+    drop(node);
+    // While no node is there the agent clears its screen: the rule has nothing to read.
+    std::thread::sleep(Duration::from_millis(3000));
+
+    let node = rig.node();
+    assert!(held(&node, &id));
+    assert_eq!(
+        state_of(&node, &id),
+        Some(agora_core::AgentState::Idle),
+        "a reattached idle agent lost its state"
+    );
+    // It stays so while the screen is blank (nothing replaces it without evidence).
+    std::thread::sleep(Duration::from_millis(1500));
+    assert!(!screen(&node, &id).contains("ready-prompt"));
+    assert_eq!(
+        state_of(&node, &id),
+        Some(agora_core::AgentState::Idle),
+        "the state was dropped while the agent stayed idle"
+    );
+    let _ = std::fs::remove_file(&go);
+}
+
 #[test]
 fn an_agent_started_by_a_node_without_a_holder_is_the_nodes_own_and_ends_with_it() {
     let _serial = serial();

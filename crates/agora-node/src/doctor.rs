@@ -473,6 +473,16 @@ fn version_older(a: &str, b: &str) -> bool {
     }
 }
 
+/// ADR-0093: a notice when the holder running here speaks only link version 1 (built before 0.3.27), so structured agents are resumed
+/// after a node restart, not kept. Read only: it looks at the note the node leaves (`holder_note`), never at the holder or an agent.
+/// A warning, never a failure: it does not change the exit status. `detail` is how many agents the holder keeps.
+pub fn holder_checks(home: &Path) -> Vec<Check> {
+    match crate::holder_note::old_holder(home) {
+        Some(h) => vec![check("holder-old", Status::Warn, h.kept.to_string())],
+        None => Vec::new(),
+    }
+}
+
 /// True when nothing failed (warnings are fine): the exit status of `agora doctor`.
 pub fn healthy(checks: &[Check]) -> bool {
     checks.iter().all(|c| c.status != Status::Fail)

@@ -2,6 +2,8 @@
 // positioned events. Keys are hub-wide `<producer>/<local id>`. Pure: no sockets, no React.
 
 import { agora } from '../gen/agora.js';
+import type { QuotaObs } from './quota';
+import { SKIP_ACTION, skipOf, type SkipRequest } from './skipApproval';
 import { type AgentTileModel, type CommandModel, type ConfigCategory, type ConfigOptionModel, type SessionModel, type SessionOptionModel, uiState } from '../model';
 
 type Ev = agora.v1.Event.$Properties;
@@ -93,7 +95,12 @@ export interface View {
   forgottenAgents?: Set<string>;
   // ADR-0061: node id -> the devices it says it trusts (its last `NodeTrustedDevices`).
   trusted?: Map<string, string[]>;
+  // ADR-0091: the newest plan-limit observation per machine, tool and window (node, then `<tool>\0<window>`); at most `MAX_QUOTA` windows per machine.
+  quota?: Map<string, Map<string, QuotaV>>;
 }
+export interface QuotaV { nodeId: string; tool: string; window: string; usedPercent: number; resetsAtMs: number; observedAtMs: number }
+const MAX_QUOTA = 64; // per machine, as the hub
+const QUOTA_SKEW_MS = 120_000;
 
 const MAX_MESSAGES = 50;
 
@@ -165,7 +172,7 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
   // ADR-0090: the hub sends an agent's last settings and slash commands right after a snapshot, AT the snapshot's position (the snapshot
   // has no field for them). These two replace what is held, so they are applied at the window's own position too; every other event
   // at or before it was already seen.
-  const replacing = pos === v.pos && (ev.body === 'agentSessionConfig' || ev.body === 'agentCommands');
+  const replacing = pos === v.pos && (ev.body === 'agentSessionConfig' || ev.body === 'agentCommands' || ev.body === 'agentQuotaObserved');
   if (pos <= v.pos && !replacing) return;
   v.pos = pos;
   const producer = ev.producerId ?? '';
@@ -309,6 +316,26 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
       if (a) a.session = { ...(a.session ?? emptySession()), config: configOf(e.agentSessionConfig.options) };
       break;
     }
+    // ADR-0091: a machine speaks for itself only; the newest observation of a window wins; the table is bounded (the oldest goes).
+    case 'agentQuotaObserved': {
+      const b = e.agentQuotaObserved;
+      if ((b.nodeId ?? '') !== producer || !b.tool || !b.window) break;
+      const key = `${b.tool}\u0000${b.window}`;
+      const table = ((v.quota ??= new Map()).get(producer) ?? new Map<string, QuotaV>());
+      v.quota.set(producer, table);
+      // Never newer than this window's own clock (plus skew): a machine whose clock runs ahead cannot win a window for good. The
+      // comparison with the stored reading is made on the cut time.
+      const observedAtMs = Math.min(num(b.observedAtMs), Date.now() + QUOTA_SKEW_MS);
+      const old = table.get(key);
+      if (old && old.observedAtMs > observedAtMs) break;
+      table.set(key, { nodeId: producer, tool: b.tool, window: b.window, usedPercent: Math.min(100, num(b.usedPercent)), resetsAtMs: num(b.resetsAtMs), observedAtMs });
+      if (table.size > MAX_QUOTA) {
+        let oldest: string | undefined;
+        for (const [k, x] of table) if (oldest === undefined || x.observedAtMs < (table.get(oldest)?.observedAtMs ?? 0)) oldest = k;
+        if (oldest !== undefined) table.delete(oldest);
+      }
+      break;
+    }
     case 'agentCommands': {
       const a = v.agents.get(q(e.agentCommands.agentId));
       if (a) a.session = { ...(a.session ?? emptySession()), commands: commandsOf(e.agentCommands.commands) };
@@ -337,9 +364,11 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
       a.sinceMs = num(b.interruptedAtMs) || at;
       a.interrupted = { resumable: !!b.resumable, atMs: num(b.interruptedAtMs), folder: b.folder ?? '', stillRunning: !!b.stillRunning };
       v.agents.set(key, a);
+      dropSkipCards(v, key);
       break;
     }
     case 'agentExited': {
+      dropSkipCards(v, q(e.agentExited.agentId));
       const a = v.agents.get(q(e.agentExited.agentId));
       if (a) {
         a.running = false; a.state = 4 /* done */; a.sinceMs = at; a.exitCode = e.agentExited.exitCode ?? 0;
@@ -470,6 +499,8 @@ export interface ApprovalModel {
   detail: string;
   expiresAtMs: number;
   start?: StartRequest; // ADR-0057: what an `agent.start` request asks for
+  skip?: SkipRequest; // ADR-0090 Amendment A: what an `agent.skip_permissions` request says, read strictly
+  skipUnknown?: boolean; // the action is that kind but the card is not the shape this window expects: nothing is signed
 }
 
 // An agent's request to start another (ADR-0057), read from the approval's detail. Every field is the asking agent's text: shown, never
@@ -518,6 +549,14 @@ export function startRequest(action: string, detail: string): StartRequest | und
   }
 }
 
+const skipFields = (r: ReturnType<typeof skipOf>): Pick<ApprovalModel, 'skip' | 'skipUnknown'> => (r === undefined ? {} : 'ok' in r ? { skip: r.ok } : { skipUnknown: true });
+
+// ADR-0090 Amendment A: a card for a switch to a mode that skips permissions belongs to the agent's run; when the agent ends the node
+// withdraws it, and the window drops it at once too, so a stale card is never left to answer.
+function dropSkipCards(v: View, agentKey: string): void {
+  for (const [id, a] of v.approvals) if (a.agentId === agentKey && a.action === SKIP_ACTION) v.approvals.delete(id);
+}
+
 // What the approvals section shows: soonest to expire first.
 export function approvalList(v: View): ApprovalModel[] {
   const names = new Map(tiles(v).map((t) => [t.id, t.name]));
@@ -535,6 +574,7 @@ export function approvalList(v: View): ApprovalModel[] {
         detail: a.detail,
         expiresAtMs: a.expiresAtMs,
         start: startRequest(a.action, a.detail),
+        ...skipFields(skipOf(a.action, a.detail, at < 0 ? '' : id.slice(0, at), a.agentId)),
       };
     })
     .sort((a, b) => a.expiresAtMs - b.expiresAtMs);
@@ -565,7 +605,13 @@ export function shown(v: View): View {
     approvals: keep(v.approvals, (k) => !under(k)),
     withTerminal: new Set([...v.withTerminal].filter((k) => !under(k))),
     trusted: v.trusted && keep(v.trusted, (id) => !hidden.has(id)),
+    quota: v.quota && keep(v.quota, (node) => !hidden.has(node)),
   };
+}
+
+/** ADR-0091: the plan-limit observations the window holds, for the Usage panel, the cards and the start window. */
+export function quotaObs(v: View): QuotaObs[] {
+  return [...(v.quota?.values() ?? [])].flatMap((m) => [...m.values()]).map((q) => ({ machineId: q.nodeId, tool: q.tool, window: q.window, usedPercent: q.usedPercent, resetsAtMs: q.resetsAtMs, observedAtMs: q.observedAtMs }));
 }
 
 export interface MachineModel { id: string; name: string; os: string; online: boolean; agentsRunning: number; lastSeenMs: number; memoryBytes?: number; build?: string; terminalsOpen?: number; binary?: string }

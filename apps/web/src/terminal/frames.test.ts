@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { decodeTerminalFrame, inputBytes } from './frames';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { decodeTerminalFrame, inputBytes, snapshotAfterSize, SNAPSHOT_WAIT_MS, type TerminalEvent } from './frames';
 
 const u16x2 = (a: number, b: number) => new Uint8Array(new Uint16Array([a, b]).buffer); // little-endian hosts
 const i32 = (v: number) => new Uint8Array(new Int32Array([v]).buffer);
@@ -27,5 +27,37 @@ describe('terminal frames', () => {
   });
   it('encodes typed text as UTF-8', () => {
     expect(Array.from(inputBytes('é'))).toEqual([0xc3, 0xa9]);
+  });
+});
+
+describe('a snapshot is painted after the size that follows it', () => {
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+  const snap: TerminalEvent = { type: 'snapshot', bytes: new Uint8Array([1]) };
+  const size: TerminalEvent = { type: 'resize', cols: 158, rows: 39 };
+  const data: TerminalEvent = { type: 'data', bytes: new Uint8Array([2]) };
+  const run = (...events: TerminalEvent[]) => { const out: string[] = []; const g = snapshotAfterSize((e) => out.push(e.type)); events.forEach((e) => g.push(e)); return { out, g }; };
+  it('takes the size first and paints the snapshot then', () => {
+    expect(run(snap, size).out).toEqual(['resize', 'snapshot']);
+  });
+  it('keeps output behind the snapshot it follows', () => {
+    expect(run(snap, size, data).out).toEqual(['resize', 'snapshot', 'data']);
+    expect(run(snap, data).out).toEqual(['snapshot', 'data']);
+  });
+  it('paints a snapshot that no size follows after a short wait', () => {
+    const { out } = run(snap);
+    expect(out).toEqual([]);
+    vi.advanceTimersByTime(SNAPSHOT_WAIT_MS);
+    expect(out).toEqual(['snapshot']);
+  });
+  it('paints a snapshot before a later one and passes a size on its own through', () => {
+    expect(run(snap, snap, size).out).toEqual(['snapshot', 'resize', 'snapshot']);
+    expect(run(size, data).out).toEqual(['resize', 'data']);
+  });
+  it('drops what it holds when disposed', () => {
+    const { out, g } = run(snap);
+    g.dispose();
+    vi.advanceTimersByTime(SNAPSHOT_WAIT_MS * 2);
+    expect(out).toEqual([]);
   });
 });

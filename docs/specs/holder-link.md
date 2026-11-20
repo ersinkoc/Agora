@@ -162,3 +162,119 @@ next frame's.
    masters, or end, before the new node attaches.
    Step 2: a clean stop closes the masters before the link (`Supervisor::shutdown`); a node that is alive and not stopping while another
    takes the lock (not a case `agora` produces: its supervisor ends the old node first) is not handled.
+
+## Pipe agents (ADR-0093, link version 2)
+
+Appended, as the spec is: nothing above changes. Status: built for Unix in ADR-0093 build-order steps 1 and 2 (`crates/agora/src/hold.rs`,
+`crates/agora-platform/src/held.rs` and `unixhold.rs`, `crates/agora-node/src/holder_link.rs`, `holder.rs`, `supervisor.rs`,
+`crates/agora-adapters/src/host.rs`). Windows joins in step 3 with the same frames over the named pipe.
+
+A **pipe agent** is a structured agent: an adapter or an ACP bridge, a program with a pair of pipes (stdin and stdout) and no terminal. The holder
+starts it, keeps both pipe ends across a node restart, reads its output into a bounded buffer whether or not a node is there, and lets the
+next node take the output over. **The holder never parses what the agent writes**: a line is bytes up to a newline, and what is in it (ACP's or
+the adapter's JSON-RPC) is the node's to understand. The holder knows nothing of ACP, approvals or chat.
+
+### Version negotiation
+The frame, `Hello` and `Refused` are frozen, so version 2 is reached without a new frame: a node says `Hello(2)`. A holder that speaks 2
+answers `HelloOk(2)`; a holder built before ADR-0093 answers `Refused(VersionMismatch, 1)`, and the node says `Hello(1)` on a new connection
+(`Client::connect`; `Client::version` says what was agreed). **Version 2 is version 1 plus the tags below** and nothing in version 1 changes:
+
+- A holder speaks 1 and 2 (`version_spoken`). To a node that said `Hello(1)` it never sends a new tag, and it answers a new request with
+  `Refused(BadRequest)`. This is what lets a node built before this version keep working with this holder.
+- A node never sends a new tag to a holder that answered 1: an older holder closes the link on a tag it does not know, which would cost the node
+  its terminals (decision 5 above: `Request::decode` failing is "not served"). `HolderSession::pipes` says whether the holder keeps pipe agents; when
+  it does not, the node runs a structured agent itself, as before.
+- A different version from both is still `Refused(VersionMismatch, 1)` (the holder's own base version) and changes nothing.
+
+### New frames
+Node to holder: `StartPipe`(9: agent, argv, cwd, env), `AttachPipes`(10), `PipeRead`(11: agent), `PipeWrite`(12: agent, line).
+Holder to node: `PipeStarted`(71: agent, pid), `PipeData`(72: agent, pid, state, `dropped: u64`, `eof: flag`, `seen: lines`, `fresh: lines`).
+A line list is a `u32` count (never more than the bytes left) and, per line, `u32` length and bytes. A line is sent without its newline.
+`Ok`, `Refused`, `Agents` and `AttachDone` are as before. Golden fixtures for the new frames are in `tests/fixtures/holder-link/` (`start-pipe`,
+`attach-pipes`, `pipe-read`, `pipe-write`, `pipe-started`, `pipe-data`, `pipe-data-exited`, `hello-v2`, `hello-ok-v2`).
+
+The framing of the link itself is the length prefix per frame; **a line is one length-prefixed item inside a frame**, so a line is never split by the
+frame and the node never has to find a newline in the link's bytes. Limits as for every frame (1 to 4 MiB): a frame that is empty, larger than
+`MAX_FRAME`, has an unknown tag, a cut or trailing body, a count that lies or a flag that is not 0 or 1 is `Malformed` and the link is closed
+(tested with the real holder, `crates/agora/tests/hold_pipes.rs`, and for every cut of a frame in `holder_link_pipes_format.rs`). A line a node
+wants to write that cannot fit one frame fails that write on the node's side, before anything is sent: the link stays whole.
+
+### Order and meaning
+1. `Hello(2)`, then `Attach` and `AttachPipes`, as for terminals (everything but `List` waits for `Attach`; `AttachPipes` is `NotAttached` before it).
+2. `StartPipe` runs `argv` in `cwd` with **exactly** `env` (as for terminals: the holder passes nothing of its own), stdin and stdout piped, stderr the
+   holder's own (its log), in a session of its own (so a process group of its own, as a terminal agent). Every descriptor beyond 0, 1 and 2 is
+   close-on-exec. The launch is the node's: it is sent the complete environment `Adapter::spawn` would have given (`Adapter::held_env`); a variable that
+   is not UTF-8 means the node runs the adapter itself. `Failed`: the program is not there (the node's own start says why); `AgentExists`: the id is in use.
+   `argv` and `env` are the node's launch, never ACP: the holder cannot tell an adapter from any other program.
+3. **Output.** A thread per agent reads stdout into a buffer of at most 1 MiB (`HELD_BUFFER`) of whole lines, oldest dropped first. A line longer than
+   1 MiB (`HELD_LINE_MAX`) is dropped and counted. Empty lines are nothing. A last line without a newline is a line when the output ends.
+4. **Dropped bytes.** Bytes pushed out of the buffer *before any node was given them* are counted, and `PipeData.dropped` says how many since the last
+   hand-over, once. This is the explicit "dropped N bytes" marker. Kept bytes plus dropped bytes are every byte the agent wrote (tested exactly, with 3 MB
+   written to a holder nobody read). The node tells the person (`adapter.output_dropped`, a notice with the count in `bytes`, after the replay).
+5. **Taking over.** `PipeRead` answers the lines no node has had (`fresh`) and marks them given. The holder **keeps lines it has given** until 1 MiB of newer
+   ones pushes them out. `AttachPipes` answers, per pipe agent, **all** it holds: the lines an earlier node was given as `seen` and the others as
+   `fresh`; then `AttachDone`. A line is `fresh` once: what a node was given is never `fresh` again. Delivery is at most once, as for terminals ("what was
+   sent into a socket nobody reads is the one unavoidable loss"): a reply that is written to a node that dies before using it is lost. `eof` is true when the
+   agent's output has ended; with the agent's state `Exited` and no line left, nothing more will come.
+6. **Input.** `PipeWrite` queues one line (the holder adds the newline) for a thread of its own, up to 256 lines, so an agent that does not read never holds
+   the holder. A full queue or a closed input is `Refused(Failed)`; an unknown agent `Refused(UnknownAgent)`. `Resize` of a pipe agent is `BadRequest`.
+7. **Ending.** `Signal`, `Stop`, `List` and `Release` work on pipe agents as on terminals (a pipe agent is in `List`). `Release` of an ended agent forgets it;
+   a running one is `BadRequest`. A holder with no agent left ends (decision 2). `SIGTERM` to the holder (`agora down --agents`) ends the pipe agents too.
+   If the holder dies, the agent's stdin reaches end of file (nothing guarantees more; there is no `PDEATHSIG` on pipe agents).
+
+### How the node uses it
+- **Where:** `HolderSession::start_pipe`, `pipe_io`; `Supervisor::launch_adapter` (through `launch_held_adapter`), `adopt_held_pipe`; `Adapter::attach_held`,
+  `Adapter::detach`; `agora_node::daemon::take_up_held`. Unix only; elsewhere nothing here runs.
+- **What goes through it:** an adapter the node does not confine (`sandbox` is `None`), also when the node restarts it after a crash or resumes it. A
+  confined adapter is the node's own, as the confined terminal agents are.
+- **Reading and writing:** the adapter host's reader reads a stream that polls the holder (`PipeRead`, every 2 ms after a line, backing off to 40 ms when
+  idle: a line waits at most about 40 ms); its writer writes lines to the holder (`PipeWrite`). The host, its JSON-RPC and everything above it are unchanged.
+- **When the node stops cleanly** (`Supervisor::shutdown`): a held adapter is let go (`Adapter::detach`: reading and writing stop, the process is not ended);
+  any other adapter ends, as before. **When it is killed** the link closes and the holder keeps buffering.
+- **When the next node starts:** `take_up_held` attaches, then attaches the pipe agents. For each running pipe agent whose ledger entry names this holder
+  (pid and start time) and is interrupted, it restores the agent (`restore`), reads the adapter's session id and capabilities the old node wrote to the ledger
+  (`Entry::adapter_session`, `adapter_capabilities`; the node cannot ask the adapter again), starts a new adapter host over the holder's pipes (**no
+  `initialize` and no `session/start`: the adapter still has its session**), makes the mesh endpoint again at the same path, and clears the interruption.
+  An agent the node does not take up (unknown to the ledger, another holder, ended, its folder gone, no session recorded) is ended through the holder.
+- **Rebuilding what waited on the person (decision 3):** the `seen` lines go through `pending_approvals`, which keeps an `approval/request` unless a later
+  `state/update` shows the agent went on (a state other than `blocked`); the `fresh` lines are read as if they had just arrived. A kept request becomes an
+  `ApprovalRequest` event exactly as a new one, so the person is **asked again**: the node never answers it, and no line of the replay is a decision. A
+  request the old node had already shown and the person had already answered shows the agent going on and is not asked again; one that cannot be told apart
+  (a holder that kept less than the turn) can be shown after it was answered, and the answer then reaches an agent that no longer waits (the adapter answers
+  with an error), never the other way round.
+- **Without a holder:** unchanged. A structured agent is the node's own, ends with it, and is resumed (ADR-0060).
+
+### Limits, plainly
+- A request the old node had read, before it was killed and with fewer than 1 MiB of output after it, is rebuilt. A request more than 1 MiB of output back is not
+  (the agent waits and the person can cancel the turn).
+- Lines in flight to a node that dies are lost (at most once). What the old node had *not yet turned into an event* when it was let go is lost with it.
+- Mode, model and configuration lists an adapter reported before the restart and not within the last 1 MiB are not known until it reports them again.
+- "Kept" against "continued" in the window (ADR-0093 decision 4) is **not built**: the snapshot has no field that says it without a schema change (`still_running`
+  says the process runs, not that it survived a node). Left for build-order step 4.
+- **Delivered is forgotten as new.** A line is marked given when the holder takes it for a reply, before the reply is written. A reply that then
+  fails (the link broke) loses those lines as `fresh`; they stay available as `seen`, from which only `approval/request` lines are rebuilt. Anything
+  else in them (chat, state, usage) is lost to the next node.
+- **Evicted but delivered is not counted.** `dropped` counts only bytes pushed out of the buffer before any node was given them. An
+  `approval/request` that a node had been given and that 1 MiB of newer output then pushed out is neither rebuilt nor counted. (Counting it would
+  need a new field in `PipeData`, a new tag; not done.)
+- **The bound is on encoded size** (each line costs its bytes plus 4), so everything kept, as `seen` and `fresh` together, fits one `PipeData` frame
+  whatever the lengths of the lines (a flood of one-byte lines is tested).
+- **An ended agent's group:** when the holder collects a pipe agent's end it sends `SIGKILL` to what is left of the agent's process group, at that
+  moment (the one moment the group's number is certainly still the agent's), so a crashed adapter cannot leave processes running that hold its output
+  open.
+- **A node that went back to link version 1** still sees pipe agents in `List` (they are agents of the holder) but does not end them: a version 1 node ends only
+  what `Attach` handed it, and `Attach` never lists pipe agents (a `Stop` it sent by name would work, but it never knows the names); they run until the
+  holder gets `SIGTERM` (`agora down --agents`).
+  A node of this build never does this to itself.
+- Confinement (ADR-0093 decision 6) is as for terminals: a confined adapter is the node's own.
+- Windows has no holder (step 3).
+
+### Telling the person about an older holder (ADR-0093 "Build status")
+A holder started before link version 2 keeps running until every agent it keeps has ended, so a node of this build can negotiate down to
+version 1 and then runs structured agents itself: a node restart ends them (automatic resume brings them back). `agora doctor` and
+`agora status` are not the node, so the holder does not answer them (admission above) and they never connect to it. Instead the node writes
+what its own `Hello` agreed to `<home>/run/hold.link` (`version pid start`, owner-only, replaced atomically; `agora_node::holder_note`).
+A reader names a holder as older only when the note says version 1 **and** that pid still has that start time; the number of agents it keeps
+comes from the holder's own `run/hold.pid`. `agora doctor` then prints a warning (exit status unchanged) and `agora status` a line under the
+node; there is nothing to print without a holder, with a version 2 holder, or on Windows. The node logs `holder.link_v1: ...` once, the first
+time it starts a structured agent itself for this reason. Nothing here stops, restarts or signals the holder or reads an agent.

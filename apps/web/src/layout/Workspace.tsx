@@ -157,7 +157,7 @@ export function Workspace({ ws, dispatch, fleet, bindings, narrow, renderAgent, 
               const pa = agentFor(p);
               return (
                 <div key={p.id} id={`tab-${p.id}`} role="tab" aria-selected={i === f.active} aria-controls={`pane-${p.id}`} aria-keyshortcuts="Delete" tabIndex={i === f.active ? 0 : -1}
-                  className={`ide-tab group cursor-pointer ${drag && drag !== p.id ? 'ring-1 ring-inset ring-accent/50' : ''}`} title={t('layout-drag')}
+                  className={`ide-tab group cursor-pointer ${drag && drag !== p.id ? 'ring-1 ring-inset ring-accent/50' : ''}`} title={label(p)}
                   onClick={() => dispatch({ type: 'activate', pane: p.id })} onKeyDown={(e) => tabKey(e, f, i)} {...dragProps(p)}>
                   {pa ? <StateMark state={pa.state} failed={endedWithError(pa)} /> : <Icon name="layout" className="size-3.5 text-muted" />}
                   <span className="min-w-0 truncate">{label(p)}</span>
@@ -168,11 +168,11 @@ export function Workspace({ ws, dispatch, fleet, bindings, narrow, renderAgent, 
             })}
           </TabStrip>
         ) : (
-          <div className="flex min-w-0 flex-1 cursor-grab items-center gap-2 px-3 text-[0.8125rem]" title={t('layout-drag')} {...dragProps(front)}>
+          <div className="@container flex min-w-0 flex-1 cursor-grab items-center gap-2 px-3 text-[0.8125rem]" title={t('layout-drag')} {...dragProps(front)}>
             {a ? <StateMark state={a.state} failed={endedWithError(a)} /> : <Icon name="layout" className="size-3.5 text-muted" />}
-            <span className="min-w-0 truncate font-medium">{label(front)}</span>
+            <span className="min-w-0 truncate font-medium" title={label(front)}>{label(front)}</span>
             {a && <NoAskBadge agent={a} icon />}
-            {a && <span className="hidden truncate text-xs text-muted sm:inline">{a.machine}</span>}
+            {a && <span className="hidden flex-none text-xs text-muted @lg:inline">{a.machine}</span>}
             {followOf(front) && <span className="ide-chip flex-none">{t(`layout-follows-${followOf(front)}`)}</span>}
           </div>
         )}

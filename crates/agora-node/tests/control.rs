@@ -1987,6 +1987,26 @@ fn a_decision_the_adapter_cannot_take_does_not_leave_the_permission_entry_pendin
         "the user is told the decision did not reach the agent"
     );
     assert_eq!(outcome(), Some(v1::PermissionOutcome::Cancelled as i32));
+    // Codex review of #794: the request is over, so the hub is told as for a cancelled turn (unsigned, not approved), or it would
+    // keep showing an approval the node no longer holds.
+    let resolved: Vec<_> = n
+        .events
+        .events_after(0)
+        .into_iter()
+        .filter_map(|e| match e.body {
+            Some(Body::ApprovalResolved(r)) => Some(r),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(resolved.len(), 1, "{resolved:?}");
+    assert_eq!(
+        (
+            resolved[0].approval_id.as_str(),
+            resolved[0].approved,
+            resolved[0].signer_device_id.as_str()
+        ),
+        (id.as_str(), false, "")
+    );
 }
 
 /// ADR-0090: a client that reads too slowly is dropped from the conversation, and told: the stream ends with a close frame (which the
