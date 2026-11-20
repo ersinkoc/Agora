@@ -83,4 +83,16 @@ untrusted, clamped; the reporter rung: a settings file the agent trusts).
 - Review follow-ups (same PR): a file read from its start sends only the newest report per window, stamped with the line's own time (`[quota] at`, RFC 3339) or
   the file's, never later than now; an observation older than the newest of its window is dropped; `five_hour` and `seven_day` are never evicted by invented
   `minutes:<n>` windows (30 of those, oldest offered goes first); the node prints a line at start when a folder manifest replaces a built-in kind.
-- Steps 3 (hub table, web Usage bars, chip, start hint) and 4 (Claude Code reporter: needs its own acceptance): not done.
+- Step 3 (hub table, web Usage bars, chip, start hint): done. The hub keeps the newest `AgentQuotaObserved` per (machine, tool, window), at most 64 per
+  machine (the oldest goes), only for the machine that sent it, and replays it after a snapshot at the snapshot's position (as the settings and
+  commands of ADR-0090), scoped to the machines a window may see and left out for a forgotten one. The web client folds it into its view and
+  draws it from one provider with one clock (30 s): bars in the Usage panel per machine, "Reset" after the reset time, "Out of date" past the
+  window's own length, "Unknown" with a reason, the card and row chip from 80 percent (fresh readings only), the start hint from 95 percent
+  that never blocks. The tool's name is the agent kind with a capital. No schema change.
+- Review follow-ups (same PR): `observed_at_ms` is cut to the receiver's clock plus 2 minutes (hub at the session, web at apply; comparing the cut
+  times), and a window with no reset time is "reset", never fresh for ever. "Unknown" became one quiet line ("No limit information from this tool:
+  kinds"), only for kinds known to have plan limits (`PLAN_TOOLS` in `net/quota.ts`: codex, claude-code, claude), never one block per machine; an
+  agent is matched to its machine by id only, never by display name. Privacy: plan limits go to windows with no project scope only, not to project
+  members (`scope.rs`). Bounds are 64 per machine on both sides, found per machine. Units of time are locale strings. Forgotten machines keep their
+  last readings until they return (`docs/specs/protocol.md`).
+- Step 4 (Claude Code reporter: needs its own acceptance): not done.

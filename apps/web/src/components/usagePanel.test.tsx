@@ -31,7 +31,7 @@ describe('usage (no money)', () => {
   it('never draws a currency amount, even when an agent reported a cost', () => {
     const html = renderToStaticMarkup(<UsagePanel fleet={fleet} now={61_000} />);
     expect(html).not.toMatch(/\$|USD|<details|reported by the agent/i);
-    expect(html).toContain('Plan limits appear here when the agent reports them.');
+    expect(html).toContain('Plan limits');
     expect(html).toContain('13.2K tokens used');
   });
   it('says one token, not "1 tokens", and keys machines by id so two with one name stay apart', () => {

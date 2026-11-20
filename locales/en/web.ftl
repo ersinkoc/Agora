@@ -1206,3 +1206,26 @@ refusal-unsupported = This agent's machine does not support that yet.
 refusal-unconfirmed = That choice lets the agent act without asking, and it needs a confirmation this window cannot give yet. Start the agent that way instead.
 refusal-forbidden = This machine's settings do not let the agent act without asking.
 refusal-unknown-option = The agent no longer offers that setting or value.
+
+# ADR-0091: plan limits. The numbers are what the tool itself reported; nothing is worked out. No money.
+quota-window-five-hour = Five hours
+quota-window-seven-day = Seven days
+quota-window-minutes = { $minutes ->
+    [one] 1 minute
+   *[other] { $minutes } minutes
+}
+quota-percent = { $percent } %
+quota-chip = Limit { $percent } %
+quota-chip-title = { $kind }, { $what }: { $percent } % of the plan limit used.
+quota-resets = Resets in { $time } ({ $when })
+quota-reset-unknown = Reset time not reported
+quota-observed = Observed { $when }
+quota-stale = Out of date
+quota-stale-note = Older than the window itself, so it may no longer be true
+quota-reset = Reset
+quota-reset-note = The window reset ({ $when }); no new reading yet
+quota-unknown-line = No limit information from this tool: { $kinds }
+quota-span-days = { $days } d { $hours } h
+quota-span-hours = { $hours } h { $minutes } min
+quota-span-minutes = { $minutes } min
+quota-hint = { $kind }: the { $what } limit is almost used ({ $percent } %). You can still start.

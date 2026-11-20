@@ -149,6 +149,10 @@ impl<'a, S: EventStore> NodeSession<'a, S> {
             Some(Ok(Some(node))) if node != self.producer => return Err(invalid("node_id")),
             _ => {}
         }
+        // ADR-0091: a plan-limit reading is never newer than this hub's own clock (plus a little skew), whatever the node's clock says;
+        // the stored event carries the bounded time, so a restart reads the same.
+        let bounded = bound_quota_time(&ev, now_ms());
+        let payload = bounded.as_deref().unwrap_or(payload);
         let appended = match self.resync_at_ms {
             Some(at) => self
                 .store
@@ -185,6 +189,33 @@ impl<'a, S: EventStore> NodeSession<'a, S> {
             Append::Gap { expected } => Ingest::Gap { expected },
         })
     }
+}
+
+/// How far ahead of the receiver's clock a reading's time may be (clock skew between a node and the hub).
+pub(crate) const QUOTA_SKEW_MS: u64 = 120_000;
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+}
+
+/// ADR-0091: the encoded event with `observed_at_ms` cut back to `now_ms + skew`, or `None` when it is a different event or already
+/// within bounds. A node whose clock is ahead cannot win a window forever by dating its readings in the future.
+pub(crate) fn bound_quota_time(ev: &Event, now_ms: u64) -> Option<Vec<u8>> {
+    use agora_protocol::v1::event::Body;
+    let Some(Body::AgentQuotaObserved(q)) = &ev.body else {
+        return None;
+    };
+    let limit = now_ms.saturating_add(QUOTA_SKEW_MS);
+    if q.observed_at_ms <= limit {
+        return None;
+    }
+    let mut cut = ev.clone();
+    if let Some(Body::AgentQuotaObserved(c)) = cut.body.as_mut() {
+        c.observed_at_ms = limit;
+    }
+    Some(cut.encode_to_vec())
 }
 
 #[cfg(test)]

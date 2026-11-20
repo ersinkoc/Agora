@@ -181,8 +181,9 @@ impl Scope {
             Body::NodeLink(e) => self.node_visible(&e.node_id),
             Body::NodeForgotten(e) => self.node_visible(&e.node_id),
             Body::NodeResources(e) => self.node_visible(&e.node_id),
-            // ADR-0091: a fact about a tool on a machine (no project, no agent, no path), seen with the machine.
-            Body::AgentQuotaObserved(e) => self.node_visible(&e.node_id),
+            // ADR-0091 (privacy): a plan limit is the whole machine's use, not a project's. A member of one shared project must not see
+            // the owner's plan usage, so a scope (a member's window) never gets it; only an unscoped window does.
+            Body::AgentQuotaObserved(_) => false,
             Body::NodeTrustedDevices(_) => self.node_visible(node),
             // A node speaks for itself only: the project is placed on the producer, whatever `node_id` the event names.
             Body::CheckoutDiscovered(e) => {
@@ -429,6 +430,28 @@ mod tests {
         let replay = s.filter_view(&full).session_replay();
         assert_eq!(replay.len(), 1);
         assert_eq!(replay[0].producer_id, "n1");
+    }
+
+    #[test]
+    fn a_guest_member_is_never_given_the_plan_limits_of_a_machine() {
+        let mut full = View::default();
+        let mut s = scope(&["n1/id:shared"]);
+        let obs = ev(
+            "n1",
+            Body::AgentQuotaObserved(v1::AgentQuotaObserved {
+                node_id: "n1".into(),
+                tool: "codex".into(),
+                window: "five_hour".into(),
+                used_percent: 40,
+                ..Default::default()
+            }),
+        );
+        full.apply(&obs);
+        full.apply(&agent("n1", "a1", "id:shared"));
+        // The owner's view replays it; the guest, who may see a project on that very machine, neither live nor on connect.
+        assert_eq!(full.session_replay().len(), 1);
+        assert!(!s.admit(&obs));
+        assert!(s.filter_view(&full).session_replay().is_empty());
     }
 
     #[test]

@@ -4,7 +4,10 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
-_Nothing yet._
+### Plan limits in the Usage panel
+- The Usage panel shows, per tool and machine, how much of each plan window is used (Five hours, Seven days, or a number of minutes), when it resets (in your time zone) and how long ago it was read. Only what the tool itself reported is shown (Codex for now): after the reset time it says "Reset" instead of the old percentage, a reading older than its window says "Out of date", and a tool with plan limits that reported nothing gets one quiet line saying so. Plan limits are shown to the owner only, not to people who were given some projects. No money anywhere.
+- An agent's card and row show a small "Limit 82 %" chip from 80 percent (stronger from 95), and the start window hints when the chosen agent's limit is nearly used up and when it resets. The hint never stops you from starting.
+- The hub keeps the latest reading per machine, tool and window (a small, bounded table) and gives it to a window that opens later, only for machines that window may see.
 
 ## 0.3.25
 

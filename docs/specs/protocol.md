@@ -997,7 +997,18 @@ forwards either to a node that did not offer it.
 - **`AgentQuotaObserved`** (`Event` arm 67, capability `usage.quota`): `node_id` (1, the producer's own id, checked like `NodeResources`; a
   node naming another machine is refused as forged), `tool` (2, the agent kind, `codex`), `window` (3), `used_percent` (4, 0 to 100),
   `resets_at_ms` (5), `source` (6, `file`), `observed_at_ms` (7, the node's clock when it read a live line; for what it replays from the start of a file, the line's own time or the file's, never later than the node's clock). One observation of one plan window of a tool on a
-  machine; the hub replaces the earlier one of the same `(node_id, tool, window)` (a later step: this build only relays it).
+  machine; the hub keeps the newest one per `(node_id, tool, window)`.
+- **Hub table (ADR-0091 step 3):** at most 64 windows per machine (the oldest `observed_at_ms` goes, found among that machine's own windows);
+  labels of 1 to 64 bytes; only for the machine that sent it. A reading replaces the stored one only when its `observed_at_ms` is not older.
+  The hub cuts `observed_at_ms` back to its own clock plus 2 minutes when a session receives it (the stored event carries the cut time), so a
+  node whose clock runs ahead cannot hold a window with a time in the future; the projection also never takes a time more than 2 minutes
+  after the event's own `at_ms`. Clients cut a time ahead of their own clock the same way, and a client treats a missing or passed
+  `resets_at_ms` as a reset.
+- **Retention:** a forgotten machine's last readings stay in the table (nothing is sent for it) until the machine returns, and are
+  rebuilt with the rest of the view when the hub restarts.
+- **Privacy rule:** a plan limit is the use of a whole machine, not of a project. It is replayed and routed only to a window with no
+  project scope (the owner's, full access). A member who was given some projects never receives it, even for a machine that hosts their
+  project.
 - **`window`** is `five_hour`, `seven_day`, or `minutes:<n>` (a length in minutes, `n` from 1), derived from the window's length and never
   from a field name such as "primary". A client must accept any `minutes:<n>`.
 - **Bounds, by the node:** `used_percent` is clamped to 0..100; `resets_at_ms` is not more than a day in the past and not more than 31 days

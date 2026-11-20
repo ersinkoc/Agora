@@ -4,10 +4,11 @@ import type { AgentTileModel } from '../model';
 import { duration } from '../net/time';
 import { usageView, type UsageAgent } from '../net/usageView';
 import { shortCount } from './sessionChoice';
+import { QuotaSection } from './Quota';
 
 // The Usage panel of the rail: tokens, context and time per machine, project and agent. No money: most people pay a subscription, so a
-// dollar figure says little, so no amount is ever shown here. Plan limits have a place and an honest
-// empty state until something reports them.
+// dollar figure says little, so no amount is ever shown here. Plan limits (ADR-0091) are what the tools themselves reported: fresh,
+// stale, reset or unknown, never worked out.
 const time = (ms?: number) => (ms === undefined ? '—' : duration(ms));
 
 function Meter({ pct, label }: { pct: number; label: string }) {
@@ -30,7 +31,7 @@ export function UsagePanel({ fleet, now }: { fleet: readonly AgentTileModel[]; n
   if (fleet.length === 0 || (v.totalTokens === 0 && v.totalActiveMs === 0 && v.byProject.every((g) => g.agents.every((a) => a.contextPct === undefined)))) {
     return <div className="grid gap-4">
       <p className="muted m-0">{t('usage-empty')}</p>
-      <Limits />
+      <QuotaSection fleet={fleet} />
     </div>;
   }
   return <div className="grid gap-4">
@@ -51,14 +52,6 @@ export function UsagePanel({ fleet, now }: { fleet: readonly AgentTileModel[]; n
         <ul className="m-0 grid list-none divide-y divide-line p-0">{g.agents.map((a) => <AgentRow key={a.id} a={a} />)}</ul>
       </div>)}
     </section>
-    <Limits />
+    <QuotaSection fleet={fleet} />
   </div>;
-}
-
-// Plan quota windows: a research task is scoping what can be shown. Nothing here is invented; it says so until an agent reports limits.
-function Limits() {
-  return <section className="grid gap-1" aria-label={t('usage-limits-title')}>
-    <h3 className="m-0 text-xs font-semibold tracking-wider text-muted uppercase">{t('usage-limits-title')}</h3>
-    <p className="muted m-0 rounded-s border border-dashed border-line px-3 py-2">{t('usage-limits-empty')}</p>
-  </section>;
 }
