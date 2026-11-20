@@ -4,6 +4,13 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+_Nothing yet._
+
+## 0.3.28
+
+### Structured agents: overlapping messages
+- When two messages to a structured agent overlap (the next queued one is sent after a cancel, or a helper asks while you wait), the first reply no longer ends the running turn or drops its waiting permission request: the agent keeps working and your decision still reaches it. A permission decided after its turn already ended returns the agent to idle instead of showing it as working.
+
 ### Steadier window layout and terminals
 - Tabs in a pane that is split beside another (Files next to an agent, for example) keep a readable title: a tab shrinks to a minimum width and shows an ellipsis with its full title as a tooltip, and a tab that does not fit is not drawn as a cut-off fragment; it is listed in the "more" menu next to the tabs instead.
 - "Group by" in the agents panel stays on one row in a narrow panel, in English and in Turkish: the "Group by" word gives way first, then the four buttons shrink.
