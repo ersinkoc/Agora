@@ -366,7 +366,7 @@ so it can be driven with no hub. Frames are the envelope above. `CommandRequest`
 opened by sending `TerminalSubscribe` on a dynamic stream id (3+) chosen by the client. After the response the
 node writes that terminal's frames on that stream: kind 1 snapshot (ANSI that repaints the screen, with its colours and
 attributes, then restores the program's bracketed-paste and application-cursor modes and its current style), each one followed by kind 2 with the size it was painted at, kind 0 raw
-output, kind 2 resize (cols, rows as u16 LE), kind 3 exit (i32 LE; negative = signal). A client that falls behind
+output, kind 2 resize (cols, rows as u16 LE), kind 3 exit (i32 LE; negative = signal). A client takes the size of the kind 2 frame that follows a snapshot before it paints the snapshot (a snapshot is made at the node's size; parsed at another width it wraps and scrolls its first rows away); the web window waits for that frame, at most 150 ms. A client that falls behind
 gets a fresh snapshot instead of the dropped output; it never slows the terminal. When the exit was among what it
 missed it still gets the exit frame, with `i32::MIN` (unknown) when the node no longer has the code. Input and resize are ordinary
 commands. Terminal ids are `t-<agent id>` (one terminal per agent). Implemented commands: `project.list`,

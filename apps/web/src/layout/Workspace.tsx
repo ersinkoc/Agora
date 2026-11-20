@@ -157,7 +157,7 @@ export function Workspace({ ws, dispatch, fleet, bindings, narrow, renderAgent, 
               const pa = agentFor(p);
               return (
                 <div key={p.id} id={`tab-${p.id}`} role="tab" aria-selected={i === f.active} aria-controls={`pane-${p.id}`} aria-keyshortcuts="Delete" tabIndex={i === f.active ? 0 : -1}
-                  className={`ide-tab group cursor-pointer ${drag && drag !== p.id ? 'ring-1 ring-inset ring-accent/50' : ''}`} title={t('layout-drag')}
+                  className={`ide-tab group cursor-pointer ${drag && drag !== p.id ? 'ring-1 ring-inset ring-accent/50' : ''}`} title={label(p)}
                   onClick={() => dispatch({ type: 'activate', pane: p.id })} onKeyDown={(e) => tabKey(e, f, i)} {...dragProps(p)}>
                   {pa ? <StateMark state={pa.state} failed={endedWithError(pa)} /> : <Icon name="layout" className="size-3.5 text-muted" />}
                   <span className="min-w-0 truncate">{label(p)}</span>

@@ -4,7 +4,11 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
-_Nothing yet._
+### Steadier window layout and terminals
+- Tabs in a pane that is split beside another (Files next to an agent, for example) keep a readable title: a tab shrinks to a minimum width and shows an ellipsis with its full title as a tooltip, and a tab that does not fit is not drawn as a cut-off fragment; it is listed in the "more" menu next to the tabs instead.
+- "Group by" in the agents panel stays on one row in a narrow panel, in English and in Turkish: the "Group by" word gives way first, then the four buttons shrink.
+- A terminal opened in a fresh window now always shows what is on the node's screen. Before, a first open could stay blank when the window painted the screen before it had taken the terminal's size, and an idle shell sent nothing to bring the prompt back.
+- An agent that the terminal holder kept running while the node restarted shows the state it had (idle, for example) instead of "unknown" until it writes something again.
 
 ## 0.3.27
 

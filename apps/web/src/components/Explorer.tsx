@@ -122,7 +122,7 @@ export function Explorer({ by, onBy, spread, fleet, machines, open, current, pro
     {projects.length > 0 && <label className="flex-none px-2 pb-2 text-xs text-muted"><span className="sr-only">{t('filter-project')}</span>
       <select value={project} onChange={e => onProject(e.target.value)} className="w-full rounded-xs py-1 text-[0.8125rem]"><option value="">{t('filter-all-projects')}</option>{projects.map(([id, p]) => <option key={id} value={id}>{t('filter-project-machines', { name: p.name, count: p.machines.size })}</option>)}</select>
     </label>}
-    <div className="flex-none px-2 pb-2"><GroupByControl by={by} onChange={onBy} /></div>
+    <div className="@container flex-none px-2 pb-2"><GroupByControl by={by} onChange={onBy} /></div>
     <nav className="min-h-0 flex-1 overflow-y-auto px-1 pb-3">
       {machines.length === 0 && fleet.length === 0 && <p className="muted px-3 py-2">{t('machines-empty')}</p>}
       {by !== 'machine' && flat.map((g) => {
