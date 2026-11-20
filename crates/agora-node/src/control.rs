@@ -244,21 +244,24 @@ fn ok_empty() -> v1::CommandOk {
 }
 
 /// ADR-0090 Amendment A: what a switch of a running agent's mode or config option came to. A call is made (outside the supervisor's lock)
-/// and settles the option: a card still waiting for another value of it is withdrawn. A choice that skips permissions under a policy that
-/// allows it is not applied and not refused: the node raises the owner's approval and answers `agent.approval_needed`.
+/// and settles the option: a card still waiting for another value of it is withdrawn. `settles` names the option and its twin (F1322: a
+/// mode and the config option of category `mode` an agent gives as its mode are one setting). A choice that skips permissions under a
+/// policy that allows it is not applied and not refused: the node raises the owner's approval and answers `agent.approval_needed`.
 fn switch(
     ctx: &ControlContext,
     agent: &AgentId,
-    option: Option<(SkipKind, &str)>,
+    settles: &[(SkipKind, String)],
     prepared: Result<Prepared, SupervisorError>,
 ) -> Result<v1::CommandOk, Error> {
     match prepared.map_err(sup_err)? {
         Prepared::Call(call) => {
             call.run().map_err(sup_err)?;
-            if let (Some(approvals), Some(option)) = (&ctx.approvals, option) {
-                for id in approvals.withdraw_skips(agent, Some(option)) {
-                    if let Some(ev) = &ctx.events {
-                        ev.approval_resolved(&id, false, "");
+            if let Some(approvals) = &ctx.approvals {
+                for (kind, option) in settles {
+                    for id in approvals.withdraw_skips(agent, Some((*kind, option))) {
+                        if let Some(ev) = &ctx.events {
+                            ev.approval_resolved(&id, false, "");
+                        }
                     }
                 }
             }
@@ -939,10 +942,15 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
         // The adapter's answer is waited for after the supervisor's lock is let go (`AdapterCall::run`).
         Cmd::AgentSetMode(a) => {
             let id = AgentId::new(a.agent_id.clone());
-            let prepared =
-                ctx.sup()
-                    .prepare_set_option(&id, agora_adapters::host::OptionKind::Mode, &a.mode);
-            switch(ctx, &id, Some((SkipKind::Mode, "mode")), prepared)
+            let (prepared, twins) = {
+                let sup = ctx.sup();
+                let prepared =
+                    sup.prepare_set_option(&id, agora_adapters::host::OptionKind::Mode, &a.mode);
+                (prepared, sup.mode_config_ids(&id))
+            };
+            let mut settles = vec![(SkipKind::Mode, "mode".to_string())];
+            settles.extend(twins.into_iter().map(|c| (SkipKind::Config, c)));
+            switch(ctx, &id, &settles, prepared)
         }
         Cmd::AgentSetModel(a) => {
             let id = AgentId::new(a.agent_id.clone());
@@ -951,14 +959,22 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                 agora_adapters::host::OptionKind::Model,
                 &a.model,
             );
-            switch(ctx, &id, None, prepared)
+            switch(ctx, &id, &[], prepared)
         }
         // ADR-0090: the user's own change of an option the agent reported (the reasoning effort is one). The supervisor checks the id and
         // the value against the report, and the node's `skip_permissions` policy against what the choice does.
         Cmd::AgentSetConfig(a) => {
             let id = AgentId::new(a.agent_id.clone());
-            let prepared = ctx.sup().prepare_set_config(&id, &a.config_id, &a.value);
-            switch(ctx, &id, Some((SkipKind::Config, &a.config_id)), prepared)
+            let (prepared, twins) = {
+                let sup = ctx.sup();
+                let prepared = sup.prepare_set_config(&id, &a.config_id, &a.value);
+                (prepared, sup.mode_config_ids(&id))
+            };
+            let mut settles = vec![(SkipKind::Config, a.config_id.clone())];
+            if twins.contains(&a.config_id) {
+                settles.push((SkipKind::Mode, "mode".to_string()));
+            }
+            switch(ctx, &id, &settles, prepared)
         }
         // ADR-0090: ends the agent's current turn; the agent and its process live on (`AgentStop` ends them). Permission requests of
         // the turn are withdrawn and shown as cancelled; queued prompts are kept unless `drop_queue` says to throw them away.
