@@ -197,6 +197,43 @@ impl ConfinedDir {
     }
 }
 
+/// The fixed part of `FILE_RENAME_INFORMATION` (the layout the system documents, with a pointer-sized `RootDirectory`).
+#[cfg(any(windows, test))]
+#[repr(C)]
+struct RenameHeader {
+    /// `ReplaceIfExists` (a BOOLEAN) in the first byte; the rest is zero.
+    flags: u32,
+    root: usize,
+    /// Bytes of the name, not characters.
+    name_len: u32,
+    name: [u16; 1],
+}
+
+/// The buffer for `NtSetInformationFile(FileRenameInformation)` replacing an existing file, and the `Length` to pass. The system
+/// refuses a length below the whole structure (`size_of`, 24 on 64 bits), which is more than `offset_of(FileName) + name` for a
+/// short name (`STATUS_INFO_LENGTH_MISMATCH` for a one-character name), so the length is at least that; the buffer is zeroed, so
+/// the padding is zero.
+#[cfg(any(windows, test))]
+fn rename_buffer(root: usize, name: &[u16]) -> io::Result<(Vec<u64>, u32)> {
+    let header = std::mem::offset_of!(RenameHeader, name);
+    let name_bytes = name.len() * 2;
+    let length = (header + name_bytes).max(std::mem::size_of::<RenameHeader>());
+    let length32 = u32::try_from(length).map_err(|_| refused())?;
+    let mut buffer = vec![0u64; length.div_ceil(8)];
+    let base = buffer.as_mut_ptr().cast::<u8>();
+    // SAFETY: the buffer is 8-aligned, zeroed and `length` bytes at least; every write below stays inside the header and the name.
+    unsafe {
+        base.cast::<RenameHeader>().write(RenameHeader {
+            flags: 1,
+            root,
+            name_len: u32::try_from(name_bytes).map_err(|_| refused())?,
+            name: [0],
+        });
+        std::ptr::copy_nonoverlapping(name.as_ptr(), base.add(header).cast::<u16>(), name.len());
+    }
+    Ok((buffer, length32))
+}
+
 #[cfg(unix)]
 mod imp {
     use super::{refused, Entry, EntryKind};
@@ -365,7 +402,7 @@ mod imp {
 
 #[cfg(windows)]
 mod imp {
-    use super::{refused, Entry, EntryKind};
+    use super::{refused, rename_buffer, Entry, EntryKind};
     use std::ffi::OsStr;
     use std::fs::File;
     use std::io;
@@ -391,6 +428,23 @@ mod imp {
         FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE, FILE_TYPE_DISK, SYNCHRONIZE,
     };
     use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
+
+    // The private header must be the system's structure.
+    const _: () = {
+        assert!(size_of::<super::RenameHeader>() == size_of::<FILE_RENAME_INFORMATION>());
+        assert!(
+            std::mem::offset_of!(super::RenameHeader, name)
+                == std::mem::offset_of!(FILE_RENAME_INFORMATION, FileName)
+        );
+        assert!(
+            std::mem::offset_of!(super::RenameHeader, root)
+                == std::mem::offset_of!(FILE_RENAME_INFORMATION, RootDirectory)
+        );
+        assert!(
+            std::mem::offset_of!(super::RenameHeader, name_len)
+                == std::mem::offset_of!(FILE_RENAME_INFORMATION, FileNameLength)
+        );
+    };
 
     fn status_error(status: i32) -> io::Error {
         // SAFETY: converting an NTSTATUS to a Win32 error code touches no memory.
@@ -535,23 +589,8 @@ mod imp {
         to: &OsStr,
     ) -> io::Result<()> {
         let name: Vec<u16> = to.encode_wide().collect();
-        let name_bytes = name.len() * 2;
-        let header = std::mem::offset_of!(FILE_RENAME_INFORMATION, FileName);
-        // Eight-byte aligned buffer for the fixed part plus the name.
-        let mut buffer = vec![0u64; (header + name_bytes).div_ceil(8) + 1];
-        let info = buffer.as_mut_ptr().cast::<FILE_RENAME_INFORMATION>();
-        // SAFETY: the buffer is aligned, zeroed and large enough for the header and the name; the name is copied inside it.
-        unsafe {
-            (*info).Anonymous.ReplaceIfExists = true;
-            // Relative to the held folder: the new name is looked up there, never as a path.
-            (*info).RootDirectory = dir.as_raw_handle();
-            (*info).FileNameLength = name_bytes as u32;
-            std::ptr::copy_nonoverlapping(
-                name.as_ptr(),
-                buffer.as_mut_ptr().cast::<u8>().add(header).cast::<u16>(),
-                name.len(),
-            );
-        }
+        // Relative to the held folder: the new name is looked up there, never as a path.
+        let (buffer, length) = rename_buffer(dir.as_raw_handle() as usize, &name)?;
         let mut block = IO_STATUS_BLOCK::default();
         // SAFETY: a live handle opened with DELETE access and a fully initialized information structure of the stated length.
         let status = unsafe {
@@ -559,7 +598,7 @@ mod imp {
                 file.as_raw_handle(),
                 &mut block,
                 buffer.as_ptr().cast(),
-                (header + name_bytes) as u32,
+                length,
                 FileRenameInformation,
             )
         };
@@ -638,8 +677,46 @@ mod imp {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod name_tests {
     use super::*;
+
+    #[test]
+    fn the_rename_buffer_is_never_shorter_than_the_whole_structure() {
+        let header = std::mem::size_of::<RenameHeader>();
+        assert_eq!(std::mem::offset_of!(RenameHeader, flags), 0);
+        #[cfg(target_pointer_width = "64")]
+        {
+            assert_eq!(std::mem::offset_of!(RenameHeader, root), 8);
+            assert_eq!(std::mem::offset_of!(RenameHeader, name_len), 16);
+            assert_eq!(std::mem::offset_of!(RenameHeader, name), 20);
+            assert_eq!(header, 24);
+        }
+        for text in ["f", "ab", "abc", "a-longer-file-name.txt"] {
+            let name: Vec<u16> = text.encode_utf16().collect();
+            let (buffer, length) = rename_buffer(0x1234, &name).unwrap();
+            let length = length as usize;
+            let offset = std::mem::offset_of!(RenameHeader, name);
+            assert_eq!(length, (offset + name.len() * 2).max(header), "{text}");
+            assert!(length >= header && length <= buffer.len() * 8, "{text}");
+            let bytes: &[u8] =
+                unsafe { std::slice::from_raw_parts(buffer.as_ptr().cast(), length) };
+            assert_eq!(bytes[0], 1, "replace flag");
+            #[cfg(target_pointer_width = "64")]
+            assert_eq!(bytes[8..16], 0x1234usize.to_ne_bytes(), "root handle");
+            let len_field = u32::from_ne_bytes(
+                bytes[std::mem::offset_of!(RenameHeader, name_len)..][..4]
+                    .try_into()
+                    .unwrap(),
+            );
+            assert_eq!(len_field as usize, name.len() * 2);
+            let got: Vec<u16> = bytes[offset..offset + name.len() * 2]
+                .chunks(2)
+                .map(|c| u16::from_ne_bytes([c[0], c[1]]))
+                .collect();
+            assert_eq!(got, name, "{text}");
+        }
+    }
 
     #[test]
     fn plain_components_only() {
