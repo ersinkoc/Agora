@@ -320,7 +320,9 @@ fn oversize_and_garbage_frames_are_refused_and_the_holder_keeps_serving() {
             .expect("hello");
             s.set_read_timeout(Some(Duration::from_secs(5)))
                 .expect("timeout");
-            let (payload, _) = read_frame(&mut s).expect("frame").expect("an answer");
+            let (payload, _) = read_frame(&mut s, Duration::from_secs(5))
+                .expect("frame")
+                .expect("an answer");
             match Reply::decode(&payload).expect("reply") {
                 Reply::HelloOk { .. } => return s,
                 Reply::Refused {
@@ -335,7 +337,7 @@ fn oversize_and_garbage_frames_are_refused_and_the_holder_keeps_serving() {
         // The holder closes a link it will not serve: what is read next is the end of it, or an error, never an answer.
         let end = Instant::now() + Duration::from_secs(5);
         loop {
-            match read_frame(s) {
+            match read_frame(s, Duration::from_millis(200)) {
                 Err(_) => return true,
                 Ok(Some(_)) => return false,
                 Ok(None) if Instant::now() < end => {}
@@ -492,7 +494,9 @@ fn a_new_node_falls_back_to_version_one_against_a_holder_that_only_speaks_it() {
         for _ in 0..2 {
             let mut s = listener.accept().expect("accept");
             s.set_read_timeout(Some(Duration::from_secs(5))).expect("t");
-            let (payload, _) = read_frame(&mut s).expect("frame").expect("hello");
+            let (payload, _) = read_frame(&mut s, Duration::from_secs(5))
+                .expect("frame")
+                .expect("hello");
             let Request::Hello { version } = Request::decode(&payload).expect("hello") else {
                 panic!("not a hello");
             };

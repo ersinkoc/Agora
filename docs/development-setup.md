@@ -11,6 +11,10 @@
 CI builds and tests all three operating systems on every pull request from day one, so platform breakage is
 caught even before Windows-specific work starts.
 
+The Linux web CI job runs `scripts/e2e-browser.mjs` and `scripts/e2e-hub-restart.mjs` in Chromium
+against a temporary hub and nodes. The scenarios cover signing in, typing in a terminal, approving an
+agent request, and reconnecting after a hub outage. They use shells and the fake agent.
+
 ## Rules
 - Keep the repository on the Ubuntu machine's native filesystem. If you use WSL2 on Windows, keep the
   checkout inside the WSL filesystem, not under `/mnt/c`.
