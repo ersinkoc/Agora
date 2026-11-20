@@ -4,7 +4,7 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
-_Nothing yet._
+- The tab you are on keeps room for its icon, the start of its name with an ellipsis, and its close button, even in a narrow split or at a high display zoom; the other tabs step aside into the tab menu, and a pane title that is too long ends in an ellipsis instead of a cut-off word.
 
 ## 0.3.29
 
