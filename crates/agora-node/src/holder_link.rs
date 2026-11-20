@@ -763,23 +763,80 @@ pub fn write_frame(
     let mut frame = Vec::with_capacity(4 + payload.len());
     frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
     frame.extend_from_slice(payload);
+    let began = Instant::now();
+    // In the frame's last slice each send waits only for what is left of its time (and the stream's own slice is put back after).
+    let mut capped = false;
+    let result = send_frame(stream, &frame, terminal, began, &mut capped);
+    if capped {
+        // A frame that went whole is not failed for this: the peer may have closed right after taking it (macOS then refuses the
+        // option, EINVAL). A timeout left short only makes the next frame's sends wake more often; each still waits for its frame's
+        // time (`budget`).
+        let _ = stream.set_write_timeout(Some(WRITE_SLICE));
+    }
+    result
+}
+
+/// [`write_frame`]'s sends, each started only while the frame has time left and allowed to wait no longer than that time.
+fn send_frame(
+    stream: &mut LocalStream,
+    frame: &[u8],
+    terminal: Option<&TerminalHandle>,
+    began: Instant,
+    capped: &mut bool,
+) -> Result<(), LinkError> {
     let mut sent = 0;
     if terminal.is_some() {
-        // The terminal goes with the first byte that goes; the rest follows plainly.
-        sent = stream.send_with_terminal(&frame, terminal)?;
+        // The terminal goes with the first byte that goes; the rest follows plainly. A send that timed out sent nothing (nor the
+        // terminal): it is tried again until the frame's time is up, as a plain send is.
+        loop {
+            budget(stream, began, capped)?;
+            match stream.send_with_terminal(piece(frame), terminal) {
+                Ok(0) => return Err(LinkError::Closed),
+                Ok(n) => {
+                    sent = n;
+                    break;
+                }
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) if timed_out(&e) => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
     }
-    let began = Instant::now();
     while sent < frame.len() {
-        match stream.write(&frame[sent..]) {
+        budget(stream, began, capped)?;
+        match stream.write(piece(&frame[sent..])) {
             Ok(0) => return Err(LinkError::Closed),
             Ok(n) => sent += n,
             Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-            Err(e) if timed_out(&e) && began.elapsed() < FRAME_TIMEOUT => {}
+            Err(e) if timed_out(&e) => {}
             Err(e) => return Err(e.into()),
         }
-        if sent < frame.len() && began.elapsed() >= FRAME_TIMEOUT {
-            return Err(LinkError::Io(io::Error::from(io::ErrorKind::TimedOut)));
-        }
+    }
+    Ok(())
+}
+
+/// Most bytes one send is given, so that each send waits at most once and the frame's deadline holds whatever the socket's buffer.
+/// A blocking send waits its write timeout afresh for each kernel buffer it allocates (measured: a whole-frame send ran to 5.4 s
+/// against a 5 s limit). On Linux a Unix stream send splits into buffers of at most `SO_SNDBUF / 2 - 64` bytes, and `SO_SNDBUF` is
+/// never below `SOCK_MIN_SNDBUF` (2 * (2048 + sizeof(sk_buff)), about 4.5 KiB: buffers of at least about 2.2 KiB), so 2 KiB is one
+/// buffer even at the smallest size. (agora-platform has no wait-for-writable helper for a `LocalStream`; a poll here would need
+/// platform code.) A 4 MiB frame, the largest, is 2048 sends.
+const SEND_PIECE: usize = 2 << 10;
+
+fn piece(bytes: &[u8]) -> &[u8] {
+    &bytes[..bytes.len().min(SEND_PIECE)]
+}
+
+/// Before a send: a timeout error when the frame's [`FRAME_TIMEOUT`] is spent; otherwise, in its last [`WRITE_SLICE`], the stream's
+/// write timeout is cut to what is left.
+fn budget(stream: &LocalStream, began: Instant, capped: &mut bool) -> Result<(), LinkError> {
+    let left = FRAME_TIMEOUT.saturating_sub(began.elapsed());
+    if left.is_zero() {
+        return Err(LinkError::Io(io::Error::from(io::ErrorKind::TimedOut)));
+    }
+    if left < WRITE_SLICE {
+        stream.set_write_timeout(Some(left))?;
+        *capped = true;
     }
     Ok(())
 }
@@ -794,28 +851,30 @@ fn timed_out(e: &io::Error) -> bool {
 /// A frame's payload (tag and body) and the terminal that came with it.
 pub type Frame = (Vec<u8>, Option<TerminalHandle>);
 
-/// Reads one frame: its payload and the terminal that came with it. `Ok(None)` when nothing arrived within the stream's read
-/// timeout. A frame begun must end within [`FRAME_TIMEOUT`]. Reads are in exact sizes (the 4-byte length, then the payload), so a
-/// terminal sent with one frame is never taken for the next one's.
-pub fn read_frame(stream: &mut LocalStream) -> Result<Option<Frame>, LinkError> {
+/// Reads one frame: its payload and the terminal that came with it. `Ok(None)` when no frame began within `wait` (not zero). A frame
+/// begun must end within [`FRAME_TIMEOUT`]: each later receive waits at most what is left of that time and at most a
+/// [`WRITE_SLICE`] (and never more than `wait`), and a frame whose last bytes came after it is refused too. The read timeout is set here, so the stream's own is not
+/// used. Reads are in exact sizes (the 4-byte length, then the payload), so a terminal sent with one frame is never taken for the
+/// next one's.
+pub fn read_frame(stream: &mut LocalStream, wait: Duration) -> Result<Option<Frame>, LinkError> {
     let mut terminal: Option<TerminalHandle> = None;
+    let mut set = None;
     let mut head = [0u8; 4];
     let mut have = 0;
     let mut began: Option<Instant> = None;
     while have < head.len() {
+        receive_budget(stream, wait, began, &mut set)?;
         match stream.recv_with_terminal(&mut head[have..]) {
             Ok((0, _)) => return Err(LinkError::Closed),
             Ok((n, t)) => {
                 have += n;
-                began.get_or_insert_with(Instant::now);
+                let b = *began.get_or_insert_with(Instant::now);
                 terminal = terminal.or(t);
+                past_deadline(b)?;
             }
-            Err(e) if timed_out(&e) => {
-                let Some(b) = began else { return Ok(None) };
-                if b.elapsed() > FRAME_TIMEOUT {
-                    return Err(LinkError::Io(e));
-                }
-            }
+            // Before the frame: nothing came. Within it: the next receive's budget says whether there is time left.
+            Err(e) if timed_out(&e) && began.is_none() => return Ok(None),
+            Err(e) if timed_out(&e) => {}
             Err(e) => return Err(e.into()),
         }
     }
@@ -827,17 +886,62 @@ pub fn read_frame(stream: &mut LocalStream) -> Result<Option<Frame>, LinkError> 
     let mut payload = vec![0u8; len];
     let mut have = 0;
     while have < len {
+        receive_budget(stream, wait, Some(began), &mut set)?;
         match stream.recv_with_terminal(&mut payload[have..]) {
             Ok((0, _)) => return Err(LinkError::Closed),
             Ok((n, t)) => {
                 have += n;
                 terminal = terminal.or(t);
+                // Also after the receive that completes the frame: its last bytes must have come in time.
+                past_deadline(began)?;
             }
-            Err(e) if timed_out(&e) && began.elapsed() <= FRAME_TIMEOUT => {}
+            Err(e) if timed_out(&e) => {}
             Err(e) => return Err(e.into()),
         }
     }
     Ok(Some((payload, terminal)))
+}
+
+/// Before a receive: its read timeout is `wait` until the frame began, then what is left of the frame's time, at most a
+/// [`WRITE_SLICE`] as for a send (a long kernel timeout fires late: on Linux one of about 5 s ran up to 0.3 s past it) and at most
+/// `wait`; a timeout error once that time is spent. `set` is the timeout last set, so an unchanged one is not set again.
+fn receive_budget(
+    stream: &LocalStream,
+    wait: Duration,
+    began: Option<Instant>,
+    set: &mut Option<Duration>,
+) -> Result<(), LinkError> {
+    let timeout = match began {
+        None => wait,
+        Some(b) => {
+            let left = FRAME_TIMEOUT.saturating_sub(b.elapsed());
+            if left.is_zero() {
+                return Err(LinkError::Io(io::Error::from(io::ErrorKind::TimedOut)));
+            }
+            left.min(WRITE_SLICE).min(wait)
+        }
+    };
+    if timeout.is_zero() {
+        return Err(LinkError::Io(io::Error::from(io::ErrorKind::TimedOut)));
+    }
+    if *set != Some(timeout) {
+        match stream.set_read_timeout(Some(timeout)) {
+            Ok(()) => *set = Some(timeout),
+            // macOS refuses a new timeout (EINVAL) once the peer has shut the connection, as the holder does right after a refusal.
+            // A receive then returns what is buffered or the end at once, so it cannot wait, and the frame's time is still checked.
+            Err(e) if e.kind() == io::ErrorKind::InvalidInput => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(())
+}
+
+/// A timeout error when the frame that began at `began` is past its [`FRAME_TIMEOUT`].
+fn past_deadline(began: Instant) -> Result<(), LinkError> {
+    if began.elapsed() > FRAME_TIMEOUT {
+        return Err(LinkError::Io(io::Error::from(io::ErrorKind::TimedOut)));
+    }
+    Ok(())
 }
 
 // ----- the node's client -----
@@ -848,6 +952,9 @@ pub struct Held {
     pub info: TerminalInfo,
     pub terminal: Option<TerminalHandle>,
 }
+
+/// How long the node waits for the holder's answer to begin.
+const REPLY_WAIT: Duration = Duration::from_secs(10);
 
 /// A node's connection to its holder.
 pub struct Client {
@@ -874,7 +981,7 @@ impl Client {
     /// As [`Self::connect`] with another version (tests of the mismatch rule). `Refused(VersionMismatch, v)` carries the holder's.
     pub fn connect_with_version(socket: &Path, version: u16) -> Result<Self, LinkError> {
         let mut stream = agora_platform::local_connect(socket)?;
-        stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+        stream.set_read_timeout(Some(REPLY_WAIT))?;
         stream.set_write_timeout(Some(WRITE_SLICE))?;
         write_frame(&mut stream, &Request::Hello { version }.encode(), None)?;
         match Self::read_reply(&mut stream)?.0 {
@@ -897,8 +1004,8 @@ impl Client {
     }
 
     fn read_reply(stream: &mut LocalStream) -> Result<(Reply, Option<TerminalHandle>), LinkError> {
-        // A read timeout with nothing read is the holder not answering within the stream's timeout.
-        match read_frame(stream)? {
+        // Nothing read within the wait is the holder not answering.
+        match read_frame(stream, REPLY_WAIT)? {
             Some((payload, t)) => Ok((Reply::decode(&payload)?, t)),
             None => Err(LinkError::Io(io::Error::from(io::ErrorKind::TimedOut))),
         }
