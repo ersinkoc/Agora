@@ -142,6 +142,26 @@ describe('view', () => {
     expect(costByProject(v, new Map())).toEqual([]);
   });
 
+  it('adds the cost of an agent started in a folder to that folder\'s project (F1420)', () => {
+    const v = emptyView();
+    applyEvent(v, 1, ev('n', 1, { workspaceRegistered: { workspaceId: 'directory:/home/me/api', nodeId: 'n', projectId: 'q', path: '/home/me/api', gitRoot: '/home/me/api' } }));
+    applyEvent(v, 2, ev('n', 2, { agentStarted: { agentId: 'd', nodeId: 'n', worktreeId: '', kind: 'claude' } }));
+    applyEvent(v, 3, ev('n', 3, { agentWorkspaceBound: { agentId: 'd', workspaceId: 'directory:/home/me/api' } }));
+    expect(costByProject(v, new Map([['n/d', 2_000_000]]))).toEqual([{ label: 'api', microUsd: 2_000_000 }]);
+  });
+
+  it('drops the settings and commands of an agent that ended by interruption or by its machine\'s restart (F1421)', () => {
+    for (const end of [{ agentInterrupted: { agentId: 'a', kind: 'claude', resumable: true } }, { nodeOnline: { nodeId: 'n', hostname: 'N' } }]) {
+      const v = emptyView();
+      applyEvent(v, 1, ev('n', 1, { agentStarted: { agentId: 'a', nodeId: 'n', kind: 'claude' } }));
+      applyEvent(v, 2, ev('n', 2, { agentSessionConfig: { agentId: 'a', options: [{ id: 'mode', name: 'Mode', category: 1, type: 1, current: 'ask', choices: [{ id: 'ask', name: 'Ask' }] }] } }));
+      applyEvent(v, 3, ev('n', 3, { agentCommands: { agentId: 'a', commands: [{ name: 'compact' }] } }));
+      applyEvent(v, 4, ev('n', 4, end));
+      const s = tiles(v)[0]?.session;
+      expect([s?.config, s?.commands]).toEqual([undefined, undefined]);
+    }
+  });
+
   it('carries each workspace\'s uncommitted file count onto its agent', () => {
     const v = emptyView();
     applyEvent(v, 1, ev('n', 1, { worktreeCreated: { worktreeId: 'w', checkoutId: 'c', path: '/x', branch: 'b' } }));
