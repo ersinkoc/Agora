@@ -1,0 +1,61 @@
+# 0094. A plain terminal shows the agent program running in it
+Status: Proposed
+Date: 2026-11-20
+
+Not accepted. Nothing here may be built until the maintainer names this ADR in an acceptance message.
+
+Builds on ADR-0004 (agents are data), ADR-0079 (the terminal holder), ADR-0091 (plan limits) and the invariant "detection never reads the
+user-visible viewport". Touches the threat model (a program name is untrusted data).
+
+Origin: the maintainer, 2026-11-20: "I open a plain terminal and then run claude, codex, wrongstack inside it myself: will we notice them?"
+
+## Context
+- A plain terminal is the `shell` kind. The node knows the shell it started and nothing about the programs the person runs in it. A
+  Claude Code, Codex or WrongStack started by hand shows as an idle shell: no kind, no state (working, asks you, idle), no needs-you card,
+  no chip, and none of the manifest's screen rules apply, because those rules belong to a kind the agent was started as.
+- Starting an agent from the window already gives all of that. The gap is only the hand-started program.
+- The node holds the pseudo-terminal and the process tree below the shell, so it can see which program is in the foreground without
+  reading the screen. This is the signal terminals themselves use (the foreground process group).
+
+## Decision
+1. **The node looks at the terminal's foreground program, not at the screen.** On Unix, the foreground process group of the agent's PTY
+   (`tcgetpgrp` on the master) and the executable of its leader. On Windows, which has no foreground group on a pseudoconsole, the
+   newest descendant of the shell that owns the console. The lookup is OS-specific and lives only in `agora-platform`. It runs at a low
+   fixed rate (about every 2 s, only while someone watches the agent or the agent is not idle) and is never in the terminal byte path.
+2. **Names map to kinds through data.** A manifest may carry `[match] executables = ["claude", "claude.exe"]`. The node compares the
+   executable's file name (never its arguments, never its path contents) with the installed manifests. The first match marks the shell
+   agent as "running KIND", and that kind's screen rules (ADR-0004 L1) start reading the live bottom of the buffer, exactly as for an
+   agent started as that kind. When the program ends and the shell is back, the mark ends.
+3. **The shell stays a shell.** The agent's kind does not change, its id does not change, its ledger entry and resume rule do not
+   change. A new, additive field (a name, not a command) says which kind runs inside; windows show "Claude Code in Shell" and the state.
+   Nothing the agent could print can set it: only the node's process lookup does.
+4. **Nothing is installed or run.** Looking at a process is read-only. The node never starts the program, never sends it input, and a
+   mark grants no permission: skip-permissions classification (ADR-0090) applies only to agents started as that kind.
+5. **Unknown programs are ignored.** A program no manifest names is not marked; an executable that is renamed is not recognised, and
+   that is stated in the window help rather than guessed from screen text.
+6. **Quota and usage** (ADR-0091) keep reading the tool's own files per machine, so a hand-started Codex already counts there;
+   the mark lets the window show the chip on that terminal as well.
+
+## Alternatives
+- **Read the screen for a banner or prompt.** Rejected: the invariant forbids it, and it can be spoofed by anything printed.
+- **Wrap the shell so a launcher reports what it starts** (shell integration). More precise, but it edits the person's shell
+  configuration, which Agora never does.
+- **Ask the person to start agents from the window.** Already possible; this ADR is for the person who does not.
+
+## Build order
+1. `agora-platform`: foreground-program lookup (Unix) with tests on a fake process tree; the executable name only.
+2. Manifest `[match]` field (append-only) and the node's mark; a snapshot field for "runs inside" (schema, append-only).
+3. Windows lookup (descendant of the console's shell), measured on a real Windows machine before it is built.
+4. The window: the "X in Shell" label, state and chip; the TUI line.
+
+## Open questions
+- Cost of the 2 s lookup with many terminals. Proposed answer: only terminals that are visible or not idle; measure before enabling it
+  everywhere (ADR-0022).
+- Is a node-side `[match]` enough, or should it also read the registry's command names (ADR-0092)? Proposed answer: the converter
+  fills `[match]` from the registry entry's command when it is a plain binary name.
+- Should a mark survive the node restart? Proposed answer: yes through the holder, because the lookup runs again on reattach.
+
+## Consequences
+Schema: one optional field in the agent snapshot, and a manifest key; both additive. Docs: `docs/specs/agent-manifest.md`, the threat model
+row "foreground program name". Tests: a fake agent started under a shell, state changes and the mark ends when it exits; a renamed
+binary is not marked; a program name containing control characters is refused.
