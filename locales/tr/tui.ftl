@@ -258,3 +258,4 @@ tui-app-cmd-pair = Bir makinenin katılma isteğini oku (p)
 tui-link-confirm = Bağlantı: { $url } (açmak için Ctrl+tıklamayı tekrarlayın)
 tui-link-opened = { $url } açıldı
 tui-link-failed = { $url } açılamadı. Bunun yerine terminalden kopyalayın.
+tui-typing-needs-ok = Ctrl-] ardından g: { $agent } için bir saatliğine yazmaya izin verin. Önce onayınız gerekiyor.
