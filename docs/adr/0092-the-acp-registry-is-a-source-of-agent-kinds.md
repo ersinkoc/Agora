@@ -15,7 +15,7 @@ Origin: the maintainer, 2026-11-20: "look at the ACP registry repo, we need to s
   and a `distribution` of one or more of `npx` (21 agents, plus 3 that also ship binaries), `binary` (21 plus those 3, per OS and
   architecture, with an archive URL, a SHA-256, a command and arguments) and `uvx` (2). The registry's CI starts every agent and checks
   that it answers `initialize` with valid `authMethods`.
-- Agora has five manifests today (Claude Code, Codex, WrongStack, WrongStack structured, Antigravity, opencode). Every other ACP agent
+- Agora has six manifests today (Claude Code, Codex, WrongStack, WrongStack structured, Antigravity, opencode). Every other ACP agent
   needs a hand-written manifest. ADR-0004 says an ACP agent is "a flag", so most of that work is data the registry already holds.
 - The registry is a CDN file and a Git repository: **nobody signs it**. A node that ran what it says would run what whoever can write to
   that repository (or the CDN) says, with the user's files and login. That is the exact risk ADR-0087 and ADR-0044 exist to close.
