@@ -811,9 +811,8 @@ fn the_terminal_console_learns_that_typing_was_refused_for_want_of_a_grant() {
     let terminal = format!("t-{}", s.agent_id);
     let stream = session.terminal_open("laptop", &terminal).unwrap();
     // Each refusal names the terminal whose typing was refused (the console asks only for the agent in front).
-    let refused_here = |r: Option<agora_tui::client::Refused>, t: &str| {
-        r.is_some_and(|r| r.node == "laptop" && r.terminal_id == t)
-    };
+    let refused_here =
+        |r: Vec<agora_tui::client::Refused>, t: &str| r.iter().any(|r| r.is_for("laptop", t));
     // Typing is sent without waiting for an answer; the refusal is noticed all the same.
     session.terminal_input("laptop", &terminal, b"echo first-try\n");
     let end = Instant::now() + D::from_secs(10);
@@ -843,6 +842,21 @@ fn the_terminal_console_learns_that_typing_was_refused_for_want_of_a_grant() {
             "the refusal read while a stream opened was lost"
         );
     }
+    // Codex review of #796: two terminals' refusals read before the console looks are both kept (it picks the one in front).
+    // Gate: every typing answered (read), and only then looked at.
+    let other_terminal = format!("t-{}", other.agent_id);
+    session.terminal_input("laptop", &other_terminal, b"echo other-first\n");
+    session.terminal_input("laptop", &terminal, b"echo this-second\n");
+    let end = Instant::now() + D::from_secs(10);
+    while session.typing_unanswered() > 0 {
+        let _ = session.next(D::from_millis(100));
+        assert!(Instant::now() < end, "the typing was never answered");
+    }
+    let both = session.take_grant_wanted();
+    assert!(
+        refused_here(both.clone(), &terminal) && refused_here(both.clone(), &other_terminal),
+        "a refusal was replaced by another terminal's: {both:?}"
+    );
     // After a grant the same typing reaches the shell.
     let scope = format!("agent:{}", s.agent_id);
     let commands = ["agent.stop", "agent.prompt", "terminal.input"];
@@ -864,10 +878,9 @@ fn the_terminal_console_learns_that_typing_was_refused_for_want_of_a_grant() {
             "typing after the grant never arrived: {seen}"
         );
     }
-    assert!(session.take_grant_wanted().is_none());
+    assert!(session.take_grant_wanted().is_empty());
     // Codex review of #796: the other agent's typing is refused, then typing into the allowed one is taken (its echo seen): the
     // refusal still names the other agent's terminal, never the one typed into last.
-    let other_terminal = format!("t-{}", other.agent_id);
     session.terminal_input("laptop", &other_terminal, b"echo refused\n");
     session.terminal_input("laptop", &terminal, b"echo third-try\n");
     let mut seen = String::new();
@@ -885,7 +898,7 @@ fn the_terminal_console_learns_that_typing_was_refused_for_want_of_a_grant() {
     }
     let end = Instant::now() + D::from_secs(10);
     let refused = loop {
-        if let Some(r) = session.take_grant_wanted() {
+        if let Some(r) = session.take_grant_wanted().pop() {
             break r;
         }
         let _ = session.next(D::from_millis(100));

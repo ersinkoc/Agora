@@ -143,7 +143,7 @@ pub struct Session {
     /// A snapshot that arrived while something else was waiting (the hub's first one comes right after subscribing, often while
     /// the device registration waits for its answer): `next` hands it out first, so it is never lost.
     snapshot: Option<Box<Snapshot>>,
-    /// Typing sent without waiting for the answer, and the last of it a machine refused because it wants a grant first.
+    /// Typing sent without waiting for the answer, and the newest of it a machine refused (per terminal) because it wants a grant first.
     typing: Typing,
 }
 
@@ -156,16 +156,28 @@ pub struct Refused {
     pub request: u64,
 }
 
+impl Refused {
+    /// Whether this is typing into `terminal_id` on `node`.
+    pub fn is_for(&self, node: &str, terminal_id: &str) -> bool {
+        self.node == node && self.terminal_id == terminal_id
+    }
+}
+
 /// Typing waiting for its answer, by request (the hub answers under the client's request id), so a refusal names its terminal.
 #[derive(Default)]
 struct Typing {
     sent: std::collections::VecDeque<(u64, String, String)>,
-    refused: Option<Refused>,
+    /// The newest refusal of each terminal not read yet (a console picks the one in front; two may come in one turn).
+    refused: Vec<Refused>,
 }
 
 impl Typing {
-    /// As many as a client may have waiting at the hub (docs/specs/protocol.md): an older one never gets an answer.
-    const KEPT: usize = 256;
+    /// Typing waiting for its answer is kept until the answer is read: every key of a long paste is one request, and the hub answers
+    /// past its own limit of 256 waiting (docs/specs/protocol.md) at once, so this many are only reached when answers stop coming.
+    /// Beyond it the oldest is forgotten, and its refusal, should it still come, asks nothing (fails closed).
+    const KEPT: usize = 4096;
+    /// Terminals with a refusal not read yet; more is not a console a user types into.
+    const REFUSED: usize = 64;
 
     fn sent(&mut self, request: u64, node: &str, terminal_id: &str) {
         if self.sent.len() >= Self::KEPT {
@@ -204,7 +216,19 @@ impl Typing {
             return;
         };
         if refused_for_grant(r) {
-            self.refused = Some(Refused {
+            // Answers may come out of order: a terminal keeps its newest typing's refusal, by request number.
+            if self
+                .refused
+                .iter()
+                .any(|old| old.is_for(&node, &terminal_id) && old.request > request)
+            {
+                return;
+            }
+            self.refused.retain(|old| !old.is_for(&node, &terminal_id));
+            if self.refused.len() >= Self::REFUSED {
+                self.refused.remove(0);
+            }
+            self.refused.push(Refused {
                 node,
                 terminal_id,
                 request,
@@ -1101,14 +1125,20 @@ impl Session {
         self.typing.sent(request, node, terminal_id);
     }
 
-    /// The last typing a machine refused because it wants a grant first (ADR-0041), if any since the last call. Reading it clears it.
-    pub fn take_grant_wanted(&mut self) -> Option<Refused> {
-        self.typing.refused.take()
+    /// The typing machines refused because they want a grant first (ADR-0041) since the last call: the newest per terminal, oldest
+    /// first. Reading it clears it.
+    pub fn take_grant_wanted(&mut self) -> Vec<Refused> {
+        std::mem::take(&mut self.typing.refused)
     }
 
     /// The number of the last request sent: a [`Refused`] with a number up to it was typed before now.
     pub fn last_request(&self) -> u64 {
         self.requests
+    }
+
+    /// How much typing still waits for its answer (a caller that must know every refusal has been read waits for 0).
+    pub fn typing_unanswered(&self) -> usize {
+        self.typing.sent.len()
     }
 
     pub fn terminal_resize(&mut self, node: &str, terminal_id: &str, cols: u16, rows: u16) {
@@ -1333,6 +1363,80 @@ fn keep_pair_frame(f: Frame, queue: &mut std::collections::VecDeque<Frame>) {
         if let Some(pos) = queue.iter().position(is_pair_frame) {
             queue.remove(pos);
         }
+    }
+}
+
+#[cfg(test)]
+mod typing_tests {
+    use super::*;
+
+    fn answer(n: u64, code: Option<&str>) -> CommandResponse {
+        CommandResponse {
+            request_id: format!("t{n}"),
+            result: code.map(|c| {
+                command_response::Result::Err(ErrorInfo {
+                    code: c.into(),
+                    ..Default::default()
+                })
+            }),
+        }
+    }
+    const GRANT: Option<&str> = Some("approval.grant_required");
+
+    /// Codex review of #796: two terminals' refusals before the console looks are both kept; a terminal keeps only its newest.
+    #[test]
+    fn each_terminal_keeps_its_newest_refusal() {
+        let mut t = Typing::default();
+        t.sent(1, "laptop", "t-b");
+        t.sent(2, "laptop", "t-a");
+        t.sent(3, "laptop", "t-a");
+        t.sent(4, "mac", "t-a");
+        t.reply(&answer(1, GRANT));
+        t.reply(&answer(2, GRANT));
+        t.reply(&answer(3, GRANT));
+        t.reply(&answer(4, Some("node.offline")));
+        let kept: Vec<_> = t
+            .refused
+            .iter()
+            .map(|r| (r.node.as_str(), r.terminal_id.as_str(), r.request))
+            .collect();
+        assert_eq!(kept, [("laptop", "t-b", 1), ("laptop", "t-a", 3)]);
+        assert!(t.sent.is_empty(), "every answer read forgets its typing");
+        // An answer to nothing typed (another reader's, or forgotten) asks nothing.
+        t.reply(&answer(9, GRANT));
+        assert_eq!(t.refused.len(), 2);
+        // Answers out of order: the older typing's refusal, read last, does not replace the newer one.
+        let mut t = Typing::default();
+        t.sent(5, "laptop", "t-a");
+        t.sent(6, "laptop", "t-a");
+        t.reply(&answer(6, GRANT));
+        t.reply(&answer(5, GRANT));
+        assert_eq!(t.refused.len(), 1);
+        assert_eq!(t.refused[0].request, 6);
+    }
+
+    /// Codex review of #796: a long paste without markers is one request per key; the first key's refusal still names its terminal,
+    /// and past the hard cap the forgotten one fails closed (no refusal, so no question).
+    #[test]
+    fn a_long_paste_keeps_its_first_keys_terminal_and_the_cap_fails_closed() {
+        let mut t = Typing::default();
+        for n in 1..=300 {
+            t.sent(n, "laptop", "t-a");
+        }
+        t.reply(&answer(1, GRANT));
+        assert!(t
+            .refused
+            .iter()
+            .any(|r| r.is_for("laptop", "t-a") && r.request == 1));
+        let mut t = Typing::default();
+        for n in 1..=(Typing::KEPT as u64 + 1) {
+            t.sent(n, "laptop", "t-a");
+        }
+        assert_eq!(t.sent.len(), Typing::KEPT);
+        t.reply(&answer(1, GRANT));
+        assert!(t.refused.is_empty());
+        t.reply(&answer(2, GRANT));
+        assert_eq!(t.refused.len(), 1);
     }
 }
 

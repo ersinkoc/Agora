@@ -588,11 +588,29 @@ fn ask_grant(
 }
 
 /// Shows `lines` and waits up to `wait` for a key pressed after they were shown: keys typed before (meant for an agent, a `y` among
-/// them) are set aside, so only a fresh answer confirms (ADR-0063).
+/// them) are set aside, and a paste never answers, so only a fresh key confirms (ADR-0063).
 fn fresh_key(ask: &mut dyn Asker, lines: &[String], wait: Duration) -> Option<u8> {
     ask.show(lines);
     ask.discard();
-    ask.key(lines, wait)
+    ask.answer(lines, wait)
+}
+
+/// Sets aside every key typed so far by reading it through `parser` and dropping what it makes: a bracketed paste that began
+/// before, or begins among them, keeps its framing (its text stays a paste, and the parser leaves paste mode at its end marker).
+fn set_aside_keys(parser: &mut Parser, rx: &mpsc::Receiver<u8>) {
+    let mut bytes = Vec::new();
+    while let Ok(b) = rx.try_recv() {
+        bytes.push(b);
+    }
+    let _ = parser.push(&bytes);
+}
+
+/// The answer in one read of the keyboard: only when it is exactly one key or click, never a paste nor several keys at once.
+fn one_answer(events: &[AppEvent], area: Area, lines: &[String]) -> Option<u8> {
+    match events {
+        [e] if !matches!(e, AppEvent::Paste(_)) => agora_tui::app::dialog_key(e, area, lines),
+        _ => None,
+    }
 }
 
 /// What `action` came to once a refusal for a missing grant was handled.
@@ -670,7 +688,11 @@ fn attach(
             TermEvent::Resized(..) | TermEvent::Quiet => {}
         }
         // What was typed was refused until the owner allows it: ask, and show the screen again either way (the typed keys are lost).
-        if session.take_grant_wanted().is_some() {
+        if session
+            .take_grant_wanted()
+            .iter()
+            .any(|r| r.is_for(node, &terminal))
+        {
             let scope = format!("agent:{local}");
             let _ = ask_grant(say, session, &mut Plain(rx), node, &scope, &TYPING);
             session.terminal_close(stream);
@@ -2520,23 +2542,26 @@ fn console(
         }
         // ADR-0041: what was typed was refused until the owner allows it. Asked over the console, once for everything typed before
         // the question, and only when the refused agent is the one in front (the question does not name one; typing into it again
-        // asks there). The typed keys are lost, and the pane is opened again afterwards.
-        if let Some(refused) = session.take_grant_wanted() {
-            if let Some((node, local)) =
-                typing_grant_for(&refused, asked_through, c.app.active_agent())
-            {
-                asked_through = session.last_request();
-                let scope = format!("agent:{local}");
-                let asked = over_console(say, c, session, &mut preview, None, rx, |s, ask| {
-                    ask_grant(say, s, ask, &node, &scope, &TYPING)
-                });
-                c.notice = match asked {
-                    Ok(true) => say.text(key!("tui-granted"), &[]),
-                    Ok(false) => String::new(),
-                    Err(line) => line,
-                };
-                redraw = true;
-            }
+        // asks there; another tab's refusal is dropped). The typed keys are lost.
+        let refused = session.take_grant_wanted();
+        if let Some((node, local)) = refused
+            .iter()
+            .rev()
+            .find_map(|r| typing_grant_for(r, asked_through, c.app.active_agent()))
+        {
+            asked_through = session.last_request();
+            let scope = format!("agent:{local}");
+            // The pane stays open under the question (its scrollback and the program's modes), whatever the answer: its
+            // frames meanwhile wait in the session. `over_console` gets no preview to let go.
+            let asked = over_console(say, c, session, &mut None, None, rx, |s, ask| {
+                ask_grant(say, s, ask, &node, &scope, &TYPING)
+            });
+            c.notice = match asked {
+                Ok(true) => say.text(key!("tui-granted"), &[]),
+                Ok(false) => String::new(),
+                Err(line) => line,
+            };
+            redraw = true;
         }
         // At most one frame per FRAME (ADR-0022: an echo within 16 ms), however fast the agent writes; input was handled before this.
         // The first frame of a run is drawn over a cleared screen: lines written meanwhile ("connecting…", a lost link) must not stay
@@ -3000,6 +3025,10 @@ trait Asker {
     fn discard(&mut self) {
         while self.rx().try_recv().is_ok() {}
     }
+    /// Like [`Asker::key`], for a question whose `y` signs something: an answer must be one key, not part of a paste.
+    fn answer(&mut self, lines: &[String], wait: Duration) -> Option<u8> {
+        self.key(lines, wait)
+    }
 }
 
 /// The text of a question as lines.
@@ -3078,15 +3107,34 @@ impl Asker for Over<'_> {
         Plain(self.rx).frame(bytes);
     }
 
-    /// Sets aside every key typed so far, with the console's half-read escape sequence.
+    /// Sets aside every key typed so far through the console's parser, so a paste around the question keeps its framing.
     fn discard(&mut self) {
-        while self.rx.try_recv().is_ok() {}
-        let _ = self.c.parser.flush();
+        set_aside_keys(&mut self.c.parser, self.rx);
     }
 
     /// Keys and clicks through the console's own reader: a click on a numbered line is its number, a click outside the box cancels
     /// (`dialog_key`). A window resized meanwhile gets the box drawn again for its size.
     fn key(&mut self, lines: &[String], wait: Duration) -> Option<u8> {
+        self.read(lines, wait, |events, area, lines| {
+            events
+                .iter()
+                .find_map(|e| agora_tui::app::dialog_key(e, area, lines))
+        })
+    }
+
+    /// One key or click read alone ([`one_answer`]): a paste, or a burst of keys, never answers.
+    fn answer(&mut self, lines: &[String], wait: Duration) -> Option<u8> {
+        self.read(lines, wait, one_answer)
+    }
+}
+
+impl Over<'_> {
+    fn read(
+        &mut self,
+        lines: &[String],
+        wait: Duration,
+        pick: fn(&[AppEvent], Area, &[String]) -> Option<u8>,
+    ) -> Option<u8> {
         self.show(lines);
         let end = Instant::now() + wait;
         let mut area = window_area();
@@ -3106,10 +3154,7 @@ impl Asker for Over<'_> {
                 Err(mpsc::RecvTimeoutError::Timeout) => self.c.parser.flush(),
                 Err(mpsc::RecvTimeoutError::Disconnected) => return None,
             };
-            if let Some(k) = events
-                .iter()
-                .find_map(|e| agora_tui::app::dialog_key(e, area, lines))
-            {
+            if let Some(k) = pick(&events, area, lines) {
                 return Some(k);
             }
             if window_area() != area {
@@ -3642,6 +3687,38 @@ mod typing_grant_tests {
             }
         }
         fn frame(&mut self, _: &[u8]) {}
+    }
+
+    /// Codex review of #796: a bracketed paste around the grant question keeps its framing when the keys before the question are set
+    /// aside, and never answers it; only one key read alone does.
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn a_paste_around_the_grant_question_never_answers_it_and_keys_after_it_still_do() {
+        let area = Area::new(0, 0, 80, 24);
+        let q = ["q".to_string()];
+        let (tx, rx) = mpsc::channel();
+        let send = |bytes: &[u8]| bytes.iter().for_each(|b| tx.send(*b).unwrap());
+        // The paste's opener is queued before the question; its text and end come after.
+        let mut p = Parser::default();
+        send(b"\x1b[200~ab");
+        set_aside_keys(&mut p, &rx);
+        assert_eq!(one_answer(&p.push(b"y\x1b[201~"), area, &q), None);
+        assert_eq!(one_answer(&p.push(b"y"), area, &q), Some(b'y'));
+        // The opener was read before (by the console); its end is among the keys set aside: the parser leaves paste mode.
+        let mut p = Parser::default();
+        assert!(p.push(b"\x1b[200~ab").is_empty());
+        send(b"cd\x1b[201~");
+        set_aside_keys(&mut p, &rx);
+        assert_eq!(one_answer(&p.push(b"n"), area, &q), Some(b'n'));
+        // Half an opener queued: the rest after the question still makes a paste, never a `y`.
+        let mut p = Parser::default();
+        send(b"\x1b[20");
+        set_aside_keys(&mut p, &rx);
+        assert_eq!(one_answer(&p.push(b"0~y\x1b[201~"), area, &q), None);
+        // A paste without markers (a burst of keys) never answers; Esc alone does (it declines).
+        assert_eq!(one_answer(&p.push(b"yes"), area, &q), None);
+        assert_eq!(one_answer(&p.push(b"\x1b"), area, &q), None);
+        assert_eq!(one_answer(&p.flush(), area, &q), Some(0x1b));
     }
 
     /// Codex review of #796: a `y` typed for the agent and still queued when the grant question appears never answers it; only a key
