@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { recall, remember, rememberStarted, startedWith } from './launchMemory';
-import type { LaunchSettingChoice } from './launchSettings';
+import type { LaunchSettingChoice } from './launchSettingsModel';
 
 const effort: LaunchSettingChoice = { id: 'effort', label: 'setting-effort', values: ['low', 'high'], defaultValue: 'low' };
 const model: LaunchSettingChoice = { id: 'model', label: 'setting-model', values: [], defaultValue: '' };

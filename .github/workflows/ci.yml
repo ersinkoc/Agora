@@ -54,6 +54,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: sh scripts/check-docs.sh
+      - run: sh scripts/check-case.sh
 
   schema:
     runs-on: ubuntu-latest
