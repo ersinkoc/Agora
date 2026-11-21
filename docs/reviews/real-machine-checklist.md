@@ -28,13 +28,17 @@ agent's or machine's name as `<agent>` or `<machine>` (the window gives agents n
 - **No real accounts or tokens.** Use `agora-fake-agent` or the Shell (setup S2). A step marked **human, dedicated account** is run
   only by a person, with an account made for testing, never by an agent session.
 - **Disposable everything.** Every run uses its own Agora folder (`AGORA_HOME`) and its own project folders under one run folder
-  (`$RM`). Before any `agora down`, `agora service`, `agora update` or `kill`, check that `AGORA_HOME` is set to the run's folder and
+  (`$RM`), new for that run (S0). Every file a step reads, writes or tries to reach is one the run made under `$RM`, with made-up
+  content: never a real file of the machine (`~/.ssh`, shell profiles, your git configuration) and never a write outside `$RM`. A
+  step never changes the machine's own settings (global git configuration, login items, PATH). Before any `agora down`, `agora service`, `agora update` or `kill`, check that `AGORA_HOME` is set to the run's folder and
   that `agora status` shows the run's data folder. Never touch `~/.agora` (`%USERPROFILE%\.agora`) or the machine's own services.
 - **Do not stop agents that are running on that machine.** blackview, WHITE and the Macs run the maintainer's agents. Stop only what
   the run started, and only by its id or process id from the run's own `agora status`/`agora agent list`.
 - **Never install a login service on a machine that has its own Agora service** (the names `agora-hub`/`agora-node` are shared):
   the `agora service` steps are for a machine without one, or are skipped.
-- **Clean up:** `agora down --agents` with the run's `AGORA_HOME`, then delete `$RM`. Release builds of `agora-fake-agent` go with it.
+- **Clean up, only this run:** stop the S3 node (Ctrl-C in its own shell), then, with `AGORA_HOME=$RM/home`, check that `agora
+  status` names that folder and run `agora down --agents`; then delete exactly that one folder (`rm -rf -- "$RM"`, never a pattern or a
+  parent). The build of `agora-fake-agent` in `$RM/src` goes with it.
 
 ## Which entries a platform session can run alone
 
@@ -52,12 +56,21 @@ agent's or machine's name as `<agent>` or `<machine>` (the window gives agents n
 The commands are for a Unix shell; on Windows use PowerShell (`$env:AGORA_HOME = "$env:TEMP\rm\home"` for `export`). In the window,
 a node is a **Machine** and an approval is a card that says "… asks permission" with Allow and Deny (under "Waiting for your answer").
 
-**S0. Run folder.** `RM=$HOME/rm-$(date +%F)`; `mkdir -p $RM/home $RM/proj`; `export AGORA_HOME=$RM/home`; in `$RM/proj`:
-`git init -b main && git commit --allow-empty -m init`. Check `agora --version` says 0.3.33.
+**S0. Run folder, new for each run.** `RM=$(mktemp -d "$HOME/agora-rm-$(date +%Y%m%dT%H%M%S)-XXXX")` (a new, empty folder whose
+name no other run has; on Windows `$RM = New-Item -ItemType Directory (Join-Path $env:TEMP ("agora-rm-" + (Get-Date -Format
+yyyyMMddTHHmmss)))`; it must not exist before). It is under the home on purpose: on Linux a node folder under `/tmp` makes confined
+starts refuse (`control_token_reachable`, RM-23). `mkdir $RM/home $RM/proj`; `export AGORA_HOME=$RM/home`; in `$RM/proj`:
+`git init -b main && git commit --allow-empty -m init` (it uses the identity you already have; set one with `-c user.name=rm -c
+user.email=rm@example.invalid` on that one command if you have none, never with `git config --global`). Check `agora --version`
+says 0.3.33.
 
-**S1. Hub and machine here.** With `AGORA_HOME` set, type `agora --ui none`. To the first question answer `1` ("1) Start Agora here: …");
-to "Let other machines of yours connect? [y/N]" answer `N` (or `y` for the entries that need a second machine); to "Start Agora when
-you log in? [Y/n]" answer `n` (Enter alone means yes). `agora status` shows the hub's address (the first free port from 7443, so not the machine's own hub) and the data folder.
+**S1. Hub and machine here.** With `AGORA_HOME` set, type `agora --ui none --resume ask` (`--resume ask` answers the question "Bring
+agents back by themselves after a restart? [Y/n]" for this run, so it is not asked; the machine file records `resume = ask`). To the
+first question answer `1` ("1) Start Agora here: …"); to "Let other machines of yours connect? [y/N]" answer `n` (S3 uses loopback;
+`y` only for the entries that need a second computer). If "Start Agora when you log in? [Y/n]" is asked, type `n` and Enter: **never
+answer it with Enter alone**, which means yes and registers a login service. `agora status` shows the hub's address (the first free
+port from 7443, so not the machine's own hub) and the data folder. Without `--ui`, a desktop opens the web window instead. Where a later step says to start
+again with `agora`, it means `agora --ui none` with the run's `AGORA_HOME`.
 `agora web` opens the window signed in (accept the hub's own certificate for this run only).
 
 **S2. Fake agents and the Shell.** `agora-fake-agent` is not in the release: build it from the same tag,
@@ -86,9 +99,13 @@ manifest spec and the tests that use the fake agent, so each is **(unverified)**
 
 `agora agent kinds` lists every kind; one that is missing is named by `agora doctor`.
 
-**S3. A second machine on the same computer** (when no second computer is at hand): `export AGORA_HOME=$RM/two`,
-`agora hub code --hub-dir $RM/home/hub` (with the first home), then `agora node enroll --hub wss://localhost:PORT --ca
-$RM/home/hub/ca.pem --code CODE --id rm-two` and `agora node run --project $RM/proj2` in its own terminal.
+**S3. A second machine on the same computer** (when no second computer is at hand). First a committed checkout for it, the same
+project as `$RM/proj`: `git clone -q $RM/proj $RM/proj2`, then `git -C $RM/proj2 remote remove origin` (the source has no remote, so
+the clone keeps the same project identity without one). Then **open a second shell** and keep it for this machine only:
+`export AGORA_HOME=$RM/two`; `agora hub code --hub-dir $RM/home/hub` gives CODE; PORT is the hub's port from `agora status` in the
+first shell; `agora node enroll --hub wss://localhost:PORT --ca $RM/home/hub/ca.pem --code CODE --id rm-two`; then `agora node run
+--project $RM/proj2` in the foreground. Check it with `agora hub machines --hub-dir $RM/home/hub` (rm-two online) or `agora agent list`
+in this shell, not `agora status` (which reads a machine file only `agora` writes). Stop it with Ctrl-C in this shell before cleanup.
 
 **S4. Trust this browser on the machine.** If a start says this browser is not trusted: in the window, Settings > This device shows
 its fingerprint; on the machine run `agora node trust --from-hub`, compare the fingerprint, answer `y`.
@@ -110,7 +127,9 @@ then calls such as `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"nam
 - **See:** the terminal echoes at once; `pwd` is `$RM/proj`; Files lists `a.txt`; Changes shows `a.txt` as Added; the agent goes to
   Closed with "Left behind" naming the change.
 - **Evidence so far:** [LAN run 2026-11-11](../backlog/lan-test-findings.md): Linux and macOS nodes;
-  [macOS 2026-11-14](2026-11-14-macos-confinement-and-terminal-client.md): a scratch node with shell, fake and Claude Code agents.
+  [macOS 2026-11-14](2026-11-14-macos-confinement-and-terminal-client.md): a scratch node with shell, fake and Claude Code agents;
+  [macOS 2026-11-21](2026-11-21-macos-update-0333.md): on the LAN Mac's old Agora folder, `data/`, `m/` and `link/` became
+  `drwx------` at the first 0.3.33 start (#879).
 
 ### RM-02 Node on Windows: ConPTY, job objects, named pipe
 - **OS:** Windows.
@@ -153,7 +172,9 @@ then calls such as `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"nam
 
 ### RM-06 `agora` on a fresh machine starts a hub and a node here
 - **OS:** Linux, macOS, Windows.
-- **Do:** S0 (an empty `AGORA_HOME` is a fresh machine to Agora). Type `agora`: answer the first question, `n` to start at login. Then
+- **Do:** S0 (an empty `AGORA_HOME` is a fresh machine to Agora). Type `agora --ui tui`: answer `1`, `n` to other machines, the
+  question "Bring agents back by themselves after a restart? [Y/n]" (asked here, since `--resume` is not given: answer `n` and note
+  what it says), and `n` then Enter to "Start Agora when you log in? [Y/n]" (never Enter alone). Then
   `agora status`; kill the node process; wait 40 s; `agora status`; `agora down`. On a machine with **no** Agora service of its own:
   `agora service install`, `status`, `remove`.
 - **See:** the first question appears once; the terminal client opens signed in; `status` shows hub and node with versions; the killed
@@ -195,7 +216,9 @@ not built: nothing to check.
 - **See:** `--check` says "Agora 0.3.33 is the newest release." (or which is available); each update says "Updated to Agora …"
   only after the checksum and signature checked out ("Nothing was changed." otherwise);
   `$RM/bin/agora --version` follows; the machine's own `agora` is untouched. On Windows, note any Microsoft Defender verdict.
-- **Evidence so far:** none recorded (lan-test-findings L13 lists the self-replace among the suspects of a Defender verdict).
+- **Evidence so far:** [macOS 2026-11-21](2026-11-21-macos-update-0333.md): the LAN Mac updated to 0.3.33 with `--version` and
+  `--release-key`, the checksum equal to the published one, Local Network asked again after the update; Windows: none recorded
+  (lan-test-findings L13 lists the self-replace among the suspects of a Defender verdict).
 
 ## Agents
 
@@ -315,9 +338,13 @@ not built: nothing to check.
 - **OS:** Linux, macOS; Windows built but off by default (turn on with `AGORA_WINDOWS_CONFINEMENT=1` for the run's node only).
   One level per node; `worktree-offline` on macOS only.
 - **Do:** write `sandbox = worktree` into `$AGORA_HOME/data/policy`; restart the node. Start a Shell with "Create an isolated working
-  copy"; in it try `cat ~/.ssh/known_hosts`, `ls ~`, `touch ~/rm-out`, `touch $AGORA_HOME/x`, then `git commit --allow-empty -m t`.
-- **See:** reading the home, writing outside the worktree and touching the Agora folder are refused; the commit works; `agora doctor`
-  says the machine confines agents.
+  copy" and run `pwd` in it (its worktree, W). In your own terminal make the probes, all synthetic: `mkdir "$W/../rm-sibling" && echo
+  rm-synthetic > "$W/../rm-sibling/secret.txt"`, and `echo rm-synthetic > $RM/outside.txt`. In the confined Shell try `cat
+  ../rm-sibling/secret.txt`, `touch ../rm-sibling/out`, `cat $RM/outside.txt` and `touch $RM/home/x` (type these two paths out in full: `$RM` is not set in the agent); then `touch
+  in-worktree.txt` and `git add -A && git commit -m t` (only if you have a global identity, RM-33).
+- **See:** reading and writing the sibling folder, reading `$RM/outside.txt` and writing the Agora folder are refused; the file in
+  the worktree is made and the commit works; `agora doctor` says the machine confines agents (unverified: which folders around the
+  worktree each system leaves readable).
 - **Evidence so far:** [macOS 2026-11-14](2026-11-14-macos-confinement-and-terminal-client.md): every way out refused; Claude Code and
   Codex confined; LAN run L10, L11, L21, L22, L23 (Linux and Windows findings).
 
@@ -361,7 +388,7 @@ not built: nothing to check.
 
 ### RM-29 Shared project board (tasks, leases)
 - **OS:** Linux, macOS, Windows.
-- **Do:** S3 with the same project on both machines (a clone of `$RM/proj`). With S5: `task_create`; `task_claim` from both agents;
+- **Do:** S3 (`$RM/proj2` is a clone of `$RM/proj`, so the same project is on both machines). With S5: `task_create`; `task_claim` from both agents;
   `lease_acquire {"paths":["README.md"],"ttl_s":60,"reason":"rm"}` from both; stop `rm-two`'s node; create a task; start it again.
 - **See:** one claim wins, the other gets `task.not_open`; one lease holder, the other `lease.held` with its end time; the board stays
   on the hub while one machine is down and the returning machine sees every task.
@@ -394,10 +421,13 @@ not built: nothing to check.
 
 ### RM-33 A confined agent gets a git configuration the node wrote
 - **OS:** Linux, macOS; Windows with confinement on.
-- **Do:** RM-23's policy; set `user.name` in your global git config. In a confined Shell: `echo $GIT_CONFIG_GLOBAL`, `git config
-  --global --list`, `git commit --allow-empty -m t`.
-- **See:** `GIT_CONFIG_GLOBAL` names the node's file; it holds only the copied keys (no `credential.*`, `url.*`, `include`); the commit
-  works with your name.
+- **Do:** RM-23's policy. Change no git configuration: the node reads your global file itself and ignores a `GIT_CONFIG_GLOBAL` it
+  inherits (`agora-node/src/gitconfig.rs`), so a scratch file would not test the copy. In your own terminal, read only: `git config
+  --global --get user.name`, `git config --global --get user.email`. In a confined Shell: `echo $GIT_CONFIG_GLOBAL`, `git config
+  --global --list`; if both identity keys were set, `git commit --allow-empty -m t` in its worktree; if not, skip the commit. A test
+  identity is set only in a disposable OS account or VM.
+- **See:** `GIT_CONFIG_GLOBAL` names the node's file; it holds only keys of the allow-list (`docs/security/sandbox-recipes.md`), with
+  the same values as yours, and no `credential.*`, `url.*` or `include`; the commit, when run, carries your name.
 - **Evidence so far:** [macOS 2026-11-14](2026-11-14-macos-confinement-and-terminal-client.md) (before ADR-0078: a confined commit
   needed `~/.gitconfig` readable); LAN run L10 (Windows commit under the profile).
 
@@ -435,8 +465,9 @@ not built: nothing to check.
 ### RM-38 A confined agent reaches only the unix sockets it is given
 - **OS:** macOS (allow-list), Linux (abstract sockets, Landlock ABI 6 or newer; pathname sockets not restricted); Windows: not
   established.
-- **Do:** RM-23's policy. In a confined Shell: `env | grep -E 'SSH_AUTH_SOCK|DBUS|TMUX|DOCKER'`; on macOS connect to a socket of your
-  own outside the worktree (`nc -U`); run `agora doctor`.
+- **Do:** RM-23's policy. In a confined Shell: `env | grep -E 'SSH_AUTH_SOCK|DBUS|TMUX|DOCKER'`; on macOS, first make a synthetic
+  socket in your own terminal (`nc -lU $RM/rm.sock`), then from the confined Shell `echo hi | nc -U <that path typed out>`
+  (unverified); run `agora doctor`.
 - **See:** none of those variables; on macOS the outside socket is refused, the agent's own mesh socket works; `doctor` says what this
   machine refuses.
 - **Evidence so far:** macOS 27.2.1, 2026-11-17 (ADR-0083 "Built", cited in `docs/capabilities.md`); LAN run L21 (Linux, before the
@@ -460,7 +491,8 @@ not built: nothing to check.
   kept 60 days or more: note the dates and check again then.)
 - **See:** `doctor` shows the days left for this machine's certificate and the hub's; after the 60th day, a new end date with no step
   taken.
-- **Evidence so far:** none recorded.
+- **Evidence so far:** [macOS 2026-11-21](2026-11-21-macos-update-0333.md): `agora doctor` on the LAN Mac, "valid for 79 more days.
+  It renews itself …"; a renewal itself: none recorded.
 
 ### RM-41 Any machine can be the hub, with takeover
 not built: nothing to check.
@@ -505,7 +537,10 @@ not built: nothing to check.
 
 ### RM-49 A project's kanban board; a task dispatched to an agent
 - **OS:** Linux, macOS, Windows (the window and the terminal client).
-- **Do:** S2 plus a probe terminal agent `rm-paste`. The probe used on WHITE on 2026-11-21 is not in the repository, so write one that
+- **Builds:** part A runs on the release 0.3.33. Part B needs a build newer than 0.3.33 that has #889 ("Start a new agent for this
+  task") and #893 (the terminal client's board and give): the first release after 0.3.33, or a release build of `main` from after
+  both (write its commit in the note). On 0.3.33, record part B as **skip** ("not in 0.3.33"); a run on a newer build does both.
+- **Do, part A (0.3.33):** S2 plus a probe terminal agent `rm-paste`. The probe used on WHITE on 2026-11-21 is not in the repository, so write one that
   does this (unverified, on every system): put its terminal in raw mode (no echo, no line editing, so every byte is seen as it
   arrives); turn bracketed paste on (DECSET 2004, `ESC [ ? 2004 h`); print a working line that the manifest's `working` rule matches
   (for example `* Working (esc to interrupt)`) and keep it as the last line for 20 s; then print an idle line that the `idle` rule
@@ -513,15 +548,17 @@ not built: nothing to check.
   manifest has the three rules of `rm-screen` (unverified). A second probe, `rm-nopaste`, is the same without DECSET 2004.
   Start `rm-paste` and `rm-acp` in `$RM/proj`. To `rm-acp` send `mcp task_create {"title":"RM task 1"}`, then `RM task 2` and `RM task
   3`. Within 5 s of `rm-paste`'s start: Open board (N) > the "RM task 1" card in Backlog > Give to an agent > `rm-paste` > Give the
-  task. Give "RM task 2" to `rm-acp`. On "RM task 3": Give to an agent > Start a new agent for this task. Then start `rm-nopaste` and
-  give it a task. In the terminal client (`agora tui`), create "RM task 4" the same way, select an agent of the project, press `b`,
+  task. Give "RM task 2" to `rm-acp`. Then start `rm-nopaste` and give it a task.
+- **Do, part B (newer build):** On "RM task 3": Give to an agent > Start a new agent for this task. In the terminal client (`agora
+  tui`), create "RM task 4" the same way, select an agent of the project, press `b`,
   select "RM task 4", press `g`, choose `rm-acp`, hold Enter for a second, then press `g` once; resize the terminal to 80x6 and try
   again on "RM task 5" (unverified: the labels are the terminal client's own text from `tui.ftl`).
-- **See:** "Give this task to <agent>?" names Task, Agent, Kind, Machine and Project; the answer is "Sent to <agent>. It waits until
+- **See, part A:** "Give this task to <agent>?" names Task, Agent, Kind, Machine and Project; the answer is "Sent to <agent>. It waits until
   the agent's current turn ends."; the probe's log has no byte before its idle line, then one bracketed paste (`ESC [ 200 ~` … `ESC
-  [ 201 ~`) and an Enter (`\r`) shortly after; the card moves to Doing with "Agent: <agent>"; Start a new agent for this task opens
-  the start window and then the same confirmation for the new agent; `rm-nopaste` gets "This agent's terminal program cannot take a
-  pasted task. Choose another agent, or type the task into it yourself."; in the terminal client the board shows Backlog, Doing and
+  [ 201 ~`) and an Enter (`\r`) shortly after; the card moves to Doing with "Agent: <agent>"; `rm-nopaste` gets "This agent's terminal
+  program cannot take a pasted task. Choose another agent, or type the task into it yourself."
+- **See, part B:** Start a new agent for this task opens the start window and then the same confirmation for the new agent; in the
+  terminal client the board shows Backlog, Doing and
   Done, held Enter gives nothing, the single `g` gives "RM task 4" (it moves to Doing), and at 80x6 the confirmation says the terminal
   is too small and `g` gives nothing.
 - **Evidence so far:** [Windows 11 2026-11-21](2026-11-21-windows-dispatch-conpty.md): through ConPTY, given at about 5.5 s while
