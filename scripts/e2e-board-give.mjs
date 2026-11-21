@@ -73,6 +73,11 @@ try {
     mkdirSync(screenshots, { recursive: true });
     for (const theme of ['dark', 'light']) {
       await page.emulateMedia({ colorScheme: theme });
+      // The page follows the system scheme through `<html data-theme>`; buttons fade their colours (150 ms). Shoot only once the page
+      // shows the scheme asked for and the fade is over, or a light page can carry the dark buttons.
+      await page.waitForFunction(t => document.documentElement.dataset.theme === t, theme);
+      await page.evaluate(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))));
+      await page.waitForTimeout(300);
       await page.screenshot({ path: join(screenshots, `board-give-${name}-${theme}.png`), animations: 'disabled' });
     }
   };
@@ -95,7 +100,10 @@ try {
   for (const part of ['Write the release notes', 'fake-adapter', 'laptop', 'Give this task to']) assert.ok(confirm.includes(part), `confirmation names ${part}: ${confirm}`);
   assert.doesNotMatch(confirm, /\b(claim|lease|mesh|dispatch)/i); // "release" is not "lease"
   await shoot('confirm');
-  await page.keyboard.press('Enter'); // the send button has the focus
+  // The focus is on Back, never on "Give the task": a fresh Tab and Enter send it.
+  assert.equal(await page.evaluate(() => document.activeElement?.textContent), 'Back');
+  await page.keyboard.press('Tab');
+  await page.keyboard.press('Enter');
   await give.locator('[data-give-step="result"]').waitFor();
   const answer = await give.locator('[role=status]').innerText();
   assert.match(answer, /^Sent to .+\.( It waits until the agent's current turn ends\.)?$/);
@@ -122,12 +130,18 @@ try {
   await page.keyboard.type('Port the parser');
   const item = page.getByRole('option', { name: 'Give to an agent: Port the parser to the new API' });
   await item.waitFor();
-  await page.keyboard.press('Enter');
+  // Holding Enter: the first press opens the dialog; its repeats must neither pick an agent nor send.
+  await page.keyboard.down('Enter');
   await give.waitFor();
+  for (let i = 0; i < 4; i++) await page.keyboard.down('Enter'); // already down: sent with repeat = true
+  await page.keyboard.up('Enter');
+  assert.equal(await give.locator('[data-give-step]').count(), 0, 'a held Enter stays on the picker');
   assert.ok((await give.innerText()).includes('Port the parser to the new API'));
   if (screenshots) {
     await page.setViewportSize({ width: 390, height: 844 });
     await page.emulateMedia({ colorScheme: 'light' });
+    await page.waitForFunction(() => document.documentElement.dataset.theme === 'light');
+    await page.waitForTimeout(300);
     await page.screenshot({ path: join(screenshots, 'board-give-phone-light.png'), animations: 'disabled' });
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
   }

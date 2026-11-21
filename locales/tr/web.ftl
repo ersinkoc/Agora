@@ -1232,7 +1232,7 @@ refusal-agent-gone = O ajan artık çalışmıyor.
 refusal-task-taken = Bu görevi bir ajan zaten aldı ya da görev bitti.
 refusal-task-blocked = Bu görev, önce başka bir görevin bitmesini bekliyor.
 refusal-task-gone = Bu görev artık panoda yok.
-refusal-task-other-project = O ajan bu görevin projesine ait değil.
+give-refused-other-project = O ajan bu görevin projesine ait değil.
 refusal-board-unavailable = Bu projenin panosuna şu anda ulaşılamıyor. Biraz sonra yeniden deneyin.
 
 # ADR-0091: plan limitleri. Sayılar aracın kendi bildirdiğidir; hiçbiri hesaplanmaz. Para yok.

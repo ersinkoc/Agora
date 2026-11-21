@@ -33,8 +33,8 @@ new features.
   - [x] the answer: "sent", "waits for the agent's turn to end", or the refusal sentence from `locales/` (all `task.*`, `agent.queue_full`, `task.dispatch_limited`)
   - [x] `taskDispatch` in `apps/web/src/net/grant.ts` `AGENT_KINDS` (a limited device asks for an agent grant, not a machine grant)
   - [x] a window without the capability hides the action (`task.dispatch` not negotiated): the window cannot read capabilities, so it
-    hides the action for a machine once the hub or the node refused it as `protocol.capability_missing` (`task.dispatch`), and everywhere
-    when the hub does not know the command
+    hides the action for a machine once it was refused there as `protocol.capability_missing` (`task.dispatch`) or, from a node too old to
+    decode it, `protocol.invalid_message` (`command`); forgotten when that machine goes offline and on every reconnect
   - [x] tests (unit, and a browser e2e with `agora-fake-agent`, run against a build with #883), screenshots in both themes, 44 px targets, keyboard path
 - [ ] **M0.4 Start a new agent for a task** (ADR-0095 step 3)
   - [ ] "Start a new one" in the picker opens the ordinary start (kind, machine, folder), then dispatches to the new agent

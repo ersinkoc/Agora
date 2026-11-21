@@ -5,9 +5,9 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setLanguage, t } from '../i18n';
 import type { AgentTileModel } from '../model';
-import { forgetGiveSupport, givableTasks, giveAsk, giveCandidates, giveRefusal, giveRequest, giveTask, noteRefusal, offersGive, type GiveResult, type GiveTask } from '../net/give';
+import { forgetGiveSupport, forgetOffline, givableTasks, giveAsk, giveCandidates, giveRefusal, giveRequest, giveTask, noteRefusal, offersGive, resendGive, type GiveResult, type GiveTask } from '../net/give';
 import { grantFor } from '../net/grant';
-import { REFUSAL_KEYS } from '../net/refusal';
+import { REFUSAL_KEYS, refusalKey } from '../net/refusal';
 import type { BoardModel, BoardTaskModel } from '../net/view';
 import { BoardColumns } from './BoardView';
 import { GiveContext, GiveDialog, type GiveApi } from './GiveTask';
@@ -60,9 +60,10 @@ describe('Give to an agent on the board', () => {
     expect(offersGive('n1')).toBe(false);
     expect(cards(api([agent('n1/a-1')]))).toBe(0);
     expect(cards(api([agent('n1/a-1'), agent('n2/a-2')]))).toBe(1);
-    // A hub that does not know the command at all: no machine is offered.
+    // A node too old to decode the command (or a hub that does not know it: the window cannot tell) hides that machine only.
     act(() => noteRefusal('n2', 'protocol.invalid_message', { field: 'command' }));
     expect(cards(api([agent('n2/a-2')]))).toBe(0);
+    expect(cards({ ...api([agent('n3/a-3')]), online: undefined })).toBe(1);
   });
 
   it('lists running agents of the task\'s project only, helpers under their parent', () => {
@@ -212,5 +213,87 @@ describe('the command palette', () => {
     expect(givableTasks(boards, [agent('n1/a-1'), agent('n1/b', { projectId: 'q' })]).map((x) => x.key)).toEqual(['p/1', 'p/9']);
     expect(givableTasks(boards, [])).toEqual([]);
     expect(givableTasks([board(Array.from({ length: 50 }, (_, i) => task(String(i), 'open')))], [agent('n1/a-1')], undefined, 10)).toHaveLength(10);
+  });
+});
+
+describe('review fixes', () => {
+  const key = (el: Element, init: KeyboardEventInit) => { const e = new KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init }); act(() => { el.dispatchEvent(e); }); return e; };
+
+  it('ignores a held Enter and never puts the focus on "Give the task"', () => {
+    const send = vi.fn(async () => ({ ok: true, queued: false }) as GiveResult);
+    render(<GiveDialog task={theTask} give={api([agent('n1/a-1')], send)} onClose={() => {}} />);
+    const row = dialog().querySelector('[data-agent-id] button')!;
+    // A repeat of the Enter that chose the palette entry: its default (clicking the focused row) is cancelled.
+    expect(key(row, { key: 'Enter', repeat: true }).defaultPrevented).toBe(true);
+    expect(key(row, { key: ' ', repeat: true }).defaultPrevented).toBe(true);
+    // The keypress of a press that began before the dialog opened is ignored too (a browser clicks a button on Enter's keypress).
+    const press = (el: Element) => { const e = new KeyboardEvent('keypress', { bubbles: true, cancelable: true, key: 'Enter', charCode: 13, keyCode: 13 }); act(() => { el.dispatchEvent(e); }); return e; };
+    expect(press(row).defaultPrevented).toBe(true);
+    expect(key(row, { key: 'Enter' }).defaultPrevented).toBe(false);
+    expect(press(row).defaultPrevented).toBe(false); // a fresh press in the dialog works
+    click(row);
+    expect(document.activeElement?.textContent).toBe('Back');
+    expect(key(button('Give the task', dialog())!, { key: 'Enter', repeat: true }).defaultPrevented).toBe(true);
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it('keeps the dialog open while the task is being sent, and shows the answer', async () => {
+    let answer!: (r: GiveResult) => void;
+    const onClose = vi.fn();
+    render(<GiveDialog task={theTask} give={api([agent('n1/a-1')], () => new Promise((r) => { answer = r; }))} onClose={onClose} />);
+    click(dialog().querySelector('[data-agent-id] button'));
+    click(button('Give the task', dialog()));
+    expect(dialog().getAttribute('aria-busy')).toBe('true');
+    key(document.activeElement ?? document.body, { key: 'Escape' });
+    key(document.body, { key: 'Escape' });
+    expect(onClose).not.toHaveBeenCalled();
+    expect(dialog()).not.toBeNull();
+    await act(async () => { answer({ ok: true, queued: true }); await Promise.resolve(); });
+    expect(dialog().textContent).toContain('It waits until the agent\'s current turn ends.');
+    // Once the answer is there, Escape closes as usual (the same key that was held back while sending).
+    key(document.body, { key: 'Escape' });
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows the answer of the command sent again after the owner allowed it, without offering another try meanwhile', async () => {
+    let calls = 0;
+    const command = vi.fn(async () => { calls++; if (calls === 1) throw { code: 'approval.grant_required', params: {} }; return { taskDispatch: { queued: false } }; });
+    render(<GiveDialog task={theTask} give={api([agent('n1/a-1')], (a, task) => giveTask(command, a, task))} onClose={() => {}} />);
+    click(dialog().querySelector('[data-agent-id] button'));
+    click(button('Give the task', dialog()));
+    await flush();
+    expect(dialog().textContent).toContain('This machine needs your permission first.');
+    expect(button('Choose another agent', dialog())).toBeUndefined();
+    // The grant dialog's Allow sends the same command again (App.allowGrant -> resendGive).
+    await act(async () => { await resendGive(command, 'n1', giveRequest(agent('n1/a-1'), theTask).body); await Promise.resolve(); });
+    expect(command).toHaveBeenCalledTimes(2);
+    expect(dialog().textContent).toContain('Sent to claude · a-1.');
+  });
+
+  it('forgets a machine that went offline, so an updated one is offered again', () => {
+    noteRefusal('n1', 'protocol.capability_missing', { capability: 'task.dispatch' });
+    forgetOffline(new Set(['n1', 'n2']));
+    expect(offersGive('n1')).toBe(false);
+    forgetOffline(new Set(['n2']));
+    expect(offersGive('n1')).toBe(true);
+    noteRefusal('n1', 'protocol.invalid_message', { field: 'command' });
+    forgetGiveSupport(); // a new connection
+    expect(offersGive('n1')).toBe(true);
+  });
+
+  it('keeps "not of this project" to giving a task; other commands keep their general sentence', () => {
+    expect(refusalKey('mesh.recipient_unknown')).toBeUndefined();
+    expect(giveRefusal('mesh.recipient_unknown')).toEqual({ key: 'give-refused-other-project' });
+  });
+
+  it('shows names as plain text in the title, the no-ask note, the rows and the answer', async () => {
+    const name = 'claude · a\u202Eb\u0007c';
+    render(<GiveDialog task={theTask} give={api([agent('n1/a-1', { name, skipsPermissions: true, machine: 'lap\u202Etop' })])} onClose={() => {}} />);
+    expect(dialog().textContent).not.toMatch(/[\u202E\u0007]/);
+    click(dialog().querySelector('[data-agent-id] button'));
+    expect(dialog().textContent).not.toMatch(/[\u202E\u0007]/);
+    click(button('Give the task', dialog()));
+    await flush();
+    expect(dialog().textContent).toContain('Sent to claude · abc.');
   });
 });

@@ -39,7 +39,7 @@ import { agentTarget } from './components/sessionChoice';
 import { ChatActionsContext, type ChatActions, type PromptResult } from './components/chatActions';
 import { CloseAgentContext } from './components/CloseAgent';
 import { closeAsk } from './net/closeAgent';
-import { forgetGiveSupport, givableTasks, giveAsk, giveTask, useGiveAsk, useGiveSupport } from './net/give';
+import { forgetGiveSupport, forgetOffline, givableTasks, giveAsk, giveTask, isGive, resendGive, useGiveAsk, useGiveSupport } from './net/give';
 import { GiveContext, GiveDialog, type GiveApi } from './components/GiveTask';
 import { plain } from './components/boardColumns';
 import { failure, type ActionResult } from './net/refusal';
@@ -265,7 +265,9 @@ export function App() {
       const s = await signGrant(device, g.node, g.ask, Date.now());
       await api.command(g.node, { grantCreate: s });
       setGrantAsk(undefined);
-      if (!('terminalResize' in g.body)) await api.command(g.node, g.body).catch(() => {});
+      // A task given to an agent: the answer goes to its dialog (sent, queued or the refusal).
+      if (isGive(g.body)) await resendGive(api.command, g.node, g.body);
+      else if (!('terminalResize' in g.body)) await api.command(g.node, g.body).catch(() => {});
     } catch {
       setGrantAsk({ ...g, busy: false, failed: true });
     }
@@ -366,6 +368,9 @@ export function App() {
     return { agents, online: new Set(list.filter((m) => m.online).map((m) => m.id)), machines: list.map((m) => ({ id: m.id, name: m.name })), send: (agent, task) => giveTask(api.command, agent, task) };
   }, [hub, api, live, agents]);
   const giving = useGiveAsk();
+  // What was heard of machines that do not take tasks belongs to one connection, and to a machine until it goes offline (an update restarts it).
+  useEffect(() => { if (link === 'live') forgetGiveSupport(); }, [link]);
+  useEffect(() => { if (giveApi?.online) forgetOffline(giveApi.online); }, [giveApi?.online]);
   const giveSupport = useGiveSupport(); // machines heard not to take tasks drop out of the palette too
   const current = hash.startsWith('#/agent/') ? decodeURIComponent(hash.slice('#/agent/'.length)) : undefined;
   const approvalsNow = live ? approvalList(live) : hub ? [] : demoApprovals;

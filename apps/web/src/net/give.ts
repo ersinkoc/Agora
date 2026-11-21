@@ -10,33 +10,39 @@ import { refusalKey } from './refusal';
 /** The task a "Give to an agent" is about. `key` is the board's own key (`<project>/<task>`), `taskId` the id the node knows. */
 export interface GiveTask { key: string; projectId: string; taskId: string; project: string; title: string }
 
-/** What the window says once it tried: given now, given and waiting for the turn to end, or the locale key of the refusal. */
-export type GiveResult = { ok: true; queued: boolean } | { ok: false; key: string; args?: Record<string, string> };
+/** What the window says once it tried: given now, given and waiting for the turn to end, or the locale key of the refusal. `grant`: the
+ *  machine asked for the owner's permission first; it settles with the answer to the command that is sent again once it is allowed. */
+export type GiveResult = { ok: true; queued: boolean } | { ok: false; key: string; args?: Record<string, string>; grant?: Promise<GiveResult> };
 
 // The window cannot read a machine's capabilities (the snapshot carries none, and a window does not negotiate them with the hub), so it
-// offers the action and learns from the answer: a machine that refused `TaskDispatch` as `protocol.capability_missing` for `task.dispatch`
-// (the hub says so for a node that does not offer it; an older node says so itself) is not offered again in this window. A hub too old to
-// know the command at all answers `protocol.invalid_message` for the field `command`, and then no machine is offered.
+// offers the action and learns from the answer. A machine that does not take tasks answers in one of two ways: `protocol.capability_missing`
+// for `task.dispatch` (the hub, for a node that does not offer it), or `protocol.invalid_message` for the field `command` (a node too old to
+// decode the command; a hub too old to know it answers the same, and the window cannot tell the two apart). Either way only that machine is
+// no longer offered. What was heard of a machine is forgotten when it goes offline (an update restarts it) and on every new connection.
 const lacking = new Set<string>();
-let hubLacks = false;
 let version = 0;
 const listeners = new Set<() => void>();
 const changed = () => { version++; listeners.forEach((l) => l()); };
 
-/** Remembers what a refused dispatch says about the machine (or the hub). The refusal itself is still shown. */
+/** Remembers what a refused dispatch says about the machine. The refusal itself is still shown. */
 export function noteRefusal(node: string, code: string, params: Record<string, string> = {}): void {
-  if (code === 'protocol.capability_missing' && (params.capability ?? 'task.dispatch') === 'task.dispatch' && node && !lacking.has(node)) {
+  const cannot = (code === 'protocol.capability_missing' && (params.capability ?? 'task.dispatch') === 'task.dispatch')
+    || (code === 'protocol.invalid_message' && params.field === 'command');
+  if (cannot && node && !lacking.has(node)) {
     lacking.add(node);
-    changed();
-  } else if (code === 'protocol.invalid_message' && params.field === 'command' && !hubLacks) {
-    hubLacks = true;
     changed();
   }
 }
 /** Whether the window still offers giving tasks to agents on this machine. */
-export const offersGive = (node: string): boolean => !hubLacks && !lacking.has(node);
+export const offersGive = (node: string): boolean => !lacking.has(node);
 /** Forgets what was heard (a new connection or another hub starts again; tests). */
-export function forgetGiveSupport(): void { lacking.clear(); hubLacks = false; changed(); }
+export function forgetGiveSupport(): void { if (lacking.size > 0) { lacking.clear(); changed(); } }
+/** Forgets what was heard of machines that are not connected now: one that comes back may have been updated. */
+export function forgetOffline(online: ReadonlySet<string>): void {
+  let any = false;
+  for (const node of lacking) if (!online.has(node)) { lacking.delete(node); any = true; }
+  if (any) changed();
+}
 /** Re-renders when what was heard changes. */
 export function useGiveSupport(): number {
   return useSyncExternalStore((l) => { listeners.add(l); return () => { listeners.delete(l); }; }, () => version, () => version);
@@ -67,6 +73,8 @@ export function giveRefusal(code: string, params: Record<string, string> = {}): 
     case 'agent.queue_full': return params.limit === '1' ? { key: 'give-refused-waiting' } : { key: refusalKey(code) ?? 'give-failed' };
     case 'task.dispatch_limited': return { key: 'give-refused-limited', args: { limit: params.limit || '8' } };
     case 'approval.grant_required': return { key: 'give-refused-grant' };
+    // Only giving a task names an agent of another project this way; other commands keep their general sentence.
+    case 'mesh.recipient_unknown': return { key: 'give-refused-other-project' };
     case 'node.offline': return { key: 'give-refused-offline' };
     case 'auth.forbidden': return { key: 'give-refused-forbidden' };
     default: return { key: refusalKey(code) ?? 'give-failed' };
@@ -75,10 +83,15 @@ export function giveRefusal(code: string, params: Record<string, string> = {}): 
 
 type Command = (node: string, body: CommandBody) => Promise<agora.v1.CommandOk.$Properties>;
 
-/** Sends the dispatch and says how it went; a refusal also teaches the window what the machine can do (`noteRefusal`). */
-export async function giveTask(command: Command, agent: AgentTileModel, task: GiveTask): Promise<GiveResult> {
-  const { node, body } = giveRequest(agent, task);
-  if (!node) return { ok: false, key: 'give-failed' };
+// A dispatch the machine held back until the owner allows it (ADR-0041): the window's grant dialog sends the same command again once
+// allowed (`resendGive`), and its answer goes to the dialog that waits here. Keyed by the exact command.
+const waiting = new Map<string, (r: GiveResult) => void>();
+const waitKey = (node: string, body: CommandBody) => {
+  const d = body.taskDispatch;
+  return d ? [node, d.agentId ?? '', d.projectId ?? '', d.taskId ?? ''].join('\u0000') : '';
+};
+
+async function run(command: Command, node: string, body: CommandBody): Promise<GiveResult> {
   try {
     const ok = await command(node, body);
     return { ok: true, queued: !!ok.taskDispatch?.queued };
@@ -86,8 +99,32 @@ export async function giveTask(command: Command, agent: AgentTileModel, task: Gi
     const err = e as { code?: string; params?: Record<string, string> };
     const code = err.code ?? '';
     noteRefusal(node, code, err.params);
-    return { ok: false, ...giveRefusal(code, err.params) };
+    const said = giveRefusal(code, err.params);
+    if (code !== 'approval.grant_required') return { ok: false, ...said };
+    const key = waitKey(node, body);
+    return { ok: false, ...said, grant: new Promise<GiveResult>((resolve) => { waiting.set(key, resolve); }) };
   }
+}
+
+/** Sends the dispatch and says how it went; a refusal also teaches the window what the machine can do (`noteRefusal`). */
+export async function giveTask(command: Command, agent: AgentTileModel, task: GiveTask): Promise<GiveResult> {
+  const { node, body } = giveRequest(agent, task);
+  if (!node) return { ok: false, key: 'give-failed' };
+  return run(command, node, body);
+}
+
+/** Whether a command is a dispatch (the grant dialog sends it again through `resendGive`, so its answer is shown). */
+export const isGive = (body: CommandBody): boolean => !!body.taskDispatch;
+
+/** Sends a dispatch again after the owner allowed it, and hands the answer to the dialog that waits for it (if it is still open). */
+export async function resendGive(command: Command, node: string, body: CommandBody): Promise<void> {
+  const key = waitKey(node, body);
+  const resolve = waiting.get(key);
+  waiting.delete(key);
+  const result = await run(command, node, body);
+  // A second permission request (unlikely) keeps the dialog waiting on the new one.
+  if (!result.ok && result.grant) void result.grant.then((r) => resolve?.(r));
+  else resolve?.(result);
 }
 
 /** The board's tasks a person can give to an agent now (Backlog, with at least one agent to take it), for the command palette. */

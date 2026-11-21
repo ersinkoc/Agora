@@ -33,11 +33,11 @@ const KEYS: Record<string, string> = {
   // `node.resource_limit` with resource `skip_approvals_agent` (see `failure`).
   'node.resource_limit.skip_approvals_agent': 'refusal-skip-agent-limit',
   'agent.not_found': 'refusal-agent-gone',
-  // ADR-0095: giving a board task to an agent (net/give.ts adds the refusals whose words depend on their parameters).
+  // ADR-0095: giving a board task to an agent (net/give.ts adds the refusals whose words depend on
+  // their parameters or that only giving a task gives, such as `mesh.recipient_unknown`).
   'task.not_open': 'refusal-task-taken',
   'task.blocked': 'refusal-task-blocked',
   'task.not_found': 'refusal-task-gone',
-  'mesh.recipient_unknown': 'refusal-task-other-project',
   'board.unavailable': 'refusal-board-unavailable',
 };
 

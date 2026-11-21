@@ -1289,7 +1289,7 @@ refusal-agent-gone = That agent is no longer running.
 refusal-task-taken = This task was already taken by an agent, or it is done.
 refusal-task-blocked = This task waits for another task to be done first.
 refusal-task-gone = This task is no longer on the board.
-refusal-task-other-project = That agent does not belong to this task's project.
+give-refused-other-project = That agent does not belong to this task's project.
 refusal-board-unavailable = This project's board cannot be reached right now. Try again in a moment.
 
 # ADR-0091: plan limits. The numbers are what the tool itself reported; nothing is worked out. No money.

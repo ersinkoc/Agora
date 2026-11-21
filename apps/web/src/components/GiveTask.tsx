@@ -46,17 +46,18 @@ export function GiveRow({ agent, depth, machines, onPick }: { agent: AgentTileMo
           <NoAskBadge agent={agent} compact nested />
         </span>
         <span className="min-w-0 break-words text-xs text-muted">
-          {depth > 0 && agent.parentId ? t('give-row-helper', { kind: plain(agent.kind ?? '', OWNER_MAX), machine: machineName(agent, machines) }) : t('give-row-detail', { kind: plain(agent.kind ?? '', OWNER_MAX), machine: machineName(agent, machines) })}
+          {depth > 0 && agent.parentId ? t('give-row-helper', { kind: plain(agent.kind ?? '', OWNER_MAX), machine: plain(machineName(agent, machines), FULL) }) : t('give-row-detail', { kind: plain(agent.kind ?? '', OWNER_MAX), machine: plain(machineName(agent, machines), FULL) })}
         </span>
       </button>
     </li>
   );
 }
 
-/** The confirmation: agent, kind, machine and project in full, and that the agent acts without asking when it does. */
+/** The confirmation: agent, kind, machine and project in full, and that the agent acts without asking when it does. The focus goes to
+ *  Back, never to "Give the task": a key held down since the palette or the picker must not send it (repeats are ignored as well). */
 export function GiveConfirm({ task, agent, machines, busy, onSend, onBack }: { task: GiveTask; agent: AgentTileModel; machines: readonly { id: string; name: string }[]; busy?: boolean; onSend: () => void; onBack: () => void }) {
-  const send = useRef<HTMLButtonElement>(null);
-  useEffect(() => { send.current?.focus(); }, []);
+  const back = useRef<HTMLButtonElement>(null);
+  useEffect(() => { back.current?.focus(); }, []);
   const row = (label: string, value: ReactNode, ltr = false) => (
     <div className="grid min-w-0 gap-0.5 sm:grid-cols-[7rem_minmax(0,1fr)] sm:gap-3">
       <dt className="text-xs text-muted">{label}</dt>
@@ -75,29 +76,38 @@ export function GiveConfirm({ task, agent, machines, busy, onSend, onBack }: { t
       {agent.skipsPermissions && (
         <p role="note" className="m-0 flex items-start gap-2 rounded-s border border-needs-you/60 p-3 text-sm text-ink">
           <NoAskBadge agent={agent} compact nested />
-          <span>{t('give-confirm-no-ask', { agent: agent.name })}</span>
+          <span>{t('give-confirm-no-ask', { agent: plain(agent.name, FULL) })}</span>
         </p>
       )}
       <p className="muted m-0 text-sm">{t('give-confirm-body')}</p>
       <div className="flex flex-wrap justify-end gap-2">
-        <button type="button" className="button min-h-11" disabled={busy} onClick={onBack}>{t('give-back')}</button>
-        <button ref={send} type="button" className="button button--primary min-h-11" disabled={busy} onClick={onSend}>{busy ? t('give-sending') : t('give-send')}</button>
+        <button ref={back} type="button" className="button min-h-11" disabled={busy} onClick={onBack}>{t('give-back')}</button>
+        <button type="button" className="button button--primary min-h-11" disabled={busy} onClick={onSend}>{busy ? t('give-sending') : t('give-send')}</button>
       </div>
     </div>
   );
 }
 
-/** What happened: given now, given and waiting for the turn to end, or why it was not. */
-export function GiveOutcome({ result, agent, onClose, onBack }: { result: GiveResult; agent: AgentTileModel; onClose: () => void; onBack: () => void }) {
+/** What happened: given now, given and waiting for the turn to end, or why it was not. While the machine waits for the owner's permission
+ *  (`grant`) it says so and shows the answer of the command the grant dialog sends again; choosing another agent is not offered then,
+ *  since that would be another try while this one may still go through. */
+export function GiveOutcome({ result, agent, onClose, onBack, onSettled }: { result: GiveResult; agent: AgentTileModel; onClose: () => void; onBack: () => void; onSettled?: (r: GiveResult) => void }) {
   const done = useRef<HTMLButtonElement>(null);
   useEffect(() => { done.current?.focus(); }, []);
+  const grant = !result.ok ? result.grant : undefined;
+  useEffect(() => {
+    if (!grant) return;
+    let live = true;
+    void grant.then((r) => { if (live) onSettled?.(r); });
+    return () => { live = false; };
+  }, [grant]); // eslint-disable-line react-hooks/exhaustive-deps
   return (
     <div className="grid gap-3" data-give-step="result">
       {result.ok
-        ? <p role="status" className="m-0 text-sm text-ink">{t(result.queued ? 'give-queued' : 'give-sent', { agent: agent.name })}</p>
-        : <p role="alert" className="m-0 text-sm text-ink">{t(result.key, result.args)}</p>}
+        ? <p role="status" className="m-0 text-sm text-ink">{t(result.queued ? 'give-queued' : 'give-sent', { agent: plain(agent.name, FULL) })}</p>
+        : <p role={grant ? 'status' : 'alert'} className="m-0 text-sm text-ink">{t(result.key, result.args)}</p>}
       <div className="flex flex-wrap justify-end gap-2">
-        {!result.ok && <button type="button" className="button min-h-11" onClick={onBack}>{t('give-other-agent')}</button>}
+        {!result.ok && !grant && <button type="button" className="button min-h-11" onClick={onBack}>{t('give-other-agent')}</button>}
         <button ref={done} type="button" className="button button--primary min-h-11" onClick={onClose}>{t('give-done')}</button>
       </div>
     </div>
@@ -116,12 +126,26 @@ export function GiveDialog({ task, give, onClose }: { task: GiveTask; give: Give
     const result = await give.send(agent, task);
     setStep({ at: 'result', agent, result });
   };
-  const title = step.at === 'pick' ? t('give-title') : step.at === 'confirm' ? t('give-confirm-title', { agent: step.agent.name }) : t('give-title');
+  const title = step.at === 'pick' ? t('give-title') : step.at === 'confirm' ? t('give-confirm-title', { agent: plain(step.agent.name, FULL) }) : t('give-title');
+  // While the command is on its way the dialog stays: its answer (sent, queued, refused) is only shown here.
+  const sending = step.at === 'confirm' && !!step.busy;
+  const hold = (e: Event) => { if (sending) e.preventDefault(); };
+  // A key whose press began before the dialog opened (the Enter that chose the palette entry) must not activate the row that has the
+  // focus now: a browser clicks a button on Enter's keypress and on Space's keyup, so both are ignored until a key is pressed here.
+  const armed = useRef(false);
   return (
-    <Dialog.Root open onOpenChange={(o) => { if (!o) onClose(); }}>
+    <Dialog.Root open onOpenChange={(o) => { if (!o && !sending) onClose(); }}>
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 z-40 bg-surface-0/70 backdrop-blur-sm" />
-        <Dialog.Content aria-describedby={step.at === 'pick' ? 'give-task-title' : undefined} data-give-dialog=""
+        <Dialog.Content aria-describedby={step.at === 'pick' ? 'give-task-title' : undefined} data-give-dialog="" aria-busy={sending || undefined}
+          onEscapeKeyDown={hold} onPointerDownOutside={hold} onInteractOutside={hold}
+          // A held key repeats: only a fresh press activates a row or a button here, so holding Enter from the palette cannot pick and send.
+          onKeyDownCapture={(e) => {
+            if (!e.repeat) armed.current = true;
+            else if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); }
+          }}
+          onKeyPressCapture={(e) => { if (!armed.current) { e.preventDefault(); e.stopPropagation(); } }}
+          onKeyUpCapture={(e) => { if (!armed.current && e.key === ' ') { e.preventDefault(); e.stopPropagation(); } }}
           onKeyDown={(e) => { if (!e.ctrlKey && !e.metaKey && !e.altKey && e.key.length === 1) e.stopPropagation(); }}
           className="fixed left-1/2 top-1/2 z-50 grid max-h-[calc(100dvh-2rem)] w-[min(34rem,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2 gap-3 overflow-auto rounded-l border border-line bg-surface-1 p-5 shadow-card">
           <Dialog.Title className="m-0 break-words text-base font-semibold tracking-normal text-ink normal-case">{title}</Dialog.Title>
@@ -138,7 +162,8 @@ export function GiveDialog({ task, give, onClose }: { task: GiveTask; give: Give
             <div className="flex justify-end"><Dialog.Close className="button min-h-11">{t('give-cancel')}</Dialog.Close></div>
           </>}
           {step.at === 'confirm' && <GiveConfirm task={task} agent={step.agent} machines={give.machines} busy={step.busy} onSend={() => void send(step.agent)} onBack={() => setStep({ at: 'pick' })} />}
-          {step.at === 'result' && <GiveOutcome result={step.result} agent={step.agent} onClose={onClose} onBack={() => setStep({ at: 'pick' })} />}
+          {step.at === 'result' && <GiveOutcome key={step.result.ok ? 'ok' : step.result.key} result={step.result} agent={step.agent} onClose={onClose} onBack={() => setStep({ at: 'pick' })}
+            onSettled={(result) => setStep({ at: 'result', agent: step.agent, result })} />}
         </Dialog.Content>
       </Dialog.Portal>
     </Dialog.Root>
