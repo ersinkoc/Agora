@@ -115,4 +115,4 @@ Date: YYYY-MM-DD
 | 0095 | A project has a kanban board, and a task can be dispatched to an agent | Accepted |
 | 0096 | Agora offers a ready helper agent instead of a coding-agent loop of its own | Accepted |
 | 0098 | Generated Git configuration belongs to the node | Accepted |
-| 0099 | A native desktop client in Rust on GPUI replaces the Tauri shell over time | Proposed |
+| 0099 | A native desktop client in Rust on GPUI replaces the Tauri shell over time | Accepted |

@@ -1,9 +1,10 @@
 # 0099. A native desktop client in Rust on GPUI replaces the Tauri shell over time
-Status: Proposed
+Status: Accepted
 Date: 2026-11-22
-
-Not accepted. Nothing here may be built until the maintainer accepts it. Accepting only stage 0 (the spike, decision 6) is a valid
-partial answer: the spike's numbers then decide the rest.
+Accepted: 2026-11-22, stage 0 only (the maintainer, in the merger chat, answering "Aşama 0'ı kabul et" to the question that described
+stage 0: a spike on all three operating systems measuring GPUI with a native terminal, screen readers, start time, memory and size,
+against the go/no-go numbers of decision 6). Stages 1 to 5 stay Proposed: the spike report goes back to the maintainer, who accepts
+or rejects them then. Nothing beyond the spike may be built until then.
 
 Touches ADR-0005 (web-first, Tauri desktop), ADR-0048 (the desktop app is a thin Tauri shell; proposed to be superseded once decision 5's
 retirement step is reached), ADR-0043 and ADR-0063 (the terminal client, whose state model decision 3 extracts), ADR-0012 (VT backend),
