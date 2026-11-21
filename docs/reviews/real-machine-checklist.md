@@ -102,7 +102,8 @@ manifest spec and the tests that use the fake agent. The Linux run of 2026-11-21
   `bottom_non_empty_lines(4)` (that frame's last line is "  2. No", so one line never shows it); `idle` (100) for `regex = '^>'` on
   `bottom_non_empty_lines(1)` (not `'^> '`: the row's trailing space is trimmed, so that never matches). `$RM/screen.toml` is
   `crates/agora-fake-agent/fixtures/working-blocked-idle.toml` with `delay_ms` of 20000 on the first two frames and 600000 on the
-  last, so each state lasts long enough to see.
+  last, so each state lasts long enough to see (verified on macOS 2026-11-21: Working, Needs you at about 23 s, Idle at
+  about 41 s).
 - `rm-acp.toml` (a structured agent over ACP): `[structured]` `acp = { argv = [FAKE, "--acp"] }`. Its prompts are listed at the top
   of `crates/agora-fake-agent/src/acp.rs` (`plan`, `ask`, `rich`, `usage`, `mcp TOOL JSON`, `slow`, anything else is echoed). The
   shape is the one `crates/agora/tests/acp.rs` writes. It says `loadSession: false`, so a Resume (RM-20) restarts it without its
@@ -198,7 +199,9 @@ then calls such as `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"nam
 - **Do:** S0 (an empty `AGORA_HOME` is a fresh machine to Agora). Type `agora --ui tui`: answer `1`, `n` to other machines, the
   question "Bring agents back by themselves after a restart? [Y/n]" (asked here, since `--resume` is not given: answer `n` and note
   what it says), and `n` then Enter to "Start Agora when you log in? [Y/n]" (never Enter alone). Then
-  `agora status`; kill the node process; wait 40 s; `agora status`; `agora down`. On a machine with **no** Agora service of its own:
+  `agora status`; wait more than a minute (a node that ends in its first minute is taken for a failed start and not started
+  again: "The node ended right after starting …, so it was not started again."), then kill the node process; wait 40 s; `agora
+  status`; `agora down`. On a machine with **no** Agora service of its own:
   `agora service install`, `status`, `remove`.
 - **See:** the first question appears once; the terminal client opens signed in; `status` shows hub and node with versions; the killed
   node is back about 30 s later and `status` says "restarted once in the last N minutes" with the last crash; `agora down` leaves no
@@ -288,7 +291,8 @@ not built: nothing to check.
 - **See:** the first runs in `$RM/proj` on `main` (the start window: "main · The agent will work in this folder. Existing files and
   the current branch are kept."; the Changes panel: "Shared folder · changes belong to the workspace"); the second in
   `$AGORA_HOME/worktrees/<kind>-<id>` on an `agent/<kind>-<id>` branch; after Close both worktrees and branches stay: removing a
-  never-changed one is ADR-0064 (RM-22, not built), the node removes a worktree only to roll back a failed start.
+  never-changed one is ADR-0064 (RM-22, not built), the node removes a worktree only to roll back a failed start (macOS 2026-11-21: an unchanged and a changed worktree
+  both stayed after `agora agent stop`).
 - **Evidence so far:** LAN run 2026-11-11, L20 and L22 (lan-test-findings): branch rollback and selected checkouts under confinement.
 
 ### RM-15 Launch options, including "do not ask" modes
@@ -346,8 +350,9 @@ not built: nothing to check.
 - **OS:** Linux, macOS, Windows.
 - **Do:** start `rm-acp` (and on Windows the Shell too). End the node in a way that ends its agents: on Windows `agora down`; on Linux
   and macOS `kill -9` of the run's node and of its holder (by the process ids the run's `agora status` gives), or a confined agent
-  with RM-23's policy (only in a disposable OS account or VM, #900). Start again with `agora`; then with `agora
-  --resume auto`.
+  with RM-23's policy (only in a disposable OS account or VM, #900). Start again with `agora`; then `agora down` and start again
+  with `agora --resume auto` (given while Agora already runs, `--resume auto` changes nothing and says nothing; it applies to a
+  start).
 - **See:** the agents are under "Stopped when the machine shut down" with Resume or Start again; Resume starts the same agent in
   the same folder (the conversation comes back only for an agent that can load a session: not the fake, which says
   `loadSession: false`, and the window keeps no chat history of its own, RM-43); with `--resume auto` they come back by themselves (asked once); one still running from before says "Stop it".
@@ -451,8 +456,10 @@ not built: nothing to check.
 - **OS:** Linux, macOS, Windows.
 - **Do:** a separate hub: `agora hub run --listen 127.0.0.1:17450 --hub-dir $RM/mhub --metrics`; `agora hub metrics-token create rm
   --hub-dir $RM/mhub`; `curl --cacert $RM/mhub/ca.pem -H "Authorization: Bearer TOKEN" https://localhost:17450/api/metrics`
-  (`curl.exe --ssl-no-revoke` on Windows, L4); then the same token on another path; then `revoke rm`.
-- **See:** the metrics in Prometheus text; another path answers 401; after `revoke` the metrics answer 401.
+  (`curl.exe --ssl-no-revoke` on Windows, L4); then the same token on the protected path `https://localhost:17450/api/audit`; then
+  `revoke rm`.
+- **See:** the metrics in Prometheus text; the same token on a protected path (`/api/audit`) answers 401 (an unknown path such as
+  `/api/state` answers 200 with the web app, with or without a token, so it proves nothing); after `revoke` the metrics answer 401.
 - **Evidence so far:** none recorded.
 
 ### RM-32 The Windows binary is code-signed
