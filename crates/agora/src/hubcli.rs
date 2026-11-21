@@ -44,6 +44,8 @@ const HUB_CAPABILITIES: &[&str] = &[
     "approval.skip_permissions",
     // ADR-0091: `AgentQuotaObserved` (the plan windows of a subscription tool) is relayed to windows; the hub keeps nothing of it yet.
     "usage.quota",
+    // ADR-0095: the hub stamps `TaskDispatch.by_user`, counts each person's dispatches and relays `TaskDispatched` (a node offers it).
+    "task.dispatch",
     // ADR-0060
     "agent.resume",
     // ADR-0059

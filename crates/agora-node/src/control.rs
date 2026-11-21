@@ -267,6 +267,173 @@ fn prompt_result(queued: bool, queue_len: usize) -> v1::CommandOk {
     }
 }
 
+/// ADR-0090: a prompt for an adapter agent, through its adapter: sent now, or queued behind the turn that runs (at most 8, shown as
+/// queued until it is sent). Takes the supervisor's lock and lets it go before the adapter's answer is waited for. `(queued,
+/// queue_len)`; `queue_len` is 0 when it was sent. `on_queued` gets the queued prompt's tag while the lock is held, so nothing can
+/// take the prompt out of the queue before the caller knows its tag.
+fn submit_to_adapter(
+    ctx: &ControlContext,
+    mut sup: MutexGuard<'_, Supervisor>,
+    id: &AgentId,
+    text: &str,
+    on_queued: impl FnOnce(u64),
+) -> Result<(bool, usize), Error> {
+    let now = crate::daemon::now_ms();
+    let submitted = sup
+        .adapter_submit(id, text, |_| {
+            let tag = ctx.chat.push_queued(id, text.to_string(), now);
+            on_queued(tag);
+            tag
+        })
+        .map_err(sup_err);
+    drop(sup);
+    match submitted? {
+        Submit::Queued { queue_len } => Ok((true, queue_len)),
+        Submit::Send(call) => {
+            // The user's entry is in the conversation BEFORE the agent can answer, so a fast agent's first chunk never comes ahead
+            // of the prompt it answers. A prompt that did not go out is taken back.
+            let generation = call.generation();
+            let entry = ctx.chat.push_user(id, text.to_string(), now);
+            match call.run() {
+                Ok(()) => Ok((false, 0)),
+                Err(e) => {
+                    ctx.chat.retract(id, entry);
+                    ctx.sup().adapter_send_failed(id, generation);
+                    Err(sup_err(e))
+                }
+            }
+        }
+    }
+}
+
+/// ADR-0095 decisions 3 to 5: give open task `d.task_id` of `d.project_id` to agent `d.agent_id` of this node. The task is claimed
+/// for the agent where the project's board is ([`MeshServer::dispatch_claim`]); the prompt built from it is not typed over a running
+/// turn (a structured agent queues it; a terminal agent in a turn gets it held, one at most, until it is between turns, and every
+/// terminal agent gets it as a bracketed paste); a prompt that does not reach the agent gives a task on the node's own broker back;
+/// and `TaskDispatched` records it. Not an approval: nothing about the agent's permissions changes.
+///
+/// [`MeshServer::dispatch_claim`]: crate::mesh_server::MeshServer::dispatch_claim
+fn task_dispatch(ctx: &ControlContext, d: &v1::TaskDispatch) -> Result<v1::CommandOk, Error> {
+    use crate::task_dispatch::{Given, Held, Slot};
+    let unknown = || Error::new(ErrorCode::MeshRecipientUnknown).with("to", d.agent_id.as_str());
+    let gone = || Error::new(ErrorCode::AgentNotFound).with("agent_id", d.agent_id.as_str());
+    let Some(mesh) = &ctx.mesh else {
+        return Err(unknown());
+    };
+    let id = AgentId::new(d.agent_id.clone());
+    let (terminal, skips, paste) = {
+        let sup = ctx.sup();
+        let view = sup
+            .list()
+            .into_iter()
+            .find(|v| v.id == id && v.running && v.project == d.project_id)
+            .ok_or_else(unknown)?;
+        let paste = sup
+            .terminal(&id)
+            .map(crate::terminal::TerminalHandle::bracketed_paste);
+        (view.terminal, sup.skips_permissions_now(&id), paste)
+    };
+    let dispatches = mesh.dispatches();
+    // A terminal agent: its program must take a paste (its lines then arrive together, never as several submits), and its one slot is
+    // reserved before anything is claimed.
+    let token = if terminal {
+        match paste {
+            None => return Err(gone()),
+            Some(false) => return Err(capability_missing("terminal.bracketed_paste")),
+            Some(true) => Some(dispatches.reserve(&id, Instant::now())?),
+        }
+    } else {
+        None
+    };
+    let claim = match mesh.dispatch_claim(&d.project_id, &id, &d.task_id) {
+        Ok(c) => c,
+        Err(e) => {
+            if let Some(t) = token {
+                dispatches.cancel(&id, t);
+            }
+            return Err(e);
+        }
+    };
+    let given = Given {
+        agent: id.clone(),
+        task_id: d.task_id.clone(),
+        shared: claim.shared,
+    };
+    let sent = if let Some(token) = token {
+        // Decided now, after the claim (which may have waited for the hub), from its live screen read now (never the paced
+        // detection's last result): a turn that began meanwhile, or a screen no rule names, gets the prompt held, not pasted over it.
+        let fresh = ctx.sup().terminal_readiness(&id);
+        let slot = match fresh {
+            Some((state, detects)) => dispatches.decide(&id, token, state, detects, Instant::now()),
+            None => {
+                dispatches.cancel(&id, token);
+                None
+            }
+        };
+        match slot {
+            // The reservation went with the agent (it stopped meanwhile).
+            None => Err(gone()),
+            Some(Slot::PasteNow) => {
+                // The program may have turned bracketed paste off since it was checked: then it is refused as before the claim.
+                let control = ctx
+                    .sup()
+                    .terminal(&id)
+                    .map(|h| (h.bracketed_paste(), h.input_handle().ok()));
+                match control {
+                    Some((true, Some(c))) => crate::task_dispatch::paste_prompt(&c, &claim.prompt)
+                        .map(|()| (false, 0))
+                        .map_err(|_| gone()),
+                    Some((false, _)) => Err(capability_missing("terminal.bracketed_paste")),
+                    _ => Err(gone()),
+                }
+            }
+            Some(Slot::Hold) => {
+                let held = Held {
+                    prompt: claim.prompt.clone(),
+                    given: given.clone(),
+                };
+                if dispatches.fill(token, held) {
+                    Ok((true, crate::task_dispatch::MAX_HELD))
+                } else {
+                    Err(gone())
+                }
+            }
+        }
+    } else {
+        submit_to_adapter(ctx, ctx.sup(), &id, &claim.prompt, |tag| {
+            dispatches.queued(tag, given.clone());
+        })
+    };
+    let (queued, queue_len) = match sent {
+        Ok(v) => v,
+        Err(e) => {
+            mesh.give_back(&given);
+            return Err(e);
+        }
+    };
+    let prompt_sha256 = crate::task_dispatch::prompt_sha256(&claim.prompt);
+    if let Some(ev) = &ctx.events {
+        ev.record_bodies(vec![v1::event::Body::TaskDispatched(v1::TaskDispatched {
+            project_id: d.project_id.clone(),
+            task_id: d.task_id.clone(),
+            agent_id: d.agent_id.clone(),
+            by_user: d.by_user.clone(),
+            prompt_sha256: prompt_sha256.clone(),
+            queued,
+            agent_skips_permissions: skips,
+        })]);
+    }
+    Ok(v1::CommandOk {
+        result: Some(v1::command_ok::Result::TaskDispatch(
+            v1::TaskDispatchResult {
+                queued,
+                queue_len: u32::try_from(queue_len).unwrap_or(u32::MAX),
+                prompt_sha256,
+            },
+        )),
+    })
+}
+
 fn ok_empty() -> v1::CommandOk {
     v1::CommandOk {
         result: Some(v1::command_ok::Result::Empty(v1::Empty {})),
@@ -447,6 +614,7 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                     .collect(),
             })),
         }),
+        Cmd::TaskDispatch(d) => task_dispatch(ctx, d),
         // A mesh message another node's agent sent, routed here by the hub with `origin` set by the hub (ADR-0031).
         Cmd::MeshPost(p) => {
             if p.origin.is_empty() {
@@ -910,6 +1078,12 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                 for e in &events {
                     if let SupervisorEvent::PromptsDropped { agent, tags } = e {
                         ctx.chat.drop_queued(agent, tags, crate::daemon::now_ms());
+                        // ADR-0095: a dispatch prompt that waited in the stopped agent's queue gives its task back.
+                        if let Some(mesh) = &ctx.mesh {
+                            for g in mesh.dispatches().dropped(agent, tags) {
+                                mesh.give_back(&g);
+                            }
+                        }
                     }
                 }
                 if let Some(ev) = &ctx.events {
@@ -920,35 +1094,11 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
         }
         Cmd::AgentPrompt(a) => {
             let id = AgentId::new(a.agent_id.clone());
-            let mut sup = ctx.sup();
+            let sup = ctx.sup();
             if sup.terminal(&id).is_none() {
-                // An adapter agent takes prompts through its adapter; the request is part of its conversation. ADR-0090: a prompt
-                // that arrives during a turn waits behind it (at most 8), shown as queued until it is sent.
-                let now = crate::daemon::now_ms();
-                let submitted = sup
-                    .adapter_submit(&id, &a.text, |_| {
-                        ctx.chat.push_queued(&id, a.text.clone(), now)
-                    })
-                    .map_err(sup_err);
-                // The adapter's answer is waited for after the supervisor's lock is let go.
-                drop(sup);
-                return match submitted? {
-                    Submit::Queued { queue_len } => Ok(prompt_result(true, queue_len)),
-                    Submit::Send(call) => {
-                        // The user's entry is in the conversation BEFORE the agent can answer, so a fast agent's first chunk never
-                        // comes ahead of the prompt it answers. A prompt that did not go out is taken back.
-                        let generation = call.generation();
-                        let entry = ctx.chat.push_user(&id, a.text.clone(), now);
-                        match call.run() {
-                            Ok(()) => Ok(prompt_result(false, 0)),
-                            Err(e) => {
-                                ctx.chat.retract(&id, entry);
-                                ctx.sup().adapter_send_failed(&id, generation);
-                                Err(sup_err(e))
-                            }
-                        }
-                    }
-                };
+                // An adapter agent takes prompts through its adapter; the request is part of its conversation.
+                let (queued, queue_len) = submit_to_adapter(ctx, sup, &id, &a.text, |_| {})?;
+                return Ok(prompt_result(queued, queue_len));
             }
             let control = sup
                 .terminal(&id)
@@ -956,15 +1106,11 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                 .ok_or_else(|| {
                     Error::new(ErrorCode::AgentNotFound).with("agent_id", a.agent_id.as_str())
                 })?;
-            // The write happens after the supervisor lock is let go. The text and the Enter key are two writes: a terminal
-            // program that reads both in one go takes them for a paste and keeps the Enter as a newline in its input box
-            // (seen with WrongStack, whose prompt then never ran).
+            // The write happens after the supervisor lock is let go (seen with WrongStack: text and Enter must be two writes).
             drop(sup);
-            let gone =
-                |_| Error::new(ErrorCode::AgentNotFound).with("agent_id", a.agent_id.as_str());
-            control.write_input(a.text.as_bytes()).map_err(gone)?;
-            std::thread::sleep(std::time::Duration::from_millis(150));
-            control.write_input(b"\r").map_err(gone)?;
+            crate::task_dispatch::type_prompt(&control, &a.text).map_err(|_| {
+                Error::new(ErrorCode::AgentNotFound).with("agent_id", a.agent_id.as_str())
+            })?;
             Ok(ok_empty())
         }
         // ADR-0058: the user's own switch; the supervisor refuses a terminal agent, an adapter without the switch and an id the
@@ -1018,6 +1164,12 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                 .adapter_turn_cancelled(&id, generation, a.drop_queue);
             let now = crate::daemon::now_ms();
             ctx.chat.drop_queued(&id, &dropped, now);
+            // ADR-0095: a dropped dispatch prompt gives its task back.
+            if let Some(mesh) = &ctx.mesh {
+                for g in mesh.dispatches().dropped(&id, &dropped) {
+                    mesh.give_back(&g);
+                }
+            }
             if let Some(approvals) = &ctx.approvals {
                 for approval in approvals.cancel_adapter_requests(&id) {
                     ctx.chat
@@ -1572,7 +1724,6 @@ pub(crate) fn command_name(c: &Cmd) -> &'static str {
         Cmd::UsageReport(_) => "usage.report",
         Cmd::Enroll(_) => "enroll",
         Cmd::TaskUpdate(_) => "task.update",
-        // ADR-0095: in the schema, handled by no node code yet, so the node refuses it as `protocol.capability_missing`.
         Cmd::TaskDispatch(_) => "task.dispatch",
         Cmd::BoardCall(_) => "board.call",
         Cmd::BoardJoin(_) => "board.join",

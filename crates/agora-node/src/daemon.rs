@@ -1840,6 +1840,9 @@ impl Node {
                     // ADR-0060: the process each agent runs as, as last written to the ledger.
                     let mut processes: std::collections::HashMap<AgentId, u32> = Default::default();
                     while !stop.load(Ordering::Acquire) {
+                        // ADR-0095: when the list below is taken (under the lock, after the tick): a dispatch made after this is not
+                        // dropped by a list that predates it.
+                        let views_at = Instant::now();
                         let (
                             events,
                             views,
@@ -1970,6 +1973,39 @@ impl Node {
                                 }
                             }
                         }
+                        // ADR-0095: every dispatch of an agent no longer running (stopped by a person or its parent, ended, crashed)
+                        // is dropped and its task on this node's broker given back; a held prompt of a terminal agent between turns
+                        // is pasted on a thread of its own (the paste pauses). A paste that cannot start, or that fails, gives the task
+                        // back too (the shared board has no release).
+                        if !mesh.dispatches().is_empty() {
+                            let seen: Vec<crate::task_dispatch::Seen> = views
+                                .iter()
+                                .map(|v| crate::task_dispatch::Seen {
+                                    id: v.id.clone(),
+                                    running: v.running,
+                                    terminal: v.terminal,
+                                })
+                                .collect();
+                            let back = mesh.dispatches().tick(
+                                &seen,
+                                views_at,
+                                Instant::now(),
+                                // ADR-0095: the live screen of an agent with a held prompt, read now, and paced like the agent's own
+                                // detection, so a held prompt adds no screen reads beyond it.
+                                |a| {
+                                    let s = sup.lock().unwrap_or_else(|e| e.into_inner());
+                                    let ready =
+                                        s.terminal_readiness(a).is_some_and(|(state, detects)| {
+                                            crate::task_dispatch::between_turns(state, detects)
+                                        });
+                                    (ready, s.detection_interval(a).unwrap_or(Duration::ZERO))
+                                },
+                                |h| deliver_held(&sup, &mesh, h),
+                            );
+                            for g in &back {
+                                mesh.give_back(g);
+                            }
+                        }
                         spawner.tick();
                         // ADR-0090: versions of chat entries held back to keep to one per 150 ms go out once they are due.
                         chat.flush_due(now_ms());
@@ -2028,9 +2064,17 @@ impl Node {
                                     } else {
                                         chat.drop_queued(agent, &[*tag], now);
                                     }
+                                    // ADR-0095: a dispatch prompt that could not be sent gives its task back.
+                                    if let Some(g) = mesh.dispatches().dequeued(agent, *tag, *sent)
+                                    {
+                                        mesh.give_back(&g);
+                                    }
                                 }
                                 SupervisorEvent::PromptsDropped { agent, tags } => {
                                     chat.drop_queued(agent, tags, now);
+                                    for g in mesh.dispatches().dropped(agent, tags) {
+                                        mesh.give_back(&g);
+                                    }
                                 }
                                 SupervisorEvent::OutputDropped { agent, bytes } => {
                                     chat.output_dropped(agent, *bytes, now);
@@ -2346,6 +2390,43 @@ impl Drop for Node {
         // The agents' last states. They ended without an end in the ledger: at the next start they are interrupted (ADR-0060).
         let _ = self.ledger.flush();
     }
+}
+
+/// ADR-0095: pastes a held dispatch prompt into its terminal agent on a thread of its own (the paste pauses); false when it cannot start
+/// (no terminal, or the program turned bracketed paste off since the prompt was held, which is logged). A paste that fails on its
+/// thread gives the task back there.
+fn deliver_held(
+    sup: &Mutex<Supervisor>,
+    mesh: &Arc<crate::mesh_server::MeshServer>,
+    h: &crate::task_dispatch::Held,
+) -> bool {
+    let control = {
+        let s = sup.lock().unwrap_or_else(|e| e.into_inner());
+        s.terminal(&h.given.agent)
+            .map(|t| (t.bracketed_paste(), t.input_handle().ok()))
+    };
+    let c = match control {
+        Some((true, Some(c))) => c,
+        Some((false, _)) => {
+            // Operational log, not UI text.
+            eprintln!(
+                "task dispatch: {} turned bracketed paste off; the held prompt for task {} is dropped and the task given back",
+                h.given.agent.as_str(),
+                h.given.task_id
+            );
+            return false;
+        }
+        _ => return false,
+    };
+    let (mesh, h) = (Arc::clone(mesh), h.clone());
+    std::thread::Builder::new()
+        .name("agora-dispatch-paste".into())
+        .spawn(move || {
+            if crate::task_dispatch::paste_prompt(&c, &h.prompt).is_err() {
+                mesh.give_back(&h.given);
+            }
+        })
+        .is_ok()
 }
 
 /// The node's agent kinds: the built-in manifests, then every `*.toml` in `dir` (a file there replaces the built-in kind of the same

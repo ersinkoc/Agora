@@ -430,6 +430,11 @@ impl TerminalHandle {
         snapshot_of(&self.inner.lock())
     }
 
+    /// Whether the program turned on bracketed paste (DECSET 2004), read without copying the screen.
+    pub fn bracketed_paste(&self) -> bool {
+        self.inner.lock().term.modes().bracketed_paste
+    }
+
     /// Block until the snapshot sequence is greater than `after` or the timeout passes; returns the
     /// current snapshot either way.
     pub fn wait_change(&self, after: u64, timeout: Duration) -> Snapshot {
