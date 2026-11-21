@@ -1,0 +1,11 @@
+{
+  "requestId": "r1",
+  "idempotencyKey": "k1",
+  "targetNode": "n1",
+  "taskDispatch": {
+    "projectId": "p1",
+    "taskId": "t7",
+    "agentId": "agent-1",
+    "byUser": "u1"
+  }
+}

@@ -83,6 +83,8 @@ impl SignedCommands {
                 // switch).
                 "agent.set_config",
                 "agent.cancel_turn",
+                // ADR-0095: it claims a task and prompts an agent, like `agent.prompt`.
+                "task.dispatch",
                 "terminal.open",
                 "terminal.input",
                 "files.write",
@@ -172,6 +174,8 @@ fn subject(c: &Cmd) -> Subject {
         Cmd::AgentSetModel(a) => s.agent = Some(a.agent_id.clone()),
         Cmd::AgentSetConfig(a) => s.agent = Some(a.agent_id.clone()),
         Cmd::AgentCancelTurn(a) => s.agent = Some(a.agent_id.clone()),
+        // ADR-0095: the agent, so a project grant is matched against the agent's real project, never the command's `project_id`.
+        Cmd::TaskDispatch(a) => s.agent = Some(a.agent_id.clone()),
         Cmd::TerminalInput(t) => {
             s.agent = agent_of_terminal(&t.terminal_id).map(|a| a.as_str().to_string());
         }
@@ -1022,6 +1026,7 @@ mod tests {
             "agent.set_model",
             "agent.set_config",
             "agent.cancel_turn",
+            "task.dispatch",
             "terminal.input",
             "files.write",
             "worktree.remove",

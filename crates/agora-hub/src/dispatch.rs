@@ -7,8 +7,12 @@
 //! Not here yet: a person's own devices (`server.rs::device_command`, ADR-0061), which decides and answers in one place, and the
 //! shared terminal size, which is the router's state rather than a rule about who may act.
 
+use std::collections::VecDeque;
+use std::time::{Duration, Instant};
+
 use agora_protocol::v1::command_request::Command as C;
 use agora_protocol::v1::CommandRequest;
+use agora_protocol::{Error, ErrorCode};
 
 use crate::scope::Scope;
 use crate::users::{viewer_may, Access, Role};
@@ -75,6 +79,44 @@ pub fn route(who: &Access, scope: Option<&Scope>, req: &CommandRequest) -> Route
         Some(C::UsageReport(_)) => Route::UsageReport,
         _ => Route::Forward,
     }
+}
+
+/// ADR-0095: the most tasks one window may give to agents in [`DISPATCH_WINDOW`].
+pub const MAX_DISPATCHES: usize = 8;
+/// ADR-0095: the span [`MAX_DISPATCHES`] is counted over.
+pub const DISPATCH_WINDOW: Duration = Duration::from_secs(60);
+
+/// ADR-0095: the times of one window's (one client connection's) recent dispatches.
+#[derive(Debug, Default)]
+pub struct DispatchRate {
+    recent: VecDeque<Instant>,
+}
+
+/// ADR-0095, for a command that [`route`] lets through: a `TaskDispatch` gets `by_user` from the person who asks (whatever the client
+/// wrote there is replaced) and counts against the window's limit (`task.dispatch_limited`, nothing forwarded). Any other command is
+/// left as it is.
+pub fn prepare_dispatch(
+    who: &Access,
+    req: &mut CommandRequest,
+    rate: &mut DispatchRate,
+    now: Instant,
+) -> Result<(), Error> {
+    let Some(C::TaskDispatch(d)) = req.command.as_mut() else {
+        return Ok(());
+    };
+    while rate
+        .recent
+        .front()
+        .is_some_and(|t| now.saturating_duration_since(*t) >= DISPATCH_WINDOW)
+    {
+        rate.recent.pop_front();
+    }
+    if rate.recent.len() >= MAX_DISPATCHES {
+        return Err(Error::new(ErrorCode::TaskDispatchLimited).with("limit", MAX_DISPATCHES as i64));
+    }
+    rate.recent.push_back(now);
+    d.by_user = who.user.clone();
+    Ok(())
 }
 
 #[cfg(test)]
@@ -214,5 +256,52 @@ mod tests {
             route(&member, None, &req("n1", forget_node(false))),
             Route::TargetNotAllowed
         );
+    }
+
+    /// ADR-0095: the hub writes who asked (a client's own `by_user` is replaced) and lets a window give 8 tasks a minute, no more.
+    #[test]
+    fn a_dispatch_names_the_person_and_a_window_may_give_eight_a_minute() {
+        let dispatch = |by: &str| {
+            req(
+                "n1",
+                C::TaskDispatch(v1::TaskDispatch {
+                    project_id: "p".into(),
+                    task_id: "t".into(),
+                    agent_id: "a".into(),
+                    by_user: by.into(),
+                }),
+            )
+        };
+        let mut rate = DispatchRate::default();
+        let t0 = Instant::now();
+        let person = who(Role::Member);
+        for i in 0..MAX_DISPATCHES {
+            let mut r = dispatch("someone-else");
+            prepare_dispatch(
+                &person,
+                &mut r,
+                &mut rate,
+                t0 + Duration::from_secs(i as u64),
+            )
+            .unwrap();
+            assert!(matches!(&r.command, Some(C::TaskDispatch(d)) if d.by_user == "u"));
+        }
+        let mut r = dispatch("");
+        let e =
+            prepare_dispatch(&person, &mut r, &mut rate, t0 + Duration::from_secs(30)).unwrap_err();
+        assert_eq!(e.code, ErrorCode::TaskDispatchLimited);
+        assert_eq!(
+            e.params.get("limit"),
+            Some(&agora_protocol::ParamValue::Int(8))
+        );
+        // A refused one does not count, and the first falls out of the window after a minute.
+        prepare_dispatch(&person, &mut r, &mut rate, t0 + DISPATCH_WINDOW).unwrap();
+        // Other commands are not touched and not counted.
+        let mut other = req("n1", stop());
+        let before = other.clone();
+        for _ in 0..20 {
+            prepare_dispatch(&person, &mut other, &mut rate, t0).unwrap();
+        }
+        assert_eq!(other, before);
     }
 }

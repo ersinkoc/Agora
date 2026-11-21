@@ -1,0 +1,9 @@
+{
+  "projectId": "x",
+  "taskId": "x",
+  "agentId": "x",
+  "byUser": "x",
+  "promptSha256": "x",
+  "queued": true,
+  "agentSkipsPermissions": true
+}

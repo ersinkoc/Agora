@@ -1076,3 +1076,27 @@ forwards either to a node that did not offer it.
 - **Capability:** `usage.quota` is passed by the hub (`hubcli.rs`) and advertised by every node of this build (`uplink_client.rs`), which has the
   reader (manifest `[quota]`, `docs/specs/agent-manifest.md`; Codex only).
   Golden fixtures: `schema/fixtures/v1/agora.v1.AgentQuotaObserved.*` and `schema/fixtures/usage-quota/`.
+
+### Giving a task to an agent (ADR-0095)
+Schema step approved by the maintainer on 2026-11-21. Not yet handled by any node or offered by the hub: until a node advertises
+`task.dispatch`, the hub refuses `TaskDispatch` for it with `protocol.capability_missing` and a node refuses it the same way.
+- **`TaskDispatch`** (`CommandRequest` field 109, capability `task.dispatch`): `project_id` (1), `task_id` (2), `agent_id` (3, an agent
+  of the receiving node), `by_user` (4). The node claims the open task for that agent where the project's board is (its broker; for a
+  shared project the hub's board, as the agent's own `task_claim` would, ADR-0039), sends the agent one prompt built from the node's
+  template around the task's title and detail (`agora_mesh::dispatch::build_prompt`: a fenced block marked untrusted task data, cleaned and
+  cut to the mesh message limit), queued behind a running turn as `AgentPrompt` is, and writes `TaskDispatched`. A prompt that cannot be
+  sent gives the task back. Refusals: `mesh.recipient_unknown` (the agent is not of `project_id`), `task.not_found`, `task.blocked`,
+  `task.not_open` (also a second dispatch of a claimed task), `agent.queue_full`. Not signed and not an approval: it changes no permission
+  of the agent, and every sensitive action the agent later asks for still needs the person (ADR-0020). Like `AgentPrompt` it needs the
+  sender's access to the agent (a viewer may not send it; a scoped window needs the project and the agent); on a node with limited
+  devices it is in the team default of `signed_commands` and a grant covers it by the agent's own project (ADR-0041).
+- **`by_user`** is written by the hub from the window's sign-in; whatever a client puts there is replaced. On the node's own control socket
+  it is empty (the machine's user). The hub's audit row of the command is the record of who asked; the event carries the node's copy.
+- **`TaskDispatchResult`** (`CommandOk` arm 31): `queued` (1) and `queue_len` (2) as in `AgentPromptResult`, `prompt_sha256` (3, lowercase
+  hex SHA-256 of the prompt's UTF-8 bytes).
+- **`TaskDispatched`** (`Event` arm 68): `project_id` (1), `task_id` (2), `agent_id` (3), `by_user` (4), `prompt_sha256` (5), `queued` (6),
+  `agent_skips_permissions` (7, the agent acts without asking, ADR-0059, as the node knows it). The prompt itself is not stored. The task's
+  move is its own `TaskChanged` as before. Names no machine (the agent is the producer's); a window sees it when it may see the agent.
+- **Limits:** at most 8 dispatches per minute per window, counted by the hub (`task.dispatch_limited`, `limit`); one dispatch per task at a
+  time follows from the claim.
+- Golden fixtures: `schema/fixtures/v1/agora.v1.TaskDispatch*.*`, `agora.v1.TaskDispatched.*` and `schema/fixtures/task-dispatch/`.
