@@ -454,15 +454,19 @@ pub fn draw_board(
 
 /// Whether `a` acts without asking now, as the web window decides it (`actsFreely`): started so (a launch option, ADR-0059), or its
 /// current mode skips approvals (ADR-0058), or one of its config options is on a value that does (ADR-0090 Amendment A: a boolean that
-/// skips them and is "true", a select whose current choice skips them). `configs`: the options its machine last reported
-/// ([`crate::client::Session::configs`]).
+/// skips them and is "true", a select whose current choice skips them). `configs`: what its machine reported after the snapshot
+/// ([`crate::client::Session::configs`]): its config options, and its modes when they changed since the snapshot.
 pub fn acts_freely(a: &AgentSnapshot, configs: &Configs) -> bool {
+    let (modes, current) = configs
+        .modes
+        .get(&a.agent_id)
+        .map_or((a.modes.as_slice(), a.current_mode.as_str()), |(m, c)| {
+            (m.as_slice(), c.as_str())
+        });
     a.skips_permissions
-        || (!a.current_mode.is_empty()
-            && a.modes
-                .iter()
-                .any(|m| m.skips_permissions && m.id == a.current_mode))
+        || (!current.is_empty() && modes.iter().any(|m| m.skips_permissions && m.id == current))
         || configs
+            .options
             .get(&a.agent_id)
             .is_some_and(|options| options.iter().any(config_skips))
 }
@@ -632,17 +636,23 @@ pub fn draw_picker(
     );
 }
 
-/// The confirmation: task, agent, kind, machine and project in full, that the agent acts without asking when it does, what giving
-/// does, and the keys. Only `g` gives the task: not Enter, the key that chose the agent, so a key held down since the picker never
-/// gives it.
+/// The confirmation as it fits a window of `area` (the box over the console, `app::dialog_layout`): the question naming the agent, the
+/// task, that the agent acts without asking when it does, and the keys are always in it, near the top and at the bottom; the agent,
+/// machine, kind and project rows, what giving does and the spacing follow in that order as far as there is room. Only `g` gives the
+/// task: not Enter, the key that chose the agent, so a key held down since the picker never gives it.
+///
+/// `Err`: the window cannot show the lines that must be read before `g` (the box would cut them), so it says the terminal is too small
+/// and `g` must not give the task.
+#[allow(clippy::too_many_arguments)] // one question: what it names
 pub fn confirm_lines(
     s: &Snapshot,
     a: &AgentSnapshot,
     configs: &Configs,
     task: &str,
     project: &str,
+    area: Rect,
     t: Text<'_>,
-) -> Vec<String> {
+) -> Result<Vec<String>, Vec<String>> {
     let name = one_line(&agent_name(s, a), FULL);
     let agent = [("agent", Arg::Str(name.clone()))];
     let task = if task.is_empty() {
@@ -651,27 +661,71 @@ pub fn confirm_lines(
         one_line(task, TITLE_MAX)
     };
     let field = |id: &str, value: String| t(id, &[("value", Arg::Str(value))]);
-    let mut lines = vec![
-        t(key!("tui-give-confirm-title"), &agent),
-        String::new(),
-        field(key!("tui-give-field-task"), task),
-        field(key!("tui-give-field-agent"), name.clone()),
-        field(key!("tui-give-field-kind"), one_line(&a.kind, FULL)),
-        field(
-            key!("tui-give-field-machine"),
-            machine_label(s, &a.node_id, t),
-        ),
-        field(key!("tui-give-field-project"), one_line(project, FULL)),
-        String::new(),
+    // In the order shown, each with its place in what is kept when room runs out (0: always).
+    let mut all: Vec<(usize, String)> = vec![
+        (0, t(key!("tui-give-confirm-title"), &agent)),
+        (8, String::new()),
     ];
     if acts_freely(a, configs) {
-        lines.push(t(key!("tui-give-confirm-no-ask"), &agent));
-        lines.push(String::new());
+        all.push((0, t(key!("tui-give-confirm-no-ask"), &agent)));
+        all.push((9, String::new()));
     }
-    lines.push(t(key!("tui-give-confirm-body"), &[]));
-    lines.push(String::new());
-    lines.push(t(key!("tui-give-confirm-keys"), &[]));
-    lines
+    all.extend([
+        (0, field(key!("tui-give-field-task"), task)),
+        (1, field(key!("tui-give-field-agent"), name.clone())),
+        (
+            2,
+            field(
+                key!("tui-give-field-machine"),
+                machine_label(s, &a.node_id, t),
+            ),
+        ),
+        (
+            3,
+            field(key!("tui-give-field-kind"), one_line(&a.kind, FULL)),
+        ),
+        (
+            4,
+            field(key!("tui-give-field-project"), one_line(project, FULL)),
+        ),
+        (7, String::new()),
+        (5, t(key!("tui-give-confirm-body"), &[])),
+        (6, String::new()),
+        (0, t(key!("tui-give-confirm-keys"), &[])),
+    ]);
+    let fits = |lines: &[String]| {
+        let (_, wrapped) = crate::app::dialog_layout(area, lines);
+        wrapped.len() + 2 <= usize::from(area.height.saturating_sub(2))
+    };
+    let pick = |most: usize| -> Vec<String> {
+        all.iter()
+            .filter(|(p, _)| *p <= most)
+            .map(|(_, l)| l.clone())
+            .collect()
+    };
+    let required = pick(0);
+    if !fits(&required) {
+        return Err(vec![t(key!("tui-give-too-small"), &[])]);
+    }
+    // What fits, adding one kind of row at a time in its order; a row that does not fit is left out and the next is tried.
+    let mut kept: Vec<usize> = vec![0];
+    for p in 1..=9 {
+        let mut with = kept.clone();
+        with.push(p);
+        let lines: Vec<String> = all
+            .iter()
+            .filter(|(q, _)| with.contains(q))
+            .map(|(_, l)| l.clone())
+            .collect();
+        if fits(&lines) {
+            kept = with;
+        }
+    }
+    Ok(all
+        .iter()
+        .filter(|(q, _)| kept.contains(q))
+        .map(|(_, l)| l.clone())
+        .collect())
 }
 
 /// The command that gives task `task_id` of `project_id` to `a`, and the machine it goes to (the agent's own): `by_user` is left
@@ -1041,7 +1095,7 @@ mod tests {
         let list = candidates(&s, "p1", &Lacking::default());
         let lines: Vec<String> = list
             .iter()
-            .map(|(a, d)| choice_line(&s, a, *d, &Configs::new(), &text))
+            .map(|(a, d)| choice_line(&s, a, *d, &Configs::default(), &text))
             .collect();
         assert!(
             lines[0].contains("tui-give-row-detail kind=claude machine=mac"),
@@ -1054,9 +1108,9 @@ mod tests {
         assert!(!lines[1].contains("tui-badge-no-ask"));
         // A launch option that skips approvals counts as well.
         let mut a = agent("mac/agent-7", "claude", "p1");
-        assert!(!acts_freely(&a, &Configs::new()));
+        assert!(!acts_freely(&a, &Configs::default()));
         a.skips_permissions = true;
-        assert!(acts_freely(&a, &Configs::new()));
+        assert!(acts_freely(&a, &Configs::default()));
     }
 
     #[test]
@@ -1092,10 +1146,11 @@ mod tests {
             ],
             ..Default::default()
         };
-        let with = |options: Vec<SessionConfigOption>| {
-            Configs::from([("mac/agent-3".to_string(), options)])
+        let with = |options: Vec<SessionConfigOption>| Configs {
+            options: [("mac/agent-3".to_string(), options)].into(),
+            ..Default::default()
         };
-        assert!(!acts_freely(a, &Configs::new()));
+        assert!(!acts_freely(a, &Configs::default()));
         assert!(acts_freely(a, &with(vec![boolean("true", true)])));
         // Off, or a boolean that does not skip approvals, does not count.
         assert!(!acts_freely(a, &with(vec![boolean("false", true)])));
@@ -1103,14 +1158,130 @@ mod tests {
         assert!(acts_freely(a, &with(vec![select("never")])));
         assert!(!acts_freely(a, &with(vec![select("ask")])));
         // Another agent's options are not this one's.
-        let other = Configs::from([("mac/agent-1".to_string(), vec![boolean("true", true)])]);
+        let other = Configs {
+            options: [("mac/agent-1".to_string(), vec![boolean("true", true)])].into(),
+            ..Default::default()
+        };
         assert!(!acts_freely(a, &other));
         // The row and the confirmation say it.
         let configs = with(vec![select("never")]);
         assert!(choice_line(&s, a, 1, &configs, &text).ends_with("[tui-badge-no-ask]"));
-        assert!(confirm_lines(&s, a, &configs, "x", "web", &text)
+        assert!(confirm_lines(&s, a, &configs, "x", "web", BIG, &text)
+            .unwrap()
             .join("\n")
             .contains("tui-give-confirm-no-ask"));
+        // ADR-0058: a live mode change after the snapshot stands in for the snapshot's mode, both ways.
+        let to = |mode: &str| Configs {
+            modes: [(
+                "mac/agent-3".to_string(),
+                (
+                    vec![SessionOption {
+                        id: "bypassPermissions".into(),
+                        skips_permissions: true,
+                        ..Default::default()
+                    }],
+                    mode.to_string(),
+                ),
+            )]
+            .into(),
+            ..Default::default()
+        };
+        assert!(acts_freely(a, &to("bypassPermissions")));
+        assert!(!acts_freely(a, &to("default")));
+        let free = s
+            .agents
+            .iter()
+            .find(|a| a.agent_id == "mac/agent-1")
+            .unwrap();
+        let back = Configs {
+            modes: [(
+                "mac/agent-1".to_string(),
+                (free.modes.clone(), "plan".to_string()),
+            )]
+            .into(),
+            ..Default::default()
+        };
+        assert!(acts_freely(free, &Configs::default()) && !acts_freely(free, &back));
+        assert!(
+            confirm_lines(&s, a, &to("bypassPermissions"), "x", "web", BIG, &text)
+                .unwrap()
+                .join("\n")
+                .contains("tui-give-confirm-no-ask")
+        );
+    }
+
+    const BIG: Rect = Rect {
+        x: 0,
+        y: 0,
+        width: 160,
+        height: 50,
+    };
+
+    /// Codex review of #893: in a small window the question, the task, the warning and the keys are always in the box, before the
+    /// details; when even they cannot be shown the confirmation says the terminal is too small (and `g` gives nothing).
+    #[test]
+    fn a_small_window_keeps_the_warning_and_the_keys_or_says_it_is_too_small() {
+        let catalog = agora_i18n::Catalog::english();
+        let en = |id: &str, args: &[(&str, Arg)]| catalog.render(id, args).unwrap_or_default();
+        let s = snapshot();
+        let free = s
+            .agents
+            .iter()
+            .find(|a| a.agent_id == "mac/agent-1")
+            .unwrap();
+        let shown = |area: Rect| {
+            confirm_lines(
+                &s,
+                free,
+                &Configs::default(),
+                "Fix the login redirect",
+                "web",
+                area,
+                &en,
+            )
+        };
+        let whole = shown(BIG).unwrap();
+        let warning = en(
+            key!("tui-give-confirm-no-ask"),
+            &[("agent", Arg::Str(one_line(&agent_name(&s, free), FULL)))],
+        );
+        let keys = en(key!("tui-give-confirm-keys"), &[]);
+        assert!(whole.contains(&warning) && whole.contains(&keys));
+        assert!(whole.iter().any(|l| l.starts_with("Machine: ")));
+        let compact = Rect::new(0, 0, 80, 12);
+        let lines = shown(compact).unwrap();
+        assert!(lines[0].starts_with("Give this task to "), "{lines:?}");
+        assert!(lines.contains(&warning), "{lines:?}");
+        assert!(lines.iter().any(|l| l.starts_with("Task: ")), "{lines:?}");
+        assert_eq!(lines.last(), Some(&keys));
+        // Every line is in the box: nothing is cut at its bottom.
+        let (_, wrapped) = crate::app::dialog_layout(compact, &lines);
+        assert!(
+            wrapped.len() + 2 <= usize::from(compact.height - 2),
+            "{wrapped:?}"
+        );
+        assert!(lines.len() < whole.len(), "details were left out");
+        // Too small for what must be read: said, and nothing to answer with g.
+        for area in [Rect::new(0, 0, 40, 8), Rect::new(0, 0, 80, 6)] {
+            let said = shown(area).unwrap_err();
+            assert_eq!(said, [en(key!("tui-give-too-small"), &[])], "{area:?}");
+        }
+        // An agent that asks needs no warning, so it fits sooner.
+        let helper = s
+            .agents
+            .iter()
+            .find(|a| a.agent_id == "mac/agent-3")
+            .unwrap();
+        assert!(confirm_lines(
+            &s,
+            helper,
+            &Configs::default(),
+            "x",
+            "web",
+            Rect::new(0, 0, 80, 9),
+            &en
+        )
+        .is_ok());
     }
 
     #[test]
@@ -1170,11 +1341,13 @@ mod tests {
         let lines = confirm_lines(
             &s,
             free,
-            &Configs::new(),
+            &Configs::default(),
             "Fix \x1b]0;x\x07it",
             "web",
+            BIG,
             &text,
-        );
+        )
+        .unwrap();
         let all = lines.join("\n");
         assert!(lines[0].starts_with("tui-give-confirm-title agent=claude · "));
         assert!(
@@ -1193,7 +1366,8 @@ mod tests {
             .find(|a| a.agent_id == "mac/agent-3")
             .unwrap();
         assert!(
-            !confirm_lines(&s, helper, &Configs::new(), "x", "web", &text)
+            !confirm_lines(&s, helper, &Configs::default(), "x", "web", BIG, &text)
+                .unwrap()
                 .join("\n")
                 .contains("tui-give-confirm-no-ask")
         );

@@ -160,8 +160,14 @@ pub struct Seen {
     pub configs_changed: bool,
 }
 
-/// Config options by hub-wide agent id.
-pub type Configs = std::collections::HashMap<String, Vec<agora_protocol::v1::SessionConfigOption>>;
+/// What the events after the snapshot said about the agents' sessions, by hub-wide agent id: their config options (ADR-0090) and, from
+/// a live `AgentSessionOptions` newer than the snapshot, their modes and current mode (ADR-0058), which then stand in for the
+/// snapshot's.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Configs {
+    pub options: std::collections::HashMap<String, Vec<agora_protocol::v1::SessionConfigOption>>,
+    pub modes: std::collections::HashMap<String, (Vec<agora_protocol::v1::SessionOption>, String)>,
+}
 
 /// At most this many agents' options are kept, each at most [`MAX_OPTIONS`] (a hub cannot make the client's memory grow).
 const MAX_CONFIG_AGENTS: usize = 4096;
@@ -174,24 +180,44 @@ impl Seen {
         let Ok(p) = agora_protocol::v1::PositionedEvent::decode(f.payload.as_slice()) else {
             return true;
         };
-        if let Some(e) = &p.event {
-            if let Some(agora_protocol::v1::event::Body::AgentSessionConfig(c)) = &e.body {
-                let id = format!("{}/{}", e.producer_id, c.agent_id);
-                let before = self.configs.get(&id).cloned();
+        let newer = self.snapshot_pos.is_none_or(|at| p.pos > at);
+        match p.event.as_ref().map(|e| (&e.producer_id, &e.body)) {
+            Some((producer, Some(agora_protocol::v1::event::Body::AgentSessionConfig(c)))) => {
+                let id = format!("{producer}/{}", c.agent_id);
+                let options = &mut self.configs.options;
+                let before = options.get(&id).cloned();
                 if c.options.is_empty() {
-                    self.configs.remove(&id);
-                } else if self.configs.len() < MAX_CONFIG_AGENTS || self.configs.contains_key(&id) {
-                    self.configs.insert(
+                    options.remove(&id);
+                } else if options.len() < MAX_CONFIG_AGENTS || options.contains_key(&id) {
+                    options.insert(
                         id.clone(),
                         c.options.iter().take(MAX_OPTIONS).cloned().collect(),
                     );
                 }
-                if self.configs.get(&id) != before.as_ref() {
+                if options.get(&id) != before.as_ref() {
                     self.configs_changed = true;
                 }
             }
+            // A mode change after the snapshot (an older one is in the snapshot already).
+            Some((producer, Some(agora_protocol::v1::event::Body::AgentSessionOptions(o))))
+                if newer =>
+            {
+                let id = format!("{producer}/{}", o.agent_id);
+                let modes = &mut self.configs.modes;
+                if modes.len() < MAX_CONFIG_AGENTS || modes.contains_key(&id) {
+                    let now = (
+                        o.modes.iter().take(MAX_OPTIONS).cloned().collect(),
+                        o.current_mode.clone(),
+                    );
+                    if modes.get(&id) != Some(&now) {
+                        modes.insert(id, now);
+                        self.configs_changed = true;
+                    }
+                }
+            }
+            _ => {}
         }
-        self.snapshot_pos.is_none_or(|at| p.pos > at)
+        newer
     }
 }
 
@@ -1733,7 +1759,10 @@ mod set_aside_tests {
             &mut seen,
         );
         assert!(!changed);
-        assert_eq!(seen.configs.get("mac/agent-1"), Some(&vec![skip.clone()]));
+        assert_eq!(
+            seen.configs.options.get("mac/agent-1"),
+            Some(&vec![skip.clone()])
+        );
         assert!(
             std::mem::take(&mut seen.configs_changed),
             "a view draws again"
@@ -1765,7 +1794,49 @@ mod set_aside_tests {
             &mut queue,
             &mut seen,
         );
-        assert!(seen.configs.is_empty() && !changed && seen.configs_changed);
+        assert!(seen.configs.options.is_empty() && !changed && seen.configs_changed);
+        // A live mode change after the snapshot is kept for the agent and wants a redraw; an older one is in the snapshot already.
+        let options = |pos: u64, mode: &str| {
+            agora_protocol::v1::PositionedEvent {
+                pos,
+                event: Some(agora_protocol::v1::Event {
+                    producer_id: "mac".into(),
+                    body: Some(agora_protocol::v1::event::Body::AgentSessionOptions(
+                        agora_protocol::v1::AgentSessionOptions {
+                            agent_id: "agent-1".into(),
+                            current_mode: mode.into(),
+                            ..Default::default()
+                        },
+                    )),
+                    ..Default::default()
+                }),
+            }
+            .encode_to_vec()
+        };
+        seen.configs_changed = false;
+        set_aside(
+            frame(STREAM_EVENTS, kinds::POSITIONED_EVENT, options(6, "old")),
+            &mut changed,
+            &mut asked,
+            &mut kept,
+            &mut queue,
+            &mut seen,
+        );
+        assert!(seen.configs.modes.is_empty() && !seen.configs_changed && !changed);
+        set_aside(
+            frame(STREAM_EVENTS, kinds::POSITIONED_EVENT, options(9, "bypass")),
+            &mut changed,
+            &mut asked,
+            &mut kept,
+            &mut queue,
+            &mut seen,
+        );
+        assert_eq!(
+            seen.configs.modes.get("mac/agent-1"),
+            Some(&(Vec::new(), "bypass".to_string()))
+        );
+        assert!(seen.configs_changed && changed);
+        changed = false;
         // An event after the snapshot is newer than it: it stays marked, so the caller asks again after taking the snapshot.
         set_aside(
             frame(

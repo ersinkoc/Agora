@@ -314,3 +314,4 @@ tui-give-target-gone = O ajan durdu, kapatıldı ya da bu projeden ayrıldı. Hi
 tui-give-machine-unsupported = O ajanın makinesi henüz görev alamıyor; güncellenmesi gerekebilir. Hiçbir şey gönderilmedi.
 tui-give-grant-declined = Makinenin izni verilmedi, bu yüzden hiçbir şey gönderilmedi. Yeniden deneyebilirsiniz.
 tui-grant-ask-give = Bu pencerenin { $agent } ajanına bir saat boyunca pano görevi vermesine izin verilsin mi? İzin yalnızca buna yeter. İzin vermek için y tuşuna, iptal için başka bir tuşa basın.
+tui-give-too-small = Bu terminal onayın tamamını gösteremeyecek kadar küçük, bu yüzden görev buradan verilemez. Pencereyi büyütün ya da geri dönmek için n veya Esc tuşuna basın.

@@ -341,3 +341,4 @@ tui-give-target-gone = That agent stopped, was closed or left this project. Noth
 tui-give-machine-unsupported = That agent's machine cannot take tasks yet; it may need an update. Nothing was sent.
 tui-give-grant-declined = The machine's permission was not given, so nothing was sent. You can try again.
 tui-grant-ask-give = Allow this window to give board tasks to { $agent } for one hour? That is all it allows. Press y to allow it, any other key to cancel.
+tui-give-too-small = This terminal is too small to show the whole confirmation, so the task cannot be given here. Make the window larger, or press n or Esc to go back.
