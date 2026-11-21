@@ -127,12 +127,13 @@ A program `agora agent install` put under `<AGORA_HOME>/agents/bin/` is the one 
 (terminal agents) names it, and `agora doctor` reports it as installed "by Agora" with its version, against "by you" for a program found
 only through the user's `PATH` or a full path. The lookup (`agent_install::installed_program`) happens before the user's `PATH` and
 accepts a program only when all of these hold; otherwise the `PATH` decides as before:
-- the manifest's program is a plain file name (no separator, not `.` or `..`);
+- the manifest's program is a plain file name (no separator, not `.` or `..`); on Windows `claude` also matches the installer's `claude.exe`;
 - an agent folder's `exe` file names it, and that agent's `current` file names a version;
-- `agents` and `agents/bin` are real folders (not links, not junctions);
+- `agents`, `agents/bin` and (Unix) the version folder are real folders (not links, not junctions), this user's, and not writable by group or others;
 - the launcher is what the installer writes: on Unix a link that resolves to `agents/<name>/<current version>/<program>`, on Windows a
   regular file in `bin`; a link to anywhere else (another agent, an old version, outside `agents`) is refused;
 - on Unix the resolved file belongs to this user and is not writable by group or others.
+When a folder owns the name but a check fails, the node writes a line to its log (the program's file name only) and starts the one on the `PATH`; `agora doctor` adds an "installed by Agora, but not safe" note (`agent-unsafe`).
 The node then starts the resolved real file by its full path. The agent's own `PATH` is not changed: it does not gain
 `agents/bin`, so an agent that needs a sibling program installed the same way will not find it there. Agents started through ACP or an
 adapter command still resolve their program through the user's `PATH`.

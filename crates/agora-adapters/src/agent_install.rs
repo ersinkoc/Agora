@@ -730,34 +730,79 @@ pub struct Installed {
     pub version: String,
 }
 
-/// ADR-0087 item 3: the program the installer made for `program`, or `None`. Accepted only for a plain file name that an agent
-/// folder's `exe` file owns, whose launcher in `<home>/agents/bin` is exactly what the installer writes (Unix: a link that resolves to
-/// `agents/<name>/<current version>/<program>`; Windows: a regular file there), inside a real `agents` folder (neither it nor `bin` is a
-/// link), and that no other user wrote or can write. Anything else is not used, so the user's `PATH` decides. Only reads the file system.
-pub fn installed_program(home: &Path, program: &str) -> Option<Installed> {
+/// What the installer's own records say about a program name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Lookup {
+    /// No agent folder owns this name (or it is not a plain file name).
+    NotInstalled,
+    /// Owned and every check passed.
+    Installed(Installed),
+    /// An agent folder owns it, but a check failed (a link, a folder or file others can write, a launcher that is not the
+    /// installer's). It is not used.
+    Unsafe,
+}
+
+/// The launcher file names the installer may have written for a manifest's `program`: the name itself and, on Windows, the name
+/// with `.exe` (the installer writes `claude.exe` where the manifest launches `claude`). `windows` is a parameter so the mapping is
+/// testable everywhere.
+pub fn launcher_names(program: &str, windows: bool) -> Vec<String> {
+    let mut names = vec![program.to_string()];
+    if windows && Path::new(program).extension().is_none() {
+        names.push(format!("{program}.exe"));
+    }
+    names
+}
+
+fn plain_name(program: &str) -> bool {
     let mut parts = Path::new(program).components();
-    let plain = matches!(
+    matches!(
         (parts.next(), parts.next()),
         (Some(std::path::Component::Normal(n)), None) if n == OsStr::new(program)
-    );
-    if !plain || program.is_empty() {
-        return None;
+    ) && !program.is_empty()
+}
+
+/// ADR-0087 item 3: the program the installer made for `program`. See [`Lookup`]. Accepted only for a plain file name that an agent
+/// folder's `exe` file owns, whose launcher in `<home>/agents/bin` is exactly what the installer writes (Unix: a link that resolves to
+/// `agents/<name>/<current version>/<program>`; Windows: a regular file there), and where `agents`, `bin`, the version folder and the
+/// file are real (not links), this user's, and not writable by group or others. Only reads the file system.
+pub fn lookup_installed(home: &Path, program: &str) -> Lookup {
+    if !plain_name(program) {
+        return Lookup::NotInstalled;
     }
     let agents = agents_dir(home);
-    let real_dir = |p: &Path| std::fs::symlink_metadata(p).is_ok_and(|m| m.is_dir());
+    let Some((exe, name)) = launcher_names(program, cfg!(windows))
+        .into_iter()
+        .find_map(|n| owner_of(&agents, &n).map(|o| (n, o)))
+    else {
+        return Lookup::NotInstalled;
+    };
+    match checked(home, &agents, &exe, name) {
+        Some(i) => Lookup::Installed(i),
+        None => Lookup::Unsafe,
+    }
+}
+
+fn checked(home: &Path, agents: &Path, exe: &str, name: String) -> Option<Installed> {
+    // A real folder of this user's that others cannot write to (`symlink_metadata`: a link is not a folder here).
+    let safe_dir = |p: &Path| {
+        std::fs::symlink_metadata(p)
+            .is_ok_and(|m| m.is_dir() && !agora_platform::others_can_write(&m))
+    };
     let bin = agents.join("bin");
-    if !real_dir(&agents) || !real_dir(&bin) {
+    if !safe_dir(agents) || !safe_dir(&bin) {
         return None;
     }
-    let canon_agents = std::fs::canonicalize(&agents).ok()?;
-    let name = owner_of(&agents, program)?;
+    let canon_agents = std::fs::canonicalize(agents).ok()?;
     let version = installed_version(home, &name)?;
-    let launcher = bin.join(program);
+    let launcher = bin.join(exe);
     let linked = std::fs::symlink_metadata(&launcher).ok()?;
     let wanted = if linked.is_symlink() {
-        canon_agents.join(&name).join(&version).join(program)
+        if !safe_dir(&agents.join(&name).join(&version)) {
+            return None;
+        }
+        canon_agents.join(&name).join(&version).join(exe)
     } else if linked.is_file() {
-        canon_agents.join("bin").join(program)
+        canon_agents.join("bin").join(exe)
     } else {
         return None;
     };
@@ -774,6 +819,14 @@ pub fn installed_program(home: &Path, program: &str) -> Option<Installed> {
         name,
         version,
     })
+}
+
+/// [`lookup_installed`], keeping only an accepted program.
+pub fn installed_program(home: &Path, program: &str) -> Option<Installed> {
+    match lookup_installed(home, program) {
+        Lookup::Installed(i) => Some(i),
+        _ => None,
+    }
 }
 
 // ---- names ---------------------------------------------------------------------------------------------------------------

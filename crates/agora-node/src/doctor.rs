@@ -38,6 +38,8 @@ pub struct Inputs {
     pub data_dir: PathBuf,
     pub socket: PathBuf,
     pub manifests_dir: PathBuf,
+    /// `<AGORA_HOME>`: where `agora agent install` keeps the programs it installed.
+    pub agora_home: PathBuf,
 }
 
 /// Is `program` runnable: an existing path, or found in a `PATH` directory.
@@ -96,9 +98,23 @@ pub fn locate_in(home: &Path, program: &str) -> Option<Found> {
 
 /// The program to start for `program`: the installed one's full path, else `program` unchanged.
 pub fn start_program(home: &Path, program: &str) -> String {
-    agora_adapters::agent_install::installed_program(home, program)
-        .and_then(|i| i.path.to_str().map(str::to_string))
-        .unwrap_or_else(|| program.to_string())
+    use agora_adapters::agent_install::{lookup_installed, Lookup};
+    match lookup_installed(home, program) {
+        Lookup::Installed(i) => i.path.to_str().map(str::to_string),
+        Lookup::Unsafe => {
+            // No secret here: only the program's file name.
+            eprintln!("agent program {program:?} was installed by agora but its folder or file is not safe; using the PATH");
+            None
+        }
+        Lookup::NotInstalled => None,
+    }
+    .unwrap_or_else(|| program.to_string())
+}
+
+/// An agent folder owns `program` but the installed copy failed its safety checks, so it is not used.
+pub fn install_unsafe(home: &Path, program: &str) -> bool {
+    agora_adapters::agent_install::lookup_installed(home, program)
+        == agora_adapters::agent_install::Lookup::Unsafe
 }
 
 /// A file the owner may not run (ADR-0087 rung 1: "broken"): found, but without the execute bit. Where the platform has no such bit
@@ -199,10 +215,7 @@ pub fn run(inputs: &Inputs) -> Vec<Check> {
     });
 
     out.extend(policy_read_at_start(&policy_file, &inputs.socket, running));
-    out.extend(manifests(
-        &inputs.manifests_dir,
-        &agora_adapters::package::agora_home(),
-    ));
+    out.extend(manifests(&inputs.manifests_dir, &inputs.agora_home));
     out.extend(credential_checks(
         &inputs.manifests_dir,
         &crate::credentials::SecretStore::in_data(&inputs.data_dir),
@@ -479,9 +492,12 @@ fn manifests(dir: &Path, home: &Path) -> Vec<Check> {
                 "agent-missing"
             },
             if installed { Status::Ok } else { Status::Warn },
-            l.manifest.kind,
+            l.manifest.kind.clone(),
         );
-        c.args = vec![("program", program), ("from", l.source.name().to_string())];
+        c.args = vec![
+            ("program", program.clone()),
+            ("from", l.source.name().to_string()),
+        ];
         // Where it was found: `agora` (installed by Agora, with the version folder) or `you` (found on the PATH or named by a path).
         if let Some(f) = &found {
             let (by, version) = match f {
@@ -492,6 +508,11 @@ fn manifests(dir: &Path, home: &Path) -> Vec<Check> {
             c.args.push(("version", version));
         }
         out.push(c);
+        if !program.is_empty() && install_unsafe(home, &program) {
+            let mut u = check("agent-unsafe", Status::Warn, l.manifest.kind);
+            u.args = vec![("program", program)];
+            out.push(u);
+        }
     }
     for (p, _) in problems {
         let name = p
@@ -583,6 +604,9 @@ mod tests {
         std::fs::create_dir_all(&vdir).unwrap();
         std::fs::create_dir_all(agents.join("bin")).unwrap();
         std::fs::write(vdir.join(exe), "x").unwrap();
+        for d in [&agents, &agents.join("bin"), &agents.join("fake"), &vdir] {
+            agora_platform::restrict_to_owner(d).unwrap();
+        }
         agora_platform::set_executable(&vdir.join(exe), true).unwrap();
         std::fs::write(agents.join("fake").join("current"), version).unwrap();
         std::fs::write(agents.join("fake").join("exe"), exe).unwrap();
@@ -611,6 +635,7 @@ mod tests {
             data_dir: d.join("data"),
             socket: d.join("nope.sock"),
             manifests_dir: d.join("manifests"),
+            agora_home: none_home(),
         });
         assert_eq!(find(&checks, "version")[0].status, Status::Ok);
         assert_eq!(find(&checks, "data-dir")[0].status, Status::Ok);
@@ -671,6 +696,7 @@ mod tests {
             data_dir: d.clone(),
             socket: d.join("nope.sock"),
             manifests_dir: d.join("manifests"),
+            agora_home: none_home(),
         });
         assert_eq!(find(&checks, "policy-restart").len(), 1);
         let _ = std::fs::remove_dir_all(&d);
@@ -685,6 +711,7 @@ mod tests {
             data_dir: data.clone(),
             socket: dir.join("none.sock"),
             manifests_dir: dir.join("manifests"),
+            agora_home: none_home(),
         };
         let ids = |checks: &[Check]| -> Vec<(&'static str, String)> {
             checks
@@ -739,6 +766,7 @@ mod tests {
             data_dir: data.clone(),
             socket: dir.join("none.sock"),
             manifests_dir: dir.join("manifests"),
+            agora_home: none_home(),
         };
         let checks = run(&inputs);
         let found = |id: &str| -> Vec<String> {
@@ -924,6 +952,21 @@ mod tests {
             start_program(&none_home(), "installed-by-agora-xyz"),
             "installed-by-agora-xyz"
         );
+        // The installed copy made unsafe: not used, and doctor says why.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let dir = home.join("agents");
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+            let checks = manifests(&m, &home);
+            assert_eq!(of(checks.clone()).id, "agent-missing");
+            assert_eq!(find(&checks, "agent-unsafe").len(), 1);
+            assert_eq!(
+                start_program(&home, "installed-by-agora-xyz"),
+                "installed-by-agora-xyz"
+            );
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
         // A program found only through a full path is "installed by you".
         let own = d.join("own-agent");
         std::fs::write(&own, "#!/bin/sh\n").unwrap();

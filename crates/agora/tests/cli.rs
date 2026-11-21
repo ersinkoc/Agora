@@ -351,7 +351,7 @@ fn doctor_reports_agents_and_exits_zero_on_a_healthy_machine() {
     if agora_platform::PTY_SUPPORTED {
         if sh_on_path() {
             assert!(
-                out.contains("shell (from the manifests folder): `sh` is found."),
+                out.contains("shell (from the manifests folder): `sh` is found"),
                 "{out}"
             );
         } else {

@@ -1062,7 +1062,16 @@ fn layout(home: &Path, name: &str, version: &str, exe: &str) -> PathBuf {
     std::fs::create_dir_all(&vdir).unwrap();
     std::fs::create_dir_all(agents.join("bin")).unwrap();
     std::fs::write(vdir.join(exe), "x").unwrap();
+    // As the installer leaves them, whatever this machine's umask: only the owner can write.
+    for d in [&agents, &agents.join("bin"), &agents.join(name), &vdir] {
+        agora_platform::restrict_to_owner(d).unwrap();
+    }
     agora_platform::set_executable(&vdir.join(exe), true).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(vdir.join(exe), std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
     std::fs::write(agents.join(name).join("current"), version).unwrap();
     std::fs::write(agents.join(name).join("exe"), exe).unwrap();
     let launcher = agents.join("bin").join(exe);
@@ -1128,11 +1137,9 @@ fn a_launcher_nobody_recorded_is_not_used() {
     assert!(agora_adapters::agent_install::installed_program(&home.0, "fake-agent").is_none());
 }
 
+#[cfg(unix)]
 #[test]
 fn a_launcher_that_leaves_the_install_folder_or_the_current_version_is_not_used() {
-    if cfg!(not(unix)) {
-        return; // launchers are copies there
-    }
     let home = Home::new();
     let launcher = layout(&home.0, "fake", "1.2.3", "fake-agent");
     let outside = Home::new();
@@ -1155,11 +1162,9 @@ fn a_launcher_that_leaves_the_install_folder_or_the_current_version_is_not_used(
     assert!(agora_adapters::agent_install::installed_program(&home.0, "fake-agent").is_none());
 }
 
+#[cfg(unix)]
 #[test]
 fn links_for_the_agents_or_bin_folder_and_files_others_can_write_are_not_used() {
-    if cfg!(not(unix)) {
-        return;
-    }
     use std::os::unix::fs::PermissionsExt;
     let home = Home::new();
     layout(&home.0, "fake", "1.2.3", "fake-agent");
@@ -1169,7 +1174,7 @@ fn links_for_the_agents_or_bin_folder_and_files_others_can_write_are_not_used() 
         std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(mode)).unwrap();
         assert!(agora_adapters::agent_install::installed_program(&home.0, "fake-agent").is_none());
     }
-    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o700)).unwrap();
     assert!(agora_adapters::agent_install::installed_program(&home.0, "fake-agent").is_some());
     // `bin` and `agents` as links to a real folder.
     let bin = home.agents().join("bin");
@@ -1181,4 +1186,45 @@ fn links_for_the_agents_or_bin_folder_and_files_others_can_write_are_not_used() 
     std::fs::rename(home.agents(), real.0.join("agents")).unwrap();
     std::os::unix::fs::symlink(real.0.join("agents"), home.agents()).unwrap();
     assert!(agora_adapters::agent_install::installed_program(&home.0, "fake-agent").is_none());
+}
+
+#[test]
+fn a_manifest_name_maps_to_the_exe_the_installer_wrote() {
+    use agora_adapters::agent_install::launcher_names;
+    assert_eq!(launcher_names("claude", true), ["claude", "claude.exe"]);
+    assert_eq!(launcher_names("claude", false), ["claude"]);
+    assert_eq!(launcher_names("claude.exe", true), ["claude.exe"]);
+    assert_eq!(launcher_names("tool.cmd", true), ["tool.cmd"]);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_record_that_fails_a_check_is_unsafe_not_absent() {
+    use agora_adapters::agent_install::{lookup_installed, Lookup};
+    use std::os::unix::fs::PermissionsExt;
+    let home = Home::new();
+    layout(&home.0, "fake", "1.2.3", "fake-agent");
+    assert!(matches!(
+        lookup_installed(&home.0, "fake-agent"),
+        Lookup::Installed(_)
+    ));
+    assert_eq!(lookup_installed(&home.0, "nobody"), Lookup::NotInstalled);
+    // Each folder on the way, group-writable, makes it unsafe.
+    for dir in [
+        home.agents(),
+        home.agents().join("bin"),
+        home.agents().join("fake").join("1.2.3"),
+    ] {
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o775)).unwrap();
+        assert_eq!(
+            lookup_installed(&home.0, "fake-agent"),
+            Lookup::Unsafe,
+            "{dir:?}"
+        );
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(matches!(
+            lookup_installed(&home.0, "fake-agent"),
+            Lookup::Installed(_)
+        ));
+    }
 }

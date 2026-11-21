@@ -129,6 +129,7 @@ doctor-agent-broken = { $detail } ({ $from ->
         [built-in] built in
        *[folder] from the manifests folder
     }): `{ $program }` is there but this account may not run it. Make the file executable, or reinstall it.
+doctor-agent-unsafe = { $detail }: `{ $program }` was installed by Agora, but its folder or file is not safe (another user could change it), so it is not used: using the one on your PATH, if there is one. Reinstall it with `agora agent install`, or make the install folders yours alone.
 doctor-manifest-older = The manifests folder holds an older description of { $detail } (version { $from }; this program has { $shipped } built in) and it replaces the built-in one, so agents of this kind may not resume after a restart. Remove the file { $file } from the manifests folder: the shipped descriptions are built in.
 doctor-holder-old = Chat agents on this machine are resumed after a node restart, not kept running, because this machine's agent keeper is older than this program. It ends when the agents it keeps have ended ({ $detail ->
     [one] 1 agent now
