@@ -29,13 +29,10 @@ agent's or machine's name as `<agent>` or `<machine>` (the window gives agents n
   only by a person, with an account made for testing, never by an agent session.
 - **Disposable everything.** Every run uses its own Agora folder (`AGORA_HOME`) and its own project folders under one run folder
   (`$RM`), new for that run (S0). Every file a step reads, writes or tries to reach is one the run made under `$RM`, with made-up
-  content: never a real file of the machine (`~/.ssh`, shell profiles, your git configuration) and never a write outside `$RM` (one known exception, confinement, below). A
-  step never changes the machine's own settings (global git configuration, login items, PATH).
-- **One known exception: confinement (#900).** A confined start (any node with a `sandbox` policy) writes the agent's generated git
-  configuration outside `AGORA_HOME`, whatever `AGORA_HOME` says: on Linux into `~/.agora/git-config` in the real home, on macOS and
-  Windows into `agora-git-config` in the system temp folder (`docs/security/sandbox-recipes.md`). So every step that needs a
-  `sandbox` policy (RM-20's confined variant, RM-23, RM-33, RM-37, RM-38, RM-39's confined variant, RM-47's confined variant) runs
-  **only in a disposable OS account or VM** until issue #900 is fixed, never in the account that runs the maintainer's Agora.
+  content. Leave the machine's own configuration, login items and PATH as they are. The confined Git check in RM-33 uses a test identity.
+- **Confinement on 0.3.33.** Use a disposable OS account or VM for any step that needs a `sandbox` policy. Release 0.3.33 writes
+  the generated Git configuration outside `$RM` (#900). With ADR-0098 it lives in the node's own data directory at
+  `$AGORA_HOME/data/git-config/`. See [Sandbox recipes](../security/sandbox-recipes.md).
 - **Denied-path probes live outside the worktree and outside `/tmp`.** On Linux the confinement grants agents the shared `/tmp`, so a
   probe there proves nothing; probes go in the run's own folder under the home (S0). Before any `agora down`, `agora service`, `agora update` or `kill`, check that `AGORA_HOME` is set to the run's folder and
   that `agora status` shows the run's data folder. Never touch `~/.agora` (`%USERPROFILE%\.agora`) or the machine's own services.
@@ -355,8 +352,7 @@ not built: nothing to check.
 ### RM-23 Agent confinement (sandbox)
 - **OS:** Linux, macOS; Windows built but off by default (turn on with `AGORA_WINDOWS_CONFINEMENT=1` for the run's node only).
   One level per node; `worktree-offline` on macOS only.
-- **Disposable OS account or VM only, until #900 is fixed:** a confined start writes the agent's generated git configuration
-  outside `$RM`, on Linux into the real `~/.agora/git-config` (macOS and Windows: `agora-git-config` in the system temp folder).
+- **Isolation:** follow the confinement rule in [Safety rules](#safety-rules) for the version under test.
 - **Do:** write `sandbox = worktree` into `$AGORA_HOME/data/policy`; restart the node. Start a Shell with "Create an isolated working
   copy" and run `pwd` in it (its worktree, W; it must not be under `/tmp`, which Linux confinement grants to every agent: with
   S0's folder under the home it is not). In your own terminal make the probes, all synthetic: `mkdir "$W/../rm-sibling" && echo
@@ -442,15 +438,13 @@ not built: nothing to check.
 
 ### RM-33 A confined agent gets a git configuration the node wrote
 - **OS:** Linux, macOS; Windows with confinement on.
-- **Disposable OS account or VM only, until #900 is fixed:** a confined start writes the agent's generated git configuration
-  outside `$RM`, on Linux into the real `~/.agora/git-config` (macOS and Windows: `agora-git-config` in the system temp folder).
-- **Do:** RM-23's policy. Change no git configuration: the node reads your global file itself and ignores a `GIT_CONFIG_GLOBAL` it
-  inherits (`agora-node/src/gitconfig.rs`), so a scratch file would not test the copy. In your own terminal, read only: `git config
-  --global --get user.name`, `git config --global --get user.email`. In a confined Shell: `echo $GIT_CONFIG_GLOBAL`, `git config
-  --global --list`; if both identity keys were set, `git commit --allow-empty -m t` in its worktree; if not, skip the commit. A test
-  identity is set only in a disposable OS account or VM.
-- **See:** `GIT_CONFIG_GLOBAL` names the node's file; it holds only keys of the allow-list (`docs/security/sandbox-recipes.md`), with
-  the same values as yours, and no `credential.*`, `url.*` or `include`; the commit, when run, carries your name.
+- **Isolation:** follow the confinement rule in [Safety rules](#safety-rules) for the version under test.
+- **Do:** in a disposable OS account or VM, set a made-up `user.name` and `user.email` in that account's global Git configuration,
+  then apply RM-23's policy. In the confined Shell, print `GIT_CONFIG_GLOBAL` (`echo "$GIT_CONFIG_GLOBAL"` or, in PowerShell,
+  `$env:GIT_CONFIG_GLOBAL`), run `git config --global --list` and make a commit with `git commit --allow-empty -m t`.
+- **See:** with ADR-0098, `GIT_CONFIG_GLOBAL` names a file in the run's `$AGORA_HOME/data/git-config/`. The file holds the
+  allow-listed values from the test identity (see [Sandbox recipes](../security/sandbox-recipes.md)). The commit carries the
+  test identity's name.
 - **Evidence so far:** [macOS 2026-11-14](2026-11-14-macos-confinement-and-terminal-client.md) (before ADR-0078: a confined commit
   needed `~/.gitconfig` readable); LAN run L10 (Windows commit under the profile).
 
@@ -480,8 +474,7 @@ not built: nothing to check.
 
 ### RM-37 A confined agent cannot use the node's control socket
 - **OS:** Linux, macOS; Windows with confinement on.
-- **Disposable OS account or VM only, until #900 is fixed:** a confined start writes the agent's generated git configuration
-  outside `$RM`, on Linux into the real `~/.agora/git-config` (macOS and Windows: `agora-git-config` in the system temp folder).
+- **Isolation:** follow the confinement rule in [Safety rules](#safety-rules) for the version under test.
 - **Do:** RM-23's policy. In a confined Shell: `agora agent list --socket $AGORA_HOME/node.sock` (and `agora agent list`).
 - **See:** refused (no list of agents); the same command in your own terminal works.
 - **Evidence so far:** [macOS 2026-11-14](2026-11-14-macos-confinement-and-terminal-client.md): the control socket refused under
@@ -490,8 +483,7 @@ not built: nothing to check.
 ### RM-38 A confined agent reaches only the unix sockets it is given
 - **OS:** macOS (allow-list), Linux (abstract sockets, Landlock ABI 6 or newer; pathname sockets not restricted); Windows: not
   established.
-- **Disposable OS account or VM only, until #900 is fixed:** a confined start writes the agent's generated git configuration
-  outside `$RM`, on Linux into the real `~/.agora/git-config` (macOS and Windows: `agora-git-config` in the system temp folder).
+- **Isolation:** follow the confinement rule in [Safety rules](#safety-rules) for the version under test.
 - **Do:** RM-23's policy. In a confined Shell: `env | grep -E 'SSH_AUTH_SOCK|DBUS|TMUX|DOCKER'`; on macOS, first make a synthetic
   socket in your own terminal (`nc -lU $RM/rm.sock`), then from the confined Shell `echo hi | nc -U <that path typed out>`
   (unverified); run `agora doctor`.
