@@ -4,6 +4,7 @@
 import { agora } from '../gen/agora.js';
 import type { QuotaObs } from './quota';
 import { SKIP_ACTION, skipOf, type SkipRequest } from './skipApproval';
+import { AGENT_COLOUR_NAMES } from '../themes/tokens';
 import { detailLaunchOptions, type StartOption } from './approval';
 import { type AgentTileModel, type CommandModel, type ConfigCategory, type ConfigOptionModel, type SessionModel, type SessionOptionModel, type UiState, uiState } from '../model';
 
@@ -417,8 +418,9 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
   }
 }
 
-const ACCENTS = ['#ffb454', '#4fd1c5', '#a78bfa', '#fb7185', '#94a3b8', '#7dd3fc', '#86efac'];
-const ACCENT_NAMES = ['amber', 'teal', 'violet', 'rose', 'slate', 'sky', 'mint'];
+// An agent's colour is a variable per name (design/tokens.css `--agent-*`), so each theme draws it in a shade that shows on it.
+const ACCENT_NAMES = AGENT_COLOUR_NAMES;
+const ACCENTS = ACCENT_NAMES.map((n) => `var(--agent-${n})`);
 
 function hash(s: string): number {
   let h = 0;

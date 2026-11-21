@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { setLanguage, t } from '../i18n';
 import { issueText, themeName, tokenLabel } from './messages';
 import {
-  BUILT_IN, CONTRAST_PAIRS, DERIVED, TOKEN_NAMES, type ParsedTheme, type ThemeIssue, applyTheme, baseTokens, contrast, contrastIssues,
+  AGENT_COLOURS, AGENT_COLOUR_NAMES, BUILT_IN, CONTRAST_PAIRS, agentColours, DERIVED, TOKEN_NAMES, type ParsedTheme, type ThemeIssue, applyTheme, baseTokens, contrast, contrastIssues,
   cssVariables, deserialiseTheme, parseTheme, readValue, serialiseTheme, themeFile,
 } from './tokens';
 
@@ -26,6 +26,29 @@ describe('theme tokens', () => {
     }
     const root = block(':root {');
     for (const n of ['font-ui', 'font-mono', 'text-16', 'radius-xs', 'radius-s', 'radius-m', 'radius-l'] as const) expect(value(root, n), n).toBe(baseTokens('dark')[n]);
+  });
+
+  it('draws agent colours from one list, visible on the surfaces of every theme (at least 3:1)', () => {
+    const css = readFileSync('src/design/tokens.css', 'utf8').replace(/\r\n/g, '\n');
+    const block = (selector: string) => {
+      const i = css.indexOf(selector);
+      return css.slice(i, css.indexOf('}', i));
+    };
+    // Dark and Light are drawn by the stylesheet itself: it holds the same values.
+    for (const [scheme, src] of [['dark', block(":root,\n[data-theme='dark']")], ['light', block("[data-theme='light']")], ['light', block(':root:not([data-theme])')]] as const) {
+      for (const n of AGENT_COLOUR_NAMES) expect(new RegExp(`--agent-${n}:\\s*([^;]+);`).exec(src)?.[1]?.trim(), `${scheme} --agent-${n}`).toBe(AGENT_COLOURS[scheme][n]);
+      expect(agentColours(baseTokens(scheme))).toBe(AGENT_COLOURS[scheme]);
+    }
+    // Every built-in theme, and a Light-slot theme with Dark's surfaces (a valid import), gets a set that shows on its own surfaces.
+    const lightSlotDarkSurfaces = { ...baseTokens('light'), ...Object.fromEntries((['surface-0', 'surface-1', 'surface-2'] as const).map((s) => [s, baseTokens('dark')[s]])) };
+    for (const [id, tokens] of [...BUILT_IN.map((t) => [t.id, t.tokens] as const), ['light-slot-dark-surfaces', lightSlotDarkSurfaces] as const]) {
+      const vars = cssVariables({ tokens });
+      for (const n of AGENT_COLOUR_NAMES) {
+        for (const surface of ['surface-0', 'surface-1', 'surface-2'] as const) {
+          expect(contrast(vars[`--agent-${n}`] as string, tokens[surface]), `${id} --agent-${n} on ${surface}`).toBeGreaterThanOrEqual(3);
+        }
+      }
+    }
   });
 
   it('computes WCAG contrast', () => {
@@ -106,14 +129,15 @@ describe('theme tokens', () => {
     expect(vars['--text-scale']).toBe('1.25');
     expect(vars['--space-1']).toBe('0.25rem');
     expect(vars['--radius-s']).toBe('10px');
-    expect(Object.keys(vars).filter((k) => !TOKEN_NAMES.includes(k.slice(2) as never))).toEqual(['--text-scale']);
+    expect(Object.keys(vars).filter((k) => !TOKEN_NAMES.includes(k.slice(2) as never))).toEqual(['--text-scale', ...AGENT_COLOUR_NAMES.map((n) => `--agent-${n}`)]);
     const set = new Map<string, string>();
     const root = { style: { setProperty: (k: string, v: string) => { set.set(k, v); }, removeProperty: (k: string) => set.delete(k) }, dataset: {} as Record<string, string | undefined> };
     applyTheme(root, BUILT_IN.find((b) => b.id === 'sand')!);
     expect(root.dataset.theme).toBe('light');
     expect(set.get('--accent')).toBe('#9a4a1f');
     expect(set.get('--text-scale')).toBe('1');
-    expect(set.size).toBe(TOKEN_NAMES.length + 1);
+    expect(set.get('--agent-slate')).toBe(AGENT_COLOURS.light.slate); // sand's surfaces are light
+    expect(set.size).toBe(TOKEN_NAMES.length + 1 + AGENT_COLOUR_NAMES.length);
     // Back to Dark: the stylesheet's own values show again (and `data-theme` flips still work).
     applyTheme(root, BUILT_IN[0]!);
     expect(set.size).toBe(0);

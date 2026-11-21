@@ -1,6 +1,8 @@
 /* Design tokens (docs/ux/visual-language.md §3). `--diff-removed` is a content colour (like syntax colours), not a state and not a theme
    token: amber stays "needs you", so a deleted line is red. Components use only these variables, never raw values; the Tailwind theme in
-   app.css maps onto them (ADR-0036). Dark-first, light-equal. Color is reserved for agent state and one brand accent.
+   app.css maps onto them (ADR-0036). Dark-first, light-equal. Color is reserved for agent state and one brand accent;
+   `--agent-*` are the colours an agent is told apart by (its tile's edge, its name: "claude · amber"), assigned, never a state, darker in Light so
+   they stay visible on a white surface (at least 3:1, a test checks it).
    A theme (docs/ux/themes.md) sets these same variables on the page; the values here are the Dark and Light themes, shown until
    the script has applied the chosen one (src/themes/tokens.ts holds the same values; a test keeps them equal). */
 :root {
@@ -47,6 +49,13 @@
   --state-idle: #8b8b96;
   --state-unknown: #8f8f9b;
   --diff-removed: #f87171;
+  --agent-amber: #ffb454;
+  --agent-teal: #4fd1c5;
+  --agent-violet: #a78bfa;
+  --agent-rose: #fb7185;
+  --agent-slate: #94a3b8;
+  --agent-sky: #7dd3fc;
+  --agent-mint: #86efac;
   --shadow: 0 1px 2px rgb(0 0 0 / 0.5), 0 8px 24px rgb(0 0 0 / 0.35);
   color-scheme: dark;
 }
@@ -66,6 +75,13 @@
   --state-idle: #5b5b68;
   --state-unknown: #6a6a76;
   --diff-removed: #a82117;
+  --agent-amber: #b45309;
+  --agent-teal: #0f766e;
+  --agent-violet: #6d28d9;
+  --agent-rose: #be123c;
+  --agent-slate: #475569;
+  --agent-sky: #0369a1;
+  --agent-mint: #15803d;
   --shadow: 0 1px 2px rgb(20 20 40 / 0.06), 0 8px 24px rgb(20 20 40 / 0.08);
   color-scheme: light;
 }
@@ -87,6 +103,13 @@
     --state-idle: #5b5b68;
     --state-unknown: #6a6a76;
     --diff-removed: #a82117;
+    --agent-amber: #b45309;
+    --agent-teal: #0f766e;
+    --agent-violet: #6d28d9;
+    --agent-rose: #be123c;
+    --agent-slate: #475569;
+    --agent-sky: #0369a1;
+    --agent-mint: #15803d;
     --shadow: 0 1px 2px rgb(20 20 40 / 0.06), 0 8px 24px rgb(20 20 40 / 0.08);
     color-scheme: light;
   }
