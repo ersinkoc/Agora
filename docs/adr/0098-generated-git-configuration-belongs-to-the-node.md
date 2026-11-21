@@ -1,9 +1,8 @@
 # 0098. Generated Git configuration belongs to the node
-Status: Proposed
+Status: Accepted
 Date: 2026-11-21
-Origin: issue #900. This proposes an amendment to decision 3 of [ADR-0078](0078-a-confined-agent-gets-a-git-configuration-the-node-wrote.md).
-
-Implementation requires maintainer acceptance.
+Accepted: 2026-11-21 (the maintainer, in the merger chat: "Kabul ediyorum")
+Origin: issue #900. This amends decision 3 of [ADR-0078](0078-a-confined-agent-gets-a-git-configuration-the-node-wrote.md).
 
 ## Context
 
@@ -17,7 +16,7 @@ outside the state directory its owner set aside for it.
 Location and confinement must be decided together. For example, macOS Seatbelt discards ordinary read grants beneath
 protected directories. A directory-wide exception would make sibling files visible to the agent.
 
-## Proposed decision
+## Decision
 
 1. **Store generated files in the node's effective data directory.** The normal location is `<AGORA_HOME>/data/git-config/`.
    When a node is configured with an explicit data directory, use its `git-config/` subdirectory. Pass this location from the
