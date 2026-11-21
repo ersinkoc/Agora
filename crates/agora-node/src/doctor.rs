@@ -973,7 +973,8 @@ mod tests {
         agora_platform::set_executable(&own, true).unwrap();
         std::fs::write(
             m.join("a.toml"),
-            MANIFEST.replace("LAUNCH", &own.display().to_string()),
+            // Forward slashes: a Windows path's backslashes are escapes inside a TOML string.
+            MANIFEST.replace("LAUNCH", &own.display().to_string().replace('\\', "/")),
         )
         .unwrap();
         let c = of(manifests(&m, &home));
