@@ -1,9 +1,10 @@
 import * as Dialog from '@radix-ui/react-dialog';
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { t } from '../i18n';
 import type { BoardModel, BoardTaskModel } from '../net/view';
 import { COLUMN_PAGE, HELD_SHOWN, OWNER_MAX, TITLE_MAX, columnsOf, plain, type ColumnId } from './boardColumns';
 import { EmptyState } from './EmptyState';
+import { belowAnotherDialog } from './dialogStack';
 import { GiveButton, useCanGive } from './GiveTask';
 import { giveTaskOf } from '../net/give';
 import { NoAskBadge } from './NoAskBadge';
@@ -58,11 +59,15 @@ export function BoardColumns({ board }: { board: BoardModel }) {
 // ADR-0095 step 1: a project's tasks in three columns, a deep view opened on demand. Step 2: a Backlog card offers "Give to an agent"
 // (the dialog, net/give.ts and GiveTask.tsx, sends it); nothing else here changes a task.
 export function BoardView({ board, onClose }: { board: BoardModel; onClose: () => void }) {
+  const content = useRef<HTMLDivElement>(null);
   return (
     <Dialog.Root open onOpenChange={(o) => { if (!o) onClose(); }}>
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 z-40 bg-surface-0/70 backdrop-blur-sm" />
-        <Dialog.Content aria-describedby={undefined} onKeyDown={(e) => { if (!e.ctrlKey && !e.metaKey && !e.altKey && e.key.length === 1) e.stopPropagation(); }}
+        <Dialog.Content aria-describedby={undefined}
+          // A dialog opened over the board (Give to an agent) takes Escape; the board never closes under it (dialogStack.ts).
+          ref={content} onEscapeKeyDown={(e) => { if (belowAnotherDialog(content.current)) e.preventDefault(); }}
+          onKeyDown={(e) => { if (!e.ctrlKey && !e.metaKey && !e.altKey && e.key.length === 1) e.stopPropagation(); }}
           className="fixed inset-2 z-50 flex flex-col overflow-hidden rounded-l border border-line bg-surface-1 shadow-card md:inset-x-[3vw] md:inset-y-[4vh]">
           <header className="flex flex-none items-center justify-between gap-3 border-b border-line px-4 py-2.5">
             <Dialog.Title className="m-0 min-w-0 truncate text-base font-semibold tracking-normal text-ink normal-case">{t('board-view-title', { name: plain(board.project, OWNER_MAX) })}</Dialog.Title>

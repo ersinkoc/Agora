@@ -5,6 +5,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { agora } from '../gen/agora.js';
 import { declineGive, isGive, resendGive } from './give';
 import { grantFor, type GrantAsk } from './grant';
+import { declineStart, isStart, resendStart } from './startHold';
 import type { CommandBody } from './live';
 
 export interface GrantQuestion { id: number; node: string; body: CommandBody; ask: GrantAsk; busy: boolean; failed: boolean }
@@ -47,6 +48,8 @@ export function useGrantFlow(deps: GrantDeps) {
       setQuestion(undefined);
       // A task given to an agent: the answer goes to its dialog (sent, queued or the refusal).
       if (isGive(g.body)) await resendGive(command, g.node, g.body);
+      // A start: the answer goes to the window that waits for it (the new agent, or the refusal).
+      else if (isStart(g.body)) await resendStart(command, g.node, g.body);
       else if (!('terminalResize' in g.body)) await command(g.node, g.body).catch(() => {});
     } catch {
       busy.current = false;
@@ -60,6 +63,7 @@ export function useGrantFlow(deps: GrantDeps) {
     if (!g || busy.current || g.busy) return;
     live.current = undefined;
     if (isGive(g.body)) declineGive(g.node, g.body);
+    if (isStart(g.body)) declineStart(g.body);
     setQuestion(undefined);
   }, [question]);
 
