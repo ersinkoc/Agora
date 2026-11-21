@@ -32,6 +32,13 @@ const KEYS: Record<string, string> = {
   'node.resource_limit': 'refusal-limit',
   // `node.resource_limit` with resource `skip_approvals_agent` (see `failure`).
   'node.resource_limit.skip_approvals_agent': 'refusal-skip-agent-limit',
+  'agent.not_found': 'refusal-agent-gone',
+  // ADR-0095: giving a board task to an agent (net/give.ts adds the refusals whose words depend on their parameters).
+  'task.not_open': 'refusal-task-taken',
+  'task.blocked': 'refusal-task-blocked',
+  'task.not_found': 'refusal-task-gone',
+  'mesh.recipient_unknown': 'refusal-task-other-project',
+  'board.unavailable': 'refusal-board-unavailable',
 };
 
 /** The locale key to say for a refusal code; undefined for none known (the caller uses its own general sentence). */

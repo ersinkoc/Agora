@@ -39,6 +39,9 @@ import { agentTarget } from './components/sessionChoice';
 import { ChatActionsContext, type ChatActions, type PromptResult } from './components/chatActions';
 import { CloseAgentContext } from './components/CloseAgent';
 import { closeAsk } from './net/closeAgent';
+import { forgetGiveSupport, givableTasks, giveAsk, giveTask, useGiveAsk, useGiveSupport } from './net/give';
+import { GiveContext, GiveDialog, type GiveApi } from './components/GiveTask';
+import { plain } from './components/boardColumns';
 import { failure, type ActionResult } from './net/refusal';
 import { usableId } from './components/launchChoice';
 import { launchSettingsField } from './components/launchSettingsModel';
@@ -328,6 +331,7 @@ export function App() {
     if (!hub) return;
     // What was heard of machines and answered here belongs to one connection: another hub, or this one again, starts from nothing.
     forgetSkipCapable();
+    forgetGiveSupport();
     const c = connectLive({ url: hub.url, token: hub.token, onView: (v) => setLive(shown(v)), onState: setLink, onPair: pairing.dispatch,
       onRejected: () => { forgetToken(); setLive(undefined); setHub(undefined); },
       onGrantRequired: (node, body) => {
@@ -354,6 +358,15 @@ export function App() {
   const quotaList = useMemo(() => (hub ? (live ? quotaObs(live) : []) : demoQuota), [hub, live]);
   const quotaMachines = useMemo(() => new Map((live ? machines(live) : hub ? [] : demoMachines).map((m) => [m.id, m.name] as const)), [hub, live]);
   const agents = useMemo(() => (hub ? (live ? tiles(live) : []) : demoAgents), [hub, live]);
+  // ADR-0095 step 2: "Give to an agent" on a Backlog task, from its board card or the command palette (a hub window only).
+  const boardList = useMemo(() => (live ? boards(live) : []), [live]);
+  const giveApi = useMemo<GiveApi | undefined>(() => {
+    if (!hub || !api || !live) return undefined;
+    const list = machines(live);
+    return { agents, online: new Set(list.filter((m) => m.online).map((m) => m.id)), machines: list.map((m) => ({ id: m.id, name: m.name })), send: (agent, task) => giveTask(api.command, agent, task) };
+  }, [hub, api, live, agents]);
+  const giving = useGiveAsk();
+  const giveSupport = useGiveSupport(); // machines heard not to take tasks drop out of the palette too
   const current = hash.startsWith('#/agent/') ? decodeURIComponent(hash.slice('#/agent/'.length)) : undefined;
   const approvalsNow = live ? approvalList(live) : hub ? [] : demoApprovals;
   // On a phone a notice's link to an approval opens the agent that asks (ADR-0046, ADR-0067); answered already, the list.
@@ -521,7 +534,9 @@ export function App() {
     ...agents.map((a) => ({ id: `agent-${a.id}`, label: t('palette-open-agent', { name: a.name }), run: () => open(a.id) })),
     // Close agent: opens that agent and asks for the confirm there; nothing is closed from the palette itself.
     ...(hub && api ? agents.filter((a) => !a.closed && a.machineId).map((a) => ({ id: `close-${a.id}`, label: t('palette-close-agent', { name: a.name }), run: () => { open(a.id); closeAsk.ask(a.id, 'pane'); } })) : []),
-  ], [api, agents, go, toWindow, hub, next, open, openStart, language, editTheme, palette, phone, live, info.passwordSet, pairing.ui, lockNow, showPairing]);
+    // A Backlog task is a searchable object: choosing it opens "Give to an agent" for it (the dialog asks before anything is sent).
+    ...(giveApi ? givableTasks(boardList, giveApi.agents, giveApi.online).map((task) => ({ id: `give-${task.key}`, label: t('palette-give-task', { title: plain(task.title, 80) || t('board-task-untitled') }), run: () => giveAsk.ask(task) })) : []),
+  ], [api, agents, go, toWindow, hub, next, open, openStart, language, editTheme, palette, phone, live, info.passwordSet, pairing.ui, lockNow, showPairing, giveApi, boardList, giveSupport]);
 
   useEffect(() => {
     const on = (e: KeyboardEvent) => {
@@ -549,6 +564,7 @@ export function App() {
     <QuotaProvider obs={quotaList} machines={quotaMachines}>
     <CloseAgentContext.Provider value={hub && api ? closeAgent : undefined}>
     <ChatActionsContext.Provider value={chatActions}>
+    <GiveContext.Provider value={giveApi}>
       {hash === '#/gallery' ? <Gallery /> : isMachinesHash(hash) ? <MachinesPage focus={machineOfHash(hash)} machines={live ? machines(live) : hub ? [] : demoMachines} agents={agents} usage={usage} projects={live && usage ? costByProject(live, usage.perAgent) : []} onBack={() => go('#/')} onForget={hub ? forgetMachines : undefined} /> : hash === '#/audit' && hub ? <AuditPage load={(who) => loadAudit(hub.token, who)} onBack={() => go('#/')} /> : isSettingsHash(hash) ? <DevicePage section={settingsSectionOf(hash)} device={device} onBack={() => go('#/')} onTheme={editTheme} onAddPasskey={hub && passkeysSupported() ? (password) => addPasskey(hub.token, undefined, password) : undefined} passkeyNeedsPassword={info.passwordRequired}
           fingerprint={device ? prints.get(device.id) : undefined} machines={live ? machines(live) : undefined} trustedOn={trustedOn} others={hub ? others : undefined}
           loadKinds={hub && api && live ? loadKinds : undefined} asked={asked} onAsk={hub && api ? askApproval : undefined} onRemove={hub && api ? removeDevice : undefined}
@@ -564,7 +580,7 @@ export function App() {
           link={hub ? link : 'live'} onRetry={api ? api.retry : undefined} onOpen={open} onCommand={() => setPalette(true)} onLock={hub ? lockNow : undefined} start={startWindow} pairing={pairing.ui}
           onStart={hub && api && live ? () => openStart() : (!hub && import.meta.env.DEV ? () => openStart() : undefined)} />
         : <Console agents={agents} machines={live ? machines(live) : []} usage={usage} projects={live && usage ? costByProject(live, usage.perAgent) : []}
-          approvals={live ? approvalList(live) : hub ? [] : demoApprovals} messages={live ? recentMessages(live) : []} boards={live ? boards(live) : []} terminalFor={terminalFor} chatOf={hub && api ? chatOf : undefined} sendPrompt={hub && api ? sendPrompt : undefined} chooseOption={hub && api ? chooseOption : undefined} loadDiff={hub && api ? loadDiff : !hub ? demoLoadDiff : undefined} loadHistory={hub && api ? loadHistory : undefined} filesOf={hub && api ? filesOf : !hub ? demoFilesOf : undefined} onOpen={open}
+          approvals={live ? approvalList(live) : hub ? [] : demoApprovals} messages={live ? recentMessages(live) : []} boards={boardList} terminalFor={terminalFor} chatOf={hub && api ? chatOf : undefined} sendPrompt={hub && api ? sendPrompt : undefined} chooseOption={hub && api ? chooseOption : undefined} loadDiff={hub && api ? loadDiff : !hub ? demoLoadDiff : undefined} loadHistory={hub && api ? loadHistory : undefined} filesOf={hub && api ? filesOf : !hub ? demoFilesOf : undefined} onOpen={open}
           onResolve={resolve} helperGrants={hub && api ? helperGrants : undefined} revokeGrant={hub && api ? revokeGrant : undefined} notice={notice ? t(notice) : undefined} link={hub ? link : 'live'} onRetry={api ? api.retry : undefined}
           onStart={hub && api && live ? (node) => openStart(node) : (!hub && import.meta.env.DEV ? (node) => openStart(node) : undefined)}
           onNewTerminal={hub && api && live ? (node) => openStart(node, true) : (!hub && import.meta.env.DEV ? (node) => openStart(node, true) : undefined)} onCommand={() => setPalette(true)} onForget={hub && api ? forgetAgent : undefined} onResume={hub && api ? resumeAgent : (!hub && import.meta.env.DEV ? async () => undefined : undefined)} onLock={hub ? lockNow : undefined}
@@ -574,11 +590,13 @@ export function App() {
       {pairing.ui && pairing.ui.cards[0] && !showsHome && <PairRequest key={pairing.ui.cards[0].id} request={pairing.ui.cards[0]} offline={pairing.ui.offline} onAnswer={(a, r) => pairing.ui!.onAnswer(pairing.ui!.cards[0]!, a, r)} />}
       <AttentionLayer items={attention} stale={hub ? link !== 'live' : false} phone={phone} onResolve={resolve} onReview={reviewAttention} />
       {palette && <CommandPalette items={items} onClose={() => setPalette(false)} />}
+      {giving && giveApi && <GiveDialog key={giving.key} task={giving} give={giveApi} onClose={giveAsk.cancel} />}
       {hub && live && waiting[0] && <DeviceRequest key={waiting[0].deviceId ?? ''}
         request={{ id: waiting[0].deviceId ?? '', name: deviceLabel(waiting[0].name, waiting[0].deviceId ?? ''), fingerprint: prints.get(waiting[0].deviceId ?? '') ?? '' }}
         machines={machines(live).filter((m) => trustedOn.includes(m.id)).map((m) => ({ id: m.id, name: m.name }))}
         onApprove={(nodes) => approveDevice(waiting[0]!, nodes)}
         onLater={() => setLater((l) => new Set(l).add(waiting[0]?.deviceId ?? ''))} />}
+    </GiveContext.Provider>
     </ChatActionsContext.Provider>
     </CloseAgentContext.Provider>
     </QuotaProvider>

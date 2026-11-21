@@ -653,7 +653,8 @@ export function recentMessages(v: View, limit = 5): MessageModel[] {
   }));
 }
 
-export interface BoardTaskModel { id: string; title: string; status: 'open' | 'claimed' | 'done'; owner: string; ownerState?: UiState; ownerSkips?: boolean; held?: string[] }
+// `id` is the board's key (`<project>/<task>`); `taskId` is the id the board and the node know.
+export interface BoardTaskModel { id: string; taskId?: string; title: string; status: 'open' | 'claimed' | 'done'; owner: string; ownerState?: UiState; ownerSkips?: boolean; held?: string[] }
 export interface BoardLeaseModel { path: string; holder: string; expiresAtMs: number }
 export interface BoardFolderModel { nodeId: string; machine: string; path: string }
 export interface BoardModel { projectId: string; project: string; folders: BoardFolderModel[]; tasks: BoardTaskModel[]; leases: BoardLeaseModel[] }
@@ -686,7 +687,7 @@ export function boards(v: View): BoardModel[] {
   for (const l of v.leases.values()) { const list = heldBy.get(l.agentId); if (list) list.push(l.path); else heldBy.set(l.agentId, [l.path]); }
   for (const [id, t] of v.tasks) {
     const owner = t.ownerId ? agents.get(t.ownerId) : undefined;
-    board(t.projectId).tasks.push({ id, title: t.title, status: t.done ? 'done' : t.ownerId ? 'claimed' : 'open', owner: t.ownerId ? label(t.ownerId) : '', ownerState: owner?.state, ownerSkips: owner?.skipsPermissions, held: t.ownerId ? heldBy.get(t.ownerId) ?? [] : [] });
+    board(t.projectId).tasks.push({ id, taskId: id.slice(t.projectId.length + 1), title: t.title, status: t.done ? 'done' : t.ownerId ? 'claimed' : 'open', owner: t.ownerId ? label(t.ownerId) : '', ownerState: owner?.state, ownerSkips: owner?.skipsPermissions, held: t.ownerId ? heldBy.get(t.ownerId) ?? [] : [] });
   }
   // A lease belongs to its holder's project.
   for (const l of v.leases.values()) {

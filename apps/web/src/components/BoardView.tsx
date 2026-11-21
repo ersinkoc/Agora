@@ -4,10 +4,13 @@ import { t } from '../i18n';
 import type { BoardModel, BoardTaskModel } from '../net/view';
 import { COLUMN_PAGE, HELD_SHOWN, OWNER_MAX, TITLE_MAX, columnsOf, plain, type ColumnId } from './boardColumns';
 import { EmptyState } from './EmptyState';
+import { GiveButton, useCanGive } from './GiveTask';
+import { giveTaskOf } from '../net/give';
 import { NoAskBadge } from './NoAskBadge';
 import { StateBadge } from './StateBadge';
 
-function Card({ task }: { task: BoardTaskModel }) {
+// `give`: the board this card is on, when its Backlog cards offer "Give to an agent" (ADR-0095 step 2).
+function Card({ task, give }: { task: BoardTaskModel; give?: { projectId: string; project: string } }) {
   const held = task.held ?? [];
   return (
     <li className="grid min-w-0 gap-1 rounded-s border border-line bg-surface-0 p-2.5 text-[0.8125rem]" data-task-id={task.id}>
@@ -23,6 +26,7 @@ function Card({ task }: { task: BoardTaskModel }) {
         {held.slice(0, HELD_SHOWN).map((path) => <code key={path} dir="ltr" className="truncate">{plain(path, 80)}</code>)}
         {held.length > HELD_SHOWN && <span>{t('board-card-more-paths', { count: held.length - HELD_SHOWN })}</span>}
       </span>}
+      {give && task.status === 'open' && <GiveButton task={giveTaskOf(give, task)} />}
     </li>
   );
 }
@@ -30,6 +34,7 @@ function Card({ task }: { task: BoardTaskModel }) {
 export function BoardColumns({ board }: { board: BoardModel }) {
   const [shown, setShown] = useState<Partial<Record<ColumnId, number>>>({});
   const columns = columnsOf(board.tasks, shown);
+  const canGive = useCanGive(board.projectId);
   if (board.tasks.length === 0) return <EmptyState icon="check" title={t('board-view-empty-title')} hint={t('board-view-empty-hint')} />;
   return (
     <div className="grid min-h-0 flex-1 grid-cols-1 gap-3 overflow-auto p-3 md:grid-cols-3">
@@ -39,7 +44,7 @@ export function BoardColumns({ board }: { board: BoardModel }) {
             <span>{t(`board-col-${col.id}`)}</span><span className="text-xs font-normal text-muted">{col.total}</span>
           </h3>
           {col.total === 0 ? <p className="muted m-0 text-xs">{t(`board-col-${col.id}-empty`)}</p> : <ul className="m-0 grid list-none gap-2 p-0">
-            {col.cards.map((task) => <Card key={task.id} task={task} />)}
+            {col.cards.map((task) => <Card key={task.id} task={task} give={canGive && col.id === 'backlog' ? board : undefined} />)}
           </ul>}
           {col.total > col.cards.length && <button type="button" className="button" onClick={() => setShown({ ...shown, [col.id]: col.cards.length + COLUMN_PAGE })}>
             {t('board-show-more', { count: col.cards.length, total: col.total })}
@@ -50,7 +55,8 @@ export function BoardColumns({ board }: { board: BoardModel }) {
   );
 }
 
-// ADR-0095 step 1: a project's tasks in three columns, a deep view opened on demand. Read-only: nothing here changes a task.
+// ADR-0095 step 1: a project's tasks in three columns, a deep view opened on demand. Step 2: a Backlog card offers "Give to an agent"
+// (the dialog, net/give.ts and GiveTask.tsx, sends it); nothing else here changes a task.
 export function BoardView({ board, onClose }: { board: BoardModel; onClose: () => void }) {
   return (
     <Dialog.Root open onOpenChange={(o) => { if (!o) onClose(); }}>
