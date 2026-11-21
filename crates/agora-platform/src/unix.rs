@@ -1108,9 +1108,16 @@ mod tests {
     fn a_log_opened_owner_created_is_the_users_only_and_appends() {
         use std::io::Write;
         use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("agora-owner-created-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("dir");
+        // A fresh folder this test made itself (create_dir fails on one that exists), owner-only, in the shared temp folder.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let dir = std::env::temp_dir().join(format!(
+            "agora-owner-created-{}-{nanos}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&dir).expect("a fresh folder");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).expect("private");
         let log = dir.join("x.log");
         for line in ["a\n", "b\n"] {
             let mut f = crate::open_append_owner_created(&log).expect("open");
