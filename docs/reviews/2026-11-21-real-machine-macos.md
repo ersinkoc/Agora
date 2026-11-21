@@ -18,7 +18,7 @@ says which part ran: the CLI, the mesh (S5) or the node's files. The window part
 - S3 gave the second machine `rm-two` on the same Mac.
 - Clean-up: `agora down --agents` with the run's `AGORA_HOME`, then `rm -rf -- "$RM"`. No process of the run was left, and the Mac's own node stayed on 0.3.33 and connected.
 
-**Issues opened:** #912 (mesh lost after a node restart), #914 (`agent start` of a missing program says `internal`), #915 (a message to an offline machine is silently lost).
+**Issues opened:** #906 (mesh lost after a node restart; my #912 closed as its duplicate), #903 (`agent start` of a missing program says `internal`; my #914 closed as its duplicate), #915 (a message to an offline machine is silently lost).
 
 ## Results
 
@@ -66,7 +66,7 @@ says which part ran: the CLI, the mesh (S5) or the node's files. The window part
 - **RM-15 skip (window).** The CLI has no flag for a launch option.
 - **RM-16 partial (CLI).** `agora agent start rm-probe --setting model=m1 --setting effort=high`: the probe's arguments end in `--fake-model m1 --fake-effort high`, and `cwd` is `$RM/proj`. The start window's text and the helper card were not checked.
 - **RM-18 partial pass.** `agora doctor` names each kind with its program found, or `cannot find … in its PATH`. The install from a signed list is a human step and was not run.
-- **RM-19 fail (#914).**
+- **RM-19 fail (#903).**
   - `agora agent kinds` → `missing`.
   - `doctor` says why in words.
   - But `agora agent start rm-missing` → `Error internal: Something went wrong. Reference: unassigned.`, and `node.log` has `agent start failed: "No such file or directory (os error 2)"`.
@@ -89,7 +89,7 @@ says which part ran: the CLI, the mesh (S5) or the node's files. The window part
   - `task_claim` of `t-1`: one side ok, the other `task.not_open`.
   - `lease_acquire README.md`: one lease, the other `lease.held` with `holder_agent_id` and `expires_at`.
   - A task created while `rm-two` was stopped was seen with the first one after it returned.
-- **RM-30 fail (#912).** A hand-run bridge on a Shell's mesh socket stayed alive across `agora down` / `agora`, but no call got an answer afterwards, not even `mesh.unavailable`. A new `agora mesh stdio` said `No node is listening at …/m/agent-15.sock`. An agent kept by the holder loses its mesh at every node restart.
+- **RM-30 fail (#906).** A hand-run bridge on a Shell's mesh socket stayed alive across `agora down` / `agora`, but no call got an answer afterwards, not even `mesh.unavailable`. A new `agora mesh stdio` said `No node is listening at …/m/agent-15.sock`. An agent kept by the holder loses its mesh at every node restart.
 - **RM-31 pass; step fixed.**
   - A separate hub on `127.0.0.1:17450 --metrics`: the token read `/api/metrics` (200, Prometheus text) and got 401 on `/api/audit`.
   - After `revoke`, `/api/metrics` answered 401.
