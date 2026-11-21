@@ -10,7 +10,9 @@ import { grantFor } from '../net/grant';
 import { REFUSAL_KEYS, refusalKey } from '../net/refusal';
 import type { BoardModel, BoardTaskModel } from '../net/view';
 import { BoardColumns } from './BoardView';
-import { GiveContext, GiveDialog, type GiveApi } from './GiveTask';
+import { StartAgent } from './StartAgent';
+import { BoardView } from './BoardView';
+import { APPEAR_WAIT_MS, GiveContext, GiveDialog, type GiveApi, type StartForTask } from './GiveTask';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -367,5 +369,301 @@ describe('cross-review fixes', () => {
       const src = readFileSync(`../../locales/${lang}/web.ftl`, 'utf8');
       for (const k of ['give-grant-declined', 'give-target-gone']) expect(src, `${lang} ${k}`).toMatch(new RegExp(`^${k} = `, 'm'));
     }
+  });
+});
+
+// ADR-0095 step 3: "Start a new agent for this task" opens the ordinary start window for the task's project; once it started, the same
+// confirmation follows for the new agent, and only then is the task sent.
+describe('start a new agent for the task', () => {
+  const projects = [
+    { node: 'n1', projectId: 'p', label: 'laptop · shop', path: '/w/shop' },
+    { node: 'n1', projectId: 'q', label: 'laptop · other', path: '/w/other' },
+  ];
+  const onlineMachines = [
+    { id: 'n1', name: 'laptop', os: 'linux', online: true, agentsRunning: 0, lastSeenMs: 0 },
+    { id: 'n2', name: 'server', os: 'linux', online: true, agentsRunning: 0, lastSeenMs: 0 },
+  ];
+  const starter = (launch: StartForTask['launch']): StartForTask => ({
+    projects, machines: onlineMachines,
+    loadKinds: async () => [{ kind: 'claude', name: 'Claude Code', installed: true }, { kind: 'shell', name: 'Shell', installed: true }],
+    inspect: async (_node, path) => ({ path, projectId: path === '/w/shop' ? 'p' : 'q', gitRoot: path, branch: 'main', portable: false }),
+    launch,
+  });
+  const withStart = (agents: AgentTileModel[], launch: StartForTask['launch'], send: GiveApi['send'] = async () => ({ ok: true, queued: false })): GiveApi => ({ ...api(agents, send), start: starter(launch) });
+  const startWindow = () => document.querySelector('[role=dialog][aria-label="Start an agent"]') as HTMLElement | null;
+  const typeInto = (input: HTMLInputElement, value: string) => act(() => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, value);
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  /** Opens the start window from the picker and chooses the prefilled folder; returns the window. */
+  const openAndChoose = async () => {
+    click(dialog().querySelector('[data-give-start]'));
+    await flush();
+    const win = startWindow();
+    expect(win).not.toBeNull();
+    click(button('Use this folder', win!));
+    await flush();
+    return startWindow()!;
+  };
+
+  it('is the main action when no agent of the project can take the task, and a quieter entry under the list otherwise', () => {
+    render(<GiveDialog task={theTask} give={withStart([], vi.fn())} onClose={() => {}} />);
+    expect(dialog().textContent).toContain('No agent of shop is running on a connected machine that can take tasks. Start one for this task.');
+    const main = dialog().querySelector('[data-give-start]') as HTMLButtonElement;
+    expect(main.textContent).toBe('Start a new agent for this task');
+    expect(main.className).toContain('button--primary');
+    expect(main.className).toContain('min-h-11');
+    act(() => root.unmount());
+    root = createRoot(host);
+    render(<GiveDialog task={theTask} give={withStart([agent('n1/a-1')], vi.fn())} onClose={() => {}} />);
+    const entry = dialog().querySelector('[data-give-start]') as HTMLButtonElement;
+    expect(entry.textContent).toBe('Start a new agent for this task');
+    expect(entry.className).not.toContain('button--primary');
+    expect(entry.className).toContain('min-h-11');
+    // Under the list of agents, not instead of it.
+    expect(dialog().querySelector('[data-agent-id]')).not.toBeNull();
+    expect(entry.compareDocumentPosition(dialog().querySelector('ul')!) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
+  });
+
+  it('is not offered by a window that cannot start agents', () => {
+    render(<GiveDialog task={theTask} give={api([])} onClose={() => {}} />);
+    expect(dialog().querySelector('[data-give-start]')).toBeNull();
+    expect(dialog().textContent).toContain('Start one first.');
+  });
+
+  it('puts "Give to an agent" on Backlog cards and in the palette when no agent runs but one can be started', () => {
+    render(<GiveContext.Provider value={withStart([], vi.fn())}><BoardColumns board={board([task('1', 'open'), task('2', 'claimed')])} /></GiveContext.Provider>);
+    expect([...host.querySelectorAll('button')].filter((b) => b.textContent === 'Give to an agent')).toHaveLength(1);
+    expect(givableTasks([board([task('1', 'open'), task('2', 'done')])], [], undefined, 300, (id) => id === 'p').map((x) => x.key)).toEqual(['p/1']);
+    expect(givableTasks([board([task('1', 'open')])], [], undefined, 300, () => false)).toEqual([]);
+    expect(givableTasks([board([task('1', 'open')])], [])).toEqual([]);
+  });
+
+  it('opens the ordinary start window for the task\'s project: its folders only, agents only, the task named as text', async () => {
+    const evil = { ...theTask, title: '<b>bold</b> ‮evil' };
+    render(<GiveDialog task={evil} give={withStart([], vi.fn())} onClose={() => {}} />);
+    click(dialog().querySelector('[data-give-start]'));
+    await flush();
+    const win = startWindow()!;
+    expect(dialog()).toBeNull(); // the picker gave way to the start window
+    const named = win.querySelector('[data-start-for-task]')!;
+    expect(named.textContent).toBe('For the task “<b>bold</b> evil” of shop');
+    expect(named.querySelector('b')).toBeNull();
+    // Prefilled as an ordinary start prefills: the machine with the project's folder, and that folder; the person still chooses it.
+    expect((win.querySelector('input:not([type])') as HTMLInputElement).value).toBe('/w/shop');
+    expect(win.textContent).not.toContain('/w/other');
+    expect(button('Start', win)).toBeUndefined();
+    click(button('Use this folder', win));
+    await flush();
+    const radios = [...startWindow()!.querySelectorAll('[role=radiogroup] [role=radio]')].map((r) => r.textContent);
+    expect(radios).toContain('Claude Code');
+    expect(radios).not.toContain('Shell'); // a plain terminal cannot take a task
+  });
+
+  it('confirms for the new agent once it started and shows up, then sends the task to it', async () => {
+    const launch = vi.fn<StartForTask['launch']>(async () => ({ agentId: 'agent-9' }));
+    const send = vi.fn<GiveApi['send']>(async () => ({ ok: true, queued: true }));
+    render(<GiveDialog task={theTask} give={withStart([], launch, send)} onClose={() => {}} />);
+    const win = await openAndChoose();
+    click(button('Start', win));
+    await flush();
+    expect(launch).toHaveBeenCalledTimes(1);
+    expect(launch.mock.calls[0]!.slice(0, 5)).toEqual(['n1', expect.objectContaining({ path: '/w/shop', projectId: 'p' }), 'claude', false, false]);
+    // Started, not in the live view yet: it waits, and nothing is sent.
+    expect(startWindow()).toBeNull();
+    expect(dialog().querySelector('[data-give-step="waiting"]')).not.toBeNull();
+    expect(send).not.toHaveBeenCalled();
+    // It shows up (still starting): the same confirmation as for any agent, nothing sent before "Give the task".
+    const fresh = agent('n1/agent-9', { state: 'starting' as AgentTileModel['state'], skipsPermissions: true });
+    render(<GiveDialog task={theTask} give={withStart([fresh], launch, send)} onClose={() => {}} />);
+    expect(dialog().querySelector('[data-give-step="confirm"]')).not.toBeNull();
+    const text = dialog().textContent ?? '';
+    for (const part of ['Give this task to claude · agent-9?', 'Write the release notes', 'laptop', 'shop', 'claude', 'acts without asking']) expect(text).toContain(part);
+    expect(document.activeElement?.textContent).toBe('Back');
+    expect(send).not.toHaveBeenCalled();
+    click(button('Give the task', dialog()));
+    await flush();
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send.mock.calls[0]![0].id).toBe('n1/agent-9');
+    expect(giveRequest(send.mock.calls[0]![0], send.mock.calls[0]![1])).toEqual({ node: 'n1', body: { taskDispatch: { projectId: 'p', taskId: 't-1', agentId: 'agent-9', byUser: '' } } });
+    expect(dialog().textContent).toContain('Sent to claude · agent-9. It waits until the agent is ready and its current turn ends.');
+  });
+
+  it('returns to the picker with the start\'s refusal when it failed, and sends nothing', async () => {
+    const launch = vi.fn<StartForTask['launch']>(async () => ({ failure: 'start-limit' }));
+    const send = vi.fn<GiveApi['send']>();
+    render(<GiveDialog task={theTask} give={withStart([agent('n1/a-1')], launch, send)} onClose={() => {}} />);
+    const win = await openAndChoose();
+    click(button('Start', win));
+    await flush();
+    // The ordinary start window keeps the refusal, so the person can change something and try again.
+    expect(startWindow()!.querySelector('[role=alert]')?.textContent).toBe(t('start-limit'));
+    click(button('Cancel', startWindow()!));
+    expect(startWindow()).toBeNull();
+    expect(dialog().querySelector('[data-give-refusal]')?.textContent).toBe(t('start-limit'));
+    expect(dialog().querySelector('[data-agent-id]')).not.toBeNull();
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it('returns to the picker without a refusal when the start window is cancelled, and sends nothing', async () => {
+    const launch = vi.fn<StartForTask['launch']>();
+    const send = vi.fn<GiveApi['send']>();
+    render(<GiveDialog task={theTask} give={withStart([], launch, send)} onClose={() => {}} />);
+    click(dialog().querySelector('[data-give-start]'));
+    await flush();
+    click(button('Cancel', startWindow()!));
+    expect(dialog().querySelector('[data-give-start]')).not.toBeNull();
+    expect(dialog().querySelector('[role=alert]')).toBeNull();
+    expect(launch).not.toHaveBeenCalled();
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it('keeps the task\'s project: no "shared project identity" in the start for a task, and the folder is inspected without making one', async () => {
+    const inspect = vi.fn<StartForTask['inspect']>(async (_node, path) => ({ path, projectId: 'p', gitRoot: path, branch: 'main', portable: false }));
+    const give = withStart([], vi.fn());
+    give.start = { ...give.start!, inspect };
+    render(<GiveDialog task={theTask} give={give} onClose={() => {}} />);
+    click(dialog().querySelector('[data-give-start]'));
+    await flush();
+    expect(startWindow()!.textContent).not.toContain(t('start-portable'));
+    expect(startWindow()!.querySelector('input[type=checkbox]')).toBeNull();
+    click(button('Use this folder', startWindow()!));
+    await flush();
+    expect(inspect).toHaveBeenCalledWith('n1', '/w/shop', false);
+    // The ordinary start keeps it.
+    act(() => root.unmount());
+    root = createRoot(host);
+    const s = give.start!;
+    render(<StartAgent projects={s.projects} machines={s.machines} loadKinds={s.loadKinds} inspect={inspect} onStart={async () => undefined} onClose={() => {}} />);
+    await flush();
+    expect(startWindow()!.textContent).toContain(t('start-portable'));
+  });
+
+  it('does not start in a folder of another project', async () => {
+    const launch = vi.fn<StartForTask['launch']>();
+    render(<GiveDialog task={theTask} give={withStart([], launch)} onClose={() => {}} />);
+    click(dialog().querySelector('[data-give-start]'));
+    await flush();
+    typeInto(startWindow()!.querySelector('input:not([type])') as HTMLInputElement, '/w/other');
+    click(button('Use this folder', startWindow()!));
+    await flush();
+    const win = startWindow()!;
+    expect(win.querySelector('[role=alert]')?.textContent).toBe('This folder is not part of shop. The task can only be given to an agent working in its project: choose one of its folders.');
+    expect(button('Start', win)?.disabled).toBe(true);
+    expect(launch).not.toHaveBeenCalled();
+  });
+
+  it('says so when a machine started the agent without naming it, and sends nothing', async () => {
+    const send = vi.fn<GiveApi['send']>();
+    render(<GiveDialog task={theTask} give={withStart([], async () => ({ agentId: '' }), send)} onClose={() => {}} />);
+    click(button('Start', await openAndChoose()));
+    await flush();
+    expect(dialog().querySelector('[data-give-refusal]')?.textContent).toBe(t('give-start-unnamed'));
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  for (const [what, change] of [['already stopped', { closed: true }], ['showed up in another project', { projectId: 'q' }]] as [string, Partial<AgentTileModel>][]) {
+    it(`does not send to a new agent that ${what}`, async () => {
+      const send = vi.fn<GiveApi['send']>();
+      const launch: StartForTask['launch'] = async () => ({ agentId: 'agent-9' });
+      render(<GiveDialog task={theTask} give={withStart([], launch, send)} onClose={() => {}} />);
+      click(button('Start', await openAndChoose()));
+      await flush();
+      render(<GiveDialog task={theTask} give={withStart([agent('n1/agent-9', change)], launch, send)} onClose={() => {}} />);
+      expect(dialog().textContent).toContain(t('give-target-gone'));
+      expect(button('Give the task', dialog())).toBeUndefined();
+      expect(send).not.toHaveBeenCalled();
+    });
+  }
+
+  it('offers the start only where the started agent could take the task: not on a machine heard to lack tasks', async () => {
+    const cards = () => [...host.querySelectorAll('button')].filter((b) => b.textContent === 'Give to an agent').length;
+    render(<GiveContext.Provider value={withStart([], vi.fn())}><BoardColumns board={board([task('1', 'open')])} /></GiveContext.Provider>);
+    expect(cards()).toBe(1);
+    // The project's only folder is on n1, and n1 was heard not to take tasks: no start, no card action, no palette entry.
+    act(() => noteRefusal('n1', 'protocol.capability_missing', { capability: 'task.dispatch' }));
+    render(<GiveContext.Provider value={withStart([], vi.fn())}><BoardColumns board={board([task('1', 'open')])} /></GiveContext.Provider>);
+    expect(cards()).toBe(0);
+    act(() => root.unmount());
+    root = createRoot(host);
+    render(<GiveDialog task={theTask} give={withStart([], vi.fn())} onClose={() => {}} />);
+    expect(dialog().querySelector('[data-give-start]')).toBeNull();
+    expect(dialog().textContent).toContain(t('give-none-plain', { project: 'shop' }));
+    // A folder of the project on n2 as well: the start is offered, and the start window does not offer n1.
+    act(() => root.unmount());
+    root = createRoot(host);
+    const both = withStart([], vi.fn());
+    both.start = { ...both.start!, projects: [...projects, { node: 'n2', projectId: 'p', label: 'server · shop', path: '/s/shop' }] };
+    render(<GiveDialog task={theTask} give={both} onClose={() => {}} />);
+    click(dialog().querySelector('[data-give-start]'));
+    await flush();
+    const machinesShown = [...startWindow()!.querySelectorAll('[role=radiogroup][aria-label="Machine"] [role=radio]')].map((r) => r.textContent);
+    expect(machinesShown).toEqual(['server']);
+    expect((startWindow()!.querySelector('input:not([type])') as HTMLInputElement).value).toBe('/s/shop');
+  });
+
+  it('says truthfully that a new agent\'s machine cannot take tasks', async () => {
+    const send = vi.fn<GiveApi['send']>();
+    const launch: StartForTask['launch'] = async () => ({ agentId: 'agent-9' });
+    render(<GiveDialog task={theTask} give={withStart([], launch, send)} onClose={() => {}} />);
+    click(button('Start', await openAndChoose()));
+    await flush();
+    act(() => noteRefusal('n1', 'protocol.invalid_message', { field: 'command' }));
+    render(<GiveDialog task={theTask} give={withStart([agent('n1/agent-9')], launch, send)} onClose={() => {}} />);
+    expect(dialog().textContent).toContain(t('give-machine-unsupported'));
+    expect(dialog().textContent).not.toContain(t('give-target-gone'));
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it('says when the new agent has not appeared after a while, and still follows it when it does', async () => {
+    const send = vi.fn<GiveApi['send']>();
+    const launch: StartForTask['launch'] = async () => ({ agentId: 'agent-9' });
+    render(<GiveDialog task={theTask} give={withStart([], launch, send)} onClose={() => {}} />);
+    const win = await openAndChoose();
+    // Only the wait's own timer is faked (from before the waiting step starts it); promises run as usual.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      click(button('Start', win));
+      await flush();
+      expect(dialog().textContent).toContain(t('give-start-waiting'));
+      act(() => { vi.advanceTimersByTime(APPEAR_WAIT_MS); });
+      expect(dialog().textContent).toContain(t('give-start-late'));
+      expect(button('Back', dialog())).toBeDefined();
+    } finally { vi.useRealTimers(); }
+    // Another agent with the same local id on another machine is not it: the binding is by machine and id.
+    render(<GiveDialog task={theTask} give={withStart([agent('n2/agent-9')], launch, send)} onClose={() => {}} />);
+    expect(dialog().querySelector('[data-give-step="waiting"]')).not.toBeNull();
+    render(<GiveDialog task={theTask} give={withStart([agent('n2/agent-9'), agent('n1/agent-9')], launch, send)} onClose={() => {}} />);
+    expect(dialog().textContent).toContain('Give this task to claude · agent-9?');
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  for (const lang of ['en', 'tr'] as const) {
+    it(`has every new sentence in ${lang}, in the UI vocabulary`, () => {
+      setLanguage(lang);
+      const src = readFileSync(`../../locales/${lang}/web.ftl`, 'utf8');
+      for (const key of ['give-start-new', 'give-none-start', 'give-none-plain', 'give-start-waiting', 'give-start-late', 'give-start-unnamed', 'give-machine-unsupported', 'give-queued-new', 'start-for-task', 'start-for-task-other-project']) {
+        expect(src).toMatch(new RegExp(`^${key} = `, 'm'));
+        expect(t(key, { project: 'shop', title: 'x', agent: 'a' })).not.toMatch(/claim|lease|mesh|dispatch|sahiplen/i);
+      }
+    });
+  }
+});
+
+// Escape belongs to the topmost dialog: the board never closes under a dialog opened over it (the "Give to an agent" dialog listens for
+// Escape a render after it appears, and an Escape in that moment closed the board instead).
+describe('the board under another dialog', () => {
+  it('ignores Escape while another dialog is open above it, and closes on Escape otherwise', () => {
+    const onClose = vi.fn();
+    render(<BoardView board={board([task('1', 'open')])} onClose={onClose} />);
+    const above = document.createElement('div');
+    above.setAttribute('role', 'dialog');
+    above.setAttribute('data-state', 'open');
+    document.body.append(above);
+    act(() => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); });
+    expect(onClose).not.toHaveBeenCalled();
+    above.remove();
+    act(() => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); });
+    expect(onClose).toHaveBeenCalledTimes(1);
   });
 });

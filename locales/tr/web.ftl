@@ -292,6 +292,17 @@ give-refused-offline = O makine şu anda bağlı değil.
 give-refused-forbidden = Bu ajana görev verme izniniz yok.
 give-target-gone = O ajan durdu, kapatıldı ya da bu projeden ayrıldı. Hiçbir şey gönderilmedi; başka bir ajan seçin.
 give-grant-declined = Makinenin izni verilmedi, bu yüzden hiçbir şey gönderilmedi. Yeniden deneyebilirsiniz.
+# ADR-0095 adım 3: Bir pano görevi için yeni bir ajan başlatmak, sonra görevi ona vermek.
+give-start-new = Bu görev için yeni bir ajan başlat
+give-none-start = { $project } projesinde, görev alabilen bağlı bir makinede çalışan ajan yok. Bu görev için bir ajan başlatın.
+give-start-waiting = Ajan başladı. Burada görünür görünmez sonraki adım açılır.
+give-start-unnamed = Ajan başladı, ancak makinesi hangisi olduğunu bildirmedi. Listede göründüğünde onu seçin.
+give-queued-new = { $agent } ajanına gönderildi. Ajan hazır olana ve sürmekte olan turu bitene kadar bekler.
+start-for-task = { $project } projesindeki “{ $title }” görevi için
+start-for-task-other-project = Bu klasör { $project } projesine ait değil. Görev yalnızca kendi projesinde çalışan bir ajana verilebilir: projenin klasörlerinden birini seçin.
+give-none-plain = { $project } projesinde, görev alabilen bağlı bir makinede çalışan ajan yok.
+give-start-late = Ajan henüz görünmedi. Geri dönün ve göründüğünde onu listeden seçin.
+give-machine-unsupported = O ajanın makinesi henüz görev alamıyor; güncellenmesi gerekebilir. Hiçbir şey gönderilmedi.
 messages-title = Son mesajlar
 message-cross = makineler arası
 console-agents = Ajanlar

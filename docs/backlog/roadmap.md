@@ -37,8 +37,8 @@ new features.
     decode it, `protocol.invalid_message` (`command`); forgotten when that machine goes offline and on every reconnect
   - [x] tests (unit, and a browser e2e with `agora-fake-agent`, run against a build with #883), screenshots in both themes, 44 px targets, keyboard path
 - [ ] **M0.4 Start a new agent for a task** (ADR-0095 step 3)
-  - [ ] "Start a new one" in the picker opens the ordinary start (kind, machine, folder), then dispatches to the new agent
-  - [ ] under a parent: the ordinary ADR-0057 helper start (signed approval as an agent-made request)
+  - [x] "Start a new one" in the picker opens the ordinary start (kind, machine, folder), then dispatches to the new agent
+  - [x] under a parent: the ordinary ADR-0057 helper start (signed approval as an agent-made request): the window has no person-made helper start, so it stays the agent's ADR-0057 path and is not offered in the picker
   - [ ] the TUI: dispatch from its board list (same command)
 - [ ] **M0.5 Release 0.3.33**
   - [ ] release notes; tag; the release workflow; update the hub machine (blackview), then ask mac and win to update and report

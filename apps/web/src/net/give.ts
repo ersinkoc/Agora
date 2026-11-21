@@ -63,6 +63,22 @@ export function canTake(a: AgentTileModel, projectId: string, online?: ReadonlyS
     && (!online || online.has(a.machineId)) && offersGive(a.machineId);
 }
 
+/** Whether a new agent for a task of `projectId` can be started here (ADR-0095 step 3): the project has a folder on a connected machine
+ *  that was not heard to lack `task.dispatch`, so the agent started there could be given the task. */
+export function canStartFor(projects: readonly { node: string; projectId: string }[], machines: readonly { id: string; online: boolean }[], projectId: string): boolean {
+  return !!projectId && projects.some((p) => p.projectId === projectId && offersGive(p.node) && machines.some((m) => m.id === p.node && m.online));
+}
+
+/** Why an agent cannot be given a task of `projectId` now, as the locale key the dialog shows: its machine is not connected, or was heard
+ *  not to take tasks, or the agent stopped, was closed or interrupted, or left the project (or is gone from the list). */
+export function cannotTakeKey(a: AgentTileModel | undefined, online?: ReadonlySet<string>): string {
+  if (a?.machineId && !a.closed && !a.interrupted) {
+    if (online && !online.has(a.machineId)) return 'give-refused-offline';
+    if (!offersGive(a.machineId)) return 'give-machine-unsupported';
+  }
+  return 'give-target-gone';
+}
+
 /** Whether the agent acts without asking now: started so (a launch option, ADR-0059), or its current mode or setting is one that skips
  *  approvals (ADR-0058, ADR-0090 Amendment A). */
 export const actsFreelyNow = (a: AgentTileModel): boolean => !!a.skipsPermissions || actsFreely(a.session);
@@ -145,16 +161,18 @@ export async function resendGive(command: Command, node: string, body: CommandBo
   else resolve?.(result);
 }
 
-/** The board's tasks a person can give to an agent now (Backlog, with at least one agent to take it), for the command palette. */
+/** The board's tasks a person can give to an agent now, for the command palette: Backlog, with at least one agent to take it, or any
+ *  Backlog task of a project the window can start a new agent for (`canStart`, ADR-0095 step 3). */
 export function givableTasks(
   boards: readonly { projectId: string; project: string; tasks: readonly { id: string; taskId?: string; title: string; status: string }[] }[],
   agents: readonly AgentTileModel[],
   online?: ReadonlySet<string>,
   max = 300,
+  canStart?: (projectId: string) => boolean,
 ): GiveTask[] {
   const out: GiveTask[] = [];
   for (const b of boards) {
-    if (giveCandidates(agents, b.projectId, online).length === 0) continue;
+    if (!b.projectId || (!canStart?.(b.projectId) && giveCandidates(agents, b.projectId, online).length === 0)) continue;
     for (const t of b.tasks) {
       if (t.status !== 'open') continue;
       out.push(giveTaskOf(b, t));
