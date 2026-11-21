@@ -1227,3 +1227,177 @@ fn a_task_given_to_an_agent_arrives_as_data_and_refusals_move_nothing() {
     drop(node);
     let _ = std::fs::remove_dir_all(&home);
 }
+
+/// A terminal kind that plays one frame for two minutes. `frame` is the frame's text as a TOML basic-string body (so `\u001b` is ESC),
+/// `rules` the manifest's `[[rules]]`, if any.
+fn terminal_kind(home: &Path, kind: &str, frame: &str, rules: &str) {
+    let script = home.join(format!("{kind}.script.toml"));
+    std::fs::write(
+        &script,
+        format!("[[frame]]\ntext = \"{frame}\"\ndelay_ms = 120000\n"),
+    )
+    .unwrap();
+    std::fs::write(
+        home.join(format!("manifests/{kind}.toml")),
+        format!(
+            "kind = \"{kind}\"\ndisplay_name = \"T\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [{:?}, \"--script\", {:?}]\n{rules}",
+            fake_agent(),
+            script.to_string_lossy()
+        ),
+    )
+    .unwrap();
+}
+
+/// Starts `kind` and waits until `agent list` shows it with `state` (any state when empty).
+fn started_terminal(home: &Path, kind: &str, state: &str) -> String {
+    let (code, started) = agora(home, &["agent", "start", kind]);
+    assert_eq!(code, 0, "{started}");
+    let id = started
+        .split_whitespace()
+        .find(|w| w.starts_with("agent-"))
+        .expect("an agent id")
+        .trim_matches(|c: char| !c.is_alphanumeric() && c != '-')
+        .to_string();
+    let end = Instant::now() + Duration::from_secs(30);
+    loop {
+        let (_, out) = agora(home, &["agent", "list"]);
+        if out.lines().any(|l| l.contains(&id) && l.contains(state)) {
+            return id;
+        }
+        assert!(Instant::now() < end, "{id} never showed {state}: {out}");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// `(status, owner)` of `task` on the board, as `agent` sees it.
+fn task_state(home: &Path, agent: &str, task: &str) -> (String, Option<String>) {
+    let list = answer(home, agent, "mcp task_list {}", |t| t.contains("task_id"));
+    let tasks: serde_json::Value = serde_json::from_str(&list).unwrap();
+    let t = tasks
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["task_id"] == task)
+        .unwrap()
+        .clone();
+    (
+        t["status"].as_str().unwrap().to_string(),
+        t["owner"].as_str().map(str::to_string),
+    )
+}
+
+/// Waits until `task` is open again (its dispatch gave it back).
+fn wait_open(home: &Path, agent: &str, task: &str) {
+    let end = Instant::now() + Duration::from_secs(20);
+    while task_state(home, agent, task).0 != "open" {
+        assert!(Instant::now() < end, "{task} was not given back");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// ADR-0095 on terminal agents and a structured agent's queue, through a real node: a program without bracketed paste is refused
+/// before anything is claimed; a busy agent gets one prompt held (a second is refused, nothing claimed for it) and stopping it gives the
+/// held task back; a kind without detection rules that takes a paste gets it at once; a prompt queued behind a structured agent's turn
+/// that is dropped gives its task back.
+#[test]
+fn terminal_dispatches_need_a_paste_are_held_while_busy_and_lost_prompts_give_the_task_back() {
+    let Some((home, node)) = node_with_acp("dispatch-term") else {
+        return;
+    };
+    terminal_kind(&home, "term-plain", "ready", "");
+    terminal_kind(
+        &home,
+        "term-busy",
+        "\\u001b[?2004hBUSY",
+        "[[rules]]\nid = \"busy\"\nstate = \"working\"\npriority = 800\nregion = \"bottom_non_empty_lines(12)\"\ncontains = \"BUSY\"\n",
+    );
+    terminal_kind(&home, "term-paste", "\\u001b[?2004hready", "");
+    let author = started_agent(&home);
+    let task = |title: &str| {
+        created(&answer(
+            &home,
+            &author,
+            &format!(r#"mcp task_create {{"title":"{title}"}}"#),
+            |t| t.contains("task_id"),
+        ))
+    };
+    let (t1, t2, t3) = (task("one"), task("two"), task("three"));
+    let mut c = Client::connect(&home.join("node.sock")).unwrap();
+    let project = match c
+        .call(Cmd::ProjectList(v1::ProjectList {}))
+        .unwrap()
+        .unwrap()
+        .result
+    {
+        Some(v1::command_ok::Result::ProjectList(p)) => p.projects[0].project_id.clone(),
+        other => panic!("{other:?}"),
+    };
+    let dispatch = |c: &mut Client, agent: &str, task: &str| {
+        c.call(Cmd::TaskDispatch(v1::TaskDispatch {
+            project_id: project.clone(),
+            task_id: task.into(),
+            agent_id: agent.into(),
+            by_user: String::new(),
+        }))
+        .unwrap()
+    };
+    let result = |r: Result<v1::CommandOk, v1::ErrorInfo>| match r.expect("dispatched").result {
+        Some(v1::command_ok::Result::TaskDispatch(r)) => r,
+        other => panic!("{other:?}"),
+    };
+
+    // No bracketed paste: refused, nothing claimed.
+    let plain = started_terminal(&home, "term-plain", "");
+    let e = dispatch(&mut c, &plain, &t1).unwrap_err();
+    assert_eq!(e.code, "protocol.capability_missing", "{e:?}");
+    assert_eq!(task_state(&home, &author, &t1).0, "open");
+
+    // Busy: held (one), claimed for it; a second is refused and claims nothing; a stop gives the held task back.
+    let busy = started_terminal(&home, "term-busy", "working");
+    let held = result(dispatch(&mut c, &busy, &t1));
+    assert!(held.queued && held.queue_len == 1, "{held:?}");
+    assert_eq!(
+        task_state(&home, &author, &t1),
+        ("claimed".to_string(), Some(busy.clone()))
+    );
+    let e = dispatch(&mut c, &busy, &t2).unwrap_err();
+    assert_eq!(e.code, "agent.queue_full", "{e:?}");
+    assert_eq!(task_state(&home, &author, &t2).0, "open");
+    let (code, out) = agora(&home, &["agent", "stop", &busy]);
+    assert_eq!(code, 0, "{out}");
+    wait_open(&home, &author, &t1);
+
+    // No detection rules and a paste: pasted at once (retried while the program's first frame is still on its way).
+    let paste = started_terminal(&home, "term-paste", "");
+    let end = Instant::now() + Duration::from_secs(15);
+    let pasted = loop {
+        match dispatch(&mut c, &paste, &t2) {
+            Err(e) if e.code == "protocol.capability_missing" && Instant::now() < end => {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            r => break result(r),
+        }
+    };
+    assert!(!pasted.queued, "{pasted:?}");
+    assert_eq!(
+        task_state(&home, &author, &t2),
+        ("claimed".to_string(), Some(paste.clone()))
+    );
+
+    // A structured agent in a turn queues the prompt; dropping the queue gives the task back.
+    let worker = started_agent(&home);
+    let (code, out) = agora(&home, &["agent", "prompt", &worker, "slow"]);
+    assert_eq!(code, 0, "{out}");
+    let queued = result(dispatch(&mut c, &worker, &t3));
+    assert!(queued.queued, "{queued:?}");
+    assert_eq!(task_state(&home, &author, &t3).0, "claimed");
+    c.call(Cmd::AgentCancelTurn(v1::AgentCancelTurn {
+        agent_id: worker.clone(),
+        drop_queue: true,
+    }))
+    .unwrap()
+    .expect("cancelled");
+    wait_open(&home, &author, &t3);
+    drop(node);
+    let _ = std::fs::remove_dir_all(&home);
+}

@@ -321,7 +321,7 @@ fn task_dispatch(ctx: &ControlContext, d: &v1::TaskDispatch) -> Result<v1::Comma
         return Err(unknown());
     };
     let id = AgentId::new(d.agent_id.clone());
-    let (view, skips, paste) = {
+    let (terminal, skips, paste) = {
         let sup = ctx.sup();
         let view = sup
             .list()
@@ -330,26 +330,23 @@ fn task_dispatch(ctx: &ControlContext, d: &v1::TaskDispatch) -> Result<v1::Comma
             .ok_or_else(unknown)?;
         let paste = sup
             .terminal(&id)
-            .map(|h| h.snapshot().modes.bracketed_paste);
-        (view, sup.skips_permissions_now(&id), paste)
+            .map(crate::terminal::TerminalHandle::bracketed_paste);
+        (view.terminal, sup.skips_permissions_now(&id), paste)
     };
     let dispatches = mesh.dispatches();
-    let now = Instant::now();
-    // A terminal agent: its program must take a paste (its lines then arrive together, never as several submits), and its slot is
-    // decided, and a hold reserved, in one step before anything is claimed.
-    let slot = if view.terminal {
+    // A terminal agent: its program must take a paste (its lines then arrive together, never as several submits), and its one slot is
+    // reserved before anything is claimed.
+    if terminal {
         match paste {
             None => return Err(gone()),
             Some(false) => return Err(capability_missing("terminal.bracketed_paste")),
-            Some(true) => Some(dispatches.begin(&id, view.state, now)?),
+            Some(true) => dispatches.reserve(&id, Instant::now())?,
         }
-    } else {
-        None
-    };
+    }
     let claim = match mesh.dispatch_claim(&d.project_id, &id, &d.task_id) {
         Ok(c) => c,
         Err(e) => {
-            if slot == Some(Slot::Hold) {
+            if terminal {
                 dispatches.cancel(&id);
             }
             return Err(e);
@@ -360,31 +357,49 @@ fn task_dispatch(ctx: &ControlContext, d: &v1::TaskDispatch) -> Result<v1::Comma
         task_id: d.task_id.clone(),
         shared: claim.shared,
     };
-    let sent = match slot {
-        None => submit_to_adapter(ctx, ctx.sup(), &id, &claim.prompt, |tag| {
-            dispatches.queued(tag, given.clone());
-        }),
-        Some(Slot::PasteNow) => {
-            let control = ctx.sup().terminal(&id).and_then(|h| h.input_handle().ok());
-            match control {
-                Some(c) => crate::task_dispatch::paste_prompt(&c, &claim.prompt)
-                    .map(|()| (false, 0))
-                    .map_err(|_| gone()),
-                None => Err(gone()),
+    let sent = if terminal {
+        // Decided now, after the claim (which may have waited for the hub), from the agent's state read again: a turn that began
+        // meanwhile gets the prompt held, not pasted over it.
+        let fresh = ctx.sup().terminal_state(&id);
+        let slot = match fresh {
+            Some((state, detects)) => dispatches.decide(&id, state, detects, Instant::now()),
+            None => {
+                dispatches.cancel(&id);
+                None
+            }
+        };
+        match slot {
+            // The reservation went with the agent (it stopped meanwhile).
+            None => Err(gone()),
+            Some(Slot::PasteNow) => {
+                let control = ctx
+                    .sup()
+                    .terminal(&id)
+                    .filter(|h| h.bracketed_paste())
+                    .and_then(|h| h.input_handle().ok());
+                match control {
+                    Some(c) => crate::task_dispatch::paste_prompt(&c, &claim.prompt)
+                        .map(|()| (false, 0))
+                        .map_err(|_| gone()),
+                    None => Err(gone()),
+                }
+            }
+            Some(Slot::Hold) => {
+                let held = Held {
+                    prompt: claim.prompt.clone(),
+                    given: given.clone(),
+                };
+                if dispatches.fill(held) {
+                    Ok((true, crate::task_dispatch::MAX_HELD))
+                } else {
+                    Err(gone())
+                }
             }
         }
-        Some(Slot::Hold) => {
-            let held = Held {
-                prompt: claim.prompt.clone(),
-                given: given.clone(),
-            };
-            // The slot is gone when the agent stopped while the task was being claimed.
-            if dispatches.fill(held) {
-                Ok((true, crate::task_dispatch::MAX_HELD))
-            } else {
-                Err(gone())
-            }
-        }
+    } else {
+        submit_to_adapter(ctx, ctx.sup(), &id, &claim.prompt, |tag| {
+            dispatches.queued(tag, given.clone(), Instant::now());
+        })
     };
     let (queued, queue_len) = match sent {
         Ok(v) => v,

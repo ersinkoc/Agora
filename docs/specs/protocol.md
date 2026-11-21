@@ -1089,18 +1089,25 @@ passes it (`hubcli.rs`). To an older node without the capability the hub refuses
   has no queue, and its prompt always arrives as one bracketed paste (`ESC[200~` … `ESC[201~`, then Enter), so a line break in it never
   submits part of it: a terminal program that has not turned on bracketed paste (DECSET 2004, as the node's terminal emulator sees it) is
   refused with `protocol.capability_missing` (`capability`: `terminal.bracketed_paste`) before anything is claimed; the prompt holds no ESC
-  or other control character but line break and tab, so its text cannot end the paste. When the agent is between turns (detected idle,
-  done or unknown, and nothing pasted into it in the last 5 seconds) it is pasted at once; otherwise the node holds it, one per agent. The
-  slot is decided and reserved in one step before the task is claimed, so two dispatches at once never both paste and a second is
-  `agent.queue_full` (`limit` 1) with nothing claimed. Unknown counts as between turns, so a kind whose screen the node cannot read still
-  gets held prompts; such a paste may arrive while the program works, and the program decides what a paste during a turn does.
+  or other control character but line break and tab, so its text cannot end the paste. The agent's one slot is reserved
+  before the task is claimed, so a second dispatch meanwhile is `agent.queue_full` (`limit` 1) with nothing claimed. After the claim (which
+  may wait for the hub) the node reads the agent's state again and decides: between turns (detected idle or done, and nothing pasted into it
+  in the last 5 seconds) it is pasted at once; otherwise the node holds it and pastes it once the agent is between turns. `unknown` counts as
+  between turns only for a kind whose manifest has no `[[rules]]` at all (it never leaves `unknown`, and would otherwise never get a held
+  prompt): for such a kind the paste, and the Enter after it, may arrive while the program works or while it shows a dialog (an Enter can
+  answer it). A kind with rules that is `unknown` (starting, or a screen no rule names, such as a startup dialog) is waited for. A paste that
+  was written but whose Enter failed means the terminal is gone (a write fails only then), so no input box keeps the text; its task is given
+  back like any lost prompt.
   A prompt that never reaches the agent gives its task on the node's broker back: a held one when the agent is no longer running (stopped
   by a person or its parent, ended, crashed; checked every supervision round, so every stop path is covered), a paste that cannot start or
   fails, a queued one that the adapter refused or dropped (the adapter ended, or `AgentCancelTurn` with `drop_queue`). Held prompts live in
   memory: a node restart drops them and leaves their claims. For a shared project the node asks the hub's board as the agent (`task_list` for the task's text and status, then `task_claim`)
   and still builds the prompt itself; a project known to be shared with no hub link is `board.unavailable`. A prompt that cannot be sent gives a task on the node's own broker back; the shared board has no release yet, so
-  there the task stays claimed by that agent. Refusals: `mesh.recipient_unknown` (the agent is not of `project_id`), `task.not_found`, `task.blocked`,
-  `task.not_open` (also a second dispatch of a claimed task), `agent.queue_full`. Not signed and not an approval: it changes no permission
+  there the task stays claimed by that agent. Refusals: `mesh.recipient_unknown` (the agent is not of `project_id`, or the node has no mesh),
+  `task.not_found`, `task.blocked`, `task.not_open` (also a second dispatch of a claimed task), `agent.queue_full` (`limit` 8 behind a
+  structured agent's turn, 1 for a terminal agent's held dispatch), `agent.not_found` (the agent stopped while its task was being claimed or
+  pasted; the task is given back), `board.unavailable` (a shared project whose hub cannot be asked), `protocol.capability_missing`
+  (`capability`: `terminal.bracketed_paste`, a terminal program without bracketed paste). Not signed and not an approval: it changes no permission
   of the agent, and every sensitive action the agent later asks for still needs the person (ADR-0020). Like `AgentPrompt` it needs the
   sender's access to the agent (a viewer may not send it; a scoped window needs the project and the agent); on a node with limited
   devices it is in the team default of `signed_commands` and a grant covers it by the agent's own project (ADR-0041).

@@ -471,6 +471,26 @@ pub struct AgentView {
     pub skips_permissions: bool,
 }
 
+/// ADR-0095: whether an agent started with `launch_skips` (a launch option that skips permissions) and with these options in use acts
+/// without asking now: the launch option, the current mode when it skips, or a config option in use that skips (a boolean that is on,
+/// or a select whose current choice skips).
+pub fn skips_now(launch_skips: bool, options: &SessionOptions, config: &[ConfigOption]) -> bool {
+    let mode = options
+        .modes
+        .iter()
+        .any(|m| m.id == options.current_mode && m.skips_permissions);
+    let config = config.iter().any(|o| {
+        if o.boolean {
+            o.skips_permissions && o.current == "true"
+        } else {
+            o.choices
+                .iter()
+                .any(|c| c.id == o.current && c.skips_permissions)
+        }
+    });
+    launch_skips || mode || config
+}
+
 /// ADR-0057: whether `program` is a shell, a wrapper or an interpreter, which runs whatever it is given. Compared by its file name,
 /// lower-cased, without `.exe`, `.cmd`, `.bat` or `.com` and without a version (`python3.12` is `python`, `pypy3` is `pypy`).
 fn runs_anything(program: &str) -> bool {
@@ -3549,29 +3569,25 @@ impl Supervisor {
 
     /// ADR-0095: whether the agent acts without asking for permission now: a launch option that skips it (ADR-0059), or, for a
     /// structured agent, the mode or a config option in use that does (ADR-0058, ADR-0090 Amendment A; the node's own judgement
-    /// added to the adapter's word).
+    /// added to the adapter's word). See [`skips_now`].
     pub fn skips_permissions_now(&self, id: &AgentId) -> bool {
         if let Some(e) = self.agents.get(id) {
             return e.launch.skips_permissions;
         }
-        let Some(e) = self.adapters.get(id) else {
-            return false;
-        };
-        let mode = e
-            .options
-            .modes
-            .iter()
-            .any(|m| m.id == e.options.current_mode && m.skips_permissions);
-        let config = e.rich.config.iter().any(|o| {
-            if o.boolean {
-                o.skips_permissions && o.current == "true"
-            } else {
-                o.choices
-                    .iter()
-                    .any(|c| c.id == o.current && c.skips_permissions)
-            }
-        });
-        e.launch.skips_permissions || mode || config
+        self.adapters
+            .get(id)
+            .is_some_and(|e| skips_now(e.launch.skips_permissions, &e.options, &e.rich.config))
+    }
+
+    /// ADR-0095: a running terminal agent's detected state, and whether its kind has screen-detection rules at all (a kind without
+    /// any never leaves `unknown`). `None` for an agent that is not a running terminal agent here.
+    pub fn terminal_state(&self, id: &AgentId) -> Option<(AgentState, bool)> {
+        let e = self.agents.get(id).filter(|e| e.terminal.is_some())?;
+        let detects = self
+            .kinds
+            .get(&e.agent.kind)
+            .is_some_and(|k| !k.manifest.rules.is_empty());
+        Some((e.agent.state(), detects))
     }
 
     pub fn list(&self) -> Vec<AgentView> {
@@ -4391,6 +4407,49 @@ fn session_report(agent: &Agent) -> Option<SupervisorEvent> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod adapter_option_tests {
     use super::*;
+
+    /// ADR-0095: `TaskDispatched.agent_skips_permissions` is true for a launch option that skips, the current mode that skips, a boolean
+    /// option that skips and is on, or a select whose current choice skips; never for one that is offered but not in use.
+    #[test]
+    fn an_agent_skips_permissions_by_its_launch_its_mode_or_an_option_in_use() {
+        let opt = |id: &str, skips: bool| SessionOption {
+            id: id.into(),
+            skips_permissions: skips,
+            ..SessionOption::default()
+        };
+        let mut options = SessionOptions {
+            modes: vec![opt("build", false), opt("bypass", true)],
+            current_mode: "build".into(),
+            ..SessionOptions::default()
+        };
+        let boolean = |current: &str| ConfigOption {
+            id: "auto_approve".into(),
+            boolean: true,
+            current: current.into(),
+            skips_permissions: true,
+            ..ConfigOption::default()
+        };
+        let select = |current: &str| ConfigOption {
+            id: "approvals".into(),
+            current: current.into(),
+            choices: vec![opt("ask", false), opt("turbo", true)],
+            ..ConfigOption::default()
+        };
+        assert!(!skips_now(false, &options, &[]));
+        assert!(skips_now(true, &options, &[]));
+        assert!(!skips_now(
+            false,
+            &options,
+            &[boolean("false"), select("ask")]
+        ));
+        assert!(skips_now(false, &options, &[boolean("true")]));
+        assert!(skips_now(false, &options, &[select("turbo")]));
+        options.current_mode = "bypass".into();
+        assert!(skips_now(false, &options, &[]));
+        // A mode no longer offered (the id does not match one of the list) does not count.
+        options.current_mode = String::new();
+        assert!(!skips_now(false, &options, &[]));
+    }
 
     #[test]
     fn claude_code_session_markers_are_left_out_only_when_the_node_runs_inside_a_session() {
