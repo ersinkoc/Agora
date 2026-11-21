@@ -6,7 +6,7 @@ Accepted: 2026-11-19 (the maintainer's explicit message in the merger chat: "ADR
 screen must be a real coding-agent experience where everything works: choose the model and the reasoning effort (also while the agent runs),
 see tool calls with kind, status, duration, files and output, messages, thinking, the plan with step status, stop the current turn (not the
 whole agent), queued prompts, permission requests inline, the slash commands the agent offers, token usage in and out, and history.
-Builds on ADR-0038, ADR-0058, ADR-0066; complements ADR-0089 (Proposed, persistence); touches the schema, so it needs the maintainer.
+Builds on ADR-0038, ADR-0058, ADR-0066; complements ADR-0089 (persistence); touches the schema, so it needs the maintainer.
 
 ## Research: what I read, and what I could not verify
 - **ACP**: the official JSON schema of release `schema-v1.33.0` (`agentclientprotocol/agent-client-protocol`, downloaded and parsed) and the
@@ -68,7 +68,7 @@ and say nothing of effort for ACP kinds.
 | `session_info_update`, `compaction_*`, `notice` | No | Dropped |
 | Queued prompts | No | `AgentPrompt` is a plain request; the web client cannot tell a queued prompt from a sent one |
 | Tool duration | Not in ACP | Must be measured by the node (first `pending` to terminal status) |
-| History | Ring of 500 entries or 256 KiB (ADR-0038) | Persistence is ADR-0089 (Proposed) |
+| History | Ring of 500 entries or 256 KiB (ADR-0038) | Persistence is ADR-0089 |
 
 The web client (`apps/web/src/net/chat.ts`) reads `ChatLine.kind` as `text | tool | plan | diff | notice`, so it cannot show more than the
 node sends. The cause is the protocol and the bridge, not only the client.

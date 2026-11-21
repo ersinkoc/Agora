@@ -21,7 +21,7 @@ L1 is an agent in a terminal read from its screen (a manifest); L2/L3 are struct
 | A machine is online while its link is (silence noticed in 25 s) | ADR-0070 Accepted | yes | hub tests; `scripts/e2e-link-silent.mjs` | none recorded here |
 | Old machines shown apart; forget one, clean up old ones | ADR-0073 Accepted | hub, CLI, web and terminal client yes | hub, server and CLI tests; web tests | none recorded here |
 | `agora` on a fresh machine starts a hub and a node here | ADR-0062 Accepted | rung 1 yes; restart after a crash yes; agents come back after a restart yes (asked once, 8 at a time, 16 at most, the node policy wins); start at login yes on Windows (logon task), on Linux with systemd (user unit) and on macOS (LaunchAgent); join and pairing not built | front-door tests (`crates/agora/tests/front_door.rs`), login service against a fake `systemctl` (`crates/agora/tests/service_systemd.rs`) | none recorded here |
-| Pairing: find a hub on the network, approve on the hub | ADR-0065 Accepted | not built | — | — |
+| Pairing: find a hub on the network, approve on the hub | ADR-0065 Accepted | yes (#664, #700, #705, #709, step 4 #710: `agora pair`, `agora join`, the request in the window and the terminal client) | hub, CLI, web and terminal-client tests | none recorded here |
 | Machines reachable only over SSH | ADR-0032 Accepted, ADR-0034 Accepted | yes | tests against a stand-in `ssh` | [real SSH run 2026-11-09](reviews/2026-11-09-real-ssh-run.md): a private loopback `sshd`; no other OS as target |
 | Direct client ↔ node path for terminals | ADR-0023 Accepted | not built (terminal streams go through the hub relay) | — | — |
 | `agora update` (self-update) | ADR-0019 Accepted | yes (replaces the program; not a live handoff) | update tests | none recorded here |
@@ -37,12 +37,12 @@ L1 is an agent in a terminal read from its screen (a manifest); L2/L3 are struct
 | Launch options, including "do not ask" modes | ADR-0059 Accepted | yes | node and web tests | none recorded here |
 | Start with model, effort and mode | ADR-0066 Accepted | node and hub yes (a start with settings is signed; the approval card lists them); the start window's picker yes (`LaunchSettings.tsx`); the terminal client's start picker not built | node, hub and web tests | none recorded here |
 | Agent login and accounts on a node ([design](design/agent-accounts.md)) | no ADR (design only) | not built (the manifest table is parsed; nothing runs a login) | — | — |
-| Install and update coding agents on a machine from the window | ADR-0087 Accepted | not built, ADR accepted | — | — |
+| Install and update coding agents on a machine from the window | ADR-0087 Accepted | partly: rungs 1-2 (`agora agent doctor`, the signed agent-package list, #868) and rung 3 (`agora agent install`, binary download with a typed local approval, #871); install from the window not built | adapter and CLI tests | none recorded here |
 | A missing agent kind says why | ADR-0069 Accepted | yes (protocol, web start window, terminal client) | protocol fixtures; web and terminal-client tests | none recorded here |
 | Resume after the node restarts (session ledger) | ADR-0060 Accepted | yes | node tests | none recorded here |
 | An agent starts helpers, with the user's signed approval | ADR-0057 Accepted | yes | node, hub and web tests | none recorded here |
 | Workspace clean-up and disk limits | ADR-0064 Accepted | not built | — | — |
-| Agent confinement (sandbox) | ADR-0047 Accepted, ADR-0050 Accepted | Linux and macOS yes; Windows built but off by default | sandbox tests on each OS | [macOS 2026-11-14](reviews/2026-11-14-macos-confinement-and-terminal-client.md): every way out refused; Claude Code and Codex run confined |
+| Agent confinement (sandbox) | ADR-0047 Accepted, ADR-0050 Accepted | Linux and macOS yes; Windows built but off by default; one level per node (the per-project and per-kind choice of ADR-0047 decision 1 is not built); `worktree-offline` on macOS only | sandbox tests on each OS | [macOS 2026-11-14](reviews/2026-11-14-macos-confinement-and-terminal-client.md): every way out refused; Claude Code and Codex run confined |
 
 ## People, approvals and coordination
 
@@ -53,7 +53,7 @@ L1 is an agent in a terminal read from its screen (a manifest); L2/L3 are struct
 | Team mode: people, roles, audit | ADR-0049 Accepted | partly ([phase 7](backlog/phase-7.md) P7-09 in progress) | hub tests | none recorded here |
 | Agents message each other across machines (mesh) | ADR-0008 Accepted, ADR-0031 Accepted | yes; a reply's link across machines not built | mesh tests | LAN run 2026-11-11: cross-node messages |
 | A reply keeps its link across machines | ADR-0074 Accepted | not built | — | — |
-| Shared project board (tasks, leases) | ADR-0039 Accepted, ADR-0040 Accepted | yes; a change is answered only once stored | board and hub tests, fault tests | LAN run 2026-11-11: shared-board behavior |
+| Shared project board (tasks, leases) | ADR-0039 Accepted, ADR-0040 Accepted | yes; a change is answered only once stored; a lease is renewed only when its agent takes it again (the node's own renewal of ADR-0039 is not built) | board and hub tests, fault tests | LAN run 2026-11-11: shared-board behavior |
 
 ## Updates, secrets and confinement (ADR-0075 to ADR-0084)
 
@@ -63,12 +63,28 @@ L1 is an agent in a terminal read from its screen (a manifest); L2/L3 are struct
 | A read-only metrics token | ADR-0076 Accepted | yes (#637) | hub tests | none recorded here |
 | The Windows binary is code-signed | ADR-0077 Accepted | partly: the release workflow signs through SignPath once it is set up (#652); no signed release recorded here | none (the workflow is not run without the account) | none recorded here |
 | A confined agent gets a git configuration the node wrote | ADR-0078 Accepted | yes (#638) | node tests | none recorded here |
-| A terminal holder keeps agents alive when the node stops | ADR-0079 Accepted | not built | — | — |
+| A terminal holder keeps agents alive when the node stops | ADR-0079 Accepted | yes (Windows primitives #697, Unix core #760, agents start through it #761, the service unit keeps it #774) | platform, node and `crates/agora/tests/hold*.rs` tests | none recorded here |
 | The file browser does not show secret files | ADR-0080 Accepted | yes (node and review #636; web and terminal client #665) | node, web and terminal-client tests | none recorded here |
 | A replayed revocation does not undo the owner's re-trust | ADR-0081 Accepted | yes (#673) | node tests | none recorded here |
-| A confined agent cannot use the node's control socket | ADR-0082 Accepted | not built on `main` (in review: #674) | — | — |
-| A confined agent reaches only the unix sockets it is given | ADR-0083 Accepted | not built | — | — |
-| A confined agent gets its login from a secret the node holds | ADR-0084 Accepted | not built | — | — |
+| A confined agent cannot use the node's control socket | ADR-0082 Accepted | yes (#674; what it does not close: #678, threat model) | node tests | none recorded here |
+| A confined agent reaches only the unix sockets it is given | ADR-0083 Accepted | yes (environment scrubbed and sockets restricted; macOS rule switched on #702) | node and platform tests | none recorded here |
+| A confined agent gets its login from a secret the node holds | ADR-0084 Accepted | yes (#699); a policy name the manifest does not declare is skipped and named by `agora doctor`, not refused at load (ADR-0084 "Built" note) | node tests | none recorded here |
+
+## Since ADR-0085
+
+| Capability | Decision | Built on `main` | Automated evidence | Real machines |
+| --- | --- | --- | --- | --- |
+| Machine and hub certificates renew themselves | ADR-0085 Accepted | yes (hub side #780, machine side #783); Amendment A (a machine whose clock is behind) not built | hub, node and CLI tests | none recorded here |
+| Any machine can be the hub, with takeover | ADR-0086 Accepted | not built | — | — |
+| Preview an agent's local web server | ADR-0088 Accepted | schema only (#768) | protocol fixtures | — |
+| A structured agent's chat history survives the node, read in pages | ADR-0089 Accepted | not built | — | — |
+| A structured agent's conversation is complete (thinking, tools, plan, effort) | ADR-0090 Accepted | yes: node and adapters, hub step 5 (#781), web; skip-permissions switch through a signed approval (Amendment); the terminal client's view not built; the adapter's current mode is not checked against `skip_permissions` at start (backlog P2-16) | node, adapter, hub and web tests | none recorded here |
+| Plan limits of subscription agents | ADR-0091 Accepted | Codex yes (#787, #788); other tools not built | node, hub and web tests | none recorded here |
+| The ACP registry as a source of agent kinds | ADR-0092 Accepted | step 1 (conversion, #832) | adapter tests | none recorded here |
+| Structured agents survive a node restart | ADR-0093 Accepted | Unix yes (steps 1-2, #800); Windows not built | node and platform tests | none recorded here |
+| A plain terminal shows the agent program running in it | ADR-0094 Accepted | not built | — | — |
+| A project's kanban board; a task dispatched to an agent | ADR-0095 Accepted | read-only board (#858) and the broker's claim (#859); dispatch from the window not built | web and mesh tests | none recorded here |
+| A ready helper agent | ADR-0096 Accepted | not built | — | — |
 
 ## The window
 

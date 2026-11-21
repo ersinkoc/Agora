@@ -1,7 +1,7 @@
 # 0096. Agora offers a ready helper agent instead of a coding-agent loop of its own
 Status: Accepted
 Date: 2026-11-20
-Accepted: 2026-11-20 (the maintainer's explicit message in the merger chat: "ADR-0095 ve ADR-0096'yı kabul ediyorum"). The open questions' proposed answers stand; the Review column's "accepted by" field (a schema step) stays deferred.
+Accepted: 2026-11-20 (the maintainer's explicit message in the merger chat: "ADR-0095 ve ADR-0096'yı kabul ediyorum"). The open questions' proposed answers stand.
 
 Builds on ADR-0004 (agents are data), ADR-0020 (approvals), ADR-0059 (skipping permissions), ADR-0087 (install agents from the window), ADR-0092
 (the ACP registry is a source of kinds) and ADR-0095 (kanban and dispatch). Touches the threat model. Accepted: it may be built on.

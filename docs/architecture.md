@@ -15,17 +15,19 @@ Status: living document. Decisions referenced here are recorded in `adr/`.
                             └──────────────────────────┘
 ```
 
-- **Hub-and-spoke.** Nodes connect to the hub; clients connect to the hub. Clients never connect to nodes
-  directly. (ADR-0002)
+- **Hub-and-spoke.** Nodes connect to the hub; clients connect to the hub. Clients do not connect to nodes
+  directly today (ADR-0002); a direct client ↔ node path for terminals is accepted but not built (ADR-0023). One hub is
+  authoritative; a standby that can take over is accepted but not built (ADR-0086).
 - **Outbound by default.** Nodes dial the hub (WSS or QUIC with mTLS), so nodes behind NAT/firewalls work
   without opening ports.
 - **SSH bootstrap.** For machines where the user cannot or will not install a service, the hub connects
-  over SSH, uploads the matching binary if needed, and speaks the node protocol over the SSH channel's stdio.
+  over SSH, installs the matching binary if needed, and the node dials back through a reverse tunnel the hub holds
+  (`ssh -N -R`, ADR-0032); `agora node stdio` remains for tools that want the control protocol over SSH (ADR-0011).
 - **Autonomous nodes.** If the hub is unreachable, nodes keep agents running, keep enforcing leases they
   already granted, and buffer events locally. On reconnect they replay buffered events in order.
 - **Single binary.** `agora hub`, `agora node`, `agora tui`, and CLI subcommands are one executable per
   platform. The web client's static assets are embedded in the hub.
-- **Hub deployment modes.** Local (tiny, SQLite, single user), server (team, Postgres), cloud (multi-tenant,
+- **Hub deployment modes.** Local (tiny, SQLite, single user), server (team; SQLite until it is not enough, then Postgres, ADR-0049), cloud (multi-tenant,
   later). The domain model always has an owner/team so modes do not diverge.
 
 ## 2. Three planes

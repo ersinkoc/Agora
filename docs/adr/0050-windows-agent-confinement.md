@@ -50,7 +50,7 @@ protected ACLs; and needs an administrator to grant `ALL APPLICATION PACKAGES` r
    Low-labelled folder that also grants `Users` write is what lets a second agent in; it is detectable, so it is refused instead of promised away. `agora doctor` reports the same.
 5. **Reads are weaker than on Linux and macOS, and the documentation says so**: files that grant `Users` or `Everyone` read (many data folders, `Program Files`) stay readable to the agent; files only the user may read (`%USERPROFILE%`,
    the node's keys, other agents' folders unless they inherit a broad read grant) are refused. The `worktree` policy on Windows therefore means **writes only below the allowed folders; user-private reads refused**. A read allow-list is not claimed.
-6. Still no network rule (`worktree-offline` stays refused on every OS); AppContainer is the path to one.
+6. Still no network rule (`worktree-offline` stays refused on Windows, as on Linux; macOS has it, ADR-0047 implementation note); AppContainer is the path to one.
 
 **Acceptance evidence** (real Windows, in CI and on a real machine; `ENABLED` stays false until both pass): writes outside refused in three parents (`%TEMP%`, a data volume, `C:\ProgramData`), including by a child process; a second
 agent's folder refused for writes, and an allowed folder that grants `Users` write refused before start; user-private files unreadable; `cmd`, `git` (with commit, under the profile and on a data volume), `node`, `python`, `sh` start; ConPTY
@@ -87,7 +87,7 @@ drops it as the mechanism and enforces the **path rules of ADR-0047** with the D
    allowed folders with inheritance to children, and nowhere above). Handles the node holds are opened without inheritance
    (`bInheritHandles = FALSE` with an explicit handle list), so an agent cannot receive a writable handle it should not have.
 6. **Refusal stays the default.** `worktree` and `worktree-offline` keep answering `agent.sandbox_unavailable` on Windows until the
-   tests below pass in CI and a revision of this ADR is accepted. `worktree-offline` stays refused on every OS (no network control).
+   tests below pass in CI and a revision of this ADR is accepted. `worktree-offline` stays refused on Windows (no network control), as on Linux.
    A volume without ACLs (FAT32, some network shares) also answers `agent.sandbox_unavailable`.
 7. **Still not AppContainer**, for the reason in the original decision 4; a restricted token breaks fewer developer tools.
 
@@ -128,7 +128,7 @@ owner cannot use the feature.
    its git folders, the agent's state folder and the temp folder it hands out, and removes the label when the worktree is removed.
    Only these folders are touched, never a parent, and only with the owner's `sandbox` policy line switched on.
 3. **Say what it does not stop.** `agora doctor` and the threat model state, for Windows: writes confined, reads open, network open
-   (`worktree-offline` is still refused, as on every OS). A machine whose Windows version or file system cannot label (FAT32, some
+   (`worktree-offline` is still refused, as on Linux). A machine whose Windows version or file system cannot label (FAT32, some
    network drives) answers `agent.sandbox_unavailable`.
 4. **No AppContainer.** Agents are ordinary developer CLIs that read `~/.config`, spawn compilers and open sockets; an AppContainer
    breaks them in ways that are hard to diagnose and would need per-tool capability lists.
