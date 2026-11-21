@@ -61,14 +61,19 @@ agent's or machine's name as `<agent>` or `<machine>` (the window gives agents n
 
 ## Common setup
 
-The commands are for a Unix shell; on Windows use PowerShell (`$env:AGORA_HOME = "$env:TEMP\rm\home"` for `export`). In the window,
+The commands are for a Unix shell; on Windows use PowerShell, with `$env:AGORA_HOME = Join-Path $RM 'home'` for `export
+AGORA_HOME="$RM/home"` (always inside the run's own folder from S0, never a fixed path). Every path that starts with `$RM` stands
+for the run's absolute folder: quote it when you type it (`"$RM/home"`), and never run a step in a shell where `RM` is not set
+(check `echo "$RM"` first). In the window,
 a node is a **Machine** and an approval is a card that says "… asks permission" with Allow and Deny (under "Waiting for your answer").
 
-**S0. Run folder, new for each run.** `RM=$(mktemp -d "$HOME/agora-rm-$(date +%Y%m%dT%H%M%S)-XXXX")` (a new, empty folder whose
-name no other run has; on Windows `$RM = New-Item -ItemType Directory (Join-Path $env:TEMP ("agora-rm-" + (Get-Date -Format
-yyyyMMddTHHmmss)))`; it must not exist before). It is under the home on purpose: on Linux a node folder under `/tmp` makes confined
-starts refuse (`control_token_reachable`, RM-23). `mkdir $RM/home $RM/proj`; `export AGORA_HOME=$RM/home`; in `$RM/proj`:
-`git init -b main && git commit --allow-empty -m init` (it uses the identity you already have; set one with `-c user.name=rm -c
+**S0. Run folder, new for each run.** `RM="$(mktemp -d "$HOME/agora-rm-$(date +%Y%m%dT%H%M%S)-XXXX")"` (a new, empty folder whose
+name no other run has; on Windows `$RM = (New-Item -ItemType Directory (Join-Path $env:TEMP ("agora-rm-" + (Get-Date -Format
+yyyyMMddTHHmmss)))).FullName`, which fails if it exists). It is under the home on purpose: on Linux a node folder under `/tmp` makes
+confined starts refuse (`control_token_reachable`, RM-23). **Print it and write it down:** `echo "$RM"` (an absolute path; every
+other shell of this run sets `RM` to exactly this text). Then `mkdir "$RM/home" "$RM/proj"`; `export AGORA_HOME="$RM/home"`
+(Windows: `New-Item -ItemType Directory (Join-Path $RM 'home'), (Join-Path $RM 'proj')`; `$env:AGORA_HOME = Join-Path $RM 'home'`);
+in `"$RM/proj"`: `git init -b main && git commit --allow-empty -m init` (it uses the identity you already have; set one with `-c user.name=rm -c
 user.email=rm@example.invalid` on that one command if you have none, never with `git config --global`). Check `agora --version`
 says 0.3.33.
 
@@ -107,13 +112,17 @@ manifest spec and the tests that use the fake agent, so each is **(unverified)**
 
 `agora agent kinds` lists every kind; one that is missing is named by `agora doctor`.
 
-**S3. A second machine on the same computer** (when no second computer is at hand). First a committed checkout for it, the same
-project as `$RM/proj`: `git clone -q $RM/proj $RM/proj2`, then `git -C $RM/proj2 remote remove origin` (the source has no remote, so
-the clone keeps the same project identity without one). Then **open a second shell** and keep it for this machine only:
-`export AGORA_HOME=$RM/two`; `agora hub code --hub-dir $RM/home/hub` gives CODE; PORT is the hub's port from `agora status` in the
-first shell; `agora node enroll --hub wss://localhost:PORT --ca $RM/home/hub/ca.pem --code CODE --id rm-two`; then `agora node run
---project $RM/proj2` in the foreground. Check it with `agora hub machines --hub-dir $RM/home/hub` (rm-two online) or `agora agent list`
-in this shell, not `agora status` (which reads a machine file only `agora` writes). Stop it with Ctrl-C in this shell before cleanup.
+**S3. A second machine on the same computer** (when no second computer is at hand). In the first shell, a committed checkout for
+it, the same project as `"$RM/proj"`: `git clone -q "$RM/proj" "$RM/proj2"`, then `git -C "$RM/proj2" remote remove origin` (the
+source has no remote, so the clone keeps the same project identity without one); note the hub's port (PORT) from `agora status`.
+Then **open a second shell** and keep it for this machine only. A new terminal does not inherit the first one's variables, so set
+the run folder again by hand, to the absolute path S0 printed, and check it before any `agora` command:
+`RM='/the/path/S0/printed'` (PowerShell: `$RM = 'C:\the\path\S0\printed'`); `[ -d "$RM/home/hub" ] || echo "WRONG RM: stop"`
+(PowerShell: `Test-Path (Join-Path $RM 'home\hub')` must say `True`); only then `export AGORA_HOME="$RM/two"` and `echo
+"$AGORA_HOME"`. In that shell: `agora hub code --hub-dir "$RM/home/hub"` gives CODE; `agora node enroll --hub wss://localhost:PORT
+--ca "$RM/home/hub/ca.pem" --code CODE --id rm-two`; then `agora node run --project "$RM/proj2"` in the foreground. Check it with
+`agora hub machines --hub-dir "$RM/home/hub"` (rm-two online) or `agora agent list` in this shell, not `agora status` (which reads a
+machine file only `agora` writes). Stop it with Ctrl-C in this shell before cleanup.
 
 **S4. Trust this browser on the machine.** If a start says this browser is not trusted: in the window, Settings > This device shows
 its fingerprint; on the machine run `agora node trust --from-hub`, compare the fingerprint, answer `y`.
@@ -346,7 +355,8 @@ not built: nothing to check.
 ### RM-23 Agent confinement (sandbox)
 - **OS:** Linux, macOS; Windows built but off by default (turn on with `AGORA_WINDOWS_CONFINEMENT=1` for the run's node only).
   One level per node; `worktree-offline` on macOS only.
-- **Disposable OS account or VM only, until #900 is fixed** (a confined start writes outside `$RM`; see the safety rules).
+- **Disposable OS account or VM only, until #900 is fixed:** a confined start writes the agent's generated git configuration
+  outside `$RM`, on Linux into the real `~/.agora/git-config` (macOS and Windows: `agora-git-config` in the system temp folder).
 - **Do:** write `sandbox = worktree` into `$AGORA_HOME/data/policy`; restart the node. Start a Shell with "Create an isolated working
   copy" and run `pwd` in it (its worktree, W; it must not be under `/tmp`, which Linux confinement grants to every agent: with
   S0's folder under the home it is not). In your own terminal make the probes, all synthetic: `mkdir "$W/../rm-sibling" && echo
@@ -432,7 +442,8 @@ not built: nothing to check.
 
 ### RM-33 A confined agent gets a git configuration the node wrote
 - **OS:** Linux, macOS; Windows with confinement on.
-- **Disposable OS account or VM only, until #900 is fixed** (a confined start writes outside `$RM`; see the safety rules).
+- **Disposable OS account or VM only, until #900 is fixed:** a confined start writes the agent's generated git configuration
+  outside `$RM`, on Linux into the real `~/.agora/git-config` (macOS and Windows: `agora-git-config` in the system temp folder).
 - **Do:** RM-23's policy. Change no git configuration: the node reads your global file itself and ignores a `GIT_CONFIG_GLOBAL` it
   inherits (`agora-node/src/gitconfig.rs`), so a scratch file would not test the copy. In your own terminal, read only: `git config
   --global --get user.name`, `git config --global --get user.email`. In a confined Shell: `echo $GIT_CONFIG_GLOBAL`, `git config
@@ -469,7 +480,8 @@ not built: nothing to check.
 
 ### RM-37 A confined agent cannot use the node's control socket
 - **OS:** Linux, macOS; Windows with confinement on.
-- **Disposable OS account or VM only, until #900 is fixed** (a confined start writes outside `$RM`; see the safety rules).
+- **Disposable OS account or VM only, until #900 is fixed:** a confined start writes the agent's generated git configuration
+  outside `$RM`, on Linux into the real `~/.agora/git-config` (macOS and Windows: `agora-git-config` in the system temp folder).
 - **Do:** RM-23's policy. In a confined Shell: `agora agent list --socket $AGORA_HOME/node.sock` (and `agora agent list`).
 - **See:** refused (no list of agents); the same command in your own terminal works.
 - **Evidence so far:** [macOS 2026-11-14](2026-11-14-macos-confinement-and-terminal-client.md): the control socket refused under
@@ -478,7 +490,8 @@ not built: nothing to check.
 ### RM-38 A confined agent reaches only the unix sockets it is given
 - **OS:** macOS (allow-list), Linux (abstract sockets, Landlock ABI 6 or newer; pathname sockets not restricted); Windows: not
   established.
-- **Disposable OS account or VM only, until #900 is fixed** (a confined start writes outside `$RM`; see the safety rules).
+- **Disposable OS account or VM only, until #900 is fixed:** a confined start writes the agent's generated git configuration
+  outside `$RM`, on Linux into the real `~/.agora/git-config` (macOS and Windows: `agora-git-config` in the system temp folder).
 - **Do:** RM-23's policy. In a confined Shell: `env | grep -E 'SSH_AUTH_SOCK|DBUS|TMUX|DOCKER'`; on macOS, first make a synthetic
   socket in your own terminal (`nc -lU $RM/rm.sock`), then from the confined Shell `echo hi | nc -U <that path typed out>`
   (unverified); run `agora doctor`.
