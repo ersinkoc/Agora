@@ -1565,6 +1565,7 @@ impl Node {
         });
         let mut sandbox = read_policy(&cfg.data_dir.join(POLICY_FILE)).sandbox;
         sandbox.protect = node_private_paths(cfg);
+        sandbox.data_dir = Some(cfg.data_dir.clone());
         // ADR-0082: where a confined agent could otherwise connect to the control socket (Linux), the socket needs a token the agent's
         // profile must not reach. Made here, written when the socket is bound.
         let control_token = if agora_platform::CONTROL_TOKEN_REQUIRED

@@ -450,6 +450,13 @@ pub(crate) fn start_child(
         cmd.env("TERM", "xterm-256color");
     }
     cmd.envs(config.env.iter().map(|(k, v)| (k, v)));
+    if let Some(file) = config
+        .sandbox
+        .as_ref()
+        .and_then(crate::Sandbox::git_config_file)
+    {
+        cmd.envs(crate::git_config_env(&file));
+    }
     cmd.stdin(Stdio::from(slave.try_clone()?));
     cmd.stdout(Stdio::from(slave.try_clone()?));
     cmd.stderr(Stdio::from(slave));

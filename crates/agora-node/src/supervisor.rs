@@ -1289,11 +1289,7 @@ impl Supervisor {
             .kinds
             .get(kind)
             .and_then(|k| k.manifest.sandbox.as_ref());
-        let mut profile = self.sandbox.profile(kind, needs, worktree, program)?;
-        // ADR-0078: the file of git settings the node wrote for this start, readable and not writable.
-        let file = self.sandbox.git_config(worktree, &profile.write);
-        profile.read.extend(file);
-        Some(profile)
+        self.sandbox.profile(kind, needs, worktree, program)
     }
 
     /// The confinement of one adapter agent of `kind` ([`Self::sandbox_for`]), refused as a terminal agent's is
@@ -1304,9 +1300,10 @@ impl Supervisor {
         worktree: &Path,
         program: &str,
     ) -> Result<Option<agora_platform::Sandbox>, SupervisorError> {
-        let profile = self.sandbox_for(kind, worktree, program);
-        if let Some(p) = &profile {
+        let mut profile = self.sandbox_for(kind, worktree, program);
+        if let Some(p) = &mut profile {
             self.refuse_reachable(kind, p)?;
+            p.git_config = self.sandbox.git_config(p);
         }
         Ok(profile)
     }
@@ -2771,9 +2768,10 @@ impl Supervisor {
             // ADR-0083: what points at a socket the user's session offers is not inherited by a confined agent.
             cfg.env_remove.extend(self.sandbox.scrubbed_env());
         }
-        // ADR-0082 and ADR-0084: checked with the final read grants (the private configuration folder included).
-        if let Some(profile) = &cfg.sandbox {
+        // Check the final ordinary grants before writing the file for this launch (ADR-0098).
+        if let Some(profile) = &mut cfg.sandbox {
             self.refuse_reachable(kind, profile)?;
+            profile.git_config = self.sandbox.git_config(profile);
         }
         if let Some(k) = self.kinds.get(kind) {
             cfg.env = k
@@ -2792,9 +2790,6 @@ impl Supervisor {
         for (name, value) in plan.set {
             cfg.env.retain(|(k, _)| k != &name);
             cfg.env.push((name, value.expose().to_string()));
-        }
-        if let Some(profile) = &cfg.sandbox {
-            cfg.env.extend(git_env(profile, worktree));
         }
         if cfg.sandbox.is_some() && agora_platform::PRIVATE_TEMP {
             let temp = crate::sandbox::agent_temp(worktree).display().to_string();
@@ -4087,8 +4082,11 @@ fn launch_adapter(
     if let Some(profile) = &mut sandbox {
         own_socket(profile, mesh.map(|m| m.socket.as_path()));
     }
-    if let Some(profile) = &sandbox {
-        env.extend(git_env(profile, worktree));
+    if let Some(file) = sandbox
+        .as_ref()
+        .and_then(agora_platform::Sandbox::git_config_file)
+    {
+        env.extend(agora_platform::git_config_env(&file));
     }
     // A confined adapter works in its own private temporary folder, as a confined terminal agent does.
     if sandbox.is_some() && agora_platform::PRIVATE_TEMP {
@@ -4265,17 +4263,6 @@ fn open_session(
         )
         .map_err(adapter_error)?;
     Ok((session_id, init.capabilities))
-}
-
-/// ADR-0078: points a confined agent's git at the file the node wrote, when the profile grants that file for reading (it does not when
-/// the owner grants `~/.gitconfig` themselves, or the file could not be written).
-fn git_env(profile: &agora_platform::Sandbox, worktree: &Path) -> Vec<(String, String)> {
-    let file = crate::gitconfig::path_for(worktree);
-    if profile.read.contains(&file) {
-        crate::gitconfig::env_for(&file)
-    } else {
-        Vec::new()
-    }
 }
 
 /// The agent's own mesh socket joins the unix sockets a confined agent may reach (#475, ADR-0083): it lies in a folder of the node's,

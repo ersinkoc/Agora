@@ -75,7 +75,8 @@ const CREATE_RULESET_VERSION: libc::c_ulong = 1;
 const RULE_PATH_BENEATH: libc::c_int = 1;
 /// The first version's rights: execute, write/read file, read dir, remove, make (char, dir, reg, sock, fifo, block, sym).
 const ALL_FS: u64 = (1 << 13) - 1;
-const READ_FS: u64 = 1 | (1 << 2) | (1 << 3);
+const READ_FILE_FS: u64 = 1 << 2;
+const READ_FS: u64 = 1 | READ_FILE_FS | (1 << 3);
 /// Moving or linking a file into another folder (ABI 2). Not handled, every such move is refused, even inside `write`.
 const REFER_FS: u64 = 1 << 13;
 /// `truncate(2)` and opening with `O_TRUNC` (ABI 3). Not handled, a file anywhere can be cut to nothing.
@@ -180,7 +181,12 @@ pub(crate) fn ruleset(
     }
     // SAFETY: the kernel returned a fresh descriptor that nothing else owns.
     let set = unsafe { OwnedFd::from_raw_fd(fd as i32) };
-    for (paths, rights) in [(&sb.read, READ_FS), (&sb.write, all)] {
+    let git_config = sb.git_config_file();
+    for (paths, rights) in [
+        (sb.read.as_slice(), READ_FS),
+        (sb.write.as_slice(), all),
+        (git_config.as_slice(), READ_FILE_FS),
+    ] {
         for p in paths {
             let below = folder.and_then(|h| {
                 // The most specific spelling: one that lies inside the held folder (a link there) is resolved by the hold, never
@@ -193,6 +199,13 @@ pub(crate) fn ruleset(
                 Some((h, rel))
             });
             let opened = match below {
+                _ if rights == READ_FILE_FS => {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    std::fs::OpenOptions::new()
+                        .read(true)
+                        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                        .open(p)
+                }
                 Some((held, rel)) => open_below(held, rel),
                 None => std::fs::File::open(p),
             };
@@ -200,7 +213,11 @@ pub(crate) fn ruleset(
             let Ok(f) = opened else {
                 continue;
             };
-            let rights = if f.metadata()?.is_dir() {
+            let metadata = f.metadata()?;
+            if rights == READ_FILE_FS && !metadata.is_file() {
+                continue;
+            }
+            let rights = if metadata.is_dir() {
                 rights
             } else {
                 rights & FILE_FS

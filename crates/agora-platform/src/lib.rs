@@ -1260,7 +1260,8 @@ pub struct Sandbox {
     pub confine_sockets: bool,
     /// The node's own folders and files (its data, identity, logs, control socket, other agents' mesh sockets): never read or written,
     /// and no unix socket below them connected to, even when they sit below an allowed folder (a node home under `/tmp`), except
-    /// `sockets`, including paths that do not exist yet when the agent starts. Enforced on macOS only (Seatbelt can say "except");
+    /// `sockets` and the dedicated generated Git file, including paths that do not exist yet when the agent starts.
+    /// Enforced on macOS only (Seatbelt can say "except");
     /// Linux and Windows ignore it, so there a node home below an allowed folder stays reachable by file rights: on Linux the node
     /// refuses to start an agent whose grants contain the control token file and the socket needs that token (ADR-0082); Windows
     /// keeps the files out by its own ACLs (see `docs/security/threat-model.md`, T16).
@@ -1270,6 +1271,9 @@ pub struct Sandbox {
     /// otherwise have the home opened at its next start. A `read` or `write` entry that resolves below `deny` is never opened.
     /// macOS only, as `deny`.
     pub reopen: Vec<PathBuf>,
+    /// The node-generated Git configuration (ADR-0098). This grant reads an exact file, including
+    /// under a protected directory. Unlike a worktree exception, it grants no writes or listing.
+    pub git_config: Option<PathBuf>,
 }
 
 impl Sandbox {
@@ -1281,6 +1285,37 @@ impl Sandbox {
             ..Self::default()
         }
     }
+
+    /// The file that can be named in the sandbox and in the launch environment.
+    pub fn git_config_file(&self) -> Option<PathBuf> {
+        let path = self.git_config.as_deref()?;
+        path.to_str()?;
+        if !path.is_absolute() || !std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_file())
+        {
+            return None;
+        }
+        #[cfg(target_os = "macos")]
+        {
+            macos::git_config_path(path)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Some(path.to_path_buf())
+        }
+    }
+}
+
+/// The settings copied by the node take precedence over ambient Git environment overrides.
+pub fn git_config_env(file: &std::path::Path) -> [(String, String); 4] {
+    [
+        ("GIT_CONFIG_COUNT".into(), "0".into()),
+        ("GIT_CONFIG_PARAMETERS".into(), String::new()),
+        (
+            "GIT_CONFIG_GLOBAL".into(),
+            file.to_string_lossy().into_owned(),
+        ),
+        ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+    ]
 }
 
 /// True where a [`Sandbox`] is enforced by per-agent folder permissions (Windows, ADR-0050) rather than by a rule list the kernel

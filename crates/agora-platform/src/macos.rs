@@ -372,6 +372,26 @@ pub(crate) fn profile(sb: &crate::Sandbox) -> io::Result<String> {
             out.push_str(&format!("(allow network-outbound {})\n", own.join(" ")));
         }
     }
+    // ADR-0098: reopen only the generated file after the deny on its parent. The
+    // parent metadata grants allow traversal and do not grant directory listing.
+    if let Some(file) = sb.git_config_file() {
+        out.push_str(&format!(
+            "(allow file-read-data file-read-metadata {})\n",
+            literal(&file)
+        ));
+        let parents: Vec<_> = file
+            .ancestors()
+            .skip(1)
+            .filter(|p| denied.iter().any(|d| p.starts_with(d)))
+            .map(literal)
+            .collect();
+        if !parents.is_empty() {
+            out.push_str(&format!(
+                "(allow file-read-metadata {})\n",
+                parents.join(" ")
+            ));
+        }
+    }
     if sb.offline {
         // ADR-0047 `worktree-offline`: nothing leaves the machine. Seatbelt names only `localhost` (this machine's own addresses) or
         // every host. Connections to this machine stay open (a local model; see the threat model for what else listens there);
@@ -399,6 +419,11 @@ pub(crate) fn profile(sb: &crate::Sandbox) -> io::Result<String> {
         }
     }
     Ok(out)
+}
+
+pub(crate) fn git_config_path(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    let found = walk(path, &|_, _| true).ok()?;
+    (found.file && found.links == 1).then_some(found.path)
 }
 
 /// An entry where the kernel has it (see [`walk`]).
