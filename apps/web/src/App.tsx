@@ -40,13 +40,14 @@ import { agentTarget } from './components/sessionChoice';
 import { ChatActionsContext, type ChatActions, type PromptResult } from './components/chatActions';
 import { CloseAgentContext } from './components/CloseAgent';
 import { closeAsk } from './net/closeAgent';
-import { forgetGiveSupport, forgetOffline, givableTasks, giveAsk, giveTask, useGiveAsk, useGiveSupport } from './net/give';
+import { canStartFor, forgetGiveSupport, forgetOffline, givableTasks, giveAsk, giveTask, useGiveAsk, useGiveSupport } from './net/give';
 import { GiveContext, GiveDialog, type GiveApi } from './components/GiveTask';
 import { plain } from './components/boardColumns';
 import { failure, type ActionResult } from './net/refusal';
 import { usableId } from './components/launchChoice';
 import { launchSettingsField } from './components/launchSettingsModel';
 import { rememberStarted } from './components/launchMemory';
+import { sendStart, startRefusal, type StartResult } from './net/startHold';
 import { PhoneAgent, PhoneHome, PhoneTheme, usePhone } from './phone/Phone';
 import { approvalRedirect, phoneScreen } from './phone/nav';
 import { AttentionLayer } from './components/AttentionLayer';
@@ -56,12 +57,6 @@ import { TOOL_PANELS } from './net/paneTools';
 import { isMachinesHash, isSettingsHash, machineOfHash, settingsSectionOf, paletteExtras, projectsOf } from './net/paletteExtras';
 import { themeStore } from './themes/store';
 import { themeName } from './themes/messages';
-
-// ADR-0059: why the machine refused the chosen launch option, as a message id (its `policy` parameter, a stable value).
-function optionForbidden(e: unknown): string {
-  const policy = (e as { params?: Record<string, string> }).params?.policy;
-  return policy === 'confined_only' ? 'start-option-confined-only' : 'start-option-forbidden';
-}
 
 function useHash(): [string, (h: string) => void] {
   const [hash, setHash] = useState(window.location.hash);
@@ -158,24 +153,16 @@ export function App() {
   }, [api, device]);
   // The ordinary start command (ADR-0052, ADR-0059, ADR-0066), signed by this device: the new agent's id on its machine, or the refusal's
   // locale key. "Start an agent" and "Start a new agent for this task" (ADR-0095 step 3) both start through this and nothing else.
-  const launchAgent = useCallback(async (node: string, info: DirectoryInfo, kind: string, separateWorktree: boolean, acceptIdentityChange: boolean, launch: { ids: string[]; confirmed: string[]; settings: [string, string][] }): Promise<{ agentId: string } | { failure: string }> => {
+  const launchAgent = useCallback(async (node: string, info: DirectoryInfo, kind: string, separateWorktree: boolean, acceptIdentityChange: boolean, launch: { ids: string[]; confirmed: string[]; settings: [string, string][] }): Promise<StartResult> => {
     try {
       if (!api || !device) return { failure: 'approval-not-trusted' };
       // ADR-0059: the device signs the chosen launch options too, so the hub can neither add nor remove one.
       const authorization = await signDirectory(device, node, 'launch', info.path, kind, info.projectId, separateWorktree, acceptIdentityChange, launch.ids, launch.confirmed, launch.settings);
-      const ok = await api.command(node, { agentLaunch: { path: info.path, projectId: info.projectId, kind, separateWorktree, acceptIdentityChange, authorization, launchOptions: launch.ids, confirmedLaunchOptions: launch.confirmed, ...launchSettingsField(launch.settings) } });
-      const id = ok.agentLaunch?.agentId ?? '';
-      if (id) rememberStarted(`${node}/${id}`, launch.settings);
-      return { agentId: id };
+      const r = await sendStart(api.command, node, { agentLaunch: { path: info.path, projectId: info.projectId, kind, separateWorktree, acceptIdentityChange, authorization, launchOptions: launch.ids, confirmedLaunchOptions: launch.confirmed, ...launchSettingsField(launch.settings) } }, launch);
+      if ('agentId' in r && r.agentId) rememberStarted(`${node}/${r.agentId}`, launch.settings);
+      return r;
     } catch (e) {
-      const code = (e as { code?: string }).code;
-      if (code === 'agent.option_forbidden') return { failure: optionForbidden(e) };
-      if (code === 'agent.option_unconfirmed') return { failure: 'start-option-unconfirmed' };
-      if (code === 'agent.option_invalid') return { failure: 'start-option-invalid' };
-      if (code === 'agent.setting_unknown' || code === 'agent.setting_invalid') return { failure: 'start-setting-refused' };
-      if (code === 'protocol.capability_missing' && launch.settings.length > 0) return { failure: 'start-settings-unsupported' };
-      if (code === 'protocol.capability_missing' && launch.ids.length > 0) return { failure: 'start-options-unsupported' };
-      return { failure: code === 'agent.mode_unsupported' ? 'start-directory-agent-unsupported' : code === 'approval.signature_invalid' ? 'approval-not-trusted' : code === 'protocol.capability_missing' ? 'start-directory-unsupported' : code === 'agent.kind_unknown' ? 'start-kind-unknown' : code === 'node.resource_limit' ? 'start-limit' : code === 'auth.forbidden' ? 'start-directory-forbidden' : 'start-failed' };
+      return { failure: startRefusal((e as { code?: string }).code) };
     }
   }, [api, device]);
   const startAgent = useCallback(async (node: string, info: DirectoryInfo, kind: string, separateWorktree: boolean, acceptIdentityChange: boolean, launch: { ids: string[]; confirmed: string[]; settings: [string, string][] }): Promise<string | undefined> => {
@@ -540,7 +527,7 @@ export function App() {
     // Close agent: opens that agent and asks for the confirm there; nothing is closed from the palette itself.
     ...(hub && api ? agents.filter((a) => !a.closed && a.machineId).map((a) => ({ id: `close-${a.id}`, label: t('palette-close-agent', { name: a.name }), run: () => { open(a.id); closeAsk.ask(a.id, 'pane'); } })) : []),
     // A Backlog task is a searchable object: choosing it opens "Give to an agent" for it (the dialog asks before anything is sent).
-    ...(giveApi ? givableTasks(boardList, giveApi.agents, giveApi.online, undefined, !!giveApi.start).map((task) => ({ id: `give-${task.key}`, label: t('palette-give-task', { title: plain(task.title, 80) || t('board-task-untitled') }), run: () => giveAsk.ask(task) })) : []),
+    ...(giveApi ? givableTasks(boardList, giveApi.agents, giveApi.online, undefined, (id) => !!giveApi.start && canStartFor(giveApi.start.projects, giveApi.start.machines, id)).map((task) => ({ id: `give-${task.key}`, label: t('palette-give-task', { title: plain(task.title, 80) || t('board-task-untitled') }), run: () => giveAsk.ask(task) })) : []),
   ], [api, agents, go, toWindow, hub, next, open, openStart, language, editTheme, palette, phone, live, info.passwordSet, pairing.ui, lockNow, showPairing, giveApi, boardList, giveSupport]);
 
   useEffect(() => {

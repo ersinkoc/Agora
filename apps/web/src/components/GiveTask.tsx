@@ -2,7 +2,8 @@ import * as Dialog from '@radix-ui/react-dialog';
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
 import { t } from '../i18n';
 import { sharesName, type AgentTileModel } from '../model';
-import { actsFreelyNow, canTake, giveAsk, giveCandidates, useGiveSupport, type GiveResult, type GiveTask } from '../net/give';
+import { actsFreelyNow, canStartFor, canTake, cannotTakeKey, giveAsk, giveCandidates, offersGive, useGiveSupport, type GiveResult, type GiveTask } from '../net/give';
+import type { StartResult } from '../net/startHold';
 import { OWNER_MAX, TITLE_MAX, plain } from './boardColumns';
 import type { DirectoryInfo, DirectoryListing } from '../net/directory';
 import type { MachineModel, ProjectChoice } from '../net/view';
@@ -21,7 +22,7 @@ export interface StartForTask {
   loadKinds: (node: string) => Promise<KindChoice[]>;
   inspect: (node: string, path: string, createIdentity: boolean) => Promise<DirectoryInfo>;
   list?: (node: string, path: string) => Promise<DirectoryListing>;
-  launch: (node: string, info: DirectoryInfo, kind: string, separate: boolean, acceptIdentityChange: boolean, launch: { ids: string[]; confirmed: string[]; settings: [string, string][] }) => Promise<{ agentId: string } | { failure: string }>;
+  launch: (node: string, info: DirectoryInfo, kind: string, separate: boolean, acceptIdentityChange: boolean, launch: { ids: string[]; confirmed: string[]; settings: [string, string][] }) => Promise<StartResult>;
 }
 
 // ADR-0095 step 2: "Give to an agent". Present only in a window signed in to a hub; the board's cards and the command palette read it to
@@ -42,7 +43,7 @@ export const GiveContext = createContext<GiveApi | undefined>(undefined);
 export function useCanGive(projectId: string): boolean {
   const give = useContext(GiveContext);
   useGiveSupport();
-  return !!give && !!projectId && (!!give.start || giveCandidates(give.agents, projectId, give.online).length > 0);
+  return !!give && !!projectId && ((!!give.start && canStartFor(give.start.projects, give.start.machines, projectId)) || giveCandidates(give.agents, projectId, give.online).length > 0);
 }
 
 // Names in the confirmation are shown in full (only control and direction characters are taken out); this bound only stops a hostile
@@ -143,8 +144,24 @@ export function GiveOutcome({ result, agent, fresh, onClose, onBack, onSettled }
 // current data, so a change while it is open is shown and an agent that stopped or left the project is not sent to.
 // `start`: the ordinary start window, opened for this task; `refusal` is the last thing it refused, shown in the picker when the person
 // comes back. `fresh`: the agent was just started from here (it may not be in the live view yet, and may still be starting).
-type Step = { at: 'pick'; refusal?: string } | { at: 'start'; refusal?: string } | { at: 'confirm'; agentId: string; busy?: boolean; fresh?: boolean }
+// `held`: the machine held the start back until the owner allows it (ADR-0041); the confirmation follows if it then starts.
+type Step = { at: 'pick'; refusal?: string } | { at: 'start'; refusal?: string } | { at: 'held' } | { at: 'confirm'; agentId: string; busy?: boolean; fresh?: boolean }
   | { at: 'result'; agent: AgentTileModel; result: GiveResult; fresh?: boolean };
+
+// How long the window waits for a started agent to show up before it says so (the binding to that agent stays: it still follows).
+export const APPEAR_WAIT_MS = 60_000;
+
+/** Started, and not in the live view yet. After `APPEAR_WAIT_MS` it says the agent has not appeared yet; Back returns to the picker. */
+function WaitingForAgent({ onBack }: { onBack: () => void }) {
+  const [late, setLate] = useState(false);
+  useEffect(() => { const id = setTimeout(() => setLate(true), APPEAR_WAIT_MS); return () => clearTimeout(id); }, []);
+  return (
+    <div className="grid gap-3" data-give-step="waiting">
+      <p role="status" className="m-0 text-sm text-ink">{t(late ? 'give-start-late' : 'give-start-waiting')}</p>
+      <div className="flex justify-end"><button type="button" className="button min-h-11" onClick={onBack}>{t('give-back')}</button></div>
+    </div>
+  );
+}
 
 /** "Start a new agent for this task": the picker's main action when no agent can take the task, else a quieter one under the list. */
 function StartForTaskButton({ main, onClick }: { main: boolean; onClick: () => void }) {
@@ -171,7 +188,7 @@ export function GiveDialog({ task, give, onClose }: { task: GiveTask; give: Give
     const agent = current(agentId);
     // Checked again at the moment of sending: it may have stopped, been closed or interrupted, or moved to another project meanwhile.
     if (!agent || !canTake(agent, task.projectId, latest.current.online)) {
-      setStep({ at: 'result', agent: agent ?? ({ id: agentId, name: '', machine: '' } as AgentTileModel), result: { ok: false, key: 'give-target-gone' } });
+      setStep({ at: 'result', agent: agent ?? ({ id: agentId, name: '', machine: '' } as AgentTileModel), result: { ok: false, key: cannotTakeKey(agent, latest.current.online) } });
       return;
     }
     setStep({ at: 'confirm', agentId, busy: true, fresh });
@@ -180,13 +197,32 @@ export function GiveDialog({ task, give, onClose }: { task: GiveTask; give: Give
   };
   // The ordinary start: what it refused stays in its own window (with the trust command and the rest), and is shown again in the picker
   // when the person goes back. Once it started, the same confirmation follows for the new agent; nothing is sent before it.
+  // A start held for the owner's permission: until it is answered the picker does not offer a second start for this task (it could start
+  // a second agent). Once it started, the new agent is listed there anyway.
+  const [held, setHeld] = useState<'waiting' | 'started' | undefined>();
   const starter = give.start;
+  // Only where an agent started could be given the task: a connected machine with a folder of the project, not heard to lack tasks.
+  const startable = !!starter && !held && canStartFor(starter.projects, starter.machines, task.projectId);
+  const follow = (grant: Promise<{ agentId: string } | { failure: string }>, node: string) => {
+    setHeld('waiting');
+    void grant.then((r) => {
+      const id = 'agentId' in r ? r.agentId : '';
+      setHeld(id ? 'started' : undefined);
+      setStep((s) => {
+        if (s.at !== 'held') return s.at === 'pick' && !id ? { at: 'pick', refusal: 'failure' in r ? r.failure : undefined } : s;
+        if ('failure' in r) return { at: 'pick', refusal: r.failure };
+        return id ? { at: 'confirm', agentId: `${node}/${id}`, fresh: true } : { at: 'pick', refusal: 'give-start-unnamed' };
+      });
+    });
+  };
   if (step.at === 'start' && starter) {
-    const projects = starter.projects.filter((p) => p.projectId === task.projectId);
-    return <StartAgent projects={projects} machines={starter.machines} trust={starter.trust} askApproval={starter.askApproval} loadKinds={starter.loadKinds} inspect={starter.inspect} list={starter.list}
+    const projects = starter.projects.filter((p) => p.projectId === task.projectId && offersGive(p.node));
+    return <StartAgent projects={projects} machines={starter.machines.filter((m) => offersGive(m.id))} trust={starter.trust} askApproval={starter.askApproval} loadKinds={starter.loadKinds} inspect={starter.inspect} list={starter.list}
       forTask={{ projectId: task.projectId, project: plain(task.project, FULL), title: plain(task.title, TITLE_MAX) || t('board-task-untitled') }}
       onStart={async (node, info, kind, separate, acceptIdentityChange, launch) => {
         const r = await starter.launch(node, info, kind, separate, acceptIdentityChange, launch);
+        // Held for the owner's permission: the start window gives way, and the confirmation follows once it started.
+        if ('failure' in r && r.grant) { follow(r.grant, node); setStep({ at: 'held' }); return r.failure; }
         if ('failure' in r) { setStep({ at: 'start', refusal: r.failure }); return r.failure; }
         // An older machine that does not say which agent it started: back to the picker, where the new agent is listed once it shows up.
         setStep(r.agentId ? { at: 'confirm', agentId: `${node}/${r.agentId}`, fresh: true } : { at: 'pick', refusal: 'give-start-unnamed' });
@@ -218,30 +254,32 @@ export function GiveDialog({ task, give, onClose }: { task: GiveTask; give: Give
           <Dialog.Title className="m-0 break-words text-base font-semibold tracking-normal text-ink normal-case">{title}</Dialog.Title>
           {step.at === 'pick' && <>
             <p id="give-task-title" dir="auto" className="m-0 break-words rounded-s border border-line bg-surface-0 p-2.5 text-sm text-ink">{plain(task.title, TITLE_MAX) || t('board-task-untitled')}</p>
+            {held === 'waiting' && <p role="status" data-give-held="" className="m-0 text-sm text-ink">{t('give-start-held-note')}</p>}
             {step.refusal && <p role="alert" data-give-refusal="" className="m-0 rounded-s border border-needs-you/60 p-2.5 text-sm text-ink">{t(step.refusal)}</p>}
             {candidates.length === 0
               ? <>
-                <p className="muted m-0 text-sm">{t(starter ? 'give-none-start' : 'give-none', { project: task.project })}</p>
-                {starter && <StartForTaskButton main onClick={() => setStep({ at: 'start' })} />}
+                <p className="muted m-0 text-sm">{t(startable ? 'give-none-start' : starter ? 'give-none-plain' : 'give-none', { project: plain(task.project, FULL) })}</p>
+                {startable && <StartForTaskButton main onClick={() => setStep({ at: 'start' })} />}
               </>
               : <>
-                <p className="muted m-0 text-sm">{t('give-pick-hint', { project: task.project })}</p>
+                <p className="muted m-0 text-sm">{t('give-pick-hint', { project: plain(task.project, FULL) })}</p>
                 <ul aria-label={t('give-pick-label')} className="m-0 grid list-none gap-2 p-0">
                   {candidates.map(({ agent, depth }) => <GiveRow key={agent.id} agent={agent} depth={depth} machines={give.machines} onPick={() => setStep({ at: 'confirm', agentId: agent.id })} />)}
                 </ul>
-                {starter && <StartForTaskButton main={false} onClick={() => setStep({ at: 'start' })} />}
+                {startable && <StartForTaskButton main={false} onClick={() => setStep({ at: 'start' })} />}
               </>}
             <div className="flex justify-end"><Dialog.Close className="button min-h-11">{t('give-cancel')}</Dialog.Close></div>
           </>}
+          {step.at === 'held' && <div className="grid gap-3" data-give-step="held">
+            <p role="status" className="m-0 text-sm text-ink">{t('give-start-held')}</p>
+            <div className="flex justify-end"><button type="button" className="button min-h-11" onClick={() => setStep({ at: 'pick' })}>{t('give-back')}</button></div>
+          </div>}
           {step.at === 'confirm' && (!chosen && step.fresh
             // Started, and not in the live view yet: the confirmation follows as soon as it shows up.
-            ? <div className="grid gap-3" data-give-step="waiting">
-              <p role="status" className="m-0 text-sm text-ink">{t('give-start-waiting')}</p>
-              <div className="flex justify-end"><button type="button" className="button min-h-11" onClick={() => setStep({ at: 'pick' })}>{t('give-back')}</button></div>
-            </div>
+            ? <WaitingForAgent onBack={() => setStep({ at: 'pick' })} />
             : chosen && (step.busy || canTake(chosen, task.projectId, give.online))
             ? <GiveConfirm task={task} agent={chosen} machines={give.machines} busy={step.busy} onSend={() => void send(step.agentId, step.fresh)} onBack={() => setStep({ at: 'pick' })} />
-            : <GiveOutcome result={{ ok: false, key: 'give-target-gone' }} agent={chosen ?? ({ id: step.agentId, name: '', machine: '' } as AgentTileModel)} onClose={onClose} onBack={() => setStep({ at: 'pick' })} />)}
+            : <GiveOutcome result={{ ok: false, key: cannotTakeKey(chosen, give.online) }} agent={chosen ?? ({ id: step.agentId, name: '', machine: '' } as AgentTileModel)} onClose={onClose} onBack={() => setStep({ at: 'pick' })} />)}
           {step.at === 'result' && <GiveOutcome key={step.result.ok ? 'ok' : step.result.key} result={step.result} agent={step.agent} fresh={step.fresh} onClose={onClose} onBack={() => setStep({ at: 'pick' })}
             onSettled={(result) => setStep({ at: 'result', agent: step.agent, result, fresh: step.fresh })} />}
         </Dialog.Content>
