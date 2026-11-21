@@ -467,6 +467,7 @@ fn doctor(say: &Say, o: &Opts) -> ExitCode {
         data_dir: o.data.clone().unwrap_or_else(|| h.join("data")),
         socket: socket_path(o),
         manifests_dir: o.manifests.clone().unwrap_or_else(|| h.join("manifests")),
+        agora_home: agora_adapters::package::agora_home(),
     });
     // Certificates last 90 days and renew themselves (ADR-0085): the days left, and what a refused renewal needs.
     checks.extend(certs::checks_now(&hubcli::link_dir(), &hubcli::hub_dir(o)));
@@ -500,6 +501,7 @@ fn doctor(say: &Say, o: &Opts) -> ExitCode {
             ("agent-installed", _) => key!("doctor-agent-installed"),
             ("agent-missing", _) => key!("doctor-agent-missing"),
             ("agent-broken", _) => key!("doctor-agent-broken"),
+            ("agent-unsafe", _) => key!("doctor-agent-unsafe"),
             ("manifest-older", _) => key!("doctor-manifest-older"),
             ("policy-path-dropped", _) => key!("doctor-policy-path-dropped"),
             ("policy-path-missing", _) => key!("doctor-policy-path-missing"),

@@ -38,6 +38,8 @@ pub struct Inputs {
     pub data_dir: PathBuf,
     pub socket: PathBuf,
     pub manifests_dir: PathBuf,
+    /// `<AGORA_HOME>`: where `agora agent install` keeps the programs it installed.
+    pub agora_home: PathBuf,
 }
 
 /// Is `program` runnable: an existing path, or found in a `PATH` directory.
@@ -66,6 +68,53 @@ pub fn locate(program: &str) -> Option<PathBuf> {
         let exe = dir.join(format!("{program}.exe"));
         (cfg!(windows) && exe.is_file()).then_some(exe)
     })
+}
+
+/// Where an agent's program was found (ADR-0087 item 3 and 6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Found {
+    /// `agora agent install` put it under `<AGORA_HOME>/agents/bin`: the agent's folder name and its version.
+    Agora(PathBuf, String),
+    /// The user's own: a path, or a `PATH` directory.
+    You(PathBuf),
+}
+
+impl Found {
+    pub fn path(&self) -> &Path {
+        match self {
+            Found::Agora(p, _) | Found::You(p) => p,
+        }
+    }
+}
+
+/// Like [`locate`], but what `agora agent install` made under `<home>/agents/bin` comes first (only for a plain file name that the
+/// installer's own records and checks accept, [`agora_adapters::agent_install::installed_program`]), then the user's `PATH`.
+pub fn locate_in(home: &Path, program: &str) -> Option<Found> {
+    if let Some(i) = agora_adapters::agent_install::installed_program(home, program) {
+        return Some(Found::Agora(i.path, i.version));
+    }
+    locate(program).map(Found::You)
+}
+
+/// The program to start for `program`: the installed one's full path, else `program` unchanged.
+pub fn start_program(home: &Path, program: &str) -> String {
+    use agora_adapters::agent_install::{lookup_installed, Lookup};
+    match lookup_installed(home, program) {
+        Lookup::Installed(i) => i.path.to_str().map(str::to_string),
+        Lookup::Unsafe => {
+            // No secret here: only the program's file name.
+            eprintln!("agent program {program:?} was installed by agora but its folder or file is not safe; using the PATH");
+            None
+        }
+        Lookup::NotInstalled => None,
+    }
+    .unwrap_or_else(|| program.to_string())
+}
+
+/// An agent folder owns `program` but the installed copy failed its safety checks, so it is not used.
+pub fn install_unsafe(home: &Path, program: &str) -> bool {
+    agora_adapters::agent_install::lookup_installed(home, program)
+        == agora_adapters::agent_install::Lookup::Unsafe
 }
 
 /// A file the owner may not run (ADR-0087 rung 1: "broken"): found, but without the execute bit. Where the platform has no such bit
@@ -166,7 +215,7 @@ pub fn run(inputs: &Inputs) -> Vec<Check> {
     });
 
     out.extend(policy_read_at_start(&policy_file, &inputs.socket, running));
-    out.extend(manifests(&inputs.manifests_dir));
+    out.extend(manifests(&inputs.manifests_dir, &inputs.agora_home));
     out.extend(credential_checks(
         &inputs.manifests_dir,
         &crate::credentials::SecretStore::in_data(&inputs.data_dir),
@@ -418,7 +467,7 @@ fn data_dir(dir: &Path) -> Check {
 /// or `folder`), the program looked for (`$program`) and whether it is found (`agent-installed`), not found (`agent-missing`) or found
 /// without the right to run it (`agent-broken`). The agent's own version is not shown: no manifest has a version command yet. A folder file that cannot be read is named; its
 /// built-in kind, if any, stays. A missing folder is fine: the built-in kinds still load.
-fn manifests(dir: &Path) -> Vec<Check> {
+fn manifests(dir: &Path, home: &Path) -> Vec<Check> {
     let (loaded, problems) = crate::manifests::load(dir);
     let mut out = vec![check("manifests", Status::Ok, loaded.len().to_string())];
     for l in loaded {
@@ -428,11 +477,11 @@ fn manifests(dir: &Path) -> Vec<Check> {
         let found = if program.is_empty() {
             None
         } else {
-            locate(&program)
+            locate_in(home, &program)
         };
         // Found but not runnable is "broken": the program is there and starting it would fail (ADR-0087 rung 1). Nothing is run to
         // find out, so a program that starts and then fails its own checks is not caught here.
-        let broken = found.as_deref().is_some_and(|f| !runnable(f));
+        let broken = found.as_ref().is_some_and(|f| !runnable(f.path()));
         let installed = found.is_some() && !broken;
         let mut c = check(
             if installed {
@@ -443,10 +492,27 @@ fn manifests(dir: &Path) -> Vec<Check> {
                 "agent-missing"
             },
             if installed { Status::Ok } else { Status::Warn },
-            l.manifest.kind,
+            l.manifest.kind.clone(),
         );
-        c.args = vec![("program", program), ("from", l.source.name().to_string())];
+        c.args = vec![
+            ("program", program.clone()),
+            ("from", l.source.name().to_string()),
+        ];
+        // Where it was found: `agora` (installed by Agora, with the version folder) or `you` (found on the PATH or named by a path).
+        if let Some(f) = &found {
+            let (by, version) = match f {
+                Found::Agora(_, v) => ("agora", v.clone()),
+                Found::You(_) => ("you", String::new()),
+            };
+            c.args.push(("by", by.to_string()));
+            c.args.push(("version", version));
+        }
         out.push(c);
+        if !program.is_empty() && install_unsafe(home, &program) {
+            let mut u = check("agent-unsafe", Status::Warn, l.manifest.kind);
+            u.args = vec![("program", program)];
+            out.push(u);
+        }
     }
     for (p, _) in problems {
         let name = p
@@ -526,6 +592,29 @@ pub fn healthy(checks: &[Check]) -> bool {
 mod tests {
     use super::*;
 
+    /// A home with no installed agents.
+    fn none_home() -> PathBuf {
+        std::env::temp_dir().join("agora-doctor-no-such-home")
+    }
+
+    /// What `agora agent install` leaves for `exe`, made by hand.
+    fn installed_layout(home: &Path, version: &str, exe: &str) {
+        let agents = home.join("agents");
+        let vdir = agents.join("fake").join(version);
+        std::fs::create_dir_all(&vdir).unwrap();
+        std::fs::create_dir_all(agents.join("bin")).unwrap();
+        std::fs::write(vdir.join(exe), "x").unwrap();
+        for d in [&agents, &agents.join("bin"), &agents.join("fake"), &vdir] {
+            agora_platform::restrict_to_owner(d).unwrap();
+        }
+        agora_platform::set_executable(&vdir.join(exe), true).unwrap();
+        std::fs::write(agents.join("fake").join("current"), version).unwrap();
+        std::fs::write(agents.join("fake").join("exe"), exe).unwrap();
+        let relative = Path::new("..").join("fake").join(version).join(exe);
+        agora_platform::install_launcher(&vdir.join(exe), &relative, &agents.join("bin").join(exe))
+            .unwrap();
+    }
+
     fn tmp(name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("agora-doctor-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
@@ -546,6 +635,7 @@ mod tests {
             data_dir: d.join("data"),
             socket: d.join("nope.sock"),
             manifests_dir: d.join("manifests"),
+            agora_home: none_home(),
         });
         assert_eq!(find(&checks, "version")[0].status, Status::Ok);
         assert_eq!(find(&checks, "data-dir")[0].status, Status::Ok);
@@ -606,6 +696,7 @@ mod tests {
             data_dir: d.clone(),
             socket: d.join("nope.sock"),
             manifests_dir: d.join("manifests"),
+            agora_home: none_home(),
         });
         assert_eq!(find(&checks, "policy-restart").len(), 1);
         let _ = std::fs::remove_dir_all(&d);
@@ -620,6 +711,7 @@ mod tests {
             data_dir: data.clone(),
             socket: dir.join("none.sock"),
             manifests_dir: dir.join("manifests"),
+            agora_home: none_home(),
         };
         let ids = |checks: &[Check]| -> Vec<(&'static str, String)> {
             checks
@@ -674,6 +766,7 @@ mod tests {
             data_dir: data.clone(),
             socket: dir.join("none.sock"),
             manifests_dir: dir.join("manifests"),
+            agora_home: none_home(),
         };
         let checks = run(&inputs);
         let found = |id: &str| -> Vec<String> {
@@ -736,7 +829,7 @@ mod tests {
             "kind = \"mine\"\ndisplay_name = \"M\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [\"mine\"]\n",
         )
         .unwrap();
-        let checks = manifests(&dir);
+        let checks = manifests(&dir, &none_home());
         let older = find(&checks, "manifest-older");
         assert_eq!(older.len(), 1, "{checks:?}");
         assert_eq!(older[0].detail, "claude-code");
@@ -750,7 +843,7 @@ mod tests {
             .any(|(k, v)| *k == "from" && v == "2026.01.01.1"));
         // A newer folder copy is not warned about.
         std::fs::write(dir.join("claude-code.toml"), with("2099.01.01.1")).unwrap();
-        assert!(find(&manifests(&dir), "manifest-older").is_empty());
+        assert!(find(&manifests(&dir, &none_home()), "manifest-older").is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -782,7 +875,7 @@ mod tests {
         )
         .unwrap();
         std::fs::write(m.join("c.toml"), "not = [valid").unwrap();
-        let checks = manifests(&m);
+        let checks = manifests(&m, &none_home());
         assert_eq!(checks[0].id, "manifests");
         assert_eq!(
             checks[0].detail,
@@ -792,7 +885,12 @@ mod tests {
         assert_eq!(of("demo").id, "agent-installed");
         assert_eq!(
             of("demo").args,
-            [("program", present.to_string()), ("from", "folder".into())]
+            [
+                ("program", present.to_string()),
+                ("from", "folder".into()),
+                ("by", "you".into()),
+                ("version", String::new())
+            ]
         );
         assert_eq!(of("ghost").id, "agent-missing");
         assert_eq!(of("ghost").args[0].1, "definitely-not-installed-xyz");
@@ -816,11 +914,72 @@ mod tests {
         let text = MANIFEST.replace("LAUNCH", &prog.display().to_string());
         std::fs::write(m.join("a.toml"), &text).unwrap();
         let of = |checks: &[Check]| checks.iter().find(|c| c.detail == "demo").unwrap().id;
-        assert_eq!(of(&manifests(&m)), "agent-broken");
+        assert_eq!(of(&manifests(&m, &none_home())), "agent-broken");
         agora_platform::set_executable(&prog, true).unwrap();
-        assert_eq!(of(&manifests(&m)), "agent-installed");
+        assert_eq!(of(&manifests(&m, &none_home())), "agent-installed");
         std::fs::remove_file(&prog).unwrap();
-        assert_eq!(of(&manifests(&m)), "agent-missing");
+        assert_eq!(of(&manifests(&m, &none_home())), "agent-missing");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_program_agora_installed_comes_first_and_is_told_apart_from_the_users_own() {
+        let d = tmp("installed-by");
+        let m = d.join("m");
+        let home = d.join("home");
+        std::fs::create_dir_all(&m).unwrap();
+        std::fs::write(
+            m.join("a.toml"),
+            MANIFEST.replace("LAUNCH", "installed-by-agora-xyz"),
+        )
+        .unwrap();
+        let of = |checks: Vec<Check>| checks.into_iter().find(|c| c.detail == "demo").unwrap();
+        // Nothing installed and nothing on PATH.
+        assert_eq!(of(manifests(&m, &home)).id, "agent-missing");
+        installed_layout(&home, "1.2.3", "installed-by-agora-xyz");
+        let c = of(manifests(&m, &home));
+        assert_eq!(c.id, "agent-installed");
+        assert!(c.args.contains(&("by", "agora".to_string())));
+        assert!(c.args.contains(&("version", "1.2.3".to_string())));
+        // The installed one is the one to start, by its full path; another name is left to the PATH.
+        let start = start_program(&home, "installed-by-agora-xyz");
+        assert!(
+            Path::new(&start).is_absolute() && Path::new(&start).is_file(),
+            "{start}"
+        );
+        assert_eq!(start_program(&home, "other-xyz"), "other-xyz");
+        assert_eq!(
+            start_program(&none_home(), "installed-by-agora-xyz"),
+            "installed-by-agora-xyz"
+        );
+        // The installed copy made unsafe: not used, and doctor says why.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let dir = home.join("agents");
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+            let checks = manifests(&m, &home);
+            assert_eq!(of(checks.clone()).id, "agent-missing");
+            assert_eq!(find(&checks, "agent-unsafe").len(), 1);
+            assert_eq!(
+                start_program(&home, "installed-by-agora-xyz"),
+                "installed-by-agora-xyz"
+            );
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        // A program found only through a full path is "installed by you".
+        let own = d.join("own-agent");
+        std::fs::write(&own, "#!/bin/sh\n").unwrap();
+        agora_platform::set_executable(&own, true).unwrap();
+        std::fs::write(
+            m.join("a.toml"),
+            // Forward slashes: a Windows path's backslashes are escapes inside a TOML string.
+            MANIFEST.replace("LAUNCH", &own.display().to_string().replace('\\', "/")),
+        )
+        .unwrap();
+        let c = of(manifests(&m, &home));
+        assert_eq!(c.id, "agent-installed");
+        assert!(c.args.contains(&("by", "you".to_string())));
         let _ = std::fs::remove_dir_all(&d);
     }
 

@@ -2730,6 +2730,10 @@ impl Supervisor {
         folder: Option<&agora_platform::HeldFolder>,
     ) -> Result<TerminalHandle, SupervisorError> {
         let mut argv = argv.to_vec();
+        // ADR-0087 item 3: a program `agora agent install` made is found first, then the user's PATH (the node's own, as before).
+        if let Some(first) = argv.first_mut() {
+            *first = crate::doctor::start_program(&agora_adapters::package::agora_home(), first);
+        }
         argv.extend(extras.options.iter().cloned());
         argv.extend(extras.argv.iter().cloned());
         let program = argv.first().cloned();
@@ -3631,7 +3635,10 @@ impl Supervisor {
                     kind: m.kind.clone(),
                     display_name: m.display_name.clone(),
                     level,
-                    installed: program.is_some_and(crate::doctor::on_path),
+                    installed: program.is_some_and(|p| {
+                        crate::doctor::locate_in(&agora_adapters::package::agora_home(), p)
+                            .is_some()
+                    }),
                     program: program.unwrap_or_default().to_string(),
                     launch_options: m.launch.option.clone(),
                     settings: m.launch.setting.clone(),
