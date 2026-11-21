@@ -1807,12 +1807,18 @@ fn hold_link_within(dir: &Path, wait: std::time::Duration) -> std::io::Result<He
     std::fs::create_dir_all(dir)?;
     // Resolved once: the guard and every write name the same folder, also when `link` is a link that is pointed elsewhere meanwhile.
     let dir = std::fs::canonicalize(dir)?;
-    // Closed to every other user each time it is held (issue #877): today's files are written owner-only, but an older version
-    // wrote `url`, `node-id`, `ca.pem` and `cert.pem` under the umask (a Mac's `staff` group, a `D:\` ACL could read them). Best
-    // effort: a folder this user cannot change is used as it is, as before.
-    let _ = agora_platform::restrict_to_owner(&dir);
     let guard = link_guard(&dir, wait)?;
+    close_link_folder(&dir);
     Ok(HeldLink { dir, _guard: guard })
+}
+
+/// Closes the link folder to every other user (issue #877), once its guard is held (so only a folder this user can write in, never
+/// one kept read-only or shut on purpose): today's files are written owner-only, but an older version wrote `url`, `node-id`,
+/// `ca.pem` and `cert.pem` under the umask, where a Mac's `staff` group or a `D:\` ACL could read them. Every read (the node's
+/// start, `agora status`), save and enrollment holds the guard, so the next one closes what an older version left. Best effort: a
+/// folder whose mode cannot be changed is used as it is, as before.
+fn close_link_folder(dir: &Path) {
+    let _ = agora_platform::restrict_to_owner(dir);
 }
 
 /// How long the link folder's guard is waited for: the longest a holder that is alive and working holds it (Codex review of F1030). An
@@ -2218,20 +2224,30 @@ mod store_tests {
 
     /// Codex re-review of F1031: a link folder that is there but cannot be resolved or entered is an error, not "no link" (the node would
     /// start unlinked). Here: a path through a file, a link to a missing folder, and a folder this user may not enter.
-    /// Issue #877: an older version wrote `url`, `node-id`, `ca.pem` and `cert.pem` under the umask in an open folder. Holding the
-    /// link folder (every read, save and enrollment does) closes it to other users, which on Unix closes every file below it.
+    /// Issue #877: an older version wrote `url`, `node-id`, `ca.pem` and `cert.pem` under the umask in an open folder. A read of
+    /// the link (the node's start) and a save both close it to other users, which on Unix closes every file below it.
     #[cfg(unix)]
     #[test]
-    fn a_link_folder_an_older_version_left_open_is_closed_when_held() {
+    fn a_link_folder_an_older_version_left_open_is_closed_by_the_next_read_or_save() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = tmp("old-open");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
-        std::fs::write(dir.join("url"), "wss://h:1").unwrap();
-        drop(hold_link_within(&dir, std::time::Duration::ZERO).unwrap());
-        let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o700);
-        let _ = std::fs::remove_dir_all(dir);
+        let mode = |d: &Path| std::fs::metadata(d).unwrap().permissions().mode() & 0o777;
+        let open = |name: &str| {
+            let dir = tmp(name);
+            store_into(&dir, LINK_GUARD_WAIT, NEW, &agora_platform::write_private).unwrap();
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+            dir
+        };
+        let read = open("old-open-read");
+        let got = load_from(&read, LINK_GUARD_WAIT, PathBuf::from("socket"), &|p| {
+            std::fs::read_to_string(p)
+        });
+        assert!(matches!(got, Ok(Some(_))));
+        assert_eq!(mode(&read), 0o700);
+        let saved = open("old-open-save");
+        drop(hold_link_within(&saved, std::time::Duration::ZERO).unwrap());
+        assert_eq!(mode(&saved), 0o700);
+        let _ = std::fs::remove_dir_all(read);
+        let _ = std::fs::remove_dir_all(saved);
     }
 
     #[cfg(unix)]
@@ -2394,6 +2410,7 @@ fn load_from(
     // pair that was in use, before anything reads them. Only under the guard: without it a renewal may be running.
     if _guard.is_some() {
         agora_node::link_renewal::recover(&dir, &agora_node::link_renewal::Real);
+        close_link_folder(&dir);
     }
     link_files(&dir, socket, read)
 }
