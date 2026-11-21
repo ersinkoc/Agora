@@ -2,6 +2,7 @@
 
 pub mod app;
 pub mod backend;
+pub mod board;
 pub mod client;
 pub mod clip;
 pub mod device;

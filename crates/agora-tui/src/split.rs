@@ -411,7 +411,7 @@ fn project_name(s: &Snapshot, a: &AgentSnapshot) -> String {
 
 /// A readable name from a project id when the machine has no checkout of it: the repository's name of
 /// `github.com/owner/Agora#db6f…` ("Agora"), else `project` and the start of its hash, never the bare id.
-fn project_from_id(id: &str) -> String {
+pub(crate) fn project_from_id(id: &str) -> String {
     let (name, hash) = id.split_once('#').unwrap_or((id, ""));
     let name = name
         .trim_end_matches('/')
@@ -440,6 +440,25 @@ fn machine_offline(s: &Snapshot, node: &str) -> bool {
     s.nodes.iter().any(|n| n.node_id == node && !n.online)
 }
 
+/// An agent's state in words, as its tree row says it: interrupted, finished (not running), offline (its machine is: what it last did
+/// is not known now, so it never looks idle or waiting), else what it reported.
+pub fn state_text(s: &Snapshot, a: &AgentSnapshot, t: Text<'_>) -> String {
+    if a.interrupted && !a.running {
+        t(key!("tui-interrupted"), &[])
+    } else if !a.running {
+        t(key!("tui-state-finished"), &[])
+    } else if machine_offline(s, &a.node_id) {
+        t(key!("tui-state-unreachable"), &[])
+    } else {
+        state_word(state_of(a), t)
+    }
+}
+
+/// A machine's name as the tree shows it: its host name, else its id.
+pub fn machine_name(n: &agora_protocol::v1::NodeSnapshot) -> &str {
+    name(n)
+}
+
 pub fn app_rows(s: &Snapshot, now_ms: u64, t: Text<'_>) -> Vec<crate::app::Row> {
     let mut rows = Vec::new();
     let agent_row = |a: &AgentSnapshot, depth: usize| {
@@ -454,17 +473,8 @@ pub fn app_rows(s: &Snapshot, now_ms: u64, t: Text<'_>) -> Vec<crate::app::Row> 
         } else {
             String::new()
         };
-        // An agent whose machine is offline: what it last did is not known now, so it never looks idle (or waiting).
         let unreachable = a.running && machine_offline(s, &a.node_id);
-        let state = if a.interrupted && !a.running {
-            t(key!("tui-interrupted"), &[])
-        } else if !a.running {
-            t(key!("tui-state-finished"), &[])
-        } else if unreachable {
-            t(key!("tui-state-unreachable"), &[])
-        } else {
-            state_word(st, t)
-        };
+        let state = state_text(s, a, t);
         let asks = s.approvals.iter().any(|x| x.agent_id == a.agent_id);
         crate::app::Row {
             id: a.agent_id.clone(),
@@ -568,7 +578,7 @@ pub fn app_rows(s: &Snapshot, now_ms: u64, t: Text<'_>) -> Vec<crate::app::Row> 
 }
 
 /// An agent id's order in the tree: by machine, then by its number (`agent-2` before `agent-10`, not after it as text).
-fn by_number(id: &str) -> (&str, u64, &str) {
+pub(crate) fn by_number(id: &str) -> (&str, u64, &str) {
     let (machine, local) = id.split_once('/').unwrap_or(("", id));
     let digits = local.trim_start_matches(|c: char| !c.is_ascii_digit());
     (machine, digits.parse().unwrap_or(u64::MAX), local)

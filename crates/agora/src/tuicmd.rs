@@ -624,6 +624,7 @@ fn grant_question(say: &Say, scope: &str, commands: &[&str]) -> String {
         ["agent.stop"] => say.text(key!("tui-grant-ask-stop"), &agent),
         ["agent.set_mode"] => say.text(key!("tui-grant-ask-mode"), &agent),
         ["agent.set_model"] => say.text(key!("tui-grant-ask-model"), &agent),
+        ["task.dispatch"] => say.text(key!("tui-grant-ask-give"), &agent),
         _ => say.text(key!("tui-grant-ask"), &[]),
     }
 }
@@ -744,6 +745,8 @@ const TYPING_INPUT: [&str; 1] = ["terminal.input"];
 const PROMPT: [&str; 1] = ["agent.prompt"];
 /// Stopping an agent.
 const STOP: [&str; 1] = ["agent.stop"];
+/// ADR-0095: giving a board task to an agent (a grant for that agent, as the web window asks).
+const GIVE: [&str; 1] = ["task.dispatch"];
 
 /// The places that ask for a grant (#810): each one's command set comes from here, so a test can say what every place signs.
 #[derive(Clone, Copy, Debug)]
@@ -760,6 +763,8 @@ enum Site {
     SplitStop,
     /// Stopping from the console.
     ConsoleStop,
+    /// "Give to an agent" from the board.
+    BoardGive,
 }
 
 impl Site {
@@ -768,6 +773,7 @@ impl Site {
             Site::AttachTyping | Site::GrantKey => &TYPING_INPUT,
             Site::SplitPrompt | Site::ChatPrompt => &PROMPT,
             Site::SplitStop | Site::ConsoleStop => &STOP,
+            Site::BoardGive => &GIVE,
         }
     }
 }
@@ -1636,6 +1642,7 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                 typing_allowed: None,
                 asked: false,
                 typing_taken: std::collections::HashMap::new(),
+                give_lacking: std::collections::HashSet::new(),
             }),
             Err(_) => None,
         }
@@ -1744,6 +1751,8 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                 || c.notice == say.text(key!("tui-lost"), &hub_arg)
             {
                 c.notice.clear();
+                // The link was lost (a routine refresh keeps the notice): what machines said about taking tasks may be old now.
+                c.give_lacking.clear();
             }
             // A new connection: the cards held from the last one are stale until the hub sends the ones waiting now.
             c.pair.reset();
@@ -2203,6 +2212,9 @@ struct Console {
     /// The newest typing each terminal's machine took in this session, (node, terminal) to request: a refusal read in a later turn
     /// for typing sent before it is old news (answers can come out of order).
     typing_taken: Taken,
+    /// ADR-0095: machines that answered a "Give to an agent" in a way that says they do not take tasks (`board::lacks_give`); their
+    /// agents are not offered again until the machine goes offline or the link to the hub is lost (as the web window does, #885).
+    give_lacking: std::collections::HashSet<String>,
 }
 
 /// A notice too long for the footer is shown whole in a box above it until the next key (the trust command must be readable and
@@ -2352,6 +2364,9 @@ fn console(
         }
         match session.next(wait) {
             Update::Snapshot(s) => {
+                // A machine that is not connected now may come back updated: it is offered tasks again.
+                c.give_lacking
+                    .retain(|n| s.nodes.iter().any(|x| x.node_id == *n && x.online));
                 c.snapshot = Some(*s);
                 dirty_since = None;
                 redraw = true;
@@ -3921,6 +3936,19 @@ fn command(
             let _ = c.window.invalidate();
             false
         }
+        // ADR-0095: the board of the selected agent's project, whole-screen, and "Give to an agent" on a Backlog task. Like the review
+        // it redraws when the window is resized and says when a new request arrives meanwhile.
+        'b' if !selected.is_empty() => {
+            let Some(project) = agora_tui::board::project_of(&s, &selected) else {
+                c.notice = say.text(key!("tui-board-no-project"), &[]);
+                return false;
+            };
+            c.notice = over_console(say, c, session, None, rx, |session, ask| {
+                board_view(say, session, ask, &project)
+            });
+            let _ = c.window.invalidate();
+            false
+        }
         // ADR-0041: the grant the footer asked for when typing into the agent in front was refused. Only this key opens the question
         // (from the list, Ctrl-] then g): what follows is meant for it. Without such a refusal it does nothing.
         'g' => {
@@ -3957,6 +3985,185 @@ fn command(
             false
         }
         _ => false,
+    }
+}
+
+/// ADR-0095: a project's board, whole-screen (Backlog, Doing, Done; the keyboard on a card), until q or Esc. Enter or `g` on a Backlog
+/// task gives it to an agent ([`give_task`]); what that came to stays in the footer. The snapshot is the console's: a task given here
+/// is shown under Doing at once, other changes when the board is opened again. Answers the line the console shows after it (none).
+fn board_view(say: &Say, session: &mut Session, ask: &mut Over<'_>, project: &str) -> String {
+    let text = |id: &str, args: &[(&str, Arg)]| say.text(id, args);
+    // Tasks given from here: shown under Doing until the hub's next snapshot says where they are.
+    let mut given: Vec<(String, String)> = Vec::new();
+    let mut at = 0usize;
+    let mut notice = String::new();
+    let mut view = ViewWait::new(say, ask);
+    loop {
+        let Some(b) = ask
+            .c
+            .snapshot
+            .as_ref()
+            .map(|s| agora_tui::board::board(s, project, &given, &text))
+        else {
+            return String::new();
+        };
+        let cards: Vec<(agora_tui::board::Column, agora_tui::board::Card)> = b
+            .cards()
+            .into_iter()
+            .map(|(col, card)| (col, card.clone()))
+            .collect();
+        at = at.min(cards.len().saturating_sub(1));
+        let banner = view.banner.clone();
+        let _ = ask.c.window.draw(|f| {
+            agora_tui::board::draw_board(f, &b, at, &notice, &banner, &text);
+        });
+        let wake = view.wait(say, ask, session);
+        if matches!(wake, Wake::Key(_)) {
+            notice.clear();
+        }
+        match wake {
+            Wake::Key(b'j') if !cards.is_empty() => at = (at + 1).min(cards.len() - 1),
+            Wake::Key(b'k') => at = at.saturating_sub(1),
+            Wake::Key(b'\r' | b'\n' | b'g') => match cards.get(at) {
+                Some((agora_tui::board::Column::Backlog, card)) => {
+                    notice = give_task(say, session, ask, &mut view, &b, card, &mut given);
+                    let _ = ask.c.window.invalidate();
+                }
+                Some(_) => notice = say.text(key!("tui-board-backlog-only"), &[]),
+                None => {}
+            },
+            Wake::Gone | Wake::Key(b'q' | 0x1b | 3) => return String::new(),
+            Wake::Key(_) | Wake::Redraw => {}
+        }
+    }
+}
+
+/// "Give to an agent" for one Backlog task (ADR-0095 decisions 3, 4, 8): a picker of the project's agents that can take it, then a
+/// confirmation that only a fresh `g` answers (not Enter, the key that chose the agent, so a held key never gives it; keys typed before
+/// it was on the screen, a paste, or several keys at once never answer it), then the command to the agent's machine. A machine that
+/// wants a grant first gets the console's one-hour question for that agent. Answers what happened, or nothing when the user went back.
+fn give_task(
+    say: &Say,
+    session: &mut Session,
+    ask: &mut Over<'_>,
+    view: &mut ViewWait,
+    b: &agora_tui::board::Board,
+    task: &agora_tui::board::Card,
+    given: &mut Vec<(String, String)>,
+) -> String {
+    use agora_tui::board;
+    let text = |id: &str, args: &[(&str, Arg)]| say.text(id, args);
+    let mut at = 0usize;
+    'pick: loop {
+        let Some(s) = ask.c.snapshot.clone() else {
+            return String::new();
+        };
+        let choices: Vec<(String, String)> =
+            board::candidates(&s, &b.project_id, &ask.c.give_lacking)
+                .into_iter()
+                .map(|(a, depth)| (a.agent_id.clone(), board::choice_line(&s, a, depth, &text)))
+                .collect();
+        at = at.min(choices.len().saturating_sub(1));
+        let banner = view.banner.clone();
+        let _ = ask.c.window.draw(|f| {
+            board::draw_picker(f, &task.title, &b.project, &choices, at, "", &banner, &text);
+        });
+        let agent_id = match view.wait(say, ask, session) {
+            Wake::Key(b'j') if !choices.is_empty() => {
+                at = (at + 1).min(choices.len() - 1);
+                continue;
+            }
+            Wake::Key(b'k') => {
+                at = at.saturating_sub(1);
+                continue;
+            }
+            Wake::Key(b'\r' | b'\n') => match choices.get(at) {
+                Some((id, _)) => id.clone(),
+                None => continue,
+            },
+            Wake::Gone | Wake::Key(b'q' | 0x1b | 3 | 0x7f | 0x08) => return String::new(),
+            Wake::Key(_) | Wake::Redraw => continue,
+        };
+        // The confirmation, from the agent as it is now; any key but g, n, Esc or q (a repeated Enter) asks again.
+        loop {
+            let Some(s) = ask.c.snapshot.clone() else {
+                return String::new();
+            };
+            let Some(a) = s
+                .agents
+                .iter()
+                .find(|a| a.agent_id == agent_id)
+                .filter(|a| board::can_take(&s, a, &b.project_id, &ask.c.give_lacking))
+            else {
+                return board::cannot_take_text(&s, &agent_id, &ask.c.give_lacking, &text);
+            };
+            let lines = board::confirm_lines(&s, a, &task.title, &b.project, &text);
+            match ask.answer(&lines, Duration::from_secs(120)) {
+                Some(b'g') => break,
+                Some(b'n' | b'q' | 0x1b | 0x7f) | None => continue 'pick,
+                Some(_) => {}
+            }
+        }
+        // Checked again at the moment of sending: it may have stopped, been closed or interrupted, or left the project meanwhile.
+        let Some(s) = ask.c.snapshot.clone() else {
+            return String::new();
+        };
+        let Some(a) = s
+            .agents
+            .iter()
+            .find(|a| a.agent_id == agent_id)
+            .filter(|a| board::can_take(&s, a, &b.project_id, &ask.c.give_lacking))
+        else {
+            return board::cannot_take_text(&s, &agent_id, &ask.c.give_lacking, &text);
+        };
+        let name = board::agent_name(&s, a);
+        let (node, request) = board::give_request(a, &b.project_id, &task.task_id);
+        let scope = format!(
+            "agent:{}",
+            agent_id
+                .split_once('/')
+                .map_or(agent_id.as_str(), |(_, l)| l)
+        );
+        let mut refusal: Option<ErrorInfo> = None;
+        let tried = with_grant(
+            say,
+            session,
+            ask,
+            (&node, &scope, Site::BoardGive.commands()),
+            |session| {
+                session
+                    .command_info(&node, request.clone(), Duration::from_secs(15))
+                    .map_err(|e| {
+                        let code = e.code.clone();
+                        refusal = Some(e);
+                        code
+                    })
+            },
+        );
+        return match tried {
+            Tried::Done(Ok(ok)) => {
+                given.push((task.task_id.clone(), agent_id.clone()));
+                // The board changed: the console asks for a fresh snapshot once the board is closed.
+                ask.c.stale = true;
+                let result = match &ok.result {
+                    Some(agora_protocol::v1::command_ok::Result::TaskDispatch(r)) => Some(r),
+                    _ => None,
+                };
+                board::result_text(result, &name, &text)
+            }
+            Tried::Done(Err(code)) => {
+                let e = refusal.unwrap_or(ErrorInfo {
+                    code,
+                    ..Default::default()
+                });
+                if board::lacks_give(&e) {
+                    ask.c.give_lacking.insert(node);
+                }
+                board::refusal_text(&e, &text)
+            }
+            Tried::Declined => say.text(key!("tui-give-grant-declined"), &[]),
+            Tried::Line(l) => l,
+        };
     }
 }
 
@@ -4146,6 +4353,7 @@ mod typing_grant_tests {
             (Site::ChatPrompt, "agent.prompt"),
             (Site::SplitStop, "agent.stop"),
             (Site::ConsoleStop, "agent.stop"),
+            (Site::BoardGive, "task.dispatch"),
         ] {
             assert_eq!(site.commands(), [want], "{site:?}");
         }
@@ -4153,14 +4361,14 @@ mod typing_grant_tests {
         // A Windows checkout may turn line ends into CRLF; the searches below use LF.
         let src = include_str!("tuicmd.rs").replace("\r\n", "\n");
         let code = &src[..src.find("#[cfg(test)]").unwrap()];
-        assert_eq!(code.matches(".commands()").count(), 6);
+        assert_eq!(code.matches(".commands()").count(), 7);
     }
 
     /// An agent's id is written to the terminal: no control character of it gets there.
     #[test]
     fn the_question_shows_no_control_character_of_the_id() {
         let say = Say(agora_i18n::Catalog::english());
-        for c in [&TYPING_INPUT, &PROMPT, &STOP] {
+        for c in [&TYPING_INPUT, &PROMPT, &STOP, &GIVE] {
             let q = grant_question(&say, "agent:a\x1b[2Jb\nc", c);
             assert!(!q.contains('\x1b') && !q.contains('\n'), "{q:?}");
             assert!(q.contains("a[2Jb c"), "{q:?}");
@@ -4171,8 +4379,9 @@ mod typing_grant_tests {
     fn each_grant_covers_only_what_its_question_says() {
         let say = Say(agora_i18n::Catalog::english());
         // attach() and the grant key; both chat prompts; both stops; the option switches; a start (the general words).
-        let sites: [(&[&str], &str); 6] = [
+        let sites: [(&[&str], &str); 7] = [
             (&TYPING_INPUT, "type into"),
+            (&GIVE, "give board tasks to"),
             (&PROMPT, "send messages to"),
             (&STOP, "stop"),
             (&["agent.set_mode"], "mode"),
@@ -4199,7 +4408,7 @@ mod typing_grant_tests {
         }
         // The Turkish questions name the agent too.
         let tr = Say(agora_i18n::Catalog::turkish());
-        for c in [&TYPING_INPUT, &PROMPT, &STOP] {
+        for c in [&TYPING_INPUT, &PROMPT, &STOP, &GIVE] {
             assert!(grant_question(&tr, "agent:a1", c).contains("a1"));
         }
     }
