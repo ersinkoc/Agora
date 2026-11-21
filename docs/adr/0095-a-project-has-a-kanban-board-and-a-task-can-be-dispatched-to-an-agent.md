@@ -2,6 +2,7 @@
 Status: Accepted
 Date: 2026-11-20
 Accepted: 2026-11-20 (the maintainer's explicit message in the merger chat: "ADR-0095 ve ADR-0096'yı kabul ediyorum"). The open questions' proposed answers stand; the Review column's "accepted by" field (a schema step) stays deferred.
+Schema for build steps 2 and 3 approved: 2026-11-21 (the maintainer, in the merger chat: "ADR-0095'in dağıtım şema eklemelerini (TaskDispatch komutu, dağıtım olayı, yetenek bayrağı) onaylıyorum."): the `TaskDispatch` command, the `TaskDispatched` event and the capability `task.dispatch` (`docs/specs/protocol.md`, "Giving a task to an agent"). Step 4 still needs its own approval.
 
 Builds on ADR-0031 and ADR-0039/0040 (the mesh task board, shared across machines), ADR-0020 (approvals), ADR-0057 (agents start agents,
 parent and helper links), ADR-0059 (skipping permissions) and ADR-0092 (more agent kinds). Touches the threat model. Accepted: it may be built on.

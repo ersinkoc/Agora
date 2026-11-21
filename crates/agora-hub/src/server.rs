@@ -1154,6 +1154,24 @@ where
             .await?;
         return Ok(());
     }
+    // ADR-0095: a dispatch names the person who asks, and a person gives at most a few a minute.
+    if let Err(e) = crate::dispatch::prepare_dispatch(
+        who,
+        &mut req,
+        hub.dispatches(),
+        std::time::Instant::now(),
+    ) {
+        audit(
+            hub,
+            who,
+            &audit_action(&req),
+            &req.target_node,
+            e.code.as_str(),
+        );
+        conn.send(&frame(STREAM_COMMANDS, 1, refuse(e).encode_to_vec()))
+            .await?;
+        return Ok(());
+    }
     // Shared terminal size: the node gets the smallest size of the windows watching the terminal, and only when it changes.
     if let Some(command_request::Command::TerminalResize(t)) = req.command.as_mut() {
         if !req.target_node.is_empty() {

@@ -265,6 +265,8 @@ impl Scope {
             Body::LeaseReleased(e) => self.lease_visible(node, &e.agent_id),
             // The shared board spans machines, so no single grant covers it.
             Body::TaskChanged(_) => false,
+            // ADR-0095: a dispatch is about one agent of the producer; it is theirs when that agent is.
+            Body::TaskDispatched(e) => self.granted(self.agents.get(&q(&e.agent_id))),
         }
     }
 
@@ -314,6 +316,11 @@ impl Scope {
             C::WorktreeRemove(c) => self.granted(self.worktrees.get(&q(&c.worktree_id))),
             C::ApprovalResolve(c) => self.granted(self.approvals.get(&q(&c.approval_id))),
             C::TaskUpdate(c) => self.projects.contains(&qualified(node, &c.project_id)),
+            // ADR-0095: the person needs the project and the agent (the node checks that the agent is of that project).
+            C::TaskDispatch(c) => {
+                self.projects.contains(&qualified(node, &c.project_id))
+                    && self.granted(self.agents.get(&q(&c.agent_id)))
+            }
             // What agents a machine can start is not private to a project, but only for machines the person works on.
             C::AgentKinds(_) => self.node_visible(node),
             _ => false,

@@ -1,0 +1,14 @@
+{
+  "producerId": "n1",
+  "seq": "42",
+  "atMs": "1700000007000",
+  "taskDispatched": {
+    "projectId": "p1",
+    "taskId": "t7",
+    "agentId": "agent-1",
+    "byUser": "u1",
+    "promptSha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+    "queued": true,
+    "agentSkipsPermissions": true
+  }
+}

@@ -107,6 +107,7 @@ pub enum ErrorCode {
     AgentQueueFull,
     AgentApprovalNeeded,
     EnrollRenewRefused,
+    TaskDispatchLimited,
     Internal,
     /// A code this build does not know (sent by a newer peer).
     Unknown(String),
@@ -208,6 +209,7 @@ impl ErrorCode {
         ErrorCode::AgentQueueFull,
         ErrorCode::AgentApprovalNeeded,
         ErrorCode::EnrollRenewRefused,
+        ErrorCode::TaskDispatchLimited,
         ErrorCode::Internal,
     ];
 
@@ -306,6 +308,7 @@ impl ErrorCode {
             ErrorCode::AgentQueueFull => "agent.queue_full",
             ErrorCode::AgentApprovalNeeded => "agent.approval_needed",
             ErrorCode::EnrollRenewRefused => "enroll.renew_refused",
+            ErrorCode::TaskDispatchLimited => "task.dispatch_limited",
             ErrorCode::Internal => "internal",
             ErrorCode::Unknown(s) => s,
         }
@@ -416,6 +419,7 @@ impl ErrorCode {
             ErrorCode::AgentQueueFull => &["limit"],
             ErrorCode::AgentApprovalNeeded => &["approval_id"],
             ErrorCode::EnrollRenewRefused => &["reason"],
+            ErrorCode::TaskDispatchLimited => &["limit"],
             ErrorCode::Internal => &["incident_id"],
             ErrorCode::Unknown(_) => &[],
         }

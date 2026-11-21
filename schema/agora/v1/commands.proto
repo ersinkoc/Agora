@@ -100,6 +100,8 @@ message CommandRequest {
     AgentCancelTurn agent_cancel_turn = 107;
     // ADR-0085: renew this machine's certificate; only on the machine's own authenticated connection, capability `enroll.renew`.
     RenewRequest renew = 108;
+    // ADR-0095, sent only to a node with the capability `task.dispatch` (a hub refuses it for any other node).
+    TaskDispatch task_dispatch = 109;
   }
 }
 
@@ -149,6 +151,8 @@ message CommandOk {
     AgentPromptResult agent_prompt = 29;
     // ADR-0085
     RenewResponse renew = 30;
+    // ADR-0095: the answer to `TaskDispatch`.
+    TaskDispatchResult task_dispatch = 31;
   }
 }
 
@@ -435,6 +439,32 @@ message TaskUpdate {
   string title = 3;
   string claim_by_agent_id = 4;
   bool done = 5;
+}
+
+// ADR-0095 decision 3: a person gives an open task of a project to an agent of that project on the receiving node. The node claims the
+// task for the agent where the project's board is (its own broker, or the hub's board for a shared project, as the agent's own
+// `task_claim` would), sends the agent one prompt built from the node's template around the task's title and detail (marked as untrusted
+// task data, decision 5), never typed over a running turn, and records `TaskDispatched`. If the prompt cannot be sent, a task on the node's
+// own broker is given back (the shared board has no release yet: there the task stays the agent's). Refused: an agent that is not of `project_id` (`mesh.recipient_unknown`), an unknown task (`task.not_found`), a
+// blocked one (`task.blocked`), one that is not open (`task.not_open`, also a second dispatch of the same task), a full queue
+// (`agent.queue_full`). Not an approval and changes no permission (decision 4); not signed, it needs the sender's access to the agent,
+// like `AgentPrompt`. The hub allows each person at most 8 tries per minute (`task.dispatch_limited`).
+message TaskDispatch {
+  string project_id = 1;
+  string task_id = 2;
+  string agent_id = 3;
+  // The hub user who asked, written by the hub from the window's sign-in (a client's own value is replaced). A node cannot tell a command
+  // the hub carried from one sent on its own control socket, so on the node this is the sender's word: the hub's audit row of the command
+  // is the record of who asked. Copied into `TaskDispatched`.
+  string by_user = 4;
+}
+
+// ADR-0095: what the node did with the prompt. `queued` and `queue_len` mean what they mean in `AgentPromptResult`.
+message TaskDispatchResult {
+  bool queued = 1;
+  uint32 queue_len = 2;
+  // Lowercase hex SHA-256 of the prompt's UTF-8 bytes, as in `TaskDispatched`.
+  string prompt_sha256 = 3;
 }
 
 message NodePolicyGet {

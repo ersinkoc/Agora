@@ -243,6 +243,9 @@ pub(crate) fn named_node(body: &Body) -> Result<Option<&str>, &'static str> {
         | Body::LeaseGranted(_)
         | Body::LeaseReleased(_)
         | Body::HandoffCreated(_)
+        // ADR-0095: names an agent of the producer; `by_user` is the node's copy of what the hub wrote into the command (the hub's
+        // own audit row of that command is the record of who asked).
+        | Body::TaskDispatched(_)
         | Body::AgentStartRefused(_)
         | Body::PreviewSuggested(_)
         | Body::PreviewChanged(_)
@@ -791,6 +794,8 @@ impl View {
             // ADR-0057: a refused start changes no view; it is in the store and the audit trail.
             Body::MessagePosted(_)
             | Body::HandoffCreated(_)
+            // ADR-0095: the audit record changes no view; the task's move is its `TaskChanged`.
+            | Body::TaskDispatched(_)
             | Body::FilesChanged(_)
             // ADR-0088: the preview events change no view yet (schema only).
             | Body::PreviewSuggested(_)

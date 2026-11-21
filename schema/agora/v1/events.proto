@@ -64,6 +64,8 @@ message Event {
     LeaseGranted lease_granted = 62;
     LeaseReleased lease_released = 63;
     HandoffCreated handoff_created = 64;
+    // ADR-0095, capability `task.dispatch`: a person gave a task to an agent (the audit record of `TaskDispatch`).
+    TaskDispatched task_dispatched = 68;
     // ADR-0057: the node refused an agent's `agent_start` before any approval was asked (limits, folder, kind).
     AgentStartRefused agent_start_refused = 65;
     // files
@@ -342,6 +344,21 @@ message TaskChanged {
   string title = 3;
   string claimed_by_agent_id = 4;
   bool done = 5;
+}
+
+// ADR-0095: written by the node that sent the prompt, after the claim and the send. The task's own move is `TaskChanged` as before.
+message TaskDispatched {
+  string project_id = 1;
+  string task_id = 2;
+  string agent_id = 3;
+  // `TaskDispatch.by_user` as the node received it (the sender's word; the hub's audit row is the record of who asked).
+  string by_user = 4;
+  // Lowercase hex SHA-256 of the prompt's UTF-8 bytes; the prompt itself is not stored (task text is untrusted and may be large).
+  string prompt_sha256 = 5;
+  // The prompt waits behind the agent's running turn.
+  bool queued = 6;
+  // ADR-0059: the agent acts without asking for permission (a launch option or mode that skips it), as the node knows it.
+  bool agent_skips_permissions = 7;
 }
 
 message LeaseGranted {

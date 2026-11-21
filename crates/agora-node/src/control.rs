@@ -1572,6 +1572,8 @@ pub(crate) fn command_name(c: &Cmd) -> &'static str {
         Cmd::UsageReport(_) => "usage.report",
         Cmd::Enroll(_) => "enroll",
         Cmd::TaskUpdate(_) => "task.update",
+        // ADR-0095: in the schema, handled by no node code yet, so the node refuses it as `protocol.capability_missing`.
+        Cmd::TaskDispatch(_) => "task.dispatch",
         Cmd::BoardCall(_) => "board.call",
         Cmd::BoardJoin(_) => "board.join",
         Cmd::NodePolicyGet(_) => "node.policy.get",

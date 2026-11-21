@@ -66,6 +66,8 @@ pub struct Hub {
     metrics: crate::metrics::Metrics,
     metrics_on: std::sync::atomic::AtomicBool,
     boards: crate::board::Boards,
+    /// ADR-0095: each person's recent task dispatches, across all their windows.
+    dispatches: crate::dispatch::DispatchRates,
     /// ADR-0065: pairing sessions, in memory only.
     pairing: crate::pairing_net::Shared,
     prices: std::sync::RwLock<(std::sync::Arc<crate::usage::Catalog>, u64)>,
@@ -158,6 +160,7 @@ impl Hub {
         let hub = Self {
             metrics: crate::metrics::Metrics::default(),
             metrics_on: std::sync::atomic::AtomicBool::new(false),
+            dispatches: crate::dispatch::DispatchRates::default(),
             boards: crate::board::Boards::new(),
             pairing: crate::pairing_net::Shared::new(),
             prices: std::sync::RwLock::new((crate::usage::Catalog::bundled(), 0)),
@@ -260,6 +263,11 @@ impl Hub {
     /// The pairing state (ADR-0065): the switch, the sessions, the limits. Memory only.
     pub fn pairing(&self) -> &crate::pairing_net::Shared {
         &self.pairing
+    }
+
+    /// ADR-0095: the per-person dispatch counts (`task.dispatch_limited`).
+    pub fn dispatches(&self) -> &crate::dispatch::DispatchRates {
+        &self.dispatches
     }
 
     /// Where connected nodes wait for commands (ADR-0029).
