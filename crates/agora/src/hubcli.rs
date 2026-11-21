@@ -1807,6 +1807,10 @@ fn hold_link_within(dir: &Path, wait: std::time::Duration) -> std::io::Result<He
     std::fs::create_dir_all(dir)?;
     // Resolved once: the guard and every write name the same folder, also when `link` is a link that is pointed elsewhere meanwhile.
     let dir = std::fs::canonicalize(dir)?;
+    // Closed to every other user each time it is held (issue #877): today's files are written owner-only, but an older version
+    // wrote `url`, `node-id`, `ca.pem` and `cert.pem` under the umask (a Mac's `staff` group, a `D:\` ACL could read them). Best
+    // effort: a folder this user cannot change is used as it is, as before.
+    let _ = agora_platform::restrict_to_owner(&dir);
     let guard = link_guard(&dir, wait)?;
     Ok(HeldLink { dir, _guard: guard })
 }
@@ -2214,6 +2218,22 @@ mod store_tests {
 
     /// Codex re-review of F1031: a link folder that is there but cannot be resolved or entered is an error, not "no link" (the node would
     /// start unlinked). Here: a path through a file, a link to a missing folder, and a folder this user may not enter.
+    /// Issue #877: an older version wrote `url`, `node-id`, `ca.pem` and `cert.pem` under the umask in an open folder. Holding the
+    /// link folder (every read, save and enrollment does) closes it to other users, which on Unix closes every file below it.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_folder_an_older_version_left_open_is_closed_when_held() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tmp("old-open");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(dir.join("url"), "wss://h:1").unwrap();
+        drop(hold_link_within(&dir, std::time::Duration::ZERO).unwrap());
+        let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_folder_that_cannot_be_resolved_is_an_error_not_no_link() {
