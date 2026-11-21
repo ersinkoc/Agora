@@ -13,7 +13,7 @@ export interface WheelEventLike {
   deltaY: number;
   /** 0 pixels, 1 lines, 2 pages. */
   deltaMode: number;
-  /** The legacy field: a multiple of 120 for a wheel notch, anything for a trackpad. */
+  /** The legacy field: 120 per notch in Chromium; three times `deltaY` in Firefox and WebKit, where it says nothing more. */
   wheelDeltaY?: number;
   shiftKey: boolean;
   ctrlKey: boolean;
@@ -41,9 +41,22 @@ export type WheelAction =
 
 export const LINES_PER_NOTCH = 3;
 
-// A notch is a big step that the legacy field counts in whole 120s; a trackpad sends small steps (a browser may still report the
-// legacy field as a multiple of 120 for them, so the size is checked too).
-const isNotch = (e: WheelEventLike) => e.deltaMode === 0 && Math.abs(e.deltaY) >= 40 && !!e.wheelDeltaY && Math.abs(e.wheelDeltaY) % 120 === 0;
+/** Pixels of `deltaY` that make one notch where the legacy field cannot tell (Firefox and WebKit report 100 for one notch). */
+export const NOTCH_PX = 100;
+
+// How many notches a pixel-mode event is; 0 for a trackpad's small step, which is counted in pixels instead (one line per row height).
+// Chromium counts the legacy `wheelDeltaY` in whole 120s per notch, whatever the pixel size of a notch is on that system. Firefox and
+// WebKit derive it from the pixels (three times `deltaY`: 300 for a 100 px notch), so there it counts nothing and the pixels do: about
+// 100 a notch, never less than one for a big step. (Before, a Firefox or WebKit notch was not one, and was counted as a trackpad's
+// pixels: 5 or 6 arrows instead of 3.) A trackpad's step is small; a browser may still report the legacy field as a multiple of 120
+// for it, so the size is checked first.
+export function notches(e: WheelEventLike): number {
+  if (e.deltaMode !== 0 || Math.abs(e.deltaY) < 40) return 0;
+  const legacy = Math.abs(e.wheelDeltaY ?? 0);
+  const fromPixels = legacy === 0 || Math.abs(legacy - 3 * Math.abs(e.deltaY)) < 1.5;
+  if (!fromPixels) return legacy % 120 === 0 ? legacy / 120 : 0;
+  return Math.max(1, Math.round(Math.abs(e.deltaY) / NOTCH_PX));
+}
 
 export class Wheel {
   private carry = 0;
@@ -52,7 +65,8 @@ export class Wheel {
   private lines(e: WheelEventLike, s: WheelState): number {
     if (e.deltaMode === 1) return e.deltaY;
     if (e.deltaMode === 2) return e.deltaY * s.rows;
-    if (isNotch(e)) return (Math.sign(e.deltaY) * Math.abs((e.wheelDeltaY ?? 0) / 120)) * LINES_PER_NOTCH;
+    const n = notches(e);
+    if (n) return Math.sign(e.deltaY) * n * LINES_PER_NOTCH;
     return e.deltaY / Math.max(1, s.cellHeight);
   }
 
@@ -64,7 +78,7 @@ export class Wheel {
     // Report mouse wheel events only when a whole line of swipe has gone by, so a trackpad does not flood the program.
     const mouseMode = s.mouse && !e.shiftKey;
     if (mouseMode) {
-      if (isNotch(e) || e.deltaMode !== 0 || whole !== 0) { this.carry -= whole; return { kind: 'pass' }; }
+      if (notches(e) || e.deltaMode !== 0 || whole !== 0) { this.carry -= whole; return { kind: 'pass' }; }
       return { kind: 'ignore' };
     }
     if (whole === 0) return { kind: 'ignore' };

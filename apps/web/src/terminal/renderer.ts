@@ -12,6 +12,7 @@ import { type TerminalPrefs, terminalPrefs, terminalSize } from './prefs';
 import { clipboardOffer, sanitizePaste } from './clipboard';
 import { enhancedKey, KeyboardProtocols, registerKeyboardProtocols, shortcut } from './keys';
 import { openLink } from './links';
+import { MouseEncodingModes, urxvtReport } from './mouse';
 import { TouchScroll, Wheel, type WheelAction } from './wheel';
 
 export interface TerminalRenderer {
@@ -87,6 +88,10 @@ export class XtermRenderer implements TerminalRenderer {
   private wheel = new Wheel();
   private touch = new TouchScroll();
   private keys = new KeyboardProtocols();
+  private mouseEncoding = new MouseEncodingModes();
+  // Ends the listeners put on the element this renderer was mounted in: the element outlives it (a new source mounts a new renderer
+  // there), and an old wheel listener would take every event before the new terminal saw it.
+  private listeners = new AbortController();
   private copyOnSelect = false;
   private clipboardCb: ((text: string) => void) | undefined;
   private findCb: (() => void) | undefined;
@@ -126,7 +131,6 @@ export class XtermRenderer implements TerminalRenderer {
     this.term.loadAddon(new Unicode11Addon());
     this.term.unicode.activeVersion = '11';
     this.term.loadAddon(new WebLinksAddon((e, uri) => { if (e.ctrlKey || e.metaKey) openLink(uri); }, { hover: (_e, uri) => this.hoverCb?.(uri), leave: () => this.hoverCb?.(undefined) }));
-    this.term.attachCustomWheelEventHandler((e) => this.onWheel(e));
     this.term.attachCustomKeyEventHandler((e) => this.onKey(e));
     this.term.onSelectionChange(() => { if (this.copyOnSelect && this.term.hasSelection()) void this.copy(); });
     this.term.onScroll(() => this.scrollState());
@@ -135,6 +139,11 @@ export class XtermRenderer implements TerminalRenderer {
     // The keyboard protocols a program may switch on for keys a plain terminal cannot tell apart (keys.ts).
     const p = this.term.parser;
     registerKeyboardProtocols(p, this.keys, (data) => this.term.input(data, false));
+    // The mouse encoding the program asked for, followed here only for the urxvt form (1015), which xterm.js does not write (mouse.ts).
+    // Each handler returns false so xterm.js still handles the sequence itself.
+    p.registerCsiHandler({ prefix: '?', final: 'h' }, (params) => { this.mouseEncoding.apply(params, true); return false; });
+    p.registerCsiHandler({ prefix: '?', final: 'l' }, (params) => { this.mouseEncoding.apply(params, false); return false; });
+    p.registerEscHandler({ final: 'c' }, () => { this.mouseEncoding.reset(); return false; });
     // OSC 52: offered to the user, never written by itself, never answered (clipboard.ts).
     p.registerOscHandler(52, (data) => { const text = clipboardOffer(data); if (text !== undefined) this.clipboardCb?.(text); return true; });
     // A theme change repaints the terminal; the tokens have changed by the time the event fires.
@@ -153,8 +162,6 @@ export class XtermRenderer implements TerminalRenderer {
     if (atBottom !== this.lastAtBottom) { this.lastAtBottom = atBottom; this.scrollCb?.(atBottom); }
   }
 
-  // xterm asks this only when the wheel is for the program (mouse reports, arrow keys on the alternate screen); on the main screen with
-  // no mouse mode its own scroll bar scrolls the history, three lines a notch and smoothly for a trackpad.
   private wheelState() {
     const screen = this.term.element?.querySelector('.xterm-screen');
     const cellHeight = screen && this.term.rows > 0 ? screen.getBoundingClientRect().height / this.term.rows : 16;
@@ -174,14 +181,17 @@ export class XtermRenderer implements TerminalRenderer {
     }
   }
 
-  private onWheel(e: WheelEvent): boolean {
+  // Every wheel event over the terminal is decided here (wheel.ts) before xterm.js or its scroll bar see it. xterm.js's scroll bar counts
+  // a notch by the legacy `wheelDeltaY / 120`, which is 2.5 in Firefox and WebKit (7 history lines a notch there, 3 in Chromium), and
+  // xterm.js asks a custom wheel handler only when its scroll bar did not take the event. Only a report for a program that has the
+  // mouse is left to xterm.js.
+  private onWheel(e: WheelEvent): void {
     const a = this.wheel.decide(e, this.wheelState());
-    if (a.kind === 'pass') return true;
+    if (a.kind === 'pass') return;
     this.apply(a);
     // Nothing else may act on it: the terminal's own scroll bar would scroll by its own measure as well.
     e.preventDefault();
     e.stopPropagation();
-    return false;
   }
 
   private onKey(e: KeyboardEvent): boolean {
@@ -234,15 +244,17 @@ export class XtermRenderer implements TerminalRenderer {
       e.stopImmediatePropagation();
       if (text) this.term.paste(sanitizePaste(text));
     }, true);
+    const signal = this.listeners.signal;
+    el.addEventListener('wheel', (e) => this.onWheel(e), { capture: true, passive: false, signal });
     // A finger drags the history (the terminal's own handling does not on a touch screen).
-    el.addEventListener('touchstart', (e) => { if (e.touches.length === 1) this.touch.start(e.touches[0]?.clientY ?? 0); else this.touch.end(); }, { passive: true });
+    el.addEventListener('touchstart', (e) => { if (e.touches.length === 1) this.touch.start(e.touches[0]?.clientY ?? 0); else this.touch.end(); }, { passive: true, signal });
     el.addEventListener('touchmove', (e) => {
       if (e.touches.length !== 1) return;
       this.apply(this.touch.move(e.touches[0]?.clientY ?? 0, this.wheelState()));
       if (e.cancelable) e.preventDefault();
-    }, { passive: false });
-    el.addEventListener('touchend', () => this.touch.end(), { passive: true });
-    el.addEventListener('touchcancel', () => this.touch.end(), { passive: true });
+    }, { passive: false, signal });
+    el.addEventListener('touchend', () => this.touch.end(), { passive: true, signal });
+    el.addEventListener('touchcancel', () => this.touch.end(), { passive: true, signal });
   }
 
   // The graphics-card renderer draws box-drawing, block and Powerline characters itself, exactly to the cell, so they join; the page's
@@ -302,9 +314,11 @@ export class XtermRenderer implements TerminalRenderer {
   }
 
   onInput(cb: (data: string, binary?: boolean) => void): void {
-    this.term.onData((d) => cb(d));
+    // A program that asked for the urxvt encoding (1015) gets its mouse reports in that form, rewritten from the one xterm.js made.
+    const urxvt = (d: string) => (this.mouseEncoding.encoding === 'urxvt' ? urxvtReport(d) : undefined);
+    this.term.onData((d) => cb(urxvt(d) ?? d));
     // The older mouse encodings (X10 and UTF-8, modes 1000 without 1006) arrive as bytes, not text: each char is one byte as it is.
-    this.term.onBinary((s) => cb(s, true));
+    this.term.onBinary((s) => { const u = urxvt(s); if (u !== undefined) cb(u); else cb(s, true); });
   }
 
   paste(text: string): void {
@@ -339,6 +353,7 @@ export class XtermRenderer implements TerminalRenderer {
 
   dispose(): void {
     window.removeEventListener('agora-theme', this.repaint);
+    this.listeners.abort();
     this.term.dispose();
   }
 }

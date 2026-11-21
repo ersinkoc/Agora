@@ -14,7 +14,8 @@ its README), plus a real program on a real PTY in the loop: `mouse-echo.py` swit
 and prints the bytes it receives; the page's clicks, drags, wheel notches and Shift+drag are what it printed back. Unit tests cover the
 pure parts (`wheel.test.ts`, `links.test.ts`, `keys.test.ts`).
 
-Limits of the evidence: one Chromium (Linux, software GL); a wheel from a real trackpad cannot be produced through the DevTools
+Limits of the evidence: one Chromium (Linux, software GL; Firefox and WebKit were run later for the pointer and the wheel, see
+"Pointer and wheel in every engine"); a wheel from a real trackpad cannot be produced through the DevTools
 protocol (it always reports a whole notch), so trackpad feel rests on xterm.js's own handling; a high-density screen cannot be
 emulated for the graphics-card renderer (see "Rendering" below); no macOS or Windows browser was run.
 
@@ -30,10 +31,10 @@ done in a web page). "Now" is the state after this change.
 | Mouse modes 9, 1000, 1002, 1003 | the program gets presses, releases, drags, motion as it asked | xterm.js reports all four; SGR press, drag (`<32;..M`) and any-motion (`<35;..M`) arrived intact (lab) | ok | unchanged; real program through a PTY receives click, drag, wheel (check 1-4) |
 | SGR (1006) encoding | `ESC [ < b ; x ; y M/m` | correct | ok | unchanged |
 | Default (X10) encoding | `ESC [ M` and three raw bytes | **nothing was sent**: xterm.js hands these to `onBinary`, which the renderer never subscribed to (`renderer.ts:106` only `onData`; lab: click with mode 1000 and no 1006 sent no bytes) | **wrong** | `onBinary` is sent as raw bytes (`binaryBytes`, a column over 95 stays one byte); check 5. This is the X10 form only |
-| urxvt (1015) and UTF-8 (1005) encodings | extended coordinates | **not supported**: xterm.js has no such encodings; a program that asks for them gets the default (X10) bytes, which it will misread | partial | unchanged (a program that knows only 1015 sees columns up to 223; programs that matter use 1006) |
+| urxvt (1015) and UTF-8 (1005) encodings | extended coordinates | **not supported**: xterm.js has no such encodings; a program that asks for them gets the default (X10) bytes, which it will misread | partial | **1015 done** (see "Pointer and wheel in every engine" below): `ESC [ 32 ; 6 ; 4 M` for a click on (5,3), release as button 3. 1005 unchanged: the X10 bytes, the same below column 95 |
 | Wheel to a program that has the mouse on | buttons 4 and 5, once per notch | one SGR 64/65 per notch (lab) | ok | a trackpad swipe no longer floods the program: one report per row height of swipe (`wheel.ts`, tested) |
-| Wheel with no mouse mode, main screen | history scrolls, three lines a notch | three lines per 100 px notch (lab: `top line 2974 -> 2971`) | ok | unchanged (xterm.js's scroll bar does it; the history stays put when new output arrives, see below) |
-| Wheel over the alternate screen with no mouse mode (mode 1007) | arrow keys, several per notch | xterm.js sent **one** arrow per notch, so a pager or `man` crawled | partial | three arrows per notch, in the cursor-key form the program asked for (DECCKM), never more than the rows; check 2 |
+| Wheel with no mouse mode, main screen | history scrolls, three lines a notch | three lines per 100 px notch (lab: `top line 2974 -> 2971`) | ok | three lines a notch in every engine (it was 7 in Firefox and WebKit, see below); decided in `wheel.ts` like the rest, no longer by xterm.js's scroll bar; the history stays put when new output arrives |
+| Wheel over the alternate screen with no mouse mode (mode 1007) | arrow keys, several per notch | xterm.js sent **one** arrow per notch, so a pager or `man` crawled | partial | three arrows per notch, in the cursor-key form the program asked for (DECCKM), never more than the rows; check 2. In Firefox and WebKit it was 5 or 6 until "Pointer and wheel in every engine" |
 | Shift+drag forces local selection while the program has the mouse | yes | works: no bytes reach the program, selection made (check 1 with the real program) | ok | unchanged; Shift+wheel scrolls the history 3 lines and sends nothing (check 2) |
 | Touch scrolling (phone, tablet) | a drag scrolls | **did not scroll**: the browser took the drag as a page pan (`pointercancel`), xterm.js 6 does nothing with it (lab, 390 px touch: no movement) | **wrong** | a drag scrolls the history one line per row height, or sends arrows on the alternate screen (`TouchScroll`); `touch-action: none` on the screen; check 5 |
 | Focus events (1004) | `ESC [ I` / `ESC [ O` | works (lab) | ok | unchanged; the real program receives them |
@@ -102,6 +103,39 @@ Files: `apps/web/src/terminal/` (`renderer.ts`, `wheel.ts`, `links.ts`, `clipboa
   Rendering). Flip `DEFAULT_PREFS.gpu` in `prefs.ts` once it is confirmed.
 - Settings the user can change (browser-local, `agora.terminal.prefs`): row height, history, readable colours, copy on select, graphics
   card (off by default). They sit in a "Terminal settings" menu in the pane's header, next to the text size.
+
+## Pointer and wheel in every engine (web client)
+
+The first audit ran one Chromium. A later run of the same probes in Chromium, Firefox and WebKit (Playwright 1.63, a real shell on a
+real PTY behind a throw-away hub and node, 100, 125 and 150 % zoom) found three defects in the window, fixed here in
+`apps/web/src/terminal/` (`renderer.ts`, `wheel.ts`, new `mouse.ts`), `design/app.css` and `phone/phone.css`:
+
+- **The lowest pixels of the bottom row were dead to the mouse** (125 % in Chromium and Firefox, 100 % in WebKit: about 5 px of the
+  last row reported nothing). xterm.js gives its own element the class `terminal`, so our `.terminal` rule (padding, full height,
+  clipping) applied to it as well as to the element we mount it in. The fit (xterm's FitAddon) counts the padding of xterm's element
+  only, so the screen was sized for one padding, sat inside two, stuck out of xterm's box and was clipped by ours; a click there hit
+  our element. Our element is now `.terminal-host` (all uses, the loading placeholders and the scripts renamed), and its padding is on
+  xterm's element, where the fit looks for it. Same rows and columns as before; the text sits 8 px from the pane's edge instead of
+  16 px at the top and left. A test keeps any bare `.terminal` selector out of the stylesheets (`hostClass.test.ts`). Proof: a click
+  0.5, 2, 3.5 and 5 px above the screen's bottom edge on the last row was reported in all three engines at all three zooms (before:
+  lost in the three failing cases, the pointer on our element).
+- **A wheel notch was not three lines in Firefox and WebKit.** Both report a 100 px notch with the legacy `wheelDeltaY` at 300 (three
+  times `deltaY`, so it counts nothing) where Chromium reports 120. `wheel.ts` took that for a trackpad's pixels (5 or 6 arrows on
+  the alternate screen), and xterm.js's own scroll bar, which handled the main screen, divides by 120 (7 lines). Now `notches()`
+  counts Chromium's 120s and, where the legacy field is three times the pixels, about 100 px a notch (at least one for a step of 40 px
+  or more); smaller steps stay a trackpad's pixels (one line per row height), line mode (Firefox) counts lines. Every wheel event over
+  the terminal is decided in a capture listener before xterm.js and its scroll bar see it; only a report for a program that has the
+  mouse is left to xterm.js. Proof: one notch is 3 history lines, 3 arrows (`\eOA` with DECCKM, `\e[A` without) and one SGR report in
+  all three engines; `wheel.test.ts` has each engine's values.
+- **urxvt (1015) mouse encoding.** xterm.js logs "not supported" and keeps writing X10 bytes. The renderer follows the encoding the
+  program set (`CSI ? Pm h/l`, `ESC c`; as in xterm, the encodings exclude each other and a reset ends only its own) and rewrites the
+  report xterm.js made, X10 or SGR, into `ESC [ Cb ; Cx ; Cy M` (`mouse.ts`, tested). Proof: a click on (5,3) is
+  `\e[32;6;4M\e[35;6;4M` in all three engines. Limit: with 1015 alone (no 1006 set before it) xterm.js makes X10 internally, which
+  has no room past column or row 223, so nothing is sent there.
+
+Not changed by this, and still failing in all three engines: a window opened, reloaded or reconnected while a program has the mouse,
+focus reporting or the alternate screen on does not know it, and its history starts at the repaint. That is Phase 3 item 1 below (the
+repaint carrying the modes and the history); it changes the snapshot, so it waits for an ADR.
 
 ## The terminal client (TUI): what a program now gets
 
@@ -211,8 +245,8 @@ decision, so each needs an ADR first.
 
 ## Left for later (web client)
 
-- urxvt (1015) and UTF-8 (1005) mouse encodings are not implemented by xterm.js; a small encoder in the renderer would add them if a
-  program that needs them turns up.
+- The UTF-8 (1005) mouse encoding is not implemented by xterm.js (it writes X10, the same below column 95); urxvt (1015) is done
+  (above), past column 223 only when the program also set 1006 first.
 - A trackpad's feel on the main screen rests on xterm.js's own scroll handling; it was not driven by a real trackpad.
 - Momentum after a touch drag stops at once (a real fling keeps going).
 - Right click does not paste (the browser's menu opens); a "paste on right click" setting would match the terminals that do it.

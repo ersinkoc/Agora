@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { Wheel, type WheelEventLike, type WheelState } from './wheel';
+import { notches, Wheel, type WheelEventLike, type WheelState } from './wheel';
 
 const state = (o: Partial<WheelState> = {}): WheelState => ({ altScreen: false, mouse: false, rows: 24, cellHeight: 18, ...o });
 const notch = (dir: 1 | -1, o: Partial<WheelEventLike> = {}): WheelEventLike => ({ deltaY: 100 * dir, deltaMode: 0, wheelDeltaY: -120 * dir, shiftKey: false, ctrlKey: false, altKey: false, ...o });
@@ -48,6 +48,44 @@ describe('the wheel in a terminal', () => {
     expect(new Wheel().decide(notch(1), state({ altScreen: true }))).toEqual({ kind: 'arrows', count: 3, up: false });
     // Never more arrows than rows, so a fast fling cannot flood a program.
     expect(new Wheel().decide({ ...notch(1), deltaMode: 2, deltaY: 5 }, state({ altScreen: true, rows: 10 }))).toEqual({ kind: 'arrows', count: 10, up: false });
+  });
+
+  // One notch as each engine reports it (recorded in Chromium, Firefox and WebKit with Playwright 1.63): Chromium counts the legacy
+  // field in 120s, Firefox and WebKit make it three times the pixels.
+  const engines: [string, WheelEventLike][] = [
+    ['Chromium', notch(1)],
+    ['Firefox', notch(1, { wheelDeltaY: -300 })],
+    ['WebKit', notch(1, { wheelDeltaY: -300 })],
+    ['Firefox, line mode', notch(1, { deltaMode: 1, deltaY: 3, wheelDeltaY: -9 })],
+  ];
+  it.each(engines)('counts one %s notch as three lines, three arrows and one mouse report', (_name, down) => {
+    const up = { ...down, deltaY: -down.deltaY, wheelDeltaY: -(down.wheelDeltaY ?? 0) };
+    const w = new Wheel();
+    expect(w.decide(up, state())).toEqual({ kind: 'scroll', lines: -3 });
+    expect(w.decide(down, state())).toEqual({ kind: 'scroll', lines: 3 });
+    // Repeated notches stay at three each: nothing is carried over to make a fourth.
+    const alt = new Wheel();
+    for (let i = 0; i < 4; i++) expect(alt.decide(up, state({ altScreen: true }))).toEqual({ kind: 'arrows', count: 3, up: true });
+    expect(alt.decide(down, state({ altScreen: true }))).toEqual({ kind: 'arrows', count: 3, up: false });
+    expect(new Wheel().decide(up, state({ mouse: true }))).toEqual({ kind: 'pass' });
+  });
+
+  it('counts notches the engine joined into one event', () => {
+    expect(notches(notch(1, { deltaY: 200, wheelDeltaY: -240 }))).toBe(2); // Chromium
+    expect(notches(notch(1, { deltaY: 200, wheelDeltaY: -600 }))).toBe(2); // Firefox, WebKit
+    // Chromium's notch is not always 100 px; its legacy field still says one.
+    expect(notches(notch(1, { deltaY: 53, wheelDeltaY: -120 }))).toBe(1);
+    // A big step whose legacy field is missing counts by its pixels.
+    expect(notches(notch(1, { deltaY: 100, wheelDeltaY: undefined }))).toBe(1);
+  });
+
+  it('keeps a trackpad in pixels in every engine, also when its legacy field is a multiple of 120', () => {
+    expect(notches(pad(5))).toBe(0);
+    expect(notches(pad(-30, { wheelDeltaY: 120 }))).toBe(0);
+    const w = new Wheel();
+    // 18 px rows: six 6 px steps (Firefox and WebKit legacy field: three times the pixels) are two lines.
+    const lines = Array.from({ length: 6 }, () => w.decide(pad(6, { wheelDeltaY: -18 }), state())).reduce((n, a) => n + (a.kind === 'scroll' ? a.lines : 0), 0);
+    expect(lines).toBe(2);
   });
 
   it('ignores a wheel event that moves nothing', () => {
