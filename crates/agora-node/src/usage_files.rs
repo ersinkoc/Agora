@@ -2,6 +2,11 @@
 //! lines (`agora-adapters::usage`); this module finds the files that belong to a running agent, follows their growth and returns
 //! what each new line added. A file belongs to an agent when it was touched after the agent started and the working directory it
 //! records is the agent's worktree, so another session of the same tool is never counted.
+//!
+//! Two agents can share a folder (ADR-0052) and the same files (one kind, or kinds with one glob): there the folder says nothing about
+//! which session is whose, and both used to count both. An agent with such a peer takes only a file whose name holds its own native
+//! session id (`<id>.jsonl` for Claude Code, `rollout-…-<id>.jsonl` for Codex; ADR-0042 point 2), and an agent whose id is not known
+//! takes none: a session counted for nobody rather than for two (the same choice as `session_files` for Resume).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{Read, Seek, SeekFrom};
@@ -36,7 +41,30 @@ pub struct Target {
     /// ADR-0091: the agent kind the plan windows of this file belong to, and how to read them (`[quota]`).
     pub tool: String,
     pub quota: Option<QuotaSpec>,
+    /// The agent's own session id, when the node knows it (chosen at start, or found by `session_files`).
+    pub session: Option<String>,
 }
+
+/// What a scan needs to know of every live agent to tell whether another shares this one's folder and files.
+#[derive(Clone)]
+struct Peer {
+    agent: AgentId,
+    glob: String,
+    worktree: PathBuf,
+}
+
+impl Peer {
+    fn of(t: &Target) -> Self {
+        Self {
+            agent: t.agent.clone(),
+            glob: t.spec.glob.clone(),
+            worktree: t.worktree.clone(),
+        }
+    }
+}
+
+/// A session id short enough to be found by chance inside another file's name is not used to tell files apart.
+const MIN_SESSION_ID: usize = 8;
 
 struct FileState {
     reader: FileReader,
@@ -66,6 +94,8 @@ pub struct UsageWatcher {
     agents: HashMap<AgentId, AgentUsage>,
     /// ADR-0091: plan windows read from files that are an agent's own, as `(tool, window)` in file order, for [`Self::take_quota`].
     quota_out: Vec<(String, QuotaRaw)>,
+    /// The agents of the last [`Self::poll`], so the last read of an ended agent ([`Self::finish`]) still knows its peers.
+    peers: Vec<Peer>,
 }
 
 pub fn home_dir() -> Option<PathBuf> {
@@ -160,6 +190,7 @@ impl UsageWatcher {
             home,
             agents: HashMap::new(),
             quota_out: Vec::new(),
+            peers: Vec::new(),
         }
     }
 
@@ -172,12 +203,14 @@ impl UsageWatcher {
     pub fn poll(&mut self, now: Instant, targets: &[Target]) -> Vec<(AgentId, Sample)> {
         let live: HashSet<&AgentId> = targets.iter().map(|t| &t.agent).collect();
         self.agents.retain(|id, _| live.contains(id));
+        self.peers = targets.iter().map(Peer::of).collect();
         let mut out = Vec::new();
         let Some(home) = self.home.clone() else {
             return out;
         };
+        let peers = self.peers.clone();
         for t in targets {
-            self.step(now, t, &home, &mut out);
+            self.step(now, t, &peers, &home, &mut out);
         }
         out
     }
@@ -188,18 +221,26 @@ impl UsageWatcher {
         let Some(home) = self.home.clone() else {
             return out;
         };
+        let peers = self.peers.clone();
         for t in targets {
             if let Some(a) = self.agents.get_mut(&t.agent) {
                 a.next_scan = now;
                 a.next_read = now;
             }
-            self.step(now, t, &home, &mut out);
+            self.step(now, t, &peers, &home, &mut out);
             self.agents.remove(&t.agent);
         }
         out
     }
 
-    fn step(&mut self, now: Instant, t: &Target, home: &Path, out: &mut Vec<(AgentId, Sample)>) {
+    fn step(
+        &mut self,
+        now: Instant,
+        t: &Target,
+        peers: &[Peer],
+        home: &Path,
+        out: &mut Vec<(AgentId, Sample)>,
+    ) {
         let a = self
             .agents
             .entry(t.agent.clone())
@@ -212,13 +253,34 @@ impl UsageWatcher {
             });
         if now >= a.next_scan {
             a.next_scan = now + SCAN_EVERY;
+            // With a peer in this folder only a file named after this agent's own session is its; without its id, none is.
+            let own_id = if shares_files(t, peers) {
+                t.session
+                    .as_deref()
+                    .filter(|s| s.len() >= MIN_SESSION_ID)
+                    .map(Some)
+            } else {
+                Some(None)
+            };
             let glob = t.spec.glob.replacen("{home}", &home.to_string_lossy(), 1);
-            for path in expand(Path::new(&glob)) {
+            let found = match own_id {
+                Some(_) => expand(Path::new(&glob)),
+                None => Vec::new(),
+            };
+            for path in found {
                 if a.files.len() >= MAX_FILES {
                     break;
                 }
                 if a.files.contains_key(&path) || a.ignored.contains(&path) {
                     continue;
+                }
+                if let Some(Some(id)) = own_id {
+                    if !path
+                        .file_name()
+                        .is_some_and(|n| n.to_string_lossy().contains(id))
+                    {
+                        continue;
+                    }
                 }
                 let fresh = std::fs::metadata(&path)
                     .and_then(|m| m.modified())
@@ -265,6 +327,15 @@ impl UsageWatcher {
             }
         }
     }
+}
+
+/// Whether another live agent reads the same files in the same folder, so the folder alone cannot say which session is whose.
+fn shares_files(t: &Target, peers: &[Peer]) -> bool {
+    peers.iter().any(|p| {
+        p.agent != t.agent
+            && p.glob == t.spec.glob
+            && (p.worktree == t.worktree || same_dir(&p.worktree.to_string_lossy(), &t.worktree))
+    })
 }
 
 /// Reads what was appended to one file and returns the samples that are the agent's.
@@ -429,6 +500,7 @@ mod tests {
             spec: spec(),
             tool: "t".into(),
             quota: None,
+            session: None,
         }
     }
 
@@ -519,6 +591,64 @@ mod tests {
         let got = step(&mut w, &t, 4);
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].1.input, 5);
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn two_agents_in_one_folder_each_count_only_their_own_session() {
+        // ADR-0052: agents run in the selected folder, so two agents of one kind can share it; each writes its own session file.
+        let d = tmp("shared");
+        let work = d.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let mut w = UsageWatcher::new(Some(d.clone()));
+        let one = "11111111-aaaa-4bbb-8ccc-000000000001";
+        let two = "22222222-aaaa-4bbb-8ccc-000000000002";
+        let with = |agent: &str, id: Option<&str>| Target {
+            session: id.map(str::to_string),
+            ..target(agent, &work)
+        };
+        // The second agent's id is not known yet (Codex: found later, or never when its folder is shared).
+        let mut t = [with("a1", Some(one)), with("a2", None)];
+        step(&mut w, &t, 0);
+        let cwd = work.to_string_lossy();
+        std::fs::write(
+            d.join(format!("logs/p/{one}.jsonl")),
+            format!("{}\n", line(&cwd, "m1", 10, 1)),
+        )
+        .unwrap();
+        std::fs::write(
+            d.join(format!("logs/p/rollout-2026-11-21-{two}.jsonl")),
+            format!("{}\n", line(&cwd, "m2", 20, 2)),
+        )
+        .unwrap();
+        let got = step(&mut w, &t, 1);
+        let total: u64 = got.iter().map(|(_, s)| s.input).sum();
+        assert_eq!(
+            total, 10,
+            "each session counted once at most, and only for its own agent: {got:?}"
+        );
+        assert!(
+            got.iter().all(|(a, s)| a.as_str() == "a1" && s.input == 10),
+            "{got:?}"
+        );
+        // Once its id is known, the second agent counts its own session, and still not the first one's.
+        t[1] = with("a2", Some(two));
+        let got = step(&mut w, &t, 2);
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!((got[0].0.as_str(), got[0].1.input), ("a2", 20));
+        // An agent alone in its folder needs no id (unchanged).
+        let alone = d.join("alone");
+        std::fs::create_dir_all(&alone).unwrap();
+        let mut w2 = UsageWatcher::new(Some(d.clone()));
+        let t2 = [target("a3", &alone)];
+        step(&mut w2, &t2, 0);
+        std::fs::write(
+            d.join("logs/p/x.jsonl"),
+            format!("{}\n", line(&alone.to_string_lossy(), "m3", 5, 1)),
+        )
+        .unwrap();
+        let got = step(&mut w2, &t2, 1);
+        assert_eq!(got.iter().map(|(_, s)| s.input).sum::<u64>(), 5, "{got:?}");
         let _ = std::fs::remove_dir_all(d);
     }
 
