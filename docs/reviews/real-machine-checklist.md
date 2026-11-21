@@ -29,8 +29,15 @@ agent's or machine's name as `<agent>` or `<machine>` (the window gives agents n
   only by a person, with an account made for testing, never by an agent session.
 - **Disposable everything.** Every run uses its own Agora folder (`AGORA_HOME`) and its own project folders under one run folder
   (`$RM`), new for that run (S0). Every file a step reads, writes or tries to reach is one the run made under `$RM`, with made-up
-  content: never a real file of the machine (`~/.ssh`, shell profiles, your git configuration) and never a write outside `$RM`. A
-  step never changes the machine's own settings (global git configuration, login items, PATH). Before any `agora down`, `agora service`, `agora update` or `kill`, check that `AGORA_HOME` is set to the run's folder and
+  content: never a real file of the machine (`~/.ssh`, shell profiles, your git configuration) and never a write outside `$RM` (one known exception, confinement, below). A
+  step never changes the machine's own settings (global git configuration, login items, PATH).
+- **One known exception: confinement (#900).** A confined start (any node with a `sandbox` policy) writes the agent's generated git
+  configuration outside `AGORA_HOME`, whatever `AGORA_HOME` says: on Linux into `~/.agora/git-config` in the real home, on macOS and
+  Windows into `agora-git-config` in the system temp folder (`docs/security/sandbox-recipes.md`). So every step that needs a
+  `sandbox` policy (RM-20's confined variant, RM-23, RM-33, RM-37, RM-38, RM-39's confined variant, RM-47's confined variant) runs
+  **only in a disposable OS account or VM** until issue #900 is fixed, never in the account that runs the maintainer's Agora.
+- **Denied-path probes live outside the worktree and outside `/tmp`.** On Linux the confinement grants agents the shared `/tmp`, so a
+  probe there proves nothing; probes go in the run's own folder under the home (S0). Before any `agora down`, `agora service`, `agora update` or `kill`, check that `AGORA_HOME` is set to the run's folder and
   that `agora status` shows the run's data folder. Never touch `~/.agora` (`%USERPROFILE%\.agora`) or the machine's own services.
 - **Do not stop agents that are running on that machine.** blackview, WHITE and the Macs run the maintainer's agents. Stop only what
   the run started, and only by its id or process id from the run's own `agora status`/`agora agent list`.
@@ -43,11 +50,12 @@ agent's or machine's name as `<agent>` or `<machine>` (the window gives agents n
 ## Which entries a platform session can run alone
 
 - **macOS session:** RM-01, RM-03 to RM-07, RM-08 (a private `sshd` on loopback, as on 2026-11-09), RM-10, RM-11 to RM-16 (the
-  fake-agent steps), RM-18, RM-19 to RM-21, RM-23, RM-24, RM-25, RM-27, RM-29, RM-30, RM-31, RM-33 to RM-40, RM-44, RM-47, RM-49,
-  RM-51, RM-53, RM-55, RM-58, RM-59, RM-60 (the CI disk image).
-- **Windows session:** RM-02, RM-03 to RM-07, RM-10, RM-11 to RM-16 (the fake-agent steps), RM-18, RM-19 to RM-21, RM-23 (confinement
-  is off by default: turned on for the run only), RM-24, RM-25, RM-27, RM-29, RM-31, RM-32 (checking the signature only), RM-35,
-  RM-36, RM-39, RM-40, RM-44, RM-49, RM-51, RM-53, RM-55, RM-58, RM-59, RM-60 (the CI installer).
+  fake-agent steps), RM-18, RM-19 to RM-21, RM-24, RM-25, RM-27, RM-29, RM-30, RM-31, RM-34 to RM-36, RM-39 (unconfined), RM-40,
+  RM-44, RM-47, RM-49, RM-51, RM-53, RM-55, RM-58, RM-59, RM-60 (the CI disk image); in a disposable macOS account or VM only (#900):
+  RM-23, RM-33, RM-37, RM-38.
+- **Windows session:** RM-02, RM-03 to RM-07, RM-10, RM-11 to RM-16 (the fake-agent steps), RM-18, RM-19 to RM-21, RM-24, RM-25, RM-27, RM-29, RM-31, RM-32 (checking the signature only), RM-35,
+  RM-36, RM-39, RM-40, RM-44, RM-49, RM-51, RM-53, RM-55, RM-58, RM-59, RM-60 (the CI installer); in a disposable Windows account or VM only (#900): RM-23
+  (confinement is off by default: turned on for that node only).
 - **Needs a person:** the real-agent steps of RM-11 to RM-13, RM-18's install (no person-facing way to make a signed list yet), RM-26 with a second person, RM-32
   (signing account), RM-45, RM-54 (a real phone), RM-56 (a tailnet), RM-57 (a real tunnel).
 
@@ -312,7 +320,8 @@ not built: nothing to check.
 ### RM-20 Resume after the node restarts (session ledger)
 - **OS:** Linux, macOS, Windows.
 - **Do:** start `rm-acp` (and on Windows the Shell too). End the node in a way that ends its agents: on Windows `agora down`; on Linux
-  and macOS a confined agent (RM-23's policy) or `kill -9` of the node and its holder. Start again with `agora`; then with `agora
+  and macOS `kill -9` of the run's node and of its holder (by the process ids the run's `agora status` gives), or a confined agent
+  with RM-23's policy (only in a disposable OS account or VM, #900). Start again with `agora`; then with `agora
   --resume auto`.
 - **See:** the agents are under "Stopped when the machine shut down" with Resume or Start again; Resume brings the conversation back in
   the same folder; with `--resume auto` they come back by themselves (asked once); one still running from before says "Stop it".
@@ -337,8 +346,10 @@ not built: nothing to check.
 ### RM-23 Agent confinement (sandbox)
 - **OS:** Linux, macOS; Windows built but off by default (turn on with `AGORA_WINDOWS_CONFINEMENT=1` for the run's node only).
   One level per node; `worktree-offline` on macOS only.
+- **Disposable OS account or VM only, until #900 is fixed** (a confined start writes outside `$RM`; see the safety rules).
 - **Do:** write `sandbox = worktree` into `$AGORA_HOME/data/policy`; restart the node. Start a Shell with "Create an isolated working
-  copy" and run `pwd` in it (its worktree, W). In your own terminal make the probes, all synthetic: `mkdir "$W/../rm-sibling" && echo
+  copy" and run `pwd` in it (its worktree, W; it must not be under `/tmp`, which Linux confinement grants to every agent: with
+  S0's folder under the home it is not). In your own terminal make the probes, all synthetic: `mkdir "$W/../rm-sibling" && echo
   rm-synthetic > "$W/../rm-sibling/secret.txt"`, and `echo rm-synthetic > $RM/outside.txt`. In the confined Shell try `cat
   ../rm-sibling/secret.txt`, `touch ../rm-sibling/out`, `cat $RM/outside.txt` and `touch $RM/home/x` (type these two paths out in full: `$RM` is not set in the agent); then `touch
   in-worktree.txt` and `git add -A && git commit -m t` (only if you have a global identity, RM-33).
@@ -421,6 +432,7 @@ not built: nothing to check.
 
 ### RM-33 A confined agent gets a git configuration the node wrote
 - **OS:** Linux, macOS; Windows with confinement on.
+- **Disposable OS account or VM only, until #900 is fixed** (a confined start writes outside `$RM`; see the safety rules).
 - **Do:** RM-23's policy. Change no git configuration: the node reads your global file itself and ignores a `GIT_CONFIG_GLOBAL` it
   inherits (`agora-node/src/gitconfig.rs`), so a scratch file would not test the copy. In your own terminal, read only: `git config
   --global --get user.name`, `git config --global --get user.email`. In a confined Shell: `echo $GIT_CONFIG_GLOBAL`, `git config
@@ -457,6 +469,7 @@ not built: nothing to check.
 
 ### RM-37 A confined agent cannot use the node's control socket
 - **OS:** Linux, macOS; Windows with confinement on.
+- **Disposable OS account or VM only, until #900 is fixed** (a confined start writes outside `$RM`; see the safety rules).
 - **Do:** RM-23's policy. In a confined Shell: `agora agent list --socket $AGORA_HOME/node.sock` (and `agora agent list`).
 - **See:** refused (no list of agents); the same command in your own terminal works.
 - **Evidence so far:** [macOS 2026-11-14](2026-11-14-macos-confinement-and-terminal-client.md): the control socket refused under
@@ -465,6 +478,7 @@ not built: nothing to check.
 ### RM-38 A confined agent reaches only the unix sockets it is given
 - **OS:** macOS (allow-list), Linux (abstract sockets, Landlock ABI 6 or newer; pathname sockets not restricted); Windows: not
   established.
+- **Disposable OS account or VM only, until #900 is fixed** (a confined start writes outside `$RM`; see the safety rules).
 - **Do:** RM-23's policy. In a confined Shell: `env | grep -E 'SSH_AUTH_SOCK|DBUS|TMUX|DOCKER'`; on macOS, first make a synthetic
   socket in your own terminal (`nc -lU $RM/rm.sock`), then from the confined Shell `echo hi | nc -U <that path typed out>`
   (unverified); run `agora doctor`.
@@ -476,7 +490,7 @@ not built: nothing to check.
 ### RM-39 A confined agent gets its login from a secret the node holds
 - **OS:** Linux, macOS, Windows.
 - **Do:** a manifest `rm-env` with `launch = [FAKE, "--print-env"]` and `[accounts]` `credential_env = ["RM_TOKEN"]` (unverified;
-  if the node gives the secret only to confined agents, add RM-23's policy).
+  if the node gives the secret only to confined agents, add RM-23's policy, and then only in a disposable OS account or VM, #900).
   `agora node secret set RM_TOKEN` (type `rm-fake-value`); policy line `credentials.rm-env = RM_TOKEN`; restart the node. Start
   `rm-env` and, for comparison, the same program under another kind name.
 - **See:** `rm-env`'s screen shows `ENV RM_TOKEN=rm-fake-value`; the other kind does not get it; `agora node secret list` shows the name
@@ -529,7 +543,8 @@ not built: nothing to check.
 - **OS:** Linux, macOS (unconfined agents through a holder of link version 2); Windows: not built.
 - **Do:** start `rm-acp`; send `hello`; `agora down`; `agora`; send `hello again`.
 - **See:** the same agent and conversation, not under "Stopped when the machine shut down"; the second prompt is answered; a confined
-  `rm-acp` instead ends with the node and comes back only as the resume policy allows.
+  `rm-acp` (only in a disposable OS account or VM, #900) instead ends with the node and comes back only as the resume policy
+  allows.
 - **Evidence so far:** none for the built steps (the 2026-11-20 run on `blackview` in ADR-0093 "Origin" is the case that led to it).
 
 ### RM-48 A plain terminal shows the agent program running in it
