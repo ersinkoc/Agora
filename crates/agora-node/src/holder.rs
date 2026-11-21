@@ -126,6 +126,7 @@ impl HolderSession {
         let stop = Arc::new(AtomicBool::new(false));
         let dropped = Arc::new(AtomicU64::new(dropped));
         let ready = Arc::new(AtomicBool::new(false));
+        let exit = Arc::new(std::sync::Mutex::new(None));
         let mut first = Vec::new();
         for l in fresh {
             first.extend_from_slice(&l);
@@ -146,6 +147,8 @@ impl HolderSession {
                 stop: Arc::clone(&stop),
                 dropped: Arc::clone(&dropped),
                 ready: Arc::clone(&ready),
+                exit: Arc::clone(&exit),
+                ended_reads: 0,
                 wait: PIPE_POLL_MIN,
                 exited_idle: None,
                 failures: 0,
@@ -154,6 +157,7 @@ impl HolderSession {
             stop,
             dropped,
             ready,
+            exit,
         }
     }
 
@@ -213,6 +217,8 @@ const PIPE_POLL_MIN: Duration = Duration::from_millis(2);
 const PIPE_POLL_MAX: Duration = Duration::from_millis(40);
 /// An agent that ended and whose output stays open (something it started holds it) is over after this long without a line.
 const PIPE_EXIT_GRACE: Duration = Duration::from_millis(500);
+/// Reads after the output ended while the holder still says the agent runs, to hear how it ended (#902).
+const PIPE_EOF_READS: u32 = 5;
 
 /// The output of a pipe agent in the holder, as a stream of lines for the adapter host's reader: what the holder kept first, then what
 /// it writes. A holder or a link that cannot be asked is the end of the stream (the adapter then counts as ended).
@@ -225,6 +231,11 @@ struct PipeReader {
     dropped: Arc<AtomicU64>,
     /// Set once what the holder kept has been handed to the reader.
     ready: Arc<AtomicBool>,
+    /// #902: how the agent ended, as the holder says with its output; published before the output ends, read by the node without a
+    /// question of its own (`Adapter::exit_status`).
+    exit: Arc<std::sync::Mutex<Option<agora_platform::ExitStatus>>>,
+    /// Reads since the output ended while the holder still said the agent ran (it closes its output a moment before it exits).
+    ended_reads: u32,
     wait: Duration,
     exited_idle: Option<Instant>,
     /// Reads in a row the holder refused for a passing reason.
@@ -279,6 +290,11 @@ impl Read for PipeReader {
                     continue;
                 }
             };
+            if let AgentState::Exited { code, signal } = data.info.state {
+                if let Ok(mut exit) = self.exit.lock() {
+                    *exit = Some(agora_platform::ExitStatus { code, signal });
+                }
+            }
             if data.dropped > 0 {
                 self.dropped.fetch_add(data.dropped, Ordering::AcqRel);
             }
@@ -291,8 +307,17 @@ impl Read for PipeReader {
                 self.exited_idle = None;
                 continue;
             }
+            // The output ended: over once the holder says how the agent ended, or after a few more reads (off any lock of the node's;
+            // at most `PIPE_EOF_READS` times `PIPE_POLL_MAX`) when it still says it runs; its status is then not known.
             if data.eof {
-                return Ok(0);
+                if matches!(data.info.state, AgentState::Exited { .. })
+                    || self.ended_reads >= PIPE_EOF_READS
+                {
+                    return Ok(0);
+                }
+                self.ended_reads += 1;
+                std::thread::sleep(PIPE_POLL_MAX);
+                continue;
             }
             if matches!(data.info.state, AgentState::Exited { .. })
                 && self.exited_idle.get_or_insert_with(Instant::now).elapsed() >= PIPE_EXIT_GRACE

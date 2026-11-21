@@ -2135,7 +2135,7 @@ impl Supervisor {
                             });
                         }
                         // #902: how its process ended, for the end the node reports if it gives up on it now. A crash path only
-                        // (rare), and at most 50 ms under this lock: a held adapter's holder is asked off the lock (`exit_status`).
+                        // (rare), and at most 50 ms under this lock; a held adapter's is what its output's reader heard from the holder, never a question.
                         let status = e
                             .adapter
                             .as_mut()
