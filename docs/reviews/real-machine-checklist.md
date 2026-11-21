@@ -5,7 +5,12 @@ which systems it applies to, what to do on a real machine with the released Agor
 written down in this repository. When a row is added to `docs/capabilities.md`, add its entry here in the same pull request.
 
 This is a first draft written from the docs and the code, not from a run. Where a step turns out to be wrong on a real machine, fix
-the step in the same pull request as the run's note.
+the step in the same pull request as the run's note. A step that ends in **(unverified)** could not be proved from the code or the
+docs (a manifest or probe written for this list, a system tool's menu): expect friction there, and the first run turns it into a
+verified step. Words in quotes, and the names of buttons, menus and sections, are the window's own text from `locales/en/web.ftl`
+(the terminal client's from `tui.ftl`, the commands' from `cli.ftl`); a `{ $count }` in that text is written here as `N`, and an
+agent's or machine's name as `<agent>` or `<machine>` (the window gives agents names of their own; a kind is shown by its
+`display_name`).
 
 ## How to run it
 
@@ -39,40 +44,45 @@ the step in the same pull request as the run's note.
 - **Windows session:** RM-02, RM-03 to RM-07, RM-10, RM-11 to RM-16 (the fake-agent steps), RM-18, RM-19 to RM-21, RM-23 (confinement
   is off by default: turned on for the run only), RM-24, RM-25, RM-27, RM-29, RM-31, RM-32 (checking the signature only), RM-35,
   RM-36, RM-39, RM-40, RM-44, RM-49, RM-51, RM-53, RM-55, RM-58, RM-59, RM-60 (the CI installer).
-- **Needs a person:** the real-agent steps of RM-11 to RM-13, RM-18 with a published list, RM-26 with a second person, RM-32
+- **Needs a person:** the real-agent steps of RM-11 to RM-13, RM-18's install (no person-facing way to make a signed list yet), RM-26 with a second person, RM-32
   (signing account), RM-45, RM-54 (a real phone), RM-56 (a tailnet), RM-57 (a real tunnel).
 
 ## Common setup
 
 The commands are for a Unix shell; on Windows use PowerShell (`$env:AGORA_HOME = "$env:TEMP\rm\home"` for `export`). In the window,
-the words are the ones it shows (`docs/ux/visual-language.md`): a node is a **Machine**, an approval is **Needs your OK**.
+a node is a **Machine** and an approval is a card that says "… asks permission" with Allow and Deny (under "Waiting for your answer").
 
 **S0. Run folder.** `RM=$HOME/rm-$(date +%F)`; `mkdir -p $RM/home $RM/proj`; `export AGORA_HOME=$RM/home`; in `$RM/proj`:
 `git init -b main && git commit --allow-empty -m init`. Check `agora --version` says 0.3.33.
 
-**S1. Hub and machine here.** With `AGORA_HOME` set, type `agora --ui none`. To the first question answer `1` ("Start Agora here");
-to "other machines may connect" answer `N` (or `y` for the entries that need a second machine); to "Start Agora when you log in?"
-answer `n`. `agora status` shows the hub's address (the first free port from 7443, so not the machine's own hub) and the data folder.
+**S1. Hub and machine here.** With `AGORA_HOME` set, type `agora --ui none`. To the first question answer `1` ("1) Start Agora here: …");
+to "Let other machines of yours connect? [y/N]" answer `N` (or `y` for the entries that need a second machine); to "Start Agora when
+you log in? [Y/n]" answer `n` (Enter alone means yes). `agora status` shows the hub's address (the first free port from 7443, so not the machine's own hub) and the data folder.
 `agora web` opens the window signed in (accept the hub's own certificate for this run only).
 
 **S2. Fake agents and the Shell.** `agora-fake-agent` is not in the release: build it from the same tag,
 `git clone --depth 1 --branch v0.3.33 https://github.com/ersinkoc/Agora $RM/src && cargo build --release -p agora-fake-agent
 --manifest-path $RM/src/Cargo.toml`, and use `FAKE=$RM/src/target/release/agora-fake-agent` (`.exe` on Windows). Write these
 manifests into `$AGORA_HOME/manifests/` (the node reads the folder again before it lists or starts agents; on Windows write paths as
-TOML literal strings, `'C:\...'`):
+TOML literal strings, `'C:\...'`). Each manifest has `version = "1"`, `min_engine = 1` and a `display_name` equal to its `kind`, so
+the window shows the same name as these steps. None of these manifests is in the repository; each is written for this list from the
+manifest spec and the tests that use the fake agent, so each is **(unverified)** until a run has loaded it:
 
 - `shell.toml`: `kind = "shell"`, `display_name = "Shell"`, `version = "1"`, `min_engine = 1`, `[process]` `launch = ["sh"]`
-  (`["powershell.exe", "-NoLogo"]` on Windows).
+  (`["powershell.exe", "-NoLogo"]` on Windows). The shape is the one `scripts/browser-harness.mjs` writes; the PowerShell form
+  (unverified).
 - `rm-screen.toml` (a terminal agent read from its screen): `launch = [FAKE, "--script", "$RM/screen.toml"]`, with three `[[rules]]`
   on `region = "bottom_non_empty_lines(1)"`: `working` for `contains = "esc to interrupt"`, `blocked` for `contains = "Allow Bash"`,
   `idle` for `regex = '^> '`. `$RM/screen.toml` is `crates/agora-fake-agent/fixtures/working-blocked-idle.toml` with `delay_ms`
-  of 20000 on the first two frames and 600000 on the last, so each state lasts long enough to see.
+  of 20000 on the first two frames and 600000 on the last, so each state lasts long enough to see (unverified).
 - `rm-acp.toml` (a structured agent over ACP): `[structured]` `acp = { argv = [FAKE, "--acp"] }`. Its prompts are listed at the top
-  of `crates/agora-fake-agent/src/acp.rs` (`plan`, `ask`, `rich`, `usage`, `mcp TOOL JSON`, `slow`, anything else is echoed).
-- `rm-chat.toml` (a structured agent through an adapter): `[adapter]` `command = [FAKE, "--adapter"]` (prompts `ask`, `cwd`, `crash`).
+  of `crates/agora-fake-agent/src/acp.rs` (`plan`, `ask`, `rich`, `usage`, `mcp TOOL JSON`, `slow`, anything else is echoed). The
+  shape is the one `crates/agora/tests/acp.rs` writes (unverified on a release node).
+- `rm-chat.toml` (a structured agent through an adapter): `[adapter]` `command = [FAKE, "--adapter"]` (prompts `ask`, `cwd`, `crash`). The shape is
+  the one `scripts/browser-harness.mjs` writes (unverified on a release node).
 - `rm-probe.toml`: `launch = [FAKE, "--probe-directory", "$RM/probe-{pid}.json"]`, with the `[[launch.option]]` and
   `[[launch.setting]]` blocks of `crates/agora-node/tests/agent_spawn.rs` (`skip-permissions`, `model`, `effort`). The probe writes
-  its folder and its arguments to that file and waits.
+  its folder and its arguments to that file and waits (unverified).
 
 `agora agent kinds` lists every kind; one that is missing is named by `agora doctor`.
 
@@ -124,7 +134,8 @@ then calls such as `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"nam
 ### RM-04 A machine is online while its link is (silence noticed in 25 s)
 - **OS:** Linux, macOS, Windows.
 - **Do:** S1, S3. Start a Shell on `rm-two`. Freeze `rm-two`'s node process for 60 s (`kill -STOP <pid>` on Linux and macOS; on
-  Windows, Resource Monitor > the process > Suspend process), then let it go (`kill -CONT`, Resume process). Note the times.
+  Windows, Resource Monitor > CPU > right-click the node's `agora.exe` > Suspend process (unverified)), then let it go (`kill -CONT`;
+  on Windows, Resume process (unverified)). Note the times.
 - **See:** `rm-two` shows Offline with "last seen" within about 25 to 35 s of the freeze; Online again within a few seconds of the
   resume, by itself; its Shell agent is still there and answers.
 - **Evidence so far:** lan-test-findings R1 and R5 measured earlier builds (the first version failed on `754a7b1`, the hub restart
@@ -134,8 +145,10 @@ then calls such as `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"nam
 - **OS:** Linux, macOS, Windows.
 - **Do:** S1, S3. Stop `rm-two`'s node. Old means not seen for 24 hours: either leave it 24 h, or only check Offline now. Then Your
   machines > the machine > Forget…; and `agora hub machines` and `agora hub machines forget --old` with `--hub-dir $RM/home/hub`.
-- **See:** after 24 h the machine is under Old machines (n), not offered in the start window; Forget… asks first (Keep / confirm), then
-  the machine is gone from the window and from `agora hub machines`; a machine that is Online again is not forgotten.
+- **See:** after 24 h the machine is in its own folded section, "One old machine" ("N old machines" for more), with "Clean up…"
+  under it, and is not offered in the start window; Forget… asks "Forget <machine>?" with Keep and Forget; Clean up… asks "Clean up
+  one old machine?"; then the machine is gone from the window and from `agora hub machines`; a machine that is Online again is not
+  forgotten ("It is connected again, so it was not forgotten.").
 - **Evidence so far:** none recorded.
 
 ### RM-06 `agora` on a fresh machine starts a hub and a node here
@@ -144,8 +157,9 @@ then calls such as `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"nam
   `agora status`; kill the node process; wait 40 s; `agora status`; `agora down`. On a machine with **no** Agora service of its own:
   `agora service install`, `status`, `remove`.
 - **See:** the first question appears once; the terminal client opens signed in; `status` shows hub and node with versions; the killed
-  node is back about 30 s later and `status` says it was started again; `agora down` leaves no Agora process of the run;
-  `service status` says "starts when you log in … running now", `remove` leaves nothing.
+  node is back about 30 s later and `status` says "restarted once in the last N minutes" with the last crash; `agora down` leaves no
+  Agora process of the run; `agora service status` says `The node starts when you log in ("agora-node").` and "running now (process
+  N)"; `remove` says `"agora-node" is removed: the node no longer starts when you log in.` and leaves nothing.
 - **Evidence so far:** [supervisor and login service 2026-11-14](2026-11-14-supervisor-and-login-service.md): restart after a crash
   and start at login on Windows 11, macOS and Linux with scratch homes (0.3.11 to 0.3.12 era); joining a hub by its address: none.
 
@@ -154,8 +168,9 @@ then calls such as `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"nam
 - **Do:** on the hub machine S1 with `y`, then `agora pair open` (in a terminal). On a second machine (or a second `AGORA_HOME` on the
   same one) `agora join`, then `agora join HUB-ADDRESS`. Answer on the hub's terminal once, and once in the window (A new machine wants
   to join > Yes, the numbers match > Approve).
-- **See:** `join` finds the hub and shows the same fingerprint as `pair open`; both sides show the same number; after `y` the new
-  machine says `Joined. This machine is "…"` and is Online in Your machines; a denied or timed-out request ends with "Nothing was
+- **See:** `join` says `Found the hub "…" at …. Its fingerprint is …` with the same fingerprint as `pair open`; the new machine says
+  `Number N. Approve this machine on the hub: …` and the hub `New machine "…" (…) wants to join. Number N.`, the same number; after `y`
+  the new machine says `Joined. This machine is "…"` and is Online in Your machines; a denied or timed-out request ends with "Nothing was
   saved"; the hub closes itself after one approval.
 - **Evidence so far:** none recorded.
 
@@ -174,9 +189,11 @@ not built: nothing to check.
 
 ### RM-10 `agora update` (self-update)
 - **OS:** Linux, macOS, Windows.
-- **Do:** copy the program to `$RM/bin/agora` and use only that copy: `$RM/bin/agora update --check`, then
-  `$RM/bin/agora update --version 0.3.32` and `$RM/bin/agora update --version 0.3.33`.
-- **See:** `--check` names the newest release; each update checks the checksum and signature before it replaces the copy;
+- **Do:** copy the program to `$RM/bin/agora` and use only that copy, with the release key from the repository:
+  `$RM/bin/agora update --check --release-key $RM/src/docs/security/release-key.pub`, then `$RM/bin/agora update --version 0.3.32
+  --release-key …` and `--version 0.3.33` (going back a version this way is unverified).
+- **See:** `--check` says "Agora 0.3.33 is the newest release." (or which is available); each update says "Updated to Agora …"
+  only after the checksum and signature checked out ("Nothing was changed." otherwise);
   `$RM/bin/agora --version` follows; the machine's own `agora` is untouched. On Windows, note any Microsoft Defender verdict.
 - **Evidence so far:** none recorded (lan-test-findings L13 lists the self-replace among the suspects of a Defender verdict).
 
@@ -206,14 +223,14 @@ not built: nothing to check.
 - **Do:** S2. Start `rm-chat`; send `ask`, then `cwd`, then `crash`. Registry: there is no default registry; if one is published, run
   `agora adapter install NAME --registry URL`, `agora adapter list`, `agora adapter remove NAME` (**human, dedicated account** for an
   adapter that needs a login).
-- **See:** the chat answers; `ask` brings an approval that Allow resolves; `cwd` says `$RM/proj`; `crash` shows the agent ended with
-  an error and its reason; an installed adapter shows its version in `list` and its kind in the start window.
+- **See:** the chat answers; `ask` brings an approval that Allow resolves; `cwd` says `$RM/proj`; `crash` shows it "Ended with an error"
+  with its reason; an installed adapter shows its version in `list` and its kind in the start window.
 - **Evidence so far:** none recorded.
 
 ### RM-14 Agents run in the selected folder; worktrees optional
 - **OS:** Linux, macOS, Windows.
 - **Do:** Start an agent > Working folder > Browse folders > `$RM/proj` > Use this folder > Shell > Start; run `pwd` and `git branch
-  --show-current`. Again with "Create an isolated working copy" checked. Close both.
+  --show-current`. Again with "Create an isolated working copy" checked. Close agent on both.
 - **See:** the first runs in `$RM/proj` on `main` ("Shared folder · changes belong to the workspace"); the second in its own folder
   on an `agent/…` branch; after Close, a worktree that was never changed and its branch are removed, a changed one is kept.
 - **Evidence so far:** LAN run 2026-11-11, L20 and L22 (lan-test-findings): branch rollback and selected checkouts under confinement.
@@ -227,10 +244,11 @@ not built: nothing to check.
 
 ### RM-16 Start with model, effort and mode
 - **OS:** Linux, macOS, Windows (the window; the terminal client's picker is not built).
-- **Do:** S2. Start `rm-probe` with Model `m1` and Effort `high`. On a second machine (S3), start the same there, so the start is
-  signed.
-- **See:** the start window says "rm-probe will start with …"; the probe's arguments hold `--fake-model m1 --fake-effort high`; the
-  agent's settings show them; a signed start's approval card lists them.
+- **Do:** S2. Start an agent > `rm-probe`, Model `m1`, Effort `high` > Start. Then from `rm-acp` (RM-21) send
+  `mcp agent_start {"kind":"rm-probe","settings":{"model":"m1"}}`.
+- **See:** the start window says "rm-probe will start with …" naming both; the probe's arguments hold `--fake-model m1 --fake-effort
+  high`; the helper's card lists the model and says "Only this one can be allowed: a start with its own model or effort is always
+  asked."
 - **Evidence so far:** none recorded.
 
 ### RM-17 Agent login and accounts on a node
@@ -239,15 +257,25 @@ not built: nothing to check.
 ### RM-18 Install and update coding agents on a machine from the window
 - **OS:** Linux, macOS, Windows. Built: `agora doctor`'s agent checks and `agora agent install` (binary download); from the window:
   not built.
-- **Do:** `agora doctor` with the run's `AGORA_HOME`. `agora agent install fake-goose --list
-  $RM/src/crates/agora-adapters/tests/fixtures/agent-list/fake-list-v1.signed.json --root-key
-  8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c` (the FAKE test list and its public test key, from
-  `crates/agora-adapters/tests/agent_packages.rs`): type the name; it must stop at the download, since the list's addresses are fake.
-  Run it once more with its input from a pipe (`echo fake-goose | agora agent install …`). With a published first-party list (**human, dedicated account**):
-  install one agent, type its name to approve, then `--go-back`.
+- **Do (a session can run it):** `agora doctor` with the run's `AGORA_HOME`.
+- **Do (human):** there is no person-facing way to make a signed agent list yet. No `agora` command makes a list key or signs a
+  list, no first-party list is published, and `docs/specs/agent-packages.md` defines only the format and the check (the first-party
+  list is to be signed by the release key, ADR-0087, not done yet). So the install is run by the maintainer, by hand, with a key made
+  for this test only and a disposable `AGORA_HOME`:
+  1. Make an Ed25519 key pair with any tool you trust; keep the private key off every machine Agora runs on. The root key Agora takes
+     is the raw 32-byte public key as 64 hex characters (unverified: no doc names a tool for this).
+  2. Write the payload as `docs/specs/agent-packages.md` says: `version`, `expires_ms`, one publisher (`id`, `key`), and one
+     `binary-download` entry for a small program for this system (an `https://` address on a public DNS name, its SHA-256,
+     `provides`, `verify` with `--version` and a regex that matches its output). The `name` matches a manifest kind on the machine.
+  3. Sign the payload's exact bytes with the private key (Ed25519, the signature as hex) and save
+     `{"payload": "<the payload text>", "sig": "<hex>"}` as `$RM/list.json`.
+  4. `agora agent install NAME --list $RM/list.json --root-key <64 hex>`; type the name to approve. Again with the input from a pipe
+     (`echo NAME | agora agent install …`). To check going back: install a newer version from a list with a higher `version`, then
+     the older entry again with `--go-back` (it asks for the version to be typed too).
 - **See:** `doctor` names each agent kind as installed or not; the install prints the exact plan (version, address, SHA-256,
-  publisher, target folder), asks for the name and then fails at the download with a reason in words (or says this system is not
-  offered); input that is not a terminal is refused; nothing outside `$AGORA_HOME/agents` changes; the installed agent is "Installed" under Settings > Agents.
+  publisher, target folder) and asks for the name; input that is not a terminal is refused; a wrong root key or a changed payload is
+  refused before any download; nothing outside `$AGORA_HOME/agents` changes; the installed agent is "Installed" under Settings >
+  Agents.
 - **Evidence so far:** none recorded.
 
 ### RM-19 A missing agent kind says why
@@ -271,10 +299,13 @@ not built: nothing to check.
 
 ### RM-21 An agent starts helpers, with the user's signed approval
 - **OS:** Linux, macOS, Windows.
-- **Do:** S2, S4. Start `rm-acp`; send `mcp agent_start {"kind":"rm-screen","prompt":"hello"}`. Answer the card; then the same with
-  Deny. Settings > Helper permissions: Revoke.
-- **See:** a card says rm-acp "asks to start a rm-screen agent", with the folder and "Its first prompt"; Only this one starts the
-  helper, shown "started by rm-acp" under its parent; Deny starts nothing and the agent is told; nothing starts without a card.
+- **Do:** S2, S4. Start `rm-acp`; send `mcp agent_start {"kind":"rm-screen","prompt":"hello"}`. Answer Only this one; send it again and
+  answer Deny; send it a third time and allow "Up to N rm-screen agents in this folder while rm-acp runs, without asking again", then
+  Revoke that permission ("Can still start N rm-screen without asking in …") under Helper permissions (unverified: where the window
+  shows it, and whether this kind may be allowed more than once).
+- **See:** a card says "<agent> asks to start a rm-screen agent" (with "on <machine>" when it names one), the Folder and "Its first
+  prompt"; Only this one starts the helper, shown "started by <agent>" under its parent; Deny starts nothing and the agent is told; after Revoke the next start asks
+  again; nothing starts without a card.
 - **Evidence so far:** none recorded.
 
 ### RM-22 Workspace clean-up and disk limits
@@ -296,14 +327,15 @@ not built: nothing to check.
 - **OS:** Linux, macOS, Windows.
 - **Do:** S3 without S4 for `rm-two`: start an agent on it from the window; then S4 for `rm-two` and start again. Start `rm-chat`
   there, send `ask`, answer Allow.
-- **See:** before trust, the start is refused and the window says this browser is not trusted there; after trust, the start and the
-  Allow work; the answer is in Activity.
+- **See:** before trust, the start window says "<machine> has to trust this browser once before it starts agents from it, …" with
+  the command and Copy, and Settings > This device says the machine "does not trust this browser yet"; after trust, the start and
+  the Allow work; Activity lists "Started an agent" and "Answered an approval".
 - **Evidence so far:** none recorded.
 
 ### RM-25 Trusting your devices in one step
 - **OS:** Linux, macOS, Windows.
 - **Do:** S1 with browser A trusted (S4). Sign in from browser B (another profile). In B: Settings > This device > Ask another device to
-  approve. In A: the request > Approve. Then in A: Your other devices > B > Remove.
+  approve. In A: "<device> asks to be trusted" > compare the fingerprint > Approve. Then in A: Your other devices > B > Remove.
 - **See:** B's fingerprint in A matches B's own; after Approve, B "trusts this browser" on the machines in scope and can start an agent
   with no command typed; after Remove, B cannot.
 - **Evidence so far:** none recorded.
@@ -312,14 +344,15 @@ not built: nothing to check.
 - **OS:** Linux, macOS, Windows (the hub). Partly built (P7-09).
 - **Do:** `agora hub user add rm-viewer --role viewer --hub-dir $RM/home/hub`; sign in with its code in browser B (a second person:
   **human**; otherwise a second browser profile). As the viewer try to start an agent. As the owner open Activity.
-- **See:** the viewer sees the agents but cannot start one; Activity lists both people's actions with a session id each.
+- **See:** the viewer sees the agents but cannot start one; Activity (Person column) lists both people's actions, each row with
+  "session <id>".
 - **Evidence so far:** LAN run 2026-11-11, L16 and L17 (lan-test-findings): the audit page on the Windows web window pass.
 
 ### RM-27 Agents message each other across machines (mesh)
 - **OS:** Linux, macOS, Windows, in every direction.
 - **Do:** S3; a Shell on each machine. With S5 as the first agent call `send_message` to `rm-two/<agent id>`; as the second call
-  `inbox`. Open Messages in the window.
-- **See:** the message arrives once with `provenance.node`; the window shows it "between machines"; a message to an offline machine
+  `inbox`. Open the Messages tab in the window.
+- **See:** the message arrives once with `provenance.node`; the window lists it under "Recent messages", marked "between machines"; a message to an offline machine
   fails with a reason.
 - **Evidence so far:** LAN run 2026-11-11, L12 (lan-test-findings): six directions over the LAN hub; R3.
 
@@ -339,7 +372,7 @@ not built: nothing to check.
 ### RM-30 The node updates in place without stopping agents
 - **OS:** Linux, macOS (step 1 only: the mesh bridge reconnects; the later steps are not built).
 - **Do:** start a Shell; open its bridge with S5 and call `workspace_status`; `agora down` (the agent stays with its holder), then
-  `agora`; within 15 minutes call `workspace_status` again on the same bridge.
+  `agora`; within 15 minutes call `workspace_status` again on the same bridge (unverified: a bridge run by hand, not by an agent).
 - **See:** the second call answers without restarting the bridge (during the gap a call may fail with `mesh.unavailable`).
 - **Evidence so far:** none recorded.
 
@@ -353,9 +386,10 @@ not built: nothing to check.
 
 ### RM-32 The Windows binary is code-signed
 - **OS:** Windows.
-- **Do:** download `agora-x86_64-pc-windows-msvc` of 0.3.33; in PowerShell `Get-AuthenticodeSignature .\agora.exe`.
+- **Do:** download `agora-x86_64-pc-windows-msvc.exe` of 0.3.33; in PowerShell `Get-AuthenticodeSignature
+  .\agora-x86_64-pc-windows-msvc.exe`.
   Signing a release needs the SignPath account (**human**).
-- **See:** today: not signed (expected until SignPath is set up). After setup: `Valid`, with a timestamp.
+- **See:** today: `NotSigned` (expected until SignPath is set up). After setup: `Valid`, with a timestamp.
 - **Evidence so far:** none recorded (lan-test-findings L13: Defender flagged the unsigned 0.3.12).
 
 ### RM-33 A confined agent gets a git configuration the node wrote
@@ -380,8 +414,8 @@ not built: nothing to check.
 - **OS:** Linux, macOS, Windows.
 - **Do:** in `$RM/proj` make `.env` (`KEY=rm-fake`) and `id_rsa` (any text). Open Files; open Changes; in `agora tui` open the file
   browser (`o`) and the diff (`r`).
-- **See:** both are listed "kept private" and their content is never shown, in the window and in the terminal client; Changes says
-  "Changed, content hidden".
+- **See:** in the window both are listed as "…, kept private" and opening one says "Kept private: it may hold a secret"; the terminal
+  client marks them "private" with the same sentence; Changes says "Changed, content hidden"; their content is never shown.
 - **Evidence so far:** none recorded.
 
 ### RM-36 A replayed revocation does not undo the owner's re-trust
@@ -410,7 +444,8 @@ not built: nothing to check.
 
 ### RM-39 A confined agent gets its login from a secret the node holds
 - **OS:** Linux, macOS, Windows.
-- **Do:** a manifest `rm-env` with `launch = [FAKE, "--print-env"]` and `[accounts]` `credential_env = ["RM_TOKEN"]`.
+- **Do:** a manifest `rm-env` with `launch = [FAKE, "--print-env"]` and `[accounts]` `credential_env = ["RM_TOKEN"]` (unverified;
+  if the node gives the secret only to confined agents, add RM-23's policy).
   `agora node secret set RM_TOKEN` (type `rm-fake-value`); policy line `credentials.rm-env = RM_TOKEN`; restart the node. Start
   `rm-env` and, for comparison, the same program under another kind name.
 - **See:** `rm-env`'s screen shows `ENV RM_TOKEN=rm-fake-value`; the other kind does not get it; `agora node secret list` shows the name
@@ -438,18 +473,19 @@ not built: nothing to check.
 
 ### RM-44 A structured agent's conversation is complete (thinking, tools, plan, effort)
 - **OS:** Linux, macOS, Windows (the window; the terminal client's view is not built).
-- **Do:** S2 with `rm-acp`'s argv extended with `--config-options` and `--bypass-mode`. Send `rich`, `plan`, `slow` (then Stop turn),
-  and two prompts while one is running. Switch to a mode that does not ask.
-- **See:** thinking, the tool call with its path and output, and the plan with each step's status; Stop turn ends only the turn; the
-  queued prompts are sent in order when the turn ends; the switch asks "Let the agent act without asking?" and waits for a signed
-  approval.
+- **Do:** S2 with `rm-acp`'s argv extended with `--config-options` and `--bypass-mode` (unverified: the two flags together). Send
+  `rich`, `plan`, `slow` (then Stop turn), and two prompts while `slow` runs. Under Agent settings, set Mode to the one that does not
+  ask; answer "Switch anyway".
+- **See:** "Thought for …", the tool call with its path and output, and the Plan with "N of M done"; Stop turn ends only the turn;
+  the waiting prompts show "Sent when this turn ends" and go in order when it ends; the mode switch asks "Let the agent act without
+  asking?", then shows "Waiting for your approval" until the signed approval is given.
 - **Evidence so far:** none recorded.
 
 ### RM-45 Plan limits of subscription agents
 - **OS:** Linux, macOS, Windows. Codex only.
-- **Do:** **human, dedicated account:** start Codex, give it a prompt, open Usage.
-- **See:** Plan limits shows the five-hour and seven-day windows with a percentage and a reset time; other tools are listed as having
-  no limit information.
+- **Do:** **human, dedicated account:** start Codex, give it a prompt, open the Usage tab.
+- **See:** Plan limits shows "Five hours" and "Seven days" with "N %" and "Resets in …"; the agent shows "Limit N %"; other tools are
+  named in "No limit information from this tool: …".
 - **Evidence so far:** none recorded.
 
 ### RM-46 The ACP registry as a source of agent kinds
@@ -469,15 +505,21 @@ not built: nothing to check.
 
 ### RM-49 A project's kanban board; a task dispatched to an agent
 - **OS:** Linux, macOS, Windows (the window; the terminal client's dispatch is not built).
-- **Do:** S2 plus a manifest `rm-paste` (Linux and macOS: `launch = ["sh", "-c", "printf '\\033[?2004h* Working (esc to interrupt)\\n';
-  sleep 20; printf '> '; exec cat -v"]`, rules as `rm-screen`; Windows: the same in PowerShell). Start `rm-paste` and `rm-acp` in
-  `$RM/proj`; with S5 call `task_create` twice. Open board > a Backlog card > Give to an agent > `rm-paste` > Give the task, within 5 s
-  of its start. Give the second task to `rm-acp`. Then "Start a new agent for this task" on a third task. Then the same with a manifest
-  that never turns bracketed paste on.
-- **See:** the confirmation names task, agent, kind, machine and project; the answer is "It waits until the agent's current turn ends";
-  nothing reaches `rm-paste` before it is idle, then one bracketed paste (`^[[200~` … `^[[201~` in its `cat -v`) and Enter; the card
-  moves to Doing with the agent; the new-agent path opens the start window and then the same confirmation; without bracketed paste the
-  answer is "This agent's terminal program cannot take a pasted task…".
+- **Do:** S2 plus a probe terminal agent `rm-paste`. The probe used on WHITE on 2026-11-21 is not in the repository, so write one that
+  does this (unverified, on every system): put its terminal in raw mode (no echo, no line editing, so every byte is seen as it
+  arrives); turn bracketed paste on (DECSET 2004, `ESC [ ? 2004 h`); print a working line that the manifest's `working` rule matches
+  (for example `* Working (esc to interrupt)`) and keep it as the last line for 20 s; then print an idle line that the `idle` rule
+  matches (`> `); from its start to its end, log every byte read from its input with the time since start, to a file in `$RM`. Its
+  manifest has the three rules of `rm-screen` (unverified). A second probe, `rm-nopaste`, is the same without DECSET 2004.
+  Start `rm-paste` and `rm-acp` in `$RM/proj`. To `rm-acp` send `mcp task_create {"title":"RM task 1"}`, then `RM task 2` and `RM task
+  3`. Within 5 s of `rm-paste`'s start: Open board (N) > the "RM task 1" card in Backlog > Give to an agent > `rm-paste` > Give the
+  task. Give "RM task 2" to `rm-acp`. On "RM task 3": Give to an agent > Start a new agent for this task. Then start `rm-nopaste` and
+  give it a task.
+- **See:** "Give this task to <agent>?" names Task, Agent, Kind, Machine and Project; the answer is "Sent to <agent>. It waits until
+  the agent's current turn ends."; the probe's log has no byte before its idle line, then one bracketed paste (`ESC [ 200 ~` … `ESC
+  [ 201 ~`) and an Enter (`\r`) shortly after; the card moves to Doing with "Agent: <agent>"; Start a new agent for this task opens
+  the start window and then the same confirmation for the new agent; `rm-nopaste` gets "This agent's terminal program cannot take a
+  pasted task. Choose another agent, or type the task into it yourself."
 - **Evidence so far:** [Windows 11 2026-11-21](2026-11-21-windows-dispatch-conpty.md): through ConPTY, given at about 5.5 s while
   working, no byte before idle at 20.0 s, one 768-byte bracketed paste 1.9 s after idle, Enter about 120 ms later; the refusal path
   and real agents not tested.
@@ -489,10 +531,11 @@ not built: nothing to check.
 
 ### RM-51 Review screen and file browser
 - **OS:** Linux, macOS, Windows (any browser).
-- **Do:** in `$RM/proj` change a file, add one, delete one, rename one. Open Changes: filters, Side by side, Wrap lines, Next file; open
-  Files: filter, Find in the file, Copy the whole file, Download.
-- **See:** each change is shown with its kind (Changed, Added, Deleted, Renamed) and its lines; removed lines red with `-`, added green
-  with `+`; Files marks the changed lines.
+- **Do:** in `$RM/proj` change a file, add one, delete one, rename one. Open Changes: Show (All, Changed, Added, Deleted, Renamed), Layout
+  > Side by side, Wrap lines, Next file; open Files: "Filter files by name", "Find in the file", "Copy the whole file"; in the File
+  manager, Download.
+- **See:** each change is shown with its kind (Changed, Added, Deleted, Renamed, "was <name>" for the rename) and its lines; removed
+  lines red with `-`, added green with `+`; Files marks lines "Added since the last commit" and "Changed since the last commit".
 - **Evidence so far:** none recorded.
 
 ### RM-52 A diff names every changed file even when cut
@@ -507,17 +550,18 @@ not built (the window says how many files are not shown): nothing to check.
 
 ### RM-54 Phone-sized window
 - **OS:** a real phone (iOS, Android) against a hub on any system.
-- **Do:** **human:** open the window on the phone over the same network (or RM-56); use Start, Machines, Needs you · n, an agent's
-  terminal with the Terminal keys (Esc, Tab, Ctrl, arrows, Paste).
+- **Do:** **human:** open the window on the phone over the same network (or RM-56); use Start, Machines, "Needs you · N", an
+  agent's terminal with its key bar (Esc, Tab, Ctrl, Up, Down, Left, Right, Paste).
 - **See:** no page scrolls sideways; targets are easy to hit; typing reaches the agent.
 - **Evidence so far:** not run on a real phone.
 
 ### RM-55 Screen password for remote sign-in
 - **OS:** Linux, macOS, Windows.
-- **Do:** `agora password set --hub-dir $RM/home/hub` (a throwaway password); open the hub in a fresh browser profile; sign in with
-  Screen password, wrong and then right; Lock; `agora password clear`.
-- **See:** a wrong password is refused ("That password is not right."), the right one signs in; Lock signs out with agents still
-  running; setting a new password signs every other window out.
+- **Do:** `agora password set --hub-dir $RM/home/hub` (a throwaway password); open the hub in a fresh browser profile; Sign in with
+  the code and the Screen password, first wrong, then right; Lock; in Settings, Screen password > Change password; then `agora
+  password clear --hub-dir $RM/home/hub`.
+- **See:** a wrong password is refused ("That password is not right."), the right one signs in; Lock signs this window out while
+  the agents keep running; a changed password says "Saved. Every other window was signed out."
 - **Evidence so far:** none recorded.
 
 ### RM-56 Tailscale (rung 3): `agora remote tailscale|status|off`, public-address rule, doctor checks
@@ -529,33 +573,36 @@ not built (the window says how many files are not shown): nothing to check.
 
 ### RM-57 Trusted reverse proxy or tunnel (rung 4): `agora remote proxy`, Host/Origin checks, real client address
 - **OS:** Linux, macOS, Windows.
-- **Do:** a local reverse proxy in front of the run's hub (any proxy the session can run on loopback), then `agora remote proxy
-  --trust-header X-Forwarded-For --host <name>` (see `docs/guides/remote-hub.md` part C). A real tunnel (Cloudflare Tunnel) is
-  **human**.
-- **See:** the window opens through the proxy; a request with another Host answers 421/403; Activity shows the real client address.
+- **Do:** a local reverse proxy in front of the run's hub that sets one header itself on every request (for example `X-Real-IP`;
+  never `X-Forwarded-For`, as `docs/guides/remote-hub.md` part C says), then `agora remote proxy --trust-header X-Real-IP --host
+  <name>` with the run's `--hub-dir`; `agora remote status`. Which proxy, and its settings, are the runner's choice (unverified). A
+  real tunnel (Cloudflare Tunnel, part C) is **human**.
+- **See:** the window opens through the proxy and asks for the screen password and the code; a request with another `Host` or
+  `Origin` answers `421` / `403`; wrong passwords through the proxy lock out only that visitor address.
 - **Evidence so far:** never run against a real tunnel.
 
 ### RM-58 Layouts and themes
 - **OS:** Linux, macOS, Windows (Chrome, Firefox, Safari; Windows at 125 % and 150 %).
-- **Do:** Layout > each preset; Split right, Close pane; Save layout as…, reload, Saved layouts…; Export and Import; Colour scheme >
-  Dark, Light, Follow the system; Edit theme > Customize a colour.
-- **See:** each layout keeps its panes after a reload; themes switch at once with every text readable; a colour that would be hard to
-  read is "Not applied".
+- **Do:** Layout > each preset; Split right, Close pane; Save layout as…, reload, Saved layouts… > Use; Export and Import…; Reset
+  layout; the colour scheme switch: Dark, Light, Follow the system; Edit theme > Customize a colour.
+- **See:** each layout keeps its panes after a reload; themes switch at once with every text readable ("All text is readable (WCAG
+  AA)."); a colour that would be hard to read says "Not applied: some text would be hard to read."
 - **Evidence so far:** none recorded.
 
 ### RM-59 Terminal client (TUI)
 - **OS:** Linux, macOS, Windows (Windows Terminal).
-- **Do:** S1, S2; `agora tui` at 80×24 and at a large size. Open the list, an agent's tab, the file browser (`o`) and the diff (`r`);
-  answer an approval of `rm-chat` (`ask`); resize.
-- **See:** agents named by kind and colour; Needs you marked with the number waiting; the tab redraws after a resize; readers say when
-  they wait.
+- **Do:** S1, S2; `agora tui` at 80×24 and at a large size. Open the list, an agent's tab (Enter), its files (`o`) and its changes
+  (`r`); answer an approval of `rm-chat` (`ask`) with `y`; resize; Ctrl-] back to the list.
+- **See:** agents named by kind and colour; "<agent> is waiting for you" and "N waiting" while it asks; the tab redraws after a
+  resize; readers say when they wait.
 - **Evidence so far:** [macOS 2026-11-14](2026-11-14-macos-confinement-and-terminal-client.md): list, tabs, readers, a real Claude Code
   agent; LAN run L3 (`agora tui` by IP address, fixed).
 
 ### RM-60 Desktop app
 - **OS:** Linux, macOS, Windows. Partly built (P7-06); builds are unsigned CI artifacts (`desktop.yml`: the NSIS installer, the disk
   image).
-- **Do:** install the CI build of the 0.3.33 tag; connect it to the run's hub (S1 with `y`) from the same machine and from another on
+- **Do:** install the newest `desktop` workflow artifact (it is built on `main` and on pull requests, not on tags: note its commit;
+  unverified); connect it to the run's hub (S1 with `y`) from the same machine and from another on
   the LAN; on macOS allow the local network when asked.
 - **See:** the app opens the window signed in; it refuses a hub it cannot verify and says so; on macOS it reaches a hub on the LAN.
 - **Evidence so far:** LAN run 2026-11-11, L1 and L2 (lan-test-findings): the macOS app on the LAN and the desktop shell's hub check,
