@@ -4,9 +4,16 @@
 //! records is the agent's worktree, so another session of the same tool is never counted.
 //!
 //! Two agents can share a folder (ADR-0052) and the same files (one kind, or kinds with one glob): there the folder says nothing about
-//! which session is whose, and both used to count both. An agent with such a peer takes only a file whose name holds its own native
-//! session id (`<id>.jsonl` for Claude Code, `rollout-…-<id>.jsonl` for Codex; ADR-0042 point 2), and an agent whose id is not known
-//! takes none: a session counted for nobody rather than for two (the same choice as `session_files` for Resume).
+//! which session is whose, and both used to count both. So:
+//! - a file whose tokens one agent counted is that agent's for good: no other agent counts it, also after its owner ended;
+//! - an agent with such a peer counts the tokens of a file only when the file's name holds its own native session id (`<id>.jsonl` for
+//!   Claude Code, `rollout-…-<id>.jsonl` for Codex; ADR-0042 point 2). Without its id it reads such files for the tool's plan windows
+//!   only (ADR-0091: per tool, not per session) and counts no tokens: a session counted for nobody rather than for two.
+//!
+//! Known limits: peers are agents with the same glob and the same folder as written (no file system lookup on the supervision
+//! thread), so two kinds whose different globs match the same files, or one folder spelled two ways, are not seen as peers; the id is
+//! found in the file's name, not read from its lines; an agent that ends in the same second a new peer starts can still take that
+//! peer's first file in its last read.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{Read, Seek, SeekFrom};
@@ -74,6 +81,9 @@ struct FileState {
     pending: Vec<Sample>,
     /// Plan windows read before the directory was known (at most [`MAX_PENDING_QUOTA`]: the newest).
     pending_quota: Vec<QuotaRaw>,
+    /// Whether this file's tokens count for the agent; `false` for a file read only for the tool's plan windows (a peer shares the
+    /// folder and this agent's session id is not known).
+    tokens: bool,
     /// Set once a read has reached the end of the file. Until then the file is being replayed from its start: its plan windows are
     /// old news, so only the newest of each is sent and it is stamped with the line's (or the file's) time, not the read time.
     caught_up: bool,
@@ -96,6 +106,8 @@ pub struct UsageWatcher {
     quota_out: Vec<(String, QuotaRaw)>,
     /// The agents of the last [`Self::poll`], so the last read of an ended agent ([`Self::finish`]) still knows its peers.
     peers: Vec<Peer>,
+    /// Which agent counted the tokens of a file: no other agent counts that file, also after its owner ended.
+    owners: HashMap<PathBuf, AgentId>,
 }
 
 pub fn home_dir() -> Option<PathBuf> {
@@ -191,6 +203,7 @@ impl UsageWatcher {
             agents: HashMap::new(),
             quota_out: Vec::new(),
             peers: Vec::new(),
+            owners: HashMap::new(),
         }
     }
 
@@ -204,6 +217,10 @@ impl UsageWatcher {
         let live: HashSet<&AgentId> = targets.iter().map(|t| &t.agent).collect();
         self.agents.retain(|id, _| live.contains(id));
         self.peers = targets.iter().map(Peer::of).collect();
+        if self.owners.len() > MAX_MATCHES {
+            // Bounded: the files of agents that ended are let go first.
+            self.owners.retain(|_, owner| live.contains(owner));
+        }
         let mut out = Vec::new();
         let Some(home) = self.home.clone() else {
             return out;
@@ -251,47 +268,44 @@ impl UsageWatcher {
                 files: BTreeMap::new(),
                 ignored: HashSet::new(),
             });
+        let peered = has_peer(t, peers);
+        let id = t.session.as_deref().filter(|s| s.len() >= MIN_SESSION_ID);
+        let named = |path: &Path, id: &str| {
+            path.file_name()
+                .is_some_and(|n| n.to_string_lossy().contains(id))
+        };
+        // Whether a file's tokens may count for this agent: always alone in its folder (the directory decides, as before); with a
+        // peer only a file named after its own session.
+        let counts = |path: &Path| !peered || id.is_some_and(|id| named(path, id));
         if now >= a.next_scan {
             a.next_scan = now + SCAN_EVERY;
-            // With a peer in this folder only a file named after this agent's own session is its; without its id, none is.
-            let own_id = if shares_files(t, peers) {
-                t.session
-                    .as_deref()
-                    .filter(|s| s.len() >= MIN_SESSION_ID)
-                    .map(Some)
-            } else {
-                Some(None)
-            };
             let glob = t.spec.glob.replacen("{home}", &home.to_string_lossy(), 1);
-            let found = match own_id {
-                Some(_) => expand(Path::new(&glob)),
-                None => Vec::new(),
-            };
-            for path in found {
+            for path in expand(Path::new(&glob)) {
                 if a.files.len() >= MAX_FILES {
                     break;
                 }
                 if a.files.contains_key(&path) || a.ignored.contains(&path) {
                     continue;
                 }
-                if let Some(Some(id)) = own_id {
-                    if !path
-                        .file_name()
-                        .is_some_and(|n| n.to_string_lossy().contains(id))
-                    {
-                        continue;
-                    }
+                if self.owners.get(&path).is_some_and(|o| o != &t.agent) {
+                    continue;
+                }
+                // With its id known, a peer's file is not even opened.
+                if peered && id.is_some() && !counts(&path) {
+                    continue;
                 }
                 let fresh = std::fs::metadata(&path)
                     .and_then(|m| m.modified())
                     .is_ok_and(|m| m + SLACK >= a.first_seen);
                 if fresh {
+                    let tokens = counts(&path);
                     a.files.insert(
                         path,
                         FileState {
                             reader: FileReader::new(t.spec.clone()).with_quota(t.quota.clone()),
                             offset: 0,
                             owned: None,
+                            tokens,
                             pending: Vec::new(),
                             pending_quota: Vec::new(),
                             caught_up: false,
@@ -305,11 +319,40 @@ impl UsageWatcher {
             return;
         }
         a.next_read = now + READ_EVERY;
-        let mut budget = READ_BUDGET;
         let mut drop_files = Vec::new();
+        // A file taken while this agent was alone is looked at again once a peer is there, and a file another agent counted is let go.
+        for (path, f) in &mut a.files {
+            if self.owners.get(path).is_some_and(|o| o != &t.agent) {
+                drop_files.push(path.clone());
+            } else if f.tokens && !counts(path) {
+                if id.is_some() {
+                    drop_files.push(path.clone());
+                } else {
+                    f.tokens = false;
+                    f.pending.clear();
+                }
+            } else if !f.tokens && counts(path) {
+                // Read for plan windows while this agent's id was not known; now it is its own: read again from the start, so the
+                // tokens of the lines already read are counted (its plan windows come again as replayed, newest only).
+                *f = FileState {
+                    reader: FileReader::new(t.spec.clone()).with_quota(t.quota.clone()),
+                    offset: 0,
+                    owned: None,
+                    tokens: true,
+                    pending: Vec::new(),
+                    pending_quota: Vec::new(),
+                    caught_up: false,
+                    partial: Vec::new(),
+                };
+            }
+        }
+        let mut budget = READ_BUDGET;
         for (path, f) in &mut a.files {
             if budget == 0 {
                 break;
+            }
+            if drop_files.contains(path) {
+                continue;
             }
             let mut quota = Vec::new();
             let samples = read_new(path, f, &mut budget, t, &mut quota);
@@ -318,7 +361,14 @@ impl UsageWatcher {
             if f.owned == Some(false) {
                 drop_files.push(path.clone());
             }
-            out.extend(samples.into_iter().map(|s| (t.agent.clone(), s)));
+            if f.tokens {
+                if f.owned == Some(true) {
+                    self.owners
+                        .entry(path.clone())
+                        .or_insert_with(|| t.agent.clone());
+                }
+                out.extend(samples.into_iter().map(|s| (t.agent.clone(), s)));
+            }
         }
         for p in drop_files {
             a.files.remove(&p);
@@ -330,12 +380,11 @@ impl UsageWatcher {
 }
 
 /// Whether another live agent reads the same files in the same folder, so the folder alone cannot say which session is whose.
-fn shares_files(t: &Target, peers: &[Peer]) -> bool {
-    peers.iter().any(|p| {
-        p.agent != t.agent
-            && p.glob == t.spec.glob
-            && (p.worktree == t.worktree || same_dir(&p.worktree.to_string_lossy(), &t.worktree))
-    })
+/// Compared as written: no file system lookup here, on the node's supervision thread (see the module's known limits).
+fn has_peer(t: &Target, peers: &[Peer]) -> bool {
+    peers
+        .iter()
+        .any(|p| p.agent != t.agent && p.glob == t.spec.glob && p.worktree == t.worktree)
 }
 
 /// Reads what was appended to one file and returns the samples that are the agent's.
@@ -357,6 +406,7 @@ fn read_new(
             reader: FileReader::new(spec.clone()).with_quota(target.quota.clone()),
             offset: 0,
             owned: None,
+            tokens: f.tokens,
             pending: Vec::new(),
             pending_quota: Vec::new(),
             caught_up: false,
@@ -649,6 +699,95 @@ mod tests {
         .unwrap();
         let got = step(&mut w2, &t2, 1);
         assert_eq!(got.iter().map(|(_, s)| s.input).sum::<u64>(), 5, "{got:?}");
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    /// Codex review of #881: a survivor never counts a stopped peer's file, a file taken while alone is looked at again when a peer
+    /// comes, and a peer without its id still gives the tool's plan windows (no tokens).
+    #[test]
+    fn a_peers_file_stays_the_peers_and_plan_windows_still_come_without_an_id() {
+        let d = tmp("peer-edges");
+        let work = d.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let cwd = work.to_string_lossy().into_owned();
+        let one = "11111111-aaaa-4bbb-8ccc-000000000001";
+        let two = "22222222-aaaa-4bbb-8ccc-000000000002";
+        let with = |agent: &str, id: Option<&str>| Target {
+            session: id.map(str::to_string),
+            ..target(agent, &work)
+        };
+        // a1 alone takes its file; then a2 comes, writes its own, then stops: a1 never counts a2's file.
+        let mut w = UsageWatcher::new(Some(d.clone()));
+        step(&mut w, &[with("a1", Some(one))], 0);
+        std::fs::write(
+            d.join(format!("logs/p/{one}.jsonl")),
+            format!("{}\n", line(&cwd, "m1", 1, 1)),
+        )
+        .unwrap();
+        assert_eq!(step(&mut w, &[with("a1", Some(one))], 1).len(), 1);
+        let both = [with("a1", Some(one)), with("a2", Some(two))];
+        step(&mut w, &both, 2);
+        std::fs::write(
+            d.join(format!("logs/p/{two}.jsonl")),
+            format!("{}\n", line(&cwd, "m2", 20, 2)),
+        )
+        .unwrap();
+        let got = step(&mut w, &both, 3);
+        assert_eq!(
+            got.iter()
+                .map(|(a, s)| (a.as_str(), s.input))
+                .collect::<Vec<_>>(),
+            [("a2", 20)]
+        );
+        for n in 4..7 {
+            let got = step(&mut w, &[with("a1", Some(one))], n);
+            assert!(
+                got.is_empty(),
+                "the survivor counted its stopped peer's file: {got:?}"
+            );
+        }
+        // A file taken while alone and without an id stops counting tokens once a peer is there.
+        let mut w = UsageWatcher::new(Some(d.clone()));
+        let solo = d.join("logs/p/solo.jsonl");
+        step(&mut w, &[with("b1", None)], 0);
+        std::fs::write(&solo, format!("{}\n", line(&cwd, "s1", 3, 3))).unwrap();
+        assert_eq!(step(&mut w, &[with("b1", None)], 1).len(), 1);
+        let pair = [with("b1", None), with("b2", None)];
+        step(&mut w, &pair, 2);
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&solo)
+            .unwrap();
+        writeln!(f, "{}", line(&cwd, "s2", 4, 4)).unwrap();
+        assert!(
+            step(&mut w, &pair, 3).is_empty(),
+            "no tokens are counted while nobody knows whose the session is"
+        );
+        // Plan windows are per tool: a peer without its id still reads them.
+        let mut w = UsageWatcher::new(Some(d.clone()));
+        let pair = [
+            Target {
+                session: None,
+                ..quota_target("c1", &work)
+            },
+            Target {
+                session: None,
+                ..quota_target("c2", &work)
+            },
+        ];
+        step(&mut w, &pair, 0);
+        std::fs::write(
+            d.join("logs/p/q.jsonl"),
+            format!("{}\n", qline(Some(&cwd), 42)),
+        )
+        .unwrap();
+        assert!(step(&mut w, &pair, 1).is_empty(), "no tokens");
+        let seen: Vec<_> = w
+            .take_quota()
+            .iter()
+            .map(|(t, q)| (t.clone(), q.percent))
+            .collect();
+        assert!(seen.contains(&("tool-x".to_string(), 42.0)), "{seen:?}");
         let _ = std::fs::remove_dir_all(d);
     }
 
