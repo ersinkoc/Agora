@@ -39,6 +39,9 @@ seeing details; this text is the detailed proposal and is not accepted until the
 - Cost: a name check per listed entry and per read: no I/O, not a hot path.
 - Someone who really wants to share a `.env` through a window turns the switch on, knowingly.
 
+## Amendment (issue #847): writes
+This decision covers reads and listings. `Files::write` is dormant and `files.write` stays disabled; before it is exposed the helper applies the same name policy to the requested path, every folder prefix and the real folder, and writes only through verified folder handles (`docs/security/threat-model.md` T53). No protocol or support-status change.
+
 ## Open questions (for the maintainer)
 1. Is the name list right? Proposed: as written; a name is added later by an ADR amendment, never from the hub.
 2. Should the owner's own windows also see the marker and be refused by default? Proposed: yes, one rule for everyone with one switch for the machine,

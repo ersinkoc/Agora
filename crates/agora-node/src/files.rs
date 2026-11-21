@@ -11,6 +11,7 @@ use std::ops::ControlFlow;
 use std::path::{Component, Path, PathBuf};
 use std::time::SystemTime;
 
+use agora_core::secrets::is_secret_path;
 use agora_core::{AgentId, LeaseTable};
 use agora_protocol::{Error, ErrorCode};
 
@@ -149,6 +150,40 @@ pub struct Files {
     show_secret: bool,
 }
 
+/// The points inside [`Files::write`] where a test makes the disk change under it.
+#[allow(dead_code)] // the folder index is read by tests only
+enum WriteStep {
+    /// Before folder `n` of the path is opened.
+    BeforeFolder(usize),
+    /// After the temporary file is written, before it is renamed over the target.
+    BeforeCommit,
+    /// After the last folder is opened, before its real path is checked.
+    AfterFolders,
+}
+
+/// The temporary file of a write: removed when dropped (an error or a panic) unless the rename happened, and only if the name still
+/// is the file this write made.
+struct PendingFile<'a> {
+    dir: &'a agora_platform::ConfinedDir,
+    name: std::ffi::OsString,
+    file: Option<std::fs::File>,
+}
+
+impl PendingFile<'_> {
+    fn committed(&mut self) {
+        self.file = None;
+        self.name = std::ffi::OsString::new();
+    }
+}
+
+impl Drop for PendingFile<'_> {
+    fn drop(&mut self) {
+        if let Some(file) = self.file.take() {
+            let _ = self.dir.remove_owned(&file, &self.name);
+        }
+    }
+}
+
 /// Why [`visit_inside`] gave nothing.
 enum Inside {
     /// The folder's handle is not below the root (a link swapped in).
@@ -212,7 +247,6 @@ impl Files {
 
     /// `rel`, the path the client asked for, or `real`, where it really is, names a secret file (ADR-0080).
     fn is_secret(&self, rel: &str, real: &Path) -> bool {
-        use agora_core::secrets::is_secret_path;
         is_secret_path(rel)
             || real
                 .strip_prefix(&self.root)
@@ -378,8 +412,22 @@ impl Files {
         Ok(Untracked::Link(bytes))
     }
 
-    /// Write a file on behalf of `agent`, unless another agent holds a live lease covering it.
-    /// Missing parent directories are created.
+    /// Write a file on behalf of `agent`, unless another agent holds a live lease covering it. Missing parent folders are created.
+    ///
+    /// Dormant (ADR-0080: `files.write` is disabled and no request path calls this), and built so that exposing it later is safe:
+    ///
+    /// - the root is opened once and every folder is then opened relative to the one before it, never following a link, so a
+    ///   folder swapped for a link between steps is refused, or the write lands in the folder that was verified, never elsewhere;
+    /// - the file is written to a temporary name in that verified folder and renamed over the target, so a failure leaves nothing
+    ///   behind (a guard removes the temporary file even on a panic, and only if the name still is the file this call made); a link, folder,
+    ///   FIFO or device at the target is refused (a folder, FIFO or device reads as `files.not_found`, as a read of one does: the
+    ///   protocol has no code for "not a regular file"); a link swapped in for the target after the check is replaced as itself;
+    /// - the secret-name policy of reads applies to the requested path, to each folder prefix, and to where the folder really is;
+    /// - `max_read` is also the largest write, checked before anything is created.
+    ///
+    /// A folder inside the worktree that is itself a link is refused for writes (reads follow it): a write never goes through one.
+    /// A new file is `0o600`; a replaced file keeps its owner permission bits and read/execute for others, never write for group or
+    /// other. Owner, group and extended attributes are not preserved. Folders created for the path stay if a later step fails.
     pub fn write(
         &self,
         rel: &str,
@@ -388,7 +436,31 @@ impl Files {
         leases: &LeaseTable,
         now_ms: u64,
     ) -> Result<(), FilesError> {
-        let path = self.resolve(rel)?;
+        self.write_with(rel, bytes, agent, leases, now_ms, &mut |_| {})
+    }
+
+    fn write_with(
+        &self,
+        rel: &str,
+        bytes: &[u8],
+        agent: &AgentId,
+        leases: &LeaseTable,
+        now_ms: u64,
+        hook: &mut dyn FnMut(WriteStep),
+    ) -> Result<(), FilesError> {
+        let outside = || FilesError::OutsideRoot(rel.to_string());
+        let mut names = Vec::new();
+        for c in Path::new(rel).components() {
+            match c {
+                Component::Normal(p) if agora_platform::valid_component(p) => names.push(p),
+                Component::CurDir => {}
+                // `..`, `/x`, `C:\x`, and names a platform reads two ways: never allowed.
+                _ => return Err(outside()),
+            }
+        }
+        let Some((file_name, folders)) = names.split_last() else {
+            return Err(outside());
+        };
         if let Some(l) = leases.blocking_lease(rel, agent, now_ms) {
             return Err(FilesError::LeaseHeld {
                 path: rel.to_string(),
@@ -396,10 +468,94 @@ impl Files {
                 expires_at_ms: l.expires_at_ms,
             });
         }
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|e| io_err(rel, &e))?;
+        // Names only, before the disk is touched: the path as asked, and each prefix of it (a folder named like a secret file).
+        if !self.show_secret {
+            let mut prefix = String::new();
+            let mut secret = is_secret_path(rel);
+            for n in &names {
+                if !prefix.is_empty() {
+                    prefix.push('/');
+                }
+                prefix.push_str(&n.to_string_lossy());
+                secret |= is_secret_path(&prefix);
+            }
+            if secret {
+                return Err(FilesError::Secret(rel.to_string()));
+            }
         }
-        fs::write(&path, bytes).map_err(|e| io_err(rel, &e))
+        if bytes.len() as u64 > self.max_read {
+            return Err(FilesError::TooLarge {
+                path: rel.to_string(),
+                limit: self.max_read,
+            });
+        }
+
+        let confined = |e: std::io::Error| {
+            if agora_platform::not_confined(&e) {
+                outside()
+            } else {
+                io_err(rel, &e)
+            }
+        };
+        let mut dir = agora_platform::ConfinedDir::open_root(&self.root).map_err(confined)?;
+        if dir.real_path().map_err(|e| io_err(rel, &e))? != self.root {
+            return Err(outside());
+        }
+        for (i, name) in folders.iter().enumerate() {
+            hook(WriteStep::BeforeFolder(i));
+            dir = dir.subdir(name, true).map_err(confined)?;
+        }
+        hook(WriteStep::AfterFolders);
+        // Where the verified folder really is (the kernel's spelling), with the secret policy once more.
+        let real = dir.real_path().map_err(|e| io_err(rel, &e))?;
+        if !real.starts_with(&self.root) {
+            return Err(outside());
+        }
+        if !self.show_secret && self.is_secret(rel, &real.join(file_name)) {
+            return Err(FilesError::Secret(rel.to_string()));
+        }
+
+        let mode = match dir.entry(file_name).map_err(confined)? {
+            None => 0o600,
+            // Group and other never get write, whatever the old file had (or the umask allows).
+            Some(e) if e.kind == agora_platform::EntryKind::File => e.mode & 0o755,
+            Some(e) if e.kind == agora_platform::EntryKind::Link => return Err(outside()),
+            Some(_) => return Err(FilesError::NotFound(rel.to_string())),
+        };
+
+        static TEMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let mut attempt = 0;
+        let mut pending = loop {
+            let temp = std::ffi::OsString::from(format!(
+                ".agora-write-{}-{}",
+                std::process::id(),
+                TEMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            match dir.create_new(&temp, mode) {
+                Ok(file) => {
+                    break PendingFile {
+                        dir: &dir,
+                        name: temp,
+                        file: Some(file),
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && attempt < 8 => {
+                    attempt += 1;
+                }
+                Err(e) => return Err(confined(e)),
+            }
+        };
+        let result = (|| {
+            use std::io::Write;
+            let file = pending.file.as_mut().ok_or(std::io::ErrorKind::Other)?;
+            file.write_all(bytes)?;
+            file.sync_all()?;
+            hook(WriteStep::BeforeCommit);
+            dir.rename_over(file, &pending.name, file_name)
+        })();
+        result.map_err(confined)?;
+        pending.committed();
+        Ok(())
     }
 
     /// Start watching: the first [`Watcher::poll`] reports nothing, later polls report what changed.
@@ -819,6 +975,432 @@ mod tests {
         // After expiry the other agent may write.
         f.write("src/a.rs", b"b wins", &b, &leases, 61_000).unwrap();
         assert_eq!(f.read("src/a.rs").unwrap(), b"b wins");
+    }
+
+    fn only_files_under(dir: &Path) -> Vec<String> {
+        fn walk(dir: &Path, base: &Path, out: &mut Vec<String>) {
+            for e in fs::read_dir(dir).unwrap() {
+                let e = e.unwrap();
+                let p = e.path();
+                let ft = e.file_type().unwrap();
+                if ft.is_dir() {
+                    walk(&p, base, out);
+                } else {
+                    out.push(
+                        p.strip_prefix(base)
+                            .unwrap()
+                            .to_string_lossy()
+                            .replace('\\', "/"),
+                    );
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(dir, dir, &mut out);
+        out.sort();
+        out
+    }
+
+    fn write_plain(f: &Files, rel: &str, bytes: &[u8]) -> Result<(), FilesError> {
+        f.write(rel, bytes, &AgentId::new("a"), &LeaseTable::new(), 0)
+    }
+
+    #[test]
+    fn a_write_replaces_atomically_and_leaves_no_temporary_file() {
+        let (d, f) = setup();
+        write_plain(&f, "src/a.rs", b"new body").unwrap();
+        write_plain(&f, "./src/./b.rs", b"b").unwrap();
+        assert_eq!(f.read("src/a.rs").unwrap(), b"new body");
+        assert_eq!(
+            only_files_under(&d.join("wt")),
+            vec!["README.md", "src/a.rs", "src/b.rs"]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_replaced_file_keeps_its_permission_bits() {
+        use std::os::unix::fs::PermissionsExt;
+        let (d, f) = setup();
+        let p = d.join("wt/src/a.rs");
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o750)).unwrap();
+        write_plain(&f, "src/a.rs", b"x").unwrap();
+        assert_eq!(
+            fs::metadata(&p).unwrap().permissions().mode() & 0o777,
+            0o750
+        );
+    }
+
+    #[test]
+    fn dot_dot_absolute_and_empty_paths_are_outside() {
+        let (d, f) = setup();
+        for rel in [
+            "../x.txt",
+            "src/../../x.txt",
+            "/etc/x",
+            "",
+            ".",
+            "src/..",
+            "a\\..\\b",
+        ] {
+            assert!(
+                matches!(write_plain(&f, rel, b"x"), Err(FilesError::OutsideRoot(_))),
+                "{rel:?}"
+            );
+        }
+        assert!(!d.join("x.txt").exists());
+    }
+
+    #[test]
+    fn secret_names_are_refused_by_every_component_and_never_created() {
+        let (d, f) = setup();
+        for rel in [
+            ".env",
+            "src/.ENV",
+            ".ssh/config",
+            "a/.aws/credentials",
+            "keys/server.pem",
+            ".docker/config.json",
+            "src/id_rsa/inner.txt",
+        ] {
+            assert!(
+                matches!(write_plain(&f, rel, b"x"), Err(FilesError::Secret(_))),
+                "{rel}"
+            );
+        }
+        assert_eq!(
+            only_files_under(&d.join("wt")),
+            vec!["README.md", "src/a.rs"]
+        );
+        assert!(!d.join("wt/.ssh").exists() && !d.join("wt/a").exists());
+        // The owner's policy that shows secret files applies to writes as it does to reads.
+        let shown = Files::open(&d.join("wt"), 1024)
+            .unwrap()
+            .with_secret_shown(true);
+        write_plain(&shown, ".env", b"K=1").unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_that_really_is_secret_is_refused_by_the_real_path_check() {
+        // The names asked for pass the first check; the folder is moved to a secret name after it was opened, so only the check of
+        // where the handle really is can catch it.
+        let (d, f) = setup();
+        let root = d.join("wt");
+        fs::create_dir_all(root.join("sub")).unwrap();
+        let e = f
+            .write_with(
+                "sub/x.txt",
+                b"x",
+                &AgentId::new("a"),
+                &LeaseTable::new(),
+                0,
+                &mut |step| {
+                    if matches!(step, WriteStep::AfterFolders) {
+                        fs::rename(root.join("sub"), root.join(".ssh")).unwrap();
+                    }
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(e, FilesError::Secret(_)), "{e:?}");
+        assert!(only_files_under(&root.join(".ssh")).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_temporary_name_swapped_for_a_link_is_neither_renamed_nor_removed() {
+        let (d, f) = setup();
+        let root = d.join("wt");
+        let outside = d.join("secret.txt");
+        let e = f
+            .write_with(
+                "src/a.rs",
+                b"mine",
+                &AgentId::new("a"),
+                &LeaseTable::new(),
+                0,
+                &mut |step| {
+                    if matches!(step, WriteStep::BeforeCommit) {
+                        let temp = fs::read_dir(root.join("src"))
+                            .unwrap()
+                            .map(|e| e.unwrap().path())
+                            .find(|p| {
+                                p.file_name()
+                                    .unwrap()
+                                    .to_string_lossy()
+                                    .starts_with(".agora-write-")
+                            })
+                            .unwrap();
+                        fs::remove_file(&temp).unwrap();
+                        std::os::unix::fs::symlink(&outside, &temp).unwrap();
+                    }
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(e, FilesError::OutsideRoot(_)), "{e:?}");
+        assert_eq!(fs::read(&outside).unwrap(), b"top secret");
+        assert_eq!(fs::read(root.join("src/a.rs")).unwrap(), b"fn a() {}");
+        // The planted link is not ours: it stays.
+        let left: Vec<_> = fs::read_dir(root.join("src"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        assert!(left
+            .iter()
+            .any(|p| fs::symlink_metadata(p).unwrap().file_type().is_symlink()));
+    }
+
+    #[test]
+    fn a_panic_in_the_middle_removes_the_temporary_file() {
+        let (d, f) = setup();
+        let root = d.join("wt");
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = f.write_with(
+                "src/a.rs",
+                b"x",
+                &AgentId::new("a"),
+                &LeaseTable::new(),
+                0,
+                &mut |step| {
+                    if matches!(step, WriteStep::BeforeCommit) {
+                        panic!("injected");
+                    }
+                },
+            );
+        }));
+        assert!(r.is_err());
+        assert_eq!(only_files_under(&root), vec!["README.md", "src/a.rs"]);
+        assert_eq!(fs::read(root.join("src/a.rs")).unwrap(), b"fn a() {}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn modes_never_give_group_or_other_write() {
+        use std::os::unix::fs::PermissionsExt;
+        let (d, f) = setup();
+        let p = d.join("wt/src/a.rs");
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o666)).unwrap();
+        write_plain(&f, "src/a.rs", b"x").unwrap();
+        assert_eq!(
+            fs::metadata(&p).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+        write_plain(&f, "src/new.rs", b"x").unwrap();
+        assert_eq!(
+            fs::metadata(d.join("wt/src/new.rs"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
+
+    #[test]
+    fn a_payload_over_the_limit_is_refused_before_anything_is_created() {
+        let (d, f) = setup();
+        let big = vec![7u8; 1025];
+        let e = write_plain(&f, "new/deep/big.bin", &big).unwrap_err();
+        assert_eq!(
+            e,
+            FilesError::TooLarge {
+                path: "new/deep/big.bin".into(),
+                limit: 1024
+            }
+        );
+        assert!(!d.join("wt/new").exists());
+        write_plain(&f, "src/a.rs", &vec![1u8; 1024]).unwrap();
+    }
+
+    #[test]
+    fn a_lease_held_by_another_agent_blocks_before_the_disk_changes() {
+        let (d, f) = setup();
+        let (a, b) = (AgentId::new("a"), AgentId::new("b"));
+        let mut leases = LeaseTable::new();
+        leases.acquire("fresh", &a, 1_000, 60_000).unwrap();
+        let e = f
+            .write("fresh/deep/x.txt", b"x", &b, &leases, 2_000)
+            .unwrap_err();
+        assert_eq!(e.to_protocol().code, ErrorCode::LeaseHeld);
+        assert!(!d.join("wt/fresh").exists());
+        f.write("fresh/deep/x.txt", b"x", &a, &leases, 2_000)
+            .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_as_the_final_component_is_replaced_never_followed() {
+        let (d, f) = setup();
+        let outside = d.join("secret.txt");
+        std::os::unix::fs::symlink(&outside, d.join("wt/link.txt")).unwrap();
+        // Refused, and the file it points at is untouched.
+        assert!(matches!(
+            write_plain(&f, "link.txt", b"pwned"),
+            Err(FilesError::OutsideRoot(_))
+        ));
+        assert_eq!(fs::read(&outside).unwrap(), b"top secret");
+        // A dangling link is refused the same way, and nothing is created at its target.
+        std::os::unix::fs::symlink(d.join("nowhere.txt"), d.join("wt/dangling.txt")).unwrap();
+        assert!(matches!(
+            write_plain(&f, "dangling.txt", b"x"),
+            Err(FilesError::OutsideRoot(_))
+        ));
+        assert!(!d.join("nowhere.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_as_a_folder_component_is_refused_even_inside_the_root() {
+        let (d, f) = setup();
+        std::os::unix::fs::symlink(d.join("wt/src"), d.join("wt/alias")).unwrap();
+        std::os::unix::fs::symlink(&d, d.join("wt/out")).unwrap();
+        for rel in ["alias/x.rs", "out/x.rs", "out/wt/x.rs"] {
+            assert!(
+                matches!(write_plain(&f, rel, b"x"), Err(FilesError::OutsideRoot(_))),
+                "{rel}"
+            );
+        }
+        assert!(!d.join("x.rs").exists() && !d.join("wt/src/x.rs").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_a_folder_or_a_device_at_the_target_is_refused() {
+        let (d, f) = setup();
+        let fifo = d.join("wt/pipe");
+        assert!(std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success());
+        fs::create_dir(d.join("wt/adir")).unwrap();
+        for rel in ["pipe", "adir", "src"] {
+            assert!(
+                matches!(write_plain(&f, rel, b"x"), Err(FilesError::NotFound(_))),
+                "{rel}"
+            );
+        }
+        // Still a FIFO, and no temporary file beside it.
+        assert!(std::os::unix::fs::FileTypeExt::is_fifo(
+            &fs::symlink_metadata(&fifo).unwrap().file_type()
+        ));
+        assert_eq!(
+            only_files_under(&d.join("wt")),
+            vec!["README.md", "pipe", "src/a.rs"]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_swapped_for_a_link_before_it_is_opened_is_refused() {
+        let (d, f) = setup();
+        let root = d.join("wt");
+        fs::create_dir_all(root.join("sub/inner")).unwrap();
+        let mut swapped = false;
+        let e = f
+            .write_with(
+                "sub/inner/x.txt",
+                b"x",
+                &AgentId::new("a"),
+                &LeaseTable::new(),
+                0,
+                &mut |step| {
+                    if matches!(step, WriteStep::BeforeFolder(1)) && !swapped {
+                        swapped = true;
+                        fs::remove_dir_all(root.join("sub/inner")).unwrap();
+                        std::os::unix::fs::symlink(&d, root.join("sub/inner")).unwrap();
+                    }
+                },
+            )
+            .unwrap_err();
+        assert!(swapped);
+        assert!(matches!(e, FilesError::OutsideRoot(_)));
+        assert!(!d.join("x.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_swapped_for_a_link_after_it_was_opened_cannot_redirect_the_write() {
+        let (d, f) = setup();
+        let root = d.join("wt");
+        fs::create_dir_all(root.join("sub")).unwrap();
+        let elsewhere = d.join("elsewhere");
+        fs::create_dir_all(&elsewhere).unwrap();
+        let mut swapped = false;
+        f.write_with(
+            "sub/x.txt",
+            b"inside",
+            &AgentId::new("a"),
+            &LeaseTable::new(),
+            0,
+            &mut |step| {
+                if matches!(step, WriteStep::BeforeCommit) {
+                    swapped = true;
+                    // The verified folder is moved away and a link to another place takes its name.
+                    fs::rename(root.join("sub"), d.join("moved")).unwrap();
+                    std::os::unix::fs::symlink(&elsewhere, root.join("sub")).unwrap();
+                }
+            },
+        )
+        .unwrap();
+        assert!(swapped);
+        // The file went into the folder that was verified, and nothing reached the link's target.
+        assert_eq!(fs::read(d.join("moved/x.txt")).unwrap(), b"inside");
+        assert!(fs::read_dir(&elsewhere).unwrap().next().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_swapped_in_for_the_target_before_the_commit_is_replaced_not_followed() {
+        let (d, f) = setup();
+        let root = d.join("wt");
+        let outside = d.join("secret.txt");
+        f.write_with(
+            "src/a.rs",
+            b"mine",
+            &AgentId::new("a"),
+            &LeaseTable::new(),
+            0,
+            &mut |step| {
+                if matches!(step, WriteStep::BeforeCommit) {
+                    fs::remove_file(root.join("src/a.rs")).unwrap();
+                    std::os::unix::fs::symlink(&outside, root.join("src/a.rs")).unwrap();
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(fs::read(&outside).unwrap(), b"top secret");
+        assert!(!fs::symlink_metadata(root.join("src/a.rs"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read(root.join("src/a.rs")).unwrap(), b"mine");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_error_in_the_middle_leaves_the_old_file_and_no_temporary_file() {
+        let (d, f) = setup();
+        let root = d.join("wt");
+        // The target becomes a folder just before the rename: the rename fails after the data was written.
+        let e = f
+            .write_with(
+                "src/a.rs",
+                b"new",
+                &AgentId::new("a"),
+                &LeaseTable::new(),
+                0,
+                &mut |step| {
+                    if matches!(step, WriteStep::BeforeCommit) {
+                        fs::remove_file(root.join("src/a.rs")).unwrap();
+                        fs::create_dir(root.join("src/a.rs")).unwrap();
+                    }
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(e, FilesError::Io(_)), "{e:?}");
+        assert_eq!(only_files_under(&root), vec!["README.md"]);
+        assert!(root.join("src/a.rs").is_dir());
     }
 
     #[test]
