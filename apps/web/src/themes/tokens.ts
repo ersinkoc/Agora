@@ -215,6 +215,24 @@ export function themeFile(theme: Pick<Theme, 'scheme' | 'tokens'>, name: string)
 }
 export const serialiseTheme = (file: ThemeFile) => JSON.stringify(file, null, 2);
 
+// ---- Agent colours -------------------------------------------------------------------------------------------------------------
+
+// The colours agents are told apart by (an agent's tile edge, the second word of its name: design/tokens.css `--agent-*`). They are
+// not theme tokens a person sets: a theme gets the set that shows best on its own surfaces, whatever its scheme says (a theme in the
+// Light slot may have dark surfaces). Dark and Light draw them from design/tokens.css; a test keeps these values equal to it.
+export const AGENT_COLOUR_NAMES = ['amber', 'teal', 'violet', 'rose', 'slate', 'sky', 'mint'] as const;
+export type AgentColourName = (typeof AGENT_COLOUR_NAMES)[number];
+export const AGENT_COLOURS: Readonly<Record<Scheme, Readonly<Record<AgentColourName, string>>>> = {
+  dark: { amber: '#ffb454', teal: '#4fd1c5', violet: '#a78bfa', rose: '#fb7185', slate: '#94a3b8', sky: '#7dd3fc', mint: '#86efac' },
+  light: { amber: '#b45309', teal: '#0f766e', violet: '#6d28d9', rose: '#be123c', slate: '#475569', sky: '#0369a1', mint: '#15803d' },
+};
+const AGENT_SURFACES = ['surface-0', 'surface-1', 'surface-2'] as const;
+const worstContrast = (set: Readonly<Record<AgentColourName, string>>, tokens: Pick<Tokens, (typeof AGENT_SURFACES)[number]>) =>
+  Math.min(...AGENT_COLOUR_NAMES.flatMap((n) => AGENT_SURFACES.map((s) => contrast(set[n], tokens[s]))));
+export function agentColours(tokens: Pick<Tokens, (typeof AGENT_SURFACES)[number]>): Readonly<Record<AgentColourName, string>> {
+  return worstContrast(AGENT_COLOURS.dark, tokens) >= worstContrast(AGENT_COLOURS.light, tokens) ? AGENT_COLOURS.dark : AGENT_COLOURS.light;
+}
+
 // ---- Applying -----------------------------------------------------------------------------------------------------------------
 
 // The CSS variables a theme sets on the page. Sizes become rem so the browser's own text size still counts: the base text
@@ -224,6 +242,7 @@ export function cssVariables(theme: Pick<Theme, 'tokens'>): Record<string, strin
   for (const n of TOKEN_NAMES) vars[`--${n}`] = theme.tokens[n];
   vars['--text-scale'] = String(pxOf(theme.tokens['text-16']) / 16);
   vars['--space-1'] = `${pxOf(theme.tokens['space-1']) / 16}rem`;
+  for (const [n, v] of Object.entries(agentColours(theme.tokens))) vars[`--agent-${n}`] = v;
   return vars;
 }
 
