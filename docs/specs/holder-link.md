@@ -123,7 +123,11 @@ next frame's.
   that everything the node ran before is gone) and its `CheckoutDiscovered`, each agent taken up is said up again as a resync
   announcement says it: `AgentStarted`, `AgentStateChanged` (the state the ledger knew), `AgentSessionReported` when the ledger has a
   session, and `TerminalOpened` (`EventSink::agent_taken_up`, re-stated, so the ledger does not learn it again). Without them the hub, the
-  window and the terminal client showed the kept agent finished (#907). An agent that ended while no node was attached is released and
+  window and the terminal client showed the kept agent finished (#907). `AgentStarted` carries the launch options the agent was started
+  with and whether it acts without asking (ADR-0059), from the ledger (`Entry::launch_options`, `skips_permissions`, recorded from its
+  first `AgentStarted`; `Supervisor::set_kept_launch`): it is the same process. An option this node's manifest marks as skipping, or no
+  longer lists, counts as skipping too. The options' arguments are not known again, so a restart after a crash runs without them, as a
+  resume does, and the restarted agent is shown without them. An agent that ended while no node was attached is released and
   stays interrupted (offered for resume); its status and output are not replayed.
   **Nothing is left attached and unread:** `Attach` made the holder stop reading each terminal and forget its buffer, and the node drops
   a master it does not take, so a running agent left like that would block on a full terminal for good. Every held agent the node does
@@ -243,9 +247,10 @@ wants to write that cannot fit one frame fails that write on the node's side, be
   (pid and start time) and is interrupted, it restores the agent (`restore`), reads the adapter's session id and capabilities the old node wrote to the ledger
   (`Entry::adapter_session`, `adapter_capabilities`; the node cannot ask the adapter again), starts a new adapter host over the holder's pipes (**no
   `initialize` and no `session/start`: the adapter still has its session**), makes the mesh endpoint again at the same path, and clears the interruption.
-  It is said up again to the hub after `NodeOnline` as a terminal agent is (above), without `TerminalOpened`. What it last reported of its modes, models,
-  settings and commands is not said again (the adapter is not asked again) until it reports them, and its earlier conversation is not shown (the chat
-  history is in memory, ADR-0089).
+  It is said up again to the hub after `NodeOnline` as a terminal agent is (above), with its launch options, without `TerminalOpened`. Not built: what it
+  last reported of its modes, models, settings and commands (a mode that skips permissions included) is not known to the new node and not said again
+  until the adapter reports it (#932); its usage counters in the hub's view start again from 0 (#930); its earlier conversation is not shown (the chat
+  history is in memory, ADR-0089; #931).
   An agent the node does not take up (unknown to the ledger, another holder, ended, its folder gone, no session recorded) is ended through the holder.
 - **Rebuilding what waited on the person (decision 3):** the `seen` lines go through `pending_approvals`, which keeps an `approval/request` unless a later
   `state/update` shows the agent went on (a state other than `blocked`); the `fresh` lines are read as if they had just arrived. A kept request becomes an

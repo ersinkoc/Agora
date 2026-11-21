@@ -97,6 +97,11 @@ impl Rig {
 
     /// A user-started agent of kind `k` in the work folder; returns its id.
     fn launch(&self, node: &Node) -> String {
+        self.launch_with(node, &[])
+    }
+
+    /// [`Self::launch`] with these launch options, each confirmed (as the window does for one that skips permissions).
+    fn launch_with(&self, node: &Node, options: &[&str]) -> String {
         let mut c = Client::connect(node.socket().unwrap()).expect("control");
         let info = match c
             .call(Cmd::DirectoryInspect(v1::DirectoryInspect {
@@ -116,6 +121,8 @@ impl Rig {
                 path: info.path.clone(),
                 project_id: info.project_id.clone(),
                 kind: "k".into(),
+                launch_options: options.iter().map(|o| (*o).to_string()).collect(),
+                confirmed_launch_options: options.iter().map(|o| (*o).to_string()).collect(),
                 ..Default::default()
             }))
             .unwrap()
@@ -681,13 +688,17 @@ fn hub_view(node: &Node) -> agora_hub::projection::View {
 /// #906 and #907 (RM-30, RM-34): an agent the holder kept across a node restart is the next node's in full. Its mesh socket is served
 /// again at the same path, so a bridge that was open across the restart reconnects and its next call answers, and a new bridge
 /// connects; and the hub, which the new node's `NodeOnline` told that everything it ran is gone, shows it running with its terminal,
-/// not finished.
+/// not finished, and still acting without asking (it was started with an option that skips permissions, and it is the same process).
 #[test]
 fn a_kept_agent_is_on_the_mesh_again_and_shown_running_after_its_node_restarts() {
     let _serial = serial();
     let rig = Rig::new("kept", &sh("echo up; sleep 600"));
+    let manifest = rig.root.join("manifests/k.toml");
+    let mut text = std::fs::read_to_string(&manifest).expect("manifest");
+    text.push_str("[[launch.option]]\nid = \"skip\"\nlabel = \"option-skip\"\nargs = [\"--yes\"]\nskips_permissions = true\n");
+    std::fs::write(&manifest, text).expect("manifest");
     let node = rig.node();
-    let id = rig.launch(&node);
+    let id = rig.launch_with(&node, &["skip"]);
     assert!(held(&node, &id), "the test agent must start in the holder");
     wait_for("the agent", || screen(&node, &id).contains("up"));
     let pid = pid_of(&node, &id);
@@ -702,6 +713,10 @@ fn a_kept_agent_is_on_the_mesh_again_and_shown_running_after_its_node_restarts()
     let before = hub_view(&node);
     let key = agora_hub::projection::qualified("hold-node", &id);
     assert!(before.agents[&key].running);
+    assert!(
+        before.agents[&key].skips_permissions,
+        "the test agent must start skipping permissions"
+    );
 
     // A node's process that ends closes its agents' mesh endpoints with it. This test process stands for the node and lives on (other
     // parts still hold the old node's mesh), so the endpoint is closed here, as the end of the process would.
@@ -740,6 +755,16 @@ fn a_kept_agent_is_on_the_mesh_again_and_shown_running_after_its_node_restarts()
     assert!(agent.running, "the hub shows the kept agent finished");
     assert_ne!(agent.state, v1::AgentState::Done);
     assert!(agent.interrupted.is_none());
+    assert!(
+        agent.skips_permissions,
+        "the kept agent acts without asking but is shown as if it asks"
+    );
+    assert_eq!(agent.launch_options, vec!["skip".to_string()]);
+    assert!(node
+        .supervisor
+        .lock()
+        .unwrap()
+        .skips_permissions_now(&AgentId::new(id.clone())));
     let terminal = agora_node::control::terminal_id_of(&AgentId::new(&id));
     assert!(
         view.terminals

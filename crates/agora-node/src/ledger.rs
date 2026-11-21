@@ -62,6 +62,9 @@ pub struct Entry {
     pub session_id: String,
     /// ADR-0059's launch options, when that lands; kept for the record and never applied by a resume (a resumed agent asks again).
     pub launch_options: Vec<String>,
+    /// ADR-0059: one of `launch_options` made the agent act without asking (the node's word at the launch, from `AgentStarted`). An
+    /// agent the holder kept is still that process, so the next node shows it the same way (#907).
+    pub skips_permissions: bool,
     pub started_at_ms: u64,
     pub updated_at_ms: u64,
     /// `working`, `blocked`, `idle`, `done` or `unknown`.
@@ -166,6 +169,7 @@ impl Entry {
             "parent_agent_id": self.parent_agent_id,
             "session_id": self.session_id,
             "launch_options": self.launch_options,
+            "skips_permissions": self.skips_permissions,
             "started_at_ms": self.started_at_ms,
             "updated_at_ms": self.updated_at_ms,
             "last_state": self.last_state,
@@ -213,6 +217,7 @@ impl Entry {
                         .collect()
                 })
                 .unwrap_or_default(),
+            skips_permissions: flag(v, "skips_permissions"),
             started_at_ms: number(v, "started_at_ms"),
             updated_at_ms: number(v, "updated_at_ms"),
             last_state: field(v, "last_state"),
@@ -687,6 +692,7 @@ fn apply(st: &mut State, body: &Body, now: u64) -> bool {
                 .take(8)
                 .cloned()
                 .collect();
+            e.skips_permissions = a.skips_permissions;
             match workspace {
                 Some(w) => {
                     e.directory = true;
@@ -861,6 +867,33 @@ mod tests {
         // The held state is used once: a later start of the same id does not bring it back.
         l.observe(&started("agent-1", "/wt/a", ""), 14);
         assert_eq!(l.get("agent-1").unwrap().last_state, "blocked");
+    }
+
+    /// #907: what the launch said of acting without asking is kept with the agent and written, so a node that takes the agent up from
+    /// the holder shows it the same way; a later start of the id (a resume, which gets no option back) replaces it.
+    #[test]
+    fn a_launch_that_skips_permissions_is_kept_across_a_reopen() {
+        let dir = temp("skips");
+        let l = Ledger::open(&dir, 1).unwrap();
+        l.observe(
+            &Body::AgentStarted(v1::AgentStarted {
+                agent_id: "agent-1".into(),
+                kind: "fake".into(),
+                worktree_id: "/wt/a".into(),
+                launch_options: vec!["skip".into()],
+                skips_permissions: true,
+                ..Default::default()
+            }),
+            2,
+        );
+        l.flush().unwrap();
+        let again = Ledger::open(&dir, 3).unwrap();
+        let e = again.get("agent-1").unwrap();
+        assert!(e.skips_permissions);
+        assert_eq!(e.launch_options, vec!["skip".to_string()]);
+        again.observe(&started("agent-1", "/wt/a", ""), 4);
+        assert!(!again.get("agent-1").unwrap().skips_permissions);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

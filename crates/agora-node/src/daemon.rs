@@ -2551,6 +2551,11 @@ fn take_up_held(
             continue;
         }
         sup.seed_reattached_state(&AgentId::new(id.clone()), ledger_state(&entry.last_state));
+        sup.set_kept_launch(
+            &AgentId::new(id.clone()),
+            &entry.launch_options,
+            entry.skips_permissions,
+        );
         if !entry.parent_agent_id.is_empty() {
             sup.set_parent(
                 &AgentId::new(id.clone()),
@@ -2622,6 +2627,11 @@ fn take_up_held(
             ended_pipes.push(gone(&id));
             continue;
         }
+        sup.set_kept_launch(
+            &AgentId::new(id.clone()),
+            &entry.launch_options,
+            entry.skips_permissions,
+        );
         if !entry.parent_agent_id.is_empty() {
             sup.set_parent(
                 &AgentId::new(id.clone()),

@@ -1048,6 +1048,39 @@ impl Supervisor {
         }
     }
 
+    /// ADR-0079/0093 with ADR-0059: an agent taken up from the holder is the process that was started with these launch options (the
+    /// ledger's record of its `AgentStarted`), so it is shown with them, and acting without asking when it does (#907). It skips when
+    /// the launch said so (`recorded_skips`), when this node's manifest says one of the options does, and when an option is no longer
+    /// in the manifest (it cannot be told, so it is shown as skipping). Their arguments are not known again: a restart after a crash
+    /// runs without them, as a resume does, and then the agent is shown without them (see `restart`).
+    pub fn set_kept_launch(&mut self, id: &AgentId, ids: &[String], recorded_skips: bool) {
+        let kind = self
+            .agents
+            .get(id)
+            .map(|e| e.agent.kind.clone())
+            .or_else(|| self.adapters.get(id).map(|e| e.agent.kind.clone()));
+        let Some(kind) = kind else {
+            return;
+        };
+        let manifest = self.kinds.get(&kind).map(|k| &k.manifest);
+        let skips = recorded_skips
+            || ids.iter().any(|o| {
+                manifest
+                    .and_then(|m| m.launch_option(o))
+                    .is_none_or(|o| o.skips_permissions)
+            });
+        let launch = LaunchChoice {
+            ids: ids.to_vec(),
+            args: Vec::new(),
+            skips_permissions: skips,
+        };
+        if let Some(e) = self.agents.get_mut(id) {
+            e.launch = launch;
+        } else if let Some(e) = self.adapters.get_mut(id) {
+            e.launch = launch;
+        }
+    }
+
     /// ADR-0060: agent ids start at `next` (the session ledger's), so an id is never given twice across the node's restarts.
     pub fn reserve_ids(&mut self, next: u64) {
         self.next_id = self.next_id.max(next);
@@ -2199,6 +2232,10 @@ impl Supervisor {
                 e.rich.forget();
                 e.running = true;
                 e.agent.process_restarted();
+                // As for a terminal agent (`restart`): one taken up from the holder restarts without its options' arguments.
+                if e.launch.args.is_empty() {
+                    e.launch = LaunchChoice::default();
+                }
                 events.push(SupervisorEvent::Started { agent: id.clone() });
                 events.extend(session_report(&e.agent));
             }
@@ -3042,6 +3079,11 @@ impl Supervisor {
                 entry.pacer = Pacer::default();
                 entry.next_check = now;
                 entry.agent.process_restarted();
+                // An agent taken up from the holder knows its launch options but not their arguments (`set_kept_launch`): the
+                // restarted process runs without them, so it is not shown with them any more.
+                if entry.launch.args.is_empty() && entry.extras.options.is_empty() {
+                    entry.launch = LaunchChoice::default();
+                }
                 // A new session when its own could not be continued (ADR-0060): that one is its session now.
                 if !native {
                     entry.agent.session = fresh;
