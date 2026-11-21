@@ -1459,7 +1459,7 @@ mod tests {
     }
 
     #[test]
-    fn a_new_audit_log_is_the_owners_only_and_keeps_every_line() {
+    fn the_audit_log_keeps_every_line() {
         let d = dir("audit-private");
         let log = d.join(AUDIT_FILE);
         audit(&log, 1, "untrust", "web-1", "owner", "done");
@@ -1470,12 +1470,7 @@ mod tests {
             text.starts_with("1 untrust web-1 by=owner done\n"),
             "{text}"
         );
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(&log).unwrap().permissions().mode();
-            assert_eq!(mode & 0o777, 0o600);
-        }
+        // That the file is the user's only is agora-platform's test (`open_append_owner_created`).
         let _ = std::fs::remove_dir_all(d);
     }
 
