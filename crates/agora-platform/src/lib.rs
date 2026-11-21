@@ -465,8 +465,10 @@ pub fn restrict_to_owner(path: &std::path::Path) -> io::Result<()> {
 /// Takes every other user's access away from `path` without giving its owner anything new (issue #877: node files an older version
 /// left open): Unix clears the group and other mode bits, so a folder kept `0555` stays read-only and a `0000` one stays shut;
 /// Windows sets the owner-only ACL of [`restrict_to_owner`] (passed on to what inherits, for a folder). `InvalidInput` for a link, so
-/// a link planted at one of the node's paths never closes some other folder; a path another user owns fails as the system says.
-/// The link check and the change are two steps: whoever could swap the path between them can already write in the node's home.
+/// a link planted at one of the node's paths never closes some other folder, and for a Unix folder others may write in (sticky or
+/// other-writable, such as a shared socket folder): it is shared on purpose and is left as it is. A path another user owns fails as
+/// the system says. The link check and the change are two steps: whoever could swap the path between them can already write in the
+/// node's home. Not covered: macOS extended ACL entries (`chmod +a`), which mode bits do not remove.
 pub fn close_to_others(path: &std::path::Path) -> io::Result<()> {
     let meta = std::fs::symlink_metadata(path)?;
     if meta.file_type().is_symlink() {

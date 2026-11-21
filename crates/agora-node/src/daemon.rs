@@ -1308,9 +1308,9 @@ pub fn policy_sandbox_entries(path: &std::path::Path) -> Vec<(&'static str, Stri
 /// group `staff`) or a volume whose default ACL lets other users in (Windows `D:\`) others could read the buffered events and the
 /// ledger. An existing folder is closed too, so what an older version left is closed at the next start. On Unix taking the group and
 /// other bits off the folder closes everything below it; on Windows the owner-only ACL is passed on to what inherits. Nothing is
-/// given to the owner, and a folder reached through a link (a `--data` or `--socket` pointed elsewhere, perhaps at a shared folder)
-/// or one that cannot be changed (another user's) is logged and used as it is: the node keeps running its agents (nodes are
-/// autonomous).
+/// given to the owner, and a folder reached through a link (a `--data` or `--socket` pointed elsewhere, perhaps at a shared folder),
+/// one shared on purpose (sticky or other-writable) or one that cannot be changed (another user's) is written to the node's log and
+/// used as it is: the node keeps running its agents (nodes are autonomous).
 fn private_node_dir(dir: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
     if let Err(e) = agora_platform::close_to_others(dir) {

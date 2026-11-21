@@ -1816,11 +1816,10 @@ fn hold_link_within(dir: &Path, wait: std::time::Duration) -> std::io::Result<He
 /// so): today's files are written owner-only, but an older version wrote `url`, `node-id`, `ca.pem` and `cert.pem` under the umask,
 /// where a Mac's `staff` group or a `D:\` ACL could read them. Every read (the node's start, `agora status`), save and enrollment
 /// does it, also a read without the guard, so the next one closes what an older version left. A folder that cannot be changed
-/// (another user's) is used as it is, as before, and said on the error stream: the machine's key may be readable there.
+/// (another user's, a link, one shared on purpose) is used as it is, as before (no English on the person's terminal; a doctor line
+/// for it is a possible follow-up).
 fn close_link_folder(dir: &Path) {
-    if let Err(e) = agora_platform::close_to_others(dir) {
-        eprintln!("{}: not closed to other users: {e}", dir.display());
-    }
+    let _ = agora_platform::close_to_others(dir);
 }
 
 /// How long the link folder's guard is waited for: the longest a holder that is alive and working holds it (Codex review of F1030). An

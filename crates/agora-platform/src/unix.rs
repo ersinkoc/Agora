@@ -786,10 +786,14 @@ pub(crate) fn owner_only_on_create(options: &mut std::fs::OpenOptions) {
     std::os::unix::fs::OpenOptionsExt::mode(options, 0o600);
 }
 
-/// For [`crate::close_to_others`]: clears the group and other bits, keeps the owner's (and the special) bits as they are.
+/// For [`crate::close_to_others`]: clears the group and other bits, keeps the owner's (and the special) bits as they are. A folder
+/// others may write in (sticky, or other-writable) is shared on purpose: `InvalidInput`, unchanged.
 pub(crate) fn close_to_others(path: &std::path::Path, meta: &std::fs::Metadata) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let mode = meta.permissions().mode() & 0o7777;
+    if meta.is_dir() && mode & (0o1000 | 0o002) != 0 {
+        return Err(io::Error::from(io::ErrorKind::InvalidInput));
+    }
     let closed = mode & !0o077;
     if closed == mode {
         return Ok(());
@@ -1185,6 +1189,24 @@ mod tests {
             Err(std::io::ErrorKind::InvalidInput)
         );
         assert_eq!(mode(&target), 0o755);
+        // A folder shared on purpose (sticky or other-writable, a shared socket folder) is left as it is.
+        let shared = dir.join("shared");
+        std::fs::create_dir(&shared).expect("dir");
+        for m in [0o1777, 0o777] {
+            set(&shared, m);
+            assert_eq!(
+                crate::close_to_others(&shared).map_err(|e| e.kind()),
+                Err(std::io::ErrorKind::InvalidInput)
+            );
+            assert_eq!(
+                std::fs::metadata(&shared)
+                    .expect("meta")
+                    .permissions()
+                    .mode()
+                    & 0o7777,
+                m
+            );
+        }
         set(&read_only, 0o700);
         let _ = std::fs::remove_dir_all(&dir);
     }
