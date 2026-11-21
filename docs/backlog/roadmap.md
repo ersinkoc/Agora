@@ -26,14 +26,16 @@ new features.
   - [x] never typed over a turn: the structured agents' queue; one held prompt per terminal agent, sent as a bracketed paste
   - [ ] review round 3 fixes (stale agent list in `tick`, re-decide after a slow claim, Unknown state holds when the kind has rules)
   - [ ] a clean independent review, Codex review, CI green on all three OSes, merge
-- [ ] **M0.3 Window: "Give to an agent"**
-  - [ ] a card action on the board (Backlog cards only), also in the command palette (a task and an agent are searchable)
-  - [ ] the picker lists the project's running agents, helpers under their parent (decision 8); other projects are never offered
-  - [ ] the confirmation names agent, project and machine in full, and says "acts without asking" for an agent that skips permissions
-  - [ ] the answer: "sent", "waits for the agent's turn to end", or the refusal sentence from `locales/` (all `task.*`, `agent.queue_full`, `task.dispatch_limited`)
-  - [ ] `taskDispatch` in `apps/web/src/net/grant.ts` `AGENT_KINDS` (a limited device asks for an agent grant, not a machine grant)
-  - [ ] a window without the capability hides the action (`task.dispatch` not negotiated)
-  - [ ] tests (unit, and a browser e2e with `agora-fake-agent`), screenshots in both themes, 44 px targets, keyboard path
+- [x] **M0.3 Window: "Give to an agent"** (#885)
+  - [x] a card action on the board (Backlog cards only), also in the command palette (a task and an agent are searchable)
+  - [x] the picker lists the project's running agents, helpers under their parent (decision 8); other projects are never offered
+  - [x] the confirmation names agent, project and machine in full, and says "acts without asking" for an agent that skips permissions
+  - [x] the answer: "sent", "waits for the agent's turn to end", or the refusal sentence from `locales/` (all `task.*`, `agent.queue_full`, `task.dispatch_limited`)
+  - [x] `taskDispatch` in `apps/web/src/net/grant.ts` `AGENT_KINDS` (a limited device asks for an agent grant, not a machine grant)
+  - [x] a window without the capability hides the action (`task.dispatch` not negotiated): the window cannot read capabilities, so it
+    hides the action for a machine once it was refused there as `protocol.capability_missing` (`task.dispatch`) or, from a node too old to
+    decode it, `protocol.invalid_message` (`command`); forgotten when that machine goes offline and on every reconnect
+  - [x] tests (unit, and a browser e2e with `agora-fake-agent`, run against a build with #883), screenshots in both themes, 44 px targets, keyboard path
 - [ ] **M0.4 Start a new agent for a task** (ADR-0095 step 3)
   - [ ] "Start a new one" in the picker opens the ordinary start (kind, machine, folder), then dispatches to the new agent
   - [ ] under a parent: the ordinary ADR-0057 helper start (signed approval as an agent-made request)
