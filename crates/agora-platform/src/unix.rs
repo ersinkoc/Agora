@@ -1116,8 +1116,9 @@ mod tests {
             "agora-owner-created-{}-{nanos}",
             std::process::id()
         ));
-        std::fs::create_dir(&dir).expect("a fresh folder");
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).expect("private");
+        std::os::unix::fs::DirBuilderExt::mode(&mut std::fs::DirBuilder::new(), 0o700)
+            .create(&dir)
+            .expect("a fresh folder, private from its creation");
         let log = dir.join("x.log");
         for line in ["a\n", "b\n"] {
             let mut f = crate::open_append_owner_created(&log).expect("open");
