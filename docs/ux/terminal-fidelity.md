@@ -173,7 +173,8 @@ decision, so each needs an ADR first.
    the window opened, until the program switches the mode on again, and the history starts empty. Proposed fix: extend `Modes` with
    the mouse tracking and encoding modes, focus reporting, cursor style and the alternate screen, emit them in the repaint, and add a
    history replay (the node already keeps 2000 lines, `alacritty.rs:16`; "never read by clients" is the comment to remove) sent before
-   the repaint and bounded by a client-chosen count. Needs an ADR (it extends the snapshot).
+   the repaint and bounded by a client-chosen count. Needs an ADR (it extends the snapshot). The ADR is ADR-0100 (modes in the repaint, then a
+   history replay the window asks for).
 2. **Nobody owns the answers to terminal queries.** The node's emulator drops `PtyWrite` events (`crates/agora-vt/src/alacritty.rs:41`,
    only titles are kept), so a program that asks for the device attributes, the cursor position, the colours or the keyboard protocol
    when **no window is attached** gets no answer, and with **two windows** it gets two, each with its own theme's colours. Proposed
