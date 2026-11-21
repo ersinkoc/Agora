@@ -1978,7 +1978,7 @@ pub fn open_append_owner_created(path: &std::path::Path) -> io::Result<std::fs::
     let mut options = std::fs::OpenOptions::new();
     options.create(true).append(true);
     #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    unix::owner_only_on_create(&mut options);
     options.open(path)
 }
 
