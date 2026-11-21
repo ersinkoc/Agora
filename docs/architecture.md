@@ -21,8 +21,9 @@ Status: living document. Decisions referenced here are recorded in `adr/`.
 - **Outbound by default.** Nodes dial the hub (WSS or QUIC with mTLS), so nodes behind NAT/firewalls work
   without opening ports.
 - **SSH bootstrap.** For machines where the user cannot or will not install a service, the hub connects
-  over SSH, installs the matching binary if needed, and the node dials back through a reverse tunnel the hub holds
-  (`ssh -N -R`, ADR-0032); `agora node stdio` remains for tools that want the control protocol over SSH (ADR-0011).
+  over SSH: the owner installs the node there once (`agora hub ssh install NAME`, ADR-0034, or by hand), and the node dials
+  back through a reverse tunnel the hub holds (`ssh -N -R`, ADR-0032; the tunnel installs nothing). `agora node stdio` remains for
+  tools that want the control protocol over SSH (ADR-0011).
 - **Autonomous nodes.** If the hub is unreachable, nodes keep agents running, keep enforcing leases they
   already granted, and buffer events locally. On reconnect they replay buffered events in order.
 - **Single binary.** `agora hub`, `agora node`, `agora tui`, and CLI subcommands are one executable per
