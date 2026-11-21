@@ -30,6 +30,7 @@ pub mod sandbox;
 pub mod session_files;
 pub mod spawn;
 pub mod supervisor;
+pub mod task_dispatch;
 pub mod terminal;
 pub mod uplink;
 pub mod uplink_client;

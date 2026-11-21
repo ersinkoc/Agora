@@ -1078,16 +1078,50 @@ forwards either to a node that did not offer it.
   Golden fixtures: `schema/fixtures/v1/agora.v1.AgentQuotaObserved.*` and `schema/fixtures/usage-quota/`.
 
 ### Giving a task to an agent (ADR-0095)
-Schema step approved by the maintainer on 2026-11-21. Not yet handled by any node or offered by the hub: until a node advertises
-`task.dispatch`, the hub refuses `TaskDispatch` for it with `protocol.capability_missing` and a node refuses it the same way.
+Schema step approved by the maintainer on 2026-11-21. Handled by every node of this build, which advertises `task.dispatch`; the hub
+passes it (`hubcli.rs`). To an older node without the capability the hub refuses `TaskDispatch` with `protocol.capability_missing`.
 - **`TaskDispatch`** (`CommandRequest` field 109, capability `task.dispatch`): `project_id` (1), `task_id` (2), `agent_id` (3, an agent
   of the receiving node), `by_user` (4). The node claims the open task for that agent where the project's board is (its broker; for a
   shared project the hub's board, as the agent's own `task_claim` would, ADR-0039), sends the agent one prompt built from the node's
   template around the task's title and detail (`agora_mesh::dispatch::build_prompt`: a fenced block marked untrusted task data, cleaned and
-  cut to the mesh message limit), never typed over a running turn (a structured agent queues it as it queues `AgentPrompt`), and writes
-  `TaskDispatched`. A prompt that cannot be sent gives a task on the node's own broker back; the shared board has no release yet, so
-  there the task stays claimed by that agent. Refusals: `mesh.recipient_unknown` (the agent is not of `project_id`), `task.not_found`, `task.blocked`,
-  `task.not_open` (also a second dispatch of a claimed task), `agent.queue_full`. Not signed and not an approval: it changes no permission
+  cut to the mesh message limit), not typed over a running turn as far as the node can tell, and writes `TaskDispatched`.
+  A structured agent gets it as an `AgentPrompt` would (sent now, or queued behind the turn, `agent.queue_full` past 8). A terminal agent
+  has no queue, and its prompt always arrives as one bracketed paste (`ESC[200~` … `ESC[201~`, then Enter), so a line break in it never
+  submits part of it: a terminal program that has not turned on bracketed paste (DECSET 2004, as the node's terminal emulator sees it) is
+  refused with `protocol.capability_missing` (`capability`: `terminal.bracketed_paste`) before anything is claimed; the prompt holds no ESC
+  or other control character but line break and tab, so its text cannot end the paste. The agent's one slot is reserved
+  before the task is claimed, so a second dispatch meanwhile is `agent.queue_full` (`limit` 1) with nothing claimed. After the claim (which
+  may wait for the hub) the node looks at the agent's screen again and decides: its rules are run now on the live bottom of the buffer (never
+  the user-visible viewport, and never the paced detection's last result, which a screen no rule names, such as a dialog, leaves as it was;
+  a screen no rule matches is `unknown`). Between turns (idle or done, and nothing pasted into it in the last 5 seconds) it is pasted at
+  once; otherwise the node holds it. A held prompt is pasted only after the same fresh look says the agent is between turns, taken right
+  before the paste, for agents with a held prompt only and no more often than that agent's own detection looks at its screen
+  (its pacing interval), so holding adds no screen reads. `unknown` counts as
+  between turns only for a kind whose manifest has no `[[rules]]` entry with `state = "idle"` or `"done"` (it never reaches either, and
+  would otherwise never get a held prompt): for such a kind the paste, and the Enter after it, may arrive while the program works or while
+  it shows a dialog (an Enter can answer it). A kind that can say idle or done and is `unknown` (starting, or a screen no rule names, such
+  as a startup dialog) is waited for. A prompt is held at most 15 minutes: an agent that stays busy, blocked or unknown longer gets it
+  dropped and its task on the node's broker given back, so a stuck agent does not keep the task and its slot. A program that turns
+  bracketed paste off after the check is refused the same way (`protocol.capability_missing`) when the prompt would be pasted at once,
+  and its held prompt is dropped (logged on the machine) with the task given back. A paste that
+  was written but whose Enter failed means the terminal is gone (a write fails only then), so no input box keeps the text; its task is given
+  back like any lost prompt.
+  A prompt that never reaches the agent gives its task on the node's broker back: a held one when the agent is no longer running (stopped
+  by a person or its parent, ended, crashed; checked every supervision round, so every stop path is covered), a paste that cannot start or
+  fails, a queued one that the adapter refused or dropped (the adapter ended or was stopped, by a person's `AgentStop` too, or `AgentCancelTurn` with `drop_queue`; a
+  queued prompt is settled only by the queue's own reports, so one reported sent keeps its claim even when the agent ends in the same
+  moment). Held prompts live in
+  memory: a node restart drops them and leaves their claims. For a shared project the node asks the hub's board as the agent (`task_list` with `task_id`, which answers that one task, for its text
+  and status, then `task_claim`; an older hub ignores `task_id` and answers the whole board, in which the node finds the task the same
+  way; a hub of this build answers a board result too big for one frame with the tool error `mesh.body_too_large` instead of sending
+  it, which a dispatch passes on as its refusal; an older hub still sends it, and one over the frame limit ends that node's connection
+  as an agent's own `task_list` of such a board always did)
+  and still builds the prompt itself; a project known to be shared with no hub link is `board.unavailable`. A prompt that cannot be sent gives a task on the node's own broker back; the shared board has no release yet, so
+  there the task stays claimed by that agent. Refusals: `mesh.recipient_unknown` (the agent is not of `project_id`, or the node has no mesh),
+  `task.not_found`, `task.blocked`, `task.not_open` (also a second dispatch of a claimed task), `agent.queue_full` (`limit` 8 behind a
+  structured agent's turn, 1 for a terminal agent's held dispatch), `agent.not_found` (the agent stopped while its task was being claimed or
+  pasted; the task is given back), `board.unavailable` (a shared project whose hub cannot be asked), `protocol.capability_missing`
+  (`capability`: `terminal.bracketed_paste`, a terminal program without bracketed paste). Not signed and not an approval: it changes no permission
   of the agent, and every sensitive action the agent later asks for still needs the person (ADR-0020). Like `AgentPrompt` it needs the
   sender's access to the agent (a viewer may not send it; a scoped window needs the project and the agent); on a node with limited
   devices it is in the team default of `signed_commands` and a grant covers it by the agent's own project (ADR-0041).
@@ -1098,7 +1132,8 @@ Schema step approved by the maintainer on 2026-11-21. Not yet handled by any nod
 - **`TaskDispatchResult`** (`CommandOk` arm 31): `queued` (1) and `queue_len` (2) as in `AgentPromptResult`, `prompt_sha256` (3, lowercase
   hex SHA-256 of the prompt's UTF-8 bytes).
 - **`TaskDispatched`** (`Event` arm 68): `project_id` (1), `task_id` (2), `agent_id` (3), `by_user` (4), `prompt_sha256` (5), `queued` (6),
-  `agent_skips_permissions` (7, the agent acts without asking, ADR-0059, as the node knows it). The prompt itself is not stored. The task's
+  `agent_skips_permissions` (7, the agent acts without asking as the node knows it at the dispatch: a launch option that skips permissions,
+  ADR-0059, or for a structured agent the mode or a config option in use that does, ADR-0058, ADR-0090 Amendment A). The prompt itself is not stored. The task's
   move is its own `TaskChanged` as before. Names no machine (the agent is the producer's); a window sees it when it may see the agent.
 - **Limits:** at most 8 tries per minute per person, counted by the hub across all that person's windows and connections, every try that
   passed the access check, also one the node then refuses (`task.dispatch_limited`, `limit`); one dispatch per task at a time follows from
