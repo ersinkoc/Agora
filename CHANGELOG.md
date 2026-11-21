@@ -4,14 +4,21 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+_Nothing yet._
+
+## 0.3.32
+
+### Your agents, per machine
 - Settings has an Agents section (`#/device/agents`): for each machine, the agents it can start, installed ones first, how each runs (terminal or chat), and the model, effort and options each takes; a machine that is offline shows what it reported last, marked as older. It is read only for now: choices are still made when you start an agent.
 - `agora doctor` now tells an agent program that is on the machine but cannot be run (no execute permission) apart from one that is missing.
-- In the terminal client, a question over the console (such as the one-hour permission to type) no longer closes the open agent's terminal, is not answered by a `y` inside a paste or beside passive mouse motion, and a refresh no longer drops a refusal of a key you just typed; Ctrl-K lists `g`, the key that asks for that permission.
+
+### Permission questions say what they allow
 - When a machine asks for your OK before you type into, message or stop an agent, the question now names the agent and that one action, and the one-hour permission covers only that action (before, it also covered stopping and sending messages), in the web window and the terminal client.
+- In the terminal client, a question over the console (such as the one-hour permission to type) no longer closes the open agent's terminal, is not answered by a `y` inside a paste or beside passive mouse motion, and a refresh no longer drops a refusal of a key you just typed; Ctrl-K lists `g`, the key that asks for that permission.
 
-### Session discovery checks for look-alike agents off the supervision thread
-
-When the node decides whether two agents could be mixed up, it looks at the disk on a thread of its own (reading the session files still happens on the supervision thread). A moved workspace or a changed manifest is noticed within 30 seconds, and until a lookup answers the agent is given no session.
+### Steadier session matching and connections
+- When the node decides whether two agents could be mixed up, it looks at the disk on a thread of its own (reading the session files still happens on the supervision thread). A moved workspace or a changed manifest is noticed within 30 seconds, and until a lookup answers the agent is given no session.
+- The agent keeper link, the chat-agent bridge and the files helper are stricter about time limits, queue sizes and paths: a chat agent that stops reading no longer stalls the bridge (its queue is bounded), and the worktree file writer, still switched off, now refuses links and secret names at every step.
 
 ## 0.3.31
 
