@@ -320,6 +320,16 @@ fn stopping_an_adapter_agent_ends_its_session() {
     until(&mut s, state_is(AgentState::Idle));
     let ev = s.stop(&id).unwrap();
     assert!(ev.contains(&SupervisorEvent::Stopped { agent: id.clone() }));
+    // #902: a person's stop is a stop, never a give-up with an exit (in the stop's answer or the ticks after it).
+    std::thread::sleep(Duration::from_millis(200));
+    let after = s.tick(Instant::now());
+    assert!(
+        !ev.iter().chain(after.iter()).any(|e| matches!(
+            e,
+            SupervisorEvent::Exited { .. } | SupervisorEvent::GaveUp { .. }
+        )),
+        "{ev:#?} {after:#?}"
+    );
     assert!(!s.list().into_iter().find(|v| v.id == id).unwrap().running);
 }
 
@@ -401,6 +411,13 @@ fn a_crashed_adapter_is_restarted_with_backoff_and_then_given_up_on() {
         },
         "{ev:#?}"
     );
+    assert_eq!(
+        ev[n - 1],
+        SupervisorEvent::GaveUp {
+            agent: id.clone(),
+            exit_code: Some(3),
+        }
+    );
     // Only the end is reported as exited: the earlier crashes were restarts.
     assert_eq!(
         ev.iter()
@@ -422,12 +439,17 @@ fn a_stop_cancels_a_pending_adapter_restart() {
     until(&mut s, state_is(AgentState::Idle));
     let _ = s.adapter_prompt(&id, "crash", false);
     until(&mut s, |e| matches!(e, SupervisorEvent::Restarting { .. }));
-    s.stop(&id).unwrap();
+    let stopped = s.stop(&id).unwrap();
     std::thread::sleep(Duration::from_millis(500));
     let ev = s.tick(std::time::Instant::now());
     assert!(!ev
         .iter()
         .any(|e| matches!(e, SupervisorEvent::Started { .. })));
+    // #902: stopped while a restart waited: no give-up and no exit is reported for it.
+    assert!(!ev.iter().chain(stopped.iter()).any(|e| matches!(
+        e,
+        SupervisorEvent::Exited { .. } | SupervisorEvent::GaveUp { .. }
+    )));
     assert!(!s.list().iter().find(|v| v.id == id).unwrap().running);
 }
 

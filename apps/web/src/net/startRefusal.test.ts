@@ -17,7 +17,7 @@ describe('a refused start and an adapter that ended (#902, #903)', () => {
     for (const lang of ['en', 'tr']) {
       setLanguage(lang);
       const restarting = t(noticeKey('adapter.restarting'), { attempt: '2' });
-      const gaveUp = t(noticeKey('adapter.gave_up'), { exit_code: '3' });
+      const gaveUp = t(noticeKey('adapter.gave_up'), { restarts: '5', exit_code: '3' });
       expect(restarting, lang).toContain('2');
       expect(gaveUp, lang).toContain('3');
       expect(restarting).not.toBe(noticeKey('adapter.restarting'));

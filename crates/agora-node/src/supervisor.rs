@@ -168,8 +168,11 @@ pub enum SupervisorEvent {
         attempt: u32,
         after: Duration,
     },
+    /// The node stopped restarting the agent. `exit_code` (#902): how its last process ended, as reported (`AgentExited`), when the
+    /// node knows it; `None` when it does not (its status could not be read, or the last restart did not start).
     GaveUp {
         agent: AgentId,
+        exit_code: Option<i32>,
     },
     Stopped {
         agent: AgentId,
@@ -2994,7 +2997,10 @@ impl Supervisor {
             } else {
                 entry.gave_up = true;
                 set_state(entry, AgentState::Unknown, StateSource::Reported, events);
-                events.push(SupervisorEvent::GaveUp { agent: id.clone() });
+                events.push(SupervisorEvent::GaveUp {
+                    agent: id.clone(),
+                    exit_code: status.code.or_else(|| status.signal.map(|s| -s)),
+                });
             }
             return;
         }
@@ -3074,7 +3080,10 @@ impl Supervisor {
                     });
                 } else {
                     entry.gave_up = true;
-                    events.push(SupervisorEvent::GaveUp { agent: id.clone() });
+                    events.push(SupervisorEvent::GaveUp {
+                        agent: id.clone(),
+                        exit_code: None,
+                    });
                 }
             }
         }
@@ -4342,25 +4351,40 @@ fn schedule_adapter_restart(
             after,
         });
     } else {
+        let (status, known) = gave_up_status(last);
         events.push(SupervisorEvent::Exited {
             agent: id.clone(),
-            status: gave_up_status(last),
+            status,
         });
-        events.push(SupervisorEvent::GaveUp { agent: id.clone() });
+        events.push(SupervisorEvent::GaveUp {
+            agent: id.clone(),
+            exit_code: known,
+        });
     }
 }
 
-/// #902: the end reported for an adapter the node gave up on: its last process's exit code, or the signal that ended it, as a terminal
-/// agent's end is reported; exit code 1 when that is not known or was 0. An adapter does not end on its own, so this end is a failure and
-/// must never read as a plain finish.
-fn gave_up_status(last: Option<ExitStatus>) -> ExitStatus {
-    match last {
-        Some(s) if s.signal.is_some() || s.code.is_some_and(|c| c != 0) => s,
-        _ => ExitStatus {
-            code: Some(1),
+/// #902: the end reported for an adapter the node gave up on, and the exit code it may say (`None`: not known). An adapter does not end
+/// on its own, so this end is always a failure and must read as one wherever an end is shown, whatever ended the last process:
+/// - its own non-zero exit code is kept;
+/// - a signal is reported as an exit code the way a shell reports it, 128 + the signal (SIGKILL 137), because a window reads only some
+///   signals (a crash) as a failure and the others (a stop) as a plain end; this mapping is only for an agent the node gave up on, so an
+///   agent a person ends keeps being shown as before;
+/// - exit code 1 goes on the wire when the status is not known or was 0 (so it is never a success), and is not said as its exit code.
+fn gave_up_status(last: Option<ExitStatus>) -> (ExitStatus, Option<i32>) {
+    let code = match last {
+        Some(ExitStatus {
+            signal: Some(sig), ..
+        }) => Some(sig.saturating_add(128)),
+        Some(ExitStatus { code: Some(c), .. }) if c != 0 => Some(c),
+        _ => None,
+    };
+    (
+        ExitStatus {
+            code: Some(code.unwrap_or(1)),
             signal: None,
         },
-    }
+        code,
+    )
 }
 
 fn set_state(
@@ -4493,16 +4517,35 @@ fn session_report(agent: &Agent) -> Option<SupervisorEvent> {
 mod adapter_option_tests {
     use super::*;
 
-    /// #902: an adapter the node gave up on always ends as a failure: its own failing code or signal is kept, and a status that is not
-    /// known or says success becomes exit code 1.
+    /// #902: an adapter the node gave up on always ends as a failure: its own failing code is kept, a signal (a crash, or SIGKILL from
+    /// an out-of-memory killer) becomes the positive code a shell reports (never the negative value a window reads as a stop), and a
+    /// status that is not known or says success goes out as exit code 1 without being said as its code.
     #[test]
     fn an_adapter_given_up_on_ends_as_a_failure() {
         let st = |code, signal| ExitStatus { code, signal };
-        assert_eq!(gave_up_status(Some(st(Some(3), None))), st(Some(3), None));
-        assert_eq!(gave_up_status(Some(st(None, Some(11)))), st(None, Some(11)));
-        assert_eq!(gave_up_status(Some(st(Some(0), None))), st(Some(1), None));
-        assert_eq!(gave_up_status(Some(st(None, None))), st(Some(1), None));
-        assert_eq!(gave_up_status(None), st(Some(1), None));
+        let wire = |code| st(Some(code), None);
+        assert_eq!(gave_up_status(Some(st(Some(3), None))), (wire(3), Some(3)));
+        assert_eq!(
+            gave_up_status(Some(st(None, Some(9)))),
+            (wire(137), Some(137))
+        );
+        assert_eq!(
+            gave_up_status(Some(st(None, Some(15)))),
+            (wire(143), Some(143))
+        );
+        assert_eq!(
+            gave_up_status(Some(st(None, Some(11)))),
+            (wire(139), Some(139))
+        );
+        assert_eq!(gave_up_status(Some(st(Some(0), None))), (wire(1), None));
+        assert_eq!(gave_up_status(Some(st(None, None))), (wire(1), None));
+        assert_eq!(gave_up_status(None), (wire(1), None));
+        for (status, _) in [
+            gave_up_status(Some(st(None, Some(9)))),
+            gave_up_status(None),
+        ] {
+            assert!(!status.success() && status.code.is_some_and(|c| c > 0));
+        }
     }
 
     /// ADR-0095: `TaskDispatched.agent_skips_permissions` is true for a launch option that skips, the current mode that skips, a boolean

@@ -265,8 +265,8 @@ not built: nothing to check.
   adapter that needs a login).
 - **See:** the chat answers; `ask` brings an approval that Allow resolves; `cwd` says `$RM/proj`; `crash` says in the conversation that
   the agent stopped unexpectedly and is started again (attempt N); after the node gives up (`crash` after each restart, 6 times in all,
-  `agora agent list` says `stopped`) the agent shows "Ended with an error (exit code 3)", the conversation says Agora stopped starting it,
-  and its input box is off (#902), also after a reload; an installed adapter shows its version in `list` and its kind in the start window.
+  `agora agent list` says `stopped`) the agent shows "Ended with an error (exit code 3)", its summary (and the conversation in
+  `agora tui`) says Agora stopped starting it again after 5 restarts, and its input box is off (#902), also after a reload; an installed adapter shows its version in `list` and its kind in the start window.
 - **Evidence so far:** none recorded.
 
 ### RM-14 Agents run in the selected folder; worktrees optional
