@@ -575,12 +575,8 @@ fn audit(path: &Path, now_ms: u64, action: &str, device: &str, by: &str, outcome
         logged(by),
         logged(outcome)
     );
-    let mut options = std::fs::OpenOptions::new();
-    options.create(true).append(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    // The log only: never the terminal of whoever ran the command (`agora node untrust` says what happened in words of its own).
-    if let Ok(mut f) = options.open(path) {
+    // OS differences in how the file is made the user's only live in agora-platform. The log only: never the terminal of whoever ran the command (`agora node untrust` says what happened in words of its own).
+    if let Ok(mut f) = agora_platform::open_append_owner_created(path) {
         let _ = f.write_all(line.as_bytes());
     }
 }
@@ -1456,6 +1452,27 @@ mod tests {
         {
             use std::os::unix::fs::PermissionsExt;
             let mode = std::fs::metadata(&file).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn a_new_audit_log_is_the_owners_only_and_keeps_every_line() {
+        let d = dir("audit-private");
+        let log = d.join(AUDIT_FILE);
+        audit(&log, 1, "untrust", "web-1", "owner", "done");
+        audit(&log, 2, "endorse", "web-2", "web-1", "refused");
+        let text = std::fs::read_to_string(&log).unwrap();
+        assert_eq!(text.lines().count(), 2, "{text}");
+        assert!(
+            text.starts_with("1 untrust web-1 by=owner done\n"),
+            "{text}"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&log).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o600);
         }
         let _ = std::fs::remove_dir_all(d);
