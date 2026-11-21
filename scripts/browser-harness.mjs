@@ -1,6 +1,7 @@
 // Shared by the real-browser scripts: a throw-away hub and node on this machine, and a signed-in Chromium page.
 // Needs `cargo build -p agora -p agora-fake-agent`, a built `apps/web/dist`, playwright-core (PW_DIR) and a Chromium (CHROME).
 import { spawn, execFileSync } from 'node:child_process';
+import { connect } from 'node:net';
 import { cpSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
@@ -55,7 +56,17 @@ export async function startStack({ viewport = { width: 1440, height: 900 }, scal
     const startHub = () => { hub = spawn(bin, ['hub', 'run', '--listen', `127.0.0.1:${port}`, '--hub-dir', hubDir, ...(web ? ['--web', web] : [])], { env, stdio: 'ignore' }); children.push(hub); };
     const stopHub = () => new Promise(resolve => { if (hub.exitCode !== null || hub.signalCode !== null) { resolve(); return; } hub.once('exit', () => resolve()); hub.kill('SIGKILL'); });
     startHub();
-    await new Promise((r) => setTimeout(r, 2500));
+    // Wait until the hub accepts connections (a slow runner needs more than a fixed pause), then give it a moment to write its files.
+    await new Promise((resolve, reject) => {
+      const end = Date.now() + 60000;
+      const ask = () => {
+        const s = connect(port, '127.0.0.1');
+        s.once('connect', () => { s.destroy(); resolve(); });
+        s.once('error', () => { s.destroy(); if (Date.now() > end) reject(new Error('the hub did not start listening')); else setTimeout(ask, 200); });
+      };
+      ask();
+    });
+    await new Promise((r) => setTimeout(r, 1000));
     const code = run(['hub', 'code', '--hub-dir', hubDir]).match(/[A-Z0-9]{4}-[A-Z0-9]{4}/)[0];
     run(['node', 'enroll', '--hub', `wss://localhost:${port}`, '--ca', join(hubDir, 'ca.pem'), '--code', code, '--id', 'laptop']);
     children.push(spawn(bin, ['node', 'run', '--project', proj, ...projects.flatMap(path => ['--project', path])], { env, stdio: 'ignore' }));
