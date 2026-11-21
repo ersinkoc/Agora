@@ -26,10 +26,10 @@ Per project. Backed by the mesh task model (`docs/specs/mesh-tools.md`).
   offers agents only (a plain terminal cannot take a task), does not offer "Create a shared project identity" (a new identity would make
   the folder another project; the folder is inspected without one), and does not start in a folder of another project. Escape closes
   only the topmost dialog: the board never closes under the picker or the start window. Starting is the ordinary
-  signed start command under the machine's policy and any `signed_commands` line (ADR-0041); there is no shortcut. A refusal stays in the
-  start window (with the trust command and the rest, as always); going back shows it in the picker, and nothing is given. A start the
-  machine holds for the owner's permission says so: the start window gives way, the picker offers no second start for the task while it
-  waits, the start sent again after Allow continues to the confirmation for the agent it made, and a dismissal says no agent was started. Once it started,
+  signed launch under the machine's policy: this device signs each launch (folder, kind, launch options and settings), exactly as "Start
+  an agent" does, and there is no shortcut. The start needs no separate one-hour grant; only giving the task can (a `signed_commands`
+  line naming `task.dispatch`, ADR-0041), and then the Give confirmation asks for it as above. A refusal stays in the start window (with
+  the trust command and the rest, as always); going back shows it in the picker, and nothing is given. Once it started,
   the window stays on the board (it does not open the new agent) and, as soon as the new agent (that machine and id) shows up, the same
   confirmation follows for it; only "Give the task" sends it. After 60 seconds without it the dialog says it has not appeared yet and
   offers Back (it still follows the agent). An agent that is still starting gets it when it is ready (the machine holds it; the answer then says

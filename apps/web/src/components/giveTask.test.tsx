@@ -13,7 +13,6 @@ import { BoardColumns } from './BoardView';
 import { StartAgent } from './StartAgent';
 import { BoardView } from './BoardView';
 import { APPEAR_WAIT_MS, GiveContext, GiveDialog, type GiveApi, type StartForTask } from './GiveTask';
-import { declineStart, isStart, resendStart, sendStart, startRefusal, type StartAnswer } from '../net/startHold';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -639,80 +638,11 @@ describe('start a new agent for the task', () => {
     expect(send).not.toHaveBeenCalled();
   });
 
-  describe('a start held for the owner\'s permission (ADR-0041)', () => {
-    const heldLaunch = () => {
-      let settle!: (r: StartAnswer) => void;
-      const grant = new Promise<StartAnswer>((r) => { settle = r; });
-      const launch = vi.fn<StartForTask['launch']>(async () => ({ failure: 'start-refused-grant', grant }));
-      return { launch, settle: (r: StartAnswer) => act(async () => { settle(r); await grant; await Promise.resolve(); }) };
-    };
-
-    it('waits for it, offers no second start meanwhile, and confirms for the agent the allowed start made', async () => {
-      const { launch, settle } = heldLaunch();
-      const send = vi.fn<GiveApi['send']>(async () => ({ ok: true, queued: false }));
-      render(<GiveDialog task={theTask} give={withStart([], launch, send)} onClose={() => {}} />);
-      click(button('Start', await openAndChoose()));
-      await flush();
-      expect(startWindow()).toBeNull();
-      expect(dialog().querySelector('[data-give-step="held"]')?.textContent).toContain(t('give-start-held'));
-      // Back to the picker: no second start for this task while the first may still go through.
-      click(button('Back', dialog()));
-      expect(dialog().querySelector('[data-give-start]')).toBeNull();
-      expect(dialog().querySelector('[data-give-held]')).not.toBeNull();
-      expect(launch).toHaveBeenCalledTimes(1);
-      // Allowed and started: the agent is listed; the start is still not offered again.
-      await settle({ agentId: 'agent-9' });
-      expect(dialog().querySelector('[data-give-start]')).toBeNull();
-      render(<GiveDialog task={theTask} give={withStart([agent('n1/agent-9')], launch, send)} onClose={() => {}} />);
-      expect(dialog().querySelector('[data-agent-id="n1/agent-9"]')).not.toBeNull();
-      expect(send).not.toHaveBeenCalled();
-    });
-
-    it('goes on to the confirmation when it starts while the dialog waits', async () => {
-      const { launch, settle } = heldLaunch();
-      const send = vi.fn<GiveApi['send']>();
-      render(<GiveDialog task={theTask} give={withStart([agent('n1/agent-9')], launch, send)} onClose={() => {}} />);
-      click(button('Start', await openAndChoose()));
-      await flush();
-      await settle({ agentId: 'agent-9' });
-      expect(dialog().querySelector('[data-give-step="confirm"]')).not.toBeNull();
-      expect(send).not.toHaveBeenCalled();
-    });
-
-    it('says no agent was started when the permission was not given, and offers the start again', async () => {
-      const { launch, settle } = heldLaunch();
-      const send = vi.fn<GiveApi['send']>();
-      render(<GiveDialog task={theTask} give={withStart([], launch, send)} onClose={() => {}} />);
-      click(button('Start', await openAndChoose()));
-      await flush();
-      await settle({ failure: 'start-grant-declined' });
-      expect(dialog().querySelector('[data-give-refusal]')?.textContent).toBe(t('start-grant-declined'));
-      expect(dialog().querySelector('[data-give-start]')).not.toBeNull();
-      expect(send).not.toHaveBeenCalled();
-    });
-
-    it('hands the answer of the start sent again after Allow to the window that waits, and a dismissal as declined', async () => {
-      const body = { agentLaunch: { path: '/w/shop', projectId: 'p', kind: 'claude' } };
-      const refused = Object.assign(new Error('x'), { code: 'approval.grant_required' });
-      const first = await sendStart(async () => { throw refused; }, 'n1', body, { ids: [], settings: [] });
-      expect(first).toMatchObject({ failure: 'start-refused-grant' });
-      expect(isStart(body)).toBe(true);
-      await resendStart(async () => ({ agentLaunch: { agentId: 'agent-9' } }), 'n1', body);
-      await expect((first as { grant: Promise<StartAnswer> }).grant).resolves.toEqual({ agentId: 'agent-9' });
-      const again = await sendStart(async () => { throw refused; }, 'n1', body, { ids: [], settings: [] });
-      declineStart(body);
-      await expect((again as { grant: Promise<StartAnswer> }).grant).resolves.toEqual({ failure: 'start-grant-declined' });
-      // A start refused for another reason waits for nothing.
-      expect(await sendStart(async () => { throw Object.assign(new Error('x'), { code: 'node.resource_limit' }); }, 'n1', body, { ids: [], settings: [] })).toEqual({ failure: 'start-limit' });
-      expect(startRefusal('agent.option_forbidden', { policy: 'confined_only' })).toBe('start-option-confined-only');
-    });
-  });
-
   for (const lang of ['en', 'tr'] as const) {
     it(`has every new sentence in ${lang}, in the UI vocabulary`, () => {
       setLanguage(lang);
       const src = readFileSync(`../../locales/${lang}/web.ftl`, 'utf8');
-      for (const key of ['give-start-new', 'give-none-start', 'give-none-plain', 'give-start-waiting', 'give-start-late', 'give-start-unnamed', 'give-start-held', 'give-start-held-note', 'give-machine-unsupported', 'give-queued-new', 'start-for-task', 'start-for-task-other-project', 'start-refused-grant', 'start-grant-declined']) {
+      for (const key of ['give-start-new', 'give-none-start', 'give-none-plain', 'give-start-waiting', 'give-start-late', 'give-start-unnamed', 'give-machine-unsupported', 'give-queued-new', 'start-for-task', 'start-for-task-other-project']) {
         expect(src).toMatch(new RegExp(`^${key} = `, 'm'));
         expect(t(key, { project: 'shop', title: 'x', agent: 'a' })).not.toMatch(/claim|lease|mesh|dispatch|sahiplen/i);
       }

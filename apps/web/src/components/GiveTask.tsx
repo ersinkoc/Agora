@@ -3,7 +3,6 @@ import { createContext, useContext, useEffect, useRef, useState, type ReactNode 
 import { t } from '../i18n';
 import { sharesName, type AgentTileModel } from '../model';
 import { actsFreelyNow, canStartFor, canTake, cannotTakeKey, giveAsk, giveCandidates, offersGive, useGiveSupport, type GiveResult, type GiveTask } from '../net/give';
-import type { StartResult } from '../net/startHold';
 import { OWNER_MAX, TITLE_MAX, plain } from './boardColumns';
 import type { DirectoryInfo, DirectoryListing } from '../net/directory';
 import type { MachineModel, ProjectChoice } from '../net/view';
@@ -22,7 +21,7 @@ export interface StartForTask {
   loadKinds: (node: string) => Promise<KindChoice[]>;
   inspect: (node: string, path: string, createIdentity: boolean) => Promise<DirectoryInfo>;
   list?: (node: string, path: string) => Promise<DirectoryListing>;
-  launch: (node: string, info: DirectoryInfo, kind: string, separate: boolean, acceptIdentityChange: boolean, launch: { ids: string[]; confirmed: string[]; settings: [string, string][] }) => Promise<StartResult>;
+  launch: (node: string, info: DirectoryInfo, kind: string, separate: boolean, acceptIdentityChange: boolean, launch: { ids: string[]; confirmed: string[]; settings: [string, string][] }) => Promise<{ agentId: string } | { failure: string }>;
 }
 
 // ADR-0095 step 2: "Give to an agent". Present only in a window signed in to a hub; the board's cards and the command palette read it to
@@ -144,8 +143,7 @@ export function GiveOutcome({ result, agent, fresh, onClose, onBack, onSettled }
 // current data, so a change while it is open is shown and an agent that stopped or left the project is not sent to.
 // `start`: the ordinary start window, opened for this task; `refusal` is the last thing it refused, shown in the picker when the person
 // comes back. `fresh`: the agent was just started from here (it may not be in the live view yet, and may still be starting).
-// `held`: the machine held the start back until the owner allows it (ADR-0041); the confirmation follows if it then starts.
-type Step = { at: 'pick'; refusal?: string } | { at: 'start'; refusal?: string } | { at: 'held' } | { at: 'confirm'; agentId: string; busy?: boolean; fresh?: boolean }
+type Step = { at: 'pick'; refusal?: string } | { at: 'start'; refusal?: string } | { at: 'confirm'; agentId: string; busy?: boolean; fresh?: boolean }
   | { at: 'result'; agent: AgentTileModel; result: GiveResult; fresh?: boolean };
 
 // How long the window waits for a started agent to show up before it says so (the binding to that agent stays: it still follows).
@@ -197,32 +195,15 @@ export function GiveDialog({ task, give, onClose }: { task: GiveTask; give: Give
   };
   // The ordinary start: what it refused stays in its own window (with the trust command and the rest), and is shown again in the picker
   // when the person goes back. Once it started, the same confirmation follows for the new agent; nothing is sent before it.
-  // A start held for the owner's permission: until it is answered the picker does not offer a second start for this task (it could start
-  // a second agent). Once it started, the new agent is listed there anyway.
-  const [held, setHeld] = useState<'waiting' | 'started' | undefined>();
   const starter = give.start;
   // Only where an agent started could be given the task: a connected machine with a folder of the project, not heard to lack tasks.
-  const startable = !!starter && !held && canStartFor(starter.projects, starter.machines, task.projectId);
-  const follow = (grant: Promise<{ agentId: string } | { failure: string }>, node: string) => {
-    setHeld('waiting');
-    void grant.then((r) => {
-      const id = 'agentId' in r ? r.agentId : '';
-      setHeld(id ? 'started' : undefined);
-      setStep((s) => {
-        if (s.at !== 'held') return s.at === 'pick' && !id ? { at: 'pick', refusal: 'failure' in r ? r.failure : undefined } : s;
-        if ('failure' in r) return { at: 'pick', refusal: r.failure };
-        return id ? { at: 'confirm', agentId: `${node}/${id}`, fresh: true } : { at: 'pick', refusal: 'give-start-unnamed' };
-      });
-    });
-  };
+  const startable = !!starter && canStartFor(starter.projects, starter.machines, task.projectId);
   if (step.at === 'start' && starter) {
     const projects = starter.projects.filter((p) => p.projectId === task.projectId && offersGive(p.node));
     return <StartAgent projects={projects} machines={starter.machines.filter((m) => offersGive(m.id))} trust={starter.trust} askApproval={starter.askApproval} loadKinds={starter.loadKinds} inspect={starter.inspect} list={starter.list}
       forTask={{ projectId: task.projectId, project: plain(task.project, FULL), title: plain(task.title, TITLE_MAX) || t('board-task-untitled') }}
       onStart={async (node, info, kind, separate, acceptIdentityChange, launch) => {
         const r = await starter.launch(node, info, kind, separate, acceptIdentityChange, launch);
-        // Held for the owner's permission: the start window gives way, and the confirmation follows once it started.
-        if ('failure' in r && r.grant) { follow(r.grant, node); setStep({ at: 'held' }); return r.failure; }
         if ('failure' in r) { setStep({ at: 'start', refusal: r.failure }); return r.failure; }
         // An older machine that does not say which agent it started: back to the picker, where the new agent is listed once it shows up.
         setStep(r.agentId ? { at: 'confirm', agentId: `${node}/${r.agentId}`, fresh: true } : { at: 'pick', refusal: 'give-start-unnamed' });
@@ -254,7 +235,6 @@ export function GiveDialog({ task, give, onClose }: { task: GiveTask; give: Give
           <Dialog.Title className="m-0 break-words text-base font-semibold tracking-normal text-ink normal-case">{title}</Dialog.Title>
           {step.at === 'pick' && <>
             <p id="give-task-title" dir="auto" className="m-0 break-words rounded-s border border-line bg-surface-0 p-2.5 text-sm text-ink">{plain(task.title, TITLE_MAX) || t('board-task-untitled')}</p>
-            {held === 'waiting' && <p role="status" data-give-held="" className="m-0 text-sm text-ink">{t('give-start-held-note')}</p>}
             {step.refusal && <p role="alert" data-give-refusal="" className="m-0 rounded-s border border-needs-you/60 p-2.5 text-sm text-ink">{t(step.refusal)}</p>}
             {candidates.length === 0
               ? <>
@@ -270,10 +250,6 @@ export function GiveDialog({ task, give, onClose }: { task: GiveTask; give: Give
               </>}
             <div className="flex justify-end"><Dialog.Close className="button min-h-11">{t('give-cancel')}</Dialog.Close></div>
           </>}
-          {step.at === 'held' && <div className="grid gap-3" data-give-step="held">
-            <p role="status" className="m-0 text-sm text-ink">{t('give-start-held')}</p>
-            <div className="flex justify-end"><button type="button" className="button min-h-11" onClick={() => setStep({ at: 'pick' })}>{t('give-back')}</button></div>
-          </div>}
           {step.at === 'confirm' && (!chosen && step.fresh
             // Started, and not in the live view yet: the confirmation follows as soon as it shows up.
             ? <WaitingForAgent onBack={() => setStep({ at: 'pick' })} />
