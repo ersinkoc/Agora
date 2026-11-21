@@ -7,7 +7,7 @@
 //! Not here yet: a person's own devices (`server.rs::device_command`, ADR-0061), which decides and answers in one place, and the
 //! shared terminal size, which is the router's state rather than a rule about who may act.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 use agora_protocol::v1::command_request::Command as C;
@@ -86,35 +86,48 @@ pub const MAX_DISPATCHES: usize = 8;
 /// ADR-0095: the span [`MAX_DISPATCHES`] is counted over.
 pub const DISPATCH_WINDOW: Duration = Duration::from_secs(60);
 
-/// ADR-0095: the times of one window's (one client connection's) recent dispatches.
+/// ADR-0095: the times of each person's recent dispatches, kept by the hub across all of that person's windows and connections (so
+/// reconnecting or opening another window does not reset the count). Only people who dispatched in the last minute are kept.
 #[derive(Debug, Default)]
-pub struct DispatchRate {
-    recent: VecDeque<Instant>,
+pub struct DispatchRates(std::sync::Mutex<HashMap<String, VecDeque<Instant>>>);
+
+impl DispatchRates {
+    /// Counts one dispatch of `user` at `now`; false when [`MAX_DISPATCHES`] were already counted in the last [`DISPATCH_WINDOW`].
+    fn admit(&self, user: &str, now: Instant) -> bool {
+        let mut g = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        g.retain(|_, recent| {
+            while recent
+                .front()
+                .is_some_and(|t| now.saturating_duration_since(*t) >= DISPATCH_WINDOW)
+            {
+                recent.pop_front();
+            }
+            !recent.is_empty()
+        });
+        let recent = g.entry(user.to_string()).or_default();
+        if recent.len() >= MAX_DISPATCHES {
+            return false;
+        }
+        recent.push_back(now);
+        true
+    }
 }
 
 /// ADR-0095, for a command that [`route`] lets through: a `TaskDispatch` gets `by_user` from the person who asks (whatever the client
-/// wrote there is replaced) and counts against the window's limit (`task.dispatch_limited`, nothing forwarded). Any other command is
-/// left as it is.
+/// wrote there is replaced) and counts against that person's limit (`task.dispatch_limited`, nothing forwarded). Every try counts,
+/// also one the node then refuses. Any other command is left as it is.
 pub fn prepare_dispatch(
     who: &Access,
     req: &mut CommandRequest,
-    rate: &mut DispatchRate,
+    rates: &DispatchRates,
     now: Instant,
 ) -> Result<(), Error> {
     let Some(C::TaskDispatch(d)) = req.command.as_mut() else {
         return Ok(());
     };
-    while rate
-        .recent
-        .front()
-        .is_some_and(|t| now.saturating_duration_since(*t) >= DISPATCH_WINDOW)
-    {
-        rate.recent.pop_front();
-    }
-    if rate.recent.len() >= MAX_DISPATCHES {
+    if !rates.admit(&who.user, now) {
         return Err(Error::new(ErrorCode::TaskDispatchLimited).with("limit", MAX_DISPATCHES as i64));
     }
-    rate.recent.push_back(now);
     d.by_user = who.user.clone();
     Ok(())
 }
@@ -258,7 +271,8 @@ mod tests {
         );
     }
 
-    /// ADR-0095: the hub writes who asked (a client's own `by_user` is replaced) and lets a window give 8 tasks a minute, no more.
+    /// ADR-0095: the hub writes who asked (a client's own `by_user` is replaced) and lets a person give 8 tasks a minute, no more,
+    /// however many windows or connections they use.
     #[test]
     fn a_dispatch_names_the_person_and_a_window_may_give_eight_a_minute() {
         let dispatch = |by: &str| {
@@ -272,35 +286,40 @@ mod tests {
                 }),
             )
         };
-        let mut rate = DispatchRate::default();
+        let rate = DispatchRates::default();
         let t0 = Instant::now();
         let person = who(Role::Member);
         for i in 0..MAX_DISPATCHES {
             let mut r = dispatch("someone-else");
-            prepare_dispatch(
-                &person,
-                &mut r,
-                &mut rate,
-                t0 + Duration::from_secs(i as u64),
-            )
-            .unwrap();
+            prepare_dispatch(&person, &mut r, &rate, t0 + Duration::from_secs(i as u64)).unwrap();
             assert!(matches!(&r.command, Some(C::TaskDispatch(d)) if d.by_user == "u"));
         }
         let mut r = dispatch("");
-        let e =
-            prepare_dispatch(&person, &mut r, &mut rate, t0 + Duration::from_secs(30)).unwrap_err();
+        let e = prepare_dispatch(&person, &mut r, &rate, t0 + Duration::from_secs(30)).unwrap_err();
         assert_eq!(e.code, ErrorCode::TaskDispatchLimited);
         assert_eq!(
             e.params.get("limit"),
             Some(&agora_protocol::ParamValue::Int(8))
         );
+        // Another person has a count of their own.
+        let mut theirs = dispatch("");
+        prepare_dispatch(
+            &Access {
+                user: "v".into(),
+                ..who(Role::Member)
+            },
+            &mut theirs,
+            &rate,
+            t0 + Duration::from_secs(30),
+        )
+        .unwrap();
         // A refused one does not count, and the first falls out of the window after a minute.
-        prepare_dispatch(&person, &mut r, &mut rate, t0 + DISPATCH_WINDOW).unwrap();
+        prepare_dispatch(&person, &mut r, &rate, t0 + DISPATCH_WINDOW).unwrap();
         // Other commands are not touched and not counted.
         let mut other = req("n1", stop());
         let before = other.clone();
         for _ in 0..20 {
-            prepare_dispatch(&person, &mut other, &mut rate, t0).unwrap();
+            prepare_dispatch(&person, &mut other, &rate, t0).unwrap();
         }
         assert_eq!(other, before);
     }

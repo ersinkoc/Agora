@@ -351,7 +351,7 @@ message TaskDispatched {
   string project_id = 1;
   string task_id = 2;
   string agent_id = 3;
-  // `TaskDispatch.by_user`: the hub user who asked; empty when the machine's own user asked on its control socket.
+  // `TaskDispatch.by_user` as the node received it (the sender's word; the hub's audit row is the record of who asked).
   string by_user = 4;
   // Lowercase hex SHA-256 of the prompt's UTF-8 bytes; the prompt itself is not stored (task text is untrusted and may be large).
   string prompt_sha256 = 5;

@@ -878,7 +878,6 @@ where
     let owner = current.role == crate::users::Role::Owner;
     let subscription = hub.subscribe(if restricted { None } else { sub.after_pos })?;
     let mut scope = None;
-    let mut dispatches = crate::dispatch::DispatchRate::default();
     if let Some((view, pos)) = &subscription.snapshot {
         let body = match &current.projects {
             Some(projects) => {
@@ -990,7 +989,6 @@ where
                         Caller {
                             who: &who,
                             scope: scope.as_ref(),
-                            dispatches: &mut dispatches,
                         },
                     )
                     .await?;
@@ -1057,8 +1055,6 @@ fn an_answer(inflight: &mut [Inflight]) -> impl std::future::Future<Output = ()>
 struct Caller<'a> {
     who: &'a crate::users::Access,
     scope: Option<&'a crate::scope::Scope>,
-    /// ADR-0095: this window's recent task dispatches.
-    dispatches: &'a mut crate::dispatch::DispatchRate,
 }
 
 async fn forward_command<S>(
@@ -1076,11 +1072,7 @@ where
     let mut req = v1::CommandRequest::decode(payload).map_err(|_| invalid("request"))?;
     let client_request_id = req.request_id.clone();
     let refuse = |e: Error| error_response(&client_request_id, &e);
-    let Caller {
-        who,
-        scope,
-        dispatches,
-    } = caller;
+    let Caller { who, scope } = caller;
     // ADR-0065: the owner's pairing commands are the hub's own; a machine's pairing messages are not a window's to send.
     if let Some(resp) = crate::pairing_net::owner_command(hub, who, &req) {
         conn.send(&frame(STREAM_COMMANDS, 1, resp.encode_to_vec()))
@@ -1162,10 +1154,13 @@ where
             .await?;
         return Ok(());
     }
-    // ADR-0095: a dispatch names the person who asks, and a window gives at most a few a minute.
-    if let Err(e) =
-        crate::dispatch::prepare_dispatch(who, &mut req, dispatches, std::time::Instant::now())
-    {
+    // ADR-0095: a dispatch names the person who asks, and a person gives at most a few a minute.
+    if let Err(e) = crate::dispatch::prepare_dispatch(
+        who,
+        &mut req,
+        hub.dispatches(),
+        std::time::Instant::now(),
+    ) {
         audit(
             hub,
             who,

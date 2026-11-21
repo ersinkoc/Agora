@@ -444,17 +444,18 @@ message TaskUpdate {
 // ADR-0095 decision 3: a person gives an open task of a project to an agent of that project on the receiving node. The node claims the
 // task for the agent where the project's board is (its own broker, or the hub's board for a shared project, as the agent's own
 // `task_claim` would), sends the agent one prompt built from the node's template around the task's title and detail (marked as untrusted
-// task data, decision 5), queued behind a running turn like `AgentPrompt`, and records `TaskDispatched`. If the prompt cannot be sent the
-// task is given back. Refused: an agent that is not of `project_id` (`mesh.recipient_unknown`), an unknown task (`task.not_found`), a
+// task data, decision 5), never typed over a running turn, and records `TaskDispatched`. If the prompt cannot be sent, a task on the node's
+// own broker is given back (the shared board has no release yet: there the task stays the agent's). Refused: an agent that is not of `project_id` (`mesh.recipient_unknown`), an unknown task (`task.not_found`), a
 // blocked one (`task.blocked`), one that is not open (`task.not_open`, also a second dispatch of the same task), a full queue
 // (`agent.queue_full`). Not an approval and changes no permission (decision 4); not signed, it needs the sender's access to the agent,
-// like `AgentPrompt`. The hub allows at most 8 per minute per window (`task.dispatch_limited`).
+// like `AgentPrompt`. The hub allows each person at most 8 tries per minute (`task.dispatch_limited`).
 message TaskDispatch {
   string project_id = 1;
   string task_id = 2;
   string agent_id = 3;
-  // The hub user who asked, written by the hub from the window's sign-in (a client's own value is replaced). Empty on the node's own
-  // control socket: this machine's user. Copied into `TaskDispatched` for the audit trail.
+  // The hub user who asked, written by the hub from the window's sign-in (a client's own value is replaced). A node cannot tell a command
+  // the hub carried from one sent on its own control socket, so on the node this is the sender's word: the hub's audit row of the command
+  // is the record of who asked. Copied into `TaskDispatched`.
   string by_user = 4;
 }
 
