@@ -1553,7 +1553,7 @@ fn board_for_node(
             let _ = answers.send(error_response(rid, &e));
             return;
         }
-        Verdict::Done { result, is_error } => (result.to_string(), is_error),
+        Verdict::Done { result, is_error } => bounded_board_result(result.to_string(), is_error),
     };
     if let Some(f) = a.fanout {
         // Best effort, like any mesh post: a receiver that is gone just does not get its copy.
@@ -1635,6 +1635,19 @@ fn board_for_node(
         };
         let _ = answers.send(resp);
     });
+}
+
+/// The largest board tool result the hub sends a node (well inside one frame, `DEFAULT_MAX_PAYLOAD`, with room for the envelope).
+const MAX_BOARD_RESULT: usize = agora_protocol::frame::DEFAULT_MAX_PAYLOAD - 64 * 1024;
+
+/// A board tool result as it may be sent: one too big for a frame (a large board's whole `task_list`) becomes the tool error
+/// `mesh.body_too_large` (`limit`), so the answer never ends the node's connection.
+fn bounded_board_result(result: String, is_error: bool) -> (String, bool) {
+    if result.len() <= MAX_BOARD_RESULT {
+        return (result, is_error);
+    }
+    let e = Error::new(ErrorCode::MeshBodyTooLarge).with("limit", MAX_BOARD_RESULT as i64);
+    (agora_mesh::mcp::protocol_error_result(&e).to_string(), true)
 }
 
 /// ADR-0058: the snapshot fields that come from an agent's reported session (options, context, its own cost).
@@ -2582,6 +2595,20 @@ mod event_writer_tests {
 #[cfg(test)]
 mod audit_cleanup_tests {
     use super::*;
+
+    /// Codex review of #883: a board answer too big for one frame (a large board's whole `task_list`) becomes a tool error instead of a
+    /// frame that would end the node's connection.
+    #[test]
+    fn a_board_answer_too_big_for_a_frame_becomes_a_tool_error() {
+        let small = "[]".to_string();
+        assert_eq!(bounded_board_result(small.clone(), false), (small, false));
+        let (text, is_error) = bounded_board_result("x".repeat(MAX_BOARD_RESULT + 1), false);
+        assert!(is_error);
+        assert!(text.len() < 1024, "{}", text.len());
+        assert!(text.contains("mesh.body_too_large"), "{text}");
+        let ok = "y".repeat(MAX_BOARD_RESULT);
+        assert_eq!(bounded_board_result(ok.clone(), false), (ok, false));
+    }
 
     /// Review F7: the audit text is bounded in count and in the length of each entry, with a mark, and the request is not touched.
     #[test]

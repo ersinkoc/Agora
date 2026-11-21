@@ -1398,6 +1398,16 @@ fn terminal_dispatches_need_a_paste_are_held_while_busy_and_lost_prompts_give_th
     .unwrap()
     .expect("cancelled");
     wait_open(&home, &author, &t3);
+
+    // An explicit stop of a structured agent with a dispatch prompt in its queue gives that task back too.
+    let (code, out) = agora(&home, &["agent", "prompt", &worker, "slow"]);
+    assert_eq!(code, 0, "{out}");
+    let queued = result(dispatch(&mut c, &worker, &t3));
+    assert!(queued.queued, "{queued:?}");
+    assert_eq!(task_state(&home, &author, &t3).0, "claimed");
+    let (code, out) = agora(&home, &["agent", "stop", &worker]);
+    assert_eq!(code, 0, "{out}");
+    wait_open(&home, &author, &t3);
     drop(node);
     let _ = std::fs::remove_dir_all(&home);
 }

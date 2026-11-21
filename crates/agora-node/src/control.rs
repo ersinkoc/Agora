@@ -360,9 +360,9 @@ fn task_dispatch(ctx: &ControlContext, d: &v1::TaskDispatch) -> Result<v1::Comma
         shared: claim.shared,
     };
     let sent = if let Some(token) = token {
-        // Decided now, after the claim (which may have waited for the hub), from the agent's state read again: a turn that began
-        // meanwhile gets the prompt held, not pasted over it.
-        let fresh = ctx.sup().terminal_state(&id);
+        // Decided now, after the claim (which may have waited for the hub), from its live screen read now (never the paced
+        // detection's last result): a turn that began meanwhile, or a screen no rule names, gets the prompt held, not pasted over it.
+        let fresh = ctx.sup().terminal_readiness(&id);
         let slot = match fresh {
             Some((state, detects)) => dispatches.decide(&id, token, state, detects, Instant::now()),
             None => {
@@ -1078,6 +1078,12 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                 for e in &events {
                     if let SupervisorEvent::PromptsDropped { agent, tags } = e {
                         ctx.chat.drop_queued(agent, tags, crate::daemon::now_ms());
+                        // ADR-0095: a dispatch prompt that waited in the stopped agent's queue gives its task back.
+                        if let Some(mesh) = &ctx.mesh {
+                            for g in mesh.dispatches().dropped(agent, tags) {
+                                mesh.give_back(&g);
+                            }
+                        }
                     }
                 }
                 if let Some(ev) = &ctx.events {

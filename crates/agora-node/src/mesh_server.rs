@@ -795,11 +795,13 @@ impl MeshServer {
             }
             Ok(text.to_string())
         };
-        let list = match self.board_call(agent, project, "task_list", &json!({})) {
-            BoardRoute::Local => return local(),
-            BoardRoute::Unavailable => return Err(board_unavailable(project)),
-            BoardRoute::Shared(v) => answer(&v)?,
-        };
+        // Only the one task (an older hub ignores `task_id` and answers the whole board; the task is found in it the same way).
+        let list =
+            match self.board_call(agent, project, "task_list", &json!({ "task_id": task_id })) {
+                BoardRoute::Local => return local(),
+                BoardRoute::Unavailable => return Err(board_unavailable(project)),
+                BoardRoute::Shared(v) => answer(&v)?,
+            };
         let tasks: Value = serde_json::from_str(&list).map_err(|_| board_unavailable(project))?;
         let task = tasks
             .as_array()

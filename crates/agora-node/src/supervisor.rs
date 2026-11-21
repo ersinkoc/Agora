@@ -3579,12 +3579,11 @@ impl Supervisor {
             .is_some_and(|e| skips_now(e.launch.skips_permissions, &e.options, &e.rich.config))
     }
 
-    /// ADR-0095: a running terminal agent's detected state, and whether its kind has a screen-detection rule that says idle or done
-    /// (a kind without one never reaches a state the node pastes in, so `unknown` is all it says). `None` for an agent that is not a
-    /// running terminal agent here.
-    pub fn terminal_state(&self, id: &AgentId) -> Option<(AgentState, bool)> {
+    /// ADR-0095: whether a running terminal agent's kind has a screen-detection rule that says idle or done (a kind without one never
+    /// reaches a state the node pastes in, so `unknown` is all it can say). `None` for an agent that is not a running terminal agent.
+    pub fn terminal_detects(&self, id: &AgentId) -> Option<bool> {
         let e = self.agents.get(id).filter(|e| e.terminal.is_some())?;
-        let detects = self.kinds.get(&e.agent.kind).is_some_and(|k| {
+        Some(self.kinds.get(&e.agent.kind).is_some_and(|k| {
             k.manifest.rules.iter().any(|r| {
                 matches!(
                     r.state,
@@ -3592,8 +3591,22 @@ impl Supervisor {
                         | agora_adapters::manifest::RuleState::Done
                 )
             })
-        });
-        Some((e.agent.state(), detects))
+        }))
+    }
+
+    /// ADR-0095: a fresh look at a running terminal agent's screen, for a dispatch: its rules run now on the live bottom of the buffer
+    /// (never the user-visible viewport, and never the paced detection's last result, which an unmatched screen such as a dialog leaves
+    /// as it was): the state they detect (`unknown` when none matches), and [`Self::terminal_detects`]. `None` for an agent that is
+    /// not a running terminal agent.
+    pub fn terminal_readiness(&self, id: &AgentId) -> Option<(AgentState, bool)> {
+        let detects = self.terminal_detects(id)?;
+        let e = self.agents.get(id)?;
+        let term = e.terminal.as_ref()?;
+        let kind = self.kinds.get(&e.agent.kind)?;
+        let state = term
+            .inspect(|t| kind.detector.detect(t))
+            .map_or(AgentState::Unknown, |d| d.state);
+        Some((state, detects))
     }
 
     pub fn list(&self) -> Vec<AgentView> {

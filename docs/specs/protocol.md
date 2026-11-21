@@ -1091,8 +1091,11 @@ passes it (`hubcli.rs`). To an older node without the capability the hub refuses
   refused with `protocol.capability_missing` (`capability`: `terminal.bracketed_paste`) before anything is claimed; the prompt holds no ESC
   or other control character but line break and tab, so its text cannot end the paste. The agent's one slot is reserved
   before the task is claimed, so a second dispatch meanwhile is `agent.queue_full` (`limit` 1) with nothing claimed. After the claim (which
-  may wait for the hub) the node reads the agent's state again and decides: between turns (detected idle or done, and nothing pasted into it
-  in the last 5 seconds) it is pasted at once; otherwise the node holds it and pastes it once the agent is between turns. `unknown` counts as
+  may wait for the hub) the node looks at the agent's screen again and decides: its rules are run now on the live bottom of the buffer (never
+  the user-visible viewport, and never the paced detection's last result, which a screen no rule names, such as a dialog, leaves as it was;
+  a screen no rule matches is `unknown`). Between turns (idle or done, and nothing pasted into it in the last 5 seconds) it is pasted at
+  once; otherwise the node holds it. A held prompt is pasted only after the same fresh look says the agent is between turns, taken right
+  before the paste, for agents with a held prompt only. `unknown` counts as
   between turns only for a kind whose manifest has no `[[rules]]` entry with `state = "idle"` or `"done"` (it never reaches either, and
   would otherwise never get a held prompt): for such a kind the paste, and the Enter after it, may arrive while the program works or while
   it shows a dialog (an Enter can answer it). A kind that can say idle or done and is `unknown` (starting, or a screen no rule names, such
@@ -1104,10 +1107,14 @@ passes it (`hubcli.rs`). To an older node without the capability the hub refuses
   back like any lost prompt.
   A prompt that never reaches the agent gives its task on the node's broker back: a held one when the agent is no longer running (stopped
   by a person or its parent, ended, crashed; checked every supervision round, so every stop path is covered), a paste that cannot start or
-  fails, a queued one that the adapter refused or dropped (the adapter ended or was stopped, or `AgentCancelTurn` with `drop_queue`; a
+  fails, a queued one that the adapter refused or dropped (the adapter ended or was stopped, by a person's `AgentStop` too, or `AgentCancelTurn` with `drop_queue`; a
   queued prompt is settled only by the queue's own reports, so one reported sent keeps its claim even when the agent ends in the same
   moment). Held prompts live in
-  memory: a node restart drops them and leaves their claims. For a shared project the node asks the hub's board as the agent (`task_list` for the task's text and status, then `task_claim`)
+  memory: a node restart drops them and leaves their claims. For a shared project the node asks the hub's board as the agent (`task_list` with `task_id`, which answers that one task, for its text
+  and status, then `task_claim`; an older hub ignores `task_id` and answers the whole board, in which the node finds the task the same
+  way; a hub of this build answers a board result too big for one frame with the tool error `mesh.body_too_large` instead of sending
+  it, which a dispatch passes on as its refusal; an older hub still sends it, and one over the frame limit ends that node's connection
+  as an agent's own `task_list` of such a board always did)
   and still builds the prompt itself; a project known to be shared with no hub link is `board.unavailable`. A prompt that cannot be sent gives a task on the node's own broker back; the shared board has no release yet, so
   there the task stays claimed by that agent. Refusals: `mesh.recipient_unknown` (the agent is not of `project_id`, or the node has no mesh),
   `task.not_found`, `task.blocked`, `task.not_open` (also a second dispatch of a claimed task), `agent.queue_full` (`limit` 8 behind a

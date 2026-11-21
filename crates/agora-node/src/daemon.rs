@@ -1978,24 +1978,29 @@ impl Node {
                         // is pasted on a thread of its own (the paste pauses). A paste that cannot start, or that fails, gives the task
                         // back too (the shared board has no release).
                         if !mesh.dispatches().is_empty() {
-                            let seen: Vec<crate::task_dispatch::Seen> = {
-                                let s = sup.lock().unwrap_or_else(|e| e.into_inner());
-                                views
-                                    .iter()
-                                    .map(|v| crate::task_dispatch::Seen {
-                                        id: v.id.clone(),
-                                        state: v.state,
-                                        running: v.running,
-                                        terminal: v.terminal,
-                                        detects: s.terminal_state(&v.id).is_some_and(|(_, d)| d),
-                                    })
-                                    .collect()
-                            };
-                            let back =
-                                mesh.dispatches()
-                                    .tick(&seen, views_at, Instant::now(), |h| {
-                                        deliver_held(&sup, &mesh, h)
-                                    });
+                            let seen: Vec<crate::task_dispatch::Seen> = views
+                                .iter()
+                                .map(|v| crate::task_dispatch::Seen {
+                                    id: v.id.clone(),
+                                    running: v.running,
+                                    terminal: v.terminal,
+                                })
+                                .collect();
+                            let back = mesh.dispatches().tick(
+                                &seen,
+                                views_at,
+                                Instant::now(),
+                                // ADR-0095: the live screen of an agent with a held prompt, read now.
+                                |a| {
+                                    sup.lock()
+                                        .unwrap_or_else(|e| e.into_inner())
+                                        .terminal_readiness(a)
+                                        .is_some_and(|(state, detects)| {
+                                            crate::task_dispatch::between_turns(state, detects)
+                                        })
+                                },
+                                |h| deliver_held(&sup, &mesh, h),
+                            );
                             for g in &back {
                                 mesh.give_back(g);
                             }
