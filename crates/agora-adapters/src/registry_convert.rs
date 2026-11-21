@@ -71,13 +71,13 @@ fn plain_token(s: &str) -> bool {
 }
 
 /// Display text (name, licence, repository): no control, format, bidirectional, separator or private-use character (ADR-0057 list).
-fn clean_text(s: &str) -> bool {
+pub(crate) fn clean_text(s: &str) -> bool {
     !s.chars()
         .any(|c| c.is_control() || agora_core::text::is_hidden(c))
 }
 
 /// An npm package name: `name` or `@scope/name`, lower-case letters, digits, `.`, `_`, `-`; no URL, path, alias or tag syntax.
-fn npm_name(n: &str) -> bool {
+pub(crate) fn npm_name(n: &str) -> bool {
     let part = |p: &str| {
         !p.is_empty()
             && !p.starts_with(['.', '_', '-'])
@@ -100,7 +100,7 @@ fn pypi_name(n: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
 }
 
-fn exact_version(v: &str) -> bool {
+pub(crate) fn exact_version(v: &str) -> bool {
     let core = v.split(['-', '+']).next().unwrap_or("");
     let parts: Vec<&str> = core.split('.').collect();
     parts.len() == 3
@@ -237,9 +237,16 @@ fn convert_uvx(d: &Value) -> Result<Dist, Reason> {
 }
 
 /// A shell or interpreter would run whatever its arguments say, so a registry entry may not name one as its executable.
-fn forbidden_executable(exe: &str) -> bool {
-    let e = exe.to_ascii_lowercase();
-    let e = e.strip_suffix(".bat").unwrap_or(&e);
+pub(crate) fn forbidden_executable(exe: &str) -> bool {
+    // Whatever extension a platform runs it by is the same program: `node.exe`, `bash.exe`, `powershell.exe -c` are a shell too.
+    let mut e = exe.to_ascii_lowercase();
+    while let Some(bare) = [".exe", ".cmd", ".bat", ".ps1", ".com"]
+        .iter()
+        .find_map(|x| e.strip_suffix(x))
+    {
+        e = bare.to_string();
+    }
+    let e = e.as_str();
     [
         "sh",
         "bash",

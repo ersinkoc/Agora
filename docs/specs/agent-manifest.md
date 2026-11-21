@@ -17,11 +17,11 @@ it, a file with a new `kind` adds one. A built-in kind cannot be removed, only r
 and named by `agora doctor`, and the built-in kind it meant to replace stays. The folder is read again before agents are listed
 or started, so a new or changed file needs no restart. `agora doctor` lists each kind with where it came from (built in, or the
 folder) and the program it looks for. A kind is "installed" when that program (the L3 adapter command, else the ACP `argv[0]`,
-else `process.launch[0]`) is found in the node's own `PATH` (the environment the node was started in, not the user's current
+else `process.launch[0]`) is found as a file in the node's own `PATH` (the environment the node was started in, not the user's current
 shell) or, when the manifest names a path, exists there. On Windows, a bare name with no extension that has no `.exe` but a
 `.com`, `.bat` or `.cmd` of that name (`npx`, most npm global commands) is started by that file's full path, for all three
 levels, looked up where the standard library looks and never in the agent's project folder; it is installed when that file
-exists. A new shipped manifest must be added to `BUILT_IN`; a test fails until it is.
+exists. A found file without the owner's execute bit is "broken" (`agent-broken`, ADR-0087 rung 1): there, but starting it would fail. Doctor runs nothing and reads nothing from the program, and shows no agent version because no manifest has a version command yet. A new shipped manifest must be added to `BUILT_IN`; a test fails until it is.
 
 ```toml
 kind = "example-agent"          # stable id, lowercase, used in protocol and UI
@@ -182,6 +182,7 @@ A setting chosen at the start lasts while the node runs (a restart after a crash
 agent resumed after the node itself restarted (ADR-0060) starts with the tool's defaults, as its launch options do.
 
 ## Manifests converted from the ACP registry (ADR-0092)
+The package entry it writes is a draft of an entry in the signed agent-package list; the differences are in `docs/specs/agent-packages.md`.
 `registry_convert` (`crates/agora-adapters`, run through `cargo run -p agora-adapters --example registry_convert -- <registry clone> <dir>`)
 turns one registry `agent.json` into `registry-<id>.toml` (an L2 `[structured] acp` manifest, never a launch option) and a package entry
 (`<id>.package.json`, ADR-0087 shape plus `tested = false`). `npx` becomes `npx --yes PKG@VERSION ARGS`, `uvx` becomes `uvx PKG==VERSION ARGS`,
