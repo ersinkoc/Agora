@@ -556,7 +556,8 @@ not built: nothing to check.
 ### RM-47 Structured agents survive a node restart
 - **OS:** Linux, macOS (unconfined agents through a holder of link version 2); Windows: not built.
 - **Do:** start `rm-acp`; send `hello`; `agora down`; `agora`; send `hello again`.
-- **See:** the same agent and session, shown running in the window and the terminal client (not "Finished", #907), not under
+- **See:** the same agent and session, shown running in the window and the terminal client (not "Finished", #907) with the mode
+  and settings it had (#932), not under
   "Stopped when the machine shut down"; the second prompt is answered; the earlier turns are not shown again (the chat history is in
   memory until ADR-0089, #931); a confined `rm-acp` (only in a disposable OS account or VM, #900) instead ends with the node and comes back
   only as the resume policy allows.

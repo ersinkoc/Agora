@@ -247,10 +247,13 @@ wants to write that cannot fit one frame fails that write on the node's side, be
   (pid and start time) and is interrupted, it restores the agent (`restore`), reads the adapter's session id and capabilities the old node wrote to the ledger
   (`Entry::adapter_session`, `adapter_capabilities`; the node cannot ask the adapter again), starts a new adapter host over the holder's pipes (**no
   `initialize` and no `session/start`: the adapter still has its session**), makes the mesh endpoint again at the same path, and clears the interruption.
-  It is said up again to the hub after `NodeOnline` as a terminal agent is (above), with its launch options, without `TerminalOpened`. Not built: what it
-  last reported of its modes, models, settings and commands (a mode that skips permissions included) is not known to the new node and not said again
-  until the adapter reports it (#932); its usage counters in the hub's view start again from 0 (#930); its earlier conversation is not shown (the chat
-  history is in memory, ADR-0089; #931).
+  It is said up again to the hub after `NodeOnline` as a terminal agent is (above), with its launch options, without `TerminalOpened`, and then with what
+  it last reported of its session: `AgentSessionOptions`, `AgentSessionConfig`, `AgentCommands` (#932). The adapter does not report them again by itself,
+  so the node keeps the last ones it recorded for each adapter agent in `<data>/sessions/kept-<id>.pb` (beside the ledger, owner-only; removed when the
+  agent ends, restarts, or is not taken up), puts them back on the agent (bounded and judged again as a report is), and re-states them. A mode or config
+  option in use that makes the agent act without asking (switched to after the start, by the person or by the agent) is so shown and checked
+  (`skips_permissions_now`) until the agent reports new ones. Not built: its usage counters in the hub's view start again from 0 (#930); its earlier
+  conversation is not shown (the chat history is in memory, ADR-0089; #931).
   An agent the node does not take up (unknown to the ledger, another holder, ended, its folder gone, no session recorded) is ended through the holder.
 - **Rebuilding what waited on the person (decision 3):** the `seen` lines go through `pending_approvals`, which keeps an `approval/request` unless a later
   `state/update` shows the agent went on (a state other than `blocked`); the `fresh` lines are read as if they had just arrived. A kept request becomes an

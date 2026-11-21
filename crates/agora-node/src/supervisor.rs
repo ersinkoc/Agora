@@ -220,6 +220,12 @@ pub struct Reattach {
     pub capabilities: Vec<String>,
     /// The state the ledger last saw it in.
     pub state: Option<AgentState>,
+    /// #932: what it last reported of its session (modes and models, config options, commands), as the last node recorded it. The
+    /// adapter is not initialised again and does not report them again by itself, so they are the agent's until it reports new ones:
+    /// a mode or option in use that makes it act without asking keeps it shown so, and checked so (`skips_permissions_now`).
+    pub options: SessionOptions,
+    pub config: Vec<ConfigOption>,
+    pub commands: Vec<AdapterCommand>,
 }
 
 /// ADR-0090: the most prompts that wait behind a turn, per agent (`agent.queue_full`).
@@ -973,6 +979,10 @@ impl Supervisor {
         e.adapter = Some(adapter);
         e.session_id = reattach.session_id;
         e.capabilities = reattach.capabilities;
+        // Bounded and judged again as a report is (`perm`): the file is the node's own, the words in it are the adapter's.
+        e.options = bounded_options(reattach.options);
+        e.rich.config = bounded_config(reattach.config);
+        e.rich.commands = bounded_commands(reattach.commands);
         e.mesh = mesh;
         e.running = true;
         if let Some(state) = reattach.state {

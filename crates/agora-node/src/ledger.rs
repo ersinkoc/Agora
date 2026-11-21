@@ -4,7 +4,9 @@
 //! One file, `<data>/sessions/ledger.json`, readable by the owner only (file `0600` in a `0700` folder on Unix, an owner-only ACL on
 //! Windows, both through `agora-platform`), replaced whole on every write (a temporary file in the same folder, then a rename). It holds
 //! per agent: id, kind, project, folder (its workspace or its own worktree), parent agent, the agent's own session id when one was
-//! reported, start time, last state, and whether it ended. Never terminal contents, prompts, or secrets.
+//! reported, start time, last state, and whether it ended. Never terminal contents, prompts, or secrets. Beside it, `kept-<id>.pb` holds
+//! what an adapter agent last reported of its session (modes and models, config options, commands, as the node recorded them), for a
+//! node that takes the agent up from the holder (ADR-0093, #932); removed when the agent ends, restarts, or is not taken up.
 //!
 //! The ledger learns from the events the node records (see [`Ledger::observe`]), so every way an agent starts, reports its session,
 //! or ends is covered without a call at each place. It writes when an agent starts, when its session id is reported, and when it
@@ -117,8 +119,125 @@ struct State {
     /// The same for the last state: a state change can be recorded (by the supervision tick) before the control thread records the
     /// agent's `AgentStarted`, and an idle agent reports no further change, so a dropped one would leave `last_state` empty for good.
     early_states: BTreeMap<String, String>,
+    /// ADR-0093 (#932): what each adapter agent last reported of its session, as the node recorded it, in `kept-<id>.pb` beside the
+    /// ledger (not in it: a full set of config options is larger than the ledger may be). Filled as the node records, or from the file
+    /// when an agent is taken up from the holder.
+    kept: BTreeMap<String, KeptSession>,
     /// Something changed that is not on disk yet.
     dirty: bool,
+}
+
+/// ADR-0093 (#932): the last `AgentSessionOptions`, `AgentSessionConfig` and `AgentCommands` the node recorded for an adapter agent. The
+/// adapter of an agent the holder kept is not initialised again and does not report them again, so a node that takes it up shows them
+/// from here: its modes and settings, and whether one in use makes it act without asking.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct KeptSession {
+    pub options: Option<v1::AgentSessionOptions>,
+    pub config: Option<v1::AgentSessionConfig>,
+    pub commands: Option<v1::AgentCommands>,
+}
+
+impl KeptSession {
+    /// The events, in the order the node records them.
+    pub fn bodies(&self) -> Vec<Body> {
+        let mut out = Vec::new();
+        if let Some(o) = &self.options {
+            out.push(Body::AgentSessionOptions(o.clone()));
+        }
+        if let Some(c) = &self.config {
+            out.push(Body::AgentSessionConfig(c.clone()));
+        }
+        if let Some(c) = &self.commands {
+            out.push(Body::AgentCommands(c.clone()));
+        }
+        out
+    }
+
+    fn encode(&self) -> Vec<u8> {
+        use prost::Message;
+        let mut out = Vec::new();
+        for body in self.bodies() {
+            let ev = v1::Event {
+                body: Some(body),
+                ..Default::default()
+            };
+            out.extend(ev.encode_length_delimited_to_vec());
+        }
+        out
+    }
+
+    /// What `encode` wrote for `agent`; anything else in the file is left out.
+    fn decode(mut bytes: &[u8], agent: &str) -> Self {
+        use prost::Message;
+        let mut kept = Self::default();
+        while !bytes.is_empty() {
+            let Ok(ev) = v1::Event::decode_length_delimited(&mut bytes) else {
+                break;
+            };
+            match ev.body {
+                Some(Body::AgentSessionOptions(o)) if o.agent_id == agent => kept.options = Some(o),
+                Some(Body::AgentSessionConfig(c)) if c.agent_id == agent => kept.config = Some(c),
+                Some(Body::AgentCommands(c)) if c.agent_id == agent => kept.commands = Some(c),
+                _ => {}
+            }
+        }
+        kept
+    }
+}
+
+/// A kept session file larger than this is not read (the node's own caps keep one far smaller).
+const MAX_KEPT_BYTES: u64 = 8 << 20;
+
+/// The file a kept session of `agent` is written to, in the ledger's folder; `None` for an id that is not a plain node-made id.
+fn kept_file(dir: &Path, agent: &str) -> Option<PathBuf> {
+    (!agent.is_empty()
+        && agent.len() <= 64
+        && agent
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'))
+    .then(|| dir.join(format!("kept-{agent}.pb")))
+}
+
+/// What `body` changes in the kept sessions: the agent whose file must be written again (or removed), if any. A report may be recorded
+/// before its agent's `AgentStarted` (the supervision tick records it while the control thread is still recording the start), so it is
+/// kept without an entry, up to [`MAX_ENTRIES`] agents.
+fn keep(st: &mut State, body: &Body) -> Option<String> {
+    let room = |st: &State, id: &str| st.kept.contains_key(id) || st.kept.len() < MAX_ENTRIES;
+    match body {
+        Body::AgentSessionOptions(o) if room(st, &o.agent_id) => {
+            let k = st.kept.entry(o.agent_id.clone()).or_default();
+            (k.options.as_ref() != Some(o)).then(|| {
+                k.options = Some(o.clone());
+                o.agent_id.clone()
+            })
+        }
+        Body::AgentSessionConfig(c) if room(st, &c.agent_id) => {
+            let k = st.kept.entry(c.agent_id.clone()).or_default();
+            (k.config.as_ref() != Some(c)).then(|| {
+                k.config = Some(c.clone());
+                c.agent_id.clone()
+            })
+        }
+        Body::AgentCommands(c) if room(st, &c.agent_id) => {
+            let k = st.kept.entry(c.agent_id.clone()).or_default();
+            (k.commands.as_ref() != Some(c)).then(|| {
+                k.commands = Some(c.clone());
+                c.agent_id.clone()
+            })
+        }
+        // A new process of a known agent (a restart, a resume) reports its own. A first start keeps what was reported before it.
+        Body::AgentStarted(v1::AgentStarted { agent_id, .. })
+            if st.entries.contains_key(agent_id) =>
+        {
+            st.kept.remove(agent_id).map(|_| agent_id.clone())
+        }
+        // An agent that ended or was interrupted has none to keep.
+        Body::AgentExited(v1::AgentExited { agent_id, .. })
+        | Body::AgentInterrupted(v1::AgentInterrupted { agent_id, .. }) => {
+            st.kept.remove(agent_id).map(|_| agent_id.clone())
+        }
+        _ => None,
+    }
 }
 
 /// See the module documentation. Every method takes the ledger's own lock alone and never another one while holding it.
@@ -587,16 +706,97 @@ impl Ledger {
     /// Learns from one event the node records. Writes the file when an agent started, reported its session, or ended; a failed
     /// write is retried with the next one (a full disk must never stop agents).
     pub fn observe(&self, body: &Body, now_ms: u64) {
-        let write = {
+        let (write, kept) = {
             let mut st = self.st();
+            let kept = keep(&mut st, body);
             let write = apply(&mut st, body, now_ms);
             if write {
                 prune(&mut st, now_ms);
             }
-            write
+            (write, kept)
         };
         if write {
             let _ = self.flush();
+        }
+        if let Some(agent) = kept {
+            self.write_kept(&agent);
+        }
+    }
+
+    /// Writes `agent`'s kept session file from what the ledger holds now, or removes it when there is none. Under the write lock, so the
+    /// newest is the one left on disk. A failed write is not retried: the next change writes it again.
+    fn write_kept(&self, agent: &str) {
+        let _writing = self.write.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(file) = self
+            .path
+            .as_ref()
+            .and_then(|p| p.parent())
+            .and_then(|d| kept_file(d, agent))
+        else {
+            return;
+        };
+        let bytes = self.st().kept.get(agent).map(KeptSession::encode);
+        match bytes {
+            Some(b) => {
+                let _ = agora_platform::write_private(&file, &b);
+            }
+            None => {
+                let _ = std::fs::remove_file(&file);
+            }
+        }
+    }
+
+    /// ADR-0093 (#932): what `agent` last reported of its session, as the last node recorded it (read from its file the first time),
+    /// for a node that takes the agent up from the holder.
+    pub fn kept_session(&self, agent: &str) -> KeptSession {
+        if let Some(k) = self.st().kept.get(agent) {
+            return k.clone();
+        }
+        let file = self
+            .path
+            .as_ref()
+            .and_then(|p| p.parent())
+            .and_then(|d| kept_file(d, agent));
+        let Some(file) = file else {
+            return KeptSession::default();
+        };
+        let read = std::fs::metadata(&file)
+            .ok()
+            .filter(|m| m.len() <= MAX_KEPT_BYTES)
+            .and_then(|_| std::fs::read(&file).ok());
+        let kept = read.map_or_else(KeptSession::default, |b| KeptSession::decode(&b, agent));
+        if kept != KeptSession::default() {
+            self.st()
+                .kept
+                .entry(agent.to_string())
+                .or_insert_with(|| kept.clone());
+        }
+        kept
+    }
+
+    /// Removes every kept session file but those of `keep` (the agents just taken up from the holder): an agent that is not running in
+    /// the holder any more has no session to show again.
+    pub fn forget_kept_except(&self, keep: &[&str]) {
+        let Some(dir) = self.path.as_ref().and_then(|p| p.parent()) else {
+            return;
+        };
+        let _writing = self.write.lock().unwrap_or_else(|e| e.into_inner());
+        let Ok(list) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for f in list.flatten() {
+            let name = f.file_name();
+            let Some(agent) = name
+                .to_str()
+                .and_then(|n| n.strip_prefix("kept-"))
+                .and_then(|n| n.strip_suffix(".pb"))
+            else {
+                continue;
+            };
+            if !keep.contains(&agent) {
+                let _ = std::fs::remove_file(f.path());
+                self.st().kept.remove(agent);
+            }
         }
     }
 
@@ -893,6 +1093,46 @@ mod tests {
         assert_eq!(e.launch_options, vec!["skip".to_string()]);
         again.observe(&started("agent-1", "/wt/a", ""), 4);
         assert!(!again.get("agent-1").unwrap().skips_permissions);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #932: what an adapter agent last reported of its session is written beside the ledger (also when it came before the agent's
+    /// start), read back by a later node, replaced by a newer report, and removed when the agent ends or is not taken up.
+    #[test]
+    fn a_kept_session_is_written_read_back_and_removed() {
+        let dir = temp("kept");
+        let l = Ledger::open(&dir, 1).unwrap();
+        let options = |mode: &str| {
+            Body::AgentSessionOptions(v1::AgentSessionOptions {
+                agent_id: "agent-1".into(),
+                current_mode: mode.into(),
+                ..Default::default()
+            })
+        };
+        l.observe(&options("plan"), 2);
+        l.observe(&started("agent-1", "/wt/a", ""), 3);
+        l.observe(&options("bypassPermissions"), 4);
+        let file = dir.join(LEDGER_DIR).join("kept-agent-1.pb");
+        assert!(file.is_file());
+        let again = Ledger::open(&dir, 5).unwrap();
+        let kept = again.kept_session("agent-1");
+        assert_eq!(kept.options.unwrap().current_mode, "bypassPermissions");
+        assert!(kept.config.is_none());
+        again.forget_kept_except(&["agent-1"]);
+        assert!(file.is_file());
+        again.observe(
+            &Body::AgentExited(v1::AgentExited {
+                agent_id: "agent-1".into(),
+                exit_code: 0,
+            }),
+            6,
+        );
+        assert!(!file.exists(), "an ended agent kept its session");
+        assert_eq!(again.kept_session("agent-1"), KeptSession::default());
+        again.observe(&options("plan"), 7);
+        assert!(file.is_file());
+        again.forget_kept_except(&[]);
+        assert!(!file.exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
