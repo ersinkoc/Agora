@@ -139,9 +139,9 @@ command writes.
 
 | ACP (agent → client) | Adapter protocol (bridge → node) |
 | --- | --- |
-| `session/update` `agent_message_chunk` | `chat/append` text, chunks joined for up to 150 ms (or 4 KiB). An explicit stop or the end of the node's request stream flushes buffered text while the reply stream remains open |
-| `session/update` `tool_call` (title, `rawInput`) | `chat/append` tool call; a `diff` in its content (or in `tool_call_update`) becomes a diff item (old and new text shown as a whole-file replacement) |
-| `session/update` `plan` | `chat/append` plan, one step per entry; with `chat.rich` also `entries` (`text`, `status`, `priority`) |
+| `session/update` `agent_message_chunk` | `chat/append` text, chunks joined for up to 150 ms (or 4 KiB; a chunk that would take the joined text past 4 KiB first sends what is buffered). An explicit stop or the end of the node's request stream flushes buffered text while the reply stream remains open |
+| `session/update` `tool_call` (title, `rawInput`) | `chat/append` tool call; a `diff` in its content (or in `tool_call_update`) becomes a diff item (old and new text shown as a whole-file replacement); the tool's arguments and the diff are each cut to 64 KiB (head and tail kept), so an item never grows past the 4 MiB line limit on its way to the node |
+| `session/update` `plan` | `chat/append` plan, one step per entry; with `chat.rich` also `entries` (`text`, `status`, `priority`), at most 256 entries with text cut at 4 KiB and status and priority at 40 bytes |
 | `session/update` `agent_thought_chunk` | With `chat.rich`: `chat/append` `thought`, chunks joined like a message (150 ms, 4 KiB; a message and a thought never share an item); thinking does not count as the agent saying something (a turn of only thinking is still an empty turn). Otherwise dropped |
 | `session/update` `tool_call` and `tool_call_update` with `toolCallId` | With `chat.rich`: `chat/append` tool call with `callId`, `kind`, `status`, `locations` (at most 64) and `output`: the text blocks of `content`, or else `rawOutput`, cut to 64 KiB (head and tail kept) and with anything that looks like a secret replaced (the same removal as for a stderr tail); only the fields the update carries are sent. A `diff` in `content` still becomes a diff item. Without `chat.rich`, or without an id, as before |
 | `session/update` `available_commands_update` | With `chat.rich`: `session/commands` (at most 100) |

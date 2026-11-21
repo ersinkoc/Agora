@@ -48,7 +48,7 @@ const AGENT_WRITE_QUEUE: usize = 64;
 const AGENT_WRITE_BYTES: usize = 8 * 1024 * 1024;
 /// How long agent text chunks are joined into one chat item.
 const JOIN: Duration = Duration::from_millis(150);
-/// The most text one joined item holds before it is sent anyway.
+/// The most text one joined item holds: a chunk that would take it past this is sent in an item of its own (Audit F54).
 const JOIN_MAX: usize = 4096;
 const MAX_DETAIL: usize = 300;
 /// The bytes of the agent's stderr kept for an exit report, and the most of them a report carries (after secrets are removed).
@@ -364,6 +364,13 @@ const COMMANDS_MAX: usize = 100;
 const LOCATIONS_MAX: usize = 64;
 /// ADR-0090: a tool's output is cut here (head and tail kept) before secrets are removed; the node cuts it to its own cap after.
 const OUTPUT_MAX: usize = 64 * 1024;
+/// Audit F54: a tool call's arguments and a diff are cut here (head and tail kept), and a rich plan to this many entries of this much
+/// text (each is sent twice, as a step and as an entry), so a line from the agent that fits `MAX_LINE` cannot grow past it on its
+/// way to the node, whose host drops such a line whole. The node keeps less of each (16 KiB, 64 entries of 512 bytes).
+const ARGUMENTS_MAX: usize = 64 * 1024;
+const DIFF_MAX: usize = 64 * 1024;
+const PLAN_ENTRIES_MAX: usize = 256;
+const PLAN_TEXT_MAX: usize = 4096;
 
 /// `s` as is when it fits `max` bytes, otherwise its first and last `max / 2` bytes (cut on character boundaries).
 fn head_tail(s: &str, max: usize) -> String {
@@ -1631,7 +1638,11 @@ impl<W: Write> Bridge<W> {
             "agent_message_chunk" => {
                 if let Some(t) = u.pointer("/content/text").and_then(Value::as_str) {
                     let sid = replay_id.or(self.session.as_deref()).unwrap_or_default();
-                    if !self.text.is_empty() && (self.rich.thought || self.text_session != sid) {
+                    if !self.text.is_empty()
+                        && (self.rich.thought
+                            || self.text_session != sid
+                            || self.text.len() + t.len() > JOIN_MAX)
+                    {
                         self.flush_text()?;
                     }
                     if self.text.is_empty() {
@@ -1654,7 +1665,11 @@ impl<W: Write> Bridge<W> {
                         .unwrap_or_default()
                         .to_string();
                     // A thought and a message are different entries: whichever the buffer holds goes first.
-                    if !self.text.is_empty() && (!self.rich.thought || self.text_session != sid) {
+                    if !self.text.is_empty()
+                        && (!self.rich.thought
+                            || self.text_session != sid
+                            || self.text.len() + t.len() > JOIN_MAX)
+                    {
                         self.flush_text()?;
                     }
                     if self.text.is_empty() {
@@ -1710,7 +1725,10 @@ impl<W: Write> Bridge<W> {
                     .and_then(Value::as_str)
                     .or_else(|| u.get("kind").and_then(Value::as_str))
                     .unwrap_or("tool");
-                let args = u.get("rawInput").map(Value::to_string).unwrap_or_default();
+                let args = u
+                    .get("rawInput")
+                    .map(|v| head_tail(&v.to_string(), ARGUMENTS_MAX))
+                    .unwrap_or_default();
                 self.chat(
                     json!({"toolCall": {"tool": title, "argumentsJson": args}}),
                     replay_id,
@@ -1720,14 +1738,23 @@ impl<W: Write> Bridge<W> {
             "tool_call_update" => self.diffs_in(u, replay_id)?,
             "plan" => {
                 self.flush_text()?;
+                // A rich node reads only the entries; a plain one gets the steps as they came (they cannot outgrow the line).
+                let (most, text_max) = if self.rich.on {
+                    (PLAN_ENTRIES_MAX, PLAN_TEXT_MAX)
+                } else {
+                    (usize::MAX, usize::MAX)
+                };
                 let steps: Vec<String> = u
                     .get("entries")
                     .and_then(Value::as_array)
                     .map(|a| {
                         a.iter()
                             .filter_map(|e| {
-                                e.get("content").and_then(Value::as_str).map(str::to_string)
+                                e.get("content")
+                                    .and_then(Value::as_str)
+                                    .map(|c| head_tail(c, text_max))
                             })
+                            .take(most)
                             .collect()
                     })
                     .unwrap_or_default();
@@ -1740,10 +1767,11 @@ impl<W: Write> Bridge<W> {
                         .map(|a| a
                             .iter()
                             .filter_map(|e| {
-                                Some(json!({"text": e.get("content")?.as_str()?,
-                                            "status": e.get("status").and_then(Value::as_str).unwrap_or(""),
-                                            "priority": e.get("priority").and_then(Value::as_str).unwrap_or("")}))
+                                Some(json!({"text": head_tail(e.get("content")?.as_str()?, PLAN_TEXT_MAX),
+                                            "status": clip(e.get("status").and_then(Value::as_str).unwrap_or(""), 40),
+                                            "priority": clip(e.get("priority").and_then(Value::as_str).unwrap_or(""), 40)}))
                             })
+                            .take(PLAN_ENTRIES_MAX)
                             .collect::<Vec<_>>())
                         .unwrap_or_default());
                 }
@@ -1791,7 +1819,7 @@ impl<W: Write> Bridge<W> {
             t["tool"] = json!(title);
         }
         if let Some(raw) = u.get("rawInput").filter(|v| !v.is_null()) {
-            t["argumentsJson"] = json!(raw.to_string());
+            t["argumentsJson"] = json!(head_tail(&raw.to_string(), ARGUMENTS_MAX));
         } else if create {
             t["argumentsJson"] = json!("");
         }
@@ -1879,7 +1907,7 @@ impl<W: Write> Bridge<W> {
             let old = c.get("oldText").and_then(Value::as_str);
             self.flush_text()?;
             self.chat(
-                json!({"diff": {"path": path, "unifiedDiff": replace_diff(path, old, new)}}),
+                json!({"diff": {"path": path, "unifiedDiff": head_tail(&replace_diff(path, old, new), DIFF_MAX)}}),
                 replay_id,
             )?;
         }
@@ -2818,6 +2846,57 @@ mod tests {
     fn long_details_are_cut_on_a_character_boundary() {
         let s = short(&json!({"x": "é".repeat(400)}));
         assert!(s.ends_with('…') && s.len() <= MAX_DETAIL + 4);
+    }
+
+    /// Audit F54: an agent line that fits `MAX_LINE` never becomes a longer line to the node (whose host drops it whole): arguments
+    /// escaped twice, a replacement diff, a rich plan sent twice and a chunk joined to buffered text all stay within it.
+    #[test]
+    fn an_agent_line_within_the_limit_stays_within_it_on_its_way_to_the_node(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let update = |u: Value| json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "s", "update": u}});
+        let cases = [
+            vec![update(
+                json!({"sessionUpdate": "tool_call", "toolCallId": "c1", "title": "Write",
+                       "rawInput": {"content": "\"".repeat(1_900_000)}}),
+            )],
+            vec![update(
+                json!({"sessionUpdate": "tool_call", "toolCallId": "c1", "title": "Write",
+                       "content": [{"type": "diff", "path": "f", "oldText": "a\n".repeat(650_000), "newText": "b\n".repeat(650_000)}]}),
+            )],
+            vec![update(json!({"sessionUpdate": "plan",
+                "entries": (0..270_000).map(|_| json!({"content": ""})).collect::<Vec<_>>()}))],
+            vec![
+                update(
+                    json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "x".repeat(4000)}}),
+                ),
+                update(
+                    json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "y".repeat(MAX_LINE - 300)}}),
+                ),
+            ],
+        ];
+        for rich in [false, true] {
+            for lines in &cases {
+                let mut b = bridge_in_session()?;
+                b.rich.on = rich;
+                for line in lines {
+                    assert!(line.to_string().len() <= MAX_LINE);
+                    b.handle_agent(line)?;
+                }
+                b.flush_text()?;
+                let sent: Vec<&[u8]> = b
+                    .out
+                    .split(|c| *c == b'\n')
+                    .filter(|l| !l.is_empty())
+                    .collect();
+                assert!(!sent.is_empty());
+                assert!(
+                    sent.iter().all(|l| l.len() <= MAX_LINE),
+                    "rich={rich}: {:?}",
+                    sent.iter().map(|l| l.len()).collect::<Vec<_>>()
+                );
+            }
+        }
+        Ok(())
     }
 
     /// A bridge with an open session and no turn, whose agent input goes nowhere (what it is sent is read from its state).
