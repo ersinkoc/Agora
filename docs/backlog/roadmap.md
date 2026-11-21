@@ -58,6 +58,8 @@ fixes it.
 
 - [ ] **M1.1 Real-machine checklist**
   - [ ] one checklist line per capability in `docs/capabilities.md` (what to do, what to see), in `docs/reviews/real-machine-checklist.md`
+    - the checklist exists: [`docs/reviews/real-machine-checklist.md`](../reviews/real-machine-checklist.md) (RM-01 to RM-60, one per
+      row, a first draft from the docs and the code); its first run on each system is the next subtask
   - [ ] run it on Linux (blackview), then **mac** and **win** through comms; each run is a dated note in `docs/reviews/`
   - [ ] the "Real machines" column cites the note; each failure becomes an issue and a fix PR
 - [ ] **M1.2 Real agents** (**human**)
