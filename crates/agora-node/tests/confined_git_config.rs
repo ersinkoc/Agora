@@ -5,7 +5,6 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
-#[cfg(unix)]
 use std::time::{Duration, Instant};
 
 #[cfg(unix)]
@@ -53,7 +52,7 @@ fn two_confined_nodes_keep_generated_git_config_in_their_own_roots() {
             if ls "$folder" >/dev/null 2>&1; then echo LIST_FOLDER; fi
             if (echo changed >> "$GIT_CONFIG_GLOBAL") 2>/dev/null; then echo WRITE_FILE; fi
             if touch "$folder/another" 2>/dev/null; then echo WRITE_FOLDER; fi
-            if rm "$GIT_CONFIG_GLOBAL" 2>/dev/null; then echo REMOVE_FILE; fi
+            if rm -f "$GIT_CONFIG_GLOBAL" 2>/dev/null; then echo REMOVE_FILE; fi
             echo done
         } > observed
     "#;
@@ -151,6 +150,94 @@ fn two_confined_nodes_keep_generated_git_config_in_their_own_roots() {
     drop(node_two);
     drop(node_one);
     let _ = std::fs::remove_dir_all(base);
+}
+
+#[cfg(windows)]
+#[test]
+fn generated_git_config_grants_access_to_one_file() {
+    let _serial = serial();
+    home();
+    std::env::set_var("AGORA_WINDOWS_CONFINEMENT", "1");
+    assert!(agora_platform::sandbox_supported());
+
+    let root = std::env::temp_dir().join(format!("gitcfg-{}-acl", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let work = root.join("work");
+    let data = root.join("data");
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::create_dir_all(&data).unwrap();
+    let mut profile = Sandbox::new(vec![], vec![work.clone()]);
+    let policy = SandboxPolicy {
+        level: Level::Worktree,
+        data_dir: Some(data.clone()),
+        ..Default::default()
+    };
+    let file = policy.git_config(&profile).unwrap();
+    let text = std::fs::read_to_string(&file).unwrap();
+    let config = agora_platform::canonicalize_plain(&gitconfig::directory(&data)).unwrap();
+    std::fs::write(config.join("sibling"), "private").unwrap();
+    let expected = config.join(file.file_name().unwrap());
+    let acl = || {
+        let result = Command::new("icacls").arg(&expected).output().unwrap();
+        assert!(result.status.success(), "{result:?}");
+        result.stdout
+    };
+    let before = acl();
+    profile.git_config = Some(file.clone());
+    let script = work.join("run.cmd");
+    std::fs::write(
+        &script,
+        format!(
+            "@echo off\r\n\
+             echo GCG=\"%GIT_CONFIG_GLOBAL%\"\r\n\
+             git config --global --get user.name && echo GIT-OK|| echo GIT-FAILED\r\n\
+             more < \"%GIT_CONFIG_GLOBAL%\" && echo FILE-OK|| echo FILE-FAILED\r\n\
+             more < \"{dir}\\sibling\" >nul 2>&1 && echo SIBLING-READ|| echo SIBLING-REFUSED\r\n\
+             dir /b \"{dir}\\\" >nul 2>&1 && echo LISTED|| echo LIST-REFUSED\r\n\
+             echo change>> \"%GIT_CONFIG_GLOBAL%\" && echo WRITTEN|| echo WRITE-REFUSED\r\n",
+            dir = config.display(),
+        ),
+    )
+    .unwrap();
+
+    let mut cfg = agora_platform::PtyConfig::new(vec![
+        "cmd.exe".into(),
+        "/c".into(),
+        script.to_str().unwrap().into(),
+    ]);
+    cfg.cwd = Some(work);
+    cfg.sandbox = Some(profile);
+    let pty = agora_platform::spawn(&cfg).unwrap();
+    let mut bytes = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        match pty.output().recv_timeout(Duration::from_millis(100)) {
+            Ok(chunk) => bytes.extend(chunk),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+        }
+    }
+    drop(pty);
+
+    let out = String::from_utf8_lossy(&bytes);
+    assert!(
+        out.contains(&format!("GCG=\"{}\"", expected.display())),
+        "{out}"
+    );
+    for marker in [
+        "Ada Example",
+        "GIT-OK",
+        "FILE-OK",
+        "SIBLING-REFUSED",
+        "LIST-REFUSED",
+        "WRITE-REFUSED",
+    ] {
+        assert!(out.contains(marker), "{marker} missing: {out}");
+    }
+    println!("{out}");
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), text);
+    assert_eq!(acl(), before);
+    let _ = std::fs::remove_dir_all(root);
 }
 
 /// The tests share one `HOME` and one of them rewrites its file, so they run one at a time.

@@ -1298,7 +1298,18 @@ impl Sandbox {
         {
             macos::git_config_path(path)
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(windows)]
+        {
+            // Git for Windows ignores verbatim paths in GIT_CONFIG_GLOBAL. If the same
+            // file has no ordinary spelling, the generated configuration is optional.
+            let plain = canonicalize_plain(path).ok()?;
+            if matches!(plain.components().next(), Some(std::path::Component::Prefix(p)) if p.kind().is_verbatim())
+            {
+                return None;
+            }
+            Some(plain)
+        }
+        #[cfg(not(any(target_os = "macos", windows)))]
         {
             Some(path.to_path_buf())
         }
@@ -1485,8 +1496,12 @@ pub fn recover_sandbox_leftovers() {
 }
 
 /// Confines `cmd` (and what it starts) the same way [`PtyConfig::sandbox`] does a PTY process. Fails with `Unsupported` where that
-/// cannot be enforced, so the caller never runs the command unconfined by accident.
-pub fn confine_command(cmd: &mut std::process::Command, sandbox: &Sandbox) -> io::Result<()> {
+/// cannot be enforced, so the caller never runs the command unconfined by accident. Returns the
+/// generated Git file if the confinement grants read access to it.
+pub fn confine_command(
+    cmd: &mut std::process::Command,
+    sandbox: &Sandbox,
+) -> io::Result<Option<PathBuf>> {
     if !enforceable(sandbox) {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
@@ -1496,16 +1511,17 @@ pub fn confine_command(cmd: &mut std::process::Command, sandbox: &Sandbox) -> io
     #[cfg(target_os = "linux")]
     {
         use std::os::unix::process::CommandExt;
-        let ruleset = linux::ruleset(sandbox, None, None)?;
+        let mut ruleset = linux::ruleset(sandbox, None, None)?;
+        let git_config = ruleset.git_config.take();
         // SAFETY: the closure only applies a ruleset made before the fork (async-signal-safe calls).
         unsafe { cmd.pre_exec(move || ruleset.enforce()) };
-        Ok(())
+        Ok(git_config)
     }
     #[cfg(target_os = "macos")]
     {
         // The command becomes `sandbox-exec -p <profile> -- <program> <args>`. Environment and folder carry over; standard streams do
         // not (std cannot read them back), so callers confine first and set the streams after.
-        let (program, args) = {
+        let (program, args, git_config) = {
             let a: Vec<_> = cmd.get_args().map(ToOwned::to_owned).collect();
             macos::wrap(sandbox, cmd.get_program(), &a)?
         };
@@ -1521,7 +1537,7 @@ pub fn confine_command(cmd: &mut std::process::Command, sandbox: &Sandbox) -> io
             };
         }
         *cmd = wrapped;
-        Ok(())
+        Ok(git_config)
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {

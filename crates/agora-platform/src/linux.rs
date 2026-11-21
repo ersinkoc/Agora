@@ -129,7 +129,10 @@ pub(crate) fn scopes_abstract_sockets() -> bool {
 }
 
 /// A ruleset made before the fork, so the child only has to apply it (two async-signal-safe calls).
-pub(crate) struct Ruleset(std::os::fd::OwnedFd);
+pub(crate) struct Ruleset {
+    fd: std::os::fd::OwnedFd,
+    pub(crate) git_config: Option<PathBuf>,
+}
 
 /// `folder`: the folder a start holds (F1012). Entries at or below its path are opened through the held folder, never by the path, so
 /// they name the folder the process starts in even when the path led elsewhere for a moment while the rules were made (F1022).
@@ -182,12 +185,14 @@ pub(crate) fn ruleset(
     // SAFETY: the kernel returned a fresh descriptor that nothing else owns.
     let set = unsafe { OwnedFd::from_raw_fd(fd as i32) };
     let git_config = sb.git_config_file();
+    let mut granted_git_config = None;
     for (paths, rights) in [
         (sb.read.as_slice(), READ_FS),
         (sb.write.as_slice(), all),
         (git_config.as_slice(), READ_FILE_FS),
     ] {
         for p in paths {
+            let file_only = rights == READ_FILE_FS;
             let below = folder.and_then(|h| {
                 // The most specific spelling: one that lies inside the held folder (a link there) is resolved by the hold, never
                 // opened again below the folder.
@@ -199,7 +204,7 @@ pub(crate) fn ruleset(
                 Some((h, rel))
             });
             let opened = match below {
-                _ if rights == READ_FILE_FS => {
+                _ if file_only => {
                     use std::os::unix::fs::OpenOptionsExt;
                     std::fs::OpenOptions::new()
                         .read(true)
@@ -213,9 +218,16 @@ pub(crate) fn ruleset(
             let Ok(f) = opened else {
                 continue;
             };
-            let metadata = f.metadata()?;
-            if rights == READ_FILE_FS && !metadata.is_file() {
-                continue;
+            let metadata = match f.metadata() {
+                Ok(m) => m,
+                Err(_) if file_only => continue,
+                Err(e) => return Err(e),
+            };
+            if file_only {
+                use std::os::unix::fs::MetadataExt;
+                if !metadata.is_file() || metadata.nlink() != 1 {
+                    continue;
+                }
             }
             let rights = if metadata.is_dir() {
                 rights
@@ -237,11 +249,20 @@ pub(crate) fn ruleset(
                 )
             };
             if r < 0 {
+                if file_only {
+                    continue;
+                }
                 return Err(io::Error::last_os_error());
+            }
+            if file_only {
+                granted_git_config = Some(p.clone());
             }
         }
     }
-    Ok(Ruleset(set))
+    Ok(Ruleset {
+        fd: set,
+        git_config: granted_git_config,
+    })
 }
 
 /// F1022: `rel` (empty: the folder itself) opened from the held folder's handle, as a place only (`O_PATH`, which Landlock takes and
@@ -291,7 +312,7 @@ impl Ruleset {
             }
             if libc::syscall(
                 SYS_LANDLOCK_RESTRICT_SELF,
-                self.0.as_raw_fd(),
+                self.fd.as_raw_fd(),
                 0 as libc::c_uint,
             ) != 0
             {

@@ -4082,12 +4082,6 @@ fn launch_adapter(
     if let Some(profile) = &mut sandbox {
         own_socket(profile, mesh.map(|m| m.socket.as_path()));
     }
-    if let Some(file) = sandbox
-        .as_ref()
-        .and_then(agora_platform::Sandbox::git_config_file)
-    {
-        env.extend(agora_platform::git_config_env(&file));
-    }
     // A confined adapter works in its own private temporary folder, as a confined terminal agent does.
     if sandbox.is_some() && agora_platform::PRIVATE_TEMP {
         let temp = crate::sandbox::agent_temp(worktree).display().to_string();

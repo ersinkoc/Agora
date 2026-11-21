@@ -598,59 +598,6 @@ fn git(dir: &Path, args: &[&str]) {
     );
 }
 
-#[test]
-fn generated_git_config_grants_access_to_one_file() {
-    enable();
-    let root = scratch("git-config");
-    let work = root.join("work");
-    let config = root.join("data").join("git-config");
-    std::fs::create_dir_all(&work).unwrap();
-    agora_platform::ensure_private_dir(&config).unwrap();
-    let file = config.join("generated");
-    let text = "[user]\r\nname = Ada Example\r\n";
-    std::fs::write(&file, text).unwrap();
-    std::fs::write(config.join("sibling"), "private").unwrap();
-    let before = acl_text(&file);
-    let script = work.join("run.cmd");
-    std::fs::write(
-        &script,
-        format!(
-            "@echo off\r\n\
-             git config --global --get user.name && echo GIT-OK|| echo GIT-FAILED\r\n\
-             type \"%GIT_CONFIG_GLOBAL%\" && echo FILE-OK|| echo FILE-FAILED\r\n\
-             type \"{dir}\\sibling\" >nul 2>&1 && echo SIBLING-READ|| echo SIBLING-REFUSED\r\n\
-             dir /b \"{dir}\\\" >nul 2>&1 && echo LISTED|| echo LIST-REFUSED\r\n\
-             echo change>> \"%GIT_CONFIG_GLOBAL%\" && echo WRITTEN|| echo WRITE-REFUSED\r\n",
-            dir = config.display(),
-        ),
-    )
-    .unwrap();
-    let out = run(
-        Sandbox {
-            write: vec![work.clone()],
-            // The node resolves its effective data directory before writing the file.
-            git_config: Some(file.canonicalize().unwrap()),
-            ..Default::default()
-        },
-        &work,
-        &script,
-    );
-    for marker in [
-        "Ada Example",
-        "GIT-OK",
-        "FILE-OK",
-        "SIBLING-REFUSED",
-        "LIST-REFUSED",
-        "WRITE-REFUSED",
-    ] {
-        assert!(out.contains(marker), "{marker} missing: {out}");
-    }
-    let file = config.join("generated");
-    assert_eq!(std::fs::read_to_string(&file).unwrap(), text);
-    assert_eq!(acl_text(&file), before);
-    let _ = std::fs::remove_dir_all(root);
-}
-
 /// LAN L10: a confined agent commits in its worktree when the checkout lives under the user profile (here `%TEMP%`), with the
 /// node's narrow Windows profile: the worktree, a private temp folder, its own admin folder, the shared `objects/`, `refs/` and
 /// `logs/refs/` to write, and the shared Git folder to read (`agora-node/src/sandbox.rs`, `narrow_profile`). The profile is written
