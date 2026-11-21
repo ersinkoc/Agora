@@ -336,7 +336,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
         {a.terminal !== false && <LiveSummary agent={a} now={now} onChanges={() => { setRailTab('changes'); setShowDetails(true); }} />}
         <div className="pane min-h-0 flex-1 p-1.5">
         {a.terminal === false ? <PromptBox key={a.id} agent={a} send={sendPrompt} source={chatOf?.(a)} choose={chooseOption} onReview={loadDiff ? () => setReviewing(a.id) : undefined} approvals={pinnedAsks(a.id)} /> : (
-          <Suspense fallback={<div className="terminal" aria-busy="true" />}>
+          <Suspense fallback={<div className="terminal-host" aria-busy="true" />}>
             <TerminalView source={terminalFor(a.id)} label={`${t('focus-terminal')} · ${a.name}`} />
           </Suspense>
         )}

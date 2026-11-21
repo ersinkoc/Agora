@@ -239,18 +239,23 @@
   .gallery__row { @apply flex flex-wrap items-center gap-4; }
   .theme-panel { @apply grid gap-4 rounded-l border border-line bg-surface-0 p-4 text-ink; }
 
-  .pane .terminal { border: 0; }
-  /* Its size never depends on the terminal inside: the terminal is shown at the node's size, which may be smaller (a smaller
+  .pane .terminal-host { border: 0; }
+  /* The element the terminal is mounted in. Never `.terminal`: xterm.js gives its own element that class, and this rule then
+     padded both; the fit (xterm's FitAddon: this element's height less the padding of xterm's element) counted one padding only,
+     so the screen stuck out of xterm's box and a click on the lowest pixels of the bottom row hit this element and never reached
+     the program. The padding is on xterm's element, where the fit looks for it.
+     Its size never depends on the terminal inside: the terminal is shown at the node's size, which may be smaller (a smaller
      window watches it too) or, set from elsewhere, bigger; what fits this element is what the window reports (sizing.ts). */
-  .terminal { @apply h-full min-h-0 overflow-hidden rounded-m bg-surface-0 p-2; contain: strict; }
+  .terminal-host { @apply h-full min-h-0 overflow-hidden rounded-m bg-surface-0; contain: strict; }
+  .terminal-host > .xterm { @apply p-2; }
   /* Smaller than this window: it sits at the top left, and a hairline marks where it ends. */
-  .terminal[data-smaller] .xterm-screen { box-shadow: 1px 1px 0 0 var(--border); }
-  .page .terminal { height: clamp(320px, 65vh, 720px); @apply border border-line; }
+  .terminal-host[data-smaller] .xterm-screen { box-shadow: 1px 1px 0 0 var(--border); }
+  .page .terminal-host { height: clamp(320px, 65vh, 720px); @apply border border-line; }
   /* The terminal's frame carries what floats over it: find, a clipboard offer, "jump to latest". */
   .terminal-frame { @apply relative h-full min-h-0; }
   /* A finger dragging over the screen scrolls the history (renderer.ts); the browser must not take the drag for a page scroll. */
-  .terminal .xterm-screen { touch-action: none; }
-  .terminal[data-bell] { box-shadow: inset 0 0 0 2px var(--state-needs-you); }
+  .terminal-host .xterm-screen { touch-action: none; }
+  .terminal-host[data-bell] { box-shadow: inset 0 0 0 2px var(--state-needs-you); }
   .terminal-find { @apply absolute end-3 top-3 z-10 flex items-center gap-1 rounded-m border border-line bg-surface-1 px-2 py-1 text-ink; box-shadow: var(--shadow); }
   .terminal-find__input { @apply w-48 rounded-xs border border-line bg-surface-0 px-2 py-1 text-sm text-ink; }
   .terminal-float { @apply pointer-events-none absolute inset-x-3 bottom-3 z-10 flex flex-col items-end gap-2; }
