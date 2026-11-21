@@ -504,7 +504,7 @@ not built: nothing to check.
 not built: nothing to check.
 
 ### RM-49 A project's kanban board; a task dispatched to an agent
-- **OS:** Linux, macOS, Windows (the window; the terminal client's dispatch is not built).
+- **OS:** Linux, macOS, Windows (the window and the terminal client).
 - **Do:** S2 plus a probe terminal agent `rm-paste`. The probe used on WHITE on 2026-11-21 is not in the repository, so write one that
   does this (unverified, on every system): put its terminal in raw mode (no echo, no line editing, so every byte is seen as it
   arrives); turn bracketed paste on (DECSET 2004, `ESC [ ? 2004 h`); print a working line that the manifest's `working` rule matches
@@ -514,12 +514,16 @@ not built: nothing to check.
   Start `rm-paste` and `rm-acp` in `$RM/proj`. To `rm-acp` send `mcp task_create {"title":"RM task 1"}`, then `RM task 2` and `RM task
   3`. Within 5 s of `rm-paste`'s start: Open board (N) > the "RM task 1" card in Backlog > Give to an agent > `rm-paste` > Give the
   task. Give "RM task 2" to `rm-acp`. On "RM task 3": Give to an agent > Start a new agent for this task. Then start `rm-nopaste` and
-  give it a task.
+  give it a task. In the terminal client (`agora tui`), create "RM task 4" the same way, select an agent of the project, press `b`,
+  select "RM task 4", press `g`, choose `rm-acp`, hold Enter for a second, then press `g` once; resize the terminal to 80x6 and try
+  again on "RM task 5" (unverified: the labels are the terminal client's own text from `tui.ftl`).
 - **See:** "Give this task to <agent>?" names Task, Agent, Kind, Machine and Project; the answer is "Sent to <agent>. It waits until
   the agent's current turn ends."; the probe's log has no byte before its idle line, then one bracketed paste (`ESC [ 200 ~` … `ESC
   [ 201 ~`) and an Enter (`\r`) shortly after; the card moves to Doing with "Agent: <agent>"; Start a new agent for this task opens
   the start window and then the same confirmation for the new agent; `rm-nopaste` gets "This agent's terminal program cannot take a
-  pasted task. Choose another agent, or type the task into it yourself."
+  pasted task. Choose another agent, or type the task into it yourself."; in the terminal client the board shows Backlog, Doing and
+  Done, held Enter gives nothing, the single `g` gives "RM task 4" (it moves to Doing), and at 80x6 the confirmation says the terminal
+  is too small and `g` gives nothing.
 - **Evidence so far:** [Windows 11 2026-11-21](2026-11-21-windows-dispatch-conpty.md): through ConPTY, given at about 5.5 s while
   working, no byte before idle at 20.0 s, one 768-byte bracketed paste 1.9 s after idle, Enter about 120 ms later; the refusal path
   and real agents not tested.
