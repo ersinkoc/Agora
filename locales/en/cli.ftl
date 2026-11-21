@@ -42,6 +42,7 @@ cli-usage =
       agora tui [--hub HOST:PORT --ca FILE --code CODE] [--hub-dir DIR]
       agora update [--check] [--version X] [--release-url URL] [--release-key FILE] [--unsigned]
       agora adapter install NAME [--registry URL] [--root-key FILE] [--yes] | update [NAME] | list | remove NAME
+      agora agent install NAME --list FILE [--root-key HEX|FILE] [--go-back]
       agora doctor [--data DIR] [--manifests DIR] [--socket PATH]
 cli-node-listening = Node is running. Control socket: { $socket }
 cli-node-events-set-aside = Events recorded before this machine was linked as { $node_id } (under { $old_id }) were set aside and will not be sent to the hub: { $path }
@@ -607,3 +608,36 @@ doctor-remote-proxy-listen = A trusted proxy is on, but the hub listens on { $ad
 doctor-remote-proxy-damaged = The file that turns on the trusted proxy is damaged. A hub that is running keeps the last good settings (its Host and Origin checks too); one that starts now trusts no proxy and checks no Host or Origin. Run `agora remote off`, then `agora remote proxy` again.
 cli-hub-proxy-on = Trusted proxy: on. The hub answers { $hosts } and is reachable from the internet through it.
 hold-failed = The terminal holder could not start: { $message }
+cli-agent-install-about =
+    About to install { $display } ({ $name }) { $version } for { $platform }, on this machine only:
+      Download:   { $url }
+      SHA-256:    { $sha256 }
+      Signature:  { $signature }
+      Publisher:  { $publisher } (key { $key })
+      Folder:     { $dir }
+      Then runs:  the new program with "{ $verify }" to check its version.
+    The program runs as you, with your files. Nothing outside the Agora folder is changed and nothing runs as administrator.
+cli-agent-install-signature-none = none (the checksum only)
+cli-agent-install-signature-by = detached signature { $url } checked with your key "{ $key }"
+cli-agent-install-ask-name = Type the agent name ({ $name }) to install it, or anything else to stop:
+cli-agent-install-ask-go-back = { $installed } is installed and this is an older version. Type the version ({ $version }) to go back to it:
+cli-agent-install-done = Installed { $name } { $version }. The program is at { $launcher }. Agora does not edit your shell profile; agents it starts find the program there once a later release looks in that folder. Running agents are not touched.
+cli-agent-install-current = { $name } { $version } is already installed.
+cli-agent-install-no-list = Give the signed list and its root key: --list FILE and --root-key HEX or FILE (or save the key as agent-list-root-key in the Agora folder). Nothing was changed.
+cli-agent-install-err-index-invalid = The agent list is not acceptable ({ $code }: { $detail }). Nothing was changed.
+cli-agent-install-err-not-approved = Not installed: the agent name was not typed here ({ $code }: { $detail }). Nothing was changed.
+cli-agent-install-err-download-failed = The download did not happen ({ $code }: { $detail }). Nothing was changed.
+cli-agent-install-err-checksum-mismatch = The download does not match the checksum in the list ({ $code }). Nothing was changed.
+cli-agent-install-err-signature-invalid = The download's signature could not be accepted ({ $code }: { $detail }). Save the vendor's key as agent-keys/NAME.pub in the Agora folder. Nothing was changed.
+cli-agent-install-err-disk-full = The disk is full ({ $code }). Nothing was changed.
+cli-agent-install-err-verify-failed = The new program did not report the expected version ({ $code }: { $detail }). The new version was removed; the version installed before, if any, is unchanged.
+cli-agent-install-err-timeout = It took too long ({ $code }: { $detail }). Nothing was changed.
+cli-agent-install-err-unsupported-platform = The list has no download for this system ({ $code }: { $detail }). Nothing was changed.
+cli-agent-install-err-in-progress = Another install is running on this machine ({ $code }). Nothing was changed.
+cli-agent-install-err-revoked = The list's publisher { $detail } has been revoked ({ $code }). Nothing was changed.
+cli-agent-install-err-downgrade = Version { $detail } is installed and the list names an older one ({ $code }). Add --go-back to go to the older version. Nothing was changed.
+cli-agent-install-err-unsupported-format = This entry cannot be installed here yet ({ $code }: { $detail }): archives are not supported. Nothing was changed.
+cli-agent-install-err-not-offered = The list does not offer that agent as a download ({ $code }: { $detail }). Nothing was changed.
+cli-agent-install-err-tool-missing = A program this needs is not installed: { $detail } ({ $code }). Nothing was changed.
+cli-agent-install-err-io-failed = A file could not be written ({ $code }: { $detail }). Nothing was changed.
+cli-agent-install-err-conflict = That name is not available ({ $code }: { $detail }): another agent already owns that program name, or the agent is named bin. Nothing was changed.

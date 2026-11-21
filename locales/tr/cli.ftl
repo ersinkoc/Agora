@@ -42,6 +42,7 @@ cli-usage =
       agora tui [--hub ADRES:PORT --ca DOSYA --code KOD] [--hub-dir DİZİN]
       agora update [--check] [--version X] [--release-url URL] [--release-key DOSYA] [--unsigned]
       agora adapter install AD [--registry URL] [--root-key DOSYA] [--yes] | update [AD] | list | remove AD
+      agora agent install AD --list DOSYA [--root-key HEX|DOSYA] [--go-back]
       agora doctor [--data DİZİN] [--manifests DİZİN] [--socket YOL]
 cli-node-listening = Düğüm çalışıyor. Denetim soketi: { $socket }
 cli-node-events-set-aside = Bu makine { $node_id } olarak bağlanmadan önce ({ $old_id } adıyla) kaydedilen olaylar bir kenara ayrıldı ve hub'a gönderilmeyecek: { $path }
@@ -595,3 +596,36 @@ doctor-remote-proxy-listen = Güvenilen bir vekil açık, ama hub bu makinenin �
 doctor-remote-proxy-damaged = Güvenilen vekili açan dosya bozuk. Çalışan bir hub son sağlam ayarları korur (Host ve Origin denetimleri dahil); şimdi başlayan bir hub hiçbir vekile güvenmez ve Host ile Origin denetlemez. `agora remote off` çalıştırın, sonra `agora remote proxy` komutunu yeniden verin.
 cli-hub-proxy-on = Güvenilen vekil: açık. Hub { $hosts } adlarını yanıtlar ve onun üzerinden internetten erişilebilir.
 hold-failed = Terminal tutucu başlatılamadı: { $message }
+cli-agent-install-about =
+    { $display } ({ $name }) { $version } sürümü, { $platform } için yalnızca bu makineye kurulmak üzere:
+      İndirme:    { $url }
+      SHA-256:    { $sha256 }
+      İmza:       { $signature }
+      Yayımcı:    { $publisher } (anahtar { $key })
+      Klasör:     { $dir }
+      Sonra:      sürümünü doğrulamak için yeni program "{ $verify }" ile çalıştırılır.
+    Program sizin kullanıcınız olarak, dosyalarınızla çalışır. Agora klasörü dışında hiçbir şey değişmez, yönetici olarak hiçbir şey çalışmaz.
+cli-agent-install-signature-none = yok (yalnızca sağlama toplamı)
+cli-agent-install-signature-by = { $url } adresindeki ayrık imza, "{ $key }" anahtarınızla denetlenir
+cli-agent-install-ask-name = Kurmak için ajanın adını ({ $name }) yazın; durdurmak için başka bir şey yazın:
+cli-agent-install-ask-go-back = { $installed } kurulu ve bu daha eski bir sürüm. Geri dönmek için sürümü ({ $version }) yazın:
+cli-agent-install-done = { $name } { $version } kuruldu. Program şurada: { $launcher }. Agora kabuk profilinizi düzenlemez; sonraki bir sürüm bu klasöre bakana kadar başlattığı ajanlar programı burada bulmaz. Çalışan ajanlara dokunulmadı.
+cli-agent-install-current = { $name } { $version } zaten kurulu.
+cli-agent-install-no-list = İmzalı listeyi ve kök anahtarını verin: --list DOSYA ve --root-key HEX ya da DOSYA (ya da anahtarı Agora klasörüne agent-list-root-key adıyla kaydedin). Hiçbir şey değişmedi.
+cli-agent-install-err-index-invalid = Ajan listesi kabul edilemedi ({ $code }: { $detail }). Hiçbir şey değişmedi.
+cli-agent-install-err-not-approved = Kurulmadı: ajanın adı burada yazılmadı ({ $code }: { $detail }). Hiçbir şey değişmedi.
+cli-agent-install-err-download-failed = İndirme yapılamadı ({ $code }: { $detail }). Hiçbir şey değişmedi.
+cli-agent-install-err-checksum-mismatch = İndirilen dosya listedeki sağlama toplamıyla uyuşmuyor ({ $code }). Hiçbir şey değişmedi.
+cli-agent-install-err-signature-invalid = İndirilenin imzası kabul edilemedi ({ $code }: { $detail }). Üreticinin anahtarını Agora klasörüne agent-keys/AD.pub olarak kaydedin. Hiçbir şey değişmedi.
+cli-agent-install-err-disk-full = Disk dolu ({ $code }). Hiçbir şey değişmedi.
+cli-agent-install-err-verify-failed = Yeni program beklenen sürümü bildirmedi ({ $code }: { $detail }). Yeni sürüm kaldırıldı; daha önce kurulu sürüm varsa değişmedi.
+cli-agent-install-err-timeout = Çok uzun sürdü ({ $code }: { $detail }). Hiçbir şey değişmedi.
+cli-agent-install-err-unsupported-platform = Listede bu sistem için indirme yok ({ $code }: { $detail }). Hiçbir şey değişmedi.
+cli-agent-install-err-in-progress = Bu makinede başka bir kurulum çalışıyor ({ $code }). Hiçbir şey değişmedi.
+cli-agent-install-err-revoked = Listenin yayımcısı { $detail } iptal edilmiş ({ $code }). Hiçbir şey değişmedi.
+cli-agent-install-err-downgrade = { $detail } sürümü kurulu ve liste daha eskisini gösteriyor ({ $code }). Eski sürüme gitmek için --go-back ekleyin. Hiçbir şey değişmedi.
+cli-agent-install-err-unsupported-format = Bu kayıt henüz burada kurulamaz ({ $code }: { $detail }): arşivler desteklenmiyor. Hiçbir şey değişmedi.
+cli-agent-install-err-not-offered = Liste bu ajanı indirme olarak sunmuyor ({ $code }: { $detail }). Hiçbir şey değişmedi.
+cli-agent-install-err-tool-missing = Bunun için gereken bir program kurulu değil: { $detail } ({ $code }). Hiçbir şey değişmedi.
+cli-agent-install-err-io-failed = Bir dosya yazılamadı ({ $code }: { $detail }). Hiçbir şey değişmedi.
+cli-agent-install-err-conflict = Bu ad kullanılamaz ({ $code }: { $detail }): başka bir ajan bu program adına zaten sahip ya da ajanın adı bin. Hiçbir şey değişmedi.

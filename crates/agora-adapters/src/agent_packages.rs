@@ -435,7 +435,7 @@ fn https_url(s: &str) -> R<String> {
         c.is_whitespace()
             || c.is_control()
             || agora_core::text::is_hidden(c)
-            || "\"'\\<>`{}|^".contains(c)
+            || "\"'\\<>`{}|^[]".contains(c)
             || !c.is_ascii()
     };
     let last = labels.last().copied().unwrap_or("");
@@ -1432,5 +1432,18 @@ mod tests {
             verify_list(&sign(&root, &p.to_string()), &pubhex(&root), 0, 0),
             Err(ListError::Signed(RegistryError::Malformed))
         );
+    }
+
+    #[test]
+    fn a_url_with_brackets_is_refused() {
+        for u in [
+            "https://a.example.com/x[1]",
+            "https://a.example.com/?q=[a-b]",
+            "https://[::1]/x",
+            "https://a.example.com/[",
+        ] {
+            assert!(https_url(u).is_err(), "{u}");
+        }
+        assert!(https_url("https://a.example.com/x").is_ok());
     }
 }
