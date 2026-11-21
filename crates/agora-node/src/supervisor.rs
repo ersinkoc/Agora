@@ -3598,6 +3598,14 @@ impl Supervisor {
     /// (never the user-visible viewport, and never the paced detection's last result, which an unmatched screen such as a dialog leaves
     /// as it was): the state they detect (`unknown` when none matches), and [`Self::terminal_detects`]. `None` for an agent that is
     /// not a running terminal agent.
+    /// ADR-0095: how long until the agent's screen is looked at again by its own detection pacing (`tick_agent`): a held dispatch
+    /// prompt's look at the live screen ([`Self::terminal_readiness`]) waits as long, so it adds no screen reads beyond normal
+    /// detection. `None` for an agent that is not a running terminal agent.
+    pub fn detection_interval(&self, id: &AgentId) -> Option<Duration> {
+        let e = self.agents.get(id).filter(|e| e.terminal.is_some())?;
+        Some(e.pacer.interval(e.visible))
+    }
+
     pub fn terminal_readiness(&self, id: &AgentId) -> Option<(AgentState, bool)> {
         let detects = self.terminal_detects(id)?;
         let e = self.agents.get(id)?;

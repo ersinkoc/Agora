@@ -1990,14 +1990,15 @@ impl Node {
                                 &seen,
                                 views_at,
                                 Instant::now(),
-                                // ADR-0095: the live screen of an agent with a held prompt, read now.
+                                // ADR-0095: the live screen of an agent with a held prompt, read now, and paced like the agent's own
+                                // detection, so a held prompt adds no screen reads beyond it.
                                 |a| {
-                                    sup.lock()
-                                        .unwrap_or_else(|e| e.into_inner())
-                                        .terminal_readiness(a)
-                                        .is_some_and(|(state, detects)| {
+                                    let s = sup.lock().unwrap_or_else(|e| e.into_inner());
+                                    let ready =
+                                        s.terminal_readiness(a).is_some_and(|(state, detects)| {
                                             crate::task_dispatch::between_turns(state, detects)
-                                        })
+                                        });
+                                    (ready, s.detection_interval(a).unwrap_or(Duration::ZERO))
                                 },
                                 |h| deliver_held(&sup, &mesh, h),
                             );

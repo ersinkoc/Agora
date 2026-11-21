@@ -116,6 +116,8 @@ struct Slotted {
     /// [`HOLD_FOR`] after.
     since: Instant,
     token: Token,
+    /// When the live screen may be looked at again for this held prompt (paced like the agent's own detection).
+    next_look: Instant,
 }
 
 #[derive(Default)]
@@ -165,6 +167,7 @@ impl Dispatches {
                 held: None,
                 since: now,
                 token,
+                next_look: now,
             },
         );
         Ok(token)
@@ -244,16 +247,18 @@ impl Dispatches {
     /// is dropped and never pasted; one made after it is left for the next round (the list may predate a just-started agent). One held
     /// longer than [`HOLD_FOR`] is dropped too. Queued prompts of structured agents are left to the queue's events.
     ///
-    /// Then, for each running terminal agent with a held prompt and nothing pasted in the last [`SETTLE`], `ready` is asked (outside
-    /// this lock) whether its live screen says it is between turns now; only those get their prompt handed to `deliver` (which pastes
-    /// it, off this thread, and says whether it could start). Returns the tasks to give back: the dropped ones and those `deliver`
+    /// Then, for each running terminal agent with a held prompt, nothing pasted in the last [`SETTLE`] and its next look due, `ready`
+    /// is asked (outside this lock) whether its live screen says it is between turns now and how long until the agent's own detection
+    /// looks again (`(between_turns, interval)`); a held prompt whose agent is not ready is not looked at again before that interval,
+    /// so holding adds no screen reads beyond normal detection. Those that are ready get their prompt handed to `deliver` (which
+    /// pastes it, off this thread, and says whether it could start). Returns the tasks to give back: the dropped ones and those `deliver`
     /// could not start.
     pub fn tick(
         &self,
         agents: &[Seen],
         seen_at: Instant,
         now: Instant,
-        mut ready: impl FnMut(&AgentId) -> bool,
+        mut ready: impl FnMut(&AgentId) -> (bool, Duration),
         mut deliver: impl FnMut(&Held) -> bool,
     ) -> Vec<Given> {
         let running: HashSet<&AgentId> =
@@ -284,18 +289,32 @@ impl Dispatches {
                     Some(Slotted {
                         held: Some(_),
                         token,
+                        next_look,
                         ..
-                    }) => Some((a.id.clone(), *token)),
+                    }) if now >= *next_look => Some((a.id.clone(), *token)),
                     _ => None,
                 })
                 .collect()
         };
         // The live screen is read with the supervisor's lock, never with this one held.
-        let ready: Vec<(AgentId, Token)> =
-            candidates.into_iter().filter(|(a, _)| ready(a)).collect();
+        let looked: Vec<(AgentId, Token, bool, Duration)> = candidates
+            .into_iter()
+            .map(|(a, t)| {
+                let (r, interval) = ready(&a);
+                (a, t, r, interval)
+            })
+            .collect();
         let due: Vec<Held> = {
             let mut st = self.st();
             let mut due = Vec::new();
+            let mut ready = Vec::new();
+            for (a, token, r, interval) in looked {
+                if r {
+                    ready.push((a, token));
+                } else if let Some(s) = st.held.get_mut(&a).filter(|s| s.token == token) {
+                    s.next_look = now + interval;
+                }
+            }
             for (a, token) in ready {
                 let same = matches!(st.held.get(&a), Some(Slotted { held: Some(_), token: t, .. }) if *t == token);
                 if same && !st.pasted.contains_key(&a) {
@@ -344,9 +363,9 @@ mod tests {
         }
     }
 
-    /// A live screen that says `state` (for a kind that can say idle or done).
-    fn live(state: AgentState) -> impl FnMut(&AgentId) -> bool {
-        move |_| between_turns(state, true)
+    /// A live screen that says `state` (for a kind that can say idle or done), looked at again after no wait.
+    fn live(state: AgentState) -> impl FnMut(&AgentId) -> (bool, Duration) {
+        move |_| (between_turns(state, true), Duration::ZERO)
     }
 
     /// Reserves, decides `Hold` and fills: a prompt held for `agent`.
@@ -467,7 +486,7 @@ mod tests {
             later,
             |x| {
                 asked.push(x.clone());
-                false
+                (false, Duration::ZERO)
             },
             |_| true,
         );
@@ -512,6 +531,41 @@ mod tests {
             false
         });
         assert_eq!(back, vec![given("a", "t3")]);
+    }
+
+    /// A held prompt's look at the live screen follows the agent's own detection pacing: after a look that says "not yet", the next
+    /// one waits the interval the agent's detection would wait.
+    #[test]
+    fn a_held_prompt_looks_at_the_screen_no_more_often_than_detection() {
+        let d = Dispatches::default();
+        let t0 = Instant::now();
+        hold(&d, "a", "t1", t0);
+        let interval = Duration::from_millis(800);
+        let mut looks = 0;
+        let mut round = |at: Instant, busy: bool| {
+            let back = d.tick(
+                &[seen("a", true)],
+                at,
+                at,
+                |_| {
+                    looks += 1;
+                    (!busy, interval)
+                },
+                |_| true,
+            );
+            assert!(back.is_empty());
+        };
+        // Busy: looked at once, then not again for the interval, however many 100 ms rounds run.
+        round(t0, true);
+        for i in 1..8 {
+            round(t0 + Duration::from_millis(100 * i), true);
+        }
+        round(t0 + interval, false);
+        assert_eq!(looks, 2);
+        assert!(
+            d.is_empty(),
+            "the second look found it between turns and pasted it"
+        );
     }
 
     #[test]

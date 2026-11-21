@@ -1095,7 +1095,8 @@ passes it (`hubcli.rs`). To an older node without the capability the hub refuses
   the user-visible viewport, and never the paced detection's last result, which a screen no rule names, such as a dialog, leaves as it was;
   a screen no rule matches is `unknown`). Between turns (idle or done, and nothing pasted into it in the last 5 seconds) it is pasted at
   once; otherwise the node holds it. A held prompt is pasted only after the same fresh look says the agent is between turns, taken right
-  before the paste, for agents with a held prompt only. `unknown` counts as
+  before the paste, for agents with a held prompt only and no more often than that agent's own detection looks at its screen
+  (its pacing interval), so holding adds no screen reads. `unknown` counts as
   between turns only for a kind whose manifest has no `[[rules]]` entry with `state = "idle"` or `"done"` (it never reaches either, and
   would otherwise never get a held prompt): for such a kind the paste, and the Enter after it, may arrive while the program works or while
   it shows a dialog (an Enter can answer it). A kind that can say idle or done and is `unknown` (starting, or a screen no rule names, such
