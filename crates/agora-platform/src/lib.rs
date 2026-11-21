@@ -462,6 +462,31 @@ pub fn restrict_to_owner(path: &std::path::Path) -> io::Result<()> {
     }
 }
 
+/// Takes every other user's access away from `path` without giving its owner anything new (issue #877: node files an older version
+/// left open): Unix clears the group and other mode bits, so a folder kept `0555` stays read-only and a `0000` one stays shut;
+/// Windows sets the owner-only ACL of [`restrict_to_owner`] (passed on to what inherits, for a folder). `InvalidInput` for a link, so
+/// a link planted at one of the node's paths never closes some other folder; a path another user owns fails as the system says.
+/// The link check and the change are two steps: whoever could swap the path between them can already write in the node's home.
+pub fn close_to_others(path: &std::path::Path) -> io::Result<()> {
+    let meta = std::fs::symlink_metadata(path)?;
+    if meta.file_type().is_symlink() {
+        return Err(io::Error::from(io::ErrorKind::InvalidInput));
+    }
+    #[cfg(unix)]
+    {
+        unix::close_to_others(path, &meta)
+    }
+    #[cfg(windows)]
+    {
+        windows::set_owner_only(path, meta.is_dir())
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = meta;
+        Ok(())
+    }
+}
+
 /// Writes `contents` to `path` readable and writable only by the current user (private keys and tokens), replacing any
 /// existing file: `0600` on Unix; on Windows a protected ACL for the user and SYSTEM, so a folder that lets other users in
 /// (a data volume's default ACL) does not reach the file.

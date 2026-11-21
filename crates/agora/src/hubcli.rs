@@ -1812,13 +1812,15 @@ fn hold_link_within(dir: &Path, wait: std::time::Duration) -> std::io::Result<He
     Ok(HeldLink { dir, _guard: guard })
 }
 
-/// Closes the link folder to every other user (issue #877), once its guard is held (so only a folder this user can write in, never
-/// one kept read-only or shut on purpose): today's files are written owner-only, but an older version wrote `url`, `node-id`,
-/// `ca.pem` and `cert.pem` under the umask, where a Mac's `staff` group or a `D:\` ACL could read them. Every read (the node's
-/// start, `agora status`), save and enrollment holds the guard, so the next one closes what an older version left. Best effort: a
-/// folder whose mode cannot be changed is used as it is, as before.
+/// Closes the resolved link folder to every other user (issue #877) without giving its owner anything (a folder kept read-only stays
+/// so): today's files are written owner-only, but an older version wrote `url`, `node-id`, `ca.pem` and `cert.pem` under the umask,
+/// where a Mac's `staff` group or a `D:\` ACL could read them. Every read (the node's start, `agora status`), save and enrollment
+/// does it, also a read without the guard, so the next one closes what an older version left. A folder that cannot be changed
+/// (another user's) is used as it is, as before, and said on the error stream: the machine's key may be readable there.
 fn close_link_folder(dir: &Path) {
-    let _ = agora_platform::restrict_to_owner(dir);
+    if let Err(e) = agora_platform::close_to_others(dir) {
+        eprintln!("{}: not closed to other users: {e}", dir.display());
+    }
 }
 
 /// How long the link folder's guard is waited for: the longest a holder that is alive and working holds it (Codex review of F1030). An
@@ -2410,8 +2412,8 @@ fn load_from(
     // pair that was in use, before anything reads them. Only under the guard: without it a renewal may be running.
     if _guard.is_some() {
         agora_node::link_renewal::recover(&dir, &agora_node::link_renewal::Real);
-        close_link_folder(&dir);
     }
+    close_link_folder(&dir);
     link_files(&dir, socket, read)
 }
 

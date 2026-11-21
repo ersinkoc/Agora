@@ -1306,14 +1306,15 @@ pub fn policy_sandbox_entries(path: &std::path::Path) -> Vec<(&'static str, Stri
 /// Makes one of the node's own folders (its data, its agents' mesh sockets) exist and closes it to every other user (issue #877): the
 /// event buffer, the session ledger, `hub-link` and the sockets inside are created under the umask, so on a Mac (every account in
 /// group `staff`) or a volume whose default ACL lets other users in (Windows `D:\`) others could read the buffered events and the
-/// ledger. An existing folder is closed too, so what an older version left is closed at the next start, as `private_hub_dir` does for
-/// the hub. On Unix the folder's `0700` closes everything below it; on Windows the owner-only ACL is passed on to what inherits.
-/// A folder that cannot be changed (another user's, a file system without modes) is logged and used as it is: the node keeps
-/// running its agents (nodes are autonomous).
+/// ledger. An existing folder is closed too, so what an older version left is closed at the next start. On Unix taking the group and
+/// other bits off the folder closes everything below it; on Windows the owner-only ACL is passed on to what inherits. Nothing is
+/// given to the owner, and a folder reached through a link (a `--data` or `--socket` pointed elsewhere, perhaps at a shared folder)
+/// or one that cannot be changed (another user's) is logged and used as it is: the node keeps running its agents (nodes are
+/// autonomous).
 fn private_node_dir(dir: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
-    if let Err(e) = agora_platform::restrict_to_owner(dir) {
-        eprintln!("{}: could not be closed to other users: {e}", dir.display());
+    if let Err(e) = agora_platform::close_to_others(dir) {
+        eprintln!("{}: not closed to other users: {e}", dir.display());
     }
     Ok(())
 }
