@@ -1970,6 +1970,18 @@ pub fn stop_requested() -> bool {
     }
 }
 
+/// Opens `path` to append (creating it) for a best-effort log in a folder its caller already keeps private, such as the node's
+/// `<data>/device-trust.log`: a new file is the user's only on Unix (`0o600`); on Windows it inherits the folder's ACL. Unlike
+/// [`open_append_private`] it follows a link and accepts an existing file of any owner, so a data folder reached through a link, or
+/// a log an elevated command created, keeps being written.
+pub fn open_append_owner_created(path: &std::path::Path) -> io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    unix::owner_only_on_create(&mut options);
+    options.open(path)
+}
+
 /// Opens `path` to append for a log a process writes for itself (`agora supervise --log`), so that nothing planted in the Agora folder
 /// can redirect what is written or change another file's permissions (`InvalidInput` when it refuses):
 /// - the folder it is in is opened as itself, never through a link or junction, and the log is opened against that folder (Unix

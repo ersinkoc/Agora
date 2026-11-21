@@ -781,6 +781,11 @@ pub(crate) fn catch_stop_requests() -> io::Result<()> {
     Ok(())
 }
 
+/// For [`crate::open_append_owner_created`]: a file these options create is the user's only (0600).
+pub(crate) fn owner_only_on_create(options: &mut std::fs::OpenOptions) {
+    std::os::unix::fs::OpenOptionsExt::mode(options, 0o600);
+}
+
 /// See [`crate::open_append_private`] (`append`) and [`crate::open_lock_private`] (read and write): the folder is opened as itself (`O_DIRECTORY|O_NOFOLLOW`) and the log is created or opened
 /// relative to that descriptor (`openat` with `O_NOFOLLOW`), so neither can be swapped for a link between a check and the open. A new
 /// log is created exclusively with mode 0600; an existing one must be a regular file with one name, owned by this user, and is made
@@ -1099,6 +1104,32 @@ fn transient_addrs(text: &str) -> Vec<std::net::Ipv6Addr> {
 #[cfg(test)]
 #[allow(clippy::expect_used)] // expect is allowed in tests
 mod tests {
+    #[test]
+    fn a_log_opened_owner_created_is_the_users_only_and_appends() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        // A fresh folder this test made itself (create_dir fails on one that exists), owner-only, in the shared temp folder.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let dir = std::env::temp_dir().join(format!(
+            "agora-owner-created-{}-{nanos}",
+            std::process::id()
+        ));
+        std::os::unix::fs::DirBuilderExt::mode(&mut std::fs::DirBuilder::new(), 0o700)
+            .create(&dir)
+            .expect("a fresh folder, private from its creation");
+        let log = dir.join("x.log");
+        for line in ["a\n", "b\n"] {
+            let mut f = crate::open_append_owner_created(&log).expect("open");
+            f.write_all(line.as_bytes()).expect("write");
+        }
+        assert_eq!(std::fs::read_to_string(&log).expect("read"), "a\nb\n");
+        let mode = std::fs::metadata(&log).expect("meta").permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn if_inet6_lines_flag_temporary_and_deprecated_addresses_only() {
