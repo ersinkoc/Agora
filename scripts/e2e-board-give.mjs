@@ -2,6 +2,7 @@
 // (agora-fake-agent). No real coding agent or account is used. Needs the normal browser-harness prerequisites and a node that offers
 // `task.dispatch` (AGORA_TEST_BINARY may name such a build).
 // AGORA_SCREENSHOTS=<dir> also saves screenshots of the picker, the confirmation and the answer in both themes and at phone width.
+import { hostname } from 'node:os';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { mkdirSync } from 'node:fs';
@@ -97,7 +98,11 @@ try {
   await rows.first().locator('button').click();
   await give.locator('[data-give-step="confirm"]').waitFor();
   const confirm = await give.innerText();
-  for (const part of ['Write the release notes', 'fake-adapter', 'laptop', 'Give this task to']) assert.ok(confirm.includes(part), `confirmation names ${part}: ${confirm}`);
+  for (const part of ['Write the release notes', 'fake-adapter', 'Give this task to']) assert.ok(confirm.includes(part), `confirmation names ${part}: ${confirm}`);
+  // The machine: the harness names it `laptop` through HOSTNAME, which Windows does not use for the machine name (it shows the computer's
+  // own name there), so either is accepted.
+  const machines = ['laptop', process.env.COMPUTERNAME, hostname()].filter(Boolean).map((m) => m.toLowerCase());
+  assert.ok(machines.some((m) => confirm.toLowerCase().includes(m)), `confirmation names the machine (${machines.join(' or ')}): ${confirm}`);
   assert.doesNotMatch(confirm, /\b(claim|lease|mesh|dispatch)/i); // "release" is not "lease"
   await shoot('confirm');
   // The focus is on Back, never on "Give the task": a fresh Tab and Enter send it.
