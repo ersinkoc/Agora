@@ -25,6 +25,7 @@ const DETACH: u8 = 0x1d;
 const TERMINAL_STREAM: u32 = 3;
 
 mod adaptercmd;
+mod agentcmd;
 mod certs;
 mod frontdoor;
 mod hold;
@@ -157,6 +158,9 @@ pub(crate) struct Opts {
     minutes: Option<u64>,
     who: Option<String>,
     root_key: Option<PathBuf>,
+    /// ADR-0087 rung 3: `agora agent install NAME --list FILE [--go-back]`.
+    list: Option<PathBuf>,
+    go_back: bool,
     /// ADR-0061: `agora node trust --from-hub`, and the fingerprints `--yes` covers.
     from_hub: bool,
     fingerprints: Vec<String>,
@@ -240,6 +244,8 @@ fn parse(args: &[String]) -> Option<Opts> {
             "--who" => o.who = Some(it.next()?.clone()),
             "--role" => o.role = Some(it.next()?.clone()),
             "--root-key" => o.root_key = Some(it.next()?.into()),
+            "--list" => o.list = Some(it.next()?.into()),
+            "--go-back" => o.go_back = true,
             "--from-hub" => o.from_hub = true,
             "--fingerprint" => o.fingerprints.push(it.next()?.clone()),
             "--include-others" => o.include_others = true,
@@ -344,6 +350,7 @@ fn main() -> ExitCode {
         ["agent", "prompt"] => agent_prompt(&say, &opts),
         ["agent", "list"] => agent_list(&say, &opts),
         ["agent", "kinds"] => agent_kinds(&say, &opts),
+        ["agent", "install"] => agentcmd::install(&say, &opts),
         ["terminal", "attach"] => terminal_attach(&say, &opts),
         ["panel"] => panelcmd::panel(&say),
         ["doctor"] => doctor(&say, &opts),

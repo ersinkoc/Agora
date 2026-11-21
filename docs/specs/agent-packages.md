@@ -1,8 +1,8 @@
-# Agent package list (ADR-0087, rung 2)
+# Agent package list (ADR-0087, rungs 2 and 3)
 
 A signed list says which agent programs (Claude Code, Codex, a Node runtime, ...) a node may offer to install, and how. This is the
-**data and its verification only**. Nothing reads the network, installs or runs anything yet (rungs 3 and later); no protocol message
-and no schema changes. Code: `crates/agora-adapters/src/agent_packages.rs`. Fixtures: `crates/agora-adapters/tests/fixtures/agent-list/`
+**data and its verification** (rung 2); rung 3, at the end of this page, installs one entry kind from the command line. No protocol
+message and no schema change. Code: `crates/agora-adapters/src/agent_packages.rs`. Fixtures: `crates/agora-adapters/tests/fixtures/agent-list/`
 (a FAKE list signed by a public seed; fixtures are only added, never edited).
 
 ## The envelope is ADR-0044's
@@ -69,6 +69,54 @@ entries of the signed list. The two do not fork; the differences, all deliberate
 `tests/agent_packages.rs::converter_output_fits_the_entry_format_after_review` runs a real converter fixture (`goose`) through this
 parser to keep the two aligned.
 
+## Rung 3: `agora agent install` (binary-download only)
+`agora agent install NAME --list FILE [--root-key HEX|FILE] [--go-back]` installs one agent program on the machine the owner is
+typing at. Code: `crates/agora-adapters/src/agent_install.rs` (the logic, with the network and the signature tool behind traits) and
+`crates/agora/src/agentcmd.rs` (the words and the question). Nothing here involves the hub, a window or a protocol message.
+
+1. **The list.** Read from `--list`, opened with `verify_list` under the root key (`--root-key` as 64 hex characters or a file; default
+   `<AGORA_HOME>/agent-list-root-key`). The newest accepted version is kept in `<AGORA_HOME>/agents/list-state.json` (atomic, only
+   goes up), so an older list is refused as a rollback.
+2. **The plan.** `AgentList::offer` (a revoked publisher: `agent.install.revoked`), the entry's `binary-download` installer, and the
+   key of this system (`agora_platform::platform_key()`: `linux-x86_64`, `darwin-aarch64`, `windows-x86_64`, `-musl` on a musl
+   build); none: `agent.install.unsupported_platform`. The node prints the exact action from its own state: name, version, URL,
+   SHA-256, publisher and key, signature key if any, the target folder, and the version check it will run.
+3. **The approval is typed.** The owner types the agent name, exactly, on a terminal. There is no `--yes`; a stdin that is not a
+   terminal refuses (`agent.install.not_approved`). Going to a version lower than the installed one (ADR-0087 item 9) is refused
+   (`agent.install.downgrade`) unless `--go-back` is given and the owner also types the version.
+4. **The download.** The address is `https://` with a DNS name, checked again (port 1 to 65535, no userinfo, no IP literal). The host
+   is resolved by Agora first; one address that is loopback, private, link-local, unique-local, CGNAT (`100.64/10`), unspecified,
+   multicast, documentation, benchmarking or reserved refuses the name, and IPv6 forms that carry an IPv4 address (mapped, NAT64,
+   6to4, compatible) are judged by the address inside. `curl` is told to connect only to the checked address (`--resolve`), to ignore
+   `.curlrc` and proxies, to speak only https, and to follow **no redirect** (a 3xx fails with `download_failed`); the body is read
+   by Agora through a pipe, capped at 200 MiB, and hashed on the way (`agent.install.download_failed`, detail `too_large`).
+   `curl` missing is `agent.install.tool_missing`.
+5. **The checks.** SHA-256 equals the entry's (`checksum_mismatch`). With `signature_url` and `signature_key`, the detached signature is
+   fetched the same way (64 KiB cap) and checked with `ssh-keygen -Y verify -I agora-agent -n file` against
+   `<AGORA_HOME>/agent-keys/<signature_key>.pub` (an allowed-signers file naming the principal `agora-agent`); no such file refuses
+   before any download (`signature_invalid`, detail `key_missing`).
+6. **Format.** Only a raw executable: the download is the program, named by the entry's single `provides` name (`.exe` added on
+   Windows). An entry with `cmd` (a program inside an archive) is refused: `agent.install.unsupported_format`. This tree has no
+   inflate code and the rung adds no dependency, so `.tar.gz` and `.zip` are a later rung, with the restrictive reader of ADR-0087 item 2.
+7. **Layout.** `<AGORA_HOME>/agents/<name>/<version>/<exe>` (folders `0700`, program `0700` on Unix; a protected ACL on Windows),
+   `<AGORA_HOME>/agents/<name>/current` (the installed version), and the launcher `<AGORA_HOME>/agents/bin/<exe>`: a relative symbolic
+   link on Unix, a copy on Windows. Every write below `agents` goes through `agora_platform::ConfinedDir` (a link is refused,
+   never followed). The folder is made in `.tmp-<pid>` and renamed into place; nothing in `bin` changes until `verify` passed.
+8. **Verify, then switch.** The new program is run with the entry's `verify` arguments, 10 seconds, stdin closed, an empty environment
+   but `PATH=/usr/bin:/bin` (system folders on Windows) and a home inside its own folder (no token or secret of Agora reaches it); the
+   first 4096 bytes of its output (standard output then standard error) must match the entry's regex and it must exit with success,
+   and the `provides` program must exist (`verify_failed`, `timeout`). Only then the launcher moves (atomic rename) and `current` is
+   written. A failed verify removes the new folder and leaves the old launcher. The new version and the one before it are kept; older
+   ones are removed.
+9. **One at a time, and crashes.** `<AGORA_HOME>/agents/.lock` holds the pid; a live owner is `agent.install.in_progress`, a dead one is
+   taken over, one that cannot be read is left alone. Every run first removes `.tmp-*` folders and half-made launchers a crash left.
+10. **Never** a script from the entry, `sudo`, a shell profile edit, or a write outside `<AGORA_HOME>`.
+
+Test seams: `Tools` carries the resolver, the fetcher and the signature checker; the command line always passes the strict ones
+(`SystemResolver`, `CurlFetcher`, `SshKeygen`). The address rules run on the answers of whatever resolver is passed.
+
 ## Not here
-No download, install, approval, schema message or window. No `agora agent source add` and no refresh of the list. The doctor of
-rung 1 does not read this list yet.
+No archives (rung 3 follow-up), no other installer kind (`npm-global`, `package-manager` and `vendor-script` are rung 6), no signed
+device approval, schema message, hub involvement or window (rungs 4 and 5), no `agora agent source add`, no refresh of the list. The node
+does not look in `agents/bin` when it starts an agent, and `agora doctor` does not read it yet: both are follow-ups, so a program
+installed this way is run through its launcher path until they land.

@@ -284,6 +284,87 @@ pub fn set_executable(path: &std::path::Path, executable: bool) -> io::Result<()
     }
 }
 
+/// True where a shell script with a `#!` line can be the program an agent entry names (tests of the agent installer use a script as
+/// a fake agent and skip themselves elsewhere).
+pub const SHELL_SCRIPTS_RUN: bool = cfg!(unix);
+
+/// What a program's file name ends with here: `.exe` on Windows, nothing elsewhere.
+pub const EXECUTABLE_SUFFIX: &str = if cfg!(windows) { ".exe" } else { "" };
+
+/// The platform key of the signed agent list (`<os>-<arch>[-musl]`: `linux-x86_64`, `darwin-aarch64`, `windows-x86_64`,
+/// `linux-aarch64-musl`), or `None` for a system the list has no keys for.
+pub fn platform_key() -> Option<String> {
+    let os = if cfg!(target_os = "linux") {
+        "linux"
+    } else if cfg!(target_os = "macos") {
+        "darwin"
+    } else if cfg!(windows) {
+        "windows"
+    } else {
+        return None;
+    };
+    let arch = if cfg!(target_arch = "x86_64") {
+        "x86_64"
+    } else if cfg!(target_arch = "aarch64") {
+        "aarch64"
+    } else {
+        return None;
+    };
+    let musl = if cfg!(target_env = "musl") {
+        "-musl"
+    } else {
+        ""
+    };
+    Some(format!("{os}-{arch}{musl}"))
+}
+
+/// Puts a launcher for the program `real` at `link`, replacing what is there in one step, never by editing in place: a symbolic
+/// link on Unix (pointing at `relative`, the path from the link's folder, so the folder can move), a copy of the program on Windows
+/// (a symbolic link needs a privilege there). The new launcher is made beside `link` under a temporary name and renamed over it.
+pub fn install_launcher(
+    real: &std::path::Path,
+    relative: &std::path::Path,
+    link: &std::path::Path,
+) -> io::Result<()> {
+    let mut tmp = link.as_os_str().to_owned();
+    tmp.push(format!(".tmp-{}", std::process::id()));
+    let tmp = PathBuf::from(tmp);
+    let _ = std::fs::remove_file(&tmp);
+    let made = {
+        #[cfg(unix)]
+        {
+            let _ = real;
+            std::os::unix::fs::symlink(relative, &tmp)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = relative;
+            std::fs::copy(real, &tmp).map(|_| ())
+        }
+    };
+    made.and_then(|()| std::fs::rename(&tmp, link))
+        .inspect_err(|_| {
+            let _ = std::fs::remove_file(&tmp);
+        })
+}
+
+/// A `PATH` for a program started with an empty environment: the system's own program folders only (nothing of the user's).
+pub fn safe_search_path() -> String {
+    if cfg!(windows) {
+        std::env::var("SystemRoot").map_or_else(|_| String::new(), |r| format!("{r}\\System32;{r}"))
+    } else {
+        "/usr/bin:/bin".to_string()
+    }
+}
+
+/// Whether a process with this id exists (a lock file's owner). A system that cannot tell says yes: a lock is never broken on a guess.
+pub fn process_exists(pid: u32) -> bool {
+    match process_name(pid) {
+        Ok(_) => true,
+        Err(e) => e.kind() == io::ErrorKind::Unsupported,
+    }
+}
+
 /// Opens `path` for reading without waiting on it: on Unix with `O_NONBLOCK` (a FIFO or a device swapped in for a file would
 /// otherwise block the open until a writer appears; regular files read as usual) and `O_NOCTTY`. Check what was opened on the handle
 /// (`metadata().is_file()`, [`opened_path`]).

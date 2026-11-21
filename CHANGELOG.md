@@ -4,7 +4,9 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
-_Nothing yet._
+### Install an agent program from a signed list, from the command line
+- `agora agent install NAME --list FILE --root-key KEY` downloads one agent program (a single executable file) listed in a signed agent list, checks its checksum (and its signature when the list names a key), runs its version check, and only then makes it the installed one under the Agora folder. You approve by typing the agent's name at the terminal; there is no `--yes`. An older version needs `--go-back` and a second confirmation, and the last two versions are kept.
+- Downloads refuse addresses that point at this machine or your private network, follow no redirects, and stop at 200 MiB. Programs inside archives (`.tar.gz`, `.zip`) are not supported yet. Nothing is installed by the hub or the window yet, and agents you start do not use the installed program until a later release.
 
 ## 0.3.32
 
