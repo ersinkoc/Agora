@@ -12,7 +12,7 @@ import { type TerminalPrefs, terminalPrefs, terminalSize } from './prefs';
 import { clipboardOffer, sanitizePaste } from './clipboard';
 import { enhancedKey, KeyboardProtocols, registerKeyboardProtocols, shortcut } from './keys';
 import { openLink } from './links';
-import { MouseEncodingModes, urxvtReport } from './mouse';
+import { followMouseEncoding } from './mouse';
 import { TouchScroll, Wheel, type WheelAction } from './wheel';
 
 export interface TerminalRenderer {
@@ -88,7 +88,6 @@ export class XtermRenderer implements TerminalRenderer {
   private wheel = new Wheel();
   private touch = new TouchScroll();
   private keys = new KeyboardProtocols();
-  private mouseEncoding = new MouseEncodingModes();
   // Ends the listeners put on the element this renderer was mounted in: the element outlives it (a new source mounts a new renderer
   // there), and an old wheel listener would take every event before the new terminal saw it.
   private listeners = new AbortController();
@@ -139,11 +138,8 @@ export class XtermRenderer implements TerminalRenderer {
     // The keyboard protocols a program may switch on for keys a plain terminal cannot tell apart (keys.ts).
     const p = this.term.parser;
     registerKeyboardProtocols(p, this.keys, (data) => this.term.input(data, false));
-    // The mouse encoding the program asked for, followed here only for the urxvt form (1015), which xterm.js does not write (mouse.ts).
-    // Each handler returns false so xterm.js still handles the sequence itself.
-    p.registerCsiHandler({ prefix: '?', final: 'h' }, (params) => { this.mouseEncoding.apply(params, true); return false; });
-    p.registerCsiHandler({ prefix: '?', final: 'l' }, (params) => { this.mouseEncoding.apply(params, false); return false; });
-    p.registerEscHandler({ final: 'c' }, () => { this.mouseEncoding.reset(); return false; });
+    // Mouse reports in the urxvt encoding (1015) when the program asked for it, which xterm.js does not write (mouse.ts).
+    followMouseEncoding(this.term);
     // OSC 52: offered to the user, never written by itself, never answered (clipboard.ts).
     p.registerOscHandler(52, (data) => { const text = clipboardOffer(data); if (text !== undefined) this.clipboardCb?.(text); return true; });
     // A theme change repaints the terminal; the tokens have changed by the time the event fires.
@@ -181,17 +177,19 @@ export class XtermRenderer implements TerminalRenderer {
     }
   }
 
-  // Every wheel event over the terminal is decided here (wheel.ts) before xterm.js or its scroll bar see it. xterm.js's scroll bar counts
-  // a notch by the legacy `wheelDeltaY / 120`, which is 2.5 in Firefox and WebKit (7 history lines a notch there, 3 in Chromium), and
-  // xterm.js asks a custom wheel handler only when its scroll bar did not take the event. Only a report for a program that has the
-  // mouse is left to xterm.js.
+  // Every wheel event over the terminal is decided here (wheel.ts) before xterm.js or its scroll bar see it: the scroll bar counts a notch
+  // by the legacy `wheelDeltaY / 120`, which is 2.5 in Firefox and WebKit (7 history lines a notch there, 3 in Chromium), and xterm.js
+  // asks a custom wheel handler only when its scroll bar did not take the event. Left to xterm.js: a report for a program that has the
+  // mouse, and a trackpad's pixels over the main screen (its scroll bar scrolls them smoothly). Ctrl+wheel and a pinch are the browser's
+  // (zoom): xterm.js would cancel them.
   private onWheel(e: WheelEvent): void {
     const a = this.wheel.decide(e, this.wheelState());
     if (a.kind === 'pass') return;
+    e.stopPropagation();
+    if (a.kind === 'browser') return;
     this.apply(a);
     // Nothing else may act on it: the terminal's own scroll bar would scroll by its own measure as well.
     e.preventDefault();
-    e.stopPropagation();
   }
 
   private onKey(e: KeyboardEvent): boolean {
@@ -314,11 +312,9 @@ export class XtermRenderer implements TerminalRenderer {
   }
 
   onInput(cb: (data: string, binary?: boolean) => void): void {
-    // A program that asked for the urxvt encoding (1015) gets its mouse reports in that form, rewritten from the one xterm.js made.
-    const urxvt = (d: string) => (this.mouseEncoding.encoding === 'urxvt' ? urxvtReport(d) : undefined);
-    this.term.onData((d) => cb(urxvt(d) ?? d));
-    // The older mouse encodings (X10 and UTF-8, modes 1000 without 1006) arrive as bytes, not text: each char is one byte as it is.
-    this.term.onBinary((s) => { const u = urxvt(s); if (u !== undefined) cb(u); else cb(s, true); });
+    this.term.onData((d) => cb(d));
+    // The older mouse encodings (X10, and urxvt as mouse.ts writes it) arrive as bytes, not text: each char is one byte as it is.
+    this.term.onBinary((s) => cb(s, true));
   }
 
   paste(text: string): void {
