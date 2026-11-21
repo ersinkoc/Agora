@@ -417,17 +417,17 @@ pub(crate) fn start_child(
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "argv is empty"));
     };
     #[cfg(target_os = "macos")]
-    let (program, args) = match &config.sandbox {
+    let (program, args, git_config) = match &config.sandbox {
         Some(sb) => {
             let a: Vec<std::ffi::OsString> = args.iter().map(Into::into).collect();
-            let (p, a) = crate::macos::wrap(sb, program.as_ref(), &a)?;
-            (p, a)
+            crate::macos::wrap(sb, program.as_ref(), &a)?
         }
         None => (
             program.into(),
             args.iter()
                 .map(Into::into)
                 .collect::<Vec<std::ffi::OsString>>(),
+            None,
         ),
     };
     let mut cmd = Command::new(program);
@@ -461,6 +461,14 @@ pub(crate) fn start_child(
         .as_ref()
         .map(|sb| crate::linux::ruleset(sb, folder, config.cwd.as_deref()))
         .transpose()?;
+    #[cfg(target_os = "linux")]
+    let git_config = ruleset.as_ref().and_then(|r| r.git_config.as_deref());
+    #[cfg(target_os = "macos")]
+    let git_config = git_config.as_deref();
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if let Some(file) = git_config {
+        cmd.envs(crate::git_config_env(file));
+    }
     // SAFETY: runs between fork and exec and only calls async-signal-safe functions (fchdir, setsid, ioctl,
     // setrlimit). `held` is a descriptor of `folder`, which the caller keeps open until `spawn` returns.
     unsafe {

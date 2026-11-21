@@ -929,9 +929,12 @@ impl Adapter {
         let mut cmd = Command::new(&program);
         cmd.args(&cfg.args);
         // Confined first: on macOS this rewrites the command, which must happen before the streams are set.
-        if let Some(sb) = &cfg.sandbox {
-            agora_platform::confine_command(&mut cmd, sb)?;
-        }
+        let git_config = cfg
+            .sandbox
+            .as_ref()
+            .map(|sb| agora_platform::confine_command(&mut cmd, sb))
+            .transpose()?
+            .flatten();
         // The node has no console: on Windows the adapter (and the agent it starts, which shares its console) would otherwise keep a
         // window of its own open for the agent's whole life.
         agora_platform::no_console_window(&mut cmd);
@@ -952,6 +955,9 @@ impl Adapter {
             }
         }
         cmd.envs(cfg.env.iter().map(|(k, v)| (k, v)));
+        if let Some(file) = git_config {
+            cmd.envs(agora_platform::git_config_env(&file));
+        }
         if let Some(dir) = &cfg.cwd {
             cmd.current_dir(dir);
         }
