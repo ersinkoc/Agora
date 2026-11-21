@@ -84,8 +84,10 @@ of something.
 5. **Once per interruption.** The ledger records when the message was sent, and it is never sent twice for the same interruption.
    The existing rule that an agent brought back by itself in the last 10 minutes is not brought back again also keeps a crash loop from
    repeating it.
-6. **Nothing is skipped.** The message is ordinary input to the agent. Every approval, the node's policy and the agent's launch options
-   (ADR-0059) apply as they did before the restart. The message shows in the agent's own terminal and conversation like any prompt,
+6. **Nothing is skipped.** The message is ordinary input to the agent. Every approval and the node's policy apply as they did before the restart. Launch
+   options (ADR-0059) are not carried by a resume: the node does not pass a "Don't ask" option again (ADR-0062 decision 4,
+   `ledger.rs`). This does not by itself make the resumed agent ask: a structured agent can restore its own permission-skipping
+   mode, and the node does not yet check that mode on a resume (ADR-0090 known gap, backlog P2-16). The message shows in the agent's own terminal and conversation like any prompt,
    and the node's log says it was sent.
 
 **Consequences:** a manifest field (`[resume] continue` and `continue_argv`, `docs/specs/agent-manifest.md`), a ledger field (sent at),
