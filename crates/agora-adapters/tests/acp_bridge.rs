@@ -9,6 +9,8 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
+const LARGE_PROMPT_BYTES: usize = 256 * 1024;
+
 #[test]
 fn acp_child() {
     // Only as the bridge's child: the harness running every test sees the variable too once another test set it, and would
@@ -31,6 +33,92 @@ fn acp_child_fails_at_start() {
     }
     let code = agora_fake_agent::acp::fail_at_start(&mut std::io::stderr().lock());
     std::process::exit(code);
+}
+
+/// An agent that sends an oversized line instead of answering initialize, then leaves stdout open.
+#[test]
+fn acp_child_sends_an_oversized_line() {
+    if std::env::var_os("AGORA_TEST_ACP").is_none()
+        || !std::env::args().any(|a| a == "acp_child_sends_an_oversized_line")
+    {
+        return;
+    }
+    println!();
+    let mut input = std::io::stdin().lock();
+    let mut request = String::new();
+    input.read_line(&mut request).unwrap();
+    let mut output = std::io::stdout().lock();
+    let mut bytes = io::repeat(b' ').take((agora_adapters::host::MAX_LINE + 1) as u64);
+    if io::copy(&mut bytes, &mut output).is_ok() && output.flush().is_ok() {
+        let _ = io::copy(&mut input, &mut io::sink());
+    }
+}
+
+/// An agent that emits progress while it is still reading a large prompt.
+#[test]
+fn acp_child_streams_before_reading_large_prompt() {
+    if std::env::var_os("AGORA_TEST_ACP").is_none()
+        || !std::env::args().any(|a| a == "acp_child_streams_before_reading_large_prompt")
+    {
+        return;
+    }
+    println!();
+    let mut input = io::stdin().lock();
+    let mut output = io::stdout().lock();
+    for (method, result) in [
+        (
+            "initialize",
+            json!({"protocolVersion": 1, "agentCapabilities": {}}),
+        ),
+        ("session/new", json!({"sessionId": "acp-s1"})),
+    ] {
+        let mut line = String::new();
+        input.read_line(&mut line).unwrap();
+        let request: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(request["method"], method);
+        let reply = json!({"jsonrpc": "2.0", "id": request["id"], "result": result});
+        writeln!(output, "{reply}").unwrap();
+        output.flush().unwrap();
+    }
+
+    // Read only one byte before emitting enough complete updates to fill the bridge's
+    // input queue and OS pipe. The rest of the prompt remains outstanding during the burst.
+    let mut first = [0];
+    input.read_exact(&mut first).unwrap();
+    let mut update = |text: &str| {
+        let message = json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {"sessionId": "acp-s1", "update": {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": text},
+            }},
+        });
+        writeln!(output, "{message}").unwrap();
+        output.flush().unwrap();
+    };
+    let progress = "p".repeat(16 * 1024);
+    for _ in 0..16 {
+        update(&progress);
+    }
+    let mut line = first.to_vec();
+    input.read_until(b'\n', &mut line).unwrap();
+    let prompt: Value = serde_json::from_slice(&line).unwrap();
+    assert_eq!(prompt["method"], "session/prompt");
+    assert_eq!(
+        prompt
+            .pointer("/params/prompt/0/text")
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .len(),
+        LARGE_PROMPT_BYTES,
+    );
+    update("fixture prompt received");
+    let reply = json!({"jsonrpc": "2.0", "id": prompt["id"], "result": {"stopReason": "end_turn"}});
+    writeln!(output, "{reply}").unwrap();
+    output.flush().unwrap();
+    let _ = io::copy(&mut input, &mut io::sink());
 }
 
 /// The fake agent that refuses `session/new`.
@@ -57,6 +145,33 @@ fn acp_child_no_stdio_mcp() {
     }
     println!();
     std::env::set_var("AGORA_FAKE_ACP_NO_STDIO_MCP", "1");
+    let _ = agora_fake_agent::acp::run(std::io::stdin().lock(), &mut std::io::stdout().lock());
+}
+
+/// The fake agent that is slow to initialize.
+#[test]
+fn acp_child_init_delay() {
+    if std::env::var_os("AGORA_TEST_ACP").is_none()
+        || !std::env::args().any(|a| a == "acp_child_init_delay")
+    {
+        return;
+    }
+    println!();
+    std::env::set_var("AGORA_FAKE_ACP_INIT_DELAY_MS", "400");
+    let _ = agora_fake_agent::acp::run(std::io::stdin().lock(), &mut std::io::stdout().lock());
+}
+
+/// The fake agent that offers a bypass mode and refuses a model switch.
+#[test]
+fn acp_child_bypass() {
+    if std::env::var_os("AGORA_TEST_ACP").is_none()
+        || !std::env::args().any(|a| a == "acp_child_bypass")
+    {
+        return;
+    }
+    println!();
+    std::env::set_var("AGORA_FAKE_ACP_BYPASS_MODE", "1");
+    std::env::set_var("AGORA_FAKE_ACP_REFUSE_MODEL", "1");
     let _ = agora_fake_agent::acp::run(std::io::stdin().lock(), &mut std::io::stdout().lock());
 }
 
@@ -273,8 +388,7 @@ fn an_acp_agent_looks_like_an_adapter_to_the_node() {
 
 #[test]
 fn the_node_is_told_the_bridge_is_ready_only_after_the_agent_finished_initializing() {
-    std::env::set_var("AGORA_FAKE_ACP_INIT_DELAY_MS", "400");
-    let n = Node::start();
+    let n = Node::start_with("acp_child_init_delay");
     n.to_bridge
         .send(
             format!(
@@ -293,7 +407,6 @@ fn the_node_is_told_the_bridge_is_ready_only_after_the_agent_finished_initializi
     );
     let reply = n.wait(|m| m.get("id") == Some(&json!(1)));
     assert_eq!(reply["result"]["adapterName"], "acp-bridge");
-    std::env::remove_var("AGORA_FAKE_ACP_INIT_DELAY_MS");
 }
 
 #[test]
@@ -309,6 +422,70 @@ fn an_agent_that_dies_ends_the_bridge_so_the_node_sees_the_adapter_exit() {
         json!({"sessionId": "acp-s1", "text": "crash"}),
     );
     assert!(n.done.take().unwrap().join().unwrap().is_err());
+}
+
+#[test]
+fn an_agent_can_stream_updates_while_a_large_prompt_is_written() {
+    let mut n = Node::start_with("acp_child_streams_before_reading_large_prompt");
+    assert_eq!(
+        n.call("initialize", json!({}))["result"]["adapterName"],
+        "acp-bridge"
+    );
+    let started = n.call(
+        "session/start",
+        json!({"projectRoot": ".", "worktree": "."}),
+    );
+    assert_eq!(started["result"]["sessionId"], "acp-s1");
+    n.call(
+        "session/prompt",
+        json!({"sessionId": "acp-s1", "text": "x".repeat(LARGE_PROMPT_BYTES)}),
+    );
+    n.wait(|m| {
+        m["method"] == "chat/append" && m["params"]["text"]["text"] == "fixture prompt received"
+    });
+    assert!(chats(&n).iter().any(|m| {
+        m["text"]["text"]
+            .as_str()
+            .is_some_and(|text| text.starts_with("ppp"))
+    }));
+    n.call(
+        "session/stop",
+        json!({"sessionId": "acp-s1", "reason": "user"}),
+    );
+    assert!(n.done.take().unwrap().join().unwrap().is_ok());
+}
+
+#[test]
+fn an_oversized_agent_line_ends_initialize_with_the_agent_exit_reason() {
+    let mut n = Node::start_with("acp_child_sends_an_oversized_line");
+    let reply = n.call("initialize", json!({}));
+    assert_eq!(reply["error"]["data"]["code"], "adapter.agent_exited");
+    assert_eq!(reply["error"]["data"]["params"]["stage"], "initialize");
+    assert_eq!(reply["error"]["data"]["params"]["stderr_tail"], "");
+    let bridge = n.done.take().unwrap();
+    drop(n);
+    let error = bridge.join().unwrap().unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+}
+
+#[test]
+fn an_oversized_node_line_ends_the_bridge_while_input_is_open() {
+    let mut n = Node::start();
+    assert_eq!(
+        n.call("initialize", json!({}))["result"]["adapterName"],
+        "acp-bridge"
+    );
+    n.to_bridge
+        .send(vec![b' '; agora_adapters::host::MAX_LINE + 1])
+        .unwrap();
+    let bridge = n.done.take().unwrap();
+    let end = Instant::now() + Duration::from_secs(10);
+    while !bridge.is_finished() {
+        assert!(Instant::now() < end, "bridge did not close");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let error = bridge.join().unwrap().unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
 }
 
 fn started() -> Node {
@@ -561,9 +738,7 @@ fn options(n: &Node) -> Vec<Value> {
 
 #[test]
 fn the_agents_modes_and_models_are_reported_and_can_be_switched() {
-    std::env::set_var("AGORA_FAKE_ACP_BYPASS_MODE", "1");
-    std::env::set_var("AGORA_FAKE_ACP_REFUSE_MODEL", "1");
-    let mut n = Node::start();
+    let mut n = Node::start_with("acp_child_bypass");
     let init = n.call("initialize", json!({}));
     let caps = init["result"]["capabilities"].as_array().unwrap().clone();
     assert!(caps.contains(&json!("set_mode")) && caps.contains(&json!("set_model")));

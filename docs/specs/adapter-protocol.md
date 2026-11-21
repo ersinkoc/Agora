@@ -124,6 +124,19 @@ towards the node, so chat items, approvals, state and cancel work as for any L3 
 `agora agent kinds` reports such a kind as level L2. On Windows the bridge starts a `.cmd` shim such as `npx` by its full path
 (`agora_platform::program_path`, see agent-manifest.md).
 
+Each input accepts lines up to 4 MiB, excluding the line feed. The two readers share an eight-entry queue of raw lines and
+wait for space when it fills. The bridge parses lines as it dispatches them, preserving each sender's order. Malformed JSON
+and invalid UTF-8 within the limit are ignored. A line over the limit closes that input as soon as the extra byte is detected.
+On the agent side the bridge stops the agent and uses the existing `adapter.agent_exited` reason with the current stage.
+On the node side the bridge stops the agent and exits with an invalid-input error, which the host sees as an adapter exit.
+
+The bridge writes to the agent on a separate thread so it can continue dispatching updates while the agent reads a
+command. The writer holds up to 64 queued commands, and at most 8 MiB of queued bytes (one line is always accepted into an empty
+queue), in addition to the current write of at most 4 MiB, so its worst-case memory is about 12 MiB (ADR-0022). A healthy agent
+that is busy and not reading stdin therefore survives a burst of permission answers, cancels and mode switches. If either
+limit is hit, the bridge stops the agent and uses `adapter.agent_exited`. The node's adapter host reads bridge replies independently of its
+command writes.
+
 | ACP (agent → client) | Adapter protocol (bridge → node) |
 | --- | --- |
 | `session/update` `agent_message_chunk` | `chat/append` text, chunks joined for up to 150 ms (or 4 KiB). An explicit stop or the end of the node's request stream flushes buffered text while the reply stream remains open |
@@ -175,7 +188,8 @@ answered and followed by `session/config` from the agent's full reply;
 `reject_once`, else `reject_always`, else `cancelled` for a denial). A decision for an approval the bridge no longer holds (it
 answered the request `cancelled` itself, by the rules above, or never knew it) is refused with a JSON-RPC error (`-32602`) and the
 agent is sent nothing; the node then marks the conversation's entry cancelled and publishes the approval as resolved, not approved
-and unsigned (as when a turn is cancelled), so the hub clears it; it does so for any decision it cannot deliver. The node learns of a
+and unsigned (as when a turn is cancelled), so the hub clears it. The bridge acknowledges the decision once it is queued for the
+agent. A full or disconnected writer queue gets a JSON-RPC error (`-32603`); the node cancels its entry in this case too. The node learns of a
 cancelled permission when its decision is refused, and clears it: telling it the moment the bridge cancels would need a new adapter
 → node notification (follow-up). The bridge offers no capabilities: `fs/*` and `terminal/*`
 requests from the agent are refused (the agent works in its own worktree), and mesh delivery to ACP agents goes through the mesh MCP

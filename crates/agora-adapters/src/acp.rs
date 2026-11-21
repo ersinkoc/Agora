@@ -24,15 +24,28 @@
 use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::ops::ControlFlow;
-use std::process::{Child, ChildStderr, Command, Stdio};
-use std::sync::mpsc::{channel, Receiver, RecvTimeoutError};
+use std::process::{Child, ChildStderr, ChildStdin, Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::{
+    channel, sync_channel, Receiver, RecvTimeoutError, SyncSender, TrySendError,
+};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
+use crate::host::MAX_LINE;
 use crate::perm::{self, Category};
 
+/// Both readers share this queue. Store line bytes so queued JSON has not expanded into values.
+const INPUT_QUEUE: usize = 8;
+/// Commands waiting behind the one being written to the agent. A busy agent that is not reading stdin must survive a burst of
+/// permission answers, cancels and mode switches, so the count is generous; the byte budget below is what bounds memory.
+const AGENT_WRITE_QUEUE: usize = 64;
+/// The most bytes waiting in the writer queue (ADR-0022). Commands are small, but a prompt line can be up to `MAX_LINE`, so the
+/// queue also stops at this many bytes; one line over the budget is still accepted when the queue is empty. Worst case memory of
+/// the writer: this budget (or one `MAX_LINE` line if larger) queued, plus the line being written, which is at most `MAX_LINE`.
+const AGENT_WRITE_BYTES: usize = 8 * 1024 * 1024;
 /// How long agent text chunks are joined into one chat item.
 const JOIN: Duration = Duration::from_millis(150);
 /// The most text one joined item holds before it is sent anyway.
@@ -71,10 +84,14 @@ const OPTION_ID_MAX: usize = 200;
 const OPTION_NAME_MAX: usize = 200;
 const OPTION_DESCRIPTION_MAX: usize = 500;
 enum Ev {
-    Node(Value),
-    Agent(Value),
-    NodeGone,
-    AgentGone,
+    Node(Input),
+    Agent(Input),
+}
+
+enum Input {
+    Line(Box<[u8]>),
+    Gone,
+    TooLong,
 }
 
 enum Waiting {
@@ -112,30 +129,91 @@ struct Permission {
     options: Vec<(String, String)>, // (option id, kind)
 }
 
-fn lines<R: Read + Send + 'static>(
-    r: R,
-    wrap: fn(Value) -> Ev,
-    gone: Ev,
-    tx: std::sync::mpsc::Sender<Ev>,
-) {
+fn lines<R: Read + Send + 'static>(r: R, wrap: fn(Input) -> Ev, tx: SyncSender<Ev>) {
     std::thread::spawn(move || {
-        // Lines as bytes: one that is not UTF-8 must not read as the end of the stream.
-        for line in BufReader::new(r).split(b'\n') {
-            let Ok(line) = line else { break };
-            // A line that is not JSON (or not UTF-8) is the agent's own noise; it is ignored like any unknown message.
-            if let Ok(v) = serde_json::from_slice::<Value>(&line) {
-                if tx.send(wrap(v)).is_err() {
-                    return;
-                }
+        let mut reader = BufReader::new(r);
+        let end = loop {
+            let mut line = Vec::new();
+            // One extra byte distinguishes a full line followed by LF from a line that exceeds the limit.
+            match (&mut reader)
+                .take((MAX_LINE + 1) as u64)
+                .read_until(b'\n', &mut line)
+            {
+                Ok(0) | Err(_) => break Input::Gone,
+                Ok(_) => {}
             }
-        }
-        let _ = tx.send(gone);
+            if line.last() == Some(&b'\n') {
+                line.pop();
+            }
+            if line.len() > MAX_LINE {
+                break Input::TooLong;
+            }
+            if tx.send(wrap(Input::Line(line.into_boxed_slice()))).is_err() {
+                return;
+            }
+        };
+        drop(reader);
+        let _ = tx.send(wrap(end));
     });
 }
 
 fn write_line<W: Write>(w: &mut W, v: &Value) -> io::Result<()> {
     writeln!(w, "{v}")?;
     w.flush()
+}
+
+struct AgentWriter {
+    line: Vec<u8>,
+    pending: SyncSender<Box<[u8]>>,
+    /// Bytes queued and not yet taken by the writer thread.
+    queued: Arc<AtomicUsize>,
+}
+
+impl AgentWriter {
+    fn start(mut stdin: ChildStdin) -> Self {
+        let (pending, lines) = sync_channel::<Box<[u8]>>(AGENT_WRITE_QUEUE);
+        let queued = Arc::new(AtomicUsize::new(0));
+        let taken = Arc::clone(&queued);
+        std::thread::spawn(move || {
+            while let Ok(line) = lines.recv() {
+                taken.fetch_sub(line.len(), Ordering::SeqCst);
+                if stdin.write_all(&line).and_then(|()| stdin.flush()).is_err() {
+                    break;
+                }
+            }
+        });
+        Self {
+            line: Vec::new(),
+            pending,
+            queued,
+        }
+    }
+}
+
+impl Write for AgentWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.line.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        let line = std::mem::take(&mut self.line).into_boxed_slice();
+        let len = line.len();
+        // Only this thread adds, so the check cannot race another add; the writer thread only subtracts.
+        let held = self.queued.load(Ordering::SeqCst);
+        if held > 0 && held.saturating_add(len) > AGENT_WRITE_BYTES {
+            return Err(io::ErrorKind::WouldBlock.into());
+        }
+        self.queued.fetch_add(len, Ordering::SeqCst);
+        self.pending.try_send(line).map_err(|error| {
+            self.queued.fetch_sub(len, Ordering::SeqCst);
+            match error {
+                TrySendError::Full(_) => io::ErrorKind::WouldBlock,
+                TrySendError::Disconnected(_) => io::ErrorKind::BrokenPipe,
+            }
+            .into()
+        })
+    }
 }
 
 /// A unified diff that replaces `old` by `new` as a whole (ACP gives both texts, not a patch).
@@ -865,6 +943,7 @@ struct Bridge<W: Write> {
     out: W,
     /// The agent's stdin (a buffer in tests, so what the agent was sent can be read on every platform).
     agent: Box<dyn Write>,
+    agent_writer_full: bool,
     next: u64,
     waiting: HashMap<u64, Waiting>,
     session: Option<String>,
@@ -990,10 +1069,19 @@ impl<W: Write> Bridge<W> {
         }
     }
 
-    /// A line to the agent. A failed write means the agent is gone or going: the end of its output follows and is reported then
-    /// (with what was still waiting), so the failure itself is not an error of the bridge.
-    fn send_agent(&mut self, v: &Value) {
-        let _ = write_line(&mut self.agent, v);
+    /// Queue a line to the agent. If its writer has fallen behind, the dispatcher ends the agent via the normal exit path.
+    /// A broken pipe is reported when the agent's output ends, with its own exit status and stderr.
+    fn send_agent(&mut self, v: &Value) -> bool {
+        if self.agent_writer_full {
+            return false;
+        }
+        match write_line(&mut self.agent, v) {
+            Ok(()) => true,
+            Err(e) => {
+                self.agent_writer_full = e.kind() == io::ErrorKind::WouldBlock;
+                false
+            }
+        }
     }
 
     fn ask_agent(&mut self, method: &str, params: Value, waiting: Waiting) {
@@ -1498,7 +1586,6 @@ impl<W: Write> Bridge<W> {
                     }
                     return Ok(ControlFlow::Continue(()));
                 };
-                done(self)?;
                 let want: &[&str] = if approved {
                     &["allow_once", "allow_always"]
                 } else {
@@ -1512,9 +1599,16 @@ impl<W: Write> Bridge<W> {
                     Some((option, _)) => json!({"outcome": "selected", "optionId": option}),
                     None => json!({"outcome": "cancelled"}),
                 };
-                self.send_agent(
+                if !self.send_agent(
                     &json!({"jsonrpc": "2.0", "id": p.request, "result": {"outcome": outcome}}),
-                );
+                ) {
+                    if let Some(id) = &id {
+                        self.send_node(&json!({"jsonrpc": "2.0", "id": id,
+                            "error": {"code": -32603, "message": "adapter.approval_undelivered"}}))?;
+                    }
+                    return Ok(ControlFlow::Continue(()));
+                }
+                done(self)?;
                 // Permissions are kept only while a prompt runs (one outside a turn is refused, any prompt's reply cancels them).
                 if self.perms.is_empty() {
                     self.state("WORKING")?;
@@ -2091,12 +2185,13 @@ where
         };
     let kept = Arc::new(Mutex::new(Kept::default()));
     let stderr_done = keep_stderr(stderr, Arc::clone(&kept));
-    let (tx, rx) = channel();
-    lines(input, Ev::Node, Ev::NodeGone, tx.clone());
-    lines(stdout, Ev::Agent, Ev::AgentGone, tx);
+    let (tx, rx) = sync_channel(INPUT_QUEUE);
+    lines(input, Ev::Node, tx.clone());
+    lines(stdout, Ev::Agent, tx);
     let mut b = Bridge {
         out: output,
-        agent: Box::new(stdin),
+        agent: Box::new(AgentWriter::start(stdin)),
+        agent_writer_full: false,
         next: 0,
         waiting: HashMap::new(),
         session: None,
@@ -2119,50 +2214,67 @@ where
             .ok(),
     };
     let result = (|| -> io::Result<Option<Value>> {
-        loop {
+        let failure = loop {
             match rx.recv_timeout(Duration::from_millis(50)) {
-                Ok(Ev::Node(m)) => {
-                    if let ControlFlow::Break(id) = b.handle_node(&m)? {
-                        return Ok(id);
-                    }
-                }
-                Ok(Ev::Agent(m)) => b.handle_agent(&m)?,
-                Ok(Ev::NodeGone) => return Ok(None),
-                Ok(Ev::AgentGone) => {
-                    let code = wait_briefly(&mut child);
-                    // The rest of its stderr, unless something it started still holds the stream open.
-                    let _ = stderr_done.recv_timeout(Duration::from_millis(500));
-                    let raw = kept.lock().unwrap_or_else(|e| e.into_inner()).buf.clone();
-                    let home = std::env::var("HOME")
-                        .or_else(|_| std::env::var("USERPROFILE"))
-                        .ok();
-                    let tail = stderr_tail(&raw, home.as_deref());
-                    b.agent_gone(code, &tail)?;
-                    // The node's initialize or session/start may still be on its way. Give it the exit reason too.
-                    if b.session.is_none() {
-                        let end = Instant::now() + LATE_REQUEST_WAIT;
-                        while let Some(left) = end.checked_duration_since(Instant::now()) {
-                            match rx.recv_timeout(left) {
-                                Ok(Ev::Node(m)) => {
-                                    if b.answer_late(&m, code, &tail)? {
-                                        break;
-                                    }
-                                }
-                                Ok(_) => {}
-                                Err(_) => break,
-                            }
+                Ok(Ev::Node(Input::Line(line))) => {
+                    if let Ok(m) = serde_json::from_slice(&line) {
+                        if let ControlFlow::Break(id) = b.handle_node(&m)? {
+                            return Ok(id);
                         }
                     }
-                    return Err(io::Error::other("the agent exited"));
                 }
+                Ok(Ev::Agent(Input::Line(line))) => {
+                    // The agent can print noise on stdout. Malformed JSON and non-UTF-8 lines are ignored.
+                    if let Ok(m) = serde_json::from_slice(&line) {
+                        b.handle_agent(&m)?;
+                    }
+                }
+                Ok(Ev::Node(Input::Gone)) => return Ok(None),
+                Ok(Ev::Node(Input::TooLong)) => return Err(io::ErrorKind::InvalidData.into()),
+                Ok(Ev::Agent(Input::Gone)) => break None,
+                Ok(Ev::Agent(Input::TooLong)) => break Some(io::ErrorKind::InvalidData),
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => return Ok(None),
+            }
+            if b.agent_writer_full {
+                break Some(io::ErrorKind::WouldBlock);
             }
             if !b.text.is_empty() && b.text_since.elapsed() >= JOIN {
                 b.flush_text()?;
             }
+        };
+        if failure.is_some() {
+            let _ = child.kill();
         }
+        let code = wait_briefly(&mut child);
+        // The rest of its stderr, unless something it started still holds the stream open.
+        let _ = stderr_done.recv_timeout(Duration::from_millis(500));
+        let raw = kept.lock().unwrap_or_else(|e| e.into_inner()).buf.clone();
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .ok();
+        let tail = stderr_tail(&raw, home.as_deref());
+        b.agent_gone(code, &tail)?;
+        // The node's initialize or session/start may still be on its way. Give it the exit reason too.
+        if b.session.is_none() {
+            let end = Instant::now() + LATE_REQUEST_WAIT;
+            while let Some(left) = end.checked_duration_since(Instant::now()) {
+                match rx.recv_timeout(left) {
+                    Ok(Ev::Node(Input::Line(line))) => {
+                        if let Ok(m) = serde_json::from_slice(&line) {
+                            if b.answer_late(&m, code, &tail)? {
+                                break;
+                            }
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(_) => break,
+                }
+            }
+        }
+        Err(failure.map_or_else(|| io::Error::other("the agent exited"), io::Error::from))
     })();
+    drop(rx);
     let _ = child.kill();
     let reaped = child.wait();
     let Some(id) = result? else {
@@ -2181,6 +2293,7 @@ mod tests {
         let mut bridge = Bridge {
             out: Vec::new(),
             agent: Box::new(io::sink()),
+            agent_writer_full: false,
             next: 0,
             waiting: HashMap::new(),
             session: Some("s".to_string()),
@@ -2338,19 +2451,106 @@ mod tests {
     /// A line that is not UTF-8 used to end the reader as if the agent had exited (audit F044).
     #[test]
     fn a_line_that_is_not_utf8_is_noise_not_the_end_of_the_agent() {
-        let (tx, rx) = channel();
+        let (tx, rx) = sync_channel(INPUT_QUEUE);
         let data = b"\xff\xfe noise\n{\"text\":\"\xff\"}\n{\"id\":1}\r\n{\"id\":2}".to_vec();
-        lines(std::io::Cursor::new(data), Ev::Agent, Ev::AgentGone, tx);
+        lines(std::io::Cursor::new(data), Ev::Agent, tx);
         let mut ids = Vec::new();
         loop {
             match rx.recv_timeout(Duration::from_secs(10)) {
-                Ok(Ev::Agent(v)) => ids.push(v["id"].clone()),
-                Ok(Ev::AgentGone) => break,
+                Ok(Ev::Agent(Input::Line(line))) => {
+                    if let Ok(v) = serde_json::from_slice::<Value>(&line) {
+                        ids.push(v["id"].clone());
+                    }
+                }
+                Ok(Ev::Agent(Input::Gone)) => break,
                 Ok(_) => {}
                 Err(e) => panic!("reader stalled: {e}"),
             }
         }
         assert_eq!(ids, vec![json!(1), json!(2)]);
+    }
+
+    #[test]
+    fn the_bridge_accepts_a_full_line_and_refuses_the_next_line_before_its_newline() {
+        let (tx, rx) = sync_channel(INPUT_QUEUE);
+        let mut data = b"{}".to_vec();
+        data.resize(MAX_LINE, b' ');
+        data.push(b'\n');
+        data.resize(data.len() + MAX_LINE + 1, b' ');
+        lines(std::io::Cursor::new(data), Ev::Node, tx);
+        let wait = Duration::from_secs(10);
+        let Ok(Ev::Node(Input::Line(line))) = rx.recv_timeout(wait) else {
+            panic!("the full line should be accepted");
+        };
+        assert_eq!(line.len(), MAX_LINE);
+        assert_eq!(serde_json::from_slice::<Value>(&line).ok(), Some(json!({})));
+        assert!(matches!(
+            rx.recv_timeout(wait),
+            Ok(Ev::Node(Input::TooLong))
+        ));
+        assert!(matches!(
+            rx.recv_timeout(wait),
+            Err(RecvTimeoutError::Disconnected)
+        ));
+    }
+
+    /// ADR-0022: the writer queue is bounded by bytes as well as by count.
+    #[test]
+    fn the_writer_queue_is_bounded_by_count_and_by_bytes() {
+        use std::io::Write;
+        let writer = |count: usize| {
+            let (pending, rx) = sync_channel(count);
+            (
+                super::AgentWriter {
+                    line: Vec::new(),
+                    pending,
+                    queued: Default::default(),
+                },
+                rx,
+            )
+        };
+        let put = |w: &mut super::AgentWriter, n: usize| {
+            w.write_all(&vec![b'x'; n]).and_then(|()| w.flush())
+        };
+        let (mut w, _rx) = writer(super::AGENT_WRITE_QUEUE);
+        for _ in 0..super::AGENT_WRITE_QUEUE {
+            assert!(put(&mut w, 10).is_ok());
+        }
+        assert_eq!(
+            put(&mut w, 10).err().map(|e| e.kind()),
+            Some(io::ErrorKind::WouldBlock)
+        );
+        let (mut w, _rx) = writer(super::AGENT_WRITE_QUEUE);
+        assert!(
+            put(&mut w, super::AGENT_WRITE_BYTES + 1).is_ok(),
+            "a lone big line"
+        );
+        assert_eq!(
+            put(&mut w, 1).err().map(|e| e.kind()),
+            Some(io::ErrorKind::WouldBlock)
+        );
+    }
+
+    #[test]
+    fn a_burst_larger_than_the_queue_is_delivered_in_order() {
+        let (tx, rx) = sync_channel(INPUT_QUEUE);
+        let count = INPUT_QUEUE * 2;
+        let mut data = Vec::new();
+        for id in 0..count {
+            assert!(writeln!(data, "{}", json!({"id": id})).is_ok());
+        }
+        lines(std::io::Cursor::new(data), Ev::Agent, tx);
+        let wait = Duration::from_secs(10);
+        for id in 0..count {
+            let Ok(Ev::Agent(Input::Line(line))) = rx.recv_timeout(wait) else {
+                panic!("missing frame {id}");
+            };
+            assert_eq!(
+                serde_json::from_slice::<Value>(&line).ok(),
+                Some(json!({"id": id}))
+            );
+        }
+        assert!(matches!(rx.recv_timeout(wait), Ok(Ev::Agent(Input::Gone))));
     }
 
     #[test]
@@ -2870,6 +3070,36 @@ mod tests {
                 sent.take().is_empty(),
                 "{approval}: the agent is sent nothing"
             );
+        }
+        for full in [true, false] {
+            let (mut b, _) = bridge_with_agent()?;
+            prompt(&mut b, 10, "t")?;
+            ask(&mut b, "perm-unavailable")?;
+            let approval = b.perms.keys().next().cloned().ok_or("no approval")?;
+            b.out.clear();
+            let (pending, rx) = std::sync::mpsc::sync_channel(1);
+            let queued = if full {
+                pending.try_send(Box::from(&b"pending\n"[..]))?;
+                Some(rx)
+            } else {
+                drop(rx);
+                None
+            };
+            b.agent = Box::new(super::AgentWriter {
+                line: Vec::new(),
+                pending,
+                queued: Default::default(),
+            });
+            resolve(&mut b, 23, &approval)?;
+            let reply = answer(&b.out, 23).ok_or("no reply")?;
+            assert_eq!(reply["error"]["code"], -32603, "{reply}");
+            assert!(reply.get("result").is_none(), "{reply}");
+            assert!(states(&b.out).is_empty());
+            assert_eq!(b.agent_writer_full, full);
+            if let Some(rx) = queued {
+                assert_eq!(&*rx.try_recv()?, b"pending\n");
+                assert!(rx.try_recv().is_err());
+            }
         }
         // A decision the bridge holds is delivered and succeeds.
         let (mut b, sent) = bridge_with_agent()?;
