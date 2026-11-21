@@ -1078,14 +1078,19 @@ forwards either to a node that did not offer it.
   Golden fixtures: `schema/fixtures/v1/agora.v1.AgentQuotaObserved.*` and `schema/fixtures/usage-quota/`.
 
 ### Giving a task to an agent (ADR-0095)
-Schema step approved by the maintainer on 2026-11-21. Not yet handled by any node or offered by the hub: until a node advertises
-`task.dispatch`, the hub refuses `TaskDispatch` for it with `protocol.capability_missing` and a node refuses it the same way.
+Schema step approved by the maintainer on 2026-11-21. Handled by every node of this build, which advertises `task.dispatch`; the hub
+passes it (`hubcli.rs`). To an older node without the capability the hub refuses `TaskDispatch` with `protocol.capability_missing`.
 - **`TaskDispatch`** (`CommandRequest` field 109, capability `task.dispatch`): `project_id` (1), `task_id` (2), `agent_id` (3, an agent
   of the receiving node), `by_user` (4). The node claims the open task for that agent where the project's board is (its broker; for a
   shared project the hub's board, as the agent's own `task_claim` would, ADR-0039), sends the agent one prompt built from the node's
   template around the task's title and detail (`agora_mesh::dispatch::build_prompt`: a fenced block marked untrusted task data, cleaned and
-  cut to the mesh message limit), never typed over a running turn (a structured agent queues it as it queues `AgentPrompt`), and writes
-  `TaskDispatched`. A prompt that cannot be sent gives a task on the node's own broker back; the shared board has no release yet, so
+  cut to the mesh message limit), never typed over a running turn, and writes `TaskDispatched`. A structured agent gets it as an
+  `AgentPrompt` would (sent now, or queued behind the turn, `agent.queue_full` past 8). A terminal agent has no queue: when it is between
+  turns (detected idle, done or unknown, and no prompt typed into it in the last 5 seconds) the prompt is typed as `AgentPrompt` types one;
+  otherwise the node holds it, one per agent (`agent.queue_full` with `limit` 1 for a second, refused before anything is claimed), and types
+  it once the agent is between turns; a held prompt is dropped if the agent ends or is stopped (its task on the node's broker is then given
+  back). For a shared project the node asks the hub's board as the agent (`task_list` for the task's text and status, then `task_claim`)
+  and still builds the prompt itself; a project known to be shared with no hub link is `board.unavailable`. A prompt that cannot be sent gives a task on the node's own broker back; the shared board has no release yet, so
   there the task stays claimed by that agent. Refusals: `mesh.recipient_unknown` (the agent is not of `project_id`), `task.not_found`, `task.blocked`,
   `task.not_open` (also a second dispatch of a claimed task), `agent.queue_full`. Not signed and not an approval: it changes no permission
   of the agent, and every sensitive action the agent later asks for still needs the person (ADR-0020). Like `AgentPrompt` it needs the

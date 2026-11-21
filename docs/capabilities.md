@@ -83,7 +83,7 @@ L1 is an agent in a terminal read from its screen (a manifest); L2/L3 are struct
 | The ACP registry as a source of agent kinds | ADR-0092 Accepted | step 1 (conversion, #832) | adapter tests | none recorded here |
 | Structured agents survive a node restart | ADR-0093 Accepted | Linux and macOS, unconfined agents started through a holder of link version 2: the process survives (steps 1-2, #800); a version-1 holder cannot keep it; a confined adapter is the node's own, ends with it, and comes back only as the resume policy allows (it may stay interrupted for a manual resume); Windows not built | node and platform tests | none recorded here |
 | A plain terminal shows the agent program running in it | ADR-0094 Accepted | not built | — | — |
-| A project's kanban board; a task dispatched to an agent | ADR-0095 Accepted | read-only board (#858), the broker's claim (#859) and the schema (`TaskDispatch`, `TaskDispatched`, `task.dispatch`); no node handles it and dispatch from the window is not built | web and mesh tests | none recorded here |
+| A project's kanban board; a task dispatched to an agent | ADR-0095 Accepted | read-only board (#858), the broker's claim (#859), the schema (`TaskDispatch`, `TaskDispatched`, `task.dispatch`) and the node handler (claim, data-wrapped prompt never over a running turn, audit event); dispatch from the window is not built | web and mesh tests | none recorded here |
 | A ready helper agent | ADR-0096 Accepted | not built | — | — |
 
 ## The window

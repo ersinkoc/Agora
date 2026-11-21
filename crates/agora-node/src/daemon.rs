@@ -1970,6 +1970,47 @@ impl Node {
                                 }
                             }
                         }
+                        // ADR-0095: a dispatch prompt held for a terminal agent in a turn is typed once the agent is between turns, on a
+                        // thread of its own (the typing pauses); one whose agent ended or was stopped is never typed, and its task on this
+                        // node's broker is given back (the shared board has no release).
+                        for e in &events {
+                            if let SupervisorEvent::Exited { agent, .. }
+                            | SupervisorEvent::GaveUp { agent }
+                            | SupervisorEvent::Stopped { agent } = e
+                            {
+                                if let Some(h) = mesh.held().take(agent) {
+                                    if !h.shared {
+                                        mesh.dispatch_release(agent, &h.task_id);
+                                    }
+                                }
+                            }
+                        }
+                        let due = mesh.held().due(
+                            views
+                                .iter()
+                                .filter(|v| v.running && v.terminal)
+                                .map(|v| (&v.id, v.state)),
+                            Instant::now(),
+                        );
+                        for (agent, h) in due {
+                            let control = sup
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .terminal(&agent)
+                                .and_then(|t| t.input_handle().ok());
+                            let (task, shared) = (h.task_id.clone(), h.shared);
+                            let typing = control.and_then(|c| {
+                                std::thread::Builder::new()
+                                    .name("agora-dispatch-type".into())
+                                    .spawn(move || {
+                                        let _ = crate::task_dispatch::type_prompt(&c, &h.prompt);
+                                    })
+                                    .ok()
+                            });
+                            if typing.is_none() && !shared {
+                                mesh.dispatch_release(&agent, &task);
+                            }
+                        }
                         spawner.tick();
                         // ADR-0090: versions of chat entries held back to keep to one per 150 ms go out once they are due.
                         chat.flush_due(now_ms());

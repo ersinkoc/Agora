@@ -48,6 +48,8 @@ pub const CAPABILITIES: &[&str] = &[
     "approval.skip_permissions",
     // ADR-0091: reads the plan windows a tool reports in its usage file (`[quota]`) and sends `AgentQuotaObserved`.
     "usage.quota",
+    // ADR-0095: claims a task for an agent, sends it the data-wrapped prompt (never over a running turn) and records `TaskDispatched`.
+    "task.dispatch",
     // ADR-0060
     "agent.resume",
     // ADR-0059
