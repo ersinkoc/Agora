@@ -4,19 +4,19 @@
 //! and where the keyboard points in, lines and frames out (render never mutates state, AGENTS.md); the caller asks the hub and reads the
 //! keys. Task text and names are untrusted: they are drawn as plain text on one line, cut short.
 
-use std::collections::HashSet;
-
 use agora_i18n::{key, Arg};
 use agora_protocol::v1::{
-    command_request::Command, param_value::Value, AgentSnapshot, ErrorInfo, Snapshot, TaskDispatch,
-    TaskDispatchResult,
+    command_request::Command, param_value::Value, AgentSnapshot, ErrorInfo, SessionConfigOption,
+    SessionConfigType, Snapshot, TaskDispatch, TaskDispatchResult,
 };
+use agora_protocol::ErrorCode;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
 use ratatui::Frame;
 
+use crate::client::Configs;
 use crate::render::{plain, Text};
 
 /// A board's columns over the statuses the board already has: Backlog (nobody holds it), Doing (an agent holds it), Done.
@@ -75,6 +75,15 @@ impl Board {
 
     pub fn is_empty(&self) -> bool {
         self.columns.iter().all(|c| c.total == 0)
+    }
+
+    /// Where the keyboard is after the board changed: on the task it was on (`task_id`, wherever that task is now: a task just given
+    /// is in Doing), else at the same place in the list, else the last card.
+    pub fn select(&self, task_id: Option<&str>, at: usize) -> usize {
+        let cards = self.cards();
+        task_id
+            .and_then(|id| cards.iter().position(|(_, c)| c.task_id == id))
+            .unwrap_or_else(|| at.min(cards.len().saturating_sub(1)))
     }
 }
 
@@ -443,25 +452,73 @@ pub fn draw_board(
     );
 }
 
-/// Whether `a` acts without asking now: started so (a launch option, ADR-0059), or its current mode is one that skips approvals
-/// (ADR-0058). (A config option that skips them, ADR-0090, is not in the hub's snapshot, so this client cannot see it.)
-pub fn acts_freely(a: &AgentSnapshot) -> bool {
+/// Whether `a` acts without asking now, as the web window decides it (`actsFreely`): started so (a launch option, ADR-0059), or its
+/// current mode skips approvals (ADR-0058), or one of its config options is on a value that does (ADR-0090 Amendment A: a boolean that
+/// skips them and is "true", a select whose current choice skips them). `configs`: the options its machine last reported
+/// ([`crate::client::Session::configs`]).
+pub fn acts_freely(a: &AgentSnapshot, configs: &Configs) -> bool {
     a.skips_permissions
         || (!a.current_mode.is_empty()
             && a.modes
                 .iter()
                 .any(|m| m.skips_permissions && m.id == a.current_mode))
+        || configs
+            .get(&a.agent_id)
+            .is_some_and(|options| options.iter().any(config_skips))
+}
+
+/// Whether a config option is on a value that makes the agent act without asking: for a boolean the flag is on the option and only
+/// "true" does, for a select the flag is on the chosen choice.
+fn config_skips(o: &SessionConfigOption) -> bool {
+    if o.r#type == SessionConfigType::Boolean as i32 {
+        o.skips_permissions && o.current == "true"
+    } else {
+        o.choices
+            .iter()
+            .any(|c| c.id == o.current && c.skips_permissions)
+    }
+}
+
+/// Machines that answered a "Give to an agent" in a way that says they do not take tasks ([`lacks_give`]), with the build they had
+/// then: their agents are not offered again until the machine goes offline, is gone, or a snapshot shows it with another build or
+/// program (it was updated, ADR-0069), or the link to the hub is lost ([`Lacking::clear`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Lacking(std::collections::HashMap<String, (String, String)>);
+
+impl Lacking {
+    /// Remembers that `node` does not take tasks, as `s` shows it now.
+    pub fn note(&mut self, s: &Snapshot, node: &str) {
+        let build = s
+            .nodes
+            .iter()
+            .find(|n| n.node_id == node)
+            .map(|n| (n.build.clone(), n.binary.clone()))
+            .unwrap_or_default();
+        self.0.insert(node.to_string(), build);
+    }
+
+    pub fn contains(&self, node: &str) -> bool {
+        self.0.contains_key(node)
+    }
+
+    /// Forgets the machines `s` shows offline, does not list, or lists with another build or program than when they refused.
+    pub fn settle(&mut self, s: &Snapshot) {
+        self.0.retain(|node, (build, binary)| {
+            s.nodes
+                .iter()
+                .any(|n| n.node_id == *node && n.online && n.build == *build && n.binary == *binary)
+        });
+    }
+
+    pub fn clear(&mut self) {
+        self.0.clear();
+    }
 }
 
 /// Whether `a` may be given a task of `project_id` now: an agent (not a plain shell) of that project, running and neither closed nor
 /// interrupted, on a connected machine not heard to lack `task.dispatch` in this connection (`lacking`). By its lifecycle, not its
 /// state word: a running agent whose last turn finished is between turns and takes it.
-pub fn can_take(
-    s: &Snapshot,
-    a: &AgentSnapshot,
-    project_id: &str,
-    lacking: &HashSet<String>,
-) -> bool {
+pub fn can_take(s: &Snapshot, a: &AgentSnapshot, project_id: &str, lacking: &Lacking) -> bool {
     !project_id.is_empty()
         && a.running
         && !a.interrupted
@@ -476,7 +533,7 @@ pub fn can_take(
 pub fn candidates<'a>(
     s: &'a Snapshot,
     project_id: &str,
-    lacking: &HashSet<String>,
+    lacking: &Lacking,
 ) -> Vec<(&'a AgentSnapshot, usize)> {
     let mut list: Vec<&AgentSnapshot> = s
         .agents
@@ -490,7 +547,13 @@ pub fn candidates<'a>(
 }
 
 /// One agent in the picker: its name, kind and machine (a helper says so), its state, and whether it acts without asking.
-pub fn choice_line(s: &Snapshot, a: &AgentSnapshot, depth: usize, t: Text<'_>) -> String {
+pub fn choice_line(
+    s: &Snapshot,
+    a: &AgentSnapshot,
+    depth: usize,
+    configs: &Configs,
+    t: Text<'_>,
+) -> String {
     let args = [
         ("kind", Arg::Str(one_line(&a.kind, NAME_MAX))),
         ("machine", Arg::Str(machine_label(s, &a.node_id, t))),
@@ -510,7 +573,7 @@ pub fn choice_line(s: &Snapshot, a: &AgentSnapshot, depth: usize, t: Text<'_>) -
         one_line(&agent_name(s, a), NAME_MAX),
         crate::split::state_text(s, a, t)
     );
-    if acts_freely(a) {
+    if acts_freely(a, configs) {
         line.push_str(&format!("  [{}]", t(key!("tui-badge-no-ask"), &[])));
     }
     line
@@ -575,6 +638,7 @@ pub fn draw_picker(
 pub fn confirm_lines(
     s: &Snapshot,
     a: &AgentSnapshot,
+    configs: &Configs,
     task: &str,
     project: &str,
     t: Text<'_>,
@@ -600,7 +664,7 @@ pub fn confirm_lines(
         field(key!("tui-give-field-project"), one_line(project, FULL)),
         String::new(),
     ];
-    if acts_freely(a) {
+    if acts_freely(a, configs) {
         lines.push(t(key!("tui-give-confirm-no-ask"), &agent));
         lines.push(String::new());
     }
@@ -677,32 +741,24 @@ pub fn refusal_text(e: &ErrorInfo, t: Text<'_>) -> String {
     };
     let text = match own {
         Some((id, args)) => t(id, &args),
-        None => {
-            let id = e.code.replace('.', "-");
-            let mut names: Vec<&String> = e.params.keys().collect();
-            names.sort();
-            let args: Vec<(&str, Arg)> = names
-                .into_iter()
-                .filter_map(|k| {
-                    let v = e.params.get(k)?;
-                    match &v.value {
-                        Some(Value::Str(s)) => Some((k.as_str(), Arg::Str(one_line(s, FULL)))),
-                        Some(Value::Int(i)) => Some((k.as_str(), Arg::Num(*i))),
-                        None => None,
-                    }
-                })
-                .collect();
-            let said = t(&id, &args);
-            // A code the catalog does not know comes back as its own id: the general sentence then.
-            if said == id || e.code.is_empty() {
-                t(
-                    key!("tui-give-failed"),
-                    &[("code", Arg::Str(one_line(&e.code, NAME_MAX)))],
-                )
-            } else {
-                said
+        None => match ErrorCode::parse(&e.code) {
+            // Only a code this build knows is looked up in `errors.ftl`, with only the parameters its sentence takes.
+            ErrorCode::Unknown(_) => t(
+                key!("tui-give-failed"),
+                &[("code", Arg::Str(one_line(&e.code, NAME_MAX)))],
+            ),
+            code => {
+                let args: Vec<(&str, Arg)> = code
+                    .params()
+                    .iter()
+                    .filter_map(|k| match e.params.get(*k)?.value.as_ref()? {
+                        Value::Str(s) => Some((*k, Arg::Str(one_line(s, FULL)))),
+                        Value::Int(i) => Some((*k, Arg::Num(*i))),
+                    })
+                    .collect();
+                t(&code.fluent_key(), &args)
             }
-        }
+        },
     };
     one_line(&text, FULL * 2)
 }
@@ -719,12 +775,7 @@ pub fn result_text(r: Option<&TaskDispatchResult>, agent: &str, t: Text<'_>) -> 
 
 /// Why `agent_id` cannot be given a task of `project_id` now (checked again when sending): its machine is not connected, or was heard
 /// not to take tasks, or the agent stopped, was closed or interrupted, or left the project (or is gone).
-pub fn cannot_take_text(
-    s: &Snapshot,
-    agent_id: &str,
-    lacking: &HashSet<String>,
-    t: Text<'_>,
-) -> String {
+pub fn cannot_take_text(s: &Snapshot, agent_id: &str, lacking: &Lacking, t: Text<'_>) -> String {
     if let Some(a) = s
         .agents
         .iter()
@@ -939,8 +990,8 @@ mod tests {
     fn only_running_agents_of_the_project_on_a_connected_machine_are_offered_helpers_under_their_parent(
     ) {
         let s = snapshot();
-        let mut lacking = HashSet::new();
-        let ids = |lacking: &HashSet<String>| {
+        let mut lacking = Lacking::default();
+        let ids = |lacking: &Lacking| {
             candidates(&s, "p1", lacking)
                 .into_iter()
                 .map(|(a, d)| (a.agent_id.clone(), d))
@@ -956,7 +1007,7 @@ mod tests {
             ]
         );
         // A machine heard to lack `task.dispatch` is not offered.
-        lacking.insert("old".to_string());
+        lacking.note(&s, "old");
         assert_eq!(ids(&lacking).len(), 2);
         assert!(candidates(&s, "", &lacking).is_empty());
     }
@@ -978,7 +1029,7 @@ mod tests {
         });
         assert_eq!(project_of(&s, "mac/agent-9").as_deref(), Some("p1"));
         assert_eq!(project_label(&s, "p1"), "web");
-        assert!(candidates(&s, "p1", &HashSet::new())
+        assert!(candidates(&s, "p1", &Lacking::default())
             .iter()
             .any(|(a, _)| a.agent_id == "mac/agent-9"));
         assert_eq!(project_label(&s, "github.com/me/Agora#ab12"), "Agora");
@@ -987,10 +1038,10 @@ mod tests {
     #[test]
     fn a_row_says_kind_machine_state_and_whether_it_acts_without_asking() {
         let s = snapshot();
-        let list = candidates(&s, "p1", &HashSet::new());
+        let list = candidates(&s, "p1", &Lacking::default());
         let lines: Vec<String> = list
             .iter()
-            .map(|(a, d)| choice_line(&s, a, *d, &text))
+            .map(|(a, d)| choice_line(&s, a, *d, &Configs::new(), &text))
             .collect();
         assert!(
             lines[0].contains("tui-give-row-detail kind=claude machine=mac"),
@@ -1003,9 +1054,109 @@ mod tests {
         assert!(!lines[1].contains("tui-badge-no-ask"));
         // A launch option that skips approvals counts as well.
         let mut a = agent("mac/agent-7", "claude", "p1");
-        assert!(!acts_freely(&a));
+        assert!(!acts_freely(&a, &Configs::new()));
         a.skips_permissions = true;
-        assert!(acts_freely(&a));
+        assert!(acts_freely(&a, &Configs::new()));
+    }
+
+    #[test]
+    fn a_config_option_on_a_value_that_skips_approvals_marks_the_agent_as_the_web_does() {
+        use agora_protocol::v1::{SessionConfigOption, SessionConfigType};
+        let s = snapshot();
+        let a = s
+            .agents
+            .iter()
+            .find(|a| a.agent_id == "mac/agent-3")
+            .unwrap();
+        let boolean = |current: &str, skips: bool| SessionConfigOption {
+            id: "yolo".into(),
+            r#type: SessionConfigType::Boolean as i32,
+            current: current.into(),
+            skips_permissions: skips,
+            ..Default::default()
+        };
+        let select = |current: &str| SessionConfigOption {
+            id: "approvals".into(),
+            r#type: SessionConfigType::Select as i32,
+            current: current.into(),
+            choices: vec![
+                SessionOption {
+                    id: "ask".into(),
+                    ..Default::default()
+                },
+                SessionOption {
+                    id: "never".into(),
+                    skips_permissions: true,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let with = |options: Vec<SessionConfigOption>| {
+            Configs::from([("mac/agent-3".to_string(), options)])
+        };
+        assert!(!acts_freely(a, &Configs::new()));
+        assert!(acts_freely(a, &with(vec![boolean("true", true)])));
+        // Off, or a boolean that does not skip approvals, does not count.
+        assert!(!acts_freely(a, &with(vec![boolean("false", true)])));
+        assert!(!acts_freely(a, &with(vec![boolean("true", false)])));
+        assert!(acts_freely(a, &with(vec![select("never")])));
+        assert!(!acts_freely(a, &with(vec![select("ask")])));
+        // Another agent's options are not this one's.
+        let other = Configs::from([("mac/agent-1".to_string(), vec![boolean("true", true)])]);
+        assert!(!acts_freely(a, &other));
+        // The row and the confirmation say it.
+        let configs = with(vec![select("never")]);
+        assert!(choice_line(&s, a, 1, &configs, &text).ends_with("[tui-badge-no-ask]"));
+        assert!(confirm_lines(&s, a, &configs, "x", "web", &text)
+            .join("\n")
+            .contains("tui-give-confirm-no-ask"));
+    }
+
+    #[test]
+    fn a_machine_that_refused_is_offered_again_once_it_was_updated_or_went_offline() {
+        let mut s = snapshot();
+        s.nodes[2].build = "0.3.32".into();
+        s.nodes[2].binary = "bin/agora".into();
+        let mut lacking = Lacking::default();
+        lacking.note(&s, "old");
+        lacking.note(&s, "mac");
+        // The same build, still connected: still not offered.
+        lacking.settle(&s);
+        assert!(lacking.contains("old") && lacking.contains("mac"));
+        assert!(!candidates(&s, "p1", &lacking)
+            .iter()
+            .any(|(a, _)| a.node_id == "old"));
+        // Updated (a restart within one refresh: never seen offline): offered again.
+        s.nodes[2].build = "0.3.33".into();
+        lacking.settle(&s);
+        assert!(!lacking.contains("old") && lacking.contains("mac"));
+        // Another program, or offline: forgotten too.
+        lacking.note(&s, "old");
+        s.nodes[2].binary = "other/agora".into();
+        s.nodes[0].online = false;
+        lacking.settle(&s);
+        assert_eq!(lacking, Lacking::default());
+        lacking.note(&s, "old");
+        lacking.clear();
+        assert!(!lacking.contains("old"));
+    }
+
+    #[test]
+    fn the_keyboard_stays_on_the_task_it_gave_now_in_doing() {
+        let s = snapshot();
+        let before = board(&s, "p1", &[], &text);
+        // The first Backlog task is chosen, then given to an agent.
+        assert_eq!(before.cards()[0].1.task_id, "t1");
+        let given = [("t1".to_string(), "mac/agent-3".to_string())];
+        let after = board(&s, "p1", &given, &text);
+        let at = after.select(Some("t1"), 0);
+        assert_eq!(after.cards()[at].0, Column::Doing);
+        assert_eq!(after.cards()[at].1.task_id, "t1");
+        // A task gone from the board: the same place, kept inside the list.
+        assert_eq!(after.select(Some("gone"), 2), 2);
+        assert_eq!(after.select(Some("gone"), 99), after.cards().len() - 1);
+        assert_eq!(after.select(None, 1), 1);
     }
 
     #[test]
@@ -1016,7 +1167,14 @@ mod tests {
             .iter()
             .find(|a| a.agent_id == "mac/agent-1")
             .unwrap();
-        let lines = confirm_lines(&s, free, "Fix \x1b]0;x\x07it", "web", &text);
+        let lines = confirm_lines(
+            &s,
+            free,
+            &Configs::new(),
+            "Fix \x1b]0;x\x07it",
+            "web",
+            &text,
+        );
         let all = lines.join("\n");
         assert!(lines[0].starts_with("tui-give-confirm-title agent=claude · "));
         assert!(
@@ -1034,9 +1192,11 @@ mod tests {
             .iter()
             .find(|a| a.agent_id == "mac/agent-3")
             .unwrap();
-        assert!(!confirm_lines(&s, helper, "x", "web", &text)
-            .join("\n")
-            .contains("tui-give-confirm-no-ask"));
+        assert!(
+            !confirm_lines(&s, helper, &Configs::new(), "x", "web", &text)
+                .join("\n")
+                .contains("tui-give-confirm-no-ask")
+        );
     }
 
     #[test]
@@ -1151,17 +1311,22 @@ mod tests {
             assert_eq!(lacks_give(&e), lacks, "{e:?}");
             assert_eq!(refusal_text(&e, &text), said, "{e:?}");
         }
-        // A code the catalog does not know: the general sentence with the code.
-        let unknown = |id: &str, args: &[(&str, Arg)]| {
-            if id.starts_with("tui-") {
-                text(id, args)
-            } else {
-                id.to_string()
-            }
-        };
+        // A code this build does not know is never looked up (it could name any message of the catalog): the general sentence
+        // with the code. A known code's sentence gets only the parameters it takes.
         assert_eq!(
-            refusal_text(&err("x.new", &[]), &unknown),
+            refusal_text(&err("x.new", &[]), &text),
             "tui-give-failed code=x.new"
+        );
+        assert_eq!(
+            refusal_text(&err("tui.give.sent", &[("agent", "me")]), &text),
+            "tui-give-failed code=tui.give.sent"
+        );
+        assert_eq!(
+            refusal_text(
+                &err("task.not_open", &[("task_id", "t1"), ("agent", "x")]),
+                &text
+            ),
+            "task-not_open task_id=t1"
         );
     }
 
@@ -1177,12 +1342,12 @@ mod tests {
         );
         assert_eq!(result_text(None, "a", &text), "tui-give-sent agent=a");
         let s = snapshot();
-        let mut lacking = HashSet::new();
+        let mut lacking = Lacking::default();
         assert_eq!(
             cannot_take_text(&s, "win/agent-1", &lacking, &text),
             "tui-give-refused-offline"
         );
-        lacking.insert("old".to_string());
+        lacking.note(&s, "old");
         assert_eq!(
             cannot_take_text(&s, "old/agent-1", &lacking, &text),
             "tui-give-machine-unsupported"

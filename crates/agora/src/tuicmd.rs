@@ -1220,7 +1220,10 @@ impl ViewWait {
                 return Wake::Redraw;
             }
             match session.next(Duration::ZERO) {
-                Update::Snapshot(s) => ask.c.snapshot = Some(*s),
+                Update::Snapshot(s) => {
+                    ask.c.give_lacking.settle(&s);
+                    ask.c.snapshot = Some(*s);
+                }
                 Update::Changed => ask.c.stale = true,
                 Update::Closed => return Wake::Gone,
                 Update::Quiet => {}
@@ -1642,7 +1645,7 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                 typing_allowed: None,
                 asked: false,
                 typing_taken: std::collections::HashMap::new(),
-                give_lacking: std::collections::HashSet::new(),
+                give_lacking: agora_tui::board::Lacking::default(),
             }),
             Err(_) => None,
         }
@@ -2213,8 +2216,9 @@ struct Console {
     /// for typing sent before it is old news (answers can come out of order).
     typing_taken: Taken,
     /// ADR-0095: machines that answered a "Give to an agent" in a way that says they do not take tasks (`board::lacks_give`); their
-    /// agents are not offered again until the machine goes offline or the link to the hub is lost (as the web window does, #885).
-    give_lacking: std::collections::HashSet<String>,
+    /// agents are not offered again until the machine goes offline or comes back with another build, or the link to the hub is lost
+    /// (as the web window does, #885).
+    give_lacking: agora_tui::board::Lacking,
 }
 
 /// A notice too long for the footer is shown whole in a box above it until the next key (the trust command must be readable and
@@ -2364,9 +2368,8 @@ fn console(
         }
         match session.next(wait) {
             Update::Snapshot(s) => {
-                // A machine that is not connected now may come back updated: it is offered tasks again.
-                c.give_lacking
-                    .retain(|n| s.nodes.iter().any(|x| x.node_id == *n && x.online));
+                // A machine that is not connected now, or came back with another build, is offered tasks again.
+                c.give_lacking.settle(&s);
                 c.snapshot = Some(*s);
                 dirty_since = None;
                 redraw = true;
@@ -3996,6 +3999,8 @@ fn board_view(say: &Say, session: &mut Session, ask: &mut Over<'_>, project: &st
     // Tasks given from here: shown under Doing until the hub's next snapshot says where they are.
     let mut given: Vec<(String, String)> = Vec::new();
     let mut at = 0usize;
+    // The task the keyboard is on: it stays on it when the board changes (a task just given moves to Doing).
+    let mut on: Option<String> = None;
     let mut notice = String::new();
     let mut view = ViewWait::new(say, ask);
     loop {
@@ -4012,7 +4017,8 @@ fn board_view(say: &Say, session: &mut Session, ask: &mut Over<'_>, project: &st
             .into_iter()
             .map(|(col, card)| (col, card.clone()))
             .collect();
-        at = at.min(cards.len().saturating_sub(1));
+        at = b.select(on.as_deref(), at);
+        on = cards.get(at).map(|(_, card)| card.task_id.clone());
         let banner = view.banner.clone();
         let _ = ask.c.window.draw(|f| {
             agora_tui::board::draw_board(f, &b, at, &notice, &banner, &text);
@@ -4022,8 +4028,14 @@ fn board_view(say: &Say, session: &mut Session, ask: &mut Over<'_>, project: &st
             notice.clear();
         }
         match wake {
-            Wake::Key(b'j') if !cards.is_empty() => at = (at + 1).min(cards.len() - 1),
-            Wake::Key(b'k') => at = at.saturating_sub(1),
+            Wake::Key(b'j') if !cards.is_empty() => {
+                at = (at + 1).min(cards.len() - 1);
+                on = None;
+            }
+            Wake::Key(b'k') => {
+                at = at.saturating_sub(1);
+                on = None;
+            }
             Wake::Key(b'\r' | b'\n' | b'g') => match cards.get(at) {
                 Some((agora_tui::board::Column::Backlog, card)) => {
                     notice = give_task(say, session, ask, &mut view, &b, card, &mut given);
@@ -4058,10 +4070,16 @@ fn give_task(
         let Some(s) = ask.c.snapshot.clone() else {
             return String::new();
         };
+        let configs = session.configs().clone();
         let choices: Vec<(String, String)> =
             board::candidates(&s, &b.project_id, &ask.c.give_lacking)
                 .into_iter()
-                .map(|(a, depth)| (a.agent_id.clone(), board::choice_line(&s, a, depth, &text)))
+                .map(|(a, depth)| {
+                    (
+                        a.agent_id.clone(),
+                        board::choice_line(&s, a, depth, &configs, &text),
+                    )
+                })
                 .collect();
         at = at.min(choices.len().saturating_sub(1));
         let banner = view.banner.clone();
@@ -4084,8 +4102,8 @@ fn give_task(
             Wake::Gone | Wake::Key(b'q' | 0x1b | 3 | 0x7f | 0x08) => return String::new(),
             Wake::Key(_) | Wake::Redraw => continue,
         };
-        // The confirmation, from the agent as it is now; any key but g, n, Esc or q (a repeated Enter) asks again.
-        loop {
+        // The confirmation, from the agent as it is now.
+        {
             let Some(s) = ask.c.snapshot.clone() else {
                 return String::new();
             };
@@ -4097,11 +4115,10 @@ fn give_task(
             else {
                 return board::cannot_take_text(&s, &agent_id, &ask.c.give_lacking, &text);
             };
-            let lines = board::confirm_lines(&s, a, &task.title, &b.project, &text);
-            match ask.answer(&lines, Duration::from_secs(120)) {
-                Some(b'g') => break,
-                Some(b'n' | b'q' | 0x1b | 0x7f) | None => continue 'pick,
-                Some(_) => {}
+            let configs = session.configs().clone();
+            let lines = board::confirm_lines(&s, a, &configs, &task.title, &b.project, &text);
+            if !confirm_give(ask, &lines, Duration::from_secs(120)) {
+                continue 'pick;
             }
         }
         // Checked again at the moment of sending: it may have stopped, been closed or interrupted, or left the project meanwhile.
@@ -4157,13 +4174,26 @@ fn give_task(
                     ..Default::default()
                 });
                 if board::lacks_give(&e) {
-                    ask.c.give_lacking.insert(node);
+                    ask.c.give_lacking.note(&s, &node);
                 }
                 board::refusal_text(&e, &text)
             }
             Tried::Declined => say.text(key!("tui-give-grant-declined"), &[]),
             Tried::Line(l) => l,
         };
+    }
+}
+
+/// The answer to "Give to an agent"'s confirmation: true only for a `g` pressed after it is on the screen ([`Asker::answer`]: keys typed
+/// before it are set aside, a paste or several keys at once never answer). `n`, Esc, q, ⌫ or no answer in `wait` go back; any other
+/// key (Enter repeated by a held key, the key that chose the agent) asks again.
+fn confirm_give(ask: &mut dyn Asker, lines: &[String], wait: Duration) -> bool {
+    loop {
+        match ask.answer(lines, wait) {
+            Some(b'g') => return true,
+            Some(b'n' | b'q' | 0x1b | 0x7f) | None => return false,
+            Some(_) => {}
+        }
     }
 }
 
@@ -4757,6 +4787,72 @@ mod typing_grant_tests {
         }
         assert!(!passive_input(&AppEvent::Key(Key::Char('y'))));
         assert!(!passive_input(&AppEvent::Paste("y".into())));
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod confirm_give_tests {
+    use super::*;
+
+    /// An asker that, for each time the confirmation is drawn, first gets the keys typed before it could be seen (held keys,
+    /// repeats), then the keys pressed once it is on the screen.
+    struct Draws {
+        rx: mpsc::Receiver<u8>,
+        tx: mpsc::Sender<u8>,
+        draws: Vec<(&'static [u8], &'static [u8])>,
+        drawn: usize,
+    }
+
+    impl Asker for Draws {
+        fn rx(&self) -> &mpsc::Receiver<u8> {
+            &self.rx
+        }
+        fn show(&mut self, _: &[String]) {
+            if let Some((before, _)) = self.draws.get(self.drawn) {
+                before.iter().for_each(|k| self.tx.send(*k).unwrap());
+            }
+        }
+        fn discard(&mut self) {
+            while self.rx.try_recv().is_ok() {}
+            if let Some((_, after)) = self.draws.get(self.drawn) {
+                after.iter().for_each(|k| self.tx.send(*k).unwrap());
+            }
+            self.drawn += 1;
+        }
+        fn frame(&mut self, _: &[u8]) {}
+    }
+
+    fn confirm(draws: Vec<(&'static [u8], &'static [u8])>) -> (bool, usize) {
+        let (tx, rx) = mpsc::channel();
+        let mut ask = Draws {
+            rx,
+            tx,
+            draws,
+            drawn: 0,
+        };
+        let given = confirm_give(&mut ask, &["q".into()], Duration::from_millis(20));
+        (given, ask.drawn)
+    }
+
+    /// ADR-0095 (the web needed this too): Enter, which chose the agent, held or repeated, never gives the task; nor does a `g` typed
+    /// before the confirmation was on the screen, a held `g` arriving as several keys at once, or a pasted `g`. Only a fresh `g` does.
+    #[test]
+    fn only_a_fresh_g_after_the_confirmation_is_shown_gives_the_task() {
+        // A held Enter: typed before each draw and repeated after it. It keeps asking and, when the keys stop, goes back.
+        let (given, drawn) = confirm(vec![(b"\r\r", b"\r"); 5]);
+        assert!(!given);
+        assert_eq!(drawn, 6, "each Enter asked again");
+        // A g typed before the confirmation could be seen is set aside.
+        assert_eq!(confirm(vec![(b"g", b"")]), (false, 1));
+        // Several keys at once (a held key's burst) and a paste never answer.
+        assert!(!confirm(vec![(b"", b"gg")]).0);
+        assert!(!confirm(vec![(b"", b"\x1b[200~g\x1b[201~")]).0);
+        // n goes back at once.
+        assert_eq!(confirm(vec![(b"", b"n")]), (false, 1));
+        // A fresh g gives it, also after Enter asked again.
+        assert_eq!(confirm(vec![(b"", b"g")]), (true, 1));
+        assert_eq!(confirm(vec![(b"\r", b"\r"), (b"\r", b"g")]), (true, 2));
     }
 }
 

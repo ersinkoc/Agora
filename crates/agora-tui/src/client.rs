@@ -145,6 +145,46 @@ pub struct Session {
     snapshot: Option<Box<Snapshot>>,
     /// Typing sent without waiting for the answer, and the newest of it a machine refused (per terminal) because it wants a grant first.
     typing: Typing,
+    /// What the events after the snapshot said that the snapshot has no field for (ADR-0090 config options).
+    seen: Seen,
+}
+
+/// The agents' config options (ADR-0090: the snapshot has no field for them; the hub replays each running agent's last
+/// `AgentSessionConfig` right after the snapshot, at its position, and live changes follow the same way), by hub-wide agent id, and the
+/// snapshot's position: an event at or before it says nothing the snapshot did not.
+#[derive(Debug, Default)]
+pub struct Seen {
+    pub configs: Configs,
+    snapshot_pos: Option<u64>,
+}
+
+/// Config options by hub-wide agent id.
+pub type Configs = std::collections::HashMap<String, Vec<agora_protocol::v1::SessionConfigOption>>;
+
+/// At most this many agents' options are kept, each at most [`MAX_OPTIONS`] (a hub cannot make the client's memory grow).
+const MAX_CONFIG_AGENTS: usize = 4096;
+const MAX_OPTIONS: usize = 64;
+
+impl Seen {
+    /// Reads one positioned event: keeps an agent's config options (each report replaces the last), and says whether the event is
+    /// newer than the snapshot (a fresh snapshot is wanted for it).
+    fn note(&mut self, f: &Frame) -> bool {
+        let Ok(p) = agora_protocol::v1::PositionedEvent::decode(f.payload.as_slice()) else {
+            return true;
+        };
+        if let Some(e) = &p.event {
+            if let Some(agora_protocol::v1::event::Body::AgentSessionConfig(c)) = &e.body {
+                let id = format!("{}/{}", e.producer_id, c.agent_id);
+                if c.options.is_empty() {
+                    self.configs.remove(&id);
+                } else if self.configs.len() < MAX_CONFIG_AGENTS || self.configs.contains_key(&id) {
+                    self.configs
+                        .insert(id, c.options.iter().take(MAX_OPTIONS).cloned().collect());
+                }
+            }
+        }
+        self.snapshot_pos.is_none_or(|at| p.pos > at)
+    }
 }
 
 /// Typing a machine refused because it wants a grant first (ADR-0041): the terminal it was for, and its request's number (typing sent
@@ -325,6 +365,7 @@ impl Session {
             asked: false,
             snapshot: None,
             typing: Typing::default(),
+            seen: Seen::default(),
         })
     }
 
@@ -342,6 +383,7 @@ impl Session {
         let queue = &mut self.term_frames;
         let asked = &mut self.asked;
         let typing = &mut self.typing;
+        let seen = &mut self.seen;
         self.rt.block_on(async {
             match tokio::time::timeout(wait, conn.recv()).await {
                 Err(_) => Update::Quiet,
@@ -354,7 +396,10 @@ impl Session {
                 }
                 Ok(Ok(Some(f))) if f.stream_id == STREAM_EVENTS && f.kind == kinds::SNAPSHOT => {
                     match Snapshot::decode(f.payload.as_slice()) {
-                        Ok(s) => Update::Snapshot(Box::new(s)),
+                        Ok(s) => {
+                            seen.snapshot_pos = Some(s.pos);
+                            Update::Snapshot(Box::new(s))
+                        }
                         Err(_) => Update::Closed,
                     }
                 }
@@ -364,7 +409,12 @@ impl Session {
                     if asks_the_user(&f) {
                         *asked = true;
                     }
-                    Update::Changed
+                    // The config options the hub replays right after the snapshot are kept, and want no fresh snapshot.
+                    if seen.note(&f) {
+                        Update::Changed
+                    } else {
+                        Update::Quiet
+                    }
                 }
                 Ok(Ok(Some(f))) if f.stream_id == STREAM_EVENTS && is_pair_frame(&f) => {
                     keep_pair_frame(f, queue);
@@ -397,6 +447,11 @@ impl Session {
         }
         self.term_frames = rest;
         notes
+    }
+
+    /// ADR-0090: each agent's config options as its machine last reported them in this session, by hub-wide agent id.
+    pub fn configs(&self) -> &Configs {
+        &self.seen.configs
     }
 
     /// Whether a request for the user's answer arrived since the last call (then cleared).
@@ -446,6 +501,7 @@ impl Session {
         let term_frames = &mut self.term_frames;
         let typing = &mut self.typing;
         let asked = &mut self.asked;
+        let seen = &mut self.seen;
         self.rt.block_on(async {
             conn.send(&Frame {
                 stream_id: STREAM_COMMANDS,
@@ -477,7 +533,7 @@ impl Session {
                         None => Ok(CommandOk::default()),
                     };
                 }
-                set_aside(f, changed, asked, kept, term_frames);
+                set_aside(f, changed, asked, kept, term_frames, seen);
             }
         })
     }
@@ -570,6 +626,7 @@ impl Session {
         let kept = &mut self.snapshot;
         let term_frames = &mut self.term_frames;
         let asked = &mut self.asked;
+        let seen = &mut self.seen;
         let typing = &mut self.typing;
         self.rt.block_on(async {
             conn.send(&Frame {
@@ -600,7 +657,7 @@ impl Session {
                     }
                     typing.reply(&r);
                 } else {
-                    set_aside(f, changed, asked, kept, term_frames);
+                    set_aside(f, changed, asked, kept, term_frames, seen);
                 }
             }
         })
@@ -638,6 +695,7 @@ impl Session {
         let queue = &mut self.term_frames;
         let typing = &mut self.typing;
         let asked = &mut self.asked;
+        let seen = &mut self.seen;
         self.rt.block_on(async {
             match tokio::time::timeout(wait, conn.recv()).await {
                 Err(_) => TermEvent::Quiet,
@@ -645,7 +703,7 @@ impl Session {
                 Ok(Ok(Some(f))) => {
                     // The answer to something typed without waiting: only a missing grant matters.
                     if !typing.answer(&f) {
-                        set_aside(f, changed, asked, kept, queue);
+                        set_aside(f, changed, asked, kept, queue, seen);
                     }
                     TermEvent::Quiet
                 }
@@ -681,6 +739,7 @@ impl Session {
         let kept = &mut self.snapshot;
         let queue = &mut self.term_frames;
         let asked = &mut self.asked;
+        let seen = &mut self.seen;
         let typing = &mut self.typing;
         self.rt.block_on(async {
             match tokio::time::timeout(wait, conn.recv()).await {
@@ -688,7 +747,7 @@ impl Session {
                 Ok(Ok(Some(f))) if f.stream_id == stream => take(&f).unwrap_or(ChatEvent::Quiet),
                 Ok(Ok(Some(f))) => {
                     if !typing.answer(&f) {
-                        set_aside(f, changed, asked, kept, queue);
+                        set_aside(f, changed, asked, kept, queue, seen);
                     }
                     ChatEvent::Quiet
                 }
@@ -1371,14 +1430,18 @@ fn set_aside(
     asked: &mut bool,
     kept: &mut Option<Box<Snapshot>>,
     queue: &mut std::collections::VecDeque<Frame>,
+    seen: &mut Seen,
 ) {
     if f.stream_id == STREAM_EVENTS && f.kind == kinds::POSITIONED_EVENT {
-        *changed = true;
+        if seen.note(&f) {
+            *changed = true;
+        }
         if asks_the_user(&f) {
             *asked = true;
         }
     } else if f.stream_id == STREAM_EVENTS && f.kind == kinds::SNAPSHOT {
         if let Ok(s) = Snapshot::decode(f.payload.as_slice()) {
+            seen.snapshot_pos = Some(s.pos);
             *kept = Some(Box::new(s));
             // The snapshot is newer than any event before it.
             *changed = false;
@@ -1585,6 +1648,7 @@ mod set_aside_tests {
     fn a_snapshot_that_arrives_while_something_waits_is_kept_and_events_and_streams_are_not_lost() {
         let (mut changed, mut kept, mut queue) = (false, None, std::collections::VecDeque::new());
         let mut asked = false;
+        let mut seen = Seen::default();
         let frame = |stream_id, kind, payload: Vec<u8>| Frame {
             stream_id,
             kind,
@@ -1597,9 +1661,11 @@ mod set_aside_tests {
             &mut asked,
             &mut kept,
             &mut queue,
+            &mut seen,
         );
         assert!(changed && kept.is_none());
         let s = Snapshot {
+            pos: 7,
             nodes: vec![agora_protocol::v1::NodeSnapshot {
                 node_id: "mac".into(),
                 ..Default::default()
@@ -1612,16 +1678,79 @@ mod set_aside_tests {
             &mut asked,
             &mut kept,
             &mut queue,
+            &mut seen,
         );
         assert_eq!(kept.as_deref(), Some(&s));
         assert!(!changed, "a snapshot supersedes the events before it");
-        // An event after the snapshot is newer than it: it stays marked, so the caller asks again after taking the snapshot.
+        // ADR-0090: the config options the hub replays right after the snapshot, at its position, are kept and want no fresh
+        // snapshot (they would make the console refresh again and again).
+        let config = |pos: u64, options: Vec<agora_protocol::v1::SessionConfigOption>| {
+            agora_protocol::v1::PositionedEvent {
+                pos,
+                event: Some(agora_protocol::v1::Event {
+                    producer_id: "mac".into(),
+                    body: Some(agora_protocol::v1::event::Body::AgentSessionConfig(
+                        agora_protocol::v1::AgentSessionConfig {
+                            agent_id: "agent-1".into(),
+                            options,
+                        },
+                    )),
+                    ..Default::default()
+                }),
+            }
+            .encode_to_vec()
+        };
+        let skip = agora_protocol::v1::SessionConfigOption {
+            id: "yolo".into(),
+            r#type: agora_protocol::v1::SessionConfigType::Boolean as i32,
+            current: "true".into(),
+            skips_permissions: true,
+            ..Default::default()
+        };
         set_aside(
-            frame(STREAM_EVENTS, kinds::POSITIONED_EVENT, vec![]),
+            frame(
+                STREAM_EVENTS,
+                kinds::POSITIONED_EVENT,
+                config(7, vec![skip.clone()]),
+            ),
             &mut changed,
             &mut asked,
             &mut kept,
             &mut queue,
+            &mut seen,
+        );
+        assert!(!changed);
+        assert_eq!(seen.configs.get("mac/agent-1"), Some(&vec![skip]));
+        // A later report replaces it; an empty one forgets it.
+        set_aside(
+            frame(
+                STREAM_EVENTS,
+                kinds::POSITIONED_EVENT,
+                config(7, Vec::new()),
+            ),
+            &mut changed,
+            &mut asked,
+            &mut kept,
+            &mut queue,
+            &mut seen,
+        );
+        assert!(seen.configs.is_empty() && !changed);
+        // An event after the snapshot is newer than it: it stays marked, so the caller asks again after taking the snapshot.
+        set_aside(
+            frame(
+                STREAM_EVENTS,
+                kinds::POSITIONED_EVENT,
+                agora_protocol::v1::PositionedEvent {
+                    pos: 8,
+                    event: None,
+                }
+                .encode_to_vec(),
+            ),
+            &mut changed,
+            &mut asked,
+            &mut kept,
+            &mut queue,
+            &mut seen,
         );
         assert!(changed && kept.is_some());
         changed = false;
@@ -1635,6 +1764,7 @@ mod set_aside_tests {
             &mut asked,
             &mut kept,
             &mut queue,
+            &mut seen,
         );
         assert_eq!(queue.len(), 1);
         // A frame that is not for a waiting caller changes nothing.
@@ -1644,6 +1774,7 @@ mod set_aside_tests {
             &mut asked,
             &mut kept,
             &mut queue,
+            &mut seen,
         );
         assert!(!changed && queue.len() == 1 && kept.is_some());
         assert!(!asked, "no request for the user's answer came");
@@ -1653,6 +1784,7 @@ mod set_aside_tests {
     fn a_request_for_the_users_answer_that_arrives_while_something_waits_is_still_said() {
         let (mut changed, mut asked, mut kept, mut queue) =
             (false, false, None, std::collections::VecDeque::new());
+        let mut seen = Seen::default();
         let event = |body| Frame {
             stream_id: STREAM_EVENTS,
             kind: kinds::POSITIONED_EVENT,
@@ -1675,6 +1807,7 @@ mod set_aside_tests {
             &mut asked,
             &mut kept,
             &mut queue,
+            &mut seen,
         );
         assert!(changed && !asked);
         set_aside(
@@ -1685,6 +1818,7 @@ mod set_aside_tests {
             &mut asked,
             &mut kept,
             &mut queue,
+            &mut seen,
         );
         assert!(changed && asked, "a full-screen view says the request");
     }
