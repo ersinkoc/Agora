@@ -417,8 +417,9 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
   }
 }
 
-const ACCENTS = ['#ffb454', '#4fd1c5', '#a78bfa', '#fb7185', '#94a3b8', '#7dd3fc', '#86efac'];
+// An agent's colour is a design token per name (design/tokens.css `--agent-*`), so each theme draws it in its own shade.
 const ACCENT_NAMES = ['amber', 'teal', 'violet', 'rose', 'slate', 'sky', 'mint'];
+const ACCENTS = ACCENT_NAMES.map((n) => `var(--agent-${n})`);
 
 function hash(s: string): number {
   let h = 0;

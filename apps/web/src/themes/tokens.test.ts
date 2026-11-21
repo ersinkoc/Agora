@@ -28,6 +28,27 @@ describe('theme tokens', () => {
     for (const n of ['font-ui', 'font-mono', 'text-16', 'radius-xs', 'radius-s', 'radius-m', 'radius-l'] as const) expect(value(root, n), n).toBe(baseTokens('dark')[n]);
   });
 
+  it('draws every agent colour in each scheme so it stays visible on every surface (at least 3:1)', () => {
+    const css = readFileSync('src/design/tokens.css', 'utf8').replace(/\r\n/g, '\n');
+    const block = (selector: string) => {
+      const i = css.indexOf(selector);
+      return css.slice(i, css.indexOf('}', i));
+    };
+    const names = ['amber', 'teal', 'violet', 'rose', 'slate', 'sky', 'mint'];
+    const schemes = [['dark', block(":root,\n[data-theme='dark']")], ['light', block("[data-theme='light']")], ['light', block(':root:not([data-theme])')]] as const;
+    const agentColour = (src: string, n: string) => new RegExp(`--agent-${n}:\\s*([^;]+);`).exec(src)?.[1]?.trim() as string;
+    for (const [scheme, src] of schemes) for (const n of names) expect(agentColour(src, n), `${scheme} --agent-${n}`).toMatch(/^#[0-9a-f]{6}$/);
+    // Every built-in theme takes the agent colours of its scheme (a theme sets `data-theme` to it); each must show on its surfaces.
+    for (const theme of BUILT_IN) {
+      const src = theme.scheme === 'dark' ? schemes[0][1] : schemes[1][1];
+      for (const n of names) {
+        for (const surface of ['surface-0', 'surface-1', 'surface-2'] as const) {
+          expect(contrast(agentColour(src, n), theme.tokens[surface]), `${theme.id} --agent-${n} on ${surface}`).toBeGreaterThanOrEqual(3);
+        }
+      }
+    }
+  });
+
   it('computes WCAG contrast', () => {
     expect(contrast('#000000', '#ffffff')).toBeCloseTo(21, 5);
     expect(contrast('#ffffff', '#ffffff')).toBeCloseTo(1, 5);
