@@ -785,27 +785,54 @@ impl Adapter {
         }
     }
 
-    /// #902: how the process ended, once its output has: its exit code, or on Unix the signal that ended it. Waits at most `wait` for
-    /// a process that closed its output a moment before it exits; `None` when it has not ended by then or its status cannot be read.
-    /// Reading it changes nothing for the end of this value (a later drop kills and collects as before; both are harmless then).
+    /// #902: how the process ended, once its output has: its exit code, or on Unix the signal that ended it. Returns within `wait`
+    /// (it is asked under the node's supervisor lock); `None` when it has not ended by then or its status cannot be read.
+    ///
+    /// A process the holder runs is asked over the holder link, which can take far longer than `wait` (a list with its own reply
+    /// timeout, a release, the link's lock): that question runs on a thread of its own and is waited for at most `wait`; an answer that
+    /// comes later is dropped (the status is then unknown). Reading it changes nothing for the end of this value (a later drop kills and
+    /// collects as before).
     pub fn exit_status(&mut self, wait: Duration) -> Option<agora_platform::ExitStatus> {
         let end = std::time::Instant::now() + wait;
-        loop {
-            let read = match &mut self.proc {
-                Proc::Child(c) => c.try_wait().map(|s| {
+        match &mut self.proc {
+            Proc::Child(c) => loop {
+                let read = c.try_wait().map(|s| {
                     s.map(|s| agora_platform::ExitStatus {
                         code: s.code(),
                         signal: agora_platform::exit_signal(&s),
                     })
-                }),
-                Proc::Held { control, .. } => control.exit_status(),
-            };
-            match read {
-                Ok(Some(status)) => return Some(status),
-                Ok(None) if std::time::Instant::now() < end => {
-                    std::thread::sleep(Duration::from_millis(5));
+                });
+                match read {
+                    Ok(Some(status)) => return Some(status),
+                    Ok(None) if std::time::Instant::now() < end => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    _ => return None,
                 }
-                _ => return None,
+            },
+            Proc::Held { control, .. } => {
+                let control = Arc::clone(control);
+                let (tx, rx) = sync_channel(1);
+                let asked = std::thread::Builder::new()
+                    .name("agora-adapter-status".into())
+                    .spawn(move || {
+                        let status = loop {
+                            match control.exit_status() {
+                                Ok(Some(status)) => break Some(status),
+                                Ok(None) if std::time::Instant::now() < end => {
+                                    std::thread::sleep(Duration::from_millis(5));
+                                }
+                                _ => break None,
+                            }
+                        };
+                        let _ = tx.try_send(status);
+                    });
+                if asked.is_err() {
+                    return None;
+                }
+                rx.recv_timeout(end.saturating_duration_since(std::time::Instant::now()))
+                    .ok()
+                    .flatten()
             }
         }
     }
