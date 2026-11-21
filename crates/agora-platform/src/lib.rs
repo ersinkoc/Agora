@@ -360,12 +360,31 @@ pub fn safe_search_path() -> String {
 /// Whether a process with this id exists (a lock file's owner). Only "no such process" says no; any other answer (access denied,
 /// a system that cannot tell) says yes, so a lock is never broken on a guess.
 pub fn process_exists(pid: u32) -> bool {
-    match process_name(pid) {
-        Ok(_) => true,
-        // Windows `OpenProcess` reports a pid that does not exist as ERROR_INVALID_PARAMETER.
-        Err(e) => {
-            !(e.kind() == io::ErrorKind::NotFound
-                || (cfg!(windows) && e.raw_os_error() == Some(87)))
+    #[cfg(unix)]
+    {
+        let Ok(p) = i32::try_from(pid) else {
+            return true;
+        };
+        if p <= 0 {
+            return true;
+        }
+        // SAFETY: signal 0 only checks that the process exists and may be signalled; nothing is sent.
+        if unsafe { libc::kill(p, 0) } == 0 {
+            return true;
+        }
+        // ESRCH is the one answer that means "no such process" (EPERM: it exists, owned by someone else). This is the same on every
+        // Unix, unlike the name lookups, whose error for a dead pid differs (macOS leaves a stale errno).
+        io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+    }
+    #[cfg(not(unix))]
+    {
+        match process_name(pid) {
+            Ok(_) => true,
+            // Windows `OpenProcess` reports a pid that does not exist as ERROR_INVALID_PARAMETER.
+            Err(e) => {
+                !(e.kind() == io::ErrorKind::NotFound
+                    || (cfg!(windows) && e.raw_os_error() == Some(87)))
+            }
         }
     }
 }

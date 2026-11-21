@@ -705,9 +705,15 @@ fn a_second_install_waits_out_a_live_lock_and_takes_over_a_dead_one() {
     }
     install(&p, &approval(&p), &home.0, &tools(&net, &Sig(true))).unwrap();
     assert!(!lock.exists());
+    // The same, in the current format (pid, start, boot): an identity that cannot be read falls back to the pid, which is gone.
+    std::fs::write(&lock, format!("{dead} 12345 some-boot")).unwrap();
+    let l1 = list(&Opts::new("1.2.4", GOOD));
+    let p1 = plan(&l1, "fake-agent", PLATFORM, &home.0).unwrap();
+    install(&p1, &approval(&p1), &home.0, &tools(&net, &Sig(true))).unwrap();
+    assert!(!lock.exists());
     // Garbage in the lock is not ours to break.
     std::fs::write(&lock, "not a pid").unwrap();
-    let l2 = list(&Opts::new("1.2.4", GOOD));
+    let l2 = list(&Opts::new("1.2.5", GOOD));
     let p2 = plan(&l2, "fake-agent", PLATFORM, &home.0).unwrap();
     assert_eq!(
         install(&p2, &approval(&p2), &home.0, &tools(&net, &Sig(true)))
