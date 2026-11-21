@@ -72,6 +72,10 @@ struct Slot {
     key: PathBuf,
     at: Instant,
     seq: u64,
+    /// The first ask of this path still unanswered (0: none sent). A probe slower than [`REVERIFY_AFTER`] is asked again, but a FIFO
+    /// worker answers the older ask first: that answer, of the same path, is taken too (F42), or no slow probe would ever be. Every
+    /// ask of this agent's slot since `first` was of this path (another path, or the agent leaving, starts a new slot).
+    first: u64,
     value: Option<Option<PathBuf>>,
 }
 
@@ -379,10 +383,15 @@ fn lookup(
         && now.saturating_duration_since(s.at) < REVERIFY_AFTER);
     if !fresh {
         let (seq, value) = ask(agent, which, key);
+        let first = match slot {
+            Some(s) if s.key == key && s.value.is_none() && s.first != 0 => s.first,
+            _ => seq,
+        };
         *slot = Some(Slot {
             key: key.to_path_buf(),
             at: now,
             seq,
+            first,
             value,
         });
     }
@@ -558,6 +567,7 @@ impl SessionWatcher {
     }
 
     fn apply(&mut self, a: Answer) {
+        let asked = self.seq;
         let Some(l) = self.looked.get_mut(&a.agent) else {
             return;
         };
@@ -565,7 +575,11 @@ impl SessionWatcher {
             Which::Folder => &mut l.folder,
             Which::Root => &mut l.root,
         };
-        if let Some(s) = slot.as_mut().filter(|s| s.seq == a.seq) {
+        // The latest ask, or an earlier one of the same path while none is answered (F42); never one of another path or agent.
+        if let Some(s) = slot.as_mut().filter(|s| {
+            s.seq == a.seq
+                || (s.value.is_none() && s.first != 0 && (s.first..=asked).contains(&a.seq))
+        }) {
             s.value = Some(a.value);
         }
     }
@@ -2128,6 +2142,70 @@ mod tests {
             with_glob(target("a", folder.clone()), "ka", "{home}/ra/*.jsonl"),
             with_glob(target("b", folder), "kb", "{home}/rb/*.jsonl"),
         ]
+    }
+
+    #[test]
+    fn a_probe_slower_than_the_reverify_period_is_still_decided_by_its_answer() {
+        // F42: a probe outstanding past REVERIFY_AFTER is asked again; the FIFO worker answers the older ask first. That answer, of
+        // the same path, must be taken, or a mount that answers in more than 30 s keeps the pair undecided for good. Gated by
+        // channels: the test plays the worker and answers each ask only after the next look re-asked it.
+        let root = tmp("slow-probe");
+        let mut w = SessionWatcher::new(Some(root.join("home")));
+        let (ask_tx, ask_rx) = std::sync::mpsc::channel::<Ask>();
+        let (answer_tx, answer_rx) = std::sync::mpsc::channel::<Answer>();
+        w.worker = Some(Worker {
+            tx: ask_tx,
+            rx: answer_rx,
+        });
+        let targets = pair_in_one_folder(&root);
+        let answer = |asks: &[Ask]| {
+            for a in asks {
+                let value = Some(root.join("home").join(a.agent.as_str()));
+                answer_tx
+                    .send(Answer {
+                        agent: a.agent.clone(),
+                        which: a.which,
+                        seq: a.seq,
+                        value,
+                    })
+                    .unwrap();
+            }
+        };
+        let now = Instant::now();
+        assert!(w.poll(now, &targets, &HashSet::new()).is_empty());
+        std::fs::create_dir_all(root.join("home/ra")).unwrap();
+        let line = serde_json::json!({"type": "session_meta",
+            "payload": {"id": "0199aaaa-0000-4000-8000-0000000000f4", "cwd": root.join("work/a")}});
+        std::fs::write(root.join("home/ra/x.jsonl"), format!("{line}\n")).unwrap();
+        let first: Vec<Ask> = ask_rx.try_iter().collect();
+        assert_eq!(first.len(), 2);
+        let late = now + REVERIFY_AFTER + SCAN_EVERY;
+        assert!(w.poll(late, &targets, &HashSet::new()).is_empty());
+        let again: Vec<Ask> = ask_rx.try_iter().collect();
+        assert_eq!(again.len(), 2, "outstanding asks are asked again");
+        // The asks taken first are answered only now, after they were asked again.
+        answer(&first);
+        assert_eq!(
+            w.poll(late + SCAN_EVERY, &targets, &HashSet::new()),
+            vec![(
+                AgentId::new("a"),
+                "0199aaaa-0000-4000-8000-0000000000f4".to_string()
+            )]
+        );
+        // The later answers change nothing; one of a path asked before a change of path is never taken.
+        answer(&again);
+        w.poll(late + SCAN_EVERY * 2, &targets, &HashSet::new());
+        let b = AgentId::new("b");
+        let mut moved = targets.clone();
+        moved[1].spec.glob = "{home}/rc/*.jsonl".into();
+        let t = late + REVERIFY_AFTER + SCAN_EVERY * 3;
+        w.poll(t, &targets, &HashSet::new());
+        let before: Vec<Ask> = ask_rx.try_iter().filter(|a| a.agent == b).collect();
+        assert_eq!(before.len(), 1);
+        w.poll(t + SCAN_EVERY, &moved, &HashSet::new());
+        answer(&before);
+        w.poll(t + SCAN_EVERY * 2, &moved, &HashSet::new());
+        assert!(w.looked[&b].root.as_ref().unwrap().value.is_none());
     }
 
     #[test]
