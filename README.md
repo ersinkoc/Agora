@@ -55,7 +55,8 @@ For an SSH-only machine, the hub can maintain a reverse tunnel and install and e
   model, effort, and launch options in the web app. **Settings → Agents** shows which tools each machine
   reports. Run `agora doctor` on the machine for local diagnostics. [Agent manifests](manifests/agents/README.md)
 - **Coordinate across machines.** Agents use MCP to exchange messages, claim shared tasks and file leases,
-  and hand off work. From a Backlog card on the web board, give a task to a running agent in that project.
+  and hand off work. From a Backlog card on the web board, give a task to a running agent in that project
+  or start a new agent for it.
   Agents can request a helper on their own node with signed approval.
   [Task board](docs/ux/task-board.md) · [Mesh tools](docs/specs/mesh-tools.md)
 - **Reconnect to live agents.** Closing a client or losing the hub link leaves agent processes running.
