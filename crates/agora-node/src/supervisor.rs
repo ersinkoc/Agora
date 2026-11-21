@@ -3547,6 +3547,33 @@ impl Supervisor {
             .collect()
     }
 
+    /// ADR-0095: whether the agent acts without asking for permission now: a launch option that skips it (ADR-0059), or, for a
+    /// structured agent, the mode or a config option in use that does (ADR-0058, ADR-0090 Amendment A; the node's own judgement
+    /// added to the adapter's word).
+    pub fn skips_permissions_now(&self, id: &AgentId) -> bool {
+        if let Some(e) = self.agents.get(id) {
+            return e.launch.skips_permissions;
+        }
+        let Some(e) = self.adapters.get(id) else {
+            return false;
+        };
+        let mode = e
+            .options
+            .modes
+            .iter()
+            .any(|m| m.id == e.options.current_mode && m.skips_permissions);
+        let config = e.rich.config.iter().any(|o| {
+            if o.boolean {
+                o.skips_permissions && o.current == "true"
+            } else {
+                o.choices
+                    .iter()
+                    .any(|c| c.id == o.current && c.skips_permissions)
+            }
+        });
+        e.launch.skips_permissions || mode || config
+    }
+
     pub fn list(&self) -> Vec<AgentView> {
         let mut out: Vec<AgentView> = self
             .agents

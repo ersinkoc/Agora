@@ -502,8 +502,8 @@ pub struct MeshServer {
     agents: Mutex<HashMap<AgentId, AgentServer>>,
     stop: Arc<AtomicBool>,
     ticker: Option<JoinHandle<()>>,
-    /// ADR-0095: dispatch prompts held for terminal agents in a turn.
-    held: crate::task_dispatch::HeldDispatches,
+    /// ADR-0095: the dispatches that have not reached their agent yet.
+    dispatches: crate::task_dispatch::Dispatches,
 }
 
 /// ADR-0095: a task claimed for an agent and the prompt that gives it the task.
@@ -587,7 +587,7 @@ impl MeshServer {
             agents: Mutex::new(HashMap::new()),
             stop,
             ticker: Some(ticker),
-            held: crate::task_dispatch::HeldDispatches::default(),
+            dispatches: crate::task_dispatch::Dispatches::default(),
         })
     }
 
@@ -698,9 +698,17 @@ impl MeshServer {
         Arc::clone(&self.mesh)
     }
 
-    /// ADR-0095: the dispatch prompts held for terminal agents.
-    pub fn held(&self) -> &crate::task_dispatch::HeldDispatches {
-        &self.held
+    /// ADR-0095: the dispatches that have not reached their agent yet.
+    pub fn dispatches(&self) -> &crate::task_dispatch::Dispatches {
+        &self.dispatches
+    }
+
+    /// ADR-0095: gives back the task of a dispatch whose prompt never reached its agent, when it is on the node's own broker (the shared
+    /// board has no release: there it stays the agent's).
+    pub fn give_back(&self, given: &crate::task_dispatch::Given) {
+        if !given.shared {
+            self.dispatch_release(&given.agent, &given.task_id);
+        }
     }
 
     /// One board tool call as `agent`, routed as the agent's own call would be (`board_reply`): the hub's board for a project it says

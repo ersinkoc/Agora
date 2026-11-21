@@ -1137,10 +1137,10 @@ fn a_task_given_to_an_agent_arrives_as_data_and_refusals_move_nothing() {
         Some(v1::command_ok::Result::TaskDispatch(r)) => r,
         other => panic!("{other:?}"),
     };
-    assert_eq!(result.prompt_sha256.len(), 64);
-    // The fake agent says back what it was sent.
+    // The conversation holds the prompt as sent (the user entry), and the fake agent says back what it received.
     let end = Instant::now() + Duration::from_secs(20);
-    let echoed = loop {
+    let (mut sent, mut echoed) = (None, None);
+    while sent.is_none() || echoed.is_none() {
         assert!(Instant::now() < end, "the worker never got the task");
         let Some(f) = chat.read_frame(Some(Duration::from_millis(200))).unwrap() else {
             continue;
@@ -1149,10 +1149,22 @@ fn a_task_given_to_an_agent_arrives_as_data_and_refusals_move_nothing() {
             continue;
         }
         let e = v1::ChatEntry::decode(f.payload.as_slice()).unwrap();
-        if e.role == v1::ChatRole::Agent as i32 && e.text.contains("untrusted-task-data") {
-            break e.text;
+        if !e.text.contains("untrusted-task-data") {
+            continue;
         }
-    };
+        if e.role == v1::ChatRole::User as i32 {
+            sent = Some(e.text);
+        } else if e.role == v1::ChatRole::Agent as i32 {
+            echoed = Some(e.text);
+        }
+    }
+    let (sent, echoed) = (sent.unwrap(), echoed.unwrap());
+    // The recorded hash is the hash of exactly what the agent received.
+    assert_eq!(echoed, sent);
+    assert_eq!(
+        result.prompt_sha256,
+        agora_node::task_dispatch::prompt_sha256(&echoed)
+    );
     let lines: Vec<&str> = echoed.lines().collect();
     let open = lines
         .iter()

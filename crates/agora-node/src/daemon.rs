@@ -1970,46 +1970,41 @@ impl Node {
                                 }
                             }
                         }
-                        // ADR-0095: a dispatch prompt held for a terminal agent in a turn is typed once the agent is between turns, on a
-                        // thread of its own (the typing pauses); one whose agent ended or was stopped is never typed, and its task on this
-                        // node's broker is given back (the shared board has no release).
-                        for e in &events {
-                            if let SupervisorEvent::Exited { agent, .. }
-                            | SupervisorEvent::GaveUp { agent }
-                            | SupervisorEvent::Stopped { agent } = e
-                            {
-                                if let Some(h) = mesh.held().take(agent) {
-                                    if !h.shared {
-                                        mesh.dispatch_release(agent, &h.task_id);
+                        // ADR-0095: every dispatch of an agent no longer running (stopped by a person or its parent, ended, crashed)
+                        // is dropped and its task on this node's broker given back; a held prompt of a terminal agent between turns
+                        // is pasted on a thread of its own (the paste pauses). A paste that cannot start, or that fails, gives the task
+                        // back too (the shared board has no release).
+                        let seen: Vec<crate::task_dispatch::Seen> = views
+                            .iter()
+                            .map(|v| crate::task_dispatch::Seen {
+                                id: v.id.clone(),
+                                state: v.state,
+                                running: v.running,
+                                terminal: v.terminal,
+                            })
+                            .collect();
+                        let back = mesh.dispatches().tick(&seen, Instant::now(), |h| {
+                            let control = {
+                                let s = sup.lock().unwrap_or_else(|e| e.into_inner());
+                                s.terminal(&h.given.agent)
+                                    .filter(|t| t.snapshot().modes.bracketed_paste)
+                                    .and_then(|t| t.input_handle().ok())
+                            };
+                            let Some(c) = control else {
+                                return false;
+                            };
+                            let (mesh, h) = (Arc::clone(&mesh), h.clone());
+                            std::thread::Builder::new()
+                                .name("agora-dispatch-paste".into())
+                                .spawn(move || {
+                                    if crate::task_dispatch::paste_prompt(&c, &h.prompt).is_err() {
+                                        mesh.give_back(&h.given);
                                     }
-                                }
-                            }
-                        }
-                        let due = mesh.held().due(
-                            views
-                                .iter()
-                                .filter(|v| v.running && v.terminal)
-                                .map(|v| (&v.id, v.state)),
-                            Instant::now(),
-                        );
-                        for (agent, h) in due {
-                            let control = sup
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner())
-                                .terminal(&agent)
-                                .and_then(|t| t.input_handle().ok());
-                            let (task, shared) = (h.task_id.clone(), h.shared);
-                            let typing = control.and_then(|c| {
-                                std::thread::Builder::new()
-                                    .name("agora-dispatch-type".into())
-                                    .spawn(move || {
-                                        let _ = crate::task_dispatch::type_prompt(&c, &h.prompt);
-                                    })
-                                    .ok()
-                            });
-                            if typing.is_none() && !shared {
-                                mesh.dispatch_release(&agent, &task);
-                            }
+                                })
+                                .is_ok()
+                        });
+                        for g in &back {
+                            mesh.give_back(g);
                         }
                         spawner.tick();
                         // ADR-0090: versions of chat entries held back to keep to one per 150 ms go out once they are due.
@@ -2069,9 +2064,17 @@ impl Node {
                                     } else {
                                         chat.drop_queued(agent, &[*tag], now);
                                     }
+                                    // ADR-0095: a dispatch prompt that could not be sent gives its task back.
+                                    if let Some(g) = mesh.dispatches().dequeued(agent, *tag, *sent)
+                                    {
+                                        mesh.give_back(&g);
+                                    }
                                 }
                                 SupervisorEvent::PromptsDropped { agent, tags } => {
                                     chat.drop_queued(agent, tags, now);
+                                    for g in mesh.dispatches().dropped(agent, tags) {
+                                        mesh.give_back(&g);
+                                    }
                                 }
                                 SupervisorEvent::OutputDropped { agent, bytes } => {
                                     chat.output_dropped(agent, *bytes, now);
