@@ -21,6 +21,16 @@ pub const SETTLE: Duration = Duration::from_secs(5);
 /// How many dispatch prompts the node holds for one terminal agent.
 pub const MAX_HELD: usize = 1;
 
+/// How long a terminal agent's dispatch prompt is held at most. An agent that stays in a turn, waits for an answer or shows a screen
+/// no rule names for longer gets it dropped, and a task on the node's broker back, so a stuck agent does not keep a task and its slot
+/// for good.
+pub const HOLD_FOR: Duration = Duration::from_secs(15 * 60);
+
+/// Identifies one reservation ([`Dispatches::reserve`]): a late call of an older dispatch to an agent of the same id never acts on a
+/// newer dispatch's reservation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Token(u64);
+
 /// The task a dispatch claimed, to give back if its prompt never reaches the agent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Given {
@@ -54,13 +64,13 @@ pub struct Seen {
     pub state: AgentState,
     pub running: bool,
     pub terminal: bool,
-    /// Its kind has screen-detection rules (`[[rules]]`).
+    /// Its kind has a screen-detection rule that says idle or done, so it can leave `unknown` for a state the node pastes in.
     pub detects: bool,
 }
 
 /// Whether a terminal agent in `state` is between turns, so a prompt may be pasted: idle, or finished and not yet seen. `Unknown`
-/// counts only for a kind with no screen-detection rules at all (`detects` false), which never leaves `unknown`: without that its
-/// held prompts would never arrive. A kind with rules that is `unknown` (starting up, or a screen no rule names, such as a dialog) is
+/// counts only for a kind with no rule that says idle or done (`detects` false), which never reaches either: without that its held
+/// prompts would never arrive. A kind with rules that is `unknown` (starting up, or a screen no rule names, such as a dialog) is
 /// waited for: the paste ends with Enter, which could answer a dialog nobody recognised.
 pub fn between_turns(state: AgentState, detects: bool) -> bool {
     match state {
@@ -105,17 +115,23 @@ pub fn paste_prompt(control: &agora_platform::PtyControl, prompt: &str) -> io::R
 struct Slotted {
     /// `None` while a dispatch reserved it and is claiming its task.
     held: Option<Held>,
-    /// When it was reserved: a supervision round drops it only with a view of the agents taken after this.
+    /// When it was reserved: a supervision round drops it only with a view of the agents taken after this, and it expires
+    /// [`HOLD_FOR`] after.
     since: Instant,
+    token: Token,
 }
 
 #[derive(Default)]
 struct State {
     held: HashMap<AgentId, Slotted>,
+    /// The last reservation token given.
+    tokens: u64,
     /// When a prompt was last pasted into each terminal agent (kept for [`SETTLE`]).
     pasted: HashMap<AgentId, Instant>,
-    /// Dispatch prompts queued behind a structured agent's turn, by the tag the queue gave them, with when they were queued.
-    queued: HashMap<(AgentId, u64), (Given, Instant)>,
+    /// Dispatch prompts queued behind a structured agent's turn, by the tag the queue gave them. Forgotten only by the queue's own
+    /// events ([`Dispatches::dequeued`], [`Dispatches::dropped`]): every way a queue ends (a stop, an exit, a crash, a cancel that drops
+    /// it) reports its prompts, and a prompt reported sent must keep its claim even if the agent ended in the same round.
+    queued: HashMap<(AgentId, u64), Given>,
 }
 
 /// The node's dispatches that have not reached their agent yet.
@@ -139,19 +155,22 @@ impl Dispatches {
 
     /// Reserves terminal agent `agent`'s one hold slot before its task is claimed, so a second dispatch meanwhile is refused with
     /// `agent.queue_full` (`limit` 1) and claims nothing. After the claim, [`Self::decide`]; on a refused claim, [`Self::cancel`].
-    pub fn reserve(&self, agent: &AgentId, now: Instant) -> Result<(), Error> {
+    pub fn reserve(&self, agent: &AgentId, now: Instant) -> Result<Token, Error> {
         let mut st = self.st();
         if st.held.contains_key(agent) {
             return Err(queue_full());
         }
+        st.tokens += 1;
+        let token = Token(st.tokens);
         st.held.insert(
             agent.clone(),
             Slotted {
                 held: None,
                 since: now,
+                token,
             },
         );
-        Ok(())
+        Ok(token)
     }
 
     /// After the claim, with the agent's state read again (`state`, `detects`): paste now when it is between turns and nothing was
@@ -160,12 +179,14 @@ impl Dispatches {
     pub fn decide(
         &self,
         agent: &AgentId,
+        token: Token,
         state: AgentState,
         detects: bool,
         now: Instant,
     ) -> Option<Slot> {
         let mut st = self.st();
-        if !matches!(st.held.get(agent), Some(Slotted { held: None, .. })) {
+        if !matches!(st.held.get(agent), Some(Slotted { held: None, token: t, .. }) if *t == token)
+        {
             return None;
         }
         let settled = st
@@ -183,10 +204,10 @@ impl Dispatches {
 
     /// Fills the slot reserved for `held.given.agent`; false when it is gone (the agent stopped meanwhile: the caller gives the task
     /// back).
-    pub fn fill(&self, held: Held) -> bool {
+    pub fn fill(&self, token: Token, held: Held) -> bool {
         let mut st = self.st();
         match st.held.get_mut(&held.given.agent) {
-            Some(slot @ Slotted { held: None, .. }) => {
+            Some(slot @ Slotted { held: None, .. }) if slot.token == token => {
                 slot.held = Some(held);
                 true
             }
@@ -195,39 +216,38 @@ impl Dispatches {
     }
 
     /// Lets go of a reservation never filled (the claim was refused).
-    pub fn cancel(&self, agent: &AgentId) {
+    pub fn cancel(&self, agent: &AgentId, token: Token) {
         let mut st = self.st();
-        if matches!(st.held.get(agent), Some(Slotted { held: None, .. })) {
+        if matches!(st.held.get(agent), Some(Slotted { held: None, token: t, .. }) if *t == token) {
             st.held.remove(agent);
         }
     }
 
-    /// Remembers a dispatch prompt queued behind a structured agent's turn under the queue's `tag`, at `now`.
-    pub fn queued(&self, tag: u64, given: Given, now: Instant) {
-        self.st()
-            .queued
-            .insert((given.agent.clone(), tag), (given, now));
+    /// Remembers a dispatch prompt queued behind a structured agent's turn under the queue's `tag`.
+    pub fn queued(&self, tag: u64, given: Given) {
+        self.st().queued.insert((given.agent.clone(), tag), given);
     }
 
     /// A queued prompt left the queue: sent (forgotten) or not (its task, to give back).
     pub fn dequeued(&self, agent: &AgentId, tag: u64, sent: bool) -> Option<Given> {
         let g = self.st().queued.remove(&(agent.clone(), tag));
-        g.map(|(g, _)| g).filter(|_| !sent)
+        g.filter(|_| !sent)
     }
 
     /// Queued prompts that will never be sent: their tasks, to give back.
     pub fn dropped(&self, agent: &AgentId, tags: &[u64]) -> Vec<Given> {
         let mut st = self.st();
         tags.iter()
-            .filter_map(|t| st.queued.remove(&(agent.clone(), *t)).map(|(g, _)| g))
+            .filter_map(|t| st.queued.remove(&(agent.clone(), *t)))
             .collect()
     }
 
-    /// One round of the supervision loop, with `agents` as the supervisor listed them at `seen_at`. Every dispatch made before
-    /// `seen_at` of an agent that list shows not running (stopped by a person or its parent, ended, crashed, gone) is dropped and never
-    /// pasted; one made after it is left for the next round (the list may predate a just-started agent). Then the held prompt of each
-    /// running terminal agent that is between turns and settled is handed to `deliver` (which pastes it, off this thread, and says
-    /// whether it could start). Returns the tasks to give back: the dropped ones and those `deliver` could not start.
+    /// One round of the supervision loop, with `agents` as the supervisor listed them at `seen_at`. A terminal agent's held or reserved
+    /// dispatch made before `seen_at` whose agent that list shows not running (stopped by a person or its parent, ended, crashed, gone)
+    /// is dropped and never pasted; one made after it is left for the next round (the list may predate a just-started agent). One held
+    /// longer than [`HOLD_FOR`] is dropped too. Queued prompts of structured agents are left to the queue's events. Then the held prompt
+    /// of each running terminal agent that is between turns and settled is handed to `deliver` (which pastes it, off this thread, and
+    /// says whether it could start). Returns the tasks to give back: the dropped ones and those `deliver` could not start.
     pub fn tick(
         &self,
         agents: &[Seen],
@@ -245,22 +265,16 @@ impl Dispatches {
             let gone: Vec<AgentId> = st
                 .held
                 .iter()
-                .filter(|(a, s)| !running.contains(a) && s.since < seen_at)
+                .filter(|(a, s)| {
+                    (!running.contains(a) && s.since < seen_at)
+                        || now.saturating_duration_since(s.since) >= HOLD_FOR
+                })
                 .map(|(a, _)| a.clone())
                 .collect();
             for a in gone {
                 if let Some(Slotted { held: Some(h), .. }) = st.held.remove(&a) {
                     back.push(h.given);
                 }
-            }
-            let gone: Vec<(AgentId, u64)> = st
-                .queued
-                .iter()
-                .filter(|((a, _), (_, at))| !running.contains(a) && *at < seen_at)
-                .map(|(k, _)| k.clone())
-                .collect();
-            for k in gone {
-                back.extend(st.queued.remove(&k).map(|(g, _)| g));
             }
             let mut due = Vec::new();
             for a in agents.iter().filter(|a| a.running && a.terminal) {
@@ -315,8 +329,19 @@ mod tests {
         }
     }
 
+    /// Reserves, decides `Hold` and fills: a prompt held for `agent`.
+    fn hold(d: &Dispatches, agent: &str, task: &str, now: Instant) {
+        let a = AgentId::new(agent);
+        let t = d.reserve(&a, now).unwrap();
+        assert_eq!(
+            d.decide(&a, t, AgentState::Working, true, now),
+            Some(Slot::Hold)
+        );
+        assert!(d.fill(t, held(agent, task)));
+    }
+
     #[test]
-    fn unknown_is_between_turns_only_for_a_kind_without_detection_rules() {
+    fn unknown_is_between_turns_only_for_a_kind_that_cannot_say_idle() {
         assert!(between_turns(AgentState::Idle, true));
         assert!(between_turns(AgentState::Done, true));
         assert!(!between_turns(AgentState::Unknown, true));
@@ -331,7 +356,7 @@ mod tests {
         let a = AgentId::new("a");
         let t0 = Instant::now();
         assert!(d.is_empty());
-        d.reserve(&a, t0).unwrap();
+        let t = d.reserve(&a, t0).unwrap();
         // While the first claims, a second is refused and claims nothing.
         let e = d.reserve(&a, t0).unwrap_err();
         assert_eq!(e.code, ErrorCode::AgentQueueFull);
@@ -341,30 +366,53 @@ mod tests {
         );
         // Decided after the claim with the state read again: a turn began meanwhile, so it is held, not pasted over it.
         assert_eq!(
-            d.decide(&a, AgentState::Working, true, t0),
+            d.decide(&a, t, AgentState::Working, true, t0),
             Some(Slot::Hold)
         );
-        assert!(d.fill(held("a", "t1")));
+        assert!(d.fill(t, held("a", "t1")));
         assert!(d.reserve(&a, t0).is_err());
         // A refused claim lets a reservation go; a filled slot stays.
-        d.cancel(&a);
+        d.cancel(&a, t);
         assert!(!d.is_empty());
         let b = AgentId::new("b");
-        d.reserve(&b, t0).unwrap();
-        d.cancel(&b);
-        d.reserve(&b, t0).unwrap();
+        let tb = d.reserve(&b, t0).unwrap();
+        d.cancel(&b, tb);
+        let tb = d.reserve(&b, t0).unwrap();
         // Between turns at decision time: pasted, the reservation goes and the paste counts at once.
         assert_eq!(
-            d.decide(&b, AgentState::Idle, true, t0),
+            d.decide(&b, tb, AgentState::Idle, true, t0),
             Some(Slot::PasteNow)
         );
-        assert_eq!(d.decide(&b, AgentState::Idle, true, t0), None);
-        d.reserve(&b, t0).unwrap();
+        assert_eq!(d.decide(&b, tb, AgentState::Idle, true, t0), None);
+        let tb = d.reserve(&b, t0).unwrap();
         // Within SETTLE of that paste a second is held even though the screen still looks idle.
         assert_eq!(
-            d.decide(&b, AgentState::Idle, true, t0 + Duration::from_secs(1)),
+            d.decide(&b, tb, AgentState::Idle, true, t0 + Duration::from_secs(1)),
             Some(Slot::Hold)
         );
+    }
+
+    #[test]
+    fn an_older_dispatch_never_touches_a_newer_reservation_of_the_same_agent() {
+        let d = Dispatches::default();
+        let a = AgentId::new("a");
+        let t0 = Instant::now();
+        let old = d.reserve(&a, t0).unwrap();
+        // The agent stops (the round drops the reservation) and is resumed under the same id; a new dispatch reserves.
+        let later = t0 + Duration::from_millis(5);
+        d.tick(&[seen("a", AgentState::Idle, false)], later, later, |_| {
+            true
+        });
+        let new = d.reserve(&a, later).unwrap();
+        // The old dispatch's late calls do nothing to it.
+        d.cancel(&a, old);
+        assert_eq!(d.decide(&a, old, AgentState::Idle, true, later), None);
+        assert!(!d.fill(old, held("a", "old")));
+        assert_eq!(
+            d.decide(&a, new, AgentState::Working, true, later),
+            Some(Slot::Hold)
+        );
+        assert!(d.fill(new, held("a", "new")));
     }
 
     #[test]
@@ -372,15 +420,10 @@ mod tests {
         let d = Dispatches::default();
         let a = AgentId::new("a");
         let t0 = Instant::now();
-        d.reserve(&a, t0).unwrap();
-        assert_eq!(
-            d.decide(&a, AgentState::Blocked, true, t0),
-            Some(Slot::Hold)
-        );
-        assert!(d.fill(held("a", "t1")));
+        hold(&d, "a", "t1", t0);
         let later = t0 + Duration::from_millis(10);
         let mut pasted = Vec::new();
-        // In a turn, waiting for an answer, or unknown for a kind with rules: nothing.
+        // In a turn, waiting for an answer, or unknown for a kind that can say idle: nothing.
         for state in [
             AgentState::Working,
             AgentState::Blocked,
@@ -400,12 +443,12 @@ mod tests {
         assert!(back.is_empty());
         assert_eq!(pasted, vec![held("a", "t1")]);
         // A new dispatch right after is held, and not pasted until SETTLE has passed.
-        d.reserve(&a, later).unwrap();
+        let t = d.reserve(&a, later).unwrap();
         assert_eq!(
-            d.decide(&a, AgentState::Idle, true, later),
+            d.decide(&a, t, AgentState::Idle, true, later),
             Some(Slot::Hold)
         );
-        assert!(d.fill(held("a", "t2")));
+        assert!(d.fill(t, held("a", "t2")));
         let mut next = Vec::new();
         let t1 = later + Duration::from_secs(1);
         d.tick(&[seen("a", AgentState::Idle, true)], t1, t1, |h| {
@@ -419,48 +462,70 @@ mod tests {
             true
         });
         assert_eq!(next, vec![held("a", "t2")]);
-        // A kind without rules is pasted to while unknown.
+        // A kind that cannot say idle is pasted to while unknown; a paste that cannot start gives its task back.
         let mut free = seen("a", AgentState::Unknown, true);
         free.detects = false;
-        d.reserve(&a, t2).unwrap();
-        assert_eq!(
-            d.decide(&a, AgentState::Working, false, t2),
-            Some(Slot::Hold)
-        );
-        assert!(d.fill(held("a", "t3")));
+        hold(&d, "a", "t3", t2);
         let t3 = t2 + SETTLE;
-        // A paste that cannot start gives its task back.
         let back = d.tick(&[free], t3, t3, |_| false);
         assert_eq!(back, vec![given("a", "t3")]);
     }
 
     #[test]
-    fn a_stopped_agents_dispatches_are_dropped_and_their_tasks_come_back() {
+    fn a_held_prompt_expires_and_its_task_comes_back() {
         let d = Dispatches::default();
-        let a = AgentId::new("a");
         let t0 = Instant::now();
-        d.reserve(&a, t0).unwrap();
-        assert_eq!(
-            d.decide(&a, AgentState::Working, true, t0),
-            Some(Slot::Hold)
-        );
-        assert!(d.fill(held("a", "t1")));
-        d.queued(7, given("b", "t2"), t0);
+        hold(&d, "a", "t1", t0);
+        let stuck = [seen("a", AgentState::Blocked, true)];
+        let almost = t0 + HOLD_FOR - Duration::from_secs(1);
+        assert!(d.tick(&stuck, almost, almost, |_| true).is_empty());
+        let over = t0 + HOLD_FOR;
+        assert_eq!(d.tick(&stuck, over, over, |_| true), vec![given("a", "t1")]);
+        assert!(d.is_empty());
+    }
+
+    #[test]
+    fn a_stopped_agents_held_dispatches_are_dropped_and_their_tasks_come_back() {
+        let d = Dispatches::default();
+        let t0 = Instant::now();
+        hold(&d, "a", "t1", t0);
         // A reservation of an agent that stops while its dispatch claims: dropped, so the late decision finds nothing (the caller
         // gives back).
         let c = AgentId::new("c");
-        d.reserve(&c, t0).unwrap();
+        let tc = d.reserve(&c, t0).unwrap();
         let seen_at = t0 + Duration::from_millis(5);
-        let mut back = d.tick(
+        let back = d.tick(
             &[seen("a", AgentState::Idle, false)],
             seen_at,
             seen_at,
             |_| panic!("a stopped agent's prompt was pasted"),
         );
-        back.sort_by(|x, y| x.task_id.cmp(&y.task_id));
-        assert_eq!(back, vec![given("a", "t1"), given("b", "t2")]);
-        assert_eq!(d.decide(&c, AgentState::Idle, true, seen_at), None);
-        assert!(!d.fill(held("c", "t3")));
+        assert_eq!(back, vec![given("a", "t1")]);
+        assert_eq!(d.decide(&c, tc, AgentState::Idle, true, seen_at), None);
+        assert!(!d.fill(tc, held("c", "t3")));
+        assert!(d.is_empty());
+    }
+
+    #[test]
+    fn a_queued_prompt_sent_just_before_its_agent_ended_keeps_its_claim() {
+        // In one round an adapter reports the queued dispatch prompt sent and then exits: the round's list shows the agent gone, but
+        // only the queue's events decide; sent means the agent has the task.
+        let d = Dispatches::default();
+        let a = AgentId::new("a");
+        let t0 = Instant::now();
+        d.queued(1, given("a", "t1"));
+        d.queued(2, given("a", "t2"));
+        let later = t0 + Duration::from_millis(5);
+        let back = d.tick(&[seen("a", AgentState::Idle, false)], later, later, |_| {
+            true
+        });
+        assert!(
+            back.is_empty(),
+            "the round gave back a queued task: {back:?}"
+        );
+        assert_eq!(d.dequeued(&a, 1, true), None);
+        // The exit reports what was still queued.
+        assert_eq!(d.dropped(&a, &[2]), vec![given("a", "t2")]);
         assert!(d.is_empty());
     }
 
@@ -471,32 +536,35 @@ mod tests {
         let a = AgentId::new("new");
         let seen_at = Instant::now();
         let t0 = seen_at + Duration::from_millis(5);
-        d.reserve(&a, t0).unwrap();
-        d.queued(1, given("new2", "t9"), t0);
-        let back = d.tick(&[], seen_at, t0, |_| true);
-        assert!(back.is_empty());
+        let t = d.reserve(&a, t0).unwrap();
+        assert!(d.tick(&[], seen_at, t0, |_| true).is_empty());
         assert_eq!(
-            d.decide(&a, AgentState::Idle, true, t0),
+            d.decide(&a, t, AgentState::Idle, true, t0),
             Some(Slot::PasteNow)
         );
         // Its paste mark survives a round with an old list, so a second dispatch is still held.
         d.tick(&[], seen_at, t0, |_| true);
-        d.reserve(&a, t0).unwrap();
-        assert_eq!(d.decide(&a, AgentState::Idle, true, t0), Some(Slot::Hold));
-        // A newer list that shows them gone drops them.
+        let t = d.reserve(&a, t0).unwrap();
+        assert_eq!(
+            d.decide(&a, t, AgentState::Idle, true, t0),
+            Some(Slot::Hold)
+        );
+        assert!(d.fill(t, held("new", "t9")));
+        // A newer list that shows it gone drops it.
         let after = t0 + Duration::from_millis(5);
-        let back = d.tick(&[], after, after, |_| true);
-        assert_eq!(back, vec![given("new2", "t9")]);
+        assert_eq!(
+            d.tick(&[], after, after, |_| true),
+            vec![given("new", "t9")]
+        );
     }
 
     #[test]
     fn a_queued_prompt_that_is_not_sent_gives_its_task_back() {
         let d = Dispatches::default();
         let a = AgentId::new("a");
-        let t0 = Instant::now();
-        d.queued(1, given("a", "t1"), t0);
-        d.queued(2, given("a", "t2"), t0);
-        d.queued(3, given("a", "t3"), t0);
+        d.queued(1, given("a", "t1"));
+        d.queued(2, given("a", "t2"));
+        d.queued(3, given("a", "t3"));
         assert_eq!(d.dequeued(&a, 1, true), None);
         assert_eq!(d.dequeued(&a, 2, false), Some(given("a", "t2")));
         assert_eq!(d.dropped(&a, &[3, 99]), vec![given("a", "t3")]);

@@ -336,18 +336,20 @@ fn task_dispatch(ctx: &ControlContext, d: &v1::TaskDispatch) -> Result<v1::Comma
     let dispatches = mesh.dispatches();
     // A terminal agent: its program must take a paste (its lines then arrive together, never as several submits), and its one slot is
     // reserved before anything is claimed.
-    if terminal {
+    let token = if terminal {
         match paste {
             None => return Err(gone()),
             Some(false) => return Err(capability_missing("terminal.bracketed_paste")),
-            Some(true) => dispatches.reserve(&id, Instant::now())?,
+            Some(true) => Some(dispatches.reserve(&id, Instant::now())?),
         }
-    }
+    } else {
+        None
+    };
     let claim = match mesh.dispatch_claim(&d.project_id, &id, &d.task_id) {
         Ok(c) => c,
         Err(e) => {
-            if terminal {
-                dispatches.cancel(&id);
+            if let Some(t) = token {
+                dispatches.cancel(&id, t);
             }
             return Err(e);
         }
@@ -357,14 +359,14 @@ fn task_dispatch(ctx: &ControlContext, d: &v1::TaskDispatch) -> Result<v1::Comma
         task_id: d.task_id.clone(),
         shared: claim.shared,
     };
-    let sent = if terminal {
+    let sent = if let Some(token) = token {
         // Decided now, after the claim (which may have waited for the hub), from the agent's state read again: a turn that began
         // meanwhile gets the prompt held, not pasted over it.
         let fresh = ctx.sup().terminal_state(&id);
         let slot = match fresh {
-            Some((state, detects)) => dispatches.decide(&id, state, detects, Instant::now()),
+            Some((state, detects)) => dispatches.decide(&id, token, state, detects, Instant::now()),
             None => {
-                dispatches.cancel(&id);
+                dispatches.cancel(&id, token);
                 None
             }
         };
@@ -372,16 +374,17 @@ fn task_dispatch(ctx: &ControlContext, d: &v1::TaskDispatch) -> Result<v1::Comma
             // The reservation went with the agent (it stopped meanwhile).
             None => Err(gone()),
             Some(Slot::PasteNow) => {
+                // The program may have turned bracketed paste off since it was checked: then it is refused as before the claim.
                 let control = ctx
                     .sup()
                     .terminal(&id)
-                    .filter(|h| h.bracketed_paste())
-                    .and_then(|h| h.input_handle().ok());
+                    .map(|h| (h.bracketed_paste(), h.input_handle().ok()));
                 match control {
-                    Some(c) => crate::task_dispatch::paste_prompt(&c, &claim.prompt)
+                    Some((true, Some(c))) => crate::task_dispatch::paste_prompt(&c, &claim.prompt)
                         .map(|()| (false, 0))
                         .map_err(|_| gone()),
-                    None => Err(gone()),
+                    Some((false, _)) => Err(capability_missing("terminal.bracketed_paste")),
+                    _ => Err(gone()),
                 }
             }
             Some(Slot::Hold) => {
@@ -389,7 +392,7 @@ fn task_dispatch(ctx: &ControlContext, d: &v1::TaskDispatch) -> Result<v1::Comma
                     prompt: claim.prompt.clone(),
                     given: given.clone(),
                 };
-                if dispatches.fill(held) {
+                if dispatches.fill(token, held) {
                     Ok((true, crate::task_dispatch::MAX_HELD))
                 } else {
                     Err(gone())
@@ -398,7 +401,7 @@ fn task_dispatch(ctx: &ControlContext, d: &v1::TaskDispatch) -> Result<v1::Comma
         }
     } else {
         submit_to_adapter(ctx, ctx.sup(), &id, &claim.prompt, |tag| {
-            dispatches.queued(tag, given.clone(), Instant::now());
+            dispatches.queued(tag, given.clone());
         })
     };
     let (queued, queue_len) = match sent {

@@ -1994,26 +1994,7 @@ impl Node {
                             let back =
                                 mesh.dispatches()
                                     .tick(&seen, views_at, Instant::now(), |h| {
-                                        let control = {
-                                            let s = sup.lock().unwrap_or_else(|e| e.into_inner());
-                                            s.terminal(&h.given.agent)
-                                                .filter(|t| t.bracketed_paste())
-                                                .and_then(|t| t.input_handle().ok())
-                                        };
-                                        let Some(c) = control else {
-                                            return false;
-                                        };
-                                        let (mesh, h) = (Arc::clone(&mesh), h.clone());
-                                        std::thread::Builder::new()
-                                            .name("agora-dispatch-paste".into())
-                                            .spawn(move || {
-                                                if crate::task_dispatch::paste_prompt(&c, &h.prompt)
-                                                    .is_err()
-                                                {
-                                                    mesh.give_back(&h.given);
-                                                }
-                                            })
-                                            .is_ok()
+                                        deliver_held(&sup, &mesh, h)
                                     });
                             for g in &back {
                                 mesh.give_back(g);
@@ -2403,6 +2384,43 @@ impl Drop for Node {
         // The agents' last states. They ended without an end in the ledger: at the next start they are interrupted (ADR-0060).
         let _ = self.ledger.flush();
     }
+}
+
+/// ADR-0095: pastes a held dispatch prompt into its terminal agent on a thread of its own (the paste pauses); false when it cannot start
+/// (no terminal, or the program turned bracketed paste off since the prompt was held, which is logged). A paste that fails on its
+/// thread gives the task back there.
+fn deliver_held(
+    sup: &Mutex<Supervisor>,
+    mesh: &Arc<crate::mesh_server::MeshServer>,
+    h: &crate::task_dispatch::Held,
+) -> bool {
+    let control = {
+        let s = sup.lock().unwrap_or_else(|e| e.into_inner());
+        s.terminal(&h.given.agent)
+            .map(|t| (t.bracketed_paste(), t.input_handle().ok()))
+    };
+    let c = match control {
+        Some((true, Some(c))) => c,
+        Some((false, _)) => {
+            // Operational log, not UI text.
+            eprintln!(
+                "task dispatch: {} turned bracketed paste off; the held prompt for task {} is dropped and the task given back",
+                h.given.agent.as_str(),
+                h.given.task_id
+            );
+            return false;
+        }
+        _ => return false,
+    };
+    let (mesh, h) = (Arc::clone(mesh), h.clone());
+    std::thread::Builder::new()
+        .name("agora-dispatch-paste".into())
+        .spawn(move || {
+            if crate::task_dispatch::paste_prompt(&c, &h.prompt).is_err() {
+                mesh.give_back(&h.given);
+            }
+        })
+        .is_ok()
 }
 
 /// The node's agent kinds: the built-in manifests, then every `*.toml` in `dir` (a file there replaces the built-in kind of the same

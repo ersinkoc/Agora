@@ -1093,14 +1093,20 @@ passes it (`hubcli.rs`). To an older node without the capability the hub refuses
   before the task is claimed, so a second dispatch meanwhile is `agent.queue_full` (`limit` 1) with nothing claimed. After the claim (which
   may wait for the hub) the node reads the agent's state again and decides: between turns (detected idle or done, and nothing pasted into it
   in the last 5 seconds) it is pasted at once; otherwise the node holds it and pastes it once the agent is between turns. `unknown` counts as
-  between turns only for a kind whose manifest has no `[[rules]]` at all (it never leaves `unknown`, and would otherwise never get a held
-  prompt): for such a kind the paste, and the Enter after it, may arrive while the program works or while it shows a dialog (an Enter can
-  answer it). A kind with rules that is `unknown` (starting, or a screen no rule names, such as a startup dialog) is waited for. A paste that
+  between turns only for a kind whose manifest has no `[[rules]]` entry with `state = "idle"` or `"done"` (it never reaches either, and
+  would otherwise never get a held prompt): for such a kind the paste, and the Enter after it, may arrive while the program works or while
+  it shows a dialog (an Enter can answer it). A kind that can say idle or done and is `unknown` (starting, or a screen no rule names, such
+  as a startup dialog) is waited for. A prompt is held at most 15 minutes: an agent that stays busy, blocked or unknown longer gets it
+  dropped and its task on the node's broker given back, so a stuck agent does not keep the task and its slot. A program that turns
+  bracketed paste off after the check is refused the same way (`protocol.capability_missing`) when the prompt would be pasted at once,
+  and its held prompt is dropped (logged on the machine) with the task given back. A paste that
   was written but whose Enter failed means the terminal is gone (a write fails only then), so no input box keeps the text; its task is given
   back like any lost prompt.
   A prompt that never reaches the agent gives its task on the node's broker back: a held one when the agent is no longer running (stopped
   by a person or its parent, ended, crashed; checked every supervision round, so every stop path is covered), a paste that cannot start or
-  fails, a queued one that the adapter refused or dropped (the adapter ended, or `AgentCancelTurn` with `drop_queue`). Held prompts live in
+  fails, a queued one that the adapter refused or dropped (the adapter ended or was stopped, or `AgentCancelTurn` with `drop_queue`; a
+  queued prompt is settled only by the queue's own reports, so one reported sent keeps its claim even when the agent ends in the same
+  moment). Held prompts live in
   memory: a node restart drops them and leaves their claims. For a shared project the node asks the hub's board as the agent (`task_list` for the task's text and status, then `task_claim`)
   and still builds the prompt itself; a project known to be shared with no hub link is `board.unavailable`. A prompt that cannot be sent gives a task on the node's own broker back; the shared board has no release yet, so
   there the task stays claimed by that agent. Refusals: `mesh.recipient_unknown` (the agent is not of `project_id`, or the node has no mesh),

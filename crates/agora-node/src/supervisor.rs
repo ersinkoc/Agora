@@ -3579,14 +3579,20 @@ impl Supervisor {
             .is_some_and(|e| skips_now(e.launch.skips_permissions, &e.options, &e.rich.config))
     }
 
-    /// ADR-0095: a running terminal agent's detected state, and whether its kind has screen-detection rules at all (a kind without
-    /// any never leaves `unknown`). `None` for an agent that is not a running terminal agent here.
+    /// ADR-0095: a running terminal agent's detected state, and whether its kind has a screen-detection rule that says idle or done
+    /// (a kind without one never reaches a state the node pastes in, so `unknown` is all it says). `None` for an agent that is not a
+    /// running terminal agent here.
     pub fn terminal_state(&self, id: &AgentId) -> Option<(AgentState, bool)> {
         let e = self.agents.get(id).filter(|e| e.terminal.is_some())?;
-        let detects = self
-            .kinds
-            .get(&e.agent.kind)
-            .is_some_and(|k| !k.manifest.rules.is_empty());
+        let detects = self.kinds.get(&e.agent.kind).is_some_and(|k| {
+            k.manifest.rules.iter().any(|r| {
+                matches!(
+                    r.state,
+                    agora_adapters::manifest::RuleState::Idle
+                        | agora_adapters::manifest::RuleState::Done
+                )
+            })
+        });
         Some((e.agent.state(), detects))
     }
 
