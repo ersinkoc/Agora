@@ -113,10 +113,17 @@ typing at. Code: `crates/agora-adapters/src/agent_install.rs` (the logic, with t
    written; if either step fails the previous launcher is put back first. A failed verify removes the new folder and leaves the old
    launcher. A folder the launcher resolves into is never removed. The new version and the one before it are kept; older
    ones are removed.
-9. **One at a time, and crashes.** `<AGORA_HOME>/agents/.lock` holds `pid start boot` of its owner (a reused pid does not look alive); a live owner is
-   `agent.install.in_progress`; a dead owner's lock is taken over by renaming it to a unique name and checking what was renamed
-   (another process's fresh lock is put back); an empty or unreadable lock is stale only after 60 seconds; the lock is removed on
-   exit only while it still holds this process's text. The list version is remembered under the same lock. Every run first removes `.tmp-*` folders and half-made launchers a crash left.
+9. **One at a time, and crashes.** `<AGORA_HOME>/agents/.lock` is held with the system's file lock (`File::try_lock`; opened by
+   `agora_platform::open_lock_private`), which the system releases when its owner ends, so a crash never leaves it held and nothing
+   is taken over (audit F100: the earlier rename-and-check takeover let two installs hold it at once). A lock held by another install
+   is `agent.install.in_progress` after a wait of at most one second (a process another thread is starting holds a copy of the
+   handle until its exec). While held, the file holds `pid start boot` of its owner (a reused pid does not look alive) for older
+   versions, which judge the lock by that text alone; a live owner named there (an older version holding it) is also
+   `agent.install.in_progress`, and empty or unreadable text never blocks. On release the file is emptied, never removed. Limits
+   while versions are mixed: an older version waits up to 60 seconds after a newer one released the lock (it reads the empty file as
+   somebody still writing), and an older version taking a fresh lock in the instant a newer one also does is not excluded. The list
+   version is remembered under the same lock. Every run first removes `.tmp-*` folders, `.lock.stale-*` files older versions left and
+   half-made launchers a crash left.
 10. **Never** a script from the entry, `sudo`, a shell profile edit, or a write outside `<AGORA_HOME>`.
 
 Test seams: `Tools` carries the resolver, the fetcher and the signature checker; the command line always passes the strict ones

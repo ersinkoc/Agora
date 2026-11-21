@@ -13,7 +13,7 @@
 use std::cmp::Ordering;
 use std::ffi::OsStr;
 use std::fs::File;
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, Write};
 use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -874,8 +874,8 @@ pub fn remember_list_version(home: &Path, version: u64) -> Result<(), InstallErr
     if version <= last_seen_version(home) {
         return Ok(());
     }
-    let (root, dir) = open_agents(home)?;
-    let _lock = Lock::acquire(&root, &dir)?;
+    let (_root, dir) = open_agents(home)?;
+    let _lock = Lock::acquire(&dir)?;
     if version <= last_seen_version(home) {
         return Ok(());
     }
@@ -915,17 +915,19 @@ pub struct Outcome {
     pub unchanged: bool,
 }
 
-/// How long a `.lock` with nothing readable in it is believed to be somebody still writing it.
-const LOCK_GRACE: Duration = Duration::from_secs(60);
-
-/// The install lock: `<agents>/.lock` holding `pid started boot` of its owner (the start time and boot tell a reused pid from the
-/// owner). It is taken over only when its owner is gone, by renaming it to a unique name and checking what was renamed; it is
-/// removed on drop only while it still holds this process's own text.
-struct Lock<'a> {
-    root: &'a ConfinedDir,
-    path: PathBuf,
-    text: String,
+/// The install lock (audit F100): `<agents>/.lock`, held with the system's file lock (`File::try_lock`), which the system releases
+/// when its owner ends, so a crash never leaves it held and nothing is taken over. While held it names its owner (`pid started boot`)
+/// for versions before this one, which judge the lock by that text alone; a lock such a version holds (a live owner named in the file)
+/// is respected. It is emptied on release and never removed: a file removed while another process has it open and is about to lock
+/// it would let two processes hold locks on two different files.
+struct Lock {
+    file: File,
 }
+
+/// How long [`Lock::acquire`] waits before an install is `in_progress`. A process started by another thread of this process holds a
+/// copy of the lock's handle from its fork to its exec (the handle is close-on-exec), and the system counts that copy as holding the
+/// lock: the wait outlasts such a copy, not another install.
+const LOCK_WAIT: Duration = Duration::from_secs(1);
 
 enum Holder {
     Alive,
@@ -969,71 +971,39 @@ fn holder(text: &str) -> Holder {
     }
 }
 
-impl<'a> Lock<'a> {
-    fn acquire(root: &'a ConfinedDir, agents: &Path) -> Result<Self, InstallError> {
-        static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        let name = OsStr::new(".lock");
-        let path = agents.join(".lock");
-        let text = own_text();
-        for _ in 0..4 {
-            match root.create_new(name, 0o600) {
-                Ok(mut f) => {
-                    f.write_all(text.as_bytes()).map_err(|e| io_err(&e))?;
-                    return Ok(Self { root, path, text });
+impl Lock {
+    fn acquire(agents: &Path) -> Result<Self, InstallError> {
+        let mut file =
+            agora_platform::open_lock_private(&agents.join(".lock")).map_err(|e| io_err(&e))?;
+        let end = Instant::now() + LOCK_WAIT;
+        loop {
+            match file.try_lock() {
+                Ok(()) => break,
+                Err(std::fs::TryLockError::WouldBlock) if Instant::now() < end => {
+                    std::thread::sleep(Duration::from_millis(10));
                 }
-                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-                    let seen = std::fs::read_to_string(&path);
-                    let stale = match &seen {
-                        Ok(t) => match holder(t) {
-                            Holder::Gone => true,
-                            Holder::Alive => false,
-                            Holder::Unreadable => old_enough(&path),
-                        },
-                        // Gone between create and read: try again.
-                        Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
-                        Err(_) => old_enough(&path),
-                    };
-                    if !stale {
-                        return err(Code::InProgress, "locked");
-                    }
-                    // Only one of several racing processes wins the rename. What was renamed must be what was judged stale: if
-                    // another process has taken over in between, that is its live lock, and it is put back (a hard link fails
-                    // when `.lock` exists again) rather than deleted.
-                    let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    let moved = agents.join(format!(".lock.stale-{}-{n}", std::process::id()));
-                    if std::fs::rename(&path, &moved).is_err() {
-                        continue;
-                    }
-                    let got = std::fs::read_to_string(&moved).unwrap_or_default();
-                    if got == seen.unwrap_or_default() {
-                        let _ = std::fs::remove_file(&moved);
-                    } else {
-                        let _ = std::fs::hard_link(&moved, &path);
-                        let _ = std::fs::remove_file(&moved);
-                        return err(Code::InProgress, "locked");
-                    }
-                }
-                Err(e) => return Err(io_err(&e)),
+                Err(std::fs::TryLockError::WouldBlock) => return err(Code::InProgress, "locked"),
+                Err(std::fs::TryLockError::Error(e)) => return Err(io_err(&e)),
             }
         }
-        err(Code::InProgress, "locked")
+        // What is left in the file is a crashed owner's (gone) or the lock of a version without the system lock (alive).
+        let mut seen = Vec::new();
+        file.read_to_end(&mut seen).map_err(|e| io_err(&e))?;
+        if matches!(holder(&String::from_utf8_lossy(&seen)), Holder::Alive) {
+            return err(Code::InProgress, "locked");
+        }
+        file.set_len(0)
+            .and_then(|()| file.seek(io::SeekFrom::Start(0)))
+            .and_then(|_| file.write_all(own_text().as_bytes()))
+            .map_err(|e| io_err(&e))?;
+        Ok(Self { file })
     }
 }
 
-fn old_enough(path: &Path) -> bool {
-    std::fs::metadata(path)
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| t.elapsed().ok())
-        .is_some_and(|age| age >= LOCK_GRACE)
-}
-
-impl Drop for Lock<'_> {
+impl Drop for Lock {
     fn drop(&mut self) {
-        // Somebody else's lock (ours was taken over after a long stall) is not ours to remove.
-        if std::fs::read_to_string(&self.path).is_ok_and(|t| t == self.text) {
-            let _ = self.root.remove_file(OsStr::new(".lock"));
-        }
+        // Emptied while still held; the system lock goes with the handle.
+        let _ = self.file.set_len(0);
     }
 }
 
@@ -1125,7 +1095,7 @@ pub fn install(
         }
     };
     let (root, agents) = open_agents(home)?;
-    let _lock = Lock::acquire(&root, &agents)?;
+    let _lock = Lock::acquire(&agents)?;
     // What the plan saw may have changed while waiting for the lock.
     let installed = installed_version(home, &plan.name);
     if installed.as_deref() == Some(plan.version.as_str()) {
