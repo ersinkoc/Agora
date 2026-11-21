@@ -26,7 +26,7 @@ new features.
   - [x] never typed over a turn: the structured agents' queue; one held prompt per terminal agent, sent as a bracketed paste
   - [ ] review round 3 fixes (stale agent list in `tick`, re-decide after a slow claim, Unknown state holds when the kind has rules)
   - [ ] a clean independent review, Codex review, CI green on all three OSes, merge
-- [x] **M0.3 Window: "Give to an agent"** (PR `claude/kanban-give-web`)
+- [x] **M0.3 Window: "Give to an agent"** (#885)
   - [x] a card action on the board (Backlog cards only), also in the command palette (a task and an agent are searchable)
   - [x] the picker lists the project's running agents, helpers under their parent (decision 8); other projects are never offered
   - [x] the confirmation names agent, project and machine in full, and says "acts without asking" for an agent that skips permissions
