@@ -624,6 +624,7 @@ fn grant_question(say: &Say, scope: &str, commands: &[&str]) -> String {
         ["agent.stop"] => say.text(key!("tui-grant-ask-stop"), &agent),
         ["agent.set_mode"] => say.text(key!("tui-grant-ask-mode"), &agent),
         ["agent.set_model"] => say.text(key!("tui-grant-ask-model"), &agent),
+        ["task.dispatch"] => say.text(key!("tui-grant-ask-give"), &agent),
         _ => say.text(key!("tui-grant-ask"), &[]),
     }
 }
@@ -744,6 +745,8 @@ const TYPING_INPUT: [&str; 1] = ["terminal.input"];
 const PROMPT: [&str; 1] = ["agent.prompt"];
 /// Stopping an agent.
 const STOP: [&str; 1] = ["agent.stop"];
+/// ADR-0095: giving a board task to an agent (a grant for that agent, as the web window asks).
+const GIVE: [&str; 1] = ["task.dispatch"];
 
 /// The places that ask for a grant (#810): each one's command set comes from here, so a test can say what every place signs.
 #[derive(Clone, Copy, Debug)]
@@ -760,6 +763,8 @@ enum Site {
     SplitStop,
     /// Stopping from the console.
     ConsoleStop,
+    /// "Give to an agent" from the board.
+    BoardGive,
 }
 
 impl Site {
@@ -768,6 +773,7 @@ impl Site {
             Site::AttachTyping | Site::GrantKey => &TYPING_INPUT,
             Site::SplitPrompt | Site::ChatPrompt => &PROMPT,
             Site::SplitStop | Site::ConsoleStop => &STOP,
+            Site::BoardGive => &GIVE,
         }
     }
 }
@@ -1214,13 +1220,20 @@ impl ViewWait {
                 return Wake::Redraw;
             }
             match session.next(Duration::ZERO) {
-                Update::Snapshot(s) => ask.c.snapshot = Some(*s),
+                Update::Snapshot(s) => {
+                    ask.c.give_lacking.settle(&s);
+                    ask.c.snapshot = Some(*s);
+                }
                 Update::Changed => ask.c.stale = true,
                 Update::Closed => return Wake::Gone,
                 Update::Quiet => {}
             }
             if session.take_asked() {
                 self.banner = say.text(key!("tui-view-asked"), &[]);
+                return Wake::Redraw;
+            }
+            // ADR-0090: an agent's config options changed (the picker's "does not ask" mark may have).
+            if session.take_configs_changed() {
                 return Wake::Redraw;
             }
             if Instant::now() >= self.idle_until {
@@ -1636,6 +1649,7 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                 typing_allowed: None,
                 asked: false,
                 typing_taken: std::collections::HashMap::new(),
+                give_lacking: agora_tui::board::Lacking::default(),
             }),
             Err(_) => None,
         }
@@ -1744,6 +1758,8 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                 || c.notice == say.text(key!("tui-lost"), &hub_arg)
             {
                 c.notice.clear();
+                // The link was lost (a routine refresh keeps the notice): what machines said about taking tasks may be old now.
+                c.give_lacking.clear();
             }
             // A new connection: the cards held from the last one are stale until the hub sends the ones waiting now.
             c.pair.reset();
@@ -2203,6 +2219,10 @@ struct Console {
     /// The newest typing each terminal's machine took in this session, (node, terminal) to request: a refusal read in a later turn
     /// for typing sent before it is old news (answers can come out of order).
     typing_taken: Taken,
+    /// ADR-0095: machines that answered a "Give to an agent" in a way that says they do not take tasks (`board::lacks_give`); their
+    /// agents are not offered again until the machine goes offline or comes back with another build, or the link to the hub is lost
+    /// (as the web window does, #885).
+    give_lacking: agora_tui::board::Lacking,
 }
 
 /// A notice too long for the footer is shown whole in a box above it until the next key (the trust command must be readable and
@@ -2352,6 +2372,8 @@ fn console(
         }
         match session.next(wait) {
             Update::Snapshot(s) => {
+                // A machine that is not connected now, or came back with another build, is offered tasks again.
+                c.give_lacking.settle(&s);
                 c.snapshot = Some(*s);
                 dirty_since = None;
                 redraw = true;
@@ -3398,6 +3420,11 @@ trait Asker {
         self.discard();
         read_answer(&mut Parser::default(), self.rx(), lines, wait)
     }
+    /// Goes on waiting up to `wait` for the answer to the question [`Asker::answer`] put on the screen, which is still there as it
+    /// was: nothing is drawn or set aside.
+    fn answer_more(&mut self, lines: &[String], wait: Duration) -> Option<u8> {
+        read_answer(&mut Parser::default(), self.rx(), lines, wait)
+    }
 }
 
 /// The text of a question as lines.
@@ -3432,6 +3459,10 @@ impl Asker for Plain<'_> {
     fn answer(&mut self, lines: &[String], wait: Duration) -> Option<u8> {
         self.show(lines);
         self.discard();
+        read_answer(&mut self.1, self.0, lines, wait)
+    }
+
+    fn answer_more(&mut self, lines: &[String], wait: Duration) -> Option<u8> {
         read_answer(&mut self.1, self.0, lines, wait)
     }
 
@@ -3524,6 +3555,10 @@ impl Asker for Over<'_> {
     fn answer(&mut self, lines: &[String], wait: Duration) -> Option<u8> {
         self.show(lines);
         self.discard();
+        self.read(lines, wait, one_answer)
+    }
+
+    fn answer_more(&mut self, lines: &[String], wait: Duration) -> Option<u8> {
         self.read(lines, wait, one_answer)
     }
 }
@@ -3921,6 +3956,19 @@ fn command(
             let _ = c.window.invalidate();
             false
         }
+        // ADR-0095: the board of the selected agent's project, whole-screen, and "Give to an agent" on a Backlog task. Like the review
+        // it redraws when the window is resized and says when a new request arrives meanwhile.
+        'b' if !selected.is_empty() => {
+            let Some(project) = agora_tui::board::project_of(&s, &selected) else {
+                c.notice = say.text(key!("tui-board-no-project"), &[]);
+                return false;
+            };
+            c.notice = over_console(say, c, session, None, rx, |session, ask| {
+                board_view(say, session, ask, &project)
+            });
+            let _ = c.window.invalidate();
+            false
+        }
         // ADR-0041: the grant the footer asked for when typing into the agent in front was refused. Only this key opens the question
         // (from the list, Ctrl-] then g): what follows is meant for it. Without such a refusal it does nothing.
         'g' => {
@@ -3959,6 +4007,336 @@ fn command(
         _ => false,
     }
 }
+
+/// ADR-0095: a project's board, whole-screen (Backlog, Doing, Done; the keyboard on a card), until q or Esc. Enter or `g` on a Backlog
+/// task gives it to an agent ([`give_task`]); what that came to stays in the footer. The snapshot is the console's: a task given here
+/// is shown under Doing at once, other changes when the board is opened again. Answers the line the console shows after it (none).
+fn board_view(say: &Say, session: &mut Session, ask: &mut Over<'_>, project: &str) -> String {
+    let text = |id: &str, args: &[(&str, Arg)]| say.text(id, args);
+    // Tasks given from here: shown under Doing until the hub's next snapshot says where they are.
+    let mut given: Vec<(String, String)> = Vec::new();
+    let mut at = 0usize;
+    // The task the keyboard is on: it stays on it when the board changes (a task just given moves to Doing).
+    let mut on: Option<String> = None;
+    let mut notice = String::new();
+    let mut view = ViewWait::new(say, ask);
+    loop {
+        let Some(b) = ask
+            .c
+            .snapshot
+            .as_ref()
+            .map(|s| agora_tui::board::board(s, project, &given, &text))
+        else {
+            return String::new();
+        };
+        let cards: Vec<(agora_tui::board::Column, agora_tui::board::Card)> = b
+            .cards()
+            .into_iter()
+            .map(|(col, card)| (col, card.clone()))
+            .collect();
+        at = b.select(on.as_deref(), at);
+        on = cards.get(at).map(|(_, card)| card.task_id.clone());
+        let banner = view.banner.clone();
+        let _ = ask.c.window.draw(|f| {
+            agora_tui::board::draw_board(f, &b, at, &notice, &banner, &text);
+        });
+        let wake = view.wait(say, ask, session);
+        if matches!(wake, Wake::Key(_)) {
+            notice.clear();
+        }
+        match wake {
+            Wake::Key(b'j') if !cards.is_empty() => {
+                at = (at + 1).min(cards.len() - 1);
+                on = None;
+            }
+            Wake::Key(b'k') => {
+                at = at.saturating_sub(1);
+                on = None;
+            }
+            Wake::Key(b'\r' | b'\n' | b'g') => match cards.get(at) {
+                Some((agora_tui::board::Column::Backlog, card)) => {
+                    notice = give_task(say, session, ask, &mut view, &b, card, &mut given);
+                    let _ = ask.c.window.invalidate();
+                }
+                Some(_) => notice = say.text(key!("tui-board-backlog-only"), &[]),
+                None => {}
+            },
+            Wake::Gone | Wake::Key(b'q' | 0x1b | 3) => return String::new(),
+            Wake::Key(_) | Wake::Redraw => {}
+        }
+    }
+}
+
+/// "Give to an agent" for one Backlog task (ADR-0095 decisions 3, 4, 8): a picker of the project's agents that can take it, then a
+/// confirmation that only a fresh `g` answers (not Enter, the key that chose the agent, so a held key never gives it; keys typed before
+/// it was on the screen, a paste, or several keys at once never answer it), then the command to the agent's machine. A machine that
+/// wants a grant first gets the console's one-hour question for that agent. Answers what happened, or nothing when the user went back.
+fn give_task(
+    say: &Say,
+    session: &mut Session,
+    ask: &mut Over<'_>,
+    view: &mut ViewWait,
+    b: &agora_tui::board::Board,
+    task: &agora_tui::board::Card,
+    given: &mut Vec<(String, String)>,
+) -> String {
+    use agora_tui::board;
+    let text = |id: &str, args: &[(&str, Arg)]| say.text(id, args);
+    let mut at = 0usize;
+    'pick: loop {
+        let Some(s) = ask.c.snapshot.clone() else {
+            return String::new();
+        };
+        let configs = session.configs().clone();
+        let choices: Vec<(String, String)> =
+            board::candidates(&s, &b.project_id, &ask.c.give_lacking)
+                .into_iter()
+                .map(|(a, depth)| {
+                    (
+                        a.agent_id.clone(),
+                        board::choice_line(&s, a, depth, &configs, &text),
+                    )
+                })
+                .collect();
+        at = at.min(choices.len().saturating_sub(1));
+        let banner = view.banner.clone();
+        let _ = ask.c.window.draw(|f| {
+            board::draw_picker(f, &task.title, &b.project, &choices, at, "", &banner, &text);
+        });
+        let agent_id = match view.wait(say, ask, session) {
+            Wake::Key(b'j') if !choices.is_empty() => {
+                at = (at + 1).min(choices.len() - 1);
+                continue;
+            }
+            Wake::Key(b'k') => {
+                at = at.saturating_sub(1);
+                continue;
+            }
+            Wake::Key(b'\r' | b'\n') => match choices.get(at) {
+                Some((id, _)) => id.clone(),
+                None => continue,
+            },
+            Wake::Gone | Wake::Key(b'q' | 0x1b | 3 | 0x7f | 0x08) => return String::new(),
+            Wake::Key(_) | Wake::Redraw => continue,
+        };
+        // The confirmation, from the agent as it is now.
+        {
+            let Some(s) = ask.c.snapshot.clone() else {
+                return String::new();
+            };
+            let Some(a) = s
+                .agents
+                .iter()
+                .find(|a| a.agent_id == agent_id)
+                .filter(|a| board::can_take(&s, a, &b.project_id, &ask.c.give_lacking))
+            else {
+                return board::cannot_take_text(&s, &agent_id, &ask.c.give_lacking, &text);
+            };
+            // The hub keeps being read while it waits: a report that changes the agent's options or mode redraws it.
+            let mut source = GiveConfirm {
+                say,
+                session: &mut *session,
+                s: &s,
+                agent: a,
+                task: &task.title,
+                project: &b.project,
+                kept: None,
+                stale: false,
+            };
+            let given = confirm_give(ask, Duration::from_secs(120), &window_area, &mut source);
+            let (kept, stale) = (source.kept, source.stale);
+            if let Some(new) = kept {
+                ask.c.give_lacking.settle(&new);
+                ask.c.snapshot = Some(new);
+            }
+            ask.c.stale |= stale;
+            if !given {
+                continue 'pick;
+            }
+        }
+        // Checked again at the moment of sending: it may have stopped, been closed or interrupted, or left the project meanwhile.
+        let Some(s) = ask.c.snapshot.clone() else {
+            return String::new();
+        };
+        let Some(a) = s
+            .agents
+            .iter()
+            .find(|a| a.agent_id == agent_id)
+            .filter(|a| board::can_take(&s, a, &b.project_id, &ask.c.give_lacking))
+        else {
+            return board::cannot_take_text(&s, &agent_id, &ask.c.give_lacking, &text);
+        };
+        let name = board::agent_name(&s, a);
+        let (node, request) = board::give_request(a, &b.project_id, &task.task_id);
+        let scope = format!(
+            "agent:{}",
+            agent_id
+                .split_once('/')
+                .map_or(agent_id.as_str(), |(_, l)| l)
+        );
+        let mut refusal: Option<ErrorInfo> = None;
+        let tried = with_grant(
+            say,
+            session,
+            ask,
+            (&node, &scope, Site::BoardGive.commands()),
+            |session| {
+                session
+                    .command_info(&node, request.clone(), Duration::from_secs(15))
+                    .map_err(|e| {
+                        let code = e.code.clone();
+                        refusal = Some(e);
+                        code
+                    })
+            },
+        );
+        return match tried {
+            Tried::Done(Ok(ok)) => {
+                given.push((task.task_id.clone(), agent_id.clone()));
+                // The board changed: the console asks for a fresh snapshot once the board is closed.
+                ask.c.stale = true;
+                let result = match &ok.result {
+                    Some(agora_protocol::v1::command_ok::Result::TaskDispatch(r)) => Some(r),
+                    _ => None,
+                };
+                board::result_text(result, &name, &text)
+            }
+            Tried::Done(Err(code)) => {
+                let e = refusal.unwrap_or(ErrorInfo {
+                    code,
+                    ..Default::default()
+                });
+                if board::lacks_give(&e) {
+                    ask.c.give_lacking.note(&s, &node);
+                }
+                board::refusal_text(&e, &text)
+            }
+            Tried::Declined => say.text(key!("tui-give-grant-declined"), &[]),
+            Tried::Line(l) => l,
+        };
+    }
+}
+
+/// What "Give to an agent"'s confirmation reads while it waits ([`confirm_give`]).
+trait ConfirmSource {
+    /// Reads what the hub said meanwhile: whether the confirmation may read differently now (an agent's config options or mode
+    /// changed), or the link is gone.
+    fn poll(&mut self) -> Refresh;
+    /// The confirmation as it reads now in a window of `area`; `Err` when the window cannot show what must be read before `g`.
+    fn lines(&self, area: Area) -> Result<Vec<String>, Vec<String>>;
+}
+
+/// What the hub said while the confirmation waited.
+#[derive(Debug, PartialEq, Eq)]
+enum Refresh {
+    Same,
+    /// Something the confirmation shows may have changed.
+    Changed,
+    /// The link to the hub is gone.
+    Gone,
+}
+
+/// The confirmation of a give from the board: the agent as the snapshot shows it and its options and mode as its machine reported
+/// them since. A snapshot or a change read while it waits is kept for the console.
+struct GiveConfirm<'a> {
+    say: &'a Say,
+    session: &'a mut Session,
+    s: &'a Snapshot,
+    agent: &'a agora_protocol::v1::AgentSnapshot,
+    task: &'a str,
+    project: &'a str,
+    kept: Option<Snapshot>,
+    stale: bool,
+}
+
+impl ConfirmSource for GiveConfirm<'_> {
+    fn poll(&mut self) -> Refresh {
+        match self.session.next(Duration::ZERO) {
+            Update::Snapshot(new) => self.kept = Some(*new),
+            Update::Changed => self.stale = true,
+            Update::Closed => return Refresh::Gone,
+            Update::Quiet => {}
+        }
+        if self.session.take_configs_changed() {
+            Refresh::Changed
+        } else {
+            Refresh::Same
+        }
+    }
+
+    fn lines(&self, area: Area) -> Result<Vec<String>, Vec<String>> {
+        let text = |id: &str, args: &[(&str, Arg)]| self.say.text(id, args);
+        agora_tui::board::confirm_lines(
+            self.s,
+            self.agent,
+            self.session.configs(),
+            self.task,
+            self.project,
+            area,
+            &text,
+        )
+    }
+}
+
+/// The answer to "Give to an agent"'s confirmation: true only for a `g` pressed after it is on the screen ([`Asker::answer`]: keys typed
+/// before it are set aside, a paste or several keys at once never answer). `n`, Esc, q, ⌫ or no answer in `wait` go back; any other
+/// key (Enter repeated by a held key, the key that chose the agent) asks again.
+///
+/// While it waits it reads the hub ([`ConfirmSource::poll`]) and the window's size (`area`). When the confirmation reads differently
+/// (the agent now acts without asking, or no longer does; the window was resized) it is drawn again and only a `g` pressed after that
+/// gives the task: a `g` pressed while the old one was shown, even in the same moment the change was read, does not. A window too small
+/// for the lines that must be read says so, and `g` gives nothing there.
+fn confirm_give(
+    ask: &mut dyn Asker,
+    wait: Duration,
+    area: &dyn Fn() -> Area,
+    source: &mut dyn ConfirmSource,
+) -> bool {
+    let end = Instant::now() + wait;
+    let mut at = area();
+    let mut fit = source.lines(at);
+    let mut fresh = true;
+    loop {
+        let left = end.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return false;
+        }
+        let slice = left.min(CONFIRM_SLICE);
+        let shown = match &fit {
+            Ok(l) | Err(l) => l.clone(),
+        };
+        let got = if std::mem::take(&mut fresh) {
+            ask.answer(&shown, slice)
+        } else {
+            ask.answer_more(&shown, slice)
+        };
+        let changed = match source.poll() {
+            Refresh::Gone => return false,
+            Refresh::Changed => true,
+            Refresh::Same => false,
+        };
+        let now = area();
+        if changed || now != at {
+            at = now;
+            let new = source.lines(at);
+            if new != fit {
+                fit = new;
+                fresh = true;
+                continue;
+            }
+        }
+        match got {
+            Some(b'g') if fit.is_ok() => return true,
+            Some(b'n' | b'q' | 0x1b | 0x7f) => return false,
+            // Any other key (Enter repeated by a held key, the key that chose the agent, g where it cannot be given) asks again.
+            Some(_) => fresh = true,
+            None => {}
+        }
+    }
+}
+
+/// How often the confirmation looks for a change while it waits.
+const CONFIRM_SLICE: Duration = Duration::from_millis(200);
 
 /// ADR-0073 "Clean up old machines": the machines not seen for a day, each with when it was last seen, in a box that asks once:
 /// y forgets them, r forgets them and refuses them if they connect again, any other key keeps them. Returns the line to show.
@@ -4146,6 +4524,7 @@ mod typing_grant_tests {
             (Site::ChatPrompt, "agent.prompt"),
             (Site::SplitStop, "agent.stop"),
             (Site::ConsoleStop, "agent.stop"),
+            (Site::BoardGive, "task.dispatch"),
         ] {
             assert_eq!(site.commands(), [want], "{site:?}");
         }
@@ -4153,14 +4532,14 @@ mod typing_grant_tests {
         // A Windows checkout may turn line ends into CRLF; the searches below use LF.
         let src = include_str!("tuicmd.rs").replace("\r\n", "\n");
         let code = &src[..src.find("#[cfg(test)]").unwrap()];
-        assert_eq!(code.matches(".commands()").count(), 6);
+        assert_eq!(code.matches(".commands()").count(), 7);
     }
 
     /// An agent's id is written to the terminal: no control character of it gets there.
     #[test]
     fn the_question_shows_no_control_character_of_the_id() {
         let say = Say(agora_i18n::Catalog::english());
-        for c in [&TYPING_INPUT, &PROMPT, &STOP] {
+        for c in [&TYPING_INPUT, &PROMPT, &STOP, &GIVE] {
             let q = grant_question(&say, "agent:a\x1b[2Jb\nc", c);
             assert!(!q.contains('\x1b') && !q.contains('\n'), "{q:?}");
             assert!(q.contains("a[2Jb c"), "{q:?}");
@@ -4171,8 +4550,9 @@ mod typing_grant_tests {
     fn each_grant_covers_only_what_its_question_says() {
         let say = Say(agora_i18n::Catalog::english());
         // attach() and the grant key; both chat prompts; both stops; the option switches; a start (the general words).
-        let sites: [(&[&str], &str); 6] = [
+        let sites: [(&[&str], &str); 7] = [
             (&TYPING_INPUT, "type into"),
+            (&GIVE, "give board tasks to"),
             (&PROMPT, "send messages to"),
             (&STOP, "stop"),
             (&["agent.set_mode"], "mode"),
@@ -4199,7 +4579,7 @@ mod typing_grant_tests {
         }
         // The Turkish questions name the agent too.
         let tr = Say(agora_i18n::Catalog::turkish());
-        for c in [&TYPING_INPUT, &PROMPT, &STOP] {
+        for c in [&TYPING_INPUT, &PROMPT, &STOP, &GIVE] {
             assert!(grant_question(&tr, "agent:a1", c).contains("a1"));
         }
     }
@@ -4548,6 +4928,226 @@ mod typing_grant_tests {
         }
         assert!(!passive_input(&AppEvent::Key(Key::Char('y'))));
         assert!(!passive_input(&AppEvent::Paste("y".into())));
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod confirm_give_tests {
+    use super::*;
+
+    /// An asker that, for each time the confirmation is drawn, first gets the keys typed before it could be seen (held keys,
+    /// repeats), then the keys pressed once it is on the screen.
+    struct Draws {
+        rx: mpsc::Receiver<u8>,
+        tx: mpsc::Sender<u8>,
+        draws: Vec<(&'static [u8], &'static [u8])>,
+        drawn: usize,
+        shown: Vec<Vec<String>>,
+    }
+
+    impl Asker for Draws {
+        fn rx(&self) -> &mpsc::Receiver<u8> {
+            &self.rx
+        }
+        fn show(&mut self, lines: &[String]) {
+            self.shown.push(lines.to_vec());
+            if let Some((before, _)) = self.draws.get(self.drawn) {
+                before.iter().for_each(|k| self.tx.send(*k).unwrap());
+            }
+        }
+        fn discard(&mut self) {
+            while self.rx.try_recv().is_ok() {}
+            if let Some((_, after)) = self.draws.get(self.drawn) {
+                after.iter().for_each(|k| self.tx.send(*k).unwrap());
+            }
+            self.drawn += 1;
+        }
+        fn frame(&mut self, _: &[u8]) {}
+    }
+
+    fn asker(draws: Vec<(&'static [u8], &'static [u8])>) -> Draws {
+        let (tx, rx) = mpsc::channel();
+        Draws {
+            rx,
+            tx,
+            draws,
+            drawn: 0,
+            shown: Vec::new(),
+        }
+    }
+
+    /// A confirmation whose agent starts acting without asking at the `change`-th look at the hub (0: never); with the warning it
+    /// needs 10 rows.
+    struct Source {
+        polls: usize,
+        change: usize,
+        gone: bool,
+    }
+
+    impl ConfirmSource for Source {
+        fn poll(&mut self) -> Refresh {
+            self.polls += 1;
+            if self.gone {
+                Refresh::Gone
+            } else if self.polls == self.change {
+                Refresh::Changed
+            } else {
+                Refresh::Same
+            }
+        }
+        fn lines(&self, area: Area) -> Result<Vec<String>, Vec<String>> {
+            let warned = self.change > 0 && self.polls >= self.change;
+            if warned && area.height < 10 {
+                return Err(vec!["too small".into()]);
+            }
+            let mut l = vec!["q".to_string()];
+            if warned {
+                l.push("warning".into());
+            }
+            Ok(l)
+        }
+    }
+
+    fn source(change: usize) -> Source {
+        Source {
+            polls: 0,
+            change,
+            gone: false,
+        }
+    }
+
+    fn big() -> Area {
+        Area::new(0, 0, 80, 24)
+    }
+
+    fn confirm(draws: Vec<(&'static [u8], &'static [u8])>) -> (bool, usize) {
+        let mut ask = asker(draws);
+        let given = confirm_give(&mut ask, Duration::from_millis(20), &big, &mut source(0));
+        (given, ask.drawn)
+    }
+
+    /// ADR-0095 (the web needed this too): Enter, which chose the agent, held or repeated, never gives the task; nor does a `g` typed
+    /// before the confirmation was on the screen, a held `g` arriving as several keys at once, or a pasted `g`. Only a fresh `g` does.
+    #[test]
+    fn only_a_fresh_g_after_the_confirmation_is_shown_gives_the_task() {
+        // A held Enter: typed before each draw and repeated after it. It keeps asking and, when the keys stop, goes back.
+        let (given, drawn) = confirm(vec![(b"\r\r", b"\r"); 5]);
+        assert!(!given);
+        assert_eq!(drawn, 6, "each Enter asked again");
+        // A g typed before the confirmation could be seen is set aside.
+        assert_eq!(confirm(vec![(b"g", b"")]), (false, 1));
+        // Several keys at once (a held key's burst) and a paste never answer.
+        assert!(!confirm(vec![(b"", b"gg")]).0);
+        assert!(!confirm(vec![(b"", b"\x1b[200~g\x1b[201~")]).0);
+        // n goes back at once.
+        assert_eq!(confirm(vec![(b"", b"n")]), (false, 1));
+        // A fresh g gives it, also after Enter asked again.
+        assert_eq!(confirm(vec![(b"", b"g")]), (true, 1));
+        assert_eq!(confirm(vec![(b"\r", b"\r"), (b"\r", b"g")]), (true, 2));
+    }
+
+    /// A report that makes the agent act without asking while the confirmation is open (a config option, or a live mode change,
+    /// Codex review of #893): it is drawn again with the warning, and a `g` pressed before that, even in the same moment the report
+    /// was read, does not give the task; a fresh `g` after it does. A lost link ends it.
+    #[test]
+    fn a_change_while_the_confirmation_is_open_is_shown_before_g_can_give() {
+        let warned = vec!["q".to_string(), "warning".to_string()];
+        let mut ask = asker(vec![(b"", b"g"), (b"", b"")]);
+        assert!(!confirm_give(
+            &mut ask,
+            Duration::from_millis(500),
+            &big,
+            &mut source(1)
+        ));
+        assert_eq!(ask.shown[1], warned, "{:?}", ask.shown);
+        let mut ask = asker(vec![(b"", b""), (b"", b"g")]);
+        assert!(confirm_give(
+            &mut ask,
+            Duration::from_secs(5),
+            &big,
+            &mut source(1)
+        ));
+        assert_eq!(ask.shown.last(), Some(&warned));
+        // A look that changes nothing draws nothing new.
+        let mut ask = asker(vec![(b"", b"g")]);
+        let mut same = source(0);
+        assert!(confirm_give(
+            &mut ask,
+            Duration::from_secs(5),
+            &big,
+            &mut same
+        ));
+        assert_eq!(ask.shown.len(), 1);
+        let mut ask = asker(vec![(b"", b"g")]);
+        let mut gone = source(0);
+        gone.gone = true;
+        assert!(!confirm_give(
+            &mut ask,
+            Duration::from_secs(5),
+            &big,
+            &mut gone
+        ));
+    }
+
+    /// Codex review of #893: where the window cannot show the lines that must be read (the warning, the keys), the confirmation says
+    /// the terminal is too small and `g` gives nothing; once the window is large enough, a fresh `g` does.
+    #[test]
+    fn a_window_too_small_for_the_warning_never_gives_the_task() {
+        let small = || Area::new(0, 0, 80, 8);
+        // The agent acts without asking from the start (the change is read at once) in a small window: g only asks again.
+        let mut ask = asker(vec![(b"", b""), (b"", b"g"), (b"", b"g"), (b"", b"")]);
+        let mut s = source(1);
+        assert!(!confirm_give(
+            &mut ask,
+            Duration::from_millis(700),
+            &small,
+            &mut s
+        ));
+        assert!(
+            ask.shown
+                .iter()
+                .skip(1)
+                .all(|l| l == &["too small".to_string()]),
+            "{:?}",
+            ask.shown
+        );
+        // The window grows: the whole confirmation is drawn and a fresh g gives the task.
+        let size = std::cell::Cell::new(Area::new(0, 0, 80, 8));
+        let area = || size.get();
+        let mut ask = asker(vec![(b"", b""), (b"", b"g"), (b"", b"g")]);
+        let mut s = source(1);
+        // Grown before the third draw.
+        struct Growing<'a> {
+            inner: &'a mut Source,
+            size: &'a std::cell::Cell<Area>,
+        }
+        impl ConfirmSource for Growing<'_> {
+            fn poll(&mut self) -> Refresh {
+                let r = self.inner.poll();
+                if self.inner.polls == 2 {
+                    self.size.set(Area::new(0, 0, 80, 24));
+                }
+                r
+            }
+            fn lines(&self, area: Area) -> Result<Vec<String>, Vec<String>> {
+                self.inner.lines(area)
+            }
+        }
+        let mut g = Growing {
+            inner: &mut s,
+            size: &size,
+        };
+        assert!(confirm_give(
+            &mut ask,
+            Duration::from_secs(5),
+            &area,
+            &mut g
+        ));
+        assert_eq!(
+            ask.shown.last(),
+            Some(&vec!["q".to_string(), "warning".to_string()])
+        );
     }
 }
 

@@ -35,6 +35,23 @@ Per project. Backed by the mesh task model (`docs/specs/mesh-tools.md`).
   offers Back (it still follows the agent). An agent that is still starting gets it when it is ready (the machine holds it; the answer then says
   "it waits until the agent is ready and its current turn ends"). Starting a helper under a parent is not offered: the window has no way
   for a person to start a helper (helpers are agent-made, ADR-0057), so decision 8's "start a new one under a parent" stays the agent's path.
+- **The terminal client** (`agora tui`, ADR-0095 step 2): `b` (also in Ctrl-K) opens the board of the selected agent's project
+  whole-screen: Backlog, Doing and Done with their counts, 200 cards per column and the rest counted, titles as plain text on one line,
+  cut short (control, escape and direction characters dropped), Doing with the agent that holds the task and its state. Enter or `g` on a
+  Backlog task is "Give to an agent": the same agents as the web window's picker (running agents of the project on a connected machine,
+  no plain shells, not closed or interrupted, helpers under their parent), each with kind, machine, state and "does not ask" when it acts
+  without asking (a launch option, a current mode that skips approvals, or a config option on a value that skips them: the hub replays
+  each running agent's last config options right after its snapshot, and the terminal keeps them and every later mode change; a change redraws
+  the picker, and redraws an open confirmation, where only a `g` pressed after the redrawn one gives the task). Enter on an agent opens the confirmation, which names task, agent, kind, machine and project and says
+  when the agent acts without asking (the question, the task, that warning and the keys always come first; the other rows are
+  left out when the window is small, and a window too small even for those says so and does not give the task); only a `g` pressed after it is on the screen gives the task (Enter, the key that chose the agent,
+  never does, keys typed before it are set aside, and a paste or several keys at once never answer it). The footer then says "Sent to
+  ...", "... it waits until the agent's current turn ends", or the refusal in words; the agent is checked again when sending. A machine
+  that refused with `protocol.capability_missing` (`task.dispatch`) or `protocol.invalid_message` (field `command`) is not offered again
+  until it goes offline, a snapshot shows it with another build or program (it was updated), or the link to the hub is lost. A limited device is asked the console's one-hour grant question for that agent
+  (`task.dispatch` only) and the task is sent again once it is allowed. The board shows the snapshot the console had when it opened: a
+  task given from it moves to Doing at once (the keyboard stays on it), other changes show when the board is opened again. Starting a new agent for the task is not
+  offered in the terminal (start one with `s` or `f`, then give the task).
 - Card: title, owner agent or human, dependencies, linked branch/worktree, messages count.
 - Humans can create tasks, assign them to an agent kind or a specific agent, and reorder priority.
 - Assigning to an agent kind can start a new agent automatically on a chosen node (policy permitting).

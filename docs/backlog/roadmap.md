@@ -39,10 +39,10 @@ new features.
     hides the action for a machine once it was refused there as `protocol.capability_missing` (`task.dispatch`) or, from a node too old to
     decode it, `protocol.invalid_message` (`command`); forgotten when that machine goes offline and on every reconnect
   - [x] tests (unit, and a browser e2e with `agora-fake-agent`, run against a build with #883), screenshots in both themes, 44 px targets, keyboard path
-- [ ] **M0.4 Start a new agent for a task** (ADR-0095 step 3; window: #889, merged)
+- [x] **M0.4 Start a new agent for a task** (ADR-0095 step 3; window: #889, merged; terminal client: #893)
   - [x] "Start a new one" in the picker opens the ordinary start (kind, machine, folder), then dispatches to the new agent
   - [x] under a parent: the ordinary ADR-0057 helper start (signed approval as an agent-made request): the window has no person-made helper start, so it stays the agent's ADR-0057 path and is not offered in the picker
-  - [ ] the TUI: dispatch from its board list (same command)
+  - [x] the TUI: dispatch from its board list (same command): `b` opens the board, Enter or `g` gives a Backlog task
 - [ ] **M0.5 Release 0.3.33** (#888, tag `v0.3.33`)
   - [x] release notes; tag; the release workflow (five targets, `.sha256` and `.sig`)
   - [x] the hub machine (blackview) updated, signature checked; its five agents came back after the restart

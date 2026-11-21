@@ -698,6 +698,7 @@ impl App {
             ('U', key!("tui-app-cmd-again")),
             ('r', key!("tui-app-cmd-review")),
             ('o', key!("tui-app-cmd-files")),
+            ('b', key!("tui-app-cmd-board")),
             ('d', key!("tui-app-cmd-remove")),
             ('a', key!("tui-app-cmd-ask")),
             ('v', key!("tui-app-cmd-devices")),
