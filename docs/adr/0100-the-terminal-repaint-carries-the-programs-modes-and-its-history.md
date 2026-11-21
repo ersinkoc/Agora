@@ -1,8 +1,9 @@
 # 0100. The terminal repaint carries the program's modes and its history
-Status: Proposed
+Status: Accepted
 Date: 2026-11-22
-
-Not accepted. Nothing here may be built until the maintainer accepts it (decision 2 also needs the schema step it names).
+Accepted: 2026-11-22 (the maintainer, in the merger chat: "Kabul, şema dahil" to the question that described decision 1, the modes in the
+repaint with no schema change, and decision 2, the history before the repaint with the new optional `TerminalSubscribe.history_lines`
+field). The schema step of decision 2 is approved with it. The open questions' proposed answers stand.
 
 Touches ADR-0012 (VT backend: the `Terminal` trait's `modes`), ADR-0029 (terminal relay: a new terminal frame kind, relayed
 unchanged), ADR-0072 (the size frame after a repaint), ADR-0022 and `docs/design/performance.md` (bytes per attach, input outranks
