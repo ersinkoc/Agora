@@ -265,7 +265,7 @@ Prerequisite: ADR-0085 (certificate renewal) accepted and built, because section
     and the manual takeover (steps 1 to 4) says so in `agora doctor` for Windows machines.
   - **State** reaches a Windows standby only as section 2 says (`VACUUM INTO` / backup API, never the folder; `ca.key` and `token` never carried).
 
-## Amendment (2026-11-17, accepted with this ADR on 2026-11-19): the Windows measurements
+## Amendment (2026-11-17): the Windows measurements
 After the first text, the Windows developer measured on a real Windows 11 machine (release 0.3.16, hub started non-elevated as a logon task would, 39 minutes) and reviewed section 8.
 Four changes, applied in place above and listed here so the history is visible:
 1. The firewall rule is scoped to the hub's TCP port and the installed `agora.exe` path in the profile of the network the hub serves, not "to the private profile" (section 8, Per OS).
