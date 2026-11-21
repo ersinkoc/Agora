@@ -133,7 +133,36 @@ try {
   await give.locator('[data-agent-id]').first().waitFor();
   await give.getByRole('button', { name: 'Start a new agent for this task', exact: true }).waitFor();
   await shoot('picker');
+  // Escape goes to the topmost dialog: the picker closes and the board stays. Pressed once the picker is ready (it holds the focus, and a
+  // frame has passed since: a dialog listens for Escape a render after it appears; until then the board ignores the key, dialogStack.ts).
+  const pickerReady = async () => {
+    await page.waitForFunction(() => !!document.querySelector('[data-give-dialog]')?.contains(document.activeElement));
+    await page.evaluate(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))));
+  };
+  // In the document, not by role: the picker is modal, so the board under it is hidden from the accessibility tree while it is open.
+  const boardOpen = async () => (await page.locator('[data-column="backlog"]').count()) === 1;
+  await pickerReady();
+  await page.keyboard.press('Escape');
+  await give.waitFor({ state: 'detached' });
+  assert.ok(await boardOpen(), 'the board stays open under the picker');
+  // An Escape right after the picker opened (no wait) never closes the board under it: it closes the picker, or does nothing yet.
+  const giveParser = col('backlog').getByRole('button', { name: 'Give “Port the parser to the new API” to an agent' });
+  for (let i = 0; i < 5; i++) {
+    await giveParser.click();
+    await give.waitFor();
+    await page.keyboard.press('Escape');
+    await page.waitForTimeout(400);
+    assert.ok(await boardOpen(), `an early Escape did not close the board (try ${i + 1})`);
+    if (await give.count()) {
+      await pickerReady();
+      await page.keyboard.press('Escape');
+      await give.waitFor({ state: 'detached' });
+    }
+  }
   if (screenshots) {
+    // At phone width the window shows its phone layout (no board); the picker stays.
+    await giveParser.click();
+    await give.waitFor();
     await page.setViewportSize({ width: 390, height: 844 });
     for (const theme of ['light', 'dark']) {
       await page.emulateMedia({ colorScheme: theme });
@@ -147,11 +176,14 @@ try {
     await page.waitForTimeout(300);
     await page.screenshot({ path: join(screenshots, 'board-start-phone-start-dark.png'), animations: 'disabled' });
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    // Escape closes the start window only (the topmost dialog); the picker comes back.
     await page.keyboard.press('Escape');
+    await start.waitFor({ state: 'detached' });
     await give.waitFor();
+    await pickerReady();
+    await page.keyboard.press('Escape');
+    await give.waitFor({ state: 'detached' });
   }
-  await page.keyboard.press('Escape');
-  await give.waitFor({ state: 'detached' });
   assert.deepEqual(errors, []);
   console.log('PASS: a Backlog task with no agent to take it starts the fake chat agent through the ordinary start window, then is given to it after the confirmation.');
 } finally {

@@ -132,7 +132,8 @@ export function StartAgent({ projects, machines, initialNode, initialKind, forTa
   }, [projectPath]);
   const choose = async (at = path) => {
     setBusy(true); setError(undefined);
-    try { setInfo(await inspect(node, at, createIdentity)); }
+    // For a task the project is the task's: no new project identity is made for the folder (it would make it another project).
+    try { setInfo(await inspect(node, at, forTask ? false : createIdentity)); }
     catch (e) { setError(directoryReasonKey((e as { code?: string }).code)); }
     finally { setBusy(false); }
   };
@@ -219,7 +220,7 @@ export function StartAgent({ projects, machines, initialNode, initialKind, forTa
                   </button></li>)}
                 </ul>
               </div>}
-              <label className="flex items-start gap-2 text-[0.8125rem]"><input type="checkbox" className="mt-0.5" checked={createIdentity} disabled={busy} onChange={e => setCreateIdentity(e.target.checked)} /><span>{t('start-portable')}{createIdentity && <span className="mt-0.5 block text-xs text-muted">{t('start-portable-explain')}</span>}</span></label>
+              {!forTask && <label className="flex items-start gap-2 text-[0.8125rem]"><input type="checkbox" className="mt-0.5" checked={createIdentity} disabled={busy} onChange={e => setCreateIdentity(e.target.checked)} /><span>{t('start-portable')}{createIdentity && <span className="mt-0.5 block text-xs text-muted">{t('start-portable-explain')}</span>}</span></label>}
             </>}
           </div>
 

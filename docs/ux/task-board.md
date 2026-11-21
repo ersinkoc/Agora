@@ -23,7 +23,9 @@ Per project. Backed by the mesh task model (`docs/specs/mesh-tools.md`).
   the task; if its machine still turns out unable, the dialog says so (not that the agent stopped). It opens the ordinary "Start an agent" window, naming the task as plain
   text, with only the task's project folders under "Known folders"; the machine and folder are prefilled as an ordinary start prefills
   them and the person still chooses the folder, the agent, its settings and how it acts (the skip-permissions confirmation included). It
-  offers agents only (a plain terminal cannot take a task) and does not start in a folder of another project. Starting is the ordinary
+  offers agents only (a plain terminal cannot take a task), does not offer "Create a shared project identity" (a new identity would make
+  the folder another project; the folder is inspected without one), and does not start in a folder of another project. Escape closes
+  only the topmost dialog: the board never closes under the picker or the start window. Starting is the ordinary
   signed start command under the machine's policy and any `signed_commands` line (ADR-0041); there is no shortcut. A refusal stays in the
   start window (with the trust command and the rest, as always); going back shows it in the picker, and nothing is given. A start the
   machine holds for the owner's permission says so: the start window gives way, the picker offers no second start for the task while it

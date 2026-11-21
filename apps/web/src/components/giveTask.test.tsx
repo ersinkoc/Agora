@@ -10,6 +10,8 @@ import { grantFor } from '../net/grant';
 import { REFUSAL_KEYS, refusalKey } from '../net/refusal';
 import type { BoardModel, BoardTaskModel } from '../net/view';
 import { BoardColumns } from './BoardView';
+import { StartAgent } from './StartAgent';
+import { BoardView } from './BoardView';
 import { APPEAR_WAIT_MS, GiveContext, GiveDialog, type GiveApi, type StartForTask } from './GiveTask';
 import { declineStart, isStart, resendStart, sendStart, startRefusal, type StartAnswer } from '../net/startHold';
 
@@ -517,6 +519,27 @@ describe('start a new agent for the task', () => {
     expect(send).not.toHaveBeenCalled();
   });
 
+  it('keeps the task\'s project: no "shared project identity" in the start for a task, and the folder is inspected without making one', async () => {
+    const inspect = vi.fn<StartForTask['inspect']>(async (_node, path) => ({ path, projectId: 'p', gitRoot: path, branch: 'main', portable: false }));
+    const give = withStart([], vi.fn());
+    give.start = { ...give.start!, inspect };
+    render(<GiveDialog task={theTask} give={give} onClose={() => {}} />);
+    click(dialog().querySelector('[data-give-start]'));
+    await flush();
+    expect(startWindow()!.textContent).not.toContain(t('start-portable'));
+    expect(startWindow()!.querySelector('input[type=checkbox]')).toBeNull();
+    click(button('Use this folder', startWindow()!));
+    await flush();
+    expect(inspect).toHaveBeenCalledWith('n1', '/w/shop', false);
+    // The ordinary start keeps it.
+    act(() => root.unmount());
+    root = createRoot(host);
+    const s = give.start!;
+    render(<StartAgent projects={s.projects} machines={s.machines} loadKinds={s.loadKinds} inspect={inspect} onStart={async () => undefined} onClose={() => {}} />);
+    await flush();
+    expect(startWindow()!.textContent).toContain(t('start-portable'));
+  });
+
   it('does not start in a folder of another project', async () => {
     const launch = vi.fn<StartForTask['launch']>();
     render(<GiveDialog task={theTask} give={withStart([], launch)} onClose={() => {}} />);
@@ -695,4 +718,22 @@ describe('start a new agent for the task', () => {
       }
     });
   }
+});
+
+// Escape belongs to the topmost dialog: the board never closes under a dialog opened over it (the "Give to an agent" dialog listens for
+// Escape a render after it appears, and an Escape in that moment closed the board instead).
+describe('the board under another dialog', () => {
+  it('ignores Escape while another dialog is open above it, and closes on Escape otherwise', () => {
+    const onClose = vi.fn();
+    render(<BoardView board={board([task('1', 'open')])} onClose={onClose} />);
+    const above = document.createElement('div');
+    above.setAttribute('role', 'dialog');
+    above.setAttribute('data-state', 'open');
+    document.body.append(above);
+    act(() => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); });
+    expect(onClose).not.toHaveBeenCalled();
+    above.remove();
+    act(() => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); });
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
 });
