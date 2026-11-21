@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { setLanguage, t } from '../i18n';
 import { LaunchSettings } from './LaunchSettings';
-import { chooseSetting, chosenSettings, launchSettingsField, noSettings, plainValue, settingName, usableSettings, type LaunchSettingChoice } from './launchSettings';
+import { chooseSetting, chosenSettings, launchSettingsField, noSettings, plainValue, settingName, usableSettings, type LaunchSettingChoice } from './launchSettingsModel';
 import { directoryMessage, launchMessageV4, signDirectory } from '../net/directory';
 import { thisDevice } from '../net/approval';
 

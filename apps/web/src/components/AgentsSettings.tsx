@@ -4,7 +4,7 @@ import type { MachineModel } from '../net/view';
 import { ago } from '../net/time';
 import { groupKinds, kindChoices, plainText, readKnown, runsAs, writeKnown, type KindInfo, type KnownKinds } from '../net/agentKinds';
 import { labelOf } from './launchChoice';
-import { settingName } from './launchSettings';
+import { settingName } from './launchSettingsModel';
 import type { KindChoice } from './StartAgent';
 
 const storage = (): Storage | undefined => { try { return window.localStorage; } catch { return undefined; } };

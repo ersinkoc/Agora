@@ -9,7 +9,7 @@ import { Icon } from './Icon';
 import { isBareName, machineFor, missingPrograms, shortBinary, trustCommand } from './startChoice';
 import { LaunchSettings } from './LaunchSettings';
 import { recall, remember } from './launchMemory';
-import { chosenSettings, noSettings, settingName, usableSettings, type LaunchSettingChoice, type SettingsState } from './launchSettings';
+import { chosenSettings, noSettings, settingName, usableSettings, type LaunchSettingChoice, type SettingsState } from './launchSettingsModel';
 import { ASK, chosenIds, confirmedIds, confirmSkip, harmless, initialLaunch, keepAsking, labelOf, pickPermission, skipping, toggleHarmless, usableOptions, type LaunchOptionChoice } from './launchChoice';
 // ADR-0059: `options` are the kind's launch options as the machine lists them (none from an older machine).
 // ADR-0066: `settings` are the kind's launch settings as the machine lists them (none from an older machine).

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { refusalKey, type ActionResult } from '../net/refusal';
 import { NoAskBadge } from './NoAskBadge';
 import { approvedHere, skipAnswerOf } from '../net/skipApproval';
-import { settingName } from './launchSettings';
+import { settingName } from './launchSettingsModel';
 import { startedWith } from './launchMemory';
 import { Icon } from './Icon';
 import { Menu, type MenuItem } from '../layout/Menu';

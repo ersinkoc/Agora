@@ -1,4 +1,4 @@
-import { chooseSetting, chosenSettings, noSettings, usableSettings, type LaunchSettingChoice, type SettingsState } from './launchSettings';
+import { chooseSetting, chosenSettings, noSettings, usableSettings, type LaunchSettingChoice, type SettingsState } from './launchSettingsModel';
 
 // ADR-0066 decision 3: the start window remembers the last model and effort chosen for each kind on each machine, on this device only
 // (localStorage, guarded: private windows and blocked storage just remember nothing). It is a convenience, never an authority: what it

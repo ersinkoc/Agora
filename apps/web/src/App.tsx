@@ -41,7 +41,7 @@ import { CloseAgentContext } from './components/CloseAgent';
 import { closeAsk } from './net/closeAgent';
 import { failure, type ActionResult } from './net/refusal';
 import { usableId } from './components/launchChoice';
-import { launchSettingsField } from './components/launchSettings';
+import { launchSettingsField } from './components/launchSettingsModel';
 import { rememberStarted } from './components/launchMemory';
 import { PhoneAgent, PhoneHome, PhoneTheme, usePhone } from './phone/Phone';
 import { approvalRedirect, phoneScreen } from './phone/nav';

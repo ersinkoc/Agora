@@ -1,5 +1,5 @@
 import { t } from '../i18n';
-import { allowed, chooseSetting, settingName, type LaunchSettingChoice, type SettingsState } from './launchSettings';
+import { allowed, chooseSetting, settingName, type LaunchSettingChoice, type SettingsState } from './launchSettingsModel';
 
 const chip = 'inline-flex items-center gap-2 rounded-xs border px-2.5 py-1.5 text-[0.8125rem] transition-colors duration-150 disabled:opacity-50';
 const chipOn = 'border-accent bg-surface-2 text-ink ring-1 ring-accent';
