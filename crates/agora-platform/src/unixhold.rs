@@ -531,9 +531,12 @@ const CONTROL_WORDS: usize = 8;
 
 /// Waits until `sock` is writable (or in error or hung up), at most `timeout`. `Ok(false)` on the time running out.
 pub(crate) fn wait_writable(sock: RawFd, timeout: std::time::Duration) -> io::Result<bool> {
-    let end = std::time::Instant::now() + timeout;
+    // A timeout past what an `Instant` can hold (`Duration::MAX`) has no end: it waits until writable.
+    let end = std::time::Instant::now().checked_add(timeout);
     loop {
-        let left = end.saturating_duration_since(std::time::Instant::now());
+        let left = end.map_or(timeout, |end| {
+            end.saturating_duration_since(std::time::Instant::now())
+        });
         // Rounded up to a whole millisecond, so the wait never ends before the time given.
         let ms = left.as_nanos().div_ceil(1_000_000).min(i32::MAX as u128) as libc::c_int;
         let mut p = libc::pollfd {
@@ -547,6 +550,10 @@ pub(crate) fn wait_writable(sock: RawFd, timeout: std::time::Duration) -> io::Re
             return Ok(true);
         }
         if r == 0 {
+            if end.is_none() {
+                // The wait is capped at `i32::MAX` ms per poll; one with no end polls again.
+                continue;
+            }
             return Ok(false);
         }
         let e = io::Error::last_os_error();
