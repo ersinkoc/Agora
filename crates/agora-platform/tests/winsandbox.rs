@@ -628,7 +628,8 @@ fn generated_git_config_grants_access_to_one_file() {
     let out = run(
         Sandbox {
             write: vec![work.clone()],
-            git_config: Some(file),
+            // The node resolves its effective data directory before writing the file.
+            git_config: Some(file.canonicalize().unwrap()),
             ..Default::default()
         },
         &work,
