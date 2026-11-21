@@ -1,156 +1,182 @@
 # Agora
 
-> Working name. Pre-alpha: the hub, node, mesh and web window run end to end on Linux, macOS and Windows.
-> Real-agent fixtures and multi-machine runs are recorded; integration coverage and remaining limits are listed below.
+**One console for your coding agents across Linux, macOS, and Windows.**
 
-One window for every AI coding agent on every machine you own.
+Run a **node** on each machine that runs agents, then connect the nodes to one **hub**. Open the hub in
+a browser, terminal client, or desktop app to see which agents are working, answer approvals, and review
+workspace changes. Nodes keep agents running and buffer events when the hub is unreachable.
 
-Agora runs a small **node** on each of your machines (Linux, macOS, Windows, local or reachable only over
-SSH). All nodes report to a **hub**. You open one window and see your projects, agents, files and changes,
-and the approvals waiting for you. Agent integrations use manifests, ACP or external adapters; a generic CLI can run
-in a terminal. Agents coordinate through a structured mesh: messages, a shared task board, file leases, and handoff.
-Nodes keep agents running when the hub or window disconnects.
+Pre-alpha. See the [changelog](CHANGELOG.md) for released changes and the [capability matrix](docs/capabilities.md)
+for what's implemented and where it has been tested.
 
-## Install a release
-
-Download the binary for your platform from [releases](https://github.com/ersinkoc/Agora/releases), along with its
-`.sha256` checksum and `.sig` signature. Verify signed releases with the key in
-[`docs/security/release-key.pub`](docs/security/release-key.pub). These commands assume all three files are in the current directory:
-
-```sh
-f=agora-x86_64-unknown-linux-gnu   # or aarch64-unknown-linux-gnu, aarch64-apple-darwin, x86_64-apple-darwin, x86_64-pc-windows-msvc.exe
-sha256sum -c $f.sha256
-ssh-keygen -Y verify -f docs/security/release-key.pub -I agora-release -n file -s $f.sig < $f
-chmod +x $f && ./$f doctor
-```
-
-On macOS the binary is ad-hoc signed but not notarized yet. Downloaded with `curl` or `gh release download` it runs; downloaded with a browser, macOS
-blocks it ("cannot be verified"): run `xattr -d com.apple.quarantine agora-aarch64-apple-darwin` first. Notarization needs a Developer ID (open question).
-
-`agora update` checks and installs newer releases the same way once the key is saved as `<agora dir>/release-key`.
-The web window is embedded in the binary, so steps 2 to 4 below work with a release too.
+[![Web console showing agents across machines and approvals waiting for you](docs/screenshots/fleet-console/after-attention-dark.png)](docs/screenshots/README.md)
 
 ## Get started
 
-Type `agora`. The first time it asks one question; then it starts everything this machine needs in the background and opens
-the terminal client signed in (`agora web` opens the browser). See [docs/getting-started.md](docs/getting-started.md).
+1. Download the binary for your platform from [GitHub Releases](https://github.com/ersinkoc/Agora/releases).
+   [Verify the download](#install-a-release) and put it on your PATH as `agora` (`agora.exe` on Windows).
+2. Run `agora` from a project folder and choose **Start Agora here**. For a new Git repository, make the first
+   commit before running setup in that folder. The first run starts a local hub and node in the background
+   and signs you in. It opens the browser on a desktop and the terminal client over SSH or on Linux without
+   a display. Use `agora --ui web` or `agora --ui tui` to choose.
+3. Choose **Start an agent** and select a folder. Pick **Shell** to try a live terminal with no coding agent
+   installed, or pick an agent already installed and signed in on that machine.
 
-## Try it (from source)
-
-These examples use a POSIX shell. For Windows setup, see the [Windows development guide](docs/fordevs/for_windows_dev.md).
-
-```sh
-# 1. Build the web window, then the binary (it embeds the window; skip the first line to serve it with --web DIR instead)
-(cd apps/web && npm ci && npm run gen && npm run build)
-cargo build --release -p agora
-
-# 2. The hub: prints the address and a one-time sign-in code (data lives in ~/.agora/hub)
-target/release/agora hub run --listen 127.0.0.1:7443
-
-# 3. A machine: get an enrollment code from the hub, enroll, run the node on a git project
-target/release/agora hub code
-target/release/agora node enroll --hub wss://localhost:7443 --ca ~/.agora/hub/ca.pem --code XXXX-XXXX --id laptop
-#    The node offers every agent in manifests/agents/ built in (Claude Code, Codex, WrongStack, ...; `agora doctor` lists
-#    them and whether each program is found). Files in ~/.agora/manifests replace or add kinds (format:
-#    docs/specs/agent-manifest.md); the built-in Shell (your own shell) shows the whole flow without any agent installed:
-target/release/agora node run --project ~/code/myproject
-#    in the window, "Start an agent"; or in another terminal:
-target/release/agora agent start shell --cwd /path/to/myproject
-
-# 4. Open https://localhost:7443/ , accept the hub's own certificate, sign in with the code from step 2
-#    (`agora hub login` makes another). Your agents and their terminals appear in the window.
-```
-
-To use an installed coding agent, start its kind; for example, with Codex installed and signed in on the node machine:
+You can also start a session from another terminal on the same machine.
 
 ```sh
-target/release/agora agent start codex --cwd /path/to/myproject
+agora agent start shell --cwd .
+agora agent start codex --cwd . --worktree  # Requires Codex and a Git checkout
 ```
 
-A manifest does not install the agent or sign in to its account.
-See [agent manifests](manifests/agents/README.md) for the available kinds and integration details.
+Multiple agents can share a folder, including one outside Git. Use `--worktree` for a separate Git working
+copy. To group checkouts and their board across machines, run `agora project init --cwd .` and share the
+resulting `.agent-project.json` with the other checkouts. Files still move through your usual Git workflow.
+See the [getting started guide](docs/getting-started.md).
 
-Agents start in the folder you select. In the web app, choose a machine, a project or another folder, then the agent.
-Several agents can share that folder. Choose **Create an isolated working copy** (CLI: `--worktree`) when you want a separate Git worktree.
-Folders without Git also work. Adding a folder does not require restarting the node.
+### Add another machine
 
-To group copies of a project across machines, run `agora project init --cwd /path/to/myproject`, or choose **Create a shared project ID**
-in the launch form. This explicitly adds `.agent-project.json`; commit or copy that file to the other machines. It groups the sessions;
-it does not synchronize source files. Existing repositories without metadata keep automatic Git-based discovery. An independent fork can
-remove its copied metadata and run `project init` to create a new ID; changing a previously used identity requires explicit confirmation
-at launch (`--accept-project-id-change` in the CLI).
+Allow network connections when setting up the hub. On the hub machine, run `agora pair open`. On the new
+machine, run `agora join` and verify the discovered hub's fingerprint against the hub's screen. If discovery
+is unavailable, give the address with `agora join HUB-ADDRESS`. Compare the six-digit number on both
+machines before approving on the hub. Then run `agora` on the new machine to start its node.
+See the [pairing walkthrough](docs/getting-started.md#add-a-second-machine).
 
-## Status
+For an SSH-only machine, the hub can maintain a reverse tunnel and install and enroll the node with
+`agora hub ssh install NAME`. For a hub on a VPS or a browser on another network, see the
+[SSH installation decision](docs/adr/0034-install-a-node-over-ssh.md) and the [remote hub guide](docs/guides/remote-hub.md).
 
-Pre-alpha. This describes the current source tree; see [CHANGELOG.md](CHANGELOG.md) for release-by-release changes. What is decided,
-built, tested and seen on a real machine, capability by capability, is in [docs/capabilities.md](docs/capabilities.md).
+## What works today
 
-- **One console across machines:** live terminals side by side, agent states, workspace files, diffs, commits, messages and estimated spend.
-- **Structured conversations:** chat, plans, tool calls, diffs and approvals for ACP agents through `agora acp-bridge` and for external adapters.
-- **Coordination:** per-agent MCP endpoints, cross-node messaging, shared project tasks, path leases and handoff. Shared-board calls fail when the hub is unreachable; local agent execution continues.
-- **Clients:** the web app, a [Tauri desktop shell](apps/desktop/README.md) that pins the hub CA, and a [TUI](docs/adr/0043-tui-client.md) for terminals, chat, approvals and agent control. `agora panel` serves the enrolled hub's window on `http://127.0.0.1:<fixed port>/` through the node's pinned link, so no browser on a node machine needs the hub's certificate; the person still signs in (ADR-0056 Amendment A).
-- **Starting and keeping agents:** `agora` on a fresh machine starts a hub and a node; `agora service install` starts Agora at login (Windows, Linux, macOS); agents that were running come back after a restart; an agent can start with a model and effort (`--setting model=... --setting effort=...`, [ADR-0066](docs/adr/0066-start-an-agent-with-model-effort-and-mode.md)); a missing agent says which program it looks for.
-- **Safer files:** the file browser and review do not show secret files such as `.env` and private keys unless the machine's policy allows it ([ADR-0080](docs/adr/0080-the-file-browser-does-not-show-secret-files.md)); a confined agent gets a git configuration the node wrote ([ADR-0078](docs/adr/0078-a-confined-agent-gets-a-git-configuration-the-node-wrote.md)).
-- **Accounts and operations:** passkey sign-in, device-signed approvals, team roles and project access, audit export, hub backup/restore and signed binary updates. English and Turkish interfaces are included.
+- **Supervise agents.** View live terminals side by side, see agent state and pending approvals, and browse
+  workspace files, Git diffs, and commit history. The Usage panel shows tokens and context where available,
+  including subscription plan limits for Codex. [Screenshots](docs/screenshots/README.md)
+- **Start agents on any connected machine.** Choose a folder and, where the agent kind supports them, set
+  model, effort, and launch options in the web app. **Settings → Agents** shows which tools each machine
+  reports. Run `agora doctor` on the machine for local diagnostics. [Agent manifests](manifests/agents/README.md)
+- **Coordinate across machines.** Agents use MCP to exchange messages, claim shared tasks and file leases,
+  and hand off work. From a Backlog card on the web board, give a task to a running agent in that project
+  or start a new agent for it.
+  Agents can request a helper on their own node with signed approval.
+  [Task board](docs/ux/task-board.md) · [Mesh tools](docs/specs/mesh-tools.md)
+- **Reconnect to live agents.** Closing a client or losing the hub link leaves agent processes running.
+  On Linux and macOS, unconfined terminal and structured agents launched through the background holder
+  can also survive a node restart. Windows and confined agents rely on session resume when available.
+  [Restart and resume behavior](docs/getting-started.md)
+- **Choose a client.** The embedded web app works on desktop and phone-sized screens and ships in English
+  and Turkish. The TUI covers terminals, chat, and approvals. The Tauri desktop app wraps the web app and
+  pins the hub CA. [Desktop setup](apps/desktop/README.md)
+- **Run it in the background.** `agora service install` starts the hub and node roles configured on a machine
+  at login. The hub supports passkeys, audit export, and backup and restore. [Getting started](docs/getting-started.md)
 
 ### Agent integrations
 
-| Manifest | Interface | Recorded validation |
+| Integration | Built-in kinds | Recorded validation |
 | --- | --- | --- |
-| `claude-code` | Native terminal with state detection | Real terminal captures, including trust and permission prompts |
-| `codex` | Native terminal with state detection | Real terminal captures; MCP configuration checked, but the recorded live mesh call stopped at the user's hook-review prompt |
-| `wrongstack` | Native terminal with state detection | Real captures, resume and a live mesh task creation |
-| `wrongstack-acp` | Structured conversation over ACP | A real turn through the bridge and node is recorded |
-| `opencode-acp` | Structured conversation over ACP | Manifest included; a real program run through the bridge is still pending |
-| `antigravity-acp` | Structured conversation over ACP | Manifest included; a real program run through the bridge is still pending |
+| Shell | `shell` | Live terminal without an agent account |
+| Native terminal with state detection | `claude-code`, `codex`, `wrongstack` | Real terminal captures for all three, plus a live mesh task with WrongStack |
+| Structured chat via ACP | `wrongstack-acp`, `opencode-acp`, `antigravity-acp` | A real WrongStack turn through the node. OpenCode and Antigravity still await an end-to-end run with the real program |
+| External adapter | Install or provide a compatible adapter process | Adapter host and conformance tests |
 
-The [phase 4 record](docs/backlog/phase-4.md) describes the captured versions and the limits of each run.
-The shipped Claude Code and Codex integrations use terminals; they do not provide structured ACP conversations.
+Claude Code and Codex use their native terminal integrations. Structured agents can supply chat, plans,
+tool calls, diffs, and approvals. See the [integration guide](docs/architecture.md#integration-levels) and
+[real-agent test record](docs/backlog/phase-4.md).
 
-### Validation and remaining work
+## Project direction
 
-- **Real machines:** the [2026-11-11 LAN run](docs/backlog/lan-test-findings.md) used a Linux hub with Linux, macOS and Windows 11 nodes, including real Claude Code and Codex on Windows. It records cross-node messages, shared-board behavior and unresolved platform issues.
-- **SSH:** `agora hub ssh add` maintains a reverse tunnel, and `agora hub ssh install NAME` installs and enrolls a node. The [real SSH run](docs/reviews/2026-11-09-real-ssh-run.md) used a private loopback `sshd`, including installation of a published signed release and rejection of a wrong signing key. That run did not cover a working user service manager, jump hosts, passphrases or macOS/Windows installation targets.
-- **Registry:** adapter install/update, signature checks and publisher revocation have local registry tests. A production registry, hub mirroring and automatic updates remain unfinished; see [phase 6](docs/backlog/phase-6.md).
-- **Desktop and mobile:** desktop builds and unsigned installer artifacts exist; signed installers and notarization remain unfinished; the desktop shell shows a system notification for waiting approvals on Windows and Linux (macOS later). The mobile web app has a PWA manifest and notification links, with no service worker or Web Push; see [phase 7](docs/backlog/phase-7.md).
-- **Planned extensions:** the optional direct terminal/file path ([ADR-0023](docs/adr/0023-direct-data-path.md)) is an accepted direction, not built: terminal streams use the hub relay. Helper agents (start/wait/output tools, [ADR-0057](docs/adr/0057-agents-start-agents.md)) are built, except starting a helper on another machine.
-- **Next:** easy setup (pairing: find a hub and enter a number, [ADR-0065](docs/adr/0065-pairing-find-a-hub-enter-a-number.md), design in [docs/specs/pairing.md](docs/specs/pairing.md)); the pickers for an agent's model and effort in the start window ([ADR-0066](docs/adr/0066-start-an-agent-with-model-effort-and-mode.md), the node and the signing are built); a terminal holder that keeps agents alive when the node stops ([ADR-0079](docs/adr/0079-a-terminal-holder-keeps-agents-alive-when-the-node-stops.md)); the later steps of the in-place node update ([ADR-0075](docs/adr/0075-the-node-updates-in-place-without-stopping-agents.md)). The Windows binary is signed once SignPath is set up ([ADR-0077](docs/adr/0077-the-windows-binary-is-code-signed.md)).
+- **Agent setup.** Use `agora agent install NAME --list FILE --root-key KEY` to install a
+  single executable from a signed package list, with confirmation at the local terminal. Terminal agent kinds
+  can use the installed executable. Installation and updates from the web app are planned.
+  [Agent package decision](docs/adr/0087-install-and-update-coding-agents-from-the-window.md)
+- **Task dispatch.** Giving a board task to an agent from the terminal client is planned.
+  [Board and dispatch decision](docs/adr/0095-a-project-has-a-kanban-board-and-a-task-can-be-dispatched-to-an-agent.md)
+- **Session tools.** Persistent, paged chat history and a preview of an agent's local web server are planned.
+  [Chat history decision](docs/adr/0089-the-chat-history-survives-the-node-and-is-read-in-pages.md) ·
+  [Web preview decision](docs/adr/0088-preview-an-agents-local-web-server-in-the-window.md)
+- **Remote operations.** Signed binary updates and automatic certificate renewal are implemented. Live node
+  upgrades and standby hub takeover are still on the roadmap. Terminal streams currently relay through one
+  authoritative hub. [Capabilities](docs/capabilities.md) · [Roadmap](docs/roadmap.md)
+
+The [three-machine LAN test](docs/backlog/lan-test-findings.md) records cross-node messaging and shared
+tasks with Linux, macOS, and Windows 11 nodes, including real Claude Code and Codex on Windows. The
+[SSH validation](docs/reviews/2026-11-09-real-ssh-run.md) used a local SSH server.
 
 ## Security and isolation
 
-Approvals are signed by a device the node trusts and verified on the node. The window's **This device** page shows the
-`agora node trust` command to run on that machine. Routed-command grants depend on the node's `signed_commands` policy;
-the default single-owner policy does not require grants for legacy routed commands. Selected-folder inspection and launch
-use exact-request signatures separately. Configure the policy before relying on it to contain a compromised hub.
-See the [threat model](docs/security/threat-model.md) for device limits and the complete authority rules.
+The node verifies approvals signed by devices it trusts. For routed actions that use grants, the node's
+`signed_commands` policy determines when to require one. Under the default single-owner policy, legacy
+routed commands rely on hub authorization. Selected-folder inspection and launch use request-specific
+signatures. Browser and desktop signing keys depend on the integrity of the web app served by the hub.
+[Threat model](docs/security/threat-model.md)
 
-Confinement is opt-in with `sandbox = worktree` in the node's policy on supported Linux and macOS systems.
-Windows confinement remains disabled by default and has documented compatibility limits. A worktree isolates Git changes;
-leases coordinate cooperating agents and node-mediated writes, but cannot stop an agent's direct shell writes.
-See [sandbox recipes](docs/security/sandbox-recipes.md) and the [platform backlog](docs/backlog/phase-7.md).
+Git worktrees separate working copies. Use node sandbox policy for process confinement where supported.
+Confinement is opt-in and its limits vary by platform. File leases coordinate cooperating agents and
+node-mediated writes. [Sandbox recipes](docs/security/sandbox-recipes.md)
 
-## Project documentation
+## Install a release
 
-Start here:
+Releases include the web app. Choose the binary for Linux (x64 or ARM64), macOS (Intel or Apple Silicon),
+or Windows (x64), and download its `.sha256` and `.sig` files. Save the repository's
+[release verification key](docs/security/release-key.pub) as `release-key.pub` in the same directory.
 
-- [Vision](docs/vision.md)
-- [Architecture](docs/architecture.md)
-- [Roadmap](docs/roadmap.md) and [backlog](docs/backlog/)
-- [Decisions](docs/adr/) and [open questions](docs/open-questions.md)
-
-## Building
-
-Development setup and machine roles: [docs/development-setup.md](docs/development-setup.md).
+Use the downloaded filename in place of the Linux x64 example. This works in a POSIX shell with OpenSSH.
 
 ```sh
-cargo build --workspace
-just check
+f=agora-x86_64-unknown-linux-gnu
+if command -v sha256sum >/dev/null; then
+  sha256sum -c "$f.sha256"
+else
+  shasum -a 256 -c "$f.sha256"
+fi &&
+  ssh-keygen -Y verify -f release-key.pub -I agora-release -n file -s "$f.sig" < "$f"
 ```
+
+After verification, make the binary executable on Linux or macOS (`chmod +x "$f"`), put it on your PATH,
+and run `agora doctor`. On Windows, PowerShell's `Get-FileHash -Algorithm SHA256` can compute the hash to
+compare with the checksum file. macOS releases use ad hoc signing. If Gatekeeper blocks a browser download
+after you've verified it, remove the quarantine flag with `xattr -d com.apple.quarantine "$f"`. Save the
+trusted release key as `~/.agora/release-key` (or `$AGORA_HOME/release-key`) to use `agora update`.
+
+## Try it (from source)
+
+Use the Rust toolchain pinned in this repository and Node.js 22 as in CI. Build the web app first so the
+binary embeds it. See the [platform setup guides](docs/fordevs/) for prerequisites.
+
+```sh
+(cd apps/web && npm ci && npm run gen && npm run build)
+cargo build --locked --release -p agora
+target/release/agora
+```
+
+On Windows, use the [Windows development guide](docs/fordevs/for_windows_dev.md) and run
+`target\release\agora.exe`. For a terminal-only build, you can build the Rust binary directly. A hub with
+no embedded web app can serve a separate build via `agora hub run --web DIR`.
+
+<details>
+<summary>Start the hub and node manually</summary>
+
+The hub and node each run in their own terminal. Start the hub, then use another terminal to get an enrollment
+code from it and enroll the local node.
+
+```sh
+target/release/agora hub run --listen 127.0.0.1:7443
+
+target/release/agora hub code
+target/release/agora node enroll --hub wss://localhost:7443 --ca ~/.agora/hub/ca.pem --code XXXX-XXXX --id laptop
+target/release/agora node run --project /path/to/myproject
+```
+
+Open `https://localhost:7443/` and sign in with the separate one-time sign-in code printed by the hub.
+Run `agora hub login` to issue another code. The browser needs to trust the local hub's certificate.
+
+</details>
 
 ## Contributing
 
-Read [CONTRIBUTING.md](CONTRIBUTING.md). Coding agents: read [AGENTS.md](AGENTS.md) first.
+Run `just check` for the Rust, localization, and documentation checks. See
+[CONTRIBUTING.md](CONTRIBUTING.md), the [architecture map](docs/map.md), and the [backlog](docs/backlog/).
+Coding agents should read [AGENTS.md](AGENTS.md).
 
 ## License
 
-Apache-2.0 ([ADR-0016](docs/adr/0016-license.md)); contributions use the DCO. See `LICENSE`.
+[Apache-2.0](LICENSE). Contributions use the Developer Certificate of Origin.

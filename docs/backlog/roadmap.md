@@ -21,11 +21,14 @@ new features.
 ## M0. In flight: the kanban board gives a task to an agent (ADR-0095)
 
 - [x] **M0.1 Schema step** (#882, merged): `TaskDispatch`, `TaskDispatchResult`, `TaskDispatched`, `task.dispatch`, `task.dispatch_limited`.
-- [ ] **M0.2 Node handler** (#883)
+- [x] **M0.2 Node handler** (#883, merged)
   - [x] claim on the node's broker or the hub board as the agent; data-wrapped prompt; `TaskDispatched` with the prompt's SHA-256
   - [x] never typed over a turn: the structured agents' queue; one held prompt per terminal agent, sent as a bracketed paste
-  - [ ] review round 3 fixes (stale agent list in `tick`, re-decide after a slow claim, Unknown state holds when the kind has rules)
-  - [ ] a clean independent review, Codex review, CI green on all three OSes, merge
+  - [x] review fixes: stale agent list in `tick`, re-decide after a slow claim, Unknown holds when the kind can say idle, held prompts
+    expire after 15 minutes, reservation tokens, readiness from the live screen, one-task board lookup, explicit stop settles queued tasks,
+    held-prompt checks paced like detection
+  - [x] four independent review rounds and Codex's review clean, CI green on all three OSes; a real Windows 11 run (WHITE, ConPTY):
+    the paste arrives whole and nothing is typed over a working agent
 - [x] **M0.3 Window: "Give to an agent"** (#885)
   - [x] a card action on the board (Backlog cards only), also in the command palette (a task and an agent are searchable)
   - [x] the picker lists the project's running agents, helpers under their parent (decision 8); other projects are never offered
@@ -36,12 +39,15 @@ new features.
     hides the action for a machine once it was refused there as `protocol.capability_missing` (`task.dispatch`) or, from a node too old to
     decode it, `protocol.invalid_message` (`command`); forgotten when that machine goes offline and on every reconnect
   - [x] tests (unit, and a browser e2e with `agora-fake-agent`, run against a build with #883), screenshots in both themes, 44 px targets, keyboard path
-- [x] **M0.4 Start a new agent for a task** (ADR-0095 step 3)
+- [x] **M0.4 Start a new agent for a task** (ADR-0095 step 3; window: #889, merged; terminal client: #893)
   - [x] "Start a new one" in the picker opens the ordinary start (kind, machine, folder), then dispatches to the new agent
   - [x] under a parent: the ordinary ADR-0057 helper start (signed approval as an agent-made request): the window has no person-made helper start, so it stays the agent's ADR-0057 path and is not offered in the picker
   - [x] the TUI: dispatch from its board list (same command): `b` opens the board, Enter or `g` gives a Backlog task
-- [ ] **M0.5 Release 0.3.33**
-  - [ ] release notes; tag; the release workflow; update the hub machine (blackview), then ask mac and win to update and report
+- [ ] **M0.5 Release 0.3.33** (#888, tag `v0.3.33`)
+  - [x] release notes; tag; the release workflow (five targets, `.sha256` and `.sig`)
+  - [x] the hub machine (blackview) updated, signature checked; its five agents came back after the restart
+  - [x] win updated and reported (0.3.33, `agora doctor` clean)
+  - [ ] mac updated and reported
 - [ ] **M0.6 ADR-0097** (#874, **decision**): the key that can sign approvals is out of the hub-served page's reach (closes T55)
   - [ ] accepted → build steps as the ADR lists; rejected → T55 stays "not mitigated" with the reason
 
@@ -87,6 +93,9 @@ fixes it.
 - [ ] **M2.9 ACP registry** (ADR-0092): the next steps after the conversion (the reviewed list in a release, "Add an agent" reads it)
 - [ ] **M2.10 Preview a local web server** (ADR-0088): node forwarder, hub relay, the Browser pane (schema is in)
 - [ ] **M2.11 Layouts** (ADR-0068): panel registry, keybindings, the terminal client
+- [ ] **M2.13 The window knows what each machine can do** (**schema**): the web window never reads node capabilities (no Hello
+  with the hub, none in the snapshot), so it learns that a machine cannot take a task only from a refusal (#885). Carry each node's
+  negotiated capabilities in the snapshot (append-only), then hide actions a machine cannot do before anyone tries
 - [ ] **M2.12 Code signing** (ADR-0077, **human**): SignPath for Windows, Apple Developer ID for macOS; one signed release recorded
 
 ## M3. New features (Accepted, not built)
