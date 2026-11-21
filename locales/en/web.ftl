@@ -515,6 +515,7 @@ grant-title-task = Allow giving tasks to { $agent } for 1 hour?
 grant-title-other = Allow this window to act on { $machine } for 1 hour?
 grant-explain = { $machine } asks for your permission before it lets this window do that. Your key on this device signs it, and it ends by itself.
 grant-allow = Allow for 1 hour
+grant-allowing = Allowing…
 grant-later = Not now
 grant-failed = The permission did not go through. Try again.
 audit-title = Activity

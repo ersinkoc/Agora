@@ -14,7 +14,8 @@ Per project. Backed by the mesh task model (`docs/specs/mesh-tools.md`).
   in plain words (taken or done, waits for another task, gone, not of this project, the agent's queue is full, the terminal program cannot
   take a pasted task, the board cannot be reached, too many tasks given in a minute). A machine that does not offer `task.dispatch` is not
   offered again once it refused, until it goes offline or the window reconnects. Nothing is focused on "Give the task" and a held key
-  never activates anything in the dialog; while the task is on its way the dialog stays open. A limited device is asked for a one-hour grant on that agent, and the dialog shows the answer once it is allowed (dismissed: nothing was sent, try again). "Start a new one" is step 3.
+  never activates anything in the dialog; while the task is on its way the dialog stays open. A limited device is asked for a one-hour grant on that agent, and the dialog shows the answer once it is allowed (dismissed: nothing was sent, try again; while Allow is being
+  signed and sent the question cannot be dismissed, and the task is sent again only for the question still being answered). "Start a new one" is step 3.
 - Card: title, owner agent or human, dependencies, linked branch/worktree, messages count.
 - Humans can create tasks, assign them to an agent kind or a specific agent, and reorder priority.
 - Assigning to an agent kind can start a new agent automatically on a chosen node (policy permitting).

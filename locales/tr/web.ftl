@@ -497,6 +497,7 @@ grant-title-task = { $agent } ajanına 1 saat boyunca görev vermeye izin verils
 grant-title-other = Bu pencerenin 1 saat boyunca { $machine } üzerinde işlem yapmasına izin verilsin mi?
 grant-explain = { $machine }, bu pencerenin bu işlemi yapmasına izin vermeden önce onayınızı ister. Verdiğiniz izin bu cihazdaki anahtarınızla imzalanır ve süresi dolunca kendiliğinden sona erer.
 grant-allow = 1 saatliğine izin ver
+grant-allowing = İzin veriliyor…
 grant-later = Şimdi değil
 grant-failed = İzin iletilemedi. Yeniden deneyin.
 audit-title = Hareketler

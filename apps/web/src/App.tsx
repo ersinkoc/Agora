@@ -11,7 +11,8 @@ import { usePairing } from './net/usePairing';
 import { PairRequest } from './components/PairRequest';
 import { connectLive, type CommandBody, type Live, type LinkState } from './net/live';
 import { GrantDialog } from './components/GrantDialog';
-import { grantFor, signGrant, type GrantAsk } from './net/grant';
+import { signGrant } from './net/grant';
+import { useGrantFlow } from './net/useGrantFlow';
 import type { TerminalSource } from './terminal/source';
 import { signDirectory, type DirectoryInfo, type DirectoryListing } from './net/directory';
 import { StartAgent, type KindChoice } from './components/StartAgent';
@@ -39,7 +40,7 @@ import { agentTarget } from './components/sessionChoice';
 import { ChatActionsContext, type ChatActions, type PromptResult } from './components/chatActions';
 import { CloseAgentContext } from './components/CloseAgent';
 import { closeAsk } from './net/closeAgent';
-import { declineGive, forgetGiveSupport, forgetOffline, givableTasks, giveAsk, giveTask, isGive, resendGive, useGiveAsk, useGiveSupport } from './net/give';
+import { forgetGiveSupport, forgetOffline, givableTasks, giveAsk, giveTask, useGiveAsk, useGiveSupport } from './net/give';
 import { GiveContext, GiveDialog, type GiveApi } from './components/GiveTask';
 import { plain } from './components/boardColumns';
 import { failure, type ActionResult } from './net/refusal';
@@ -127,7 +128,6 @@ export function App() {
   const startedAsTerminal = useRef(false);
   const openStart = useCallback((node?: string, terminal = false) => { startedAsTerminal.current = terminal; setStarting({ ...(node ? { node } : {}), ...(terminal ? { kind: 'shell' } : {}) }); }, []);
   // A machine refused a command until the owner allows it (ADR-0041): what was asked, shown as a dialog.
-  const [grantAsk, setGrantAsk] = useState<{ node: string; body: CommandBody; ask: GrantAsk; busy: boolean; failed: boolean } | undefined>();
   const loadKinds = useCallback(async (node: string): Promise<KindChoice[]> => {
     const ok = await api!.command(node, { agentKinds: {} });
     return (ok.agentKinds?.kinds ?? []).map((k) => ({
@@ -256,22 +256,9 @@ export function App() {
     if (!api || !agent.machineId) return;
     await api.command(agent.machineId, { grantRevoke: { grantId: id } });
   }, [api]);
-  // The owner allowed it: sign the grant with this device's key, send it to the machine, then repeat what was refused.
-  const allowGrant = useCallback(async () => {
-    const g = grantAsk;
-    if (!g || !api || !device) { setGrantAsk((c) => c && { ...c, failed: true }); return; }
-    setGrantAsk({ ...g, busy: true, failed: false });
-    try {
-      const s = await signGrant(device, g.node, g.ask, Date.now());
-      await api.command(g.node, { grantCreate: s });
-      setGrantAsk(undefined);
-      // A task given to an agent: the answer goes to its dialog (sent, queued or the refusal).
-      if (isGive(g.body)) await resendGive(api.command, g.node, g.body);
-      else if (!('terminalResize' in g.body)) await api.command(g.node, g.body).catch(() => {});
-    } catch {
-      setGrantAsk({ ...g, busy: false, failed: true });
-    }
-  }, [api, device, grantAsk]);
+  // The owner allowed it: sign the grant with this device's key, send it to the machine, then repeat what was refused (net/useGrantFlow.ts).
+  const grants = useGrantFlow({ command: api?.command, sign: device ? (node, ask) => signGrant(device, node, ask, Date.now()) : undefined });
+  const grantAsk = grants.question;
   // ADR-0061: this browser registers its key and name with the hub on every connection (a candidate for the person's machines, never
   // trust by itself), then follows the person's devices: which wait for an approval, which machines trust which.
   const refreshDevices = useCallback(async () => {
@@ -336,13 +323,10 @@ export function App() {
     forgetGiveSupport();
     const c = connectLive({ url: hub.url, token: hub.token, onView: (v) => setLive(shown(v)), onState: setLink, onPair: pairing.dispatch,
       onRejected: () => { forgetToken(); setLive(undefined); setHub(undefined); },
-      onGrantRequired: (node, body) => {
-        const ask = grantFor(body as Record<string, unknown>);
-        if (ask) setGrantAsk((cur) => cur ?? { node, body, ask, busy: false, failed: false });
-      } });
+      onGrantRequired: grants.request });
     setApi(c);
     return () => { c.close(); setApi(undefined); };
-  }, [hub, pairing.dispatch]);
+  }, [hub, pairing.dispatch, grants.request]);
   // "Lock" in the title bar: this window's session ends at the hub and the sign-in screen comes back. Agents keep running.
   const lockNow = useCallback(() => {
     if (!hub) return;
@@ -590,7 +574,7 @@ export function App() {
           onStart={hub && api && live ? (node) => openStart(node) : (!hub && import.meta.env.DEV ? (node) => openStart(node) : undefined)}
           onNewTerminal={hub && api && live ? (node) => openStart(node, true) : (!hub && import.meta.env.DEV ? (node) => openStart(node, true) : undefined)} onCommand={() => setPalette(true)} onForget={hub && api ? forgetAgent : undefined} onResume={hub && api ? resumeAgent : (!hub && import.meta.env.DEV ? async () => undefined : undefined)} onLock={hub ? lockNow : undefined}
           start={startWindow} pairing={pairing.ui} />}
-      {grantAsk && <GrantDialog machine={live?.nodes.get(grantAsk.node)?.hostname || grantAsk.node} agent={grantAgentName} kind={grantAsk.ask.kind} busy={grantAsk.busy} failed={grantAsk.failed} onAllow={() => void allowGrant()} onClose={() => { if (isGive(grantAsk.body)) declineGive(grantAsk.node, grantAsk.body); setGrantAsk(undefined); }} />}
+      {grantAsk && <GrantDialog machine={live?.nodes.get(grantAsk.node)?.hostname || grantAsk.node} agent={grantAgentName} kind={grantAsk.ask.kind} busy={grantAsk.busy} failed={grantAsk.failed} onAllow={() => void grants.allow()} onClose={grants.dismiss} />}
       {/* Away from Home (an agent, a page) a request to join still reaches the owner: the first card floats over the window. */}
       {pairing.ui && pairing.ui.cards[0] && !showsHome && <PairRequest key={pairing.ui.cards[0].id} request={pairing.ui.cards[0]} offline={pairing.ui.offline} onAnswer={(a, r) => pairing.ui!.onAnswer(pairing.ui!.cards[0]!, a, r)} />}
       <AttentionLayer items={attention} stale={hub ? link !== 'live' : false} phone={phone} onResolve={resolve} onReview={reviewAttention} />
