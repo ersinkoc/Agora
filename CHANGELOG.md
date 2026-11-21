@@ -4,9 +4,23 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+_Nothing yet._
+
+## 0.3.33
+
+### Give a board task to an agent
+- On a project's board, a Backlog card has "Give to an agent" (also in the command palette). You pick one of the project's running agents (helpers are listed under the agent that started them), and a confirmation names the task, the agent, its machine and the project, and says so when the agent acts without asking. The agent gets the task as one message; if it is in the middle of a turn, the task waits until that turn ends, and anything that needs your OK still asks you. The card then moves to Doing.
+- The task's text reaches the agent marked as information from the board, not as instructions from you or from Agora. A terminal agent gets it as one pasted block once it is between turns; a terminal program that cannot take a pasted block is refused. Each person can give at most 8 tasks a minute, and every hand-over is recorded with a fingerprint of the message sent.
+
 ### Install an agent program from a signed list, from the command line
 - `agora agent install NAME --list FILE --root-key KEY` downloads one agent program (a single executable file) listed in a signed agent list, checks its checksum (and its signature when the list names a key), runs its version check, and only then makes it the installed one under the Agora folder. You approve by typing the agent's name at the terminal; there is no `--yes`. An older version needs `--go-back` and a second confirmation, and the last two versions are kept.
 - Downloads refuse addresses that point at this machine or your private network, follow no redirects, and stop at 200 MiB. Programs inside archives (`.tar.gz`, `.zip`) are not supported yet. Nothing is installed by the hub or the window yet. Terminal agents you start now use a program installed this way before one on your PATH, and `agora doctor` says whether an agent was installed by Agora (with its version) or by you. Agents that start through ACP or an adapter, and other programs an agent runs, still look only on your PATH.
+
+### Steadier usage, folders and colours
+- Two agents working in the same folder no longer both count each other's tokens and cost in the Usage panel.
+- The node's data, mesh and link folders are closed to other users of the machine when it starts.
+- Agent colours come from the theme and are darker in Light, so a tile's edge shows on a white page.
+- The web app builds on Windows and macOS again.
 
 ## 0.3.32
 
