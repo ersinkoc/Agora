@@ -575,7 +575,8 @@ fn audit(path: &Path, now_ms: u64, action: &str, device: &str, by: &str, outcome
         logged(by),
         logged(outcome)
     );
-    // OS differences in how the file is made the user's only live in agora-platform. The log only: never the terminal of whoever ran the command (`agora node untrust` says what happened in words of its own).
+    // How the file is made the user's only differs per OS and lives in agora-platform. The log only: never the terminal of whoever
+    // ran the command (`agora node untrust` says what happened in words of its own).
     if let Ok(mut f) = agora_platform::open_append_owner_created(path) {
         let _ = f.write_all(line.as_bytes());
     }
