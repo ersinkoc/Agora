@@ -94,7 +94,11 @@ doctor-manifests = { $detail ->
 doctor-agent-installed = { $detail } ({ $from ->
         [built-in] yerleşik
        *[folder] tanımlar klasöründen
-    }): `{ $program }` bulundu.
+    }): `{ $program }` bulundu{ $by ->
+        [agora] , Agora kurdu (sürüm { $version })
+        [you] , siz kurmuşsunuz
+       *[other] {""}
+    }.
 doctor-agent-missing = { $detail } ({ $from ->
         [built-in] yerleşik
        *[folder] tanımlar klasöründen

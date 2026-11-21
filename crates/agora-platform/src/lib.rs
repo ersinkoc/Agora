@@ -429,6 +429,23 @@ pub fn open_read_no_follow(path: &std::path::Path) -> io::Result<std::fs::File> 
     }
 }
 
+/// Whether a file could have been changed by someone other than this user (ADR-0087 item 3): on Unix it belongs to another user or is
+/// writable by its group or by everyone. Elsewhere `false`: the Windows install folder is protected by its owner-only ACL.
+pub fn others_can_write(meta: &std::fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        // SAFETY: plain call, no arguments.
+        let me = unsafe { libc::geteuid() };
+        meta.uid() != me || meta.permissions().mode() & 0o022 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        false
+    }
+}
+
 /// Whether a file's owner may run it, as git records it (`100755`): the owner's execute bit on Unix; elsewhere never.
 pub fn is_executable(meta: &std::fs::Metadata) -> bool {
     #[cfg(unix)]

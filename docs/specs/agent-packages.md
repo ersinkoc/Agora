@@ -122,8 +122,22 @@ typing at. Code: `crates/agora-adapters/src/agent_install.rs` (the logic, with t
 Test seams: `Tools` carries the resolver, the fetcher and the signature checker; the command line always passes the strict ones
 (`SystemResolver`, `CurlFetcher`, `SshKeygen`). The address rules run on the answers of whatever resolver is passed.
 
+## Used by the node and shown by doctor (ADR-0087 items 3 and 6)
+A program `agora agent install` put under `<AGORA_HOME>/agents/bin/` is the one the node starts for a kind whose manifest `launch`
+(terminal agents) names it, and `agora doctor` reports it as installed "by Agora" with its version, against "by you" for a program found
+only through the user's `PATH` or a full path. The lookup (`agent_install::installed_program`) happens before the user's `PATH` and
+accepts a program only when all of these hold; otherwise the `PATH` decides as before:
+- the manifest's program is a plain file name (no separator, not `.` or `..`);
+- an agent folder's `exe` file names it, and that agent's `current` file names a version;
+- `agents` and `agents/bin` are real folders (not links, not junctions);
+- the launcher is what the installer writes: on Unix a link that resolves to `agents/<name>/<current version>/<program>`, on Windows a
+  regular file in `bin`; a link to anywhere else (another agent, an old version, outside `agents`) is refused;
+- on Unix the resolved file belongs to this user and is not writable by group or others.
+The node then starts the resolved real file by its full path. The agent's own `PATH` is not changed: it does not gain
+`agents/bin`, so an agent that needs a sibling program installed the same way will not find it there. Agents started through ACP or an
+adapter command still resolve their program through the user's `PATH`.
+
 ## Not here
 No archives (rung 3 follow-up), no other installer kind (`npm-global`, `package-manager` and `vendor-script` are rung 6), no signed
-device approval, schema message, hub involvement or window (rungs 4 and 5), no `agora agent source add`, no refresh of the list. The node
-does not look in `agents/bin` when it starts an agent, and `agora doctor` does not read it yet: both are follow-ups, so a program
-installed this way is run through its launcher path until they land.
+device approval, schema message, hub involvement or window (rungs 4 and 5), no `agora agent source add`, no refresh of the list. The
+node does not put `agents/bin` on an agent's `PATH`, and ACP and adapter commands are not looked up in `agents/bin` yet.

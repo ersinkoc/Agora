@@ -718,6 +718,64 @@ impl SignatureCheck for SshKeygen {
     }
 }
 
+// ---- finding what was installed -------------------------------------------------------------------------------------------
+
+/// A program `agora agent install` put under `<AGORA_HOME>/agents/bin`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Installed {
+    /// The real file to start (the version folder's program on Unix, the launcher copy on Windows).
+    pub path: PathBuf,
+    /// The agent that owns the launcher and the version `current` names.
+    pub name: String,
+    pub version: String,
+}
+
+/// ADR-0087 item 3: the program the installer made for `program`, or `None`. Accepted only for a plain file name that an agent
+/// folder's `exe` file owns, whose launcher in `<home>/agents/bin` is exactly what the installer writes (Unix: a link that resolves to
+/// `agents/<name>/<current version>/<program>`; Windows: a regular file there), inside a real `agents` folder (neither it nor `bin` is a
+/// link), and that no other user wrote or can write. Anything else is not used, so the user's `PATH` decides. Only reads the file system.
+pub fn installed_program(home: &Path, program: &str) -> Option<Installed> {
+    let mut parts = Path::new(program).components();
+    let plain = matches!(
+        (parts.next(), parts.next()),
+        (Some(std::path::Component::Normal(n)), None) if n == OsStr::new(program)
+    );
+    if !plain || program.is_empty() {
+        return None;
+    }
+    let agents = agents_dir(home);
+    let real_dir = |p: &Path| std::fs::symlink_metadata(p).is_ok_and(|m| m.is_dir());
+    let bin = agents.join("bin");
+    if !real_dir(&agents) || !real_dir(&bin) {
+        return None;
+    }
+    let canon_agents = std::fs::canonicalize(&agents).ok()?;
+    let name = owner_of(&agents, program)?;
+    let version = installed_version(home, &name)?;
+    let launcher = bin.join(program);
+    let linked = std::fs::symlink_metadata(&launcher).ok()?;
+    let wanted = if linked.is_symlink() {
+        canon_agents.join(&name).join(&version).join(program)
+    } else if linked.is_file() {
+        canon_agents.join("bin").join(program)
+    } else {
+        return None;
+    };
+    let path = std::fs::canonicalize(&launcher).ok()?;
+    if path != wanted {
+        return None;
+    }
+    let meta = std::fs::metadata(&path).ok()?;
+    if !meta.is_file() || agora_platform::others_can_write(&meta) {
+        return None;
+    }
+    Some(Installed {
+        path,
+        name,
+        version,
+    })
+}
+
 // ---- names ---------------------------------------------------------------------------------------------------------------
 
 /// The agent that owns the launcher `exe`, from the `exe` file each agent folder keeps (written when its launcher moved).

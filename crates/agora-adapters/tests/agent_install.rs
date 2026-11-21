@@ -1052,3 +1052,133 @@ fn the_list_version_is_remembered_under_the_lock() {
     );
     assert_eq!(last_seen_version(&home.0), 0);
 }
+
+// ---- finding what was installed (ADR-0087 item 3) ----------------------------------------------------------------------------
+
+/// The layout the installer leaves, made by hand (no program runs): the version folder, `current`, `exe` and the launcher.
+fn layout(home: &Path, name: &str, version: &str, exe: &str) -> PathBuf {
+    let agents = home.join("agents");
+    let vdir = agents.join(name).join(version);
+    std::fs::create_dir_all(&vdir).unwrap();
+    std::fs::create_dir_all(agents.join("bin")).unwrap();
+    std::fs::write(vdir.join(exe), "x").unwrap();
+    agora_platform::set_executable(&vdir.join(exe), true).unwrap();
+    std::fs::write(agents.join(name).join("current"), version).unwrap();
+    std::fs::write(agents.join(name).join("exe"), exe).unwrap();
+    let launcher = agents.join("bin").join(exe);
+    agora_platform::install_launcher(
+        &vdir.join(exe),
+        &Path::new("..").join(name).join(version).join(exe),
+        &launcher,
+    )
+    .unwrap();
+    launcher
+}
+
+#[test]
+fn the_program_the_installer_made_is_found_by_its_plain_name() {
+    let home = Home::new();
+    layout(&home.0, "fake", "1.2.3", "fake-agent");
+    let found = agora_adapters::agent_install::installed_program(&home.0, "fake-agent").unwrap();
+    assert_eq!(
+        (found.name.as_str(), found.version.as_str()),
+        ("fake", "1.2.3")
+    );
+    assert!(found.path.is_file());
+    assert!(found.path.ends_with("fake-agent"));
+    // Nothing else: a name no agent owns, and nothing at all in an empty home.
+    assert!(agora_adapters::agent_install::installed_program(&home.0, "other").is_none());
+    let empty = Home::new();
+    assert!(agora_adapters::agent_install::installed_program(&empty.0, "fake-agent").is_none());
+}
+
+#[test]
+fn only_a_plain_file_name_is_looked_up_in_the_install_folder() {
+    let home = Home::new();
+    layout(&home.0, "fake", "1.2.3", "fake-agent");
+    let agents = home.agents();
+    let sep = std::path::MAIN_SEPARATOR;
+    for bad in [
+        String::new(),
+        ".".into(),
+        "..".into(),
+        format!("bin{sep}fake-agent"),
+        format!("..{sep}bin{sep}fake-agent"),
+        format!("{sep}fake-agent"),
+        agents.join("bin").join("fake-agent").display().to_string(),
+        "fake-agent/".into(),
+        "./fake-agent".into(),
+    ] {
+        assert!(
+            agora_adapters::agent_install::installed_program(&home.0, &bad).is_none(),
+            "{bad:?}"
+        );
+    }
+}
+
+#[test]
+fn a_launcher_nobody_recorded_is_not_used() {
+    let home = Home::new();
+    layout(&home.0, "fake", "1.2.3", "fake-agent");
+    // A file someone dropped into `bin` that no agent folder owns.
+    std::fs::write(home.agents().join("bin").join("planted"), "x").unwrap();
+    assert!(agora_adapters::agent_install::installed_program(&home.0, "planted").is_none());
+    // The record gone: the launcher alone is not enough.
+    std::fs::remove_file(home.agents().join("fake").join("exe")).unwrap();
+    assert!(agora_adapters::agent_install::installed_program(&home.0, "fake-agent").is_none());
+}
+
+#[test]
+fn a_launcher_that_leaves_the_install_folder_or_the_current_version_is_not_used() {
+    if cfg!(not(unix)) {
+        return; // launchers are copies there
+    }
+    let home = Home::new();
+    let launcher = layout(&home.0, "fake", "1.2.3", "fake-agent");
+    let outside = Home::new();
+    std::fs::write(outside.0.join("fake-agent"), "x").unwrap();
+    // Points outside `agents`.
+    std::fs::remove_file(&launcher).unwrap();
+    std::os::unix::fs::symlink(outside.0.join("fake-agent"), &launcher).unwrap();
+    assert!(agora_adapters::agent_install::installed_program(&home.0, "fake-agent").is_none());
+    // Points at another agent's file inside `agents`.
+    layout(&home.0, "evil", "9", "evil-agent");
+    std::fs::remove_file(&launcher).unwrap();
+    std::os::unix::fs::symlink("../evil/9/evil-agent", &launcher).unwrap();
+    assert!(agora_adapters::agent_install::installed_program(&home.0, "fake-agent").is_none());
+    // Points at a version that `current` does not name.
+    let old = home.agents().join("fake").join("1.0.0");
+    std::fs::create_dir_all(&old).unwrap();
+    std::fs::write(old.join("fake-agent"), "x").unwrap();
+    std::fs::remove_file(&launcher).unwrap();
+    std::os::unix::fs::symlink("../fake/1.0.0/fake-agent", &launcher).unwrap();
+    assert!(agora_adapters::agent_install::installed_program(&home.0, "fake-agent").is_none());
+}
+
+#[test]
+fn links_for_the_agents_or_bin_folder_and_files_others_can_write_are_not_used() {
+    if cfg!(not(unix)) {
+        return;
+    }
+    use std::os::unix::fs::PermissionsExt;
+    let home = Home::new();
+    layout(&home.0, "fake", "1.2.3", "fake-agent");
+    let exe = home.agents().join("fake").join("1.2.3").join("fake-agent");
+    // Writable by the group or everyone.
+    for mode in [0o775, 0o757] {
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(mode)).unwrap();
+        assert!(agora_adapters::agent_install::installed_program(&home.0, "fake-agent").is_none());
+    }
+    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(agora_adapters::agent_install::installed_program(&home.0, "fake-agent").is_some());
+    // `bin` and `agents` as links to a real folder.
+    let bin = home.agents().join("bin");
+    let moved = home.0.join("elsewhere");
+    std::fs::rename(&bin, &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, &bin).unwrap();
+    assert!(agora_adapters::agent_install::installed_program(&home.0, "fake-agent").is_none());
+    let real = Home::new();
+    std::fs::rename(home.agents(), real.0.join("agents")).unwrap();
+    std::os::unix::fs::symlink(real.0.join("agents"), home.agents()).unwrap();
+    assert!(agora_adapters::agent_install::installed_program(&home.0, "fake-agent").is_none());
+}

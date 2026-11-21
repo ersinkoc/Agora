@@ -94,7 +94,11 @@ doctor-manifests = { $detail ->
 doctor-agent-installed = { $detail } ({ $from ->
         [built-in] built in
        *[folder] from the manifests folder
-    }): `{ $program }` is found.
+    }): `{ $program }` is found{ $by ->
+        [agora] , installed by Agora (version { $version })
+        [you] , installed by you
+       *[other] {""}
+    }.
 doctor-agent-missing = { $detail } ({ $from ->
         [built-in] built in
        *[folder] from the manifests folder
