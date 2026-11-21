@@ -128,28 +128,30 @@ Checked on that date (crates.io API, GitHub API, Zed's `Cargo.toml`):
      mark ADR-0048 `Superseded by 0099`; update `docs/architecture.md` §1 and §5. Until then the Tauri shell keeps receiving fixes.
 6. **Staged build order, each stage its own PR:**
    0. **Spike** (throwaway unless it passes; report in `docs/reviews/`): a GPUI window on Linux (Wayland and X11), macOS and Windows that
-      signs in to a real hub with a code and shows agent terminals from `agora-vt`. **Measurement fixture** (the same on all three
-      systems, scripted so the Mac and Windows sessions run it unchanged): a disposable hub and node with 20 agents listed (the fake
-      agent), four terminals visible at once, two more terminals open in the background, one of the visible ones flooding at 10 MB/s, and
-      one list item and one button exposed to accessibility. Numbers, each on all three systems (proposed; the maintainer may change them
-      before the spike starts). **Hard gates** (a miss is a no-go for GPUI): echo latency, frame rate, IME, accessibility. **Targets**
-      (a miss is reported with its cost, not an automatic no-go): switching times, start time, memory, idle CPU, binary size, RTL, no-GPU:
-      - keystroke to echo on screen, node on the same machine: ≤ 16 ms p95 (ADR-0022), measured to the presented frame;
-      - one terminal at 10 MB/s plus 20 other active terminals, and four visible terminals flooding: steady 60 fps, no main-thread
-        stall over 50 ms;
+      signs in to a real hub with a code and shows agent terminals from `agora-vt`. **Measurement fixtures** (the same on all three
+      systems, scripted so the Mac and Windows sessions run them unchanged; a disposable hub and node, the fake agent):
+      - F1 echo: one visible terminal, idle otherwise; keystrokes typed into it.
+      - F2 one flood: one visible terminal receiving 10 MB/s while 20 other agents are listed and their 20 terminals are active
+        (output at a steady low rate) in the background.
+      - F3 four floods: four terminals visible at once, each receiving 10 MB/s.
+      - F4 resident: 20 agents listed, four terminals visible and two open in the background, idle.
+      - F5 accessibility: one list item and one button exposed to the screen reader.
+      **Go/no-go numbers, as the maintainer approved them on 2026-11-22** (each on all three systems; every one is a go/no-go gate):
+      - F1: keystroke to echo on screen, node on the same machine: ≤ 16 ms p95 (ADR-0022), measured to the presented frame;
+      - F2 and F3: steady 60 fps, no main-thread stall over 50 ms;
       - switching to a terminal: snapshot shown ≤ 150 ms; switching agent or tab ≤ 50 ms;
-      - start to first useful paint: cold ≤ 1.5 s and warm (second start) ≤ 500 ms, the web's cold and cached budgets in ADR-0022
-        (≤ 500 ms cold is a stretch goal for a native app, reported but not a gate);
-      - memory with 20 agents listed and 4 terminals open ≤ 200 MB resident, and below the Tauri app measured the same way on the same
-        machine;
+      - cold start to first useful paint ≤ 500 ms (stricter than the web's cold budget of 1.5 s in ADR-0022; the maintainer approved
+        500 ms for the native app); the warm start is reported too;
+      - F4: memory ≤ 200 MB resident, and below the Tauri app measured the same way on the same machine;
       - idle CPU with the window visible and nothing changing ≤ 1 %;
       - stripped app binary ≤ 40 MB per platform (the existing single-binary budget);
       - IME: Japanese or Chinese input and the Turkish layout work in a terminal pane (preedit visible, committed text arrives once);
-      - accessibility: a screen reader on each system announces a list item and a button with its name (AccessKit verified, or no-go);
+      - F5: a screen reader on each system announces the list item and the button with their names (AccessKit verified, or no-go);
       - RTL: whether GPUI lays out and shapes bidirectional text; if not, the cost of adding it upstream or in the app is estimated;
       - what happens without a GPU API (a VM or remote desktop): a usable fallback, or a documented limit.
-      A miss on a hard gate is a no-go for GPUI; the report then compares the strongest alternative. A missed target is reported with
-      what it would cost to meet.
+      The numbers above (echo, frame rate, switching, start, memory, idle CPU, binary size, IME, accessibility) are all go/no-go gates
+      as approved; RTL and the no-GPU case are findings the report states with their cost. A miss on any gate is a no-go for GPUI as
+      measured; the report then says what would close it and compares the strongest alternative, and the maintainer decides.
    1. The shared view-model crate (decision 3); the TUI moves onto it with no behaviour change.
    2. Native app: sign-in and pairing, machines, agents list, one terminal; device key in secure storage (decision 4).
    3. Splits, approvals, start an agent.
