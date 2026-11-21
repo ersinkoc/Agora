@@ -357,11 +357,16 @@ pub fn safe_search_path() -> String {
     }
 }
 
-/// Whether a process with this id exists (a lock file's owner). A system that cannot tell says yes: a lock is never broken on a guess.
+/// Whether a process with this id exists (a lock file's owner). Only "no such process" says no; any other answer (access denied,
+/// a system that cannot tell) says yes, so a lock is never broken on a guess.
 pub fn process_exists(pid: u32) -> bool {
     match process_name(pid) {
         Ok(_) => true,
-        Err(e) => e.kind() == io::ErrorKind::Unsupported,
+        // Windows `OpenProcess` reports a pid that does not exist as ERROR_INVALID_PARAMETER.
+        Err(e) => {
+            !(e.kind() == io::ErrorKind::NotFound
+                || (cfg!(windows) && e.raw_os_error() == Some(87)))
+        }
     }
 }
 

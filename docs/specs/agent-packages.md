@@ -100,16 +100,23 @@ typing at. Code: `crates/agora-adapters/src/agent_install.rs` (the logic, with t
    inflate code and the rung adds no dependency, so `.tar.gz` and `.zip` are a later rung, with the restrictive reader of ADR-0087 item 2.
 7. **Layout.** `<AGORA_HOME>/agents/<name>/<version>/<exe>` (folders `0700`, program `0700` on Unix; a protected ACL on Windows),
    `<AGORA_HOME>/agents/<name>/current` (the installed version), and the launcher `<AGORA_HOME>/agents/bin/<exe>`: a relative symbolic
-   link on Unix, a copy on Windows. Every write below `agents` goes through `agora_platform::ConfinedDir` (a link is refused,
-   never followed). The folder is made in `.tmp-<pid>` and renamed into place; nothing in `bin` changes until `verify` passed.
+   link on Unix, a copy on Windows; `<name>/exe` records which launcher name an agent owns (another agent is refused that name, and
+   an agent cannot be named `bin`). The `agents` folder itself must not be a link or junction (refused); it is opened once and the
+   temporary folder, the staged program, the signature file and the version-folder checks go through `agora_platform::ConfinedDir`
+   (a link is refused, never followed). The later steps (the rename into place, the launcher, `current`, `list-state.json`, the
+   removal of old versions) use ordinary paths inside that private folder, under the install lock; they are not handle-relative.
+   The folder is made in `.tmp-<pid>` and renamed into place; nothing in `bin` changes until `verify` passed.
 8. **Verify, then switch.** The new program is run with the entry's `verify` arguments, 10 seconds, stdin closed, an empty environment
    but `PATH=/usr/bin:/bin` (system folders on Windows) and a home inside its own folder (no token or secret of Agora reaches it); the
    first 4096 bytes of its output (standard output then standard error) must match the entry's regex and it must exit with success,
    and the `provides` program must exist (`verify_failed`, `timeout`). Only then the launcher moves (atomic rename) and `current` is
-   written. A failed verify removes the new folder and leaves the old launcher. The new version and the one before it are kept; older
+   written; if either step fails the previous launcher is put back first. A failed verify removes the new folder and leaves the old
+   launcher. A folder the launcher resolves into is never removed. The new version and the one before it are kept; older
    ones are removed.
-9. **One at a time, and crashes.** `<AGORA_HOME>/agents/.lock` holds the pid; a live owner is `agent.install.in_progress`, a dead one is
-   taken over, one that cannot be read is left alone. Every run first removes `.tmp-*` folders and half-made launchers a crash left.
+9. **One at a time, and crashes.** `<AGORA_HOME>/agents/.lock` holds `pid start boot` of its owner (a reused pid does not look alive); a live owner is
+   `agent.install.in_progress`; a dead owner's lock is taken over by renaming it to a unique name and checking what was renamed
+   (another process's fresh lock is put back); an empty or unreadable lock is stale only after 60 seconds; the lock is removed on
+   exit only while it still holds this process's text. The list version is remembered under the same lock. Every run first removes `.tmp-*` folders and half-made launchers a crash left.
 10. **Never** a script from the entry, `sudo`, a shell profile edit, or a write outside `<AGORA_HOME>`.
 
 Test seams: `Tools` carries the resolver, the fetcher and the signature checker; the command line always passes the strict ones

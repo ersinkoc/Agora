@@ -12,9 +12,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use agora_adapters::agent_install::{
-    blocked_address, curl_args, install, last_seen_version, plan, remember_list_version, Approval,
-    Change, Code, FetchRequest, Fetcher, InstallError, Plan, Resolver, SignatureCheck, SshKeygen,
-    Tools,
+    blocked_address, compare_versions, curl_args, install, last_seen_version, plan,
+    remember_list_version, Approval, Change, Code, Fault, FetchRequest, Fetcher, InstallError,
+    Plan, Resolver, SignatureCheck, SshKeygen, Tools,
 };
 use agora_adapters::agent_packages::{verify_list, AgentList};
 use ring::digest;
@@ -510,6 +510,7 @@ fn curl_gets_the_pin_the_protocol_limits_and_no_redirects() {
     let has = |pair: &[&str]| a.windows(pair.len()).any(|w| w == pair);
     assert!(has(&["--resolve", "agents.example.com:8443:93.184.216.34"]));
     assert!(has(&["--proto", "=https"]) && has(&["--proto-redir", "=https"]));
+    assert!(a.contains(&"--globoff".to_string()));
     assert!(has(&["--max-redirs", "0"]) && !a.iter().any(|x| x == "--location" || x == "-L"));
     assert!(
         has(&["--noproxy", "*"]) && has(&["--max-filesize", "1000"]) && has(&["--max-time", "60"])
@@ -580,7 +581,7 @@ fn verify_runs_with_a_scrubbed_environment_and_a_time_limit() {
     // The test process has a PATH with more in it; the program must not see it.
     let body = "#!/bin/sh\nif [ \"$PATH\" = \"/usr/bin:/bin\" ] && [ -z \"$CARGO_HOME\" ] && [ -z \"$USER\" ]; then echo \"fake-agent 1\"; else echo \"leaked $PATH\"; fi\n";
     run(&home, &Opts::new("1.0.0", body), body).unwrap();
-    let slow = "#!/bin/sh\nsleep 30\n";
+    let slow = "#!/bin/sh\nexec sleep 30\n";
     let l = list(&Opts::new("1.0.1", slow));
     let p = plan(&l, "fake-agent", PLATFORM, &home.0).unwrap();
     let net = Net::serving(slow);
@@ -646,7 +647,7 @@ fn only_the_new_and_the_previous_version_are_kept() {
         k.sort();
         k
     };
-    assert_eq!(kept, ["1.1.0", "1.2.0", "current"]);
+    assert_eq!(kept, ["1.1.0", "1.2.0", "current", "exe"]);
 }
 
 #[test]
@@ -742,4 +743,306 @@ fn the_list_version_seen_only_goes_up() {
     assert_eq!(last_seen_version(&home.0), 5);
     remember_list_version(&home.0, 6).unwrap();
     assert_eq!(last_seen_version(&home.0), 6);
+}
+
+#[test]
+fn versions_compare_as_semver_including_prerelease_identifiers() {
+    use std::cmp::Ordering::{Equal, Greater, Less};
+    let cases = [
+        ("1.0.0-rc.2", "1.0.0-rc.10", Less),
+        ("1.0.0-rc.10", "1.0.0-rc.2", Greater),
+        ("1.0.0-1", "1.0.0-alpha", Less),
+        ("1.0.0-alpha", "1.0.0-alpha.1", Less),
+        ("1.0.0-alpha.1", "1.0.0-alpha.beta", Less),
+        ("1.0.0-alpha.beta", "1.0.0-beta", Less),
+        ("1.0.0-beta.11", "1.0.0-rc.1", Less),
+        ("1.0.0-rc.1", "1.0.0", Less),
+        ("1.0.0", "1.0.0-rc.1", Greater),
+        ("1.0.0-rc.01", "1.0.0-rc.1", Equal),
+        ("1.9.0", "1.10.0", Less),
+        ("1.0.0+a", "1.0.0+b", Equal),
+        ("2.0.0-rc.1", "1.99.99", Greater),
+    ];
+    for (a, b, want) in cases {
+        assert_eq!(compare_versions(a, b), want, "{a} vs {b}");
+    }
+}
+
+#[test]
+fn a_prerelease_that_looks_newer_as_text_is_still_a_downgrade() {
+    let home = Home::new();
+    // Installed rc.10; the list names rc.2.
+    std::fs::create_dir_all(home.agents().join("fake-agent")).unwrap();
+    std::fs::write(
+        home.agents().join("fake-agent").join("current"),
+        "1.0.0-rc.10",
+    )
+    .unwrap();
+    let l = list(&Opts::new("1.0.0-rc.2", GOOD));
+    let p = plan(&l, "fake-agent", PLATFORM, &home.0).unwrap();
+    assert_eq!(p.change, Change::Downgrade);
+}
+
+/// Writes `.lock` and runs an install against it; returns the install's result.
+fn with_lock(home: &Home, text: &str, age_secs: u64) -> Result<(), InstallError> {
+    std::fs::create_dir_all(home.agents()).unwrap();
+    let lock = home.agents().join(".lock");
+    std::fs::write(&lock, text).unwrap();
+    if age_secs > 0 {
+        let when = std::time::SystemTime::now() - Duration::from_secs(age_secs);
+        std::fs::File::options()
+            .write(true)
+            .open(&lock)
+            .unwrap()
+            .set_modified(when)
+            .unwrap();
+    }
+    let l = list(&Opts::new("1.2.3", GOOD));
+    let p = plan(&l, "fake-agent", PLATFORM, &home.0).unwrap();
+    let net = Net::serving(GOOD);
+    install(&p, &approval(&p), &home.0, &tools(&net, &Sig(true))).map(|_| ())
+}
+
+#[test]
+fn an_empty_or_garbage_lock_blocks_only_while_it_is_young() {
+    if skip() {
+        return;
+    }
+    for text in ["", "garbage", "0x12"] {
+        let home = Home::new();
+        assert_eq!(
+            with_lock(&home, text, 0).unwrap_err().code,
+            Code::InProgress,
+            "{text:?}"
+        );
+        let home = Home::new();
+        with_lock(&home, text, 120).unwrap();
+        assert!(!home.agents().join(".lock").exists());
+    }
+}
+
+#[test]
+fn a_lock_of_a_reused_pid_is_stale() {
+    if skip() {
+        return;
+    }
+    // This very pid, but a start time that is not this process's: a different process that got the pid later.
+    let home = Home::new();
+    with_lock(&home, &format!("{} 1 other-boot", std::process::id()), 0).unwrap();
+    // The real identity of this process is alive.
+    let home = Home::new();
+    let i = agora_platform::process_identity(std::process::id()).unwrap();
+    let alive = format!("{} {} {}", std::process::id(), i.started, i.boot);
+    assert_eq!(
+        with_lock(&home, &alive, 0).unwrap_err().code,
+        Code::InProgress
+    );
+}
+
+/// A fetcher that, while the install holds the lock, replaces the lock with somebody else's.
+struct Thief<'a>(&'a Net, PathBuf);
+impl Fetcher for Thief<'_> {
+    fn fetch(&self, r: &FetchRequest<'_>, sink: &mut dyn Write) -> Result<(), InstallError> {
+        std::fs::write(&self.1, format!("{} 1 someone-else", std::process::id())).unwrap();
+        self.0.fetch(r, sink)
+    }
+}
+
+#[test]
+fn the_lock_is_removed_only_while_it_is_still_ours() {
+    if skip() {
+        return;
+    }
+    let home = Home::new();
+    let l = list(&Opts::new("1.2.3", GOOD));
+    let p = plan(&l, "fake-agent", PLATFORM, &home.0).unwrap();
+    let net = Net::serving(GOOD);
+    let thief = Thief(&net, home.agents().join(".lock"));
+    let sig = Sig(true);
+    let t = Tools::new(&net, &thief, &sig);
+    install(&p, &approval(&p), &home.0, &t).unwrap();
+    let left = std::fs::read_to_string(home.agents().join(".lock")).unwrap();
+    assert!(
+        left.ends_with("someone-else"),
+        "another process's lock was removed"
+    );
+}
+
+#[test]
+fn racing_installs_over_a_stale_lock_end_with_one_consistent_install() {
+    if skip() {
+        return;
+    }
+    let home = Home::new();
+    std::fs::create_dir_all(home.agents()).unwrap();
+    std::fs::write(home.agents().join(".lock"), "").unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(home.agents().join(".lock"))
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - Duration::from_secs(300))
+        .unwrap();
+    let results: Vec<Result<(), InstallError>> = std::thread::scope(|s| {
+        let hs: Vec<_> = (0..6)
+            .map(|_| {
+                s.spawn(|| {
+                    let l = list(&Opts::new("1.2.3", GOOD));
+                    let p = plan(&l, "fake-agent", PLATFORM, &home.0).unwrap();
+                    let net = Net::serving(GOOD);
+                    install(&p, &approval(&p), &home.0, &tools(&net, &Sig(true))).map(|_| ())
+                })
+            })
+            .collect();
+        hs.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    assert!(results.iter().any(Result::is_ok), "{results:?}");
+    for r in &results {
+        if let Err(e) = r {
+            assert_eq!(e.code, Code::InProgress, "{e:?}");
+        }
+    }
+    assert!(launcher(&home).exists());
+    assert!(!home.agents().join(".lock").exists());
+    assert_eq!(
+        agora_adapters::agent_install::installed_version(&home.0, "fake-agent").as_deref(),
+        Some("1.2.3")
+    );
+}
+
+#[test]
+fn a_failure_after_the_launcher_moved_puts_the_old_launcher_back() {
+    if skip() {
+        return;
+    }
+    let home = Home::new();
+    run(&home, &Opts::new("1.0.0", GOOD), GOOD).unwrap();
+    let before = std::fs::read_link(launcher(&home)).unwrap();
+    let l = list(&Opts::new("2.0.0", GOOD));
+    let p = plan(&l, "fake-agent", PLATFORM, &home.0).unwrap();
+    let net = Net::serving(GOOD);
+    let mut t = tools(&net, &Sig(true));
+    t.fault = Some(Fault::BeforeCurrent);
+    let e = install(&p, &approval(&p), &home.0, &t).unwrap_err();
+    assert_eq!(e.detail, "injected");
+    assert_eq!(std::fs::read_link(launcher(&home)).unwrap(), before);
+    assert!(launcher(&home).exists(), "the launcher must still resolve");
+    nothing_live(&home, "2.0.0");
+    // A first install that fails after the move leaves no launcher at all.
+    let home = Home::new();
+    let l = list(&Opts::new("1.0.0", GOOD));
+    let p = plan(&l, "fake-agent", PLATFORM, &home.0).unwrap();
+    let net = Net::serving(GOOD);
+    let mut t = tools(&net, &Sig(true));
+    t.fault = Some(Fault::BeforeCurrent);
+    install(&p, &approval(&p), &home.0, &t).unwrap_err();
+    assert!(std::fs::symlink_metadata(launcher(&home)).is_err());
+    nothing_live(&home, "1.0.0");
+}
+
+#[test]
+fn a_failed_write_of_current_is_rolled_back_for_real() {
+    if skip() {
+        return;
+    }
+    let home = Home::new();
+    run(&home, &Opts::new("1.0.0", GOOD), GOOD).unwrap();
+    let before = std::fs::read_link(launcher(&home)).unwrap();
+    let l = list(&Opts::new("2.0.0", GOOD));
+    let p = plan(&l, "fake-agent", PLATFORM, &home.0).unwrap();
+    // A folder where `current` must go makes the real write fail.
+    let current = home.agents().join("fake-agent").join("current");
+    std::fs::remove_file(&current).unwrap();
+    std::fs::create_dir(&current).unwrap();
+    let net = Net::serving(GOOD);
+    install(&p, &approval(&p), &home.0, &tools(&net, &Sig(true))).unwrap_err();
+    assert_eq!(std::fs::read_link(launcher(&home)).unwrap(), before);
+    assert!(home
+        .agents()
+        .join("fake-agent")
+        .join("1.0.0")
+        .join("fake-agent")
+        .is_file());
+    assert!(!home.agents().join("fake-agent").join("2.0.0").exists());
+}
+
+#[test]
+fn a_folder_the_launcher_uses_is_never_removed() {
+    if skip() {
+        return;
+    }
+    let home = Home::new();
+    run(&home, &Opts::new("1.0.0", GOOD), GOOD).unwrap();
+    // `current` is lost, so the plan sees a fresh install of the very version the launcher resolves into.
+    std::fs::remove_file(home.agents().join("fake-agent").join("current")).unwrap();
+    let e = run(&home, &Opts::new("1.0.0", GOOD), GOOD).unwrap_err();
+    assert_eq!(e.detail, "in_use");
+    assert!(launcher(&home).exists());
+    // And a failed verify of the same version does not remove it either.
+    let bad = "#!/bin/sh\necho nope\n";
+    let e = run(&home, &Opts::new("1.0.0", bad), bad).unwrap_err();
+    assert_eq!(e.detail, "in_use");
+    assert!(launcher(&home).exists());
+}
+
+#[test]
+fn a_launcher_name_belongs_to_one_agent_and_bin_is_not_an_agent() {
+    if skip() {
+        return;
+    }
+    let home = Home::new();
+    run(&home, &Opts::new("1.0.0", GOOD), GOOD).unwrap();
+    // Another agent folder claims the same program name.
+    let l = list(&Opts::new("1.0.0", GOOD));
+    let mut p = plan(&l, "fake-agent", PLATFORM, &home.0).unwrap();
+    let a = approval(&p);
+    p.name = "other-agent".into();
+    p.change = Change::Fresh;
+    let net = Net::serving(GOOD);
+    let e = install(&p, &a, &home.0, &tools(&net, &Sig(true))).unwrap_err();
+    assert_eq!(
+        (e.code, e.detail.as_str()),
+        (Code::Conflict, "executable_owned")
+    );
+    p.name = "bin".into();
+    let e = install(&p, &a, &home.0, &tools(&net, &Sig(true))).unwrap_err();
+    assert_eq!(
+        (e.code, e.detail.as_str()),
+        (Code::Conflict, "reserved_name")
+    );
+    assert_eq!(e.code.code(), "agent.install.conflict");
+}
+
+#[test]
+fn a_linked_agents_folder_is_refused() {
+    let home = Home::new();
+    let real = home.0.join("elsewhere");
+    std::fs::create_dir_all(&real).unwrap();
+    if agora_platform::link_dir(&real, &home.agents()).is_err() {
+        return;
+    }
+    let l = list(&Opts::new("1.2.3", GOOD));
+    let p = plan(&l, "fake-agent", PLATFORM, &home.0).unwrap();
+    let net = Net::serving(GOOD);
+    let e = install(&p, &approval(&p), &home.0, &tools(&net, &Sig(true))).unwrap_err();
+    assert_eq!(
+        (e.code, e.detail.as_str()),
+        (Code::IoFailed, "not_confined")
+    );
+    assert!(std::fs::read_dir(&real).unwrap().next().is_none());
+    assert_eq!(
+        remember_list_version(&home.0, 9).unwrap_err().detail,
+        "not_confined"
+    );
+}
+
+#[test]
+fn the_list_version_is_remembered_under_the_lock() {
+    let home = Home::new();
+    std::fs::create_dir_all(home.agents()).unwrap();
+    std::fs::write(home.agents().join(".lock"), std::process::id().to_string()).unwrap();
+    assert_eq!(
+        remember_list_version(&home.0, 4).unwrap_err().code,
+        Code::InProgress
+    );
+    assert_eq!(last_seen_version(&home.0), 0);
 }

@@ -57,6 +57,8 @@ pub enum Code {
     ToolMissing,
     /// Any other file system failure.
     IoFailed,
+    /// The agent is named `bin`, or another agent already owns the launcher name.
+    Conflict,
 }
 
 impl Code {
@@ -78,6 +80,7 @@ impl Code {
             Code::NotOffered => "agent.install.not_offered",
             Code::ToolMissing => "agent.install.tool_missing",
             Code::IoFailed => "agent.install.io_failed",
+            Code::Conflict => "agent.install.conflict",
         }
     }
 }
@@ -185,6 +188,8 @@ pub fn plan(
         return err(Code::UnsupportedFormat, "one_program_per_download");
     };
     let (host, port) = split_url(&download.url)?;
+    let exe = exe_name(program);
+    check_names(home, &entry.name, &exe)?;
     let publisher_key = list
         .publishers
         .iter()
@@ -213,7 +218,7 @@ pub fn plan(
         publisher_key,
         signature: download.signature.clone(),
         target_dir: agents_dir(home).join(&entry.name).join(&entry.version),
-        exe: exe_name(program),
+        exe,
         verify_args: entry.verify.args.clone(),
         verify_pattern: entry.verify.pattern().to_string(),
         installed,
@@ -231,7 +236,9 @@ fn exe_name(program: &str) -> String {
     }
 }
 
-/// `major.minor.patch[-pre][+build]` order: numbers first, a release above its own pre-release, build metadata ignored.
+/// Semantic-version order: `major.minor.patch` as numbers; a release is above its own pre-release; pre-release identifiers
+/// (split on `.`) compare one by one, numbers as numbers and below words, words as text, and the shorter list is lower when the
+/// rest is equal (`rc.2` < `rc.10`, `1.0.0-1` < `1.0.0-alpha`). Build metadata (`+...`) is ignored.
 pub fn compare_versions(a: &str, b: &str) -> Ordering {
     fn split(v: &str) -> (Vec<u64>, Option<&str>) {
         let v = v.split('+').next().unwrap_or(v);
@@ -244,12 +251,37 @@ pub fn compare_versions(a: &str, b: &str) -> Ordering {
             pre,
         )
     }
+    fn ident(a: &str, b: &str) -> Ordering {
+        let num = |s: &str| !s.is_empty() && s.bytes().all(|c| c.is_ascii_digit());
+        match (num(a), num(b)) {
+            (true, true) => {
+                let (x, y) = (a.trim_start_matches('0'), b.trim_start_matches('0'));
+                x.len().cmp(&y.len()).then_with(|| x.cmp(y))
+            }
+            (true, false) => Ordering::Less,
+            (false, true) => Ordering::Greater,
+            (false, false) => a.cmp(b),
+        }
+    }
     let ((na, pa), (nb, pb)) = (split(a), split(b));
     na.cmp(&nb).then_with(|| match (pa, pb) {
         (None, None) => Ordering::Equal,
         (None, Some(_)) => Ordering::Greater,
         (Some(_), None) => Ordering::Less,
-        (Some(x), Some(y)) => x.cmp(y),
+        (Some(x), Some(y)) => {
+            let (mut x, mut y) = (x.split('.'), y.split('.'));
+            loop {
+                match (x.next(), y.next()) {
+                    (None, None) => return Ordering::Equal,
+                    (None, Some(_)) => return Ordering::Less,
+                    (Some(_), None) => return Ordering::Greater,
+                    (Some(p), Some(q)) => match ident(p, q) {
+                        Ordering::Equal => {}
+                        o => return o,
+                    },
+                }
+            }
+        }
     })
 }
 
@@ -339,6 +371,15 @@ pub struct Tools<'a> {
     pub max_download: u64,
     /// How long `verify` may run ([`VERIFY_TIMEOUT`] for the command line; tests lower it).
     pub verify_timeout: Duration,
+    /// A failure to inject after the launcher moved (tests only; `None` for the command line).
+    pub fault: Option<Fault>,
+}
+
+/// Where a test makes the install fail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fault {
+    /// Right after the launcher moved, before `current` is written.
+    BeforeCurrent,
 }
 
 impl<'a> Tools<'a> {
@@ -354,6 +395,7 @@ impl<'a> Tools<'a> {
             signatures,
             max_download: MAX_DOWNLOAD_BYTES,
             verify_timeout: VERIFY_TIMEOUT,
+            fault: None,
         }
     }
 }
@@ -377,6 +419,7 @@ pub fn blocked_address(ip: IpAddr) -> bool {
             || a.is_multicast()
             || a.is_documentation()
             || o[0] == 0
+            || (o[0] == 192 && o[1] == 88 && o[2] == 99)
             || (o[0] == 100 && (o[1] & 0xc0) == 64)
             || (o[0] == 192 && o[1] == 0 && o[2] == 0)
             || (o[0] == 198 && (o[1] & 0xfe) == 18)
@@ -395,7 +438,8 @@ pub fn blocked_address(ip: IpAddr) -> bool {
                 || (s[0] & 0xfe00) == 0xfc00
                 || (s[0] & 0xffc0) == 0xfe80
                 || (s[0] & 0xffc0) == 0xfec0
-                || (s[0] == 0x2001 && (s[1] == 0x0db8 || s[1] == 0))
+                || (s[0] == 0x2001 && (s[1] == 0x0db8 || s[1] == 0 || (s[1] == 2 && s[2] == 0)))
+                || (s[0] == 0x100 && s[1..4].iter().all(|x| *x == 0))
                 || (s[0] == 0x64
                     && s[1] == 0xff9b
                     && (s[2..6].iter().any(|x| *x != 0) || {
@@ -537,6 +581,7 @@ pub fn curl_args(r: &FetchRequest<'_>) -> Vec<String> {
     };
     [
         "-q",
+        "--globoff",
         "--silent",
         "--show-error",
         "--fail",
@@ -673,6 +718,34 @@ impl SignatureCheck for SshKeygen {
     }
 }
 
+// ---- names ---------------------------------------------------------------------------------------------------------------
+
+/// The agent that owns the launcher `exe`, from the `exe` file each agent folder keeps (written when its launcher moved).
+fn owner_of(agents: &Path, exe: &str) -> Option<String> {
+    for e in std::fs::read_dir(agents).into_iter().flatten().flatten() {
+        let n = e.file_name().to_string_lossy().into_owned();
+        if n.starts_with('.') || n == "bin" || !e.path().is_dir() {
+            continue;
+        }
+        let owned = std::fs::read_to_string(e.path().join("exe")).unwrap_or_default();
+        if owned.trim() == exe {
+            return Some(n);
+        }
+    }
+    None
+}
+
+/// `bin` is the launcher folder, not an agent; and a launcher name another agent already owns is never taken over.
+fn check_names(home: &Path, name: &str, exe: &str) -> Result<(), InstallError> {
+    if name == "bin" {
+        return err(Code::Conflict, "reserved_name");
+    }
+    match owner_of(&agents_dir(home), exe) {
+        Some(other) if other != name => err(Code::Conflict, "executable_owned"),
+        _ => Ok(()),
+    }
+}
+
 // ---- last seen list version ----------------------------------------------------------------------------------------------
 
 /// The newest list version this machine accepted (`<AGORA_HOME>/agents/list-state.json`), 0 when none or unreadable.
@@ -684,13 +757,17 @@ pub fn last_seen_version(home: &Path) -> u64 {
         .unwrap_or(0)
 }
 
-/// Remembers `version` as the newest accepted, atomically; an older number never replaces a newer one.
+/// Remembers `version` as the newest accepted, atomically, under the install lock (two processes cannot interleave a read and a
+/// write); an older number never replaces a newer one.
 pub fn remember_list_version(home: &Path, version: u64) -> Result<(), InstallError> {
     if version <= last_seen_version(home) {
         return Ok(());
     }
-    let dir = agents_dir(home);
-    private_dir(&dir)?;
+    let (root, dir) = open_agents(home)?;
+    let _lock = Lock::acquire(&root, &dir)?;
+    if version <= last_seen_version(home) {
+        return Ok(());
+    }
     agora_platform::write_private(
         &dir.join("list-state.json"),
         format!("{{\"version\":{version}}}\n").as_bytes(),
@@ -698,10 +775,20 @@ pub fn remember_list_version(home: &Path, version: u64) -> Result<(), InstallErr
     .map_err(|e| io_err(&e))
 }
 
-fn private_dir(path: &Path) -> Result<(), InstallError> {
-    std::fs::create_dir_all(path)
-        .and_then(|()| agora_platform::restrict_to_owner(path))
-        .map_err(|e| io_err(&e))
+/// Makes `<home>/agents` (private) and holds it open. The folder itself must not be a link or junction: it is refused, not followed
+/// (what is below it is opened through the handle).
+fn open_agents(home: &Path) -> Result<(ConfinedDir, PathBuf), InstallError> {
+    let agents = agents_dir(home);
+    if let Ok(m) = std::fs::symlink_metadata(&agents) {
+        if m.file_type().is_symlink() || agora_platform::is_reparse_point(&m) || !m.is_dir() {
+            return err(Code::IoFailed, "not_confined");
+        }
+    }
+    std::fs::create_dir_all(&agents)
+        .and_then(|()| agora_platform::restrict_to_owner(&agents))
+        .map_err(|e| io_err(&e))?;
+    let root = ConfinedDir::open_root(&agents).map_err(|e| io_err(&e))?;
+    Ok((root, agents))
 }
 
 // ---- the install ---------------------------------------------------------------------------------------------------------
@@ -717,30 +804,102 @@ pub struct Outcome {
     pub unchanged: bool,
 }
 
+/// How long a `.lock` with nothing readable in it is believed to be somebody still writing it.
+const LOCK_GRACE: Duration = Duration::from_secs(60);
+
+/// The install lock: `<agents>/.lock` holding `pid started boot` of its owner (the start time and boot tell a reused pid from the
+/// owner). It is taken over only when its owner is gone, by renaming it to a unique name and checking what was renamed; it is
+/// removed on drop only while it still holds this process's own text.
 struct Lock<'a> {
     root: &'a ConfinedDir,
+    path: PathBuf,
+    text: String,
+}
+
+enum Holder {
+    Alive,
+    Gone,
+    /// Empty or not understood.
+    Unreadable,
+}
+
+fn own_text() -> String {
+    let pid = std::process::id();
+    match agora_platform::process_identity(pid) {
+        Ok(i) => format!("{pid} {} {}", i.started, i.boot),
+        Err(_) => pid.to_string(),
+    }
+}
+
+fn holder(text: &str) -> Holder {
+    let mut f = text.split_whitespace();
+    let Some(pid) = f.next().and_then(|p| p.parse::<u32>().ok()) else {
+        return Holder::Unreadable;
+    };
+    let started = f.next().and_then(|s| s.parse::<u64>().ok());
+    let boot = f.next().unwrap_or("");
+    match (started, agora_platform::process_identity(pid)) {
+        // The same pid with another start time or boot is a different process: the owner is gone.
+        (Some(s), Ok(now)) => {
+            if now.started == s && now.boot == boot {
+                Holder::Alive
+            } else {
+                Holder::Gone
+            }
+        }
+        (Some(_), Err(e)) if e.kind() == io::ErrorKind::NotFound => Holder::Gone,
+        _ => {
+            if agora_platform::process_exists(pid) {
+                Holder::Alive
+            } else {
+                Holder::Gone
+            }
+        }
+    }
 }
 
 impl<'a> Lock<'a> {
     fn acquire(root: &'a ConfinedDir, agents: &Path) -> Result<Self, InstallError> {
+        static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let name = OsStr::new(".lock");
-        for _ in 0..3 {
+        let path = agents.join(".lock");
+        let text = own_text();
+        for _ in 0..4 {
             match root.create_new(name, 0o600) {
                 Ok(mut f) => {
-                    f.write_all(std::process::id().to_string().as_bytes())
-                        .map_err(|e| io_err(&e))?;
-                    return Ok(Self { root });
+                    f.write_all(text.as_bytes()).map_err(|e| io_err(&e))?;
+                    return Ok(Self { root, path, text });
                 }
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-                    let holder = std::fs::read_to_string(agents.join(".lock"))
-                        .ok()
-                        .and_then(|t| t.trim().parse::<u32>().ok());
-                    // A lock whose owner is gone (a crash) is taken over; one we cannot read is not ours to break.
-                    match holder {
-                        Some(pid) if !agora_platform::process_exists(pid) => {
-                            let _ = root.remove_file(name);
-                        }
-                        _ => return err(Code::InProgress, "locked"),
+                    let seen = std::fs::read_to_string(&path);
+                    let stale = match &seen {
+                        Ok(t) => match holder(t) {
+                            Holder::Gone => true,
+                            Holder::Alive => false,
+                            Holder::Unreadable => old_enough(&path),
+                        },
+                        // Gone between create and read: try again.
+                        Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                        Err(_) => old_enough(&path),
+                    };
+                    if !stale {
+                        return err(Code::InProgress, "locked");
+                    }
+                    // Only one of several racing processes wins the rename. What was renamed must be what was judged stale: if
+                    // another process has taken over in between, that is its live lock, and it is put back (a hard link fails
+                    // when `.lock` exists again) rather than deleted.
+                    let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let moved = agents.join(format!(".lock.stale-{}-{n}", std::process::id()));
+                    if std::fs::rename(&path, &moved).is_err() {
+                        continue;
+                    }
+                    let got = std::fs::read_to_string(&moved).unwrap_or_default();
+                    if got == seen.unwrap_or_default() {
+                        let _ = std::fs::remove_file(&moved);
+                    } else {
+                        let _ = std::fs::hard_link(&moved, &path);
+                        let _ = std::fs::remove_file(&moved);
+                        return err(Code::InProgress, "locked");
                     }
                 }
                 Err(e) => return Err(io_err(&e)),
@@ -750,13 +909,24 @@ impl<'a> Lock<'a> {
     }
 }
 
+fn old_enough(path: &Path) -> bool {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .is_some_and(|age| age >= LOCK_GRACE)
+}
+
 impl Drop for Lock<'_> {
     fn drop(&mut self) {
-        let _ = self.root.remove_file(OsStr::new(".lock"));
+        // Somebody else's lock (ours was taken over after a long stall) is not ours to remove.
+        if std::fs::read_to_string(&self.path).is_ok_and(|t| t == self.text) {
+            let _ = self.root.remove_file(OsStr::new(".lock"));
+        }
     }
 }
 
-/// Removes what a crashed install left: `.tmp-*` in the agents folder and half-made launchers in `bin`.
+/// Removes what a crashed install left: `.tmp-*` and `.lock.stale-*` in the agents folder and half-made launchers in `bin`.
 fn clean_leftovers(agents: &Path) {
     let remove = |path: &Path| {
         match std::fs::symlink_metadata(path) {
@@ -770,7 +940,8 @@ fn clean_leftovers(agents: &Path) {
         };
     };
     for e in std::fs::read_dir(agents).into_iter().flatten().flatten() {
-        if e.file_name().to_string_lossy().starts_with(".tmp-") {
+        let n = e.file_name().to_string_lossy().into_owned();
+        if n.starts_with(".tmp-") || n.starts_with(".lock.stale-") {
             remove(&e.path());
         }
     }
@@ -795,28 +966,40 @@ impl Drop for TempDir {
     }
 }
 
-/// Installs the planned program. `home` is `<AGORA_HOME>`; `now` is not needed (the list was opened by the caller).
+/// Whether the launcher in `bin` resolves into the folder `<name>/<version>` (Unix: its link names it; Windows launchers are
+/// copies, which nothing in the folder backs, so a folder there is never in use through the launcher).
+fn launcher_uses(launcher: &Path, name: &str, version: &str) -> bool {
+    let Ok(target) = std::fs::read_link(launcher) else {
+        return false;
+    };
+    let mut parts = target.components().rev().skip(1);
+    let v = parts.next().map(|c| c.as_os_str().to_owned());
+    let n = parts.next().map(|c| c.as_os_str().to_owned());
+    v.as_deref() == Some(OsStr::new(version)) && n.as_deref() == Some(OsStr::new(name))
+}
+
+/// Removes a version folder unless the launcher resolves into it.
+fn remove_version(launcher: &Path, name: &str, version: &str, path: &Path) {
+    if !launcher_uses(launcher, name, version) {
+        let _ = std::fs::remove_dir_all(path);
+    }
+}
+
+/// Installs the planned program. `home` is `<AGORA_HOME>`.
 ///
 /// In order: lock (one install per machine), remove leftovers of a crash, download into a temporary folder (address rules,
 /// size cap, SHA-256 equal to the entry's), the detached signature when the entry names a key (the key file must be in
 /// `<home>/agent-keys/<key>.pub`), move the folder to `<name>/<version>`, run `verify` (10 seconds, scrubbed environment) and
-/// check the program exists, then move the launcher in `bin` and write `current`, then drop all but the new and the previous version.
-/// Any failure before the launcher moves removes the new folder and leaves the old launcher where it was.
+/// check the program exists, then move the launcher in `bin`, write `current` and the `exe` owner file, then drop all but the new
+/// and the previous version. A failure before the launcher moves removes the new folder and leaves the launcher untouched. A
+/// failure after it puts the previous launcher back (or removes the new one when there was none) before the new folder is
+/// removed; a folder the launcher resolves into is never removed.
 pub fn install(
     plan: &Plan,
     _approval: &Approval,
     home: &Path,
     tools: &Tools<'_>,
 ) -> Result<Outcome, InstallError> {
-    if plan.change == Change::Same {
-        return Ok(Outcome {
-            version: plan.version.clone(),
-            previous: plan.installed.clone(),
-            dir: plan.target_dir.clone(),
-            launcher: agents_dir(home).join("bin").join(&plan.exe),
-            unchanged: true,
-        });
-    }
     if !valid_name(&plan.name) || !valid_component_text(&plan.version) {
         return err(Code::IoFailed, "bad_name");
     }
@@ -830,16 +1013,20 @@ pub fn install(
             Some(f)
         }
     };
-    let agents = agents_dir(home);
-    private_dir(&agents)?;
-    let root = ConfinedDir::open_root(&agents).map_err(|e| io_err(&e))?;
-    // The folder we hold is the folder we were asked to use (a link in its place is refused, not followed).
-    let real = root.real_path().map_err(|e| io_err(&e))?;
-    let expected = agora_platform::canonicalize_plain(&agents).map_err(|e| io_err(&e))?;
-    if real != expected {
-        return err(Code::IoFailed, "not_confined");
-    }
+    let (root, agents) = open_agents(home)?;
     let _lock = Lock::acquire(&root, &agents)?;
+    // What the plan saw may have changed while waiting for the lock.
+    let installed = installed_version(home, &plan.name);
+    if installed.as_deref() == Some(plan.version.as_str()) {
+        return Ok(Outcome {
+            version: plan.version.clone(),
+            previous: installed,
+            dir: plan.target_dir.clone(),
+            launcher: agents.join("bin").join(&plan.exe),
+            unchanged: true,
+        });
+    }
+    check_names(home, &plan.name, &plan.exe)?;
     clean_leftovers(&agents);
 
     let tmp_name = format!(".tmp-{}", std::process::id());
@@ -889,13 +1076,19 @@ pub fn install(
     let name_path = agents.join(&plan.name);
     agora_platform::restrict_to_owner(&name_path).map_err(|e| io_err(&e))?;
     let version_path = name_path.join(&plan.version);
-    // A folder of that version that is not the live one (an earlier failure, a version that was rolled back) is replaced.
+    let bin = agents.join("bin");
+    let launcher = bin.join(&plan.exe);
     match name_dir
         .entry(OsStr::new(&plan.version))
         .map_err(|e| io_err(&e))?
     {
         None => {}
+        // A folder of that version that nothing uses (an earlier failure, a version that was rolled back) is replaced; one the
+        // launcher resolves into is live and is left alone.
         Some(e) if e.kind == EntryKind::Folder => {
+            if launcher_uses(&launcher, &plan.name, &plan.version) {
+                return err(Code::IoFailed, "in_use");
+            }
             std::fs::remove_dir_all(&version_path).map_err(|e| io_err(&e))?;
         }
         Some(_) => name_dir
@@ -917,38 +1110,54 @@ pub fn install(
         )
     })();
     if let Err(e) = checked {
-        let _ = std::fs::remove_dir_all(&version_path);
+        // The launcher was not touched and still resolves to what it did.
+        remove_version(&launcher, &plan.name, &plan.version, &version_path);
         return Err(e);
     }
 
-    // Switch.
-    let bin = agents.join("bin");
-    let switched = (|| -> Result<PathBuf, InstallError> {
+    let old_target = std::fs::read_link(&launcher).ok();
+    // Switch, then record. Any failure puts the launcher back before the new folder goes.
+    let switched = (|| -> Result<(), InstallError> {
         root.subdir(OsStr::new("bin"), true)
             .map_err(|e| io_err(&e))?;
         agora_platform::restrict_to_owner(&bin).map_err(|e| io_err(&e))?;
-        let launcher = bin.join(&plan.exe);
         link(plan, &plan.version, &version_path, &launcher)?;
-        Ok(launcher)
-    })();
-    let launcher = match switched {
-        Ok(l) => l,
-        Err(e) => {
-            // The old launcher is still the one that was there unless the move itself half-happened: put it back.
-            if let Some(old) = &plan.installed {
-                let old_path = name_path.join(old);
-                let _ = link(plan, old, &old_path, &bin.join(&plan.exe));
-            }
-            let _ = std::fs::remove_dir_all(&version_path);
-            return Err(e);
+        if tools.fault == Some(Fault::BeforeCurrent) {
+            return err(Code::IoFailed, "injected");
         }
-    };
-    agora_platform::write_private(&name_path.join("current"), plan.version.as_bytes())
-        .map_err(|e| io_err(&e))?;
-    prune(&name_path, &plan.version, plan.installed.as_deref());
+        agora_platform::write_private(&name_path.join("current"), plan.version.as_bytes())
+            .map_err(|e| io_err(&e))?;
+        agora_platform::write_private(&name_path.join("exe"), plan.exe.as_bytes())
+            .map_err(|e| io_err(&e))
+    })();
+    if let Err(e) = switched {
+        match (&old_target, installed.as_deref()) {
+            // Exactly what the launcher pointed at before, even when `current` could not be read.
+            (Some(t), _) => {
+                let _ = agora_platform::install_launcher(&bin.join(t), t, &launcher);
+            }
+            (None, Some(old)) => {
+                let _ = link(plan, old, &name_path.join(old), &launcher);
+            }
+            (None, None) => {
+                if launcher_uses(&launcher, &plan.name, &plan.version) {
+                    let _ = std::fs::remove_file(&launcher);
+                }
+            }
+        }
+        remove_version(&launcher, &plan.name, &plan.version, &version_path);
+        return Err(e);
+    }
+    prune(
+        &name_path,
+        &launcher,
+        &plan.name,
+        &plan.version,
+        installed.as_deref(),
+    );
     Ok(Outcome {
         version: plan.version.clone(),
-        previous: plan.installed.clone(),
+        previous: installed,
         dir: version_path,
         launcher,
         unchanged: false,
@@ -969,15 +1178,21 @@ fn link(
         .map_err(|e| io_err(&e))
 }
 
-/// Keeps the new version and the one before it, removes every other version folder (only real folders, never a link).
-fn prune(name_path: &Path, new: &str, previous: Option<&str>) {
+/// Keeps the new version and the one before it, removes every other version folder (only real folders, never a link, and never
+/// the one the launcher resolves into).
+fn prune(name_path: &Path, launcher: &Path, name: &str, new: &str, previous: Option<&str>) {
     for e in std::fs::read_dir(name_path).into_iter().flatten().flatten() {
         let n = e.file_name().to_string_lossy().into_owned();
-        if n.starts_with('.') || n == new || Some(n.as_str()) == previous || n == "current" {
+        if n.starts_with('.')
+            || n == new
+            || Some(n.as_str()) == previous
+            || n == "current"
+            || n == "exe"
+        {
             continue;
         }
         if std::fs::symlink_metadata(e.path()).is_ok_and(|m| m.is_dir()) {
-            let _ = std::fs::remove_dir_all(e.path());
+            remove_version(launcher, name, &n, &e.path());
         }
     }
 }
@@ -1005,10 +1220,20 @@ fn run_verify(
         // Windows programs do not start without it; it names the system folder, not a secret.
         cmd.env("SystemRoot", root);
     }
-    let mut child = cmd.spawn().map_err(|_| InstallError {
-        code: Code::VerifyFailed,
-        detail: "cannot_run".into(),
-    })?;
+    // A program just written can be "busy" for a moment when another thread forked while its file was still open for writing.
+    let mut tries = 0;
+    let mut child = loop {
+        match cmd.spawn() {
+            Ok(c) => break c,
+            Err(e) if e.kind() == io::ErrorKind::ExecutableFileBusy && tries < 40 => {
+                tries += 1;
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(_) => {
+                return err(Code::VerifyFailed, "cannot_run");
+            }
+        }
+    };
     let (tx, rx) = mpsc::channel::<Vec<u8>>();
     for stream in [
         child

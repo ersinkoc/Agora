@@ -40,6 +40,7 @@ fn failed(say: &Say, e: &InstallError) -> ExitCode {
         Code::NotOffered => key!("cli-agent-install-err-not-offered"),
         Code::ToolMissing => key!("cli-agent-install-err-tool-missing"),
         Code::IoFailed => key!("cli-agent-install-err-io-failed"),
+        Code::Conflict => key!("cli-agent-install-err-conflict"),
     };
     say.err(
         id,
