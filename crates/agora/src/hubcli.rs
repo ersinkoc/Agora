@@ -1808,7 +1808,18 @@ fn hold_link_within(dir: &Path, wait: std::time::Duration) -> std::io::Result<He
     // Resolved once: the guard and every write name the same folder, also when `link` is a link that is pointed elsewhere meanwhile.
     let dir = std::fs::canonicalize(dir)?;
     let guard = link_guard(&dir, wait)?;
+    close_link_folder(&dir);
     Ok(HeldLink { dir, _guard: guard })
+}
+
+/// Closes the resolved link folder to every other user (issue #877) without giving its owner anything (a folder kept read-only stays
+/// so): today's files are written owner-only, but an older version wrote `url`, `node-id`, `ca.pem` and `cert.pem` under the umask,
+/// where a Mac's `staff` group or a `D:\` ACL could read them. Every read (the node's start, `agora status`), save and enrollment
+/// does it, also a read without the guard, so the next one closes what an older version left. A folder that cannot be changed
+/// (another user's, a link, one shared on purpose) is used as it is, as before (no English on the person's terminal; a doctor line
+/// for it is a possible follow-up).
+fn close_link_folder(dir: &Path) {
+    let _ = agora_platform::close_to_others(dir);
 }
 
 /// How long the link folder's guard is waited for: the longest a holder that is alive and working holds it (Codex review of F1030). An
@@ -2214,6 +2225,32 @@ mod store_tests {
 
     /// Codex re-review of F1031: a link folder that is there but cannot be resolved or entered is an error, not "no link" (the node would
     /// start unlinked). Here: a path through a file, a link to a missing folder, and a folder this user may not enter.
+    /// Issue #877: an older version wrote `url`, `node-id`, `ca.pem` and `cert.pem` under the umask in an open folder. A read of
+    /// the link (the node's start) and a save both close it to other users, which on Unix closes every file below it.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_folder_an_older_version_left_open_is_closed_by_the_next_read_or_save() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |d: &Path| std::fs::metadata(d).unwrap().permissions().mode() & 0o777;
+        let open = |name: &str| {
+            let dir = tmp(name);
+            store_into(&dir, LINK_GUARD_WAIT, NEW, &agora_platform::write_private).unwrap();
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+            dir
+        };
+        let read = open("old-open-read");
+        let got = load_from(&read, LINK_GUARD_WAIT, PathBuf::from("socket"), &|p| {
+            std::fs::read_to_string(p)
+        });
+        assert!(matches!(got, Ok(Some(_))));
+        assert_eq!(mode(&read), 0o700);
+        let saved = open("old-open-save");
+        drop(hold_link_within(&saved, std::time::Duration::ZERO).unwrap());
+        assert_eq!(mode(&saved), 0o700);
+        let _ = std::fs::remove_dir_all(read);
+        let _ = std::fs::remove_dir_all(saved);
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_folder_that_cannot_be_resolved_is_an_error_not_no_link() {
@@ -2375,6 +2412,7 @@ fn load_from(
     if _guard.is_some() {
         agora_node::link_renewal::recover(&dir, &agora_node::link_renewal::Real);
     }
+    close_link_folder(&dir);
     link_files(&dir, socket, read)
 }
 

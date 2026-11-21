@@ -786,6 +786,21 @@ pub(crate) fn owner_only_on_create(options: &mut std::fs::OpenOptions) {
     std::os::unix::fs::OpenOptionsExt::mode(options, 0o600);
 }
 
+/// For [`crate::close_to_others`]: clears the group and other bits, keeps the owner's (and the special) bits as they are. A folder
+/// others may write in (sticky, or other-writable) is shared on purpose: `InvalidInput`, unchanged.
+pub(crate) fn close_to_others(path: &std::path::Path, meta: &std::fs::Metadata) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = meta.permissions().mode() & 0o7777;
+    if meta.is_dir() && mode & (0o1000 | 0o002) != 0 {
+        return Err(io::Error::from(io::ErrorKind::InvalidInput));
+    }
+    let closed = mode & !0o077;
+    if closed == mode {
+        return Ok(());
+    }
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(closed))
+}
+
 /// See [`crate::open_append_private`] (`append`) and [`crate::open_lock_private`] (read and write): the folder is opened as itself (`O_DIRECTORY|O_NOFOLLOW`) and the log is created or opened
 /// relative to that descriptor (`openat` with `O_NOFOLLOW`), so neither can be swapped for a link between a check and the open. A new
 /// log is created exclusively with mode 0600; an existing one must be a regular file with one name, owned by this user, and is made
@@ -1127,6 +1142,72 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&log).expect("read"), "a\nb\n");
         let mode = std::fs::metadata(&log).expect("meta").permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn closing_to_others_takes_group_and_other_away_and_adds_nothing() {
+        use std::os::unix::fs::PermissionsExt;
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let dir = std::env::temp_dir().join(format!("agora-close-{}-{nanos}", std::process::id()));
+        std::os::unix::fs::DirBuilderExt::mode(&mut std::fs::DirBuilder::new(), 0o700)
+            .create(&dir)
+            .expect("a fresh folder, private from its creation");
+        let mode = |p: &std::path::Path| {
+            std::fs::symlink_metadata(p)
+                .expect("meta")
+                .permissions()
+                .mode()
+                & 0o777
+        };
+        let set = |p: &std::path::Path, m: u32| {
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(m)).expect("chmod");
+        };
+        let (open, read_only, file) = (dir.join("open"), dir.join("read-only"), dir.join("file"));
+        std::fs::create_dir(&open).expect("dir");
+        std::fs::create_dir(&read_only).expect("dir");
+        std::fs::write(&file, "x").expect("file");
+        set(&open, 0o755);
+        set(&read_only, 0o555);
+        set(&file, 0o644);
+        for p in [&open, &read_only, &file] {
+            crate::close_to_others(p).expect("close");
+        }
+        assert_eq!(mode(&open), 0o700);
+        assert_eq!(mode(&read_only), 0o500, "the owner is given no write");
+        assert_eq!(mode(&file), 0o600);
+        // A link is refused and what it points at is left as it is.
+        let target = dir.join("target");
+        std::fs::create_dir(&target).expect("dir");
+        set(&target, 0o755);
+        let link = dir.join("link");
+        std::os::unix::fs::symlink(&target, &link).expect("link");
+        assert_eq!(
+            crate::close_to_others(&link).map_err(|e| e.kind()),
+            Err(std::io::ErrorKind::InvalidInput)
+        );
+        assert_eq!(mode(&target), 0o755);
+        // A folder shared on purpose (sticky or other-writable, a shared socket folder) is left as it is.
+        let shared = dir.join("shared");
+        std::fs::create_dir(&shared).expect("dir");
+        for m in [0o1777, 0o777] {
+            set(&shared, m);
+            assert_eq!(
+                crate::close_to_others(&shared).map_err(|e| e.kind()),
+                Err(std::io::ErrorKind::InvalidInput)
+            );
+            assert_eq!(
+                std::fs::metadata(&shared)
+                    .expect("meta")
+                    .permissions()
+                    .mode()
+                    & 0o7777,
+                m
+            );
+        }
+        set(&read_only, 0o700);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

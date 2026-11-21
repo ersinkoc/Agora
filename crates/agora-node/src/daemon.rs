@@ -1303,6 +1303,22 @@ pub fn policy_sandbox_entries(path: &std::path::Path) -> Vec<(&'static str, Stri
 
 /// Reads `key = value` lines (blank lines and `#` comments skipped). A known key with a value that is not `true` or `false`
 /// counts as `false`: a typo must never widen what the node allows. Unknown keys are ignored.
+/// Makes one of the node's own folders (its data, its agents' mesh sockets) exist and closes it to every other user (issue #877): the
+/// event buffer, the session ledger, `hub-link` and the sockets inside are created under the umask, so on a Mac (every account in
+/// group `staff`) or a volume whose default ACL lets other users in (Windows `D:\`) others could read the buffered events and the
+/// ledger. An existing folder is closed too, so what an older version left is closed at the next start. On Unix taking the group and
+/// other bits off the folder closes everything below it; on Windows the owner-only ACL is passed on to what inherits. Nothing is
+/// given to the owner, and a folder reached through a link (a `--data` or `--socket` pointed elsewhere, perhaps at a shared folder),
+/// one shared on purpose (sticky or other-writable) or one that cannot be changed (another user's) is written to the node's log and
+/// used as it is: the node keeps running its agents (nodes are autonomous).
+fn private_node_dir(dir: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    if let Err(e) = agora_platform::close_to_others(dir) {
+        eprintln!("{}: not closed to other users: {e}", dir.display());
+    }
+    Ok(())
+}
+
 pub fn read_policy(path: &std::path::Path) -> Policy {
     let mut p = Policy::default();
     let text = match std::fs::read_to_string(path) {
@@ -1518,7 +1534,7 @@ impl Node {
         max_bytes: u64,
         holder: Option<crate::holder::HolderSetup>,
     ) -> Result<Self, NodeError> {
-        std::fs::create_dir_all(&cfg.data_dir)?;
+        private_node_dir(&cfg.data_dir)?;
         std::fs::create_dir_all(&cfg.worktree_root)?;
         let events = Arc::new(EventSink::open_with_cap(
             &cfg.data_dir.join("events"),
@@ -1534,6 +1550,7 @@ impl Node {
             .socket
             .parent()
             .map_or_else(|| PathBuf::from("m"), |p| p.join("m"));
+        private_node_dir(&mesh_dir)?;
         let mesh = Arc::new(crate::mesh_server::MeshServer::new(
             &mesh_dir,
             agora_mesh::broker::Limits::default(),

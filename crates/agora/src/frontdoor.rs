@@ -267,7 +267,12 @@ fn machine_path(home: &Path) -> PathBuf {
 }
 
 pub(crate) fn load(home: &Path) -> Option<Machine> {
-    Machine::parse(&std::fs::read_to_string(machine_path(home)).ok()?)
+    let path = machine_path(home);
+    let text = std::fs::read_to_string(&path).ok()?;
+    // Issue #877: an older version (or a `D:\` ACL) left it open, and another local user could change what this machine runs. It
+    // is written owner-only today (ADR-0062); one left open is closed the next time it is read. Best effort.
+    let _ = agora_platform::close_to_others(&path);
+    Machine::parse(&text)
 }
 
 /// Saves `m` unless the machine already has settings (a joined machine never overwrites what `agora` set up).
@@ -1885,6 +1890,24 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    /// Issue #877: a `machine.toml` an older version (or an open volume ACL) left readable and writable by others is closed the next
+    /// time it is read.
+    #[cfg(unix)]
+    #[test]
+    fn a_machine_file_left_open_is_closed_when_read() {
+        use std::os::unix::fs::PermissionsExt;
+        let h = tmp("machine-open");
+        save(&h, &Machine::joined(&h)).unwrap();
+        let path = machine_path(&h);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
+        assert!(load(&h).is_some());
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let _ = std::fs::remove_dir_all(h);
     }
 
     #[test]
