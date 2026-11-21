@@ -99,7 +99,7 @@ described before ADR-0090, byte for byte: the ACP bridge sends the new items onl
 
 - Adapters never receive hub credentials or other agents' data; the node mediates everything.
 - Adapters must tolerate unknown fields and methods (ignore, do not crash).
-- A crashing adapter is restarted with backoff; the agent shows `unknown` until it recovers.
+- A crashing adapter is restarted with backoff; the agent shows `unknown` until it recovers, and ends with an error once the node gives up on it.
 - First-party adapters are the reference implementations and conformance test targets.
 
 ## Host implementation (`agora-adapters::host`)
@@ -114,7 +114,10 @@ stream with `Exited`; calls have timeouts. JSON uses the proto3 mapping (lowerCa
 as strings or numbers on input). `agora-fake-agent --adapter` is the reference fake adapter used in tests.
 The supervisor restarts a crashed adapter with the same backoff and budget as a crashed terminal agent (`RestartPolicy`): the
 agent is `unknown` meanwhile, the session is resumed with `resumeSessionId` when the adapter reported a native session id,
-and after the budget is spent the agent stays stopped (`GaveUp`). A user stop cancels a pending restart and ends the adapter process (`session/stop`, then `shutdown`, then kill). Not yet: the
+and after the budget is spent the agent stays stopped (`GaveUp`). #902 (RM-13): each restart is said in the agent's conversation (the node's
+own notice `adapter.restarting`, param `attempt`); giving up records `AgentExited` with the last adapter process's exit code (or the
+signal that ended it, negative), exit code 1 when that is not known or was 0, so a window shows the agent ended with an error and takes
+no more prompts, and the conversation says so (notice `adapter.gave_up`, param `exit_code`, the same value). A user stop cancels a pending restart and ends the adapter process (`session/stop`, then `shutdown`, then kill). Not yet: the
 registry of installed adapters.
 
 ## L2: ACP agents through the bridge (`agora-adapters::acp`)
@@ -211,6 +214,8 @@ The bridge never writes text for people. When something went wrong it gives a st
 | `adapter.agent_exited` | `stage` (`initialize`, `session`, `turn`, `idle`, `start`, `option`), `exit_code` (when it exited with one), `stderr_tail` | The agent's output ended. Every request the node still waits for (`initialize`, `session/start`, `session/set_option`) is answered with a JSON-RPC error whose `data` is `{code, params}` with the stage of that request. A `log` line (`LOG_LEVEL_ERROR`) and a `chat/append` notice carry the agent's stage, including `session` after successful initialization and before the first session opens. If the agent dies before opening a session, the bridge waits up to 2 s for a late request and answers it with the exit reason, using `initialize` or `session` for the corresponding request. Then the bridge exits | error `data` (`HostError::reason` on the node side), notice and `log` |
 | `adapter.agent_refused` | `stage` (`initialize`, `session`); the notice also `rpc_code` and `detail` (the agent's error message, scrubbed and cut like a stderr tail) | The agent answered its own `initialize` or `session/new` (`session/load`) with an error (opencode 2.x: -32603 `ServiceUnavailableError` without `opencode service`) | error `data` of the node's request (`stage` only) and a `chat/append` notice |
 | `adapter.option_refused` | `id` | The id was not one the agent offered, or the agent answered `session/set_mode` / `session/set_model` / `session/set_config_option` with an error | error `data` of `session/set_option` and `session/set_config` |
+| `adapter.restarting` | `attempt` | #902: the adapter ended on its own and the node starts it again (`attempt` of the restart budget); the node's own notice, an adapter does not send it | a `CHAT_KIND_NOTICE` entry |
+| `adapter.gave_up` | `exit_code` | #902: the adapter ended on its own once more after its restart budget was spent (or could not be started again), so the node gave up on it; `exit_code` is the value of the `AgentExited` it recorded. The node's own notice | a `CHAT_KIND_NOTICE` entry |
 | `adapter.queue_dropped` | `count` | Prompts that waited behind a turn will not be sent: `AgentCancelTurn` with `drop_queue`, or the adapter ended (the node's own notice, ADR-0090; an adapter does not send it) | a `CHAT_KIND_NOTICE` entry; the dropped prompts' entries leave the transcript |
 
 For `turn_empty` and `turn_failed` the bridge waits 100 ms for the last lines and adds what the agent wrote to stderr during that turn,

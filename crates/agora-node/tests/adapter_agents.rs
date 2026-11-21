@@ -384,8 +384,30 @@ fn a_crashed_adapter_is_restarted_with_backoff_and_then_given_up_on() {
     until(&mut s, |e| matches!(e, SupervisorEvent::Started { .. }));
     settle(&mut s, &id, AgentState::Idle);
     let _ = s.adapter_prompt(&id, "crash", false);
-    until(&mut s, |e| matches!(e, SupervisorEvent::GaveUp { .. }));
+    let ev = until(&mut s, |e| matches!(e, SupervisorEvent::GaveUp { .. }));
     assert!(!s.list().iter().find(|v| v.id == id).unwrap().running);
+    // #902 (RM-13): giving up ends the agent with the exit code its adapter crashed with (the fake adapter's `crash` exits 3), right
+    // before `GaveUp`, so a window shows it ended with an error instead of keeping it unknown.
+    let n = ev.len();
+    assert!(n >= 2, "{ev:#?}");
+    assert_eq!(
+        ev[n - 2],
+        SupervisorEvent::Exited {
+            agent: id.clone(),
+            status: agora_platform::ExitStatus {
+                code: Some(3),
+                signal: None
+            },
+        },
+        "{ev:#?}"
+    );
+    // Only the end is reported as exited: the earlier crashes were restarts.
+    assert_eq!(
+        ev.iter()
+            .filter(|e| matches!(e, SupervisorEvent::Exited { .. }))
+            .count(),
+        1
+    );
 }
 
 #[test]

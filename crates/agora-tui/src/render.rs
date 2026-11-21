@@ -558,6 +558,9 @@ pub fn notice_text(e: &ChatEntry, t: Text<'_>) -> String {
             ],
         ),
         "adapter.output_dropped" => t(key!("tui-notice-output_dropped"), &[("bytes", p("bytes"))]),
+        // #902: the node's own notices about an adapter that ended on its own.
+        "adapter.restarting" => t(key!("tui-notice-restarting"), &[("attempt", p("attempt"))]),
+        "adapter.gave_up" => t(key!("tui-notice-gave_up"), &[("exit_code", p("exit_code"))]),
         other => t(
             key!("tui-notice-other"),
             &[("code", Arg::Str(plain(other)))],
@@ -1088,6 +1091,16 @@ mod tests {
             said.contains("tui-notice-other[code=future.thing]"),
             "{said}"
         );
+        // #902: the node's own notices about an adapter that ended on its own, with their numbers.
+        let mut restarting = entry(ChatRole::Agent, ChatKind::Notice, "");
+        restarting.code = "adapter.restarting".into();
+        restarting.params.insert("attempt".into(), "2".into());
+        let mut gave_up = entry(ChatRole::Agent, ChatKind::Notice, "");
+        gave_up.code = "adapter.gave_up".into();
+        gave_up.params.insert("exit_code".into(), "3".into());
+        let said = render_chat(&[restarting, gave_up], "a", "", (160, 24), false, &t).join("\n");
+        assert!(said.contains("tui-notice-restarting[attempt=2]"), "{said}");
+        assert!(said.contains("tui-notice-gave_up[exit_code=3]"), "{said}");
         let a = AgentSnapshot {
             modes: vec![agora_protocol::v1::SessionOption {
                 id: "plan".into(),

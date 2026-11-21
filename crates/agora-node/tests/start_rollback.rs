@@ -134,8 +134,9 @@ fn failed_terminal_start_removes_its_unchanged_branch_and_can_retry() {
     let mut supervisor = repo.supervisor(false);
     for _ in 0..2 {
         let error = supervisor.start(&req, Instant::now()).unwrap_err();
+        // RM-19 (#903): the program is not there, and the start says so.
         assert!(
-            matches!(error, agora_node::supervisor::SupervisorError::Spawn(_)),
+            matches!(error, agora_node::supervisor::SupervisorError::ProgramMissing(ref k, _) if k == "fixture"),
             "{error:?}"
         );
         assert!(!req.worktree_root.join(&req.name).exists());
@@ -386,5 +387,87 @@ fn a_rewritten_symbolic_branch_does_not_delete_the_users_main_branch() {
         )
         .trim(),
         "refs/heads/main"
+    );
+}
+
+/// RM-19 (#903): every way a person or an agent starts an agent of a kind whose program this machine cannot find (a new worktree, a
+/// selected folder with or without its own worktree, a terminal agent or an adapter) answers `agent.program_missing` with the kind and
+/// the program, the words `agora agent kinds` and the start window use, not `internal`.
+#[test]
+fn a_start_whose_program_is_missing_says_which_program() {
+    use agora_node::supervisor::SupervisorError;
+    use agora_protocol::{ErrorCode, ParamValue};
+    for adapter in [false, true] {
+        let repo = Repo::new();
+        let req = repo.request();
+        let program = repo
+            .root
+            .join(format!(
+                "missing-agora-fake-agent{}",
+                std::env::consts::EXE_SUFFIX
+            ))
+            .to_string_lossy()
+            .into_owned();
+        let project = git::discover_checkout(&repo.checkout).unwrap().project;
+        let errors = [
+            repo.supervisor(adapter).start(&req, Instant::now()),
+            repo.supervisor(adapter).start_selected(
+                &req,
+                project.clone(),
+                &repo.checkout,
+                true,
+                Instant::now(),
+            ),
+            repo.supervisor(adapter).start_selected(
+                &req,
+                project.clone(),
+                &repo.checkout,
+                false,
+                Instant::now(),
+            ),
+            repo.supervisor(adapter)
+                .start_in_directory(&req, project.clone(), Instant::now()),
+        ];
+        for result in errors {
+            let error = result.unwrap_err();
+            assert_eq!(
+                error,
+                SupervisorError::ProgramMissing("fixture".into(), program.clone()),
+                "adapter={adapter}"
+            );
+            let wire = error.to_protocol();
+            assert_eq!(wire.code, ErrorCode::AgentProgramMissing);
+            assert_eq!(
+                wire.params.get("program"),
+                Some(&ParamValue::Str(program.clone()))
+            );
+            assert_eq!(
+                wire.params.get("kind"),
+                Some(&ParamValue::Str("fixture".into()))
+            );
+        }
+        repo.no_branch();
+    }
+}
+
+/// RM-19 (#903): a start that fails for another reason while the program is there is not called a missing program.
+#[test]
+fn a_failed_start_of_a_program_that_is_there_is_not_called_missing() {
+    let repo = Repo::new();
+    let req = repo.request();
+    // A file that is there but cannot be started (not a program, no execute permission).
+    let file = repo.root.join("not-a-program");
+    fs::write(&file, "not a program\n").unwrap();
+    let manifest = Manifest::parse(&format!(
+        "kind = \"fixture\"\ndisplay_name = \"Fixture\"\nversion = \"1\"\nmin_engine = 1\n[adapter]\ncommand = [{}]\n",
+        serde_json::to_string(&file.to_string_lossy()).unwrap()
+    ))
+    .unwrap();
+    let mut supervisor = repo.supervisor(true);
+    supervisor.register(manifest);
+    let error = supervisor.start(&req, Instant::now()).unwrap_err();
+    assert!(
+        matches!(error, agora_node::supervisor::SupervisorError::Spawn(_)),
+        "{error:?}"
     );
 }

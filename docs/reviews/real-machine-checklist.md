@@ -263,8 +263,10 @@ not built: nothing to check.
 - **Do:** S2. Start `rm-chat`; send `ask`, then `cwd`, then `crash`. Registry: there is no default registry; if one is published, run
   `agora adapter install NAME --registry URL`, `agora adapter list`, `agora adapter remove NAME` (**human, dedicated account** for an
   adapter that needs a login).
-- **See:** the chat answers; `ask` brings an approval that Allow resolves; `cwd` says `$RM/proj`; `crash` shows it "Ended with an error"
-  with its reason; an installed adapter shows its version in `list` and its kind in the start window.
+- **See:** the chat answers; `ask` brings an approval that Allow resolves; `cwd` says `$RM/proj`; `crash` says in the conversation that
+  the agent stopped unexpectedly and is started again (attempt N); after the node gives up (`crash` after each restart, 6 times in all,
+  `agora agent list` says `stopped`) the agent shows "Ended with an error (exit code 3)", the conversation says Agora stopped starting it,
+  and its input box is off (#902), also after a reload; an installed adapter shows its version in `list` and its kind in the start window.
 - **Evidence so far:** none recorded.
 
 ### RM-14 Agents run in the selected folder; worktrees optional
@@ -323,7 +325,9 @@ not built: nothing to check.
 - **Do:** add a manifest whose `launch` names a program that does not exist (`["rm-no-such-program"]`). Open Start an agent; open
   Settings > Agents; run `agora agent start` for that kind; open `agora tui` and its start list.
 - **See:** the kind is shown as "not installed"; Settings > Agents says "This machine cannot find rm-no-such-program in its PATH."; the
-  CLI and the terminal client say why in words, not a code.
+  CLI and the terminal client say why in words, not a code: `agora agent start` prints `Error agent.program_missing: rm-missing did not
+  start: this machine cannot find rm-no-such-program in its PATH. ...` (#903; also for an ACP kind such as `opencode-acp` without
+  `opencode`).
 - **Evidence so far:** none recorded.
 
 ### RM-20 Resume after the node restarts (session ledger)

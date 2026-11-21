@@ -255,6 +255,48 @@ fn errors_are_rendered_from_codes_and_exit_nonzero() {
     assert!(out.trim().ends_with("stopped"), "{out}");
 }
 
+/// RM-19 (#903): `agora agent start` for a kind whose program this machine cannot find says so in words, with the program, for a
+/// terminal kind and for an ACP kind (started through the bridge, which ends at once), as `agora agent kinds` already marks it missing.
+#[test]
+fn a_missing_agent_program_is_said_in_words() {
+    if !supported() {
+        return;
+    }
+    let s = setup("missing-program");
+    std::fs::write(
+        s.home.join("manifests/rm-missing.toml"),
+        "kind = \"rm-missing\"\ndisplay_name = \"Missing\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [\"rm-no-such-program\"]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        s.home.join("manifests/rm-missing-acp.toml"),
+        "kind = \"rm-missing-acp\"\ndisplay_name = \"Missing ACP\"\nversion = \"1\"\nmin_engine = 1\n[structured]\nacp = { argv = [\"rm-no-such-acp-program\", \"acp\"] }\n",
+    )
+    .unwrap();
+    let _node = start_node(&s);
+    let (code, out, _) = cli(&s, &["agent", "kinds"]);
+    assert_eq!(code, 0);
+    assert!(out.contains("rm-missing\tMissing\tmissing"), "{out}");
+    for (kind, program) in [
+        ("rm-missing", "rm-no-such-program"),
+        ("rm-missing-acp", "rm-no-such-acp-program"),
+    ] {
+        let (code, _, err) = cli(
+            &s,
+            &["agent", "start", kind, "--project", "demo", "--worktree"],
+        );
+        assert_eq!(code, 1, "{err}");
+        assert!(err.contains("agent.program_missing"), "{err}");
+        assert!(
+            err.contains(&format!("cannot find {program} in its PATH")),
+            "{err}"
+        );
+        assert!(!err.contains("Something went wrong"), "{err}");
+    }
+    let (_, out, _) = cli(&s, &["agent", "list"]);
+    assert_eq!(out.trim(), "This node has no agents.");
+}
+
 #[test]
 fn without_a_node_the_cli_says_so_and_bad_arguments_print_usage() {
     if !supported() {

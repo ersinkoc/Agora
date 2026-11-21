@@ -324,6 +324,8 @@ pub enum SupervisorError {
     Git(GitError),
     /// Starting the process failed; the text is for logs only.
     Spawn(String),
+    /// RM-19 (#903): the start failed and this machine cannot find the kind's program: `(kind, program)`. Nothing was started.
+    ProgramMissing(String, String),
     /// ADR-0058: the adapter answered with one of the stable reasons the node passes on (`adapter.agent_exited`,
     /// `adapter.agent_refused`, `adapter.option_refused`), with its parameters already checked and bounded.
     Adapter {
@@ -397,6 +399,9 @@ impl SupervisorError {
                 eprintln!("agent start failed: {text:?}");
                 Error::new(ErrorCode::Internal).with("incident_id", "unassigned")
             }
+            Self::ProgramMissing(k, p) => Error::new(ErrorCode::AgentProgramMissing)
+                .with("kind", k.as_str())
+                .with("program", p.as_str()),
             Self::Adapter { code, params } => params
                 .iter()
                 .fold(Error::new(ErrorCode::parse(code)), |e, (k, v)| {
@@ -1700,7 +1705,8 @@ impl Supervisor {
                         self.credential_vars(&req.kind),
                         folder,
                     )
-                });
+                })
+                .map_err(|e| self.program_missing(&req.kind, e));
             let (adapter, session_id, capabilities) = match launched {
                 Ok(l) => l,
                 Err(e) => {
@@ -1950,7 +1956,8 @@ impl Supervisor {
                     self.credential_vars(&req.kind),
                     None,
                 )
-            });
+            })
+            .map_err(|e| self.program_missing(&req.kind, e));
         let (adapter, session_id, capabilities) = match result {
             Ok(started) => started,
             Err(error) => {
@@ -2124,8 +2131,14 @@ impl Supervisor {
                                 state: AgentState::Unknown,
                             });
                         }
+                        // #902: how its process ended, for the end the node reports if it gives up on it now. A crash path only
+                        // (rare), and bounded: the process closed its output as it ended.
+                        let status = e
+                            .adapter
+                            .as_mut()
+                            .and_then(|a| a.exit_status(Duration::from_millis(50)));
                         events.push(SupervisorEvent::AdapterCrashed { agent: id.clone() });
-                        schedule_adapter_restart(id, e, now, &policy, events);
+                        schedule_adapter_restart(id, e, now, &policy, status, events);
                     }
                     other => events.push(SupervisorEvent::Adapter {
                         agent: id.clone(),
@@ -2202,7 +2215,7 @@ impl Supervisor {
                 events.push(SupervisorEvent::Started { agent: id.clone() });
                 events.extend(session_report(&e.agent));
             }
-            Err(_) => schedule_adapter_restart(id, e, now, &policy, events),
+            Err(_) => schedule_adapter_restart(id, e, now, &policy, None, events),
         }
     }
 
@@ -2828,7 +2841,7 @@ impl Supervisor {
                     self.sandbox.level.name(),
                     why.token(),
                 ),
-                None => SupervisorError::Spawn(e.to_string()),
+                None => self.program_missing(kind, SupervisorError::Spawn(e.to_string())),
             }
         })?;
         TerminalHandle::start(pty, self.cfg.terminal)
@@ -3290,6 +3303,28 @@ impl Supervisor {
         self.parents.remove(id);
     }
 
+    /// RM-19 (#903): a start that failed without a stable reason of its own (its process could not be started, or an adapter or the
+    /// ACP bridge ended before it answered) for a kind whose program this machine cannot find is said as that
+    /// (`agent.program_missing`), by the same check that marks the kind "not installed" ([`Self::kinds`]), instead of as an internal
+    /// error. The cause still goes to the node's log.
+    fn program_missing(&self, kind: &str, e: SupervisorError) -> SupervisorError {
+        let SupervisorError::Spawn(text) = &e else {
+            return e;
+        };
+        let Some(program) = self
+            .kinds
+            .get(kind)
+            .and_then(|k| crate::manifests::program(&k.manifest))
+        else {
+            return e;
+        };
+        if crate::doctor::locate_in(&agora_adapters::package::agora_home(), program).is_some() {
+            return e;
+        }
+        eprintln!("agent start failed: {text:?}");
+        SupervisorError::ProgramMissing(kind.to_string(), program.to_string())
+    }
+
     /// Start a stopped (or given-up) agent again in its worktree.
     pub fn resume(
         &mut self,
@@ -3359,7 +3394,8 @@ impl Supervisor {
                 mesh.as_ref(),
                 self.credential_vars(&entry.agent.kind),
                 folder.as_ref(),
-            );
+            )
+            .map_err(|e| self.program_missing(&entry.agent.kind, e));
             let (adapter, session_id, capabilities) = match launched {
                 Ok(l) => l,
                 Err(e) => {
@@ -4284,12 +4320,17 @@ fn own_socket(profile: &mut agora_platform::Sandbox, socket: Option<&Path>) {
     profile.sockets.extend(socket.map(Path::to_path_buf));
 }
 
-/// After an adapter died on its own: wait out the backoff and try again, or give up for good.
+/// After an adapter died on its own: wait out the backoff and try again, or give up for good. `last` is how its process ended, when
+/// the node could read it (`None` for a restart that could not start).
+///
+/// #902 (RM-13): giving up ends the agent: it is reported as exited ([`gave_up_status`]) before [`SupervisorEvent::GaveUp`], as a
+/// terminal agent's last crash is, so a window shows it ended with an error and takes no more prompts instead of keeping it unknown.
 fn schedule_adapter_restart(
     id: &AgentId,
     e: &mut AdapterEntry,
     now: Instant,
     policy: &RestartPolicy,
+    last: Option<ExitStatus>,
     events: &mut Vec<SupervisorEvent>,
 ) {
     if e.restarts < policy.max_restarts {
@@ -4301,7 +4342,24 @@ fn schedule_adapter_restart(
             after,
         });
     } else {
+        events.push(SupervisorEvent::Exited {
+            agent: id.clone(),
+            status: gave_up_status(last),
+        });
         events.push(SupervisorEvent::GaveUp { agent: id.clone() });
+    }
+}
+
+/// #902: the end reported for an adapter the node gave up on: its last process's exit code, or the signal that ended it, as a terminal
+/// agent's end is reported; exit code 1 when that is not known or was 0. An adapter does not end on its own, so this end is a failure and
+/// must never read as a plain finish.
+fn gave_up_status(last: Option<ExitStatus>) -> ExitStatus {
+    match last {
+        Some(s) if s.signal.is_some() || s.code.is_some_and(|c| c != 0) => s,
+        _ => ExitStatus {
+            code: Some(1),
+            signal: None,
+        },
     }
 }
 
@@ -4434,6 +4492,18 @@ fn session_report(agent: &Agent) -> Option<SupervisorEvent> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod adapter_option_tests {
     use super::*;
+
+    /// #902: an adapter the node gave up on always ends as a failure: its own failing code or signal is kept, and a status that is not
+    /// known or says success becomes exit code 1.
+    #[test]
+    fn an_adapter_given_up_on_ends_as_a_failure() {
+        let st = |code, signal| ExitStatus { code, signal };
+        assert_eq!(gave_up_status(Some(st(Some(3), None))), st(Some(3), None));
+        assert_eq!(gave_up_status(Some(st(None, Some(11)))), st(None, Some(11)));
+        assert_eq!(gave_up_status(Some(st(Some(0), None))), st(Some(1), None));
+        assert_eq!(gave_up_status(Some(st(None, None))), st(Some(1), None));
+        assert_eq!(gave_up_status(None), st(Some(1), None));
+    }
 
     /// ADR-0095: `TaskDispatched.agent_skips_permissions` is true for a launch option that skips, the current mode that skips, a boolean
     /// option that skips and is on, or a select whose current choice skips; never for one that is offered but not in use.

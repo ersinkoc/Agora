@@ -785,6 +785,31 @@ impl Adapter {
         }
     }
 
+    /// #902: how the process ended, once its output has: its exit code, or on Unix the signal that ended it. Waits at most `wait` for
+    /// a process that closed its output a moment before it exits; `None` when it has not ended by then or its status cannot be read.
+    /// Reading it changes nothing for the end of this value (a later drop kills and collects as before; both are harmless then).
+    pub fn exit_status(&mut self, wait: Duration) -> Option<agora_platform::ExitStatus> {
+        let end = std::time::Instant::now() + wait;
+        loop {
+            let read = match &mut self.proc {
+                Proc::Child(c) => c.try_wait().map(|s| {
+                    s.map(|s| agora_platform::ExitStatus {
+                        code: s.code(),
+                        signal: agora_platform::exit_signal(&s),
+                    })
+                }),
+                Proc::Held { control, .. } => control.exit_status(),
+            };
+            match read {
+                Ok(Some(status)) => return Some(status),
+                Ok(None) if std::time::Instant::now() < end => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                _ => return None,
+            }
+        }
+    }
+
     /// ADR-0093: whether the process is the holder's.
     pub fn is_held(&self) -> bool {
         matches!(self.proc, Proc::Held { .. })

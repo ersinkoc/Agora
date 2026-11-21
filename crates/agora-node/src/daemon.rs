@@ -274,6 +274,20 @@ fn config_option(o: &agora_adapters::host::ConfigOption) -> v1::SessionConfigOpt
     }
 }
 
+/// How a process's end is reported (`AgentExited.exit_code`): its exit code, or on Unix the signal that ended it as a negative number;
+/// -1 when neither is known.
+fn exit_code(status: &agora_platform::ExitStatus) -> i32 {
+    status
+        .code
+        .or_else(|| status.signal.map(|s| -s))
+        .unwrap_or(-1)
+}
+
+/// A chat agent (an adapter's, ADR-0038), not one in a terminal.
+fn is_chat(views: &[AgentView], agent: &AgentId) -> bool {
+    views.iter().any(|v| v.id == *agent && !v.terminal)
+}
+
 fn state_word(s: AgentState) -> &'static str {
     match s {
         AgentState::Working => "working",
@@ -678,10 +692,7 @@ impl EventSink {
                 SupervisorEvent::Exited { agent, status } => {
                     self.record(Body::AgentExited(v1::AgentExited {
                         agent_id: agent.as_str().to_string(),
-                        exit_code: status
-                            .code
-                            .or_else(|| status.signal.map(|s| -s))
-                            .unwrap_or(-1),
+                        exit_code: exit_code(status),
                     }));
                     self.record(Body::TerminalClosed(v1::TerminalClosed {
                         terminal_id: crate::control::terminal_id_of(agent),
@@ -2078,6 +2089,28 @@ impl Node {
                                 }
                                 SupervisorEvent::OutputDropped { agent, bytes } => {
                                     chat.output_dropped(agent, *bytes, now);
+                                }
+                                // #902 (RM-13): a chat agent's adapter that ended on its own: its conversation says that it is started
+                                // again, or that the node gave up on it (reported as exited only then; a stop says `Stopped`).
+                                SupervisorEvent::Restarting { agent, attempt, .. }
+                                    if is_chat(&views, agent) =>
+                                {
+                                    chat.restart_notice(
+                                        agent,
+                                        "adapter.restarting",
+                                        &[("attempt", attempt.to_string())],
+                                        now,
+                                    );
+                                }
+                                SupervisorEvent::Exited { agent, status }
+                                    if is_chat(&views, agent) =>
+                                {
+                                    chat.restart_notice(
+                                        agent,
+                                        "adapter.gave_up",
+                                        &[("exit_code", exit_code(status).to_string())],
+                                        now,
+                                    );
                                 }
                                 SupervisorEvent::Stopped { agent }
                                 | SupervisorEvent::AdapterCrashed { agent } => {
