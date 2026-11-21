@@ -469,6 +469,13 @@ impl EventSink {
         }
     }
 
+    /// ADR-0079/0093: an agent the holder kept running, taken up by this node at its start. The node's `NodeOnline` told the hub that
+    /// everything it ran before is gone, so the agent is said up again after it (started, its state, its session if known, its terminal
+    /// if it has one), as an announcement says it. Re-stated: the ledger already holds the agent and took it back (`Ledger::reclaim`).
+    pub fn agent_taken_up(&self, view: &AgentView, session: Option<&String>) {
+        self.agent_up(view, session, false);
+    }
+
     /// An agent in `view` is up: started, its state, its session if known, and its terminal if it has one. `learn` false: an
     /// announcement re-stating it from a copy of the supervisor's list (see [`restate`](Self::restate)).
     fn agent_up(&self, view: &AgentView, session: Option<&String>, learn: bool) {
@@ -1604,27 +1611,8 @@ impl Node {
             });
         }
 
-        // ADR-0079: agents the holder kept running while no node was there are this node's again, before anything is called
-        // interrupted. A holder that cannot be had changes nothing: every agent runs in the node.
-        if let Some(setup) = holder {
-            let hub = Arc::new(crate::holder::HolderHub::new(setup));
-            take_up_held(&hub, &mut sup, &ledger, cfg);
-            sup.set_holder(hub);
-        }
-        events.node_online(&cfg.node_id);
-        for p in &projects {
-            events.checkout_discovered(&cfg.node_id, &p.id, &p.root);
-        }
-        // ADR-0060: what was running when the node last stopped, offered again (Resume, or Start again in the same folder).
-        for e in ledger.interrupted() {
-            events.agent_interrupted(&e, !e.session_id.is_empty() && sup.resumable(&e.kind));
-        }
-        let known_checkouts: Vec<(String, PathBuf)> = projects
-            .iter()
-            .map(|p| (p.id.clone(), p.root.clone()))
-            .collect();
-
-        // Every agent that launches joins the mesh and, if its manifest has `[mcp]`, is handed its own endpoint.
+        // Every agent that launches joins the mesh and, if its manifest has `[mcp]`, is handed its own endpoint. Set before the holder's
+        // agents are taken up: each joins the mesh again at the same path through this hook, so its running bridge reconnects (#906).
         {
             let for_abort = Arc::clone(&mesh);
             let mesh = Arc::clone(&mesh);
@@ -1648,6 +1636,37 @@ impl Node {
             }));
             sup.set_abort_hook(Box::new(move |id| for_abort.unregister(id)));
         }
+
+        // ADR-0079: agents the holder kept running while no node was there are this node's again, before anything is called
+        // interrupted. A holder that cannot be had changes nothing: every agent runs in the node.
+        let mut taken_up = Vec::new();
+        if let Some(setup) = holder {
+            let hub = Arc::new(crate::holder::HolderHub::new(setup));
+            taken_up = take_up_held(&hub, &mut sup, &ledger, cfg);
+            sup.set_holder(hub);
+        }
+        events.node_online(&cfg.node_id);
+        for p in &projects {
+            events.checkout_discovered(&cfg.node_id, &p.id, &p.root);
+        }
+        // `NodeOnline` tells the hub that whatever this node ran before is gone; the agents taken up from the holder are not, so each is
+        // said up again after it, as an announcement does (#907).
+        if !taken_up.is_empty() {
+            let views = sup.list();
+            for (id, session) in &taken_up {
+                if let Some(v) = views.iter().find(|v| v.id == *id && v.running) {
+                    events.agent_taken_up(v, session.as_ref());
+                }
+            }
+        }
+        // ADR-0060: what was running when the node last stopped, offered again (Resume, or Start again in the same folder).
+        for e in ledger.interrupted() {
+            events.agent_interrupted(&e, !e.session_id.is_empty() && sup.resumable(&e.kind));
+        }
+        let known_checkouts: Vec<(String, PathBuf)> = projects
+            .iter()
+            .map(|p| (p.id.clone(), p.root.clone()))
+            .collect();
 
         // Only devices the owner listed in `<data>/trusted-devices` (`agora node trust`) can answer an approval; with
         // none listed every request waits and expires as denied.
@@ -2460,16 +2479,18 @@ fn ledger_state(word: &str) -> Option<agora_core::AgentState> {
 /// not take, so a running agent left like that would block on a full terminal for good. That is an agent that ended while no node was
 /// there (released; its entry stays interrupted, offered for resume), one the ledger does not know or names another holder, one whose
 /// folder or project is gone, and one that could not be taken up. When one cannot be ended the holder is not used for new agents.
+/// Returns the agents taken up, each with the session id the ledger knew, for the events that say them up again.
 fn take_up_held(
     hub: &crate::holder::HolderHub,
     sup: &mut Supervisor,
     ledger: &crate::ledger::Ledger,
     cfg: &NodeConfig,
-) {
+) -> Vec<(AgentId, Option<String>)> {
     use crate::holder_link::AgentState as Held;
     let Some((session, held, pipes)) = hub.attach_existing() else {
-        return;
+        return Vec::new();
     };
+    let mut taken_up = Vec::new();
     let mut ended = Vec::new();
     for h in held {
         let id = h.info.info.agent.clone();
@@ -2537,6 +2558,8 @@ fn take_up_held(
             );
         }
         ledger.reclaim(&id, (session.pid, session.start), now_ms());
+        let known = (!entry.session_id.is_empty()).then(|| entry.session_id.clone());
+        taken_up.push((AgentId::new(id), known));
     }
     let mut ended_pipes = Vec::new();
     for p in pipes {
@@ -2606,10 +2629,13 @@ fn take_up_held(
             );
         }
         ledger.reclaim(&id, (session.pid, session.start), now_ms());
+        let known = (!entry.session_id.is_empty()).then(|| entry.session_id.clone());
+        taken_up.push((AgentId::new(id), known));
     }
     if !crate::holder::HolderHub::end_unadopted_all(&session, ended, ended_pipes) {
         hub.retire_session();
     }
+    taken_up
 }
 
 /// ADR-0060: writes the process of every agent whose pid is new to `recorded` into the ledger, and remembers it only once the ledger

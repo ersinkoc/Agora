@@ -393,3 +393,70 @@ fn stopping_a_held_adapter_ends_its_process_and_the_holder() {
         wait_for("the holder to end with its last agent", || !alive(h));
     }
 }
+
+/// One MCP conversation on an agent's mesh socket: `initialize`, then `workspace_status`; the tool's answer, or `None` when nothing
+/// serves the socket.
+fn mesh_status(socket: &Path) -> Option<serde_json::Value> {
+    use std::io::{BufRead, Write};
+    let stream = agora_platform::local_connect(socket).ok()?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .ok()?;
+    let mut out = stream.try_clone().ok()?;
+    let mut lines = std::io::BufReader::new(stream).lines();
+    let mut ask = |msg: serde_json::Value| -> Option<serde_json::Value> {
+        writeln!(out, "{msg}").ok()?;
+        out.flush().ok()?;
+        if msg.get("id").is_none() {
+            return Some(serde_json::Value::Null);
+        }
+        serde_json::from_str(&lines.next()?.ok()?).ok()
+    };
+    ask(
+        serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26"}}),
+    )?;
+    ask(serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"}))?;
+    ask(
+        serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"workspace_status","arguments":{}}}),
+    )
+}
+
+/// #906 and #907 (RM-47): a structured agent the holder kept across a node restart has its mesh socket served again at the same path,
+/// and the hub, which the new node's `NodeOnline` told that everything it ran is gone, shows it running (not finished), so the window
+/// lets the person send it a prompt; the prompt is answered.
+#[test]
+fn a_kept_structured_agent_is_on_the_mesh_again_and_shown_running_after_its_node_restarts() {
+    let _serial = serial();
+    let rig = Rig::new("kept");
+    let node = rig.node();
+    let id = started(&rig, &node);
+    let pid = pid_of(&node, &id);
+    let socket = rig.root.join("m").join(format!("{id}.sock"));
+    let a = mesh_status(&socket).expect("the mesh socket before the restart");
+    assert!(a["result"].is_object(), "{a}");
+    // A node's process that ends closes its agents' mesh endpoints with it; this test process stands for the node and lives on.
+    node.mesh.unregister(&AgentId::new(id.clone()));
+    drop(node);
+    assert!(alive(pid), "the adapter ended with its node");
+    assert!(
+        mesh_status(&socket).is_none(),
+        "the old endpoint still answers"
+    );
+
+    let node = rig.node();
+    assert!(held(&node, &id), "the agent was not taken up again");
+    assert_eq!(pid_of(&node, &id), pid);
+    let a = mesh_status(&socket).expect("the kept agent's mesh socket is not served");
+    assert!(a["result"].is_object() && a.get("error").is_none(), "{a}");
+
+    let mut view = agora_hub::projection::View::default();
+    for ev in node.events.events_after(0) {
+        view.apply(&ev);
+    }
+    let agent = &view.agents[&agora_hub::projection::qualified("hold-node", &id)];
+    assert!(agent.running, "the hub shows the kept agent finished");
+    assert_eq!(agent.state, v1::AgentState::Idle);
+    assert!(agent.interrupted.is_none());
+    prompt(&node, &id, "hello again");
+    wait_for("the answer", || said(&node, &id, "hello again"));
+}

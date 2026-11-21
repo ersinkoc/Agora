@@ -117,8 +117,14 @@ next frame's.
 - **When the next node starts:** it attaches to the running holder before it calls anything interrupted. For each running agent whose
   ledger entry names this holder (pid and start time, written by the node's tick, `Entry::holder_pid`/`holder_started`) it restores the
   agent, builds its terminal from the master, feeds it what the holder buffered, nudges its size (two resizes) so full-screen programs
-  redraw, registers its mesh endpoint again at the same path, and clears the interruption (`Ledger::reclaim`). An agent that ended while
-  no node was attached is released and stays interrupted (offered for resume); its status and output are not replayed.
+  redraw, registers its mesh endpoint again at the same path, and clears the interruption (`Ledger::reclaim`). The mesh endpoint is made
+  through the launch hook, so the hook is set before the agents are taken up (#906: it was set after, and a kept agent's socket was never
+  served again, so its open `agora mesh stdio` bridge got `mesh.unavailable` for good). After the node's `NodeOnline` (which tells the hub
+  that everything the node ran before is gone) and its `CheckoutDiscovered`, each agent taken up is said up again as a resync
+  announcement says it: `AgentStarted`, `AgentStateChanged` (the state the ledger knew), `AgentSessionReported` when the ledger has a
+  session, and `TerminalOpened` (`EventSink::agent_taken_up`, re-stated, so the ledger does not learn it again). Without them the hub, the
+  window and the terminal client showed the kept agent finished (#907). An agent that ended while no node was attached is released and
+  stays interrupted (offered for resume); its status and output are not replayed.
   **Nothing is left attached and unread:** `Attach` made the holder stop reading each terminal and forget its buffer, and the node drops
   a master it does not take, so a running agent left like that would block on a full terminal for good. Every held agent the node does
   not take up (the ledger does not know it or names another holder, its folder or project is gone, or taking it up failed) is ended
@@ -237,6 +243,9 @@ wants to write that cannot fit one frame fails that write on the node's side, be
   (pid and start time) and is interrupted, it restores the agent (`restore`), reads the adapter's session id and capabilities the old node wrote to the ledger
   (`Entry::adapter_session`, `adapter_capabilities`; the node cannot ask the adapter again), starts a new adapter host over the holder's pipes (**no
   `initialize` and no `session/start`: the adapter still has its session**), makes the mesh endpoint again at the same path, and clears the interruption.
+  It is said up again to the hub after `NodeOnline` as a terminal agent is (above), without `TerminalOpened`. What it last reported of its modes, models,
+  settings and commands is not said again (the adapter is not asked again) until it reports them, and its earlier conversation is not shown (the chat
+  history is in memory, ADR-0089).
   An agent the node does not take up (unknown to the ledger, another holder, ended, its folder gone, no session recorded) is ended through the holder.
 - **Rebuilding what waited on the person (decision 3):** the `seen` lines go through `pending_approvals`, which keeps an `approval/request` unless a later
   `state/update` shows the agent went on (a state other than `blocked`); the `fresh` lines are read as if they had just arrived. A kept request becomes an

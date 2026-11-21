@@ -105,7 +105,9 @@ a peer that does not look at it sees an ordinary close. Order is `Hello` (role m
 a `SnapshotRequired` not followed by such an event changes nothing, and it does not carry over to the next connection. The
 hub logs a resync (`node resync: <node> skipped <from>..=<to>`) and writes an audit row (`who` = `hub`, action
 `node.resynced`, the node, outcome `<from>..=<to>`). `NodeOnline` in the hub's view ends that node's running agents and drops
-its waiting approvals and its terminals; a resync announcement then re-adds what still runs.
+its waiting approvals and its terminals; a resync announcement then re-adds what still runs. A node that takes up agents its terminal
+holder kept (ADR-0079, ADR-0093) re-adds each right after its start `NodeOnline` the same way (`AgentStarted`, `AgentStateChanged`, the
+session it knew, `TerminalOpened` for a terminal agent; `docs/specs/holder-link.md`).
 
 SSH stdio transport (ADR-0011): `agora node stdio` copies the node's local-socket frames to stdin/stdout, so a hub (or
 a person) can reach a node with `ssh host agora node stdio` and no open port. Frames are exactly those of the local

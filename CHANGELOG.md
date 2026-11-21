@@ -4,6 +4,8 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+- After `agora down` and `agora`, an agent the terminal holder kept is shown running again in the window and the terminal client, with its terminal, instead of "Finished" (#907).
+- After a node restart, an agent the terminal holder kept is on the mesh again: its mesh tools answer, and an `agora mesh stdio` bridge that was open reconnects (#906).
 - In the terminal client, `b` opens the board of the selected agent's project (Backlog, Doing, Done), and Enter on a Backlog task gives it to one of the project's running agents after a confirmation you answer with `g`.
 
 ## 0.3.33
