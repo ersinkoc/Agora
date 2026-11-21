@@ -1232,6 +1232,10 @@ impl ViewWait {
                 self.banner = say.text(key!("tui-view-asked"), &[]);
                 return Wake::Redraw;
             }
+            // ADR-0090: an agent's config options changed (the picker's "does not ask" mark may have).
+            if session.take_configs_changed() {
+                return Wake::Redraw;
+            }
             if Instant::now() >= self.idle_until {
                 return Wake::Gone;
             }
@@ -3416,6 +3420,11 @@ trait Asker {
         self.discard();
         read_answer(&mut Parser::default(), self.rx(), lines, wait)
     }
+    /// Goes on waiting up to `wait` for the answer to the question [`Asker::answer`] put on the screen, which is still there as it
+    /// was: nothing is drawn or set aside.
+    fn answer_more(&mut self, lines: &[String], wait: Duration) -> Option<u8> {
+        read_answer(&mut Parser::default(), self.rx(), lines, wait)
+    }
 }
 
 /// The text of a question as lines.
@@ -3450,6 +3459,10 @@ impl Asker for Plain<'_> {
     fn answer(&mut self, lines: &[String], wait: Duration) -> Option<u8> {
         self.show(lines);
         self.discard();
+        read_answer(&mut self.1, self.0, lines, wait)
+    }
+
+    fn answer_more(&mut self, lines: &[String], wait: Duration) -> Option<u8> {
         read_answer(&mut self.1, self.0, lines, wait)
     }
 
@@ -3542,6 +3555,10 @@ impl Asker for Over<'_> {
     fn answer(&mut self, lines: &[String], wait: Duration) -> Option<u8> {
         self.show(lines);
         self.discard();
+        self.read(lines, wait, one_answer)
+    }
+
+    fn answer_more(&mut self, lines: &[String], wait: Duration) -> Option<u8> {
         self.read(lines, wait, one_answer)
     }
 }
@@ -4115,9 +4132,38 @@ fn give_task(
             else {
                 return board::cannot_take_text(&s, &agent_id, &ask.c.give_lacking, &text);
             };
-            let configs = session.configs().clone();
-            let lines = board::confirm_lines(&s, a, &configs, &task.title, &b.project, &text);
-            if !confirm_give(ask, &lines, Duration::from_secs(120)) {
+            let lines =
+                board::confirm_lines(&s, a, session.configs(), &task.title, &b.project, &text);
+            // The hub keeps being read while it waits: a config report that changes the agent's options redraws it.
+            let mut kept: Option<Snapshot> = None;
+            let mut stale = false;
+            let mut now = || {
+                match session.next(Duration::ZERO) {
+                    Update::Snapshot(new) => kept = Some(*new),
+                    Update::Changed => stale = true,
+                    Update::Closed => return Refresh::Gone,
+                    Update::Quiet => {}
+                }
+                if session.take_configs_changed() {
+                    Refresh::Lines(board::confirm_lines(
+                        &s,
+                        a,
+                        session.configs(),
+                        &task.title,
+                        &b.project,
+                        &text,
+                    ))
+                } else {
+                    Refresh::Same
+                }
+            };
+            let given = confirm_give(ask, lines, Duration::from_secs(120), &mut now);
+            if let Some(new) = kept {
+                ask.c.give_lacking.settle(&new);
+                ask.c.snapshot = Some(new);
+            }
+            ask.c.stale |= stale;
+            if !given {
                 continue 'pick;
             }
         }
@@ -4187,14 +4233,60 @@ fn give_task(
 /// The answer to "Give to an agent"'s confirmation: true only for a `g` pressed after it is on the screen ([`Asker::answer`]: keys typed
 /// before it are set aside, a paste or several keys at once never answer). `n`, Esc, q, ⌫ or no answer in `wait` go back; any other
 /// key (Enter repeated by a held key, the key that chose the agent) asks again.
-fn confirm_give(ask: &mut dyn Asker, lines: &[String], wait: Duration) -> bool {
+///
+/// While it waits, `now` says whether the confirmation reads differently now (the agent's config options changed, so it may act
+/// without asking where it did not, or the other way round: [`Refresh::Lines`]) or the link to the hub is gone. Changed lines are
+/// drawn again and only a `g` pressed after them gives the task: a `g` pressed while the old ones were shown, even in the same moment
+/// the change was read, does not.
+fn confirm_give(
+    ask: &mut dyn Asker,
+    lines: Vec<String>,
+    wait: Duration,
+    now: &mut dyn FnMut() -> Refresh,
+) -> bool {
+    let end = Instant::now() + wait;
+    let mut lines = lines;
+    let mut fresh = true;
     loop {
-        match ask.answer(lines, wait) {
+        let left = end.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return false;
+        }
+        let slice = left.min(CONFIRM_SLICE);
+        let got = if std::mem::take(&mut fresh) {
+            ask.answer(&lines, slice)
+        } else {
+            ask.answer_more(&lines, slice)
+        };
+        match now() {
+            Refresh::Gone => return false,
+            Refresh::Lines(new) if new != lines => {
+                lines = new;
+                fresh = true;
+                continue;
+            }
+            Refresh::Lines(_) | Refresh::Same => {}
+        }
+        match got {
             Some(b'g') => return true,
-            Some(b'n' | b'q' | 0x1b | 0x7f) | None => return false,
-            Some(_) => {}
+            Some(b'n' | b'q' | 0x1b | 0x7f) => return false,
+            // Any other key (Enter repeated by a held key, the key that chose the agent) asks again.
+            Some(_) => fresh = true,
+            None => {}
         }
     }
+}
+
+/// How often the confirmation looks for a change while it waits.
+const CONFIRM_SLICE: Duration = Duration::from_millis(200);
+
+/// What changed while the confirmation waited ([`confirm_give`]).
+enum Refresh {
+    Same,
+    /// The confirmation as it reads now.
+    Lines(Vec<String>),
+    /// The link to the hub is gone.
+    Gone,
 }
 
 /// ADR-0073 "Clean up old machines": the machines not seen for a day, each with when it was last seen, in a box that asks once:
@@ -4802,13 +4894,15 @@ mod confirm_give_tests {
         tx: mpsc::Sender<u8>,
         draws: Vec<(&'static [u8], &'static [u8])>,
         drawn: usize,
+        shown: Vec<Vec<String>>,
     }
 
     impl Asker for Draws {
         fn rx(&self) -> &mpsc::Receiver<u8> {
             &self.rx
         }
-        fn show(&mut self, _: &[String]) {
+        fn show(&mut self, lines: &[String]) {
+            self.shown.push(lines.to_vec());
             if let Some((before, _)) = self.draws.get(self.drawn) {
                 before.iter().for_each(|k| self.tx.send(*k).unwrap());
             }
@@ -4823,16 +4917,85 @@ mod confirm_give_tests {
         fn frame(&mut self, _: &[u8]) {}
     }
 
-    fn confirm(draws: Vec<(&'static [u8], &'static [u8])>) -> (bool, usize) {
+    fn asker(draws: Vec<(&'static [u8], &'static [u8])>) -> Draws {
         let (tx, rx) = mpsc::channel();
-        let mut ask = Draws {
+        Draws {
             rx,
             tx,
             draws,
             drawn: 0,
-        };
-        let given = confirm_give(&mut ask, &["q".into()], Duration::from_millis(20));
+            shown: Vec::new(),
+        }
+    }
+
+    fn confirm(draws: Vec<(&'static [u8], &'static [u8])>) -> (bool, usize) {
+        let mut ask = asker(draws);
+        let given = confirm_give(
+            &mut ask,
+            vec!["q".into()],
+            Duration::from_millis(20),
+            &mut || Refresh::Same,
+        );
         (given, ask.drawn)
+    }
+
+    /// A config report that makes the agent act without asking while the confirmation is open: it is drawn again with the warning, and
+    /// a `g` pressed before that, even in the same moment the report was read, does not give the task; a fresh `g` after it does.
+    #[test]
+    fn a_change_while_the_confirmation_is_open_is_shown_before_g_can_give() {
+        let warned = || vec!["q".to_string(), "warning".to_string()];
+        // The g came in the same moment as the report: not given; the redrawn confirmation is not answered: back.
+        let mut ask = asker(vec![(b"", b"g"), (b"", b"")]);
+        let mut polls = 0;
+        let given = confirm_give(
+            &mut ask,
+            vec!["q".into()],
+            Duration::from_millis(500),
+            &mut || {
+                polls += 1;
+                if polls == 1 {
+                    Refresh::Lines(warned())
+                } else {
+                    Refresh::Same
+                }
+            },
+        );
+        assert!(!given);
+        assert_eq!(ask.shown[1], warned(), "{:?}", ask.shown);
+        // A g pressed after the redrawn one gives it.
+        let mut ask = asker(vec![(b"", b""), (b"", b"g")]);
+        let mut polls = 0;
+        let given = confirm_give(
+            &mut ask,
+            vec!["q".into()],
+            Duration::from_secs(5),
+            &mut || {
+                polls += 1;
+                if polls == 1 {
+                    Refresh::Lines(warned())
+                } else {
+                    Refresh::Same
+                }
+            },
+        );
+        assert!(given);
+        assert_eq!(ask.shown.last(), Some(&warned()));
+        // The same lines again draw nothing new; a lost link ends it.
+        let mut ask = asker(vec![(b"", b"g")]);
+        assert!(confirm_give(
+            &mut ask,
+            vec!["q".into()],
+            Duration::from_secs(5),
+            &mut || Refresh::Lines(vec!["q".into()]),
+        ));
+        assert_eq!(ask.shown.len(), 1);
+        let mut ask = asker(vec![(b"", b"g")]);
+        assert!(!confirm_give(
+            &mut ask,
+            vec!["q".into()],
+            Duration::from_secs(5),
+            &mut || Refresh::Gone,
+        ));
     }
 
     /// ADR-0095 (the web needed this too): Enter, which chose the agent, held or repeated, never gives the task; nor does a `g` typed

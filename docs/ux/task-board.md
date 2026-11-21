@@ -41,7 +41,8 @@ Per project. Backed by the mesh task model (`docs/specs/mesh-tools.md`).
   Backlog task is "Give to an agent": the same agents as the web window's picker (running agents of the project on a connected machine,
   no plain shells, not closed or interrupted, helpers under their parent), each with kind, machine, state and "does not ask" when it acts
   without asking (a launch option, a current mode that skips approvals, or a config option on a value that skips them: the hub replays
-  each running agent's last config options right after its snapshot, and the terminal keeps them). Enter on an agent opens the confirmation, which names task, agent, kind, machine and project and says
+  each running agent's last config options right after its snapshot, and the terminal keeps them; a change redraws the picker, and redraws an open
+  confirmation, where only a `g` pressed after the redrawn one gives the task). Enter on an agent opens the confirmation, which names task, agent, kind, machine and project and says
   when the agent acts without asking; only a `g` pressed after it is on the screen gives the task (Enter, the key that chose the agent,
   never does, keys typed before it are set aside, and a paste or several keys at once never answer it). The footer then says "Sent to
   ...", "... it waits until the agent's current turn ends", or the refusal in words; the agent is checked again when sending. A machine

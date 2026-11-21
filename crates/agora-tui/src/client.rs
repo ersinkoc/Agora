@@ -156,6 +156,8 @@ pub struct Session {
 pub struct Seen {
     pub configs: Configs,
     snapshot_pos: Option<u64>,
+    /// A report changed an agent's options since [`Session::take_configs_changed`] (a view that shows them draws again).
+    pub configs_changed: bool,
 }
 
 /// Config options by hub-wide agent id.
@@ -175,11 +177,17 @@ impl Seen {
         if let Some(e) = &p.event {
             if let Some(agora_protocol::v1::event::Body::AgentSessionConfig(c)) = &e.body {
                 let id = format!("{}/{}", e.producer_id, c.agent_id);
+                let before = self.configs.get(&id).cloned();
                 if c.options.is_empty() {
                     self.configs.remove(&id);
                 } else if self.configs.len() < MAX_CONFIG_AGENTS || self.configs.contains_key(&id) {
-                    self.configs
-                        .insert(id, c.options.iter().take(MAX_OPTIONS).cloned().collect());
+                    self.configs.insert(
+                        id.clone(),
+                        c.options.iter().take(MAX_OPTIONS).cloned().collect(),
+                    );
+                }
+                if self.configs.get(&id) != before.as_ref() {
+                    self.configs_changed = true;
                 }
             }
         }
@@ -452,6 +460,11 @@ impl Session {
     /// ADR-0090: each agent's config options as its machine last reported them in this session, by hub-wide agent id.
     pub fn configs(&self) -> &Configs {
         &self.seen.configs
+    }
+
+    /// Whether a report changed an agent's config options since the last call (then cleared).
+    pub fn take_configs_changed(&mut self) -> bool {
+        std::mem::take(&mut self.seen.configs_changed)
     }
 
     /// Whether a request for the user's answer arrived since the last call (then cleared).
@@ -1720,7 +1733,25 @@ mod set_aside_tests {
             &mut seen,
         );
         assert!(!changed);
-        assert_eq!(seen.configs.get("mac/agent-1"), Some(&vec![skip]));
+        assert_eq!(seen.configs.get("mac/agent-1"), Some(&vec![skip.clone()]));
+        assert!(
+            std::mem::take(&mut seen.configs_changed),
+            "a view draws again"
+        );
+        // The same report again changes nothing a view shows.
+        set_aside(
+            frame(
+                STREAM_EVENTS,
+                kinds::POSITIONED_EVENT,
+                config(7, vec![skip]),
+            ),
+            &mut changed,
+            &mut asked,
+            &mut kept,
+            &mut queue,
+            &mut seen,
+        );
+        assert!(!seen.configs_changed);
         // A later report replaces it; an empty one forgets it.
         set_aside(
             frame(
@@ -1734,7 +1765,7 @@ mod set_aside_tests {
             &mut queue,
             &mut seen,
         );
-        assert!(seen.configs.is_empty() && !changed);
+        assert!(seen.configs.is_empty() && !changed && seen.configs_changed);
         // An event after the snapshot is newer than it: it stays marked, so the caller asks again after taking the snapshot.
         set_aside(
             frame(
