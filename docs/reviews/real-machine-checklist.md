@@ -213,8 +213,10 @@ then calls such as `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"nam
 ### RM-07 Pairing: find a hub on the network, approve on the hub
 - **OS:** Linux, macOS, Windows (either side). IPv4 broadcast only.
 - **Do:** on the hub machine S1 with `y`, then `agora pair open` (in a terminal). On a second machine (or a second `AGORA_HOME` on the
-  same one) `agora join`, then `agora join HUB-ADDRESS`. Answer on the hub's terminal once, and once in the window (A new machine wants
-  to join > Approve > "Do the two numbers match exactly?" > Yes, the numbers match). Wait a second or two before each answer: a key
+  same one) `agora join`, then `agora join HUB-ADDRESS`. Answer on the hub's terminal once. The hub closes itself after one approval,
+  so for the second answer run `agora pair open` again and join from another disposable machine (its own `AGORA_HOME` and `--id`), then
+  answer that one in the window (A new machine wants to join > Approve > "Do the two numbers match exactly?" > Yes, the numbers match).
+  Wait a second or two before each answer: a key
   typed right after a question is refused ("That key came too soon after the question to be an answer. …"). Join by a name the
   hub's certificate holds (the hub's own suggestion, `agora join <hub name>:PORT`); an IP address that the certificate does not
   name fails after the approval (#901).
