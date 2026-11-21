@@ -156,29 +156,37 @@ export function App() {
     if (!d) throw { code: 'protocol.capability_missing' };
     return { path: d.path ?? '', parent: d.parent ?? '', entries: (d.entries ?? []).map((e) => ({ name: e.name ?? '', isGit: !!e.isGit })), truncated: !!d.truncated };
   }, [api, device]);
-  const startAgent = useCallback(async (node: string, info: DirectoryInfo, kind: string, separateWorktree: boolean, acceptIdentityChange: boolean, launch: { ids: string[]; confirmed: string[]; settings: [string, string][] }): Promise<string | undefined> => {
+  // The ordinary start command (ADR-0052, ADR-0059, ADR-0066), signed by this device: the new agent's id on its machine, or the refusal's
+  // locale key. "Start an agent" and "Start a new agent for this task" (ADR-0095 step 3) both start through this and nothing else.
+  const launchAgent = useCallback(async (node: string, info: DirectoryInfo, kind: string, separateWorktree: boolean, acceptIdentityChange: boolean, launch: { ids: string[]; confirmed: string[]; settings: [string, string][] }): Promise<{ agentId: string } | { failure: string }> => {
     try {
-      if (!api || !device) return 'approval-not-trusted';
+      if (!api || !device) return { failure: 'approval-not-trusted' };
       // ADR-0059: the device signs the chosen launch options too, so the hub can neither add nor remove one.
       const authorization = await signDirectory(device, node, 'launch', info.path, kind, info.projectId, separateWorktree, acceptIdentityChange, launch.ids, launch.confirmed, launch.settings);
       const ok = await api.command(node, { agentLaunch: { path: info.path, projectId: info.projectId, kind, separateWorktree, acceptIdentityChange, authorization, launchOptions: launch.ids, confirmedLaunchOptions: launch.confirmed, ...launchSettingsField(launch.settings) } });
-      const id = ok.agentLaunch?.agentId;
-      setStarting(false);
+      const id = ok.agentLaunch?.agentId ?? '';
       if (id) rememberStarted(`${node}/${id}`, launch.settings);
-      if (id && startedAsTerminal.current && kind === 'shell') requestTool({ panel: 'terminal', agent: `${node}/${id}`, wait: true });
-      else if (id) window.location.hash = `#/agent/${encodeURIComponent(`${node}/${id}`)}`;
-      return undefined;
+      return { agentId: id };
     } catch (e) {
       const code = (e as { code?: string }).code;
-      if (code === 'agent.option_forbidden') return optionForbidden(e);
-      if (code === 'agent.option_unconfirmed') return 'start-option-unconfirmed';
-      if (code === 'agent.option_invalid') return 'start-option-invalid';
-      if (code === 'agent.setting_unknown' || code === 'agent.setting_invalid') return 'start-setting-refused';
-      if (code === 'protocol.capability_missing' && launch.settings.length > 0) return 'start-settings-unsupported';
-      if (code === 'protocol.capability_missing' && launch.ids.length > 0) return 'start-options-unsupported';
-      return code === 'agent.mode_unsupported' ? 'start-directory-agent-unsupported' : code === 'approval.signature_invalid' ? 'approval-not-trusted' : code === 'protocol.capability_missing' ? 'start-directory-unsupported' : code === 'agent.kind_unknown' ? 'start-kind-unknown' : code === 'node.resource_limit' ? 'start-limit' : code === 'auth.forbidden' ? 'start-directory-forbidden' : 'start-failed';
+      if (code === 'agent.option_forbidden') return { failure: optionForbidden(e) };
+      if (code === 'agent.option_unconfirmed') return { failure: 'start-option-unconfirmed' };
+      if (code === 'agent.option_invalid') return { failure: 'start-option-invalid' };
+      if (code === 'agent.setting_unknown' || code === 'agent.setting_invalid') return { failure: 'start-setting-refused' };
+      if (code === 'protocol.capability_missing' && launch.settings.length > 0) return { failure: 'start-settings-unsupported' };
+      if (code === 'protocol.capability_missing' && launch.ids.length > 0) return { failure: 'start-options-unsupported' };
+      return { failure: code === 'agent.mode_unsupported' ? 'start-directory-agent-unsupported' : code === 'approval.signature_invalid' ? 'approval-not-trusted' : code === 'protocol.capability_missing' ? 'start-directory-unsupported' : code === 'agent.kind_unknown' ? 'start-kind-unknown' : code === 'node.resource_limit' ? 'start-limit' : code === 'auth.forbidden' ? 'start-directory-forbidden' : 'start-failed' };
     }
   }, [api, device]);
+  const startAgent = useCallback(async (node: string, info: DirectoryInfo, kind: string, separateWorktree: boolean, acceptIdentityChange: boolean, launch: { ids: string[]; confirmed: string[]; settings: [string, string][] }): Promise<string | undefined> => {
+    const r = await launchAgent(node, info, kind, separateWorktree, acceptIdentityChange, launch);
+    if ('failure' in r) return r.failure;
+    const id = r.agentId;
+    setStarting(false);
+    if (id && startedAsTerminal.current && kind === 'shell') requestTool({ panel: 'terminal', agent: `${node}/${id}`, wait: true });
+    else if (id) window.location.hash = `#/agent/${encodeURIComponent(`${node}/${id}`)}`;
+    return undefined;
+  }, [launchAgent]);
   useEffect(() => {
     const store = indexedDbStore();
     if (store) void thisDevice(store).then(setDevice).catch(() => setDevice(undefined));
@@ -345,12 +353,20 @@ export function App() {
   const quotaMachines = useMemo(() => new Map((live ? machines(live) : hub ? [] : demoMachines).map((m) => [m.id, m.name] as const)), [hub, live]);
   const agents = useMemo(() => (hub ? (live ? tiles(live) : []) : demoAgents), [hub, live]);
   // ADR-0095 step 2: "Give to an agent" on a Backlog task, from its board card or the command palette (a hub window only).
+  // Step 3: "Start a new agent for this task" opens the ordinary start window with the same choices and the same signed command.
   const boardList = useMemo(() => (live ? boards(live) : []), [live]);
   const giveApi = useMemo<GiveApi | undefined>(() => {
     if (!hub || !api || !live) return undefined;
     const list = machines(live);
-    return { agents, online: new Set(list.filter((m) => m.online).map((m) => m.id)), machines: list.map((m) => ({ id: m.id, name: m.name })), send: (agent, task) => giveTask(api.command, agent, task) };
-  }, [hub, api, live, agents]);
+    return {
+      agents, online: new Set(list.filter((m) => m.online).map((m) => m.id)), machines: list.map((m) => ({ id: m.id, name: m.name })), send: (agent, task) => giveTask(api.command, agent, task),
+      start: {
+        projects: projectChoices(live), machines: list, trust: device ? { id: device.id, key: device.publicKeyHex } : undefined,
+        askApproval: device ? { can: (node) => canBeApprovedOn(live.trusted, node, mine, device.id), ask: askApproval } : undefined,
+        loadKinds, inspect: inspectDirectory, list: listDirectory, launch: launchAgent,
+      },
+    };
+  }, [hub, api, live, agents, device, mine, askApproval, loadKinds, inspectDirectory, listDirectory, launchAgent]);
   const giving = useGiveAsk();
   // What was heard of machines that do not take tasks belongs to one connection, and to a machine until it goes offline (an update restarts it).
   useEffect(() => { if (link === 'live') forgetGiveSupport(); }, [link]);
@@ -524,7 +540,7 @@ export function App() {
     // Close agent: opens that agent and asks for the confirm there; nothing is closed from the palette itself.
     ...(hub && api ? agents.filter((a) => !a.closed && a.machineId).map((a) => ({ id: `close-${a.id}`, label: t('palette-close-agent', { name: a.name }), run: () => { open(a.id); closeAsk.ask(a.id, 'pane'); } })) : []),
     // A Backlog task is a searchable object: choosing it opens "Give to an agent" for it (the dialog asks before anything is sent).
-    ...(giveApi ? givableTasks(boardList, giveApi.agents, giveApi.online).map((task) => ({ id: `give-${task.key}`, label: t('palette-give-task', { title: plain(task.title, 80) || t('board-task-untitled') }), run: () => giveAsk.ask(task) })) : []),
+    ...(giveApi ? givableTasks(boardList, giveApi.agents, giveApi.online, undefined, !!giveApi.start).map((task) => ({ id: `give-${task.key}`, label: t('palette-give-task', { title: plain(task.title, 80) || t('board-task-untitled') }), run: () => giveAsk.ask(task) })) : []),
   ], [api, agents, go, toWindow, hub, next, open, openStart, language, editTheme, palette, phone, live, info.passwordSet, pairing.ui, lockNow, showPairing, giveApi, boardList, giveSupport]);
 
   useEffect(() => {

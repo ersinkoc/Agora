@@ -145,16 +145,18 @@ export async function resendGive(command: Command, node: string, body: CommandBo
   else resolve?.(result);
 }
 
-/** The board's tasks a person can give to an agent now (Backlog, with at least one agent to take it), for the command palette. */
+/** The board's tasks a person can give to an agent now, for the command palette: Backlog, with at least one agent to take it, or any
+ *  Backlog task when the window can start a new agent for it (`canStart`, ADR-0095 step 3). */
 export function givableTasks(
   boards: readonly { projectId: string; project: string; tasks: readonly { id: string; taskId?: string; title: string; status: string }[] }[],
   agents: readonly AgentTileModel[],
   online?: ReadonlySet<string>,
   max = 300,
+  canStart = false,
 ): GiveTask[] {
   const out: GiveTask[] = [];
   for (const b of boards) {
-    if (giveCandidates(agents, b.projectId, online).length === 0) continue;
+    if (!b.projectId || (!canStart && giveCandidates(agents, b.projectId, online).length === 0)) continue;
     for (const t of b.tasks) {
       if (t.status !== 'open') continue;
       out.push(giveTaskOf(b, t));

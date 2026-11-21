@@ -295,6 +295,14 @@ give-refused-offline = That machine is not connected right now.
 give-refused-forbidden = You are not allowed to give tasks to this agent.
 give-target-gone = That agent stopped, was closed or left this project. Nothing was sent; choose another agent.
 give-grant-declined = The machine's permission was not given, so nothing was sent. You can try again.
+# ADR-0095 step 3: starting a new agent for a board task, then giving it the task.
+give-start-new = Start a new agent for this task
+give-none-start = No agent of { $project } is running on a connected machine that can take tasks. Start one for this task.
+give-start-waiting = The agent has started. The next step shows as soon as it appears here.
+give-start-unnamed = The agent started, but its machine did not say which one it is. Choose it from the list once it appears.
+give-queued-new = Sent to { $agent }. It waits until the agent is ready and its current turn ends.
+start-for-task = For the task “{ $title }” of { $project }
+start-for-task-other-project = This folder is not part of { $project }. The task can only be given to an agent working in its project: choose one of its folders.
 messages-title = Recent messages
 message-cross = between machines
 console-agents = Agents
