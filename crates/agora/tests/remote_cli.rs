@@ -962,7 +962,8 @@ fn a_real_hub_follows_remote_proxy_and_remote_off() {
             .unwrap()
             .with_root_certificates(roots)
             .with_no_client_auth();
-            // The hub has written its address a moment before it answers TLS: ask again until it does.
+            // The hub has written its address a moment before it answers TLS: ask again until it does (up to 30 s; a loaded CI machine
+            // took longer than the earlier 4 s).
             let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(cfg));
             let mut tries = 0;
             let mut tls = loop {
@@ -975,7 +976,7 @@ fn a_real_hub_follows_remote_proxy_and_remote_off() {
                 };
                 match attempt.await {
                     Ok(tls) => break tls,
-                    Err(e) if tries >= 40 => panic!("hub did not answer TLS: {e}"),
+                    Err(e) if tries >= 300 => panic!("hub did not answer TLS: {e}"),
                     Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
                 }
             };
