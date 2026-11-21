@@ -1,4 +1,4 @@
-# 0099. A native desktop client in Rust on GPUI replaces the Tauri shell over time
+# 0099. A spike for a native desktop client in Rust on GPUI (stage 0 accepted; replacing the Tauri shell stays proposed)
 Status: Accepted
 Date: 2026-11-22
 Accepted: 2026-11-22, stage 0 only (the maintainer, in the merger chat, answering "Aşama 0'ı kabul et" to the question that described
@@ -96,8 +96,8 @@ Checked on that date (crates.io API, GitHub API, Zed's `Cargo.toml`):
    (`approval_message`, `grant_message`), pairing, and `termio`. Geometry is in cells or abstract units, never ratatui types. The hub
    connection is a module the client drives (the TUI on its loop, the native app on a background thread that posts to GPUI's main
    thread). The TUI and the native app both depend on it, so the same event gives the same state in both, and each only renders it
-   (render is pure). Extraction moves code without changing the TUI's behaviour; its tests move with it. This is a crate-boundary change
-   and is approved by accepting this ADR.
+   (render is pure). Extraction moves code without changing the TUI's behaviour; its tests move with it. This is a crate-boundary change;
+   it is part of stage 1, which stays Proposed: accepting stage 0 does not approve it.
 4. **The native app holds its device key in the operating system's secure storage, out of reach of hub-served code.**
    - macOS Keychain, Windows DPAPI for the current user (Credential Manager), Linux Secret Service (D-Bus); where no Secret Service is
      running, the TUI's owner-only file, which Settings → Devices says plainly. The code lives in `crates/agora-platform/src/<os>.rs`
@@ -128,13 +128,18 @@ Checked on that date (crates.io API, GitHub API, Zed's `Cargo.toml`):
      mark ADR-0048 `Superseded by 0099`; update `docs/architecture.md` §1 and §5. Until then the Tauri shell keeps receiving fixes.
 6. **Staged build order, each stage its own PR:**
    0. **Spike** (throwaway unless it passes; report in `docs/reviews/`): a GPUI window on Linux (Wayland and X11), macOS and Windows that
-      signs in to a real hub with a code and shows one agent terminal from `agora-vt`. Go/no-go numbers, each on all three systems
-      (proposed; the maintainer may change them before the spike starts):
+      signs in to a real hub with a code and shows agent terminals from `agora-vt`. **Measurement fixture** (the same on all three
+      systems, scripted so the Mac and Windows sessions run it unchanged): a disposable hub and node with 20 agents listed (the fake
+      agent), four terminals visible at once, two more terminals open in the background, one of the visible ones flooding at 10 MB/s, and
+      one list item and one button exposed to accessibility. Numbers, each on all three systems (proposed; the maintainer may change them
+      before the spike starts). **Hard gates** (a miss is a no-go for GPUI): echo latency, frame rate, IME, accessibility. **Targets**
+      (a miss is reported with its cost, not an automatic no-go): switching times, start time, memory, idle CPU, binary size, RTL, no-GPU:
       - keystroke to echo on screen, node on the same machine: ≤ 16 ms p95 (ADR-0022), measured to the presented frame;
       - one terminal at 10 MB/s plus 20 other active terminals, and four visible terminals flooding: steady 60 fps, no main-thread
         stall over 50 ms;
       - switching to a terminal: snapshot shown ≤ 150 ms; switching agent or tab ≤ 50 ms;
-      - cold start to first useful paint ≤ 500 ms (the web's cached budget);
+      - start to first useful paint: cold ≤ 1.5 s and warm (second start) ≤ 500 ms, the web's cold and cached budgets in ADR-0022
+        (≤ 500 ms cold is a stretch goal for a native app, reported but not a gate);
       - memory with 20 agents listed and 4 terminals open ≤ 200 MB resident, and below the Tauri app measured the same way on the same
         machine;
       - idle CPU with the window visible and nothing changing ≤ 1 %;
@@ -143,7 +148,8 @@ Checked on that date (crates.io API, GitHub API, Zed's `Cargo.toml`):
       - accessibility: a screen reader on each system announces a list item and a button with its name (AccessKit verified, or no-go);
       - RTL: whether GPUI lays out and shapes bidirectional text; if not, the cost of adding it upstream or in the app is estimated;
       - what happens without a GPU API (a VM or remote desktop): a usable fallback, or a documented limit.
-      A miss on latency, frame rate, IME or accessibility is a no-go for GPUI; the report then compares the strongest alternative.
+      A miss on a hard gate is a no-go for GPUI; the report then compares the strongest alternative. A missed target is reported with
+      what it would cost to meet.
    1. The shared view-model crate (decision 3); the TUI moves onto it with no behaviour change.
    2. Native app: sign-in and pairing, machines, agents list, one terminal; device key in secure storage (decision 4).
    3. Splits, approvals, start an agent.
