@@ -226,7 +226,16 @@ made before `[quota]` existed gives no plan limits; the node prints one line at 
 
 ## Usage files (ADR-0042)
 The node follows the files of a running terminal agent whose kind has `[usage.file]`: a file belongs to the agent when it was touched after
-the agent started and the directory it records (`cwd`) is the agent's worktree (until a line says it, usage lines wait, at most 1000). Limits:
+the agent started and the directory it records (`cwd`) is the agent's worktree (until a line says it, usage lines wait, at most 1000).
+A file whose tokens one agent counted is that agent's: no other agent counts it, and after its owner ended the claim holds against the
+agents that were its peers then (an agent started later may reuse the path). When another live agent reads the same files (same glob)
+in the same folder as written (ADR-0052), the folder cannot tell their sessions apart: then a file's tokens count for an agent only when
+its name holds the agent's own session id (at least 8 characters; Claude Code's `<id>.jsonl`, Codex's `rollout-…-<id>.jsonl`). An
+agent whose id is not known reads such files for the tool's plan windows only and counts no tokens; a file read that way stays so,
+also after the peer has gone, until the agent's id names it (then it is read from its start, unless this agent counted it before:
+nothing is counted twice). Two Codex agents in one folder get no id from
+`[session.file]`, so their tokens are not counted: a session is counted for nobody rather than for two. Not seen as peers: two kinds
+whose different globs match the same files, or one folder spelled two ways. Limits:
 4 files per agent, 1 MiB read per second per agent, lines over 256 KiB skipped, files looked for every 5 seconds. A line that does not
 parse or lacks the numbers adds nothing. Usage is reported as `AgentUsageReported`. Shipped for `claude-code` (`delta`, de-duplicated by
 `message.id`) and `codex` (`total`).

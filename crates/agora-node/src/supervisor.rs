@@ -3598,6 +3598,7 @@ impl Supervisor {
             spec,
             tool: manifest.kind.clone(),
             quota: manifest.quota.clone(),
+            session: e.agent.session.clone(),
         })
     }
 
