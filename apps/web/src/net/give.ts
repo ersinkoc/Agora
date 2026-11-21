@@ -6,6 +6,7 @@ import type { agora } from '../gen/agora.js';
 import { helperTree, type AgentTileModel } from '../model';
 import type { CommandBody } from './live';
 import { refusalKey } from './refusal';
+import { actsFreely } from '../components/sessionChoice';
 
 /** The task a "Give to an agent" is about. `key` is the board's own key (`<project>/<task>`), `taskId` the id the node knows. */
 export interface GiveTask { key: string; projectId: string; taskId: string; project: string; title: string }
@@ -52,10 +53,19 @@ export function useGiveSupport(): number {
  *  the agent that started them (ADR-0057). Plain terminals are not agents and agents of other projects are never offered. */
 export function giveCandidates(agents: readonly AgentTileModel[], projectId: string, online?: ReadonlySet<string>): { agent: AgentTileModel; depth: number }[] {
   if (!projectId) return [];
-  const list = agents.filter((a) => a.projectId === projectId && !a.closed && a.state !== 'finished' && !a.interrupted && !!a.machineId
-    && a.kind !== 'shell' && (!online || online.has(a.machineId)) && offersGive(a.machineId));
-  return helperTree(list);
+  return helperTree(agents.filter((a) => canTake(a, projectId, online)));
 }
+
+/** Whether this agent may be given a task of `projectId` now. By its lifecycle, not its state word: a running agent whose last turn is
+ *  Finished is between turns and takes it; a closed or interrupted one does not. */
+export function canTake(a: AgentTileModel, projectId: string, online?: ReadonlySet<string>): boolean {
+  return !!projectId && a.projectId === projectId && !a.closed && !a.interrupted && !!a.machineId && a.kind !== 'shell'
+    && (!online || online.has(a.machineId)) && offersGive(a.machineId);
+}
+
+/** Whether the agent acts without asking now: started so (a launch option, ADR-0059), or its current mode or setting is one that skips
+ *  approvals (ADR-0058, ADR-0090 Amendment A). */
+export const actsFreelyNow = (a: AgentTileModel): boolean => !!a.skipsPermissions || actsFreely(a.session);
 
 /** The command for giving `task` to `agent`: to the agent's own machine, with `byUser` left empty (the hub writes who asked). */
 export function giveRequest(agent: AgentTileModel, task: GiveTask): { node: string; body: CommandBody } {
@@ -115,6 +125,14 @@ export async function giveTask(command: Command, agent: AgentTileModel, task: Gi
 
 /** Whether a command is a dispatch (the grant dialog sends it again through `resendGive`, so its answer is shown). */
 export const isGive = (body: CommandBody): boolean => !!body.taskDispatch;
+
+/** The owner did not allow it (the grant dialog was dismissed): the waiting dialog says nothing was sent and offers another try. */
+export function declineGive(node: string, body: CommandBody): void {
+  const key = waitKey(node, body);
+  const resolve = waiting.get(key);
+  waiting.delete(key);
+  resolve?.({ ok: false, key: 'give-grant-declined' });
+}
 
 /** Sends a dispatch again after the owner allowed it, and hands the answer to the dialog that waits for it (if it is still open). */
 export async function resendGive(command: Command, node: string, body: CommandBody): Promise<void> {

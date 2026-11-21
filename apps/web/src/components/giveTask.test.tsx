@@ -4,8 +4,8 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setLanguage, t } from '../i18n';
-import type { AgentTileModel } from '../model';
-import { forgetGiveSupport, forgetOffline, givableTasks, giveAsk, giveCandidates, giveRefusal, giveRequest, giveTask, noteRefusal, offersGive, resendGive, type GiveResult, type GiveTask } from '../net/give';
+import type { AgentTileModel, SessionModel } from '../model';
+import { declineGive, forgetGiveSupport, forgetOffline, givableTasks, giveAsk, giveCandidates, giveRefusal, giveRequest, giveTask, noteRefusal, offersGive, resendGive, type GiveResult, type GiveTask } from '../net/give';
 import { grantFor } from '../net/grant';
 import { REFUSAL_KEYS, refusalKey } from '../net/refusal';
 import type { BoardModel, BoardTaskModel } from '../net/view';
@@ -295,5 +295,77 @@ describe('review fixes', () => {
     click(button('Give the task', dialog()));
     await flush();
     expect(dialog().textContent).toContain('Sent to claude · abc.');
+  });
+});
+
+describe('cross-review fixes', () => {
+  const freeSession = (mode: string): SessionModel => ({ modes: [{ id: 'ask', name: 'Ask', description: '', skipsPermissions: false }, { id: 'yolo', name: 'Yolo', description: '', skipsPermissions: true }], models: [], currentMode: mode, currentModel: '', contextTokens: 0, contextWindow: 0 });
+
+  it('offers a running agent whose last turn is Finished (between turns), and not a closed or interrupted one', () => {
+    const between = agent('n1/a-1', { state: 'finished', closed: false });
+    expect(giveCandidates([between], 'p').map((x) => x.agent.id)).toEqual(['n1/a-1']);
+    expect(giveCandidates([agent('n1/a-1', { state: 'finished', closed: true })], 'p')).toEqual([]);
+    expect(giveCandidates([agent('n1/a-1', { interrupted: { resumable: true } })], 'p')).toEqual([]);
+    render(<GiveContext.Provider value={api([between])}><BoardColumns board={board([task('1', 'open')])} /></GiveContext.Provider>);
+    expect([...host.querySelectorAll('button')].some((b) => b.textContent === 'Give to an agent')).toBe(true);
+    expect(givableTasks([board([task('1', 'open')])], [between]).map((x) => x.key)).toEqual(['p/1']);
+  });
+
+  it('shows "acts freely" for a mode that skips approvals, and follows a change while the confirmation is open', () => {
+    const at = (mode: string) => api([agent('n1/a-1', { session: freeSession(mode) })]);
+    render(<GiveDialog task={theTask} give={at('yolo')} onClose={() => {}} />);
+    expect(dialog().querySelector('[data-agent-id]')!.textContent).toContain('Acts freely');
+    click(dialog().querySelector('[data-agent-id] button'));
+    expect(dialog().querySelector('[role=note]')?.textContent).toContain('acts without asking');
+    // The agent is switched back to a mode that asks: the warning goes. Switched to skipping again: it comes back.
+    render(<GiveDialog task={theTask} give={at('ask')} onClose={() => {}} />);
+    expect(dialog().querySelector('[data-give-step="confirm"]')).not.toBeNull();
+    expect(dialog().querySelector('[role=note]')).toBeNull();
+    render(<GiveDialog task={theTask} give={at('yolo')} onClose={() => {}} />);
+    expect(dialog().querySelector('[role=note]')?.textContent).toContain('acts without asking');
+  });
+
+  for (const [what, change] of [
+    ['stopped', { closed: true, state: 'finished' }],
+    ['moved to another project', { projectId: 'q' }],
+    ['interrupted', { interrupted: { resumable: false } }],
+  ] as [string, Partial<AgentTileModel>][]) {
+    it(`does not send to an agent that ${what} while the confirmation was open, and says so`, () => {
+      const send = vi.fn(async () => ({ ok: true, queued: false }) as GiveResult);
+      render(<GiveDialog task={theTask} give={api([agent('n1/a-1')], send)} onClose={() => {}} />);
+      click(dialog().querySelector('[data-agent-id] button'));
+      render(<GiveDialog task={theTask} give={api([agent('n1/a-1', change)], send)} onClose={() => {}} />);
+      expect(button('Give the task', dialog())).toBeUndefined();
+      expect(dialog().textContent).toContain('Nothing was sent; choose another agent.');
+      expect(send).not.toHaveBeenCalled();
+    });
+  }
+  it('does not send to an agent that is gone from the list', () => {
+    const send = vi.fn(async () => ({ ok: true, queued: false }) as GiveResult);
+    render(<GiveDialog task={theTask} give={api([agent('n1/a-1')], send)} onClose={() => {}} />);
+    click(dialog().querySelector('[data-agent-id] button'));
+    render(<GiveDialog task={theTask} give={api([], send)} onClose={() => {}} />);
+    expect(dialog().textContent).toContain('Nothing was sent');
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it('settles a dispatch waiting for permission when the grant dialog is dismissed, with another try offered', async () => {
+    const command = vi.fn(async () => { throw { code: 'approval.grant_required', params: {} }; });
+    render(<GiveDialog task={theTask} give={api([agent('n1/a-1')], (a, task) => giveTask(command, a, task))} onClose={() => {}} />);
+    click(dialog().querySelector('[data-agent-id] button'));
+    click(button('Give the task', dialog()));
+    await flush();
+    expect(button('Choose another agent', dialog())).toBeUndefined();
+    // "Not now" / Escape in the grant dialog (App -> declineGive).
+    await act(async () => { declineGive('n1', giveRequest(agent('n1/a-1'), theTask).body); await Promise.resolve(); });
+    expect(dialog().textContent).toContain('nothing was sent. You can try again.');
+    expect(button('Choose another agent', dialog())).toBeDefined();
+    // The waiter was released: a later decline or resend for the same command reaches no dialog and changes nothing.
+    declineGive('n1', giveRequest(agent('n1/a-1'), theTask).body);
+    expect(command).toHaveBeenCalledTimes(1);
+    for (const lang of ['en', 'tr']) {
+      const src = readFileSync(`../../locales/${lang}/web.ftl`, 'utf8');
+      for (const k of ['give-grant-declined', 'give-target-gone']) expect(src, `${lang} ${k}`).toMatch(new RegExp(`^${k} = `, 'm'));
+    }
   });
 });

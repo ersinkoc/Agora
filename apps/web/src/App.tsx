@@ -39,7 +39,7 @@ import { agentTarget } from './components/sessionChoice';
 import { ChatActionsContext, type ChatActions, type PromptResult } from './components/chatActions';
 import { CloseAgentContext } from './components/CloseAgent';
 import { closeAsk } from './net/closeAgent';
-import { forgetGiveSupport, forgetOffline, givableTasks, giveAsk, giveTask, isGive, resendGive, useGiveAsk, useGiveSupport } from './net/give';
+import { declineGive, forgetGiveSupport, forgetOffline, givableTasks, giveAsk, giveTask, isGive, resendGive, useGiveAsk, useGiveSupport } from './net/give';
 import { GiveContext, GiveDialog, type GiveApi } from './components/GiveTask';
 import { plain } from './components/boardColumns';
 import { failure, type ActionResult } from './net/refusal';
@@ -590,7 +590,7 @@ export function App() {
           onStart={hub && api && live ? (node) => openStart(node) : (!hub && import.meta.env.DEV ? (node) => openStart(node) : undefined)}
           onNewTerminal={hub && api && live ? (node) => openStart(node, true) : (!hub && import.meta.env.DEV ? (node) => openStart(node, true) : undefined)} onCommand={() => setPalette(true)} onForget={hub && api ? forgetAgent : undefined} onResume={hub && api ? resumeAgent : (!hub && import.meta.env.DEV ? async () => undefined : undefined)} onLock={hub ? lockNow : undefined}
           start={startWindow} pairing={pairing.ui} />}
-      {grantAsk && <GrantDialog machine={live?.nodes.get(grantAsk.node)?.hostname || grantAsk.node} agent={grantAgentName} kind={grantAsk.ask.kind} busy={grantAsk.busy} failed={grantAsk.failed} onAllow={() => void allowGrant()} onClose={() => setGrantAsk(undefined)} />}
+      {grantAsk && <GrantDialog machine={live?.nodes.get(grantAsk.node)?.hostname || grantAsk.node} agent={grantAgentName} kind={grantAsk.ask.kind} busy={grantAsk.busy} failed={grantAsk.failed} onAllow={() => void allowGrant()} onClose={() => { if (isGive(grantAsk.body)) declineGive(grantAsk.node, grantAsk.body); setGrantAsk(undefined); }} />}
       {/* Away from Home (an agent, a page) a request to join still reaches the owner: the first card floats over the window. */}
       {pairing.ui && pairing.ui.cards[0] && !showsHome && <PairRequest key={pairing.ui.cards[0].id} request={pairing.ui.cards[0]} offline={pairing.ui.offline} onAnswer={(a, r) => pairing.ui!.onAnswer(pairing.ui!.cards[0]!, a, r)} />}
       <AttentionLayer items={attention} stale={hub ? link !== 'live' : false} phone={phone} onResolve={resolve} onReview={reviewAttention} />

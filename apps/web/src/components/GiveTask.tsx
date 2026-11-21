@@ -2,7 +2,7 @@ import * as Dialog from '@radix-ui/react-dialog';
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
 import { t } from '../i18n';
 import { sharesName, type AgentTileModel } from '../model';
-import { giveAsk, giveCandidates, useGiveSupport, type GiveResult, type GiveTask } from '../net/give';
+import { actsFreelyNow, canTake, giveAsk, giveCandidates, useGiveSupport, type GiveResult, type GiveTask } from '../net/give';
 import { OWNER_MAX, TITLE_MAX, plain } from './boardColumns';
 import { NoAskBadge } from './NoAskBadge';
 import { StateBadge } from './StateBadge';
@@ -34,6 +34,11 @@ const machineName = (a: AgentTileModel, machines: readonly { id: string; name: s
   return sharesName(m, machines) ? t('machine-name-id', { name: m.name, id: m.id }) : m.name;
 };
 
+/** "Acts freely" for an agent that acts without asking now: started so, or switched to a mode or setting that skips approvals. */
+function FreeBadge({ agent }: { agent: AgentTileModel }) {
+  return <NoAskBadge agent={{ skipsPermissions: actsFreelyNow(agent) }} session={!agent.skipsPermissions} compact nested />;
+}
+
 /** One agent in the picker: name, kind, machine, its state, and whether it acts without asking. One button, at least 44 px high. */
 export function GiveRow({ agent, depth, machines, onPick }: { agent: AgentTileModel; depth: number; machines: readonly { id: string; name: string }[]; onPick: () => void }) {
   const indent = depth === 0 ? '' : depth === 1 ? 'ms-5' : 'ms-10';
@@ -43,7 +48,7 @@ export function GiveRow({ agent, depth, machines, onPick }: { agent: AgentTileMo
         <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
           <strong className="min-w-0 break-words text-sm">{plain(agent.name, OWNER_MAX)}</strong>
           <StateBadge state={agent.state} />
-          <NoAskBadge agent={agent} compact nested />
+          <FreeBadge agent={agent} />
         </span>
         <span className="min-w-0 break-words text-xs text-muted">
           {depth > 0 && agent.parentId ? t('give-row-helper', { kind: plain(agent.kind ?? '', OWNER_MAX), machine: plain(machineName(agent, machines), FULL) }) : t('give-row-detail', { kind: plain(agent.kind ?? '', OWNER_MAX), machine: plain(machineName(agent, machines), FULL) })}
@@ -73,9 +78,9 @@ export function GiveConfirm({ task, agent, machines, busy, onSend, onBack }: { t
         {row(t('give-field-machine'), plain(machineName(agent, machines), FULL))}
         {row(t('give-field-project'), plain(task.project, FULL))}
       </dl>
-      {agent.skipsPermissions && (
+      {actsFreelyNow(agent) && (
         <p role="note" className="m-0 flex items-start gap-2 rounded-s border border-needs-you/60 p-3 text-sm text-ink">
-          <NoAskBadge agent={agent} compact nested />
+          <FreeBadge agent={agent} />
           <span>{t('give-confirm-no-ask', { agent: plain(agent.name, FULL) })}</span>
         </p>
       )}
@@ -114,19 +119,31 @@ export function GiveOutcome({ result, agent, onClose, onBack, onSettled }: { res
   );
 }
 
-type Step = { at: 'pick' } | { at: 'confirm'; agent: AgentTileModel; busy?: boolean } | { at: 'result'; agent: AgentTileModel; result: GiveResult };
+// The confirmation keeps the agent's id, not its tile: what it shows (state, "acts freely") and what is checked at send come from the
+// current data, so a change while it is open is shown and an agent that stopped or left the project is not sent to.
+type Step = { at: 'pick' } | { at: 'confirm'; agentId: string; busy?: boolean } | { at: 'result'; agent: AgentTileModel; result: GiveResult };
 
 /** The dialog for one task: pick an agent of the task's project, confirm, send. */
 export function GiveDialog({ task, give, onClose }: { task: GiveTask; give: GiveApi; onClose: () => void }) {
   useGiveSupport();
   const [step, setStep] = useState<Step>({ at: 'pick' });
   const candidates = giveCandidates(give.agents, task.projectId, give.online);
-  const send = async (agent: AgentTileModel) => {
-    setStep({ at: 'confirm', agent, busy: true });
-    const result = await give.send(agent, task);
+  const latest = useRef(give);
+  latest.current = give;
+  const current = (id: string) => latest.current.agents.find((a) => a.id === id);
+  const send = async (agentId: string) => {
+    const agent = current(agentId);
+    // Checked again at the moment of sending: it may have stopped, been closed or interrupted, or moved to another project meanwhile.
+    if (!agent || !canTake(agent, task.projectId, latest.current.online)) {
+      setStep({ at: 'result', agent: agent ?? ({ id: agentId, name: '', machine: '' } as AgentTileModel), result: { ok: false, key: 'give-target-gone' } });
+      return;
+    }
+    setStep({ at: 'confirm', agentId, busy: true });
+    const result = await latest.current.send(agent, task);
     setStep({ at: 'result', agent, result });
   };
-  const title = step.at === 'pick' ? t('give-title') : step.at === 'confirm' ? t('give-confirm-title', { agent: plain(step.agent.name, FULL) }) : t('give-title');
+  const chosen = step.at === 'confirm' ? current(step.agentId) : undefined;
+  const title = step.at === 'confirm' && chosen ? t('give-confirm-title', { agent: plain(chosen.name, FULL) }) : t('give-title');
   // While the command is on its way the dialog stays: its answer (sent, queued, refused) is only shown here.
   const sending = step.at === 'confirm' && !!step.busy;
   const hold = (e: Event) => { if (sending) e.preventDefault(); };
@@ -156,12 +173,14 @@ export function GiveDialog({ task, give, onClose }: { task: GiveTask; give: Give
               : <>
                 <p className="muted m-0 text-sm">{t('give-pick-hint', { project: task.project })}</p>
                 <ul aria-label={t('give-pick-label')} className="m-0 grid list-none gap-2 p-0">
-                  {candidates.map(({ agent, depth }) => <GiveRow key={agent.id} agent={agent} depth={depth} machines={give.machines} onPick={() => setStep({ at: 'confirm', agent })} />)}
+                  {candidates.map(({ agent, depth }) => <GiveRow key={agent.id} agent={agent} depth={depth} machines={give.machines} onPick={() => setStep({ at: 'confirm', agentId: agent.id })} />)}
                 </ul>
               </>}
             <div className="flex justify-end"><Dialog.Close className="button min-h-11">{t('give-cancel')}</Dialog.Close></div>
           </>}
-          {step.at === 'confirm' && <GiveConfirm task={task} agent={step.agent} machines={give.machines} busy={step.busy} onSend={() => void send(step.agent)} onBack={() => setStep({ at: 'pick' })} />}
+          {step.at === 'confirm' && (chosen && (step.busy || canTake(chosen, task.projectId, give.online))
+            ? <GiveConfirm task={task} agent={chosen} machines={give.machines} busy={step.busy} onSend={() => void send(step.agentId)} onBack={() => setStep({ at: 'pick' })} />
+            : <GiveOutcome result={{ ok: false, key: 'give-target-gone' }} agent={chosen ?? ({ id: step.agentId, name: '', machine: '' } as AgentTileModel)} onClose={onClose} onBack={() => setStep({ at: 'pick' })} />)}
           {step.at === 'result' && <GiveOutcome key={step.result.ok ? 'ok' : step.result.key} result={step.result} agent={step.agent} onClose={onClose} onBack={() => setStep({ at: 'pick' })}
             onSettled={(result) => setStep({ at: 'result', agent: step.agent, result })} />}
         </Dialog.Content>
