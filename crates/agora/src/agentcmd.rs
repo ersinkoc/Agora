@@ -3,14 +3,14 @@
 //! the question and the words. The owner approves by typing the agent's name on this terminal: there is no `--yes`, and a
 //! stdin that is not a terminal refuses (`agent.install.not_approved`). No hub, no window, no protocol message.
 
-use std::io::{BufRead, IsTerminal, Write};
+use std::io::{BufRead, IsTerminal, Read, Write};
 use std::path::Path;
 use std::process::ExitCode;
 
 use agora_adapters::agent_install::{
     self as inst, strict_tools, Approval, Change, Code, InstallError, Tools,
 };
-use agora_adapters::agent_packages::{verify_list, AgentList, ListError};
+use agora_adapters::agent_packages::{verify_list, AgentList, ListError, MAX_LIST_BYTES};
 use agora_adapters::registry::RegistryError;
 use agora_i18n::key;
 
@@ -62,10 +62,12 @@ fn root_key(o: &Opts, h: &Path) -> Option<String> {
     if text.len() == 64 && text.chars().all(|c| c.is_ascii_hexdigit()) {
         return Some(text);
     }
-    std::fs::read_to_string(&given)
-        .ok()
-        .map(|t| t.trim().to_string())
-        .filter(|t| !t.is_empty())
+    // A key file is 64 characters and a line ending: never read more than a small bound of it (F31).
+    let mut t = String::new();
+    std::fs::File::open(&given)
+        .and_then(|f| f.take(4096).read_to_string(&mut t))
+        .ok()?;
+    Some(t.trim().to_string()).filter(|t| !t.is_empty())
 }
 
 fn list_error(e: &ListError) -> InstallError {
@@ -102,10 +104,19 @@ fn open_list(o: &Opts, h: &Path) -> Result<AgentList, InstallError> {
             detail: "no_list_or_key".into(),
         });
     };
-    let text = std::fs::read_to_string(file).map_err(|_| InstallError {
+    let unreadable = || InstallError {
         code: Code::IndexInvalid,
         detail: "unreadable".into(),
-    })?;
+    };
+    // Read at most one byte past the cap, so an oversize or endless file is refused as too large, not read into memory (F31).
+    let mut bytes = Vec::new();
+    std::fs::File::open(file)
+        .and_then(|f| f.take(MAX_LIST_BYTES as u64 + 1).read_to_end(&mut bytes))
+        .map_err(|_| unreadable())?;
+    if bytes.len() > MAX_LIST_BYTES {
+        return Err(list_error(&ListError::TooLarge));
+    }
+    let text = String::from_utf8(bytes).map_err(|_| unreadable())?;
     let list = verify_list(&text, &root, now_ms(), inst::last_seen_version(h))
         .map_err(|e| list_error(&e))?;
     // A list this machine accepted is the newest it has seen: an older one is refused from now on.
