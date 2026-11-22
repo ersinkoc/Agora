@@ -27,8 +27,8 @@ export function QuotaProvider({ obs, machines, children }: { obs: readonly Quota
 export const useQuota = (): QuotaValue => useContext(Ctx);
 
 /** "Limit 82 %" on an agent's card or row, only from 80 percent and only for a fresh observation; amber, stronger from 95 percent.
- *  `fit`: "82 %" without the word until the nearest `@container` (an Agents-list row) is 16rem wide; never the sign alone, which would read
- *  as the Acts freely badge (#945). */
+ *  `fit`: "82 %" without the word until the nearest `@container` (an Agents-list row) is 16rem wide; never the sign alone: the percentage
+ *  is what tells it from other signs (#945; an agent that acts without asking is a red bolt, NoAskBadge). */
 export function LimitChip({ agent, compact, fit }: { agent: AgentTileModel; compact?: boolean; fit?: boolean }) {
   const { obs, now } = useQuota();
   const chip = useMemo(() => (obs.length ? chipFor(agent, obs, now) : undefined), [agent, obs, now]);

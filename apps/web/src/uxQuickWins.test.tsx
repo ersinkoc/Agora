@@ -2,6 +2,7 @@ import { execSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
+import type { ReactElement } from 'react';
 import { setLanguage, t } from './i18n';
 import { EXIT_UNKNOWN, endedWithError, sharesName, shownExitCode, type AgentTileModel } from './model';
 import { BUILT_IN, contrast } from './themes/tokens';
@@ -194,33 +195,44 @@ describe('quick win: copy', () => {
   });
 });
 
-describe('quick win: the safety badge is compact and says all of it on demand', () => {
+describe('quick win: the safety badge is one sign and says all of it on demand', () => {
   beforeEach(() => setLanguage('en'));
-  it('is a warning sign with one short word, or the sign alone in a tab; the whole meaning is its name and tooltip', () => {
-    const agent = { skipsPermissions: true };
+  it('is a red bolt and no words; the whole meaning is its name, and it never looks like the quota chip', () => {
     const full = 'Runs without asking: Started so that it acts without asking you first';
-    const sign = renderToStaticMarkup(<NoAskBadge agent={agent} icon nested />);
-    expect(sign).toContain(`aria-label="${full}"`);
-    expect(sign).toContain(`title="${full}"`);
-    expect(sign).not.toContain('Acts freely');
-    expect(sign).not.toContain('truncate');
-    const words = renderToStaticMarkup(<NoAskBadge agent={agent} compact nested />);
-    expect(words).toContain('>Acts freely<');
-    expect(words).not.toContain('>Runs without asking<');
-    expect(words).toContain('flex-none');
-    expect(renderToStaticMarkup(<NoAskBadge agent={{}} icon />)).toBe(''); // negative control: an agent that asks shows nothing
+    for (const html of [renderToStaticMarkup(<NoAskBadge agent={{ skipsPermissions: true }} />), renderToStaticMarkup(<NoAskBadge agent={{ skipsPermissions: true }} nested />)]) {
+      expect(html).toContain(`aria-label="${full}"`);
+      expect(html).toContain('role="img"');
+      expect(html).toContain('text-risk');
+      expect(html).not.toContain('needs-you'); // amber is "needs you" and the quota chip
+      expect(html).toMatch(/<path d="M9 1\.5L3\.5 9H8l-1 5\.5L12\.5 7H8z"/); // the bolt, not the warning sign
+      expect(html.replace(/<[^>]*>/g, '')).toBe(''); // no visible words
+      expect(html).not.toContain('Acts freely');
+    }
+    expect(renderToStaticMarkup(<NoAskBadge agent={{}} />)).toBe(''); // negative control: an agent that asks shows nothing
+  });
+  it('the risk colour is its own role: the fixed red, not the amber of "needs you"', () => {
+    const css = read('src/design/app.css');
+    expect(css).toContain('--color-risk: var(--diff-removed);');
   });
   it('can be focused (so tapped) to show the explanation, except inside another control', () => {
-    const alone = renderToStaticMarkup(<NoAskBadge agent={{ skipsPermissions: true }} />);
-    expect(alone).toContain('tabindex="0"');
-    expect(alone).toContain('data-tip="Runs without asking: ');
-    const inside = renderToStaticMarkup(<NoAskBadge agent={{ skipsPermissions: true }} nested />);
-    expect(inside).not.toContain('tabindex');
+    expect(renderToStaticMarkup(<NoAskBadge agent={{ skipsPermissions: true }} />)).toContain('tabindex="0"');
+    expect(renderToStaticMarkup(<NoAskBadge agent={{ skipsPermissions: true }} nested />)).not.toContain('tabindex');
+  });
+  it('keeps the started, switched and switched-with-approval meanings apart, and names the cause when known', () => {
+    const label = (el: ReactElement) => /aria-label="([^"]*)"/.exec(renderToStaticMarkup(el))?.[1];
+    const started = label(<NoAskBadge agent={{ skipsPermissions: true }} />);
+    const neutral = label(<NoAskBadge agent={{ skipsPermissions: true }} session />);
+    const approved = label(<NoAskBadge agent={{ skipsPermissions: true }} session approved />);
+    expect(new Set([started, neutral, approved]).size).toBe(3);
+    expect(neutral).toBe('Runs without asking: Acts without asking you first, until it ends or is switched back');
+    expect(approved).toContain('with your approval');
+    expect(label(<NoAskBadge agent={{ skipsPermissions: true }} session cause={'Mode: YOLO\u202e'} />)).toBe('Runs without asking: Acts without asking you first, until it ends or is switched back. Because of: Mode: YOLO');
   });
   it('says the same in Turkish', () => {
     setLanguage('tr');
-    expect(renderToStaticMarkup(<NoAskBadge agent={{ skipsPermissions: true }} icon />)).toContain('Onay istemeden çalışır');
-    expect(renderToStaticMarkup(<NoAskBadge agent={{ skipsPermissions: true }} />)).toContain('>Serbest<');
+    const html = renderToStaticMarkup(<NoAskBadge agent={{ skipsPermissions: true }} />);
+    expect(html).toContain('Onay istemeden çalışır');
+    expect(html).not.toContain('Serbest');
     setLanguage('en');
   });
 });

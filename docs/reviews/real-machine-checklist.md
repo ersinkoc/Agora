@@ -306,7 +306,7 @@ not built: nothing to check.
 ### RM-15 Launch options, including "do not ask" modes
 - **OS:** Linux, macOS, Windows.
 - **Do:** S2. Start an agent > `rm-probe` > How it acts > Don't ask > Start; confirm "Start without asking". Read `$RM/probe-*.json`.
-- **See:** the confirmation appears before the start; the agent is marked "Runs without asking" ("Acts freely"); the probe's
+- **See:** the confirmation appears before the start; the agent is marked with the red bolt (no words; its tooltip, on hover, focus or tap, says "Runs without asking: …"); the probe's
   arguments end with `--fake-skip-permissions`; without the option they do not.
 - **Evidence so far:** [Windows 2026-11-21](2026-11-21-real-machine-windows.md): pass.
 
@@ -584,7 +584,7 @@ not built: nothing to check.
   composer no longer says "Waiting for this turn to end." once the agent is Idle, and each waiting prompt is shown above its own answer,
   each answer its own message ("queued one", then "queued two", never "queued onequeued two"; #908); the mode switch opens a card at once (Setting: Approvals,
   Switch to: Turbo, "This covers this agent's session only.", Allow / Deny) and Mode shows "Waiting for your approval" ("Answer the
-  request to switch. Nothing has changed yet.") until Allow; then "Acts freely".
+  request to switch. Nothing has changed yet.") until Allow; then the red bolt, whose tooltip names the mode ("Because of: Mode: Turbo").
 - **Evidence so far:** [Linux 2026-11-21](2026-11-21-real-machine-linux.md): fail (#908: after Stop turn the tool call keeps spinning and the answers are glued). [Windows 2026-11-21](2026-11-21-real-machine-windows.md): fail (#908).
 
 ### RM-45 Plan limits of subscription agents
