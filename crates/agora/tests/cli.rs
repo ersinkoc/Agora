@@ -241,6 +241,18 @@ fn attach_session(s: &Setup, typed: &[u8], until: &str) -> Vec<u8> {
     seen
 }
 
+/// The first `n` bytes of `b` with control bytes escaped, for assertion messages.
+fn shown(b: &[u8], n: usize) -> String {
+    b.iter()
+        .take(n)
+        .map(|&c| match c {
+            0x1b => "\\e".to_string(),
+            0x20..=0x7e => (c as char).to_string(),
+            _ => format!("\\x{c:02x}"),
+        })
+        .collect()
+}
+
 /// ADR-0100 and the review of #953: the node's repaint switches the program's modes on in the user's own terminal when attaching
 /// late, and detaching switches them off again and gives the terminal back its own keyboard flags (the repaint's kitty pop is not
 /// passed on, and only the entry attach pushed is popped).
@@ -262,9 +274,16 @@ fn detaching_gives_the_users_terminal_back_its_own_modes() {
     );
     // A late attach: the repaint carries those modes.
     let late = attach_session(&s, b"", "\x1b[?1003h");
+    // Printed (shown only when the test fails): what the user's terminal got, start and end.
+    println!("start: {}", shown(&late, 300));
+    println!(
+        "end: {}",
+        shown(&late[late.len().saturating_sub(300)..], 300)
+    );
     assert!(
         late.starts_with(b"\x1b[>0u"),
-        "attach pushes its own keyboard entry first"
+        "attach pushes its own keyboard entry first: {}",
+        shown(&late, 300)
     );
     let text = String::from_utf8_lossy(&late);
     assert!(
