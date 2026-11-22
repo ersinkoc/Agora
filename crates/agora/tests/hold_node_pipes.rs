@@ -609,3 +609,125 @@ fn a_node_without_a_holder_keeps_no_earlier_session() {
     let _node = rig.node_without_holder();
     assert!(!file.exists(), "an earlier process's session was kept");
 }
+
+/// #951: a held adapter that crashes is back after exactly one restart (the holder that ended with its only agent, released at the
+/// crash, is replaced, never counted as a failed restart), the restarted one is held again, and a crash loop gives up after the
+/// configured number of restarts with the exit code of the last real crash (the fake adapter's `crash` exits 3).
+#[test]
+fn a_crashed_held_adapter_is_back_after_one_restart_and_a_crash_loop_gives_up_with_its_exit_code() {
+    use agora_node::supervisor::{
+        RestartPolicy, StartRequest, Supervisor, SupervisorConfig, SupervisorEvent,
+    };
+    let _serial = serial();
+    let rig = Rig::new("crash");
+    let mut s = Supervisor::new(SupervisorConfig {
+        node: agora_core::NodeId::new("hold-node"),
+        restart: RestartPolicy {
+            max_restarts: 2,
+            base_delay: Duration::from_millis(50),
+            max_delay: Duration::from_millis(100),
+        },
+        terminal: agora_node::terminal::TerminalOptions::default(),
+        limits: NodeLimits::default(),
+    });
+    let manifest = std::fs::read_to_string(rig.root.join("manifests/k.toml")).expect("manifest");
+    s.register(agora_adapters::Manifest::parse(&manifest).expect("parse"));
+    s.set_holder(std::sync::Arc::new(agora_node::holder::HolderHub::new(
+        rig.setup(),
+    )));
+    let path = rig.folder.to_string_lossy().into_owned();
+    let id = s
+        .start_in_directory(
+            &StartRequest {
+                kind: "k".into(),
+                checkout: rig.folder.clone(),
+                worktree_root: rig.root.join("worktrees"),
+                name: "crash".into(),
+                base: None,
+            },
+            agora_core::ProjectId::directory("hold-node", &path),
+            Instant::now(),
+        )
+        .expect("start");
+    let is_held = |s: &Supervisor| s.held_agents().0.contains(&id);
+    assert!(
+        is_held(&s),
+        "the adapter was not started through the holder"
+    );
+    let mut seen: Vec<SupervisorEvent> = Vec::new();
+    fn tick_until(
+        s: &mut Supervisor,
+        seen: &mut Vec<SupervisorEvent>,
+        what: &str,
+        done: &dyn Fn(&Supervisor, &[SupervisorEvent]) -> bool,
+    ) {
+        let end = Instant::now() + Duration::from_secs(30);
+        let mark = seen.len();
+        loop {
+            assert!(
+                Instant::now() < end,
+                "timed out waiting for {what}: {seen:#?}"
+            );
+            seen.extend(s.tick(Instant::now()));
+            if done(s, &seen[mark..]) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    let started = |_: &Supervisor, evs: &[SupervisorEvent]| {
+        evs.iter()
+            .any(|e| matches!(e, SupervisorEvent::Started { .. }))
+    };
+    let idle = |s: &Supervisor, id: &AgentId| {
+        s.list()
+            .iter()
+            .any(|v| &v.id == id && v.running && v.state == AgentState::Idle)
+    };
+    let id2 = id.clone();
+    tick_until(&mut s, &mut seen, "the agent to be idle", &|s, _| {
+        idle(s, &id2)
+    });
+
+    // One crash: one restart, and it is back, held, and answers.
+    s.adapter_prompt(&id, "crash", false).expect("prompt");
+    tick_until(&mut s, &mut seen, "the restart", &started);
+    let restarting = |seen: &[SupervisorEvent]| {
+        seen.iter()
+            .filter(|e| matches!(e, SupervisorEvent::Restarting { .. }))
+            .count()
+    };
+    assert_eq!(
+        restarting(&seen),
+        1,
+        "one crash cost more than one restart: {seen:#?}"
+    );
+    assert!(s.list().iter().any(|v| v.id == id && v.restarts == 1));
+    assert!(is_held(&s), "the restarted adapter is not the holder's");
+    tick_until(
+        &mut s,
+        &mut seen,
+        "the restarted agent to be idle",
+        &|s, _| idle(s, &id2),
+    );
+
+    // A second crash takes the last restart; the third ends it with the crash's own exit code.
+    s.adapter_prompt(&id, "crash", false).expect("prompt");
+    tick_until(&mut s, &mut seen, "the second restart", &started);
+    tick_until(&mut s, &mut seen, "the agent to be idle again", &|s, _| {
+        idle(s, &id2)
+    });
+    s.adapter_prompt(&id, "crash", false).expect("prompt");
+    tick_until(&mut s, &mut seen, "the give-up", &|_, evs| {
+        evs.iter()
+            .any(|e| matches!(e, SupervisorEvent::GaveUp { .. }))
+    });
+    assert_eq!(restarting(&seen), 2, "{seen:#?}");
+    assert!(
+        seen.contains(&SupervisorEvent::GaveUp {
+            agent: id.clone(),
+            exit_code: Some(3),
+        }),
+        "{seen:#?}"
+    );
+}
