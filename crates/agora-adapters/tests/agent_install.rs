@@ -846,26 +846,34 @@ fn a_lock_of_a_reused_pid_is_stale() {
     );
 }
 
-/// A fetcher that, while its install holds the lock, runs `during` and records what the lock file says.
+/// What reading the lock file gave while it was held, and what `during` returned.
+type Seen = (io::Result<String>, Result<(), InstallError>);
+
+/// A fetcher that, while its install holds the lock, runs `during` and records what reading the lock file gave.
 struct During<'a> {
     net: &'a Net,
     lock: PathBuf,
     during: &'a dyn Fn() -> Result<(), InstallError>,
-    seen: RefCell<Option<(String, Result<(), InstallError>)>>,
+    seen: RefCell<Option<Seen>>,
 }
 impl Fetcher for During<'_> {
     fn fetch(&self, r: &FetchRequest<'_>, sink: &mut dyn Write) -> Result<(), InstallError> {
-        let text = std::fs::read_to_string(&self.lock).unwrap_or_default();
+        let text = std::fs::read_to_string(&self.lock);
         *self.seen.borrow_mut() = Some((text, (self.during)()));
         self.net.fetch(r, sink)
     }
 }
 
+/// The text a lock held by process `pid` names.
+fn owner_text(pid: u32) -> String {
+    let i = agora_platform::process_identity(pid).unwrap();
+    format!("{pid} {} {}", i.started, i.boot)
+}
+
+/// Runs on every system (review of audit F100: the Windows lock had no test). Where the fake agent cannot run, the install fails after
+/// its download, which is still inside the lock.
 #[test]
 fn a_held_lock_names_its_owner_and_refuses_another_install_until_released() {
-    if skip() {
-        return;
-    }
     // Audit F100: the holder keeps the system lock; another install (here another thread of this process, which writes the same
     // owner text) is refused while it is held, and the file is emptied, not removed, on release.
     let home = Home::new();
@@ -891,18 +899,26 @@ fn a_held_lock_names_its_owner_and_refuses_another_install_until_released() {
         seen: RefCell::new(None),
     };
     let sig = Sig(true);
-    install(&p, &approval(&p), &home.0, &Tools::new(&net, &during, &sig)).unwrap();
+    let first = install(&p, &approval(&p), &home.0, &Tools::new(&net, &during, &sig));
+    if !skip() {
+        first.unwrap();
+    }
     let (text, other) = during.seen.into_inner().unwrap();
-    let i = agora_platform::process_identity(std::process::id()).unwrap();
-    assert_eq!(
-        text,
-        format!("{} {} {}", std::process::id(), i.started, i.boot)
-    );
+    if agora_platform::LOCK_FILES_MANDATORY {
+        // Nobody else can read a held lock there (an older version judges it by its age instead).
+        assert!(text.is_err(), "{text:?}");
+    } else {
+        assert_eq!(text.unwrap(), owner_text(std::process::id()));
+    }
     assert_eq!(other.unwrap_err().code, Code::InProgress);
     assert!(released(&home));
-    // Released: the next install takes it.
-    let net = Net::serving(GOOD);
-    install(&p2, &approval(&p2), &home.0, &tools(&net, &Sig(true))).unwrap();
+    // Released: the next holder takes it (the list version is remembered under the same lock, on every system).
+    remember_list_version(&home.0, 3).unwrap();
+    assert_eq!(last_seen_version(&home.0), 3);
+    if !skip() {
+        let net = Net::serving(GOOD);
+        install(&p2, &approval(&p2), &home.0, &tools(&net, &Sig(true))).unwrap();
+    }
     assert!(released(&home));
 }
 
@@ -947,154 +963,194 @@ fn racing_installs_over_a_stale_lock_end_with_one_consistent_install() {
     );
 }
 
-/// What the gated race below reports to the test.
-enum Ev {
-    BDone,
-    W1(std::fs::File),
-    W2(std::fs::File),
-    CEntered,
-    CDone,
-}
+/// Set for [`lock_holder_child`]: the Agora home it installs into.
+const HOLDER_HOME: &str = "AGORA_TEST_INSTALL_LOCK_HOME";
 
-/// A fetcher that reports when its install is inside the lock and waits there for a release.
-struct Held {
+/// A fetcher that, once its install holds the lock, writes `<home>/held-<pid>` and waits until its stdin closes.
+struct HoldUntilStdinCloses {
     net: Net,
-    tx: std::sync::mpsc::Sender<Ev>,
-    release: std::sync::mpsc::Receiver<()>,
+    home: PathBuf,
 }
-impl Fetcher for Held {
+impl Fetcher for HoldUntilStdinCloses {
     fn fetch(&self, r: &FetchRequest<'_>, sink: &mut dyn Write) -> Result<(), InstallError> {
-        self.tx.send(Ev::CEntered).unwrap();
-        self.release.recv().unwrap();
+        std::fs::write(self.home.join(format!("held-{}", std::process::id())), "").unwrap();
+        let _ = io::copy(&mut io::stdin().lock(), &mut io::sink());
         self.net.fetch(r, sink)
     }
 }
 
-/// Audit F100 (the CI failure of the racing test above, made deterministic). Racer B judges a dead owner's lock stale; a live owner
-/// takes over before B's rename; B renames the live lock aside and, while it is aside, racer C finds no `.lock` and takes it; B's
-/// put-back then fails and B deletes the live owner's lock. Gated with FIFOs, no sleeps: `.lock` is a FIFO, so B's read of it waits
-/// for this test, which then swaps `.lock` for a second FIFO that B renames aside and reads again (B waits there, between its rename
-/// and its put-back, while C runs). The live owner's text is this process's own identity, the text every install here writes.
+/// Not a test by itself (it returns at once unless [`HOLDER_HOME`] is set): the test below runs it as other processes, each one
+/// install contending for the lock. It writes `<home>/done-<pid>` with its outcome (`ok` or the error code); one that gets the lock
+/// holds it until its stdin closes or it is killed.
 #[test]
-fn an_install_never_takes_the_lock_while_another_takeover_holds_a_live_lock_aside() {
-    use std::sync::mpsc::channel;
-    if skip() {
+fn lock_holder_child() {
+    let Some(home) = std::env::var_os(HOLDER_HOME).map(PathBuf::from) else {
         return;
-    }
-    let mkfifo = |p: &Path| {
-        assert!(std::process::Command::new("mkfifo")
-            .arg(p)
-            .status()
-            .unwrap()
-            .success());
     };
-    let home = Home::new();
-    let agents = home.agents();
-    std::fs::create_dir_all(&agents).unwrap();
-    let lock = agents.join(".lock");
-    let (g1, g2) = (home.0.join("g1"), home.0.join("g2"));
-    mkfifo(&g1);
-    mkfifo(&g2);
-    std::fs::hard_link(&g1, &lock).unwrap();
-    let mut child = std::process::Command::new("true").spawn().unwrap();
-    let dead = child.id().to_string();
-    child.wait().unwrap();
-    let i = agora_platform::process_identity(std::process::id()).unwrap();
-    let live = format!("{} {} {}", std::process::id(), i.started, i.boot);
-    let rw = |p: &Path| {
-        std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(p)
-            .unwrap()
+    let l = list(&Opts::new("1.2.3", GOOD));
+    let p = plan(&l, "fake-agent", PLATFORM, &home).unwrap();
+    let net = Net::serving(GOOD);
+    let hold = HoldUntilStdinCloses {
+        net: Net::serving(GOOD),
+        home: home.clone(),
     };
-    let install_with = |f: &dyn Fetcher| {
-        let l = list(&Opts::new("1.2.3", GOOD));
-        let p = plan(&l, "fake-agent", PLATFORM, &home.0).unwrap();
-        let net = Net::serving(GOOD);
-        install(&p, &approval(&p), &home.0, &Tools::new(&net, f, &Sig(true))).map(|_| ())
+    let out = match install(
+        &p,
+        &approval(&p),
+        &home,
+        &Tools::new(&net, &hold, &Sig(true)),
+    ) {
+        Ok(_) => "ok".to_string(),
+        Err(e) => e.code.code().to_string(),
     };
-    let (tx, rx) = channel::<Ev>();
-    let (c_acquired, live_lock_kept) = std::thread::scope(|s| {
-        let txb = tx.clone();
-        s.spawn(move || {
-            let _ = install_with(&Net::serving(GOOD));
-            txb.send(Ev::BDone).unwrap();
-        });
-        // Returns once B has `.lock` (g1) open for reading.
-        let tx1 = tx.clone();
-        let g1w = g1.clone();
-        s.spawn(move || {
-            let f = std::fs::OpenOptions::new().write(true).open(&g1w).unwrap();
-            let _ = tx1.send(Ev::W1(f));
-        });
-        let mut w1 = match rx.recv().unwrap() {
-            Ev::W1(f) => f,
-            Ev::BDone => {
-                // B never read `.lock` as text: free the writer that may still wait on g1 (read and write never waits).
-                let _reader = rw(&g1);
-                assert!(matches!(rx.recv().unwrap(), Ev::W1(_)));
-                return (false, true);
-            }
-            _ => panic!("unexpected event"),
-        };
-        // A live owner takes over while B reads: `.lock` becomes g2, which B renames aside and reads.
-        std::fs::remove_file(&lock).unwrap();
-        std::fs::hard_link(&g2, &lock).unwrap();
-        let tx2 = tx.clone();
-        let g2w = g2.clone();
-        s.spawn(move || {
-            let f = std::fs::OpenOptions::new().write(true).open(&g2w).unwrap();
-            let _ = tx2.send(Ev::W2(f));
-        });
-        // B may not be reading at all (its open of `.lock` let the writer through): then nothing reads this.
-        let _ = w1.write_all(dead.as_bytes());
-        drop(w1);
-        let mut w2 = match rx.recv().unwrap() {
-            Ev::W2(f) => f,
-            Ev::BDone => {
-                let _reader = rw(&g2);
-                assert!(matches!(rx.recv().unwrap(), Ev::W2(_)));
-                return (false, true);
-            }
-            _ => panic!("unexpected event"),
-        };
-        // B holds the live lock aside; C runs now.
-        let (rel_tx, rel_rx) = channel::<()>();
-        let txc = tx.clone();
-        s.spawn(move || {
-            let held = Held {
-                net: Net::serving(GOOD),
-                tx: txc.clone(),
-                release: rel_rx,
-            };
-            let _ = install_with(&held);
-            txc.send(Ev::CDone).unwrap();
-        });
-        let c_acquired = match rx.recv().unwrap() {
-            Ev::CEntered => true,
-            Ev::CDone => false,
-            _ => panic!("unexpected event"),
-        };
-        w2.write_all(live.as_bytes()).unwrap();
-        drop(w2);
-        assert!(matches!(rx.recv().unwrap(), Ev::BDone));
-        let kept = std::fs::symlink_metadata(&lock).is_ok_and(|m| !m.file_type().is_file())
-            || std::fs::read_dir(&agents)
-                .unwrap()
-                .flatten()
-                .any(|e| e.file_name().to_string_lossy().starts_with(".lock.stale-"));
-        if c_acquired {
-            rel_tx.send(()).unwrap();
-            assert!(matches!(rx.recv().unwrap(), Ev::CDone));
+    // Written aside and renamed, so `done-<pid>` is never seen half written.
+    let aside = home.join(format!("out-{}", std::process::id()));
+    std::fs::write(&aside, out).unwrap();
+    std::fs::rename(&aside, home.join(format!("done-{}", std::process::id()))).unwrap();
+}
+
+/// The processes a test started; killed and reaped when it ends, also when it fails.
+struct Children(Vec<std::process::Child>);
+impl Drop for Children {
+    fn drop(&mut self) {
+        for c in &mut self.0 {
+            let _ = c.kill();
+            let _ = c.wait();
         }
-        (c_acquired, kept)
+    }
+}
+
+/// The pids in the names of `<dir>/<prefix><pid>` files.
+fn pids(dir: &Path, prefix: &str) -> Vec<u32> {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .flatten()
+        .filter_map(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .strip_prefix(prefix)
+                .and_then(|p| p.parse().ok())
+        })
+        .collect()
+}
+
+/// Waits until `done`, at most a minute.
+fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
+    let end = std::time::Instant::now() + Duration::from_secs(60);
+    while !done() {
+        assert!(std::time::Instant::now() < end, "timed out: {what}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Audit F100, with processes (review: the threads of the earlier test mostly took turns, and its FIFO never reached the system
+/// lock). Two installs started together in two processes contend for the lock: exactly one holds it and the other is
+/// `in_progress`. Then only the system lock is left to refuse (Unix: the owner text is wiped; Windows: nobody can read it): this
+/// process and a third process are refused, and on Windows nobody can read, rename or remove the held file (an older version judges
+/// a lock it cannot read by its age, then renames it). The holder is then killed while holding: the system frees the lock.
+/// Runs on every system: the holders wait inside their download, before the fake agent would run.
+#[test]
+fn installs_in_two_processes_never_hold_the_lock_at_once_and_a_killed_holder_frees_it() {
+    let home = Home::new();
+    std::fs::create_dir_all(home.agents()).unwrap();
+    let spawn = || {
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "lock_holder_child",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(HOLDER_HOME, &home.0)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap()
+    };
+    let mut kids = Children(vec![spawn(), spawn()]);
+    wait_until("both installs got the lock or were refused", || {
+        pids(&home.0, "held-").len() + pids(&home.0, "done-").len() >= 2
     });
-    assert!(
-        !c_acquired,
-        "a second install took the lock while a live owner's lock was aside"
+    let (held, done) = (pids(&home.0, "held-"), pids(&home.0, "done-"));
+    assert_eq!(held.len(), 1, "two processes held the lock at once");
+    assert_eq!(done.len(), 1);
+    assert_ne!(held[0], done[0]);
+    assert_eq!(
+        std::fs::read_to_string(home.0.join(format!("done-{}", done[0]))).unwrap(),
+        "agent.install.in_progress"
     );
-    assert!(live_lock_kept, "a live owner's lock was deleted");
+    let holder = held[0];
+    let lock = home.agents().join(".lock");
+    if agora_platform::LOCK_FILES_MANDATORY {
+        assert!(std::fs::read(&lock).is_err(), "a held lock was read");
+        assert!(
+            std::fs::rename(&lock, home.agents().join(".lock.moved")).is_err(),
+            "a held lock was renamed"
+        );
+        assert!(
+            std::fs::remove_file(&lock).is_err(),
+            "a held lock was removed"
+        );
+    } else {
+        assert_eq!(std::fs::read_to_string(&lock).unwrap(), owner_text(holder));
+        // The lock is advisory here, so the text can be wiped: from now on only the system lock refuses.
+        std::fs::write(&lock, "").unwrap();
+    }
+    // This process is refused while the other holds it, and so is a third process.
+    assert_eq!(
+        remember_list_version(&home.0, 7).unwrap_err().code,
+        Code::InProgress
+    );
+    kids.0.push(spawn());
+    let third = kids.0.last().unwrap().id();
+    let third_done = home.0.join(format!("done-{third}"));
+    wait_until("the third install was refused", || {
+        third_done.exists() || pids(&home.0, "held-").len() > 1
+    });
+    assert_eq!(
+        pids(&home.0, "held-"),
+        [holder],
+        "two processes held the lock at once"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&third_done).unwrap(),
+        "agent.install.in_progress"
+    );
+    // The holder ends without letting go.
+    let c = kids.0.iter_mut().find(|c| c.id() == holder).unwrap();
+    c.kill().unwrap();
+    c.wait().unwrap();
+    // Windows may take a moment to drop the lock of a process that was ended.
+    wait_until("the lock is free once its holder was killed", || {
+        remember_list_version(&home.0, 7).is_ok()
+    });
+    assert_eq!(last_seen_version(&home.0), 7);
+    assert!(released(&home));
+}
+
+/// Review of audit F100: an older version that ended between putting a lock back (`hard_link`) and removing the name it had moved it
+/// to left `.lock` with a second name, which the open refuses; that left every later install failing. The `.lock.stale-*` name goes
+/// and the lock is taken. Runs on every system.
+#[test]
+fn a_lock_an_older_version_left_with_a_second_name_is_taken() {
+    let home = Home::new();
+    std::fs::create_dir_all(home.agents()).unwrap();
+    let aside = home.agents().join(".lock.stale-424242-0");
+    std::fs::write(&aside, "").unwrap();
+    std::fs::hard_link(&aside, home.agents().join(".lock")).unwrap();
+    remember_list_version(&home.0, 4).unwrap();
+    assert_eq!(last_seen_version(&home.0), 4);
+    assert!(!aside.exists());
+    assert!(released(&home));
+    // A second name of any other kind is still refused.
+    let other = home.agents().join("other");
+    std::fs::hard_link(home.agents().join(".lock"), &other).unwrap();
+    assert_eq!(
+        remember_list_version(&home.0, 5).unwrap_err().code,
+        Code::IoFailed
+    );
+    assert!(other.exists());
 }
 
 #[test]

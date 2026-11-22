@@ -288,6 +288,11 @@ pub fn set_executable(path: &std::path::Path, executable: bool) -> io::Result<()
 /// a fake agent and skip themselves elsewhere).
 pub const SHELL_SCRIPTS_RUN: bool = cfg!(unix);
 
+/// True where a file lock (`File::lock`, `File::try_lock`) keeps every other handle from reading or writing the locked file and a file
+/// open through [`open_lock_private`] can be neither renamed nor removed (Windows: `LockFileEx` is mandatory and the file is not
+/// shared for delete). Elsewhere a lock is advisory: the file can be read, renamed and removed while it is held.
+pub const LOCK_FILES_MANDATORY: bool = cfg!(windows);
+
 /// What a program's file name ends with here: `.exe` on Windows, nothing elsewhere.
 pub const EXECUTABLE_SUFFIX: &str = if cfg!(windows) { ".exe" } else { "" };
 
@@ -2129,7 +2134,8 @@ pub fn open_append_private(path: &std::path::Path) -> io::Result<std::fs::File> 
 /// Opens (creating it) a lock file a process takes with `File::lock`, with every check of [`open_append_private`]: its folder opened as
 /// itself, never through a link; a new file private from its creation (mode 0600, an owner-only ACL); an existing one a regular file
 /// with one name and (Unix) this user's, made private through its handle. Read and write, never truncated. Another local user can then
-/// neither open it to hold the lock nor plant a link that makes the lock land on another file.
+/// neither open it to hold the lock nor plant a link that makes the lock land on another file. On Windows the file is not shared for
+/// delete: while any process has it open it can be neither renamed nor removed ([`LOCK_FILES_MANDATORY`]).
 pub fn open_lock_private(path: &std::path::Path) -> io::Result<std::fs::File> {
     let dir = path
         .parent()

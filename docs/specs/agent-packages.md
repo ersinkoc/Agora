@@ -119,11 +119,20 @@ typing at. Code: `crates/agora-adapters/src/agent_install.rs` (the logic, with t
    is `agent.install.in_progress` after a wait of at most one second (a process another thread is starting holds a copy of the
    handle until its exec). While held, the file holds `pid start boot` of its owner (a reused pid does not look alive) for older
    versions, which judge the lock by that text alone; a live owner named there (an older version holding it) is also
-   `agent.install.in_progress`, and empty or unreadable text never blocks. On release the file is emptied, never removed. Limits
-   while versions are mixed: an older version waits up to 60 seconds after a newer one released the lock (it reads the empty file as
-   somebody still writing), and an older version taking a fresh lock in the instant a newer one also does is not excluded. The list
-   version is remembered under the same lock. Every run first removes `.tmp-*` folders, `.lock.stale-*` files older versions left and
-   half-made launchers a crash left.
+   `agent.install.in_progress`, and empty or unreadable text never blocks. On release the file is emptied, never removed. On
+   Windows the file is opened without delete sharing, so while any process has it open it can be neither renamed nor removed. Limits
+   while versions are mixed: an older version answers `agent.install.in_progress` at once for 60 seconds after a newer one released
+   the lock (it reads the young empty file as somebody still writing); on Windows an older version cannot read a held lock (the
+   system lock is mandatory there) and judges it by its age, so after 60 seconds it tries to take it over, but its rename fails while
+   the newer one holds the file open and it answers `agent.install.in_progress`; elsewhere it reads the owner text. An older version
+   taking a fresh lock in the instant a newer one also does is not excluded (on Linux and macOS it can move the file a newer one has
+   just opened). An older version that ended between putting a lock back and removing the name it had moved it to leaves `.lock`
+   with a second name, which the private open refuses: the `.lock.stale-*` names are then removed and the open is tried once more.
+   A home on a network file system gets what that system's locks give: on Linux NFS a file lock is per process (two installs in one
+   process would not exclude each other; each `agora agent install` is its own process) and needs the server's lock service; on
+   macOS a file system without these locks makes every install fail with `agent.install.io_failed`. The list version is remembered
+   under the same lock. Every run first removes `.tmp-*` folders, `.lock.stale-*` files older versions left and half-made launchers
+   a crash left.
 10. **Never** a script from the entry, `sudo`, a shell profile edit, or a write outside `<AGORA_HOME>`.
 
 Test seams: `Tools` carries the resolver, the fetcher and the signature checker; the command line always passes the strict ones

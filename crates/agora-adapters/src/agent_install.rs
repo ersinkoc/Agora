@@ -919,7 +919,8 @@ pub struct Outcome {
 /// when its owner ends, so a crash never leaves it held and nothing is taken over. While held it names its owner (`pid started boot`)
 /// for versions before this one, which judge the lock by that text alone; a lock such a version holds (a live owner named in the file)
 /// is respected. It is emptied on release and never removed: a file removed while another process has it open and is about to lock
-/// it would let two processes hold locks on two different files.
+/// it would let two processes hold locks on two different files. On Windows such a version cannot read a held lock (the system lock
+/// is mandatory there) and judges it by its age, but the file is open without delete sharing, so it can neither rename nor remove it.
 struct Lock {
     file: File,
 }
@@ -973,8 +974,19 @@ fn holder(text: &str) -> Holder {
 
 impl Lock {
     fn acquire(agents: &Path) -> Result<Self, InstallError> {
-        let mut file =
-            agora_platform::open_lock_private(&agents.join(".lock")).map_err(|e| io_err(&e))?;
+        let path = agents.join(".lock");
+        let mut file = match agora_platform::open_lock_private(&path) {
+            Ok(f) => f,
+            // An older version that ended between putting a lock back (`hard_link`) and removing the name it had moved it to left
+            // `.lock` with a second name, which the open refuses (`InvalidInput`). That name is only ever a `.lock.stale-*` one: it
+            // goes and the open is tried once more (review of audit F100). A second name of any other kind is still refused.
+            Err(e)
+                if e.kind() == io::ErrorKind::InvalidInput && remove_stale_lock_names(agents) =>
+            {
+                agora_platform::open_lock_private(&path).map_err(|e| io_err(&e))?
+            }
+            Err(e) => return Err(io_err(&e)),
+        };
         let end = Instant::now() + LOCK_WAIT;
         loop {
             match file.try_lock() {
@@ -1005,6 +1017,20 @@ impl Drop for Lock {
         // Emptied while still held; the system lock goes with the handle.
         let _ = self.file.set_len(0);
     }
+}
+
+/// Removes the `.lock.stale-*` names older versions left in the agents folder; whether there was any.
+fn remove_stale_lock_names(agents: &Path) -> bool {
+    let mut any = false;
+    for e in std::fs::read_dir(agents).into_iter().flatten().flatten() {
+        if e.file_name().to_string_lossy().starts_with(".lock.stale-")
+            && std::fs::symlink_metadata(e.path()).is_ok_and(|m| m.is_file())
+            && std::fs::remove_file(e.path()).is_ok()
+        {
+            any = true;
+        }
+    }
+    any
 }
 
 /// Removes what a crashed install left: `.tmp-*` and `.lock.stale-*` in the agents folder and half-made launchers in `bin`.
