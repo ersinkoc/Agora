@@ -1182,6 +1182,14 @@ fn launcher_uses(launcher: &Path, name: &str, version: &str) -> bool {
     v.as_deref() == Some(OsStr::new(version)) && n.as_deref() == Some(OsStr::new(name))
 }
 
+/// After a failed switch, removes a launcher under a name the previous version did not have: the one this attempt `created` (a link,
+/// or a copy where links are not made, whose version `launcher_uses` cannot read), or a link into the new version.
+fn remove_new_launcher(launcher: &Path, name: &str, version: &str, created: bool) {
+    if created || launcher_uses(launcher, name, version) {
+        let _ = std::fs::remove_file(launcher);
+    }
+}
+
 /// Removes a version folder unless the launcher resolves into it.
 fn remove_version(launcher: &Path, name: &str, version: &str, path: &Path) {
     if !launcher_uses(launcher, name, version) {
@@ -1320,6 +1328,9 @@ pub fn install(
     }
 
     let old_target = std::fs::read_link(&launcher).ok();
+    // Whether this attempt makes the launcher where there was none (a link, or a copy on Windows, which `launcher_uses` cannot read).
+    let launcher_was_there = std::fs::symlink_metadata(&launcher).is_ok();
+    let mut created = false;
     // The records as they were, put back exactly if the switch fails (Codex review of #1027: the `exe` record too, so a renamed
     // program's new name is not left owned by a version that was rolled back).
     let (exe_was, current_was) = (
@@ -1334,6 +1345,7 @@ pub fn install(
             .map_err(|e| io_err(&e))?;
         agora_platform::restrict_to_owner(&bin).map_err(|e| io_err(&e))?;
         link(plan, &plan.version, &version_path, &launcher)?;
+        created = !launcher_was_there;
         if tools.fault == Some(Fault::BeforeCurrent) {
             return err(Code::IoFailed, "injected");
         }
@@ -1356,11 +1368,7 @@ pub fn install(
                 let _ = link(plan, old, &name_path.join(old), &launcher);
             }
             // A new launcher name (a first install, or an update that renamed the program): it goes; the old one was not touched.
-            (None, _) => {
-                if launcher_uses(&launcher, &plan.name, &plan.version) {
-                    let _ = std::fs::remove_file(&launcher);
-                }
-            }
+            (None, _) => remove_new_launcher(&launcher, &plan.name, &plan.version, created),
         }
         let restored = exe_was.put_back(&name_path.join("exe"))
             & current_was.put_back(&name_path.join("current"))
@@ -1540,5 +1548,30 @@ mod lock_open_tests {
         let opened = open_lock(&agents, &open).map(drop);
         let _ = std::fs::remove_dir_all(&agents);
         assert!(opened.is_ok(), "{opened:?}");
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod rollback_launcher_tests {
+    use super::*;
+
+    /// Codex review of #1027: a launcher this attempt made is removed by a rollback on every platform, a copy as well as a link.
+    /// `launcher_uses` reads only links, so the old criterion left a copy (Windows) under a new name behind. Needs no shell scripts.
+    #[test]
+    fn a_launcher_copy_this_attempt_made_is_removed_and_one_that_was_there_is_kept() {
+        let bin =
+            std::env::temp_dir().join(format!("agora-rollback-launcher-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&bin);
+        std::fs::create_dir_all(&bin).unwrap();
+        let copy = bin.join("fake-agent-two");
+        std::fs::write(&copy, b"a copy of the program").unwrap();
+        // The old criterion cannot tell a copy's version.
+        assert!(!launcher_uses(&copy, "fake-agent", "2.0.0"));
+        remove_new_launcher(&copy, "fake-agent", "2.0.0", false);
+        assert!(copy.exists(), "a copy this attempt did not make is kept");
+        remove_new_launcher(&copy, "fake-agent", "2.0.0", true);
+        assert!(!copy.exists(), "a copy this attempt made is removed");
+        let _ = std::fs::remove_dir_all(&bin);
     }
 }
