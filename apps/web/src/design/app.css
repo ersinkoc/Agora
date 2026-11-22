@@ -360,7 +360,8 @@
    - `--line` is the strength of a decorative hairline around a tinted surface. The tint, the icon and the words carry the meaning; a
      hairline is never the only sign of a control or a state. Control indicators (toggle, selected ring, focus, button fills) are 3:1.
    - `--danger` is the one red (ADR-0102): failed, errors, deletions, destructive actions, acting without asking. It is the fixed
-     `--diff-removed`, never a theme colour. `--shadow-pop` is the one elevation, for overlays only; cards and panels stay flat. */
+     `--diff-removed`, never a theme colour, and its label colour `--on-danger` is fixed beside it in tokens.css (never the theme's
+     on-accent, which a theme may set to anything that reads on its own accent). `--shadow-pop` is the one elevation, for overlays only; cards and panels stay flat. */
 :root {
   --text-caption: 0.75rem;
   --text-body: 0.8125rem;
@@ -380,7 +381,6 @@
 [data-theme] {
   --line: 40%;
   --danger: var(--diff-removed);
-  --on-danger: var(--on-accent);
   --surface-raised: color-mix(in oklab, var(--text) 4%, var(--surface-1));
   --border-strong: color-mix(in oklab, var(--text) 18%, var(--border));
   --tint-accent: color-mix(in oklab, var(--accent) var(--tint), var(--surface-1));
@@ -455,10 +455,11 @@
   .kit-setting__hint { @apply text-muted; font-size: var(--text-caption); }
   .kit-setting__control { @apply flex flex-wrap items-center gap-2; }
 
-  /* One segmented control: the chosen item is a raised thumb with ink text (its shape and weight say it, not a colour alone). */
+  /* One segmented control: the chosen item is a raised thumb ringed in the accent (3:1 against the thumb and the track, a test checks
+     it) with bolder ink text. */
   .kit-seg { @apply inline-flex max-w-full gap-0.5 rounded-s border border-line bg-surface-2 p-0.5; }
   .kit-seg__item { @apply inline-flex min-w-0 items-center justify-center gap-1.5 truncate rounded-xs px-2.5 font-medium text-muted transition-colors duration-150 hover:text-ink; height: 1.5rem; font-size: var(--text-caption); }
-  .kit-seg__item[aria-checked='true'] { @apply font-semibold text-ink; background: var(--surface-raised); box-shadow: inset 0 0 0 1px var(--border-strong); }
+  .kit-seg__item[aria-checked='true'] { @apply font-semibold text-ink; background: var(--surface-raised); box-shadow: inset 0 0 0 1.5px var(--accent); }
 
   /* A switch: off is an outline with a muted thumb, on is filled; one that lets an agent act without asking is red when on. */
   .kit-toggle { @apply relative inline-flex flex-none items-center rounded-full p-0.5 transition-colors duration-150; width: 2.25rem; height: 1.25rem; border: 1.5px solid var(--text-muted); background: transparent; }

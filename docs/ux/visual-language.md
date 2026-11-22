@@ -131,8 +131,9 @@ the kit (redesign PRs 2 and 3).
   (icon, title, one line, at most one action), Tooltip and KeyValue. They use tokens only and logical properties, grow to the 44 px
   touch target on a touch screen, and respect reduced motion.
 - **Derived colours** (`app.css`, not theme tokens, so every theme, a user's too, gets them): a soft tint (`--tint-*`) and a hairline
-  (`--line-*`) per role (accent, working, needs you, finished, danger, idle), `--danger` and `--on-danger`, `--surface-raised`,
-  `--border-strong`. Text on any tint reaches 4.5:1 in every built-in theme, and control indicators (a switch's track and thumb, a
+  (`--line-*`) per role (accent, working, needs you, finished, danger, idle), `--danger` and its label colour `--on-danger` (both fixed
+  per scheme in `tokens.css`, never the theme's on-accent, so a theme cannot make a filled danger button unreadable), `--surface-raised`,
+  `--border-strong`. The chosen segment of a segmented control is ringed in the accent. Text on any tint reaches 4.5:1 in every built-in theme, and control indicators (a switch's track and thumb, a
   filled button, a selected ring, the focus ring) reach 3:1; a test computes both from the real tokens. The `--line-*` hairlines are
   decoration around a tinted surface whose icon and words carry the meaning, never the only sign of a control or a state, so they are
   only held visible (about 1.5–2:1), not to 3:1.

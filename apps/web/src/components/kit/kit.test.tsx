@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act, useState } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setLanguage } from '../../i18n';
 import { AgentAvatar, Button, Callout, Card, EmptyState, KeyValue, ListRow, Pill, SegmentedControl, SettingRow, StatTile, StatusMark, StatusPill, Tag, Toggle, Tooltip } from '.';
 import { KitGallery } from './KitGallery';
@@ -160,17 +160,52 @@ describe('widget kit', () => {
     expect(q('dl dd').className).toBe('kit-kv__mono');
   });
 
-  it('a tooltip describes its control on hover and focus, and Esc closes it', () => {
-    render(<Tooltip text="Copy agent address"><button type="button" aria-label="Copy">c</button></Tooltip>);
-    const b = q('button');
-    const tip = q('[role=tooltip]');
-    expect(b.getAttribute('aria-describedby')).toBe(tip.id);
-    expect(b.getAttribute('aria-label')).toBe('Copy');
-    expect(tip.hidden).toBe(true);
-    act(() => b.focus());
-    expect(tip.hidden).toBe(false);
-    act(() => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })); });
-    expect(tip.hidden).toBe(true);
+  describe('tooltip', () => {
+    const over = (el: Element) => act(() => { el.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, relatedTarget: document.body })); });
+    const out = (el: Element) => act(() => { el.dispatchEvent(new MouseEvent('mouseout', { bubbles: true, relatedTarget: document.body })); });
+    const esc = () => act(() => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })); });
+    const later = () => act(() => { vi.advanceTimersByTime(500); });
+    beforeEach(() => { vi.useFakeTimers(); });
+    afterEach(() => { vi.useRealTimers(); });
+    const setup = () => {
+      render(<><span id="own">Own hint</span><Tooltip text="Copy agent address"><button type="button" aria-label="Copy" aria-describedby="own">c</button></Tooltip><button type="button">elsewhere</button></>);
+      return { b: q('button[aria-label=Copy]'), tip: q('[role=tooltip]') };
+    };
+    it('adds itself to the control\'s description, keeping the one it had and the control\'s own name', () => {
+      const { b, tip } = setup();
+      expect(b.getAttribute('aria-describedby')).toBe(`own ${tip.id}`);
+      expect(b.getAttribute('aria-label')).toBe('Copy');
+      expect(tip.hidden).toBe(true);
+    });
+    it('stays open while the control has focus, though the pointer leaves', () => {
+      const { b, tip } = setup();
+      act(() => b.focus());
+      over(b); out(b); later();
+      expect(tip.hidden).toBe(false);
+      act(() => b.blur());
+      expect(tip.hidden).toBe(true);
+    });
+    it('stays open while hovered, though focus leaves; closes a moment after the pointer leaves', () => {
+      const { b, tip } = setup();
+      over(b);
+      act(() => b.focus());
+      act(() => b.blur());
+      expect(tip.hidden).toBe(false);
+      out(b);
+      expect(tip.hidden).toBe(false); // the pointer may be on its way onto the tooltip
+      later();
+      expect(tip.hidden).toBe(true);
+    });
+    it('Esc closes it while hovered and focused, until the next hover or focus', () => {
+      const { b, tip } = setup();
+      over(b);
+      act(() => b.focus());
+      esc();
+      expect(tip.hidden).toBe(true);
+      act(() => b.blur());
+      act(() => b.focus());
+      expect(tip.hidden).toBe(false);
+    });
   });
 
   for (const lang of ['en', 'tr']) {
