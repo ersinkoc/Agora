@@ -360,7 +360,7 @@ fn an_adapter_whose_output_ended_keeps_its_file_until_its_process_is_collected()
     // The fake adapter runs below the shell (not `exec`), so when it crashes the shell closes its output and lives on for a while.
     let table = format!(
         "[adapter]\ncommand = [\"/bin/sh\", \"-c\", {:?}, {:?}]",
-        format!("{RECORD}; \"$0\" --adapter; exec >&-; sleep 2"),
+        format!("{RECORD}; \"$0\" --adapter; exec >&-; sleep 5"),
         fake.to_str().unwrap()
     );
     let restart = RestartPolicy {
