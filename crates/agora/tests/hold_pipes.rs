@@ -34,6 +34,12 @@ struct Rig {
     holder: Child,
 }
 
+/// The holder makes its socket file a moment before it listens on it: a connection in between is refused (macOS answers
+/// `ECONNREFUSED`, #830). The node's own path retries it the same way (`HolderHub::open`); the rig waits for the file only.
+fn not_listening_yet(e: &std::io::Error) -> bool {
+    e.kind() == std::io::ErrorKind::ConnectionRefused
+}
+
 impl Rig {
     fn new(tag: &str) -> Rig {
         let home = temp_home(tag);
@@ -68,6 +74,9 @@ impl Rig {
                 Err(LinkError::Refused(Refusal::Busy, _)) if Instant::now() < end => {
                     std::thread::sleep(Duration::from_millis(25));
                 }
+                Err(LinkError::Io(e)) if not_listening_yet(&e) && Instant::now() < end => {
+                    std::thread::sleep(Duration::from_millis(25));
+                }
                 Err(e) => panic!("connect: {e}"),
             }
         }
@@ -80,6 +89,9 @@ impl Rig {
             match Client::connect_with_version(&socket_path(&self.home), LINK_VERSION) {
                 Ok(c) => return c,
                 Err(LinkError::Refused(Refusal::Busy, _)) if Instant::now() < end => {
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+                Err(LinkError::Io(e)) if not_listening_yet(&e) && Instant::now() < end => {
                     std::thread::sleep(Duration::from_millis(25));
                 }
                 Err(e) => panic!("connect: {e}"),
@@ -308,7 +320,14 @@ fn oversize_and_garbage_frames_are_refused_and_the_holder_keeps_serving() {
     let raw = |rig: &Rig| {
         let end = Instant::now() + Duration::from_secs(10);
         loop {
-            let mut s = agora_platform::local_connect(&socket_path(&rig.home)).expect("connect");
+            let mut s = match agora_platform::local_connect(&socket_path(&rig.home)) {
+                Ok(s) => s,
+                Err(e) if not_listening_yet(&e) && Instant::now() < end => {
+                    std::thread::sleep(Duration::from_millis(25));
+                    continue;
+                }
+                Err(e) => panic!("connect: {e:?}"),
+            };
             write_frame(
                 &mut s,
                 &Request::Hello {
