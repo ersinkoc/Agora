@@ -722,6 +722,31 @@ mod tests {
     }
 
     #[test]
+    fn a_path_through_a_file_or_to_a_socket_is_not_found() {
+        // Audit F18: these answered `Io("Not a directory")` / `Io("No such device or address")`, shown as internal.
+        let (d, f) = setup();
+        assert_eq!(
+            f.read_file("README.md/x"),
+            Err(FilesError::NotFound("README.md/x".into()))
+        );
+        assert_eq!(
+            f.list("README.md"),
+            Err(FilesError::NotFound("README.md".into()))
+        );
+        #[cfg(unix)]
+        {
+            let _sock = std::os::unix::net::UnixListener::bind(d.join("wt/sock")).unwrap();
+            assert!(f.list("").unwrap().iter().any(|e| e.name == "sock"));
+            assert_eq!(
+                f.read_file("sock"),
+                Err(FilesError::NotFound("sock".into()))
+            );
+        }
+        #[cfg(not(unix))]
+        let _ = d;
+    }
+
+    #[test]
     fn large_files_are_refused_without_being_read() {
         let (d, _) = setup();
         let f = Files::open(&d.join("wt"), 4).unwrap();
