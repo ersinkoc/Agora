@@ -99,8 +99,20 @@ fn follow(h: &TerminalHandle, sub: &mut OutputSubscription, feed: &mut PaneFeed)
     panic!("the node never went quiet");
 }
 
+/// Whether `sh` (the probe) can be found on `PATH`, as in `crates/agora/tests/cli.rs`. Every Unix has it; on Windows it comes with
+/// Git's `usr\bin`, which CI runners put on `PATH` and a default Git for Windows install does not (#972).
+fn sh_on_path() -> bool {
+    std::env::var_os("PATH").is_some_and(|p| {
+        std::env::split_paths(&p).any(|d| d.join("sh").is_file() || d.join("sh.exe").is_file())
+    })
+}
+
 #[test]
 fn a_fresh_pane_holds_the_replayed_history_and_a_resize_refeed_does_not_repeat_it() {
+    if !sh_on_path() {
+        eprintln!("skipped: no `sh` on PATH (on Windows, add Git's usr\\bin to PATH)");
+        return;
+    }
     let h = probe();
     let feed_from = |lines: usize| {
         let (frames, snap, sub) = h.subscribe_with_history(lines);

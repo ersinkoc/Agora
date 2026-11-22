@@ -2486,6 +2486,13 @@ mod idempotency_tests {
         assert!(ok, "git {args:?}");
     }
 
+    /// Whether `sh` (the test agent) can be found on `PATH`, as in `crates/agora/tests/cli.rs`.
+    fn sh_on_path() -> bool {
+        std::env::var_os("PATH").is_some_and(|p| {
+            std::env::split_paths(&p).any(|d| d.join("sh").is_file() || d.join("sh.exe").is_file())
+        })
+    }
+
     fn agent_of(r: io::Result<Result<v1::CommandOk, v1::ErrorInfo>>) -> String {
         match r {
             Ok(Ok(v1::CommandOk {
@@ -2501,6 +2508,11 @@ mod idempotency_tests {
         // attempt still ran (a client that timed out and reconnected) ran it again. Gated: the supervisor lock holds the first attempt
         // inside `execute` (it has taken its name number, `names`); the retry is sent; then the lock is let go.
         if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
+            return;
+        }
+        // The test agent is `sh` (#972): Git for Windows puts it on PATH only with its `usr\bin`.
+        if !sh_on_path() {
+            eprintln!("skipped: no `sh` on PATH (on Windows, add Git's usr\\bin to PATH)");
             return;
         }
         let dir = std::env::temp_dir().join(format!("agora-ctl-idem-{}", std::process::id()));

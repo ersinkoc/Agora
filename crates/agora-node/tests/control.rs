@@ -15,6 +15,18 @@ use agora_node::supervisor::NodeLimits;
 use agora_protocol::v1::{self, command_ok::Result as Ok_, command_request::Command as Cmd};
 use agora_protocol::Frame;
 
+/// Whether `sh` (the test agent) can be found on `PATH`, as in `crates/agora/tests/cli.rs`. Every Unix has it; on Windows it comes
+/// with Git's `usr\bin`, which CI runners put on `PATH` and a default Git for Windows install does not (#972).
+fn sh_on_path() -> bool {
+    let found = std::env::var_os("PATH").is_some_and(|p| {
+        std::env::split_paths(&p).any(|d| d.join("sh").is_file() || d.join("sh.exe").is_file())
+    });
+    if !found {
+        eprintln!("skipped: no `sh` on PATH (on Windows, add Git's usr\\bin to PATH)");
+    }
+    found
+}
+
 fn git(dir: &Path, args: &[&str]) {
     let ok = Command::new("git")
         .arg("-C")
@@ -101,6 +113,9 @@ fn started(r: v1::CommandOk) -> v1::AgentStartResult {
 
 #[test]
 fn project_list_and_agent_start_stop_over_the_socket() {
+    if !sh_on_path() {
+        return;
+    }
     if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
         return;
     }
@@ -183,6 +198,9 @@ fn errors_travel_as_codes_with_params() {
 
 #[test]
 fn resource_limits_are_reported_over_the_wire() {
+    if !sh_on_path() {
+        return;
+    }
     if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
         return;
     }
@@ -210,6 +228,9 @@ fn resource_limits_are_reported_over_the_wire() {
 
 #[test]
 fn a_retried_request_does_not_repeat_its_effect() {
+    if !sh_on_path() {
+        return;
+    }
     if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
         return;
     }
@@ -249,6 +270,9 @@ fn wait_frame(c: &mut Client, stream: u32, mut want: impl FnMut(&Frame) -> bool)
 
 #[test]
 fn terminal_subscription_streams_snapshot_data_resize_and_exit() {
+    if !sh_on_path() {
+        return;
+    }
     if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
         return;
     }
@@ -369,6 +393,9 @@ fn history_lines(t: &dyn agora_vt::Terminal) -> Vec<String> {
 /// no kind 4, and a resync after falling behind never carries history.
 #[test]
 fn history_comes_before_the_snapshot_only_when_asked_and_never_with_a_resync() {
+    if !sh_on_path() {
+        return;
+    }
     if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
         return;
     }
@@ -392,7 +419,15 @@ fn history_comes_before_the_snapshot_only_when_asked_and_never_with_a_resync() {
         if f.kind == KIND_TERM_DATA {
             seen.extend_from_slice(&f.payload);
         }
-        String::from_utf8_lossy(&seen).contains("hist-60\r")
+        // The whole last line, not a prefix of it: "hist-60" followed by its line ending, or (a newer ConPTY, which writes the line
+        // ending before each line) by the escape sequence that comes next (#973).
+        let text = String::from_utf8_lossy(&seen);
+        text.match_indices("hist-60").any(|(at, m)| {
+            matches!(
+                text[at + m.len()..].chars().next(),
+                Some('\r' | '\n' | '\x1b')
+            )
+        })
     });
 
     // With history: kind 4 frames, kind 1, kind 2, then live output.
@@ -494,6 +529,9 @@ fn history_comes_before_the_snapshot_only_when_asked_and_never_with_a_resync() {
 /// terminal, in that order, and the matching closings.
 #[test]
 fn the_node_reports_what_the_hub_needs_to_show_it() {
+    if !sh_on_path() {
+        return;
+    }
     use v1::event::Body;
     if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
         return;
@@ -657,6 +695,9 @@ fn decode_tool(v: &serde_json::Value) -> (serde_json::Value, bool) {
 
 #[test]
 fn agents_on_one_node_coordinate_through_their_own_mesh_endpoints() {
+    if !sh_on_path() {
+        return;
+    }
     use agora_core::AgentId;
     use serde_json::json;
     if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
@@ -770,6 +811,9 @@ fn git_status(dir: &Path) -> String {
 
 #[test]
 fn a_manifest_with_mcp_gets_its_config_file_and_the_file_stays_out_of_git() {
+    if !sh_on_path() {
+        return;
+    }
     if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
         return;
     }
@@ -873,6 +917,9 @@ fn a_manifest_cannot_point_its_config_outside_the_worktree() {
 
 #[test]
 fn input_to_a_program_that_never_reads_does_not_wedge_the_node() {
+    if !sh_on_path() {
+        return;
+    }
     if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
         return;
     }
@@ -947,6 +994,9 @@ fn a_start_that_fails_gives_back_its_worktree_and_its_mesh_endpoint() {
 
 #[test]
 fn flags_and_variables_are_added_at_every_launch_including_restarts() {
+    if !sh_on_path() {
+        return;
+    }
     if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
         return;
     }
@@ -1243,6 +1293,9 @@ fn a_manifest_added_while_the_node_runs_is_listed_and_startable_without_a_restar
 
 #[test]
 fn agent_kinds_lists_what_this_node_can_start() {
+    if !sh_on_path() {
+        return;
+    }
     if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
         return;
     }
@@ -1376,6 +1429,9 @@ fn a_node_with_an_empty_manifests_folder_offers_and_starts_every_built_in_kind_a
 
 #[test]
 fn uncommitted_changes_in_an_agents_workspace_are_reported() {
+    if !sh_on_path() {
+        return;
+    }
     use v1::event::Body;
     if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
         return;
@@ -1418,6 +1474,9 @@ fn uncommitted_changes_in_an_agents_workspace_are_reported() {
 
 #[test]
 fn git_status_and_diff_cover_new_and_changed_files_and_only_agent_workspaces() {
+    if !sh_on_path() {
+        return;
+    }
     if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
         return;
     }
@@ -1479,6 +1538,9 @@ fn git_status_and_diff_cover_new_and_changed_files_and_only_agent_workspaces() {
 
 #[test]
 fn files_list_and_read_stay_inside_an_agents_workspace() {
+    if !sh_on_path() {
+        return;
+    }
     if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
         return;
     }
@@ -1562,6 +1624,9 @@ fn files_list_and_read_stay_inside_an_agents_workspace() {
 
 #[test]
 fn git_log_lists_the_workspaces_commits_newest_first() {
+    if !sh_on_path() {
+        return;
+    }
     if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
         return;
     }
@@ -1804,6 +1869,9 @@ fn secret_workspace(name: &str, policy: Option<&str>) -> (Env, Node, String, Str
 
 #[test]
 fn secret_files_are_marked_refused_and_left_out_of_the_diff() {
+    if !sh_on_path() {
+        return;
+    }
     if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
         return;
     }
@@ -1860,6 +1928,9 @@ fn secret_files_are_marked_refused_and_left_out_of_the_diff() {
 
 #[test]
 fn the_owners_policy_switch_shows_secret_files() {
+    if !sh_on_path() {
+        return;
+    }
     if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
         return;
     }
@@ -1883,6 +1954,9 @@ fn the_owners_policy_switch_shows_secret_files() {
 /// hears that the terminal ended, even though the exit was among what was dropped.
 #[test]
 fn a_subscriber_that_fell_behind_still_gets_the_exit_frame() {
+    if !sh_on_path() {
+        return;
+    }
     if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
         return;
     }

@@ -14,6 +14,18 @@ use agora_node::supervisor::{
 use agora_node::terminal::TerminalOptions;
 use agora_protocol::ErrorCode;
 
+/// Whether `sh` (the test agent) can be found on `PATH`, as in `crates/agora/tests/cli.rs`. Every Unix has it; on Windows it comes
+/// with Git's `usr\bin`, which CI runners put on `PATH` and a default Git for Windows install does not (#972).
+fn sh_on_path() -> bool {
+    let found = std::env::var_os("PATH").is_some_and(|p| {
+        std::env::split_paths(&p).any(|d| d.join("sh").is_file() || d.join("sh.exe").is_file())
+    });
+    if !found {
+        eprintln!("skipped: no `sh` on PATH (on Windows, add Git's usr\\bin to PATH)");
+    }
+    found
+}
+
 fn fake_agent() -> String {
     let mut p = std::env::current_exe().expect("exe");
     p.pop();
@@ -212,6 +224,9 @@ fn start_in_own_worktree_report_states_stop_and_resume() {
 
 #[test]
 fn resume_substitutes_the_session_id_into_the_manifest_command() {
+    if !sh_on_path() {
+        return;
+    }
     let e = env("native");
     let mut sup = supervisor(RestartPolicy::default());
     // The resume command prints its own argv, which proves the placeholder was substituted.
@@ -300,6 +315,9 @@ fn reported_state_outranks_the_screen() {
 
 #[test]
 fn crashing_agents_restart_with_backoff_then_give_up() {
+    if !sh_on_path() {
+        return;
+    }
     let e = env("crash");
     let policy = RestartPolicy {
         max_restarts: 2,
@@ -343,6 +361,9 @@ fn crashing_agents_restart_with_backoff_then_give_up() {
 
 #[test]
 fn stopping_cancels_a_pending_restart() {
+    if !sh_on_path() {
+        return;
+    }
     let e = env("cancel");
     let policy = RestartPolicy {
         max_restarts: 5,
@@ -364,6 +385,9 @@ fn stopping_cancels_a_pending_restart() {
 
 #[test]
 fn errors_map_to_protocol_codes() {
+    if !sh_on_path() {
+        return;
+    }
     let e = env("errors");
     let mut sup = supervisor(RestartPolicy::default());
     sup.register(manifest("[\"sh\", \"-c\", \"sleep 30\"]", None));
@@ -403,6 +427,9 @@ fn restart_delay_doubles_and_is_capped() {
 
 #[test]
 fn agent_limit_returns_resource_limit_and_frees_up_on_stop() {
+    if !sh_on_path() {
+        return;
+    }
     let e = env("limit");
     let mut sup = Supervisor::new(SupervisorConfig {
         node: NodeId::new("node-1"),
@@ -445,6 +472,9 @@ fn agent_limit_returns_resource_limit_and_frees_up_on_stop() {
 
 #[test]
 fn terminal_limit_and_disk_usage() {
+    if !sh_on_path() {
+        return;
+    }
     let e = env("terminals");
     let mut sup = Supervisor::new(SupervisorConfig {
         node: NodeId::new("node-1"),

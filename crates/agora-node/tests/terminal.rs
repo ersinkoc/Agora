@@ -7,6 +7,18 @@ use agora_node::terminal::{TerminalHandle, TerminalOptions};
 use agora_platform::{spawn, PtyConfig};
 use agora_vt::Size;
 
+/// Whether `sh` (the test agent) can be found on `PATH`, as in `crates/agora/tests/cli.rs`. Every Unix has it; on Windows it comes
+/// with Git's `usr\bin`, which CI runners put on `PATH` and a default Git for Windows install does not (#972).
+fn sh_on_path() -> bool {
+    let found = std::env::var_os("PATH").is_some_and(|p| {
+        std::env::split_paths(&p).any(|d| d.join("sh").is_file() || d.join("sh.exe").is_file())
+    });
+    if !found {
+        eprintln!("skipped: no `sh` on PATH (on Windows, add Git's usr\\bin to PATH)");
+    }
+    found
+}
+
 fn handle(argv: &[&str]) -> TerminalHandle {
     let cfg = PtyConfig::new(argv.iter().map(|s| (*s).to_string()).collect());
     TerminalHandle::start(spawn(&cfg).expect("spawn"), TerminalOptions::default()).expect("start")
@@ -72,6 +84,9 @@ fn fake_agent_screen_is_visible_in_snapshots() {
 
 #[test]
 fn input_reaches_the_process_and_resize_is_applied() {
+    if !sh_on_path() {
+        return;
+    }
     let h = handle(&["sh"]);
     h.send_input(b"echo hello-$((6*7))\n".to_vec()).unwrap();
     wait_for(&h, "echo result", |s| {
@@ -95,6 +110,9 @@ fn input_reaches_the_process_and_resize_is_applied() {
 
 #[test]
 fn flooding_terminal_does_not_delay_input_to_another() {
+    if !sh_on_path() {
+        return;
+    }
     let flood = handle(&["sh", "-c", "yes 'flood flood flood flood flood flood'"]);
     let calm = handle(&["sh"]);
     wait_for(&flood, "flood output", |s| {
@@ -119,6 +137,9 @@ fn flooding_terminal_does_not_delay_input_to_another() {
 
 #[test]
 fn scrollback_is_capped_and_screen_stays_live() {
+    if !sh_on_path() {
+        return;
+    }
     let cfg = PtyConfig::new(vec![
         "sh".into(),
         "-c".into(),
@@ -165,6 +186,9 @@ fn lines(t: &dyn Terminal) -> Vec<String> {
 
 #[test]
 fn snapshot_plus_subscription_reconstructs_the_live_screen_exactly() {
+    if !sh_on_path() {
+        return;
+    }
     let h = handle(&["sh"]);
     h.send_input(b"echo before-subscribe\n".to_vec()).unwrap();
     wait_for(&h, "first echo", |s| {
@@ -205,6 +229,9 @@ fn drain_once(sub: &OutputSubscription, term: &mut AlacrittyTerminal) {
 
 #[test]
 fn resize_and_exit_are_delivered_to_subscribers() {
+    if !sh_on_path() {
+        return;
+    }
     let h = handle(&["sh"]);
     let (_snap, sub) = h.subscribe();
     h.resize(Size { cols: 90, rows: 20 }).unwrap();
@@ -226,6 +253,9 @@ fn resize_and_exit_are_delivered_to_subscribers() {
 /// process's own terminal and every subscriber agree with it, and asking again for the same narrow size reaches no one.
 #[test]
 fn a_request_below_the_minimum_width_is_the_size_everyone_has() {
+    if !sh_on_path() {
+        return;
+    }
     let h = handle(&["sh"]);
     let (_snap, sub) = h.subscribe();
     for _ in 0..3 {
@@ -260,6 +290,9 @@ fn a_request_below_the_minimum_width_is_the_size_everyone_has() {
 
 #[test]
 fn a_resize_to_the_same_size_reaches_no_one() {
+    if !sh_on_path() {
+        return;
+    }
     let h = handle(&["sh"]);
     let (snap, sub) = h.subscribe();
     let same = snap.size;
@@ -285,6 +318,9 @@ fn a_resize_to_the_same_size_reaches_no_one() {
 
 #[test]
 fn a_slow_subscriber_lags_without_slowing_the_terminal_and_can_resync() {
+    if !sh_on_path() {
+        return;
+    }
     let flood = handle(&["sh", "-c", "yes 'flood flood flood flood flood flood'"]);
     let (_s, slow) = flood.subscribe();
     // Never read: the queue fills and the subscriber is marked lagging while the terminal keeps running.
@@ -315,6 +351,9 @@ fn a_slow_subscriber_lags_without_slowing_the_terminal_and_can_resync() {
 
 #[test]
 fn dropped_subscribers_are_forgotten() {
+    if !sh_on_path() {
+        return;
+    }
     let h = handle(&["sh"]);
     for _ in 0..50 {
         let (_s, sub) = h.subscribe();
@@ -329,6 +368,9 @@ fn dropped_subscribers_are_forgotten() {
 
 #[test]
 fn a_subscriber_gets_the_screen_with_its_colours_and_the_same_cells() {
+    if !sh_on_path() {
+        return;
+    }
     let h = handle(&["sh"]);
     h.send_input(b"printf '\\033[1;31mRED\\033[0m \\033[38;5;208mORANGE\\033[0m \\033[48;2;1;2;3mRGB\\033[0m\\n'\n".to_vec())
         .unwrap();
@@ -358,6 +400,9 @@ fn a_subscriber_gets_the_screen_with_its_colours_and_the_same_cells() {
 /// keys and pastes are encoded the way the program asked for (audit F040: the repaint used to leave both at their defaults).
 #[test]
 fn a_subscriber_joining_mid_stream_gets_the_programs_style_and_input_modes() {
+    if !sh_on_path() {
+        return;
+    }
     let h = handle(&[
         "sh",
         "-c",

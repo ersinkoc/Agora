@@ -11,6 +11,18 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use agora_node::control::Client;
 use agora_node::daemon::{Node, NodeConfig};
 use agora_node::supervisor::NodeLimits;
+
+/// Whether `sh` (the test agent) can be found on `PATH`, as in `crates/agora/tests/cli.rs`. Every Unix has it; on Windows it comes
+/// with Git's `usr\bin`, which CI runners put on `PATH` and a default Git for Windows install does not (#972).
+fn sh_on_path() -> bool {
+    let found = std::env::var_os("PATH").is_some_and(|p| {
+        std::env::split_paths(&p).any(|d| d.join("sh").is_file() || d.join("sh.exe").is_file())
+    });
+    if !found {
+        eprintln!("skipped: no `sh` on PATH (on Windows, add Git's usr\\bin to PATH)");
+    }
+    found
+}
 use agora_protocol::v1::{
     self, command_ok::Result as Ok_, command_request::Command as Cmd, event::Body,
 };
@@ -63,6 +75,9 @@ fn quota_events(n: &Node) -> Vec<v1::AgentQuotaObserved> {
 
 #[test]
 fn a_running_agents_plan_limits_reach_the_event_log_as_numbers_only() {
+    if !sh_on_path() {
+        return;
+    }
     if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
         return;
     }
