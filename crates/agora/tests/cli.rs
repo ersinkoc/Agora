@@ -280,8 +280,15 @@ fn detaching_gives_the_users_terminal_back_its_own_modes() {
         "end: {}",
         shown(&late[late.len().saturating_sub(300)..], 300)
     );
+    // On Windows the test's terminal is ConPTY, which is a terminal itself: it writes its own start (win32-input-mode and focus
+    // reports, `CSI ? 9001 h CSI ? 1004 h`) before anything of the program's, then passes through the modes it does not keep and
+    // keeps the ones it does (pen, cursor visibility, autowrap, focus), writing its own at the end. Only that start is set aside here;
+    // everything after it is checked as on the other systems.
+    let body = late
+        .strip_prefix(b"\x1b[?9001h\x1b[?1004h")
+        .unwrap_or(&late);
     assert!(
-        late.starts_with(b"\x1b[>0u"),
+        body.starts_with(b"\x1b[>0u"),
         "attach pushes its own keyboard entry first: {}",
         shown(&late, 300)
     );

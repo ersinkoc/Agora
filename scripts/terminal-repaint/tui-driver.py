@@ -5,7 +5,7 @@ line per check with the bytes the probe received. Standard library only. Every w
 
 tui-driver.py BIN HUBDIR LOG CTL MODE   (AGORA_HOME etc. from the environment; MODE: mouse | alt)
 """
-import fcntl, json, os, pty, select, signal, struct, sys, termios, time
+import fcntl, json, os, pty, re, select, signal, struct, sys, termios, time
 
 BIN, HUBDIR, LOG, CTL, MODE = sys.argv[1:6]
 COLS, ROWS = 120, 40
@@ -23,11 +23,16 @@ def read_some(t=0.05):
         except OSError:
             pass
 
+def visible_text():
+    """The console's output with escape sequences removed, for a failure message."""
+    text = re.sub(rb'\x1b\[[0-9;?<>=]*[ -/]*[@-~]|\x1b\][^\x07]*\x07|\x1b.', b' ', bytes(screen))
+    return re.sub(r'\s+', ' ', text.decode('utf-8', 'replace'))[-1500:]
+
 def until(what, ok, deadline=30.0):
     end = time.time() + deadline
     while not ok():
         if time.time() > end:
-            raise SystemExit(f'timed out waiting for {what}')
+            raise SystemExit(f'timed out waiting for {what}; the console showed: {visible_text()}')
         read_some()
 
 def lines():
@@ -59,6 +64,9 @@ try:
             if len(screen) != size:
                 size, quiet = len(screen), time.time()
 
+    # Enter opens the selected agent, so it waits until the agent is listed: the console draws before the hub's view of the agents
+    # arrives, and an Enter before that selects nothing (the pane then never opens). The list names the agent by its kind.
+    until('the agent to be listed', lambda: b'shell' in screen)
     settle(0)
     opened = len(screen)
     os.write(fd, b'\r')

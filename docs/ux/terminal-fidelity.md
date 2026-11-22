@@ -228,7 +228,19 @@ Items 1, 3 and 6 change the protocol or a recorded decision, so each needs an AD
    does not track (9, 1015, modifyOtherKeys, 47/1047, the scroll region) and origin mode, which waits for the scroll region; in the
    web window xterm.js switches 9 off on the repaint's 1000/1002/1003 resets (the terminal client keeps it); the keyboard flags are
    the current ones, not the program's stack (a pop after a late attach gives the window none, pinned by a node test); mode 12 is not
-   written (xterm.js would keep it as the window's own blink setting). The history
+   written (xterm.js would keep it as the window's own blink setting).
+   `agora terminal attach` writes the repaint to the user's own terminal. It leaves out the repaint's keyboard pop, pushes a
+   keyboard entry of its own, and on detach pops that entry together with any the program left on the main screen, then resets the
+   modes. On Windows the console host (ConPTY) sits between `agora` and the user's terminal, and it is a terminal itself:
+   - it adds its own start (`CSI ? 9001 h`, `CSI ? 1004 h`);
+   - it keeps the pen, cursor visibility, autowrap, insert, newline, the character set and focus reporting itself, re-rendering them
+     for the real terminal;
+   - it passes the other modes through (mouse tracking and encodings, the alternate screen, keypad, bracketed paste, the kitty
+     keyboard flags, the cursor shape);
+   - at the end it writes its own reset (`CSI ? 9001 l`, `CSI ? 1004 l`).
+
+   So a Windows user's terminal ends a session with the same modes as elsewhere, as `crates/agora/tests/cli.rs` checks on all three
+   systems. The history
    replay (step 2) and the clients' part (step 3) are not built.
 2. **Nobody owns the answers to terminal queries.** The node's emulator drops `PtyWrite` events (`crates/agora-vt/src/alacritty.rs:41`,
    only titles are kept), so a program that asks for the device attributes, the cursor position, the colours or the keyboard protocol
