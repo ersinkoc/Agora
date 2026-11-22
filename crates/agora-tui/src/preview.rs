@@ -38,10 +38,11 @@ pub const HISTORY_LINES: u32 = 2000;
 /// machine that sends history always sends the size next, so this only bounds a frame that went missing.
 const SIZE_WAIT: Duration = Duration::from_millis(150);
 
-/// Clears the screen without moving its rows into the scrollback (the cursor home, then erase below), so neither a resize nor a
-/// repaint's own clear (`CSI 2 J`, which this emulator keeps in its history, as xterm.js does not) copies the screen into the
-/// history: the history stays the program's, as the machine holds it.
-const CLEAR_SCREEN_ONLY: &[u8] = b"\x1b[H\x1b[J";
+/// Clears the screen without moving its rows into the scrollback (origin mode off, so the cursor goes to the top row even inside a
+/// scroll region the program left; the cursor home; erase below), so neither a resize nor a repaint's own clear (`CSI 2 J`, which
+/// this emulator keeps in its history, as xterm.js does not) copies the screen into the history: the history stays the program's, as
+/// the machine holds it. The repaint switches origin mode off itself (ADR-0100 decision 1).
+const CLEAR_SCREEN_ONLY: &[u8] = b"\x1b[?6l\x1b[H\x1b[J";
 
 /// What a call to [`Preview::pump`] saw.
 #[derive(Debug, PartialEq, Eq)]
@@ -377,6 +378,22 @@ mod tests {
         );
         assert_eq!(t.line(4), "ready");
         assert_eq!(feed.history_to_ask(), 0);
+    }
+
+    // Review of #964: a program left origin mode on inside a scroll region; clearing the screen before the next repaint must still
+    // start at the top row, or the rows above the region go into the history.
+    #[test]
+    fn a_new_screen_never_moves_rows_above_a_scroll_region_into_the_history() {
+        let size = Size { cols: 40, rows: 5 };
+        let (_, screen) = node(size, 2, "ready");
+        let mut feed = PaneFeed::new();
+        feed.screen(screen.clone(), Vec::new());
+        assert!(!feed.resized(size.cols, size.rows));
+        feed.data(b"\x1b[2;4r\x1b[?6h");
+        let before = feed.screen_term().history_len();
+        feed.screen(screen, Vec::new());
+        assert_eq!(feed.screen_term().history_len(), before);
+        assert_eq!(feed.screen_term().line(0), "line 1");
     }
 
     #[test]

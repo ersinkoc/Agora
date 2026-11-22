@@ -148,7 +148,7 @@ pub struct Session {
     /// What the events after the snapshot said that the snapshot has no field for (ADR-0090 config options).
     seen: Seen,
     /// History (kind 4, ADR-0100) per terminal stream, held for the screen it comes before: [`Session::terminal_history`].
-    history: std::collections::HashMap<u32, Vec<u8>>,
+    history: HeldHistory,
 }
 
 /// The agents' config options (ADR-0090: the snapshot has no field for them; the hub replays each running agent's last
@@ -402,7 +402,7 @@ impl Session {
             snapshot: None,
             typing: Typing::default(),
             seen: Seen::default(),
-            history: std::collections::HashMap::new(),
+            history: HeldHistory::default(),
         })
     }
 
@@ -653,7 +653,7 @@ impl Session {
     /// The history (kind 4) that came on `stream` before the [`TermEvent::Screen`] just returned, taken: empty when none came (none
     /// was asked for, the machine keeps none, or it is older).
     pub fn terminal_history(&mut self, stream: u32) -> Vec<u8> {
-        self.history.remove(&stream).unwrap_or_default()
+        self.history.take(stream)
     }
 
     /// Opens the conversation of an agent that has no terminal (ADR-0038). `agent_id` is the machine's own id. Read it with
@@ -729,46 +729,29 @@ impl Session {
     pub fn terminal_next(&mut self, stream: u32, wait: Duration) -> TermEvent {
         let mut wait = wait;
         loop {
-            let (e, history) = self.terminal_frame(stream, wait);
-            let Some(h) = history else {
-                return e;
+            let f = match self.terminal_frame(stream, wait) {
+                Ok(f) => f,
+                Err(e) => {
+                    if e == TermEvent::Lost {
+                        // Every subscription on the connection is over: history whose screen never came is dropped.
+                        self.history.clear_all();
+                    }
+                    return e;
+                }
             };
-            self.history
-                .entry(stream)
-                .or_default()
-                .extend_from_slice(&h);
+            if let Some(e) = self.history.route(&f) {
+                return e;
+            }
             // The screen follows its history directly: take what is already here without waiting again.
             wait = Duration::ZERO;
         }
     }
 
-    /// One frame of `stream`: its event, or the payload of a history frame (with [`TermEvent::Quiet`]).
-    fn terminal_frame(&mut self, stream: u32, wait: Duration) -> (TermEvent, Option<Vec<u8>>) {
-        fn history(f: &Frame) -> Option<Vec<u8>> {
-            (f.kind == KIND_HISTORY).then(|| f.payload.clone())
-        }
-        fn event(f: &Frame) -> Option<TermEvent> {
-            if f.kind == STREAM_CLOSE {
-                return Some(TermEvent::Ended);
-            }
-            let p = &f.payload;
-            match f.kind {
-                KIND_BEHIND => Some(TermEvent::Behind),
-                0 => Some(TermEvent::Data(p.clone())),
-                1 => Some(TermEvent::Screen(p.clone())),
-                2 if p.len() == 4 => Some(TermEvent::Resized(
-                    u16::from_le_bytes([p[0], p[1]]),
-                    u16::from_le_bytes([p[2], p[3]]),
-                )),
-                3 if p.len() == 4 => Some(TermEvent::Exit(i32::from_le_bytes([
-                    p[0], p[1], p[2], p[3],
-                ]))),
-                _ => None,
-            }
-        }
+    /// The next frame of `stream`, or [`TermEvent::Quiet`] (nothing in time) or [`TermEvent::Lost`].
+    fn terminal_frame(&mut self, stream: u32, wait: Duration) -> Result<Frame, TermEvent> {
         if let Some(pos) = self.term_frames.iter().position(|f| f.stream_id == stream) {
             if let Some(f) = self.term_frames.remove(pos) {
-                return (event(&f).unwrap_or(TermEvent::Quiet), history(&f));
+                return Ok(f);
             }
         }
         let conn = &mut self.conn;
@@ -780,18 +763,16 @@ impl Session {
         let seen = &mut self.seen;
         self.rt.block_on(async {
             match tokio::time::timeout(wait, conn.recv()).await {
-                Err(_) => (TermEvent::Quiet, None),
-                Ok(Ok(Some(f))) if f.stream_id == stream => {
-                    (event(&f).unwrap_or(TermEvent::Quiet), history(&f))
-                }
+                Err(_) => Err(TermEvent::Quiet),
+                Ok(Ok(Some(f))) if f.stream_id == stream => Ok(f),
                 Ok(Ok(Some(f))) => {
                     // The answer to something typed without waiting: only a missing grant matters.
                     if !typing.answer(&f) {
                         set_aside(f, changed, asked, kept, queue, seen);
                     }
-                    (TermEvent::Quiet, None)
+                    Err(TermEvent::Quiet)
                 }
-                Ok(_) => (TermEvent::Lost, None),
+                Ok(_) => Err(TermEvent::Lost),
             }
         })
     }
@@ -1339,6 +1320,7 @@ impl Session {
 
     /// Tells the hub we stopped watching this stream.
     pub fn terminal_close(&mut self, stream: u32) {
+        self.history.clear(stream);
         let conn = &mut self.conn;
         let _ = self.rt.block_on(conn.send(&Frame {
             stream_id: stream,
@@ -1347,7 +1329,6 @@ impl Session {
             payload: Vec::new(),
         }));
         self.term_frames.retain(|f| f.stream_id != stream);
-        self.history.remove(&stream);
     }
 
     fn send_nowait(&mut self, node: &str, command: command_request::Command) -> u64 {
@@ -1421,6 +1402,7 @@ pub fn place_of(snapshot: &Snapshot, agent: &str) -> Option<(String, Place)> {
 }
 
 /// What a watched terminal said.
+#[derive(Debug, PartialEq, Eq)]
 pub enum TermEvent {
     /// Output to write as it is.
     Data(Vec<u8>),
@@ -1436,6 +1418,77 @@ pub enum TermEvent {
     Quiet,
     /// The link to the hub is gone.
     Lost,
+}
+
+/// The most history held for one screen: one replay, as the machine caps it (512 KiB, docs/specs/protocol.md, kind 4).
+pub const HISTORY_HELD_MAX: usize = 512 * 1024;
+
+/// History frames (kind 4, ADR-0100) per terminal stream, held for the screen (kind 1) of the same subscription that follows them.
+/// Held history belongs to that subscription only: anything else on the stream (the relay ended, output was dropped, any other frame)
+/// or the connection's loss drops it, so it never reaches a later subscription's screen (Codex review of #964). More than one replay
+/// ([`HISTORY_HELD_MAX`]) is never held: past it the history is dropped, and the rest of it until the screen is ignored.
+#[derive(Default)]
+pub struct HeldHistory {
+    /// The bytes held, and whether they went past the cap (then nothing more is held until the screen).
+    streams: std::collections::HashMap<u32, (Vec<u8>, bool)>,
+}
+
+impl HeldHistory {
+    /// What a frame of a terminal stream means: `None` for a history frame (held), the event for any other (unknown kinds are
+    /// [`TermEvent::Quiet`]). A screen leaves the held history for [`HeldHistory::take`]; every other frame drops it.
+    pub fn route(&mut self, f: &Frame) -> Option<TermEvent> {
+        let id = f.stream_id;
+        if f.kind == KIND_HISTORY {
+            let (held, over) = self.streams.entry(id).or_default();
+            if *over || held.len() + f.payload.len() > HISTORY_HELD_MAX {
+                held.clear();
+                *over = true;
+            } else {
+                held.extend_from_slice(&f.payload);
+            }
+            return None;
+        }
+        let e = term_event(f);
+        if !matches!(e, TermEvent::Screen(_)) {
+            self.clear(id);
+        }
+        Some(e)
+    }
+
+    /// The history held for `stream`'s screen, taken (empty when none).
+    pub fn take(&mut self, stream: u32) -> Vec<u8> {
+        self.streams
+            .remove(&stream)
+            .map(|(held, _)| held)
+            .unwrap_or_default()
+    }
+
+    pub fn clear(&mut self, stream: u32) {
+        self.streams.remove(&stream);
+    }
+
+    pub fn clear_all(&mut self) {
+        self.streams.clear();
+    }
+}
+
+/// The event a terminal stream frame carries; an unknown kind or a malformed payload is [`TermEvent::Quiet`].
+fn term_event(f: &Frame) -> TermEvent {
+    if f.kind == STREAM_CLOSE {
+        return TermEvent::Ended;
+    }
+    let p = &f.payload;
+    match f.kind {
+        KIND_BEHIND => TermEvent::Behind,
+        0 => TermEvent::Data(p.clone()),
+        1 => TermEvent::Screen(p.clone()),
+        2 if p.len() == 4 => TermEvent::Resized(
+            u16::from_le_bytes([p[0], p[1]]),
+            u16::from_le_bytes([p[2], p[3]]),
+        ),
+        3 if p.len() == 4 => TermEvent::Exit(i32::from_le_bytes([p[0], p[1], p[2], p[3]])),
+        _ => TermEvent::Quiet,
+    }
 }
 
 /// What an agent's conversation said.
@@ -2275,5 +2328,70 @@ mod decision_tests {
             );
             assert_eq!(hex(&m), c["hex"].as_str().unwrap(), "{}", c["name"]);
         }
+    }
+}
+
+#[cfg(test)]
+mod history_tests {
+    use super::{HeldHistory, TermEvent, HISTORY_HELD_MAX, KIND_BEHIND, STREAM_CLOSE};
+    use agora_protocol::Frame;
+
+    fn frame(stream: u32, kind: u8, payload: &[u8]) -> Frame {
+        Frame {
+            stream_id: stream,
+            kind,
+            seq: None,
+            payload: payload.to_vec(),
+        }
+    }
+
+    #[test]
+    fn history_travels_with_the_screen_of_its_own_subscription() {
+        let mut h = HeldHistory::default();
+        assert_eq!(h.route(&frame(3, 4, b"ab")), None);
+        assert_eq!(h.route(&frame(3, 4, b"c")), None);
+        assert_eq!(
+            h.route(&frame(3, 1, b"s")),
+            Some(TermEvent::Screen(b"s".to_vec()))
+        );
+        assert_eq!(h.take(3), b"abc");
+        assert_eq!(h.take(3), b"", "taken once");
+    }
+
+    // Codex review of #964: history whose screen never came (the relay ended, output was dropped, the connection was lost, the
+    // view stopped watching) is never handed to a later screen.
+    #[test]
+    fn history_whose_screen_never_came_is_dropped() {
+        for end in [STREAM_CLOSE, KIND_BEHIND, 0] {
+            let mut h = HeldHistory::default();
+            assert_eq!(h.route(&frame(3, 4, b"stale")), None);
+            assert!(h.route(&frame(3, end, b"x")).is_some());
+            assert_eq!(
+                h.route(&frame(3, 1, b"s")),
+                Some(TermEvent::Screen(b"s".to_vec()))
+            );
+            assert_eq!(h.take(3), b"", "after kind {end}");
+        }
+        let mut h = HeldHistory::default();
+        h.route(&frame(3, 4, b"stale"));
+        h.route(&frame(4, 4, b"other"));
+        h.clear_all();
+        assert_eq!((h.take(3), h.take(4)), (Vec::new(), Vec::new()));
+        h.route(&frame(5, 4, b"stale"));
+        h.clear(5);
+        assert_eq!(h.take(5), b"");
+    }
+
+    #[test]
+    fn never_more_than_one_replay_is_held() {
+        let mut h = HeldHistory::default();
+        h.route(&frame(3, 4, &vec![b'a'; HISTORY_HELD_MAX - 1]));
+        h.route(&frame(3, 4, b"xy"));
+        h.route(&frame(3, 4, b"z"));
+        h.route(&frame(3, 1, b"s"));
+        assert_eq!(h.take(3), b"");
+        h.route(&frame(3, 4, b"ok"));
+        h.route(&frame(3, 1, b"s"));
+        assert_eq!(h.take(3), b"ok");
     }
 }

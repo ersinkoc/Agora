@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { agora } from '../gen/agora.js';
 import { decodeFrame, encodeFrame, EVENT_KIND, STREAM_CLOSE, STREAM_COMMANDS, STREAM_EVENTS } from './frame';
 import { connectLive, type LinkState, type Socket } from './live';
+import { HISTORY_PENDING_MAX, snapshotAfterSize, type TerminalEvent } from '../terminal/frames';
 import { boards, costByProject, applyEvent, emptyView, fromSnapshot, machines, recentMessages, machinesOnline, projectChoices, tiles, type View } from './view';
 
 const v1 = agora.v1;
@@ -635,13 +636,62 @@ describe('terminal history (ADR-0100 decision 2)', () => {
     expect(asked(second)).toEqual([5000]);
     deliver(second, 3, 4, new TextEncoder().encode('old lines'));
     deliver(second, 3, 1, new TextEncoder().encode('screen'));
-    expect(events).toEqual(['history', 'snapshot']);
+    expect(events).toEqual(['snapshot']); // the history travels with its snapshot
     // From now on it keeps its own (longer) history: a reconnect, or the hub ending the relay (falling behind), asks for none.
     const third = await reconnect();
     expect(asked(third)).toEqual([0]);
     deliver(third, 3, STREAM_CLOSE, new Uint8Array());
     await new Promise((r) => setTimeout(r, 600));
     expect(asked(third)).toEqual([0, 0]);
+    live.close();
+  });
+
+  // Codex review of #964: history from a subscription whose screen never came must not be painted with a later subscription's screen,
+  // and retries that each lose their screen never pile up more than one replay.
+  it('drops history whose screen never came when the connection is lost or the relay ends, and never holds more than one replay', async () => {
+    const { live, sockets, asked, deliver, reconnect } = open();
+    const painted: TerminalEvent[] = [];
+    const ordered = snapshotAfterSize((e) => painted.push(e));
+    live.terminal('laptop', 't-1').connect(ordered.push, { historyLines: 5000 });
+    let s = sockets[0] as FakeSocket;
+    // History arrives, then the connection is lost before its screen; three times, each with almost a whole replay.
+    const half = new Uint8Array(HISTORY_PENDING_MAX / 2 - 1).fill(0x61);
+    for (let i = 0; i < 3; i++) {
+      expect(asked(s)).toEqual([5000]);
+      deliver(s, 3, 4, half);
+      deliver(s, 3, 4, half);
+      s = await reconnect();
+    }
+    // The relay ends after history too.
+    deliver(s, 3, 4, new TextEncoder().encode('stale'));
+    deliver(s, 3, STREAM_CLOSE, new Uint8Array());
+    await new Promise((r) => setTimeout(r, 600));
+    // The next subscription sends only a screen and its size (the program went full screen meanwhile: no history).
+    deliver(s, 3, 1, new TextEncoder().encode('screen'));
+    deliver(s, 3, 2, new Uint8Array([80, 0, 24, 0]));
+    expect(painted.map((e) => e.type)).toEqual(['resize', 'snapshot']);
+    const snap = painted[1];
+    expect(snap?.type === 'snapshot' && snap.history).toBeFalsy();
+    ordered.dispose();
+    live.close();
+  });
+
+  it('pairs a whole replay with its screen and drops one larger than a replay can be', () => {
+    const { live, sockets, deliver } = open();
+    const s = sockets[0] as FakeSocket;
+    const got: TerminalEvent[] = [];
+    live.terminal('laptop', 't-1').connect((e) => got.push(e), { historyLines: 5000 });
+    deliver(s, 3, 4, new TextEncoder().encode('ab'));
+    deliver(s, 3, 4, new TextEncoder().encode('c'));
+    deliver(s, 3, 1, new TextEncoder().encode('screen'));
+    expect(got.map((e) => e.type)).toEqual(['snapshot']);
+    expect(new TextDecoder().decode(got[0]?.type === 'snapshot' ? got[0].history : undefined)).toBe('abc');
+    live.terminal('laptop', 't-2').connect((e) => got.push(e), { historyLines: 5000 });
+    deliver(s, 4, 4, new Uint8Array(HISTORY_PENDING_MAX).fill(0x61));
+    deliver(s, 4, 4, new Uint8Array(1).fill(0x62));
+    deliver(s, 4, 1, new TextEncoder().encode('screen'));
+    const last = got.at(-1);
+    expect(last?.type === 'snapshot' && last.history).toBeFalsy();
     live.close();
   });
 

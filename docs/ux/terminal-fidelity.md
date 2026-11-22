@@ -251,10 +251,14 @@ Items 1, 3 and 6 change the protocol or a recorded decision, so each needs an AD
    behind, where it keeps its own (`apps/web/src/net/live.ts`, `historyToAsk`). It holds the kind 4 frames with the snapshot, which
    already waits for its size frame (`frames.ts`, `snapshotAfterSize`), and writes history and repaint in one synchronized write (mode
    2026, `renderer.ts`, `reset`), so a reload is one paint at the node's width. It never waits for history: an older node sends none and
-   the snapshot is painted as before. The terminal client asks for its scrollback (2000 lines) on a fresh pane and for none when it
+   the snapshot is painted as before. History is paired with the snapshot of its own subscription only (`frames.ts`,
+   `historyPairing`): when the connection is lost or the relay ends before the snapshot, it is dropped, so it never reaches a later
+   subscription's snapshot, and at most one replay (512 KiB) is ever held (Codex review of #964; the terminal client does the same,
+   `client.rs`, `HeldHistory`). The terminal client asks for its scrollback (2000 lines) on a fresh pane and for none when it
    watches again; it holds the history with the screen until the size that follows, feeds both to its emulator once (the wheel reads
    that scrollback), and keeps only the screen as the one it feeds again on a resize, clearing its screen first without moving it into
-   the history (`crates/agora-tui/src/preview.rs`, `PaneFeed`). Tested by D4 in `scripts/e2e-terminal-repaint.mjs` (after a reload the
+   the history (`crates/agora-tui/src/preview.rs`, `PaneFeed`). This is the agent's terminal panel; the full-screen terminal opened
+   from it (`crates/agora/src/tuicmd.rs`) still asks for none. Tested by D4 in `scripts/e2e-terminal-repaint.mjs` (after a reload the
    first line of a 300-line output is in the window's history; Chromium), `crates/agora-tui/tests/history_replay.rs` (a probe on a
    real pseudo-terminal: the pane's scrollback is the node's, and feeding the screen again at the same, a taller and a shorter size
    keeps it so) and web unit tests. Still not replayed: the main screen's history while a program is on the alternate screen (the
