@@ -23,8 +23,9 @@ use crate::holder_link::{
 };
 pub use crate::holder_link::{HeldPipe, StartPipeRequest, StartRequest};
 
-/// How long a start waits for a holder it started to listen. Together with [`BUSY_WAIT`] this bounds what a start can hold the
-/// supervisor for, once per [`BACKOFF`] when the holder cannot be had.
+/// How long a start waits for a holder it started to listen. Together with [`BUSY_WAIT`] and [`ENDING_WAIT`] (a start whose holder
+/// closed the link waits that long for it to end, #951) this bounds what a start can hold the supervisor for, once per [`BACKOFF`]
+/// when the holder cannot be had.
 const START_WAIT: Duration = Duration::from_secs(3);
 /// How long a connection retries `Busy` (the holder has not noticed that the node before this one is gone).
 const BUSY_WAIT: Duration = Duration::from_secs(1);
@@ -192,20 +193,20 @@ impl HolderSession {
     }
 
     /// Whether the holder is gone after a start failed with `e` (its process, not only the link, so an agent it started is not running on
-    /// its account): its process has ended, or it closed the link and its process ends within
+    /// its account): its process has ended, or the link failed with anything but a time-out and its process ends within
     /// [`ENDING_WAIT`]. A holder ends right after the node releases its last agent (an agent that crashed, collected before its restart),
     /// so the restart's start can meet a holder that is closing but whose process has not ended yet (#951): that holder started nothing,
     /// and waiting for its end lets the restart start a new one instead of failing. A reply that did not come in time is not waited for
     /// (that holder is alive and may have started the agent).
     pub fn ended_after(&self, e: &LinkError) -> bool {
+        // Any I/O error but a time-out may be a holder that is ending: besides end of stream, a broken pipe or a reset, macOS can
+        // answer a send to a Unix socket whose peer is closing with `EPROTOTYPE`, which has no `ErrorKind` of its own. Waiting is still
+        // bounded, and the start goes on only once the process has really ended.
         let closed = match e {
             LinkError::Closed => true,
-            LinkError::Io(e) => matches!(
+            LinkError::Io(e) => !matches!(
                 e.kind(),
-                io::ErrorKind::BrokenPipe
-                    | io::ErrorKind::ConnectionReset
-                    | io::ErrorKind::ConnectionAborted
-                    | io::ErrorKind::UnexpectedEof
+                io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
             ),
             _ => false,
         };

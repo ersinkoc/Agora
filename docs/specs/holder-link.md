@@ -106,8 +106,9 @@ next frame's.
 - **An ambiguous start:** when the link fails after a `Start` was sent, the holder may have started the agent. The node asks the holder
   (`List`) before anything else: an agent it has under that id is ended (stop, wait for the exit, `Release`) and only then is another
   start made, so two copies never run. If that cannot be settled and the holder's process is alive, the start fails; if the holder's
-  process is gone the node starts again. A holder that **closed** the link (end of stream, a broken pipe, a reset; not a reply that
-  timed out) is given up to a second for its process to end: a holder ends right after it answered the `Release` of its last agent, so
+  process is gone the node starts again. When the link failed with anything but a reply that timed out (end of stream, a broken
+  pipe, a reset, or `EPROTOTYPE`, which macOS can give for a send to a socket whose peer is closing), the holder is given up to a second
+  for its process to end, and the node goes on only once it has: a holder ends right after it answered the `Release` of its last agent, so
   the restart of an agent that crashed, whose end the node collected first, can meet a holder that is closing but has not exited yet.
   Once it has, the node starts a new holder and the restart succeeds (#951: before, that first restart failed and one crash cost two
   restarts from the give-up budget). The same applies to a pipe agent (below).
