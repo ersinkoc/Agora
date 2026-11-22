@@ -23,7 +23,7 @@ import { forgetSkipAnswer, forgetSkipCapable, isSkipCapable, recordSkipAnswer, s
 import type { HelperGrant } from './components/HelperGrants';
 import { addPasskey, passkeysSupported, signInWithPasskey } from './net/passkey';
 import { summarize, type UsageSummary } from './net/usage';
-import { endSession, forgetToken, hubConnection, readCode, setPassword, signIn, signInFromLink, signInInfo } from './net/session';
+import { endSession, forgetToken, hubConnection, readCode, setPassword, signIn, signInFromLink, NO_PASSWORD } from './net/session';
 import { useSignInInfo } from './net/useSignInInfo';
 import { idleMinutes, setIdleMinutes, watchIdle, type IdleMinutes } from './net/idle';
 import { ScreenPasswordSettings } from './components/Locks';
@@ -85,7 +85,7 @@ export function App() {
   const [hub, setHub] = useState(hubConnection);
   const [signInNotice, setSignInNotice] = useState<string | undefined>();
   // Whether the hub asks this browser for the screen password (ADR-0067), and whether one is set.
-  const [info, refreshInfo, setInfo] = useSignInInfo(hub);
+  const [info, refreshInfo] = useSignInInfo(hub);
   const trySignIn = useCallback(async (code: string, password?: string) => {
     const r = await signIn(code, password);
     if (r.ok) { setSignInNotice(undefined); setHub(hubConnection()); return; }
@@ -107,8 +107,8 @@ export function App() {
     const { code, rest } = readCode(window.location.hash);
     if (code === undefined) return;
     window.history.replaceState(null, '', window.location.pathname + window.location.search + rest);
-    void signInFromLink(code, async () => { const i = await signInInfo(); setInfo(i); return i; }, (c) => { void trySignIn(c); }, setLinkCode);
-  }, [trySignIn]);
+    void signInFromLink(code, async () => (await refreshInfo()) ?? NO_PASSWORD, (c) => { void trySignIn(c); }, setLinkCode);
+  }, [trySignIn, refreshInfo]);
   const [live, setLive] = useState<View | undefined>();
   const [link, setLink] = useState<LinkState>('connecting');
   const [api, setApi] = useState<Live | undefined>();
@@ -574,7 +574,7 @@ export function App() {
           fingerprint={device ? prints.get(device.id) : undefined} machines={live ? machines(live) : undefined} trustedOn={trustedOn} others={hub ? others : undefined}
           loadKinds={hub && api && live ? loadKinds : undefined} asked={asked} onAsk={hub && api ? askApproval : undefined} onRemove={hub && api ? removeDevice : undefined}
           security={hub ? <ScreenPasswordSettings passwordSet={info.passwordSet} idle={idle} onIdle={(m) => { setIdleMinutes(m); setIdle(m); }}
-            onSet={async (password, current) => { const r = await setPassword(hub.token, password, current); refreshInfo(); return r; }} /> : undefined} /> : hash === '#/theme' && phone ? <PhoneTheme onBack={() => go('#/')} />
+            onSet={async (password, current) => { const r = await setPassword(hub.token, password, current); void refreshInfo(); return r; }} /> : undefined} /> : hash === '#/theme' && phone ? <PhoneTheme onBack={() => go('#/')} />
         : current !== undefined && phone
         ? <PhoneAgent agent={selectedAgent} agents={agents} approvals={approvalsNow} loadDiff={hub && api ? loadDiff : !hub ? demoLoadDiff : undefined} filesOf={hub && api ? filesOf : !hub ? demoFilesOf : undefined} machines={live ? machines(live) : hub ? [] : demoMachines} onResolve={resolve} untrusted={untrustedOn} notice={notice ? t(notice) : undefined}
           source={terminal} chatSource={selectedAgent?.terminal === false ? chatOf(selectedAgent) : undefined} sendPrompt={hub && api ? sendPrompt : undefined} chooseOption={hub && api ? chooseOption : undefined} link={hub ? link : 'live'} onOpen={open} onBack={() => go('#/')} />
