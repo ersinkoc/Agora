@@ -2828,8 +2828,9 @@ impl Supervisor {
     pub fn session_file_targets(&self) -> Vec<crate::session_files::Target> {
         self.agents
             .iter()
-            .filter(|(_, e)| e.terminal.is_some() && e.agent.session.is_none())
+            .filter(|(_, e)| e.agent.session.is_none())
             .filter_map(|(id, e)| {
+                let launch = e.terminal.as_ref()?.launch();
                 let spec = self
                     .kinds
                     .get(&e.agent.kind)?
@@ -2840,6 +2841,7 @@ impl Supervisor {
                     .clone()?;
                 Some(crate::session_files::Target {
                     agent: id.clone(),
+                    launch,
                     kind: e.agent.kind.clone(),
                     folder: e.worktree.clone(),
                     spec,
@@ -3646,6 +3648,32 @@ impl Supervisor {
             .ok_or_else(|| SupervisorError::NotFound(id.clone()))?;
         entry.agent.session = Some(session.to_string());
         Ok(())
+    }
+
+    /// ADR-0060: the session id found in a session file for the agent's process `launch` ([`session_files::Target`]). Set only while
+    /// that process still runs and the agent has no session yet: one found for a process that has since been restarted, resumed or
+    /// stopped is dropped (the file is that process's conversation, never the next one's, #925). Returns whether it was set.
+    ///
+    /// [`session_files::Target`]: crate::session_files::Target
+    pub fn report_found_session(
+        &mut self,
+        id: &AgentId,
+        launch: u64,
+        session: &str,
+    ) -> Result<bool, SupervisorError> {
+        if !crate::session_files::argv_safe(session) {
+            return Err(SupervisorError::OptionUnknown("session_id"));
+        }
+        let entry = self
+            .agents
+            .get_mut(id)
+            .ok_or_else(|| SupervisorError::NotFound(id.clone()))?;
+        let same = entry.terminal.as_ref().map(TerminalHandle::launch) == Some(launch);
+        if !same || entry.agent.session.is_some() {
+            return Ok(false);
+        }
+        entry.agent.session = Some(session.to_string());
+        Ok(true)
     }
 
     /// Whether anyone is looking at the agent's terminal; hidden terminals are still checked, less often.

@@ -287,7 +287,10 @@ The node holds a session id only when it learned one:
 - **`[session.file]`** (Codex, which has no flag for it: `~/.codex/sessions/YYYY/MM/DD/rollout-<time>-<id>.jsonl`, whose first line is
   `{"type":"session_meta","payload":{"id":...,"cwd":...}}`, checked on codex-cli 0.167.0 and 0.167.1): while a terminal agent runs
   without a session id, the node looks every 3 s, for at most 30 minutes, at the files the glob matches that were written after the
-  agent started, and takes the id from the first line (at most 64 KiB) when it passes `select` and its `cwd` is the agent's folder.
+  agent's process started, and takes the id from the first line (at most 64 KiB) when it passes `select` and its `cwd` is the agent's folder.
+  This is per process: a restart or a resume of an agent still without an id runs a new process, which waits (30 minutes, files newer
+  than its own start) afresh, also when discovery gave up on the process before; an id found for a process that has been replaced or
+  stopped since is dropped, and one found never replaces a session the agent already has (#925).
   It takes one only when exactly one new file fits and no other agent has that id. Two agents in one folder are rivals, and both get
   none (a file cannot say which is whose), when they are of one kind, or of kinds whose globs could match the same files: the fixed
   directory of one glob (before its first `*`, with `{home}` replaced, `.` and `..` resolved) is the other's or holds it, as written or

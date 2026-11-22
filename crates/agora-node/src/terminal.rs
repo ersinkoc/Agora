@@ -8,7 +8,7 @@
 
 use std::fmt::Write as _;
 use std::io;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
@@ -357,11 +357,15 @@ impl Repaint {
     }
 }
 
+/// The next [`TerminalHandle::launch`]; counts up for as long as the node process runs.
+static LAUNCHES: AtomicU64 = AtomicU64::new(1);
+
 /// Handle to a running terminal actor. Dropping it kills the process and stops the actor.
 pub struct TerminalHandle {
     inner: Arc<Inner>,
     control: Option<PtyControl>,
     pid: u32,
+    launch: u64,
     thread: Option<JoinHandle<()>>,
     /// ADR-0079: the process belongs to the node's terminal holder (it outlives the node).
     held: bool,
@@ -404,6 +408,7 @@ impl TerminalHandle {
             inner,
             control: Some(control),
             pid,
+            launch: LAUNCHES.fetch_add(1, Ordering::Relaxed),
             thread: Some(thread),
             held: false,
         })
@@ -431,6 +436,12 @@ impl TerminalHandle {
 
     pub fn pid(&self) -> u32 {
         self.pid
+    }
+
+    /// Which process this handle runs, as a number no other handle of this node process has (a pid can be used again): what the node
+    /// learns about one process of an agent (its session file, #925) is kept under it, so it is never taken for the agent's next one.
+    pub fn launch(&self) -> u64 {
+        self.launch
     }
 
     fn control(&self) -> io::Result<&PtyControl> {
@@ -921,6 +932,7 @@ mod tests {
             inner: inner(AlacrittyTerminal::new(Size { cols: 16, rows: 4 })),
             control: None,
             pid: 0,
+            launch: 0,
             thread: None,
             held: false,
         };

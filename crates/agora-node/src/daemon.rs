@@ -1983,21 +1983,30 @@ impl Node {
                             now_ms(),
                         );
                         // ADR-0060: the session ids terminal agents write to their own files (`[session.file]`), read outside the lock.
-                        if !session_targets.is_empty() {
-                            let known = sup
+                        // Polled with no targets too, so what was kept for a process that ended is let go at once (#925).
+                        let known = if session_targets.is_empty() {
+                            Default::default()
+                        } else {
+                            sup.lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .known_sessions()
+                        };
+                        for (agent, id) in sessions.poll(Instant::now(), &session_targets, &known) {
+                            // #925: set only for the process it was found for (the lock was let go meanwhile; a restart or a resume
+                            // may have replaced it).
+                            let Some(launch) = session_targets
+                                .iter()
+                                .find(|t| t.agent == agent)
+                                .map(|t| t.launch)
+                            else {
+                                continue;
+                            };
+                            let set = sup
                                 .lock()
                                 .unwrap_or_else(|e| e.into_inner())
-                                .known_sessions();
-                            for (agent, id) in
-                                sessions.poll(Instant::now(), &session_targets, &known)
-                            {
-                                let set = sup
-                                    .lock()
-                                    .unwrap_or_else(|e| e.into_inner())
-                                    .report_session(&agent, &id);
-                                if set.is_ok() {
-                                    ev.session_reported(&agent, &id);
-                                }
+                                .report_found_session(&agent, launch, &id);
+                            if matches!(set, Ok(true)) {
+                                ev.session_reported(&agent, &id);
                             }
                         }
                         // Usage that terminal agents wrote to their own files (ADR-0042); the files are read outside the lock.
