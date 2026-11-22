@@ -29,9 +29,11 @@ no screen runs it with `agora --ui none`. The steps, for a VPS with Tailscale or
 On the machine that runs the hub, open it for new machines, then on the new machine type the hub's address and compare one number:
 
 1. **On the hub's machine:** `agora pair open`. It says "Your hub is open for new machines for 10 minutes" and what to type next, and stays on your screen to
-   answer. What it tells you to type is an address the hub listens on and its certificate names (and the others it also answers at). A hub that listens on this
-   computer only (`127.0.0.1`, when you answered no to "Let other machines of yours connect?") says that another machine cannot reach it and how to change that:
-   `agora --listen 0.0.0.0:7443`, then `agora down` and `agora`, then `agora pair open` again; until then it offers only a join from this same computer. Run it in a terminal: it reads your answer from the keyboard only, never from a pipe or a script. `--minutes N` (1 to 10) opens it for less.
+   answer. What it tells you to type is an address the hub listens on and its certificate names (and the others it also answers at); the certificate's names
+   (such as this computer's name) are listed as names that may also reach it, depending on your network. A hub that listens on this computer only (`127.0.0.1`,
+   when you answered no to "Let other machines of yours connect?") says that another machine cannot reach it and how to change that: listen on this computer's
+   address on your network, for example `agora --listen 192.168.1.20:7443`, then `agora down` and `agora`, then `agora pair open` again. `0.0.0.0:7443` instead
+   listens on every IPv4 interface, a public one too if the computer has one. Until then it offers only a join from this same computer. Run it in a terminal: it reads your answer from the keyboard only, never from a pipe or a script. `--minutes N` (1 to 10) opens it for less.
 2. **On the new machine:** `agora join`. It listens for about three seconds for a hub that is open for new machines on your network and, when it finds one,
    asks you, at a terminal, `Found the hub "desk" at 192.168.1.20:7443. Its fingerprint is 566A D067 41A8 B995 CD07 C464. Compare it with what `agora pair open` shows on the hub`: answer `y` only
    if it is exactly the same as the fingerprint the hub's screen shows (`agora pair open` and `agora pair status` print it). With more than one hub it lists them and asks which one matches; without a

@@ -574,8 +574,13 @@ fn a_loopback_only_hub_says_other_machines_cannot_reach_it_and_offers_only_this_
     let mut owner = hub.open(&owner_home);
     let screen = owner.seen.clone();
     assert!(screen.contains("listens on this computer only"), "{screen}");
+    // How to listen on the network: this computer's network address first, every IPv4 interface only as the fallback.
+    assert!(screen.contains("`agora --listen "), "{screen}");
     assert!(
-        screen.contains(&format!("agora --listen 0.0.0.0:{}", hub.port)),
+        screen.contains(&format!(
+            "`0.0.0.0:{}` instead listens on every IPv4 interface",
+            hub.port
+        )),
         "{screen}"
     );
     let local = format!("agora join 127.0.0.1:{}", hub.port);
