@@ -5,7 +5,7 @@
 //! when the hub is unreachable and the caller buffers the events (AGENTS.md, nodes are autonomous). Time is
 //! passed in, so restart and detection timing is testable without sleeping.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -223,6 +223,12 @@ pub struct Reattach {
     pub capabilities: Vec<String>,
     /// The state the ledger last saw it in.
     pub state: Option<AgentState>,
+    /// #932: what it last reported of its session (modes and models, config options, commands), as the last node recorded it. The
+    /// adapter is not initialised again and does not report them again by itself, so they are the agent's until it reports new ones:
+    /// a mode or option in use that makes it act without asking keeps it shown so, and checked so (`skips_permissions_now`).
+    pub options: SessionOptions,
+    pub config: Vec<ConfigOption>,
+    pub commands: Vec<AdapterCommand>,
 }
 
 /// ADR-0090: the most prompts that wait behind a turn, per agent (`agent.queue_full`).
@@ -877,6 +883,9 @@ pub struct Supervisor {
     skip_permissions: SkipPermissions,
     /// ADR-0079: the terminal holder agents are started through, when this node has one (Unix); `None` runs every agent in the node.
     holder: Option<std::sync::Arc<HolderHub>>,
+    /// Agents taken up from the holder whose launch options came from the ledger without their arguments (`set_kept_launch`): their
+    /// next process (a restart after a crash) runs without them, so it is not shown with them.
+    kept_launch: BTreeSet<AgentId>,
 }
 
 impl Supervisor {
@@ -896,6 +905,7 @@ impl Supervisor {
             parents: BTreeMap::new(),
             skip_permissions: SkipPermissions::default(),
             holder: None,
+            kept_launch: BTreeSet::new(),
         }
     }
 
@@ -981,6 +991,10 @@ impl Supervisor {
         e.adapter = Some(adapter);
         e.session_id = reattach.session_id;
         e.capabilities = reattach.capabilities;
+        // Bounded and judged again as a report is (`perm`): the file is the node's own, the words in it are the adapter's.
+        e.options = bounded_options(reattach.options);
+        e.rich.config = bounded_config(reattach.config);
+        e.rich.commands = bounded_commands(reattach.commands);
         e.mesh = mesh;
         e.running = true;
         if let Some(state) = reattach.state {
@@ -1054,6 +1068,75 @@ impl Supervisor {
                 e.agent.observe(state, StateSource::Screen);
             }
         }
+    }
+
+    /// ADR-0079/0093 with ADR-0059: an agent taken up from the holder is the process that was started with these launch options (the
+    /// ledger's record of its `AgentStarted`), so it is shown with them, and acting without asking when it does (#907). It skips when
+    /// the launch said so (`recorded_skips`), when this node's manifest says one of the options does, and when an option is no longer
+    /// in the manifest (it cannot be told, so it is shown as skipping). Their arguments are not known again: a restart after a crash
+    /// runs without them, as a resume does, and then the agent is shown without them (see `restart`).
+    pub fn set_kept_launch(&mut self, id: &AgentId, ids: &[String], recorded_skips: bool) {
+        let kind = self
+            .agents
+            .get(id)
+            .map(|e| e.agent.kind.clone())
+            .or_else(|| self.adapters.get(id).map(|e| e.agent.kind.clone()));
+        let Some(kind) = kind else {
+            return;
+        };
+        let manifest = self.kinds.get(&kind).map(|k| &k.manifest);
+        let skips = recorded_skips
+            || ids.iter().any(|o| {
+                manifest
+                    .and_then(|m| m.launch_option(o))
+                    .is_none_or(|o| o.skips_permissions)
+            });
+        let launch = LaunchChoice {
+            ids: ids.to_vec(),
+            args: Vec::new(),
+            skips_permissions: skips,
+        };
+        if let Some(e) = self.agents.get_mut(id) {
+            e.launch = launch;
+        } else if let Some(e) = self.adapters.get_mut(id) {
+            e.launch = launch;
+        }
+        if !ids.is_empty() {
+            self.kept_launch.insert(id.clone());
+        }
+    }
+
+    /// #932: what an adapter agent reported of its session, as this node holds it now (bounded and judged, also when it was put back
+    /// from the ledger at a take-up), as the events a report gives. Nothing for an agent that is not hosted by an adapter, and nothing
+    /// for a part it never reported.
+    pub fn session_events(&self, id: &AgentId) -> Vec<SupervisorEvent> {
+        let Some(e) = self.adapters.get(id) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        let event = |event| SupervisorEvent::Adapter {
+            agent: id.clone(),
+            event,
+        };
+        if e.options != SessionOptions::default() {
+            out.push(event(AdapterEvent::Options {
+                session_id: e.session_id.clone(),
+                options: e.options.clone(),
+            }));
+        }
+        if !e.rich.config.is_empty() {
+            out.push(event(AdapterEvent::Config {
+                session_id: e.session_id.clone(),
+                options: e.rich.config.clone(),
+            }));
+        }
+        if !e.rich.commands.is_empty() {
+            out.push(event(AdapterEvent::Commands {
+                session_id: e.session_id.clone(),
+                commands: e.rich.commands.clone(),
+            }));
+        }
+        out
     }
 
     /// ADR-0060: agent ids start at `next` (the session ledger's), so an id is never given twice across the node's restarts.
@@ -2179,6 +2262,7 @@ impl Supervisor {
             .map(|e| self.credential_vars(&e.agent.kind))
             .unwrap_or_default();
         let holder = self.holder.clone();
+        let kept_launch = self.kept_launch.contains(id);
         let Some(e) = self.adapters.get_mut(id) else {
             return;
         };
@@ -2212,6 +2296,11 @@ impl Supervisor {
                 e.rich.forget();
                 e.running = true;
                 e.agent.process_restarted();
+                // As for a terminal agent (`restart`): one taken up from the holder restarts without its options' arguments.
+                if kept_launch {
+                    e.launch = LaunchChoice::default();
+                    self.kept_launch.remove(id);
+                }
                 events.push(SupervisorEvent::Started { agent: id.clone() });
                 events.extend(session_report(&e.agent));
             }
@@ -3035,6 +3124,7 @@ impl Supervisor {
         );
         // A restart of a process that died is never a resume by the node after its own stop: no "carry on" message here.
         let fresh_next = entry.fresh_next;
+        let kept_launch = self.kept_launch.contains(id);
         let (argv, native, fresh, _) =
             self.argv_for_resume(&kind, session.as_deref(), false, fresh_next);
         // F1020: a selected folder is held again, so a restart never follows a link swapped in for it since the agent started.
@@ -3056,6 +3146,12 @@ impl Supervisor {
                 entry.pacer = Pacer::default();
                 entry.next_check = now;
                 entry.agent.process_restarted();
+                // An agent taken up from the holder knows its launch options but not their arguments (`set_kept_launch`): the
+                // restarted process runs without them, so it is not shown with them any more.
+                if kept_launch {
+                    entry.launch = LaunchChoice::default();
+                    self.kept_launch.remove(id);
+                }
                 // A new session when its own could not be continued (ADR-0060): that one is its session now.
                 if !native {
                     entry.agent.session = fresh;

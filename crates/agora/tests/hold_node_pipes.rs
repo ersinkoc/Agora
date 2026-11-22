@@ -67,6 +67,11 @@ struct Rig {
 
 impl Rig {
     fn new(tag: &str) -> Rig {
+        Self::with_args(tag, &[])
+    }
+
+    /// [`Self::new`] with more arguments for the fake adapter (`--modes`).
+    fn with_args(tag: &str, args: &[&str]) -> Rig {
         static N: AtomicU32 = AtomicU32::new(0);
         let root = std::env::temp_dir().join(format!(
             "agora-hnp-{tag}-{}-{}",
@@ -78,7 +83,9 @@ impl Rig {
         std::fs::create_dir_all(root.join("data")).expect("data");
         let folder = root.join("work");
         std::fs::create_dir_all(&folder).expect("work");
-        let command = serde_json::to_string(&[fake_agent(), "--adapter".to_string()]).expect("cmd");
+        let mut command = vec![fake_agent(), "--adapter".to_string()];
+        command.extend(args.iter().map(|a| (*a).to_string()));
+        let command = serde_json::to_string(&command).expect("cmd");
         std::fs::write(
             root.join("manifests/k.toml"),
             format!("kind = \"k\"\ndisplay_name = \"K\"\nversion = \"1\"\nmin_engine = 1\n[adapter]\ncommand = {command}\n"),
@@ -392,4 +399,213 @@ fn stopping_a_held_adapter_ends_its_process_and_the_holder() {
     if let Some(h) = hold_pid {
         wait_for("the holder to end with its last agent", || !alive(h));
     }
+}
+
+/// One MCP conversation on an agent's mesh socket: `initialize`, then `workspace_status`; the tool's answer, or `None` when nothing
+/// serves the socket.
+fn mesh_status(socket: &Path) -> Option<serde_json::Value> {
+    use std::io::{BufRead, Write};
+    let stream = agora_platform::local_connect(socket).ok()?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .ok()?;
+    let mut out = stream.try_clone().ok()?;
+    let mut lines = std::io::BufReader::new(stream).lines();
+    let mut ask = |msg: serde_json::Value| -> Option<serde_json::Value> {
+        writeln!(out, "{msg}").ok()?;
+        out.flush().ok()?;
+        if msg.get("id").is_none() {
+            return Some(serde_json::Value::Null);
+        }
+        serde_json::from_str(&lines.next()?.ok()?).ok()
+    };
+    ask(
+        serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26"}}),
+    )?;
+    ask(serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"}))?;
+    ask(
+        serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"workspace_status","arguments":{}}}),
+    )
+}
+
+/// #906 and #907 (RM-47): a structured agent the holder kept across a node restart has its mesh socket served again at the same path,
+/// and the hub, which the new node's `NodeOnline` told that everything it ran is gone, shows it running (not finished), so the window
+/// lets the person send it a prompt; the prompt is answered.
+#[test]
+fn a_kept_structured_agent_is_on_the_mesh_again_and_shown_running_after_its_node_restarts() {
+    let _serial = serial();
+    let rig = Rig::new("kept");
+    let node = rig.node();
+    let id = started(&rig, &node);
+    let pid = pid_of(&node, &id);
+    let socket = rig.root.join("m").join(format!("{id}.sock"));
+    let a = mesh_status(&socket).expect("the mesh socket before the restart");
+    assert!(a["result"].is_object(), "{a}");
+    // A node's process that ends closes its agents' mesh endpoints with it; this test process stands for the node and lives on.
+    node.mesh.unregister(&AgentId::new(id.clone()));
+    drop(node);
+    assert!(alive(pid), "the adapter ended with its node");
+    assert!(
+        mesh_status(&socket).is_none(),
+        "the old endpoint still answers"
+    );
+
+    let node = rig.node();
+    assert!(held(&node, &id), "the agent was not taken up again");
+    assert_eq!(pid_of(&node, &id), pid);
+    let a = mesh_status(&socket).expect("the kept agent's mesh socket is not served");
+    assert!(a["result"].is_object() && a.get("error").is_none(), "{a}");
+
+    let mut view = agora_hub::projection::View::default();
+    for ev in node.events.events_after(0) {
+        view.apply(&ev);
+    }
+    let agent = &view.agents[&agora_hub::projection::qualified("hold-node", &id)];
+    assert!(agent.running, "the hub shows the kept agent finished");
+    assert_eq!(agent.state, v1::AgentState::Idle);
+    assert!(agent.interrupted.is_none());
+    prompt(&node, &id, "hello again");
+    wait_for("the answer", || said(&node, &id, "hello again"));
+}
+
+/// #932: a structured agent the holder kept runs on in the mode it was in, and that mode makes it act without asking. After the node
+/// restarts it is shown and checked so: the new node puts back what the agent last reported of its session (the adapter is not asked
+/// again), so the hub's view has its modes with the skipping one in use, and `skips_permissions_now` says so.
+#[test]
+fn a_kept_structured_agent_in_a_mode_that_skips_permissions_is_still_shown_skipping_after_its_node_restarts(
+) {
+    let _serial = serial();
+    let rig = Rig::with_args("skipmode", &["--modes"]);
+    let node = rig.node();
+    let id = started(&rig, &node);
+    let agent = AgentId::new(id.clone());
+    assert!(!node
+        .supervisor
+        .lock()
+        .unwrap()
+        .skips_permissions_now(&agent));
+    // The agent switches itself to a mode that skips permissions (the fake reports its options again with it in use).
+    prompt(&node, &id, "mode:bypassPermissions");
+    wait_for("the agent to act without asking", || {
+        node.supervisor
+            .lock()
+            .unwrap()
+            .skips_permissions_now(&agent)
+    });
+    wait_for("the mode in the kept session", || {
+        node.ledger
+            .kept_session(&id)
+            .options
+            .is_some_and(|o| o.current_mode == "bypassPermissions")
+    });
+    let pid = pid_of(&node, &id);
+    node.mesh.unregister(&agent);
+    drop(node);
+    assert!(alive(pid), "the adapter ended with its node");
+    // What was kept is judged again when it is put back, as a report is: written here without the adapter's own skip flags (as an
+    // older node, or one without a rule added since, would have kept it), the mode's words still make it one that skips.
+    let file = rig.root.join(format!("data/sessions/kept-{id}.pb"));
+    let mut bytes: &[u8] = &std::fs::read(&file).expect("the kept session file");
+    let mut rewritten = Vec::new();
+    while !bytes.is_empty() {
+        use prost::Message;
+        let mut ev = v1::Event::decode_length_delimited(&mut bytes).expect("a kept report");
+        if let Some(v1::event::Body::AgentSessionOptions(o)) = &mut ev.body {
+            for m in &mut o.modes {
+                m.skips_permissions = false;
+            }
+        }
+        rewritten.extend(ev.encode_length_delimited_to_vec());
+    }
+    std::fs::write(&file, rewritten).expect("rewrite");
+
+    let node = rig.node();
+    assert!(held(&node, &id), "the agent was not taken up again");
+    assert_eq!(pid_of(&node, &id), pid);
+    assert!(
+        node.supervisor
+            .lock()
+            .unwrap()
+            .skips_permissions_now(&agent),
+        "the new node checks the kept agent as if it asks"
+    );
+    let mut view = agora_hub::projection::View::default();
+    for ev in node.events.events_after(0) {
+        view.apply(&ev);
+    }
+    let shown = &view.agents[&agora_hub::projection::qualified("hold-node", &id)];
+    assert!(shown.running);
+    let options = shown
+        .session
+        .options
+        .as_ref()
+        .expect("the hub has no session options for the kept agent");
+    assert_eq!(options.current_mode, "bypassPermissions");
+    assert!(
+        options
+            .modes
+            .iter()
+            .any(|m| m.id == options.current_mode && m.skips_permissions),
+        "the hub shows the kept agent as if it asks"
+    );
+    assert!(
+        shown.session.config.is_some(),
+        "the config options were not shown again"
+    );
+    // A resync announcement (the hub lost this node's start) says the agent up again with `AgentStarted`, which leaves the hub with no
+    // session options: what the agent reported follows it there too.
+    node.events.announce();
+    let mut view = agora_hub::projection::View::default();
+    for ev in node.events.events_after(0) {
+        view.apply(&ev);
+    }
+    let shown = &view.agents[&agora_hub::projection::qualified("hold-node", &id)];
+    assert!(shown.running);
+    let options = shown
+        .session
+        .options
+        .as_ref()
+        .expect("a resync lost the kept agent's session options");
+    assert_eq!(options.current_mode, "bypassPermissions");
+    // Codex review of #928: the same for an announcement that leaves the node's start in place (`Announce::Present`).
+    let views = node.supervisor.lock().unwrap().list();
+    node.events
+        .announce_present(&views, &[], agora_node::daemon::Announce::Present);
+    let mut after = agora_hub::projection::View::default();
+    for ev in node.events.events_after(0) {
+        after.apply(&ev);
+    }
+    let after = &after.agents[&agora_hub::projection::qualified("hold-node", &id)];
+    assert_eq!(
+        after
+            .session
+            .options
+            .as_ref()
+            .map(|options| options.current_mode.as_str()),
+        Some("bypassPermissions"),
+        "a hub resync lost the restored mode"
+    );
+    // It still answers, and a later report replaces what was put back.
+    prompt(&node, &id, "mode:default");
+    wait_for("the agent to ask again", || {
+        !node
+            .supervisor
+            .lock()
+            .unwrap()
+            .skips_permissions_now(&agent)
+    });
+}
+
+/// Codex review of #928: a node with no holder to attach to takes nothing up, so every kept session left on disk is an earlier
+/// process's and goes, rather than waiting for an agent that reuses the id.
+#[test]
+fn a_node_without_a_holder_keeps_no_earlier_session() {
+    let _serial = serial();
+    let rig = Rig::new("nokeep");
+    let dir = rig.root.join("data/sessions");
+    std::fs::create_dir_all(&dir).expect("sessions");
+    let file = dir.join("kept-agent-7.pb");
+    std::fs::write(&file, b"old").expect("kept file");
+    let _node = rig.node_without_holder();
+    assert!(!file.exists(), "an earlier process's session was kept");
 }

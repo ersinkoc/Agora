@@ -491,7 +491,8 @@ not built: nothing to check.
 - **Do:** start a Shell; in it run a counter (`i=0; while :; do i=$((i+1)); echo $i; sleep 1; done`). `agora down`; `agora status`;
   wait 30 s; `agora`.
 - **See:** `status` counts the agent while the node is down; after `agora` the same agent (same id, same process) is back with the
-  counter still counting, no gap in its numbers; `agora down --agents` would end it.
+  counter still counting, no gap in its numbers, and the window and the terminal client show it running with its terminal, not
+  "Finished" (#907); `agora down --agents` would end it.
 - **Evidence so far:** `blackview`, 2026-11-20 (ADR-0093 "Origin", cited in `docs/capabilities.md`): a 0.3.26 node restart kept a
   Claude Code terminal agent in the same holder.
 
@@ -587,9 +588,11 @@ not built: nothing to check.
 ### RM-47 Structured agents survive a node restart
 - **OS:** Linux, macOS (unconfined agents through a holder of link version 2); Windows: not built.
 - **Do:** start `rm-acp`; send `hello`; `agora down`; `agora`; send `hello again`.
-- **See:** the same agent and conversation, not under "Stopped when the machine shut down"; the second prompt is answered; a confined
-  `rm-acp` (only in a disposable OS account or VM, #900) instead ends with the node and comes back only as the resume policy
-  allows.
+- **See:** the same agent and session, shown running in the window and the terminal client (not "Finished", #907) with the mode
+  and settings it had (#932), not under
+  "Stopped when the machine shut down"; the second prompt is answered; the earlier turns are not shown again (the chat history is in
+  memory until ADR-0089, #931); a confined `rm-acp` (only in a disposable OS account or VM, #900) instead ends with the node and comes back
+  only as the resume policy allows.
 - **Evidence so far:** none for the built steps (the 2026-11-20 run on `blackview` in ADR-0093 "Origin" is the case that led to it).
 
 ### RM-48 A plain terminal shows the agent program running in it

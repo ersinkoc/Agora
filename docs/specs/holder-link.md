@@ -117,8 +117,18 @@ next frame's.
 - **When the next node starts:** it attaches to the running holder before it calls anything interrupted. For each running agent whose
   ledger entry names this holder (pid and start time, written by the node's tick, `Entry::holder_pid`/`holder_started`) it restores the
   agent, builds its terminal from the master, feeds it what the holder buffered, nudges its size (two resizes) so full-screen programs
-  redraw, registers its mesh endpoint again at the same path, and clears the interruption (`Ledger::reclaim`). An agent that ended while
-  no node was attached is released and stays interrupted (offered for resume); its status and output are not replayed.
+  redraw, registers its mesh endpoint again at the same path, and clears the interruption (`Ledger::reclaim`). The mesh endpoint is made
+  through the launch hook, so the hook is set before the agents are taken up (#906: it was set after, and a kept agent's socket was never
+  served again, so its open `agora mesh stdio` bridge got `mesh.unavailable` for good). After the node's `NodeOnline` (which tells the hub
+  that everything the node ran before is gone) and its `CheckoutDiscovered`, each agent taken up is said up again as a resync
+  announcement says it: `AgentStarted`, `AgentStateChanged` (the state the ledger knew), `AgentSessionReported` when the ledger has a
+  session, and `TerminalOpened` (`EventSink::agent_taken_up`, re-stated, so the ledger does not learn it again). Without them the hub, the
+  window and the terminal client showed the kept agent finished (#907). `AgentStarted` carries the launch options the agent was started
+  with and whether it acts without asking (ADR-0059), from the ledger (`Entry::launch_options`, `skips_permissions`, recorded from its
+  first `AgentStarted`; `Supervisor::set_kept_launch`): it is the same process. An option this node's manifest marks as skipping, or no
+  longer lists, counts as skipping too. The options' arguments are not known again, so a restart after a crash runs without them, as a
+  resume does, and the restarted agent is shown without them. An agent that ended while no node was attached is released and
+  stays interrupted (offered for resume); its status and output are not replayed.
   **Nothing is left attached and unread:** `Attach` made the holder stop reading each terminal and forget its buffer, and the node drops
   a master it does not take, so a running agent left like that would block on a full terminal for good. Every held agent the node does
   not take up (the ledger does not know it or names another holder, its folder or project is gone, or taking it up failed) is ended
@@ -237,6 +247,17 @@ wants to write that cannot fit one frame fails that write on the node's side, be
   (pid and start time) and is interrupted, it restores the agent (`restore`), reads the adapter's session id and capabilities the old node wrote to the ledger
   (`Entry::adapter_session`, `adapter_capabilities`; the node cannot ask the adapter again), starts a new adapter host over the holder's pipes (**no
   `initialize` and no `session/start`: the adapter still has its session**), makes the mesh endpoint again at the same path, and clears the interruption.
+  It is said up again to the hub after `NodeOnline` as a terminal agent is (above), with its launch options, without `TerminalOpened`, and then with what
+  it last reported of its session: `AgentSessionOptions`, `AgentSessionConfig`, `AgentCommands` (#932). The adapter does not report them again by itself,
+  so the node keeps the last ones it recorded for each adapter agent in `<data>/sessions/kept-<id>.pb` (beside the ledger, owner-only; a report larger
+  than the hub keeps, 64 KiB encoded, is not kept). The file goes when the agent ends or is interrupted (also when only the file has it), when an agent
+  that runs restarts after a crash (a resume, which follows an end or an interruption, keeps what its new process reported before its start was recorded),
+  and at every start for each agent not taken up, with any unfinished write. On take-up the node puts them back on the agent (bounded and judged again as
+  a report is) and re-states them from the supervisor's copy (`Supervisor::session_events`), so the window's badge matches `skips_permissions_now`; a
+  resync announcement re-states them after `AgentStarted` too. A mode or config
+  option in use that makes the agent act without asking (switched to after the start, by the person or by the agent) is so shown and checked
+  (`skips_permissions_now`) until the agent reports new ones. Not built: its usage counters in the hub's view start again from 0 (#930); its earlier
+  conversation is not shown (the chat history is in memory, ADR-0089; #931).
   An agent the node does not take up (unknown to the ledger, another holder, ended, its folder gone, no session recorded) is ended through the holder.
 - **Rebuilding what waited on the person (decision 3):** the `seen` lines go through `pending_approvals`, which keeps an `approval/request` unless a later
   `state/update` shows the agent went on (a state other than `blocked`); the `fresh` lines are read as if they had just arrived. A kept request becomes an
