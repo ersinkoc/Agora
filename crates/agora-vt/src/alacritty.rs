@@ -8,9 +8,13 @@ use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config, Term, TermMode};
-use alacritty_terminal::vte::ansi::{Color as AColor, NamedColor, Processor};
+use alacritty_terminal::vte::ansi::{
+    Color as AColor, CursorShape as AShape, CursorStyle, NamedColor, Processor,
+};
 
-use crate::{Cell, Color, Cursor, Modes, Size, Style, Terminal};
+use crate::{
+    Cell, Color, Cursor, CursorShape, Modes, MouseEncoding, MouseTracking, Size, Style, Terminal,
+};
 
 /// Scrolled-back lines kept per terminal. Memory is bounded by this (design/resource-limits.md).
 const SCROLLBACK: usize = 2000;
@@ -25,6 +29,12 @@ const MIN_COLS: u16 = 2;
 /// (`CSI 22 t`). Bytes past the bound are left out; the sequence still ends at its terminator.
 const MAX_OSC: usize = 1024;
 
+/// The backend's cursor style while the program has set none (see `with_scrollback`).
+const DEFAULT_CURSOR: CursorStyle = CursorStyle {
+    shape: AShape::HollowBlock,
+    blinking: false,
+};
+
 /// What the OSC bound needs to know of the byte stream; it follows `vte`'s states for `ESC`, `ESC ]` and the OSC string.
 #[derive(Clone, Copy, Default)]
 enum Scan {
@@ -33,7 +43,16 @@ enum Scan {
     Escape,
     /// Inside an OSC, with this many payload bytes given to the parser.
     Osc(usize),
+    /// After `ESC [`: a `>` next makes it a kitty keyboard push (`CSI > flags u`).
+    Csi,
+    /// Inside `ESC [ >`, reading the parameters.
+    Push,
 }
+
+/// Kitty keyboard pushes the parser is given before the backend's keyboard stacks are emptied (see `pushes`). `alacritty_terminal`
+/// 0.26 panics on a push once a stack holds 4096 entries (it evicts from the title stack, which may be empty), so a program, or a
+/// file it prints, could stop the terminal with 4096 `CSI > u`. Below that bound, and far above the depth any program uses.
+const PUSH_LIMIT: usize = 1024;
 
 #[derive(Clone, Default)]
 struct Listener {
@@ -115,6 +134,10 @@ pub struct AlacrittyTerminal {
     listener: Listener,
     size: Size,
     scan: Scan,
+    /// The backend's settings, to empty the keyboard stacks with (see [`PUSH_LIMIT`]).
+    config: Config,
+    /// Kitty keyboard pushes given to the parser since the stacks were last emptied: never fewer than the entries on both stacks.
+    pushes: usize,
 }
 
 impl AlacrittyTerminal {
@@ -138,16 +161,47 @@ impl AlacrittyTerminal {
         let listener = Listener::default();
         let config = Config {
             scrolling_history: scrollback,
+            // ADR-0100: the emulator follows the program's kitty keyboard flags (`CSI > / < / = u`) so the repaint can hand them on.
+            // A query's reply (`CSI ? u`) is dropped like every other reply the backend would write (`Listener`).
+            kitty_keyboard: true,
+            // A shape no program can set (DECSCUSR only gives block, underline and bar): while the backend reports it, the
+            // program never set a shape or set the default, and the cursor is `CursorShape::Default`.
+            default_cursor_style: DEFAULT_CURSOR,
             ..Config::default()
         };
-        let term = Term::new(config, &Dims(size), listener.clone());
+        let term = Term::new(config.clone(), &Dims(size), listener.clone());
         Self {
             term,
             parser: Processor::new(),
             listener,
             size,
             scan: Scan::Text,
+            config,
+            pushes: 0,
         }
+    }
+
+    /// Empties both keyboard stacks once [`PUSH_LIMIT`] pushes have been given to the parser, keeping the current flags. A
+    /// synchronized update may still hold some of those pushes, so it is ended first: every counted push is then applied, and the
+    /// stacks never reach the backend's panic.
+    fn bound_keyboard_stack(&mut self) {
+        if self.pushes < PUSH_LIMIT {
+            return;
+        }
+        self.parser.stop_sync(&mut self.term);
+        let flags = self.modes().keyboard_flags;
+        // Switching the backend's kitty tracking off and on again empties both stacks (`Term::set_options`).
+        let mut off = self.config.clone();
+        off.kitty_keyboard = false;
+        self.term.set_options(off);
+        self.term.set_options(self.config.clone());
+        // `CSI = flags ; 1 u`: the flags again, without a stack entry (at most "\x1b[=255;1u", 11 bytes).
+        let mut buf = [0u8; 16];
+        let mut rest = &mut buf[..];
+        let _ = std::io::Write::write_fmt(&mut rest, format_args!("\x1b[={flags};1u"));
+        let n = 16 - rest.len();
+        self.parser.advance(&mut self.term, &buf[..n]);
+        self.pushes = 0;
     }
 
     /// Gives `bytes` to the parser, leaving out OSC payload bytes past [`MAX_OSC`].
@@ -162,9 +216,11 @@ impl AlacrittyTerminal {
                     None => break,
                 }
             }
+            let mut pushed = false;
             self.scan = match (self.scan, bytes[i]) {
                 (_, 0x1b) => Scan::Escape,
                 (Scan::Escape, b']') => Scan::Osc(0),
+                (Scan::Escape, b'[') => Scan::Csi,
                 // `vte` stays in its escape state for these.
                 (Scan::Escape, 0x00..=0x17 | 0x19 | 0x1c..=0x1f | 0x7f..=0xff) => Scan::Escape,
                 (Scan::Osc(_), 0x07 | 0x18 | 0x1a) => Scan::Text,
@@ -178,9 +234,26 @@ impl AlacrittyTerminal {
                     start = i + 1;
                     Scan::Osc(n)
                 }
+                (Scan::Csi, b'>') => Scan::Push,
+                // Executed or ignored inside a CSI sequence by `vte`, which stays in it.
+                (Scan::Csi, 0x00..=0x17 | 0x19 | 0x1c..=0x1f | 0x7f..=0xff) => Scan::Csi,
+                (Scan::Push, 0x00..=0x17 | 0x19 | 0x1c..=0x1f | 0x7f..=0xff) => Scan::Push,
+                (Scan::Push, b'0'..=b'9' | b':' | b';') => Scan::Push,
+                (Scan::Push, b'u') => {
+                    pushed = true;
+                    Scan::Text
+                }
                 _ => Scan::Text,
             };
             i += 1;
+            if pushed {
+                self.pushes += 1;
+                if self.pushes >= PUSH_LIMIT {
+                    self.parser.advance(&mut self.term, &bytes[start..i]);
+                    start = i;
+                    self.bound_keyboard_stack();
+                }
+            }
         }
         if start < bytes.len() {
             self.parser.advance(&mut self.term, &bytes[start..]);
@@ -276,19 +349,67 @@ impl Terminal for AlacrittyTerminal {
 
     fn cursor(&self) -> Cursor {
         let p = self.term.grid().cursor.point;
+        let style = self.term.cursor_style();
         Cursor {
             row: u16::try_from(p.line.0.max(0)).unwrap_or(0),
             col: u16::try_from(p.column.0).unwrap_or(0),
             visible: self.term.mode().contains(TermMode::SHOW_CURSOR),
+            shape: match style.shape {
+                AShape::Block => CursorShape::Block,
+                AShape::Underline => CursorShape::Underline,
+                AShape::Beam => CursorShape::Bar,
+                // The sentinel default (`DEFAULT_CURSOR`); `Hidden` is never set by a program either.
+                AShape::HollowBlock | AShape::Hidden => CursorShape::Default,
+            },
+            blink: style.blinking,
         }
     }
 
     fn modes(&self) -> Modes {
-        let m = self.term.mode();
+        let m = *self.term.mode();
+        // One at a time in the backend (setting one clears the others); the widest wins should that ever change.
+        let mouse_tracking = if m.contains(TermMode::MOUSE_MOTION) {
+            MouseTracking::Motion
+        } else if m.contains(TermMode::MOUSE_DRAG) {
+            MouseTracking::Drag
+        } else if m.contains(TermMode::MOUSE_REPORT_CLICK) {
+            MouseTracking::Click
+        } else {
+            MouseTracking::Off
+        };
+        let mouse_encoding = if m.contains(TermMode::SGR_MOUSE) {
+            MouseEncoding::Sgr
+        } else if m.contains(TermMode::UTF8_MOUSE) {
+            MouseEncoding::Utf8
+        } else {
+            MouseEncoding::Default
+        };
+        // The kitty flags are bits 18 to 22 of the backend's mode, in the protocol's order (1, 2, 4, 8, 16).
+        let keyboard_flags = [
+            TermMode::DISAMBIGUATE_ESC_CODES,
+            TermMode::REPORT_EVENT_TYPES,
+            TermMode::REPORT_ALTERNATE_KEYS,
+            TermMode::REPORT_ALL_KEYS_AS_ESC,
+            TermMode::REPORT_ASSOCIATED_TEXT,
+        ]
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| m.contains(**f))
+        .fold(0u8, |acc, (i, _)| acc | (1 << i));
         Modes {
             alt_screen: m.contains(TermMode::ALT_SCREEN),
             bracketed_paste: m.contains(TermMode::BRACKETED_PASTE),
             application_cursor: m.contains(TermMode::APP_CURSOR),
+            application_keypad: m.contains(TermMode::APP_KEYPAD),
+            mouse_tracking,
+            mouse_encoding,
+            focus_reporting: m.contains(TermMode::FOCUS_IN_OUT),
+            alternate_scroll: m.contains(TermMode::ALTERNATE_SCROLL),
+            autowrap: m.contains(TermMode::LINE_WRAP),
+            origin: m.contains(TermMode::ORIGIN),
+            insert: m.contains(TermMode::INSERT),
+            newline: m.contains(TermMode::LINE_FEED_NEW_LINE),
+            keyboard_flags,
         }
     }
 
@@ -334,6 +455,49 @@ mod osc_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Kitty keyboard pushes past the backend's stack bound never panic it, in one chunk, byte by byte, inside a synchronized
+    /// update, or with controls inside the sequence (`vte` still pushes then), and the current flags survive the bound.
+    #[test]
+    fn a_flood_of_keyboard_pushes_is_bounded() {
+        let cases: [(&str, String, usize); 4] = [
+            ("plain", "\x1b[>1u".repeat(5000) + "\x1b[>5u", 1 << 20),
+            ("byte by byte", "\x1b[>1u".repeat(5000) + "\x1b[>5u", 1),
+            (
+                "synchronized",
+                format!("\x1b[?2026h{}\x1b[>5u", "\x1b[>1u".repeat(5000)),
+                4096,
+            ),
+            (
+                "controls inside",
+                "\x1b[>\x07\u{e9}1u".repeat(5000) + "\x1b[>5u",
+                777,
+            ),
+        ];
+        for (what, bytes, split) in cases {
+            let mut t = AlacrittyTerminal::new(Size { cols: 20, rows: 3 });
+            for c in bytes.as_bytes().chunks(split) {
+                t.feed(c);
+            }
+            t.parser.stop_sync(&mut t.term);
+            assert_eq!(t.modes().keyboard_flags, 5, "{what}");
+            assert!(t.pushes < PUSH_LIMIT, "{what}");
+            // The stack still works after the bound: one pop goes back to the push before.
+            t.feed(b"\x1b[<u");
+            assert_eq!(t.modes().keyboard_flags & !5, 0, "{what}");
+        }
+        let mut t = AlacrittyTerminal::new(Size { cols: 20, rows: 3 });
+        t.feed(b"\x1b[>1u\x1b[>3u");
+        assert_eq!(t.modes().keyboard_flags, 3);
+        t.feed(b"\x1b[<u");
+        assert_eq!(
+            t.modes().keyboard_flags,
+            1,
+            "a pop restores the flags below"
+        );
+        t.feed(b"\x1b[=8;1u");
+        assert_eq!(t.modes().keyboard_flags, 8, "set without a push");
+    }
 
     /// A synchronized update the program never ends is applied once its timeout has passed (F702).
     #[test]

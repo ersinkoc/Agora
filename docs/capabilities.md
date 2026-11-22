@@ -92,6 +92,7 @@ L1 is an agent in a terminal read from its screen (a manifest); L2/L3 are struct
 | --- | --- | --- | --- | --- |
 | Review screen and file browser | ADR-0036 Accepted | yes | web tests; `scripts/e2e-changes*.mjs` | [Linux 2026-11-21](reviews/2026-11-21-real-machine-linux.md) |
 | A diff names every changed file even when cut | ADR-0071 Accepted | not built (the window says how many files are not shown) | — | — |
+| A window that attaches late gets the program's modes (mouse, wheel, focus, alternate screen, cursor shape) | ADR-0100 Accepted | step 1 yes (the modes in the node's repaint, every client); the history replay (step 2) and the clients' part (step 3) not built; origin mode and the modes the node does not track are not carried | `agora-vt` conformance, `agora-node` repaint tests, `crates/agora-tui/tests/repaint_modes.rs`; `scripts/e2e-terminal-repaint.mjs` (Chromium and the terminal client) | none recorded here |
 | A shared terminal takes the smallest window's size | ADR-0072 Accepted | yes | hub and web tests | [Linux 2026-11-21](reviews/2026-11-21-real-machine-linux.md) |
 | Phone-sized window | ADR-0046 Accepted, ADR-0067 Accepted | yes | `scripts/e2e-phone.mjs` in emulated Chromium | not run on a real phone |
 | Screen password for remote sign-in | ADR-0067 Accepted | yes (rung 1) | hub tests | none recorded here |

@@ -4,6 +4,7 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+- A terminal you open, reload or come back to after a lost connection now gets the program's mouse, wheel, focus and full-screen state as if you had watched from the start: clicks and the wheel reach an editor or monitor started before the window opened, the wheel sends arrow keys to a full-screen program, and a window that was away while a program switched the mouse off no longer sends it stray mouse reports. This works in the web window and the terminal client once the machine runs this version. The scrolled-away history after a reload is not there yet.
 - In the terminal client, `b` opens the board of the selected agent's project (Backlog, Doing, Done), and Enter on a Backlog task gives it to one of the project's running agents after a confirmation you answer with `g`.
 
 ## 0.3.33
