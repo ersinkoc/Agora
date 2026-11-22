@@ -141,6 +141,8 @@ export function fromSnapshot(s: agora.v1.Snapshot.$Properties): View {
       parentId: a.parentAgentId || undefined,
       ...(a.interrupted ? { interrupted: { resumable: !!a.resumable, atMs: num(a.interruptedAtMs), folder: a.folder ?? '', stillRunning: !!a.stillRunning }, sinceMs: num(a.interruptedAtMs) } : {}),
       skipsPermissions: !!a.skipsPermissions,
+      // #902: how a closed agent ended (`AgentSnapshot.exit_code`), so a reloaded window still shows one that failed as failed.
+      ...(!a.running && a.exitCode !== undefined && a.exitCode !== null ? { exitCode: a.exitCode } : {}),
     });
     const modes = optionsOf(a.modes, true), models = optionsOf(a.models, false);
     const reported = a.costMicros !== undefined && a.costMicros !== null && !!a.currency;

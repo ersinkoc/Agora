@@ -151,7 +151,7 @@ fn quote(p: &std::path::Path) -> String {
 /// Every path in the profile is where the kernel has it ([`walk`]): Seatbelt matches the path the kernel resolved, so a rule spelled
 /// another way (`/System/Volumes/Data/Users/...`, which `realpath` keeps) would match nothing (measured: a deny spelled through
 /// that firmlink left the folder readable by both spellings).
-pub(crate) fn profile(sb: &crate::Sandbox) -> io::Result<String> {
+fn build_profile(sb: &crate::Sandbox, git_config: Option<&std::path::Path>) -> io::Result<String> {
     let refused = |why| io::Error::new(io::ErrorKind::PermissionDenied, why);
     let mut denied: Vec<std::path::PathBuf> = Vec::new();
     for p in &sb.deny {
@@ -372,6 +372,26 @@ pub(crate) fn profile(sb: &crate::Sandbox) -> io::Result<String> {
             out.push_str(&format!("(allow network-outbound {})\n", own.join(" ")));
         }
     }
+    // ADR-0098: reopen only the generated file after the deny on its parent. The
+    // parent metadata grants allow traversal and do not grant directory listing.
+    if let Some(file) = git_config {
+        out.push_str(&format!(
+            "(allow file-read-data file-read-metadata {})\n",
+            literal(file)
+        ));
+        let parents: Vec<_> = file
+            .ancestors()
+            .skip(1)
+            .filter(|p| denied.iter().any(|d| p.starts_with(d)))
+            .map(literal)
+            .collect();
+        if !parents.is_empty() {
+            out.push_str(&format!(
+                "(allow file-read-metadata {})\n",
+                parents.join(" ")
+            ));
+        }
+    }
     if sb.offline {
         // ADR-0047 `worktree-offline`: nothing leaves the machine. Seatbelt names only `localhost` (this machine's own addresses) or
         // every host. Connections to this machine stay open (a local model; see the threat model for what else listens there);
@@ -399,6 +419,11 @@ pub(crate) fn profile(sb: &crate::Sandbox) -> io::Result<String> {
         }
     }
     Ok(out)
+}
+
+pub(crate) fn git_config_path(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    let found = walk(path, &|_, _| true).ok()?;
+    (found.file && found.links == 1).then_some(found.path)
 }
 
 /// An entry where the kernel has it (see [`walk`]).
@@ -639,20 +664,30 @@ fn real_or_new(p: &std::path::Path) -> Option<std::path::PathBuf> {
     }
 }
 
+#[cfg(test)]
+fn profile(sb: &crate::Sandbox) -> io::Result<String> {
+    build_profile(sb, sb.git_config_file().as_deref())
+}
+
 /// `program args...` rewritten to run under `sandbox-exec` with the profile for `sb`.
 pub(crate) fn wrap(
     sb: &crate::Sandbox,
     program: &std::ffi::OsStr,
     args: &[std::ffi::OsString],
-) -> io::Result<(std::ffi::OsString, Vec<std::ffi::OsString>)> {
+) -> io::Result<(
+    std::ffi::OsString,
+    Vec<std::ffi::OsString>,
+    Option<std::path::PathBuf>,
+)> {
+    let git_config = sb.git_config_file();
     let mut v: Vec<std::ffi::OsString> = vec![
         "-p".into(),
-        profile(sb)?.into(),
+        build_profile(sb, git_config.as_deref())?.into(),
         "--".into(),
         program.into(),
     ];
     v.extend(args.iter().cloned());
-    Ok((SANDBOX_EXEC.into(), v))
+    Ok((SANDBOX_EXEC.into(), v, git_config))
 }
 
 /// See [`crate::desktop_notify`]: not yet on macOS. The system's own notifier for a script (`osascript`) posts as *Script Editor*:

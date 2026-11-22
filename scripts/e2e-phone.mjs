@@ -94,7 +94,7 @@ try {
     check(small2.length === 0, `${tag}: every control on the agent is at least 44 px${small2.length ? `: ${small2.join(', ')}` : ''}`);
     const fits = await page.evaluate(() => { const b = document.querySelector('.key-bar'); return !!b && b.scrollWidth <= b.clientWidth; });
     check(fits, `${tag}: the whole key bar fits the width`);
-    const term = await page.locator('.phone [role=region].terminal').boundingBox();
+    const term = await page.locator('.phone [role=region].terminal-host').boundingBox();
     check(!!term && term.width >= w - 40, `${tag}: the terminal takes the width (${Math.round(term?.width ?? 0)} px)`);
     for (const scheme of ['light', 'dark']) {
       await page.emulateMedia({ colorScheme: scheme });

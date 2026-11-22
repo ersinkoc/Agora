@@ -29,13 +29,10 @@ agent's or machine's name as `<agent>` or `<machine>` (the window gives agents n
   only by a person, with an account made for testing, never by an agent session.
 - **Disposable everything.** Every run uses its own Agora folder (`AGORA_HOME`) and its own project folders under one run folder
   (`$RM`), new for that run (S0). Every file a step reads, writes or tries to reach is one the run made under `$RM`, with made-up
-  content: never a real file of the machine (`~/.ssh`, shell profiles, your git configuration) and never a write outside `$RM` (one known exception, confinement, below). A
-  step never changes the machine's own settings (global git configuration, login items, PATH).
-- **One known exception: confinement (#900).** A confined start (any node with a `sandbox` policy) writes the agent's generated git
-  configuration outside `AGORA_HOME`, whatever `AGORA_HOME` says: on Linux into `~/.agora/git-config` in the real home, on macOS and
-  Windows into `agora-git-config` in the system temp folder (`docs/security/sandbox-recipes.md`). So every step that needs a
-  `sandbox` policy (RM-20's confined variant, RM-23, RM-33, RM-37, RM-38, RM-39's confined variant, RM-47's confined variant) runs
-  **only in a disposable OS account or VM** until issue #900 is fixed, never in the account that runs the maintainer's Agora.
+  content. Leave the machine's own configuration, login items and PATH as they are. The confined Git check in RM-33 uses a test identity.
+- **Confinement on 0.3.33.** Use a disposable OS account or VM for any step that needs a `sandbox` policy. Release 0.3.33 writes
+  the generated Git configuration outside `$RM` (#900). With ADR-0098 it lives in the node's own data directory at
+  `$AGORA_HOME/data/git-config/`. See [Sandbox recipes](../security/sandbox-recipes.md).
 - **Denied-path probes live outside the worktree and outside `/tmp`.** On Linux the confinement grants agents the shared `/tmp`, so a
   probe there proves nothing; probes go in the run's own folder under the home (S0). Before any `agora down`, `agora service`, `agora update` or `kill`, check that `AGORA_HOME` is set to the run's folder and
   that `agora status` shows the run's data folder. Never touch `~/.agora` (`%USERPROFILE%\.agora`) or the machine's own services.
@@ -92,23 +89,33 @@ again with `agora`, it means `agora --ui none` with the run's `AGORA_HOME`.
 manifests into `$AGORA_HOME/manifests/` (the node reads the folder again before it lists or starts agents; on Windows write paths as
 TOML literal strings, `'C:\...'`). Each manifest has `version = "1"`, `min_engine = 1` and a `display_name` equal to its `kind`, so
 the window shows the same name as these steps. None of these manifests is in the repository; each is written for this list from the
-manifest spec and the tests that use the fake agent, so each is **(unverified)** until a run has loaded it:
+manifest spec and the tests that use the fake agent. The Linux run of 2026-11-21 loaded and used each of them as written here
+(with the corrections below); the Windows forms stay **(unverified)** until a Windows run:
 
 - `shell.toml`: `kind = "shell"`, `display_name = "Shell"`, `version = "1"`, `min_engine = 1`, `[process]` `launch = ["sh"]`
-  (`["powershell.exe", "-NoLogo"]` on Windows). The shape is the one `scripts/browser-harness.mjs` writes; the PowerShell form
-  (unverified).
-- `rm-screen.toml` (a terminal agent read from its screen): `launch = [FAKE, "--script", "$RM/screen.toml"]`, with three `[[rules]]`
-  on `region = "bottom_non_empty_lines(1)"`: `working` for `contains = "esc to interrupt"`, `blocked` for `contains = "Allow Bash"`,
-  `idle` for `regex = '^> '`. `$RM/screen.toml` is `crates/agora-fake-agent/fixtures/working-blocked-idle.toml` with `delay_ms`
-  of 20000 on the first two frames and 600000 on the last, so each state lasts long enough to see (unverified).
+  (`["powershell.exe", "-NoLogo"]` on Windows). Shell is also a built-in kind: this file replaces it (the node log says so at every
+  start), which is harmless. The PowerShell form (unverified).
+- `rm-screen.toml` (a terminal agent read from its screen): `launch = [FAKE, "--script", "$RM/screen.toml"]`, with three `[[rules]]`,
+  each with its own `id`, `state` and `priority` (a rule without `id` or `priority` makes the whole file unreadable, and `agora
+  doctor` says only "The agent description rm-screen.toml could not be read."): `working` (priority 800) for `contains = "esc to
+  interrupt"` on `region = "bottom_non_empty_lines(1)"`; `blocked` (900) for `contains = "Allow Bash"` on
+  `bottom_non_empty_lines(4)` (that frame's last line is "  2. No", so one line never shows it); `idle` (100) for `regex = '^>'` on
+  `bottom_non_empty_lines(1)` (not `'^> '`: the row's trailing space is trimmed, so that never matches). `$RM/screen.toml` is
+  `crates/agora-fake-agent/fixtures/working-blocked-idle.toml` with `delay_ms` of 20000 on the first two frames and 600000 on the
+  last, so each state lasts long enough to see (verified on macOS 2026-11-21: Working, Needs you at about 23 s, Idle at
+  about 41 s).
 - `rm-acp.toml` (a structured agent over ACP): `[structured]` `acp = { argv = [FAKE, "--acp"] }`. Its prompts are listed at the top
   of `crates/agora-fake-agent/src/acp.rs` (`plan`, `ask`, `rich`, `usage`, `mcp TOOL JSON`, `slow`, anything else is echoed). The
-  shape is the one `crates/agora/tests/acp.rs` writes (unverified on a release node).
+  shape is the one `crates/agora/tests/acp.rs` writes. It says `loadSession: false`, so a Resume (RM-20) restarts it without its
+  conversation.
 - `rm-chat.toml` (a structured agent through an adapter): `[adapter]` `command = [FAKE, "--adapter"]` (prompts `ask`, `cwd`, `crash`). The shape is
-  the one `scripts/browser-harness.mjs` writes (unverified on a release node).
+  the one `scripts/browser-harness.mjs` writes. Its approval answer is `approved`.
 - `rm-probe.toml`: `launch = [FAKE, "--probe-directory", "$RM/probe-{pid}.json"]`, with the `[[launch.option]]` and
   `[[launch.setting]]` blocks of `crates/agora-node/tests/agent_spawn.rs` (`skip-permissions`, `model`, `effort`). The probe writes
-  its folder and its arguments to that file and waits (unverified).
+  its folder and its arguments to that file and waits.
+- `rm-helper.toml` (for RM-21's "Up to N" permission): the `rm-probe` launch line with its own file (`$RM/helper-{pid}.json`) and an
+  `[mcp]` section: `method = "cli_flag"`, `path = ".mcp.json"`, `flag = ["--mcp-config", "{config_file}"]`. Only a kind with an
+  `[mcp]` section (an agent) can be allowed more than once; a plain terminal program such as `rm-screen` is always "Only this one".
 
 `agora agent kinds` lists every kind; one that is missing is named by `agora doctor`.
 
@@ -192,7 +199,9 @@ then calls such as `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"nam
 - **Do:** S0 (an empty `AGORA_HOME` is a fresh machine to Agora). Type `agora --ui tui`: answer `1`, `n` to other machines, the
   question "Bring agents back by themselves after a restart? [Y/n]" (asked here, since `--resume` is not given: answer `n` and note
   what it says), and `n` then Enter to "Start Agora when you log in? [Y/n]" (never Enter alone). Then
-  `agora status`; kill the node process; wait 40 s; `agora status`; `agora down`. On a machine with **no** Agora service of its own:
+  `agora status`; wait more than a minute (a node that ends in its first minute is taken for a failed start and not started
+  again: "The node ended right after starting …, so it was not started again."), then kill the node process; wait 40 s; `agora
+  status`; `agora down`. On a machine with **no** Agora service of its own:
   `agora service install`, `status`, `remove`.
 - **See:** the first question appears once; the terminal client opens signed in; `status` shows hub and node with versions; the killed
   node is back about 30 s later and `status` says "restarted once in the last N minutes" with the last crash; `agora down` leaves no
@@ -204,13 +213,18 @@ then calls such as `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"nam
 ### RM-07 Pairing: find a hub on the network, approve on the hub
 - **OS:** Linux, macOS, Windows (either side). IPv4 broadcast only.
 - **Do:** on the hub machine S1 with `y`, then `agora pair open` (in a terminal). On a second machine (or a second `AGORA_HOME` on the
-  same one) `agora join`, then `agora join HUB-ADDRESS`. Answer on the hub's terminal once, and once in the window (A new machine wants
-  to join > Yes, the numbers match > Approve).
+  same one) `agora join`, then `agora join HUB-ADDRESS`. Answer on the hub's terminal once. The hub closes itself after one approval,
+  so for the second answer run `agora pair open` again and join from another disposable machine (its own `AGORA_HOME` and `--id`), then
+  answer that one in the window (A new machine wants to join > Approve > "Do the two numbers match exactly?" > Yes, the numbers match).
+  Wait a second or two before each answer: a key
+  typed right after a question is refused ("That key came too soon after the question to be an answer. …"). Join by a name the
+  hub's certificate holds (the hub's own suggestion, `agora join <hub name>:PORT`); an IP address that the certificate does not
+  name fails after the approval (#901).
 - **See:** `join` says `Found the hub "…" at …. Its fingerprint is …` with the same fingerprint as `pair open`; the new machine says
   `Number N. Approve this machine on the hub: …` and the hub `New machine "…" (…) wants to join. Number N.`, the same number; after `y`
   the new machine says `Joined. This machine is "…"` and is Online in Your machines; a denied or timed-out request ends with "Nothing was
   saved"; the hub closes itself after one approval.
-- **Evidence so far:** none recorded.
+- **Evidence so far:** [Linux 2026-11-21](2026-11-21-real-machine-linux.md): the terminal answer passed; the window's approval of a join by `127.0.0.1` failed (#901).
 
 ### RM-08 Machines reachable only over SSH
 - **OS:** hub on Linux, macOS or Windows; target Linux or macOS (a systemd or launchd user service, or the `tmux` fallback).
@@ -241,7 +255,8 @@ not built: nothing to check.
 
 ### RM-11 L1: terminal agents from manifests (built-in: claude-code, codex, wrongstack)
 - **OS:** Linux, macOS, Windows.
-- **Do:** S2. Start `rm-screen` in `$RM/proj`; watch it 60 s; open "Why is this shown?". Then **human, dedicated account:** start
+- **Do:** S2. Start `rm-screen` in `$RM/proj`; watch it 60 s; in its full view hover the state badge: its title is "Why is this
+  shown? …". Then **human, dedicated account:** start
   Claude Code, Codex and WrongStack each in a disposable folder; answer the folder-trust prompt; give a prompt; wait for the end.
 - **See:** `rm-screen` goes Working, then Needs you, then Idle, in the list and on its tile, with "Read from what is on the agent's
   screen."; the real agents show Needs you on the trust prompt (wide and narrow window), Working during the turn, Idle after.
@@ -263,16 +278,23 @@ not built: nothing to check.
 - **Do:** S2. Start `rm-chat`; send `ask`, then `cwd`, then `crash`. Registry: there is no default registry; if one is published, run
   `agora adapter install NAME --registry URL`, `agora adapter list`, `agora adapter remove NAME` (**human, dedicated account** for an
   adapter that needs a login).
-- **See:** the chat answers; `ask` brings an approval that Allow resolves; `cwd` says `$RM/proj`; `crash` shows it "Ended with an error"
-  with its reason; an installed adapter shows its version in `list` and its kind in the start window.
-- **Evidence so far:** none recorded.
+- **See:** the chat answers; `ask` brings an approval that Allow resolves (the agent says `approved`); `cwd` says the folder; one
+  `crash` is restarted by the node with backoff (adapter protocol: 5 restarts, from 1 s up to 60 s) and the conversation says it is
+  started again (attempt N), so send `crash` again after each restart: after the sixth (`agora agent list` says `stopped`) the agent
+  shows "Ended with an error (exit code 3)", its summary (and the conversation in `agora tui`) says Agora stopped starting it again
+  after 5 restarts, and its input box is off, also after a reload (on 0.3.33 it stays "Unknown", #902; with a holder the exit code may
+  be missing until #951); an installed adapter shows its version in `list` and its kind in the start window.
+- **Evidence so far:** [Linux 2026-11-21](2026-11-21-real-machine-linux.md): fail (#902).
 
 ### RM-14 Agents run in the selected folder; worktrees optional
 - **OS:** Linux, macOS, Windows.
 - **Do:** Start an agent > Working folder > Browse folders > `$RM/proj` > Use this folder > Shell > Start; run `pwd` and `git branch
   --show-current`. Again with "Create an isolated working copy" checked. Close agent on both.
-- **See:** the first runs in `$RM/proj` on `main` ("Shared folder · changes belong to the workspace"); the second in its own folder
-  on an `agent/…` branch; after Close, a worktree that was never changed and its branch are removed, a changed one is kept.
+- **See:** the first runs in `$RM/proj` on `main` (the start window: "main · The agent will work in this folder. Existing files and
+  the current branch are kept."; the Changes panel: "Shared folder · changes belong to the workspace"); the second in
+  `$AGORA_HOME/worktrees/<kind>-<id>` on an `agent/<kind>-<id>` branch; after Close both worktrees and branches stay: removing a
+  never-changed one is ADR-0064 (RM-22, not built), the node removes a worktree only to roll back a failed start (macOS 2026-11-21: an unchanged and a changed worktree
+  both stayed after `agora agent stop`).
 - **Evidence so far:** LAN run 2026-11-11, L20 and L22 (lan-test-findings): branch rollback and selected checkouts under confinement.
 
 ### RM-15 Launch options, including "do not ask" modes
@@ -323,31 +345,39 @@ not built: nothing to check.
 - **Do:** add a manifest whose `launch` names a program that does not exist (`["rm-no-such-program"]`). Open Start an agent; open
   Settings > Agents; run `agora agent start` for that kind; open `agora tui` and its start list.
 - **See:** the kind is shown as "not installed"; Settings > Agents says "This machine cannot find rm-no-such-program in its PATH."; the
-  CLI and the terminal client say why in words, not a code.
+  CLI and the terminal client say why in words, not a code: `agora agent start` prints `Error agent.program_missing: rm-missing did not
+  start: this machine cannot find rm-no-such-program in its PATH. ...` (#903; also for an ACP kind such as `opencode-acp` without
+  `opencode`).
 - **Evidence so far:** none recorded.
 
 ### RM-20 Resume after the node restarts (session ledger)
 - **OS:** Linux, macOS, Windows.
 - **Do:** start `rm-acp` (and on Windows the Shell too). End the node in a way that ends its agents: on Windows `agora down`; on Linux
   and macOS `kill -9` of the run's node and of its holder (by the process ids the run's `agora status` gives), or a confined agent
-  with RM-23's policy (only in a disposable OS account or VM, #900). Start again with `agora`; then with `agora
-  --resume auto`.
-- **See:** the agents are under "Stopped when the machine shut down" with Resume or Start again; Resume brings the conversation back in
-  the same folder; with `--resume auto` they come back by themselves (asked once); one still running from before says "Stop it".
+  with RM-23's policy (only in a disposable OS account or VM, #900). Start again with `agora`; then `agora down` and start again
+  with `agora --resume auto` (given while Agora already runs, `--resume auto` changes nothing and says nothing; it applies to a
+  start).
+- **See:** the agents are under "Stopped when the machine shut down" with Resume or Start again; Resume starts the same agent in
+  the same folder (the conversation comes back only for an agent that can load a session: not the fake, which says
+  `loadSession: false`, and the window keeps no chat history of its own, RM-43); with `--resume auto` they come back by themselves (asked once); one still running from before says "Stop it".
 - **Evidence so far:** [macOS 2026-11-14](2026-11-14-macos-confinement-and-terminal-client.md): a confined agent resumed after `kill
   -9` with `resume = auto`; [supervisor 2026-11-14](2026-11-14-supervisor-and-login-service.md): on Windows a crashed node marks its
   agents interrupted.
 
 ### RM-21 An agent starts helpers, with the user's signed approval
 - **OS:** Linux, macOS, Windows.
-- **Do:** S2, S4. Start `rm-acp`; send `mcp agent_start {"kind":"rm-screen","prompt":"hello"}`. Answer Only this one; send it again and
-  answer Deny; send it a third time and allow "Up to N rm-screen agents in this folder while rm-acp runs, without asking again", then
-  Revoke that permission ("Can still start N rm-screen without asking in …") under Helper permissions (unverified: where the window
-  shows it, and whether this kind may be allowed more than once).
+- **Do:** S2, S4. Start `rm-acp`; send `mcp agent_start {"kind":"rm-screen","prompt":"hello"}` and answer Allow (`rm-screen` is a
+  plain terminal program: its card says "Only this one can be allowed: this kind runs any program it is given, …"); send it again
+  and answer Deny. Then `mcp agent_start {"kind":"rm-helper"}` (S2): its card offers "What to allow: Only this one / Up to 3
+  rm-helper agents in this folder while rm-acp runs, without asking again"; choose the second, Allow, and send it once more (it
+  starts without a card); then Revoke under Helper permissions ("Can still start N rm-helper without asking in …"), which is in the
+  parent's pane on Home under its agent address (not in the full view), and send it again. An agent has at most 3 helpers at once
+  (a fourth gets `mesh.helper_limit`): stop one first. The "An agent needs you" window may open over the card a moment after it
+  appears and take the click: answer through its Review.
 - **See:** a card says "<agent> asks to start a rm-screen agent" (with "on <machine>" when it names one), the Folder and "Its first
   prompt"; Only this one starts the helper, shown "started by <agent>" under its parent; Deny starts nothing and the agent is told; after Revoke the next start asks
   again; nothing starts without a card.
-- **Evidence so far:** none recorded.
+- **Evidence so far:** [Linux 2026-11-21](2026-11-21-real-machine-linux.md): pass.
 
 ### RM-22 Workspace clean-up and disk limits
 not built: nothing to check.
@@ -355,8 +385,7 @@ not built: nothing to check.
 ### RM-23 Agent confinement (sandbox)
 - **OS:** Linux, macOS; Windows built but off by default (turn on with `AGORA_WINDOWS_CONFINEMENT=1` for the run's node only).
   One level per node; `worktree-offline` on macOS only.
-- **Disposable OS account or VM only, until #900 is fixed:** a confined start writes the agent's generated git configuration
-  outside `$RM`, on Linux into the real `~/.agora/git-config` (macOS and Windows: `agora-git-config` in the system temp folder).
+- **Isolation:** follow the confinement rule in [Safety rules](#safety-rules) for the version under test.
 - **Do:** write `sandbox = worktree` into `$AGORA_HOME/data/policy`; restart the node. Start a Shell with "Create an isolated working
   copy" and run `pwd` in it (its worktree, W; it must not be under `/tmp`, which Linux confinement grants to every agent: with
   S0's folder under the home it is not). In your own terminal make the probes, all synthetic: `mkdir "$W/../rm-sibling" && echo
@@ -377,8 +406,8 @@ not built: nothing to check.
   there, send `ask`, answer Allow.
 - **See:** before trust, the start window says "<machine> has to trust this browser once before it starts agents from it, …" with
   the command and Copy, and Settings > This device says the machine "does not trust this browser yet"; after trust, the start and
-  the Allow work; Activity lists "Started an agent" and "Answered an approval".
-- **Evidence so far:** none recorded.
+  the Allow work; Activity (`#/audit`, or "Activity" in Ctrl K) lists "Started an agent in a folder" and "Answered an approval".
+- **Evidence so far:** [Linux 2026-11-21](2026-11-21-real-machine-linux.md): pass.
 
 ### RM-25 Trusting your devices in one step
 - **OS:** Linux, macOS, Windows.
@@ -390,10 +419,13 @@ not built: nothing to check.
 
 ### RM-26 Team mode: people, roles, audit
 - **OS:** Linux, macOS, Windows (the hub). Partly built (P7-09).
-- **Do:** `agora hub user add rm-viewer --role viewer --hub-dir $RM/home/hub`; sign in with its code in browser B (a second person:
-  **human**; otherwise a second browser profile). As the viewer try to start an agent. As the owner open Activity.
-- **See:** the viewer sees the agents but cannot start one; Activity (Person column) lists both people's actions, each row with
-  "session <id>".
+- **Do:** `agora hub user add rm-viewer --role viewer --hub-dir $RM/home/hub`; then grant a project: `agora hub user grant rm-viewer
+  NODE/PROJECT --hub-dir $RM/home/hub`, where PROJECT is the hub's project id, not the name the window shows: for a git folder with
+  no `.agent-project.json` it is `#` and the root commit's full hash (`git -C "$RM/proj" rev-list --max-parents=0 HEAD`), after
+  `agora project init` it is `id:<uuid>` (a wrong name is accepted silently, #904). Sign in with its code in browser B (a second
+  person: **human**; otherwise a second browser profile). As the viewer try to start an agent. As the owner open Activity.
+- **See:** without a grant the viewer sees no machine; with it, the project's agents, and a start is refused; Activity (Person
+  column) lists both people's actions, each row with "session <id>".
 - **Evidence so far:** LAN run 2026-11-11, L16 and L17 (lan-test-findings): the audit page on the Windows web window pass.
 
 ### RM-27 Agents message each other across machines (mesh)
@@ -428,8 +460,10 @@ not built: nothing to check.
 - **OS:** Linux, macOS, Windows.
 - **Do:** a separate hub: `agora hub run --listen 127.0.0.1:17450 --hub-dir $RM/mhub --metrics`; `agora hub metrics-token create rm
   --hub-dir $RM/mhub`; `curl --cacert $RM/mhub/ca.pem -H "Authorization: Bearer TOKEN" https://localhost:17450/api/metrics`
-  (`curl.exe --ssl-no-revoke` on Windows, L4); then the same token on another path; then `revoke rm`.
-- **See:** the metrics in Prometheus text; another path answers 401; after `revoke` the metrics answer 401.
+  (`curl.exe --ssl-no-revoke` on Windows, L4); then the same token on the protected path `https://localhost:17450/api/audit`; then
+  `revoke rm`.
+- **See:** the metrics in Prometheus text; the same token on a protected path (`/api/audit`) answers 401 (an unknown path such as
+  `/api/state` answers 200 with the web app, with or without a token, so it proves nothing); after `revoke` the metrics answer 401.
 - **Evidence so far:** none recorded.
 
 ### RM-32 The Windows binary is code-signed
@@ -442,15 +476,13 @@ not built: nothing to check.
 
 ### RM-33 A confined agent gets a git configuration the node wrote
 - **OS:** Linux, macOS; Windows with confinement on.
-- **Disposable OS account or VM only, until #900 is fixed:** a confined start writes the agent's generated git configuration
-  outside `$RM`, on Linux into the real `~/.agora/git-config` (macOS and Windows: `agora-git-config` in the system temp folder).
-- **Do:** RM-23's policy. Change no git configuration: the node reads your global file itself and ignores a `GIT_CONFIG_GLOBAL` it
-  inherits (`agora-node/src/gitconfig.rs`), so a scratch file would not test the copy. In your own terminal, read only: `git config
-  --global --get user.name`, `git config --global --get user.email`. In a confined Shell: `echo $GIT_CONFIG_GLOBAL`, `git config
-  --global --list`; if both identity keys were set, `git commit --allow-empty -m t` in its worktree; if not, skip the commit. A test
-  identity is set only in a disposable OS account or VM.
-- **See:** `GIT_CONFIG_GLOBAL` names the node's file; it holds only keys of the allow-list (`docs/security/sandbox-recipes.md`), with
-  the same values as yours, and no `credential.*`, `url.*` or `include`; the commit, when run, carries your name.
+- **Isolation:** follow the confinement rule in [Safety rules](#safety-rules) for the version under test.
+- **Do:** in a disposable OS account or VM, set a made-up `user.name` and `user.email` in that account's global Git configuration,
+  then apply RM-23's policy. In the confined Shell, print `GIT_CONFIG_GLOBAL` (`echo "$GIT_CONFIG_GLOBAL"` or, in PowerShell,
+  `$env:GIT_CONFIG_GLOBAL`), run `git config --global --list` and make a commit with `git commit --allow-empty -m t`.
+- **See:** with ADR-0098, `GIT_CONFIG_GLOBAL` names a file in the run's `$AGORA_HOME/data/git-config/`. The file holds the
+  allow-listed values from the test identity (see [Sandbox recipes](../security/sandbox-recipes.md)). The commit carries the
+  test identity's name.
 - **Evidence so far:** [macOS 2026-11-14](2026-11-14-macos-confinement-and-terminal-client.md) (before ADR-0078: a confined commit
   needed `~/.gitconfig` readable); LAN run L10 (Windows commit under the profile).
 
@@ -474,15 +506,15 @@ not built: nothing to check.
 
 ### RM-36 A replayed revocation does not undo the owner's re-trust
 - **OS:** Linux, macOS, Windows.
-- **Do:** RM-25 up to Remove of browser B; then on the machine `agora node trust --from-hub` and trust B again; restart the node.
+- **Do:** RM-25 up to Remove of browser B; then trust B again on the machine with `agora node trust <device id> <key>`, the command
+  B's Settings > This device shows (`agora node trust --from-hub` does not offer a removed device again); restart the node.
   (The replay itself is checked by the node tests; by hand only the order is checked.)
 - **See:** after the restart B is still trusted on that machine (Settings > This device in B: "trusts this browser").
-- **Evidence so far:** none recorded.
+- **Evidence so far:** [Linux 2026-11-21](2026-11-21-real-machine-linux.md): pass.
 
 ### RM-37 A confined agent cannot use the node's control socket
 - **OS:** Linux, macOS; Windows with confinement on.
-- **Disposable OS account or VM only, until #900 is fixed:** a confined start writes the agent's generated git configuration
-  outside `$RM`, on Linux into the real `~/.agora/git-config` (macOS and Windows: `agora-git-config` in the system temp folder).
+- **Isolation:** follow the confinement rule in [Safety rules](#safety-rules) for the version under test.
 - **Do:** RM-23's policy. In a confined Shell: `agora agent list --socket $AGORA_HOME/node.sock` (and `agora agent list`).
 - **See:** refused (no list of agents); the same command in your own terminal works.
 - **Evidence so far:** [macOS 2026-11-14](2026-11-14-macos-confinement-and-terminal-client.md): the control socket refused under
@@ -491,8 +523,7 @@ not built: nothing to check.
 ### RM-38 A confined agent reaches only the unix sockets it is given
 - **OS:** macOS (allow-list), Linux (abstract sockets, Landlock ABI 6 or newer; pathname sockets not restricted); Windows: not
   established.
-- **Disposable OS account or VM only, until #900 is fixed:** a confined start writes the agent's generated git configuration
-  outside `$RM`, on Linux into the real `~/.agora/git-config` (macOS and Windows: `agora-git-config` in the system temp folder).
+- **Isolation:** follow the confinement rule in [Safety rules](#safety-rules) for the version under test.
 - **Do:** RM-23's policy. In a confined Shell: `env | grep -E 'SSH_AUTH_SOCK|DBUS|TMUX|DOCKER'`; on macOS, first make a synthetic
   socket in your own terminal (`nc -lU $RM/rm.sock`), then from the confined Shell `echo hi | nc -U <that path typed out>`
   (unverified); run `agora doctor`.
@@ -533,13 +564,14 @@ not built: nothing to check.
 
 ### RM-44 A structured agent's conversation is complete (thinking, tools, plan, effort)
 - **OS:** Linux, macOS, Windows (the window; the terminal client's view is not built).
-- **Do:** S2 with `rm-acp`'s argv extended with `--config-options` and `--bypass-mode` (unverified: the two flags together). Send
-  `rich`, `plan`, `slow` (then Stop turn), and two prompts while `slow` runs. Under Agent settings, set Mode to the one that does not
-  ask; answer "Switch anyway".
-- **See:** "Thought for …", the tool call with its path and output, and the Plan with "N of M done"; Stop turn ends only the turn;
-  the waiting prompts show "Sent when this turn ends" and go in order when it ends; the mode switch asks "Let the agent act without
-  asking?", then shows "Waiting for your approval" until the signed approval is given.
-- **Evidence so far:** none recorded.
+- **Do:** S2 with a second kind `rm-acp2` whose argv is `rm-acp`'s with `--config-options` and `--bypass-mode` (the two flags work
+  together). Send `rich`, `plan`, `slow`, two prompts while `slow` runs, then Stop turn. Under the input, Mode > "Turbo (does not
+  ask)" (the list is Default, Turbo (does not ask), Plan).
+- **See:** "Thought", the tool call with its path, and the Plan with "N of M done"; the waiting prompts show "Waiting" and "Sent when
+  this turn ends"; Stop turn ends only the turn and they go in order; the mode switch opens a card at once (Setting: Approvals,
+  Switch to: Turbo, "This covers this agent's session only.", Allow / Deny) and Mode shows "Waiting for your approval" ("Answer the
+  request to switch. Nothing has changed yet.") until Allow; then "Acts freely".
+- **Evidence so far:** [Linux 2026-11-21](2026-11-21-real-machine-linux.md): fail (#908: after Stop turn the tool call keeps spinning and the answers are glued).
 
 ### RM-45 Plan limits of subscription agents
 - **OS:** Linux, macOS, Windows. Codex only.
@@ -575,8 +607,11 @@ not built: nothing to check.
   does this (unverified, on every system): put its terminal in raw mode (no echo, no line editing, so every byte is seen as it
   arrives); turn bracketed paste on (DECSET 2004, `ESC [ ? 2004 h`); print a working line that the manifest's `working` rule matches
   (for example `* Working (esc to interrupt)`) and keep it as the last line for 20 s; then print an idle line that the `idle` rule
-  matches (`> `); from its start to its end, log every byte read from its input with the time since start, to a file in `$RM`. Its
-  manifest has the three rules of `rm-screen` (unverified). A second probe, `rm-nopaste`, is the same without DECSET 2004.
+  matches (`> `); from its start to its end, log every byte read from its input with the time since start, to a file in `$RM`. On
+  Linux a 25-line Python script did it (`tty.setraw`, `select`, `os.read`, launched as `["/usr/bin/python3", "-I", script, log,
+  "paste"]`); its manifest has `rm-screen`'s `working` and `idle` rules. A second probe, `rm-nopaste`, is the same without DECSET 2004.
+  The board is in the right rail (the board icon) > "Open board (N)". Starting the probe with `agora agent start` while the board is
+  already open makes the 5 s easy. The tasks can also be made with `task_create` on an agent's mesh socket (S5).
   Start `rm-paste` and `rm-acp` in `$RM/proj`. To `rm-acp` send `mcp task_create {"title":"RM task 1"}`, then `RM task 2` and `RM task
   3`. Within 5 s of `rm-paste`'s start: Open board (N) > the "RM task 1" card in Backlog > Give to an agent > `rm-paste` > Give the
   task. Give "RM task 2" to `rm-acp`. Then start `rm-nopaste` and give it a task.
@@ -629,12 +664,15 @@ not built (the window says how many files are not shown): nothing to check.
 
 ### RM-55 Screen password for remote sign-in
 - **OS:** Linux, macOS, Windows.
-- **Do:** `agora password set --hub-dir $RM/home/hub` (a throwaway password); open the hub in a fresh browser profile; Sign in with
-  the code and the Screen password, first wrong, then right; Lock; in Settings, Screen password > Change password; then `agora
+- **Do:** `agora password set --hub-dir $RM/home/hub` (a throwaway password; it signs out every open window, the run's too); open
+  the hub in a fresh browser profile by an address that is not loopback (the machine's LAN address, which the hub's certificate
+  names when S1 answered `y`; this machine's own browser at `localhost` is never asked); Sign in with the code and the Screen
+  password, first wrong, then right; Lock; in Settings, Screen password > Change password; then `agora
   password clear --hub-dir $RM/home/hub`.
-- **See:** a wrong password is refused ("That password is not right."), the right one signs in; Lock signs this window out while
+- **See:** a wrong password is refused ("That did not work. The code may be wrong, expired or already used, or the password may be
+  wrong."), the right one signs in; Lock signs this window out while
   the agents keep running; a changed password says "Saved. Every other window was signed out."
-- **Evidence so far:** none recorded.
+- **Evidence so far:** [Linux 2026-11-21](2026-11-21-real-machine-linux.md): fail (#909: the local Settings cannot change a set password).
 
 ### RM-56 Tailscale (rung 3): `agora remote tailscale|status|off`, public-address rule, doctor checks
 - **OS:** Linux, macOS, Windows.
@@ -664,7 +702,8 @@ not built (the window says how many files are not shown): nothing to check.
 ### RM-59 Terminal client (TUI)
 - **OS:** Linux, macOS, Windows (Windows Terminal).
 - **Do:** S1, S2; `agora tui` at 80×24 and at a large size. Open the list, an agent's tab (Enter), its files (`o`) and its changes
-  (`r`); answer an approval of `rm-chat` (`ask`) with `y`; resize; Ctrl-] back to the list.
+  (`r`); answer an approval of `rm-chat` (`ask`): `y` in the list, Alt+Y in the agent's tab (there `y` goes into the draft); resize;
+  Ctrl-] back to the list; `s` lists every installed kind (on 0.3.33 only the first 9, #910).
 - **See:** agents named by kind and colour; "<agent> is waiting for you" and "N waiting" while it asks; the tab redraws after a
   resize; readers say when they wait.
 - **Evidence so far:** [macOS 2026-11-14](2026-11-14-macos-confinement-and-terminal-client.md): list, tabs, readers, a real Claude Code

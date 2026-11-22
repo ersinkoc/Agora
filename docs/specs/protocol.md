@@ -318,6 +318,11 @@ create a worktree. New clients refuse an unavailable directory launch rather tha
 | `agent.launch` / `AgentLaunch` (82) | canonical `path`, expected `project_id`, `kind`, `separate_worktree`, `authorization`, `accept_identity_change` → `AgentLaunchResult` (Ok tag 19): `agent_id`, `terminal_id`, `workspace_id`, actual cwd `path` |
 | `workspace.query` / `WorkspaceQuery` (83) | `workspace_id`, `operation` (`list`, `read`, `status`, `diff`, `history`), relative `path`, `limit` → existing file/Git results |
 
+A start of a kind whose program the machine cannot find (`AgentStart`, `AgentLaunch`, `AgentResume`, and the mesh `agent_start`) is
+refused with `agent.program_missing` (`kind`, `program`; #903): the program the node looks for (the adapter command, the ACP command
+or the launch command) is not installed by `agora agent install`, not on the node's `PATH`, and not an existing path, the same check that
+marks the kind `installed: false` in `AgentKinds`. Older nodes answered `internal`.
+
 The node canonicalizes and re-inspects before launch; a path or project ID mismatch is refused. It persists confirmed
 path/identity associations; changed metadata requires `accept_identity_change`. Metadata creation is explicit, uses
 create-new semantics and never commits or overwrites `.agent-project.json`. The metadata contains `{"project_id":"UUID"}`;

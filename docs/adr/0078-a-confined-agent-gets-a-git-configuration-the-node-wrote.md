@@ -2,6 +2,7 @@
 Status: Accepted
 Date: 2026-11-15
 Accepted: 2026-11-15 (the maintainer's explicit message in the merger chat, accepting the ADRs listed by number (#613 ADR-0060 Amendment A, #614 ADR-0078, #615 ADR-0080, #616 ADR-0079): they accepted all of them). The open questions' proposed answers stand.
+Amended by: [ADR-0098](0098-generated-git-configuration-belongs-to-the-node.md) (decision 3: the generated copy lives in the node’s own data folder).
 Origin: issue #546, found while testing #477 on a real Mac. A confined agent (`sandbox = worktree`) could not run `git` at all: `~/.gitconfig` is
 deliberately not readable by default (`docs/security/sandbox-recipes.md`), and git stops on "permission denied". The same rule holds on every system
 that confines agents.
