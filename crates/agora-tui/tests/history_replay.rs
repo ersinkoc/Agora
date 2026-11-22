@@ -84,7 +84,22 @@ fn a_fresh_pane_holds_the_replayed_history_and_a_resize_refeed_does_not_repeat_i
         "the node keeps the output: {}",
         kept.len()
     );
-    assert_eq!(kept.first().map(String::as_str), Some("history line 1"));
+    // The numbered lines are all there, in order. ConPTY (Windows) may leave blank rows before them, so the fixture skips leading
+    // blank rows here (Codex, #964); the replay below is compared with the node's history exactly, blank rows included.
+    let numbered: Vec<&str> = kept
+        .iter()
+        .map(String::as_str)
+        .skip_while(|l| l.is_empty())
+        .take(300)
+        .collect();
+    let want: Vec<String> = (1..=numbered.len())
+        .map(|i| format!("history line {i}"))
+        .collect();
+    assert!(numbered.len() >= 290, "the numbered lines: {numbered:?}");
+    assert_eq!(
+        numbered,
+        want.iter().map(String::as_str).collect::<Vec<_>>()
+    );
 
     // A fresh pane asks for its own scrollback, and gets every line the node keeps, in order, with the screen drawn over them.
     let fresh = PaneFeed::new();
