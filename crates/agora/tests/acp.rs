@@ -664,15 +664,43 @@ fn a_structured_agents_conversation_has_thinking_tool_status_and_plan_steps() {
     assert_eq!(tools.len(), 1, "{tools:#?}");
     let tool = tools[0];
     let versions: Vec<&v1::ChatEntry> = chat.seen.iter().filter(|e| e.call_id == "t3").collect();
+    // ADR-0090 sends at most one version of an entry per 150 ms, but never holds back the first one or the final status: the
+    // subscriber sees Pending first and Completed last, once. The in-progress version between them can be held and replaced by
+    // Completed (#1019). The agent sent one in-progress update, so there is at most one version between them.
     assert!(
-        versions.len() >= 3,
-        "pending, in progress, completed: {versions:#?}"
+        matches!(versions.len(), 2 | 3),
+        "pending, maybe in progress, completed: {versions:#?}"
     );
     assert!(versions.iter().all(|e| e.entry_id == tool.entry_id));
+    assert!(
+        versions.iter().all(|e| e.started_ms == tool.started_ms),
+        "the start is kept from the first sight: {versions:#?}"
+    );
     assert_eq!(
         versions.first().unwrap().status,
         v1::ToolStatus::Pending as i32
     );
+    assert_eq!(
+        versions.last().unwrap().status,
+        v1::ToolStatus::Completed as i32,
+        "nothing follows the final status: {versions:#?}"
+    );
+    assert_eq!(
+        versions
+            .iter()
+            .filter(|e| e.status == v1::ToolStatus::Completed as i32)
+            .count(),
+        1,
+        "{versions:#?}"
+    );
+    for middle in &versions[1..versions.len() - 1] {
+        assert_eq!(
+            middle.status,
+            v1::ToolStatus::InProgress as i32,
+            "{middle:?}"
+        );
+        assert_eq!(middle.ended_ms, 0, "a running call has no end: {middle:?}");
+    }
     assert_eq!(tool.status, v1::ToolStatus::Completed as i32);
     assert_eq!(tool.tool_kind, v1::ToolKind::Read as i32);
     assert_eq!(tool.output, "file text");
@@ -684,11 +712,13 @@ fn a_structured_agents_conversation_has_thinking_tool_status_and_plan_steps() {
         tool.text,
         "{\"tool\":\"read a.rs\",\"arguments\":{\"path\":\"a.rs\"}}"
     );
-    // The node's clock measured it: the fake agent waited 400 ms between the first sight and the end. The node may see the first
-    // update a little after the agent sent it (a loaded CI machine measured 201 ms), so the test asks for a clearly positive
-    // duration, not for nearly all of the wait.
+    // The node's clock measured it, from when the node read Pending to when it read Completed. The fake agent waited 400 ms between
+    // them, but a loaded node reads them late and close together (CI measured 101 ms, #1019), and the node stamps a whole batch of
+    // events with one reading of the wall clock (`daemon.rs`), so the wait sets no lower bound: the end is never before the start
+    // and the two can be equal. Seeing the in-progress version proves no floor either, since `chat.rs` publishes at once when the
+    // clock went backwards; the hold rule's 150 ms is tested with an injected clock in the `ChatBoard` unit tests.
     assert!(
-        tool.started_ms > 0 && tool.ended_ms >= tool.started_ms + 100,
+        tool.started_ms > 0 && tool.ended_ms >= tool.started_ms,
         "{tool:?}"
     );
     // The plan: one entry, replaced; its last version has the later status; old clients read the lines.
