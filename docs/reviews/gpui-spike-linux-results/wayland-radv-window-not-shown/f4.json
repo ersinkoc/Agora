@@ -1,0 +1,33 @@
+{
+  "agents_listed": 26,
+  "visible": 4,
+  "background": 2,
+  "terminals_ready": 6,
+  "idle_seconds": 11.000089186,
+  "pane_paints_while_idle": 0,
+  "window_active": false,
+  "fixture": "f4",
+  "main_entered_epoch_ms": 1795307520639,
+  "first_frame_epoch_ms": 1795307520736,
+  "first_useful_paint_epoch_ms": 1795307520741,
+  "open_errors": [],
+  "gpu": {
+    "device": "AMD Radeon Graphics (RADV RENOIR)",
+    "driver": "radv",
+    "driver_info": "Mesa 26.0.8-1ubuntu0.3",
+    "software": false
+  },
+  "driver": {
+    "spawn_epoch_ms": 1795307520637,
+    "rss_bytes": 108388352,
+    "tree_rss_bytes": 108388352,
+    "idle_cpu_percent_of_one_core": 0.0954521742836967,
+    "idle_cpu_window_ms": 10476.45072,
+    "rss_bytes_end": 108380160,
+    "rss_bytes_at_done": 108380160,
+    "exit_code": 0,
+    "spawn_to_first_frame_ms": 99.0,
+    "spawn_to_first_useful_paint_ms": 104.0,
+    "spawn_to_main_ms": 2.0
+  }
+}

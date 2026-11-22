@@ -1,0 +1,39 @@
+{
+  "open_terminal_to_snapshot_painted_ms": {
+    "samples": 0,
+    "p50": null,
+    "p95": null,
+    "max": 0.0
+  },
+  "switch_open_terminal_to_front_presented_ms": {
+    "samples": 0,
+    "p50": null,
+    "p95": null,
+    "max": 0.0
+  },
+  "switch_selected_agent_presented_ms": {
+    "samples": 0,
+    "p50": null,
+    "p95": null,
+    "max": 0.0
+  },
+  "fixture": "switch",
+  "main_entered_epoch_ms": 1795307512733,
+  "first_frame_epoch_ms": 1795307512831,
+  "first_useful_paint_epoch_ms": 1795307512837,
+  "open_errors": [],
+  "gpu": {
+    "device": "AMD Radeon Graphics (RADV RENOIR)",
+    "driver": "radv",
+    "driver_info": "Mesa 26.0.8-1ubuntu0.3",
+    "software": false
+  },
+  "driver": {
+    "spawn_epoch_ms": 1795307512731,
+    "rss_bytes_at_done": 105713664,
+    "exit_code": 0,
+    "spawn_to_first_frame_ms": 100.0,
+    "spawn_to_first_useful_paint_ms": 106.0,
+    "spawn_to_main_ms": 2.0
+  }
+}

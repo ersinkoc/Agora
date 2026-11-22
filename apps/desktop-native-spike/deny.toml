@@ -1,0 +1,49 @@
+# cargo-deny for the GPUI spike only (ADR-0099 decision 1): the main workspace's policy, plus what GPUI's tree needs, each with its
+# reason. Run `cargo deny check` in this directory.
+[advisories]
+yanked = "deny"
+ignore = [
+    # "Unmaintained" notices (no known vulnerability) for crates GPUI's text and Linux desktop stack pulls in; none is called by the
+    # spike's own code. Each is a question for the stage-2 pin review, not a reason to stop the spike.
+    "RUSTSEC-2026-0543", # chrono: dates in gpui (and its deps)
+    "RUSTSEC-2026-0206", # rustybuzz: text shaping in the font stack
+    "RUSTSEC-2026-0192", # ttf-parser: font parsing in gpui
+    "RUSTSEC-2026-0370", # zvariant: D-Bus (accesskit_unix AT-SPI, Secret Service) on Linux
+    "RUSTSEC-2026-0371", # zbus_names: same
+    "RUSTSEC-2026-0372", # zvariant_derive: same
+]
+
+[licenses]
+# The main workspace's allow-list; no GPL (a Zed application crate pulled in by mistake fails here).
+allow = ["MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Unicode-3.0", "Zlib"]
+confidence-threshold = 0.9
+private = { ignore = true }
+# Exceptions per crate, not added to the allow-list. MPL-2.0 is file-level copyleft: used unmodified as a dependency it places no
+# obligation on this project's files. CC0-1.0 is a public-domain dedication.
+exceptions = [
+    { name = "cbindgen", allow = ["MPL-2.0"] },   # build-time only (a build script in GPUI's macOS path), ships no code
+    { name = "dwrote", allow = ["MPL-2.0"] },     # DirectWrite font loading, Windows only
+    { name = "option-ext", allow = ["MPL-2.0"] }, # through `dirs`
+    { name = "tiny-keccak", allow = ["CC0-1.0"] },
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-git = [
+    # The pin (ADR-0099): gpui, gpui_platform and the Zed crates they depend on (all Apache-2.0).
+    "https://github.com/zed-industries/zed",
+    # Not the one git source the ADR hoped for: GPUI at this revision itself depends on these by git revision (spike finding).
+    # wgpu (MIT OR Apache-2.0): GPUI's renderer on Linux and Windows, an unreleased wgpu commit.
+    "https://github.com/gfx-rs/wgpu",
+    # Zed's forks: font-kit (font loading, MIT OR Apache-2.0), oo7 (Secret Service, MIT), xim-rs (X11 input method, MIT). Zed's
+    # scap fork (screen capture) is in the lock file but compiled out, so it needs no entry.
+    "https://github.com/zed-industries/font-kit",
+    "https://github.com/zed-industries/oo7",
+    "https://github.com/zed-industries/xim-rs.git",
+]

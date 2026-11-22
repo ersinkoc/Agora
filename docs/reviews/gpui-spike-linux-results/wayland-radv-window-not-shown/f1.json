@@ -1,0 +1,40 @@
+{
+  "samples": 0,
+  "timeouts": 300,
+  "key_to_output_received_ms": {
+    "p50": null,
+    "p95": null,
+    "max": 0.0
+  },
+  "key_to_frame_painted_ms": {
+    "p50": null,
+    "p95": null,
+    "max": 0.0
+  },
+  "key_to_frame_presented_ms": {
+    "p50": null,
+    "p95": null,
+    "max": 0.0
+  },
+  "window_active": false,
+  "method": "keystrokes dispatched into the window's input path (Window::dispatch_keystroke -> key handler -> input handler -> network thread -> hub -> node PTY echo -> back); 'presented' is the next frame callback after the frame that first contains the echo was drawn and handed to the platform (an upper bound of the frame being on screen, excluding OS input-event latency and display scan-out)",
+  "fixture": "f1",
+  "main_entered_epoch_ms": 1795307314195,
+  "first_frame_epoch_ms": 1795307314293,
+  "first_useful_paint_epoch_ms": 1795307314303,
+  "open_errors": [],
+  "gpu": {
+    "device": "AMD Radeon Graphics (RADV RENOIR)",
+    "driver": "radv",
+    "driver_info": "Mesa 26.0.8-1ubuntu0.3",
+    "software": false
+  },
+  "driver": {
+    "spawn_epoch_ms": 1795307314193,
+    "rss_bytes_at_done": 99368960,
+    "exit_code": 0,
+    "spawn_to_first_frame_ms": 100.0,
+    "spawn_to_first_useful_paint_ms": 110.0,
+    "spawn_to_main_ms": 2.0
+  }
+}

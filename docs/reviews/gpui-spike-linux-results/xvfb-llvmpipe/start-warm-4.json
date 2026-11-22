@@ -1,0 +1,21 @@
+{
+  "fixture": "start",
+  "main_entered_epoch_ms": 1795307663689,
+  "first_frame_epoch_ms": 1795307663818,
+  "first_useful_paint_epoch_ms": 1795307663868,
+  "open_errors": [],
+  "gpu": {
+    "device": "llvmpipe (LLVM 21.1.8, 256 bits)",
+    "driver": "llvmpipe",
+    "driver_info": "Mesa 26.0.8-1ubuntu0.3 (LLVM 21.1.8)",
+    "software": true
+  },
+  "driver": {
+    "spawn_epoch_ms": 1795307663687,
+    "rss_bytes_at_done": 158072832,
+    "exit_code": 0,
+    "spawn_to_first_frame_ms": 131.0,
+    "spawn_to_first_useful_paint_ms": 181.0,
+    "spawn_to_main_ms": 2.0
+  }
+}

@@ -1,0 +1,39 @@
+{
+  "open_terminal_to_snapshot_painted_ms": {
+    "samples": 6,
+    "p50": 113.363745,
+    "p95": 117.866419,
+    "max": 117.866419
+  },
+  "switch_open_terminal_to_front_presented_ms": {
+    "samples": 18,
+    "p50": 57.427805,
+    "p95": 63.34917800000001,
+    "max": 78.06679299999999
+  },
+  "switch_selected_agent_presented_ms": {
+    "samples": 12,
+    "p50": 56.005478,
+    "p95": 63.750028,
+    "max": 63.90591599999999
+  },
+  "fixture": "switch",
+  "main_entered_epoch_ms": 1795307729174,
+  "first_frame_epoch_ms": 1795307729310,
+  "first_useful_paint_epoch_ms": 1795307729364,
+  "open_errors": [],
+  "gpu": {
+    "device": "llvmpipe (LLVM 21.1.8, 256 bits)",
+    "driver": "llvmpipe",
+    "driver_info": "Mesa 26.0.8-1ubuntu0.3 (LLVM 21.1.8)",
+    "software": true
+  },
+  "driver": {
+    "spawn_epoch_ms": 1795307729172,
+    "rss_bytes_at_done": 183934976,
+    "exit_code": 0,
+    "spawn_to_first_frame_ms": 138.0,
+    "spawn_to_first_useful_paint_ms": 192.0,
+    "spawn_to_main_ms": 2.0
+  }
+}

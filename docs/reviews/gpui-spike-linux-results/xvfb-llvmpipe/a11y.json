@@ -1,0 +1,219 @@
+{
+  "held_seconds": 12,
+  "terminals_open_before": 1,
+  "terminals_open_after": 2,
+  "fixture": "a11y",
+  "main_entered_epoch_ms": 1795307751310,
+  "first_frame_epoch_ms": 1795307751438,
+  "first_useful_paint_epoch_ms": 1795307751491,
+  "open_errors": [],
+  "gpu": {
+    "device": "llvmpipe (LLVM 21.1.8, 256 bits)",
+    "driver": "llvmpipe",
+    "driver_info": "Mesa 26.0.8-1ubuntu0.3 (LLVM 21.1.8)",
+    "software": true
+  },
+  "driver": {
+    "spawn_epoch_ms": 1795307751308,
+    "rss_bytes_at_done": 170332160,
+    "exit_code": 0,
+    "spawn_to_first_frame_ms": 130.0,
+    "spawn_to_first_useful_paint_ms": 183.0,
+    "spawn_to_main_ms": 2.0,
+    "atspi": {
+      "app": "agora-native-spike",
+      "nodes": [
+        {
+          "depth": 0,
+          "role": "application",
+          "name": "agora-native-spike"
+        },
+        {
+          "depth": 1,
+          "role": "frame",
+          "name": "Agora native spike"
+        },
+        {
+          "depth": 2,
+          "role": "list",
+          "name": "Agents"
+        },
+        {
+          "depth": 3,
+          "role": "list item",
+          "name": "laptop/agent-1 (spike-echo)"
+        },
+        {
+          "depth": 3,
+          "role": "list item",
+          "name": "laptop/agent-10 (spike-trickle)"
+        },
+        {
+          "depth": 3,
+          "role": "list item",
+          "name": "laptop/agent-11 (spike-trickle)"
+        },
+        {
+          "depth": 3,
+          "role": "list item",
+          "name": "laptop/agent-12 (spike-trickle)"
+        },
+        {
+          "depth": 3,
+          "role": "list item",
+          "name": "laptop/agent-13 (spike-trickle)"
+        },
+        {
+          "depth": 3,
+          "role": "list item",
+          "name": "laptop/agent-14 (spike-trickle)"
+        },
+        {
+          "depth": 3,
+          "role": "list item",
+          "name": "laptop/agent-15 (spike-trickle)"
+        },
+        {
+          "depth": 3,
+          "role": "list item",
+          "name": "laptop/agent-16 (spike-trickle)"
+        },
+        {
+          "depth": 3,
+          "role": "list item",
+          "name": "laptop/agent-17 (spike-trickle)"
+        },
+        {
+          "depth": 3,
+          "role": "list item",
+          "name": "laptop/agent-18 (spike-trickle)"
+        },
+        {
+          "depth": 3,
+          "role": "list item",
+          "name": "laptop/agent-19 (spike-trickle)"
+        },
+        {
+          "depth": 3,
+          "role": "list item",
+          "name": "laptop/agent-2 (spike-flood)"
+        },
+        {
+          "depth": 3,
+          "role": "list item",
+          "name": "laptop/agent-20 (spike-trickle)"
+        },
+        {
+          "depth": 3,
+          "role": "list item",
+          "name": "laptop/agent-21 (spike-trickle)"
+        },
+        {
+          "depth": 3,
+          "role": "list item",
+          "name": "laptop/agent-22 (spike-trickle)"
+        },
+        {
+          "depth": 3,
+          "role": "list item",
+          "name": "laptop/agent-23 (spike-trickle)"
+        },
+        {
+          "depth": 3,
+          "role": "list item",
+          "name": "laptop/agent-24 (spike-trickle)"
+        },
+        {
+          "depth": 3,
+          "role": "list item",
+          "name": "laptop/agent-25 (spike-trickle)"
+        },
+        {
+          "depth": 3,
+          "role": "list item",
+          "name": "laptop/agent-26 (spike-probe)"
+        },
+        {
+          "depth": 3,
+          "role": "list item",
+          "name": "laptop/agent-3 (spike-flood)"
+        },
+        {
+          "depth": 3,
+          "role": "list item",
+          "name": "laptop/agent-4 (spike-flood)"
+        },
+        {
+          "depth": 3,
+          "role": "list item",
+          "name": "laptop/agent-5 (spike-flood)"
+        },
+        {
+          "depth": 3,
+          "role": "list item",
+          "name": "laptop/agent-6 (spike-trickle)"
+        },
+        {
+          "depth": 3,
+          "role": "list item",
+          "name": "laptop/agent-7 (spike-trickle)"
+        },
+        {
+          "depth": 3,
+          "role": "list item",
+          "name": "laptop/agent-8 (spike-trickle)"
+        },
+        {
+          "depth": 3,
+          "role": "list item",
+          "name": "laptop/agent-9 (spike-trickle)"
+        },
+        {
+          "depth": 2,
+          "role": "button",
+          "name": "Open terminal"
+        }
+      ],
+      "list_items": [
+        "laptop/agent-1 (spike-echo)",
+        "laptop/agent-10 (spike-trickle)",
+        "laptop/agent-11 (spike-trickle)",
+        "laptop/agent-12 (spike-trickle)",
+        "laptop/agent-13 (spike-trickle)",
+        "laptop/agent-14 (spike-trickle)",
+        "laptop/agent-15 (spike-trickle)",
+        "laptop/agent-16 (spike-trickle)",
+        "laptop/agent-17 (spike-trickle)",
+        "laptop/agent-18 (spike-trickle)",
+        "laptop/agent-19 (spike-trickle)",
+        "laptop/agent-2 (spike-flood)",
+        "laptop/agent-20 (spike-trickle)",
+        "laptop/agent-21 (spike-trickle)",
+        "laptop/agent-22 (spike-trickle)",
+        "laptop/agent-23 (spike-trickle)",
+        "laptop/agent-24 (spike-trickle)",
+        "laptop/agent-25 (spike-trickle)",
+        "laptop/agent-26 (spike-probe)",
+        "laptop/agent-3 (spike-flood)",
+        "laptop/agent-4 (spike-flood)",
+        "laptop/agent-5 (spike-flood)",
+        "laptop/agent-6 (spike-trickle)",
+        "laptop/agent-7 (spike-trickle)",
+        "laptop/agent-8 (spike-trickle)",
+        "laptop/agent-9 (spike-trickle)"
+      ],
+      "buttons": [
+        "Open terminal"
+      ],
+      "lists": [
+        "Agents"
+      ],
+      "button_action": {
+        "actions": [
+          "click"
+        ],
+        "invoked": true
+      }
+    }
+  }
+}

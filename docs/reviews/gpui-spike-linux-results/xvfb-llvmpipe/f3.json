@@ -1,0 +1,122 @@
+{
+  "terminals_ready": 4,
+  "record": {
+    "seconds": 10.198237917,
+    "window_frames": {
+      "frames": 217,
+      "fps": 21.27818567933886,
+      "gap_p50_ms": 47.902537,
+      "gap_p95_ms": 48.825061000000005,
+      "gap_max_ms": 49.579534,
+      "gaps_over_50ms": 0
+    },
+    "per_pane": [
+      {
+        "pane": 0,
+        "frames": {
+          "frames": 217,
+          "fps": 21.27818567933886,
+          "gap_p50_ms": 47.902537,
+          "gap_p95_ms": 48.825061000000005,
+          "gap_max_ms": 49.579534,
+          "gaps_over_50ms": 0
+        },
+        "received_mb_per_s": 10.11385004345354,
+        "parse_ms_per_s_network_thread": 208.61901323693152,
+        "node_said_behind_and_rewatched": 0,
+        "screen_tail_at_end": [
+          "nder inverse 日本語",
+          "00007026"
+        ]
+      },
+      {
+        "pane": 1,
+        "frames": {
+          "frames": 217,
+          "fps": 21.27818567933886,
+          "gap_p50_ms": 47.903209,
+          "gap_p95_ms": 49.289959,
+          "gap_max_ms": 50.268516,
+          "gaps_over_50ms": 3
+        },
+        "received_mb_per_s": 10.105237673285789,
+        "parse_ms_per_s_network_thread": 208.14141994683175,
+        "node_said_behind_and_rewatched": 0,
+        "screen_tail_at_end": [
+          "00000938 cargo frame hub state cargo frame hub state cargo frame",
+          "0000093"
+        ]
+      },
+      {
+        "pane": 2,
+        "frames": {
+          "frames": 217,
+          "fps": 21.27818567933886,
+          "gap_p50_ms": 47.920721,
+          "gap_p95_ms": 49.615831,
+          "gap_max_ms": 50.797191999999995,
+          "gaps_over_50ms": 6
+        },
+        "received_mb_per_s": 10.11044916182259,
+        "parse_ms_per_s_network_thread": 208.19366573716695,
+        "node_said_behind_and_rewatched": 0,
+        "screen_tail_at_end": [
+          "00000980 hub state cargo frame hub state cargo frame hub state bold und",
+          "er inverse 日本語"
+        ]
+      },
+      {
+        "pane": 3,
+        "frames": {
+          "frames": 217,
+          "fps": 21.27818567933886,
+          "gap_p50_ms": 47.862303,
+          "gap_p95_ms": 49.81057,
+          "gap_max_ms": 52.412164,
+          "gaps_over_50ms": 7
+        },
+        "received_mb_per_s": 10.108704154484572,
+        "parse_ms_per_s_network_thread": 208.0228810374792,
+        "node_said_behind_and_rewatched": 0,
+        "screen_tail_at_end": [
+          "00001158 token node agent check token node agent check token node",
+          "00001159 build render mesh pane build render mesh pane build render"
+        ]
+      }
+    ],
+    "main_thread_heartbeat": {
+      "interval_ms": 10,
+      "samples": 480,
+      "late_p50_ms": 0.4526299999999992,
+      "late_p95_ms": 28.314073,
+      "late_max_ms": 35.921549999999996,
+      "stalls_over_50ms": 0
+    },
+    "pane_paint_ms": {
+      "p50": 1.035,
+      "p95": 1.493,
+      "max": 2.368,
+      "count": 868
+    },
+    "window_active_fraction": 0.0
+  },
+  "fixture": "f3",
+  "main_entered_epoch_ms": 1795308146805,
+  "first_frame_epoch_ms": 1795308146945,
+  "first_useful_paint_epoch_ms": 1795308146997,
+  "open_errors": [],
+  "gpu": {
+    "device": "llvmpipe (LLVM 21.1.8, 256 bits)",
+    "driver": "llvmpipe",
+    "driver_info": "Mesa 26.0.8-1ubuntu0.3 (LLVM 21.1.8)",
+    "software": true
+  },
+  "driver": {
+    "spawn_epoch_ms": 1795308146803,
+    "rss_bytes_at_done": 246906880,
+    "exit_code": 0,
+    "spawn_to_first_frame_ms": 142.0,
+    "spawn_to_first_useful_paint_ms": 194.0,
+    "spawn_to_main_ms": 2.0
+  }
+}

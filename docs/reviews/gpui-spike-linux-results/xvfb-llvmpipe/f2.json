@@ -1,0 +1,430 @@
+{
+  "terminals_ready": 21,
+  "visible_pane": 0,
+  "background_total_mb_per_s": 0.040458561273414594,
+  "record": {
+    "seconds": 10.228070079,
+    "window_frames": {
+      "frames": 213,
+      "fps": 20.825043078002164,
+      "gap_p50_ms": 47.979068,
+      "gap_p95_ms": 48.753077999999995,
+      "gap_max_ms": 51.197341,
+      "gaps_over_50ms": 1
+    },
+    "per_pane": [
+      {
+        "pane": 0,
+        "frames": {
+          "frames": 213,
+          "fps": 20.825043078002164,
+          "gap_p50_ms": 47.979068,
+          "gap_p95_ms": 48.753077999999995,
+          "gap_max_ms": 51.197341,
+          "gaps_over_50ms": 1
+        },
+        "received_mb_per_s": 10.117711278931491,
+        "parse_ms_per_s_network_thread": 178.8030265606865,
+        "node_said_behind_and_rewatched": 0,
+        "screen_tail_at_end": [
+          "00007010 cargo frame hub state cargo frame hub state cargo frame bold under inverse 日本語",
+          "00007011 node age"
+        ]
+      },
+      {
+        "pane": 1,
+        "frames": {
+          "frames": 0,
+          "fps": 0.0,
+          "gap_p50_ms": null,
+          "gap_p95_ms": null,
+          "gap_max_ms": 0.0,
+          "gaps_over_50ms": 0
+        },
+        "received_mb_per_s": 0.002023353363846267,
+        "parse_ms_per_s_network_thread": 0.20159482522841635,
+        "node_said_behind_and_rewatched": 0,
+        "screen_tail_at_end": [
+          "00000279 node agent check token node agent check token node agent",
+          "00000280 rende"
+        ]
+      },
+      {
+        "pane": 2,
+        "frames": {
+          "frames": 0,
+          "fps": 0.0,
+          "gap_p50_ms": null,
+          "gap_p95_ms": null,
+          "gap_max_ms": 0.0,
+          "gaps_over_50ms": 0
+        },
+        "received_mb_per_s": 0.0020228645130697877,
+        "parse_ms_per_s_network_thread": 0.20559225579783985,
+        "node_said_behind_and_rewatched": 0,
+        "screen_tail_at_end": [
+          "00000279 node agent check token node agent check token node agent",
+          "00000280"
+        ]
+      },
+      {
+        "pane": 3,
+        "frames": {
+          "frames": 0,
+          "fps": 0.0,
+          "gap_p50_ms": null,
+          "gap_p95_ms": null,
+          "gap_max_ms": 0.0,
+          "gaps_over_50ms": 0
+        },
+        "received_mb_per_s": 0.0020228645130697877,
+        "parse_ms_per_s_network_thread": 0.19511559703696477,
+        "node_said_behind_and_rewatched": 0,
+        "screen_tail_at_end": [
+          "00000279 node agent check token node agent check token node agent",
+          "00000280"
+        ]
+      },
+      {
+        "pane": 4,
+        "frames": {
+          "frames": 0,
+          "fps": 0.0,
+          "gap_p50_ms": null,
+          "gap_p95_ms": null,
+          "gap_max_ms": 0.0,
+          "gaps_over_50ms": 0
+        },
+        "received_mb_per_s": 0.0020228645130697877,
+        "parse_ms_per_s_network_thread": 0.18920460898809213,
+        "node_said_behind_and_rewatched": 0,
+        "screen_tail_at_end": [
+          "00000279 node agent check token node agent check token node agent",
+          "00000280"
+        ]
+      },
+      {
+        "pane": 5,
+        "frames": {
+          "frames": 0,
+          "fps": 0.0,
+          "gap_p50_ms": null,
+          "gap_p95_ms": null,
+          "gap_max_ms": 0.0,
+          "gaps_over_50ms": 0
+        },
+        "received_mb_per_s": 0.002022277892138013,
+        "parse_ms_per_s_network_thread": 0.1876261098308417,
+        "node_said_behind_and_rewatched": 0,
+        "screen_tail_at_end": [
+          "00000279 node agent check token node agent check token node agent",
+          "00000280"
+        ]
+      },
+      {
+        "pane": 6,
+        "frames": {
+          "frames": 0,
+          "fps": 0.0,
+          "gap_p50_ms": null,
+          "gap_p95_ms": null,
+          "gap_max_ms": 0.0,
+          "gaps_over_50ms": 0
+        },
+        "received_mb_per_s": 0.0020228645130697877,
+        "parse_ms_per_s_network_thread": 0.19313604470269097,
+        "node_said_behind_and_rewatched": 0,
+        "screen_tail_at_end": [
+          "00000279 node agent check token node agent check token node agent",
+          "00000280"
+        ]
+      },
+      {
+        "pane": 7,
+        "frames": {
+          "frames": 0,
+          "fps": 0.0,
+          "gap_p50_ms": null,
+          "gap_p95_ms": null,
+          "gap_max_ms": 0.0,
+          "gaps_over_50ms": 0
+        },
+        "received_mb_per_s": 0.0020229622832250837,
+        "parse_ms_per_s_network_thread": 0.18684150433459304,
+        "node_said_behind_and_rewatched": 0,
+        "screen_tail_at_end": [
+          "00000279 node agent check token node agent check token node agent",
+          "00000280"
+        ]
+      },
+      {
+        "pane": 8,
+        "frames": {
+          "frames": 0,
+          "fps": 0.0,
+          "gap_p50_ms": null,
+          "gap_p95_ms": null,
+          "gap_max_ms": 0.0,
+          "gaps_over_50ms": 0
+        },
+        "received_mb_per_s": 0.0020228645130697877,
+        "parse_ms_per_s_network_thread": 0.18195426758182265,
+        "node_said_behind_and_rewatched": 0,
+        "screen_tail_at_end": [
+          "00000279 node agent check token node agent check token node agent",
+          "00000280"
+        ]
+      },
+      {
+        "pane": 9,
+        "frames": {
+          "frames": 0,
+          "fps": 0.0,
+          "gap_p50_ms": null,
+          "gap_p95_ms": null,
+          "gap_max_ms": 0.0,
+          "gaps_over_50ms": 0
+        },
+        "received_mb_per_s": 0.0020228645130697877,
+        "parse_ms_per_s_network_thread": 0.18530475303365393,
+        "node_said_behind_and_rewatched": 0,
+        "screen_tail_at_end": [
+          "00000279 node agent check token node agent check token node agent",
+          "00000280"
+        ]
+      },
+      {
+        "pane": 10,
+        "frames": {
+          "frames": 0,
+          "fps": 0.0,
+          "gap_p50_ms": null,
+          "gap_p95_ms": null,
+          "gap_max_ms": 0.0,
+          "gaps_over_50ms": 0
+        },
+        "received_mb_per_s": 0.002023353363846267,
+        "parse_ms_per_s_network_thread": 0.1939314049160222,
+        "node_said_behind_and_rewatched": 0,
+        "screen_tail_at_end": [
+          "00000279 node agent check token node agent check token node agent",
+          "00000280 re"
+        ]
+      },
+      {
+        "pane": 11,
+        "frames": {
+          "frames": 0,
+          "fps": 0.0,
+          "gap_p50_ms": null,
+          "gap_p95_ms": null,
+          "gap_max_ms": 0.0,
+          "gaps_over_50ms": 0
+        },
+        "received_mb_per_s": 0.002023353363846267,
+        "parse_ms_per_s_network_thread": 0.19623858504069217,
+        "node_said_behind_and_rewatched": 0,
+        "screen_tail_at_end": [
+          "00000279 node agent check token node agent check token node agent",
+          "00000280 r"
+        ]
+      },
+      {
+        "pane": 12,
+        "frames": {
+          "frames": 0,
+          "fps": 0.0,
+          "gap_p50_ms": null,
+          "gap_p95_ms": null,
+          "gap_max_ms": 0.0,
+          "gaps_over_50ms": 0
+        },
+        "received_mb_per_s": 0.0020228645130697877,
+        "parse_ms_per_s_network_thread": 0.1931581407577878,
+        "node_said_behind_and_rewatched": 0,
+        "screen_tail_at_end": [
+          "00000279 node agent check token node agent check token node agent",
+          "00000280"
+        ]
+      },
+      {
+        "pane": 13,
+        "frames": {
+          "frames": 0,
+          "fps": 0.0,
+          "gap_p50_ms": null,
+          "gap_p95_ms": null,
+          "gap_max_ms": 0.0,
+          "gaps_over_50ms": 0
+        },
+        "received_mb_per_s": 0.0020228645130697877,
+        "parse_ms_per_s_network_thread": 0.19714501215043936,
+        "node_said_behind_and_rewatched": 0,
+        "screen_tail_at_end": [
+          "00000279 node agent check token node agent check token node agent",
+          "00000280"
+        ]
+      },
+      {
+        "pane": 14,
+        "frames": {
+          "frames": 0,
+          "fps": 0.0,
+          "gap_p50_ms": null,
+          "gap_p95_ms": null,
+          "gap_max_ms": 0.0,
+          "gaps_over_50ms": 0
+        },
+        "received_mb_per_s": 0.0020225712026039006,
+        "parse_ms_per_s_network_thread": 0.19378504299354435,
+        "node_said_behind_and_rewatched": 0,
+        "screen_tail_at_end": [
+          "00000279 node agent check token node agent check token node agent",
+          "00000280"
+        ]
+      },
+      {
+        "pane": 15,
+        "frames": {
+          "frames": 0,
+          "fps": 0.0,
+          "gap_p50_ms": null,
+          "gap_p95_ms": null,
+          "gap_max_ms": 0.0,
+          "gaps_over_50ms": 0
+        },
+        "received_mb_per_s": 0.0020228645130697877,
+        "parse_ms_per_s_network_thread": 0.2000020516284927,
+        "node_said_behind_and_rewatched": 0,
+        "screen_tail_at_end": [
+          "00000279 node agent check token node agent check token node agent",
+          "00000280"
+        ]
+      },
+      {
+        "pane": 16,
+        "frames": {
+          "frames": 0,
+          "fps": 0.0,
+          "gap_p50_ms": null,
+          "gap_p95_ms": null,
+          "gap_max_ms": 0.0,
+          "gaps_over_50ms": 0
+        },
+        "received_mb_per_s": 0.0020229622832250837,
+        "parse_ms_per_s_network_thread": 0.19192105498283024,
+        "node_said_behind_and_rewatched": 0,
+        "screen_tail_at_end": [
+          "00000279 node agent check token node agent check token node agent",
+          "00000280"
+        ]
+      },
+      {
+        "pane": 17,
+        "frames": {
+          "frames": 0,
+          "fps": 0.0,
+          "gap_p50_ms": null,
+          "gap_p95_ms": null,
+          "gap_max_ms": 0.0,
+          "gaps_over_50ms": 0
+        },
+        "received_mb_per_s": 0.0020228645130697877,
+        "parse_ms_per_s_network_thread": 0.2079194788043454,
+        "node_said_behind_and_rewatched": 0,
+        "screen_tail_at_end": [
+          "00000279 node agent check token node agent check token node agent",
+          "00000280"
+        ]
+      },
+      {
+        "pane": 18,
+        "frames": {
+          "frames": 0,
+          "fps": 0.0,
+          "gap_p50_ms": null,
+          "gap_p95_ms": null,
+          "gap_max_ms": 0.0,
+          "gaps_over_50ms": 0
+        },
+        "received_mb_per_s": 0.002023353363846267,
+        "parse_ms_per_s_network_thread": 0.19042165188121413,
+        "node_said_behind_and_rewatched": 0,
+        "screen_tail_at_end": [
+          "00000279 node agent check token node agent check token node agent",
+          "00000280 re"
+        ]
+      },
+      {
+        "pane": 19,
+        "frames": {
+          "frames": 0,
+          "fps": 0.0,
+          "gap_p50_ms": null,
+          "gap_p95_ms": null,
+          "gap_max_ms": 0.0,
+          "gaps_over_50ms": 0
+        },
+        "received_mb_per_s": 0.0020228645130697877,
+        "parse_ms_per_s_network_thread": 0.19631083718545567,
+        "node_said_behind_and_rewatched": 0,
+        "screen_tail_at_end": [
+          "00000279 node agent check token node agent check token node agent",
+          "00000280"
+        ]
+      },
+      {
+        "pane": 20,
+        "frames": {
+          "frames": 0,
+          "fps": 0.0,
+          "gap_p50_ms": null,
+          "gap_p95_ms": null,
+          "gap_max_ms": 0.0,
+          "gaps_over_50ms": 0
+        },
+        "received_mb_per_s": 0.0020228645130697877,
+        "parse_ms_per_s_network_thread": 0.1940644700973797,
+        "node_said_behind_and_rewatched": 0,
+        "screen_tail_at_end": [
+          "00000279 node agent check token node agent check token node agent",
+          "00000280"
+        ]
+      }
+    ],
+    "main_thread_heartbeat": {
+      "interval_ms": 10,
+      "samples": 633,
+      "late_p50_ms": 0.09540100000000074,
+      "late_p95_ms": 19.199824,
+      "late_max_ms": 22.995854,
+      "stalls_over_50ms": 0
+    },
+    "pane_paint_ms": {
+      "p50": 3.332,
+      "p95": 4.039,
+      "max": 6.401,
+      "count": 213
+    },
+    "window_active_fraction": 0.0
+  },
+  "fixture": "f2",
+  "main_entered_epoch_ms": 1795308131769,
+  "first_frame_epoch_ms": 1795308131935,
+  "first_useful_paint_epoch_ms": 1795308131988,
+  "open_errors": [],
+  "gpu": {
+    "device": "llvmpipe (LLVM 21.1.8, 256 bits)",
+    "driver": "llvmpipe",
+    "driver_info": "Mesa 26.0.8-1ubuntu0.3 (LLVM 21.1.8)",
+    "software": true
+  },
+  "driver": {
+    "spawn_epoch_ms": 1795308131767,
+    "rss_bytes_at_done": 250748928,
+    "exit_code": 0,
+    "spawn_to_first_frame_ms": 168.0,
+    "spawn_to_first_useful_paint_ms": 221.0,
+    "spawn_to_main_ms": 2.0
+  }
+}

@@ -1,0 +1,346 @@
+{
+  "terminals_ready": 21,
+  "visible_pane": 0,
+  "background_total_mb_per_s": 0.04058969313956905,
+  "record": {
+    "seconds": 10.026264515,
+    "window_frames": {
+      "frames": 0,
+      "fps": 0.0,
+      "gap_p50_ms": null,
+      "gap_p95_ms": null,
+      "gap_max_ms": 0.0,
+      "gaps_over_50ms": 0
+    },
+    "per_pane": [
+      {
+        "pane": 0,
+        "frames": {
+          "frames": 0,
+          "fps": 0.0,
+          "gap_p50_ms": null,
+          "gap_p95_ms": null,
+          "gap_max_ms": 0.0,
+          "gaps_over_50ms": 0
+        },
+        "received_mb_per_s": 10.164278814660817,
+        "parse_ms_per_s_network_thread": 357.31343249924225,
+        "node_said_behind_and_rewatched": 0
+      },
+      {
+        "pane": 1,
+        "frames": {
+          "frames": 0,
+          "fps": 0.0,
+          "gap_p50_ms": null,
+          "gap_p95_ms": null,
+          "gap_max_ms": 0.0,
+          "gaps_over_50ms": 0
+        },
+        "received_mb_per_s": 0.002029369958229154,
+        "parse_ms_per_s_network_thread": 0.2563861143055032,
+        "node_said_behind_and_rewatched": 0
+      },
+      {
+        "pane": 2,
+        "frames": {
+          "frames": 0,
+          "fps": 0.0,
+          "gap_p50_ms": null,
+          "gap_p95_ms": null,
+          "gap_max_ms": 0.0,
+          "gaps_over_50ms": 0
+        },
+        "received_mb_per_s": 0.0020292702201862864,
+        "parse_ms_per_s_network_thread": 0.28537976389105874,
+        "node_said_behind_and_rewatched": 0
+      },
+      {
+        "pane": 3,
+        "frames": {
+          "frames": 0,
+          "fps": 0.0,
+          "gap_p50_ms": null,
+          "gap_p95_ms": null,
+          "gap_max_ms": 0.0,
+          "gaps_over_50ms": 0
+        },
+        "received_mb_per_s": 0.002029469696272022,
+        "parse_ms_per_s_network_thread": 0.26018154578879077,
+        "node_said_behind_and_rewatched": 0
+      },
+      {
+        "pane": 4,
+        "frames": {
+          "frames": 0,
+          "fps": 0.0,
+          "gap_p50_ms": null,
+          "gap_p95_ms": null,
+          "gap_max_ms": 0.0,
+          "gaps_over_50ms": 0
+        },
+        "received_mb_per_s": 0.0020298686484434927,
+        "parse_ms_per_s_network_thread": 0.2729195899336394,
+        "node_said_behind_and_rewatched": 0
+      },
+      {
+        "pane": 5,
+        "frames": {
+          "frames": 0,
+          "fps": 0.0,
+          "gap_p50_ms": null,
+          "gap_p95_ms": null,
+          "gap_max_ms": 0.0,
+          "gaps_over_50ms": 0
+        },
+        "received_mb_per_s": 0.0020300681245292284,
+        "parse_ms_per_s_network_thread": 1.0666927831396835,
+        "node_said_behind_and_rewatched": 0
+      },
+      {
+        "pane": 6,
+        "frames": {
+          "frames": 0,
+          "fps": 0.0,
+          "gap_p50_ms": null,
+          "gap_p95_ms": null,
+          "gap_max_ms": 0.0,
+          "gaps_over_50ms": 0
+        },
+        "received_mb_per_s": 0.002029469696272022,
+        "parse_ms_per_s_network_thread": 0.275701782639434,
+        "node_said_behind_and_rewatched": 0
+      },
+      {
+        "pane": 7,
+        "frames": {
+          "frames": 0,
+          "fps": 0.0,
+          "gap_p50_ms": null,
+          "gap_p95_ms": null,
+          "gap_max_ms": 0.0,
+          "gaps_over_50ms": 0
+        },
+        "received_mb_per_s": 0.0020298686484434927,
+        "parse_ms_per_s_network_thread": 0.25417721587011216,
+        "node_said_behind_and_rewatched": 0
+      },
+      {
+        "pane": 8,
+        "frames": {
+          "frames": 0,
+          "fps": 0.0,
+          "gap_p50_ms": null,
+          "gap_p95_ms": null,
+          "gap_max_ms": 0.0,
+          "gaps_over_50ms": 0
+        },
+        "received_mb_per_s": 0.0020300681245292284,
+        "parse_ms_per_s_network_thread": 0.27088662940586705,
+        "node_said_behind_and_rewatched": 0
+      },
+      {
+        "pane": 9,
+        "frames": {
+          "frames": 0,
+          "fps": 0.0,
+          "gap_p50_ms": null,
+          "gap_p95_ms": null,
+          "gap_max_ms": 0.0,
+          "gaps_over_50ms": 0
+        },
+        "received_mb_per_s": 0.0020298686484434927,
+        "parse_ms_per_s_network_thread": 0.25132161596476693,
+        "node_said_behind_and_rewatched": 0
+      },
+      {
+        "pane": 10,
+        "frames": {
+          "frames": 0,
+          "fps": 0.0,
+          "gap_p50_ms": null,
+          "gap_p95_ms": null,
+          "gap_max_ms": 0.0,
+          "gaps_over_50ms": 0
+        },
+        "received_mb_per_s": 0.002029469696272022,
+        "parse_ms_per_s_network_thread": 0.26918410101411533,
+        "node_said_behind_and_rewatched": 0
+      },
+      {
+        "pane": 11,
+        "frames": {
+          "frames": 0,
+          "fps": 0.0,
+          "gap_p50_ms": null,
+          "gap_p95_ms": null,
+          "gap_max_ms": 0.0,
+          "gaps_over_50ms": 0
+        },
+        "received_mb_per_s": 0.0020300681245292284,
+        "parse_ms_per_s_network_thread": 0.260232611666739,
+        "node_said_behind_and_rewatched": 0
+      },
+      {
+        "pane": 12,
+        "frames": {
+          "frames": 0,
+          "fps": 0.0,
+          "gap_p50_ms": null,
+          "gap_p95_ms": null,
+          "gap_max_ms": 0.0,
+          "gaps_over_50ms": 0
+        },
+        "received_mb_per_s": 0.002029469696272022,
+        "parse_ms_per_s_network_thread": 0.35291628250045226,
+        "node_said_behind_and_rewatched": 0
+      },
+      {
+        "pane": 13,
+        "frames": {
+          "frames": 0,
+          "fps": 0.0,
+          "gap_p50_ms": null,
+          "gap_p95_ms": null,
+          "gap_max_ms": 0.0,
+          "gaps_over_50ms": 0
+        },
+        "received_mb_per_s": 0.0020289710060576835,
+        "parse_ms_per_s_network_thread": 0.2824247251569744,
+        "node_said_behind_and_rewatched": 0
+      },
+      {
+        "pane": 14,
+        "frames": {
+          "frames": 0,
+          "fps": 0.0,
+          "gap_p50_ms": null,
+          "gap_p95_ms": null,
+          "gap_max_ms": 0.0,
+          "gaps_over_50ms": 0
+        },
+        "received_mb_per_s": 0.002029369958229154,
+        "parse_ms_per_s_network_thread": 0.2544041199176361,
+        "node_said_behind_and_rewatched": 0
+      },
+      {
+        "pane": 15,
+        "frames": {
+          "frames": 0,
+          "fps": 0.0,
+          "gap_p50_ms": null,
+          "gap_p95_ms": null,
+          "gap_max_ms": 0.0,
+          "gaps_over_50ms": 0
+        },
+        "received_mb_per_s": 0.002029369958229154,
+        "parse_ms_per_s_network_thread": 0.6898623101008423,
+        "node_said_behind_and_rewatched": 0
+      },
+      {
+        "pane": 16,
+        "frames": {
+          "frames": 0,
+          "fps": 0.0,
+          "gap_p50_ms": null,
+          "gap_p95_ms": null,
+          "gap_max_ms": 0.0,
+          "gaps_over_50ms": 0
+        },
+        "received_mb_per_s": 0.0020298686484434927,
+        "parse_ms_per_s_network_thread": 0.27938151799299504,
+        "node_said_behind_and_rewatched": 0
+      },
+      {
+        "pane": 17,
+        "frames": {
+          "frames": 0,
+          "fps": 0.0,
+          "gap_p50_ms": null,
+          "gap_p95_ms": null,
+          "gap_max_ms": 0.0,
+          "gaps_over_50ms": 0
+        },
+        "received_mb_per_s": 0.0020285720538862125,
+        "parse_ms_per_s_network_thread": 0.4496529084441376,
+        "node_said_behind_and_rewatched": 0
+      },
+      {
+        "pane": 18,
+        "frames": {
+          "frames": 0,
+          "fps": 0.0,
+          "gap_p50_ms": null,
+          "gap_p95_ms": null,
+          "gap_max_ms": 0.0,
+          "gaps_over_50ms": 0
+        },
+        "received_mb_per_s": 0.0020289710060576835,
+        "parse_ms_per_s_network_thread": 0.2730923362238863,
+        "node_said_behind_and_rewatched": 0
+      },
+      {
+        "pane": 19,
+        "frames": {
+          "frames": 0,
+          "fps": 0.0,
+          "gap_p50_ms": null,
+          "gap_p95_ms": null,
+          "gap_max_ms": 0.0,
+          "gaps_over_50ms": 0
+        },
+        "received_mb_per_s": 0.0020296691723577574,
+        "parse_ms_per_s_network_thread": 0.28227611547310155,
+        "node_said_behind_and_rewatched": 0
+      },
+      {
+        "pane": 20,
+        "frames": {
+          "frames": 0,
+          "fps": 0.0,
+          "gap_p50_ms": null,
+          "gap_p95_ms": null,
+          "gap_max_ms": 0.0,
+          "gaps_over_50ms": 0
+        },
+        "received_mb_per_s": 0.0020285720538862125,
+        "parse_ms_per_s_network_thread": 0.2634639247795668,
+        "node_said_behind_and_rewatched": 0
+      }
+    ],
+    "main_thread_heartbeat": {
+      "interval_ms": 10,
+      "samples": 916,
+      "late_p50_ms": 0.14217700000000022,
+      "late_p95_ms": 4.020747999999999,
+      "late_max_ms": 29.72315500000001,
+      "stalls_over_50ms": 0
+    },
+    "pane_paint_ms": {
+      "p50": null,
+      "p95": null,
+      "max": 0.0,
+      "count": 0
+    },
+    "window_active_fraction": 0.0
+  },
+  "fixture": "f2",
+  "main_entered_epoch_ms": 1795307482760,
+  "first_frame_epoch_ms": 1795307483287,
+  "first_useful_paint_epoch_ms": 1795307483316,
+  "open_errors": [],
+  "gpu": {
+    "device": "AMD Radeon Graphics (RADV RENOIR)",
+    "driver": "radv",
+    "driver_info": "Mesa 26.0.8-1ubuntu0.3",
+    "software": false
+  },
+  "driver": {
+    "spawn_epoch_ms": 1795307482746,
+    "rss_bytes_at_done": 179482624,
+    "exit_code": 0,
+    "spawn_to_first_frame_ms": 541.0,
+    "spawn_to_first_useful_paint_ms": 570.0,
+    "spawn_to_main_ms": 14.0
+  }
+}

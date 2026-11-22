@@ -1,0 +1,255 @@
+{
+  "checks": 35,
+  "passed": 35,
+  "results": [
+    {
+      "check": "key a",
+      "pass": true,
+      "expected": "61",
+      "got": "61"
+    },
+    {
+      "check": "key enter",
+      "pass": true,
+      "expected": "0d",
+      "got": "0d"
+    },
+    {
+      "check": "key ctrl-c",
+      "pass": true,
+      "expected": "03",
+      "got": "03"
+    },
+    {
+      "check": "key up",
+      "pass": true,
+      "expected": "1b 5b 41",
+      "got": "1b 5b 41"
+    },
+    {
+      "check": "key alt-x",
+      "pass": true,
+      "expected": "1b 78",
+      "got": "1b 78"
+    },
+    {
+      "check": "key shift-tab",
+      "pass": true,
+      "expected": "1b 5b 5a",
+      "got": "1b 5b 5a"
+    },
+    {
+      "check": "key f5",
+      "pass": true,
+      "expected": "1b 5b 31 35 7e",
+      "got": "1b 5b 31 35 7e"
+    },
+    {
+      "check": "key ctrl-left",
+      "pass": true,
+      "expected": "1b 5b 31 3b 35 44",
+      "got": "1b 5b 31 3b 35 44"
+    },
+    {
+      "check": "key backspace",
+      "pass": true,
+      "expected": "7f",
+      "got": "7f"
+    },
+    {
+      "check": "key escape",
+      "pass": true,
+      "expected": "1b",
+      "got": "1b"
+    },
+    {
+      "check": "key up with DECCKM (application cursor)",
+      "pass": true,
+      "expected": "1b 4f 41",
+      "got": "1b 4f 41"
+    },
+    {
+      "check": "text ş through the input handler",
+      "pass": true,
+      "expected": "c5 9f",
+      "got": "c5 9f"
+    },
+    {
+      "check": "IME preedit painted at the cursor, nothing sent",
+      "pass": true,
+      "detail": {
+        "sent_during_preedit": "",
+        "preedit_painted": true
+      }
+    },
+    {
+      "check": "IME commit sent once",
+      "pass": true,
+      "expected": "e6 97 a5 e6 9c ac",
+      "got": "e6 97 a5 e6 9c ac"
+    },
+    {
+      "check": "mouse 1000+1006 (SGR) click",
+      "pass": true,
+      "expected": "1b 5b 3c 30 3b 35 3b 33 4d 1b 5b 3c 30 3b 35 3b 33 6d",
+      "got": "1b 5b 3c 30 3b 35 3b 33 4d 1b 5b 3c 30 3b 35 3b 33 6d"
+    },
+    {
+      "check": "mouse 1000 default encoding click",
+      "pass": true,
+      "expected": "1b 5b 4d 20 25 23 1b 5b 4d 23 25 23",
+      "got": "1b 5b 4d 20 25 23 1b 5b 4d 23 25 23"
+    },
+    {
+      "check": "mouse 1000+1015 (urxvt) click",
+      "pass": true,
+      "expected": "1b 5b 33 32 3b 35 3b 33 4d 1b 5b 33 35 3b 35 3b 33 4d",
+      "got": "1b 5b 33 32 3b 35 3b 33 4d 1b 5b 33 35 3b 35 3b 33 4d"
+    },
+    {
+      "check": "mouse 1000+1005 (UTF-8) click at column 121",
+      "pass": true,
+      "expected": "1b 5b 4d 20 c2 99 23 1b 5b 4d 23 c2 99 23",
+      "got": "1b 5b 4d 20 c2 99 23 1b 5b 4d 23 c2 99 23"
+    },
+    {
+      "check": "mouse 9 (X10) press only",
+      "pass": true,
+      "expected": "1b 5b 4d 20 25 23",
+      "got": "1b 5b 4d 20 25 23"
+    },
+    {
+      "check": "mouse 1000: drag not reported",
+      "pass": true,
+      "expected": "1b 5b 3c 30 3b 35 3b 33 4d 1b 5b 3c 30 3b 38 3b 33 6d",
+      "got": "1b 5b 3c 30 3b 35 3b 33 4d 1b 5b 3c 30 3b 38 3b 33 6d"
+    },
+    {
+      "check": "mouse 1002: drag reported",
+      "pass": true,
+      "expected": "1b 5b 3c 30 3b 35 3b 33 4d 1b 5b 3c 33 32 3b 38 3b 33 4d 1b 5b 3c 30 3b 38 3b 33 6d",
+      "got": "1b 5b 3c 30 3b 35 3b 33 4d 1b 5b 3c 33 32 3b 38 3b 33 4d 1b 5b 3c 30 3b 38 3b 33 6d"
+    },
+    {
+      "check": "mouse 1002: plain motion not reported",
+      "pass": true,
+      "expected": "",
+      "got": ""
+    },
+    {
+      "check": "mouse 1003: plain motion reported",
+      "pass": true,
+      "expected": "1b 5b 3c 33 35 3b 38 3b 33 4d",
+      "got": "1b 5b 3c 33 35 3b 38 3b 33 4d"
+    },
+    {
+      "check": "mouse mode on, Shift+click: nothing sent",
+      "pass": true,
+      "expected": "",
+      "got": ""
+    },
+    {
+      "check": "wheel with mouse mode: SGR 64/65 once per notch",
+      "pass": true,
+      "expected": "1b 5b 3c 36 34 3b 35 3b 33 4d 1b 5b 3c 36 35 3b 35 3b 33 4d",
+      "got": "1b 5b 3c 36 34 3b 35 3b 33 4d 1b 5b 3c 36 35 3b 35 3b 33 4d"
+    },
+    {
+      "check": "wheel on alternate screen without mouse mode: 3 arrows",
+      "pass": true,
+      "expected": "1b 5b 41 1b 5b 41 1b 5b 41",
+      "got": "1b 5b 41 1b 5b 41 1b 5b 41"
+    },
+    {
+      "check": "wheel on alternate screen with DECCKM: 3 application arrows",
+      "pass": true,
+      "expected": "1b 4f 42 1b 4f 42 1b 4f 42",
+      "got": "1b 4f 42 1b 4f 42 1b 4f 42"
+    },
+    {
+      "check": "wheel on main screen scrolls history (6 lines for 2 notches), nothing sent",
+      "pass": true,
+      "detail": {
+        "sent": "",
+        "top_line_after": "history line 146"
+      }
+    },
+    {
+      "check": "typing returns to the live screen",
+      "pass": true,
+      "detail": {
+        "scroll": 0
+      }
+    },
+    {
+      "check": "drag selection + Ctrl+Shift+C copies",
+      "pass": true,
+      "detail": {
+        "copied": "hello selection"
+      }
+    },
+    {
+      "check": "double click selects a word",
+      "pass": true,
+      "detail": {
+        "selected": "selection"
+      }
+    },
+    {
+      "check": "triple click selects the line",
+      "pass": true,
+      "detail": {
+        "selected": "second line"
+      }
+    },
+    {
+      "check": "selection gestures send nothing",
+      "pass": true,
+      "expected": "",
+      "got": ""
+    },
+    {
+      "check": "bracketed paste, control characters removed",
+      "pass": true,
+      "expected": "1b 5b 32 30 30 7e 78 79 1b 5b 32 30 31 7e",
+      "got": "1b 5b 32 30 30 7e 78 79 1b 5b 32 30 31 7e"
+    },
+    {
+      "check": "end to end: a real program behind the node PTY (helper probe, raw mode) turned SGR mouse on and received the click",
+      "pass": true,
+      "detail": {
+        "modes_seen_from_program": "ProgramModes { track: Normal, encoding: Sgr, focus: false }",
+        "sent": "1b 5b 3c 30 3b 33 3b 32 4d 1b 5b 3c 30 3b 33 3b 32 6d",
+        "program_printed": "1b 5b 3c 30 3b 33 3b 32 4d 1b 5b 3c 30 3b 33 3b 32 6d"
+      }
+    }
+  ],
+  "wheel_line_deltas_seen": [
+    1.0,
+    -1.0,
+    1.0,
+    -1.0,
+    2.0
+  ],
+  "window_active": false,
+  "pane_paints_total": 59,
+  "fixture": "selftest",
+  "main_entered_epoch_ms": 1795307763484,
+  "first_frame_epoch_ms": 1795307763611,
+  "first_useful_paint_epoch_ms": 1795307763665,
+  "open_errors": [],
+  "gpu": {
+    "device": "llvmpipe (LLVM 21.1.8, 256 bits)",
+    "driver": "llvmpipe",
+    "driver_info": "Mesa 26.0.8-1ubuntu0.3 (LLVM 21.1.8)",
+    "software": true
+  },
+  "driver": {
+    "spawn_epoch_ms": 1795307763482,
+    "rss_bytes_at_done": 174440448,
+    "exit_code": 0,
+    "spawn_to_first_frame_ms": 129.0,
+    "spawn_to_first_useful_paint_ms": 183.0,
+    "spawn_to_main_ms": 2.0
+  }
+}

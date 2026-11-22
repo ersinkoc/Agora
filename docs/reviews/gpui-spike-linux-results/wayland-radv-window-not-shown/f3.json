@@ -1,0 +1,106 @@
+{
+  "terminals_ready": 4,
+  "record": {
+    "seconds": 10.009852602,
+    "window_frames": {
+      "frames": 0,
+      "fps": 0.0,
+      "gap_p50_ms": null,
+      "gap_p95_ms": null,
+      "gap_max_ms": 0.0,
+      "gaps_over_50ms": 0
+    },
+    "per_pane": [
+      {
+        "pane": 0,
+        "frames": {
+          "frames": 0,
+          "fps": 0.0,
+          "gap_p50_ms": null,
+          "gap_p95_ms": null,
+          "gap_max_ms": 0.0,
+          "gaps_over_50ms": 0
+        },
+        "received_mb_per_s": 10.118147591879994,
+        "parse_ms_per_s_network_thread": 195.0875951569781,
+        "node_said_behind_and_rewatched": 0
+      },
+      {
+        "pane": 1,
+        "frames": {
+          "frames": 0,
+          "fps": 0.0,
+          "gap_p50_ms": null,
+          "gap_p95_ms": null,
+          "gap_max_ms": 0.0,
+          "gaps_over_50ms": 0
+        },
+        "received_mb_per_s": 10.115852752893511,
+        "parse_ms_per_s_network_thread": 196.19084556825723,
+        "node_said_behind_and_rewatched": 0
+      },
+      {
+        "pane": 2,
+        "frames": {
+          "frames": 0,
+          "fps": 0.0,
+          "gap_p50_ms": null,
+          "gap_p95_ms": null,
+          "gap_max_ms": 0.0,
+          "gaps_over_50ms": 0
+        },
+        "received_mb_per_s": 10.120778000243323,
+        "parse_ms_per_s_network_thread": 194.57367769939512,
+        "node_said_behind_and_rewatched": 0
+      },
+      {
+        "pane": 3,
+        "frames": {
+          "frames": 0,
+          "fps": 0.0,
+          "gap_p50_ms": null,
+          "gap_p95_ms": null,
+          "gap_max_ms": 0.0,
+          "gaps_over_50ms": 0
+        },
+        "received_mb_per_s": 10.114474311017432,
+        "parse_ms_per_s_network_thread": 195.97654990524504,
+        "node_said_behind_and_rewatched": 0
+      }
+    ],
+    "main_thread_heartbeat": {
+      "interval_ms": 10,
+      "samples": 957,
+      "late_p50_ms": 0.10426600000000086,
+      "late_p95_ms": 1.0524379999999989,
+      "late_max_ms": 4.392033999999999,
+      "stalls_over_50ms": 0
+    },
+    "pane_paint_ms": {
+      "p50": null,
+      "p95": null,
+      "max": 0.0,
+      "count": 0
+    },
+    "window_active_fraction": 0.0
+  },
+  "fixture": "f3",
+  "main_entered_epoch_ms": 1795307497973,
+  "first_frame_epoch_ms": 1795307498132,
+  "first_useful_paint_epoch_ms": 1795307498138,
+  "open_errors": [],
+  "gpu": {
+    "device": "AMD Radeon Graphics (RADV RENOIR)",
+    "driver": "radv",
+    "driver_info": "Mesa 26.0.8-1ubuntu0.3",
+    "software": false
+  },
+  "driver": {
+    "spawn_epoch_ms": 1795307497969,
+    "rss_bytes_at_done": 171184128,
+    "exit_code": 0,
+    "spawn_to_first_frame_ms": 163.0,
+    "spawn_to_first_useful_paint_ms": 169.0,
+    "spawn_to_main_ms": 4.0
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "agents_listed": 26,
+  "visible": 4,
+  "background": 2,
+  "terminals_ready": 6,
+  "idle_seconds": 11.000121316,
+  "pane_paints_while_idle": 0,
+  "window_active": false,
+  "fixture": "f4",
+  "main_entered_epoch_ms": 1795307737099,
+  "first_frame_epoch_ms": 1795307737240,
+  "first_useful_paint_epoch_ms": 1795307737292,
+  "open_errors": [],
+  "gpu": {
+    "device": "llvmpipe (LLVM 21.1.8, 256 bits)",
+    "driver": "llvmpipe",
+    "driver_info": "Mesa 26.0.8-1ubuntu0.3 (LLVM 21.1.8)",
+    "software": true
+  },
+  "driver": {
+    "spawn_epoch_ms": 1795307737097,
+    "rss_bytes": 166383616,
+    "tree_rss_bytes": 166383616,
+    "idle_cpu_percent_of_one_core": 0.3817205044357946,
+    "idle_cpu_window_ms": 10478.871199000001,
+    "rss_bytes_end": 156360704,
+    "rss_bytes_at_done": 156360704,
+    "exit_code": 0,
+    "spawn_to_first_frame_ms": 143.0,
+    "spawn_to_first_useful_paint_ms": 195.0,
+    "spawn_to_main_ms": 2.0
+  }
+}

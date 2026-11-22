@@ -1,0 +1,119 @@
+{
+  "cold_spawn_to_first_frame_ms": 431.0,
+  "warm_start_first_useful_paint_ms_median": 101.0,
+  "warm_start_first_frame_ms_median": 97.0,
+  "selftest": {
+    "checks": 35,
+    "passed": 33
+  },
+  "gates": {
+    "cold_start_first_useful_paint_ms": {
+      "value": 438.0,
+      "limit": 500,
+      "pass": true,
+      "page_cache_evicted": true,
+      "files_evicted": 56
+    },
+    "f1_echo_presented_p95_ms": {
+      "value": null,
+      "limit": 16,
+      "pass": false,
+      "p50": null,
+      "painted_p95": null,
+      "samples": 0
+    },
+    "f2_fps_and_stalls": {
+      "fps": 0.0,
+      "fps_limit": 60,
+      "main_thread_stalls_over_50ms": 0,
+      "frame_gaps_over_50ms": 0,
+      "pass": false,
+      "received_mb_per_s": [
+        10.164278814660817,
+        0.002029369958229154,
+        0.0020292702201862864,
+        0.002029469696272022,
+        0.0020298686484434927,
+        0.0020300681245292284,
+        0.002029469696272022,
+        0.0020298686484434927,
+        0.0020300681245292284,
+        0.0020298686484434927,
+        0.002029469696272022,
+        0.0020300681245292284,
+        0.002029469696272022,
+        0.0020289710060576835,
+        0.002029369958229154,
+        0.002029369958229154,
+        0.0020298686484434927,
+        0.0020285720538862125,
+        0.0020289710060576835,
+        0.0020296691723577574,
+        0.0020285720538862125
+      ],
+      "window_active_fraction": 0.0
+    },
+    "f3_fps_and_stalls": {
+      "fps": 0.0,
+      "fps_limit": 60,
+      "main_thread_stalls_over_50ms": 0,
+      "frame_gaps_over_50ms": 0,
+      "pass": false,
+      "received_mb_per_s": [
+        10.118147591879994,
+        10.115852752893511,
+        10.120778000243323,
+        10.114474311017432
+      ],
+      "window_active_fraction": 0.0
+    },
+    "switch_to_terminal_snapshot_p95_ms": {
+      "value": null,
+      "limit": 150,
+      "pass": false
+    },
+    "switch_tab_p95_ms": {
+      "value": null,
+      "limit": 50,
+      "pass": false
+    },
+    "switch_agent_p95_ms": {
+      "value": null,
+      "limit": 50,
+      "pass": false
+    },
+    "f4_resident_mb": {
+      "value": 108.388352,
+      "limit": 200,
+      "pass": true,
+      "tauri_same_machine": "measure with `agora-native-spike measure --pid <tauri pid> --tree` (see howto)"
+    },
+    "idle_cpu_percent": {
+      "value": 0.0954521742836967,
+      "limit": 1,
+      "pass": true
+    },
+    "binary_mb": {
+      "value": 27.019848,
+      "limit": 40,
+      "pass": true,
+      "note": "this file, as built (release profile strips symbols)"
+    }
+  },
+  "machine": {
+    "os": "linux",
+    "arch": "x86_64",
+    "os_version": "Ubuntu 26.04.1 LTS",
+    "cpu": "AMD Ryzen 5 7430U with Radeon Graphics",
+    "logical_cpus": 12,
+    "load_average_at_start": "6.76 7.08 9.28",
+    "linux_session_type": "wayland",
+    "wayland_display": "wayland-0",
+    "x11_display": null
+  },
+  "label": "linux-gnome-wayland-radv",
+  "representative": false,
+  "not_representative_because": "real GPU (radv) on a person's live GNOME Wayland desktop, but the agent's window was never visible or focused there, so the compositor sent no frame callbacks (no frames presented); machine shared with other sessions' builds",
+  "gpui": "git https://github.com/zed-industries/zed rev d01b134cddf5e4f71964deb2d6f81cdb38fcf1e7 (tag v1.29.3)",
+  "finished_epoch_ms": 1795307540185
+}

@@ -1,0 +1,36 @@
+# ADR-0099 stage 0: the GPUI spike. Its own workspace on purpose (like apps/desktop/src-tauri): GPUI and its graphics and windowing
+# crates enter only here, never the node, the hub, the `agora` binary or the main workspace's CI jobs. Throwaway unless the spike
+# report says otherwise; stage 1 (the shared client crate) replaces the path dependency on agora-tui.
+[workspace]
+
+[package]
+name = "agora-native-spike"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "Apache-2.0"
+
+[dependencies]
+# GPUI pinned to one git revision of zed-industries/zed (ADR-0099 decision 1): tag v1.29.3. crates.io `gpui` is stale (0.2.2).
+# gpui and gpui_platform are Apache-2.0; no Zed application crate (GPL-3.0) is used.
+gpui = { git = "https://github.com/zed-industries/zed", rev = "d01b134cddf5e4f71964deb2d6f81cdb38fcf1e7", default-features = false, features = ["font-kit", "wayland", "x11", "windows-manifest"] }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "d01b134cddf5e4f71964deb2d6f81cdb38fcf1e7", default-features = false, features = ["font-kit", "wayland", "x11"] }
+# The main workspace's crates, read-only by path: the emulator trait (ADR-0012), the protocol and the TUI's sign-in and termio.
+agora-vt = { path = "../../crates/agora-vt" }
+agora-protocol = { path = "../../crates/agora-protocol", features = ["ws"] }
+agora-tui = { path = "../../crates/agora-tui" }
+# The same connection crates and features agora-tui uses (TLS to the hub with only its CA trusted).
+tokio = { version = "1", features = ["rt", "net", "time", "io-util", "sync", "macros"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+prost = "0.14"
+# Result files and the stack description; already in the tree through agora-tui.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# The channel from the network thread to GPUI's main-thread executor; already in the tree through gpui.
+futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

@@ -1,0 +1,40 @@
+{
+  "samples": 300,
+  "timeouts": 0,
+  "key_to_output_received_ms": {
+    "p50": 0.693651,
+    "p95": 1.331699,
+    "max": 24.720744
+  },
+  "key_to_frame_painted_ms": {
+    "p50": 10.784302,
+    "p95": 17.784918,
+    "max": 57.402708
+  },
+  "key_to_frame_presented_ms": {
+    "p50": 57.524103,
+    "p95": 64.455581,
+    "max": 104.3927
+  },
+  "window_active": false,
+  "method": "keystrokes dispatched into the window's input path (Window::dispatch_keystroke -> key handler -> input handler -> network thread -> hub -> node PTY echo -> back); 'presented' is the next frame callback after the frame that first contains the echo was drawn and handed to the platform (an upper bound of the frame being on screen, excluding OS input-event latency and display scan-out)",
+  "fixture": "f1",
+  "main_entered_epoch_ms": 1795307664102,
+  "first_frame_epoch_ms": 1795307664237,
+  "first_useful_paint_epoch_ms": 1795307664292,
+  "open_errors": [],
+  "gpu": {
+    "device": "llvmpipe (LLVM 21.1.8, 256 bits)",
+    "driver": "llvmpipe",
+    "driver_info": "Mesa 26.0.8-1ubuntu0.3 (LLVM 21.1.8)",
+    "software": true
+  },
+  "driver": {
+    "spawn_epoch_ms": 1795307664100,
+    "rss_bytes_at_done": 165634048,
+    "exit_code": 0,
+    "spawn_to_first_frame_ms": 137.0,
+    "spawn_to_first_useful_paint_ms": 192.0,
+    "spawn_to_main_ms": 2.0
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "fixture": "start",
+  "main_entered_epoch_ms": 1795307312579,
+  "first_frame_epoch_ms": 1795307312684,
+  "first_useful_paint_epoch_ms": 1795307312688,
+  "open_errors": [],
+  "gpu": {
+    "device": "AMD Radeon Graphics (RADV RENOIR)",
+    "driver": "radv",
+    "driver_info": "Mesa 26.0.8-1ubuntu0.3",
+    "software": false
+  },
+  "driver": {
+    "spawn_epoch_ms": 1795307312577,
+    "rss_bytes_at_done": 99934208,
+    "exit_code": 0,
+    "spawn_to_first_frame_ms": 107.0,
+    "spawn_to_first_useful_paint_ms": 111.0,
+    "spawn_to_main_ms": 2.0
+  }
+}

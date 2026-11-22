@@ -1,0 +1,129 @@
+{
+  "cold_spawn_to_first_frame_ms": 513.0,
+  "warm_start_first_useful_paint_ms_median": 182.0,
+  "warm_start_first_frame_ms_median": 131.0,
+  "selftest": {
+    "checks": 35,
+    "passed": 35
+  },
+  "gates": {
+    "cold_start_first_useful_paint_ms": {
+      "value": 590.0,
+      "limit": 500,
+      "pass": false,
+      "page_cache_evicted": true,
+      "files_evicted": 56
+    },
+    "f1_echo_presented_p95_ms": {
+      "value": 64.455581,
+      "limit": 16,
+      "pass": false,
+      "p50": 57.524103,
+      "painted_p95": 17.784918,
+      "samples": 300
+    },
+    "f2_fps_and_stalls": {
+      "fps": 20.825043078002164,
+      "fps_limit": 60,
+      "main_thread_stalls_over_50ms": 0,
+      "frame_gaps_over_50ms": 1,
+      "pass": false,
+      "received_mb_per_s": [
+        10.117711278931491,
+        0.002023353363846267,
+        0.0020228645130697877,
+        0.0020228645130697877,
+        0.0020228645130697877,
+        0.002022277892138013,
+        0.0020228645130697877,
+        0.0020229622832250837,
+        0.0020228645130697877,
+        0.0020228645130697877,
+        0.002023353363846267,
+        0.002023353363846267,
+        0.0020228645130697877,
+        0.0020228645130697877,
+        0.0020225712026039006,
+        0.0020228645130697877,
+        0.0020229622832250837,
+        0.0020228645130697877,
+        0.002023353363846267,
+        0.0020228645130697877,
+        0.0020228645130697877
+      ],
+      "window_active_fraction": 0.0,
+      "rerun_epoch_ms": 1795308161799
+    },
+    "f3_fps_and_stalls": {
+      "fps": 21.27818567933886,
+      "fps_limit": 60,
+      "main_thread_stalls_over_50ms": 0,
+      "frame_gaps_over_50ms": 0,
+      "pass": false,
+      "received_mb_per_s": [
+        10.11385004345354,
+        10.105237673285789,
+        10.11044916182259,
+        10.108704154484572
+      ],
+      "window_active_fraction": 0.0,
+      "rerun_epoch_ms": 1795308161799
+    },
+    "switch_to_terminal_snapshot_p95_ms": {
+      "value": 117.866419,
+      "limit": 150,
+      "pass": true
+    },
+    "switch_tab_p95_ms": {
+      "value": 63.34917800000001,
+      "limit": 50,
+      "pass": false
+    },
+    "switch_agent_p95_ms": {
+      "value": 63.750028,
+      "limit": 50,
+      "pass": false
+    },
+    "f4_resident_mb": {
+      "value": 166.383616,
+      "limit": 200,
+      "pass": true,
+      "tauri_same_machine": "measure with `agora-native-spike measure --pid <tauri pid> --tree` (see howto)"
+    },
+    "idle_cpu_percent": {
+      "value": 0.3817205044357946,
+      "limit": 1,
+      "pass": true
+    },
+    "f5_accessibility_tree": {
+      "list_items_exposed": 26,
+      "button_exposed_with_name": true,
+      "button_pressed_through_atspi_opened_terminal": true,
+      "pass_tree": true,
+      "screen_reader_announcement": "not verified by the harness: listen with Orca / VoiceOver / Narrator (howto)"
+    },
+    "binary_mb": {
+      "value": 27.020744,
+      "limit": 40,
+      "pass": true,
+      "note": "this file, as built (release profile strips symbols)"
+    }
+  },
+  "machine": {
+    "os": "linux",
+    "arch": "x86_64",
+    "os_version": "Ubuntu 26.04.1 LTS",
+    "cpu": "AMD Ryzen 5 7430U with Radeon Graphics",
+    "logical_cpus": 12,
+    "load_average_at_start": "4.94 6.51 8.62",
+    "linux_session_type": "wayland",
+    "wayland_display": null,
+    "x11_display": ":87"
+  },
+  "label": "linux-xvfb-llvmpipe",
+  "representative": false,
+  "not_representative_because": "Xvfb with no GPU: llvmpipe software rendering, no real display or vsync, window never focused (30 fps inactive throttle), machine shared with other sessions' builds",
+  "gpui": "git https://github.com/zed-industries/zed rev d01b134cddf5e4f71964deb2d6f81cdb38fcf1e7 (tag v1.29.3)",
+  "finished_epoch_ms": 1795307768962,
+  "note": "f2 and f3 were rerun with the final binary (window frames counted per frame callback; the first count split one frame painted in several panes into several); their gates and files are from that rerun"
+}
