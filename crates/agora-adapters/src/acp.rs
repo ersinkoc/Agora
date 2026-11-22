@@ -48,7 +48,7 @@ const AGENT_WRITE_QUEUE: usize = 64;
 const AGENT_WRITE_BYTES: usize = 8 * 1024 * 1024;
 /// How long agent text chunks are joined into one chat item.
 const JOIN: Duration = Duration::from_millis(150);
-/// The most text one joined item holds before it is sent anyway.
+/// The most text one joined item holds: a chunk that would take it past this is sent in an item of its own (Audit F54).
 const JOIN_MAX: usize = 4096;
 const MAX_DETAIL: usize = 300;
 /// The bytes of the agent's stderr kept for an exit report, and the most of them a report carries (after secrets are removed).
@@ -364,6 +364,70 @@ const COMMANDS_MAX: usize = 100;
 const LOCATIONS_MAX: usize = 64;
 /// ADR-0090: a tool's output is cut here (head and tail kept) before secrets are removed; the node cuts it to its own cap after.
 const OUTPUT_MAX: usize = 64 * 1024;
+/// Audit F54: a tool call's arguments and a diff are cut here (head and tail kept), and a rich plan to this many entries of this much
+/// text (each is sent twice, as a step and as an entry), so an ordinary item stays far below `MAX_LINE` on its way to the node,
+/// whose host drops a longer line whole; [`fit_line`] enforces the bound on the line itself. The node keeps less of each (16 KiB, 64
+/// entries of 512 bytes).
+const ARGUMENTS_MAX: usize = 64 * 1024;
+const DIFF_MAX: usize = 64 * 1024;
+const PLAN_ENTRIES_MAX: usize = 256;
+const PLAN_TEXT_MAX: usize = 4096;
+
+/// Audit F54 (review of #920): a string at most this long is never cut by [`fit_line`].
+const FIT_FLOOR: usize = 256;
+/// Audit F54 (Codex review of #920): the longest session id the bridge accepts, from the agent (`session/new`, `session/load`) or
+/// from the node (`resumeSessionId`). Longer ones are refused, not cut: an item cut down to strings of `FIT_FLOOR` bytes and lists of
+/// one element is then a few KiB, so [`fit_line`] always finds a line that fits.
+const SESSION_ID_MAX: usize = 1024;
+
+/// A `chat/append` line with `params`, serialized as the node will read it. The per-field caps above count decoded bytes, while
+/// JSON escaping can make each one up to six bytes and a rich plan carries its text twice, so the bound is enforced here on the
+/// complete line, envelope and escaping included: while it is longer than `MAX_LINE`, every string of the item longer than
+/// `FIT_FLOOR` (head and tail kept) and every list of more than one element is cut to half, the session id excepted. A line that
+/// fits, which is every ordinary one, is sent as it is. Cutting ends once nothing is left to cut; with the session id at most
+/// `SESSION_ID_MAX` the line then fits. Should it not, `Err` with the length reached: the caller drops the item and logs why, so an
+/// overlong line is never sent.
+fn fit_line(params: Value) -> Result<String, usize> {
+    let mut line = json!({"jsonrpc": "2.0", "method": "chat/append", "params": params});
+    loop {
+        let text = line.to_string();
+        if text.len() <= MAX_LINE {
+            return Ok(text);
+        }
+        let Some(params) = line.get_mut("params").and_then(Value::as_object_mut) else {
+            return Err(text.len());
+        };
+        let mut cut = false;
+        for (k, v) in params.iter_mut() {
+            if k != "sessionId" {
+                cut |= halve(v);
+            }
+        }
+        if !cut {
+            return Err(text.len());
+        }
+    }
+}
+
+/// Cuts every string in `v` longer than `FIT_FLOOR` and every list of more than one element to half; whether anything was cut.
+fn halve(v: &mut Value) -> bool {
+    match v {
+        Value::String(s) if s.len() > FIT_FLOOR => {
+            *s = head_tail(s, s.len() / 2);
+            true
+        }
+        Value::Array(a) => {
+            let mut cut = a.len() > 1;
+            a.truncate(a.len().div_ceil(2));
+            for e in a.iter_mut() {
+                cut |= halve(e);
+            }
+            cut
+        }
+        Value::Object(o) => o.values_mut().fold(false, |cut, e| halve(e) | cut),
+        _ => false,
+    }
+}
 
 /// `s` as is when it fits `max` bytes, otherwise its first and last `max / 2` bytes (cut on character boundaries).
 fn head_tail(s: &str, max: usize) -> String {
@@ -1044,7 +1108,23 @@ impl<W: Write> Bridge<W> {
         let sid = replay_id.or(self.session.as_deref()).unwrap_or_default();
         let mut p = item;
         p["sessionId"] = json!(sid);
-        self.note("chat/append", p)
+        self.append(p)
+    }
+
+    /// A `chat/append` of an item made from the agent's content, kept within the node's line limit (audit F54, [`fit_line`]).
+    fn append(&mut self, params: Value) -> io::Result<()> {
+        match fit_line(params) {
+            Ok(line) => {
+                writeln!(self.out, "{line}")?;
+                self.out.flush()
+            }
+            // Not reached with ids within `SESSION_ID_MAX`; if it were, the item is dropped with a stable reason, not sent too long.
+            Err(bytes) => self.log_reason(
+                "WARN",
+                "adapter.line_too_long",
+                &json!({"method": "chat/append", "bytes": bytes.to_string()}),
+            ),
+        }
     }
 
     fn flush_text(&mut self) -> io::Result<()> {
@@ -1057,7 +1137,7 @@ impl<W: Write> Bridge<W> {
             // Thinking is not the agent saying something: a turn of nothing else is still an empty turn.
             let mut p = json!({"thought": {"text": t}});
             p["sessionId"] = json!(sid);
-            return self.note("chat/append", p);
+            return self.append(p);
         }
         self.chat(json!({"text": {"text": t}}), Some(&sid))
     }
@@ -1220,6 +1300,18 @@ impl<W: Write> Bridge<W> {
             .and_then(Value::as_str)
             .unwrap_or("");
         let detail = stderr_tail(message.as_bytes(), self.home.as_deref());
+        self.refused_because(node_id, stage, rpc_code, &detail)
+    }
+
+    /// [`Self::refused`] with the notice's `rpc_code` and `detail` given: `0` and a stable reason when the agent's answer was not an
+    /// error but cannot be used (a session id longer than `SESSION_ID_MAX`, `session_id_too_long`).
+    fn refused_because(
+        &mut self,
+        node_id: &Value,
+        stage: &str,
+        rpc_code: i64,
+        detail: &str,
+    ) -> io::Result<()> {
         self.notice(
             "adapter.agent_refused",
             &json!({"stage": stage, "rpc_code": rpc_code.to_string(), "detail": detail}),
@@ -1488,6 +1580,15 @@ impl<W: Write> Bridge<W> {
                     .and_then(Value::as_str)
                     .map(str::to_string);
                 let node_id = id.clone().unwrap_or(Value::Null);
+                // Audit F54 (Codex review of #920): every line about a session carries its id, so one over the limit is refused.
+                if resume.as_ref().is_some_and(|r| r.len() > SESSION_ID_MAX) {
+                    if !node_id.is_null() {
+                        let data = json!({"code": "protocol.invalid_message", "params": {"field": "resumeSessionId"}});
+                        self.send_node(&json!({"jsonrpc": "2.0", "id": node_id,
+                            "error": {"code": -32602, "message": "invalid params", "data": data}}))?;
+                    }
+                    return Ok(ControlFlow::Continue(()));
+                }
                 // The node's MCP servers (the agent's own mesh server), as ACP stdio servers.
                 let servers = if self.mcp_stdio {
                     acp_mcp_servers(params.get("mcpServers"))
@@ -1631,7 +1732,11 @@ impl<W: Write> Bridge<W> {
             "agent_message_chunk" => {
                 if let Some(t) = u.pointer("/content/text").and_then(Value::as_str) {
                     let sid = replay_id.or(self.session.as_deref()).unwrap_or_default();
-                    if !self.text.is_empty() && (self.rich.thought || self.text_session != sid) {
+                    if !self.text.is_empty()
+                        && (self.rich.thought
+                            || self.text_session != sid
+                            || self.text.len() + t.len() > JOIN_MAX)
+                    {
                         self.flush_text()?;
                     }
                     if self.text.is_empty() {
@@ -1654,7 +1759,11 @@ impl<W: Write> Bridge<W> {
                         .unwrap_or_default()
                         .to_string();
                     // A thought and a message are different entries: whichever the buffer holds goes first.
-                    if !self.text.is_empty() && (!self.rich.thought || self.text_session != sid) {
+                    if !self.text.is_empty()
+                        && (!self.rich.thought
+                            || self.text_session != sid
+                            || self.text.len() + t.len() > JOIN_MAX)
+                    {
                         self.flush_text()?;
                     }
                     if self.text.is_empty() {
@@ -1710,7 +1819,10 @@ impl<W: Write> Bridge<W> {
                     .and_then(Value::as_str)
                     .or_else(|| u.get("kind").and_then(Value::as_str))
                     .unwrap_or("tool");
-                let args = u.get("rawInput").map(Value::to_string).unwrap_or_default();
+                let args = u
+                    .get("rawInput")
+                    .map(|v| head_tail(&v.to_string(), ARGUMENTS_MAX))
+                    .unwrap_or_default();
                 self.chat(
                     json!({"toolCall": {"tool": title, "argumentsJson": args}}),
                     replay_id,
@@ -1720,14 +1832,23 @@ impl<W: Write> Bridge<W> {
             "tool_call_update" => self.diffs_in(u, replay_id)?,
             "plan" => {
                 self.flush_text()?;
+                // A rich node reads only the entries; a plain one gets the steps as they came (they cannot outgrow the line).
+                let (most, text_max) = if self.rich.on {
+                    (PLAN_ENTRIES_MAX, PLAN_TEXT_MAX)
+                } else {
+                    (usize::MAX, usize::MAX)
+                };
                 let steps: Vec<String> = u
                     .get("entries")
                     .and_then(Value::as_array)
                     .map(|a| {
                         a.iter()
                             .filter_map(|e| {
-                                e.get("content").and_then(Value::as_str).map(str::to_string)
+                                e.get("content")
+                                    .and_then(Value::as_str)
+                                    .map(|c| head_tail(c, text_max))
                             })
+                            .take(most)
                             .collect()
                     })
                     .unwrap_or_default();
@@ -1740,10 +1861,11 @@ impl<W: Write> Bridge<W> {
                         .map(|a| a
                             .iter()
                             .filter_map(|e| {
-                                Some(json!({"text": e.get("content")?.as_str()?,
-                                            "status": e.get("status").and_then(Value::as_str).unwrap_or(""),
-                                            "priority": e.get("priority").and_then(Value::as_str).unwrap_or("")}))
+                                Some(json!({"text": head_tail(e.get("content")?.as_str()?, PLAN_TEXT_MAX),
+                                            "status": clip(e.get("status").and_then(Value::as_str).unwrap_or(""), 40),
+                                            "priority": clip(e.get("priority").and_then(Value::as_str).unwrap_or(""), 40)}))
                             })
+                            .take(PLAN_ENTRIES_MAX)
                             .collect::<Vec<_>>())
                         .unwrap_or_default());
                 }
@@ -1791,7 +1913,7 @@ impl<W: Write> Bridge<W> {
             t["tool"] = json!(title);
         }
         if let Some(raw) = u.get("rawInput").filter(|v| !v.is_null()) {
-            t["argumentsJson"] = json!(raw.to_string());
+            t["argumentsJson"] = json!(head_tail(&raw.to_string(), ARGUMENTS_MAX));
         } else if create {
             t["argumentsJson"] = json!("");
         }
@@ -1879,7 +2001,7 @@ impl<W: Write> Bridge<W> {
             let old = c.get("oldText").and_then(Value::as_str);
             self.flush_text()?;
             self.chat(
-                json!({"diff": {"path": path, "unifiedDiff": replace_diff(path, old, new)}}),
+                json!({"diff": {"path": path, "unifiedDiff": head_tail(&replace_diff(path, old, new), DIFF_MAX)}}),
                 replay_id,
             )?;
         }
@@ -2001,6 +2123,18 @@ impl<W: Write> Bridge<W> {
                             .map(str::to_string)
                             .or(resume_id);
                         match sid {
+                            // Audit F54 (Codex review of #920): an id over the limit is refused, never cut (that would be
+                            // another session), so no line the bridge sends about the session outgrows the node's limit.
+                            Some(sid)
+                                if msg.get("error").is_none() && sid.len() > SESSION_ID_MAX =>
+                            {
+                                self.refused_because(
+                                    &node_id,
+                                    "session",
+                                    0,
+                                    "session_id_too_long",
+                                )?;
+                            }
                             Some(sid) if msg.get("error").is_none() => {
                                 if self.session.as_deref() != Some(sid.as_str()) {
                                     // A reply from the previous session cannot finish the new turn.
@@ -2818,6 +2952,191 @@ mod tests {
     fn long_details_are_cut_on_a_character_boundary() {
         let s = short(&json!({"x": "é".repeat(400)}));
         assert!(s.ends_with('…') && s.len() <= MAX_DETAIL + 4);
+    }
+
+    /// Audit F54: an agent line that fits `MAX_LINE` never becomes a longer line to the node (whose host drops it whole): arguments
+    /// escaped twice, a replacement diff, a rich plan sent twice and a chunk joined to buffered text all stay within it.
+    #[test]
+    fn an_agent_line_within_the_limit_stays_within_it_on_its_way_to_the_node(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let update = |u: Value| json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "s", "update": u}});
+        let cases = [
+            vec![update(
+                json!({"sessionUpdate": "tool_call", "toolCallId": "c1", "title": "Write",
+                       "rawInput": {"content": "\"".repeat(1_900_000)}}),
+            )],
+            vec![update(
+                json!({"sessionUpdate": "tool_call", "toolCallId": "c1", "title": "Write",
+                       "content": [{"type": "diff", "path": "f", "oldText": "a\n".repeat(650_000), "newText": "b\n".repeat(650_000)}]}),
+            )],
+            vec![update(json!({"sessionUpdate": "plan",
+                "entries": (0..270_000).map(|_| json!({"content": ""})).collect::<Vec<_>>()}))],
+            // A title is not capped: what the arguments grow by (escaped twice) takes a line that fits past the limit.
+            vec![update(
+                json!({"sessionUpdate": "tool_call", "toolCallId": "c1", "rawInput": {"a": "\"".repeat(60_000)},
+                       "title": "\u{1}".repeat((MAX_LINE - 130_000) / 6)}),
+            )],
+            vec![
+                update(
+                    json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "x".repeat(4000)}}),
+                ),
+                update(
+                    json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "y".repeat(MAX_LINE - 300)}}),
+                ),
+            ],
+        ];
+        for rich in [false, true] {
+            for lines in &cases {
+                let mut b = bridge_in_session()?;
+                b.rich.on = rich;
+                for line in lines {
+                    assert!(line.to_string().len() <= MAX_LINE);
+                    b.handle_agent(line)?;
+                }
+                b.flush_text()?;
+                let sent: Vec<&[u8]> = b
+                    .out
+                    .split(|c| *c == b'\n')
+                    .filter(|l| !l.is_empty())
+                    .collect();
+                assert!(!sent.is_empty());
+                assert!(
+                    sent.iter().all(|l| l.len() <= MAX_LINE),
+                    "rich={rich}: {:?}",
+                    sent.iter().map(|l| l.len()).collect::<Vec<_>>()
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Audit F54 (review of #920): the per-field caps count decoded bytes and a rich plan carries its text twice, so a plan whose
+    /// text is escaped (each control character six bytes, a quote or backslash two) stays under every cap and still doubled past
+    /// `MAX_LINE`. The whole serialized line is bounded: the plan arrives cut, not dropped by the node's host.
+    #[test]
+    fn a_rich_plan_of_escaped_text_stays_within_the_line_limit(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // 3600 decoded bytes (under `PLAN_TEXT_MAX`) that take 12000 escaped; 256 entries (`PLAN_ENTRIES_MAX`): a 3 MB line that
+        // was sent to the node as a 6 MB one.
+        let text = "\"\\\u{1}".repeat(1200);
+        let entries: Vec<Value> = (0..PLAN_ENTRIES_MAX)
+            .map(|_| json!({"content": text, "status": "pending", "priority": "high"}))
+            .collect();
+        let line = json!({"jsonrpc": "2.0", "method": "session/update",
+            "params": {"sessionId": "s", "update": {"sessionUpdate": "plan", "entries": entries}}});
+        assert!(line.to_string().len() <= MAX_LINE);
+        for rich in [false, true] {
+            let mut b = bridge_in_session()?;
+            b.rich.on = rich;
+            b.handle_agent(&line)?;
+            let sent: Vec<&[u8]> = b
+                .out
+                .split(|c| *c == b'\n')
+                .filter(|l| !l.is_empty())
+                .collect();
+            assert_eq!(sent.len(), 1, "rich={rich}");
+            assert!(
+                sent[0].len() <= MAX_LINE,
+                "rich={rich}: {} bytes",
+                sent[0].len()
+            );
+            let v: Value = serde_json::from_slice(sent[0])?;
+            let plan = &v["params"]["plan"];
+            let steps = plan["steps"].as_array().ok_or("no steps")?;
+            assert!(!steps.is_empty(), "rich={rich}");
+            // What is kept is the plan's own text, from its start.
+            assert!(steps[0]
+                .as_str()
+                .ok_or("step")?
+                .starts_with("\"\\\u{1}\"\\"));
+            if rich {
+                let kept = plan["entries"].as_array().ok_or("no entries")?;
+                assert!(!kept.is_empty());
+                assert_eq!(kept[0]["status"], "pending");
+            } else {
+                // A plain plan carries each text once, which cannot outgrow the agent's line: nothing is cut.
+                assert_eq!(steps.len(), PLAN_ENTRIES_MAX);
+                assert!(steps.iter().all(|s| s == &json!(text)));
+            }
+        }
+        Ok(())
+    }
+
+    /// Audit F54 (Codex review of #920 at b80c630a): `fit_line` never cuts the session id, which came from the agent unchecked. A
+    /// session id of almost 4 MiB was accepted (its reply fit), and a plan update for it with one small entry, which fit too, went
+    /// to the node as a longer line. The session is refused now, and so is a resume of an id over the limit.
+    #[test]
+    fn a_session_id_over_the_limit_is_refused_so_no_line_about_it_outgrows_the_node_limit(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let lines = |out: &[u8]| -> Vec<Value> {
+            out.split(|c| *c == b'\n')
+                .filter_map(|l| serde_json::from_slice(l).ok())
+                .collect()
+        };
+        for rich in [false, true] {
+            let mut b = bridge_in_session()?;
+            b.session = None;
+            b.rich.on = rich;
+            let _ = b.handle_node(
+                &json!({"jsonrpc": "2.0", "id": 7, "method": "session/start", "params": {"worktree": "/w"}}),
+            )?;
+            let sid = "s".repeat(MAX_LINE - 400);
+            b.handle_agent(&json!({"jsonrpc": "2.0", "id": b.next, "result": {"sessionId": sid}}))?;
+            let plan = json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": sid,
+                "update": {"sessionUpdate": "plan", "entries": [{"content": "step", "status": "pending", "priority": "high"}]}}});
+            assert!(plan.to_string().len() <= MAX_LINE);
+            b.handle_agent(&plan)?;
+            assert!(
+                b.out.split(|c| *c == b'\n').all(|l| l.len() <= MAX_LINE),
+                "rich={rich}"
+            );
+            assert_eq!(b.session, None, "rich={rich}");
+            let sent = lines(&b.out);
+            let answer = sent.iter().find(|v| v["id"] == 7).ok_or("no answer")?;
+            assert_eq!(answer["error"]["data"]["code"], "adapter.agent_refused");
+            assert_eq!(answer["error"]["data"]["params"]["stage"], "session");
+            assert!(sent
+                .iter()
+                .any(|v| v["params"]["notice"]["params"]["detail"] == "session_id_too_long"));
+            assert!(!sent.iter().any(|v| v["params"].get("plan").is_some()));
+
+            // One at the limit is accepted.
+            let mut b = bridge_in_session()?;
+            b.session = None;
+            let _ = b.handle_node(
+                &json!({"jsonrpc": "2.0", "id": 8, "method": "session/start", "params": {"worktree": "/w"}}),
+            )?;
+            let sid = "s".repeat(SESSION_ID_MAX);
+            b.handle_agent(&json!({"jsonrpc": "2.0", "id": b.next, "result": {"sessionId": sid}}))?;
+            assert_eq!(b.session.as_deref(), Some(sid.as_str()));
+
+            // The node's resume of an id over the limit is refused before the agent is asked.
+            let mut b = bridge_in_session()?;
+            b.can_load = true;
+            let asked = b.next;
+            let _ = b.handle_node(
+                &json!({"jsonrpc": "2.0", "id": 9, "method": "session/start",
+                "params": {"worktree": "/w", "resumeSessionId": "r".repeat(SESSION_ID_MAX + 1)}}),
+            )?;
+            assert_eq!(b.next, asked);
+            let sent = lines(&b.out);
+            let answer = sent.iter().find(|v| v["id"] == 9).ok_or("no answer")?;
+            assert_eq!(answer["error"]["data"]["code"], "protocol.invalid_message");
+            assert_eq!(
+                answer["error"]["data"]["params"]["field"],
+                "resumeSessionId"
+            );
+        }
+        Ok(())
+    }
+
+    /// `fit_line` never returns a line over the limit: when nothing is left to cut, it says so (the item is dropped and logged).
+    #[test]
+    fn fit_line_gives_up_rather_than_return_a_line_over_the_limit() {
+        let small = json!({"sessionId": "s", "plan": {"steps": ["x".repeat(5000)]}});
+        assert!(fit_line(small).is_ok());
+        let stuck = json!({"sessionId": "s".repeat(MAX_LINE), "plan": {"steps": ["step"]}});
+        assert!(matches!(fit_line(stuck), Err(n) if n > MAX_LINE));
     }
 
     /// A bridge with an open session and no turn, whose agent input goes nowhere (what it is sent is read from its state).

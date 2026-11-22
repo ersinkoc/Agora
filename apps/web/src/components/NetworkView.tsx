@@ -6,6 +6,7 @@ import type { UsageSummary } from '../net/usage';
 import { bytesLabel, isOld, type MachineModel } from '../net/view';
 import { ForgetMachines } from './ForgetMachines';
 import { Icon } from './Icon';
+import { peerText, systemName } from './pairChoice';
 import { StateMark } from './StateBadge';
 
 const ROW = 104;
@@ -72,7 +73,8 @@ export function NetworkView({ machines: all, agents, usage, hubName, onForget, f
             <Icon name="machine" className="size-4 text-muted" />
             <strong className="min-w-0 truncate">{m.name}</strong>
             <span className={`ide-chip ${m.online ? 'text-finished' : ''}`}><span aria-hidden className={`size-1.5 rounded-full ${m.online ? 'bg-finished' : 'bg-unknown'}`} />{t(m.online ? 'machine-online' : 'machine-offline')}</span>
-            <span className="ide-chip">{m.os || '?'}</span>
+            {/* #944: the system as a person reads it (`os-*` messages); one this build has no words for, as the machine reported it. */}
+            <span className="ide-chip"><bdi>{peerText(systemName(m.os)) || '?'}</bdi></span>
             {m.build && <span className="ide-chip font-mono" title={t('network-build')}>{m.build}</span>}
             <span className="flex-1" />
             <span className="text-xs text-muted">{m.online ? t('network-heard', { when: ago(m.lastSeenMs, now) }) : t('network-last-seen', { when: ago(m.lastSeenMs, now) })}</span>

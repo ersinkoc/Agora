@@ -59,15 +59,29 @@ pub fn locate(program: &str) -> Option<PathBuf> {
     if started_as != p {
         return started_as.is_file().then_some(started_as);
     }
-    let paths = std::env::var_os("PATH")?;
-    std::env::split_paths(&paths).find_map(|dir| {
+    search(&std::env::var_os("PATH")?, program)
+}
+
+/// F66: as the launch searches the PATH, a file without the right to run is passed over for a later one that has it; only when none
+/// can run is the first file named (the doctor then calls it broken).
+fn search(paths: &std::ffi::OsStr, program: &str) -> Option<PathBuf> {
+    let mut first = None;
+    for dir in std::env::split_paths(paths) {
         let plain = dir.join(program);
-        if plain.is_file() {
-            return Some(plain);
-        }
         let exe = dir.join(format!("{program}.exe"));
-        (cfg!(windows) && exe.is_file()).then_some(exe)
-    })
+        let file = if plain.is_file() {
+            plain
+        } else if cfg!(windows) && exe.is_file() {
+            exe
+        } else {
+            continue;
+        };
+        if runnable(&file) {
+            return Some(file);
+        }
+        first.get_or_insert(file);
+    }
+    first
 }
 
 /// Where an agent's program was found (ADR-0087 item 3 and 6).
@@ -166,7 +180,8 @@ pub fn run(inputs: &Inputs) -> Vec<Check> {
         // ADR-0083: what keeps a confined agent off the user's other sockets here, and which variables the node leaves out.
         out.extend(socket_checks(&sandbox));
         // ADR-0078: a confined agent commits with the identity the node copies from the person's git configuration.
-        if crate::gitconfig::identity_missing() {
+        // F68: each `git config` read is time-limited like the version probe below, so a git that hangs cannot hold the doctor.
+        if identity_missing_within(crate::gitconfig::key_command, GIT_TIMEOUT) {
             out.push(check("git-identity-missing", Status::Warn, ""));
         }
         // ADR-0082: where the control socket needs its token, a folder agents may read or write must not hold the token file.
@@ -190,19 +205,10 @@ pub fn run(inputs: &Inputs) -> Vec<Check> {
     }
     out.extend(authority(&inputs.data_dir, &policy, now_ms()));
 
-    out.push(
-        match agora_platform::no_console_window(&mut Command::new("git"))
-            .arg("--version")
-            .output()
-        {
-            Ok(o) if o.status.success() => check(
-                "git",
-                Status::Ok,
-                String::from_utf8_lossy(&o.stdout).trim().to_string(),
-            ),
-            _ => check("git", Status::Fail, ""),
-        },
-    );
+    out.push(match version_of("git", GIT_TIMEOUT) {
+        Some(v) => check("git", Status::Ok, v),
+        None => check("git", Status::Fail, ""),
+    });
 
     out.push(data_dir(&inputs.data_dir));
 
@@ -224,6 +230,93 @@ pub fn run(inputs: &Inputs) -> Vec<Check> {
         |n| std::env::var(n).ok(),
     ));
     out
+}
+
+/// How long each git command the doctor runs (`git --version`, the identity's `git config` reads) may take before it counts as not
+/// working (F68).
+const GIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// The most of `git --version`'s output kept (the rest is read and dropped): a version is one short line.
+const VERSION_MAX: usize = 1024;
+/// The most of a `git config` read kept: more than a value the node copies (`gitconfig::MAX_VALUE`), so a long one is still seen.
+const KEY_MAX: usize = 4096;
+
+/// `gitconfig::identity_missing` with each key's `git config` (made by `command`) run by [`output_within`]: one that does not end
+/// in time reads as not set (F68).
+fn identity_missing_within(
+    command: impl Fn(&str) -> Option<Command>,
+    timeout: std::time::Duration,
+) -> bool {
+    crate::gitconfig::identity_missing_with(|key| {
+        let (status, out) = output_within(command(key)?, timeout, KEY_MAX)?;
+        crate::gitconfig::key_value(status, out)
+    })
+}
+
+/// `<program> --version`, trimmed, when it ends successfully within `timeout` (at most `VERSION_MAX` bytes of it). F68: one that does
+/// not end counts as not working ([`output_within`]).
+fn version_of(program: &str, timeout: std::time::Duration) -> Option<String> {
+    let mut cmd = Command::new(program);
+    agora_platform::no_console_window(&mut cmd);
+    cmd.arg("--version");
+    let (status, bytes) = output_within(cmd, timeout, VERSION_MAX)?;
+    status
+        .success()
+        .then(|| String::from_utf8_lossy(&bytes).trim().to_string())
+}
+
+/// Runs `cmd` (no input, no error output) and returns how it ended and the first `max` bytes of its output, when it ends within
+/// `timeout`; output past `max` is read and dropped, so a program that writes a lot is neither stalled nor stored. F68: a program
+/// that does not end in time (or a process it started that keeps its output open) is killed and `None` is returned, so the doctor
+/// always returns: on Unix with its process group, on Windows the direct child is killed and reaped (`kill_process_tree`); the
+/// caller's time limit holds either way.
+fn output_within(
+    mut cmd: Command,
+    timeout: std::time::Duration,
+    max: usize,
+) -> Option<(std::process::ExitStatus, Vec<u8>)> {
+    use std::process::Stdio;
+    agora_platform::own_process_group(&mut cmd);
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = std::time::Instant::now() + timeout;
+    let (tx, rx) = std::sync::mpsc::channel();
+    if let Some(mut stdout) = child.stdout.take() {
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut kept = Vec::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                match stdout.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        let room = max.saturating_sub(kept.len());
+                        kept.extend_from_slice(&buf[..n.min(room)]);
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(_) => break,
+                }
+            }
+            let _ = tx.send(kept);
+        });
+    }
+    // The output to its end first, then the exit; the child is reaped only once it has ended, so the kill below still names it.
+    let ended = rx.recv_timeout(timeout).ok().and_then(|bytes| loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some((status, bytes)),
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            _ => return None,
+        }
+    });
+    if ended.is_none() {
+        agora_platform::kill_process_tree(&mut child);
+    }
+    ended
 }
 
 /// ADR-0084, per kind whose manifest declares `credential_env`. Names only, never values, and no claim about whether the agent is
@@ -443,24 +536,48 @@ fn policy_paths(file: &Path) -> Vec<Check> {
 }
 
 fn data_dir(dir: &Path) -> Check {
-    let probe = dir.join(format!(".doctor-{}", std::process::id()));
-    // `create_new` never follows a link planted at the probe's name.
-    let ok = std::fs::create_dir_all(dir)
-        .and_then(|()| {
-            use std::io::Write;
-            std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&probe)?
-                .write_all(b"x")
-        })
-        .is_ok();
-    let _ = std::fs::remove_file(&probe);
     check(
         "data-dir",
-        if ok { Status::Ok } else { Status::Fail },
+        if writable(dir) {
+            Status::Ok
+        } else {
+            Status::Fail
+        },
         dir.display().to_string(),
     )
+}
+
+/// Whether a file can be made and written in `dir` (made if missing). F67: a name already taken (left by an earlier run) is passed
+/// over for the next one (`.doctor-<pid>`, then `.doctor-<pid>-1` to `-15`), and only a probe this run made is removed. `create_new` never follows a link planted at the probe's name.
+fn writable(dir: &Path) -> bool {
+    use std::io::Write;
+    if std::fs::create_dir_all(dir).is_err() {
+        return false;
+    }
+    let pid = std::process::id();
+    for n in 0..16 {
+        // The first name is the one earlier versions used, so a probe one of them left behind is passed over too.
+        let probe = dir.join(if n == 0 {
+            format!(".doctor-{pid}")
+        } else {
+            format!(".doctor-{pid}-{n}")
+        });
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&probe)
+        {
+            Ok(mut f) => {
+                let written = f.write_all(b"x").is_ok();
+                drop(f);
+                let _ = std::fs::remove_file(&probe);
+                return written;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(_) => return false,
+        }
+    }
+    false
 }
 
 /// Every agent kind the node offers (the built-in ones and the folder's, `crate::manifests`): where it came from (`$from`: `built-in`
@@ -999,6 +1116,110 @@ mod tests {
     fn on_path_finds_real_programs_only() {
         assert!(on_path(if cfg!(windows) { "cmd" } else { "sh" }));
         assert!(!on_path("definitely-not-installed-xyz"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_path_file_without_the_right_to_run_is_passed_over_for_a_later_runnable_one() {
+        // F66: the launch skips the first copy, so the doctor must not call the program broken.
+        let d = tmp("path-order");
+        let (a, b) = (d.join("a"), d.join("b"));
+        for dir in [&a, &b] {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join("f66-agent"), "#!/bin/sh\n").unwrap();
+        }
+        agora_platform::set_executable(&a.join("f66-agent"), false).unwrap();
+        agora_platform::set_executable(&b.join("f66-agent"), true).unwrap();
+        let paths = std::env::join_paths([&a, &b]).unwrap();
+        assert_eq!(search(&paths, "f66-agent"), Some(b.join("f66-agent")));
+        // None can run: the first file is named, so the doctor reports it broken rather than missing.
+        agora_platform::set_executable(&b.join("f66-agent"), false).unwrap();
+        assert_eq!(search(&paths, "f66-agent"), Some(a.join("f66-agent")));
+        assert_eq!(search(&paths, "f66-none"), None);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_file_left_at_the_probe_name_neither_fails_the_data_dir_nor_is_removed() {
+        // F67: a writable folder is reported writable, and a file this run did not make is kept.
+        let d = tmp("stale-probe");
+        // The first name tried, which is the only one the old code tried: there it failed the check and removed the file.
+        let stale = d.join(format!(".doctor-{}", std::process::id()));
+        std::fs::write(&stale, "not doctor's").unwrap();
+        assert_eq!(data_dir(&d).status, Status::Ok);
+        assert_eq!(std::fs::read_to_string(&stale).unwrap(), "not doctor's");
+        // Only the stale file is left: the run's own probe is gone.
+        assert_eq!(std::fs::read_dir(&d).unwrap().count(), 1);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_version_probe_that_does_not_end_is_killed_and_counts_as_not_working() {
+        // F68: fake programs only. One that answers, one that never ends, one whose background child keeps the output open.
+        let d = tmp("version-timeout");
+        let script = |name: &str, body: &str| {
+            let p = d.join(name);
+            std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
+            agora_platform::set_executable(&p, true).unwrap();
+            p.display().to_string()
+        };
+        let short = std::time::Duration::from_millis(500);
+        let good = script("good", "echo 'fake 1.0'");
+        assert_eq!(version_of(&good, short).as_deref(), Some("fake 1.0"));
+        let failing = script("failing", "echo 'fake 1.0'; exit 3");
+        assert_eq!(version_of(&failing, short), None);
+        for (name, body) in [
+            ("stuck", "echo $$ > \"$0.pid\"; exec sleep 600"),
+            (
+                "holder",
+                "sh -c 'echo $$ > \"$0.pid\"; exec sleep 600' \"$0\" &",
+            ),
+        ] {
+            let p = script(name, body);
+            let began = std::time::Instant::now();
+            assert_eq!(version_of(&p, short), None, "{name}");
+            assert!(
+                began.elapsed() < std::time::Duration::from_secs(5),
+                "{name}"
+            );
+            let pid = std::fs::read_to_string(format!("{p}.pid")).unwrap();
+            let gone = (0..200).any(|_| {
+                let stat = std::fs::read_to_string(format!("/proc/{}/stat", pid.trim()));
+                // Gone, or a zombie no longer running (its parent reaps it).
+                let dead = stat.map_or(true, |s| s.contains(") Z "));
+                if !dead {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                dead
+            });
+            assert!(gone || !cfg!(target_os = "linux"), "{name} still running");
+        }
+        // Review of #921: the output kept is bounded, and a program that writes more than that is drained, not stalled.
+        let chatty = script(
+            "chatty",
+            "echo 'fake 2.0'; head -c 3000000 /dev/zero | tr '\\0' x",
+        );
+        let v = version_of(&chatty, std::time::Duration::from_secs(5)).unwrap_or_default();
+        assert!(
+            v.starts_with("fake 2.0") && v.len() <= VERSION_MAX,
+            "{}",
+            v.len()
+        );
+        // The identity's `git config` reads are time-limited the same way: one that does not end reads as not set.
+        let stuck = script("stuck-config", "exec sleep 600");
+        let answering = script("answering-config", "printf 'Someone\\0'");
+        let began = std::time::Instant::now();
+        assert!(identity_missing_within(
+            |_| Some(Command::new(&stuck)),
+            short
+        ));
+        assert!(began.elapsed() < std::time::Duration::from_secs(5));
+        assert!(!identity_missing_within(
+            |_| Some(Command::new(&answering)),
+            short
+        ));
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     fn authority_of(name: &str, policy: &str, trusted: &str) -> Vec<Check> {

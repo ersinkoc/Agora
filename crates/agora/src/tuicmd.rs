@@ -1071,28 +1071,16 @@ fn start(
         let none = say.text(key!("tui-start-none"), &machine);
         return missing.map_or(none.clone(), |m| format!("{none} {m}"));
     }
-    let kinds: Vec<_> = kinds.into_iter().take(9).collect();
-    let mut menu = vec![say.text(key!("tui-start-pick"), &machine), String::new()];
-    for (i, (_, name)) in kinds.iter().enumerate() {
-        menu.push(say.text(
-            key!("tui-start-item"),
-            &[
-                ("n", Arg::Num(i as i64 + 1)),
-                ("name", Arg::Str(plain(name))),
-            ],
-        ));
-    }
-    if let Some(m) = missing {
-        menu.push(String::new());
-        menu.push(m);
-    }
-    // Wait for one key; anything but a listed number cancels.
-    let pick = ask.key(&menu, Duration::from_secs(30));
-    let Some(index) = pick.and_then(|k| (b'1'..=b'9').contains(&k).then(|| usize::from(k - b'1')))
-    else {
-        return String::new();
-    };
-    let Some((kind, _)) = kinds.get(index) else {
+    let pick = pick_kind(
+        say,
+        ask,
+        &node,
+        &[],
+        &kinds,
+        missing.as_deref(),
+        Duration::from_secs(30),
+    );
+    let Some((kind, _)) = pick.and_then(|i| kinds.get(i)) else {
         return String::new();
     };
     let scope = format!("project:{project}");
@@ -1386,32 +1374,16 @@ fn start_in_folder(
         let none = say.text(key!("tui-start-none"), &machine);
         return missing.map_or(none.clone(), |m| format!("{none} {m}"));
     }
-    let kinds: Vec<_> = kinds.into_iter().take(9).collect();
-    let mut menu = vec![
-        say.text(key!("tui-start-pick"), &machine),
-        plain(&info.path),
-        String::new(),
-    ];
-    for (i, (_, name)) in kinds.iter().enumerate() {
-        menu.push(say.text(
-            key!("tui-start-item"),
-            &[
-                ("n", Arg::Num(i as i64 + 1)),
-                ("name", Arg::Str(plain(name))),
-            ],
-        ));
-    }
-    if let Some(m) = missing {
-        menu.push(String::new());
-        menu.push(m);
-    }
-    let Some(index) = ask
-        .key(&menu, Duration::from_secs(60))
-        .and_then(|k| (b'1'..=b'9').contains(&k).then(|| usize::from(k - b'1')))
-    else {
-        return String::new();
-    };
-    let Some((kind, _)) = kinds.get(index) else {
+    let pick = pick_kind(
+        say,
+        ask,
+        &node,
+        &[plain(&info.path)],
+        &kinds,
+        missing.as_deref(),
+        Duration::from_secs(60),
+    );
+    let Some((kind, _)) = pick.and_then(|i| kinds.get(i)) else {
         return String::new();
     };
     // A folder whose project changed since an agent last ran there needs the user's yes (ADR-0052).
@@ -4408,6 +4380,63 @@ fn clean_up_old(
     say.text(key!("tui-cleanup-done"), &[("count", Arg::Num(forgotten))])
 }
 
+/// Asks which of a machine's installed `kinds` to start (`s`, `f`), nine to a page numbered 1 to 9: one key picks, `n` turns to the
+/// next page (after the last, the first again) when there is more than one, and the question says so; any other key, or none in
+/// `wait`, cancels. `under_title` goes below the question (the folder `f` starts in). The index into `kinds`, or `None`.
+fn pick_kind(
+    say: &Say,
+    ask: &mut dyn Asker,
+    machine: &str,
+    under_title: &[String],
+    kinds: &[(String, String)],
+    missing: Option<&str>,
+    wait: Duration,
+) -> Option<usize> {
+    const PAGE: usize = 9;
+    let pages = kinds.len().div_ceil(PAGE);
+    let mut page = 0;
+    loop {
+        let machine = ("machine", Arg::Str(machine.to_string()));
+        let title = if pages > 1 {
+            say.text(
+                key!("tui-start-pick-page"),
+                &[
+                    machine,
+                    ("page", Arg::Num(page as i64 + 1)),
+                    ("pages", Arg::Num(pages as i64)),
+                ],
+            )
+        } else {
+            say.text(key!("tui-start-pick"), &[machine])
+        };
+        let shown = &kinds[(page * PAGE).min(kinds.len())..((page + 1) * PAGE).min(kinds.len())];
+        let mut menu = vec![title];
+        menu.extend_from_slice(under_title);
+        menu.push(String::new());
+        for (i, (_, name)) in shown.iter().enumerate() {
+            menu.push(say.text(
+                key!("tui-start-item"),
+                &[
+                    ("n", Arg::Num(i as i64 + 1)),
+                    ("name", Arg::Str(plain(name))),
+                ],
+            ));
+        }
+        if let Some(m) = missing {
+            menu.push(String::new());
+            menu.push(m.to_string());
+        }
+        match ask.key(&menu, wait)? {
+            b'n' if pages > 1 => page = (page + 1) % pages,
+            k @ b'1'..=b'9' => {
+                let i = usize::from(k - b'1');
+                return (i < shown.len()).then_some(page * PAGE + i);
+            }
+            _ => return None,
+        }
+    }
+}
+
 /// A machine's agents split into the ones it can start (numbered in the menu) and one line naming the others: the machine cannot
 /// find their program in its `PATH`. Each is named with the program the machine looked for (ADR-0069), when the machine says it.
 fn split_kinds(
@@ -6157,5 +6186,107 @@ mod question_path_tests {
             one_answer(&[moved(), AppEvent::Paste("y".into())], area(), &lines),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod start_pick_tests {
+    use super::*;
+    use agora_i18n::Catalog;
+
+    /// Answers each question with the next key, and keeps each question it was shown.
+    struct Script {
+        rx: mpsc::Receiver<u8>,
+        shown: Vec<Vec<String>>,
+    }
+
+    impl Asker for Script {
+        fn rx(&self) -> &mpsc::Receiver<u8> {
+            &self.rx
+        }
+        fn show(&mut self, lines: &[String]) {
+            self.shown.push(lines.to_vec());
+        }
+        fn frame(&mut self, _: &[u8]) {}
+    }
+
+    fn script(keys: &[u8]) -> Script {
+        let (tx, rx) = mpsc::channel();
+        for k in keys {
+            tx.send(*k).unwrap_or_else(|_| panic!("send"));
+        }
+        Script {
+            rx,
+            shown: Vec::new(),
+        }
+    }
+
+    /// Sixteen installed kinds, as on the machine of RM-59: the last ones are Shell and WrongStack.
+    fn sixteen() -> Vec<(String, String)> {
+        let mut kinds: Vec<_> = (1..=14)
+            .map(|i| (format!("kind{i:02}"), format!("Agent {i:02}")))
+            .collect();
+        kinds.push(("shell".into(), "Shell".into()));
+        kinds.push(("wrongstack".into(), "WrongStack".into()));
+        kinds
+    }
+
+    fn pick(keys: &[u8], kinds: &[(String, String)]) -> (Option<usize>, Vec<Vec<String>>) {
+        let say = Say(Catalog::english());
+        let mut ask = script(keys);
+        let got = pick_kind(
+            &say,
+            &mut ask,
+            "blackview",
+            &[],
+            kinds,
+            None,
+            Duration::from_millis(50),
+        );
+        (got, ask.shown)
+    }
+
+    /// #910 (RM-59): with sixteen kinds every one can be chosen: n turns to the next nine, whose numbers start again at 1, and the
+    /// question says so in this terminal's words (from the locale, never the message id).
+    #[test]
+    fn every_kind_of_sixteen_can_be_chosen_and_the_question_says_how_to_reach_the_rest() {
+        let kinds = sixteen();
+        let (got, shown) = pick(b"n7", &kinds);
+        assert_eq!(got, Some(15), "{shown:#?}");
+        assert_eq!(kinds[15].1, "WrongStack");
+        assert_eq!(shown.len(), 2, "{shown:#?}");
+        assert_eq!(
+            shown[0][0],
+            "Start which agent on blackview? Press its number, n for the next page (1 of 2), any other key cancels."
+        );
+        assert!(shown[0].iter().any(|l| l == "9  Agent 09"), "{shown:#?}");
+        assert!(!shown[0].iter().any(|l| l.contains("Shell")), "{shown:#?}");
+        assert_eq!(
+            shown[1][0],
+            "Start which agent on blackview? Press its number, n for the next page (2 of 2), any other key cancels."
+        );
+        assert!(shown[1].iter().any(|l| l == "1  Agent 10"), "{shown:#?}");
+        assert!(shown[1].iter().any(|l| l == "6  Shell"), "{shown:#?}");
+        assert!(shown[1].iter().any(|l| l == "7  WrongStack"), "{shown:#?}");
+        // The 10th kind is 1 on the second page; n on the last page comes back to the first.
+        assert_eq!(pick(b"n1", &kinds).0, Some(9));
+        assert_eq!(pick(b"nn3", &kinds).0, Some(2));
+        // A number past the last page's end, and any other key, cancel.
+        assert_eq!(pick(b"n8", &kinds).0, None);
+        assert_eq!(pick(b"x", &kinds).0, None);
+        assert_eq!(pick(b"", &kinds).0, None);
+    }
+
+    /// Nine kinds or fewer fit on one page: the question is the one it always was, and n cancels like any other key.
+    #[test]
+    fn nine_kinds_or_fewer_keep_the_one_page_question() {
+        let kinds: Vec<_> = sixteen().into_iter().take(9).collect();
+        let (got, shown) = pick(b"9", &kinds);
+        assert_eq!(got, Some(8));
+        assert_eq!(
+            shown[0][0],
+            "Start which agent on blackview? Press its number, any other key cancels."
+        );
+        assert_eq!(pick(b"n", &kinds).0, None);
     }
 }

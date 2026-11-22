@@ -5,8 +5,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use agora_node::holder_link::{
-    AgentInfo, AgentState, LinkError, Refusal, Reply, Request, StartRequest, TerminalInfo,
-    LINK_VERSION,
+    agent_id_fits, AgentInfo, AgentState, LinkError, PipeData, Refusal, Reply, Request,
+    StartRequest, TerminalInfo, LINK_VERSION, MAX_AGENT_ID, MAX_FRAME, MAX_LIST_ENTRY,
 };
 use agora_platform::HeldSignal;
 
@@ -193,4 +193,40 @@ fn damaged_frames_are_refused_not_guessed() {
     assert!(Request::decode(&[5, 0, 0, 0, 1, b'a', 9]).is_err());
     assert!(Request::decode(&[3, 0, 0, 0, 0, 0xff, 0xff, 0xff, 0xff]).is_err());
     assert!(Reply::decode(&[65, 99, 0, 1]).is_err());
+}
+
+/// #929: every id the node makes fits the bound, and with an id at the bound the largest replies that name an agent fit a frame: a
+/// `Terminal` with a whole buffer, a `PipeData` with everything kept, and a `List` entry costs exactly `MAX_LIST_ENTRY`.
+#[test]
+fn replies_that_name_an_agent_fit_a_frame_with_any_id_the_holder_takes() {
+    assert!(agent_id_fits(&format!("agent-{}", u64::MAX)));
+    assert!(agent_id_fits(&"x".repeat(MAX_AGENT_ID)));
+    assert!(!agent_id_fits(&"x".repeat(MAX_AGENT_ID + 1)));
+    assert!(!agent_id_fits(""));
+    let info = AgentInfo {
+        agent: "x".repeat(MAX_AGENT_ID),
+        pid: u32::MAX,
+        state: AgentState::Exited {
+            code: Some(i32::MIN),
+            signal: Some(i32::MAX),
+        },
+    };
+    assert_eq!(
+        Reply::Agents(vec![info.clone()]).encode().len(),
+        1 + 4 + MAX_LIST_ENTRY
+    );
+    let terminal = Reply::Terminal(TerminalInfo {
+        info: info.clone(),
+        buffer_dropped: true,
+        buffer: vec![b'o'; agora_platform::HELD_BUFFER],
+    });
+    assert!(terminal.encode().len() <= MAX_FRAME);
+    let pipe = Reply::PipeData(PipeData {
+        info,
+        dropped: u64::MAX,
+        eof: true,
+        seen: Vec::new(),
+        fresh: vec![vec![b'o'; agora_platform::HELD_LINE_MAX]],
+    });
+    assert!(pipe.encode().len() <= MAX_FRAME);
 }

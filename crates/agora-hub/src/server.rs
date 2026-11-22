@@ -184,6 +184,8 @@ where
             eprintln!("node silent: {node_id}");
             let _ = tokio::time::timeout(Duration::from_secs(1), conn.close()).await;
         }
+        // Said in the hub's log: the node sees only a dropped connection (#935: "database is locked" here went unlogged).
+        Err(ServeError::Store(e)) => eprintln!("node link ended: {node_id} store: {}", e.0),
         _ => {}
     }
     result

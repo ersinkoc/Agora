@@ -406,9 +406,9 @@ fn display(s: &str) -> R<String> {
 }
 
 /// An `https://` URL a vendor could really serve from: a DNS name (letters, digits, `-`, at least two labels, a last label that is not
-/// all digits, so no IPv4 or IPv6 literal, and not `localhost`, `.local`, `.internal`), no userinfo, an optional port 1 to 65535, and
-/// nothing a shell, a header or a log could misread. This is syntax only: rung 3, which downloads, MUST still refuse private and
-/// loopback addresses a name resolves to, validate the port again, and refuse redirects to a non-https scheme or another host.
+/// all digits nor `0x` and hex digits, so no IPv4 or IPv6 literal, and not `localhost`, `.local`, `.internal`), no userinfo, an optional
+/// port 1 to 65535, and nothing a shell, a header or a log could misread. This is syntax only: rung 3, which downloads, MUST still refuse
+/// private and loopback addresses a name resolves to, validate the port again, and refuse redirects to a non-https scheme or another host.
 fn https_url(s: &str) -> R<String> {
     let rest = s.strip_prefix("https://").ok_or(Reason::BadUrl)?;
     let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
@@ -445,6 +445,10 @@ fn https_url(s: &str) -> R<String> {
         || labels.len() < 2
         || !labels.iter().all(label_ok)
         || last.chars().all(|c| c.is_ascii_digit())
+        // `0x` and hex digits is a number too (WHATWG URL, inet_aton): `127.0.0.0x1` is an IPv4 literal, not a name (F30).
+        || last
+            .strip_prefix("0x")
+            .is_some_and(|h| h.chars().all(|c| c.is_ascii_hexdigit()))
         || host == "localhost"
         || ["localhost", "local", "internal"].contains(&last)
         || s.chars().any(bad_char)
@@ -1364,6 +1368,11 @@ mod tests {
             "https://example.invalid@evil.invalid/",
             "https://1.2.3.4.5/",
             "https://.invalid/",
+            // F30: a last label of `0x` and hex digits is a number, so these are IPv4 literals (127.0.0.1, 169.254.169.254).
+            "https://127.0.0.0x1/x",
+            "https://0x7f.0x1/x",
+            "https://169.254.169.0XFE/x",
+            "https://1.0x/x",
         ] {
             assert_eq!(
                 refused(with(|e| e["homepage"] = json!(bad))),
@@ -1375,6 +1384,8 @@ mod tests {
             "https://example.invalid/x",
             "https://Example.invalid:8443/x?y=1#z",
             "https://a-b.c.example.invalid",
+            "https://0x7f.example.invalid/x",
+            "https://cdn.0xzz/x",
         ] {
             assert!(
                 open_with(with(|e| e["homepage"] = json!(good))).is_ok(),

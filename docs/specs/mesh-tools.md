@@ -44,6 +44,21 @@ and a reply to an open `ask` is what answers it; `agents_list` items also carry 
 and `summary`; `inbox` items carry `kind` (`message`, `ask`, `reply`, `handoff`), `reply_to` and a `provenance` object. `reason` on
 `lease_acquire` is accepted but only the audit trail of the call would hold it (not stored yet).
 
+**Message ids.** `message_id` is `m-<number>`, numbered by the node's broker, and `inbox(since)` returns the messages numbered above
+`since`. Ids never go back across a node restart: before it hands out any id (messages, and the task, lease and handoff ids that
+share its counter), each run of the broker reserves a range on disk (`<data>/sessions/mesh-ids`, beside the ledger, holds the end of
+the last range) that starts at the largest of that end, the clock in microseconds and its own next id, and a run that nears the end
+of its range reserves the next. So an agent kept across the restart (ADR-0079) still sees what arrives after the cursor it carried
+over (and a task or lease id it holds is never given to something new), and a `since` from an earlier run, or one no message has,
+just returns what is numbered above it (#965: the numbers started over at `m-1`, so a kept agent's cursor hid every new message).
+When the range cannot be reserved (the file cannot be written, or exists and cannot be read as a number), the node and its agents
+run on and `inbox`, `workspace_status`, `agents_list` and `task_list` answer, but the node's broker hands out no id: on it
+`send_message`, `ask`, `handoff`, `task_create` and `lease_acquire` fail with `mesh.unavailable` and change nothing, a message from
+another node is refused with it (its sender gets `delivery_failed` `mesh.unavailable`), and presence and `delivery_failed` notices
+for this node's agents are not made. Calls that go through the hub instead (a `#channel` message or board call on a shared
+project, below) are not numbered here and work as usual, except that a copy for an agent of this node is refused like any message
+from another node. The node tries again every half second. Numbers are per node: the same number on two nodes names two messages.
+
 Tool errors are results with `isError: true` whose text is JSON `{"error": {"code", "params"}}` using the codes in
 `error-codes.md` (new: `mesh.rate_limited`, `mesh.body_too_large`, `mesh.too_many_refs`, `mesh.too_many_asks`, `mesh.timeout`,
 `task.not_found`, `task.not_open`, `task.blocked`, `task.not_owner`, `lease.not_found`, `lease.invalid_path`). Bad arguments are
@@ -92,7 +107,7 @@ node wrote. The target broker delivers it to the local agent with `provenance.fr
 returns once the broker accepted the message (limits and rate are checked there); if it does not arrive, the sender's inbox
 receives a notice of kind `delivery_failed` whose body is the error code (`node.offline`, `node.unknown`, `node.timeout`,
 `mesh.recipient_unknown`, `mesh.rate_limited`, ...) and whose `reply_to` is the failed message's id (the `message_id`
-`send_message` answered with), so an agent with several messages in flight knows which one failed. The hub answers a post within its 30 s command deadline (`node.timeout`; `node.offline` as soon as it finds the target's link dead, which a silent link is after 25 s); a post the sending node has no answer for after 40 s fails there with `node.timeout`, so the sender is always told (#915). `node.timeout`, from the hub or from the node, means the message may or may not have arrived: a target that answers late may already have delivered it. Nothing is resent. Plain messages cross nodes; `ask` stays node-local, and a `#channel` message on a shared project reaches every other running agent of the project on any node (below), and a node may have 64 posts waiting at the hub. Tasks, leases and
+`send_message` answered with), so an agent with several messages in flight knows which one failed. The hub answers a post within its 30 s command deadline (`node.timeout`; `node.offline` as soon as it finds the target's link dead, which a silent link is after 25 s); a post the sending node has no answer for after 40 s fails there with `node.timeout`, so the sender is always told (#915), with one exception: while its own node has no reserved message ids ("Message ids" above, #965) no notice can be numbered, so a `delivery_failed` that comes back then is not made. `node.timeout`, from the hub or from the node, means the message may or may not have arrived: a target that answers late may already have delivered it. Nothing is resent. Plain messages cross nodes; `ask` stays node-local, and a `#channel` message on a shared project reaches every other running agent of the project on any node (below), and a node may have 64 posts waiting at the hub. Tasks, leases and
 `handoff` cross nodes through the shared board below, for a project that is on two or more online nodes. The machine's owner can turn it off:
 `<node data dir>/policy` with the line `mesh.remote = false` (default `true`; a value that is not exactly `true` or `false` counts as
 `false`, so a typo never widens the node). Then messages to other nodes fail with a `delivery_failed` notice `node.policy_denied`
