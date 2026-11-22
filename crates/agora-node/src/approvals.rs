@@ -1268,10 +1268,6 @@ impl NodeApprovals {
         self.sk().asks.remove(id).is_some()
     }
 
-    fn is_skip(&self, id: &str) -> bool {
-        self.sk().asks.contains_key(id)
-    }
-
     /// A signed decision arrived. On success, the adapter's own approval id and agent to answer, and the verdict.
     pub fn resolve(
         &self,
@@ -1368,15 +1364,12 @@ impl NodeApprovals {
     /// adapter) are withdrawn and their ids returned. Requests of another kind (an `agent.start` the agent waits for) stay: the agent
     /// is still alive and still waits for them.
     pub fn cancel_adapter_requests(&self, agent: &agora_core::AgentId) -> Vec<String> {
-        // The routes are let go before the skip records are asked (their locks are taken the other way round elsewhere).
-        let routed: Vec<String> = self
-            .r()
-            .iter()
-            .filter(|(_, (a, _))| a == agent)
-            .map(|(id, _)| id.clone())
+        let ids: Vec<String> = self
+            .q()
+            .pending()
+            .filter(|p| p.agent_id == agent.as_str() && !is_reserved_action(&p.action))
+            .map(|p| p.id.clone())
             .collect();
-        // A switch the user asked for is not a request of the turn that was cancelled: its card stays.
-        let ids: Vec<String> = routed.into_iter().filter(|id| !self.is_skip(id)).collect();
         for id in &ids {
             self.withdraw(id);
         }
@@ -2748,5 +2741,20 @@ mod tests {
         );
         assert!(n.resolve(&msg(&web.id, "eda"), 1).is_ok());
         assert!(n.resolve(&msg(&api.id, "phone"), 1).is_ok());
+    }
+
+    #[test]
+    fn cancel_adapter_requests_leaves_agent_start_requests_waiting() {
+        let n = node_approvals();
+        let agent = agora_core::AgentId::new("agent-1");
+        let start = n
+            .request_start(&agent, r#"{"kind":"codex"}"#, 1_000)
+            .unwrap();
+        let adapter = n
+            .request(&agent, "ap-1", "run_command", "ls", 1_000)
+            .unwrap();
+        assert_eq!(n.cancel_adapter_requests(&agent), vec![adapter.id]);
+        let waiting: Vec<String> = n.waiting().into_iter().map(|p| p.id).collect();
+        assert_eq!(waiting, vec![start.id]);
     }
 }

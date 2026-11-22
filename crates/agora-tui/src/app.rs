@@ -1006,8 +1006,10 @@ impl App {
                 Some(Divider::Inspector) => {
                     // A width the user chose: kept even where the inspector would leave the terminal less than ROOMY_MIDDLE.
                     self.inspector = Panel::Shown;
-                    self.inspector_width =
-                        area.right().saturating_sub(m.col + 1).max(MIN_INSPECTOR);
+                    self.inspector_width = area
+                        .right()
+                        .saturating_sub(m.col.saturating_add(1))
+                        .max(MIN_INSPECTOR);
                 }
                 None if self.selecting => {
                     let t = a.terminal;
@@ -2454,6 +2456,17 @@ mod tests {
         assert_eq!(a.terminal.width, MIN_MIDDLE);
         click(&mut app, &rows, MouseKind::Up, 110, 5);
         assert_eq!(a.inspector.width, 0, "no room is left for the inspector");
+    }
+
+    #[test]
+    fn dragging_inspector_divider_to_u16_max_does_not_overflow() {
+        let rows = rows();
+        let mut app = App::default();
+        key(&mut app, &rows, Key::Enter);
+        let x = app.areas(AREA).inspector_divider.unwrap();
+        click(&mut app, &rows, MouseKind::Down, x, 3);
+        click(&mut app, &rows, MouseKind::Drag, u16::MAX, 3);
+        assert_eq!(app.inspector_width, MIN_INSPECTOR);
     }
 
     #[test]

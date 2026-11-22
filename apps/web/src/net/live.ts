@@ -221,7 +221,7 @@ export function connectLive(o: LiveOptions): Live {
     refusals = heard ? 0 : dropped ? refusals + 1 : refusals;
     for (const p of pending.values()) p.reject(new CommandError('node.offline'));
     pending.clear();
-    if (refusals >= 2 && !closed) { closed = true; o.onRejected?.(); return; }
+    if (refusals >= 2 && !closed) { closed = true; unwake(); o.onRejected?.(); return; }
     if (closed) return;
     o.onState('offline');
     if (timer) clearTimeout(timer);

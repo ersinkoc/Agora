@@ -72,7 +72,7 @@ pub(crate) fn own_hub_addr(dir: &Path) -> Option<String> {
     local_dial_addr(text.trim())
 }
 
-fn local_dial_addr(listen: &str) -> Option<String> {
+pub(crate) fn local_dial_addr(listen: &str) -> Option<String> {
     let addr: std::net::SocketAddr = listen.parse().ok()?;
     let ip = match addr.ip() {
         std::net::IpAddr::V4(ip) if ip.is_unspecified() => std::net::Ipv4Addr::LOCALHOST.into(),
@@ -200,16 +200,7 @@ pub fn hub_run(say: &Say, o: &Opts) -> ExitCode {
     let run = || -> Result<(), String> {
         private_hub_dir(&dir)?;
         let ca = load_or_create_ca(&dir)?;
-        let token_path = dir.join("token");
-        let token = match std::fs::read_to_string(&token_path) {
-            Ok(t) if !t.trim().is_empty() => t.trim().to_string(),
-            _ => {
-                let t = random_token().ok_or("no system randomness")?;
-                agora_platform::write_private(&token_path, t.as_bytes())
-                    .map_err(|e| e.to_string())?;
-                t
-            }
-        };
+        let token = load_or_create_token(&dir.join("token"))?;
         let has_web = web_assets(o).is_some();
         let store = SqliteStore::open(&dir.join("hub.db")).map_err(|e| e.to_string())?;
         let hub = Arc::new(Hub::open(store).map_err(|e| e.to_string())?);
@@ -1207,7 +1198,14 @@ pub fn hub_ssh(say: &Say, o: &Opts) -> ExitCode {
     let dir = hub_dir(o);
     let file = dir.join("ssh-machines");
     let name = file.display().to_string();
-    let mut text = std::fs::read_to_string(&file).unwrap_or_default();
+    let mut text = match std::fs::read_to_string(&file) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => {
+            say.err(key!("cli-hub-failed"), &[("reason", e.to_string().into())]);
+            return ExitCode::from(1);
+        }
+    };
     match o.positional.as_slice() {
         [] => {
             let (machines, _) = parse_machines(&text);
@@ -1395,7 +1393,11 @@ pub fn hub_notify(say: &Say, o: &Opts) -> ExitCode {
         say.err(key!("cli-hub-failed"), &[("reason", e.into())]);
         ExitCode::from(1)
     };
-    let mut text = std::fs::read_to_string(&file).unwrap_or_default();
+    let mut text = match std::fs::read_to_string(&file) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return fail(e.to_string()),
+    };
     let add = match (&o.ntfy, &o.webhook) {
         (Some(u), None) => Some(("ntfy", u)),
         (None, Some(u)) => Some(("webhook", u)),
@@ -1406,8 +1408,12 @@ pub fn hub_notify(say: &Say, o: &Opts) -> ExitCode {
         }
     };
     if let Some((kind, url)) = add {
+        if url.chars().any(char::is_control) {
+            say.err(key!("cli-hub-notify-bad-url"), &[]);
+            return ExitCode::from(2);
+        }
         let line = format!("{kind} {url}");
-        if parse_targets(&line).0.is_empty() {
+        if parse_targets(&line).0.len() != 1 {
             say.err(key!("cli-hub-notify-bad-url"), &[]);
             return ExitCode::from(2);
         }
@@ -2729,4 +2735,90 @@ pub fn hub_machines(say: &Say, o: &Opts) -> ExitCode {
         }
     }
     code
+}
+
+fn load_or_create_token(token_path: &Path) -> Result<String, String> {
+    match std::fs::read_to_string(token_path) {
+        Ok(t) if !t.trim().is_empty() => Ok(t.trim().to_string()),
+        Ok(_) => create_token(token_path),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => create_token(token_path),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+fn create_token(token_path: &Path) -> Result<String, String> {
+    let t = random_token().ok_or("no system randomness")?;
+    agora_platform::write_private(token_path, t.as_bytes()).map_err(|e| e.to_string())?;
+    Ok(t)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod notify_tests {
+    use super::*;
+
+    #[test]
+    fn hub_notify_rejects_newline_injection_and_preserves_unreadable_file() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let dir = std::env::temp_dir().join(format!(
+            "agora-notify-test-{}-{}",
+            std::process::id(),
+            nanos
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let say = Say(agora_i18n::Catalog::english());
+        let mut opts = Opts {
+            hub_dir: Some(dir.clone()),
+            ntfy: Some("https://ntfy.sh/topic\nwebhook https://evil.example".into()),
+            ..Opts::default()
+        };
+        assert_ne!(hub_notify(&say, &opts), ExitCode::SUCCESS);
+        assert!(!dir.join("notify").exists());
+
+        std::fs::write(dir.join("notify"), [0xff, 0xfe]).unwrap();
+        opts.ntfy = Some("https://ntfy.sh/legit".into());
+        assert_ne!(hub_notify(&say, &opts), ExitCode::SUCCESS);
+        assert_eq!(std::fs::read(dir.join("notify")).unwrap(), [0xff, 0xfe]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn hub_ssh_preserves_unreadable_ssh_machines_file() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let dir =
+            std::env::temp_dir().join(format!("agora-ssh-test-{}-{}", std::process::id(), nanos));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("ssh-machines"), [0xff, 0xfe]).unwrap();
+        let say = Say(agora_i18n::Catalog::english());
+        let opts = Opts {
+            hub_dir: Some(dir.clone()),
+            positional: vec!["add".into(), "box2".into(), "user@host2".into()],
+            ..Opts::default()
+        };
+        assert_ne!(hub_ssh(&say, &opts), ExitCode::SUCCESS);
+        assert_eq!(
+            std::fs::read(dir.join("ssh-machines")).unwrap(),
+            [0xff, 0xfe]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_or_create_token_preserves_unreadable_file() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let dir =
+            std::env::temp_dir().join(format!("agora-token-test-{}-{}", std::process::id(), nanos));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("token");
+        std::fs::write(&path, [0xff, 0xfe]).unwrap();
+        assert!(load_or_create_token(&path).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), [0xff, 0xfe]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

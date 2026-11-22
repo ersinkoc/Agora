@@ -293,7 +293,10 @@ pub fn installed_version(home: &Path, name: &str) -> Option<String> {
 }
 
 fn valid_component_text(v: &str) -> bool {
-    v.len() <= 64
+    !v.is_empty()
+        && v != "."
+        && v != ".."
+        && v.len() <= 64
         && v.chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+'))
 }
@@ -1236,9 +1239,9 @@ pub fn install(
         if tools.fault == Some(Fault::BeforeCurrent) {
             return err(Code::IoFailed, "injected");
         }
-        agora_platform::write_private(&name_path.join("current"), plan.version.as_bytes())
-            .map_err(|e| io_err(&e))?;
         agora_platform::write_private(&name_path.join("exe"), plan.exe.as_bytes())
+            .map_err(|e| io_err(&e))?;
+        agora_platform::write_private(&name_path.join("current"), plan.version.as_bytes())
             .map_err(|e| io_err(&e))
     })();
     if let Err(e) = switched {
@@ -1254,6 +1257,14 @@ pub fn install(
                 if launcher_uses(&launcher, &plan.name, &plan.version) {
                     let _ = std::fs::remove_file(&launcher);
                 }
+            }
+        }
+        match installed.as_deref() {
+            Some(old) => {
+                let _ = agora_platform::write_private(&name_path.join("current"), old.as_bytes());
+            }
+            None => {
+                let _ = std::fs::remove_file(name_path.join("current"));
             }
         }
         remove_version(&launcher, &plan.name, &plan.version, &version_path);

@@ -52,6 +52,7 @@ export function FilesView({ files, load, changed, compact = false }: {
   const findRef = useRef<HTMLInputElement>(null);
   // The refresh a listing belongs to: one that completes after Refresh is dropped.
   const generation = useRef(0);
+  const listTimers = useRef<Set<ReturnType<typeof setTimeout>>>(new Set());
 
   // A folder that cannot be listed is tried twice more, a little later each time (just after an agent starts, the node may not hold
   // its workspace yet); then it says so, with a way to try again.
@@ -61,11 +62,31 @@ export function FilesView({ files, load, changed, compact = false }: {
     setListings((l) => { const v = l.get(dir); return v === undefined || v === 'failed' ? new Map(l).set(dir, 'loading') : l; });
     const attempt = (n: number) => files.list(dir).then(
       (items) => put([...items].sort((a, b) => Number(b.isDir) - Number(a.isDir) || a.name.localeCompare(b.name))),
-      () => { if (gen !== generation.current) return; if (n < 2) setTimeout(() => attempt(n + 1), 1000 * (n + 1)); else put('failed'); },
+      () => {
+        if (gen !== generation.current) return;
+        if (n < 2) {
+          const timer = setTimeout(() => {
+            listTimers.current.delete(timer);
+            if (gen === generation.current) attempt(n + 1);
+          }, 1000 * (n + 1));
+          listTimers.current.add(timer);
+        } else {
+          put('failed');
+        }
+      },
     );
     attempt(0);
   }, [files]);
-  useEffect(() => { generation.current++; setListings(new Map()); list(''); }, [list, round]);
+  useEffect(() => {
+    generation.current++;
+    setListings(new Map());
+    list('');
+    return () => {
+      generation.current++;
+      for (const timer of listTimers.current) clearTimeout(timer);
+      listTimers.current.clear();
+    };
+  }, [list, round]);
   // The caller may pass a new function on every render (a pane does); the diff is read on opening and when asked, not on each one.
   const loadRef = useRef(load);
   loadRef.current = load;
@@ -135,16 +156,23 @@ export function FilesView({ files, load, changed, compact = false }: {
   };
 
   const read = useCallback((path: string) => {
+    const gen = generation.current;
     setContents((c) => new Map(c).set(path, 'loading'));
     files.read(path).then(
-      (b) => setContents((c) => {
-        const text = decodeText(b);
-        if (text === undefined) return new Map(c).set(path, 'binary');
-        const lines = text.split('\n').map((l) => (l.endsWith('\r') ? l.slice(0, -1) : l));
-        if (lines.length > 1 && lines[lines.length - 1] === '') lines.pop();
-        return new Map(c).set(path, { lines, bytes: b.length });
-      }),
-      (e) => setContents((c) => new Map(c).set(path, readFailure(e))),
+      (b) => {
+        if (gen !== generation.current) return;
+        setContents((c) => {
+          const text = decodeText(b);
+          if (text === undefined) return new Map(c).set(path, 'binary');
+          const lines = text.split('\n').map((l) => (l.endsWith('\r') ? l.slice(0, -1) : l));
+          if (lines.length > 1 && lines[lines.length - 1] === '') lines.pop();
+          return new Map(c).set(path, { lines, bytes: b.length });
+        });
+      },
+      (e) => {
+        if (gen !== generation.current) return;
+        setContents((c) => new Map(c).set(path, readFailure(e)));
+      },
     );
   }, [files]);
   const openFile = (path: string, size: number) => {

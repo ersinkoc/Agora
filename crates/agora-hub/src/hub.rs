@@ -357,13 +357,13 @@ impl Hub {
         session: &mut NodeSession<impl Deref<Target = SqliteStore>>,
         payload: &[u8],
     ) -> Result<Ingest, SessionError> {
-        let outcome = session.event(payload)?;
+        let (outcome, stored) = session.event_stored(payload)?;
         if let Ingest::Applied { pos, .. } | Ingest::Resynced { pos, .. } = outcome {
             self.metrics
                 .events_ingested
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             // The session already decoded it successfully, so this cannot fail; stay defensive anyway.
-            if let Ok(event) = Event::decode(payload) {
+            if let Ok(event) = Event::decode(stored.as_deref().unwrap_or(payload)) {
                 let restarted = match &event.body {
                     Some(Body::NodeOnline(n)) => Some((n.node_id.clone(), event.at_ms)),
                     _ => None,
@@ -1695,5 +1695,41 @@ mod tests {
         let ca = crate::ca::Ca::generate("ca").unwrap();
         let (_, csr) = crate::ca::new_device_request().unwrap();
         assert!(ca.issue_node(RESERVED_HUB_ID, &csr).is_err());
+    }
+
+    #[test]
+    fn ingest_publishes_bounded_quota_timestamp_matching_store() {
+        let hub = Hub::open(SqliteStore::open_in_memory().unwrap()).unwrap();
+        let sup = Support {
+            generations: vec![1],
+            capabilities: vec![],
+            required: vec![],
+        };
+        let mut session = open_session(&hub, &sup, "n1");
+        let ev = Event {
+            producer_id: "n1".into(),
+            seq: 1,
+            at_ms: 0,
+            body: Some(Body::AgentQuotaObserved(
+                agora_protocol::v1::AgentQuotaObserved {
+                    node_id: "n1".into(),
+                    tool: "claude".into(),
+                    window: "5h".into(),
+                    observed_at_ms: u64::MAX - 1,
+                    used_percent: 20,
+                    ..Default::default()
+                },
+            )),
+        };
+        hub.ingest(&mut session, &ev.encode_to_vec()).unwrap();
+        let key = ("n1".to_string(), "claude".to_string(), "5h".to_string());
+        let live_ts = hub.view().0.quota[&key].observed_at_ms;
+        let rebuilt_ts = crate::projection::View::rebuild(hub.store())
+            .unwrap()
+            .0
+            .quota[&key]
+            .observed_at_ms;
+        assert_eq!(live_ts, rebuilt_ts);
+        assert!(live_ts < u64::MAX - 1);
     }
 }

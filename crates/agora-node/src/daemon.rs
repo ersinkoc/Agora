@@ -1356,10 +1356,17 @@ pub fn read_policy(path: &std::path::Path) -> Policy {
                             .collect(),
                     );
                 }
-                key if key.starts_with("device.") && key.ends_with(".projects") => {
+                key if key
+                    .strip_prefix("device.")
+                    .and_then(|s| s.strip_suffix(".projects"))
+                    .is_some() =>
+                {
                     // A named device with a value that names nothing is a device limited to nothing: a typo never widens.
-                    let id = &key["device.".len()..key.len() - ".projects".len()];
-                    if !id.is_empty() {
+                    if let Some(id) = key
+                        .strip_prefix("device.")
+                        .and_then(|s| s.strip_suffix(".projects"))
+                        .filter(|id| !id.is_empty())
+                    {
                         p.device_projects.insert(
                             id.to_string(),
                             v.split(',')
@@ -2906,6 +2913,31 @@ mod announce_tests {
             (p.skip_permissions, p.problems),
             (S::Forbid, vec!["unreadable".to_string()])
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_policy_handles_overlapping_device_projects_key_without_panicking() {
+        let dir =
+            std::env::temp_dir().join(format!("agora-test-device-projects-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("policy");
+        std::fs::write(
+            &file,
+            "device.projects = p1\ndevice..projects = p2\ndevice.dev1.projects = p1, p2\n",
+        )
+        .unwrap();
+        let p = read_policy(&file);
+        assert_eq!(p.problems, vec!["device.projects".to_string()]);
+        assert_eq!(
+            p.skip_permissions,
+            crate::launch_options::SkipPermissions::Forbid
+        );
+        assert!(!p.device_projects.contains_key(""));
+        assert!(p
+            .device_projects
+            .get("dev1")
+            .is_some_and(|s| s.contains("p1") && s.contains("p2") && s.len() == 2));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

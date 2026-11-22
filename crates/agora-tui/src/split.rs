@@ -101,15 +101,12 @@ fn state_word(state: AgentState, t: Text<'_>) -> String {
 /// Text cut or padded to exactly `width` columns. Every character counts as one column; agent ids, kinds and host names are what
 /// goes here, and a wide character only shortens the padding.
 fn fit(text: &str, width: usize) -> String {
-    let mut out: String = text
-        .chars()
-        .filter(|c| !c.is_control())
-        .take(width)
-        .collect();
+    let mut chars = text.chars().filter(|c| !c.is_control());
+    let mut out: String = chars.by_ref().take(width).collect();
     let n = out.chars().count();
     if n < width {
         out.extend(std::iter::repeat_n(' ', width - n));
-    } else if text.chars().count() > width && width > 0 {
+    } else if chars.next().is_some() && width > 0 {
         out.pop();
         out.push('…');
     }
@@ -1613,5 +1610,13 @@ mod tests {
         assert_eq!(agent_name("mac/agent-1", "shell"), "shell · amber");
         assert_eq!(agent_name("laptop/agent-1", "shell"), "shell · mint");
         assert_eq!(agent_name("mac.lan/agent-1", "shell"), "shell · violet");
+    }
+
+    #[test]
+    fn fit_does_not_truncate_when_only_control_characters_exceed_width() {
+        assert_eq!(fit("abc\n", 3), "abc");
+        assert_eq!(fit("\x07a\nb\x1bc", 3), "abc");
+        assert_eq!(fit("abcd\n", 3), "ab…");
+        assert_eq!(fit("a\n", 3), "a  ");
     }
 }

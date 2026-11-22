@@ -49,7 +49,7 @@ import { AttentionLayer } from './components/AttentionLayer';
 import { attentionList } from './net/fleet';
 import { requestPanel, requestProject, requestTool } from './layout/requests';
 import { TOOL_PANELS } from './net/paneTools';
-import { isMachinesHash, isSettingsHash, machineOfHash, settingsSectionOf, paletteExtras, projectsOf } from './net/paletteExtras';
+import { decodeHash, isMachinesHash, isSettingsHash, machineOfHash, settingsSectionOf, paletteExtras, projectsOf } from './net/paletteExtras';
 import { themeStore } from './themes/store';
 import { themeName } from './themes/messages';
 
@@ -354,7 +354,7 @@ export function App() {
   const quotaList = useMemo(() => (hub ? (live ? quotaObs(live) : []) : demoQuota), [hub, live]);
   const quotaMachines = useMemo(() => new Map((live ? machines(live) : hub ? [] : demoMachines).map((m) => [m.id, m.name] as const)), [hub, live]);
   const agents = useMemo(() => (hub ? (live ? tiles(live) : []) : demoAgents), [hub, live]);
-  const current = hash.startsWith('#/agent/') ? decodeURIComponent(hash.slice('#/agent/'.length)) : undefined;
+  const current = hash.startsWith('#/agent/') ? decodeHash(hash.slice('#/agent/'.length)) : undefined;
   const approvalsNow = live ? approvalList(live) : hub ? [] : demoApprovals;
   // On a phone a notice's link to an approval opens the agent that asks (ADR-0046, ADR-0067); answered already, the list.
   const redirect = phone ? approvalRedirect(phoneScreen(hash), approvalsNow, !hub || live !== undefined) : undefined;

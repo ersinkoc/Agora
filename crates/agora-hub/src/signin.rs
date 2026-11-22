@@ -473,8 +473,10 @@ impl HubSessions {
         if client.is_local() {
             return Ok(None);
         }
-        let Some(stored) = self.screen_password().stored() else {
-            return Ok(None);
+        let stored = match self.screen_password().stored() {
+            Ok(Some(s)) => s,
+            Ok(None) => return Ok(None),
+            Err(_) => return Err(()),
         };
         self.password_slot(client)
             .map(|slot| Some((stored, slot)))
@@ -586,7 +588,9 @@ impl HubSessions {
                 let Some(slot) = self.password_slot(client) else {
                     return (503, String::new());
                 };
-                let stored = self.screen_password().stored();
+                let Ok(stored) = self.screen_password().stored() else {
+                    return (500, String::new());
+                };
                 let needs_current = stored.is_some();
                 if needs_current && self.guard.attempt(client, Scope::All, now).is_err() {
                     audit("password_set", LOCKED_OUT);
@@ -620,8 +624,12 @@ impl HubSessions {
                     }
                     None => return (500, String::new()),
                 }
-                let revoked = self.signin().revoke_others(token).unwrap_or(0);
-                let _ = crate::password::drop_unvouched_passkeys(self.hub.store());
+                let Ok(revoked) = self.signin().revoke_others(token) else {
+                    return (500, String::new());
+                };
+                if crate::password::drop_unvouched_passkeys(self.hub.store()).is_err() {
+                    return (500, String::new());
+                }
                 audit("password_set", "ok");
                 (200, serde_json::json!({ "revoked": revoked }).to_string())
             }
@@ -721,8 +729,8 @@ impl HubSessions {
                             who.as_ref().and_then(|u| u.as_deref()),
                         ) {
                             Ok(()) => {
-                                if vouched {
-                                    let _ = crate::password::vouch_passkey(store, id);
+                                if vouched && crate::password::vouch_passkey(store, id).is_err() {
+                                    return (500, String::new());
                                 }
                                 (200, "{}".into())
                             }
@@ -1055,6 +1063,49 @@ mod tests {
                 200
             );
             assert!(ScreenPassword::new(hub.store()).verify("new screen password"));
+        }
+
+        #[tokio::test]
+        async fn unreadable_screen_password_fails_closed_for_remote_signin_and_password_change() {
+            use crate::store::EventStore as _;
+            let (hub, api) = hub();
+            let remote = away(10);
+            let local = home();
+            hub.store()
+                .set_setting("screen_password", &[0xff, 0xfe])
+                .unwrap();
+            let c = code(&hub);
+            assert!(matches!(
+                sign_in(&api, &c, None, &remote).await,
+                SignInReply::Busy
+            ));
+            let owner = token(sign_in(&api, &c, None, &local).await).unwrap();
+            let change = serde_json::json!({"password": "new screen password"});
+            assert_eq!(
+                api.account("password", Some(&owner), &remote, &change)
+                    .await
+                    .0,
+                500
+            );
+        }
+
+        #[tokio::test]
+        async fn account_password_change_returns_500_when_drop_unvouched_passkeys_fails() {
+            use crate::store::EventStore as _;
+            let (hub, api) = hub();
+            let local = home();
+            hub.store()
+                .set_setting("passkeys_vouched", &[0xff, 0xfe])
+                .unwrap();
+            let c = code(&hub);
+            let owner = token(sign_in(&api, &c, None, &local).await).unwrap();
+            let change = serde_json::json!({"password": "new screen password"});
+            assert_eq!(
+                api.account("password", Some(&owner), &local, &change)
+                    .await
+                    .0,
+                500
+            );
         }
 
         #[tokio::test]

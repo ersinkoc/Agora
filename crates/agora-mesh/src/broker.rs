@@ -613,6 +613,23 @@ impl Mesh {
         for id in held {
             self.release_batch(&id, now_ms);
         }
+        // Imported leases have no batch entry; release any still held by `agent`.
+        for table in self.leases.values_mut() {
+            let paths: Vec<String> = table
+                .all()
+                .iter()
+                .filter(|l| &l.holder == agent)
+                .map(|l| l.path.clone())
+                .collect();
+            for p in paths {
+                if table.release(&p, agent) {
+                    self.events.push(Body::LeaseReleased(LeaseReleased {
+                        agent_id: agent.as_str().to_string(),
+                        path: p,
+                    }));
+                }
+            }
+        }
         let owned: Vec<TaskId> = self
             .tasks
             .iter()
@@ -747,37 +764,39 @@ impl Mesh {
         self.check_content(body, refs)?;
         let to = self.local_address(&info, to);
         if let (Some((node, agent)), "message") = (split_address(to), kind) {
-            self.check_rate(from, now_ms)?;
-            let m = Message {
-                id: self.id("m"),
-                provenance: Provenance {
-                    from: info.id.clone(),
-                    kind: info.kind,
-                    node: info.node,
-                    project: info.project,
-                },
-                to: to.to_string(),
-                body: body.to_string(),
-                refs: refs.to_vec(),
-                at_ms: now_ms,
-                reply_to: reply_to.map(str::to_string),
-                kind,
-            };
-            self.outbox.push(Outbound {
-                message_id: m.id.clone(),
-                from: info.id,
-                to_node: node.to_string(),
-                to_agent: agent.to_string(),
-                body: body.to_string(),
-                refs: refs.to_vec(),
-            });
-            self.events.push(Body::MessagePosted(MessagePosted {
-                message_id: m.id.clone(),
-                from_agent_id: m.provenance.from.as_str().to_string(),
-                to: m.to.clone(),
-                body: m.body.clone(),
-            }));
-            return Ok((m, Vec::new()));
+            if !self.agents.contains_key(&AgentId::new(to)) {
+                self.check_rate(from, now_ms)?;
+                let m = Message {
+                    id: self.id("m"),
+                    provenance: Provenance {
+                        from: info.id.clone(),
+                        kind: info.kind,
+                        node: info.node,
+                        project: info.project,
+                    },
+                    to: to.to_string(),
+                    body: body.to_string(),
+                    refs: refs.to_vec(),
+                    at_ms: now_ms,
+                    reply_to: reply_to.map(str::to_string),
+                    kind,
+                };
+                self.outbox.push(Outbound {
+                    message_id: m.id.clone(),
+                    from: info.id,
+                    to_node: node.to_string(),
+                    to_agent: agent.to_string(),
+                    body: body.to_string(),
+                    refs: refs.to_vec(),
+                });
+                self.events.push(Body::MessagePosted(MessagePosted {
+                    message_id: m.id.clone(),
+                    from_agent_id: m.provenance.from.as_str().to_string(),
+                    to: m.to.clone(),
+                    body: m.body.clone(),
+                }));
+                return Ok((m, Vec::new()));
+            }
         }
         let recipients = self.recipients(&info, to)?;
         self.check_rate(from, now_ms)?;
@@ -1427,6 +1446,7 @@ impl Mesh {
         now_ms: u64,
     ) -> Result<String, MeshError> {
         let info = self.caller(from)?.clone();
+        let to = self.local_address(&info, to);
         let target = self.recipients(&info, to)?;
         let (Some(target), true) = (target.first().cloned(), !to.starts_with('#')) else {
             return Err(MeshError::RecipientUnknown(to.to_string()));
@@ -2552,6 +2572,42 @@ mod tests {
                 ]
             );
             m.delivery_failed(&AgentId::new("gone"), "m-5", "n2/b7", "x", 3); // an agent that left: nothing happens
+        }
+
+        #[test]
+        fn send_message_to_registered_hub_wide_id_delivers_locally() {
+            let mut m = Mesh::new(Limits::default());
+            m.register(info("n1/a", "n1"));
+            m.register(info("n1/b", "n1"));
+            m.send_message(&AgentId::new("n1/a"), "n1/b", "hello", &[], None, 100)
+                .unwrap();
+            assert_eq!(m.inbox(&AgentId::new("n1/b"), None, 10).unwrap().len(), 1);
+            assert!(m.take_outbound().is_empty());
+        }
+
+        #[test]
+        fn unregister_releases_imported_leases() {
+            let mut m = mesh();
+            let a1 = AgentId::new("a1");
+            let a2 = AgentId::new("a2");
+            m.import_leases("p1", &[("src/imp.rs".into(), a1.clone(), 10_000)], 100);
+            let _ = m.take_events();
+            m.unregister(&a1, 200);
+            assert!(m
+                .lease_acquire(&a2, &["src/imp.rs".into()], 1000, 200)
+                .is_ok());
+            assert!(m
+                .take_events()
+                .iter()
+                .any(|e| matches!(e, Body::LeaseReleased(r) if r.path == "src/imp.rs")));
+        }
+
+        #[test]
+        fn handoff_accepts_own_node_alias_for_local_agent() {
+            let mut m = mesh();
+            let a1 = AgentId::new("a1");
+            assert!(m.handoff(&a1, "n1/a2", None, "s", &[], 100).is_ok());
+            assert_eq!(m.inbox(&AgentId::new("a2"), None, 10).unwrap().len(), 1);
         }
     }
 }

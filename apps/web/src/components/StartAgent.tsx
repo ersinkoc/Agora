@@ -90,17 +90,23 @@ export function StartAgent({ projects, machines, initialNode, initialKind, trust
   // The folder picker: what the machine answered for the folder being looked at.
   const [browse, setBrowse] = useState<{ listing?: DirectoryListing; busy: boolean; failed?: boolean; forbidden?: boolean } | undefined>();
   const [canBrowse, setCanBrowse] = useState(!!list);
+  const lookGen = useRef(0);
   const look = async (at: string) => {
     if (!list) return;
+    const gen = ++lookGen.current;
     setBrowse((b) => ({ listing: b?.listing, busy: true }));
-    try { setBrowse({ listing: await list(node, at), busy: false }); }
+    try {
+      const listing = await list(node, at);
+      if (lookGen.current === gen) setBrowse({ listing, busy: false });
+    }
     catch (e) {
+      if (lookGen.current !== gen) return;
       // A machine without the command: keep the typed path, and do not offer the picker again.
       if ((e as { code?: string }).code === 'protocol.capability_missing') { setCanBrowse(false); setBrowse(undefined); }
       else setBrowse((b) => ({ listing: b?.listing, busy: false, failed: true, forbidden: (e as { code?: string }).code === 'auth.forbidden' }));
     }
   };
-  useEffect(() => { setBrowse(undefined); setCanBrowse(!!list); }, [node, list]);
+  useEffect(() => { lookGen.current++; setBrowse(undefined); setCanBrowse(!!list); }, [node, list]);
   useEffect(() => {
     if (!node) return;
     let current = true;

@@ -972,6 +972,49 @@ fn a_failed_write_of_current_is_rolled_back_for_real() {
 }
 
 #[test]
+fn a_failed_write_of_exe_keeps_current_on_the_previous_version() {
+    if skip() {
+        return;
+    }
+    let home = Home::new();
+    run(&home, &Opts::new("1.0.0", GOOD), GOOD).unwrap();
+    let before = std::fs::read_link(launcher(&home)).unwrap();
+    let l = list(&Opts::new("2.0.0", GOOD));
+    let p = plan(&l, "fake-agent", PLATFORM, &home.0).unwrap();
+    let exe_meta = home.agents().join("fake-agent").join("exe");
+    std::fs::remove_file(&exe_meta).unwrap();
+    std::fs::create_dir(&exe_meta).unwrap();
+    let net = Net::serving(GOOD);
+    install(&p, &approval(&p), &home.0, &tools(&net, &Sig(true))).unwrap_err();
+    assert_eq!(std::fs::read_link(launcher(&home)).unwrap(), before);
+    assert_eq!(
+        std::fs::read_to_string(home.agents().join("fake-agent").join("current")).unwrap(),
+        "1.0.0"
+    );
+    assert!(!home.agents().join("fake-agent").join("2.0.0").exists());
+}
+
+#[test]
+fn dot_and_dotdot_in_current_are_rejected_by_installed_version() {
+    let home = Home::new();
+    let dir = home.agents().join("fake-agent");
+    std::fs::create_dir_all(&dir).unwrap();
+    for bad in [".", "..", ""] {
+        std::fs::write(dir.join("current"), bad).unwrap();
+        assert_eq!(
+            agora_adapters::agent_install::installed_version(&home.0, "fake-agent"),
+            None,
+            "must reject {bad:?}"
+        );
+    }
+    std::fs::write(dir.join("current"), "1.2.3").unwrap();
+    assert_eq!(
+        agora_adapters::agent_install::installed_version(&home.0, "fake-agent").as_deref(),
+        Some("1.2.3")
+    );
+}
+
+#[test]
 fn a_folder_the_launcher_uses_is_never_removed() {
     if skip() {
         return;
