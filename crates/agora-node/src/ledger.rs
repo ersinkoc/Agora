@@ -83,9 +83,9 @@ pub struct Entry {
     /// The boot it started in (Linux) and its program's name: a process is the recorded one only when both match too.
     pub process_boot: String,
     pub process_name: String,
-    /// A time before that process started (ms since the epoch): taken before it was spawned when the node knows it
-    /// ([`Ledger::set_process_since`]), otherwise when the node first saw it. What a node that takes the agent up from the holder
-    /// knows of when it started, for session discovery (#925). 0: none.
+    /// A time before that process started (ms since the epoch), taken before it was spawned, written with the process
+    /// ([`Ledger::set_process`]): what a node that takes the agent up from the holder knows of when it started, for session discovery
+    /// (#925). 0: not known (never a time the node only saw it at).
     pub process_since_ms: u64,
     /// ADR-0062 item 4: when the node last brought it back by itself (0: never), so an agent interrupted again soon after (a crash
     /// loop) is not brought back again by itself.
@@ -648,11 +648,13 @@ impl Ledger {
 
     /// The process an agent runs as now (`None`: it has none any more). Written when it changed. `false` when the ledger does not hold
     /// the agent (yet): nothing was written, and the caller must ask again later (the entry is made by `AgentStarted`, which the
-    /// node records just after the supervisor has started the process).
+    /// node records just after the supervisor has started the process). `since_ms` is a time before it was spawned, 0 when not known
+    /// (`Entry::process_since_ms`, #925), written in the same write.
     pub fn set_process(
         &self,
         agent_id: &str,
         p: Option<agora_platform::ProcessIdentity>,
+        since_ms: u64,
         now_ms: u64,
     ) -> bool {
         let mut st = self.st();
@@ -687,28 +689,8 @@ impl Ledger {
             e.process_boot,
             e.process_name,
         ) = now;
-        e.process_since_ms = if e.pid == 0 { 0 } else { now_ms };
+        e.process_since_ms = if e.pid == 0 { 0 } else { since_ms };
         e.updated_at_ms = now_ms;
-        st.dirty = true;
-        drop(st);
-        let _ = self.flush();
-        true
-    }
-
-    /// #925: a time before the agent's current process started, taken before it was spawned (`Entry::process_since_ms`). Written when
-    /// it changed and the ledger holds a process for the agent; `false` otherwise (try again later).
-    pub fn set_process_since(&self, agent_id: &str, since_ms: u64) -> bool {
-        let mut st = self.st();
-        let Some(e) = st.entries.get_mut(agent_id) else {
-            return false;
-        };
-        if e.pid == 0 {
-            return false;
-        }
-        if e.process_since_ms == since_ms {
-            return true;
-        }
-        e.process_since_ms = since_ms;
         st.dirty = true;
         drop(st);
         let _ = self.flush();

@@ -1393,7 +1393,7 @@ fn stop_survivor(
         agora_platform::kill_process_if_same(&p)
             .map_err(|_| Error::new(ErrorCode::Internal).with("incident_id", "unassigned"))?;
     }
-    ledger.set_process(agent_id, None, crate::daemon::now_ms());
+    ledger.set_process(agent_id, None, 0, crate::daemon::now_ms());
     if let (Some(ev), Some(e)) = (&ctx.events, ledger.get(agent_id)) {
         let resumable = !e.session_id.is_empty() && ctx.sup().resumable(&e.kind);
         ev.agent_interrupted(&e, resumable);
