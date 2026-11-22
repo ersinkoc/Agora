@@ -601,13 +601,19 @@ pub fn status(worktree: &Path) -> Result<GitStatus, GitError> {
         "--",
         ".",
     ])?);
+    // #941: on a branch with no commit yet there is no HEAD to count against; every tracked file is new (git's empty tree).
+    let base = if head_commit.is_empty() {
+        empty_tree(worktree)
+    } else {
+        "HEAD"
+    };
     let (insertions, deletions) = parse_shortstat(&git(&[
         "diff",
         "--no-ext-diff",
         "--no-textconv",
         SUBMODULE_COMMITS_ONLY,
         "--shortstat",
-        "HEAD",
+        base,
         "--",
         ".",
     ])?);
@@ -620,7 +626,7 @@ pub fn status(worktree: &Path) -> Result<GitStatus, GitError> {
 }
 
 /// Changed paths (every entry line; renames are one line, paths are quoted) and the commit (`# branch.oid`, empty on a branch with no
-/// commit yet, where the `diff HEAD` that follows fails anyway) from `git status --porcelain=v2 --branch`.
+/// commit yet) from `git status --porcelain=v2 --branch`.
 fn parse_status_v2(out: &str) -> (u32, String) {
     let mut changed = 0;
     let mut head = String::new();
@@ -634,6 +640,22 @@ fn parse_status_v2(out: &str) -> (u32, String) {
         }
     }
     (changed, head)
+}
+
+/// git's empty tree, what a branch with no commit yet is compared with (#941): every file is new. Its id depends on the repository's
+/// hash; a git too old to answer `--show-object-format` knows only SHA-1.
+fn empty_tree(dir: &Path) -> &'static str {
+    match git_refs(dir, &["rev-parse", "--show-object-format"]) {
+        Ok(format) if format.trim() == "sha256" => {
+            "6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321"
+        }
+        _ => "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+    }
+}
+
+/// Whether HEAD names no commit: a repository (or a branch) with no commit yet.
+fn no_commit_yet(dir: &Path) -> bool {
+    git_refs(dir, &["rev-parse", "--verify", "-q", "HEAD"]).is_err()
 }
 
 /// Most untracked files a diff shows, and the most bytes of one it reads.
@@ -683,7 +705,8 @@ pub fn diff(worktree: &Path, path: Option<&str>) -> Result<String, GitError> {
 }
 
 /// Unified diff of the changes against HEAD, optionally for one path. A new file that git does not track yet is shown as
-/// all-added (what a reviewer would see), without touching the index.
+/// all-added (what a reviewer would see), without touching the index. With no commit yet (#941) every file is new: the diff is
+/// against git's empty tree.
 ///
 /// ADR-0080: unless `show_secret` (the owner's policy), a file whose name is secret appears as its `diff --git` header (and its
 /// mode and rename lines, which hold names only) without hunks or blob ids; its line counts are returned beside the text.
@@ -692,24 +715,37 @@ pub fn diff_with(
     path: Option<&str>,
     show_secret: bool,
 ) -> Result<(String, Vec<SecretChange>), GitError> {
-    let mut args = vec![
-        "diff",
-        "--no-color",
-        "--no-ext-diff",
-        "--no-textconv",
-        SUBMODULE_COMMITS_ONLY,
-        // Names from the folder the diff runs in, like `ls-files` below and like the paths `git.diff` and `files.read` take: without
-        // it a workspace that is a folder inside a repository (ADR-0053) gets tracked files named from the repository's root
-        // (`web/a.txt`) and untracked ones from the folder (`b.txt`). At a checkout's root it changes nothing.
-        "--relative",
-        "HEAD",
-    ];
     // Always a pathspec: without one git diffs the whole checkout even when run in a folder inside it (a selected workspace),
     // while `ls-files` below lists only that folder. A named path is a name, not a pattern: a file name may hold `*`, `?` or `[`,
     // which git would otherwise match against other files too (`a[1].txt` would show `a1.txt`).
     let literal = path.map(|p| format!(":(literal){p}"));
-    args.extend(["--", literal.as_deref().unwrap_or(".")]);
-    let tracked = git_capped(worktree, &args, MAX_DIFF_READ)?;
+    let tracked_against = |base: &str| {
+        git_capped(
+            worktree,
+            &[
+                "diff",
+                "--no-color",
+                "--no-ext-diff",
+                "--no-textconv",
+                SUBMODULE_COMMITS_ONLY,
+                // Names from the folder the diff runs in, like `ls-files` below and like the paths `git.diff` and `files.read`
+                // take: without it a workspace that is a folder inside a repository (ADR-0053) gets tracked files named from the
+                // repository's root (`web/a.txt`) and untracked ones from the folder (`b.txt`). At a checkout's root it changes
+                // nothing.
+                "--relative",
+                base,
+                "--",
+                literal.as_deref().unwrap_or("."),
+            ],
+            MAX_DIFF_READ,
+        )
+    };
+    // HEAD is asked about only when the diff against it fails: a commit is the usual case, and each git costs time on Windows.
+    let tracked = match tracked_against("HEAD") {
+        Ok(text) => text,
+        Err(_) if no_commit_yet(worktree) => tracked_against(empty_tree(worktree))?,
+        Err(e) => return Err(e),
+    };
     let (mut out, mut secret) = if show_secret {
         (tracked, Vec::new())
     } else {
@@ -1182,6 +1218,17 @@ diff --git a/.ssh/known b/.ssh/known\nold mode 100644\nnew mode 100755\n";
 
     impl Repo {
         fn new(remote: Option<&str>) -> Self {
+            let r = Self::unborn();
+            if let Some(url) = remote {
+                r.git(&["remote", "add", "origin", url]);
+            }
+            fs::write(r.dir.join("a.txt"), "one\n").expect("write");
+            r.commit("first");
+            r
+        }
+
+        /// A temporary repository on `main` with no commit yet.
+        fn unborn() -> Self {
             static N: AtomicU32 = AtomicU32::new(0);
             let dir = std::env::temp_dir().join(format!(
                 "agora-git-{}-{}",
@@ -1193,11 +1240,6 @@ diff --git a/.ssh/known b/.ssh/known\nold mode 100644\nnew mode 100755\n";
             let dir = plain(dir.canonicalize().expect("canonicalize"));
             let r = Self { dir };
             r.git(&["init", "-q", "-b", "main"]);
-            if let Some(url) = remote {
-                r.git(&["remote", "add", "origin", url]);
-            }
-            fs::write(r.dir.join("a.txt"), "one\n").expect("write");
-            r.commit("first");
             r
         }
 
@@ -1240,6 +1282,61 @@ diff --git a/.ssh/known b/.ssh/known\nold mode 100644\nnew mode 100755\n";
                 let _ = fs::remove_dir_all(self.wt(suffix));
             }
         }
+    }
+
+    /// #941 (RM-35): a repository with no commit yet is a normal state, not a failure. Its files are all new: what is staged and
+    /// what git does not track yet both show as added (secret files by name only), the counts are what `git status` shows, and
+    /// there is no commit.
+    #[test]
+    fn a_repository_with_no_commit_yet_shows_its_files_as_new() {
+        let r = Repo::unborn();
+        fs::write(r.dir.join("b.txt"), "hello\n").expect("write");
+        fs::write(r.dir.join("s.txt"), "staged\nfile\n").expect("write");
+        fs::write(r.dir.join(".env"), "KEY=fake\n").expect("write");
+        r.git(&["add", "s.txt"]);
+
+        let (d, secret) = diff_with(&r.dir, None, false).expect("diff");
+        assert!(
+            d.contains("diff --git a/b.txt b/b.txt\nnew file mode 100644\n"),
+            "{d}"
+        );
+        assert!(d.contains("+hello\n"), "{d}");
+        assert!(
+            d.contains("diff --git a/s.txt b/s.txt\nnew file mode 100644\n"),
+            "{d}"
+        );
+        assert!(d.contains("+staged\n+file\n"), "{d}");
+        assert!(!d.contains("KEY=fake"), "{d}");
+        let got: Vec<(&str, u32, u32)> = secret
+            .iter()
+            .map(|c| (c.path.as_str(), c.added, c.removed))
+            .collect();
+        assert_eq!(got, vec![(".env", 1, 0)]);
+        // One path, as `git.diff` with a path asks.
+        let one = diff(&r.dir, Some("s.txt")).expect("diff one");
+        assert!(one.contains("+staged\n") && !one.contains("b.txt"), "{one}");
+
+        let st = status(&r.dir).expect("status");
+        assert_eq!(st.files_changed, 3);
+        // Line counts are of tracked changes: the staged file's two lines.
+        assert_eq!((st.insertions, st.deletions), (2, 0));
+        assert_eq!(st.head_commit, "");
+        assert!(log(&r.dir, 5).expect("log").is_empty());
+    }
+
+    /// #941: the empty tree is the repository's own; a SHA-256 repository has another id for it.
+    #[test]
+    fn a_sha256_repository_with_no_commit_yet_shows_its_files_as_new() {
+        let r = Repo::unborn();
+        fs::remove_dir_all(r.dir.join(".git")).expect("rm .git");
+        if git(&r.dir, &["init", "-q", "--object-format=sha256"]).is_err() {
+            return; // a git without SHA-256 repositories
+        }
+        fs::write(r.dir.join("s.txt"), "staged\n").expect("write");
+        r.git(&["add", "s.txt"]);
+        assert!(diff(&r.dir, None).expect("diff").contains("+staged\n"));
+        let st = status(&r.dir).expect("status");
+        assert_eq!((st.files_changed, st.insertions), (1, 1));
     }
 
     #[test]
