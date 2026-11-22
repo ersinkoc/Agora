@@ -49,6 +49,39 @@ describe('view', () => {
     expect(m[1]?.from).toBe('claude · ' + m[1]?.from.split(' · ')[1]);
   });
 
+  it('lists a message between machines once, from its sender, marked, whichever copy comes first (#905)', () => {
+    for (const senderFirst of [true, false]) {
+      const v = emptyView();
+      applyEvent(v, 1, ev('blackview', 1, { agentStarted: { agentId: 'agent-16', nodeId: 'blackview', worktreeId: 'w', kind: 'shell' } }));
+      applyEvent(v, 2, ev('rm-two', 1, { agentStarted: { agentId: 'agent-1', nodeId: 'rm-two', worktreeId: 'w', kind: 'shell' } }));
+      // The sender's node numbers it m-1 and names the recipient `<node>/<agent>`; the receiver's numbers it m-7 and names the sender so.
+      const sent = ev('blackview', 2, { messagePosted: { messageId: 'm-1', fromAgentId: 'agent-16', to: 'rm-two/agent-1', body: 'ping' } });
+      const got = ev('rm-two', 2, { messagePosted: { messageId: 'm-7', fromAgentId: 'blackview/agent-16', to: 'agent-1', body: 'ping' } });
+      const [first, second] = senderFirst ? [sent, got] : [got, sent];
+      applyEvent(v, 3, first);
+      applyEvent(v, 4, second);
+      expect(v.messages.map((m) => [m.from, m.to])).toEqual([['blackview/agent-16', 'rm-two/agent-1']]);
+      const m = recentMessages(v);
+      expect(m).toHaveLength(1);
+      expect(m[0]?.crossMachine).toBe(true);
+      expect(m[0]?.from).toMatch(/^shell · /);
+      expect(m[0]?.to).toMatch(/^shell · /);
+    }
+  });
+
+  it('keeps a message sent twice as two rows, and a channel copy that has no twin (#905)', () => {
+    const v = emptyView();
+    const sent = (pos: number, seq: number) => applyEvent(v, pos, ev('a', seq, { messagePosted: { messageId: `m-${seq}`, fromAgentId: 'x', to: 'b/z', body: 'ping' } }));
+    const got = (pos: number, seq: number) => applyEvent(v, pos, ev('b', seq, { messagePosted: { messageId: `m-${seq}`, fromAgentId: 'a/x', to: 'z', body: 'ping' } }));
+    sent(1, 1); sent(2, 2); got(3, 1); got(4, 2);
+    expect(v.messages).toHaveLength(2);
+    // A shared channel's copies are recorded by their receivers only (the board sends them), one per receiver.
+    applyEvent(v, 5, ev('b', 3, { messagePosted: { messageId: 'm-3', fromAgentId: 'a/x', to: 'z', body: '[#ops] hi' } }));
+    applyEvent(v, 6, ev('a', 3, { messagePosted: { messageId: 'm-3', fromAgentId: 'a/x', to: 'y', body: '[#ops] hi' } }));
+    expect(v.messages.slice(-2).map((m) => [m.from, m.to])).toEqual([['a/x', 'b/z'], ['a/x', 'a/y']]);
+    expect(recentMessages(v).slice(0, 2).map((m) => m.crossMachine)).toEqual([false, true]);
+  });
+
   it('shows the shared board per project: tasks with their owner, leases with their holder, from the hub\'s events', () => {
     const v = emptyView();
     applyEvent(v, 1, ev('alpha', 1, { checkoutDiscovered: { checkoutId: 'c', nodeId: 'alpha', projectId: 'p', path: '/home/me/shop' } }));

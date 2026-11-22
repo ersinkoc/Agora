@@ -68,6 +68,10 @@ pub const CAPABILITIES: &[&str] = &[
     "enroll.renew",
 ];
 
+/// #915: the longest a mesh post or board call waits for the hub's answer on one connection before its sender is told `node.timeout`.
+/// The hub answers within its own 30 s command deadline (`node.timeout`, or `node.offline` when the target's link ends first), so this
+/// only fires when no answer is coming at all; the sender learns that its message was not delivered instead of never hearing.
+pub const POST_DEADLINE: Duration = Duration::from_secs(40);
 /// Events sent per step; the hub acknowledges after each batch.
 const BATCH: usize = 64;
 const TICK: Duration = Duration::from_millis(50);
@@ -282,17 +286,37 @@ impl crate::mesh_server::RemoteLink for MeshOut {
     }
 }
 
-/// Posts sent on one connection and not yet answered, by the request id this node chose. When the connection ends they
-/// all fail with `node.offline`.
+/// Posts sent on one connection and not yet answered, by the request id this node chose, with when each was sent. When the
+/// connection ends they all fail with `node.offline`; one left unanswered for the post deadline fails with `node.timeout` (#915).
 #[derive(Default)]
 struct Posts {
     next: u64,
-    waiting: std::collections::HashMap<String, Done>,
+    waiting: std::collections::HashMap<String, (tokio::time::Instant, Done)>,
+}
+
+impl Posts {
+    /// Fails every post sent more than `deadline` ago with `node.timeout`; a late answer to one then finds nothing.
+    fn expire(&mut self, deadline: Duration) {
+        if self.waiting.is_empty() {
+            return;
+        }
+        let late: Vec<String> = self
+            .waiting
+            .iter()
+            .filter(|(_, (sent, _))| sent.elapsed() >= deadline)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in late {
+            if let Some((_, done)) = self.waiting.remove(&id) {
+                done(Err("node.timeout".into()));
+            }
+        }
+    }
 }
 
 impl Drop for Posts {
     fn drop(&mut self) {
-        for (_, done) in self.waiting.drain() {
+        for (_, (_, done)) in self.waiting.drain() {
             done(Err("node.offline".into()));
         }
     }
@@ -511,6 +535,8 @@ struct Liveness {
     deadline: Duration,
     /// A wait for the next frame that took longer than this means the process was not running (see [`Wake`]).
     suspended_after: Duration,
+    /// See [`POST_DEADLINE`].
+    post_deadline: Duration,
 }
 
 impl Liveness {
@@ -518,6 +544,7 @@ impl Liveness {
         ping_every: PING_EVERY,
         deadline: SILENCE_DEADLINE,
         suspended_after: PING_EVERY,
+        post_deadline: POST_DEADLINE,
     };
 }
 
@@ -651,6 +678,7 @@ where
         if last_heard.elapsed() >= live.deadline {
             return Err(LinkError::Silent);
         }
+        posts.expire(live.post_deadline);
         for payload in up.next_batch(BATCH)? {
             put(
                 &mut conn,
@@ -706,7 +734,7 @@ where
                         }),
                     }),
                 };
-                posts.waiting.insert(id, done);
+                posts.waiting.insert(id, (tokio::time::Instant::now(), done));
                 put(&mut conn, &frame(STREAM_COMMANDS, 0, req.encode_to_vec()), limit).await?;
                 continue;
             }
@@ -777,7 +805,7 @@ where
                 // The hub's answer to a mesh post this node sent.
                 (STREAM_COMMANDS, 1) => {
                     if let Ok(r) = CommandResponse::decode(f.payload.as_slice()) {
-                        if let Some(done) = posts.waiting.remove(&r.request_id) {
+                        if let Some((_, done)) = posts.waiting.remove(&r.request_id) {
                             done(match r.result {
                                 Some(command_response::Result::Err(e)) => Err(e.code),
                                 Some(command_response::Result::Ok(ok)) => match ok.result {
@@ -1546,6 +1574,7 @@ mod tests {
         ping_every: Duration::from_millis(50),
         deadline: Duration::from_millis(400),
         suspended_after: Duration::from_millis(250),
+        post_deadline: POST_DEADLINE,
     };
 
     /// Runs a node's conversation against a fake hub on loopback until it ends or `stop_after` passes; returns how it ended
@@ -1562,6 +1591,18 @@ mod tests {
         stop_after: Duration,
         freeze: Option<(Duration, Duration)>,
         live: Liveness,
+    ) -> (Result<(), LinkError>, Duration) {
+        talk_posting(name, hub, stop_after, freeze, live, None)
+    }
+
+    /// [`talk_frozen`], with this node's mesh posts going out on the connection through `mesh_out`.
+    fn talk_posting(
+        name: &str,
+        hub: Hub,
+        stop_after: Duration,
+        freeze: Option<(Duration, Duration)>,
+        live: Liveness,
+        mesh_out: Option<Arc<MeshOut>>,
     ) -> (Result<(), LinkError>, Duration) {
         let dir = std::env::temp_dir().join(format!("agora-link-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1630,7 +1671,7 @@ mod tests {
                 &sink,
                 &stop,
                 None,
-                None,
+                mesh_out.as_deref(),
                 None,
                 None,
                 live,
@@ -1721,6 +1762,48 @@ mod tests {
         );
     }
 
+    /// #915: a mesh post the hub never answers (here: a hub that answers pings and nothing else) is not lost without a word. Its
+    /// sender is told `node.timeout` after the post deadline, and the link itself stays up.
+    #[test]
+    fn a_mesh_post_the_hub_never_answers_fails_with_node_timeout() {
+        const POSTS: Liveness = Liveness {
+            ping_every: Duration::from_millis(50),
+            deadline: Duration::from_millis(1500),
+            suspended_after: Duration::from_millis(1000),
+            post_deadline: Duration::from_millis(300),
+        };
+        let out = MeshOut::new();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let poster = Arc::clone(&out);
+        std::thread::spawn(move || {
+            // Once the conversation is up (its queue exists); a post before that fails at once with `node.offline`.
+            std::thread::sleep(Duration::from_millis(200));
+            let sent = std::time::Instant::now();
+            crate::mesh_server::RemoteLink::post(
+                &*poster,
+                "a1",
+                "beta/b1",
+                "hello",
+                &[],
+                Box::new(move |r| {
+                    let _ = tx.send((r, sent.elapsed()));
+                }),
+            );
+        });
+        let (r, _) = talk_posting(
+            "post-timeout",
+            Hub::Answers,
+            Duration::from_millis(1200),
+            None,
+            POSTS,
+            Some(out),
+        );
+        assert!(r.is_ok(), "the link stays up: {r:?}");
+        let (answer, after) = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(answer, Err("node.timeout".to_string()));
+        assert!(after >= POSTS.post_deadline, "{after:?}");
+    }
+
     #[test]
     fn an_idle_hub_that_answers_pings_is_never_dropped() {
         // Three deadlines with nothing but pings and pongs on the link. Pings as often as FAST, but a deadline and a suspension
@@ -1730,6 +1813,7 @@ mod tests {
             ping_every: Duration::from_millis(50),
             deadline: Duration::from_millis(1500),
             suspended_after: Duration::from_millis(1000),
+            post_deadline: POST_DEADLINE,
         };
         let (r, took) = talk_frozen("answers", Hub::Answers, IDLE.deadline * 3, None, IDLE);
         assert!(r.is_ok(), "{r:?}");

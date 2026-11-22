@@ -435,6 +435,11 @@ not built: nothing to check.
 - **See:** the message arrives once with `provenance.node`; the window lists it under "Recent messages", marked "between machines"; a message to an offline machine
   fails with a reason.
 - **Evidence so far:** LAN run 2026-11-11, L12 (lan-test-findings): six directions over the LAN hub; R3.
+  [Linux](2026-11-21-real-machine-linux.md) and Windows 2026-11-21: delivery and `node.offline` passed, but Messages listed each
+  message twice, once with a doubly qualified sender (#905: both machines record the message; the window now folds the two copies).
+  [macOS 2026-11-21](2026-11-21-real-machine-macos.md): a message to the stopped `rm-two` got no `delivery_failed` (#915, not
+  reproduced in tests; a post the hub never answers now fails with `node.timeout` after 40 s on the sender's machine). Check again:
+  the notice `node.offline` (or `node.timeout`) comes back within 40 s, also right after the other machine's Ctrl-C.
 
 ### RM-28 A reply keeps its link across machines
 not built: nothing to check.

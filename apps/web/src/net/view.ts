@@ -77,7 +77,8 @@ export interface ApprovalV { agentId: string; action: string; detail: string; ex
 
 export interface TaskV { projectId: string; title: string; ownerId: string; done: boolean }
 export interface LeaseV { agentId: string; path: string; expiresAtMs: number }
-export interface MessageV { from: string; to: string; body: string; atMs: number }
+// `producer` is the machine that recorded it; `paired` marks a sender's copy already matched with the receiver's (#905).
+export interface MessageV { from: string; to: string; body: string; atMs: number; producer?: string; paired?: boolean }
 
 export interface View {
   pos: number;
@@ -397,7 +398,15 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
     case 'messagePosted': {
       const b = e.messagePosted;
       const to = String(b.to ?? '');
-      v.messages.push({ from: q(b.fromAgentId), to: to.includes('/') || to.startsWith('#') ? to : q(to), body: b.body ?? '', atMs: at });
+      const from = String(b.fromAgentId ?? '');
+      // #905: a message between machines is recorded by both: the sender's node (`to` is `<node>/<agent>`) and the receiver's,
+      // whose `from` is already the hub-wide `<origin>/<agent>` (ADR-0031), so it is not qualified again. Message ids are per node
+      // (ADR-0074), so the two copies are matched by sender, recipient and text from two machines, one with one: a message sent
+      // twice stays two rows.
+      const m: MessageV = { from: from.includes('/') ? from : q(from), to: to.includes('/') || to.startsWith('#') ? to : q(to), body: b.body ?? '', atMs: at, producer };
+      const twin = v.messages.find((x) => !x.paired && x.producer !== producer && x.from === m.from && x.to === m.to && x.body === m.body);
+      if (twin) { twin.paired = true; break; }
+      v.messages.push(m);
       if (v.messages.length > MAX_MESSAGES) v.messages.shift();
       break;
     }
