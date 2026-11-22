@@ -49,6 +49,11 @@ pub const LOCAL_SOCKETS_SUPPORTED: bool = cfg!(any(unix, windows));
 /// True where [`spawn`] can start a PTY.
 pub const PTY_SUPPORTED: bool = cfg!(any(unix, windows));
 
+/// True where [`confine_command`] can confine a plain process (not a PTY): Linux (Landlock) and macOS (Seatbelt), when
+/// [`sandbox_supported`] also holds. Windows confines PTY processes only (its restricted token is given at process creation, which
+/// `std::process::Command` cannot do), so adapter and ACP agents are refused there before they start (#897).
+pub const COMMAND_CONFINEMENT_SUPPORTED: bool = cfg!(any(target_os = "linux", target_os = "macos"));
+
 /// The user's shell, for the node's built-in `shell` kind: on Unix `$SHELL` when it names an existing file, else `sh`; on Windows
 /// `%ComSpec%` when set, else `cmd.exe`.
 pub fn default_shell() -> String {

@@ -176,6 +176,10 @@ server with piped stdio, Node's default, cannot do so when confined on Windows.*
 (Rust's standard library, piped stdio included) and `cmd` start children confined, so Rust agents such as Codex are expected to work, but no
 real Codex run was measured. Fixing the Node case needs another confinement mechanism, a decision for ADR-0050.
 
+**Adapter and ACP (structured) agents cannot be confined on Windows** (#897). Windows confines terminal (PTY) agents only, so with any
+`sandbox` level other than `off` such an agent is refused before anything is created: `agent.sandbox_unavailable` with
+`reason = unsupported`. Run those kinds on a node with `sandbox = off` until this is solved.
+
 What differs from macOS and Linux:
 
 - **Reads are weaker** (Amendment B, 5): a file that grants `Users` or `Everyone` read (many data-volume folders, `Program Files`) stays readable to
