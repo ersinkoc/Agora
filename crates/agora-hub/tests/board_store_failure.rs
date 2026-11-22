@@ -83,7 +83,7 @@ fn tasks(hub: &Hub) -> Vec<Value> {
 fn open(file: &Path) -> Hub {
     let hub = Hub::open(SqliteStore::open(file).unwrap()).unwrap();
     for node in ["alpha", "beta"] {
-        let _ = hub.node_link_opened(node, Vec::new(), 2000);
+        let _ = hub.node_link_opened(node, Vec::new(), 2000).unwrap();
     }
     hub
 }

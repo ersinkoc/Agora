@@ -77,6 +77,12 @@ impl Opts {
 
 /// A list signed by a fake key made from a public seed, opened by the real `verify_list`.
 fn list(o: &Opts) -> AgentList {
+    let (envelope, key) = signed_list(o, 3);
+    verify_list(&envelope, &key, 1, 0).unwrap()
+}
+
+/// The signed envelope of list `version` and the root key that opens it.
+fn signed_list(o: &Opts, version: u64) -> (String, String) {
     let root = Ed25519KeyPair::from_seed_unchecked(&[1; 32]).unwrap();
     let publisher = Ed25519KeyPair::from_seed_unchecked(&[2; 32]).unwrap();
     let mut dl = json!({"url": "https://agents.example.com/fake-agent", "sha256": o.sha});
@@ -88,7 +94,7 @@ fn list(o: &Opts) -> AgentList {
         dl["signature_key"] = json!("vendor");
     }
     let payload = json!({
-        "version": 3, "expires_ms": 2_000_000_000_000_u64,
+        "version": version, "expires_ms": 2_000_000_000_000_u64,
         "publishers": [{"id": "fake-official", "key": hex(publisher.public_key().as_ref()), "revoked": o.revoked}],
         "agents": [{
             "name": "fake-agent", "display": "Fake Agent",
@@ -102,7 +108,7 @@ fn list(o: &Opts) -> AgentList {
     .to_string();
     let envelope =
         json!({"payload": payload, "sig": hex(root.sign(payload.as_bytes()).as_ref())}).to_string();
-    verify_list(&envelope, &hex(root.public_key().as_ref()), 1, 0).unwrap()
+    (envelope, hex(root.public_key().as_ref()))
 }
 
 #[derive(Default)]
@@ -746,13 +752,242 @@ fn what_a_crash_left_is_removed_by_the_next_install() {
 #[test]
 fn the_list_version_seen_only_goes_up() {
     let home = Home::new();
-    assert_eq!(last_seen_version(&home.0), 0);
+    assert_eq!(last_seen_version(&home.0).unwrap(), 0);
     remember_list_version(&home.0, 5).unwrap();
-    assert_eq!(last_seen_version(&home.0), 5);
-    remember_list_version(&home.0, 3).unwrap();
-    assert_eq!(last_seen_version(&home.0), 5);
+    assert_eq!(last_seen_version(&home.0).unwrap(), 5);
+    // Recording an older list is refused as a rollback (Codex's review of #997); the same version is already recorded.
+    let e = remember_list_version(&home.0, 3).unwrap_err();
+    assert_eq!(
+        (e.code, e.detail.as_str()),
+        (Code::IndexInvalid, "rollback")
+    );
+    assert_eq!(last_seen_version(&home.0).unwrap(), 5);
+    remember_list_version(&home.0, 5).unwrap();
     remember_list_version(&home.0, 6).unwrap();
-    assert_eq!(last_seen_version(&home.0), 6);
+    assert_eq!(last_seen_version(&home.0).unwrap(), 6);
+}
+
+/// Codex's review of #997: a list is checked against the record, then recorded. A newer list recorded by another install between
+/// those two steps must not let the older one through: recording it is refused as a rollback and the newer record stays.
+#[test]
+fn a_newer_list_recorded_after_the_check_refuses_the_older_one() {
+    let home = Home::new();
+    let o = Opts::new("1.2.3", GOOD);
+    remember_list_version(&home.0, 4).unwrap();
+    let seen = last_seen_version(&home.0).unwrap();
+    let (envelope, key) = signed_list(&o, 5);
+    let older = verify_list(&envelope, &key, 1, seen).unwrap();
+    // Another ordinary install records list 7 meanwhile.
+    remember_list_version(&home.0, 7).unwrap();
+    let e = remember_list_version(&home.0, older.version).unwrap_err();
+    assert_eq!(
+        (e.code, e.detail.as_str()),
+        (Code::IndexInvalid, "rollback")
+    );
+    assert_eq!(last_seen_version(&home.0).unwrap(), 7);
+}
+
+/// Codex's review of #997: the record is opened without following a link at its name, and what was opened is checked on the handle.
+/// A link there (to a readable record, or to nothing) is refused, never read and never taken as "no record yet".
+#[test]
+fn a_link_at_the_list_state_is_refused_not_followed() {
+    let home = Home::new();
+    std::fs::create_dir_all(home.agents()).unwrap();
+    let target = home.0.join("elsewhere.json");
+    std::fs::write(&target, "{\"version\":1}\n").unwrap();
+    let state = home.agents().join("list-state.json");
+    #[cfg(unix)]
+    let linked = std::os::unix::fs::symlink(&target, &state).is_ok();
+    #[cfg(windows)]
+    let linked = std::os::windows::fs::symlink_file(&target, &state).is_ok();
+    #[cfg(not(any(unix, windows)))]
+    let linked = false;
+    if !linked {
+        // Windows without the right to make links: nothing to test.
+        return;
+    }
+    let refused = || {
+        let e = last_seen_version(&home.0).unwrap_err();
+        assert_eq!(
+            (e.code, e.detail.as_str()),
+            (Code::IndexInvalid, "list_state_unreadable")
+        );
+        assert_eq!(
+            remember_list_version(&home.0, 2).unwrap_err().detail,
+            "list_state_unreadable"
+        );
+    };
+    refused();
+    assert_eq!(
+        std::fs::read_to_string(&target).unwrap(),
+        "{\"version\":1}\n"
+    );
+    // A link to nothing is not "no record yet" either, and nothing is written through it.
+    std::fs::remove_file(&target).unwrap();
+    refused();
+    assert!(!target.exists());
+    assert!(std::fs::symlink_metadata(&state)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+}
+
+/// #923: a `list-state.json` that is there but cannot be read or understood is never taken as "no list seen yet" (version 0): that
+/// let any older list through and then overwrote the state with its lower version. Every list is refused until the owner acts.
+type MakeState = Box<dyn Fn(&Path)>;
+
+fn unreadable_states() -> Vec<(&'static str, MakeState)> {
+    let write =
+        |text: String| -> MakeState { Box::new(move |p: &Path| std::fs::write(p, &text).unwrap()) };
+    vec![
+        ("garbage", write("not json at all".into())),
+        ("truncated", write("{\"version\":".into())),
+        ("empty", write(String::new())),
+        ("wrong_shape", write("{\"v\":5}\n".into())),
+        ("negative", write("{\"version\":-1}\n".into())),
+        ("fraction", write("{\"version\":5.5}\n".into())),
+        ("not_an_object", write("5\n".into())),
+        // Other containers and values (Codex's review of #997): a derived reader took a positional array.
+        ("array", write("[5]\n".into())),
+        ("string", write("\"5\"\n".into())),
+        ("null", write("null\n".into())),
+        ("version_null", write("{\"version\":null}\n".into())),
+        ("version_string", write("{\"version\":\"5\"}\n".into())),
+        // A repeated `version` is not read as either value (Codex's review of #997).
+        (
+            "duplicate_version",
+            write("{\"version\":1,\"version\":9}\n".into()),
+        ),
+        (
+            "trailing",
+            write("{\"version\":5}\n{\"version\":1}\n".into()),
+        ),
+        // Valid JSON, but far larger than the state ever is: not read into memory.
+        (
+            "oversized",
+            write(format!("{{\"version\":5{}}}", " ".repeat(64 * 1024))),
+        ),
+        (
+            "directory",
+            Box::new(|p: &Path| std::fs::create_dir_all(p.join("inside")).unwrap()),
+        ),
+    ]
+}
+
+#[test]
+fn an_unreadable_list_state_refuses_every_list_and_is_left_as_it_was() {
+    for (case, make) in unreadable_states() {
+        let home = Home::new();
+        std::fs::create_dir_all(home.agents()).unwrap();
+        let state = home.agents().join("list-state.json");
+        make(&state);
+        let before = std::fs::read(&state).ok();
+        let e = last_seen_version(&home.0).unwrap_err();
+        assert_eq!(
+            (e.code, e.detail.as_str()),
+            (Code::IndexInvalid, "list_state_unreadable"),
+            "{case}"
+        );
+        for offered in [1, 3, 5, 9] {
+            let e = remember_list_version(&home.0, offered).unwrap_err();
+            assert_eq!(
+                (e.code, e.detail.as_str()),
+                (Code::IndexInvalid, "list_state_unreadable"),
+                "{case}: list version {offered} was not refused"
+            );
+        }
+        assert_eq!(
+            std::fs::read(&state).ok(),
+            before,
+            "{case}: the state was changed"
+        );
+        assert_eq!(state.is_dir(), case == "directory", "{case}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_list_state_this_user_cannot_read_refuses_every_list() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = Home::new();
+    remember_list_version(&home.0, 5).unwrap();
+    let state = home.agents().join("list-state.json");
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read(&state).is_ok() {
+        // Running as root: the permission does not stop a read, so there is nothing to test.
+        return;
+    }
+    let e = last_seen_version(&home.0).unwrap_err();
+    assert_eq!(
+        (e.code, e.detail.as_str()),
+        (Code::IndexInvalid, "list_state_unreadable")
+    );
+    let e = remember_list_version(&home.0, 3).unwrap_err();
+    assert_eq!(
+        (e.code, e.detail.as_str()),
+        (Code::IndexInvalid, "list_state_unreadable")
+    );
+    assert_eq!(
+        remember_list_version(&home.0, 9).unwrap_err().detail,
+        "list_state_unreadable"
+    );
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&state).unwrap(),
+        "{\"version\":5}\n"
+    );
+}
+
+/// #923, the way out: once the owner removes the file, the next list is the first one again (accepted and recorded); a newer list
+/// is still accepted over a readable state and an older one is still refused.
+#[test]
+fn a_missing_list_state_accepts_and_records_the_first_list() {
+    let home = Home::new();
+    std::fs::create_dir_all(home.agents()).unwrap();
+    let state = home.agents().join("list-state.json");
+    std::fs::write(&state, "{\"version\":").unwrap();
+    assert!(remember_list_version(&home.0, 4).is_err());
+    std::fs::remove_file(&state).unwrap();
+    remember_list_version(&home.0, 4).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&state).unwrap(),
+        "{\"version\":4}\n"
+    );
+    remember_list_version(&home.0, 6).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&state).unwrap(),
+        "{\"version\":6}\n"
+    );
+    // No temporary file is left beside it (the write is a rename over the old file).
+    let names: Vec<String> = std::fs::read_dir(home.agents())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with("list-state"))
+        .collect();
+    assert_eq!(names, ["list-state.json"]);
+}
+
+/// The whole check as `agora agent install` runs it (the state, then `verify_list`, then the record): over a readable state an
+/// older signed list is a rollback, an equal or newer one is accepted; over a damaged state no list is opened at all.
+#[test]
+fn an_older_signed_list_is_refused_over_a_readable_state_and_every_list_over_a_damaged_one() {
+    let home = Home::new();
+    let o = Opts::new("1.2.3", GOOD);
+    let open = |version: u64| -> Result<u64, String> {
+        let seen = last_seen_version(&home.0).map_err(|e| e.detail)?;
+        let (envelope, key) = signed_list(&o, version);
+        let l = verify_list(&envelope, &key, 1, seen).map_err(|e| format!("{e:?}"))?;
+        remember_list_version(&home.0, l.version).map_err(|e| e.detail)?;
+        Ok(l.version)
+    };
+    assert_eq!(open(5), Ok(5));
+    assert!(open(3).unwrap_err().contains("Rollback"));
+    assert_eq!(open(5), Ok(5));
+    assert_eq!(open(6), Ok(6));
+    std::fs::write(home.agents().join("list-state.json"), "{\"vers").unwrap();
+    for version in [3, 6, 7] {
+        assert_eq!(open(version), Err("list_state_unreadable".into()));
+    }
 }
 
 #[test]
@@ -914,7 +1149,7 @@ fn a_held_lock_names_its_owner_and_refuses_another_install_until_released() {
     assert!(released(&home));
     // Released: the next holder takes it (the list version is remembered under the same lock, on every system).
     remember_list_version(&home.0, 3).unwrap();
-    assert_eq!(last_seen_version(&home.0), 3);
+    assert_eq!(last_seen_version(&home.0).unwrap(), 3);
     if !skip() {
         let net = Net::serving(GOOD);
         install(&p2, &approval(&p2), &home.0, &tools(&net, &Sig(true))).unwrap();
@@ -1134,7 +1369,7 @@ fn installs_in_two_processes_never_hold_the_lock_at_once_and_a_killed_holder_fre
         }
         std::thread::sleep(Duration::from_millis(20));
     }
-    assert_eq!(last_seen_version(&home.0), 7);
+    assert_eq!(last_seen_version(&home.0).unwrap(), 7);
     assert!(released(&home));
 }
 
@@ -1149,7 +1384,7 @@ fn a_lock_an_older_version_left_with_a_second_name_is_taken() {
     std::fs::write(&aside, "").unwrap();
     std::fs::hard_link(&aside, home.agents().join(".lock")).unwrap();
     remember_list_version(&home.0, 4).unwrap();
-    assert_eq!(last_seen_version(&home.0), 4);
+    assert_eq!(last_seen_version(&home.0).unwrap(), 4);
     assert!(!aside.exists());
     assert!(released(&home));
     // A second name of any other kind is still refused.
@@ -1297,7 +1532,7 @@ fn the_list_version_is_remembered_under_the_lock() {
         remember_list_version(&home.0, 4).unwrap_err().code,
         Code::InProgress
     );
-    assert_eq!(last_seen_version(&home.0), 0);
+    assert_eq!(last_seen_version(&home.0).unwrap(), 0);
 }
 
 // ---- finding what was installed (ADR-0087 item 3) ----------------------------------------------------------------------------

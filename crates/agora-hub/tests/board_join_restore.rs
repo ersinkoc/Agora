@@ -130,7 +130,8 @@ fn joins_preserve_saved_tasks_dependencies_and_live_leases_without_reloading_ini
         store.set_setting("board.p", &saved_before_reopen).unwrap();
         let hub = Hub::open(store).unwrap();
         // A hub that opens has no connections, so it records both machines offline (ADR-0070); they redial.
-        let _links = ["alpha", "beta"].map(|node| hub.node_link_opened(node, Vec::new(), 2000));
+        let _links =
+            ["alpha", "beta"].map(|node| hub.node_link_opened(node, Vec::new(), 2000).unwrap());
         if preload {
             assert_eq!(
                 call(&hub, "alpha", "task_list", json!({}))

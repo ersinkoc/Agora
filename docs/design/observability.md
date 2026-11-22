@@ -50,7 +50,10 @@
     connection and writing its fact happen under one lock, as do ending one and writing its fact, so the log's order is the
     order the connections took turns in; `generation` (1, 2, … per node, kept across hub restarts) lets a reader ignore a late
     fact about an older connection. For clients from before ADR-0070 the hub also writes `NodeOffline` when the current
-    connection ends; such a client shows a machine that reconnected as offline until it reloads (as before).
+    connection ends; such a client shows a machine that reconnected as offline until it reloads (as before). A connection
+    whose `opened` fact the store cannot write is not registered and the hub ends it (logged as `node link ended: <node>
+    store: ...`); the node dials again within seconds and is recorded then, so a machine is never connected while every view
+    shows it offline (#957).
   - **At hub start** (`agora-hub::hub::Hub::open`) no connection exists yet. A node that the view rebuilt from the log shows
     online (the hub was killed or lost power with its connection open, so no end was recorded; or only an old `NodeOnline` from
     before ADR-0070 says so) is recorded offline before the server accepts connections: `NodeOffline` for older clients, then

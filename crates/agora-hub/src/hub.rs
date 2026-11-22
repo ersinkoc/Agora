@@ -469,20 +469,27 @@ impl Hub {
         )
     }
 
-    /// ADR-0070: a node's connection is open after the handshake. Registers it with the router (commands reach it from now on) and
-    /// records `NodeLink { up }` under one lock, so the log's order of presence facts is the order the connections really took
-    /// turns in. Returns the registration, the node's commands and this connection's generation. Nothing the node runs is touched:
-    /// a reconnect is not a process start.
+    /// ADR-0070: a node's connection is open after the handshake. Records `NodeLink { up }` and registers it with the router
+    /// (commands reach it from now on) under one lock, so the log's order of presence facts is the order the connections really
+    /// took turns in. Returns the registration, the node's commands and this connection's generation. Nothing the node runs is
+    /// touched: a reconnect is not a process start.
+    ///
+    /// #957: when the fact cannot be stored, the connection is not registered and the error is returned, so the caller ends it and
+    /// the node dials again (within seconds) and is recorded then. Before, the router took the node and the failure was dropped: the
+    /// machine stayed connected and healthy but offline in every view, and nothing ever corrected it.
     pub fn node_link_opened(
         &self,
         node: &str,
         capabilities: Vec<String>,
         now_ms: u64,
-    ) -> (
-        crate::router::Registration,
-        tokio::sync::mpsc::UnboundedReceiver<crate::router::ToNode>,
-        u64,
-    ) {
+    ) -> Result<
+        (
+            crate::router::Registration,
+            tokio::sync::mpsc::UnboundedReceiver<crate::router::ToNode>,
+            u64,
+        ),
+        StoreError,
+    > {
         let mut g = self.lock();
         let generation = g
             .view
@@ -490,9 +497,7 @@ impl Hub {
             .get(node)
             .map_or(0, |n| n.link_generation)
             .saturating_add(1);
-        let (registration, commands) = self.router.register_with_capabilities(node, capabilities);
-        // The router has it either way; a store that cannot write leaves the view as it was until the next fact.
-        let _ = self.emit(
+        self.emit(
             &mut g,
             Body::NodeLink(NodeLink {
                 node_id: node.to_string(),
@@ -502,8 +507,9 @@ impl Hub {
                 last_heard_ms: now_ms,
             }),
             now_ms,
-        );
-        (registration, commands, generation)
+        )?;
+        let (registration, commands) = self.router.register_with_capabilities(node, capabilities);
+        Ok((registration, commands, generation))
     }
 
     /// ADR-0070: a node's connection ended (`silent`: the hub closed it after its deadline). Unregisters it and records
@@ -1062,7 +1068,7 @@ mod tests {
         use agora_protocol::{v1::AgentExited, ErrorCode};
         let (hub, sup) = (hub(), support());
         let mut s = open_session(&hub, &sup, "n1");
-        let (reg, _cmds, generation) = hub.node_link_opened("n1", Vec::new(), 1);
+        let (reg, _cmds, generation) = hub.node_link_opened("n1", Vec::new(), 1).unwrap();
         hub.ingest(&mut s, &online("n1", 1)).unwrap();
         hub.ingest(&mut s, &agent("n1", 2, "closed")).unwrap();
         hub.ingest(&mut s, &agent("n1", 3, "running")).unwrap();
@@ -1106,7 +1112,7 @@ mod tests {
         assert_eq!(hub.view().1, at);
 
         // It connects again: listed again, with the agent it still runs; the one closed before stays forgotten.
-        let _back = hub.node_link_opened("n1", Vec::new(), 8);
+        let _back = hub.node_link_opened("n1", Vec::new(), 8).unwrap();
         let (view, _) = hub.view();
         assert!(!view.nodes["n1"].forgotten);
         let shown = crate::server::snapshot_of(&view, 0);
@@ -1122,7 +1128,7 @@ mod tests {
         use agora_protocol::v1::CheckoutDiscovered;
         let (hub, sup) = (hub(), support());
         let mut s = open_session(&hub, &sup, "n1");
-        let (reg, _cmds, generation) = hub.node_link_opened("n1", Vec::new(), 1);
+        let (reg, _cmds, generation) = hub.node_link_opened("n1", Vec::new(), 1).unwrap();
         hub.ingest(&mut s, &online("n1", 1)).unwrap();
         let checkout = Event {
             producer_id: "n1".into(),
@@ -1147,7 +1153,7 @@ mod tests {
         assert!(shown.nodes.is_empty() && shown.checkouts.is_empty() && shown.agents.is_empty());
 
         // The machine comes back: every live client is let go...
-        let _back = hub.node_link_opened("n1", Vec::new(), 6);
+        let _back = hub.node_link_opened("n1", Vec::new(), 6).unwrap();
         assert!(
             joined.live.try_recv().is_err(),
             "a live client was kept: it would only hear NodeLink"
@@ -1659,7 +1665,7 @@ mod tests {
         assert_eq!(again.view(), live);
         assert_eq!(again.store().acked(RESERVED_HUB_ID).unwrap(), 9);
         // The next connection of "up" is a newer generation and brings it back online.
-        let (_reg, _cmds, generation) = again.node_link_opened("up", Vec::new(), 10_001);
+        let (_reg, _cmds, generation) = again.node_link_opened("up", Vec::new(), 10_001).unwrap();
         assert_eq!(generation, 3);
         assert!(again.view().0.nodes["up"].online);
     }
@@ -1703,5 +1709,66 @@ mod tests {
         let ca = crate::ca::Ca::generate("ca").unwrap();
         let (_, csr) = crate::ca::new_device_request().unwrap();
         assert!(ca.issue_node(RESERVED_HUB_ID, &csr).is_err());
+    }
+
+    /// A hub on a file, another connection to the same file (what another process is: `agora hub login`, the front door, `agora hub
+    /// code`), and a cleanup.
+    fn hub_on_file(name: &str) -> (Hub, std::path::PathBuf) {
+        let path = std::env::temp_dir().join(format!("agora-hub-{name}-{}.db", std::process::id()));
+        for ext in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{ext}", path.display()));
+        }
+        (Hub::open(SqliteStore::open(&path).unwrap()).unwrap(), path)
+    }
+
+    fn remove_db(path: &std::path::Path) {
+        for ext in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{ext}", path.display()));
+        }
+    }
+
+    /// #957: a machine that connects while another process writes the hub's database is shown online. The record of its connection
+    /// read before it wrote, in a deferred transaction, so SQLite answered "database is locked" at once instead of waiting; the
+    /// failure was dropped, and the machine stayed connected but offline in every view, with nothing to correct it (seen as "the node
+    /// never came back online": the test's own `agora hub login` wrote the database while the node reconnected).
+    #[test]
+    fn a_machine_that_connects_while_another_process_writes_is_shown_online() {
+        let (hub, path) = hub_on_file("presence-busy");
+        let other = rusqlite::Connection::open(&path).unwrap();
+        other
+            .execute_batch("BEGIN IMMEDIATE; INSERT OR REPLACE INTO settings (key, value) VALUES ('other', x'00');")
+            .unwrap();
+        let commit = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            other.execute_batch("COMMIT;").unwrap();
+        });
+        let opened = hub.node_link_opened("n1", Vec::new(), 1);
+        commit.join().unwrap();
+        assert!(opened.is_ok());
+        assert!(hub.view().0.nodes.get("n1").is_some_and(|n| n.online));
+        drop(hub);
+        remove_db(&path);
+    }
+
+    /// #957: a connection whose opening the hub cannot record is not live: the error comes back (the server ends the connection),
+    /// the router does not have the node, and the node's next connection, once the store works again, is recorded online. Before,
+    /// the router took it and the failure was dropped, so the machine was connected but shown offline for as long as it stayed.
+    #[test]
+    fn a_connection_whose_opening_cannot_be_recorded_is_not_kept() {
+        let (hub, path) = hub_on_file("presence-refused");
+        let other = rusqlite::Connection::open(&path).unwrap();
+        other
+            .execute_batch("CREATE TRIGGER no_events BEFORE INSERT ON events BEGIN SELECT RAISE(ABORT, 'full'); END;")
+            .unwrap();
+        assert!(hub.node_link_opened("n1", Vec::new(), 1).is_err());
+        assert!(!hub.router().is_connected("n1"));
+        assert!(!hub.view().0.nodes.get("n1").is_some_and(|n| n.online));
+        other.execute_batch("DROP TRIGGER no_events;").unwrap();
+        let (_reg, _cmds, generation) = hub.node_link_opened("n1", Vec::new(), 2).unwrap();
+        assert_eq!(generation, 1);
+        assert!(hub.router().is_connected("n1"));
+        assert!(hub.view().0.nodes["n1"].online);
+        drop(hub);
+        remove_db(&path);
     }
 }
