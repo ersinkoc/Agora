@@ -49,6 +49,8 @@ import { type AgentTileModel, type UiState, needsAttention, sortFleet } from './
 const demoMessages: MessageModel[] = [
   { from: 'claude · amber', to: 'codex · teal', body: 'The login fix is on branch login-fix, ready for review.', atMs: 2, crossMachine: false },
   { from: 'claude · amber', to: 'laptop/codex · violet', body: 'Can you run the tests on your machine?', atMs: 1, crossMachine: true },
+  // A copy only another machine than the sender's recorded (a receiver's channel copy, or one a node wrote for another): it says who.
+  { from: 'desktop/claude · rose', to: 'codex · teal', body: '[#ops] Deploy is done.', atMs: 0, crossMachine: true, via: 'laptop' },
 ];
 
 function Messages({ messages }: { messages: readonly MessageModel[] }) {
@@ -59,7 +61,7 @@ function Messages({ messages }: { messages: readonly MessageModel[] }) {
         <ul className="messages">
           {messages.map((m, i) => (
             <li key={`${m.atMs}-${i}`}>
-              <strong>{m.from}</strong> → <strong>{m.to}</strong>{m.crossMachine ? <span className="muted"> · {t('message-cross')}</span> : null}
+              <strong>{m.from}</strong> → <strong>{m.to}</strong>{m.crossMachine ? <span className="muted"> · {t('message-cross')}</span> : null}{m.via ? <span className="muted"> · {t('message-via', { machine: m.via })}</span> : null}
               <div className="muted">{m.body}</div>
             </li>
           ))}
@@ -233,7 +235,7 @@ export function Focus({ agent, approvals = [], onResolve, source: live, chatSour
         <AgentAddress key={agent.id} agent={agent} />
         <div className="pane min-h-0 flex-1 bg-surface-0 p-1.5" aria-label={agent.terminal === false ? t('chat-log') : t('focus-terminal')}>
           {agent.terminal === false ? <PromptBox key={agent.id} agent={agent} source={chatSource} send={sendPrompt} choose={chooseOption} approvals={asks.length ? <div className="grid gap-2">{asks.map((x) => <ApprovalBanner key={x.id} approval={x} onResolve={onResolve} pinned />)}</div> : undefined} /> : (
-            <Suspense fallback={<div className="terminal" aria-busy="true" />}>
+            <Suspense fallback={<div className="terminal-host" aria-busy="true" />}>
               <TerminalView source={source} label={t('focus-terminal')} />
             </Suspense>
           )}

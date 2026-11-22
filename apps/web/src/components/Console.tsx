@@ -327,7 +327,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
       <AgentAddress agent={a} />
       {helperGrants && revokeGrant && !a.closed && fleet.some((c) => c.parentId === a.id) &&
         <HelperGrants list={() => helperGrants(a)} revoke={(id) => revokeGrant(a, id)} refresh={fleet.filter((c) => c.parentId === a.id && !c.closed).length} />}
-      {a.closed ? <ClosedSummary agent={a} now={now}
+      {a.closed ? <ClosedSummary agent={a} now={now} source={a.terminal === false ? chatOf?.(a) : undefined}
         onReview={loadDiff ? () => setReviewing(a.id) : undefined} onHistory={loadHistory && a.git !== false ? () => setHistory(a.id) : undefined} onFiles={filesOf ? () => setBrowsing(a.id) : undefined}
         onStart={onStart ? () => onStart() : undefined} onDismiss={() => dismiss([a.id])}
         onForget={onForget ? () => removeClosed([a.id]) : undefined} forgetError={forgetError}
@@ -336,7 +336,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
         {a.terminal !== false && <LiveSummary agent={a} now={now} onChanges={() => { setRailTab('changes'); setShowDetails(true); }} />}
         <div className="pane min-h-0 flex-1 p-1.5">
         {a.terminal === false ? <PromptBox key={a.id} agent={a} send={sendPrompt} source={chatOf?.(a)} choose={chooseOption} onReview={loadDiff ? () => setReviewing(a.id) : undefined} approvals={pinnedAsks(a.id)} /> : (
-          <Suspense fallback={<div className="terminal" aria-busy="true" />}>
+          <Suspense fallback={<div className="terminal-host" aria-busy="true" />}>
             <TerminalView source={terminalFor(a.id)} label={`${t('focus-terminal')} · ${a.name}`} />
           </Suspense>
         )}

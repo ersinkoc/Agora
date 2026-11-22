@@ -106,7 +106,7 @@ export function TerminalView({ source, label }: { source: TerminalSource; label:
   const closeFind = () => { setFinding(false); renderer.current?.clearFind(); renderer.current?.focus(); };
   const view = (
     <div className="terminal-frame">
-      <div ref={host} className="terminal" role="region" aria-label={label} dir="ltr" />
+      <div ref={host} className="terminal-host" role="region" aria-label={label} dir="ltr" />
       {finding && <FindBar find={(q, back) => renderer.current?.find(q, back) ?? false} onClose={closeFind} />}
       <TerminalFloat atBottom={atBottom} onJump={() => renderer.current?.scrollToBottom()} link={link} offer={offer}
         onCopy={() => { if (offer !== undefined) void navigator.clipboard?.writeText(offer).catch(() => undefined); offerRef(undefined); renderer.current?.focus(); }}

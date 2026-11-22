@@ -592,7 +592,14 @@ fn start_process(config: &PtyConfig, hpc: HPCON) -> io::Result<(Handle, u32, Opt
         .as_ref()
         .map(|s| Confinement::new(s, config.identity.as_deref()))
         .transpose()?;
-    let env = environment(&config.env, &config.env_remove);
+    let env = match confinement.as_ref().and_then(Confinement::git_config) {
+        Some(file) => {
+            let mut extra = config.env.clone();
+            extra.extend(crate::git_config_env(file));
+            environment(&extra, &config.env_remove)
+        }
+        None => environment(&config.env, &config.env_remove),
+    };
     // Not lossily: a folder name need not be valid Unicode.
     let cwd: Option<Vec<u16>> = config.cwd.as_ref().map(|c| {
         c.as_os_str()

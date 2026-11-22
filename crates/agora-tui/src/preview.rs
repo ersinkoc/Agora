@@ -22,8 +22,8 @@ pub struct Preview {
     /// The last full repaint, applied again when the size it was meant for arrives after it.
     screen: Vec<u8>,
     output_since_screen: bool,
-    /// The mouse and focus modes the program switched on, read from the bytes that arrive (see `termio`). A repaint does not carry
-    /// them, so a program that switched a mode on before this view opened is not known to have it until it switches it on again.
+    /// The mouse and focus modes the program switched on, read from the bytes that arrive (see `termio`), the repaint included: a
+    /// current node's repaint sets or resets each mode it tracks (ADR-0100), so a mode switched on before this view opened is known.
     scanner: ModeScanner,
     /// When to ask the machine for a fresh repaint: after its terminal was resized while output had come since the last repaint.
     /// Reflowing that output here, size after size, mangled it until the tab was opened again (TUI review); the machine's own

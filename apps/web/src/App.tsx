@@ -23,7 +23,8 @@ import { forgetSkipAnswer, forgetSkipCapable, isSkipCapable, recordSkipAnswer, s
 import type { HelperGrant } from './components/HelperGrants';
 import { addPasskey, passkeysSupported, signInWithPasskey } from './net/passkey';
 import { summarize, type UsageSummary } from './net/usage';
-import { endSession, forgetToken, hubConnection, readCode, setPassword, signIn, signInFromLink, signInInfo, type SignInInfo } from './net/session';
+import { endSession, forgetToken, hubConnection, readCode, setPassword, signIn, signInFromLink, NO_PASSWORD } from './net/session';
+import { useSignInInfo } from './net/useSignInInfo';
 import { idleMinutes, setIdleMinutes, watchIdle, type IdleMinutes } from './net/idle';
 import { ScreenPasswordSettings } from './components/Locks';
 import { Console } from './components/Console';
@@ -44,6 +45,7 @@ import { canStartFor, forgetGiveSupport, forgetOffline, givableTasks, giveAsk, g
 import { GiveContext, GiveDialog, type GiveApi } from './components/GiveTask';
 import { plain } from './components/boardColumns';
 import { failure, type ActionResult } from './net/refusal';
+import { startRefusalKey } from './net/startRefusal';
 import { usableId } from './components/launchChoice';
 import { launchSettingsField } from './components/launchSettingsModel';
 import { rememberStarted } from './components/launchMemory';
@@ -83,9 +85,7 @@ export function App() {
   const [hub, setHub] = useState(hubConnection);
   const [signInNotice, setSignInNotice] = useState<string | undefined>();
   // Whether the hub asks this browser for the screen password (ADR-0067), and whether one is set.
-  const [info, setInfo] = useState<SignInInfo>({ passwordRequired: false, passwordSet: false });
-  const refreshInfo = useCallback(() => { void signInInfo().then(setInfo); }, []);
-  useEffect(refreshInfo, [refreshInfo]);
+  const [info, refreshInfo] = useSignInInfo(hub);
   const trySignIn = useCallback(async (code: string, password?: string) => {
     const r = await signIn(code, password);
     if (r.ok) { setSignInNotice(undefined); setHub(hubConnection()); return; }
@@ -107,8 +107,8 @@ export function App() {
     const { code, rest } = readCode(window.location.hash);
     if (code === undefined) return;
     window.history.replaceState(null, '', window.location.pathname + window.location.search + rest);
-    void signInFromLink(code, async () => { const i = await signInInfo(); setInfo(i); return i; }, (c) => { void trySignIn(c); }, setLinkCode);
-  }, [trySignIn]);
+    void signInFromLink(code, async () => (await refreshInfo()) ?? NO_PASSWORD, (c) => { void trySignIn(c); }, setLinkCode);
+  }, [trySignIn, refreshInfo]);
   const [live, setLive] = useState<View | undefined>();
   const [link, setLink] = useState<LinkState>('connecting');
   const [api, setApi] = useState<Live | undefined>();
@@ -175,7 +175,7 @@ export function App() {
       if (code === 'agent.setting_unknown' || code === 'agent.setting_invalid') return { failure: 'start-setting-refused' };
       if (code === 'protocol.capability_missing' && launch.settings.length > 0) return { failure: 'start-settings-unsupported' };
       if (code === 'protocol.capability_missing' && launch.ids.length > 0) return { failure: 'start-options-unsupported' };
-      return { failure: code === 'agent.mode_unsupported' ? 'start-directory-agent-unsupported' : code === 'approval.signature_invalid' ? 'approval-not-trusted' : code === 'protocol.capability_missing' ? 'start-directory-unsupported' : code === 'agent.kind_unknown' ? 'start-kind-unknown' : code === 'node.resource_limit' ? 'start-limit' : code === 'auth.forbidden' ? 'start-directory-forbidden' : 'start-failed' };
+      return { failure: startRefusalKey(code) };
     }
   }, [api, device]);
   const startAgent = useCallback(async (node: string, info: DirectoryInfo, kind: string, separateWorktree: boolean, acceptIdentityChange: boolean, launch: { ids: string[]; confirmed: string[]; settings: [string, string][] }): Promise<string | undefined> => {
@@ -574,7 +574,7 @@ export function App() {
           fingerprint={device ? prints.get(device.id) : undefined} machines={live ? machines(live) : undefined} trustedOn={trustedOn} others={hub ? others : undefined}
           loadKinds={hub && api && live ? loadKinds : undefined} asked={asked} onAsk={hub && api ? askApproval : undefined} onRemove={hub && api ? removeDevice : undefined}
           security={hub ? <ScreenPasswordSettings passwordSet={info.passwordSet} idle={idle} onIdle={(m) => { setIdleMinutes(m); setIdle(m); }}
-            onSet={async (password, current) => { const r = await setPassword(hub.token, password, current); if (r.ok) refreshInfo(); return r; }} /> : undefined} /> : hash === '#/theme' && phone ? <PhoneTheme onBack={() => go('#/')} />
+            onSet={async (password, current) => { const r = await setPassword(hub.token, password, current); void refreshInfo(); return r; }} /> : undefined} /> : hash === '#/theme' && phone ? <PhoneTheme onBack={() => go('#/')} />
         : current !== undefined && phone
         ? <PhoneAgent agent={selectedAgent} agents={agents} approvals={approvalsNow} loadDiff={hub && api ? loadDiff : !hub ? demoLoadDiff : undefined} filesOf={hub && api ? filesOf : !hub ? demoFilesOf : undefined} machines={live ? machines(live) : hub ? [] : demoMachines} onResolve={resolve} untrusted={untrustedOn} notice={notice ? t(notice) : undefined}
           source={terminal} chatSource={selectedAgent?.terminal === false ? chatOf(selectedAgent) : undefined} sendPrompt={hub && api ? sendPrompt : undefined} chooseOption={hub && api ? chooseOption : undefined} link={hub ? link : 'live'} onOpen={open} onBack={() => go('#/')} />

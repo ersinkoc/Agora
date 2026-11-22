@@ -176,7 +176,7 @@ body {
 .phone-tools { display: flex; flex: none; flex-wrap: wrap; gap: var(--space-2); padding: var(--space-2) var(--space-2) 0; }
 .phone-asks { display: grid; gap: var(--space-2); padding: var(--space-2); max-height: 50%; overflow-y: auto; flex: none; }
 .phone-pane { display: flex; flex-direction: column; flex: 1; min-height: 0; padding: var(--space-1); padding-bottom: calc(env(safe-area-inset-bottom) + var(--space-1)); }
-.phone-pane .terminal { border: 0; }
+.phone-pane .terminal-host { border: 0; }
 
 /* The terminal and its key bar, on a touch screen (any window size). */
 .terminal-touch { display: flex; flex-direction: column; height: 100%; min-height: 0; }

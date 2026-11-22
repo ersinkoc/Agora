@@ -15,6 +15,7 @@ pub mod files;
 pub mod git;
 pub mod gitconfig;
 pub mod grants;
+pub mod history;
 pub mod holder;
 pub mod holder_link;
 pub mod holder_note;

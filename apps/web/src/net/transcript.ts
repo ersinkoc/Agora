@@ -1,4 +1,4 @@
-import type { ChatLine } from './chat';
+import { notSentIds, type ChatLine } from './chat';
 import { parseHunks } from './diff';
 import { endedWithError } from '../model';
 import { toolView, type ToolAction } from './tool';
@@ -19,9 +19,43 @@ export type TranscriptItem =
   | { kind: 'diff'; id: string; line: ChatLine }
   | { kind: 'notice'; id: string; line: ChatLine };
 
+// #908 (RM-44): the order a person reads. The node numbers entries as they arrive, so a prompt that waited behind a turn has a smaller
+// id than the answers of the turn before it; when it is sent its entry comes again with the time it went (`at_ms` is when an entry's
+// event happened). So a prompt of the person's is placed after the agent's entry it was seen to follow (`sentAfter`, this window saw it
+// sent), else by time: before the first other entry that is not older, ties and out-of-order times broken by id. An entry without a
+// time (0, an old node) moves nothing past it. A prompt still waiting is drawn after everything. The agent's own entries keep the node's
+// order. Pure; the held lines are not changed.
+export function ordered(lines: readonly ChatLine[]): ChatLine[] {
+  const notSent = notSentIds(lines);
+  const others = lines.filter((l) => l.role !== 'user');
+  const firstAfter = (id: number): number => { // the index of the first other entry with a larger id
+    let lo = 0, hi = others.length;
+    while (lo < hi) { const mid = (lo + hi) >>> 1; if ((others[mid] as ChatLine).id <= id) lo = mid + 1; else hi = mid; }
+    return lo;
+  };
+  const before: ChatLine[][] = Array.from({ length: others.length + 1 }, () => []);
+  const waiting: ChatLine[] = [];
+  for (const l of lines) {
+    if (l.role !== 'user') continue;
+    if (l.queued && !notSent.has(l.id)) { waiting.push(l); continue; }
+    let i: number;
+    if (l.sentAfter !== undefined) i = firstAfter(Math.max(l.sentAfter, l.id));
+    else {
+      i = firstAfter(l.id);
+      while (i < others.length && (others[i] as ChatLine).atMs > 0 && (others[i] as ChatLine).atMs < l.atMs) i++;
+    }
+    (before[i] as ChatLine[]).push(l);
+  }
+  const out: ChatLine[] = [];
+  others.forEach((o, i) => { const b = before[i] as ChatLine[]; if (b.length) out.push(...b.sort((x, y) => x.id - y.id)); out.push(o); });
+  out.push(...(before[others.length] as ChatLine[]).sort((x, y) => x.id - y.id), ...waiting);
+  return out;
+}
+
 const day = (ms: number): string => { const d = new Date(ms); return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`; };
 
-export function transcript(lines: readonly ChatLine[]): TranscriptItem[] {
+export function transcript(held: readonly ChatLine[]): TranscriptItem[] {
+  const lines = ordered(held);
   const out: TranscriptItem[] = [];
   let lastPlan = -1;
   lines.forEach((l, i) => { if (l.role === 'agent' && l.kind === 'plan') lastPlan = i; });
@@ -93,6 +127,21 @@ export function changedFiles(lines: readonly ChatLine[]): ChangedFile[] {
     byPath.set(l.path, f);
   }
   return [...byPath.values()];
+}
+
+/** #908: the groups of calls whose turn is over, by item id: every group followed by a prompt of the person's that was sent (a later
+ *  turn began), and every group when the agent is not in a turn (`live` false: idle, finished, closed). A call of such a group that
+ *  still says it runs or waits will not finish (the turn was stopped, or the agent moved on), so it is drawn as stopped, never spinning.
+ *  ACP leaves marking them to the client. Pure. */
+export function endedGroups(items: readonly TranscriptItem[], live: boolean): Set<string> {
+  const ended = new Set<string>();
+  let later = !live;
+  for (let i = items.length - 1; i >= 0; i--) {
+    const item = items[i] as TranscriptItem;
+    if (item.kind === 'user' && !item.line.queued) later = true;
+    else if (item.kind === 'steps' && later) ended.add(item.id);
+  }
+  return ended;
 }
 
 /** The newest `shown` items of a long history, and how many older ones wait behind "show earlier". */

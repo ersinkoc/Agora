@@ -133,31 +133,6 @@ pub fn identity_missing() -> bool {
         .any(|k| read_key(k).is_none_or(|v| v.trim().is_empty()))
 }
 
-/// The folder of the files: where the system's temp folder is out of the agent's reach (macOS, Windows) one of the node's own inside
-/// it; elsewhere (Linux, where `/tmp` is the agent's to write) one under `~/.agora` of the home folder (the node's own folder by convention; derived from the home folder, not
-/// from the data folder the node was given),
-/// which no confinement profile grants. Either is made private by the platform ([`agora_platform::ensure_private_dir`]) before
-/// anything is written, because the temp folder's own permissions can admit other programs (on Windows, other sandboxes) that
-/// could then rewrite what the agent trusts. `None` when there is no home folder (no file is written then).
-fn private_folder() -> Option<PathBuf> {
-    if agora_platform::PRIVATE_TEMP {
-        return Some(std::env::temp_dir().join("agora-git-config"));
-    }
-    crate::usage_files::home_dir().map(|h| h.join(".agora").join("git-config"))
-}
-
-/// Makes the folder the file goes in ready: created if missing, then checked and made private through one handle of the folder
-/// itself (`agora_platform::ensure_private_dir`: not a link, this user's, mode 0700 or an owner-only ACL). An error means the folder
-/// cannot be trusted (or does not exist for lack of a home folder): no file.
-pub fn prepare_folder() -> std::io::Result<()> {
-    let dir = private_folder().ok_or_else(|| std::io::Error::other("no home folder"))?;
-    if let Some(parent) = dir.parent().filter(|_| !agora_platform::PRIVATE_TEMP) {
-        // The node's own folder holds the folder, so the folder is never beside what an agent can write.
-        agora_platform::ensure_private_dir(parent)?;
-    }
-    agora_platform::ensure_private_dir(&dir)
-}
-
 /// A short, stable (across runs and versions, unlike `DefaultHasher`) number for a path: FNV-1a over its bytes, folded to 32 bits.
 pub(crate) fn place_hash(path: &Path) -> u32 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
@@ -167,45 +142,32 @@ pub(crate) fn place_hash(path: &Path) -> u32 {
     (h ^ (h >> 32)) as u32 // truncation intended: the low 32 bits of the folded hash
 }
 
-/// Where the file of the agent that works in `worktree` is written: in the node's private folder ([`private_folder`]), never beside
-/// the worktree, so no other confined agent that can write a parent of the worktree can rewrite it (ADR-0078: the file is the agent's
-/// to read, not to write). Without a home folder the path lies in the temp folder, which the caller's write-grant check refuses on
-/// Linux (the file is then not written).
-pub fn path_for(worktree: &Path) -> PathBuf {
-    let name = worktree
-        .file_name()
-        .map_or_else(|| "agent".into(), |n| n.to_string_lossy().into_owned());
-    // The place is part of the name: in the shared folder two worktrees called `a` of different projects must not share a file.
-    let file = format!("agora-gitconfig-{name}-{:08x}", place_hash(worktree));
-    private_folder()
-        .unwrap_or_else(std::env::temp_dir)
-        .join(file)
-}
-
-/// The name the file is first written under: `.new` appended, not `with_extension`, which would cut a worktree name such as `fix.v1`
-/// and give it the name of `fix.v2`.
+/// A staging file beside the final file, so the rename stays on the same filesystem.
 fn temp_name(path: &Path) -> PathBuf {
     let mut name = path.as_os_str().to_owned();
     name.push(".new");
     PathBuf::from(name)
 }
 
-/// Writes the file for the agent in `worktree` from the person's configuration, replacing the last one. Written to a new name and
-/// renamed over the old, so a link left at the old name is replaced and never followed. Returns the path, or `None` when it could not
-/// be written (git then behaves as it did before: an agent that cannot read a global configuration).
-pub fn write_for(worktree: &Path) -> Option<PathBuf> {
-    write_for_result(worktree).ok()
+/// The node-owned directory for generated Git configuration (ADR-0098).
+pub fn directory(data_dir: &Path) -> PathBuf {
+    data_dir.join("git-config")
+}
+
+/// Writes a fresh file for this launch. A concurrent launch in the same worktree keeps its own
+/// file and the read grant for its inode or ACL.
+pub fn write_for(data_dir: &Path) -> Option<PathBuf> {
+    write_for_result(data_dir).ok()
 }
 
 /// [`write_for`] with the reason it failed.
-pub fn write_for_result(worktree: &Path) -> std::io::Result<PathBuf> {
-    write_values(worktree, &read_allowed())
-}
-
-fn write_values(worktree: &Path, values: &[(String, String)]) -> std::io::Result<PathBuf> {
-    let path = path_for(worktree);
-    prepare_folder()?;
-    write_to(&path, values)
+pub fn write_for_result(data_dir: &Path) -> std::io::Result<PathBuf> {
+    let dir = directory(data_dir);
+    agora_platform::ensure_private_dir(&dir)?;
+    let mut nonce = [0u8; 16];
+    getrandom::getrandom(&mut nonce).map_err(|e| std::io::Error::other(e.to_string()))?;
+    let path = dir.join(format!("agent-{:032x}", u128::from_ne_bytes(nonce)));
+    write_to(&path, &read_allowed())
 }
 
 /// Writes the file at `path` (its folder made ready by the caller).
@@ -222,9 +184,7 @@ fn write_to(path: &Path, values: &[(String, String)]) -> std::io::Result<PathBuf
             .open(&tmp)?;
         f.write_all(text.as_bytes())?;
     }
-    // Another program (a virus scanner, an indexer) may hold the old file for a moment, which makes a rename over it fail with a sharing
-    // or access error on Windows: only that is tried again. Any other error ends it, and the old file is never removed first, so the agent
-    // is never left with no file where it had one (it keeps the last one, or, failing the first write, none: git then behaves as before).
+    // A scanner may briefly hold the staging file on Windows. Retry sharing and access errors.
     let mut last = None;
     for _ in 0..5 {
         match std::fs::rename(&tmp, &path) {
@@ -246,21 +206,6 @@ fn write_to(path: &Path, values: &[(String, String)]) -> std::io::Result<PathBuf
     }
     let _ = std::fs::remove_file(&tmp);
     Err(last.unwrap_or_else(|| std::io::Error::other("rename failed")))
-}
-
-/// The environment that points a confined agent's git at its file (decisions 1 and 3). The node's own environment may carry git
-/// settings that apply on top of any global file (`GIT_CONFIG_COUNT` with `GIT_CONFIG_KEY_n`/`VALUE_n`, `GIT_CONFIG_PARAMETERS`, which
-/// `git -c` leaves for child gits): the count is set to 0 (the key and value variables are then not read) and the parameters emptied.
-pub fn env_for(file: &Path) -> Vec<(String, String)> {
-    vec![
-        ("GIT_CONFIG_COUNT".into(), "0".into()),
-        ("GIT_CONFIG_PARAMETERS".into(), String::new()),
-        (
-            "GIT_CONFIG_GLOBAL".into(),
-            file.to_string_lossy().into_owned(),
-        ),
-        ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
-    ]
 }
 
 #[cfg(test)]
@@ -357,33 +302,6 @@ mod tests {
     }
 
     #[test]
-    fn a_dotted_worktree_name_has_a_temp_name_of_its_own() {
-        let dir = std::env::temp_dir().join(format!("agora-gc-dot-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        assert_eq!(
-            temp_name(Path::new("/x/agora-gitconfig-fix.v1")),
-            Path::new("/x/agora-gitconfig-fix.v1.new")
-        );
-        assert_ne!(
-            temp_name(&path_for(Path::new("/w/fix.v1"))),
-            temp_name(&path_for(Path::new("/w/fix.v2")))
-        );
-        let (a, b) = (dir.join("fix.v1"), dir.join("fix.v2"));
-        std::fs::create_dir_all(&a).unwrap();
-        std::fs::create_dir_all(&b).unwrap();
-        // The files go in a folder of this test, not the node's real one.
-        let here = |w: &Path| dir.join(path_for(w).file_name().unwrap());
-        let pa = write_to(&here(&a), &pairs(&[("user.name", "A")])).unwrap();
-        let pb = write_to(&here(&b), &pairs(&[("user.name", "B")])).unwrap();
-        assert_ne!(pa, pb);
-        assert!(std::fs::read_to_string(&pa).unwrap().contains("\"A\""));
-        assert!(std::fs::read_to_string(&pb).unwrap().contains("\"B\""));
-        let _ = std::fs::remove_dir_all(&dir);
-        let _ = std::fs::remove_file(pa);
-        let _ = std::fs::remove_file(pb);
-    }
-
-    #[test]
     fn oversized_values_are_dropped() {
         assert_eq!(
             render(&pairs(&[("user.name", &"x".repeat(MAX_VALUE + 1))])),
@@ -392,38 +310,12 @@ mod tests {
     }
 
     #[test]
-    fn the_file_sits_outside_the_agents_write_grants() {
-        let wt = Path::new("/home/u/.agora/worktrees/agent-1");
-        let p = path_for(wt);
-        assert!(!p.starts_with(wt));
-        assert_ne!(p.parent(), Some(wt));
-        assert!(p.to_string_lossy().contains("agent-1"));
-    }
-
-    /// Review F6: the file is never beside the worktree (a folder an older agent of the same project may write), but in the node's
-    /// private folder.
-    #[test]
-    fn the_file_is_not_beside_the_worktree() {
-        let wt = Path::new("/srv/project/sub/agent-1");
-        let p = path_for(wt);
-        assert_ne!(p.parent(), wt.parent());
-        assert!(!p.starts_with("/srv/project"));
-        assert!(p
-            .parent()
-            .is_some_and(|d| d.ends_with(if agora_platform::PRIVATE_TEMP {
-                "agora-git-config"
-            } else {
-                "git-config"
-            })));
-    }
-
-    #[test]
     fn writing_replaces_a_link_and_the_old_text() {
         let dir = std::env::temp_dir().join(format!("agora-gc-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let wt = dir.join("agent-9");
         std::fs::create_dir_all(&wt).unwrap();
-        let p = dir.join(path_for(&wt).file_name().unwrap());
+        let p = dir.join("agent-9.gitconfig");
         let victim = dir.join("victim");
         std::fs::write(&victim, "keep").unwrap();
         #[cfg(unix)]
