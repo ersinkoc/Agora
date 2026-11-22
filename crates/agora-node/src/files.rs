@@ -78,6 +78,9 @@ fn io_err(path: &str, e: &std::io::Error) -> FilesError {
         std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
     ) {
         FilesError::NotFound(path.to_string())
+    } else if agora_platform::link_loop(e) {
+        // A link to itself or a ring of links never leads anywhere: refused as a link that cannot be resolved is (issue #924).
+        FilesError::OutsideRoot(path.to_string())
     } else {
         FilesError::Io(format!("{path}: {e}"))
     }
@@ -973,6 +976,40 @@ mod tests {
         f.write("fresh/dir/y.txt", b"y", &agent, &leases, 0)
             .unwrap();
         assert_eq!(f.read("fresh/dir/y.txt").unwrap(), b"y");
+    }
+
+    #[test]
+    fn a_link_that_never_resolves_is_outside_the_root_not_an_internal_error() {
+        // Issue #924: a link to itself, or a ring of links, never leads anywhere; it answers as a link that cannot be resolved does.
+        let (d, f) = setup();
+        let root = d.join("wt");
+        if agora_platform::symlink(Path::new("self"), &root.join("self")).is_err() {
+            return; // no symbolic links here (Windows without the privilege)
+        }
+        agora_platform::symlink(Path::new("ring-b"), &root.join("ring-a")).unwrap();
+        agora_platform::symlink(Path::new("ring-a"), &root.join("ring-b")).unwrap();
+        let (agent, leases) = (AgentId::new("a"), LeaseTable::new());
+        for rel in ["self", "ring-a", "self/x.txt", "ring-b/x.txt"] {
+            let outside = |r: Result<(), FilesError>| matches!(r, Err(FilesError::OutsideRoot(p)) if p == rel);
+            assert!(
+                outside(f.read(rel).map(drop)),
+                "read {rel}: {:?}",
+                f.read(rel)
+            );
+            assert!(
+                outside(f.list(rel).map(drop)),
+                "list {rel}: {:?}",
+                f.list(rel)
+            );
+            let wrote = f.write(rel, b"x", &agent, &leases, 0);
+            assert!(outside(wrote.clone()), "write {rel}: {wrote:?}");
+        }
+        // The links themselves are untouched, and a diff still shows a link as its target.
+        assert_eq!(fs::read_link(root.join("self")).unwrap(), Path::new("self"));
+        assert_eq!(
+            f.untracked("self").unwrap(),
+            Untracked::Link(b"self".to_vec())
+        );
     }
 
     #[cfg(unix)]

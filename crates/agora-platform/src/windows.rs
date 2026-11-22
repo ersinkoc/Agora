@@ -361,6 +361,15 @@ fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
+/// The name cannot be resolved (`ERROR_CANT_RESOLVE_FILENAME`: too many levels of symbolic links), or resolving it stopped at a
+/// link (`ERROR_STOPPED_ON_SYMLINK`).
+pub(crate) fn link_loop(e: &io::Error) -> bool {
+    use windows_sys::Win32::Foundation::{ERROR_CANT_RESOLVE_FILENAME, ERROR_STOPPED_ON_SYMLINK};
+    e.raw_os_error().is_some_and(|code| {
+        code == ERROR_CANT_RESOLVE_FILENAME as i32 || code == ERROR_STOPPED_ON_SYMLINK as i32
+    })
+}
+
 fn os_error(code: u32) -> io::Error {
     io::Error::from_raw_os_error(code as i32)
 }

@@ -75,7 +75,7 @@ or a local response timeout has a localized retry message.
 | `lease.invalid_path` | `path` | Empty path or one containing `..` |
 | `files.not_found` | `path` | |
 | `files.too_large` | `path`, `limit` | |
-| `files.outside_root` | `path` | Path escapes the worktree (`..`, absolute, or a symlink leading out) |
+| `files.outside_root` | `path` | Path escapes the worktree (`..`, absolute, or a symlink leading out), or a symlink never resolves (its target is missing, it points to itself, or a ring of links) |
 | `files.secret` | `path` | ADR-0080: the node treats the file as secret by its name (`.env`, a private key, ...) and does not show it; the node's owner can switch this off (`files.show_secret`) |
 | `adapter.signature_invalid` | `package` | |
 | `adapter.crashed` | `kind`, `exit_code` | |
