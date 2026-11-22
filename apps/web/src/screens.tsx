@@ -49,6 +49,8 @@ import { type AgentTileModel, type UiState, needsAttention, sortFleet } from './
 const demoMessages: MessageModel[] = [
   { from: 'claude · amber', to: 'codex · teal', body: 'The login fix is on branch login-fix, ready for review.', atMs: 2, crossMachine: false },
   { from: 'claude · amber', to: 'laptop/codex · violet', body: 'Can you run the tests on your machine?', atMs: 1, crossMachine: true },
+  // A copy only another machine than the sender's recorded (a receiver's channel copy, or one a node wrote for another): it says who.
+  { from: 'desktop/claude · rose', to: 'codex · teal', body: '[#ops] Deploy is done.', atMs: 0, crossMachine: true, via: 'laptop' },
 ];
 
 function Messages({ messages }: { messages: readonly MessageModel[] }) {
@@ -59,7 +61,7 @@ function Messages({ messages }: { messages: readonly MessageModel[] }) {
         <ul className="messages">
           {messages.map((m, i) => (
             <li key={`${m.atMs}-${i}`}>
-              <strong>{m.from}</strong> → <strong>{m.to}</strong>{m.crossMachine ? <span className="muted"> · {t('message-cross')}</span> : null}
+              <strong>{m.from}</strong> → <strong>{m.to}</strong>{m.crossMachine ? <span className="muted"> · {t('message-cross')}</span> : null}{m.via ? <span className="muted"> · {t('message-via', { machine: m.via })}</span> : null}
               <div className="muted">{m.body}</div>
             </li>
           ))}

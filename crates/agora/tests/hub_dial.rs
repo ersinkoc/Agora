@@ -1524,6 +1524,168 @@ fn an_agent_messages_an_agent_on_another_node_through_the_hub_and_a_failure_come
     );
 }
 
+/// #905 and #915, through real nodes and a real hub. One message between machines is recorded by both nodes (two `MessagePosted`
+/// with their own ids: the sender's names the recipient `<node>/<agent>`, the receiver's names the sender so), which the window
+/// folds into one row. A message to a machine that went offline with its agent comes back to the sender as `node.offline`.
+#[test]
+fn a_message_between_machines_is_recorded_by_both_and_one_to_a_stopped_machine_fails_with_node_offline(
+) {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
+        return;
+    }
+    use agora_core::AgentId;
+    use agora_hub::store::EventStore;
+    use agora_mesh::broker::AgentInfo;
+    use agora_node::uplink_client::MeshOut;
+    use agora_protocol::v1::event::Body;
+    use prost::Message as _;
+    let hub = hubside("alpha");
+    let addr = hub.listen("127.0.0.1:0");
+    let start = |name: &str, cert: String, key: String| {
+        let dir = tmp(&format!("offline-{name}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = agora_node::daemon::NodeConfig {
+            resume_all: false,
+            node_id: name.into(),
+            socket: dir.join("c.sock"),
+            data_dir: dir.join("data"),
+            worktree_root: dir.join("wt"),
+            manifests_dir: dir.join("manifests"),
+            projects: vec![],
+            limits: Default::default(),
+        };
+        let node = agora_node::daemon::Node::start(&cfg).unwrap();
+        let out = MeshOut::new();
+        node.mesh.set_remote(out.clone());
+        let mut link = hub.link(addr);
+        (link.cert_pem, link.key_pem) = (cert, key);
+        link.commands = Some(cfg.socket.clone());
+        link.mesh_out = Some(out);
+        let up = spawn(Arc::clone(&node.events), link).unwrap();
+        let agent = AgentId::new(if name == "alpha" { "a1" } else { "b1" });
+        let socket = node
+            .mesh
+            .register(AgentInfo {
+                id: agent.clone(),
+                kind: "shell".into(),
+                node: name.into(),
+                project: "p".into(),
+                label: String::new(),
+                worktree: String::new(),
+                state: "idle".into(),
+            })
+            .unwrap();
+        (node, up, agent, socket)
+    };
+    let (cert, key) = (hub.enroll("alpha"), hub.enroll("beta"));
+    let (a, _ua, a1, a_sock) = start("alpha", cert.0, cert.1);
+    let (b, ub, b1, _b_sock) = start("beta", key.0, key.1);
+    for n in ["alpha", "beta"] {
+        wait("a node to be online", || {
+            hub.state
+                .hub
+                .view()
+                .0
+                .nodes
+                .get(n)
+                .is_some_and(|x| x.online)
+        });
+    }
+    let mut conn = agora_platform::local_connect(&a_sock).unwrap();
+    mcp(
+        &mut conn,
+        1,
+        "initialize",
+        serde_json::json!({"protocolVersion": "2025-03-26"}),
+    );
+    let send = |conn: &mut agora_platform::LocalStream, id, body: &str| {
+        mcp(
+            conn,
+            id,
+            "tools/call",
+            serde_json::json!({"name": "send_message", "arguments": {"to": "beta/b1", "body": body}}),
+        )
+    };
+    let sent = send(&mut conn, 2, "ping");
+    assert_ne!(sent["isError"], true, "{sent}");
+    wait("the message to arrive", || {
+        !b.mesh
+            .mesh()
+            .lock()
+            .unwrap()
+            .inbox(&b1, None, 10)
+            .unwrap()
+            .is_empty()
+    });
+    // #905: both nodes record it; what the window gets is these two, which it shows as one row.
+    let posted = || -> Vec<(String, String, String)> {
+        hub.state
+            .hub
+            .store()
+            .events_after(0, 10_000)
+            .unwrap()
+            .iter()
+            .filter_map(|e| {
+                let ev = agora_protocol::v1::Event::decode(e.payload.as_slice()).ok()?;
+                match ev.body? {
+                    Body::MessagePosted(m) if m.body == "ping" => {
+                        Some((ev.producer_id, m.from_agent_id, m.to))
+                    }
+                    _ => None,
+                }
+            })
+            .collect()
+    };
+    wait("both copies to reach the hub", || posted().len() == 2);
+    let mut copies = posted();
+    copies.sort();
+    assert_eq!(
+        copies,
+        [
+            ("alpha".into(), "a1".into(), "beta/b1".into()),
+            ("beta".into(), "alpha/a1".into(), "b1".into()),
+        ]
+    );
+
+    // #915: beta stops, and its agent ends with it. The hub records it offline; a message to that agent fails with a reason.
+    drop(ub);
+    drop(b);
+    wait("beta to be offline", || {
+        hub.state
+            .hub
+            .view()
+            .0
+            .nodes
+            .get("beta")
+            .is_some_and(|x| !x.online)
+    });
+    let sent = send(&mut conn, 3, "are you there");
+    assert_ne!(sent["isError"], true, "{sent}");
+    let id =
+        serde_json::from_str::<serde_json::Value>(sent["content"][0]["text"].as_str().unwrap())
+            .unwrap()["message_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+    wait("the failure to come back", || {
+        !a.mesh
+            .mesh()
+            .lock()
+            .unwrap()
+            .inbox(&a1, None, 10)
+            .unwrap()
+            .is_empty()
+    });
+    let notices = a.mesh.mesh().lock().unwrap().inbox(&a1, None, 10).unwrap();
+    assert_eq!(
+        notices
+            .iter()
+            .map(|m| (m.kind, m.body.as_str(), m.reply_to.as_deref()))
+            .collect::<Vec<_>>(),
+        [("delivery_failed", "node.offline", Some(id.as_str()))]
+    );
+}
+
 /// ADR-0039: two nodes share a project, so tasks, leases and handoffs are decided on the hub's board.
 #[test]
 fn agents_on_two_nodes_share_a_board_claims_leases_and_handoffs_and_it_fails_closed_without_the_hub(

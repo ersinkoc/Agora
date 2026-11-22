@@ -1249,6 +1249,56 @@ async fn a_nodes_mesh_post_is_routed_with_the_origin_the_hub_saw_and_nothing_els
     );
 }
 
+/// #915: a mesh post to a machine whose link is dead but not yet found so (the hub still lists it online), and to one the hub
+/// already records offline, is answered `node.offline` to the sending node: never left without an answer.
+#[tokio::test]
+async fn a_mesh_post_to_a_node_whose_link_died_or_ended_is_answered_node_offline() {
+    let st = state(None);
+    let (mut n1, _t1) = node_conn(&st, "n1").await;
+    handshake(&mut n1).await;
+    n1.send(&f(
+        STREAM_EVENTS,
+        kinds::EVENT,
+        event("n1", 1, online("n1")),
+    ))
+    .await
+    .unwrap();
+    next_ack(&mut n1).await;
+    let silence = Duration::from_millis(400);
+    let (mut n2, t2) = node_conn_within(&st, "n2", silence).await;
+    let from = handshake(&mut n2).await.from_seq;
+    n2.send(&f(
+        STREAM_EVENTS,
+        kinds::EVENT,
+        event("n2", from, online("n2")),
+    ))
+    .await
+    .unwrap();
+    next_ack(&mut n2).await;
+
+    // n2's machine is gone, its connection still open: the hub lists it online and forwards the post to it.
+    assert!(st.hub.view().0.nodes["n2"].online);
+    n1.send(&mesh_post("p1", "n2/b1", "")).await.unwrap();
+    let got = recv(&mut n2).await;
+    assert_eq!((got.stream_id, got.kind), (STREAM_COMMANDS, 0));
+    // n2 never answers; when the hub finds the link silent, the sender is told.
+    let r = response(&mut n1).await;
+    assert_eq!(
+        (r.request_id.as_str(), err_code(&r)),
+        ("p1", "node.offline")
+    );
+    assert!(t2.await.unwrap(), "n2's link ended for silence");
+    assert!(!st.hub.view().0.nodes["n2"].online);
+
+    // Recorded offline (its agents ended with it): answered at once.
+    n1.send(&mesh_post("p2", "n2/b1", "")).await.unwrap();
+    let r = response(&mut n1).await;
+    assert_eq!(
+        (r.request_id.as_str(), err_code(&r)),
+        ("p2", "node.offline")
+    );
+}
+
 struct Switch(Arc<std::sync::atomic::AtomicBool>);
 
 impl ClientAuth for Switch {

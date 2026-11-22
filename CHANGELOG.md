@@ -9,6 +9,8 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 - After a node restart, an agent the terminal holder kept is on the mesh again: its mesh tools answer, and an `agora mesh stdio` bridge that was open reconnects (#906).
 - A chat agent whose program keeps crashing now says so in its conversation each time Agora starts it again, and once Agora gives up it is shown as "Ended with an error" with its exit code and takes no more messages, instead of staying "Unknown" with a live input box (#902). A reloaded window now also keeps showing an agent that ended with an error as failed, with its exit code, instead of "Finished".
 - `agora agent start` (and a start from the window, a resume, or an agent starting a helper) for an agent whose program this machine cannot find now says "cannot find PROGRAM in its PATH" instead of "Something went wrong" (#903; new error code `agent.program_missing`).
+- The window's Messages list shows a message between machines once, from its sender and marked "between machines", instead of a second time with the sender's name doubled (`rm-two/blackview/agent-16`) and no mark (#905). A copy that only another machine than the sender's recorded says which machine reported it.
+- A mesh message to another machine whose answer never comes back now fails with a `delivery_failed` notice `node.timeout` after 40 s on the sending machine, so the sender always learns that it was not delivered (#915).
 - In the terminal client, `b` opens the board of the selected agent's project (Backlog, Doing, Done), and Enter on a Backlog task gives it to one of the project's running agents after a confirmation you answer with `g`.
 
 ## 0.3.33
