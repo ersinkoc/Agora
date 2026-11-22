@@ -55,8 +55,8 @@ const machineName = (a: AgentTileModel, machines: readonly { id: string; name: s
 };
 
 /** The acts-without-asking sign for an agent that acts without asking now: started so, or switched to a mode or setting that skips approvals. */
-function FreeBadge({ agent }: { agent: AgentTileModel }) {
-  return <NoAskBadge agent={{ skipsPermissions: actsFreelyNow(agent) }} session={!agent.skipsPermissions} nested />;
+function FreeBadge({ agent, nested = true }: { agent: AgentTileModel; nested?: boolean }) {
+  return <NoAskBadge agent={{ skipsPermissions: actsFreelyNow(agent) }} session={!agent.skipsPermissions} nested={nested} />;
 }
 
 /** One agent in the picker: name, kind, machine, its state, and whether it acts without asking. One button, at least 44 px high. */
@@ -100,7 +100,7 @@ export function GiveConfirm({ task, agent, machines, busy, onSend, onBack }: { t
       </dl>
       {actsFreelyNow(agent) && (
         <p role="note" className="m-0 flex items-start gap-2 rounded-s border border-needs-you/60 p-3 text-sm text-ink">
-          <FreeBadge agent={agent} />
+          <FreeBadge agent={agent} nested={false} />
           <span>{t('give-confirm-no-ask', { agent: plain(agent.name, FULL) })}</span>
         </p>
       )}

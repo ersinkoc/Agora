@@ -189,6 +189,19 @@ try {
     const closed = (await page.$('[data-no-ask-tip]')) === null;
     if (!closed) failed++;
     console.log(`${closed ? 'ok  ' : 'FAIL'} ${label}: Esc closes the tooltip`);
+    // A touch screen: a tap on the sign opens its tooltip, a tap elsewhere closes it.
+    const touch = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, hasTouch: true, isMobile: true, colorScheme: 'dark' });
+    const phone = await touch.newPage();
+    await phone.goto(`${base}?page=session&w=370`);
+    await phone.waitForFunction(() => window.__ready === true && !!document.querySelector('[data-no-ask]'));
+    await phone.tap('[data-no-ask]');
+    if (!(await tipCheck(phone, `${label} phone tap`))) failed++;
+    await phone.tap('#bar', { position: { x: 4, y: 4 } });
+    await phone.waitForTimeout(50);
+    const gone = (await phone.$('[data-no-ask-tip]')) === null;
+    if (!gone) failed++;
+    console.log(`${gone ? 'ok  ' : 'FAIL'} ${label} phone: a tap elsewhere closes the tooltip`);
+    await touch.close();
     if (shots && scale === 1) {
       for (const theme of ['light', 'dark']) {
         await page.evaluate((t) => { document.documentElement.dataset.theme = t; window.dispatchEvent(new Event('agora-theme')); }, theme);

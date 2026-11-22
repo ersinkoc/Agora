@@ -55,6 +55,12 @@ describe('the acts-without-asking sign', () => {
     expect(tip()).toBeNull();
   });
 
+  it('a focus inside a larger focusable box that holds the sign is not the sign\'s control', () => {
+    act(() => root.render(<div tabIndex={-1}><NoAskBadge agent={{ skipsPermissions: true }} nested /><button type="button" data-other>Give</button></div>));
+    act(() => host.querySelector<HTMLButtonElement>('[data-other]')!.focus());
+    expect(tip()).toBeNull();
+  });
+
   it('says which mode makes it act so, when the window knows it', () => {
     act(() => root.render(<NoAskBadge agent={{ skipsPermissions: true }} session cause="Mode: YOLO" />));
     act(() => host.querySelector<HTMLElement>('[data-no-ask]')!.focus());

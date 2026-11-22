@@ -35,8 +35,9 @@ function Badge({ full, nested, kind }: { full: string; nested: boolean; kind: st
   useEffect(() => {
     const ctrl = nested ? ref.current?.parentElement?.closest<HTMLElement>(CONTROL) : null;
     if (!ctrl) return;
-    const on = () => setAnchor(focusVisible(ctrl) ? ref.current : null);
-    const off = () => setAnchor(null);
+    // Only the control's own focus: a focus inside it that bubbles up (a dialog that holds the sign, say) is not the control's.
+    const on = (e: FocusEvent) => { if (e.target === ctrl) setAnchor(focusVisible(ctrl) ? ref.current : null); };
+    const off = (e: FocusEvent) => { if (e.target === ctrl) setAnchor(null); };
     ctrl.addEventListener('focusin', on);
     ctrl.addEventListener('focusout', off);
     return () => { ctrl.removeEventListener('focusin', on); ctrl.removeEventListener('focusout', off); };
@@ -63,7 +64,7 @@ function focusVisible(el: Element): boolean {
   try { return el.matches(':focus-visible'); } catch { return true; } // a browser that does not know :focus-visible: show it on any focus
 }
 
-// The tooltip itself: the look of `.tip` (app.css `.tip-bubble`), placed under the sign (above it at the bottom of the window) and kept
+// The tooltip itself (app.css `.tip-bubble`), placed under the sign (above it at the bottom of the window) and kept
 // inside the window on both sides. Hidden from screen readers: the sign's name already says the same.
 function Bubble({ anchor, text }: { anchor: HTMLElement; text: string }) {
   const ref = useRef<HTMLSpanElement>(null);
