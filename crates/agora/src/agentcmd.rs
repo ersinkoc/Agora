@@ -52,6 +52,9 @@ fn failed(say: &Say, e: &InstallError) -> ExitCode {
     ExitCode::from(1)
 }
 
+/// The most of a root-key file that is read: 64 hex characters and a line ending, with room for surrounding whitespace.
+const MAX_ROOT_KEY_FILE_BYTES: usize = 4096;
+
 /// The root key: 64 hex characters given directly, or the file that holds them.
 fn root_key(o: &Opts, h: &Path) -> Option<String> {
     let given = o
@@ -62,11 +65,19 @@ fn root_key(o: &Opts, h: &Path) -> Option<String> {
     if text.len() == 64 && text.chars().all(|c| c.is_ascii_hexdigit()) {
         return Some(text);
     }
-    // A key file is 64 characters and a line ending: never read more than a small bound of it (F31).
-    let mut t = String::new();
+    // A key file is 64 characters and a line ending: never read more than a small bound of it (F31). One byte past the bound is
+    // read so a longer file is refused before trimming, never cut into a key (as `open_list` does for the list).
+    let mut bytes = Vec::new();
     std::fs::File::open(&given)
-        .and_then(|f| f.take(4096).read_to_string(&mut t))
+        .and_then(|f| {
+            f.take(MAX_ROOT_KEY_FILE_BYTES as u64 + 1)
+                .read_to_end(&mut bytes)
+        })
         .ok()?;
+    if bytes.len() > MAX_ROOT_KEY_FILE_BYTES {
+        return None;
+    }
+    let t = String::from_utf8(bytes).ok()?;
     Some(t.trim().to_string()).filter(|t| !t.is_empty())
 }
 
@@ -244,5 +255,48 @@ pub fn install(say: &Say, o: &Opts) -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(e) => failed(say, &e),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    const KEY: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    fn key_from_file(content: &[u8]) -> Option<String> {
+        let d = std::env::temp_dir().join(format!("agora-root-key-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let file = d.join(format!("key-{}", content.len()));
+        std::fs::write(&file, content).unwrap();
+        let o = Opts {
+            root_key: Some(file.clone()),
+            ..Opts::default()
+        };
+        let got = root_key(&o, &d);
+        let _ = std::fs::remove_file(&file);
+        got
+    }
+
+    /// The key file is read to at most its cap; a longer file is refused, never cut and trimmed into a key (F31 review).
+    #[test]
+    fn the_root_key_file_is_refused_past_its_cap() {
+        assert_eq!(
+            key_from_file(format!("{KEY}\n").as_bytes()),
+            Some(KEY.into())
+        );
+        // Exactly the cap: the key and whitespace to the last byte.
+        let mut at_cap = format!("{KEY}\n").into_bytes();
+        at_cap.resize(MAX_ROOT_KEY_FILE_BYTES, b' ');
+        assert_eq!(key_from_file(&at_cap), Some(KEY.into()));
+        // One byte past the cap is refused, even though the part inside the cap trims to a valid-looking key.
+        let mut over = at_cap.clone();
+        over.push(b'x');
+        assert_eq!(key_from_file(&over), None);
+        let mut over_ws = at_cap;
+        over_ws.push(b'\n');
+        assert_eq!(key_from_file(&over_ws), None);
+        assert_eq!(key_from_file(b" \n"), None);
     }
 }
