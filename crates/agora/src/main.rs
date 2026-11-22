@@ -24,16 +24,18 @@ use agora_protocol::v1::{
 const DETACH: u8 = 0x1d;
 
 /// Written to the user's own terminal before anything of the agent's (`terminal attach`): a kitty keyboard entry of our own on top
-/// of the terminal's stack, so the flags the agent sets change only our entry; detaching pops it and whatever the agent left
-/// pushed above it ([`HostKeyboard`]).
-const ATTACH_START: &[u8] = b"\x1b[>0u";
+/// of the terminal's stack, so the flags the agent sets change only our entry, and detaching pops it and whatever the agent left
+/// pushed above it ([`HostKeyboard`]); and the terminal's own alternate-scroll setting saved (XTSAVE `CSI ? 1007 s`), since the
+/// repaint sets 1007 as the node's emulator has it (on) and terminals differ in their default.
+const ATTACH_START: &[u8] = b"\x1b[>0u\x1b[?1007s";
 
-/// Written to the user's own terminal on detach, after `CSI ? 1049 l` (back to the main screen, where our keyboard entry is) and
-/// the pop of our entry and the agent's ([`HostKeyboard::detach`]): every mode the node's repaint (ADR-0100) or the agent may have
-/// switched on switched off again: mouse tracking and encodings, focus, bracketed paste, application cursor keys and keypad, insert
-/// and newline off, autowrap on, a plain pen in ASCII, the cursor shown in the terminal's own shape.
+/// Written to the user's own terminal on detach, after [`HostKeyboard::detach`] (the main screen, where our keyboard entry is, and
+/// the pop of our entry and the agent's): the modes the node's repaint (ADR-0100) or the agent may have changed put back to a
+/// terminal's defaults: mouse tracking and encodings, focus, bracketed paste, application cursor keys and keypad, insert and
+/// newline off, autowrap on, alternate scroll off and then the terminal's own setting restored where it supports XTRESTORE
+/// (`CSI ? 1007 r`; elsewhere off, xterm's default), a plain pen in ASCII, the cursor shown in the terminal's own shape.
 const DETACH_RESET: &[u8] =
-    b"\x1b[?9l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l\
+    b"\x1b[?1007l\x1b[?1007r\x1b[?9l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l\
 \x1b[?1004l\x1b[?2004l\x1b[?1l\x1b>\x1b[4l\x1b[20l\x1b[?7h\x1b[0m\x1b(B\x0f\x1b[?25h\x1b[0 q";
 
 /// The node's repaint as the user's own terminal gets it: without the kitty keyboard pop (`CSI < 32 u`) the node writes for a
@@ -65,6 +67,8 @@ struct HostKeyboard {
     screen: bool,
     alt: bool,
     pushed: u32,
+    /// Our own entry is gone: the agent popped past it, or reset the terminal. Only what it pushed since is popped on detach.
+    gone: bool,
 }
 
 impl HostKeyboard {
@@ -78,6 +82,7 @@ impl HostKeyboard {
                         state: 2,
                         alt: self.alt,
                         pushed: self.pushed,
+                        gone: self.gone,
                         ..Self::default()
                     };
                 }
@@ -86,6 +91,7 @@ impl HostKeyboard {
                     self.state = 0;
                     self.alt = false;
                     self.pushed = 0;
+                    self.gone = true;
                 }
                 (1, _) => self.state = 0,
                 (_, 0x18 | 0x1a) => self.state = 0,
@@ -131,6 +137,10 @@ impl HostKeyboard {
             (b'>', b'u') if !self.alt => self.pushed = self.pushed.saturating_add(1),
             (b'<', b'u') if !self.alt => {
                 let n = self.first.unwrap_or(1).max(1);
+                if n > self.pushed && !self.gone {
+                    // Past the agent's own entries: ours goes too, and some of the terminal's below it.
+                    self.gone = true;
+                }
                 self.pushed = self.pushed.saturating_sub(n);
             }
             (b'?', b'h') if self.screen => self.alt = true,
@@ -139,9 +149,19 @@ impl HostKeyboard {
         }
     }
 
-    /// The main screen, then the pop of our entry and of what the agent left pushed on it.
+    /// Back to the main screen if the agent left the terminal on the alternate one (only then: xterm and xterm.js restore the saved
+    /// cursor on `CSI ? 1049 l` even on the main screen, which would put the next lines over the top of it), then the pop of what
+    /// the agent left pushed on the main screen and of our own entry while it is still there.
     fn detach(&self) -> Vec<u8> {
-        format!("\x1b[?1049l\x1b[<{}u", self.pushed.saturating_add(1)).into_bytes()
+        let mut out = Vec::new();
+        if self.alt {
+            out.extend_from_slice(b"\x1b[?1049l");
+        }
+        let pop = self.pushed.saturating_add(u32::from(!self.gone));
+        if pop > 0 {
+            out.extend_from_slice(format!("\x1b[<{pop}u").as_bytes());
+        }
+        out
     }
 }
 
@@ -1267,36 +1287,39 @@ mod host_keyboard_tests {
     #[test]
     fn detach_pops_our_entry_and_what_the_agent_left_on_the_main_screen() {
         for split in [1, 3, 1 << 16] {
-            assert_eq!(pops(b"", split), "\x1b[?1049l\x1b[<1u");
-            assert_eq!(pops(b"\x1b[>5u\x1b[>7u", split), "\x1b[?1049l\x1b[<3u");
-            assert_eq!(
-                pops(b"\x1b[>5u\x1b[>7u\x1b[<u", split),
-                "\x1b[?1049l\x1b[<2u"
-            );
-            assert_eq!(
-                pops(b"\x1b[>5u\x1b[<9u", split),
-                "\x1b[?1049l\x1b[<1u",
-                "never below ours"
-            );
-            // On the alternate screen the stack is the screen's own and goes with it.
-            assert_eq!(
-                pops(b"\x1b[>1u\x1b[?1049h\x1b[>5u\x1b[>7u", split),
-                "\x1b[?1049l\x1b[<2u"
-            );
-            assert_eq!(
-                pops(b"\x1b[?1049h\x1b[>5u\x1b[?1049l\x1b[>3u", split),
-                "\x1b[?1049l\x1b[<2u"
-            );
-            assert_eq!(
-                pops(b"\x1b[?1;1049h\x1b[>5u", split),
-                "\x1b[?1049l\x1b[<1u",
-                "1049 in a list"
-            );
-            // Other sequences ending in u or h change nothing: restore cursor, set flags, an ordinary mode.
-            assert_eq!(
-                pops(b"\x1b[u\x1b[=5;1u\x1b[?2004h\x1b[>5u", split),
-                "\x1b[?1049l\x1b[<2u"
-            );
+            for (stream, want, what) in [
+                (&b""[..], "\x1b[<1u", "our entry"),
+                (b"\x1b[>5u\x1b[>7u", "\x1b[<3u", "and two of the agent's"),
+                (b"\x1b[>5u\x1b[>7u\x1b[<u", "\x1b[<2u", "one it popped"),
+                // The agent popped ours and the terminal's below it: nothing of ours is left to pop.
+                (b"\x1b[>5u\x1b[<9u", "", "past ours"),
+                (
+                    b"\x1b[>5u\x1b[<9u\x1b[>3u",
+                    "\x1b[<1u",
+                    "what it pushed after that",
+                ),
+                (b"\x1bc", "", "a full reset"),
+                // On the alternate screen the stack is the screen's own and goes with it; detach leaves that screen first.
+                (
+                    b"\x1b[>1u\x1b[?1049h\x1b[>5u\x1b[>7u",
+                    "\x1b[?1049l\x1b[<2u",
+                    "alternate screen",
+                ),
+                (
+                    b"\x1b[?1049h\x1b[>5u\x1b[?1049l\x1b[>3u",
+                    "\x1b[<2u",
+                    "back on the main screen",
+                ),
+                (
+                    b"\x1b[?1;1049h\x1b[>5u",
+                    "\x1b[?1049l\x1b[<1u",
+                    "1049 in a list",
+                ),
+                // Other sequences ending in u or h change nothing: restore cursor, set flags, an ordinary mode.
+                (b"\x1b[u\x1b[=5;1u\x1b[?2004h\x1b[>5u", "\x1b[<2u", "others"),
+            ] {
+                assert_eq!(pops(stream, split), want, "{what}, split {split}");
+            }
         }
     }
 }

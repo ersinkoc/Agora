@@ -271,6 +271,11 @@ fn detaching_gives_the_users_terminal_back_its_own_modes() {
         !text.contains("\x1b[<32u"),
         "the repaint's pop is not passed on"
     );
+    let tail = &text[text.rfind("\x1b[?1003h").unwrap_or(0)..];
+    assert!(
+        tail.contains("\x1b[?1049l"),
+        "detach leaves the alternate screen: {tail:?}"
+    );
     // The user's terminal, with keyboard flags of its own (a shell or tmux pushed 1), after the whole session.
     let mut host = AlacrittyTerminal::new(Size { cols: 80, rows: 24 });
     host.feed(b"\x1b[>1u");
@@ -282,7 +287,15 @@ fn detaching_gives_the_users_terminal_back_its_own_modes() {
     assert_eq!(m.mouse_encoding, MouseEncoding::Default);
     assert!(!m.focus_reporting && !m.application_keypad && !m.bracketed_paste);
     assert_eq!(m.keyboard_flags, 1, "the terminal's own keyboard flags");
-    assert_eq!(m, before);
+    // Alternate scroll is restored by XTRESTORE where the terminal has it; this emulator has not, so it ends off (xterm's default).
+    assert!(!m.alternate_scroll);
+    assert_eq!(
+        m,
+        agora_vt::Modes {
+            alternate_scroll: false,
+            ..before
+        }
+    );
     assert!(host.cursor().visible);
     assert_eq!(host.cursor().shape, CursorShape::Default);
 }
@@ -308,6 +321,11 @@ fn detaching_pops_what_the_agent_pushed_on_the_main_screen() {
     host.feed(b"\x1b[>1u");
     host.feed(&session);
     assert_eq!(host.modes().keyboard_flags, 1, "the terminal's own flags");
+    // Detaching from the main screen does not send `CSI ? 1049 l`: xterm and xterm.js would restore an old saved cursor on it and
+    // write the next lines over the top of the screen.
+    let text = String::from_utf8_lossy(&session);
+    let tail = &text[text.rfind("PUSHED-2").unwrap_or(0)..];
+    assert!(!tail.contains("\x1b[?1049l"), "{tail:?}");
 }
 
 #[test]
