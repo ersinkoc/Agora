@@ -559,6 +559,21 @@ pub fn always_label_line(a: &agora_protocol::v1::ApprovalSnapshot, t: Text<'_>) 
     Some(t(key!("tui-always-label"), &[("label", Arg::Str(label))]))
 }
 
+/// ADR-0101: what is read before answering a request that offers an answer the agent remembers: the agent's own name for it (when it
+/// gave one, [`always_label_line`]) and the warning that the agent decides what it covers and how long it keeps it, possibly longer than
+/// this session (the approved words; `always_text` picks them). Empty when the request offers no "always".
+pub fn always_lines(a: &agora_protocol::v1::ApprovalSnapshot, t: Text<'_>) -> Vec<String> {
+    if crate::client::always_offer(a).is_none() {
+        return Vec::new();
+    }
+    let mut out: Vec<String> = always_label_line(a, t).into_iter().collect();
+    out.push(t(
+        crate::client::always_text(key!("tui-always-warning"), false),
+        &[],
+    ));
+    out
+}
+
 /// ADR-0058: a notice in the conversation, in words. The code picks the message; parameters are the agent's text, shown plain.
 pub fn notice_text(e: &ChatEntry, t: Text<'_>) -> String {
     let p = |k: &str| Arg::Str(plain(e.params.get(k).map_or("", String::as_str)));

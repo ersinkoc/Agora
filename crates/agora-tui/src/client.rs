@@ -624,6 +624,17 @@ impl Session {
         let Some(a) = answered_approval(snapshot, agent) else {
             return Ok(false);
         };
+        self.resolve_request(a, device, answer).map(|()| true)
+    }
+
+    /// Answers exactly the request `a` (an agent's tab answers its own request, never another one): signed and sent as
+    /// [`answer_message`] says, or refused before anything is sent.
+    pub fn resolve_request(
+        &mut self,
+        a: &agora_protocol::v1::ApprovalSnapshot,
+        device: &Device,
+        answer: Answer,
+    ) -> Result<(), String> {
         // Hub-wide ids are `<node>/<local id>`; the machine knows the local one.
         let (node, local) = a
             .approval_id
@@ -644,7 +655,6 @@ impl Session {
             scope: scope as i32,
         });
         self.command(node, cmd, Duration::from_secs(15))
-            .map(|()| true)
     }
 
     /// Opens a terminal of a machine (ADR-0029): the hub relays its screen and output on a stream of ours. `terminal_id` is the
@@ -1426,6 +1436,7 @@ pub fn always_text(id: &'static str, session_limited: bool) -> &'static str {
         "tui-allowed-always" => key!("tui-allowed-always-kept"),
         "tui-app-cmd-allow-always" => key!("tui-app-cmd-allow-always-kept"),
         "tui-allow-once-not-offered" => key!("tui-allow-once-not-offered-kept"),
+        "tui-always-warning" => key!("tui-always-warning-kept"),
         other => other,
     }
 }
@@ -1529,6 +1540,18 @@ pub fn answer_message(
             }
         }
     }
+}
+
+/// The request an agent's tab answers: exactly `approval`, and only while it is still `agent`'s and waiting. Never another request.
+pub fn exact_approval<'a>(
+    snapshot: &'a Snapshot,
+    agent: &str,
+    approval: &str,
+) -> Option<&'a agora_protocol::v1::ApprovalSnapshot> {
+    snapshot
+        .approvals
+        .iter()
+        .find(|a| a.approval_id == approval && a.agent_id == agent)
 }
 
 /// The request `y` / `n` answer: `agent`'s when it has one, else the first waiting.

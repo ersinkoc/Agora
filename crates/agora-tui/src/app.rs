@@ -136,6 +136,13 @@ pub enum Action {
     /// A letter the shell has no use for, pressed in the tree or the inspector: the caller's command for the selected agent
     /// (start, stop, answer, resume…).
     Command(char),
+    /// Alt+Y, Alt+N or (ADR-0101) Alt+A in an agent's tab: answer exactly the request `approval` of `agent` (the tab's, never the tree's
+    /// selection, never another request), or nothing if it is no longer there.
+    Answer {
+        agent: String,
+        approval: String,
+        answer: crate::client::Answer,
+    },
     /// Text was selected with the mouse in the active agent's pane: copy it. In the pane's rows and columns, both ends included (the
     /// caller maps them to the screen's rows as drawn, see [`TerminalPane::first_row`]).
     Copy(Selection),
@@ -174,6 +181,9 @@ pub struct Row {
     pub request: bool,
     /// ADR-0101: that request offers an answer the agent remembers ("Allow always"): Alt+A answers so in its tab.
     pub request_always: bool,
+    /// The id of the request the agent's tab answers (its own first one; empty when none): Alt+Y, Alt+N and Alt+A carry it, so the
+    /// answer is signed for exactly that request, whatever row the tree has selected.
+    pub approval: String,
 }
 
 /// What an event is handled against: the tree's rows, the window, and the active agent's terminal modes.
@@ -504,6 +514,13 @@ impl App {
         out
     }
 
+    /// The row of the agent in front (its tab) when it has a request of its own waiting: what its Alt keys answer.
+    fn tab_request<'r>(&self, rows: &'r [Row]) -> Option<&'r Row> {
+        let id = self.active_agent()?;
+        rows.iter()
+            .find(|r| r.id == id && r.request && !r.approval.is_empty())
+    }
+
     fn key(&mut self, k: Key, cx: &Ctx<'_>, out: &mut Vec<Action>) {
         if self.selection.is_some() {
             self.selection = None;
@@ -533,25 +550,31 @@ impl App {
             }
             // ADR-0101: Alt+A allows the request of the agent in front always, only while that request offers it; otherwise it is the
             // agent's key, as Alt+Y and Alt+N are without a request.
-            Key::Alt('a' | 'A')
-                if self.focus == Focus::Terminal
-                    && self.active_agent().is_some_and(|id| {
-                        cx.rows.iter().any(|r| r.id == id && r.request_always)
-                    }) =>
-            {
-                out.push(Action::Command(ALLOW_ALWAYS));
-                return;
+            Key::Alt('a' | 'A') if self.focus == Focus::Terminal => {
+                if let Some(r) = self.tab_request(cx.rows).filter(|r| r.request_always) {
+                    out.push(Action::Answer {
+                        agent: r.id.clone(),
+                        approval: r.approval.clone(),
+                        answer: crate::client::Answer::AllowAlways,
+                    });
+                    return;
+                }
             }
             // Alt+Y / Alt+N answer the request of the agent in front (the caller shows it first when it is not in view); without
             // one they are the agent's keys, never an answer to another agent's request.
-            Key::Alt(c @ ('y' | 'Y' | 'n' | 'N'))
-                if self.focus == Focus::Terminal
-                    && self
-                        .active_agent()
-                        .is_some_and(|id| cx.rows.iter().any(|r| r.id == id && r.request)) =>
-            {
-                out.push(Action::Command(c.to_ascii_lowercase()));
-                return;
+            Key::Alt(c @ ('y' | 'Y' | 'n' | 'N')) if self.focus == Focus::Terminal => {
+                if let Some(r) = self.tab_request(cx.rows) {
+                    out.push(Action::Answer {
+                        agent: r.id.clone(),
+                        approval: r.approval.clone(),
+                        answer: if c.eq_ignore_ascii_case(&'y') {
+                            crate::client::Answer::Allow
+                        } else {
+                            crate::client::Answer::Deny
+                        },
+                    });
+                    return;
+                }
             }
             _ => {}
         }
@@ -2072,6 +2095,7 @@ mod tests {
                 group: false,
                 request: false,
                 request_always: false,
+                approval: String::new(),
             })
             .collect()
     }
@@ -2767,6 +2791,7 @@ mod tests {
                 group: false,
                 request: false,
                 request_always: false,
+                approval: String::new(),
             })
             .collect();
         let mut app = App::default();
@@ -2819,6 +2844,7 @@ mod tests {
             group: false,
             request: false,
             request_always: false,
+            approval: String::new(),
         }];
         let app = App::default();
         let question = vec![
@@ -3012,6 +3038,7 @@ mod tests {
         let mut asking = rows.clone();
         asking[0].request = true;
         asking[0].needs_you = true;
+        asking[0].approval = "mac/ap-1".into();
         // Plain letters are typing, even with a request waiting (a word with y or n never answers it: the TUI review's MUST A).
         assert_eq!(
             key(&mut app, &asking, Key::Char('y')),
@@ -3021,13 +3048,67 @@ mod tests {
             key(&mut app, &asking, Key::Char('n')),
             vec![Action::Input(b"n".to_vec())]
         );
+        let answer = |answer| Action::Answer {
+            agent: "mac/agent-1".into(),
+            approval: "mac/ap-1".into(),
+            answer,
+        };
         assert_eq!(
             key(&mut app, &asking, Key::Alt('y')),
-            vec![Action::Command('y')]
+            vec![answer(crate::client::Answer::Allow)]
         );
         assert_eq!(
             key(&mut app, &asking, Key::Alt('N')),
-            vec![Action::Command('n')]
+            vec![answer(crate::client::Answer::Deny)]
+        );
+    }
+
+    /// Codex's review of ADR-0101 part B: with the keyboard in one agent's tab and the tree on another agent, Alt+Y, Alt+N and Alt+A
+    /// answer the TAB's request (carried with its id), never the tree's selection or the first request waiting.
+    #[test]
+    fn the_alt_keys_answer_the_tabs_own_request_whatever_the_tree_selects() {
+        use crate::client::Answer;
+        let mut rows = rows();
+        for (i, r) in rows.iter_mut().take(2).enumerate() {
+            r.request = true;
+            r.request_always = true;
+            r.needs_you = true;
+            r.approval = format!("mac/ap-{}", i + 1);
+        }
+        let mut app = App::default();
+        // The tab of agent-2, then the tree moves to agent-1 (Ctrl+] gives the tree the keyboard), then back into the tab with Tab.
+        key(&mut app, &rows, Key::Down);
+        key(&mut app, &rows, Key::Enter);
+        assert_eq!(app.active_agent(), Some("mac/agent-2"));
+        key(&mut app, &rows, Key::Ctrl(']'));
+        key(&mut app, &rows, Key::Up);
+        assert_eq!(app.selected, 0, "the tree is on agent-1");
+        app.focus = Focus::Terminal;
+        let tab = |answer| Action::Answer {
+            agent: "mac/agent-2".into(),
+            approval: "mac/ap-2".into(),
+            answer,
+        };
+        assert_eq!(
+            key(&mut app, &rows, Key::Alt('a')),
+            vec![tab(Answer::AllowAlways)]
+        );
+        assert_eq!(
+            key(&mut app, &rows, Key::Alt('y')),
+            vec![tab(Answer::Allow)]
+        );
+        assert_eq!(key(&mut app, &rows, Key::Alt('n')), vec![tab(Answer::Deny)]);
+        // The tab's agent has no request: its keys, never agent-1's request.
+        rows[1].request = false;
+        rows[1].request_always = false;
+        rows[1].approval.clear();
+        assert_eq!(
+            key(&mut app, &rows, Key::Alt('a')),
+            vec![Action::Input(b"\x1ba".to_vec())]
+        );
+        assert_eq!(
+            key(&mut app, &rows, Key::Alt('y')),
+            vec![Action::Input(b"\x1by".to_vec())]
         );
     }
 
@@ -3061,6 +3142,7 @@ mod tests {
                 group: false,
                 request: false,
                 request_always: false,
+                approval: String::new(),
             },
         );
         let mut app = App::default();
@@ -3195,6 +3277,7 @@ mod tests {
             group: false,
             request: false,
             request_always: false,
+            approval: String::new(),
         }];
         rows.extend((1..=40).map(|i| Row {
             id: format!("mac/agent-{i}"),
@@ -3206,6 +3289,7 @@ mod tests {
             group: false,
             request: false,
             request_always: false,
+            approval: String::new(),
         }));
         // Near the top nothing is kept; far down the heading is on the first line and the chosen row still in view.
         assert_eq!(tree_window(3, 10, &rows), (0, None));
@@ -3305,6 +3389,12 @@ mod tests {
         let mut offering = rows.clone();
         offering[0].request = true;
         offering[0].request_always = true;
+        offering[0].approval = "mac/ap-1".into();
+        let always = |answer| Action::Answer {
+            agent: "mac/agent-1".into(),
+            approval: "mac/ap-1".into(),
+            answer,
+        };
         assert_eq!(key(&mut app, &offering, Key::Char('A')), vec![]);
         // In the tab.
         key(&mut app, &rows, Key::Enter);
@@ -3317,17 +3407,18 @@ mod tests {
         // A request that offers only a single answer: still the agent's key, never an answer.
         let mut once = rows.clone();
         once[0].request = true;
+        once[0].approval = "mac/ap-1".into();
         assert_eq!(
             key(&mut app, &once, Key::Alt('a')),
             vec![Action::Input(b"\x1ba".to_vec())]
         );
         assert_eq!(
             key(&mut app, &offering, Key::Alt('a')),
-            vec![Action::Command(ALLOW_ALWAYS)]
+            vec![always(crate::client::Answer::AllowAlways)]
         );
         assert_eq!(
             key(&mut app, &offering, Key::Alt('A')),
-            vec![Action::Command(ALLOW_ALWAYS)]
+            vec![always(crate::client::Answer::AllowAlways)]
         );
         // A plain A is typing.
         assert_eq!(
@@ -3337,7 +3428,7 @@ mod tests {
         // Alt+Y still allows once.
         assert_eq!(
             key(&mut app, &offering, Key::Alt('y')),
-            vec![Action::Command('y')]
+            vec![always(crate::client::Answer::Allow)]
         );
     }
 
@@ -3400,6 +3491,7 @@ mod tests {
             group: true,
             request: false,
             request_always: false,
+            approval: String::new(),
         });
         assert_eq!(app.commands(&cx(&rows)).len(), 1);
         assert_eq!(key(&mut app, &rows, Key::Enter), vec![Action::CleanUpOld]);
@@ -3417,6 +3509,7 @@ mod tests {
             group: false,
             request: false,
             request_always: false,
+            approval: String::new(),
         };
         let rows = vec![
             row("mac", true),

@@ -440,10 +440,23 @@ fn answer(
     selected: &str,
     answer: Answer,
 ) -> String {
+    match agora_tui::client::answered_approval(snapshot, Some(selected)).cloned() {
+        Some(a) => answer_request(say, session, snapshot, &a, answer),
+        None => String::new(),
+    }
+}
+
+/// Answers exactly the request `a`: refused first when it does not offer that answer (ADR-0101), otherwise signed and sent. Returns
+/// the line to show.
+fn answer_request(
+    say: &Say,
+    session: &mut Session,
+    snapshot: &Snapshot,
+    a: &agora_protocol::v1::ApprovalSnapshot,
+    answer: Answer,
+) -> String {
     // ADR-0101: an answer the request does not offer is never sent; the line says which one it offers.
-    if let Some(id) = agora_tui::client::answered_approval(snapshot, Some(selected))
-        .and_then(|a| agora_tui::client::not_offered(a, answer))
-    {
+    if let Some(id) = agora_tui::client::not_offered(a, answer) {
         return say.text(id, &[]);
     }
     let Some(device) = device() else {
@@ -452,9 +465,8 @@ fn answer(
             &[("code", Arg::Str("device".into()))],
         );
     };
-    match session.resolve_answer(snapshot, &device, answer, Some(selected)) {
-        Ok(false) => String::new(),
-        Ok(true) => say.text(
+    match session.resolve_request(a, &device, answer) {
+        Ok(()) => say.text(
             match answer {
                 Answer::Allow => key!("tui-allowed"),
                 Answer::AllowAlways => {
@@ -466,12 +478,7 @@ fn answer(
         ),
         Err(code) if code == "approval.signature_invalid" => {
             // The machine of the agent that asked.
-            let node = snapshot
-                .approvals
-                .iter()
-                .find(|a| a.approval_id == selected)
-                .and_then(|a| a.agent_id.split_once('/'))
-                .map_or("", |(n, _)| n);
+            let node = a.agent_id.split_once('/').map_or("", |(n, _)| n);
             not_trusted(say, &device, node_binary(snapshot, node).as_deref())
         }
         Err(code) => say.text(key!("tui-answer-failed"), &[("code", Arg::Str(code))]),
@@ -491,6 +498,16 @@ fn confirm_skipping_start(
     let Some(a) = agora_tui::client::answered_approval(s, Some(selected)) else {
         return true;
     };
+    confirm_skipping_request(say, a, text, ask)
+}
+
+/// [`confirm_skipping_start`] for exactly the request `a`.
+fn confirm_skipping_request(
+    say: &Say,
+    a: &agora_protocol::v1::ApprovalSnapshot,
+    text: agora_tui::render::Text<'_>,
+    ask: &mut dyn Asker,
+) -> bool {
     let Some(names) = agora_tui::render::start_skipping_options(&a.action, &a.detail, text) else {
         return true;
     };
@@ -2663,20 +2680,26 @@ fn console(
                         // box again instead of staying cut in the footer.
                         c.notice.clear();
                         c.note.seen.clear();
-                        // Alt+Y / Alt+N (ADR-0101: and Alt+A) in a chat tab that shows its agent's request: it is in view there.
-                        if matches!(k, 'y' | 'n' | ALLOW_ALWAYS) {
-                            if let Some(pane) = chat
-                                .as_ref()
-                                .filter(|p| Some(p.agent.as_str()) == c.app.active_agent())
-                            {
-                                c.shown_request = c
-                                    .snapshot
-                                    .as_ref()
-                                    .and_then(|s| waiting_for(s, &pane.agent))
-                                    .map(|a| a.approval_id.clone());
-                            }
-                        }
                         if command(say, session, rx, color, c, area, k)
+                            | std::mem::take(&mut c.stale)
+                        {
+                            dirty_since.get_or_insert_with(Instant::now);
+                        }
+                    }
+                    // Alt+Y, Alt+N, Alt+A in an agent's tab: exactly that tab's request, never the tree's selection or another one.
+                    Action::Answer {
+                        agent,
+                        approval,
+                        answer,
+                    } => {
+                        c.notice.clear();
+                        c.note.seen.clear();
+                        // A chat tab shows its agent's request in place of the input line: it is in view there.
+                        if chat.as_ref().is_some_and(|p| p.agent == agent) {
+                            c.shown_request = Some(approval.clone());
+                        }
+                        let target = Target::Tab { agent, approval };
+                        if answer_command(say, session, rx, c, area, &target, answer)
                             | std::mem::take(&mut c.stale)
                         {
                             dirty_since.get_or_insert_with(Instant::now);
@@ -3093,6 +3116,10 @@ fn draw_console(
                             .into_iter()
                             .take(4),
                     );
+                    // ADR-0101: the agent's own words for its always option and what "always" means, before the keys.
+                    for l in agora_tui::render::always_lines(a, &text) {
+                        block.extend(agora_tui::render::wrap_row(&l, width, width));
+                    }
                     block.extend(agora_tui::render::wrap_row(
                         &say.text(
                             agora_tui::client::answer_hint(
@@ -3628,6 +3655,146 @@ fn over_console<T>(
     out
 }
 
+/// Which request a key answers: the tree's (`y`, `n`, the commands: the selected agent's request, else the first waiting, as the
+/// inspector shows it), or exactly one agent tab's request (Alt+Y, Alt+N, Alt+A: never another one).
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Target {
+    Selected,
+    Tab { agent: String, approval: String },
+}
+
+/// The request `target` names in `s`, and the agent whose details show it.
+fn target_request(
+    s: &Snapshot,
+    selected: &str,
+    target: &Target,
+) -> Option<(agora_protocol::v1::ApprovalSnapshot, String)> {
+    match target {
+        Target::Selected => agora_tui::client::answered_approval(s, Some(selected))
+            .map(|a| (a.clone(), selected.to_string())),
+        Target::Tab { agent, approval } => agora_tui::client::exact_approval(s, agent, approval)
+            .map(|a| (a.clone(), agent.clone())),
+    }
+}
+
+/// The lines of the box that shows a request before it is answered: who asks and what, ADR-0101's always lines (the agent's own words
+/// and what "always" means), and the keys that answer.
+fn request_box_lines(
+    say: &Say,
+    s: &Snapshot,
+    a: &agora_protocol::v1::ApprovalSnapshot,
+) -> Vec<String> {
+    let text = |id: &str, args: &[(&str, Arg)]| say.text(id, args);
+    let mut lines = vec![say.text(key!("tui-attention"), &[])];
+    lines.push(plain(
+        format!(
+            "{}: {} {}",
+            agora_tui::split::agent_label(s, &a.agent_id),
+            a.action,
+            a.detail
+        )
+        .trim(),
+    ));
+    lines.extend(agora_tui::render::always_lines(a, &text));
+    lines.push(String::new());
+    lines.push(say.text(
+        agora_tui::client::answer_hint(
+            a,
+            key!("tui-request-answer"),
+            key!("tui-request-answer-always"),
+            key!("tui-request-answer-always-only"),
+        ),
+        &[],
+    ));
+    lines
+}
+
+/// Answers the request `target` names with `reply`, once it was in view (in the inspector, in the chat tab that shows it, or in a box
+/// that shows it now and takes the answer as one deliberate key). Returns whether the hub's state will change.
+fn answer_command(
+    say: &Say,
+    session: &mut Session,
+    rx: &mpsc::Receiver<u8>,
+    c: &mut Console,
+    area: Area,
+    target: &Target,
+    mut reply: Answer,
+) -> bool {
+    let text = |id: &str, args: &[(&str, Arg)]| say.text(id, args);
+    let Some(s) = c.snapshot.clone() else {
+        return false;
+    };
+    let selected = c.selected.clone();
+    let Some((a, owner)) = target_request(&s, &selected, target) else {
+        // A tab's request that is no longer waiting: nothing is answered, and never another request instead.
+        c.shown_request = None;
+        return false;
+    };
+    let inspector = c.app.areas(area).inspector;
+    // What the inspector shows: the selected agent's details (beside its tab, only its own request). For a tab's request it is in view
+    // there only when the tree has that same agent selected.
+    let details = match target {
+        Target::Selected => app_details(&s, &selected, inspector.width, inspector.height, &text),
+        Target::Tab { .. } => agora_tui::split::app_details_in_tab(
+            &s,
+            &owner,
+            inspector.width,
+            inspector.height,
+            &text,
+        ),
+    };
+    let start = (a.action == "agent.start").then(|| a.approval_id.clone());
+    // ADR-0057: a start request is allowed only once all of it was in view: in the inspector, or in the reader, which y opens.
+    if let Some(id) = start.clone() {
+        let whole = matches!(details.start, Some((ref d, true)) if *d == id);
+        if whole {
+            c.read_whole.insert(id.clone());
+        }
+        if reply == Answer::Allow && !c.read_whole.contains(&id) {
+            let read = over_console(say, c, session, None, rx, |_, ask| {
+                read_start(&a, ask, &text)
+            });
+            if read {
+                c.read_whole.insert(id);
+                c.notice = say.text(key!("tui-app-start-read"), &[]);
+            } else {
+                c.notice = say.text(key!("tui-split-read-first"), &[]);
+            }
+            return false;
+        }
+    } else {
+        let inspector_shows = owner == selected
+            && inspector.width > 0
+            && details.lines.len() <= usize::from(inspector.height);
+        let in_view = inspector_shows || c.shown_request.as_deref() == Some(a.approval_id.as_str());
+        if !in_view {
+            let lines = request_box_lines(say, &s, &a);
+            // One deliberate key or click, never a paste or a key typed before the box was shown (as every signed prompt).
+            let key = over_console(say, c, session, None, rx, |_, ask| {
+                ask.answer(&lines, Duration::from_secs(120))
+            });
+            match agora_tui::client::box_answer(key) {
+                Some(r) => reply = r,
+                None => {
+                    c.notice = String::new();
+                    return false;
+                }
+            }
+        }
+    }
+    c.shown_request = None;
+    if reply == Answer::Allow
+        && !over_console(say, c, session, None, rx, |_, ask| {
+            confirm_skipping_request(say, &a, &text, ask)
+        })
+    {
+        c.notice = String::new();
+        return false;
+    }
+    c.notice = answer_request(say, session, &s, &a, reply);
+    true
+}
+
 /// A letter for the selected agent. Returns whether the hub's state will change (a fresh snapshot is wanted).
 #[allow(clippy::too_many_arguments)]
 fn command(
@@ -3646,90 +3813,12 @@ fn command(
     let selected = c.selected.clone();
     match k {
         'y' | 'n' | ALLOW_ALWAYS => {
-            // ADR-0057: a start request is allowed only once all of it was in view: in the inspector, or in the reader, which y opens.
-            let inspector = c.app.areas(area).inspector;
-            let details = app_details(&s, &selected, inspector.width, inspector.height, &text);
-            if let Some((id, false)) = details.start.clone() {
-                if k == 'y' && !c.read_whole.contains(&id) {
-                    if let Some(a) = s.approvals.iter().find(|a| a.approval_id == id).cloned() {
-                        let read = over_console(say, c, session, None, rx, |_, ask| {
-                            read_start(&a, ask, &text)
-                        });
-                        if read {
-                            c.read_whole.insert(id);
-                            c.notice = say.text(key!("tui-app-start-read"), &[]);
-                        } else {
-                            c.notice = say.text(key!("tui-split-read-first"), &[]);
-                        }
-                    }
-                    return false;
-                }
-            }
-            if let Some((id, true)) = details.start.clone() {
-                c.read_whole.insert(id);
-            }
-            // Any other request is answered only once it was in view: in the inspector, in the chat tab that shows it, or else in a
-            // box that shows it now and takes the answer (ADR-0101: `A` there allows it always, when it offers that).
-            let mut reply = match k {
+            let reply = match k {
                 'y' => Answer::Allow,
                 ALLOW_ALWAYS => Answer::AllowAlways,
                 _ => Answer::Deny,
             };
-            let waiting = agora_tui::client::answered_approval(&s, Some(&selected)).cloned();
-            if let (Some(a), None) = (waiting, details.start.as_ref()) {
-                let in_view = (inspector.width > 0
-                    && details.lines.len() <= usize::from(inspector.height))
-                    || c.shown_request.as_deref() == Some(a.approval_id.as_str());
-                if !in_view {
-                    let mut lines = vec![say.text(key!("tui-attention"), &[])];
-                    lines.push(plain(
-                        format!(
-                            "{}: {} {}",
-                            agora_tui::split::agent_label(&s, &a.agent_id),
-                            a.action,
-                            a.detail
-                        )
-                        .trim(),
-                    ));
-                    // ADR-0101: the agent's own name for its always option, quoted, as the web's card shows it.
-                    if let Some(l) =
-                        agora_tui::render::always_label_line(&a, &|id, args| say.text(id, args))
-                    {
-                        lines.push(l);
-                    }
-                    lines.push(String::new());
-                    lines.push(say.text(
-                        agora_tui::client::answer_hint(
-                            &a,
-                            key!("tui-request-answer"),
-                            key!("tui-request-answer-always"),
-                            key!("tui-request-answer-always-only"),
-                        ),
-                        &[],
-                    ));
-                    let key = over_console(say, c, session, None, rx, |_, ask| {
-                        ask.key(&lines, Duration::from_secs(120))
-                    });
-                    match agora_tui::client::box_answer(key) {
-                        Some(r) => reply = r,
-                        None => {
-                            c.notice = String::new();
-                            return false;
-                        }
-                    }
-                }
-            }
-            c.shown_request = None;
-            if reply == Answer::Allow
-                && !over_console(say, c, session, None, rx, |_, ask| {
-                    confirm_skipping_start(say, &s, &selected, &text, ask)
-                })
-            {
-                c.notice = String::new();
-                return false;
-            }
-            c.notice = answer(say, session, &s, &selected, reply);
-            true
+            answer_command(say, session, rx, c, area, &Target::Selected, reply)
         }
         // ADR-0061: ask the person's other devices to approve this terminal (a), or approve one that waits (v).
         'a' => {
@@ -4814,6 +4903,7 @@ mod typing_grant_tests {
             group: false,
             request: false,
             request_always: false,
+            approval: String::new(),
         }];
         let text = |id: &str, _: &[(&str, Arg)]| id.to_string();
         let cx = Ctx {
@@ -6329,5 +6419,117 @@ mod start_pick_tests {
             "Start which agent on blackview? Press its number, any other key cancels."
         );
         assert_eq!(pick(b"n", &kinds).0, None);
+    }
+}
+
+/// Codex's review of ADR-0101 part B: a tab's Alt key answers exactly that tab's request, signed for it, whatever the tree selects.
+#[cfg(test)]
+mod tab_answer_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+    use agora_i18n::Catalog;
+    use agora_protocol::v1::{ApprovalScope, ApprovalSnapshot};
+
+    fn ask(n: u32) -> ApprovalSnapshot {
+        ApprovalSnapshot {
+            approval_id: format!("mac/ap-{n}"),
+            agent_id: format!("mac/agent-{n}"),
+            action: "run_command".into(),
+            detail: format!("git status {n}"),
+            scopes: vec![ApprovalScope::Once as i32, ApprovalScope::Always as i32],
+            always_label: format!("Always allow git status {n}"),
+            always_option_id: format!("opt-{n}"),
+            ..Default::default()
+        }
+    }
+
+    fn two() -> Snapshot {
+        Snapshot {
+            approvals: vec![ask(1), ask(2)],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_tabs_request_is_signed_not_the_trees_selection() {
+        let s = two();
+        // The tree is on agent-1; the keyboard is in agent-2's tab.
+        let tab = Target::Tab {
+            agent: "mac/agent-2".into(),
+            approval: "mac/ap-2".into(),
+        };
+        let (a, owner) = target_request(&s, "mac/agent-1", &tab).unwrap();
+        assert_eq!(
+            (a.approval_id.as_str(), owner.as_str()),
+            ("mac/ap-2", "mac/agent-2")
+        );
+        let (bytes, scope) = agora_tui::client::answer_message(&a, Answer::AllowAlways).unwrap();
+        assert_eq!(scope, ApprovalScope::Always);
+        assert_eq!(
+            bytes,
+            agora_tui::device::always_message(
+                "mac",
+                "ap-2",
+                "agent-2",
+                "run_command",
+                "git status 2",
+                "Always allow git status 2",
+                "opt-2"
+            )
+        );
+        // Alt+Y signs the single answer of ap-2 too.
+        assert_eq!(
+            agora_tui::client::answer_message(&a, Answer::Allow)
+                .unwrap()
+                .0,
+            agora_tui::device::approval_message("mac", "ap-2", true)
+        );
+        // The tree's own keys keep answering the selected agent's request.
+        let (a, _) = target_request(&s, "mac/agent-1", &Target::Selected).unwrap();
+        assert_eq!(a.approval_id, "mac/ap-1");
+    }
+
+    #[test]
+    fn a_tabs_request_that_is_gone_answers_nothing_never_another() {
+        let s = Snapshot {
+            approvals: vec![ask(1)],
+            ..Default::default()
+        };
+        let gone = Target::Tab {
+            agent: "mac/agent-2".into(),
+            approval: "mac/ap-2".into(),
+        };
+        assert_eq!(target_request(&s, "mac/agent-2", &gone), None);
+        // An id that now belongs to another agent is not this tab's either.
+        let moved = Target::Tab {
+            agent: "mac/agent-2".into(),
+            approval: "mac/ap-1".into(),
+        };
+        assert_eq!(target_request(&s, "mac/agent-1", &moved), None);
+    }
+
+    #[test]
+    fn the_request_box_warns_before_an_always_answer_is_given() {
+        let say = Say(Catalog::english());
+        let s = two();
+        let lines = request_box_lines(&say, &s, &ask(2));
+        let all = lines.join("\n");
+        assert!(
+            all.contains("In its own words: “Always allow git status 2”"),
+            "{all}"
+        );
+        assert!(
+            all.contains("the agent decides what that covers and how long it keeps the answer, possibly longer than this session"),
+            "{all}"
+        );
+        assert!(all.contains("A allows it always"), "{all}");
+        // A request without "always" has neither.
+        let mut once = ask(1);
+        once.scopes = vec![ApprovalScope::Once as i32];
+        let all = request_box_lines(&say, &s, &once).join("\n");
+        assert!(
+            !all.contains("In its own words") && !all.contains("possibly longer"),
+            "{all}"
+        );
     }
 }

@@ -468,10 +468,10 @@ pub fn app_rows(s: &Snapshot, now_ms: u64, t: Text<'_>) -> Vec<crate::app::Row> 
         let unreachable = a.running && machine_offline(s, &a.node_id);
         let state = state_text(s, a, t);
         let asks = s.approvals.iter().any(|x| x.agent_id == a.agent_id);
-        // ADR-0101: the request its keys answer (its first) offers an answer it remembers: Alt+A answers so in its tab.
-        let asks_always = crate::client::answered_approval(s, Some(&a.agent_id))
-            .filter(|x| x.agent_id == a.agent_id)
-            .is_some_and(|x| crate::client::always_offer(x).is_some());
+        // The request its tab's keys answer (its first), never another agent's; ADR-0101: whether it offers an answer the agent remembers
+        // (Alt+A answers so in its tab).
+        let own = s.approvals.iter().find(|x| x.agent_id == a.agent_id);
+        let asks_always = own.is_some_and(|x| crate::client::always_offer(x).is_some());
         crate::app::Row {
             id: a.agent_id.clone(),
             label: format!(" {lead}{}{no_ask}", agent_name(&a.agent_id, &a.kind)),
@@ -482,6 +482,7 @@ pub fn app_rows(s: &Snapshot, now_ms: u64, t: Text<'_>) -> Vec<crate::app::Row> 
             group: false,
             request: asks,
             request_always: asks_always,
+            approval: own.map(|x| x.approval_id.clone()).unwrap_or_default(),
         }
     };
     let mut nodes: Vec<_> = s.nodes.iter().collect();
@@ -507,6 +508,7 @@ pub fn app_rows(s: &Snapshot, now_ms: u64, t: Text<'_>) -> Vec<crate::app::Row> 
                 group: true,
                 request: false,
                 request_always: false,
+                approval: String::new(),
             });
         }
         rows.push(crate::app::Row {
@@ -526,6 +528,7 @@ pub fn app_rows(s: &Snapshot, now_ms: u64, t: Text<'_>) -> Vec<crate::app::Row> 
             group: false,
             request: false,
             request_always: false,
+            approval: String::new(),
         });
         let mut agents: Vec<&AgentSnapshot> =
             s.agents.iter().filter(|a| a.node_id == n.node_id).collect();
@@ -557,6 +560,7 @@ pub fn app_rows(s: &Snapshot, now_ms: u64, t: Text<'_>) -> Vec<crate::app::Row> 
                     group: true,
                     request: false,
                     request_always: false,
+                    approval: String::new(),
                 });
             }
             for (a, depth) in crate::render::helper_order(&list) {
@@ -738,6 +742,14 @@ fn details(
             usize::from(width).max(12),
             usize::from(width).max(12),
         ));
+        // ADR-0101: the agent's own words for its always option and what "always" means, read before the keys that answer.
+        for l in crate::render::always_lines(a, t) {
+            lines.extend(crate::render::wrap_row(
+                &l,
+                usize::from(width).max(12),
+                usize::from(width).max(12),
+            ));
+        }
         lines.push(t(
             if in_tab {
                 // ADR-0101: Alt+A, when the request offers an answer the agent remembers.
@@ -1396,6 +1408,23 @@ mod tests {
         assert_eq!(
             own.lines.last().map(String::as_str),
             Some("tui-tab-answer-always-kept")
+        );
+        // The agent's own words and the warning are read before the keys, beside the tab and in the list's inspector.
+        assert!(
+            own.lines.iter().any(|l| l.starts_with("tui-always-label")),
+            "{:#?}",
+            own.lines
+        );
+        assert!(
+            own.lines.iter().any(|l| l == "tui-always-warning-kept"),
+            "{:#?}",
+            own.lines
+        );
+        let list = app_details(&s, "mac2/agent-1", 60, 20, &text);
+        assert!(
+            list.lines.iter().any(|l| l == "tui-always-warning-kept"),
+            "{:#?}",
+            list.lines
         );
         s.approvals[0].scopes = vec![ApprovalScope::Always as i32];
         let own = app_details_in_tab(&s, "mac2/agent-1", 60, 20, &text);
