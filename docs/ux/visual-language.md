@@ -63,6 +63,15 @@ Users see plain words; internal terms stay in code and docs (`glossary.md` lists
   it cannot be read as "needs you" or as the quota chip (an amber warning sign that always shows its percentage); shape (bolt against
   triangle) and the words in the tooltip carry the difference too, never the colour alone.
 - **State is color + shape + motion + text.** Never color alone (color-blind safe, WCAG 2.2 AA).
+- **Colour is a surface, never a stripe** (ADR-0102). State and identity show as soft tinted backgrounds, hairline borders, pills and
+  avatars, never as a thick bar on one side of a card, row or tile. The only edge bars are content conventions: the diff's 2 px line bar
+  above, and a quote in a chat. A soft tint of a state colour is allowed as the background of the thing in that state.
+- **One meaning per colour** (ADR-0102). Amber means only "needs you" (plus the quota warning sign, with its triangle and percentage).
+  Red is the one **danger** role (`--danger`, the fixed `--diff-removed`, never a theme colour): a failed agent, errors shown to the
+  person, deleted files and lines, destructive actions (Forget, Remove, Delete, a destructive dialog's primary button) and acting without
+  asking (the risk sign, an Allow that lets an agent act without asking, a switch that turns it on). The accent is the brand: selection,
+  primary actions, links. Green is finished and online; blue is working. Neutral facts (an OS, a version, a branch, a count of changed
+  files) are grey tags, never a state colour.
 
 ### Agent state language
 | State | Color role | Shape | Motion |
@@ -72,6 +81,11 @@ Users see plain words; internal terms stay in code and docs (`glossary.md` lists
 | Finished | green | check | single settle animation, then still |
 | Idle | neutral | hollow dot | none |
 | Unknown | muted | dashed ring | none |
+| Failed | danger red (ADR-0102) | cross in a ring | none |
+
+An agent that ended with an error or could not start is **Failed**; one stopped on purpose is not, and stays neutral. The widget kit's
+status pill draws Failed in red; the screens that still draw it in neutral ink (the tiles and Home's counts) switch over as they adopt
+the kit (redesign PRs 2 and 3).
 
 ### Agent identity
 - Each agent kind shows its brand mark (provider logos used per their trademark guidelines; models.dev provides
@@ -90,7 +104,14 @@ Users see plain words; internal terms stay in code and docs (`glossary.md` lists
 - **Typography:** one sans family for UI, one monospace for terminals and code; a short type scale
   (12/13/14/16/20/28).
 - **Spacing:** 4 px base grid.
-- **Radius and depth:** soft radii, almost no shadows; depth from surface tone, not drop shadows.
+- **Type roles:** caption 12 (meta, tags, counts), body 13 (rows, text), strong 14 (card and section titles), title 16 (panel, dialog
+  and group titles), page 20 (page titles, stat numbers), display 28 (the pairing number). Section titles are sentence case.
+- **Radius and depth:** soft radii (xs 5, s 8, m 12, l 18, and full for pills), almost no shadows; depth from surface tone, not drop
+  shadows. **One elevation** (ADR-0102): overlays only (dialogs, menus, the palette, toasts, tooltips) use the raised surface
+  (`--surface-raised`) and the one overlay shadow (`--shadow-pop`); pages, panels, cards and tiles stay flat.
+- **Where main is today:** the widget kit follows the no-stripe, one-meaning, one-elevation and sentence-case rules above. The screens
+  reach them as they adopt the kit (the redesign plan's PRs 2–13): until then tiles keep their coloured edge and their shadow, existing
+  overlays use the older `--shadow`, errors and change counts are still amber in places, and the global `h2` is still an uppercase label.
 - **Motion:** 150–250 ms, ease-out for entering, spring for layout changes; nothing decorative loops except
   the working pulse.
 - **Icons:** one outline icon set, one stroke width.
@@ -101,8 +122,22 @@ Users see plain words; internal terms stay in code and docs (`glossary.md` lists
 - **Themes are token files** (ADR-0068, `themes.md`): built-in Dark, Light, High contrast, Large text, Slate and Sand, plus
   the person's own, checked for WCAG AA contrast before they are shown. Text and spacing sizes are rem-based so a theme's
   text size (and the browser's) scales them; components never use pixel font sizes.
+- **Widget kit** (`apps/web/src/components/kit/`): one widget per job, and every new or changed screen reuses them instead of setting
+  its own padding, border or colour:
+  Button (primary, secondary, ghost, danger, danger-ghost; sm and md), StatusPill and Pill, Tag, AgentAvatar (the agent's colour and
+  the first letter of its kind: identity lives here, not on a tile's edge), Card, ListRow (the current row is an accent tint, no bar),
+  SettingRow, SegmentedControl (a radio group: arrows move and choose), Toggle (a switch; red when it lets an agent act without asking),
+  StatTile (only Needs you is tinted, and only above zero), Callout (a tinted box with an icon chip, never a side bar), EmptyState
+  (icon, title, one line, at most one action), Tooltip and KeyValue. They use tokens only and logical properties, grow to the 44 px
+  touch target on a touch screen, and respect reduced motion.
+- **Derived colours** (`app.css`, not theme tokens, so every theme, a user's too, gets them): a soft tint (`--tint-*`) and a hairline
+  (`--line-*`) per role (accent, working, needs you, finished, danger, idle), `--danger` and `--on-danger`, `--surface-raised`,
+  `--border-strong`. Text on any tint reaches 4.5:1 in every built-in theme, and control indicators (a switch's track and thumb, a
+  filled button, a selected ring, the focus ring) reach 3:1; a test computes both from the real tokens. The `--line-*` hairlines are
+  decoration around a tinted surface whose icon and words carry the meaning, never the only sign of a control or a state, so they are
+  only held visible (about 1.5–2:1), not to 3:1.
 - **Component gallery:** every component rendered in all states, both themes, and an RTL locale; this is the
-  review surface for UI pull requests.
+  review surface for UI pull requests. The widget kit is its first section.
 - **Visual regression tests:** screenshot tests for components and key screens in CI.
 - **UI pull requests** include before/after screenshots or a short recording in both themes.
 

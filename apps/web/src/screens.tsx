@@ -29,6 +29,7 @@ import { CloseAgentMenu, CloseConfirm } from './components/CloseAgent';
 import { ago } from './net/time';
 import { NetworkView } from './components/NetworkView';
 import { StateBadge } from './components/StateBadge';
+import { KitGallery } from './components/kit/KitGallery';
 import { NoAskBadge } from './components/NoAskBadge';
 import { AsksLessChip } from './components/AllowAlways';
 import type { ApprovalModel, MachineModel, MessageModel, ProjectCost } from './net/view';
@@ -133,6 +134,7 @@ function Themed({ theme, onStart }: { theme: 'dark' | 'light'; onStart?: () => v
   return (
     <section className="theme-panel" data-theme={theme}>
       <h2>{t(`theme-${theme}`)}</h2>
+      <KitGallery />
       <div className="gallery__row">{STATES.map((s) => <StateBadge key={s} state={s} />)}</div>
       <AttentionStrip agents={needsAttention(demoAgents)} />
       <div className="fleet">{demoAgents.map((a) => <AgentTile key={a.id} agent={a} />)}</div>

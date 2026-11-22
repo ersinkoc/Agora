@@ -26,6 +26,25 @@
   --radius-m: var(--radius-m);
   --radius-l: var(--radius-l);
   --shadow-card: var(--shadow);
+  /* The widget kit's derived roles (below, and visual-language.md §3): utilities like `text-danger` and `bg-tint-needs`. */
+  --color-danger: var(--danger);
+  --color-on-danger: var(--on-danger);
+  --color-surface-raised: var(--surface-raised);
+  --color-line-strong: var(--border-strong);
+  --color-tint-accent: var(--tint-accent);
+  --color-tint-working: var(--tint-working);
+  --color-tint-needs: var(--tint-needs);
+  --color-tint-finished: var(--tint-finished);
+  --color-tint-danger: var(--tint-danger);
+  --color-tint-idle: var(--tint-idle);
+  --radius-full: var(--radius-full);
+  --shadow-pop: var(--shadow-pop);
+  --text-caption: var(--text-caption);
+  --text-body: var(--text-body);
+  --text-strong: var(--text-strong);
+  --text-title: var(--text-title);
+  --text-page: var(--text-page);
+  --text-display: var(--text-display);
   --spacing: var(--space-1);
 }
 
@@ -113,7 +132,7 @@
   .state--finished { color: var(--state-finished); }
   .state--idle { color: var(--state-idle); }
   .state--unknown { color: var(--state-unknown); }
-  /* Interim, until a failed state has its own token (ADR needed): the full-strength text colour (neutral, but never quieter than the green
+  /* Interim, until this badge adopts the kit's red Failed (ADR-0102 decided it; redesign PRs 2 and 3): the full-strength text colour (neutral, but never quieter than the green
      check was), so a failure is never drawn as success and never missed. */
   .state--failed { color: var(--text); font-weight: 600; }
   .state--working .state__mark { animation: breathe 2.4s ease-in-out infinite; }
@@ -289,6 +308,9 @@
   /* A row whose label holds a radio or a checkbox: the whole label is the target (the box itself stays its size). */
   .touch-row { min-height: var(--tap); }
   .ide-iconbtn, .menu-tile { min-width: var(--tap); }
+  /* The widget kit's controls; the switch keeps its look and grows an invisible target around it. */
+  .kit-btn, .kit-row, .kit-seg__item, button.kit-stat { min-height: var(--tap); }
+  .kit-toggle::before { content: ''; position: absolute; inset: calc((var(--tap) - 1.25rem) / -2) calc((var(--tap) - 2.25rem) / -2); }
 }
 
 @keyframes flow { to { stroke-dashoffset: -24; } }
@@ -330,6 +352,166 @@
 .hljs-meta, .hljs-doctag, .hljs-subst { color: var(--syntax-meta); }
 .hljs-emphasis { font-style: italic; }
 .hljs-strong { font-weight: 600; }
+
+/* Derived roles for the widget kit (ADR-0102; visual-language.md §2 and §3). Like the syntax colours they are mixed from the theme's own
+   colours, so a user's theme (ADR-0068) gets them with no keys of its own; theme files cannot set them. They are declared on every
+   `[data-theme]` too, so a panel drawn in the other scheme (the gallery) mixes its own colours, not the page's.
+   - `--tint` is how strong a soft state background is; Light stays at 10 % or less so amber text on its tint keeps 4.5:1 (a test pins it).
+   - `--line` is the strength of a decorative hairline around a tinted surface. The tint, the icon and the words carry the meaning; a
+     hairline is never the only sign of a control or a state. Control indicators (toggle, selected ring, focus, button fills) are 3:1.
+   - `--danger` is the one red (ADR-0102): failed, errors, deletions, destructive actions, acting without asking. It is the fixed
+     `--diff-removed`, never a theme colour. `--shadow-pop` is the one elevation, for overlays only; cards and panels stay flat. */
+:root {
+  --text-caption: 0.75rem;
+  --text-body: 0.8125rem;
+  --text-strong: 0.875rem;
+  --text-title: 1rem;
+  --text-page: 1.25rem;
+  --text-display: 1.75rem;
+  --radius-full: 999px;
+}
+:root,
+[data-theme='dark'] { --tint: 14%; --shadow-pop: 0 1px 2px rgb(0 0 0 / 0.5), 0 12px 32px rgb(0 0 0 / 0.45); }
+[data-theme='light'] { --tint: 10%; --shadow-pop: 0 1px 2px rgb(20 20 40 / 0.06), 0 12px 32px rgb(20 20 40 / 0.12); }
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]) { --tint: 10%; --shadow-pop: 0 1px 2px rgb(20 20 40 / 0.06), 0 12px 32px rgb(20 20 40 / 0.12); }
+}
+:root,
+[data-theme] {
+  --line: 40%;
+  --danger: var(--diff-removed);
+  --on-danger: var(--on-accent);
+  --surface-raised: color-mix(in oklab, var(--text) 4%, var(--surface-1));
+  --border-strong: color-mix(in oklab, var(--text) 18%, var(--border));
+  --tint-accent: color-mix(in oklab, var(--accent) var(--tint), var(--surface-1));
+  --tint-working: color-mix(in oklab, var(--state-working) var(--tint), var(--surface-1));
+  --tint-needs: color-mix(in oklab, var(--state-needs-you) var(--tint), var(--surface-1));
+  --tint-finished: color-mix(in oklab, var(--state-finished) var(--tint), var(--surface-1));
+  --tint-danger: color-mix(in oklab, var(--danger) var(--tint), var(--surface-1));
+  --tint-idle: color-mix(in oklab, var(--state-idle) var(--tint), var(--surface-1));
+  --line-accent: color-mix(in oklab, var(--accent) var(--line), var(--surface-1));
+  --line-working: color-mix(in oklab, var(--state-working) var(--line), var(--surface-1));
+  --line-needs: color-mix(in oklab, var(--state-needs-you) var(--line), var(--surface-1));
+  --line-finished: color-mix(in oklab, var(--state-finished) var(--line), var(--surface-1));
+  --line-danger: color-mix(in oklab, var(--danger) var(--line), var(--surface-1));
+}
+
+/* The widget kit (components/kit/, visual-language.md §3): one widget per job, tokens only, logical properties, colour as a surface
+   (never a stripe). A tone class gives a widget its colour, its tint and its hairline. */
+@layer components {
+  .kit-tone-accent { --kit-fg: var(--accent); --kit-tint: var(--tint-accent); --kit-line: var(--line-accent); }
+  .kit-tone-working { --kit-fg: var(--state-working); --kit-tint: var(--tint-working); --kit-line: var(--line-working); }
+  .kit-tone-needs { --kit-fg: var(--state-needs-you); --kit-tint: var(--tint-needs); --kit-line: var(--line-needs); }
+  .kit-tone-finished { --kit-fg: var(--state-finished); --kit-tint: var(--tint-finished); --kit-line: var(--line-finished); }
+  .kit-tone-danger { --kit-fg: var(--danger); --kit-tint: var(--tint-danger); --kit-line: var(--line-danger); }
+  .kit-tone-idle { --kit-fg: var(--state-idle); --kit-tint: var(--tint-idle); --kit-line: var(--border); }
+  .kit-tone-plain { --kit-fg: var(--text-muted); --kit-tint: var(--surface-2); --kit-line: var(--border); }
+
+  .kit-btn { @apply inline-flex items-center justify-center gap-1.5 whitespace-nowrap rounded-s border border-line bg-surface-2 font-medium text-ink transition-[background-color,border-color,filter] duration-150 disabled:cursor-not-allowed disabled:opacity-50; height: 2rem; padding-inline: 0.875rem; font-size: var(--text-body); }
+  .kit-btn:hover:not(:disabled) { border-color: var(--border-strong); }
+  .kit-btn--sm { height: 1.75rem; padding-inline: 0.625rem; font-size: var(--text-caption); }
+  .kit-btn--primary, .kit-btn--danger { @apply border-transparent; }
+  .kit-btn--primary { background: var(--accent); color: var(--on-accent); }
+  .kit-btn--danger { background: var(--danger); color: var(--on-danger); }
+  .kit-btn--primary:hover:not(:disabled), .kit-btn--danger:hover:not(:disabled) { border-color: transparent; filter: brightness(1.08); }
+  .kit-btn--ghost, .kit-btn--danger-ghost { @apply border-transparent bg-transparent; }
+  .kit-btn--ghost { @apply text-muted; }
+  .kit-btn--ghost:hover:not(:disabled) { @apply border-transparent bg-surface-2 text-ink; }
+  .kit-btn--danger-ghost { color: var(--danger); }
+  .kit-btn--danger-ghost:hover:not(:disabled) { border-color: transparent; background: var(--tint-danger); }
+  .kit-btn:active:not(:disabled), .kit-seg__item:active, .kit-row:active, button.kit-stat:active { @apply translate-y-px; }
+
+  /* A state as a pill: tint, state colour, shape and word, never colour alone. */
+  .kit-pill { @apply inline-flex items-center gap-1.5 whitespace-nowrap rounded-full; height: 1.25rem; padding-inline: 0.375rem 0.5rem; font-size: var(--text-caption); font-weight: 550; background: var(--kit-tint); color: var(--kit-fg); }
+  .kit-pill .state__mark { @apply size-2.5; }
+  .kit-mark { @apply inline-flex flex-none items-center; color: var(--kit-fg); }
+  .kit-mark .state__mark { @apply size-3; }
+  .kit-tag { @apply inline-flex items-center gap-1 whitespace-nowrap rounded-xs bg-surface-2 text-muted; height: 1.25rem; padding-inline: 0.4375rem; font-size: var(--text-caption); }
+  .kit-tag--mono { @apply font-mono; }
+
+  /* An agent's identity: its colour as a soft square with a ring, and the first letter of its kind in ink. */
+  .kit-avatar { --avatar: var(--agent-slate); @apply relative inline-grid flex-none place-items-center rounded-s text-ink; width: 1.75rem; height: 1.75rem; font-size: var(--text-caption); font-weight: 650; background: color-mix(in oklab, var(--avatar) 22%, var(--surface-1)); box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--avatar) 50%, var(--surface-1)); }
+  .kit-avatar--s { @apply rounded-xs; width: 1.125rem; height: 1.125rem; font-size: 0.625rem; }
+  .kit-avatar--l { width: 2.25rem; height: 2.25rem; font-size: var(--text-strong); }
+  .kit-avatar__dot { @apply absolute rounded-full bg-needs-you; inset-block-start: -3px; inset-inline-end: -3px; width: 0.5625rem; height: 0.5625rem; box-shadow: 0 0 0 2px var(--surface-1); }
+
+  .kit-card { @apply grid gap-2 rounded-m border border-line bg-surface-1 p-4 text-start text-ink; }
+  .kit-card--dense { @apply p-3; }
+  .kit-card--flush { @apply gap-0 p-0; }
+  button.kit-card { @apply transition-[border-color,transform] duration-150; }
+  button.kit-card:hover { border-color: var(--border-strong); @apply -translate-y-px; }
+  .kit-card[data-selected] { border-color: var(--accent); background: var(--tint-accent); box-shadow: 0 0 0 0.5px var(--accent); }
+
+  .kit-row { @apply flex w-full min-w-0 items-center gap-2 rounded-s px-2 py-1 text-start text-ink transition-colors duration-150 hover:bg-surface-2; min-height: 1.875rem; }
+  .kit-row[aria-current]:not([aria-current='false']) { background: var(--tint-accent); }
+  .kit-row[aria-current]:not([aria-current='false']) .kit-row__label { @apply font-semibold; }
+  .kit-row__label { @apply min-w-0 flex-1 truncate; }
+  .kit-row__meta { @apply flex flex-none items-center gap-1.5 text-muted; font-size: var(--text-caption); }
+
+  .kit-setting { @apply flex flex-wrap items-center justify-between gap-x-4 gap-y-2 px-4 py-3; }
+  .kit-setting + .kit-setting { @apply border-t border-line; }
+  .kit-setting__text { @apply grid min-w-0 gap-0.5; flex: 1 1 12rem; }
+  .kit-setting__label { font-weight: 550; }
+  .kit-setting__hint { @apply text-muted; font-size: var(--text-caption); }
+  .kit-setting__control { @apply flex flex-wrap items-center gap-2; }
+
+  /* One segmented control: the chosen item is a raised thumb with ink text (its shape and weight say it, not a colour alone). */
+  .kit-seg { @apply inline-flex max-w-full gap-0.5 rounded-s border border-line bg-surface-2 p-0.5; }
+  .kit-seg__item { @apply inline-flex min-w-0 items-center justify-center gap-1.5 truncate rounded-xs px-2.5 font-medium text-muted transition-colors duration-150 hover:text-ink; height: 1.5rem; font-size: var(--text-caption); }
+  .kit-seg__item[aria-checked='true'] { @apply font-semibold text-ink; background: var(--surface-raised); box-shadow: inset 0 0 0 1px var(--border-strong); }
+
+  /* A switch: off is an outline with a muted thumb, on is filled; one that lets an agent act without asking is red when on. */
+  .kit-toggle { @apply relative inline-flex flex-none items-center rounded-full p-0.5 transition-colors duration-150; width: 2.25rem; height: 1.25rem; border: 1.5px solid var(--text-muted); background: transparent; }
+  .kit-toggle::after { content: ''; @apply rounded-full transition-[margin] duration-150; width: 0.75rem; height: 0.75rem; background: var(--text-muted); }
+  .kit-toggle[aria-checked='true'] { border-color: var(--accent); background: var(--accent); }
+  .kit-toggle[aria-checked='true']::after { margin-inline-start: calc(2.25rem - 0.75rem - 0.25rem - 3px); background: var(--on-accent); }
+  .kit-toggle--risk[aria-checked='true'] { border-color: var(--danger); background: var(--danger); }
+  .kit-toggle--risk[aria-checked='true']::after { background: var(--on-danger); }
+  .kit-toggle:disabled { @apply cursor-not-allowed opacity-50; }
+
+  .kit-stat { @apply grid min-w-30 gap-0.5 rounded-m border border-line bg-surface-1 text-start; padding: 0.625rem 0.875rem; }
+  .kit-stat__n { @apply flex items-center gap-2 font-semibold text-ink; font-size: var(--text-page); line-height: 1.1; letter-spacing: -0.02em; }
+  .kit-stat__label { @apply flex items-center gap-1.5 text-muted; font-size: var(--text-caption); }
+  .kit-stat--zero .kit-stat__n { @apply text-muted; }
+  .kit-stat--tinted { background: var(--kit-tint); border-color: var(--kit-line); }
+  .kit-stat--tinted .kit-stat__label { color: var(--kit-fg); font-weight: 550; }
+  button.kit-stat { @apply transition-colors duration-150; }
+  button.kit-stat:hover { border-color: var(--border-strong); }
+  .kit-stat[aria-pressed='true'] { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+
+  .kit-chip { @apply grid flex-none place-items-center rounded-s; width: 1.75rem; height: 1.75rem; background: color-mix(in oklab, var(--kit-fg) 22%, var(--surface-1)); color: var(--kit-fg); }
+  .kit-callout { @apply grid items-start gap-x-3 gap-y-1 rounded-m border text-ink; grid-template-columns: auto minmax(0, 1fr) auto; padding: 0.75rem 0.875rem; background: var(--kit-tint); border-color: var(--kit-line); }
+  .kit-callout > .kit-chip { grid-row: span 2; }
+  .kit-callout__title { @apply m-0 min-w-0 font-semibold; font-size: var(--text-strong); }
+  .kit-callout__body { @apply col-start-2 m-0 min-w-0 break-words; }
+  .kit-callout__actions { @apply col-start-3 row-span-2 row-start-1 flex flex-wrap gap-2 self-center; }
+  @container (max-width: 28rem) { .kit-callout__actions { @apply col-span-2 col-start-2 row-span-1 row-start-auto; } }
+
+  .kit-empty { @apply grid justify-items-center gap-1.5 px-4 py-7 text-center; }
+  .kit-empty > .kit-chip { @apply mb-1 rounded-m; width: 2.75rem; height: 2.75rem; background: var(--kit-tint); }
+  .kit-empty__title { @apply m-0 font-semibold text-ink; font-size: var(--text-strong); }
+  .kit-empty__hint { @apply m-0 max-w-64 text-muted; }
+  .kit-empty__action { @apply mt-2; }
+
+  .kit-tip-host { @apply relative inline-flex; }
+  .kit-tip { @apply absolute z-60 w-max max-w-64 rounded-xs border border-line px-2 py-1 font-normal whitespace-normal text-ink; inset-block-start: calc(100% + 6px); inset-inline-start: 0; font-size: var(--text-caption); background: var(--surface-raised); box-shadow: var(--shadow-pop); }
+
+  .kit-kv { @apply m-0 grid gap-x-4 gap-y-1.5; grid-template-columns: max-content minmax(0, 1fr); }
+  .kit-kv dt { @apply text-muted; font-size: var(--text-caption); padding-block-start: 1px; }
+  .kit-kv dd { @apply m-0 min-w-0 break-words; }
+  .kit-kv__mono { @apply font-mono; font-size: var(--text-caption); }
+
+  .kit-gallery { @apply grid gap-4; container-type: inline-size; }
+  .kit-gallery__title { @apply m-0 text-ink normal-case tracking-normal; font-size: var(--text-title); }
+  .kit-gallery__group { @apply grid gap-2; }
+  .kit-gallery__row { @apply flex flex-wrap items-center gap-3; }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .kit-pill.kit-tone-working .state__mark { animation: breathe 2.4s ease-in-out infinite; }
+  .kit-pill.kit-tone-needs .state__mark { animation: attend 1.6s ease-in-out infinite; }
+  .kit-mark.kit-tone-working .state__mark { animation: breathe 2.4s ease-in-out infinite; }
+  .kit-mark.kit-tone-needs .state__mark { animation: attend 1.6s ease-in-out infinite; }
+}
 
 /* People who asked for less motion get none: transitions and animations collapse to an instant change (state is still shown by shape and text). */
 @media (prefers-reduced-motion: reduce) {
