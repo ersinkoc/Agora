@@ -229,15 +229,18 @@ fn history(args: &[String]) -> ExitCode {
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
-            "--runs" => {
-                runs = it
-                    .next()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(runs)
-                    .max(1)
-            }
-            "--commit" => commit = it.next().cloned().unwrap_or(commit),
-            "--out" => out = it.next().cloned(),
+            "--runs" => match parse_value::<usize>(&mut it, "--runs") {
+                Ok(v) => runs = v.max(1),
+                Err(code) => return code,
+            },
+            "--commit" => match next_value(&mut it, "--commit") {
+                Ok(v) => commit = v.to_string(),
+                Err(code) => return code,
+            },
+            "--out" => match next_value(&mut it, "--out") {
+                Ok(v) => out = Some(v.to_string()),
+                Err(code) => return code,
+            },
             "--check" => check = true,
             _ => {
                 eprintln!(
@@ -406,6 +409,12 @@ mod tests {
             ExitCode::from(2)
         );
         assert_eq!(bestof(&[p, "--out".into()]), ExitCode::from(2));
+        // `history` (added on main after the audit) reads its flags the same way: a bad or missing value is refused before any run.
+        assert_eq!(
+            history(&["--runs".into(), "many".into()]),
+            ExitCode::from(2)
+        );
+        assert_eq!(history(&["--out".into()]), ExitCode::from(2));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
