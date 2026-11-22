@@ -75,7 +75,8 @@ const CREATE_RULESET_VERSION: libc::c_ulong = 1;
 const RULE_PATH_BENEATH: libc::c_int = 1;
 /// The first version's rights: execute, write/read file, read dir, remove, make (char, dir, reg, sock, fifo, block, sym).
 const ALL_FS: u64 = (1 << 13) - 1;
-const READ_FS: u64 = 1 | (1 << 2) | (1 << 3);
+const READ_FILE_FS: u64 = 1 << 2;
+const READ_FS: u64 = 1 | READ_FILE_FS | (1 << 3);
 /// Moving or linking a file into another folder (ABI 2). Not handled, every such move is refused, even inside `write`.
 const REFER_FS: u64 = 1 << 13;
 /// `truncate(2)` and opening with `O_TRUNC` (ABI 3). Not handled, a file anywhere can be cut to nothing.
@@ -128,7 +129,10 @@ pub(crate) fn scopes_abstract_sockets() -> bool {
 }
 
 /// A ruleset made before the fork, so the child only has to apply it (two async-signal-safe calls).
-pub(crate) struct Ruleset(std::os::fd::OwnedFd);
+pub(crate) struct Ruleset {
+    fd: std::os::fd::OwnedFd,
+    pub(crate) git_config: Option<PathBuf>,
+}
 
 /// `folder`: the folder a start holds (F1012). Entries at or below its path are opened through the held folder, never by the path, so
 /// they name the folder the process starts in even when the path led elsewhere for a moment while the rules were made (F1022).
@@ -180,8 +184,15 @@ pub(crate) fn ruleset(
     }
     // SAFETY: the kernel returned a fresh descriptor that nothing else owns.
     let set = unsafe { OwnedFd::from_raw_fd(fd as i32) };
-    for (paths, rights) in [(&sb.read, READ_FS), (&sb.write, all)] {
+    let git_config = sb.git_config_file();
+    let mut granted_git_config = None;
+    for (paths, rights) in [
+        (sb.read.as_slice(), READ_FS),
+        (sb.write.as_slice(), all),
+        (git_config.as_slice(), READ_FILE_FS),
+    ] {
         for p in paths {
+            let file_only = rights == READ_FILE_FS;
             let below = folder.and_then(|h| {
                 // The most specific spelling: one that lies inside the held folder (a link there) is resolved by the hold, never
                 // opened again below the folder.
@@ -193,6 +204,13 @@ pub(crate) fn ruleset(
                 Some((h, rel))
             });
             let opened = match below {
+                _ if file_only => {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    std::fs::OpenOptions::new()
+                        .read(true)
+                        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                        .open(p)
+                }
                 Some((held, rel)) => open_below(held, rel),
                 None => std::fs::File::open(p),
             };
@@ -200,7 +218,18 @@ pub(crate) fn ruleset(
             let Ok(f) = opened else {
                 continue;
             };
-            let rights = if f.metadata()?.is_dir() {
+            let metadata = match f.metadata() {
+                Ok(m) => m,
+                Err(_) if file_only => continue,
+                Err(e) => return Err(e),
+            };
+            if file_only {
+                use std::os::unix::fs::MetadataExt;
+                if !metadata.is_file() || metadata.nlink() != 1 {
+                    continue;
+                }
+            }
+            let rights = if metadata.is_dir() {
                 rights
             } else {
                 rights & FILE_FS
@@ -220,11 +249,20 @@ pub(crate) fn ruleset(
                 )
             };
             if r < 0 {
+                if file_only {
+                    continue;
+                }
                 return Err(io::Error::last_os_error());
+            }
+            if file_only {
+                granted_git_config = Some(p.clone());
             }
         }
     }
-    Ok(Ruleset(set))
+    Ok(Ruleset {
+        fd: set,
+        git_config: granted_git_config,
+    })
 }
 
 /// F1022: `rel` (empty: the folder itself) opened from the held folder's handle, as a place only (`O_PATH`, which Landlock takes and
@@ -274,7 +312,7 @@ impl Ruleset {
             }
             if libc::syscall(
                 SYS_LANDLOCK_RESTRICT_SELF,
-                self.0.as_raw_fd(),
+                self.fd.as_raw_fd(),
                 0 as libc::c_uint,
             ) != 0
             {

@@ -38,5 +38,7 @@ prost = "0.14"
 agora-core = { path = "../agora-core" }
 # Registers mesh agents in the cross-node message test.
 agora-mesh = { path = "../agora-mesh" }
+# Plays the user's own terminal in the attach test (what `terminal attach` leaves it in); already in the tree through agora-node.
+agora-vt = { path = "../agora-vt" }
 # A signed-in client dials the hub over TLS in the routed-command test.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }

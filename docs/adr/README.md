@@ -114,3 +114,6 @@ Date: YYYY-MM-DD
 | 0094 | A plain terminal shows the agent program running in it | Accepted |
 | 0095 | A project has a kanban board, and a task can be dispatched to an agent | Accepted |
 | 0096 | Agora offers a ready helper agent instead of a coding-agent loop of its own | Accepted |
+| 0098 | Generated Git configuration belongs to the node | Accepted |
+| 0099 | A spike for a native desktop client in Rust on GPUI (stage 0 accepted; replacing the Tauri shell stays proposed) | Accepted |
+| 0100 | The terminal repaint carries the program's modes and its history | Accepted |

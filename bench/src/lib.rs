@@ -5,6 +5,7 @@
 //! for one terminal and for twenty concurrent ones (`design/performance.md`).
 
 pub mod footprint;
+pub mod history;
 
 use std::sync::mpsc;
 use std::thread;
