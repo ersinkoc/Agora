@@ -95,15 +95,22 @@ export function Explorer({ by, onBy, spread, fleet, machines, open, current, pro
                 </div>
                 {resumeError?.id === a.id && <p role="alert" className="m-0 px-2 pb-1 text-xs text-needs-you">{t(resumeReasonKey(resumeError.code))}</p>}
               </li>;
+  // #945: a row keeps the agent's name and, in words, Acts freely. The name has at least 40 % of the row and gives way only after "started by …"
+  // and the machine; when the name and the badges do not fit on one line the badges wrap below it. While the row is narrower than 16rem the
+  // limit chip says only "82 %" and "Shared" hides (it stays in the row's tooltip).
   const agentRow = (a: AgentTileModel, depth: number, withMachine: boolean) => <li key={a.id} className={depth === 0 ? undefined : depth === 1 ? 'ms-3' : 'ms-6'}>
     <div className="group flex items-center">
-    <button type="button" data-agent-row={a.id} className="ide-row flex-1" aria-current={current === a.id ? 'true' : undefined} aria-pressed={open.includes(a.id)} onClick={() => onToggle(a.id)} title={`${a.machine} · ${a.workspace}${a.branch ? ` · ${a.branch}` : ''}${a.parentName ? ` · ${t('helper-started-by', { name: a.parentName })}` : ''}`}>
+    <button type="button" data-agent-row={a.id} className="ide-row @container flex-1 flex-wrap gap-y-1 overflow-hidden" aria-current={current === a.id ? 'true' : undefined} aria-pressed={open.includes(a.id)} onClick={() => onToggle(a.id)} title={`${a.name} · ${a.machine} · ${a.workspace}${a.branch ? ` · ${a.branch}` : ''}${a.parentName ? ` · ${t('helper-started-by', { name: a.parentName })}` : ''}${a.shared ? ` · ${t('ide-shared')}` : ''}`}>
       <StateMark state={a.state} />
-      <span className="min-w-0 flex-1 truncate">{a.name}{a.parentName && <span className="ms-1.5 text-xs text-muted">{t('helper-started-by', { name: a.parentName })}</span>}{withMachine && <span className="ms-1.5 text-xs text-muted">{a.machine}</span>}</span>
+      <span className="flex min-w-[40%] flex-1 items-baseline gap-1.5 overflow-hidden" data-agent-name-cell>
+        <span className="max-w-full flex-none truncate" data-agent-name>{a.name}</span>
+        {a.parentName && <span className="min-w-0 truncate text-xs text-muted">{t('helper-started-by', { name: a.parentName })}</span>}
+        {withMachine && <span className="min-w-0 truncate text-xs text-muted">{a.machine}</span>}
+      </span>
       <NoAskBadge agent={a} compact nested />
-      <LimitChip agent={a} compact />
+      <LimitChip agent={a} compact fit />
       {(by === 'kind' || by === 'state') && a.projectId && sharedAcross(spread.get(a.projectId)) && <ProjectChip spread={spread.get(a.projectId) as ProjectSpread} compact />}
-      {a.shared && <span className="flex-none text-xs text-muted" title={t('workspace-shared')}>{t('ide-shared')}</span>}
+      {a.shared && <span className="hidden flex-none text-xs text-muted @3xs:inline" title={t('workspace-shared')}>{t('ide-shared')}</span>}
       {(a.filesChanged ?? 0) > 0 && <span className="font-mono text-xs text-needs-you">{a.filesChanged}</span>}
     </button>
     {/* Close agent: the target is this row's agent. Shown on hover or focus; always on a touch screen. */}

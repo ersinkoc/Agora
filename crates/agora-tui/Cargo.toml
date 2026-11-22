@@ -28,3 +28,5 @@ crossterm = { version = "=0.29.0", default-features = false }
 
 [dev-dependencies]
 agora-node = { path = "../agora-node" }
+# The history test runs a probe program on a real pseudo-terminal, as the node's own terminal tests do.
+agora-platform = { path = "../agora-platform" }

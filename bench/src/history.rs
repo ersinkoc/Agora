@@ -55,6 +55,11 @@ pub struct HistoryReport {
     /// wait until the control socket accepts it.
     pub switch_history_new_connection_p95_ms: f64,
     pub switch_plain_new_connection_p95_ms: f64,
+    /// The p50 of the same two (#958); absent from results written before it.
+    #[serde(default)]
+    pub switch_history_new_connection_p50_ms: f64,
+    #[serde(default)]
+    pub switch_plain_new_connection_p50_ms: f64,
     /// Bytes of one attach with a full history: the kind 4 frames, their count, and the kind 1 repaint.
     pub attach_history_bytes: usize,
     pub attach_history_frames: usize,
@@ -299,6 +304,8 @@ pub fn run(commit: &str, runs: usize) -> std::io::Result<HistoryReport> {
         switch_plain_p95_ms: 0.0,
         switch_history_new_connection_p95_ms: 0.0,
         switch_plain_new_connection_p95_ms: 0.0,
+        switch_history_new_connection_p50_ms: 0.0,
+        switch_plain_new_connection_p50_ms: 0.0,
         attach_history_bytes: 0,
         attach_history_frames: 0,
         attach_repaint_bytes: 0,
@@ -314,8 +321,11 @@ pub fn run(commit: &str, runs: usize) -> std::io::Result<HistoryReport> {
         report.switch_history_p95_ms = percentile(&mut m.history, 0.95);
         report.switch_plain_p50_ms = percentile(&mut m.plain, 0.5);
         report.switch_plain_p95_ms = percentile(&mut m.plain, 0.95);
+        report.switch_history_new_connection_p50_ms =
+            percentile(&mut m.history_new_connection, 0.5);
         report.switch_history_new_connection_p95_ms =
             percentile(&mut m.history_new_connection, 0.95);
+        report.switch_plain_new_connection_p50_ms = percentile(&mut m.plain_new_connection, 0.5);
         report.switch_plain_new_connection_p95_ms = percentile(&mut m.plain_new_connection, 0.95);
         report.attach_history_bytes = h;
         report.attach_history_frames = f;

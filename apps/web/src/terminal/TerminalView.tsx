@@ -66,10 +66,11 @@ export function TerminalView({ source, label }: { source: TerminalSource; label:
     });
     const ordered = snapshotAfterSize((e) => {
       if (e.type === 'data') r.write(e.bytes);
-      else if (e.type === 'snapshot') r.reset(e.bytes);
+      else if (e.type === 'snapshot') r.reset(e.bytes, e.history);
       else if (e.type === 'resize') sizing.resized({ cols: e.cols, rows: e.rows });
     });
-    s = source.connect(ordered.push);
+    // A new renderer has no history of its own: it asks for as much as it keeps (ADR-0100; the node caps it at what it keeps).
+    s = source.connect(ordered.push, { historyLines: terminalPrefs().scrollback });
     const live = s;
     session.current = live;
     r.onInput((d, binary) => {

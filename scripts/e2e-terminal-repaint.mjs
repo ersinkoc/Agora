@@ -5,12 +5,15 @@
 //   D3  after a reconnect (hub restarted) in which the program left the alternate screen and switched the mouse off, the wheel and
 //       a click send nothing to it;
 //   D5  after a reload, focus reports (1004) arrive;
+//   D4  after a reload, the first line of a 300-line output is reachable in the window's history (ADR-0100 step 3: the window asks
+//       for history and the node replays it before the repaint);
 //   and in `agora tui` (Linux, a pty): a late attach to a program with the mouse on gets the click and the wheel (D1), and to one on
 //   the alternate screen gets arrow keys for the wheel (D2).
 //
 //   cargo build -p agora -p agora-fake-agent && (cd apps/web && npm ci && npm run build)
 //   PW_DIR=<dir with node_modules/playwright-core> node scripts/e2e-terminal-repaint.mjs [chromium|firefox|webkit]
-//   (AGORA_BIN=<another agora> runs the same checks against that build: an older one shows the defects.)
+//   (AGORA_BIN=<another agora> runs the same checks against that build: an older one shows the defects. SHOTS=<folder> also saves
+//   the D4 terminal, scrolled up into the replayed history, in both colour schemes.)
 //
 // Needs git, sh and python3 on the node's machine (Linux or macOS). Uses a throw-away folder; changes nothing else.
 import { execFileSync } from 'node:child_process';
@@ -166,6 +169,41 @@ try {
   exact('D3 after the reconnect: the wheel sends nothing', await p3.measure(wheel(-100)), '');
   exact('D3 after the reconnect: a click sends nothing', await p3.measure(click(5, 3)), '');
   await p3.quit();
+
+  // D4: the history before the window attached. The program prints 300 numbered lines; after a reload the window scrolls up (the
+  // wheel over the main screen with no mouse mode scrolls its history) until its first line shows, or it can go no further.
+  const p4 = await probe('--ruler 300');
+  await reattach();
+  g = await geometry(page);
+  const firstRow = async () => (await visible(page)).split('\n')[0] ?? '';
+  const scrollUp = async (want) => {
+    let same = 0, before = await firstRow();
+    while (same < 20 && !(await visible(page)).includes(want)) {
+      await wheel(-300)();
+      await sleep(30);
+      const now = await firstRow();
+      same = now === before ? same + 1 : 0;
+      before = now;
+    }
+    return visible(page);
+  };
+  const top = await scrollUp('ruler line 0001');
+  check('D4 after a reload: the first line of a 300-line output is in the window\'s history', hex(top.slice(0, 200)), top.includes('ruler line 0001'));
+  // The replay holds each line once: the line after the first is the second.
+  const rows = top.split('\n').map(l => l.trim());
+  const at1 = rows.indexOf('ruler line 0001');
+  check('D4 the replayed history is in order', hex(rows.slice(at1, at1 + 3).join(' | ')), at1 >= 0 && rows[at1 + 1] === 'ruler line 0002' && rows[at1 + 2] === 'ruler line 0003');
+  if (process.env.SHOTS) {
+    // A few lines down from the top, so the picture shows the history and the button back to the live bottom.
+    await wheel(100)();
+    for (const scheme of ['light', 'dark']) {
+      await page.emulateMedia({ colorScheme: scheme });
+      await sleep(300);
+      await page.screenshot({ path: join(process.env.SHOTS, `adr100-history-after-reload-${scheme}.png`) });
+    }
+    await page.emulateMedia({ colorScheme: null });
+  }
+  await p4.quit();
 
   // The terminal client (Linux: the driver needs a pty). The window leaves the terminal so only the client watches it.
   if (process.platform === 'linux') {
