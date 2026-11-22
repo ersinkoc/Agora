@@ -15,8 +15,7 @@ and `GIT_CONFIG_NOSYSTEM=1`. The node grants read access to the one file for tha
 file while keeping directory listing, sibling reads and writes denied. If the agent's ordinary grants reach that folder,
 or the node cannot prepare the private file, the node skips the generated settings. Each file lasts as long as its launch:
 the node removes it when the agent ends, is stopped or crashes (a restart writes a new one), and when a start fails after
-the file was written. At its start the node removes the files an earlier run left behind (each file names the node process
-that wrote it, so a node never removes the files of another node that still runs). See [ADR-0078][git-config] and
+the file was written. Files of launches a node never ended (it was killed, or the machine stopped) stay in that folder. See [ADR-0078][git-config] and
 [ADR-0098][git-config-location].
 
 The node copies these keys when set in your own global configuration: `user.name`, `user.email`, `init.defaultBranch`,

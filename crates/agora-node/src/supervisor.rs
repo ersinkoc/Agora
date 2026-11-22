@@ -3714,24 +3714,6 @@ impl Supervisor {
         self.agents.get(id)?.terminal.as_ref()
     }
 
-    /// #933: removes the generated Git files (ADR-0098) that no agent of this node uses now: what an earlier run left when it was
-    /// killed or the machine stopped (nothing ended those launches). The node calls it at its start, after it took up what the holder
-    /// kept; those agents are never confined (ADR-0079), so none of them has a file here, and a file any agent of this node holds is
-    /// kept whenever this runs. Returns how many were removed.
-    pub fn sweep_launch_files(&self) -> usize {
-        let Some(data_dir) = self.sandbox.data_dir.as_deref() else {
-            return 0;
-        };
-        let keep: Vec<&std::ffi::OsStr> = self
-            .agents
-            .values()
-            .filter_map(|e| e.terminal.as_ref()?.launch_file())
-            .chain(self.adapters.values().filter_map(|e| e.git_config.as_ref()))
-            .filter_map(|f| f.path().file_name())
-            .collect();
-        crate::gitconfig::sweep(data_dir, &keep)
-    }
-
     /// The node is stopping: every agent's process ends now (terminal process groups killed, adapters shut down; an agent in the holder
     /// is let go and runs on, ADR-0079), without an end
     /// recorded anywhere, so the session ledger finds them interrupted at the next start (ADR-0060). Nothing is restarted.

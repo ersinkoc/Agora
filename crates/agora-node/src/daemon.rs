@@ -1709,8 +1709,6 @@ impl Node {
             taken_up = take_up_held(&hub, &mut sup, &ledger, cfg);
             sup.set_holder(hub);
         }
-        // #933: generated Git files an earlier run never removed (it was killed); what an agent taken up just now uses is kept.
-        sup.sweep_launch_files();
         // #932: only an agent just taken up has a session to show again; every other kept session is an earlier process's (also when
         // there is no holder to attach to).
         {

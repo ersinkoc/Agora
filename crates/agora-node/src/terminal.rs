@@ -427,11 +427,6 @@ impl TerminalHandle {
         self
     }
 
-    /// #933: this launch's generated Git file, while the handle keeps it.
-    pub(crate) fn launch_file(&self) -> Option<&crate::gitconfig::LaunchFile> {
-        self.launch_file.as_ref()
-    }
-
     /// ADR-0079: the process belongs to the terminal holder and outlives the node.
     pub fn is_held(&self) -> bool {
         self.held
