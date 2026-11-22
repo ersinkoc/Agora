@@ -251,8 +251,10 @@ where
     // ADR-0070: the connection is open, so the hub records the node online (a first connect or a reconnect alike: nothing the node
     // runs is reset) and, when it ends, offline with why. Both come from this certificate-authenticated connection only.
     let verifies_devices = welcome.capabilities.iter().any(|c| c == "device.trust");
+    // #957: a connection whose opening the hub cannot record is ended (the node dials again and is recorded then), never kept live
+    // while every view shows the machine offline.
     let (registration, commands, generation) =
-        hub.node_link_opened(node_id, welcome.capabilities, now_ms());
+        hub.node_link_opened(node_id, welcome.capabilities, now_ms())?;
     let load = registration.load();
     // ADR-0061: a node that verifies endorsements gets every one it may have missed while it was away, and every revocation.
     if verifies_devices {
@@ -2569,7 +2571,7 @@ mod event_writer_tests {
         let mut session = NodeSession::new(hub.shared_store(), "n", &support());
         session.hello(&hello(), 1).unwrap();
         session.resume(&v1::Resume::default()).unwrap();
-        let (registration, _, generation) = hub.node_link_opened("n", vec![], 1);
+        let (registration, _, generation) = hub.node_link_opened("n", vec![], 1).unwrap();
         let (release, holder) = hold_store(&hub).await;
         let mut events = NodeEvents {
             session: Some(session),
