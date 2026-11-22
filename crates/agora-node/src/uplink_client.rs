@@ -1785,8 +1785,18 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         let poster = Arc::clone(&out);
         std::thread::spawn(move || {
-            // Once the conversation is up (its queue exists); a post before that fails at once with `node.offline`.
-            std::thread::sleep(Duration::from_millis(200));
+            // Once the conversation is up (its queue exists); a post before that fails at once with `node.offline`. Waits for the
+            // queue itself rather than a fixed time: a loaded CI runner took longer than 200 ms to connect (windows-latest, #967).
+            let up = std::time::Instant::now() + Duration::from_secs(10);
+            while poster
+                .jobs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_none()
+                && std::time::Instant::now() < up
+            {
+                std::thread::sleep(Duration::from_millis(5));
+            }
             let sent = std::time::Instant::now();
             crate::mesh_server::RemoteLink::post(
                 &*poster,
@@ -1799,10 +1809,11 @@ mod tests {
                 }),
             );
         });
+        // Long enough after a late connect for the post's deadline and the next expiry check to pass while the link is still up.
         let (r, _) = talk_posting(
             "post-timeout",
             Hub::Answers,
-            Duration::from_millis(1200),
+            Duration::from_millis(3000),
             None,
             POSTS,
             Some(out),
