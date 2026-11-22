@@ -47,6 +47,22 @@ budgets above; CI runs it as an informational step and stores `footprint.json`. 
 | Node cold start ≤ 200 ms | 10 ms | start until the control socket answers a command, in-process |
 | Keystroke → echo, same machine ≤ 16 ms | 0.06–0.2 ms p95 | node portion only (no client, no network) |
 
+### History replay (ADR-0100 step 2, 2026-11-22)
+
+`cargo run --release -p agora-bench -- history` (Linux, development machine, 30 runs). The lock figures are the capture that runs under
+the terminal's lock for a 200×50 terminal whose 2000-line scrollback is full of 200-column lines; the switch figures are a real node on
+this machine, from the `TerminalSubscribe` sent on its control socket until the size frame after the repaint arrived.
+
+| Figure | Result | Note |
+| --- | --- | --- |
+| Lock held for a full 2000-line, 200-column history | p50 5.4 ms, max 5.9 ms (plain); p50 4.0 ms (a colour every 4 characters) | the coloured case stops near the byte cap, at 631 lines; formatting after the lock: 0.1 ms and 2.9 ms |
+| Bytes per attach | 404 100 (plain, 2000 lines, 25 frames); 521 768 (coloured, 32 frames, the cap); repaint 11 176 | through the node: 426 100 bytes of history in 27 frames (2000 lines, a colour per line) |
+| Terminal snapshot after switching, ≤ 150 ms | full history p50 6.2 ms, p95 6.7 ms; without history p50 0.3 ms | on one connection |
+| The same on a new connection per subscription | full history p95 111 ms; without history p95 94 ms | the node's uplink opens one for each subscription the hub routes; the difference is the control socket's accept loop, which polls every 100 ms |
+
+The budget holds, so the cap stays at 512 KiB. The lock hold delays that terminal's own output by up to about 6 ms once per attach that
+asks for history; input is not behind it (it goes to the PTY on the caller's thread).
+
 ### Hub cold start against history size (architecture review R4, 2026-11-14)
 
 The hub rebuilds its view by replaying its whole event log at start (`View::rebuild`), so its cold start grows with history. Measured
@@ -110,6 +126,8 @@ the supervisor reads the exit status without copying anything.
 ### Node and hub
 - PTY reads on dedicated threads (ADR-0013); detection runs on changed regions only, with an adaptive interval.
 - Terminal subscribe and resync capture the screen at the stream boundary and build the ANSI repaint after releasing the terminal lock.
+  A subscription that asks for history (ADR-0100) also copies the cells of the newest scrollback lines under that lock, newest
+  first, stopping at the count or near the 512 KiB cap; formatting them into kind 4 frames happens after the lock is released.
 - Scrollback stored compressed in memory with a configurable cap.
 - Hub projections are in memory. A node event's SQLite write, projection update and fanout run together on a blocking worker.
   Each hub admits one job at a time. A connection groups up to 16 immediately available events or 64 KiB per job and then waits

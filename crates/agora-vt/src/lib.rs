@@ -233,6 +233,37 @@ pub trait Terminal: Send {
         None
     }
 
+    /// Whether the scrollback line `back` rows above the live screen's top continues on the line below it (the program's text ran
+    /// past the right edge and the terminal wrapped it), so a history replay (ADR-0100) writes it without a line break and the window
+    /// can rewrap it on a resize. `false` out of range, and for a backend that does not know.
+    fn history_wrapped(&self, back: usize) -> bool {
+        let _ = back;
+        false
+    }
+
+    /// Lines kept above the screen that is **not** active: the main screen's scrollback while the program is on the alternate screen
+    /// (ADR-0100 decision 2). A history replay reads this, [`inactive_history_cell`](Self::inactive_history_cell) and
+    /// [`inactive_history_wrapped`](Self::inactive_history_wrapped) while the alternate screen is active, since the alternate screen has
+    /// no history of its own. 0 for a backend that cannot read the inactive screen ([`AlacrittyTerminal`]: `alacritty_terminal` keeps
+    /// it private), so a program on the alternate screen gets no history replay there.
+    fn inactive_history_len(&self) -> usize {
+        0
+    }
+
+    /// Like [`history_cell`](Self::history_cell), on the inactive screen's scrollback (see
+    /// [`inactive_history_len`](Self::inactive_history_len)).
+    fn inactive_history_cell(&self, back: usize, col: u16) -> Option<Cell> {
+        let _ = (back, col);
+        None
+    }
+
+    /// Like [`history_wrapped`](Self::history_wrapped), on the inactive screen's scrollback (see
+    /// [`inactive_history_len`](Self::inactive_history_len)).
+    fn inactive_history_wrapped(&self, back: usize) -> bool {
+        let _ = back;
+        false
+    }
+
     /// Text of a scrollback line with trailing blanks removed (see [`history_cell`](Self::history_cell)).
     fn history_line(&self, back: usize) -> String {
         let mut s = String::new();

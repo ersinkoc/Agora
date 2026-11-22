@@ -1313,6 +1313,7 @@ fn a_clients_terminal_is_relayed_through_the_hub_with_input_and_close() {
                         v1::TerminalSubscribe {
                             terminal_id: terminal.clone(),
                             format: String::new(),
+                            history_lines: 0,
                         },
                     )),
                 }

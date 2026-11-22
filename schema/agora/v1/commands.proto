@@ -263,6 +263,8 @@ message TerminalSubscribe {
   string terminal_id = 1;
   // Capability name chosen at handshake: "terminal.raw" or "terminal.cells".
   string format = 2;
+  // ADR-0100: how many lines of history the window wants before the repaint (kind 4 frames); 0 or absent: none (as before).
+  uint32 history_lines = 3;
 }
 
 message FilesList {

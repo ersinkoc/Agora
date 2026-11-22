@@ -240,8 +240,14 @@ Items 1, 3 and 6 change the protocol or a recorded decision, so each needs an AD
    - at the end it writes its own reset (`CSI ? 9001 l`, `CSI ? 1004 l`).
 
    So a Windows user's terminal ends a session with the same modes as elsewhere, as `crates/agora/tests/cli.rs` checks on all three
-   systems. The history
-   replay (step 2) and the clients' part (step 3) are not built.
+   systems.
+   **Step 2 is done on the node** (ADR-0100 decision 2): a `TerminalSubscribe` with `history_lines` gets the newest
+   `min(history_lines, kept)` lines (at most 512 KiB, in kind 4 frames of at most 16 KiB, at most 32) before the repaint. They are
+   re-encoded from the scrollback's cells with their colours, and a line the node holds as wrapped is written without a break, so the
+   window rewraps it. A program on the alternate screen gets none (the backend cannot read the main screen under it), and a resync
+   never carries history. Measured with `agora-bench history`; the figures are in `docs/design/performance.md`. The clients' part
+   (step 3: the web window and the terminal client asking for history, and holding it with the snapshot) is not built: they still ask
+   for none.
 2. **Nobody owns the answers to terminal queries.** The node's emulator drops `PtyWrite` events (`crates/agora-vt/src/alacritty.rs:41`,
    only titles are kept), so a program that asks for the device attributes, the cursor position, the colours or the keyboard protocol
    when **no window is attached** gets no answer, and with **two windows** it gets two, each with its own theme's colours. Proposed
