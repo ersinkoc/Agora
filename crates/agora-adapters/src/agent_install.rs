@@ -859,24 +859,61 @@ fn check_names(home: &Path, name: &str, exe: &str) -> Result<(), InstallError> {
 
 // ---- last seen list version ----------------------------------------------------------------------------------------------
 
-/// The newest list version this machine accepted (`<AGORA_HOME>/agents/list-state.json`), 0 when none or unreadable.
-pub fn last_seen_version(home: &Path) -> u64 {
-    std::fs::read_to_string(agents_dir(home).join("list-state.json"))
-        .ok()
-        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
-        .and_then(|v| v.get("version").and_then(serde_json::Value::as_u64))
-        .unwrap_or(0)
+/// The largest `list-state.json` that is read: it holds one number (`{"version":N}`); anything larger was not written by Agora.
+pub const MAX_LIST_STATE_BYTES: u64 = 4096;
+
+/// The detail of the refusal when `list-state.json` is there but cannot be read or understood (#923).
+pub const LIST_STATE_UNREADABLE: &str = "list_state_unreadable";
+
+/// `<AGORA_HOME>/agents/list-state.json`.
+pub fn list_state_path(home: &Path) -> PathBuf {
+    agents_dir(home).join("list-state.json")
+}
+
+#[derive(serde::Deserialize)]
+struct ListState {
+    version: u64,
+}
+
+/// The newest list version this machine accepted (`<AGORA_HOME>/agents/list-state.json`): 0 only when the file does not exist (no
+/// list accepted yet). A file that is there but cannot be read or understood (no permission, not a plain file, larger than
+/// [`MAX_LIST_STATE_BYTES`], not `{"version":N}`) is `agent.install.index_invalid` with the detail [`LIST_STATE_UNREADABLE`], never
+/// 0: an unknown version would let an older list through (#923). The file is only ever replaced by a rename (`write_private`), so a
+/// crash leaves the old one whole; the owner recovers from a damaged one by removing it (docs/specs/agent-packages.md, rung 3).
+pub fn last_seen_version(home: &Path) -> Result<u64, InstallError> {
+    let path = list_state_path(home);
+    let unreadable = || InstallError {
+        code: Code::IndexInvalid,
+        detail: LIST_STATE_UNREADABLE.into(),
+    };
+    match std::fs::symlink_metadata(&path) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(_) => return Err(unreadable()),
+        Ok(m) if !m.is_file() => return Err(unreadable()),
+        Ok(_) => {}
+    }
+    // One byte past the cap is read, so a larger file is refused, never read into memory or cut.
+    let mut bytes = Vec::new();
+    File::open(&path)
+        .and_then(|f| f.take(MAX_LIST_STATE_BYTES + 1).read_to_end(&mut bytes))
+        .map_err(|_| unreadable())?;
+    if bytes.len() as u64 > MAX_LIST_STATE_BYTES {
+        return Err(unreadable());
+    }
+    serde_json::from_slice::<ListState>(&bytes)
+        .map(|s| s.version)
+        .map_err(|_| unreadable())
 }
 
 /// Remembers `version` as the newest accepted, atomically, under the install lock (two processes cannot interleave a read and a
-/// write); an older number never replaces a newer one.
+/// write); an older number never replaces a newer one, and a state that cannot be read is never replaced (#923).
 pub fn remember_list_version(home: &Path, version: u64) -> Result<(), InstallError> {
-    if version <= last_seen_version(home) {
+    if version <= last_seen_version(home)? {
         return Ok(());
     }
     let (_root, dir) = open_agents(home)?;
     let _lock = Lock::acquire(&dir)?;
-    if version <= last_seen_version(home) {
+    if version <= last_seen_version(home)? {
         return Ok(());
     }
     agora_platform::write_private(

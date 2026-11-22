@@ -626,6 +626,7 @@ cli-agent-install-done = { $name } { $version } kuruldu. Program şurada: { $lau
 cli-agent-install-current = { $name } { $version } zaten kurulu.
 cli-agent-install-no-list = İmzalı listeyi ve kök anahtarını verin: --list DOSYA ve --root-key HEX ya da DOSYA (ya da anahtarı Agora klasörüne agent-list-root-key adıyla kaydedin). Hiçbir şey değişmedi.
 cli-agent-install-err-index-invalid = Ajan listesi kabul edilemedi ({ $code }: { $detail }). Hiçbir şey değişmedi.
+cli-agent-install-err-list-state = Bu makinenin kabul ettiği en yeni ajan listesinin kaydı ({ $path }) okunamıyor ({ $code }: { $detail }), bu yüzden hiçbir liste kabul edilmiyor: aksi halde eski bir liste geri getirilebilirdi. Bunu beklemiyorsanız önce o dosyayı neyin değiştirdiğini bulun. Baştan başlamak için { $path } dosyasını silin ve kurulumu yayıncının en yeni listesiyle yeniden çalıştırın: o liste ilk liste olarak kabul edilir ve sürümü kaydedilir. Hiçbir şey değişmedi.
 cli-agent-install-err-not-approved = Kurulmadı: ajanın adı burada yazılmadı ({ $code }: { $detail }). Hiçbir şey değişmedi.
 cli-agent-install-err-download-failed = İndirme yapılamadı ({ $code }: { $detail }). Hiçbir şey değişmedi.
 cli-agent-install-err-checksum-mismatch = İndirilen dosya listedeki sağlama toplamıyla uyuşmuyor ({ $code }). Hiçbir şey değişmedi.

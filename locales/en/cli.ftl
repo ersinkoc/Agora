@@ -638,6 +638,7 @@ cli-agent-install-done = Installed { $name } { $version }. The program is at { $
 cli-agent-install-current = { $name } { $version } is already installed.
 cli-agent-install-no-list = Give the signed list and its root key: --list FILE and --root-key HEX or FILE (or save the key as agent-list-root-key in the Agora folder). Nothing was changed.
 cli-agent-install-err-index-invalid = The agent list is not acceptable ({ $code }: { $detail }). Nothing was changed.
+cli-agent-install-err-list-state = The record of the newest agent list this machine accepted, { $path }, cannot be read ({ $code }: { $detail }), so no list is accepted: an older list could otherwise be put back. If you did not expect this, find out what changed that file first. To start again, remove { $path } and run the install again with the newest list from its publisher: that list is then accepted as the first one and its version recorded. Nothing was changed.
 cli-agent-install-err-not-approved = Not installed: the agent name was not typed here ({ $code }: { $detail }). Nothing was changed.
 cli-agent-install-err-download-failed = The download did not happen ({ $code }: { $detail }). Nothing was changed.
 cli-agent-install-err-checksum-mismatch = The download does not match the checksum in the list ({ $code }). Nothing was changed.
