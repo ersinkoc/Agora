@@ -2100,8 +2100,15 @@ impl Supervisor {
                     .map_err(|e| SupervisorError::Spawn(e.to_string()))?;
             }
         }
+        // #896: the mesh bridge the agent is told to run is the node's own executable, which may sit in a folder only the user may
+        // open (on Windows `%LOCALAPPDATA%\Programs\Agora`). A confined agent may read and run that one file, nothing beside it.
+        let read = private_config
+            .map(Path::to_path_buf)
+            .into_iter()
+            .chain(std::iter::once(endpoint.command.clone()))
+            .collect();
         Ok(Extras {
-            read: private_config.map(Path::to_path_buf).into_iter().collect(),
+            read,
             argv: plan.argv_extra,
             env: plan.env,
             identity,
@@ -4933,6 +4940,47 @@ fn session_report(agent: &Agent) -> Option<SupervisorEvent> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod adapter_option_tests {
     use super::*;
+
+    /// #896: an agent given the mesh may read (and so run) the mesh bridge it is told to start, the node's own executable, which may
+    /// sit in a folder only the user may open; that file is added to what it may read, not its folder.
+    #[test]
+    fn an_agent_with_the_mesh_may_read_the_bridge_program_and_only_that_file() {
+        let root = std::env::temp_dir().join(format!("agora-sup-bridge-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (worktree, programs) = (root.join("work"), root.join("programs"));
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::create_dir_all(&programs).unwrap();
+        let bridge = programs.join("agora-bridge");
+        let mut sup = Supervisor::new(SupervisorConfig {
+            node: NodeId::new("n"),
+            restart: RestartPolicy::default(),
+            terminal: TerminalOptions::default(),
+            limits: NodeLimits::default(),
+        });
+        sup.register(
+            agora_adapters::Manifest::parse(
+                "kind = \"meshy\"\ndisplay_name = \"M\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [\"claude\"]\n\
+                 [mcp]\nmethod = \"env\"\n[mcp.env]\nAGORA_MCP = \"{mcp_command} mesh stdio\"\n",
+            )
+            .unwrap(),
+        );
+        let (command, socket) = (bridge.clone(), worktree.join("mesh.sock"));
+        sup.set_launch_hook(Box::new(move |_| {
+            Some(agora_adapters::inject::Endpoint {
+                command: command.clone(),
+                socket: socket.clone(),
+            })
+        }));
+        let extras = sup
+            .inject(&AgentId::new("agent-1"), "meshy", "p", &worktree, None)
+            .unwrap();
+        assert_eq!(
+            extras.read,
+            vec![bridge],
+            "the bridge file itself, not its folder"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     /// #902: an adapter the node gave up on always ends as a failure: its own failing code is kept, a signal (a crash, or SIGKILL from
     /// an out-of-memory killer) becomes the positive code a shell reports (never the negative value a window reads as a stop), and a
