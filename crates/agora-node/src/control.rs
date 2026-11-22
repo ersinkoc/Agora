@@ -1781,6 +1781,7 @@ pub struct ControlServer {
 impl ControlServer {
     pub fn start(path: &Path, ctx: Arc<ControlContext>) -> io::Result<Self> {
         let listener = local_listen(path)?;
+        // Non-blocking so the accept after the readiness wait below never waits (a client that left in between).
         listener.set_nonblocking(true)?;
         // After the bind, which holds the node's lock: a second node on the same home fails there and never replaces the token of the
         // running one. Before the accept loop, so every connection that is answered is checked against the token in the file.
@@ -1797,14 +1798,20 @@ impl ControlServer {
             .name("agora-control".into())
             .spawn(move || {
                 while !stop2.load(Ordering::Acquire) {
-                    match listener.accept() {
-                        Ok(stream) => {
+                    // A readiness wait, not a sleep between tries (#958): the hub's routed subscriptions each open a connection, and
+                    // a fixed poll made every one of them wait up to `POLL` before it was read. The stop is still seen within `POLL`,
+                    // and at once when `Drop` wakes the wait.
+                    match listener.accept_timeout(POLL) {
+                        // The wake-up connection from `Drop`, or a client that came as the server stops: not served.
+                        Ok(Some(_)) if stop2.load(Ordering::Acquire) => break,
+                        Ok(Some(stream)) => {
                             let (ctx, stop) = (Arc::clone(&ctx), Arc::clone(&stop2));
                             let _ = std::thread::Builder::new()
                                 .name("agora-control-conn".into())
                                 .spawn(move || handle_connection(stream, &ctx, &stop));
                         }
-                        Err(e) if e.kind() == io::ErrorKind::WouldBlock => std::thread::sleep(POLL),
+                        Ok(None) => {}
+                        // A failing accept (no descriptors left) must not spin: back off before the next try.
                         Err(_) => std::thread::sleep(POLL),
                     }
                 }
@@ -1826,6 +1833,12 @@ impl Drop for ControlServer {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
         if let Some(t) = self.thread.take() {
+            // Wake the accept wait with a connection of our own, so stopping does not wait out `POLL`. Only while the accept thread
+            // runs, so something drains the socket's queue and the connect cannot wait on a full one; if it fails, the wait still
+            // ends within `POLL`.
+            if !t.is_finished() {
+                let _ = local_connect(&self.path);
+            }
             let _ = t.join();
         }
         if let Some(f) = &self.token_file {
@@ -2566,5 +2579,111 @@ mod idempotency_tests {
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(started.len(), 1, "the retry started a second agent");
         assert_eq!(a, b, "both attempts get the one answer");
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod accept_tests {
+    use super::*;
+
+    fn server(name: &str) -> (ControlServer, PathBuf) {
+        // Short: Unix socket paths are limited to about 100 bytes.
+        let dir = std::env::temp_dir().join(format!("agora-ctl-acc-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let sup = Supervisor::new(crate::supervisor::SupervisorConfig {
+            node: agora_core::NodeId::new("n"),
+            restart: crate::supervisor::RestartPolicy::default(),
+            terminal: crate::terminal::TerminalOptions::default(),
+            limits: crate::supervisor::NodeLimits::default(),
+        });
+        let ctx = Arc::new(ControlContext::new(
+            Arc::new(Mutex::new(sup)),
+            Vec::new(),
+            dir.join("worktrees"),
+            "n".into(),
+            None,
+            None,
+            None,
+            Arc::new(crate::chat::ChatBoard::new()),
+        ));
+        let sock = dir.join("c.sock");
+        (ControlServer::start(&sock, ctx).unwrap(), dir)
+    }
+
+    fn list(c: &mut Client) {
+        let r = c
+            .call(Cmd::ProjectList(v1::ProjectList::default()))
+            .unwrap();
+        assert!(r.is_ok(), "{r:?}");
+    }
+
+    fn p95(mut v: Vec<Duration>) -> Duration {
+        v.sort();
+        v[(v.len() * 95).div_ceil(100) - 1]
+    }
+
+    #[test]
+    fn a_new_connection_is_served_without_waiting_for_a_poll() {
+        // #958: the accept loop slept 100 ms after every empty try, so a command on a new connection (the uplink opens one for each
+        // subscription the hub routes) waited 0-100 ms before it was read: p95 about 95 ms. Measured against the same command on a
+        // connection already open, so a slow runner moves both and only the accept wait is left in the difference.
+        if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+            return;
+        }
+        let (server, dir) = server("new");
+        let sock = server.path().to_path_buf();
+        let mut kept = Client::connect(&sock).unwrap();
+        list(&mut kept);
+        let (mut open, mut new) = (Vec::new(), Vec::new());
+        for _ in 0..60 {
+            let t = Instant::now();
+            list(&mut kept);
+            open.push(t.elapsed());
+            let t = Instant::now();
+            let mut c = Client::connect(&sock).unwrap();
+            list(&mut c);
+            new.push(t.elapsed());
+        }
+        let (open, new) = (p95(open), p95(new));
+        drop(kept);
+        drop(server);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            new < open + Duration::from_millis(40),
+            "a new connection p95 {new:?}, an open one p95 {open:?}"
+        );
+    }
+
+    #[test]
+    fn stopping_the_server_ends_its_accept_thread_at_once() {
+        if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+            return;
+        }
+        let mut took = Vec::new();
+        for round in 0..10 {
+            let (server, dir) = server(&format!("stop{round}"));
+            let sock = server.path().to_path_buf();
+            list(&mut Client::connect(&sock).unwrap());
+            let t = Instant::now();
+            drop(server);
+            took.push(t.elapsed());
+            // The thread has ended and dropped the listener: nothing answers any more.
+            assert!(
+                Client::connect(&sock).is_err(),
+                "a stopped server still accepts"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+        // Woken rather than waiting out the poll (that took 0-100 ms, about 50 ms in the middle; woken it is under a millisecond
+        // here). Generous for a loaded runner.
+        let mut sorted = took.clone();
+        sorted.sort();
+        assert!(
+            sorted[sorted.len() / 2] < Duration::from_millis(50),
+            "{took:?}"
+        );
+        assert!(p95(took.clone()) < Duration::from_secs(2), "{took:?}");
     }
 }
