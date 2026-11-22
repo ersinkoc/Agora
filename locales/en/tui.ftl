@@ -132,6 +132,7 @@ tui-request-answer-always = y allows it · A allows it always for this session �
 tui-request-answer-always-kept = y allows it · A allows it always (the agent remembers it) · n denies it · any other key leaves it waiting
 tui-request-answer-always-only = A allows it for the rest of its session (it offers no single answer) · n denies it · any other key leaves it waiting
 tui-request-answer-always-only-kept = A allows it always, the agent remembers it (it offers no single answer) · n denies it · any other key leaves it waiting
+tui-always-label = In its own words: “{ $label }”
 tui-note-copy = c copies the command · any key closes this
 tui-note-close = Any key closes this.
 tui-copied = Copied the command to the clipboard.

@@ -3691,6 +3691,12 @@ fn command(
                         )
                         .trim(),
                     ));
+                    // ADR-0101: the agent's own name for its always option, quoted, as the web's card shows it.
+                    if let Some(l) =
+                        agora_tui::render::always_label_line(&a, &|id, args| say.text(id, args))
+                    {
+                        lines.push(l);
+                    }
                     lines.push(String::new());
                     lines.push(say.text(
                         agora_tui::client::answer_hint(

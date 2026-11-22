@@ -128,6 +128,7 @@ tui-request-answer-always = y izin verir · A bu oturum boyunca hep izin verir �
 tui-request-answer-always-kept = y izin verir · A hep izin verir (ajan hatırlar) · n reddeder · başka bir tuş beklemede bırakır
 tui-request-answer-always-only = A oturumunun geri kalanı için izin verir (tek seferlik izin sunmuyor) · n reddeder · başka bir tuş beklemede bırakır
 tui-request-answer-always-only-kept = A hep izin verir, ajan hatırlar (tek seferlik izin sunmuyor) · n reddeder · başka bir tuş beklemede bırakır
+tui-always-label = Kendi sözleriyle: “{ $label }”
 tui-note-copy = c komutu kopyalar · herhangi bir tuş bunu kapatır
 tui-note-close = Herhangi bir tuş bunu kapatır.
 tui-copied = Komut panoya kopyalandı.

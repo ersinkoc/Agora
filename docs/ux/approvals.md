@@ -36,7 +36,7 @@ A structured agent can offer an answer it remembers (ACP `allow_always`); the wi
 - **Terminal client:** in the box that shows a request, `A` allows it always (`y` once, `n` denies); in a tab or chat, **Alt+A** does,
   only while the agent in front has a request that offers it (otherwise Alt+A is the agent's key). Never in the list, where `a` is Ask:
   Enter opens the agent's tab, or the commands (Alt+K) name it. The hints say Alt+A or `A` only when offered; `A` on a request that does
-  not offer it says "This request can only be allowed once." and sends nothing. The agent's line says `[asks less]`.
+  not offer it says "This request can only be allowed once." and sends nothing. The request box quotes the agent's own name for its option ("In its own words: “…”", one plain line, at most 64 characters). The agent's line says `[asks less]`.
 - Bulk actions only for identical low-risk requests.
 - Mobile layout first: approvals are the main mobile use case.
 - Expired approvals show as expired; the agent is informed.
