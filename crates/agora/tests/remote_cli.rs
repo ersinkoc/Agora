@@ -575,14 +575,42 @@ fn a_listen_address_that_is_not_an_address_is_a_usage_error() {
     assert_eq!(code, 2);
 }
 
+/// A running `agora hub run`, its output in a file: when the test fails, the hub's exit status and output are printed, so a hub that
+/// exited, never bound, or listens somewhere other than where the test looked is visible in the log.
 #[cfg(unix)]
-struct Proc(Child);
+struct Proc {
+    child: Child,
+    log: PathBuf,
+}
+
+#[cfg(unix)]
+impl Proc {
+    /// `agora hub run --listen 127.0.0.1:0` in `e`'s hub folder. The `listen` file `Env::new` seeds (a hub that is not running) is
+    /// removed first: the hub writes its certificate before it writes `listen`, so with the seed still there a wait for "certificate
+    /// and `listen`" could end with the seed's address, where nothing listens (#978).
+    fn hub(e: &Env) -> Self {
+        let _ = std::fs::remove_file(e.hub.join("listen"));
+        let log = e.hub.with_file_name("hub-run.log");
+        let out = std::fs::File::create(&log).unwrap();
+        let mut c = e.agora(&["hub", "run", "--listen", "127.0.0.1:0"]);
+        c.stdout(out.try_clone().unwrap()).stderr(out);
+        Self {
+            child: c.spawn().unwrap(),
+            log,
+        }
+    }
+}
 
 #[cfg(unix)]
 impl Drop for Proc {
     fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        if std::thread::panicking() {
+            let status = self.child.try_wait();
+            let log = std::fs::read_to_string(&self.log).unwrap_or_default();
+            eprintln!("hub status: {status:?} (Ok(None) = still running)\nhub output:\n{log}");
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }
 
@@ -620,12 +648,7 @@ fn cert_names(hub: &Path) -> Vec<String> {
 fn the_tailnet_names_reach_the_running_hubs_certificate_and_doctor_sees_them() {
     let e = Env::new("leaf");
     e.set_password();
-    // `Env::new` seeds a stale `listen` (a hub that is not running); this test starts a real one, so the only `listen` file
-    // that can exist is the one the hub writes. Otherwise `exists()` is true at once and `remote` could read the seed.
-    std::fs::remove_file(e.hub.join("listen")).unwrap();
-    let mut hub = e.agora(&["hub", "run", "--listen", "127.0.0.1:0"]);
-    hub.stdout(Stdio::null()).stderr(Stdio::null());
-    let _hub = Proc(hub.spawn().unwrap());
+    let _hub = Proc::hub(&e);
     wait_until("the hub wrote its certificate", || {
         !cert_names(&e.hub).is_empty() && hub_listening(&e.hub).is_some()
     });
@@ -932,17 +955,11 @@ fn a_real_hub_follows_remote_proxy_and_remote_off() {
 
     let e = Env::new("proxylive");
     e.set_password();
-    let mut hub = e.agora(&["hub", "run", "--listen", "127.0.0.1:0"]);
-    hub.stdout(Stdio::null()).stderr(Stdio::null());
-    let _hub = Proc(hub.spawn().unwrap());
+    let _hub = Proc::hub(&e);
     wait_until("the hub is listening", || {
-        e.hub.join("listen").exists() && !cert_names(&e.hub).is_empty()
+        hub_listening(&e.hub).is_some() && !cert_names(&e.hub).is_empty()
     });
-    let addr: std::net::SocketAddr = std::fs::read_to_string(e.hub.join("listen"))
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
+    let addr = hub_listening(&e.hub).unwrap();
     let ca = std::fs::read_to_string(e.hub.join("ca.pem")).unwrap();
     let rt = tokio::runtime::Runtime::new().unwrap();
     let ask = |headers: &[&str]| -> String {
@@ -976,7 +993,7 @@ fn a_real_hub_follows_remote_proxy_and_remote_off() {
                 };
                 match attempt.await {
                     Ok(tls) => break tls,
-                    Err(e) if tries >= 300 => panic!("hub did not answer TLS: {e}"),
+                    Err(e) if tries >= 300 => panic!("hub did not answer TLS at {addr}: {e}"),
                     Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
                 }
             };
