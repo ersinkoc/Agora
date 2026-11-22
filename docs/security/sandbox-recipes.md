@@ -167,8 +167,8 @@ on Windows runs commands through Git Bash, so a confined Claude Code agent canno
 PowerShell are not affected. Run such an agent with `sandbox = off` until this is solved.
 
 **Not supported confined on Windows either: a Node.js program starting a child with piped input or output** (#895). Measured with Node 26:
-`child_process.spawn` and `spawnSync` fail with `EPERM` whenever a stdio stream is a pipe (the default); with `stdio: 'ignore'` or
-`'inherit'` the child starts. libuv creates each such pipe as a named pipe and opens the child's end by name. Windows gives a named pipe
+`child_process.spawnSync` fails with `EPERM` whenever a stdio stream is a pipe (the default); with `stdio: 'ignore'` or `'inherit'` the
+child starts. The asynchronous `spawn` creates its pipes the same way (not measured separately). libuv creates each such pipe as a named pipe and opens the child's end by name. Windows gives a named pipe
 created without explicit security its own default permissions (full access for the owner, the system and administrators, read for
 `Everyone`), and a restricted token passes only what its restricting groups (the agent, `Everyone`, `Users`, the logon session) are granted,
 so that end cannot be opened for writing. **Consequence: a Node-based agent (Claude Code, Gemini CLI and others) that starts a tool or an MCP
