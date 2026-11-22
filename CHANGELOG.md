@@ -22,6 +22,7 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 - An agent's mesh tools no longer leave a request unanswered when its line is not plain single JSON: a line that is not valid JSON is answered with a parse error (`-32700`), one that is not a valid request with `-32600`, and an MCP client that settled on protocol version 2025-03-26 gets a batch of requests (up to 32 in one line) answered with one batch of answers. Under other protocol versions, which have no batches, each request in a batch is refused with `-32600` instead of being dropped (#981, #984).
 - In the terminal client, `b` opens the board of the selected agent's project (Backlog, Doing, Done), and Enter on a Backlog task gives it to one of the project's running agents after a confirmation you answer with `g`.
 - A text file written as UTF-16 with a byte-order mark (what Windows PowerShell's `>` writes, as in `"hello" > a.txt` in the Shell) is shown as text in Files and the terminal client's file view, and its changes as a text diff in Changes and `r`, instead of "This file is not text". The file itself is never rewritten; a download is still its own bytes (#940).
+- A confined agent's generated Git configuration in the node's `data/git-config/` folder is now removed when the agent ends, is stopped or crashes (a restart gets a new one) and when its start fails, instead of keeping one file for every launch. Files of agents a node never ended (it was killed, or the machine stopped) are not removed (#933).
 
 ## 0.3.33
 

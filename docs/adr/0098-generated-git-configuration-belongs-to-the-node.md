@@ -45,3 +45,15 @@ protected directories. A directory-wide exception would make sibling files visib
   protected sibling present. Check that the file is readable, the sibling is inaccessible and a commit succeeds.
 - On Windows with confinement enabled, verify that the ACL grants read access to the generated file and keeps the directory
   and sibling files protected. Exercise the launcher for terminal and structured agents on platforms that support them.
+
+## Implementation notes
+
+- 2026-11-22 (#933): each launch's file lasts as long as the launch. The node keeps it with what the launch started (a terminal
+  agent's handle, an adapter agent's entry) and removes it once that process has ended and been collected, is stopped or is
+  replaced by a restart, which writes a fresh file of its own. An adapter whose output closed keeps its file until its process
+  is collected. A start, restart or resume that fails after the file was written removes it.
+- Known limit: the files of launches a node never ended stay in `git-config/`. This happens when the node was killed or the
+  machine stopped. Each file is small and readable only by the owner. A node does not sweep the folder at its start: neither
+  a node's absence nor its pid proves that the agents it started are gone. Agents can outlive their node as orphans (ADR-0060),
+  and a second node for the same data folder cannot tell its own files from another live node's. Removing them needs a later
+  decision, as for the legacy copies of decision 4.

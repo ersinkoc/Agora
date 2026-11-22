@@ -189,6 +189,42 @@ pub fn write_for_result(data_dir: &Path) -> std::io::Result<PathBuf> {
     write_to(&path, &read_allowed())
 }
 
+/// One launch's generated file (#933): it is removed when this is dropped. The node keeps it beside what the launch started (the
+/// terminal's handle, the adapter's entry), and drops it once that process is ended and collected, is replaced by a restart (which
+/// writes a fresh file of its own), or never started (a start that fails after the file was written).
+#[derive(Debug)]
+pub struct LaunchFile(PathBuf);
+
+impl LaunchFile {
+    /// Takes ownership of the file at `path`, which [`write_for`] made for one launch.
+    pub fn new(path: PathBuf) -> Self {
+        Self(path)
+    }
+
+    /// Where the file is.
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for LaunchFile {
+    fn drop(&mut self) {
+        // Through the folder held open, so a link where the folder was is not followed. Already gone (removed by hand, or the
+        // folder with it) is fine: there is nothing left to remove.
+        let (Some(folder), Some(name)) = (self.0.parent(), self.0.file_name()) else {
+            return;
+        };
+        let (Some(root), Some(sub)) = (folder.parent(), folder.file_name()) else {
+            return;
+        };
+        if let Ok(dir) =
+            agora_platform::ConfinedDir::open_root(root).and_then(|r| r.subdir(sub, false))
+        {
+            let _ = dir.remove_file(name);
+        }
+    }
+}
+
 /// Writes the file at `path` (its folder made ready by the caller).
 fn write_to(path: &Path, values: &[(String, String)]) -> std::io::Result<PathBuf> {
     let path = path.to_path_buf();
@@ -326,6 +362,22 @@ mod tests {
             render(&pairs(&[("user.name", &"x".repeat(MAX_VALUE + 1))])),
             ""
         );
+    }
+
+    #[test]
+    fn a_launch_file_goes_with_its_owner() {
+        let dir = std::env::temp_dir().join(format!("agora-gc-launch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("agent-x");
+        std::fs::write(&p, "x").unwrap();
+        let file = LaunchFile::new(p.clone());
+        assert_eq!(file.path(), p);
+        drop(file);
+        assert!(!p.exists());
+        // One removed already is not an error.
+        drop(LaunchFile::new(p));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

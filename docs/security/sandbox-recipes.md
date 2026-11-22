@@ -13,7 +13,9 @@ At each confined launch the node writes a small Git configuration to `<data>/git
 `<AGORA_HOME>/data/git-config/`). Git uses that file for its global settings, with `GIT_CONFIG_GLOBAL` pointing to it
 and `GIT_CONFIG_NOSYSTEM=1`. The node grants read access to the one file for that launch. The grant allows opening the
 file while keeping directory listing, sibling reads and writes denied. If the agent's ordinary grants reach that folder,
-or the node cannot prepare the private file, the node skips the generated settings. See [ADR-0078][git-config] and
+or the node cannot prepare the private file, the node skips the generated settings. Each file lasts as long as its launch:
+the node removes it when the agent ends, is stopped or crashes (a restart writes a new one), and when a start fails after
+the file was written. Files of launches a node never ended (it was killed, or the machine stopped) stay in that folder. See [ADR-0078][git-config] and
 [ADR-0098][git-config-location].
 
 The node copies these keys when set in your own global configuration: `user.name`, `user.email`, `init.defaultBranch`,
