@@ -4,6 +4,10 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+_Nothing yet._
+
+## 0.3.34
+
 - A symbolic link to itself, or a ring of links (`a` to `b` and `b` to `a`), in a project folder is now refused in Files and the terminal client's file view with "is outside the project folder." (`files.outside_root`), as a link that leads nowhere already was, instead of "Something went wrong" (#924).
 - `agora pair open` on a hub that listens on this computer only now says that another machine cannot reach it and how to change that (listen on this computer's network address, `agora --listen 192.168.1.20:PORT`, or on every IPv4 interface with `0.0.0.0:PORT`, a public one too), and offers only a join from this same computer, instead of telling the new machine to dial this computer's name, which could not work (#943). On a hub that other machines can reach it suggests only addresses the hub surely listens on and its certificate names, and lists the certificate's names as names that may also reach it.
 - In a folder whose repository has no commit yet, the terminal client's `r` and the window's Changes show every file as new (secret files by name only) instead of "Could not read its changes (internal).", and its changed-file count is shown like any other folder's (#941).
