@@ -59,3 +59,23 @@ harmless, since System32 is readable at Low integrity anyway (#898).
 4. Not measured: whether a Rust program (Codex) can start child processes when confined. A small Rust spawn probe would settle it (#898).
 
 Not measured either: real Claude Code or Codex agents (no real accounts were used), and `worktree-offline` (macOS only).
+
+## Follow-up, 2026-11-22 (Agora 0.3.34, same machine and setup)
+
+- **Mesh (#896): fixed** by #1010. An agent given the mesh may read and run the node's own executable, that file only. A confined `cmd`
+  agent running `"%AGORA_MCP%" --version`: "Access is denied." with 0.3.34, `Agora 0.3.34` with the fix.
+- **Node (#895): the cause is the pipes, not process creation.** `spawnSync('cmd.exe', …)` works with `stdio: 'ignore'`, `'inherit'` and
+  `detached`, and fails with `EPERM` for `'pipe'` and for a single piped stream. A pipe probe in the same agent: an anonymous pipe and
+  the server end of a named pipe are created; opening the client end of that named pipe by name for writing is refused (error 5), and
+  for reading it works. The pipe's descriptor (none given, as libuv does) is Windows' fixed default for named pipes:
+  `D:(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;<user>)(A;;FR;;;WD)(A;;FR;;;AN)` with a Low label, not the token's default DACL. The restricted
+  check sees only the restricting groups, which are granted read only. With a descriptor granting `Everyone` full access the same open
+  works, so integrity is not the cause. Making the logon SID the token's default owner is refused (error 1307). Fixing it needs another
+  confinement mechanism; #895 stays open for that decision, and `sandbox-recipes.md` states the limit.
+- **Rust (#898, item 3): works.** A Rust (std, 1.99.1) program in the same agent starts `cmd /c exit 0` with stdout null, inherited and
+  piped. So Rust agents (Codex) can run tools confined.
+- **Log noise (#898, item 2): quieted.** A read grant the user may not make is now logged only when `Users`/`Everyone` cannot read that
+  folder either, so `System32` and `Program Files` no longer add a line at every start.
+- **Ports (#898, item 1):** the wildcard-listener case is in `sandbox-recipes.md`.
+- Side finding: Node resolving a `.js` file walks up for `package.json`; in a folder under the profile with none of its own it reaches
+  `C:\Users\<user>\package.json`, gets `EPERM` and stops. Real projects have their own `package.json`.

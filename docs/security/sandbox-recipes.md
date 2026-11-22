@@ -166,6 +166,14 @@ create, and a directory created in advance by the (Medium) node with a Low label
 on Windows runs commands through Git Bash, so a confined Claude Code agent cannot run shell commands.** Agents that run commands through `cmd` or
 PowerShell are not affected. Run such an agent with `sandbox = off` until this is solved.
 
+**Not supported confined on Windows either: a Node.js program starting a child with piped input or output** (#895). `child_process.spawn` and
+`spawnSync` fail with `EPERM` whenever a stdio stream is a pipe (the default); with `stdio: 'ignore'` or `'inherit'` the child starts.
+libuv creates each such pipe as a named pipe and opens the child's end by name. Windows gives a named pipe created without explicit security
+its own default permissions (full access for the owner, the system and administrators, read for `Everyone`), and a restricted token passes
+only what its restricting groups (the agent, `Everyone`, `Users`, the logon session) are granted, so that end cannot be opened for writing.
+**Consequence: Node-based agents (Claude Code, Gemini CLI and others) cannot run tools or start MCP servers when confined on Windows.**
+Rust programs (Codex; Rust's own pipes work) and `cmd` can. Fixing it needs another confinement mechanism, a decision for ADR-0050.
+
 What differs from macOS and Linux:
 
 - **Reads are weaker** (Amendment B, 5): a file that grants `Users` or `Everyone` read (many data-volume folders, `Program Files`) stays readable to
@@ -191,5 +199,7 @@ What differs from macOS and Linux:
   - `git branch -d` fails with the same error. Delete branches outside the agent.
   - Without `~\.config\git` in `sandbox.read`, git also warns `unable to access '...\.config/git/ignore': Permission denied`; it is
     harmless.
+- **A confined dev server cannot share a port with a wildcard listener.** If another program already listens on `0.0.0.0` on that port,
+  the agent's `listen(127.0.0.1)` fails with `EACCES` (an unconfined process may bind it next to the wildcard listener). Use a free port.
 - **rustup needs `~\.rustup` itself** (`could not create home directory ... (os error 183)` when only one toolchain folder is listed).
 - Not working yet: `cargo build` (`Access is denied` starting `rustc.exe`); npm's cache (`%LOCALAPPDATA%\npm-cache`) is too large to list per agent.
