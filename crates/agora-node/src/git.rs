@@ -718,7 +718,7 @@ pub fn diff_with(
         hide_secret_sections(&tracked)
     };
     // #940: a UTF-16 text file git called binary, as text. After the secret files were cut: no hidden one is decoded.
-    out = utf16::decode_sections(worktree, std::mem::take(&mut out));
+    out = utf16::decode_sections(worktree, std::mem::take(&mut out), show_secret);
     let mut ls = vec!["ls-files", "--others", "--exclude-standard", "-z"];
     if let Some(p) = &literal {
         ls.extend(["--", p]);
@@ -976,18 +976,17 @@ fn new_file_diff(name: &str, mode: &str, data: &[u8]) -> Vec<u8> {
     if data.is_empty() {
         return out;
     }
-    // #940: UTF-16 text with a byte-order mark (Windows PowerShell's `>`) is shown as its text where git would say binary.
+    // #940: UTF-16 text with a byte-order mark (Windows PowerShell's `>`) is shown as its text, with or without a zero byte.
     let decoded;
-    let data = if data[..data.len().min(8000)].contains(&0) {
-        let Some(text) = agora_core::text::utf16_text(data) else {
-            let _ = writeln!(out, "Binary files /dev/null and {b} differ");
-            return out;
-        };
+    let data = if let Some(text) = agora_core::text::utf16_text(data) {
         decoded = text;
         if decoded.is_empty() {
             return out;
         }
         decoded.as_bytes()
+    } else if data[..data.len().min(8000)].contains(&0) {
+        let _ = writeln!(out, "Binary files /dev/null and {b} differ");
+        return out;
     } else {
         data
     };
@@ -1908,6 +1907,64 @@ diff --git a/.ssh/known b/.ssh/known\nold mode 100644\nnew mode 100755\n";
             fs::read(r.dir.join("ps.txt")).expect("read"),
             utf16("hello\r\nworld\r\n", true)
         );
+    }
+
+    #[test]
+    fn a_utf16_file_without_a_zero_byte_shows_as_its_text_too() {
+        // One line of letters above U+00FF and no line break: no zero byte, so git calls it text and prints the raw bytes.
+        let r = Repo::new(None);
+        fs::write(
+            r.dir.join("greek.txt"),
+            utf16("\u{3b1}\u{3b2}\u{3b3}", true),
+        )
+        .expect("write");
+        let d = diff(&r.dir, Some("greek.txt")).expect("diff");
+        assert!(
+            d.contains("+++ b/greek.txt\n@@ -0,0 +1 @@\n+\u{3b1}\u{3b2}\u{3b3}\n\\ No newline at end of file\n"),
+            "{d}"
+        );
+        r.commit("greek");
+        fs::write(
+            r.dir.join("greek.txt"),
+            utf16("\u{3b1}\u{3b2}\u{3b3}\u{3b4}", true),
+        )
+        .expect("write");
+        let d = diff(&r.dir, None).expect("diff");
+        assert!(
+            d.contains(
+                "--- a/greek.txt\n+++ b/greek.txt\n@@ -1 +1 @@\n-\u{3b1}\u{3b2}\u{3b3}\n\\ No newline at end of file\n\
+                 +\u{3b1}\u{3b2}\u{3b3}\u{3b4}\n\\ No newline at end of file\n"
+            ),
+            "{d}"
+        );
+        assert!(!d.contains('\u{fffd}'), "{d}");
+    }
+
+    #[test]
+    fn a_utf16_file_that_leads_to_a_secret_file_is_not_read_for_the_diff() {
+        // ADR-0080: the name git printed is not secret, but the file opened is (a link swapped in after git ran). Unless the owner
+        // shows secret files, the read is refused where the opened file really is, and the section stays git's.
+        let r = Repo::new(None);
+        fs::write(r.dir.join("notes.txt"), utf16("TOKEN=old\n", true)).expect("write");
+        fs::write(r.dir.join(".env"), utf16("TOKEN=new-secret\n", true)).expect("write");
+        r.commit("notes");
+        fs::remove_file(r.dir.join("notes.txt")).expect("rm");
+        if agora_platform::symlink(Path::new(".env"), &r.dir.join("notes.txt")).is_err() {
+            return;
+        }
+        let git_says = "diff --git a/notes.txt b/notes.txt\nindex 1111111..2222222 100644\n\
+                        Binary files a/notes.txt and b/notes.txt differ\n";
+        assert_eq!(
+            utf16::decode_sections(&r.dir, git_says.to_string(), false),
+            git_says
+        );
+        let shown = utf16::decode_sections(&r.dir, git_says.to_string(), true);
+        assert!(shown.contains("-TOKEN=old\n+TOKEN=new-secret\n"), "{shown}");
+        // And a UTF-16 secret file itself, through the whole diff: named only.
+        fs::write(r.dir.join(".env"), utf16("TOKEN=newer-secret\n", true)).expect("write");
+        let (d, secret) = diff_with(&r.dir, Some(".env"), false).expect("diff");
+        assert!(!d.contains("TOKEN"), "{d}");
+        assert_eq!(secret.len(), 1, "{d}");
     }
 
     #[test]

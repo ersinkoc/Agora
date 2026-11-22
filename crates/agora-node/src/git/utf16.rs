@@ -1,9 +1,12 @@
 //! Changes of UTF-16 text files as text (#940). Windows PowerShell 5.1's `>` writes UTF-16 LE with a byte-order mark; git sees the
 //! NUL bytes and prints `Binary files ... differ`, and does so for any repository unless a `textconv` program is set up, which the
-//! node never runs (`--no-textconv`: a repository's configuration must not start programs). So for a section git called binary
-//! where a side is UTF-16 with a mark ([`agora_core::text::utf16_text`]), the node reads both sides itself and writes the section as
-//! git would for that text: decoded for showing, the bytes on disk never changed or written back. Everything else git printed,
-//! a real binary file among it (no mark, or not valid UTF-16), is left exactly as it was.
+//! node never runs (`--no-textconv`: a repository's configuration must not start programs). A UTF-16 file with no zero byte at
+//! all (one line of characters none of which is below U+0100, with no line break) is text to git, shown as the raw bytes. So for a
+//! section git called binary, or whose first line starts with the bytes of a mark (`FF FE`/`FE FF`, two replacement characters
+//! once git's output is read as UTF-8), where a side is UTF-16 with a mark ([`agora_core::text::utf16_text`]), the node reads both
+//! sides itself and writes the section as git would for that text: decoded for showing, the bytes on disk never changed or
+//! written back. Everything else git printed, a real binary file among it (no mark, or not valid UTF-16), is left exactly as it
+//! was.
 
 use std::path::Path;
 
@@ -16,11 +19,18 @@ const CONTEXT: usize = 3;
 /// only a longer one). Keeps the time and memory of one file small: both are at most proportional to this times the line count.
 const MAX_EDITS: usize = 500;
 
-/// `diff` (git's output for the tracked files) with each binary section of a UTF-16 text file written as text. At most
+/// Where git's output, read as UTF-8, shows a byte-order mark of UTF-16 at the start of a hunk line.
+const MARK: &str = "\u{fffd}\u{fffd}";
+
+/// `diff` (git's output for the tracked files) with each section of a UTF-16 text file written as text. At most
 /// [`MAX_UNTRACKED`] sections are read, each side at most [`MAX_UNTRACKED_BYTES`], as for new files; a section past those stays
-/// as git printed it.
-pub(super) fn decode_sections(worktree: &Path, diff: String) -> String {
-    if !diff.starts_with("Binary files ") && !diff.contains("\nBinary files ") {
+/// as git printed it. Unless `show_secret` (the owner's policy, ADR-0080), the workspace's file is read with the secret check of
+/// `files.read`, on where the opened file really is: one that leads to a secret file is not read, and its section stays git's.
+pub(super) fn decode_sections(worktree: &Path, diff: String, show_secret: bool) -> String {
+    if !diff.starts_with("Binary files ")
+        && !diff.contains("\nBinary files ")
+        && !diff.contains(MARK)
+    {
         return diff;
     }
     let lines: Vec<&str> = diff.split_inclusive('\n').collect();
@@ -39,11 +49,10 @@ pub(super) fn decode_sections(worktree: &Path, diff: String) -> String {
         }
         let section = &lines[i..end];
         i = end;
-        let binary = section.iter().position(|l| l.starts_with("Binary files "));
-        let text = match binary {
+        let text = match header_end(section) {
             Some(at) if tries < MAX_UNTRACKED => {
                 tries += 1;
-                as_text(worktree, section, at)
+                as_text(worktree, section, at, show_secret)
             }
             _ => None,
         };
@@ -55,10 +64,31 @@ pub(super) fn decode_sections(worktree: &Path, diff: String) -> String {
     out
 }
 
-/// One binary section as text, or `None` to keep it: neither side is UTF-16 text, a side is not text at all, a side cannot be
-/// read (too large, gone, not a plain file), or the two texts are the same (only the bytes differ, as in a change of encoding,
-/// which git's own line says better than an empty text diff would).
-fn as_text(worktree: &Path, section: &[&str], binary_at: usize) -> Option<String> {
+/// For a section that may be a UTF-16 file, where git's header ends (its `Binary files` line, or the `---` line of a text section
+/// with a hunk line that starts with [`MARK`]); `None` for any other section. Only a guess: the bytes of both sides decide.
+fn header_end(section: &[&str]) -> Option<usize> {
+    if let Some(at) = section.iter().position(|l| l.starts_with("Binary files ")) {
+        return Some(at);
+    }
+    let hunk = section.iter().position(|l| l.starts_with("@@ "))?;
+    let marked = section[hunk..]
+        .iter()
+        .any(|l| l.get(1..).is_some_and(|c| c.starts_with(MARK)));
+    if !marked {
+        return None;
+    }
+    section[..hunk].iter().position(|l| l.starts_with("--- "))
+}
+
+/// One section as text, or `None` to keep it: neither side is UTF-16 text, a side is not text at all, a side cannot be read (too
+/// large, gone, not a plain file, secret), or the two texts are the same (only the bytes differ, as in a change of encoding, which
+/// git's own line says better than an empty text diff would). `header_end`: git's lines before it are kept.
+fn as_text(
+    worktree: &Path,
+    section: &[&str],
+    header_end: usize,
+    show_secret: bool,
+) -> Option<String> {
     let has = |p: &str| section.iter().any(|l| l.starts_with(p));
     let (added, deleted) = (has("new file mode "), has("deleted file mode "));
     let (_, new) = section_paths(section);
@@ -77,11 +107,11 @@ fn as_text(worktree: &Path, section: &[&str], binary_at: usize) -> Option<String
     let new_bytes = if deleted {
         None
     } else {
+        // A secret name's section was cut before this; the read checks again where the opened file really is (a folder swapped
+        // for a link to `.ssh` after git ran), as `files.read` does.
         let files = crate::files::Files::open(worktree, MAX_UNTRACKED_BYTES)
             .ok()?
-            // Secret files never reach this point with their content shown (their sections are cut before), and reading one
-            // here only decides how a section the caller will cut is written.
-            .with_secret_shown(true);
+            .with_secret_shown(show_secret);
         Some(files.read(&new).ok()?)
     };
     let mut utf16 = false;
@@ -101,7 +131,7 @@ fn as_text(worktree: &Path, section: &[&str], binary_at: usize) -> Option<String
         return None;
     }
     let mut out = String::new();
-    section[..binary_at].iter().for_each(|l| out.push_str(l));
+    section[..header_end].iter().for_each(|l| out.push_str(l));
     let name = |prefix: &str, path: &str, absent: bool| {
         if absent {
             return "/dev/null".to_string();
@@ -131,13 +161,21 @@ fn at_head(worktree: &Path, path: &str) -> Option<Vec<u8>> {
         .spawn()
         .ok()?;
     let mut buf = Vec::new();
-    if let Some(out) = child.stdout.take() {
-        let _ = out.take(MAX_UNTRACKED_BYTES + 1).read_to_end(&mut buf);
+    let read = match child.stdout.take() {
+        Some(out) => out
+            .take(MAX_UNTRACKED_BYTES + 1)
+            .read_to_end(&mut buf)
+            .is_ok(),
+        None => false,
+    };
+    if !read || buf.len() as u64 > MAX_UNTRACKED_BYTES {
+        // Past the cap git may still be writing; killing it is how it stops.
+        let _ = child.kill();
+        let _ = child.wait();
+        return None;
     }
-    // Past the cap git may still be writing; closing its pipe and killing it is how it stops.
-    let _ = child.kill();
-    let ok = child.wait().ok()?;
-    (ok.success() && buf.len() as u64 <= MAX_UNTRACKED_BYTES).then_some(buf)
+    // A blob under the cap was read to its end: git's own exit says whether that is the whole file.
+    child.wait().ok()?.success().then_some(buf)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
