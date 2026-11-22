@@ -20,6 +20,7 @@ import type { ChatSource } from './net/chat';
 import { demoConversation, demoRichConversation } from './demoChat';
 import { ChatActionsContext } from './components/chatActions';
 import { AgentTile } from './components/AgentTile';
+import { ApprovalCard } from './components/ApprovalCard';
 import { StartAgent, type KindChoice } from './components/StartAgent';
 import { AttentionStrip } from './components/AttentionStrip';
 import { HeaderLinks } from './components/HeaderLinks';
@@ -29,12 +30,13 @@ import { ago } from './net/time';
 import { NetworkView } from './components/NetworkView';
 import { StateBadge } from './components/StateBadge';
 import { NoAskBadge } from './components/NoAskBadge';
+import { AsksLessChip } from './components/AllowAlways';
 import type { ApprovalModel, MachineModel, MessageModel, ProjectCost } from './net/view';
 import type { Device } from './net/approval';
 import { deviceLabel } from './net/devices';
 import { AgentsSettings } from './components/AgentsSettings';
 import type { UsageSummary } from './net/usage';
-import { demoAgents, demoApprovals, demoHelper, demoSkipApproval, demoStartApproval, demoStartSettingsApproval, demoStartNoAskApproval } from './fixtures';
+import { demoAgents, demoAlwaysApproval, demoAlwaysOnlyApproval, demoApprovals, demoAsksLess, demoHelper, demoSkipApproval, demoStartApproval, demoStartSettingsApproval, demoStartNoAskApproval } from './fixtures';
 import { forgetSkipCapable, markSkipCapable } from './net/skipApproval';
 import { SessionBar } from './components/SessionBar';
 import { demoSource, type TerminalSource } from './terminal/source';
@@ -140,6 +142,12 @@ function Themed({ theme, onStart }: { theme: 'dark' | 'light'; onStart?: () => v
         <div className="h-[52rem] max-w-2xl"><PromptBox agent={demoRichAgent} source={demoRich} send={async () => true} choose={async () => true} approvals={<ApprovalBanner approval={demoApprovals[0] as ApprovalModel} onResolve={() => {}} pinned />} /></div>
       </ChatActionsContext.Provider>
       <div className="fleet"><AgentTile agent={demoHelper} /></div>
+      {/* ADR-0101: "Allow always" beside Allow and Deny, in the place of Allow when it is all the agent offers, and "Asks less". */}
+      <div data-always className="grid max-w-3xl gap-3">
+        <div className="approvals"><ApprovalCard approval={demoAlwaysApproval} onResolve={() => {}} /><ApprovalCard approval={demoAlwaysOnlyApproval} onResolve={() => {}} /></div>
+        <ApprovalBanner approval={demoAlwaysApproval} onResolve={() => {}} pinned />
+        <div className="fleet"><AgentTile agent={demoAsksLess} /></div>
+      </div>
       <AgentAddress agent={{ ...demoHelper, machineId: 'laptop', id: 'laptop/a8' }} />
       {/* ADR-0090 Amendment A: the card for a switch to a mode that skips permissions (the demo machine "has been heard"), and the badge of an agent that now runs so. */}
       <SkipApproval approval={demoSkipApproval as ApprovalModel} onResolve={() => {}} />
@@ -194,7 +202,7 @@ export function Focus({ agent, approvals = [], onResolve, source: live, chatSour
   agent: AgentTileModel | undefined;
   // What this agent waits on, answered here as in the window (an agent shown full size must not be left waiting).
   approvals?: readonly ApprovalModel[];
-  onResolve?: (approval: ApprovalModel, approved: boolean, choice?: StartChoice) => void;
+  onResolve?: (approval: ApprovalModel, approved: boolean, choice?: StartChoice, always?: boolean) => void;
   source?: TerminalSource;
   chatSource?: ChatSource;
   sendPrompt?: PromptSend;
@@ -222,6 +230,7 @@ export function Focus({ agent, approvals = [], onResolve, source: live, chatSour
         <h1 className="m-0 truncate text-[0.8125rem] font-semibold tracking-normal">{agent.name}</h1>
         <span title={`${t('focus-why')} ${why}`}><StateBadge state={agent.state} /></span>
         <NoAskBadge agent={agent} />
+        <AsksLessChip agent={agent} />
         <span className="hidden min-w-0 items-center gap-1.5 truncate text-xs text-muted md:flex"><Icon name="machine" className="size-3.5" />{agent.machine}<Icon name="chevron" className="size-3 rtl:rotate-180" /><Icon name="folder" className="size-3.5" />{agent.project || agent.workspace}{agent.branch && <><Icon name="branch" className="ms-1 size-3.5" /><span className="font-mono">{agent.branch}</span></>}</span>
         <span className="flex-1" />
         {agent.tokens ? <span className="ide-chip">{t('agent-tokens', { count: agent.tokens })}</span> : null}

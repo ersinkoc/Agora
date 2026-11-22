@@ -41,6 +41,11 @@ export const demoSkipApproval = { id: 'demo/9', node: 'demo', localId: '9', agen
 
 // The demo window's one waiting approval, for the first demo agent.
 export const demoApprovals = [{ id: 'demo/1', node: 'demo', localId: '1', agentId: 'a1', agentName: 'claude · amber', action: 'Edit src/auth.rs', detail: '+12 −3', expiresAtMs: 0 }];
+// ADR-0101: a request whose agent offers an answer it remembers as well as a single one, one that offers only that, and an agent that
+// holds two such answers ("Asks less").
+export const demoAlwaysApproval = { id: 'demo/7', node: 'demo', localId: '7', agentId: 'demo/a9', agentName: 'wstack · teal', action: 'run_command', detail: 'git status', expiresAtMs: 0, always: { label: 'Always allow git status', optionId: 'allow-always-1', only: false } };
+export const demoAlwaysOnlyApproval = { id: 'demo/8', node: 'demo', localId: '8', agentId: 'demo/a9', agentName: 'wstack · teal', action: 'write_file', detail: 'src/main.rs', expiresAtMs: 0, always: { label: 'Allow edits this session', optionId: 'edits', only: true } };
+export const demoAsksLess: AgentTileModel = { id: 'demo/a9', name: 'wstack · teal', accent: 'var(--agent-teal)', machine: 'Laptop', workspace: 'login-fix', state: 'working', preview: 'Running git status…', alwaysAllowed: ['run_command', 'write_file'] };
 
 // Development only: a small folder tree for the demo window's folder picker.
 const demoTree: Record<string, string[]> = {

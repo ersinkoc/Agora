@@ -362,14 +362,25 @@ Codex then reviewed the implementation (PR #1007 at e79a2011); its findings refi
 9. **Delivered means written to the agent.** The bridge answers `approval/resolve` only once its writer wrote the answer to the agent's
    stdin and flushed it, not when the answer was queued. A failed write or an agent that ends first is the error `adapter.approval_undelivered`.
    So is a writer report not seen within five seconds; that means delivery was not confirmed, not that no byte reached the agent (the
-   report may be queued behind another event), so the bridge ends the agent before it tells the node: whatever the agent got, it holds
-   no grant afterwards. Either way the node records the request cancelled, with no `AgentAlwaysAllowed`. An `approval/resolve` result from any adapter
+   report may be queued behind another event), so the bridge asks for the agent to be ended before it tells the node, and the node
+   records no grant for that run (an agent that saved the answer in its own settings may still keep it, as the note under the button
+   says). Either way the node records the request cancelled, with no `AgentAlwaysAllowed`. An `approval/resolve` result from any adapter
    asserts this (`docs/specs/adapter-protocol.md`).
 10. **The record names the run.** The answer is sent only to the run of the agent's process the policy was checked for, and the node
    records `AgentAlwaysAllowed` only while that run is still the agent's process, checked and written under the supervisor's lock, so a
    restart, resume, exit or stop (each begins another run and clears the records) is ordered before the check or after the record. A
    former process's late success is audited (`ApprovalResolved`, ALWAYS) but never marks its replacement. The run is the adapter's
    run counter, not the call's turn generation, which also changes when a turn begins.
+11. **Words for an unchecked kind (PR B, Codex's review).** ACP leaves what an always answer covers and how long it lasts to the agent, so
+   "for this session" and "until it ends" are said only for a kind known to drop the answer when its session ends. Nothing marks a kind
+   so yet (no manifest key or protocol field reaches the clients), so the window and the terminal client show the words that say the agent
+   remembers it, possibly beyond its session: the `-kept` ids beside the ids of decision 1 (for example `approval-allow-always-kept` =
+   "Allow always", `tui-allowed-always-kept`), chosen by one function per client (`alwaysText` in `apps/web/src/net/always.ts`,
+   `always_text` in `crates/agora-tui/src/client.rs`). The ids of decision 1 keep the session words for the day a kind can be marked as
+   checked, which needs its own decision (a manifest key and a way to tell the clients). The same applies to the chip and the
+   conversation entry. An always-only request is never answered from a one-line row (the fleet console, the phone's bar, the attention
+   dialog); its full card shows the always button in the place of Allow.
+
 
 ## Consequences
 

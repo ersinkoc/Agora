@@ -15,6 +15,7 @@ export interface ChatLine {
   id: number; atMs: number; role: 'agent' | 'user'; kind: 'text' | 'tool' | 'plan' | 'diff' | 'notice' | 'thought' | 'permission'; text: string; path: string; code?: string; params?: Record<string, string>;
   callId?: string; callKind?: CallKind; status?: CallStatus; locations?: { path: string; line: number }[]; output?: string; outputCut?: boolean; startedMs?: number; endedMs?: number;
   steps?: PlanStepLine[]; queued?: boolean; approvalId?: string; outcome?: Outcome;
+  always?: boolean; // ADR-0101: `permission_always`, the approved answer was one the agent remembers
   // #908, the window's own (never from the node): a queued prompt seen to be sent while this window followed the stream; the id of the
   // newest entry of the agent's held then. It went after that entry, whatever the times say (they tie within a millisecond).
   sentAfter?: number;
@@ -67,6 +68,7 @@ export function chatLine(e: agora.v1.ChatEntry.$Properties): ChatLine {
   if (e.approvalId) line.approvalId = e.approvalId;
   const oc = OUTCOMES[e.permissionOutcome ?? 0];
   if (oc) line.outcome = oc;
+  if (e.permissionAlways) line.always = true;
   return line;
 }
 
@@ -86,7 +88,7 @@ export function noticeText(line: ChatLine, tr: (id: string, args?: Record<string
 }
 
 // The fields that change in place; a repeat that differs in none of them says nothing new.
-const SAME_KEYS: readonly (keyof ChatLine)[] = ['role', 'text', 'kind', 'path', 'code', 'approvalId', 'callId', 'status', 'callKind', 'output', 'outputCut', 'startedMs', 'endedMs', 'queued', 'outcome', 'atMs', 'sentAfter'];
+const SAME_KEYS: readonly (keyof ChatLine)[] = ['role', 'text', 'kind', 'path', 'code', 'approvalId', 'callId', 'status', 'callKind', 'output', 'outputCut', 'startedMs', 'endedMs', 'queued', 'outcome', 'always', 'atMs', 'sentAfter'];
 function same(a: ChatLine, b: ChatLine): boolean {
   return SAME_KEYS.every((k) => a[k] === b[k]) && JSON.stringify(a.steps) === JSON.stringify(b.steps) && JSON.stringify(a.locations) === JSON.stringify(b.locations) && JSON.stringify(a.params) === JSON.stringify(b.params);
 }

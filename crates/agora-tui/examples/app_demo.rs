@@ -34,6 +34,8 @@ fn main() -> std::io::Result<()> {
             header: false,
             group: false,
             request: false,
+            request_always: false,
+            approval: String::new(),
         },
         Row {
             id: "mac/agent-2".into(),
@@ -44,6 +46,8 @@ fn main() -> std::io::Result<()> {
             header: false,
             group: false,
             request: false,
+            request_always: false,
+            approval: String::new(),
         },
         Row {
             id: "win/agent-7".into(),
@@ -54,6 +58,8 @@ fn main() -> std::io::Result<()> {
             header: false,
             group: false,
             request: false,
+            request_always: false,
+            approval: String::new(),
         },
     ];
     let mut screens: HashMap<String, AlacrittyTerminal> = HashMap::new();
@@ -144,7 +150,7 @@ fn run(
             ) {
                 match action {
                     Action::Quit => return Ok(()),
-                    Action::OpenLink { .. } | Action::InputFor { .. } => {}
+                    Action::OpenLink { .. } | Action::InputFor { .. } | Action::Answer { .. } => {}
                     Action::Open(id) => {
                         let mut t = AlacrittyTerminal::new(Size { cols: 80, rows: 24 });
                         t.feed(

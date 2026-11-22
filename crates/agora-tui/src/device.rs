@@ -61,6 +61,36 @@ pub fn approval_message(node_id: &str, approval_id: &str, approved: bool) -> Vec
     m
 }
 
+/// ADR-0101: the bytes a device signs to allow a request always (`agora-node::approvals::always_signed_message`, which a test compares
+/// against, and `schema/fixtures/signing/approval-always-v1.json`): `agora-approval-always-v1`, one NUL, then F(node_id) F(approval_id)
+/// F(verdict) F(agent_id) F(sha256(action)) F(sha256(detail)) F(always_label) F(always_option_id), the verdict always `1`, `agent_id` the
+/// node's own id of the agent, every text exactly as the machine announced it.
+pub fn always_message(
+    node_id: &str,
+    approval_id: &str,
+    agent_id: &str,
+    action: &str,
+    detail: &str,
+    always_label: &str,
+    always_option_id: &str,
+) -> Vec<u8> {
+    let sha = |x: &str| hex(ring::digest::digest(&ring::digest::SHA256, x.as_bytes()).as_ref());
+    let mut m = b"agora-approval-always-v1\0".to_vec();
+    for part in [
+        node_id,
+        approval_id,
+        "1",
+        agent_id,
+        &sha(action),
+        &sha(detail),
+        always_label,
+        always_option_id,
+    ] {
+        field(&mut m, part.as_bytes());
+    }
+    m
+}
+
 /// The bytes a device signs to decide an agent's request to start another (ADR-0057, `agora-node::approvals::start_signed_message`, which
 /// a test compares against): the decision, the grant and a hash of the request exactly as it was shown.
 pub fn start_message(
@@ -604,6 +634,66 @@ mod tests {
                 agora_node::approvals::signed_message("laptop", "7", approved)
             );
         }
+    }
+
+    /// ADR-0101: the always bytes are the node's and reproduce every shared vector.
+    #[test]
+    fn the_always_message_is_the_one_the_node_rebuilds() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../schema/fixtures/signing/approval-always-v1.json"
+        );
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let cases = v["cases"].as_array().unwrap();
+        assert!(cases.len() >= 3);
+        for case in cases {
+            let f = |k: &str| case[k].as_str().unwrap().to_string();
+            let (name, node, approval_id, agent_id) =
+                (f("name"), f("node"), f("approval_id"), f("agent_id"));
+            let (action, detail, label, option) = (
+                f("action"),
+                f("detail"),
+                f("always_label"),
+                f("always_option_id"),
+            );
+            let m = always_message(
+                &node,
+                &approval_id,
+                &agent_id,
+                &action,
+                &detail,
+                &label,
+                &option,
+            );
+            assert_eq!(hex(&m), f("hex"), "{name}");
+            let pending = agora_node::approvals::Pending {
+                id: approval_id.clone(),
+                agent_id,
+                action,
+                detail,
+                requested_ms: 0,
+                expires_ms: 0,
+                binding: None,
+                offer: agora_node::approvals::Offer {
+                    once: false,
+                    always: Some(agora_node::approvals::AlwaysOption {
+                        label,
+                        option_id: option,
+                    }),
+                },
+            };
+            assert_eq!(
+                m,
+                agora_node::approvals::always_signed_message(&node, &approval_id, &pending),
+                "{name}"
+            );
+        }
+        // Never the single answer's bytes.
+        assert_ne!(
+            always_message("laptop", "7", "a", "x", "", "", "o"),
+            approval_message("laptop", "7", true)
+        );
     }
 
     #[test]

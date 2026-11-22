@@ -14,6 +14,7 @@ import { ChatActionsContext, type PromptResult, type PromptSend } from './chatAc
 import { IME_GRACE_MS, sendsOnEnter } from './composer';
 import { Icon } from './Icon';
 import { NoAskBadge } from './NoAskBadge';
+import { AsksLessChip } from './AllowAlways';
 import { SessionBar } from './SessionBar';
 import { StateMark } from './StateBadge';
 import type { OptionKind } from './sessionChoice';
@@ -282,6 +283,7 @@ export function PromptBox({ agent, send, source, choose, approvals, onReview }: 
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
           {agent.session && <SessionBar key={agent.id} part="controls" agentKey={agent.id} session={agent.session} disabled={agent.closed} choose={choose} setConfig={actions.setConfig} approvals={actions.approvals} launchedFree={agent.skipsPermissions} />}
           <NoAskBadge agent={agent} />
+          <AsksLessChip agent={agent} />
           <span className="flex-1" />
           {sentText && <span role="status" className={`text-xs ${sent === 'ok' || sent === 'queued' ? 'text-finished' : 'text-needs-you'}`}>{sentText}</span>}
           {stopFailed && <span role="status" className="text-xs text-needs-you">{t(stopFailed)}</span>}

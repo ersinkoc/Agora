@@ -9,6 +9,7 @@ import { callMs, currentStep, initial, outputTail, planProgress, planSteps, step
 import { preciseDuration } from '../net/time';
 import { useHighlightedCode } from '../highlight/useHighlight';
 import { Icon, type IconName } from './Icon';
+import { alwaysText } from '../net/always';
 
 // How one conversation entry looks. Everything here was written by an agent or a person: it is drawn as React text, never as HTML
 // (the one exception is the syntax highlighter's own output, which is escaped text inside <span class> tags).
@@ -409,7 +410,8 @@ const PermissionRecord = memo(function PermissionRecord({ line, onShow }: { line
     <div role="note" className={`flex max-w-3xl flex-wrap items-center gap-x-2.5 gap-y-1 rounded-m border px-3 py-1.5 text-[0.8125rem] ${outcome === 'pending' ? 'border-needs-you/55 bg-needs-you/8' : 'border-line bg-surface-1'}`} data-permission={outcome} title={fullStamp(line.atMs)}>
       <span aria-hidden className={`grid size-5 flex-none place-items-center ${OUTCOME_TONE[outcome]}`}><Icon name={OUTCOME_ICON[outcome]} className="size-3.5" /></span>
       <span className="min-w-0 flex-1 break-words">
-        <span className="font-medium text-ink">{t(`permission-${outcome}`)}</span>
+        {/* ADR-0101: an approval answered "always" says so (the agent remembers it). */}
+        <span className="font-medium text-ink">{outcome === 'approved' && line.always ? t(alwaysText('permission-approved-always')) : t(`permission-${outcome}`)}</span>
         {line.text && <> <code dir="ltr" className="rounded-xs border border-line bg-surface-2 px-1.5 py-0.5 font-mono text-xs text-muted">{line.text}</code></>}
       </span>
       {outcome === 'pending' && onShow && <button type="button" className="text-xs text-muted underline underline-offset-2 hover:text-ink" onClick={onShow}>{t('permission-show')}</button>}

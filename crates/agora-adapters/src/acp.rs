@@ -80,7 +80,8 @@ const STDERR_SETTLE: Duration = Duration::from_millis(100);
 const LATE_REQUEST_WAIT: Duration = Duration::from_secs(2);
 /// ADR-0101 (Codex review of PR #1007): how long a person's answer may wait for the writer's report before the agent is ended (as for
 /// a full writer queue) and the node is told its delivery was not confirmed. Expiry does not prove no byte reached the agent (the
-/// success report may be queued behind another event), so the agent is ended first: whatever it got, it holds no grant afterwards.
+/// success report may be queued behind another event), so the agent's termination is requested first and the node records no grant
+/// for that run (what the agent saved in its own settings is the agent's, as the client's note says).
 /// Shorter than the node's wait for the answer to `approval/resolve`.
 const DELIVER_WAIT: Duration = Duration::from_secs(5);
 /// ADR-0058: the most modes or models passed on, and the longest id, name and description kept. An option whose id is longer is

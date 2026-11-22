@@ -4,7 +4,7 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
-_Nothing yet._
+- A structured (ACP) agent that offers "always allow" for a request, as WrongStack's `wstack acp serve` does, can now be told so once: the approval card, the attention dialog, the banners and the phone's card show **Allow always** beside Allow and Deny (in the terminal client `A` in the request box, Alt+A in the agent's tab or chat), and the agent stops asking for what it counts as the same request. The button appears only when the agent offers it and the machine allows it (`skip_permissions = forbid`, or `confined_only` for an agent that is not confined, removes it), says that the agent remembers the answer and decides what it covers and for how long, and is signed over its own message, which binds the agent, the request and the agent's option, so a hub cannot turn a single Allow into a remembered one. A plain Allow is never sent to the agent as a remembered answer any more; an agent that offers only "always" shows that button in the place of Allow (an older window can only deny such a request). While an agent holds such an answer it shows **Asks less** (`[asks less]` in the terminal client) until it ends or starts again (ADR-0101; new error codes `approval.scope_forbidden`, `approval.scope_unavailable`, `approval.adapter_outdated`, and conversation notices `approval.always_only_forbidden` and `adapter.permission_unanswerable`).
 
 ## 0.3.34
 

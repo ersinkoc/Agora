@@ -6,13 +6,14 @@ import { titleWithCount } from '../net/alert';
 import { type AttentionItem, askLine } from '../net/fleet';
 import { approvalName } from '../net/approvalText';
 import { pairTitle } from './pairChoice';
+import { AlwaysNote, allowAlwaysWord, alwaysNoteId } from './AllowAlways';
 import { type ApprovalModel, visible } from '../net/view';
 
 // "Needs you" must never be invisible (docs/ux/main-window.md): the list, the counts and the tab stay where they are; this layer adds, by
 // this device's choice, a card over the window and a notification while the window is in the background. It holds only memory: what was
 // put off with Later, what is open and when it appeared are not stored anywhere.
 
-type Resolve = (a: ApprovalModel, approved: boolean) => Promise<unknown> | unknown;
+type Resolve = (a: ApprovalModel, approved: boolean, choice?: undefined, always?: boolean) => Promise<unknown> | unknown;
 
 // What the person is doing, read when it matters: whether the window is the one in front, and whether keys are going into a field or a
 // terminal. Re-read on every focus change, every typed key and, while something waits, twice a second.
@@ -183,10 +184,10 @@ function AttentionCard({ item, more, stale, onResolve, onReview, onLater }: {
   const [answered, setAnswered] = useState<string | undefined>();
   // The single rule for Allow and Deny: a plain request, whole on screen, past its dwell, not answered yet, the link up.
   const canAnswer = !!x && !!onResolve && readyFor === key && answered !== key && !stale;
-  const answer = (ok: boolean) => {
+  const answer = (ok: boolean, always = false) => {
     if (!canAnswer || !x || !onResolve) return;
     setAnswered(key);
-    void Promise.resolve(onResolve(x, ok));
+    void Promise.resolve(always ? onResolve(x, ok, undefined, true) : onResolve(x, ok));
   };
   const content = useRef<HTMLDivElement>(null);
   // Said to a screen reader when the card opens (the card is an alert dialog; this is the short version of why).
@@ -209,6 +210,7 @@ function AttentionCard({ item, more, stale, onResolve, onReview, onLater }: {
           <p className="attention-who m-0 min-w-0 flex-none break-words text-sm text-muted">{who}</p>
           <div id="attention-what" className="min-h-0 overflow-auto">
             {kind === 'answer' && x && <p className="attention-ask m-0 whitespace-pre-wrap break-words font-mono text-sm text-ink">{visible(askLine(x.action, x.detail))}</p>}
+            {kind === 'answer' && x?.always && <AlwaysNote approval={x} surface="attention" className="mt-2" />}
             {kind === 'review' && x && x.start && <p className="m-0 text-sm text-ink">{t('attention-start', { name })}</p>}
             {kind === 'review' && x && (x.skip || x.skipUnknown) && <p className="m-0 text-sm text-ink">{t('attention-skip', { name })}</p>}
             {kind === 'review' && x && !x.start && !x.skip && !x.skipUnknown && <>
@@ -224,6 +226,8 @@ function AttentionCard({ item, more, stale, onResolve, onReview, onLater }: {
             <button type="button" className="button" onClick={onLater}>{t('attention-later')}</button>
             {kind === 'answer' && <>
               <button type="button" className={`button ${dead}`} aria-disabled={!canAnswer} aria-describedby={stale ? why : undefined} onClick={() => answer(false)}>{t('approval-deny')}</button>
+              {/* ADR-0101: offered as well as a single answer (a request that offers only "always" is read in its full card, `decidableInline`). */}
+              {x?.always && !x.always.only && <button type="button" className={`button ${dead}`} aria-disabled={!canAnswer} aria-describedby={stale ? why : alwaysNoteId(x, 'attention')} onClick={() => answer(true, true)}>{allowAlwaysWord()}</button>}
               <button type="button" className={`button button--primary ${dead}`} aria-disabled={!canAnswer} aria-describedby={stale ? why : undefined} onClick={() => answer(true)}>{t('approval-allow')}</button>
             </>}
             {(kind === 'review' || (kind === 'answer' && answered === key)) && <button type="button" className="button button--primary" onClick={() => onReview(item)}>{t('attention-review')}</button>}
