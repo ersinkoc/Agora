@@ -236,7 +236,8 @@ the cleaned text announced. Vectors go in `schema/fixtures/signing/approval-alwa
 - **Node policy can forbid it, by the existing `skip_permissions` line** (ADR-0059: `forbid | allow | confined_only`, default `allow`, set
   only on the machine). `forbid` refuses every ALWAYS; `confined_only` refuses it for an agent that is not confined (ADR-0047/0050); `allow`
   permits it. Under a policy that refuses, the node also leaves ALWAYS out of the `scopes` it announces (so the window shows no button that
-  would fail) and still refuses an ALWAYS that arrives (the policy is read again at decision time, it may have changed). An always-only
+  would fail) and still refuses an ALWAYS that arrives (checked again when the decision arrives, against the policy the node read from
+  its file at start and the agent's own launch, section 7 items 7 and 8). An always-only
   request under such a policy gets no card at all (decision 2). Why the same line:
   an always answer lets the agent act without asking for whatever it counts as the same request; that is a narrower case of what
   `skip_permissions` already governs, and an owner who wrote `forbid` must not find agents on that machine acting unasked. A second policy
@@ -334,7 +335,8 @@ Codex reviewed this ADR at 4c81e007; the implementation applies its findings, wh
    option. Under `allow` the residual named in the compatibility list stays.
 3. **Unknown scopes are refused.** Only UNSPECIFIED and ONCE use `agora-approval-v1`, ALWAYS the always domain; any other value is
    `protocol.invalid_message` (`field: scope`) on the node and in the bridge. `AgentAlwaysAllowed` and `ApprovalResolved.scope = ALWAYS`
-   are written only after the adapter took the answer; a refused or undelivered one is recorded cancelled, as before.
+   are written only after the adapter delivered the answer to the agent (item 9); a refused or undelivered one is recorded cancelled, as
+   before.
 4. **The decision is bound to one option.** ACP options have unique `optionId`s but may share a name and kind. The request carries the
    exact id of the always option (`always_option_id`, appended to `ApprovalRequestParams`, `ApprovalRequested` and `ApprovalSnapshot`),
    the always domain ends with `F(always_option_id)`, and an offer with more than one `allow_always` is ambiguous: ALWAYS is not offered
@@ -343,6 +345,30 @@ Codex reviewed this ADR at 4c81e007; the implementation applies its findings, wh
 5. **Error parameters.** `approval.scope_forbidden`, `approval.scope_unavailable` and `approval.adapter_outdated` carry no parameter (their
    text does not show the random approval id; the window knows which card it answered).
 6. **Event number.** `AgentAlwaysAllowed` is `Event.body` 69 (after 66 to 68, the agent and task events added since ADR-0090).
+
+Codex then reviewed the implementation (PR #1007 at e79a2011); its findings refine the text again, without changing a decision:
+
+7. **Confinement is the agent's own launch.** `confined_only` asks whether the agent's process was launched confined, never what the
+   node's sandbox setting says now. The node records it on every launch path: confined only for an adapter it started itself under a
+   sandbox the platform enforces in full; unconfined for one started without one, or run by the holder (which takes no adapter with a
+   sandbox), also after a node that confines took it up (ADR-0093); unknown before any launch, which fails closed. The "always" offer,
+   the check of an always answer and the outdated-bridge refusal of a single Allow (item 2) all read it. "Behind an ACP bridge" (item 2)
+   is read from the command the adapter was started with (`<agora> acp-bridge -- ...`): every adapter agent's integration level is L3,
+   so the level could not say it.
+8. **The policy file is read at node start.** As for every line of the node's policy file, `skip_permissions` is read when the node
+   starts; a change applies from the next start. "Checked again when the decision arrives" means against the policy the node holds and
+   the agent's launch as they are then (a card raised by an earlier node, or for an agent whose process was replaced since, is checked
+   against the current ones), not that the file is read again.
+9. **Delivered means written to the agent.** The bridge answers `approval/resolve` only once its writer wrote the answer to the agent's
+   stdin and flushed it, not when the answer was queued. A failed write, an agent that ends first, or a write still waiting after five
+   seconds is the error `adapter.approval_undelivered` (the agent is then ended, so an answer said to be undelivered cannot reach it
+   later), and the node records the request cancelled, with no `AgentAlwaysAllowed`. An `approval/resolve` result from any adapter
+   asserts this (`docs/specs/adapter-protocol.md`).
+10. **The record names the run.** The answer is sent only to the run of the agent's process the policy was checked for, and the node
+   records `AgentAlwaysAllowed` only while that run is still the agent's process, checked and written under the supervisor's lock, so a
+   restart, resume, exit or stop (each begins another run and clears the records) is ordered before the check or after the record. A
+   former process's late success is audited (`ApprovalResolved`, ALWAYS) but never marks its replacement. The run is the adapter's
+   run counter, not the call's turn generation, which also changes when a turn begins.
 
 ## Consequences
 

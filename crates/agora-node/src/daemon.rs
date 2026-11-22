@@ -867,11 +867,13 @@ impl EventSink {
         self.start_resolved(approval_id, approved, signer_device_id, 0, false);
     }
 
-    /// ADR-0101: a person's decision on an adapter's request was delivered "always": the audit record says so, and the agent's
-    /// `AgentAlwaysAllowed` follows (the hub derives the "Asks less" chip from it; the session ledger keeps it for a kept agent).
+    /// ADR-0101: a person's decision on an adapter's request was delivered "always": the audit record says so, and, when `holder` is
+    /// the agent whose current process was given it, the agent's `AgentAlwaysAllowed` follows (the hub derives the "Asks less" chip
+    /// from it; the session ledger keeps it for a kept agent). `None`: the process it was delivered to was replaced meanwhile (Codex
+    /// review of PR #1007), so nothing is said about the agent's current process.
     pub fn approval_resolved_always(
         &self,
-        agent: &AgentId,
+        holder: Option<&AgentId>,
         approval_id: &str,
         action: &str,
         signer_device_id: &str,
@@ -883,6 +885,9 @@ impl EventSink {
             scope: v1::ApprovalScope::Always as i32,
             ..Default::default()
         }));
+        let Some(agent) = holder else {
+            return;
+        };
         self.record(Body::AgentAlwaysAllowed(v1::AgentAlwaysAllowed {
             agent_id: agent.as_str().to_string(),
             approval_id: approval_id.to_string(),

@@ -25,8 +25,8 @@
 use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::ops::ControlFlow;
-use std::process::{Child, ChildStderr, ChildStdin, Command, Stdio};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::process::{Child, ChildStderr, Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{
     channel, sync_channel, Receiver, RecvTimeoutError, SyncSender, TrySendError,
 };
@@ -78,6 +78,10 @@ const EXIT_WAIT: Duration = Duration::from_secs(2);
 const STDERR_SETTLE: Duration = Duration::from_millis(100);
 /// How long the bridge waits for a late request after its agent dies before opening a session.
 const LATE_REQUEST_WAIT: Duration = Duration::from_secs(2);
+/// ADR-0101 (Codex review of PR #1007): how long a person's answer may wait for the writer to give it to the agent before the node is
+/// told it was not delivered and the agent is ended (as for a full writer queue), so an answer reported undelivered never reaches the
+/// agent later. Shorter than the node's wait for the answer to `approval/resolve`.
+const DELIVER_WAIT: Duration = Duration::from_secs(5);
 /// ADR-0058: the most modes or models passed on, and the longest id, name and description kept. An option whose id is longer is
 /// dropped (a cut id would name another option).
 const OPTIONS_MAX: usize = 200;
@@ -87,6 +91,9 @@ const OPTION_DESCRIPTION_MAX: usize = 500;
 enum Ev {
     Node(Input),
     Agent(Input),
+    /// ADR-0101: the writer's outcome for a line queued with a report token ([`AgentInput::flush_reported`]): whether it was written
+    /// to the agent's stdin and flushed.
+    Written(u64, bool),
 }
 
 enum Input {
@@ -186,23 +193,51 @@ fn write_line<W: Write>(w: &mut W, v: &Value) -> io::Result<()> {
     w.flush()
 }
 
+/// The agent's stdin as the bridge writes it: a line is written, then flushed (queued, for the writer thread).
+trait AgentInput: Write {
+    /// ADR-0101 (Codex review of PR #1007): queues what was written since the last flush, as `flush` does, and has its outcome reported
+    /// as [`Ev::Written`]`(token, ok)` once it was written to the agent and flushed (or could not be). `Ok(false)`: this input writes
+    /// before it returns (a buffer in tests), so success means the line was given to the agent and nothing is reported.
+    fn flush_reported(&mut self, _token: u64) -> io::Result<bool> {
+        self.flush().map(|()| false)
+    }
+}
+
+impl AgentInput for io::Sink {}
+
+/// A queued line and its report token (0: not reported).
+type Queued = (Box<[u8]>, u64);
+
 struct AgentWriter {
     line: Vec<u8>,
-    pending: SyncSender<Box<[u8]>>,
+    pending: SyncSender<Queued>,
     /// Bytes queued and not yet taken by the writer thread.
     queued: Arc<AtomicUsize>,
+    /// Set by the writer thread once a write failed: nothing more is queued, and every line still queued is reported failed.
+    broken: Arc<AtomicBool>,
 }
 
 impl AgentWriter {
-    fn start(mut stdin: ChildStdin) -> Self {
-        let (pending, lines) = sync_channel::<Box<[u8]>>(AGENT_WRITE_QUEUE);
+    /// Writes to `stdin` on a thread of its own; a line queued with a report token has its outcome sent on `report`.
+    fn start<S: Write + Send + 'static>(mut stdin: S, report: SyncSender<Ev>) -> Self {
+        let (pending, lines) = sync_channel::<Queued>(AGENT_WRITE_QUEUE);
         let queued = Arc::new(AtomicUsize::new(0));
         let taken = Arc::clone(&queued);
+        let broken = Arc::new(AtomicBool::new(false));
+        let failed = Arc::clone(&broken);
         std::thread::spawn(move || {
-            while let Ok(line) = lines.recv() {
+            // Runs until the bridge lets the writer go. After a failed write nothing more is written; the lines still queued are only
+            // reported (so no answer waits for an outcome that never comes).
+            while let Ok((line, token)) = lines.recv() {
                 taken.fetch_sub(line.len(), Ordering::SeqCst);
-                if stdin.write_all(&line).and_then(|()| stdin.flush()).is_err() {
-                    break;
+                let ok = !failed.load(Ordering::SeqCst)
+                    && stdin.write_all(&line).and_then(|()| stdin.flush()).is_ok();
+                if !ok {
+                    failed.store(true, Ordering::SeqCst);
+                }
+                if token != 0 {
+                    // The bridge may be ending (its queue is gone): nobody waits for the outcome then.
+                    let _ = report.send(Ev::Written(token, ok));
                 }
             }
         });
@@ -210,7 +245,30 @@ impl AgentWriter {
             line: Vec::new(),
             pending,
             queued,
+            broken,
         }
+    }
+
+    fn queue(&mut self, token: u64) -> io::Result<()> {
+        let line = std::mem::take(&mut self.line).into_boxed_slice();
+        if self.broken.load(Ordering::SeqCst) {
+            return Err(io::ErrorKind::BrokenPipe.into());
+        }
+        let len = line.len();
+        // Only this thread adds, so the check cannot race another add; the writer thread only subtracts.
+        let held = self.queued.load(Ordering::SeqCst);
+        if held > 0 && held.saturating_add(len) > AGENT_WRITE_BYTES {
+            return Err(io::ErrorKind::WouldBlock.into());
+        }
+        self.queued.fetch_add(len, Ordering::SeqCst);
+        self.pending.try_send((line, token)).map_err(|error| {
+            self.queued.fetch_sub(len, Ordering::SeqCst);
+            match error {
+                TrySendError::Full(_) => io::ErrorKind::WouldBlock,
+                TrySendError::Disconnected(_) => io::ErrorKind::BrokenPipe,
+            }
+            .into()
+        })
     }
 }
 
@@ -221,23 +279,32 @@ impl Write for AgentWriter {
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        let line = std::mem::take(&mut self.line).into_boxed_slice();
-        let len = line.len();
-        // Only this thread adds, so the check cannot race another add; the writer thread only subtracts.
-        let held = self.queued.load(Ordering::SeqCst);
-        if held > 0 && held.saturating_add(len) > AGENT_WRITE_BYTES {
-            return Err(io::ErrorKind::WouldBlock.into());
-        }
-        self.queued.fetch_add(len, Ordering::SeqCst);
-        self.pending.try_send(line).map_err(|error| {
-            self.queued.fetch_sub(len, Ordering::SeqCst);
-            match error {
-                TrySendError::Full(_) => io::ErrorKind::WouldBlock,
-                TrySendError::Disconnected(_) => io::ErrorKind::BrokenPipe,
-            }
-            .into()
-        })
+        self.queue(0)
     }
+}
+
+impl AgentInput for AgentWriter {
+    fn flush_reported(&mut self, token: u64) -> io::Result<bool> {
+        self.queue(token).map(|()| true)
+    }
+}
+
+/// ADR-0101: what became of a line sent with [`Bridge::send_agent_reported`].
+#[derive(Debug, PartialEq, Eq)]
+enum Delivery {
+    /// It could not be queued (or written): the agent was not given it.
+    Failed,
+    /// It was written to the agent before the send returned.
+    Done,
+    /// It is queued; [`Ev::Written`] with this token says whether it was written.
+    Pending(u64),
+}
+
+/// ADR-0101: a node request answered only once the line it sent the agent was written ([`Bridge::written`]), or refused when that
+/// takes longer than `by`.
+struct Delivering {
+    node_id: Value,
+    by: Instant,
 }
 
 /// A unified diff that replaces `old` by `new` as a whole (ACP gives both texts, not a patch).
@@ -1030,8 +1097,12 @@ struct Rich {
 struct Bridge<W: Write> {
     out: W,
     /// The agent's stdin (a buffer in tests, so what the agent was sent can be read on every platform).
-    agent: Box<dyn Write>,
+    agent: Box<dyn AgentInput>,
     agent_writer_full: bool,
+    /// ADR-0101: the last report token given out ([`Self::send_agent_reported`]); 0 is never one.
+    next_report: u64,
+    /// ADR-0101: the node requests (`approval/resolve`) waiting for the writer's outcome of their line, by report token.
+    delivering: HashMap<u64, Delivering>,
     next: u64,
     waiting: HashMap<u64, Waiting>,
     session: Option<String>,
@@ -1188,6 +1259,62 @@ impl<W: Write> Bridge<W> {
         }
     }
 
+    /// ADR-0101 (Codex review of PR #1007): [`Self::send_agent`] for a line whose delivery the node is told about: the caller answers
+    /// the node only once the line was written to the agent (now for [`Delivery::Done`], on [`Ev::Written`] for
+    /// [`Delivery::Pending`]).
+    fn send_agent_reported(&mut self, v: &Value) -> Delivery {
+        if self.agent_writer_full {
+            return Delivery::Failed;
+        }
+        self.next_report += 1;
+        let token = self.next_report;
+        match writeln!(self.agent, "{v}").and_then(|()| self.agent.flush_reported(token)) {
+            Ok(true) => Delivery::Pending(token),
+            Ok(false) => Delivery::Done,
+            Err(e) => {
+                self.agent_writer_full = e.kind() == io::ErrorKind::WouldBlock;
+                Delivery::Failed
+            }
+        }
+    }
+
+    /// The node's request `id` sent the agent something that did not reach it.
+    fn undelivered(&mut self, id: &Value) -> io::Result<()> {
+        self.send_node(&json!({"jsonrpc": "2.0", "id": id,
+            "error": {"code": -32603, "message": "adapter.approval_undelivered"}}))
+    }
+
+    /// ADR-0101: the writer's outcome for the line of report `token`: the node request waiting for it is answered (success only when
+    /// the line was written to the agent and flushed).
+    fn written(&mut self, token: u64, ok: bool) -> io::Result<()> {
+        let Some(d) = self.delivering.remove(&token) else {
+            return Ok(());
+        };
+        if ok {
+            self.reply(&d.node_id, json!({}))
+        } else {
+            self.undelivered(&d.node_id)
+        }
+    }
+
+    /// ADR-0101: refuses every node request whose line waited longer than [`DELIVER_WAIT`] for the writer. Returns whether there was
+    /// one: the caller then ends the agent, so a line reported undelivered cannot reach it later.
+    fn delivery_overdue(&mut self, now: Instant) -> io::Result<bool> {
+        let mut late: Vec<u64> = self
+            .delivering
+            .iter()
+            .filter(|(_, d)| now >= d.by)
+            .map(|(t, _)| *t)
+            .collect();
+        late.sort_unstable();
+        for t in &late {
+            if let Some(d) = self.delivering.remove(t) {
+                self.undelivered(&d.node_id)?;
+            }
+        }
+        Ok(!late.is_empty())
+    }
+
     fn ask_agent(&mut self, method: &str, params: Value, waiting: Waiting) {
         self.next += 1;
         self.waiting.insert(self.next, waiting);
@@ -1243,6 +1370,12 @@ impl<W: Write> Bridge<W> {
     /// idle is reported too.
     fn agent_gone(&mut self, exit_code: Option<i32>, stderr_tail: &str) -> io::Result<()> {
         self.flush_text()?;
+        // ADR-0101: an answer whose write was not confirmed before the agent ended is not said to have reached it.
+        let mut delivering: Vec<(u64, Delivering)> = self.delivering.drain().collect();
+        delivering.sort_by_key(|(t, _)| *t);
+        for (_, d) in delivering {
+            self.undelivered(&d.node_id)?;
+        }
         let mut waiting: Vec<(u64, Waiting)> = self.waiting.drain().collect();
         waiting.sort_by_key(|(n, _)| *n);
         let stage_of = |w: &Waiting| match w {
@@ -1755,16 +1888,30 @@ impl<W: Write> Bridge<W> {
                 let Some(p) = self.perms.remove(approval) else {
                     return Ok(ControlFlow::Continue(()));
                 };
-                if !self.send_agent(
+                // Codex review of PR #1007: the node is answered only once the answer was written to the agent's stdin (the node
+                // records an always answer as one the agent holds on this success).
+                match self.send_agent_reported(
                     &json!({"jsonrpc": "2.0", "id": p.request, "result": {"outcome": outcome}}),
                 ) {
-                    if let Some(id) = &id {
-                        self.send_node(&json!({"jsonrpc": "2.0", "id": id,
-                            "error": {"code": -32603, "message": "adapter.approval_undelivered"}}))?;
+                    Delivery::Failed => {
+                        if let Some(id) = &id {
+                            self.undelivered(id)?;
+                        }
+                        return Ok(ControlFlow::Continue(()));
                     }
-                    return Ok(ControlFlow::Continue(()));
+                    Delivery::Done => done(self)?,
+                    Delivery::Pending(token) => {
+                        if let Some(id) = &id {
+                            self.delivering.insert(
+                                token,
+                                Delivering {
+                                    node_id: id.clone(),
+                                    by: Instant::now() + DELIVER_WAIT,
+                                },
+                            );
+                        }
+                    }
                 }
-                done(self)?;
                 // Permissions are kept only while a prompt runs (one outside a turn is refused, any prompt's reply cancels them).
                 if self.perms.is_empty() {
                     self.state("WORKING")?;
@@ -2427,11 +2574,13 @@ where
     let stderr_done = keep_stderr(stderr, Arc::clone(&kept));
     let (tx, rx) = sync_channel(INPUT_QUEUE);
     lines(input, Ev::Node, tx.clone());
-    lines(stdout, Ev::Agent, tx);
+    lines(stdout, Ev::Agent, tx.clone());
     let mut b = Bridge {
         out: output,
-        agent: Box::new(AgentWriter::start(stdin)),
+        agent: Box::new(AgentWriter::start(stdin, tx)),
         agent_writer_full: false,
+        next_report: 0,
+        delivering: HashMap::new(),
         next: 0,
         waiting: HashMap::new(),
         session: None,
@@ -2473,11 +2622,15 @@ where
                 Ok(Ev::Node(Input::TooLong)) => return Err(io::ErrorKind::InvalidData.into()),
                 Ok(Ev::Agent(Input::Gone)) => break None,
                 Ok(Ev::Agent(Input::TooLong)) => break Some(io::ErrorKind::InvalidData),
+                Ok(Ev::Written(token, ok)) => b.written(token, ok)?,
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => return Ok(None),
             }
             if b.agent_writer_full {
                 break Some(io::ErrorKind::WouldBlock);
+            }
+            if b.delivery_overdue(Instant::now())? {
+                break Some(io::ErrorKind::TimedOut);
             }
             if !b.text.is_empty() && b.text_since.elapsed() >= JOIN {
                 b.flush_text()?;
@@ -2534,6 +2687,8 @@ mod tests {
             out: Vec::new(),
             agent: Box::new(io::sink()),
             agent_writer_full: false,
+            next_report: 0,
+            delivering: HashMap::new(),
             next: 0,
             waiting: HashMap::new(),
             session: Some("s".to_string()),
@@ -2745,6 +2900,7 @@ mod tests {
                     line: Vec::new(),
                     pending,
                     queued: Default::default(),
+                    broken: Default::default(),
                 },
                 rx,
             )
@@ -3274,6 +3430,8 @@ mod tests {
         }
     }
 
+    impl super::AgentInput for Sent {}
+
     impl Sent {
         /// The lines sent since the last call, as JSON.
         fn take(&self) -> Vec<serde_json::Value> {
@@ -3504,7 +3662,7 @@ mod tests {
             b.out.clear();
             let (pending, rx) = std::sync::mpsc::sync_channel(1);
             let queued = if full {
-                pending.try_send(Box::from(&b"pending\n"[..]))?;
+                pending.try_send((Box::from(&b"pending\n"[..]), 0))?;
                 Some(rx)
             } else {
                 drop(rx);
@@ -3514,6 +3672,7 @@ mod tests {
                 line: Vec::new(),
                 pending,
                 queued: Default::default(),
+                broken: Default::default(),
             });
             resolve(&mut b, 23, &approval)?;
             let reply = answer(&b.out, 23).ok_or("no reply")?;
@@ -3522,7 +3681,7 @@ mod tests {
             assert!(states(&b.out).is_empty());
             assert_eq!(b.agent_writer_full, full);
             if let Some(rx) = queued {
-                assert_eq!(&*rx.try_recv()?, b"pending\n");
+                assert_eq!(&*rx.try_recv()?.0, b"pending\n");
                 assert!(rx.try_recv().is_err());
             }
         }
@@ -3538,6 +3697,133 @@ mod tests {
         assert_eq!(
             answer_to(&sent.take(), "perm-2").as_deref(),
             Some("selected")
+        );
+        Ok(())
+    }
+
+    /// ADR-0101, Codex review of PR #1007: `approval/resolve` succeeds only once the writer wrote the answer to the agent's stdin and
+    /// flushed it, never when it was only queued. A write that fails (or an agent that ends first) is an error, so the node records no
+    /// always answer; one that waits longer than [`super::DELIVER_WAIT`] is an error too, and the bridge ends the agent.
+    #[test]
+    fn an_answer_is_acknowledged_only_once_the_writer_gave_it_to_the_agent(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use serde_json::json;
+        use std::sync::mpsc::sync_channel;
+        struct Broken;
+        impl std::io::Write for Broken {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        #[derive(Clone, Default)]
+        struct Shared(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Shared {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let always = |b: &mut super::Bridge<Vec<u8>>, id: u64| {
+            let approval = b.perms.keys().next().cloned().unwrap_or_default();
+            b.handle_node(&json!({"jsonrpc":"2.0","id":id,"method":"approval/resolve",
+                "params":{"approvalId":approval,"approved":true,"scope":"APPROVAL_SCOPE_ALWAYS"}}))
+                .map(drop)
+        };
+        let outcome = |rx: &std::sync::mpsc::Receiver<super::Ev>| match rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+        {
+            Ok(super::Ev::Written(token, ok)) => Some((token, ok)),
+            _ => None,
+        };
+        let ready = |agent: Box<dyn super::AgentInput>| -> std::io::Result<super::Bridge<Vec<u8>>> {
+            let mut b = bridge_in_session()?;
+            prompt(&mut b, 10, "t")?;
+            ask_with(&mut b, "perm-1", all_four())?;
+            b.agent = agent;
+            b.out.clear();
+            Ok(b)
+        };
+
+        // Written and flushed: the node hears success only after the writer said so.
+        let (tx, rx) = sync_channel(8);
+        let stdin = Shared::default();
+        let mut b = ready(Box::new(super::AgentWriter::start(stdin.clone(), tx)))?;
+        always(&mut b, 30)?;
+        assert!(
+            reply_to(&b.out, 30).is_none(),
+            "acknowledged when only queued"
+        );
+        let (token, ok) = outcome(&rx).ok_or("no outcome")?;
+        assert!(ok);
+        b.written(token, ok)?;
+        assert_eq!(reply_to(&b.out, 30).ok_or("no reply")?["result"], json!({}));
+        let written = String::from_utf8(stdin.0.lock().unwrap_or_else(|e| e.into_inner()).clone())?;
+        assert!(written.contains("\"optionId\":\"aa\""), "{written}");
+
+        // The write fails: an error, never a success, and nothing more is queued.
+        let (tx, rx) = sync_channel(8);
+        let mut b = ready(Box::new(super::AgentWriter::start(Broken, tx)))?;
+        always(&mut b, 31)?;
+        assert!(reply_to(&b.out, 31).is_none());
+        let (token, ok) = outcome(&rx).ok_or("no outcome")?;
+        assert!(!ok);
+        b.written(token, ok)?;
+        let reply = reply_to(&b.out, 31).ok_or("no reply")?;
+        assert_eq!(
+            reply["error"]["message"], "adapter.approval_undelivered",
+            "{reply}"
+        );
+        assert!(reply.get("result").is_none(), "{reply}");
+        // A late or repeated outcome changes nothing.
+        b.out.clear();
+        b.written(token, true)?;
+        assert!(b.out.is_empty());
+
+        // The agent ends before the write was confirmed: an error.
+        let (pending, _held) = sync_channel(4);
+        let stuck = super::AgentWriter {
+            line: Vec::new(),
+            pending,
+            queued: Default::default(),
+            broken: Default::default(),
+        };
+        let mut b = ready(Box::new(stuck))?;
+        always(&mut b, 32)?;
+        assert!(reply_to(&b.out, 32).is_none());
+        b.agent_gone(Some(1), "")?;
+        let reply = reply_to(&b.out, 32).ok_or("no reply")?;
+        assert_eq!(
+            reply["error"]["message"], "adapter.approval_undelivered",
+            "{reply}"
+        );
+
+        // The writer never gets to it: refused after the wait, and the caller ends the agent.
+        let (pending, _held) = sync_channel(4);
+        let stuck = super::AgentWriter {
+            line: Vec::new(),
+            pending,
+            queued: Default::default(),
+            broken: Default::default(),
+        };
+        let mut b = ready(Box::new(stuck))?;
+        always(&mut b, 33)?;
+        let now = std::time::Instant::now();
+        assert!(!b.delivery_overdue(now)?);
+        assert!(reply_to(&b.out, 33).is_none());
+        assert!(b.delivery_overdue(now + super::DELIVER_WAIT)?);
+        let reply = reply_to(&b.out, 33).ok_or("no reply")?;
+        assert_eq!(
+            reply["error"]["message"], "adapter.approval_undelivered",
+            "{reply}"
         );
         Ok(())
     }

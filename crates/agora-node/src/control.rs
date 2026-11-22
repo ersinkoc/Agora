@@ -595,6 +595,24 @@ fn sup_err(e: SupervisorError) -> Error {
     e.to_protocol()
 }
 
+/// ADR-0101 (Codex review of PR #1007): records an always answer the adapter delivered to the run `run` of `agent`'s process. The
+/// caller holds the supervisor's lock (`sup`) for the check and the record together, so a replacement of the process is ordered
+/// before the check (which then fails) or after the record. The audit record (`ApprovalResolved`, ALWAYS) is always written; the
+/// agent's `AgentAlwaysAllowed` only while that run is still the agent's process. Returns whether it was.
+pub(crate) fn record_always_answer(
+    sup: &Supervisor,
+    events: &crate::daemon::EventSink,
+    agent: &AgentId,
+    run: Option<u64>,
+    approval_id: &str,
+    action: &str,
+    signer_device_id: &str,
+) -> bool {
+    let held = run.is_some_and(|run| sup.runs(agent, run));
+    events.approval_resolved_always(held.then_some(agent), approval_id, action, signer_device_id);
+    held
+}
+
 /// Run one command. Terminal subscription is handled by the connection (it needs the stream).
 fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
     use v1::command_ok::Result as Ok_;
@@ -1215,11 +1233,15 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
-            // ADR-0101: the policy is read now (it may have changed since the card was raised), for the agent the request is routed
-            // to, before the queue is locked (the supervisor's lock is never taken under it).
-            let decide = approvals
+            // ADR-0101: the decision is checked against the node's policy (read from its file at node start) and the launch of the
+            // agent the request is routed to, as they are now, before the queue is locked (the supervisor's lock is never taken under
+            // it). The run checked is kept: the answer goes only to that run (Codex review of PR #1007).
+            let (decide, checked_run) = approvals
                 .agent_of(&r.approval_id)
-                .map(|agent| ctx.sup().approval_decide(&agent))
+                .map(|agent| {
+                    let sup = ctx.sup();
+                    (sup.approval_decide(&agent), sup.adapter_epoch(&agent))
+                })
                 .unwrap_or_default();
             let resolution = approvals
                 .resolve_decided(r, now, decide)
@@ -1261,9 +1283,23 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
             );
             let approved = verdict == crate::approvals::Verdict::Approved;
             let always = resolution.always && approved;
-            let call =
-                ctx.sup()
-                    .prepare_resolve_approval_scoped(&agent, &adapter_id, approved, always);
+            let call = ctx
+                .sup()
+                .prepare_resolve_approval_scoped(&agent, &adapter_id, approved, always)
+                .and_then(|c| {
+                    // The process was replaced since the policy was checked: the request was the former process's.
+                    if checked_run.is_some_and(|run| run != c.epoch()) {
+                        Err(crate::supervisor::SupervisorError::NotFound(agent.clone()))
+                    } else {
+                        Ok(c)
+                    }
+                });
+            let run = call
+                .as_ref()
+                .ok()
+                .map(crate::supervisor::AdapterCall::epoch);
+            // The adapter answers only once the answer was written to the agent (the ACP bridge waits for its writer), so a success
+            // here means the agent was given it.
             if let Err(e) = call.and_then(crate::supervisor::AdapterCall::run) {
                 // The decision was verified but the adapter could not be told (it is gone, did not answer, or no longer holds the
                 // request, as when an ACP bridge already answered it `cancelled`): the request is over, and the entry in the
@@ -1295,9 +1331,16 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
             );
             if let Some(ev) = &ctx.events {
                 if always {
-                    // ADR-0101: only an always answer the adapter took is recorded as one the agent holds.
-                    ev.approval_resolved_always(
+                    // ADR-0101: only an always answer the adapter delivered is recorded as one the agent holds, and only for the run it
+                    // was delivered to. Checked and recorded under the supervisor's lock (Codex review of PR #1007): a restart, resume,
+                    // exit or stop (which begin another run and clear the agent's records with their own events) is ordered either
+                    // before the check, which then fails, or after the record. A late answer of a former process is audited as given
+                    // (`ApprovalResolved` with ALWAYS) but never marks its replacement.
+                    record_always_answer(
+                        &ctx.sup(),
+                        ev,
                         &agent,
+                        run,
                         &r.approval_id,
                         &resolution.request.action,
                         &r.signer_device_id,
