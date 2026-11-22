@@ -1009,6 +1009,12 @@ fleet-machines =
         [one] { $online } of { $total } machine online
        *[other] { $online } of { $total } machines online
     }
+fleet-stat-machines =
+    { $total ->
+        [0] Machines online
+        [one] of { $total } machine online
+       *[other] of { $total } machines online
+    }
 fleet-filter-active = Showing only “{ $name }”.
 fleet-filter-clear = Show everything
 fleet-filter-none = Nothing to show here.

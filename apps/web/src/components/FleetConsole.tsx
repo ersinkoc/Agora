@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { t } from '../i18n';
 import type { AgentTileModel } from '../model';
 import { type AttentionItem, type FleetFilter, FLEET_FILTERS, projectSpread, sharedAcross, type ProjectSpread, type FleetCounts, collapseAttention, decidableInline, emptyKind, fleetView, groupFleet } from '../net/fleet';
@@ -10,10 +10,12 @@ import type { UsageSummary } from '../net/usage';
 import { approvalName } from '../net/approvalText';
 import { detailText } from '../net/tool';
 import { type ApprovalModel, type MachineModel, visible } from '../net/view';
-import { AgentTile } from './AgentTile';
+import { ATTENTION_DWELL_MS } from '../net/attention';
+import { AgentTile, kindOf } from './AgentTile';
 import { Skeleton } from './EmptyState';
-import { Icon } from './Icon';
-import { StateBadge, StateMark } from './StateBadge';
+import { Icon, type IconName } from './Icon';
+import { AgentAvatar, Button, Callout, Pill, StatTile } from './kit';
+import { Mark } from './StateBadge';
 import type { StartChoice } from './StartApproval';
 import { PairRecentList, PairWindowControl, type PairingUi } from './Pairing';
 import { PairRequest } from './PairRequest';
@@ -26,31 +28,30 @@ export type LinkState = 'connecting' | 'live' | 'offline';
 const FILTER_WORD: Record<FleetFilter, string> = { 'needs-you': 'state-needs-you', working: 'state-working', finished: 'state-finished', failed: 'fleet-failed' };
 const countOf = (c: FleetCounts, f: FleetFilter): number => (f === 'needs-you' ? c.needs : c[f]);
 
-// The header: five answers, each a live count. Four are filters of the tiles below (a press shows only those, a second press shows
-// everything again); the machines count opens the machines page. A count of zero is quiet and not pressable, unless it is the filter
-// in use (then it can still be turned off).
+// The header: five answers, each a live count, as stat tiles (only Needs you is tinted, and only above zero). Four are filters of the tiles
+// below (a press shows only those, a second press shows everything again); the machines count opens the machines page. A count of zero is
+// quiet and not pressable, unless it is the filter in use (then it can still be turned off).
 export function FleetSummary({ counts, filter, onFilter }: { counts: FleetCounts; filter?: FleetFilter; onFilter?: (f: FleetFilter | undefined) => void }) {
-  const allOnline = counts.machinesTotal > 0 && counts.machinesOnline === counts.machinesTotal;
+  const machines = counts.machinesTotal === 0 ? t('machines-online', { count: 0 }) : t('fleet-machines', { online: counts.machinesOnline, total: counts.machinesTotal });
   return (
     <div className="fleet-summary" role="group" aria-label={t('fleet-summary-label')}>
       {FLEET_FILTERS.map((f) => {
         const n = countOf(counts, f);
         const on = filter === f;
-        return (
-          <button key={f} type="button" className={`fleet-count fleet-count--${f}${n === 0 && !on ? ' fleet-count--zero' : ''}`} aria-pressed={on} disabled={!onFilter || (n === 0 && !on)}
-            onClick={() => onFilter?.(on ? undefined : f)} title={`${t('fleet-filter-hint')}: ${t(FILTER_WORD[f])}`}>
-            <span className="fleet-count__n">{n}</span>
-            <span className="fleet-count__word"><StateBadge state={f === 'failed' ? 'finished' : f} failed={f === 'failed'} word={t(FILTER_WORD[f])} /></span>
-          </button>
-        );
+        const press = onFilter && (n > 0 || on) ? () => onFilter(on ? undefined : f) : undefined;
+        // The mark's shape beside the word; the word is the name (the mark adds nothing for a screen reader).
+        const mark = <span className={`kit-mark kit-tone-${MARK_TONE[f]}`}><Mark state={f === 'failed' ? 'finished' : f} failed={f === 'failed'} /></span>;
+        return <StatTile key={f} value={n} label={t(FILTER_WORD[f])} mark={mark} tone={f === 'needs-you' ? 'needs' : undefined} pressed={on} onPress={press}
+          title={press ? `${t('fleet-filter-hint')}: ${t(FILTER_WORD[f])}` : undefined} />;
       })}
-      <a className="fleet-count fleet-count--machines" href="#/machines">
-        <span aria-hidden className={`fleet-dot ${allOnline ? 'bg-finished' : counts.machinesTotal === 0 ? 'bg-unknown' : 'bg-needs-you'}`} />
-        <span className="fleet-count__word">{counts.machinesTotal === 0 ? t('machines-online', { count: 0 }) : t('fleet-machines', { online: counts.machinesOnline, total: counts.machinesTotal })}</span>
+      <a className={`kit-stat fleet-stat--machines${counts.machinesOnline === 0 ? ' kit-stat--zero' : ''}`} href="#/machines" aria-label={machines} title={machines}>
+        <span className="kit-stat__n">{counts.machinesOnline}</span>
+        <span className="kit-stat__label"><Icon name="machine" className="size-3.5" />{t('fleet-stat-machines', { total: counts.machinesTotal })}</span>
       </a>
     </div>
   );
 }
+const MARK_TONE: Record<FleetFilter, string> = { 'needs-you': 'needs', working: 'working', finished: 'finished', failed: 'danger' };
 
 // The one line of what an agent asks: the request's own words, short. Anything long goes through the full card.
 function askText(x: ApprovalModel): string {
@@ -61,8 +62,19 @@ function askText(x: ApprovalModel): string {
 
 const askOf = (it: AttentionItem): string => (it.kind === 'approval' ? askText(it.approval) : it.kind === 'pair' ? t('pair-row-what') : t('fleet-waiting-in-terminal'));
 
-// The queue: everything that needs the user, most urgent first. A plain yes or no has Allow and Deny in its row (the same answer, signed
-// the same way, as the banner above the terminal); anything with something to read opens the agent, where the whole request is.
+// The icon chip of a request card: what kind of thing is asked.
+function iconOf(it: AttentionItem): IconName {
+  if (it.kind === 'pair') return 'machine';
+  if (it.kind === 'agent') return 'terminal';
+  return it.approval.start ? 'plus' : 'bell';
+}
+
+// What a card shows, as one string: when it changes, the card is another card (the dwell starts again).
+const shownOf = (it: AttentionItem): string => [it.key, askOf(it), it.kind === 'pair' ? peerText(it.card.name) : it.agent?.name ?? '', it.kind === 'approval' ? it.approval.machineName ?? '' : ''].join('\u0000');
+
+// The queue: everything that needs the user, most urgent first, one request card each (the kit's Callout, amber, never a bar on one side).
+// A plain yes or no has Allow and Deny in its card (the same answer, signed the same way, as the banner above the terminal); anything with
+// something to read opens the agent, where the whole request is.
 export function AttentionQueue({ items, machines, now, onOpen, onResolve, onReview, stale, pairing }: {
   items: readonly AttentionItem[];
   machines: readonly MachineModel[];
@@ -90,6 +102,29 @@ export function AttentionQueue({ items, machines, now, onOpen, onResolve, onRevi
   // never has Approve in the row, because the owner must see the number first.
   const [read, setRead] = useState<ReadonlySet<string>>(new Set());
   const toggleRead = (key: string) => setRead((cur) => { const next = new Set(cur); if (!next.delete(key)) next.add(key); return next; });
+
+  // T44: Allow and Deny in a card do nothing for a short dwell (ATTENTION_DWELL_MS, as the attention dialog and the phone bar) after anything
+  // on the list changed (a card came, went, moved, or says something else: a card that moves can put a ready Allow under a click meant for
+  // another), after the person came back to the window, and after the link came back. One timer for the whole queue, derived from what is
+  // shown, so no frame has a new list ready.
+  const layout = [all, [...each].join(), [...read].join(), stale, ...shown.map((r) => (r.kind === 'one' ? shownOf(r.item) : `${r.key}\u0000${r.items.length}`))].join('\u0001');
+  const [epoch, setEpoch] = useState(0);
+  const [readyFor, setReadyFor] = useState<string | undefined>();
+  useEffect(() => {
+    const again = () => setEpoch((n) => n + 1);
+    const seen = () => { if (document.visibilityState === 'visible') again(); };
+    window.addEventListener('focus', again);
+    document.addEventListener('visibilitychange', seen);
+    return () => { window.removeEventListener('focus', again); document.removeEventListener('visibilitychange', seen); };
+  }, []);
+  useEffect(() => {
+    const h = setTimeout(() => setReadyFor(layout), ATTENTION_DWELL_MS);
+    return () => { clearTimeout(h); setReadyFor(undefined); };
+  }, [layout, epoch]);
+  const ready = readyFor === layout && !stale;
+  // The guard is here, not only on the button: a press during the dwell sends nothing.
+  const answer = (a: ApprovalModel, ok: boolean) => { if (ready) onResolve?.(a, ok); };
+
   // With a side panel (Review opens it, where the full card is) the card is brought into view there; without one it opens under its row.
   const reviewPair = (key: string, id: string) => {
     if (onReview) {
@@ -99,23 +134,19 @@ export function AttentionQueue({ items, machines, now, onOpen, onResolve, onRevi
     }
     toggleRead(key);
   };
+  const card = (key: string, cls: string, icon: IconName, title: ReactNode, body: ReactNode, actions: ReactNode) => (
+    <li key={key} className={cls}><Callout tone="needs" icon={icon} title={title} actions={actions}>{body}</Callout></li>
+  );
   const pairRow = (it: Extract<AttentionItem, { kind: 'pair' }>) => {
     const open = read.has(it.key);
-    const card = it.card;
-    return (
-      <li key={it.key} className="fleet-ask">
-        <div className="fleet-ask__who">
-          <StateMark state="needs-you" />
-          <strong className="fleet-ask__name"><bdi>{peerText(card.name)}</bdi></strong>
-          <span className="fleet-ask__where">{t('pair-row-where')}</span>
-        </div>
+    const c = it.card;
+    return card(it.key, 'fleet-ask', 'machine',
+      <><bdi className="fleet-ask__name">{peerText(c.name)}</bdi><span className="fleet-ask__where">{t('pair-row-where')}</span></>,
+      <>
         <p className="fleet-ask__what">{t('pair-row-what')}</p>
-        <div className="fleet-ask__actions">
-          <button type="button" className="button" aria-expanded={onReview ? undefined : open} aria-controls={onReview ? `pair-request-${card.id}` : `pair-row-${card.id}`} aria-label={t('pair-review-for', { name: isolated(card.name) })} onClick={() => reviewPair(it.key, card.id)}>{open && !onReview ? t('pair-hide') : t('fleet-review')}</button>
-        </div>
-        {open && pairing && <div id={`pair-row-${card.id}`} className="col-span-full"><PairRequest inline request={card} offline={pairing.offline} onAnswer={(a, r) => pairing.onAnswer(card, a, r)} /></div>}
-      </li>
-    );
+        {open && pairing && <div id={`pair-row-${c.id}`} className="mt-2"><PairRequest inline request={c} offline={pairing.offline} onAnswer={(a, r) => pairing.onAnswer(c, a, r)} /></div>}
+      </>,
+      <Button size="sm" variant="primary" aria-expanded={onReview ? undefined : open} aria-controls={onReview ? `pair-request-${c.id}` : `pair-row-${c.id}`} aria-label={t('pair-review-for', { name: isolated(c.name) })} onClick={() => reviewPair(it.key, c.id)}>{open && !onReview ? t('pair-hide') : t('fleet-review')}</Button>);
   };
   const rowOf = (it: AttentionItem, inlineOk: boolean) => {
     if (it.kind === 'pair') return pairRow(it);
@@ -126,52 +157,44 @@ export function AttentionQueue({ items, machines, now, onOpen, onResolve, onRevi
     const inline = inlineOk && it.kind === 'approval' && !!onResolve && decidableInline(it.approval);
     const ask = askOf(it);
     const why = `fleet-stale-why-${it.key}`;
-    return (
-      <li key={it.key} className="fleet-ask">
-        <div className="fleet-ask__who">
-          <StateMark state="needs-you" />
-          <strong className="fleet-ask__name">{name}</strong>
-          <span className="fleet-ask__where">{[machine, project].filter(Boolean).join(' · ')}</span>
-          {knownWait && it.sinceMs ? <time className="fleet-ask__time" dateTime={new Date(it.sinceMs).toISOString()}>{t('fleet-asked', { when: ago(it.sinceMs, now) })}</time> : null}
-        </div>
+    const off = { 'aria-disabled': !ready || undefined, disabled: stale, 'aria-describedby': stale ? why : undefined };
+    return card(it.key, 'fleet-ask', iconOf(it),
+      <>
+        <AgentAvatar accent={agent?.accent ?? 'var(--agent-slate)'} kind={kindOf({ kind: agent?.kind, name })} size="s" />
+        <bdi className="fleet-ask__name">{name}</bdi>
+        <span className="fleet-ask__where">{[machine, project].filter(Boolean).join(' · ')}</span>
+        {knownWait && it.sinceMs ? <time className="fleet-ask__time" dateTime={new Date(it.sinceMs).toISOString()}>{t('fleet-asked', { when: ago(it.sinceMs, now) })}</time> : null}
+      </>,
+      <>
         {/* A request that can be answered here is shown whole, never cut; the others may be cut because they are read in the full card. */}
-        <p className={`fleet-ask__what${inline ? '' : ' fleet-ask__what--clamp'}`} title={ask}>{ask}</p>
-        <div className="fleet-ask__actions">
-          {inline && it.kind === 'approval' ? <>
-            <button type="button" className="button button--primary" disabled={stale} aria-describedby={stale ? why : undefined} aria-label={t('fleet-allow-for', { name })} onClick={() => onResolve?.(it.approval, true)}>{t('approval-allow')}</button>
-            <button type="button" className="button" disabled={stale} aria-describedby={stale ? why : undefined} aria-label={t('fleet-deny-for', { name })} onClick={() => onResolve?.(it.approval, false)}>{t('approval-deny')}</button>
-            {stale && <span id={why} className="fleet-ask__why">{t('fleet-stale-no-answer')}</span>}
-          </> : agent ? <button type="button" className="button" aria-label={t(it.kind === 'approval' ? 'fleet-review-for' : 'fleet-open-for', { name })} onClick={() => onOpen(agent.id)}>{t(it.kind === 'approval' ? 'fleet-review' : 'action-open')}</button>
-            : onReview ? <button type="button" className="button" aria-label={t('fleet-review-for', { name })} onClick={onReview}>{t('fleet-review')}</button> : null}
-        </div>
-      </li>
-    );
+        <p className={`fleet-ask__what${inline ? '' : ' fleet-ask__what--clamp'}`} title={ask}>{inline ? <span className="fleet-ask__cmd" dir="auto">{ask}</span> : ask}</p>
+        {inline && stale && <span id={why} className="fleet-ask__why">{t('fleet-stale-no-answer')}</span>}
+      </>,
+      inline && it.kind === 'approval' ? <>
+        <Button size="sm" {...off} aria-label={t('fleet-deny-for', { name })} onClick={() => answer(it.approval, false)}>{t('approval-deny')}</Button>
+        <Button size="sm" variant="primary" {...off} aria-label={t('fleet-allow-for', { name })} onClick={() => answer(it.approval, true)}>{t('approval-allow')}</Button>
+      </> : agent ? <Button size="sm" variant="primary" aria-label={t(it.kind === 'approval' ? 'fleet-review-for' : 'fleet-open-for', { name })} onClick={() => onOpen(agent.id)}>{t(it.kind === 'approval' ? 'fleet-review' : 'action-open')}</Button>
+        : onReview ? <Button size="sm" variant="primary" aria-label={t('fleet-review-for', { name })} onClick={onReview}>{t('fleet-review')}</Button> : null);
   };
 
   return (
     <section className="fleet-attention" aria-labelledby="fleet-attention-h">
       <div className="fleet-section__head">
-        <h2 id="fleet-attention-h" className="fleet-section__title text-needs-you">{t('attention-title')}{items.length > 0 && <span className="fleet-section__n"> · {items.length}</span>}</h2>
+        <h2 id="fleet-attention-h" className="fleet-section__title">{t('attention-title')}{items.length > 0 && <Pill tone="needs"><span className="sr-only">· </span>{items.length}</Pill>}</h2>
         {items.length > 0 && <span className="fleet-hint"><kbd className="ide-kbd">N</kbd> {t('ide-welcome-next')}</span>}
       </div>
       {items.length === 0 ? <p className="fleet-calm muted m-0">{t('attention-empty')}</p> : (
         <ul className="fleet-queue">
-          {shown.map((row) => row.kind === 'one' ? rowOf(row.item, true) : (
-            <li key={row.key} className="fleet-ask fleet-ask--many">
-              <div className="fleet-ask__who">
-                <StateMark state="needs-you" />
-                <strong className="fleet-ask__name">{row.agentKind ? t('fleet-same-ask', { count: row.items.length, kind: row.agentKind, machine: row.machine }) : t('fleet-same-ask-any', { count: row.items.length, machine: row.machine })}</strong>
-              </div>
+          {shown.map((row) => row.kind === 'one' ? rowOf(row.item, true) : card(row.key, 'fleet-ask fleet-ask--many', 'stack',
+            <span className="fleet-ask__name">{row.agentKind ? t('fleet-same-ask', { count: row.items.length, kind: row.agentKind, machine: row.machine }) : t('fleet-same-ask-any', { count: row.items.length, machine: row.machine })}</span>,
+            <>
               <p className="fleet-ask__what fleet-ask__what--clamp" title={askOf(row.items[0] as AttentionItem)}>{askOf(row.items[0] as AttentionItem)}</p>
-              <div className="fleet-ask__actions">
-                <button type="button" className="button" aria-expanded={each.has(row.key)} onClick={() => toggleEach(row.key)}>{each.has(row.key) ? t('fleet-collapse') : t('fleet-review-each')}</button>
-              </div>
               {each.has(row.key) && <ul className="fleet-queue fleet-ask__each">{row.items.map((it) => rowOf(it, false))}</ul>}
-            </li>
-          ))}
+            </>,
+            <Button size="sm" aria-expanded={each.has(row.key)} onClick={() => toggleEach(row.key)}>{each.has(row.key) ? t('fleet-collapse') : t('fleet-review-each')}</Button>))}
         </ul>
       )}
-      {rows.length > ATTENTION_SHOWN && <button type="button" className="button fleet-more" aria-expanded={all} onClick={() => setAll((v) => !v)}>{all ? t('fleet-attention-less') : t('fleet-attention-more', { count: rows.length - ATTENTION_SHOWN })}</button>}
+      {rows.length > ATTENTION_SHOWN && <Button className="fleet-more" aria-expanded={all} onClick={() => setAll((v) => !v)}>{all ? t('fleet-attention-less') : t('fleet-attention-more', { count: rows.length - ATTENTION_SHOWN })}</Button>}
     </section>
   );
 }

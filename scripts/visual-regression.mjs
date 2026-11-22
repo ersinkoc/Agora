@@ -1,4 +1,4 @@
-// Visual regression: the component gallery and the sign-in page, in both themes on a desktop and a phone viewport, compared with
+// Visual regression: the component gallery, Home (the demo window's fleet console) and the sign-in page, in both themes on a desktop and a phone viewport, compared with
 // the committed baselines in apps/web/visual/. A pull request that changes how a screen looks updates them on purpose.
 //
 //   cd apps/web && npm ci && npm run build
@@ -32,8 +32,10 @@ const server = createServer((req, res) => {
 await new Promise((r) => server.once('listening', r));
 const base = `http://127.0.0.1:${server.address().port}/`;
 
+// `quiet`: the attention dialog stays shut (its own setting, as a person can choose), so Home is captured as it is under it.
 const pages = [
   { name: 'gallery', hash: '#/gallery', ready: '.gallery' },
+  { name: 'home', hash: '#/demo', ready: '.fleet-summary', quiet: true },
   { name: 'signin', hash: '', ready: 'form' },
 ];
 const viewports = [['desktop', { width: 1280, height: 900 }], ['phone', { width: 390, height: 844 }]];
@@ -64,6 +66,7 @@ for (const p of pages) {
     for (const scheme of ['dark', 'light']) {
       const name = `${p.name}-${vname}-${scheme}`;
       const ctx = await browser.newContext({ viewport, colorScheme: scheme, reducedMotion: 'reduce' });
+      if (p.quiet) await ctx.addInitScript(() => { try { localStorage.setItem('agora.attention.mode', 'off'); } catch { /* captured as it is */ } });
       const page = await ctx.newPage();
       await page.goto(base + p.hash);
       await page.waitForSelector(p.ready);
