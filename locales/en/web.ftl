@@ -309,6 +309,8 @@ give-start-late = The agent has not appeared yet. Go back and choose it from the
 give-machine-unsupported = That agent's machine cannot take tasks yet; it may need an update. Nothing was sent.
 messages-title = Recent messages
 message-cross = between machines
+# Only that machine says who sent this message; the sender's own machine has not confirmed it.
+message-via = reported by { $machine }
 console-agents = Agents
 console-activity = Activity
 console-wall-empty = Pick an agent on the left to watch its terminal here.

@@ -66,6 +66,39 @@ describe('view', () => {
       expect(m[0]?.crossMachine).toBe(true);
       expect(m[0]?.from).toMatch(/^shell · /);
       expect(m[0]?.to).toMatch(/^shell · /);
+      expect(m[0]?.via).toBeUndefined(); // the sender's machine confirmed it, whichever came first
+    }
+  });
+
+  it('says which machine alone names the sender of a copy nobody confirmed, so a node cannot speak for another (#905)', () => {
+    const v = emptyView();
+    applyEvent(v, 1, ev('a', 1, { nodeOnline: { nodeId: 'a', hostname: 'Alpha' } }));
+    applyEvent(v, 2, ev('b', 1, { nodeOnline: { nodeId: 'b', hostname: 'Bravo' } }));
+    // b writes a message "from" a's agent that a never recorded.
+    applyEvent(v, 3, ev('b', 2, { messagePosted: { messageId: 'm-9', fromAgentId: 'a/x', to: 'z', body: 'trust me' } }));
+    let m = recentMessages(v);
+    expect(m[0]).toMatchObject({ from: 'a/x', to: 'b/z', via: 'Bravo' });
+    // Two machines that are not the sender's agreeing confirm nothing.
+    applyEvent(v, 4, ev('c', 1, { messagePosted: { messageId: 'm-1', fromAgentId: 'a/x', to: 'b/z', body: 'trust me' } }));
+    m = recentMessages(v);
+    expect(m).toHaveLength(1);
+    expect(m[0]?.via).toBe('Bravo');
+    // Its own machine's copy of another message does not vouch for this one.
+    applyEvent(v, 5, ev('a', 2, { messagePosted: { messageId: 'm-2', fromAgentId: 'x', to: 'b/z', body: 'hello' } }));
+    expect(recentMessages(v).map((r) => r.via)).toEqual([undefined, 'Bravo']);
+  });
+
+  it('folds a handoff the shared board recorded with the receiver\'s copy, the sender named once (#905)', () => {
+    for (const boardFirst of [true, false]) {
+      const v = emptyView();
+      // The hub's board writes hub-wide ids; the receiving node gets the handoff's message from `a/x`.
+      const board = ev('hub', 1, { messagePosted: { messageId: 'm-3', fromAgentId: 'a/x', to: 'b/y', body: 'take t-1' } });
+      const got = ev('b', 1, { messagePosted: { messageId: 'm-5', fromAgentId: 'a/x', to: 'y', body: 'take t-1' } });
+      const [first, second] = boardFirst ? [board, got] : [got, board];
+      applyEvent(v, 1, first);
+      applyEvent(v, 2, second);
+      const m = recentMessages(v);
+      expect(m.map((r) => [r.from, r.to, r.crossMachine, r.via])).toEqual([['a/x', 'b/y', true, undefined]]);
     }
   });
 
@@ -80,6 +113,8 @@ describe('view', () => {
     applyEvent(v, 6, ev('a', 3, { messagePosted: { messageId: 'm-3', fromAgentId: 'a/x', to: 'y', body: '[#ops] hi' } }));
     expect(v.messages.slice(-2).map((m) => [m.from, m.to])).toEqual([['a/x', 'b/z'], ['a/x', 'a/y']]);
     expect(recentMessages(v).slice(0, 2).map((m) => m.crossMachine)).toEqual([false, true]);
+    // Only the receiver names the sender of a channel copy (the board sent it): it says so; the sender's machine's own copy does not.
+    expect(recentMessages(v).slice(0, 2).map((m) => m.via)).toEqual([undefined, 'b']);
   });
 
   it('shows the shared board per project: tasks with their owner, leases with their holder, from the hub\'s events', () => {

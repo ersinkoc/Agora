@@ -77,8 +77,10 @@ export interface ApprovalV { agentId: string; action: string; detail: string; ex
 
 export interface TaskV { projectId: string; title: string; ownerId: string; done: boolean }
 export interface LeaseV { agentId: string; path: string; expiresAtMs: number }
-// `producer` is the machine that recorded it; `paired` marks a sender's copy already matched with the receiver's (#905).
-export interface MessageV { from: string; to: string; body: string; atMs: number; producer?: string; paired?: boolean }
+// `producer` is the machine that recorded it; `paired` marks a copy already matched with its twin (#905). `via` is the machine whose
+// word alone names the sender: a copy recorded by another machine than the sender's (a receiver's, or a forged one) that neither the
+// sender's machine nor the hub has confirmed.
+export interface MessageV { from: string; to: string; body: string; atMs: number; producer?: string; paired?: boolean; via?: string }
 
 export interface View {
   pos: number;
@@ -402,10 +404,18 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
       // #905: a message between machines is recorded by both: the sender's node (`to` is `<node>/<agent>`) and the receiver's,
       // whose `from` is already the hub-wide `<origin>/<agent>` (ADR-0031), so it is not qualified again. Message ids are per node
       // (ADR-0074), so the two copies are matched by sender, recipient and text from two machines, one with one: a message sent
-      // twice stays two rows.
-      const m: MessageV = { from: from.includes('/') ? from : q(from), to: to.includes('/') || to.startsWith('#') ? to : q(to), body: b.body ?? '', atMs: at, producer };
+      // twice stays two rows. A node may write any `from`: one that names another machine's agent is shown with the machine that
+      // said so until the sender's machine or the hub (the shared board, which writes hub-wide ids) records the same message.
+      const qualified = from.includes('/');
+      const sender = qualified ? from : q(from);
+      const vouched = !qualified || producer === 'hub' || producer === sender.split('/')[0];
+      const m: MessageV = { from: sender, to: to.includes('/') || to.startsWith('#') ? to : q(to), body: b.body ?? '', atMs: at, producer, ...(vouched ? {} : { via: producer }) };
       const twin = v.messages.find((x) => !x.paired && x.producer !== producer && x.from === m.from && x.to === m.to && x.body === m.body);
-      if (twin) { twin.paired = true; break; }
+      if (twin) {
+        twin.paired = true;
+        if (vouched) delete twin.via;
+        break;
+      }
       v.messages.push(m);
       if (v.messages.length > MAX_MESSAGES) v.messages.shift();
       break;
@@ -651,7 +661,8 @@ export function projectChoices(v: View): ProjectChoice[] {
   return [...choices.values()].sort((a, b) => a.label.localeCompare(b.label));
 }
 
-export interface MessageModel { from: string; to: string; body: string; atMs: number; crossMachine: boolean }
+// `via`: the machine (by name) whose word alone says who sent it, when that is not the sender's machine (see `MessageV.via`).
+export interface MessageModel { from: string; to: string; body: string; atMs: number; crossMachine: boolean; via?: string }
 
 // The newest messages first, with agent names instead of ids. A message between two machines says so.
 export function recentMessages(v: View, limit = 5): MessageModel[] {
@@ -661,6 +672,7 @@ export function recentMessages(v: View, limit = 5): MessageModel[] {
   return v.messages.slice(-limit).reverse().map((m) => ({
     from: label(m.from), to: label(m.to), body: m.body, atMs: m.atMs,
     crossMachine: m.to.includes('/') && machine(m.from) !== machine(m.to),
+    ...(m.via ? { via: v.nodes.get(m.via)?.hostname || m.via } : {}),
   }));
 }
 

@@ -306,6 +306,7 @@ give-start-late = Ajan henüz görünmedi. Geri dönün ve göründüğünde onu
 give-machine-unsupported = O ajanın makinesi henüz görev alamıyor; güncellenmesi gerekebilir. Hiçbir şey gönderilmedi.
 messages-title = Son mesajlar
 message-cross = makineler arası
+message-via = bildiren: { $machine }
 console-agents = Ajanlar
 console-activity = Etkinlik
 console-wall-empty = Terminalini burada izlemek için soldan bir ajan seçin.

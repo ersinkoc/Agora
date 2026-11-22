@@ -292,14 +292,23 @@ impl crate::mesh_server::RemoteLink for MeshOut {
 struct Posts {
     next: u64,
     waiting: std::collections::HashMap<String, (tokio::time::Instant, Done)>,
+    /// When the waiting posts are looked at next (see [`Self::expire`]).
+    next_check: Option<tokio::time::Instant>,
 }
 
 impl Posts {
-    /// Fails every post sent more than `deadline` ago with `node.timeout`; a late answer to one then finds nothing.
+    /// Fails every post sent more than `deadline` ago with `node.timeout`; a late answer to one then finds nothing. Called on every
+    /// pass of the connection's loop (terminal frames included), so it only compares one instant, and looks at the posts at most
+    /// every quarter of the deadline (capped at 1 s): a post fails up to that much after its deadline.
     fn expire(&mut self, deadline: Duration) {
         if self.waiting.is_empty() {
             return;
         }
+        let now = tokio::time::Instant::now();
+        if self.next_check.is_some_and(|at| now < at) {
+            return;
+        }
+        self.next_check = Some(now + (deadline / 4).min(Duration::from_secs(1)));
         let late: Vec<String> = self
             .waiting
             .iter()

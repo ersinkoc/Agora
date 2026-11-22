@@ -59,7 +59,7 @@ function Messages({ messages }: { messages: readonly MessageModel[] }) {
         <ul className="messages">
           {messages.map((m, i) => (
             <li key={`${m.atMs}-${i}`}>
-              <strong>{m.from}</strong> → <strong>{m.to}</strong>{m.crossMachine ? <span className="muted"> · {t('message-cross')}</span> : null}
+              <strong>{m.from}</strong> → <strong>{m.to}</strong>{m.crossMachine ? <span className="muted"> · {t('message-cross')}</span> : null}{m.via ? <span className="muted"> · {t('message-via', { machine: m.via })}</span> : null}
               <div className="muted">{m.body}</div>
             </li>
           ))}
