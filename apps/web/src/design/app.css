@@ -155,7 +155,8 @@
   /* The fleet console (Home): a header of live counts, what needs you, then the tiles grouped by machine or project. Tokens only; sizes in
      rem so Large text grows everything, and rows wrap instead of clipping. */
   .fleet-console { @apply mx-auto grid w-full min-w-0 max-w-6xl content-start gap-5 p-4; }
-  .fleet-console__bar { @apply sticky top-0 z-10 -mx-4 -mt-4 border-b border-line bg-surface-0 px-4 py-2.5; }
+  /* The counts scroll with the page: as stat tiles they wrap to two or three rows in a narrow pane, too much to pin over the tiles. */
+  .fleet-console__bar { @apply min-w-0; }
   /* The five counts are stat tiles (the kit's StatTile): a big number and its name; only Needs you is tinted, and only above zero. */
   .fleet-summary { @apply flex flex-wrap items-stretch gap-2.5; }
   .fleet-summary > * { flex: 1 1 7.5rem; }
@@ -188,6 +189,8 @@
   .fleet-ask__what--clamp { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
   .fleet-ask__why { @apply mt-1 block text-xs text-muted; }
   .fleet-ask__each { @apply mt-2; }
+  /* A card opened in place (a machine's join card, "Review each") keeps its button at the top, by its title, not in the middle. */
+  .fleet-ask--open .kit-callout__actions { @apply self-start; }
   /* Allow and Deny wait out the dwell (T44): the buttons look off and do nothing until it has passed. */
   .fleet-ask .kit-btn[aria-disabled='true'] { @apply cursor-not-allowed opacity-50; }
 

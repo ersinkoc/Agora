@@ -140,7 +140,7 @@ export function AttentionQueue({ items, machines, now, onOpen, onResolve, onRevi
   const pairRow = (it: Extract<AttentionItem, { kind: 'pair' }>) => {
     const open = read.has(it.key);
     const c = it.card;
-    return card(it.key, 'fleet-ask', 'machine',
+    return card(it.key, `fleet-ask${open ? ' fleet-ask--open' : ''}`, 'machine',
       <><bdi className="fleet-ask__name">{peerText(c.name)}</bdi><span className="fleet-ask__where">{t('pair-row-where')}</span></>,
       <>
         <p className="fleet-ask__what">{t('pair-row-what')}</p>
@@ -185,7 +185,7 @@ export function AttentionQueue({ items, machines, now, onOpen, onResolve, onRevi
       </div>
       {items.length === 0 ? <p className="fleet-calm muted m-0">{t('attention-empty')}</p> : (
         <ul className="fleet-queue">
-          {shown.map((row) => row.kind === 'one' ? rowOf(row.item, true) : card(row.key, 'fleet-ask fleet-ask--many', 'stack',
+          {shown.map((row) => row.kind === 'one' ? rowOf(row.item, true) : card(row.key, `fleet-ask fleet-ask--many${each.has(row.key) ? ' fleet-ask--open' : ''}`, 'stack',
             <span className="fleet-ask__name">{row.agentKind ? t('fleet-same-ask', { count: row.items.length, kind: row.agentKind, machine: row.machine }) : t('fleet-same-ask-any', { count: row.items.length, machine: row.machine })}</span>,
             <>
               <p className="fleet-ask__what fleet-ask__what--clamp" title={askOf(row.items[0] as AttentionItem)}>{askOf(row.items[0] as AttentionItem)}</p>

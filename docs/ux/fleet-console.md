@@ -8,7 +8,10 @@ palette's "Go home" brings it back. An empty window is the fleet console too. On
 ![The same, light](screens/home-redesign-desktop-light.png)
 
 Every tile state (needs you, working, finished, failed, idle, unknown, acting without asking, a plan limit):
-`screens/home-redesign-fleet-{dark,light}.png`; the phone: `screens/home-redesign-phone-{dark,light}.png`. The look follows ADR-0102:
+`screens/home-redesign-fleet-{dark,light}.png` and, grouped by state, `screens/home-redesign-group-state-{dark,light}.png`; every kind
+of request card (answered here, a machine's join card opened, a start request with Review, many identical asks opened):
+`screens/home-redesign-requests-{dark,light}.png`; the phone: `screens/home-redesign-phone-{dark,light}.png`. The counts scroll with
+the page (as stat tiles they take two or three rows in a narrow pane). The look follows ADR-0102:
 colour is a surface (a tint, a hairline, an avatar, a pill), never a bar on one side; `scripts/e2e-home-no-stripes.mjs` checks the
 rendered page for it.
 
