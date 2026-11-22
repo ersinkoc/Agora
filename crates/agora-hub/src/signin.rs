@@ -110,7 +110,7 @@ impl<'a> SignIn<'a> {
     pub fn exchange(&self, code: &str, now_ms: u64, origin: &str) -> Result<String, SignInError> {
         let token = new_token()?;
         let mut conn = self.store.lock()?;
-        let tx = conn.transaction()?;
+        let tx = crate::store::write_tx(&mut conn)?;
         let live: Option<(i64, Option<String>)> = tx
             .query_row(
                 "SELECT expires_ms, user_id FROM signin_codes WHERE code_hash = ?1",

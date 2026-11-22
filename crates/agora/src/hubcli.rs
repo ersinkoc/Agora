@@ -2732,3 +2732,32 @@ pub fn hub_machines(say: &Say, o: &Opts) -> ExitCode {
     }
     code
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod password_message_tests {
+    use super::*;
+    use agora_i18n::Catalog;
+
+    /// #946 (RM-55): `agora password set|clear` count the sessions they signed out with a plural form, so one reads as one.
+    #[test]
+    fn the_signed_out_count_is_singular_for_one_session_and_plural_for_more() {
+        let en = Say(Catalog::english());
+        let tr = Say(Catalog::turkish());
+        for id in [key!("cli-password-set"), key!("cli-password-cleared")] {
+            let one = en.text(id, &[("count", 1i64.into())]);
+            assert!(one.ends_with(" 1 open session was signed out."), "{one}");
+            let two = en.text(id, &[("count", 2i64.into())]);
+            assert!(two.ends_with(" 2 open sessions were signed out."), "{two}");
+            let zero = en.text(id, &[("count", 0i64.into())]);
+            assert!(
+                zero.ends_with(" 0 open sessions were signed out."),
+                "{zero}"
+            );
+            let one = tr.text(id, &[("count", 1i64.into())]);
+            assert!(one.ends_with(" Açık bir oturum kapatıldı."), "{one}");
+            let two = tr.text(id, &[("count", 2i64.into())]);
+            assert!(two.ends_with(" Açık 2 oturum kapatıldı."), "{two}");
+        }
+    }
+}

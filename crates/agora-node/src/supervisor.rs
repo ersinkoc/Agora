@@ -2953,6 +2953,11 @@ impl Supervisor {
         folder: Option<&agora_platform::HeldFolder>,
     ) -> Option<Result<TerminalHandle, SupervisorError>> {
         let hub = self.holder.as_ref()?;
+        // An id the holder would refuse (longer than the link carries, #929) is run by the node, never refused: the node's own ids
+        // always fit, an id from an older ledger may not.
+        if !crate::holder_link::agent_id_fits(id.as_str()) {
+            return None;
+        }
         let cwd = cfg.cwd.as_ref()?.to_str()?.to_string();
         // A folder that moved is the node path's to report (`FolderMoved`).
         if folder.is_some_and(|f| !f.in_place()) {
@@ -4291,15 +4296,15 @@ fn log_old_holder_once(holder_pid: u32) {
 }
 
 /// ADR-0093: starts `cfg` through the holder, on pipes. `None` means "not through the holder": the caller runs it itself (a confined
-/// adapter, no holder or an older one, a program or id the holder refuses, a variable that is not text). The environment is complete (the
-/// holder passes nothing of its own).
+/// adapter, no holder or an older one, a program or id the holder refuses, an id longer than the link carries, a variable that is not
+/// text). The environment is complete (the holder passes nothing of its own).
 fn launch_held_adapter(
     agent: &AgentId,
     cfg: &AdapterConfig,
     holder: Option<&Arc<HolderHub>>,
 ) -> Option<Result<Adapter, SupervisorError>> {
     let hub = holder?;
-    if cfg.sandbox.is_some() {
+    if cfg.sandbox.is_some() || !crate::holder_link::agent_id_fits(agent.as_str()) {
         return None;
     }
     let cwd = cfg.cwd.as_ref()?.to_str()?.to_string();

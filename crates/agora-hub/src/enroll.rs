@@ -250,7 +250,7 @@ impl<'a> Enrollment<'a> {
         }
         // Issue first: a bad CSR or node id must not burn a valid code (the user would have to start over).
         let mut conn = self.store.lock()?;
-        let tx = conn.transaction()?;
+        let tx = crate::store::write_tx(&mut conn)?;
         let live: Option<i64> = tx
             .query_row(
                 "SELECT expires_ms FROM enrollment_codes WHERE code_hash = ?1",
@@ -296,7 +296,7 @@ impl<'a> Enrollment<'a> {
         now_ms: u64,
     ) -> Result<IssuedCert, EnrollError> {
         let mut conn = self.store.lock()?;
-        let tx = conn.transaction()?;
+        let tx = crate::store::write_tx(&mut conn)?;
         let taken: bool = tx
             .query_row(
                 "SELECT 1 FROM devices WHERE node_id = ?1 AND revoked_ms IS NULL LIMIT 1",
@@ -346,7 +346,7 @@ impl<'a> Enrollment<'a> {
         now_ms: u64,
     ) -> Result<IssuedCert, RenewError> {
         let mut conn = self.store.lock()?;
-        let tx = conn.transaction()?;
+        let tx = crate::store::write_tx(&mut conn)?;
         match Self::decide(&tx, ca, from, csr_pem, now_ms)? {
             Decision::Refuse(why) => {
                 Self::audit_refusal(&tx, from, why, now_ms)?;
