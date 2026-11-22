@@ -446,6 +446,44 @@ fn stopping_a_held_agent_ends_its_process() {
     wait_for("the holder to end", || !rig.hold_pid_file().exists());
 }
 
+/// #933 (ADR-0098): a node that starts again removes the generated Git files an earlier run left (it was killed, so nothing ended
+/// those launches) and leaves the agent the holder kept running: the holder never runs a confined agent, so a kept agent has no
+/// generated file to lose.
+#[test]
+fn a_node_restart_sweeps_left_git_files_and_the_kept_agent_runs_on() {
+    let _serial = serial();
+    let rig = Rig::new(
+        "gitsweep",
+        &sh("echo GCG=[${GIT_CONFIG_GLOBAL-none}]; sleep 600"),
+    );
+    let node = rig.node();
+    let id = rig.launch(&node);
+    assert!(held(&node, &id));
+    wait_for("the agent", || screen(&node, &id).contains("GCG=[none]"));
+    let pid = pid_of(&node, &id);
+    wait_for("the holder in the ledger", || {
+        node.ledger
+            .get(&id)
+            .is_some_and(|e| e.holder_pid != 0 && e.process().is_some())
+    });
+    drop(node);
+    let folder = agora_node::gitconfig::directory(&rig.root.join("data"));
+    agora_platform::ensure_private_dir(&folder).expect("git-config folder");
+    let left = folder.join(format!("agent-{:032x}", 0x933u128));
+    std::fs::write(&left, "[user]\n").expect("left file");
+    std::fs::write(folder.join("neighbor"), "x").expect("neighbor");
+
+    let node = rig.node();
+    assert!(held(&node, &id), "the kept agent was not taken up");
+    assert_eq!(pid_of(&node, &id), pid);
+    assert!(!left.exists(), "a file an earlier run left was kept");
+    assert!(
+        folder.join("neighbor").exists(),
+        "a file that is not a launch's was removed"
+    );
+    assert!(alive(pid), "the kept agent ended");
+}
+
 fn agora(rig: &Rig, args: &[&str]) -> (bool, String) {
     let out = Command::new(AGORA)
         .args(args)

@@ -838,6 +838,9 @@ struct AdapterEntry {
     /// A selected folder (ADR-0052): its path as its start held it; a restart after a crash holds it again (F1023). `None` for a
     /// worktree the node made.
     folder: Option<PathBuf>,
+    /// #933: the generated Git configuration of the adapter process that runs now (ADR-0098), removed when it ends, is stopped or is
+    /// replaced by a restart (which writes its own). `None` when it is not confined or nothing runs.
+    git_config: Option<crate::gitconfig::LaunchFile>,
 }
 
 struct Entry {
@@ -1391,19 +1394,28 @@ impl Supervisor {
     }
 
     /// The confinement of one adapter agent of `kind` ([`Self::sandbox_for`]), refused as a terminal agent's is
-    /// ([`Self::refuse_reachable`]): an adapter and the agent below it run with exactly this profile.
+    /// ([`Self::refuse_reachable`]): an adapter and the agent below it run with exactly this profile. #933: with the launch's generated
+    /// Git file, which the caller keeps for as long as the adapter it starts runs (dropping it, as a failed start does, removes it).
     fn adapter_sandbox(
         &self,
         kind: &str,
         worktree: &Path,
         program: &str,
-    ) -> Result<Option<agora_platform::Sandbox>, SupervisorError> {
+    ) -> Result<
+        (
+            Option<agora_platform::Sandbox>,
+            Option<crate::gitconfig::LaunchFile>,
+        ),
+        SupervisorError,
+    > {
         let mut profile = self.sandbox_for(kind, worktree, program);
+        let mut file = None;
         if let Some(p) = &mut profile {
             self.refuse_reachable(kind, p)?;
             p.git_config = self.sandbox.git_config(p);
+            file = p.git_config.clone().map(crate::gitconfig::LaunchFile::new);
         }
-        Ok(profile)
+        Ok((profile, file))
     }
 
     /// ADR-0082, decision 4: where the node requires its control token, the file must lie outside every folder the agent may read or
@@ -1782,7 +1794,7 @@ impl Supervisor {
             // F1012: an adapter is started, and given its folder, by path; the folder must be where it was held before and after.
             let launched = self
                 .adapter_sandbox(&req.kind, &worktree, &spec.command[0])
-                .and_then(|profile| {
+                .and_then(|(profile, file)| {
                     launch_adapter(
                         &id,
                         self.holder.as_ref(),
@@ -1795,9 +1807,10 @@ impl Supervisor {
                         self.credential_vars(&req.kind),
                         folder,
                     )
+                    .map(|(a, s, c)| (a, s, c, file))
                 })
                 .map_err(|e| self.program_missing(&req.kind, e));
-            let (adapter, session_id, capabilities) = match launched {
+            let (adapter, session_id, capabilities, git_config) = match launched {
                 Ok(l) => l,
                 Err(e) => {
                     if let Some(hook) = &self.abort_hook {
@@ -1834,6 +1847,7 @@ impl Supervisor {
                     mesh,
                     launch: choice,
                     folder: folder.map(|f| f.path().to_path_buf()),
+                    git_config,
                 },
             );
         } else {
@@ -2033,7 +2047,7 @@ impl Supervisor {
         let mesh = self.adapter_mesh(&id, &req.kind, &checkout.project.to_string(), &worktree);
         let result = self
             .adapter_sandbox(&req.kind, &worktree, &spec.command[0])
-            .and_then(|profile| {
+            .and_then(|(profile, file)| {
                 launch_adapter(
                     &id,
                     self.holder.as_ref(),
@@ -2046,9 +2060,10 @@ impl Supervisor {
                     self.credential_vars(&req.kind),
                     None,
                 )
+                .map(|(a, s, c)| (a, s, c, file))
             })
             .map_err(|e| self.program_missing(&req.kind, e));
-        let (adapter, session_id, capabilities) = match result {
+        let (adapter, session_id, capabilities, git_config) = match result {
             Ok(started) => started,
             Err(error) => {
                 self.abandon(&id, created);
@@ -2083,6 +2098,7 @@ impl Supervisor {
                 mesh,
                 launch,
                 folder: None,
+                git_config,
             },
         );
         Ok(id)
@@ -2207,6 +2223,8 @@ impl Supervisor {
                     }
                     AdapterEvent::Exited => {
                         e.running = false;
+                        // #933: its process ended, and with it this launch's Git file; a restart writes a fresh one.
+                        e.git_config = None;
                         e.options = SessionOptions::default();
                         let dropped = e.rich.forget();
                         if !dropped.is_empty() {
@@ -2258,6 +2276,7 @@ impl Supervisor {
             .and_then(|e| e.folder.as_deref())
             .map(|p| held_again(None, p))
             .transpose();
+        // #933: the new launch's Git file is removed with the attempt when it fails (`launched` is dropped).
         let Some(profile) = self.adapters.get(id).and_then(|e| {
             Some(self.adapter_sandbox(&e.agent.kind, &e.worktree, e.spec.command.first()?))
         }) else {
@@ -2277,8 +2296,10 @@ impl Supervisor {
         e.restarts += 1;
         // The process that ended is let go before the next starts: a held one is collected from the holder, which frees its id.
         e.adapter = None;
+        e.git_config = None;
         // A crash keeps the agent in the mesh: the restarted session gets the same endpoint.
         let launched = held.and_then(|held| {
+            let (profile, file) = profile?;
             launch_adapter(
                 id,
                 holder.as_ref(),
@@ -2286,15 +2307,17 @@ impl Supervisor {
                 &e.checkout_root,
                 &e.worktree,
                 e.agent.session.as_deref(),
-                profile?,
+                profile,
                 e.mesh.as_ref(),
                 creds,
                 held.as_ref(),
             )
+            .map(|(a, s, c)| (a, s, c, file))
         });
         match launched {
-            Ok((adapter, session_id, capabilities)) => {
+            Ok((adapter, session_id, capabilities, git_config)) => {
                 e.adapter = Some(adapter);
+                e.git_config = git_config;
                 e.session_id = session_id;
                 e.capabilities = capabilities;
                 // What the old process reported does not carry over: a mode that skips permissions is checked against what the new
@@ -2880,10 +2903,16 @@ impl Supervisor {
             // ADR-0083: what points at a socket the user's session offers is not inherited by a confined agent.
             cfg.env_remove.extend(self.sandbox.scrubbed_env());
         }
-        // Check the final ordinary grants before writing the file for this launch (ADR-0098).
+        // Check the final ordinary grants before writing the file for this launch (ADR-0098). #933: the file lives exactly as long as
+        // the launch: a start that fails below drops (removes) it, a started one hands it to the terminal's handle.
+        let mut launch_file = None;
         if let Some(profile) = &mut cfg.sandbox {
             self.refuse_reachable(kind, profile)?;
             profile.git_config = self.sandbox.git_config(profile);
+            launch_file = profile
+                .git_config
+                .clone()
+                .map(crate::gitconfig::LaunchFile::new);
         }
         if let Some(k) = self.kinds.get(kind) {
             cfg.env = k
@@ -2939,6 +2968,7 @@ impl Supervisor {
             }
         })?;
         TerminalHandle::start(pty, self.cfg.terminal)
+            .map(|t| t.with_launch_file(launch_file))
             .map_err(|e| SupervisorError::Spawn(e.to_string()))
     }
 
@@ -3273,6 +3303,8 @@ impl Supervisor {
                 }
                 e.running = false;
             }
+            // #933: once its process is ended, so is this launch's Git file.
+            e.git_config = None;
             if e.agent.observe(AgentState::Done, StateSource::Reported) {
                 events.push(SupervisorEvent::StateChanged {
                     agent: id.clone(),
@@ -3356,6 +3388,7 @@ impl Supervisor {
                     mesh: None,
                     // ADR-0060: a resumed agent gets none of its launch options back (a resumed agent asks before acting again).
                     launch: LaunchChoice::default(),
+                    git_config: None,
                 },
             );
             return Ok(());
@@ -3483,9 +3516,10 @@ impl Supervisor {
                 .as_deref()
                 .map(|p| held_again(checked, p))
                 .transpose()?;
-            let profile = match entry.spec.command.first() {
+            // #933: the launch's Git file goes with a resume that fails (dropped below), and stays with the adapter it starts.
+            let (profile, git_config) = match entry.spec.command.first() {
                 Some(p) => self.adapter_sandbox(&entry.agent.kind, &entry.worktree, p)?,
-                None => None,
+                None => (None, None),
             };
             let native = entry.agent.session.is_some();
             // A stopped (or given-up) agent left the mesh; resuming joins again with a fresh endpoint, given back if the start fails.
@@ -3522,6 +3556,7 @@ impl Supervisor {
                 .get_mut(id)
                 .ok_or_else(|| SupervisorError::NotFound(id.clone()))?;
             entry.adapter = Some(adapter);
+            entry.git_config = git_config;
             entry.session_id = session_id;
             entry.capabilities = capabilities;
             entry.mesh = mesh;
@@ -3659,6 +3694,24 @@ impl Supervisor {
         self.agents.get(id)?.terminal.as_ref()
     }
 
+    /// #933: removes the generated Git files (ADR-0098) that no agent of this node uses now: what an earlier run left when it was
+    /// killed or the machine stopped (nothing ended those launches). The node calls it at its start, after it took up what the holder
+    /// kept; those agents are never confined (ADR-0079), so none of them has a file here, and a file any agent of this node holds is
+    /// kept whenever this runs. Returns how many were removed.
+    pub fn sweep_launch_files(&self) -> usize {
+        let Some(data_dir) = self.sandbox.data_dir.as_deref() else {
+            return 0;
+        };
+        let keep: Vec<&std::ffi::OsStr> = self
+            .agents
+            .values()
+            .filter_map(|e| e.terminal.as_ref()?.launch_file())
+            .chain(self.adapters.values().filter_map(|e| e.git_config.as_ref()))
+            .filter_map(|f| f.path().file_name())
+            .collect();
+        crate::gitconfig::sweep(data_dir, &keep)
+    }
+
     /// The node is stopping: every agent's process ends now (terminal process groups killed, adapters shut down; an agent in the holder
     /// is let go and runs on, ADR-0079), without an end
     /// recorded anywhere, so the session ledger finds them interrupted at the next start (ADR-0060). Nothing is restarted.
@@ -3684,6 +3737,8 @@ impl Supervisor {
                     adapter.shutdown(Duration::from_secs(1));
                 }
             }
+            // #933: an ended adapter's Git file goes with it. One the holder keeps running has none: it is never confined.
+            e.git_config = None;
         }
     }
 

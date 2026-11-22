@@ -365,6 +365,9 @@ pub struct TerminalHandle {
     thread: Option<JoinHandle<()>>,
     /// ADR-0079: the process belongs to the node's terminal holder (it outlives the node).
     held: bool,
+    /// #933: the generated Git configuration of this launch (ADR-0098), removed once the process is ended (fields drop after
+    /// [`Drop::drop`] killed it). Only a confined launch has one, and a confined agent is never the holder's.
+    launch_file: Option<crate::gitconfig::LaunchFile>,
 }
 
 impl TerminalHandle {
@@ -406,7 +409,15 @@ impl TerminalHandle {
             pid,
             thread: Some(thread),
             held: false,
+            launch_file: None,
         })
+    }
+
+    /// #933: keeps this launch's generated Git file for as long as the handle, so it is removed when the process ends or is stopped.
+    #[must_use]
+    pub(crate) fn with_launch_file(mut self, file: Option<crate::gitconfig::LaunchFile>) -> Self {
+        self.launch_file = file;
+        self
     }
 
     /// Marks this terminal's process as the holder's (see [`Self::is_held`]).
@@ -414,6 +425,11 @@ impl TerminalHandle {
     pub fn into_held(mut self) -> Self {
         self.held = true;
         self
+    }
+
+    /// #933: this launch's generated Git file, while the handle keeps it.
+    pub(crate) fn launch_file(&self) -> Option<&crate::gitconfig::LaunchFile> {
+        self.launch_file.as_ref()
     }
 
     /// ADR-0079: the process belongs to the terminal holder and outlives the node.
@@ -923,6 +939,7 @@ mod tests {
             pid: 0,
             thread: None,
             held: false,
+            launch_file: None,
         };
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::scope(|scope| {

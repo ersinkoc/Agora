@@ -189,6 +189,66 @@ pub fn write_for_result(data_dir: &Path) -> std::io::Result<PathBuf> {
     write_to(&path, &read_allowed())
 }
 
+/// One launch's generated file (#933): it is removed when this is dropped. The node keeps it beside what the launch started (the
+/// terminal's handle, the adapter's entry), so the file goes when that process ends, is stopped or is replaced by a restart (which
+/// writes a fresh file of its own), and with a start that fails after the file was written.
+#[derive(Debug)]
+pub struct LaunchFile(PathBuf);
+
+impl LaunchFile {
+    /// Takes ownership of the file at `path`, which [`write_for`] made for one launch.
+    pub fn new(path: PathBuf) -> Self {
+        Self(path)
+    }
+
+    /// Where the file is.
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for LaunchFile {
+    fn drop(&mut self) {
+        // Already gone (removed by hand, or the folder with it) is fine: there is nothing left to remove.
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// Whether `name` is one the node gives a launch's file ([`write_for`]: `agent-` and 32 hex digits), or that file's staging copy
+/// (`.new`). Nothing else in the folder is the node's to remove.
+fn is_launch_name(name: &str) -> bool {
+    let base = name.strip_suffix(".new").unwrap_or(name);
+    base.strip_prefix("agent-")
+        .is_some_and(|hex| hex.len() == 32 && hex.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+/// #933: removes from the node's generated Git folder under `data_dir` every launch file (and staging copy) whose name is not in
+/// `keep`, the files of the agents this node runs. A node calls it at its start, for the files of launches an earlier run never ended
+/// (it was killed, or the machine stopped). Only this folder: the legacy `~/.agora/git-config` copies are not touched (ADR-0098,
+/// decision 4). A folder that is a link is left alone, and so is anything that is not a file. Returns how many were removed.
+pub fn sweep(data_dir: &Path, keep: &[&std::ffi::OsStr]) -> usize {
+    let dir = directory(data_dir);
+    if !std::fs::symlink_metadata(&dir).is_ok_and(|m| m.is_dir()) {
+        return 0;
+    }
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.filter_map(Result::ok) {
+        let name = entry.file_name();
+        if keep.contains(&name.as_os_str()) || !name.to_str().is_some_and(is_launch_name) {
+            continue;
+        }
+        if entry.file_type().is_ok_and(|t| !t.is_dir())
+            && std::fs::remove_file(entry.path()).is_ok()
+        {
+            removed += 1;
+        }
+    }
+    removed
+}
+
 /// Writes the file at `path` (its folder made ready by the caller).
 fn write_to(path: &Path, values: &[(String, String)]) -> std::io::Result<PathBuf> {
     let path = path.to_path_buf();
@@ -326,6 +386,40 @@ mod tests {
             render(&pairs(&[("user.name", &"x".repeat(MAX_VALUE + 1))])),
             ""
         );
+    }
+
+    #[test]
+    fn only_the_nodes_own_launch_names_are_swept() {
+        let hex = "0123456789abcdef0123456789ABCDEF";
+        assert!(is_launch_name(&format!("agent-{hex}")));
+        assert!(is_launch_name(&format!("agent-{hex}.new")));
+        for name in [
+            "agent-",
+            "agent-123",
+            "neighbor",
+            "agent-0123456789abcdef0123456789abcdeg",
+            "agent-0123456789abcdef0123456789abcdef0",
+            "agent-0123456789abcdef0123456789abcdef.old",
+            "xagent-0123456789abcdef0123456789abcdef",
+        ] {
+            assert!(!is_launch_name(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_launch_file_goes_with_its_owner() {
+        let dir = std::env::temp_dir().join(format!("agora-gc-launch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("agent-x");
+        std::fs::write(&p, "x").unwrap();
+        let file = LaunchFile::new(p.clone());
+        assert_eq!(file.path(), p);
+        drop(file);
+        assert!(!p.exists());
+        // One removed already is not an error.
+        drop(LaunchFile::new(p));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

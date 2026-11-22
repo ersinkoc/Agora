@@ -45,3 +45,12 @@ protected directories. A directory-wide exception would make sibling files visib
   protected sibling present. Check that the file is readable, the sibling is inaccessible and a commit succeeds.
 - On Windows with confinement enabled, verify that the ACL grants read access to the generated file and keeps the directory
   and sibling files protected. Exercise the launcher for terminal and structured agents on platforms that support them.
+
+## Implementation notes
+
+- 2026-11-22 (#933): each launch's file lasts as long as the launch. The node keeps it with what the launch started (a terminal
+  agent's handle, an adapter agent's entry) and removes it when that process ends, is stopped or is replaced by a restart,
+  which writes a fresh file of its own. A start that fails after the file was written removes it. At its start, after taking
+  up what the terminal holder kept, the node removes the `agent-<32 hex>` files (and their `.new` staging copies) in its own
+  `git-config/` folder that no agent of it uses. An agent the holder keeps is never confined (ADR-0079), so it has no file
+  there. Other names in that folder and the legacy copies of decision 4 are not touched.
