@@ -5,7 +5,7 @@
 //! when the hub is unreachable and the caller buffers the events (AGENTS.md, nodes are autonomous). Time is
 //! passed in, so restart and detection timing is testable without sleeping.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -875,6 +875,9 @@ pub struct Supervisor {
     skip_permissions: SkipPermissions,
     /// ADR-0079: the terminal holder agents are started through, when this node has one (Unix); `None` runs every agent in the node.
     holder: Option<std::sync::Arc<HolderHub>>,
+    /// Agents taken up from the holder whose launch options came from the ledger without their arguments (`set_kept_launch`): their
+    /// next process (a restart after a crash) runs without them, so it is not shown with them.
+    kept_launch: BTreeSet<AgentId>,
 }
 
 impl Supervisor {
@@ -894,6 +897,7 @@ impl Supervisor {
             parents: BTreeMap::new(),
             skip_permissions: SkipPermissions::default(),
             holder: None,
+            kept_launch: BTreeSet::new(),
         }
     }
 
@@ -1089,6 +1093,42 @@ impl Supervisor {
         } else if let Some(e) = self.adapters.get_mut(id) {
             e.launch = launch;
         }
+        if !ids.is_empty() {
+            self.kept_launch.insert(id.clone());
+        }
+    }
+
+    /// #932: what an adapter agent reported of its session, as this node holds it now (bounded and judged, also when it was put back
+    /// from the ledger at a take-up), as the events a report gives. Nothing for an agent that is not hosted by an adapter, and nothing
+    /// for a part it never reported.
+    pub fn session_events(&self, id: &AgentId) -> Vec<SupervisorEvent> {
+        let Some(e) = self.adapters.get(id) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        let event = |event| SupervisorEvent::Adapter {
+            agent: id.clone(),
+            event,
+        };
+        if e.options != SessionOptions::default() {
+            out.push(event(AdapterEvent::Options {
+                session_id: e.session_id.clone(),
+                options: e.options.clone(),
+            }));
+        }
+        if !e.rich.config.is_empty() {
+            out.push(event(AdapterEvent::Config {
+                session_id: e.session_id.clone(),
+                options: e.rich.config.clone(),
+            }));
+        }
+        if !e.rich.commands.is_empty() {
+            out.push(event(AdapterEvent::Commands {
+                session_id: e.session_id.clone(),
+                commands: e.rich.commands.clone(),
+            }));
+        }
+        out
     }
 
     /// ADR-0060: agent ids start at `next` (the session ledger's), so an id is never given twice across the node's restarts.
@@ -2209,6 +2249,7 @@ impl Supervisor {
             .map(|e| self.credential_vars(&e.agent.kind))
             .unwrap_or_default();
         let holder = self.holder.clone();
+        let kept_launch = self.kept_launch.contains(id);
         let Some(e) = self.adapters.get_mut(id) else {
             return;
         };
@@ -2243,8 +2284,9 @@ impl Supervisor {
                 e.running = true;
                 e.agent.process_restarted();
                 // As for a terminal agent (`restart`): one taken up from the holder restarts without its options' arguments.
-                if e.launch.args.is_empty() {
+                if kept_launch {
                     e.launch = LaunchChoice::default();
+                    self.kept_launch.remove(id);
                 }
                 events.push(SupervisorEvent::Started { agent: id.clone() });
                 events.extend(session_report(&e.agent));
@@ -3068,6 +3110,7 @@ impl Supervisor {
         );
         // A restart of a process that died is never a resume by the node after its own stop: no "carry on" message here.
         let fresh_next = entry.fresh_next;
+        let kept_launch = self.kept_launch.contains(id);
         let (argv, native, fresh, _) =
             self.argv_for_resume(&kind, session.as_deref(), false, fresh_next);
         // F1020: a selected folder is held again, so a restart never follows a link swapped in for it since the agent started.
@@ -3091,8 +3134,9 @@ impl Supervisor {
                 entry.agent.process_restarted();
                 // An agent taken up from the holder knows its launch options but not their arguments (`set_kept_launch`): the
                 // restarted process runs without them, so it is not shown with them any more.
-                if entry.launch.args.is_empty() && entry.extras.options.is_empty() {
+                if kept_launch {
                     entry.launch = LaunchChoice::default();
+                    self.kept_launch.remove(id);
                 }
                 // A new session when its own could not be continued (ADR-0060): that one is its session now.
                 if !native {

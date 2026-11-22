@@ -249,8 +249,12 @@ wants to write that cannot fit one frame fails that write on the node's side, be
   `initialize` and no `session/start`: the adapter still has its session**), makes the mesh endpoint again at the same path, and clears the interruption.
   It is said up again to the hub after `NodeOnline` as a terminal agent is (above), with its launch options, without `TerminalOpened`, and then with what
   it last reported of its session: `AgentSessionOptions`, `AgentSessionConfig`, `AgentCommands` (#932). The adapter does not report them again by itself,
-  so the node keeps the last ones it recorded for each adapter agent in `<data>/sessions/kept-<id>.pb` (beside the ledger, owner-only; removed when the
-  agent ends, restarts, or is not taken up), puts them back on the agent (bounded and judged again as a report is), and re-states them. A mode or config
+  so the node keeps the last ones it recorded for each adapter agent in `<data>/sessions/kept-<id>.pb` (beside the ledger, owner-only; a report larger
+  than the hub keeps, 64 KiB encoded, is not kept). The file goes when the agent ends or is interrupted (also when only the file has it), when an agent
+  that runs restarts after a crash (a resume, which follows an end or an interruption, keeps what its new process reported before its start was recorded),
+  and at every start for each agent not taken up, with any unfinished write. On take-up the node puts them back on the agent (bounded and judged again as
+  a report is) and re-states them from the supervisor's copy (`Supervisor::session_events`), so the window's badge matches `skips_permissions_now`; a
+  resync announcement re-states them after `AgentStarted` too. A mode or config
   option in use that makes the agent act without asking (switched to after the start, by the person or by the agent) is so shown and checked
   (`skips_permissions_now`) until the agent reports new ones. Not built: its usage counters in the hub's view start again from 0 (#930); its earlier
   conversation is not shown (the chat history is in memory, ADR-0089; #931).

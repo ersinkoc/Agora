@@ -502,6 +502,22 @@ fn a_kept_structured_agent_in_a_mode_that_skips_permissions_is_still_shown_skipp
     node.mesh.unregister(&agent);
     drop(node);
     assert!(alive(pid), "the adapter ended with its node");
+    // What was kept is judged again when it is put back, as a report is: written here without the adapter's own skip flags (as an
+    // older node, or one without a rule added since, would have kept it), the mode's words still make it one that skips.
+    let file = rig.root.join(format!("data/sessions/kept-{id}.pb"));
+    let mut bytes: &[u8] = &std::fs::read(&file).expect("the kept session file");
+    let mut rewritten = Vec::new();
+    while !bytes.is_empty() {
+        use prost::Message;
+        let mut ev = v1::Event::decode_length_delimited(&mut bytes).expect("a kept report");
+        if let Some(v1::event::Body::AgentSessionOptions(o)) = &mut ev.body {
+            for m in &mut o.modes {
+                m.skips_permissions = false;
+            }
+        }
+        rewritten.extend(ev.encode_length_delimited_to_vec());
+    }
+    std::fs::write(&file, rewritten).expect("rewrite");
 
     let node = rig.node();
     assert!(held(&node, &id), "the agent was not taken up again");
@@ -536,6 +552,39 @@ fn a_kept_structured_agent_in_a_mode_that_skips_permissions_is_still_shown_skipp
         shown.session.config.is_some(),
         "the config options were not shown again"
     );
+    // A resync announcement (the hub lost this node's start) says the agent up again with `AgentStarted`, which leaves the hub with no
+    // session options: what the agent reported follows it there too.
+    node.events.announce();
+    let mut view = agora_hub::projection::View::default();
+    for ev in node.events.events_after(0) {
+        view.apply(&ev);
+    }
+    let shown = &view.agents[&agora_hub::projection::qualified("hold-node", &id)];
+    assert!(shown.running);
+    let options = shown
+        .session
+        .options
+        .as_ref()
+        .expect("a resync lost the kept agent's session options");
+    assert_eq!(options.current_mode, "bypassPermissions");
+    // Codex review of #928: the same for an announcement that leaves the node's start in place (`Announce::Present`).
+    let views = node.supervisor.lock().unwrap().list();
+    node.events
+        .announce_present(&views, &[], agora_node::daemon::Announce::Present);
+    let mut after = agora_hub::projection::View::default();
+    for ev in node.events.events_after(0) {
+        after.apply(&ev);
+    }
+    let after = &after.agents[&agora_hub::projection::qualified("hold-node", &id)];
+    assert_eq!(
+        after
+            .session
+            .options
+            .as_ref()
+            .map(|options| options.current_mode.as_str()),
+        Some("bypassPermissions"),
+        "a hub resync lost the restored mode"
+    );
     // It still answers, and a later report replaces what was put back.
     prompt(&node, &id, "mode:default");
     wait_for("the agent to ask again", || {
@@ -545,4 +594,18 @@ fn a_kept_structured_agent_in_a_mode_that_skips_permissions_is_still_shown_skipp
             .unwrap()
             .skips_permissions_now(&agent)
     });
+}
+
+/// Codex review of #928: a node with no holder to attach to takes nothing up, so every kept session left on disk is an earlier
+/// process's and goes, rather than waiting for an agent that reuses the id.
+#[test]
+fn a_node_without_a_holder_keeps_no_earlier_session() {
+    let _serial = serial();
+    let rig = Rig::new("nokeep");
+    let dir = rig.root.join("data/sessions");
+    std::fs::create_dir_all(&dir).expect("sessions");
+    let file = dir.join("kept-agent-7.pb");
+    std::fs::write(&file, b"old").expect("kept file");
+    let _node = rig.node_without_holder();
+    assert!(!file.exists(), "an earlier process's session was kept");
 }
