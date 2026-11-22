@@ -146,7 +146,12 @@ Every `chat/append` line the bridge makes from the agent's content stays within 
 complete serialized line (envelope and JSON escaping included; the caps in the table count decoded text, and a rich plan carries
 its text twice). A line that would be longer has every string of its item longer than 256 bytes (head and tail kept) and every
 list cut to half, repeatedly, until it fits; the session id is never cut. The item arrives shortened instead of being dropped
-whole by the node.
+whole by the node. Session ids are at most 1024 bytes: a `session/new` (`session/load`) answer with a longer id is refused like an
+agent error (`adapter.agent_refused`, `stage` `session`; the notice's `rpc_code` is `0` and its `detail` `session_id_too_long`), and
+a `session/start` whose `resumeSessionId` is longer is answered with JSON-RPC `-32602` and `data` `protocol.invalid_message`
+(`field` `resumeSessionId`) without asking the agent; an id is never cut, as that would name another session. With that, a cut
+item always fits; should one still not, the item is dropped and a `log` line says so (`adapter.line_too_long`, below) rather than
+an overlong line being sent.
 
 | ACP (agent → client) | Adapter protocol (bridge → node) |
 | --- | --- |
@@ -220,7 +225,8 @@ The bridge never writes text for people. When something went wrong it gives a st
 | `adapter.turn_stopped` | `stop_reason` (`refusal`, `max_tokens`, `max_turn_requests`, ...; `other` for anything that is not a lowercase word) | The agent stopped the turn itself | same |
 | `adapter.turn_failed` | `rpc_code`, `stderr_tail` (as for `turn_empty`) | The agent answered `session/prompt` with a JSON-RPC error | same |
 | `adapter.agent_exited` | `stage` (`initialize`, `session`, `turn`, `idle`, `start`, `option`), `exit_code` (when it exited with one), `stderr_tail` | The agent's output ended. Every request the node still waits for (`initialize`, `session/start`, `session/set_option`) is answered with a JSON-RPC error whose `data` is `{code, params}` with the stage of that request. A `log` line (`LOG_LEVEL_ERROR`) and a `chat/append` notice carry the agent's stage, including `session` after successful initialization and before the first session opens. If the agent dies before opening a session, the bridge waits up to 2 s for a late request and answers it with the exit reason, using `initialize` or `session` for the corresponding request. Then the bridge exits | error `data` (`HostError::reason` on the node side), notice and `log` |
-| `adapter.agent_refused` | `stage` (`initialize`, `session`); the notice also `rpc_code` and `detail` (the agent's error message, scrubbed and cut like a stderr tail) | The agent answered its own `initialize` or `session/new` (`session/load`) with an error (opencode 2.x: -32603 `ServiceUnavailableError` without `opencode service`) | error `data` of the node's request (`stage` only) and a `chat/append` notice |
+| `adapter.agent_refused` | `stage` (`initialize`, `session`); the notice also `rpc_code` and `detail` (the agent's error message, scrubbed and cut like a stderr tail; `rpc_code` `0` and `detail` `session_id_too_long` when the agent's session id is over 1024 bytes) | The agent answered its own `initialize` or `session/new` (`session/load`) with an error (opencode 2.x: -32603 `ServiceUnavailableError` without `opencode service`) | error `data` of the node's request (`stage` only) and a `chat/append` notice |
+| `adapter.line_too_long` | `method`, `bytes` | A `chat/append` item could not be cut to fit the 4 MiB line limit (not reached while session ids are within their 1024-byte limit) and was dropped | a `log` line (`WARN`) |
 | `adapter.option_refused` | `id` | The id was not one the agent offered, or the agent answered `session/set_mode` / `session/set_model` / `session/set_config_option` with an error | error `data` of `session/set_option` and `session/set_config` |
 | `adapter.restarting` | `attempt` | #902: the adapter ended on its own and the node starts it again (`attempt` of the restart budget); the node's own notice, an adapter does not send it | a `CHAT_KIND_NOTICE` entry |
 | `adapter.gave_up` | `restarts`, `exit_code` (only when known) | #902: the adapter ended on its own once more after its restart budget was spent (or could not be started again), so the node gave up on it; `restarts` is how often it was started again, `exit_code` the value of the `AgentExited` it recorded, left out when the node could not read how the last process ended (that `AgentExited` then carries 1). The node's own notice | a `CHAT_KIND_NOTICE` entry |
