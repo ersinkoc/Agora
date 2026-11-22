@@ -531,6 +531,15 @@ const CONTROL_WORDS: usize = 8;
 
 /// Waits until `sock` is writable (or in error or hung up), at most `timeout`. `Ok(false)` on the time running out.
 pub(crate) fn wait_writable(sock: RawFd, timeout: std::time::Duration) -> io::Result<bool> {
+    wait_writable_polling(sock, timeout, libc::c_int::MAX)
+}
+
+/// [`wait_writable`], with each `poll(2)` waiting at most `max_poll_ms` (its argument is an `int` of milliseconds).
+fn wait_writable_polling(
+    sock: RawFd,
+    timeout: std::time::Duration,
+    max_poll_ms: libc::c_int,
+) -> io::Result<bool> {
     // A timeout past what an `Instant` can hold (`Duration::MAX`) has no end: it waits until writable.
     let end = std::time::Instant::now().checked_add(timeout);
     loop {
@@ -538,7 +547,7 @@ pub(crate) fn wait_writable(sock: RawFd, timeout: std::time::Duration) -> io::Re
             end.saturating_duration_since(std::time::Instant::now())
         });
         // Rounded up to a whole millisecond, so the wait never ends before the time given.
-        let ms = left.as_nanos().div_ceil(1_000_000).min(i32::MAX as u128) as libc::c_int;
+        let ms = left.as_nanos().div_ceil(1_000_000).min(max_poll_ms as u128) as libc::c_int;
         let mut p = libc::pollfd {
             fd: sock,
             events: libc::POLLOUT,
@@ -550,11 +559,11 @@ pub(crate) fn wait_writable(sock: RawFd, timeout: std::time::Duration) -> io::Re
             return Ok(true);
         }
         if r == 0 {
-            if end.is_none() {
-                // The wait is capped at `i32::MAX` ms per poll; one with no end polls again.
-                continue;
+            // One poll waits at most `max_poll_ms`: the time has run out only at the wait's own end (never, with no end).
+            if end.is_some_and(|end| std::time::Instant::now() >= end) {
+                return Ok(false);
             }
-            return Ok(false);
+            continue;
         }
         let e = io::Error::last_os_error();
         if e.kind() != io::ErrorKind::Interrupted {
@@ -898,6 +907,24 @@ impl crate::PtyControlOps for HeldControlOps {
 mod tests {
     use super::*;
     use crate::held::HELD_BUFFER;
+
+    /// A bounded wait longer than one poll may last keeps polling until its own deadline (F78 review): with `poll(2)` capped
+    /// at 20 ms, a 200 ms wait on a full socket still takes the whole 200 ms.
+    #[test]
+    fn a_wait_longer_than_one_poll_lasts_until_its_deadline() {
+        use std::io::Write;
+        use std::os::fd::AsRawFd;
+        use std::os::unix::net::UnixStream;
+        let (mut a, _b) = UnixStream::pair().unwrap();
+        a.set_nonblocking(true).unwrap();
+        let chunk = vec![0u8; 64 << 10];
+        while a.write(&chunk).is_ok() {}
+        let want = std::time::Duration::from_millis(200);
+        let began = std::time::Instant::now();
+        assert!(!wait_writable_polling(a.as_raw_fd(), want, 20).unwrap());
+        let took = began.elapsed();
+        assert!(took >= want, "ended early: {took:?}");
+    }
 
     #[test]
     fn the_buffer_drops_the_oldest_first() {
