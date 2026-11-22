@@ -38,8 +38,9 @@ A structured agent can offer an answer it remembers (ACP `allow_always`); the wi
 - **Terminal client:** "always" is given only in the box that shows the whole request, the agent's own words and the duration
   warning, with `A` there (`y` once, `n` denies). In a tab or chat, **Alt+A** opens that box for the tab's own request, only while it
   offers "always" (otherwise Alt+A is the agent's key); so do the commands (Alt+K) and every other way in. Nothing is signed until a key
-  in the box. Never in the list, where `a` is Ask:
-  Enter opens the agent's tab, or the commands (Alt+K) name it. The hints say Alt+A or `A` only when offered; `A` on a request that does
+  in the box, and the hints and the command say so: "Alt+A allow always (asks first; …)", "Allow the request that waits, always… (asks
+  first; …)". Never in the list, where `a` is Ask:
+  Enter opens the agent's tab, or the commands (Alt+K) name it. The hints name Alt+A (in a tab or chat: it asks first) or `A` (in the box: it answers) only when offered; `A` on a request that does
   not offer it says "This request can only be allowed once." and sends nothing. Alt+Y, Alt+N and Alt+A in a tab answer exactly that tab's own request, whatever the tree has selected, and nothing if it is gone
   (never another request). Wherever the request is read before it is answered (the request box, the chat's waiting block, the inspector)
   it shows the agent's own name for its option ("In its own words: “…”", one plain line, at most 64 characters) and the warning that the

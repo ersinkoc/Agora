@@ -548,8 +548,8 @@ impl App {
                 self.common(Key::Char('m'), cx.area, out);
                 return;
             }
-            // ADR-0101: Alt+A allows the request of the agent in front always, only while that request offers it; otherwise it is the
-            // agent's key, as Alt+Y and Alt+N are without a request.
+            // ADR-0101: Alt+A asks to allow the request of the agent in front always (the request box confirms it with one key), only
+            // while that request offers it; otherwise it is the agent's key, as Alt+Y and Alt+N are without a request.
             Key::Alt('a' | 'A') if self.focus == Focus::Terminal => {
                 if let Some(r) = self.tab_request(cx.rows).filter(|r| r.request_always) {
                     out.push(Action::Answer {
