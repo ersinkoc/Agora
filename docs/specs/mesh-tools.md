@@ -45,12 +45,16 @@ and `summary`; `inbox` items carry `kind` (`message`, `ask`, `reply`, `handoff`)
 `lease_acquire` is accepted but only the audit trail of the call would hold it (not stored yet).
 
 **Message ids.** `message_id` is `m-<number>`, numbered by the node's broker, and `inbox(since)` returns the messages numbered above
-`since`. Ids never go back across a node restart: each run of the broker starts its numbers (for messages, tasks, leases and handoffs)
-at the larger of the clock in microseconds and a floor the previous run wrote beside the ledger (`<data>/sessions/mesh-ids`, set one
-billion above that run's first id before any id is handed out). So an agent kept across the restart (ADR-0079) still sees what arrives
-after the cursor it carried over, and a `since` from an earlier run, or one no message has, just returns what is numbered above it
-(#965: the numbers started over at `m-1`, so a kept agent's cursor hid every new message). Numbers are per node: the same number on
-two nodes names two messages.
+`since`. Ids never go back across a node restart: before it numbers anything, each run of the broker reserves a range on disk
+(`<data>/sessions/mesh-ids`, beside the ledger, holds the end of the last range) that starts at the largest of that end, the clock in
+microseconds and its own next id, and a run that nears the end of its range reserves the next. So an agent kept across the restart
+(ADR-0079) still sees what arrives after the cursor it carried over, and a `since` from an earlier run, or one no message has, just
+returns what is numbered above it (#965: the numbers started over at `m-1`, so a kept agent's cursor hid every new message). When the
+range cannot be reserved (the file cannot be written, or exists and cannot be read as a number), the node and its agents run on and
+the mesh tools answer, but no message is numbered: `send_message`, `ask` and `handoff` fail with `mesh.unavailable`, a message from
+another node is refused with it (its sender gets `delivery_failed` `mesh.unavailable`), and presence and `delivery_failed` notices are
+not made. The node tries again every half second. Task, lease and handoff ids share the counter. Numbers are per node: the same
+number on two nodes names two messages.
 
 Tool errors are results with `isError: true` whose text is JSON `{"error": {"code", "params"}}` using the codes in
 `error-codes.md` (new: `mesh.rate_limited`, `mesh.body_too_large`, `mesh.too_many_refs`, `mesh.too_many_asks`, `mesh.timeout`,

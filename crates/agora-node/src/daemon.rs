@@ -1623,8 +1623,9 @@ impl Node {
             agora_mesh::broker::Limits::default(),
         )?);
         mesh.set_remote_allowed(read_policy(&cfg.data_dir.join(POLICY_FILE)).mesh_remote);
-        // #965: ids never start over below what an agent kept across this restart still holds (its `inbox` cursor).
-        mesh.start_ids_at(crate::mesh_server::first_id_for_this_run(&cfg.data_dir));
+        // #965: ids never start over below what an agent kept across this restart still holds (its `inbox` cursor). A failed
+        // reservation does not stop the node: its agents run on, and messages are refused until the mesh's ticker reserves.
+        mesh.reserve_ids(&cfg.data_dir);
 
         let mut sup = Supervisor::new(SupervisorConfig {
             node: NodeId::new(cfg.node_id.clone()),
