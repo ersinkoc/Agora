@@ -74,7 +74,7 @@ in `"$RM/proj"`: `git init -b main && git commit --allow-empty -m init` (it uses
 user.email=rm@example.invalid` on that one command if you have none, never with `git config --global`). Check `agora --version`
 says 0.3.33.
 
-**S1. Hub and machine here.** With `AGORA_HOME` set, type `agora --ui none --resume ask` (`--resume ask` answers the question "Bring
+**S1. Hub and machine here.** With `AGORA_HOME` set, go into the run folder first (`cd "$RM"`; PowerShell `Set-Location $RM`): `agora` adds the folder it runs in as the node's project, so started from a checkout it serves that checkout (seen on Windows, 2026-11-21). Then type `agora --ui none --resume ask` (`--resume ask` answers the question "Bring
 agents back by themselves after a restart? [Y/n]" for this run, so it is not asked; the machine file records `resume = ask`). To the
 first question answer `1` ("1) Start Agora here: …"); to "Let other machines of yours connect? [y/N]" answer `n` (S3 uses loopback;
 `y` only for the entries that need a second computer). If "Start Agora when you log in? [Y/n]" is asked, type `n` and Enter: **never
@@ -90,11 +90,11 @@ manifests into `$AGORA_HOME/manifests/` (the node reads the folder again before 
 TOML literal strings, `'C:\...'`). Each manifest has `version = "1"`, `min_engine = 1` and a `display_name` equal to its `kind`, so
 the window shows the same name as these steps. None of these manifests is in the repository; each is written for this list from the
 manifest spec and the tests that use the fake agent. The Linux run of 2026-11-21 loaded and used each of them as written here
-(with the corrections below); the Windows forms stay **(unverified)** until a Windows run:
+(with the corrections below), and the Windows run of 2026-11-21 the Windows forms (PowerShell, `.exe`, TOML literal paths):
 
 - `shell.toml`: `kind = "shell"`, `display_name = "Shell"`, `version = "1"`, `min_engine = 1`, `[process]` `launch = ["sh"]`
   (`["powershell.exe", "-NoLogo"]` on Windows). Shell is also a built-in kind: this file replaces it (the node log says so at every
-  start), which is harmless. The PowerShell form (unverified).
+  start), which is harmless.
 - `rm-screen.toml` (a terminal agent read from its screen): `launch = [FAKE, "--script", "$RM/screen.toml"]`, with three `[[rules]]`,
   each with its own `id`, `state` and `priority` (a rule without `id` or `priority` makes the whole file unreadable, and `agora
   doctor` says only "The agent description rm-screen.toml could not be read."): `working` (priority 800) for `contains = "esc to
@@ -126,7 +126,8 @@ Then **open a second shell** and keep it for this machine only. A new terminal d
 the run folder again by hand, to the absolute path S0 printed, and check it before any `agora` command:
 `RM='/the/path/S0/printed'` (PowerShell: `$RM = 'C:\the\path\S0\printed'`); `[ -d "$RM/home/hub" ] || echo "WRONG RM: stop"`
 (PowerShell: `Test-Path (Join-Path $RM 'home\hub')` must say `True`); only then `export AGORA_HOME="$RM/two"` and `echo
-"$AGORA_HOME"`. In that shell: `agora hub code --hub-dir "$RM/home/hub"` gives CODE; `agora node enroll --hub wss://localhost:PORT
+"$AGORA_HOME"` (on Windows also `$env:COMPUTERNAME = 'RM-TWO'`: a node names its machine after the computer, so
+otherwise both nodes show as the same name in the window). In that shell: `agora hub code --hub-dir "$RM/home/hub"` gives CODE; `agora node enroll --hub wss://localhost:PORT
 --ca "$RM/home/hub/ca.pem" --code CODE --id rm-two`; then `agora node run --project "$RM/proj2"` in the foreground. Check it with
 `agora hub machines --hub-dir "$RM/home/hub"` (rm-two online) or `agora agent list` in this shell, not `agora status` (which reads a
 machine file only `agora` writes). Stop it with Ctrl-C in this shell before cleanup.
@@ -164,7 +165,7 @@ then calls such as `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"nam
   list` answers; after `agora down` no process of the run's agents is left (the job object ends them).
 - **Evidence so far:** LAN run 2026-11-11 (lan-test-findings): a Windows 11 node with real Claude Code and Codex; outages on Windows,
   2026-11-14 (lan-test-findings R1 to R5); [supervisor and login service 2026-11-14](2026-11-14-supervisor-and-login-service.md) on
-  WHITE; [dispatch through ConPTY 2026-11-21](2026-11-21-windows-dispatch-conpty.md) on WHITE.
+  WHITE; [dispatch through ConPTY 2026-11-21](2026-11-21-windows-dispatch-conpty.md) on WHITE. [Windows 2026-11-21](2026-11-21-real-machine-windows.md): pass.
 
 ### RM-03 Hub with the web window, many machines
 - **OS:** Linux, macOS, Windows (the hub on each; machines of any system).
@@ -172,17 +173,18 @@ then calls such as `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"nam
 - **See:** Your machines lists both as Online with their system; both agents are in Your agents, each "on <machine>"; typing in either
   terminal works.
 - **Evidence so far:** LAN run 2026-11-11 (lan-test-findings): a Linux hub with Linux, macOS and Windows nodes; the Windows web window
-  pass (L14 to L20).
+  pass (L14 to L20). [Windows 2026-11-21](2026-11-21-real-machine-windows.md): pass (#944: the system shown raw).
 
 ### RM-04 A machine is online while its link is (silence noticed in 25 s)
 - **OS:** Linux, macOS, Windows.
 - **Do:** S1, S3. Start a Shell on `rm-two`. Freeze `rm-two`'s node process for 60 s (`kill -STOP <pid>` on Linux and macOS; on
-  Windows, Resource Monitor > CPU > right-click the node's `agora.exe` > Suspend process (unverified)), then let it go (`kill -CONT`;
-  on Windows, Resume process (unverified)). Note the times.
-- **See:** `rm-two` shows Offline with "last seen" within about 25 to 35 s of the freeze; Online again within a few seconds of the
+  Windows, Resource Monitor > CPU > right-click the node's `agora.exe` > Suspend process (unverified; the Windows run used
+  `NtSuspendProcess`)), then let it go (`kill -CONT`; on Windows, Resume process (unverified)). Note the times.
+- **See:** `rm-two` shows Offline with "last seen" within about 15 to 25 s of the freeze (25 s after its last frame; the node pings
+  every 10 s); Online again within a few seconds of the
   resume, by itself; its Shell agent is still there and answers.
 - **Evidence so far:** lan-test-findings R1 and R5 measured earlier builds (the first version failed on `754a7b1`, the hub restart
-  catch-up after ADR-0070 on macOS and Windows); the ADR-0070 silence check itself: none recorded.
+  catch-up after ADR-0070 on macOS and Windows); the ADR-0070 silence check itself: none recorded. [Windows 2026-11-21](2026-11-21-real-machine-windows.md): pass (Offline at 18 s).
 
 ### RM-05 Old machines shown apart; forget one, clean up old ones
 - **OS:** Linux, macOS, Windows.
@@ -192,11 +194,12 @@ then calls such as `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"nam
   under it, and is not offered in the start window; Forget… asks "Forget <machine>?" with Keep and Forget; Clean up… asks "Clean up
   one old machine?"; then the machine is gone from the window and from `agora hub machines`; a machine that is Online again is not
   forgotten ("It is connected again, so it was not forgotten.").
-- **Evidence so far:** none recorded.
+- **Evidence so far:** [Windows 2026-11-21](2026-11-21-real-machine-windows.md): pass, without the 24-hour section.
 
 ### RM-06 `agora` on a fresh machine starts a hub and a node here
 - **OS:** Linux, macOS, Windows.
-- **Do:** S0 (an empty `AGORA_HOME` is a fresh machine to Agora). Type `agora --ui tui`: answer `1`, `n` to other machines, the
+- **Do:** S0 (an empty `AGORA_HOME` is a fresh machine to Agora). In `$RM` (S1: `agora` adds the folder it runs in as the node's
+  project), type `agora --ui tui`: answer `1`, `n` to other machines, the
   question "Bring agents back by themselves after a restart? [Y/n]" (asked here, since `--resume` is not given: answer `n` and note
   what it says), and `n` then Enter to "Start Agora when you log in? [Y/n]" (never Enter alone). Then
   `agora status`; wait more than a minute (a node that ends in its first minute is taken for a failed start and not started
@@ -208,7 +211,7 @@ then calls such as `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"nam
   Agora process of the run; `agora service status` says `The node starts when you log in ("agora-node").` and "running now (process
   N)"; `remove` says `"agora-node" is removed: the node no longer starts when you log in.` and leaves nothing.
 - **Evidence so far:** [supervisor and login service 2026-11-14](2026-11-14-supervisor-and-login-service.md): restart after a crash
-  and start at login on Windows 11, macOS and Linux with scratch homes (0.3.11 to 0.3.12 era); joining a hub by its address: none.
+  and start at login on Windows 11, macOS and Linux with scratch homes (0.3.11 to 0.3.12 era); joining a hub by its address: none. [Windows 2026-11-21](2026-11-21-real-machine-windows.md): pass (service part skipped: the machine has its own).
 
 ### RM-07 Pairing: find a hub on the network, approve on the hub
 - **OS:** Linux, macOS, Windows (either side). IPv4 broadcast only.
@@ -224,7 +227,7 @@ then calls such as `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"nam
   `Number N. Approve this machine on the hub: …` and the hub `New machine "…" (…) wants to join. Number N.`, the same number; after `y`
   the new machine says `Joined. This machine is "…"` and is Online in Your machines; a denied or timed-out request ends with "Nothing was
   saved"; the hub closes itself after one approval.
-- **Evidence so far:** [Linux 2026-11-21](2026-11-21-real-machine-linux.md): the terminal answer passed; the window's approval of a join by `127.0.0.1` failed (#901).
+- **Evidence so far:** [Linux 2026-11-21](2026-11-21-real-machine-linux.md): the terminal answer passed; the window's approval of a join by `127.0.0.1` failed (#901). [Windows 2026-11-21](2026-11-21-real-machine-windows.md): terminal answer passed; after a window approval the hub stays open (#942); the join hint on a loopback hub (#943).
 
 ### RM-08 Machines reachable only over SSH
 - **OS:** hub on Linux, macOS or Windows; target Linux or macOS (a systemd or launchd user service, or the `tmux` fallback).
@@ -246,10 +249,11 @@ not built: nothing to check.
   --release-key …` and `--version 0.3.33` (going back a version this way is unverified).
 - **See:** `--check` says "Agora 0.3.33 is the newest release." (or which is available); each update says "Updated to Agora …"
   only after the checksum and signature checked out ("Nothing was changed." otherwise);
-  `$RM/bin/agora --version` follows; the machine's own `agora` is untouched. On Windows, note any Microsoft Defender verdict.
+  `$RM/bin/agora --version` follows; the machine's own `agora` is untouched. On Windows, note any Microsoft Defender verdict. On
+  0.3.33 `--check` fails on Windows ("could not find the newest release": `curl -o /dev/null`, #939); `--version` works.
 - **Evidence so far:** [macOS 2026-11-21](2026-11-21-macos-update-0333.md): the LAN Mac updated to 0.3.33 with `--version` and
   `--release-key`, the checksum equal to the published one, Local Network asked again after the update; Windows: none recorded
-  (lan-test-findings L13 lists the self-replace among the suspects of a Defender verdict).
+  (lan-test-findings L13 lists the self-replace among the suspects of a Defender verdict). [Windows 2026-11-21](2026-11-21-real-machine-windows.md): `--version` passed, Defender silent; `--check` fails (#939).
 
 ## Agents
 
@@ -263,7 +267,7 @@ not built: nothing to check.
 - **Evidence so far:** [phase 4](../backlog/phase-4.md) P4-05 (Claude Code and Codex manifests done, WrongStack open); LAN run
   2026-11-11, L7 and L8 (trust prompts on Windows); [#279](0279-narrow-trust-prompts.md): Claude Code's trust prompt at both sizes on
   a real macOS node; [macOS 2026-11-14](2026-11-14-macos-confinement-and-terminal-client.md): a real Claude Code agent showing Needs
-  you.
+  you. [Windows 2026-11-21](2026-11-21-real-machine-windows.md): pass (fake agent).
 
 ### RM-12 L2: ACP agents (built-in: opencode-acp, wrongstack-acp, antigravity-acp)
 - **OS:** Linux, macOS, Windows.
@@ -271,7 +275,7 @@ not built: nothing to check.
   Antigravity (structured) and give each one prompt.
 - **See:** the agent opens as a chat (no terminal); `plan` shows a plan and a change; `ask` shows "asks permission" with Allow / Deny,
   and the agent says `allowed` after Allow; `hello` is echoed; the real agents answer, or a failed start shows the agent's own reason.
-- **Evidence so far:** none recorded.
+- **Evidence so far:** [Windows 2026-11-21](2026-11-21-real-machine-windows.md): pass (fake agent).
 
 ### RM-13 L3: adapter processes, installed from the signed registry
 - **OS:** Linux, macOS, Windows.
@@ -284,7 +288,7 @@ not built: nothing to check.
   shows "Ended with an error (exit code 3)", its summary (and the conversation in `agora tui`) says Agora stopped starting it again
   after 5 restarts, and its input box is off, also after a reload (on 0.3.33 it stays "Unknown", #902; with a holder the exit code may
   be missing until #951); an installed adapter shows its version in `list` and its kind in the start window.
-- **Evidence so far:** [Linux 2026-11-21](2026-11-21-real-machine-linux.md): fail (#902).
+- **Evidence so far:** [Linux 2026-11-21](2026-11-21-real-machine-linux.md): fail (#902). [Windows 2026-11-21](2026-11-21-real-machine-windows.md): fail (#902).
 
 ### RM-14 Agents run in the selected folder; worktrees optional
 - **OS:** Linux, macOS, Windows.
@@ -295,14 +299,14 @@ not built: nothing to check.
   `$AGORA_HOME/worktrees/<kind>-<id>` on an `agent/<kind>-<id>` branch; after Close both worktrees and branches stay: removing a
   never-changed one is ADR-0064 (RM-22, not built), the node removes a worktree only to roll back a failed start (macOS 2026-11-21: an unchanged and a changed worktree
   both stayed after `agora agent stop`).
-- **Evidence so far:** LAN run 2026-11-11, L20 and L22 (lan-test-findings): branch rollback and selected checkouts under confinement.
+- **Evidence so far:** LAN run 2026-11-11, L20 and L22 (lan-test-findings): branch rollback and selected checkouts under confinement. [Windows 2026-11-21](2026-11-21-real-machine-windows.md): pass.
 
 ### RM-15 Launch options, including "do not ask" modes
 - **OS:** Linux, macOS, Windows.
 - **Do:** S2. Start an agent > `rm-probe` > How it acts > Don't ask > Start; confirm "Start without asking". Read `$RM/probe-*.json`.
 - **See:** the confirmation appears before the start; the agent is marked "Runs without asking" ("Acts freely"); the probe's
   arguments end with `--fake-skip-permissions`; without the option they do not.
-- **Evidence so far:** none recorded.
+- **Evidence so far:** [Windows 2026-11-21](2026-11-21-real-machine-windows.md): pass.
 
 ### RM-16 Start with model, effort and mode
 - **OS:** Linux, macOS, Windows (the window; the terminal client's picker is not built).
@@ -311,7 +315,7 @@ not built: nothing to check.
 - **See:** the start window says "rm-probe will start with …" naming both; the probe's arguments hold `--fake-model m1 --fake-effort
   high`; the helper's card lists the model and says "Only this one can be allowed: a start with its own model or effort is always
   asked."
-- **Evidence so far:** none recorded.
+- **Evidence so far:** [Windows 2026-11-21](2026-11-21-real-machine-windows.md): pass.
 
 ### RM-17 Agent login and accounts on a node
 not built: nothing to check.
@@ -338,7 +342,7 @@ not built: nothing to check.
   publisher, target folder) and asks for the name; input that is not a terminal is refused; a wrong root key or a changed payload is
   refused before any download; nothing outside `$AGORA_HOME/agents` changes; the installed agent is "Installed" under Settings >
   Agents.
-- **Evidence so far:** none recorded.
+- **Evidence so far:** [Windows 2026-11-21](2026-11-21-real-machine-windows.md): pass for `doctor`.
 
 ### RM-19 A missing agent kind says why
 - **OS:** Linux, macOS, Windows.
@@ -348,7 +352,7 @@ not built: nothing to check.
   CLI and the terminal client say why in words, not a code: `agora agent start` prints `Error agent.program_missing: rm-missing did not
   start: this machine cannot find rm-no-such-program in its PATH. ...` (#903; also for an ACP kind such as `opencode-acp` without
   `opencode`).
-- **Evidence so far:** none recorded.
+- **Evidence so far:** [Windows 2026-11-21](2026-11-21-real-machine-windows.md): fail (#903; nine kinds in the terminal client, #910).
 
 ### RM-20 Resume after the node restarts (session ledger)
 - **OS:** Linux, macOS, Windows.
@@ -359,10 +363,11 @@ not built: nothing to check.
   start).
 - **See:** the agents are under "Stopped when the machine shut down" with Resume or Start again; Resume starts the same agent in
   the same folder (the conversation comes back only for an agent that can load a session: not the fake, which says
-  `loadSession: false`, and the window keeps no chat history of its own, RM-43); with `--resume auto` they come back by themselves (asked once); one still running from before says "Stop it".
+  `loadSession: false`, and the window keeps no chat history of its own, RM-43); with `--resume auto` they come back by themselves (asked once), except an agent the node brought back by itself less than 10
+  minutes ago (ADR-0062: a second restart within 10 minutes offers it with Resume instead); one still running from before says "Stop it".
 - **Evidence so far:** [macOS 2026-11-14](2026-11-14-macos-confinement-and-terminal-client.md): a confined agent resumed after `kill
   -9` with `resume = auto`; [supervisor 2026-11-14](2026-11-14-supervisor-and-login-service.md): on Windows a crashed node marks its
-  agents interrupted.
+  agents interrupted. [Windows 2026-11-21](2026-11-21-real-machine-windows.md): pass.
 
 ### RM-21 An agent starts helpers, with the user's signed approval
 - **OS:** Linux, macOS, Windows.
@@ -377,7 +382,7 @@ not built: nothing to check.
 - **See:** a card says "<agent> asks to start a rm-screen agent" (with "on <machine>" when it names one), the Folder and "Its first
   prompt"; Only this one starts the helper, shown "started by <agent>" under its parent; Deny starts nothing and the agent is told; after Revoke the next start asks
   again; nothing starts without a card.
-- **Evidence so far:** [Linux 2026-11-21](2026-11-21-real-machine-linux.md): pass.
+- **Evidence so far:** [Linux 2026-11-21](2026-11-21-real-machine-linux.md): pass. [Windows 2026-11-21](2026-11-21-real-machine-windows.md): pass (#945: helper rows unreadable at 125 %).
 
 ### RM-22 Workspace clean-up and disk limits
 not built: nothing to check.
@@ -407,7 +412,7 @@ not built: nothing to check.
 - **See:** before trust, the start window says "<machine> has to trust this browser once before it starts agents from it, …" with
   the command and Copy, and Settings > This device says the machine "does not trust this browser yet"; after trust, the start and
   the Allow work; Activity (`#/audit`, or "Activity" in Ctrl K) lists "Started an agent in a folder" and "Answered an approval".
-- **Evidence so far:** [Linux 2026-11-21](2026-11-21-real-machine-linux.md): pass.
+- **Evidence so far:** [Linux 2026-11-21](2026-11-21-real-machine-linux.md): pass. [Windows 2026-11-21](2026-11-21-real-machine-windows.md): pass.
 
 ### RM-25 Trusting your devices in one step
 - **OS:** Linux, macOS, Windows.
@@ -415,7 +420,7 @@ not built: nothing to check.
   approve. In A: "<device> asks to be trusted" > compare the fingerprint > Approve. Then in A: Your other devices > B > Remove.
 - **See:** B's fingerprint in A matches B's own; after Approve, B "trusts this browser" on the machines in scope and can start an agent
   with no command typed; after Remove, B cannot.
-- **Evidence so far:** none recorded.
+- **Evidence so far:** [Windows 2026-11-21](2026-11-21-real-machine-windows.md): pass.
 
 ### RM-26 Team mode: people, roles, audit
 - **OS:** Linux, macOS, Windows (the hub). Partly built (P7-09).
@@ -435,7 +440,7 @@ not built: nothing to check.
 - **See:** the message arrives once with `provenance.node`; the window lists it under "Recent messages", marked "between machines"; a message to an offline machine
   fails with a reason.
 - **Evidence so far:** LAN run 2026-11-11, L12 (lan-test-findings): six directions over the LAN hub; R3.
-  [Linux](2026-11-21-real-machine-linux.md) and Windows 2026-11-21: delivery and `node.offline` passed, but Messages listed each
+  [Linux](2026-11-21-real-machine-linux.md) and [Windows](2026-11-21-real-machine-windows.md) 2026-11-21: delivery and `node.offline` passed, but Messages listed each
   message twice, once with a doubly qualified sender (#905: both machines record the message; the window now folds the two copies).
   [macOS 2026-11-21](2026-11-21-real-machine-macos.md): a message to the stopped `rm-two` got no `delivery_failed` (#915, not
   reproduced in tests; a post the hub never answers now fails with `node.timeout` after 40 s on the sender's machine). Check again:
@@ -450,7 +455,7 @@ not built: nothing to check.
   `lease_acquire {"paths":["README.md"],"ttl_s":60,"reason":"rm"}` from both; stop `rm-two`'s node; create a task; start it again.
 - **See:** one claim wins, the other gets `task.not_open`; one lease holder, the other `lease.held` with its end time; the board stays
   on the hub while one machine is down and the returning machine sees every task.
-- **Evidence so far:** LAN run 2026-11-11, L12 and B1 to B7 (lan-test-findings).
+- **Evidence so far:** LAN run 2026-11-11, L12 and B1 to B7 (lan-test-findings). [Windows 2026-11-21](2026-11-21-real-machine-windows.md): pass.
 
 ## Updates, secrets and confinement (ADR-0075 to ADR-0084)
 
@@ -469,7 +474,7 @@ not built: nothing to check.
   `revoke rm`.
 - **See:** the metrics in Prometheus text; the same token on a protected path (`/api/audit`) answers 401 (an unknown path such as
   `/api/state` answers 200 with the web app, with or without a token, so it proves nothing); after `revoke` the metrics answer 401.
-- **Evidence so far:** none recorded.
+- **Evidence so far:** [Windows 2026-11-21](2026-11-21-real-machine-windows.md): pass.
 
 ### RM-32 The Windows binary is code-signed
 - **OS:** Windows.
@@ -477,7 +482,7 @@ not built: nothing to check.
   .\agora-x86_64-pc-windows-msvc.exe`.
   Signing a release needs the SignPath account (**human**).
 - **See:** today: `NotSigned` (expected until SignPath is set up). After setup: `Valid`, with a timestamp.
-- **Evidence so far:** none recorded (lan-test-findings L13: Defender flagged the unsigned 0.3.12).
+- **Evidence so far:** none recorded (lan-test-findings L13: Defender flagged the unsigned 0.3.12). [Windows 2026-11-21](2026-11-21-real-machine-windows.md): `NotSigned`, as expected today.
 
 ### RM-33 A confined agent gets a git configuration the node wrote
 - **OS:** Linux, macOS; Windows with confinement on.
@@ -507,7 +512,7 @@ not built: nothing to check.
   browser (`o`) and the diff (`r`).
 - **See:** in the window both are listed as "…, kept private" and opening one says "Kept private: it may hold a secret"; the terminal
   client marks them "private" with the same sentence; Changes says "Changed, content hidden"; their content is never shown.
-- **Evidence so far:** none recorded.
+- **Evidence so far:** [Windows 2026-11-21](2026-11-21-real-machine-windows.md): pass (#940: UTF-16 text shown as not text; #941: `r` on a repository with no commit).
 
 ### RM-36 A replayed revocation does not undo the owner's re-trust
 - **OS:** Linux, macOS, Windows.
@@ -515,7 +520,7 @@ not built: nothing to check.
   B's Settings > This device shows (`agora node trust --from-hub` does not offer a removed device again); restart the node.
   (The replay itself is checked by the node tests; by hand only the order is checked.)
 - **See:** after the restart B is still trusted on that machine (Settings > This device in B: "trusts this browser").
-- **Evidence so far:** [Linux 2026-11-21](2026-11-21-real-machine-linux.md): pass.
+- **Evidence so far:** [Linux 2026-11-21](2026-11-21-real-machine-linux.md): pass. [Windows 2026-11-21](2026-11-21-real-machine-windows.md): pass.
 
 ### RM-37 A confined agent cannot use the node's control socket
 - **OS:** Linux, macOS; Windows with confinement on.
@@ -545,18 +550,18 @@ not built: nothing to check.
   `rm-env` and, for comparison, the same program under another kind name.
 - **See:** `rm-env`'s screen shows `ENV RM_TOKEN=rm-fake-value`; the other kind does not get it; `agora node secret list` shows the name
   only; `agora doctor` names what each kind would get.
-- **Evidence so far:** none recorded.
+- **Evidence so far:** [Windows 2026-11-21](2026-11-21-real-machine-windows.md): pass.
 
 ## Since ADR-0085
 
 ### RM-40 Machine and hub certificates renew themselves
 - **OS:** Linux, macOS, Windows.
-- **Do:** `agora doctor` on the hub machine and on a joined machine. (A renewal happens under 30 days left; seeing one needs a machine
-  kept 60 days or more: note the dates and check again then.)
+- **Do:** `agora doctor` on the hub machine and on a joined machine. (A machine's certificate renews itself when a third of its life
+  is left, the hub's own when 30 days are left; seeing one needs a machine kept 60 days or more: note the dates and check again then.)
 - **See:** `doctor` shows the days left for this machine's certificate and the hub's; after the 60th day, a new end date with no step
   taken.
 - **Evidence so far:** [macOS 2026-11-21](2026-11-21-macos-update-0333.md): `agora doctor` on the LAN Mac, "valid for 79 more days.
-  It renews itself …"; a renewal itself: none recorded.
+  It renews itself …"; a renewal itself: none recorded. [Windows 2026-11-21](2026-11-21-real-machine-windows.md): pass for the days left.
 
 ### RM-41 Any machine can be the hub, with takeover
 not built: nothing to check.
@@ -578,7 +583,7 @@ not built: nothing to check.
   each answer its own message ("queued one", then "queued two", never "queued onequeued two"; #908); the mode switch opens a card at once (Setting: Approvals,
   Switch to: Turbo, "This covers this agent's session only.", Allow / Deny) and Mode shows "Waiting for your approval" ("Answer the
   request to switch. Nothing has changed yet.") until Allow; then "Acts freely".
-- **Evidence so far:** [Linux 2026-11-21](2026-11-21-real-machine-linux.md): fail (#908: after Stop turn the tool call keeps spinning and the answers are glued).
+- **Evidence so far:** [Linux 2026-11-21](2026-11-21-real-machine-linux.md): fail (#908: after Stop turn the tool call keeps spinning and the answers are glued). [Windows 2026-11-21](2026-11-21-real-machine-windows.md): fail (#908).
 
 ### RM-45 Plan limits of subscription agents
 - **OS:** Linux, macOS, Windows. Codex only.
@@ -636,7 +641,7 @@ not built: nothing to check.
   is too small and `g` gives nothing.
 - **Evidence so far:** [Windows 11 2026-11-21](2026-11-21-windows-dispatch-conpty.md): through ConPTY, given at about 5.5 s while
   working, no byte before idle at 20.0 s, one 768-byte bracketed paste 1.9 s after idle, Enter about 120 ms later; the refusal path
-  and real agents not tested.
+  and real agents not tested. [Windows 2026-11-21](2026-11-21-real-machine-windows.md): part A pass.
 
 ### RM-50 A ready helper agent
 not built: nothing to check.
@@ -647,10 +652,10 @@ not built: nothing to check.
 - **OS:** Linux, macOS, Windows (any browser).
 - **Do:** in `$RM/proj` change a file, add one, delete one, rename one. Open Changes: Show (All, Changed, Added, Deleted, Renamed), Layout
   > Side by side, Wrap lines, Next file; open Files: "Filter files by name", "Find in the file", "Copy the whole file"; in the File
-  manager, Download.
+  manager (Ctrl K > "Open the File manager beside"), Download.
 - **See:** each change is shown with its kind (Changed, Added, Deleted, Renamed, "was <name>" for the rename) and its lines; removed
   lines red with `-`, added green with `+`; Files marks lines "Added since the last commit" and "Changed since the last commit".
-- **Evidence so far:** none recorded.
+- **Evidence so far:** [Windows 2026-11-21](2026-11-21-real-machine-windows.md): pass.
 
 ### RM-52 A diff names every changed file even when cut
 not built (the window says how many files are not shown): nothing to check.
@@ -660,7 +665,7 @@ not built (the window says how many files are not shown): nothing to check.
 - **Do:** open the same Shell in two browser windows of different sizes; in it run `stty size` (Windows: `$Host.UI.RawUI.WindowSize`);
   close the smaller window; run it again.
 - **See:** the size is the smaller window's while both are open, and the remaining window's after the smaller one closes.
-- **Evidence so far:** none recorded.
+- **Evidence so far:** [Windows 2026-11-21](2026-11-21-real-machine-windows.md): pass.
 
 ### RM-54 Phone-sized window
 - **OS:** a real phone (iOS, Android) against a hub on any system.
@@ -679,7 +684,7 @@ not built (the window says how many files are not shown): nothing to check.
 - **See:** a wrong password is refused ("That did not work. The code may be wrong, expired or already used, or the password may be
   wrong."), the right one signs in; Lock signs this window out while
   the agents keep running; a changed password says "Saved. Every other window was signed out."
-- **Evidence so far:** [Linux 2026-11-21](2026-11-21-real-machine-linux.md): fail (#909: the local Settings cannot change a set password).
+- **Evidence so far:** [Linux 2026-11-21](2026-11-21-real-machine-linux.md): fail (#909: the local Settings cannot change a set password). [Windows 2026-11-21](2026-11-21-real-machine-windows.md): pass on one machine (the sign-in prompt needs a second; #946).
 
 ### RM-56 Tailscale (rung 3): `agora remote tailscale|status|off`, public-address rule, doctor checks
 - **OS:** Linux, macOS, Windows.
@@ -704,7 +709,7 @@ not built (the window says how many files are not shown): nothing to check.
   layout; the colour scheme switch: Dark, Light, Follow the system; Edit theme > Customize a colour.
 - **See:** each layout keeps its panes after a reload; themes switch at once with every text readable ("All text is readable (WCAG
   AA)."); a colour that would be hard to read says "Not applied: some text would be hard to read."
-- **Evidence so far:** none recorded.
+- **Evidence so far:** [Windows 2026-11-21](2026-11-21-real-machine-windows.md): pass (Chrome, 125 % and 150 %).
 
 ### RM-59 Terminal client (TUI)
 - **OS:** Linux, macOS, Windows (Windows Terminal).
@@ -714,7 +719,7 @@ not built (the window says how many files are not shown): nothing to check.
 - **See:** agents named by kind and colour; "<agent> is waiting for you" and "N waiting" while it asks; the tab redraws after a
   resize; readers say when they wait.
 - **Evidence so far:** [macOS 2026-11-14](2026-11-14-macos-confinement-and-terminal-client.md): list, tabs, readers, a real Claude Code
-  agent; LAN run L3 (`agora tui` by IP address, fixed).
+  agent; LAN run L3 (`agora tui` by IP address, fixed). [Windows 2026-11-21](2026-11-21-real-machine-windows.md): pass (a pseudoconsole).
 
 ### RM-60 Desktop app
 - **OS:** Linux, macOS, Windows. Partly built (P7-06); builds are unsigned CI artifacts (`desktop.yml`: the NSIS installer, the disk
@@ -724,4 +729,5 @@ not built (the window says how many files are not shown): nothing to check.
   the LAN; on macOS allow the local network when asked.
 - **See:** the app opens the window signed in; it refuses a hub it cannot verify and says so; on macOS it reaches a hub on the LAN.
 - **Evidence so far:** LAN run 2026-11-11, L1 and L2 (lan-test-findings): the macOS app on the LAN and the desktop shell's hub check,
-  both fixed.
+  both fixed. [Windows 2026-11-21](2026-11-21-real-machine-windows.md): the app (unpacked from the 0.3.33 installer, not installed:
+  a 0.3.3 install was on the machine): the hub check refuses another hub's CA, the page opens and stays remembered.

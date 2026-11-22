@@ -42,6 +42,8 @@ use windows_sys::Win32::System::Threading::{
 };
 use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 
+pub(crate) const NULL_DEVICE: &str = "NUL";
+
 /// Only the owner of the pipe and the system may open it; nobody else on the machine, and nobody over the network.
 const OWNER_ONLY: &str = "D:P(A;;GA;;;OW)(A;;GA;;;SY)";
 

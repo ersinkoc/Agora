@@ -12,6 +12,8 @@ use std::thread::JoinHandle;
 
 use crate::{ExitStatus, Pty, PtyConfig};
 
+pub(crate) const NULL_DEVICE: &str = "/dev/null";
+
 const CHUNK: usize = 16 * 1024;
 /// Bounded queue between the reader thread and the consumer: backpressure reaches the process.
 const QUEUE: usize = 64;
@@ -643,7 +645,7 @@ impl Drop for UnixPty {
         // cannot finish dying (macOS) until the master is drained or closed, so waiting first would hang.
         // Dropping the receiver makes the reader thread exit and close its duplicate of the master.
         self.output = sync_channel(1).1;
-        if let Ok(null) = File::open("/dev/null") {
+        if let Ok(null) = File::open(NULL_DEVICE) {
             drop(std::mem::replace(&mut self.writer, null));
         }
         let _ = self.child.wait();

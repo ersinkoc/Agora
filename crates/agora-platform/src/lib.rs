@@ -291,6 +291,18 @@ pub const SHELL_SCRIPTS_RUN: bool = cfg!(unix);
 /// What a program's file name ends with here: `.exe` on Windows, nothing elsewhere.
 pub const EXECUTABLE_SUFFIX: &str = if cfg!(windows) { ".exe" } else { "" };
 
+/// The device name to pass to programs that take an output path when the output should be discarded.
+pub const NULL_DEVICE: &str = {
+    #[cfg(unix)]
+    {
+        unix::NULL_DEVICE
+    }
+    #[cfg(windows)]
+    {
+        windows::NULL_DEVICE
+    }
+};
+
 /// The platform key of the signed agent list (`<os>-<arch>[-musl]`: `linux-x86_64`, `darwin-aarch64`, `windows-x86_64`,
 /// `linux-aarch64-musl`), or `None` for a system the list has no keys for.
 pub fn platform_key() -> Option<String> {
