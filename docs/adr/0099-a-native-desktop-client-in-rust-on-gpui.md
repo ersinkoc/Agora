@@ -1,10 +1,14 @@
-# 0099. A spike for a native desktop client in Rust on GPUI (stage 0 accepted; replacing the Tauri shell stays proposed)
+# 0099. A spike for a native desktop client in Rust on GPUI (stage 0 accepted; replacing the Tauri shell rejected 2026-11-22)
 Status: Accepted
 Date: 2026-11-22
 Accepted: 2026-11-22, stage 0 only (the maintainer, in the merger chat, answering "Aşama 0'ı kabul et" to the question that described
 stage 0: a spike on all three operating systems measuring GPUI with a native terminal, screen readers, start time, memory and size,
 against the go/no-go numbers of decision 6). Stages 1 to 5 stay Proposed: the spike report goes back to the maintainer, who accepts
 or rejects them then. Nothing beyond the spike may be built until then.
+Closed: 2026-11-22. Stages 1 to 5 were rejected by the maintainer after stage 0 (merger chat: "GPUI den vazgeçtik diyelim, tauri ile
+yapılan arayüzde native desktop app gibi kaliteli olmalı her şey"). The desktop stays the Tauri shell around the web window (ADR-0048),
+held to native-app quality; no GPUI code is on main. The spike's Linux part was measured in PR #954 (closed without merging); its report
+and measurements are in that PR, not on main, and the macOS and Windows runs were not done.
 
 Touches ADR-0005 (web-first, Tauri desktop), ADR-0048 (the desktop app is a thin Tauri shell; proposed to be superseded once decision 5's
 retirement step is reached), ADR-0043 and ADR-0063 (the terminal client, whose state model decision 3 extracts), ADR-0012 (VT backend),

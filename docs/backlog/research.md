@@ -8,7 +8,7 @@ Research tasks produce data files and notes with sources, not code. They can run
   and how stable they are across versions.
 - **Method:** survey open-source projects that already read these sources; read agent docs; verify on a real
   install.
-- **Output:** `docs/research/usage-sources.md` with sources per claim; manifest `[usage]` sections.
+- **Output:** `docs/research/usage-sources.md` (not written yet) with sources per claim; manifest `[usage]` sections.
 
 ### R-02 Quota profiles per provider and plan
 - **Output:** quota profile files with `sources`, `confidence`, and `last_verified`.

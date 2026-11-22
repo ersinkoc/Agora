@@ -12,7 +12,7 @@ Gates, written in the task:
 
 Owner: the merger session (Claude, Linux) builds unless the task says otherwise.
 
-Where things stand: 60 capabilities in `docs/capabilities.md`, 33 built, about 18 partly, 9 not built; 14 have evidence from a real
+Where things stand: 62 capabilities in `docs/capabilities.md`, 34 built, 18 partly, 10 not built; 42 cite evidence from a real
 machine written down. So the order is: finish what is in flight, prove what exists on real machines, finish what is half built, then the
 new features.
 
@@ -43,13 +43,13 @@ new features.
   - [x] "Start a new one" in the picker opens the ordinary start (kind, machine, folder), then dispatches to the new agent
   - [x] under a parent: the ordinary ADR-0057 helper start (signed approval as an agent-made request): the window has no person-made helper start, so it stays the agent's ADR-0057 path and is not offered in the picker
   - [x] the TUI: dispatch from its board list (same command): `b` opens the board, Enter or `g` gives a Backlog task
-- [ ] **M0.5 Release 0.3.33** (#888, tag `v0.3.33`)
+- [x] **M0.5 Release 0.3.33** (#888, tag `v0.3.33`; 0.3.34 followed, #1002, tag `v0.3.34`)
   - [x] release notes; tag; the release workflow (five targets, `.sha256` and `.sig`)
   - [x] the hub machine (blackview) updated, signature checked; its five agents came back after the restart
   - [x] win updated and reported (0.3.33, `agora doctor` clean)
-  - [ ] mac updated and reported
-- [ ] **M0.6 ADR-0097** (#874, **decision**): the key that can sign approvals is out of the hub-served page's reach (closes T55)
-  - [ ] accepted → build steps as the ADR lists; rejected → T55 stays "not mitigated" with the reason
+  - [x] mac updated and reported ([macOS 2026-11-21](../reviews/2026-11-21-macos-update-0333.md))
+- [x] **M0.6 ADR-0097** (#874, **decision**): the key that can sign approvals is out of the hub-served page's reach (closes T55)
+  - [x] closed, not now (#874 closed 2026-11-22); T55 stays "not mitigated"
 
 ## M1. Prove it on real machines
 
@@ -59,9 +59,12 @@ fixes it.
 - [ ] **M1.1 Real-machine checklist**
   - [ ] one checklist line per capability in `docs/capabilities.md` (what to do, what to see), in `docs/reviews/real-machine-checklist.md`
     - the checklist exists: [`docs/reviews/real-machine-checklist.md`](../reviews/real-machine-checklist.md) (RM-01 to RM-60, one per
-      row, a first draft from the docs and the code); its first run on each system is the next subtask
-  - [ ] run it on Linux (blackview), then **mac** and **win** through comms; each run is a dated note in `docs/reviews/`
+      row, a first draft from the docs and the code); the rows added since (ADR-0100, ADR-0101) have no line yet
+  - [x] run it on Linux (blackview), then **mac** and **win** through comms; each run is a dated note in `docs/reviews/`
+    ([Linux](../reviews/2026-11-21-real-machine-linux.md), [macOS](../reviews/2026-11-21-real-machine-macos.md),
+    [Windows](../reviews/2026-11-21-real-machine-windows.md), all 2026-11-21)
   - [ ] the "Real machines" column cites the note; each failure becomes an issue and a fix PR
+    - the column cites all three notes; every failure has an issue; #904 and #942 are still open
 - [ ] **M1.2 Real agents** (**human**)
   - [ ] fixture screens from dedicated accounts for the kinds still missing (WrongStack, Gemini CLI, OpenCode, ...), P2-09 / P4-05
   - [ ] the kanban dispatch tried once with real Claude Code and Codex (terminal and structured)
@@ -89,6 +92,9 @@ fixes it.
   - [ ] Linux pathname sockets (ADR-0083) and the Windows socket rule
 - [ ] **M2.4 Team mode** (ADR-0049, P7-09): the remaining steps in `phase-7.md`, then a two-person run on the LAN (**human**)
 - [ ] **M2.5 Desktop app** (ADR-0048, P7-06): the remaining steps; signed and notarized builds wait on M4.2
+  - [ ] the desktop stays the Tauri shell, held to native-app quality (ADR-0099 closed 2026-11-22): a terminal that feels native, the
+    OS's conventions, performance gates, an embedded browser, and checks on real devices (the terminal fixes of #950 were measured in
+    three browser engines in a lab, not on real devices)
 - [ ] **M2.6 Agents survive the node on Windows** (ADR-0079, ADR-0093): the Windows holder (**win** measurements first)
 - [ ] **M2.7 The node updates in place** (ADR-0075): the exec handoff (Unix), then Windows; agents keep running through an update
 - [ ] **M2.8 Plan limits for more tools** (ADR-0091): Claude Code's windows, from its own files, read like Codex's
@@ -98,6 +104,9 @@ fixes it.
 - [ ] **M2.13 The window knows what each machine can do** (**schema**): the web window never reads node capabilities (no Hello
   with the hub, none in the snapshot), so it learns that a machine cannot take a task only from a refusal (#885). Carry each node's
   negotiated capabilities in the snapshot (append-only), then hide actions a machine cannot do before anyone tries
+- [x] **M2.14 The terminal repaint carries the program's modes and its history** (ADR-0100, **schema** for step 2)
+  - [x] step 1, the modes in the repaint (#953); step 2, the history before the repaint when a window asks (#959); step 3, the web
+    window and the terminal client ask for it (#964)
 - [ ] **M2.12 Code signing** (ADR-0077, **human**): SignPath for Windows, Apple Developer ID for macOS; one signed release recorded
 
 ## M3. New features (Accepted, not built)
@@ -118,6 +127,9 @@ fixes it.
 - [ ] **M3.9 Any machine can be the hub** (ADR-0086, staged)
   - [ ] export and import; the signed hub record (**schema**); manual takeover with partition tests; continuous replication with a drill; automatic takeover (3+ machines)
 - [ ] **M3.10 Agent login and accounts** (design only): an ADR first (**decision**), then build
+- [ ] **M3.11 A structured agent can be allowed always for its session** (ADR-0101, Accepted 2026-11-22): not built on `main`
+  - [ ] part A, steps 1 to 3 (**schema**, bridge and node, hub): on the branch `claude/adr0101-core`, no PR yet
+  - [ ] part B, steps 4 to 6 (the window, the terminal client, docs): next
 
 ## M4. Ready for other people
 
