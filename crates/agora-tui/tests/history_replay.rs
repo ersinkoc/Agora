@@ -6,7 +6,7 @@
 
 use std::time::{Duration, Instant};
 
-use agora_node::terminal::{TerminalHandle, TerminalOptions};
+use agora_node::terminal::{Output, OutputSubscription, TerminalHandle, TerminalOptions};
 use agora_platform::{spawn, PtyConfig};
 use agora_tui::preview::{PaneFeed, HISTORY_LINES};
 use agora_vt::{Size, Terminal};
@@ -37,12 +37,18 @@ fn screen(t: &dyn Terminal) -> Vec<String> {
         .collect()
 }
 
-/// A probe that prints 300 numbered lines, then waits.
+/// A probe that prints 300 numbered lines, then waits, redrawing its screen on every resize.
 fn probe() -> TerminalHandle {
     let mut cfg = PtyConfig::new(vec![
         "sh".into(),
         "-c".into(),
-        "i=1; while [ $i -le 300 ]; do echo \"history line $i\"; i=$((i+1)); done; printf 'probe ready'; exec sleep 60".into(),
+        concat!(
+            // On a resize it clears and redraws its screen, as the console host (ConPTY) does on Windows.
+            "trap 'printf \"\\033[H\\033[2Jprobe redrawn\"' WINCH; ",
+            "i=1; while [ $i -le 300 ]; do echo \"history line $i\"; i=$((i+1)); done; printf 'probe ready'; ",
+            "while :; do sleep 0.1; done",
+        )
+        .into(),
     ]);
     cfg.cols = SIZE.cols;
     cfg.rows = SIZE.rows;
@@ -68,15 +74,40 @@ fn probe() -> TerminalHandle {
     h
 }
 
+/// Feeds the pane what the node sends after the screen, as `Preview::pump` does, until the node has been quiet for a moment: output,
+/// and sizes (a size after output asks for a fresh screen, which the pane takes with the history it asks for, none once it has its
+/// own). The node's own reaction to a resize reaches the pane this way too: on Windows the console host (ConPTY) repaints its screen
+/// after a resize, which changes what the node's emulator holds (Windows CI, #964), and the pane gets the same bytes.
+fn follow(h: &TerminalHandle, sub: &mut OutputSubscription, feed: &mut PaneFeed) {
+    let end = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < end {
+        match sub.recv_timeout(Duration::from_millis(500)) {
+            Ok(Output::Data(b)) => feed.data(&b),
+            Ok(Output::Resize(size)) => {
+                if feed.resized(size.cols, size.rows) {
+                    let (frames, snap, next) =
+                        h.subscribe_with_history(feed.history_to_ask() as usize);
+                    feed.screen(snap.to_ansi(), frames.concat());
+                    assert!(!feed.resized(snap.size.cols, snap.size.rows));
+                    *sub = next;
+                }
+            }
+            Ok(other) => panic!("unexpected {other:?}"),
+            Err(_) => return,
+        }
+    }
+    panic!("the node never went quiet");
+}
+
 #[test]
 fn a_fresh_pane_holds_the_replayed_history_and_a_resize_refeed_does_not_repeat_it() {
     let h = probe();
     let feed_from = |lines: usize| {
-        let (frames, snap, _sub) = h.subscribe_with_history(lines);
+        let (frames, snap, sub) = h.subscribe_with_history(lines);
         let mut feed = PaneFeed::new();
         feed.screen(snap.to_ansi(), frames.concat());
         assert!(!feed.resized(snap.size.cols, snap.size.rows));
-        (feed, snap)
+        (feed, snap, sub)
     };
     let kept = h.inspect(history);
     assert!(
@@ -104,7 +135,7 @@ fn a_fresh_pane_holds_the_replayed_history_and_a_resize_refeed_does_not_repeat_i
     // A fresh pane asks for its own scrollback, and gets every line the node keeps, in order, with the screen drawn over them.
     let fresh = PaneFeed::new();
     assert_eq!(fresh.history_to_ask(), HISTORY_LINES);
-    let (mut feed, snap) = feed_from(HISTORY_LINES as usize);
+    let (mut feed, snap, mut sub) = feed_from(HISTORY_LINES as usize);
     assert_eq!(
         history(feed.screen_term()),
         kept,
@@ -115,10 +146,11 @@ fn a_fresh_pane_holds_the_replayed_history_and_a_resize_refeed_does_not_repeat_i
     assert_eq!(feed.history_to_ask(), 0);
 
     // A later size (another window resized the terminal) only resizes the pane's emulator, as the node's own (#977): the history
-    // stays the node's, never replayed again. A taller terminal pulls lines out of the history onto the screen in both.
+    // stays the node's, never replayed again. A taller terminal pulls lines out of the history onto the screen in both. The pane
+    // follows the node's stream, as the client does, so whatever the node's terminal writes after a resize reaches both.
     for size in [Size { cols: 60, rows: 14 }, Size { cols: 60, rows: 7 }] {
         h.resize(size).unwrap();
-        assert!(!feed.resized(size.cols, size.rows));
+        follow(&h, &mut sub, &mut feed);
         assert_eq!(
             history(feed.screen_term()),
             h.inspect(history),
