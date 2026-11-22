@@ -256,14 +256,13 @@ Items 1, 3 and 6 change the protocol or a recorded decision, so each needs an AD
    subscription's snapshot, and at most one replay (512 KiB) is ever held (Codex review of #964; the terminal client does the same,
    `client.rs`, `HeldHistory`). The terminal client asks for its scrollback (2000 lines) on a fresh pane and for none when it
    watches again; it holds the history with the screen until the size that follows, feeds both to its emulator once (the wheel reads
-   that scrollback), and keeps only the screen as the one it feeds again on a resize, clearing its screen first without moving it into
-   the history (`crates/agora-tui/src/preview.rs`, `PaneFeed`). This is the agent's terminal panel; the full-screen terminal opened
+   that scrollback), and keeps only the screen as the one it feeds again when the screen's own size follows it (a later size only
+   resizes the emulator, #977), clearing its screen first without moving it into the history (`crates/agora-tui/src/preview.rs`, `PaneFeed`). This is the agent's terminal panel; the full-screen terminal opened
    from it (`crates/agora/src/tuicmd.rs`) still asks for none. Tested by D4 in `scripts/e2e-terminal-repaint.mjs` (after a reload the
    first line of a 300-line output is in the window's history; Chromium), `crates/agora-tui/tests/history_replay.rs` (a probe on a
-   real pseudo-terminal: the pane's scrollback is the node's, and feeding the screen again at the same, a taller and a shorter size
-   keeps it so) and web unit tests. Still not replayed: the main screen's history while a program is on the alternate screen (the
-   backend cannot read it), and a re-feed at a narrower width wraps the screen's rows (output since the screen asks the machine for a
-   fresh one instead). Screens: `docs/ux/screens/adr100-history-after-reload-light.png` and `-dark.png`.
+   real pseudo-terminal: the pane's scrollback is the node's, stays the node's through a taller and a shorter terminal, and a repaint
+   fed again at its own size never copies the screen into it) and web unit tests. Still not replayed: the main screen's history while
+   a program is on the alternate screen (the backend cannot read it). Screens: `docs/ux/screens/adr100-history-after-reload-light.png` and `-dark.png`.
 2. **Nobody owns the answers to terminal queries.** The node's emulator drops `PtyWrite` events (`crates/agora-vt/src/alacritty.rs:41`,
    only titles are kept), so a program that asks for the device attributes, the cursor position, the colours or the keyboard protocol
    when **no window is attached** gets no answer, and with **two windows** it gets two, each with its own theme's colours. Proposed

@@ -120,6 +120,9 @@ jobs:
       - name: A late or returning window gets the program's terminal modes (ADR-0100)
         run: node scripts/e2e-terminal-repaint.mjs
         timeout-minutes: 5
+      - name: Settings knows a screen password set while the window was open (#909)
+        run: node scripts/e2e-screen-password.mjs
+        timeout-minutes: 5
 
   schema-breaking:
     # A published message never changes (ADR-0006): compare schema/ with the target branch.

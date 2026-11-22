@@ -1,6 +1,7 @@
 //! ADR-0100 decisions 2 and 4: the terminal client's pane, fed what the node sends a subscription that asks for history (kind 4
 //! frames, the kind 1 repaint, the kind 2 size) from a probe program on a real pseudo-terminal, holds exactly the node's history in
-//! its scrollback (what the wheel reads), and feeding the last screen again on a resize never repeats or loses any of it.
+//! its scrollback (what the wheel reads); a later resize keeps it the node's, and a repaint fed again at its size never copies the
+//! screen into it.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::time::{Duration, Instant};
@@ -98,21 +99,30 @@ fn a_fresh_pane_holds_the_replayed_history_and_a_resize_refeed_does_not_repeat_i
     // Once it shows a screen it keeps its own history: watching again asks for none.
     assert_eq!(feed.history_to_ask(), 0);
 
-    // The size again (no output since): the last screen is fed again, and only it; then a taller and a shorter terminal. (A narrower
-    // one is left out: the screen is made for its width, so fed again narrower its rows wrap. That is why output since the screen
-    // asks the machine for a fresh one instead, `Preview::pump`.)
-    for size in [
-        SIZE,
-        Size { cols: 60, rows: 14 },
-        Size { cols: 60, rows: 7 },
-    ] {
+    // A later size (another window resized the terminal) only resizes the pane's emulator, as the node's own (#977): the history
+    // stays the node's, never replayed again. A taller terminal pulls lines out of the history onto the screen in both.
+    for size in [Size { cols: 60, rows: 14 }, Size { cols: 60, rows: 7 }] {
+        h.resize(size).unwrap();
         assert!(!feed.resized(size.cols, size.rows));
         assert_eq!(
             history(feed.screen_term()),
-            kept,
-            "after feeding the screen again at {size:?}"
+            h.inspect(history),
+            "after a resize to {size:?}"
         );
     }
+    // A fresh screen without history (watching again) and its own size: the screen is fed, then fed again at its size, and neither
+    // copies it into the history (the pane clears its screen first without moving it there).
+    let kept = h.inspect(history);
+    let (frames, snap, _sub) = h.subscribe_with_history(0);
+    assert!(frames.is_empty());
+    feed.screen(snap.to_ansi(), Vec::new());
+    assert!(!feed.resized(snap.size.cols, snap.size.rows));
+    assert_eq!(
+        history(feed.screen_term()),
+        kept,
+        "after a repaint and its size"
+    );
+    assert_eq!(screen(feed.screen_term()), screen_of(&snap));
     h.kill().unwrap();
 }
 

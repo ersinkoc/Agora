@@ -2996,8 +2996,8 @@ impl Supervisor {
                 // The link failed: the holder may have started the agent all the same. Ask before anything else is done: an agent it
                 // has is ended (the node never got its terminal) and only then is another start made, so two copies never run. When
                 // that cannot be settled the start fails rather than run a second copy, unless the holder itself is gone.
-                Err(_) => {
-                    if session.end_agent(id.as_str()).is_ok() || session.holder_ended() {
+                Err(e) => {
+                    if session.end_agent(id.as_str()).is_ok() || session.ended_after(&e) {
                         continue;
                     }
                     return Some(Err(SupervisorError::Spawn("holder link failed".into())));
@@ -4334,8 +4334,8 @@ fn launch_held_adapter(
             // The link failed: the holder may have started it all the same. Ask before anything else is done: one it has is ended and
             // only then is another start made, so two copies never run; when that cannot be settled the start fails, unless the holder
             // itself is gone.
-            Err(_) => {
-                if session.end_agent(agent.as_str()).is_ok() || session.holder_ended() {
+            Err(e) => {
+                if session.end_agent(agent.as_str()).is_ok() || session.ended_after(&e) {
                     continue;
                 }
                 return Some(Err(SupervisorError::Spawn("holder link failed".into())));

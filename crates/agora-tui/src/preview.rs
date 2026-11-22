@@ -90,6 +90,13 @@ pub struct PaneFeed {
     /// The last full repaint, applied again when the size it was meant for arrives after it.
     screen: Vec<u8>,
     output_since_screen: bool,
+    /// The last repaint waits for its size: the machine sends the size a repaint was made at right after it (protocol.md, kind 2),
+    /// and only that size paints the repaint again. A later size is the terminal resized since (this console sizes the agent's
+    /// terminal to its pane right after it opens it). Painted at that size the repaint's rows, made at the old width, wrapped and
+    /// scrolled its first rows away: a full-screen program that does not redraw on a resize showed an empty pane until the next
+    /// refresh. The emulator here is the machine's own kind, so resizing what it holds gives the machine's screen at the new size
+    /// (#977). A screen that came with history is held until its size instead, so it is painted at that size once.
+    screen_unsized: bool,
     /// The mouse and focus modes the program switched on, read from the bytes that arrive (see `termio`), the repaint included: a
     /// current node's repaint sets or resets each mode it tracks (ADR-0100), so a mode switched on before this view opened is known.
     scanner: ModeScanner,
@@ -117,6 +124,7 @@ impl PaneFeed {
             ),
             screen: Vec::new(),
             output_since_screen: false,
+            screen_unsized: false,
             scanner: ModeScanner::default(),
             held: None,
             painted: false,
@@ -151,6 +159,7 @@ impl PaneFeed {
                 rows,
             });
             self.paint(size, &[], screen);
+            self.screen_unsized = true;
         } else {
             self.held = Some((screen, history, Instant::now()));
         }
@@ -161,17 +170,26 @@ impl PaneFeed {
     pub fn resized(&mut self, cols: u16, rows: u16) -> bool {
         let size = Size { cols, rows };
         if let Some((screen, history, _)) = self.held.take() {
+            // The screen and its history, at the size they were made at: painted once (never again on a later size).
             self.paint(Some(size), &history, screen);
             return false;
         }
-        if !self.output_since_screen && !self.screen.is_empty() {
-            // The size that belongs to the repaint just applied: paint it again at that size.
+        let own = std::mem::take(&mut self.screen_unsized);
+        if self.output_since_screen {
+            // Output came after the repaint: the machine is asked for its screen at the new size (`Preview::pump`).
+            self.term.resize(size);
+            return true;
+        }
+        if own && !self.screen.is_empty() {
+            // The size that belongs to the repaint just applied: paint it again at that size (the screen only, never history).
             let screen = std::mem::take(&mut self.screen);
             self.paint(Some(size), &[], screen);
             return false;
         }
+        // The terminal was resized since its repaint was painted at its own size: resizing the emulator is all of it
+        // (`screen_unsized`).
         self.term.resize(size);
-        self.output_since_screen
+        false
     }
 
     /// Feeds a held screen whose size has not come in time; true when it did.
@@ -196,6 +214,7 @@ impl PaneFeed {
                 rows,
             });
             self.paint(size, &history, screen);
+            self.screen_unsized = true;
         }
     }
 
@@ -412,6 +431,91 @@ mod tests {
         std::thread::sleep(super::SIZE_WAIT);
         assert!(feed.tick());
         assert_eq!(feed.screen_term().history_len(), 8);
+    }
+
+    // #977, kept with the history replay: a size after the repaint's own size only resizes the emulator.
+    mod sizes {
+        use super::super::PaneFeed;
+        use agora_node::terminal::repaint_of;
+        use agora_vt::{AlacrittyTerminal, Size, Terminal};
+
+        fn lines(t: &dyn Terminal) -> Vec<String> {
+            (0..t.size().rows).map(|r| t.line(r)).collect()
+        }
+
+        /// The node's terminal at `size` after the program wrote `bytes`.
+        fn node(size: Size, bytes: &[u8]) -> AlacrittyTerminal {
+            let mut t = AlacrittyTerminal::new(size);
+            t.feed(bytes);
+            t
+        }
+
+        const WIDE: Size = Size {
+            cols: 158,
+            rows: 40,
+        };
+        const PANE: Size = Size { cols: 60, rows: 38 };
+
+        /// A late attach as the terminal client makes one: the repaint at the size another window gave the terminal, that size, then
+        /// the size of this console's pane (it sizes the terminal as it opens it). The view shows what the node shows at the new size.
+        fn late_attach(program: &[u8]) -> (Vec<String>, PaneFeed) {
+            let mut machine = node(WIDE, program);
+            let mut v = PaneFeed::new();
+            v.screen(repaint_of(&machine), Vec::new());
+            assert!(!v.resized(WIDE.cols, WIDE.rows));
+            assert_eq!(
+                lines(v.screen_term()),
+                lines(&machine),
+                "painted at its own size"
+            );
+            machine.resize(PANE);
+            assert!(
+                !v.resized(PANE.cols, PANE.rows),
+                "nothing to ask the machine for"
+            );
+            (lines(&machine), v)
+        }
+
+        #[test]
+        fn a_full_screen_program_stays_in_view_when_the_pane_resizes_its_terminal() {
+            // The repaint check's probe (scripts/terminal-repaint/probe.py --alt): it draws once and never redraws on a resize. The
+            // repaint painted again at 60 columns wrapped its 158-column rows and scrolled the whole screen away (CI, #953, #960).
+            let mut program = b"\x1b[?1049h\x1b[H\x1b[2J".to_vec();
+            for r in 1..=5 {
+                program.extend_from_slice(format!("\x1b[{r};1HALT SCREEN row {r}").as_bytes());
+            }
+            program.extend_from_slice(b"\x1b[7;1HPROBE READY");
+            let (machine, v) = late_attach(&program);
+            assert_eq!(lines(v.screen_term()), machine);
+            assert_eq!(lines(v.screen_term())[6].trim_end(), "PROBE READY");
+        }
+
+        #[test]
+        fn a_shell_reflows_as_the_machine_does_when_the_pane_resizes_its_terminal() {
+            let mut program = Vec::new();
+            for n in 0..12 {
+                program.extend_from_slice(
+                    format!("$ python3 probe.py /tmp/agt-{n}/p{n}.log --ctl /tmp/agt-{n}/p{n}.ctl --modes 1000,1006\r\nline {n}\r\n")
+                        .as_bytes(),
+                );
+            }
+            program.extend_from_slice(b"\r\nPROBE READY\r\n$ ");
+            let (machine, v) = late_attach(&program);
+            assert_eq!(lines(v.screen_term()), machine);
+            assert!(lines(v.screen_term())
+                .iter()
+                .any(|l| l.trim_end() == "PROBE READY"));
+        }
+
+        #[test]
+        fn output_after_the_repaint_asks_the_machine_again_on_a_resize() {
+            let machine = node(WIDE, b"$ ");
+            let mut v = PaneFeed::new();
+            v.screen(repaint_of(&machine), Vec::new());
+            assert!(!v.resized(WIDE.cols, WIDE.rows));
+            v.data(b"more");
+            assert!(v.resized(PANE.cols, PANE.rows));
+        }
     }
 
     #[test]

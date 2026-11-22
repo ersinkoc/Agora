@@ -106,7 +106,12 @@ next frame's.
 - **An ambiguous start:** when the link fails after a `Start` was sent, the holder may have started the agent. The node asks the holder
   (`List`) before anything else: an agent it has under that id is ended (stop, wait for the exit, `Release`) and only then is another
   start made, so two copies never run. If that cannot be settled and the holder's process is alive, the start fails; if the holder's
-  process is gone the node starts again.
+  process is gone the node starts again. When the link failed with anything but a reply that timed out (end of stream, a broken
+  pipe, a reset, or `EPROTOTYPE`, which macOS can give for a send to a socket whose peer is closing), the holder is given up to a second
+  for its process to end, and the node goes on only once it has: a holder ends right after it answered the `Release` of its last agent, so
+  the restart of an agent that crashed, whose end the node collected first, can meet a holder that is closing but has not exited yet.
+  Once it has, the node starts a new holder and the restart succeeds (#951: before, that first restart failed and one crash cost two
+  restarts from the give-up budget). The same applies to a pipe agent (below).
 - **After the start:** the node reads and writes the master it received itself; nothing passes through the holder per byte. Its copies
   of the master and of the link are close-on-exec. Resize and the foreground process use the master directly; a signal and the agent's
   end go over the link (`Signal`/`Stop`, `List` then `Release`). A terminal's exit is polled (the actor looks about once a second
@@ -252,9 +257,11 @@ wants to write that cannot fit one frame fails that write on the node's side, be
   so the node keeps the last ones it recorded for each adapter agent in `<data>/sessions/kept-<id>.pb` (beside the ledger, owner-only; a report larger
   than the hub keeps, 64 KiB encoded, is not kept). The file goes when the agent ends or is interrupted (also when only the file has it), when an agent
   that runs restarts after a crash (a resume, which follows an end or an interruption, keeps what its new process reported before its start was recorded),
-  and at every start for each agent not taken up, with any unfinished write. On take-up the node puts them back on the agent (bounded and judged again as
-  a report is) and re-states them from the supervisor's copy (`Supervisor::session_events`), so the window's badge matches `skips_permissions_now`; a
-  resync announcement re-states them after `AgentStarted` too. A mode or config
+  and at every start for each agent not taken up, with any unfinished write. A failed removal keeps the report unavailable for the
+  lifetime of the node and is retried on the next kept-session change or a clean flush. A new node rebuilds those marks when its
+  startup sweep cannot remove a report for an agent it did not take up. On take-up the node puts the reports back on the agent
+  (bounded and judged again as a report is) and re-states them from the supervisor's copy (`Supervisor::session_events`), so the
+  window's badge matches `skips_permissions_now`. A resync announcement re-states them after `AgentStarted` too. A mode or config
   option in use that makes the agent act without asking (switched to after the start, by the person or by the agent) is so shown and checked
   (`skips_permissions_now`) until the agent reports new ones. Not built: its usage counters in the hub's view start again from 0 (#930); its earlier
   conversation is not shown (the chat history is in memory, ADR-0089; #931).
