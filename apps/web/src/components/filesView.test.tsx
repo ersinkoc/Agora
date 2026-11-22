@@ -2,6 +2,7 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { t } from '../i18n';
 import { FilesView } from './FilesView';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -40,5 +41,39 @@ describe('FilesView', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('shows a file whose read was still on its way when the tree was refreshed', async () => {
+    let finish!: (b: Uint8Array) => void;
+    const files = {
+      list: () => Promise.resolve([{ name: 'a.txt', isDir: false, size: 5 }]),
+      read: () => new Promise<Uint8Array>((r) => { finish = r; }),
+    };
+    await act(async () => { root.render(<FilesView files={files} />); });
+    const row = host.querySelector<HTMLElement>('[data-path="a.txt"]');
+    expect(row).not.toBeNull();
+    await act(async () => { row!.click(); });
+    const refresh = host.querySelector<HTMLElement>(`button[aria-label="${t('files-refresh')}"]`);
+    expect(refresh).not.toBeNull();
+    await act(async () => { refresh!.click(); });
+    await act(async () => { finish(new TextEncoder().encode('hello')); await Promise.resolve(); });
+    expect(host.textContent).toContain('hello');
+    expect(host.querySelector('[aria-busy="true"]')).toBeNull();
+    await act(async () => { root.unmount(); });
+  });
+
+  it('negative control: a read for workspace files that were replaced is not shown', async () => {
+    let finish!: (b: Uint8Array) => void;
+    const old = {
+      list: () => Promise.resolve([{ name: 'a.txt', isDir: false, size: 5 }]),
+      read: () => new Promise<Uint8Array>((r) => { finish = r; }),
+    };
+    const next = { list: old.list, read: () => Promise.resolve(new TextEncoder().encode('fresh')) };
+    await act(async () => { root.render(<FilesView files={old} />); });
+    await act(async () => { host.querySelector<HTMLElement>('[data-path="a.txt"]')!.click(); });
+    await act(async () => { root.render(<FilesView files={next} />); });
+    await act(async () => { finish(new TextEncoder().encode('stale')); await Promise.resolve(); });
+    expect(host.textContent).not.toContain('stale');
+    await act(async () => { root.unmount(); });
   });
 });

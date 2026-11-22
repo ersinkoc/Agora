@@ -155,12 +155,24 @@ export function FilesView({ files, load, changed, compact = false }: {
     }
   };
 
+  // A read is dropped when a newer read of the same file started or when the workspace's files were replaced (not on Refresh, which
+  // lists the tree again and leaves open files alone: a read in flight then still lands, so its tab does not wait for ever).
+  const filesNow = useRef(files);
+  filesNow.current = files;
+  const reads = useRef(new Map<string, number>());
   const read = useCallback((path: string) => {
-    const gen = generation.current;
+    const seq = (reads.current.get(path) ?? 0) + 1;
+    reads.current.set(path, seq);
+    const stale = () => reads.current.get(path) !== seq || filesNow.current !== files;
+    // Dropped for replaced files: the tab is not left saying it is loading, so opening it again reads it again.
+    const forget = () => {
+      if (reads.current.get(path) !== seq) return;
+      setContents((c) => { if (c.get(path) !== 'loading') return c; const n = new Map(c); n.delete(path); return n; });
+    };
     setContents((c) => new Map(c).set(path, 'loading'));
     files.read(path).then(
       (b) => {
-        if (gen !== generation.current) return;
+        if (stale()) { forget(); return; }
         setContents((c) => {
           const text = decodeText(b);
           if (text === undefined) return new Map(c).set(path, 'binary');
@@ -170,7 +182,7 @@ export function FilesView({ files, load, changed, compact = false }: {
         });
       },
       (e) => {
-        if (gen !== generation.current) return;
+        if (stale()) { forget(); return; }
         setContents((c) => new Map(c).set(path, readFailure(e)));
       },
     );
