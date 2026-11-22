@@ -1,6 +1,7 @@
 # 0101. A structured agent can be allowed always for its session
-Status: Proposed
+Status: Accepted
 Date: 2026-11-22
+Accepted: 2026-11-22 (the maintainer, in the merger chat: "bence bu önemli bir özellik acilen yapmalıyız", then "Accept, start now" to the question that summarised the scope button, the separate ALWAYS signature and the policy refusal; Codex's review findings are fixed in the implementation PRs)
 
 Origin: the maintainer's decision of 2026-11-22: structured (ACP) agents must be able to get an "always allow" answer from the person,
 so they stop asking for every action. Today WrongStack's `wstack acp serve` (no launch flag that skips asking, `wrongstack-acp.toml`)
