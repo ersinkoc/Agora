@@ -410,7 +410,8 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
       const sender = qualified ? from : q(from);
       const vouched = !qualified || producer === 'hub' || producer === sender.split('/')[0];
       const m: MessageV = { from: sender, to: to.includes('/') || to.startsWith('#') ? to : q(to), body: b.body ?? '', atMs: at, producer, ...(vouched ? {} : { via: producer }) };
-      const twin = v.messages.find((x) => !x.paired && x.producer !== producer && x.from === m.from && x.to === m.to && x.body === m.body);
+      // Two copies nobody confirmed (a receiver's and one some other node wrote) never vouch for each other.
+      const twin = v.messages.find((x) => !x.paired && x.producer !== producer && (vouched || !x.via) && x.from === m.from && x.to === m.to && x.body === m.body);
       if (twin) {
         twin.paired = true;
         if (vouched) delete twin.via;
@@ -661,7 +662,9 @@ export function projectChoices(v: View): ProjectChoice[] {
   return [...choices.values()].sort((a, b) => a.label.localeCompare(b.label));
 }
 
-// `via`: the machine (by name) whose word alone says who sent it, when that is not the sender's machine (see `MessageV.via`).
+// `via`: the machine whose word alone says who sent it, when that is not the sender's machine (see `MessageV.via`). It is the
+// machine's id, which the hub checked against its certificate, never the host name the machine reports for itself: a node could
+// call itself after the sender's machine.
 export interface MessageModel { from: string; to: string; body: string; atMs: number; crossMachine: boolean; via?: string }
 
 // The newest messages first, with agent names instead of ids. A message between two machines says so.
@@ -672,7 +675,7 @@ export function recentMessages(v: View, limit = 5): MessageModel[] {
   return v.messages.slice(-limit).reverse().map((m) => ({
     from: label(m.from), to: label(m.to), body: m.body, atMs: m.atMs,
     crossMachine: m.to.includes('/') && machine(m.from) !== machine(m.to),
-    ...(m.via ? { via: v.nodes.get(m.via)?.hostname || m.via } : {}),
+    ...(m.via ? { via: m.via } : {}),
   }));
 }
 

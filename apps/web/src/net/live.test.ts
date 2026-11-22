@@ -76,16 +76,32 @@ describe('view', () => {
     applyEvent(v, 2, ev('b', 1, { nodeOnline: { nodeId: 'b', hostname: 'Bravo' } }));
     // b writes a message "from" a's agent that a never recorded.
     applyEvent(v, 3, ev('b', 2, { messagePosted: { messageId: 'm-9', fromAgentId: 'a/x', to: 'z', body: 'trust me' } }));
-    let m = recentMessages(v);
-    expect(m[0]).toMatchObject({ from: 'a/x', to: 'b/z', via: 'Bravo' });
-    // Two machines that are not the sender's agreeing confirm nothing.
-    applyEvent(v, 4, ev('c', 1, { messagePosted: { messageId: 'm-1', fromAgentId: 'a/x', to: 'b/z', body: 'trust me' } }));
-    m = recentMessages(v);
-    expect(m).toHaveLength(1);
-    expect(m[0]?.via).toBe('Bravo');
+    // Named by its id, which the hub checked, not by the host name it reports.
+    expect(recentMessages(v)[0]).toMatchObject({ from: 'a/x', to: 'b/z', via: 'b' });
     // Its own machine's copy of another message does not vouch for this one.
-    applyEvent(v, 5, ev('a', 2, { messagePosted: { messageId: 'm-2', fromAgentId: 'x', to: 'b/z', body: 'hello' } }));
-    expect(recentMessages(v).map((r) => r.via)).toEqual([undefined, 'Bravo']);
+    applyEvent(v, 4, ev('a', 2, { messagePosted: { messageId: 'm-2', fromAgentId: 'x', to: 'b/z', body: 'hello' } }));
+    expect(recentMessages(v).map((r) => r.via)).toEqual([undefined, 'b']);
+  });
+
+  it('never names the sender\'s machine as the reporter, even when another node calls itself by its host name (#905)', () => {
+    const v = emptyView();
+    applyEvent(v, 1, ev('a', 1, { nodeOnline: { nodeId: 'a', hostname: 'laptop' } }));
+    applyEvent(v, 2, ev('b', 1, { nodeOnline: { nodeId: 'b', hostname: 'laptop' } }));
+    applyEvent(v, 3, ev('b', 2, { messagePosted: { messageId: 'm-9', fromAgentId: 'a/x', to: 'z', body: 'trust me' } }));
+    expect(recentMessages(v)[0]?.via).toBe('b');
+  });
+
+  it('pairs a copy only with one the sender\'s machine or the hub recorded: two unconfirmed copies stay apart (#905)', () => {
+    const v = emptyView();
+    // b received a/x's message honestly; c writes the same "from a/x" itself.
+    applyEvent(v, 1, ev('b', 1, { messagePosted: { messageId: 'm-4', fromAgentId: 'a/x', to: 'z', body: 'ping' } }));
+    applyEvent(v, 2, ev('c', 1, { messagePosted: { messageId: 'm-1', fromAgentId: 'a/x', to: 'b/z', body: 'ping' } }));
+    expect(recentMessages(v).map((r) => r.via)).toEqual(['c', 'b']);
+    // a's own copy confirms the first unconfirmed one; the forged copy still says who reported it.
+    applyEvent(v, 3, ev('a', 1, { messagePosted: { messageId: 'm-2', fromAgentId: 'x', to: 'b/z', body: 'ping' } }));
+    const m = recentMessages(v);
+    expect(m).toHaveLength(2);
+    expect(m.map((r) => r.via)).toEqual(['c', undefined]);
   });
 
   it('folds a handoff the shared board recorded with the receiver\'s copy, the sender named once (#905)', () => {
@@ -108,13 +124,17 @@ describe('view', () => {
     const got = (pos: number, seq: number) => applyEvent(v, pos, ev('b', seq, { messagePosted: { messageId: `m-${seq}`, fromAgentId: 'a/x', to: 'z', body: 'ping' } }));
     sent(1, 1); sent(2, 2); got(3, 1); got(4, 2);
     expect(v.messages).toHaveLength(2);
-    // A shared channel's copies are recorded by their receivers only (the board sends them), one per receiver.
+    // A shared channel's copies are recorded by their receivers only, one per receiver: the board sends every other running agent
+    // of the project a `MeshPost` with `origin` = the sender's machine, also to the agents on that same machine, whose node then
+    // records `from` = `a/x` itself (deliver_remote). The sender's own node records nothing for a shared channel.
     applyEvent(v, 5, ev('b', 3, { messagePosted: { messageId: 'm-3', fromAgentId: 'a/x', to: 'z', body: '[#ops] hi' } }));
     applyEvent(v, 6, ev('a', 3, { messagePosted: { messageId: 'm-3', fromAgentId: 'a/x', to: 'y', body: '[#ops] hi' } }));
-    expect(v.messages.slice(-2).map((m) => [m.from, m.to])).toEqual([['a/x', 'b/z'], ['a/x', 'a/y']]);
-    expect(recentMessages(v).slice(0, 2).map((m) => m.crossMachine)).toEqual([false, true]);
-    // Only the receiver names the sender of a channel copy (the board sent it): it says so; the sender's machine's own copy does not.
-    expect(recentMessages(v).slice(0, 2).map((m) => m.via)).toEqual([undefined, 'b']);
+    // A channel of a project on one machine only stays on its broker: from the local id, to the channel, the text unprefixed.
+    applyEvent(v, 7, ev('a', 4, { messagePosted: { messageId: 'm-4', fromAgentId: 'x', to: '#ops', body: 'hi' } }));
+    expect(v.messages.slice(-3).map((m) => [m.from, m.to])).toEqual([['a/x', 'b/z'], ['a/x', 'a/y'], ['a/x', '#ops']]);
+    expect(recentMessages(v).slice(0, 3).map((m) => m.crossMachine)).toEqual([false, false, true]);
+    // Only b names the sender of its copy: it says so. a's copies name a's own agent, which a may.
+    expect(recentMessages(v).slice(0, 3).map((m) => m.via)).toEqual([undefined, undefined, 'b']);
   });
 
   it('shows the shared board per project: tasks with their owner, leases with their holder, from the hub\'s events', () => {
