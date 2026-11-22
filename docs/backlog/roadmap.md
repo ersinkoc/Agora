@@ -43,7 +43,7 @@ new features.
   - [x] "Start a new one" in the picker opens the ordinary start (kind, machine, folder), then dispatches to the new agent
   - [x] under a parent: the ordinary ADR-0057 helper start (signed approval as an agent-made request): the window has no person-made helper start, so it stays the agent's ADR-0057 path and is not offered in the picker
   - [x] the TUI: dispatch from its board list (same command): `b` opens the board, Enter or `g` gives a Backlog task
-- [x] **M0.5 Release 0.3.33** (#888, tag `v0.3.33`; 0.3.34 followed, #1002, tag `v0.3.34`)
+- [x] **M0.5 Release 0.3.33** (#888, tag `v0.3.33`; 0.3.34 followed, #1002, tag `v0.3.34`; all three machines updated to it: [2026-11-22 follow-ups](../reviews/2026-11-22-real-machine-followups.md))
   - [x] release notes; tag; the release workflow (five targets, `.sha256` and `.sig`)
   - [x] the hub machine (blackview) updated, signature checked; its five agents came back after the restart
   - [x] win updated and reported (0.3.33, `agora doctor` clean)
