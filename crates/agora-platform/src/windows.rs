@@ -690,9 +690,12 @@ impl Drop for Listener {
     }
 }
 
+/// How long a client waits for a free pipe instance while every one is busy (#974).
+const CONNECT_BUSY_LIMIT: Duration = Duration::from_secs(5);
+
 pub fn connect(path: &Path) -> io::Result<Stream> {
     let name = pipe_name(path);
-    let mut waited = false;
+    let end = std::time::Instant::now() + CONNECT_BUSY_LIMIT;
     loop {
         // SAFETY: valid NUL-terminated name; no attributes or template.
         let h = unsafe {
@@ -710,11 +713,18 @@ pub fn connect(path: &Path) -> io::Result<Stream> {
             return Stream::from_handle(Handle(h));
         }
         match unsafe { GetLastError() } {
-            // Every instance is serving someone: wait (once) for a free one.
-            ERROR_PIPE_BUSY if !waited => {
-                waited = true;
+            // Every instance is serving someone: wait for a free one. Clients that wait together all wake when one comes free and
+            // only one of them gets it, so the others wait again, until the limit (#974: one wait let all but about two of
+            // several clients connecting at once fail).
+            ERROR_PIPE_BUSY => {
+                let left = end.saturating_duration_since(std::time::Instant::now());
+                if left.is_zero() {
+                    return Err(os_error(ERROR_PIPE_BUSY));
+                }
+                // At least 1 ms: 0 would mean the pipe's own default wait.
+                let ms = u32::try_from(left.as_millis()).unwrap_or(u32::MAX).max(1);
                 // SAFETY: valid name.
-                unsafe { WaitNamedPipeW(name.as_ptr(), 2000) };
+                unsafe { WaitNamedPipeW(name.as_ptr(), ms) };
             }
             ERROR_FILE_NOT_FOUND => return Err(io::Error::from(io::ErrorKind::NotFound)),
             e => return Err(os_error(e)),
@@ -1600,6 +1610,64 @@ mod tests {
         // Two different socket files still get two pipes.
         assert_ne!(pipe_name(&p), pipe_name(&path("other")));
         drop(l);
+    }
+
+    #[test]
+    fn many_clients_connecting_at_once_all_get_through() {
+        // #974: a pipe has one pending instance; clients that found it busy waited once, so when several connected at once
+        // (the node routing six terminal subscriptions together) all but about two failed with os error 231.
+        let p = path("many");
+        let l = listen(&p).unwrap();
+        const N: usize = 8;
+        let server = std::thread::spawn(move || {
+            for _ in 0..N {
+                let s = l.accept().unwrap();
+                // What a real accept loop does between two accepts (hand the connection off, ...).
+                std::thread::sleep(Duration::from_millis(100));
+                drop(s);
+            }
+            l
+        });
+        let go = Arc::new(std::sync::Barrier::new(N));
+        let clients: Vec<_> = (0..N)
+            .map(|_| {
+                let p = p.clone();
+                let go = Arc::clone(&go);
+                std::thread::spawn(move || {
+                    go.wait();
+                    connect(&p).map_err(|e| e.to_string())
+                })
+            })
+            .collect();
+        // Every client keeps its connection until the server has taken all of them (one that left first is skipped by accept).
+        let results: Vec<_> = clients.into_iter().map(|c| c.join().unwrap()).collect();
+        let failed: Vec<_> = results.iter().filter_map(|r| r.as_ref().err()).collect();
+        assert!(
+            failed.is_empty(),
+            "{} of {N} failed: {failed:?}",
+            failed.len()
+        );
+        let _l = server.join().unwrap();
+    }
+
+    #[test]
+    fn a_client_waits_for_a_free_instance_only_up_to_the_limit() {
+        // #974: the bound of that wait. The one pending instance is taken by a client the server never accepts, so the next
+        // client finds every instance busy for good and fails with os error 231 after `CONNECT_BUSY_LIMIT`, not sooner or later.
+        let p = path("bound");
+        let _l = listen(&p).unwrap();
+        let _first = connect(&p).unwrap();
+        let t0 = std::time::Instant::now();
+        let second = connect(&p);
+        let waited = t0.elapsed();
+        assert_eq!(
+            second.err().and_then(|e| e.raw_os_error()),
+            Some(ERROR_PIPE_BUSY as i32)
+        );
+        assert!(
+            waited >= CONNECT_BUSY_LIMIT && waited < CONNECT_BUSY_LIMIT + Duration::from_secs(2),
+            "{waited:?}"
+        );
     }
 
     #[test]
