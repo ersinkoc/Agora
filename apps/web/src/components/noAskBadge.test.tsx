@@ -111,6 +111,30 @@ describe('the acts-without-asking sign', () => {
     }
   });
 
+  // Codex re-review of #1004: a row focused by keyboard, then its sign hovered and left, lost the tooltip after the timer.
+  it('stays open after the pointer leaves while its row still has keyboard focus, and closes when the row loses it', () => {
+    vi.useFakeTimers();
+    try {
+      act(() => root.render(<button type="button" data-row>claude · plum<NoAskBadge agent={{ skipsPermissions: true }} nested /></button>));
+      const row = host.querySelector<HTMLButtonElement>('[data-row]')!;
+      const sign = host.querySelector<HTMLElement>('[data-no-ask]')!;
+      act(() => row.focus());
+      expect(tip()).not.toBeNull();
+      act(() => { sign.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })); });
+      act(() => { sign.dispatchEvent(new MouseEvent('mouseout', { bubbles: true, relatedTarget: document.body })); });
+      act(() => { vi.advanceTimersByTime(1000); });
+      expect(tip()).not.toBeNull();
+      act(() => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); });
+      expect(tip()).toBeNull(); // still dismissable
+      act(() => { row.blur(); row.focus(); });
+      expect(tip()).not.toBeNull();
+      act(() => row.blur());
+      expect(tip()).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('a tile with its own label says it in that label, since the label hides the sign\'s name', () => {
     const agent = { id: 'n/a', name: 'claude · plum', accent: '#fff', machine: 'm', workspace: 'w', state: 'working', preview: '' } as const;
     for (const context of [undefined, { group: 'machine' as const }]) {

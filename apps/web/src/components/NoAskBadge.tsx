@@ -35,13 +35,22 @@ function Badge({ full, nested, kind }: { full: string; nested: boolean; kind: st
   const pointer = useRef('');
   const show = () => { clearTimeout(timer.current); setAnchor(ref.current); };
   const hide = () => { clearTimeout(timer.current); setAnchor(null); };
+  // The control that holds a nested sign (its row, tab or tile).
+  const host = () => (nested ? ref.current?.parentElement?.closest<HTMLElement>(CONTROL) ?? null : null);
   // The pointer may move from the sign onto its tooltip and stay there (WCAG 1.4.13, hoverable): leaving waits a moment, and entering the
-  // tooltip keeps it open.
-  const leave = () => { if (document.activeElement === ref.current) return; clearTimeout(timer.current); timer.current = setTimeout(() => setAnchor(null), 300); };
+  // tooltip keeps it open. While keyboard focus still opens it (the sign's own, or its control's), the pointer leaving does not close it
+  // (WCAG 1.4.13, persistent; Codex review of #1004).
+  const focused = () => {
+    const at = document.activeElement;
+    if (at && at === ref.current) return true;
+    const ctrl = host();
+    return !!ctrl && at === ctrl && focusVisible(ctrl);
+  };
+  const leave = () => { clearTimeout(timer.current); if (focused()) return; timer.current = setTimeout(() => { if (!focused()) setAnchor(null); }, 300); };
   useEffect(() => () => clearTimeout(timer.current), []);
   // Inside a control: the tooltip follows that control's keyboard focus (not a mouse click, which would only flash it).
   useEffect(() => {
-    const ctrl = nested ? ref.current?.parentElement?.closest<HTMLElement>(CONTROL) : null;
+    const ctrl = host();
     if (!ctrl) return;
     // Only the control's own focus: a focus inside it that bubbles up (a dialog that holds the sign, say) is not the control's.
     const on = (e: FocusEvent) => { if (e.target === ctrl) setAnchor(focusVisible(ctrl) ? ref.current : null); };
