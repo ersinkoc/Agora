@@ -2239,6 +2239,7 @@ fn subscribe_to(stream: u32, id: &str) -> Frame {
         command_request::Command::TerminalSubscribe(v1::TerminalSubscribe {
             terminal_id: "t-a".into(),
             format: String::new(),
+            history_lines: 0,
         }),
     )
 }

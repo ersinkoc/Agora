@@ -7,8 +7,8 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use agora_node::control::{
-    Client, KIND_CHAT_ENTRY, KIND_CHAT_SNAPSHOT, KIND_TERM_DATA, KIND_TERM_EXIT, KIND_TERM_RESIZE,
-    KIND_TERM_SNAPSHOT,
+    Client, KIND_CHAT_ENTRY, KIND_CHAT_SNAPSHOT, KIND_TERM_DATA, KIND_TERM_EXIT, KIND_TERM_HISTORY,
+    KIND_TERM_RESIZE, KIND_TERM_SNAPSHOT,
 };
 use agora_node::daemon::{Node, NodeConfig};
 use agora_node::supervisor::NodeLimits;
@@ -263,6 +263,7 @@ fn terminal_subscription_streams_snapshot_data_resize_and_exit() {
         Cmd::TerminalSubscribe(v1::TerminalSubscribe {
             terminal_id: s.terminal_id.clone(),
             format: "terminal.raw".into(),
+            history_lines: 0,
         }),
     ));
     let snap = wait_frame(&mut c, 3, |f| f.kind == KIND_TERM_SNAPSHOT);
@@ -319,6 +320,7 @@ fn terminal_subscription_streams_snapshot_data_resize_and_exit() {
             Cmd::TerminalSubscribe(v1::TerminalSubscribe {
                 terminal_id: "t-nope".into(),
                 format: String::new(),
+                history_lines: 0,
             })
         )),
         "agent.not_found"
@@ -329,6 +331,7 @@ fn terminal_subscription_streams_snapshot_data_resize_and_exit() {
             Cmd::TerminalSubscribe(v1::TerminalSubscribe {
                 terminal_id: s.terminal_id.clone(),
                 format: "terminal.cells".into(),
+                history_lines: 0,
             })
         )),
         "protocol.capability_missing"
@@ -338,9 +341,153 @@ fn terminal_subscription_streams_snapshot_data_resize_and_exit() {
         err_code(c.call(Cmd::TerminalSubscribe(v1::TerminalSubscribe {
             terminal_id: s.terminal_id,
             format: String::new(),
+            history_lines: 0,
         }))),
         "protocol.invalid_message"
     );
+}
+
+/// A `terminal.subscribe` for `terminal_id` that asks for `history_lines` lines of history (ADR-0100).
+fn subscribe_cmd(terminal_id: &str, history_lines: u32) -> Cmd {
+    Cmd::TerminalSubscribe(v1::TerminalSubscribe {
+        terminal_id: terminal_id.into(),
+        format: "terminal.raw".into(),
+        history_lines,
+    })
+}
+
+/// Scrollback lines of `t`, oldest first.
+fn history_lines(t: &dyn agora_vt::Terminal) -> Vec<String> {
+    (1..=t.history_len())
+        .rev()
+        .map(|b| t.history_line(b))
+        .collect()
+}
+
+/// ADR-0100 decision 2: a subscription that asks for history gets kind 4 frames, then the kind 1 repaint, then the kind 2 size,
+/// then live output; fed to an empty emulator they give the node's scrollback and screen. One that asks for none (absent or 0) gets
+/// no kind 4, and a resync after falling behind never carries history.
+#[test]
+fn history_comes_before_the_snapshot_only_when_asked_and_never_with_a_resync() {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
+        return;
+    }
+    let e = env("history");
+    let n = node(&e, NodeLimits::default());
+    let mut c = Client::connect(n.socket().unwrap()).unwrap();
+    let s = started(ok(c.call(start_cmd("shell"))));
+    let id = agora_core::AgentId::new(s.agent_id.clone());
+
+    // Without history: the snapshot comes first.
+    ok(c.call_on(3, subscribe_cmd(&s.terminal_id, 0)));
+    let first = wait_frame(&mut c, 3, |_| true);
+    assert_eq!(first.kind, KIND_TERM_SNAPSHOT);
+    ok(c.call(Cmd::TerminalInput(v1::TerminalInput {
+        terminal_id: s.terminal_id.clone(),
+        data: b"i=1; while [ $i -le 60 ]; do echo hist-$i; i=$((i+1)); done\n".to_vec(),
+    })));
+    let mut seen = Vec::new();
+    wait_frame(&mut c, 3, |f| {
+        assert_ne!(f.kind, KIND_TERM_HISTORY, "no history was asked for");
+        if f.kind == KIND_TERM_DATA {
+            seen.extend_from_slice(&f.payload);
+        }
+        String::from_utf8_lossy(&seen).contains("hist-60\r")
+    });
+
+    // With history: kind 4 frames, kind 1, kind 2, then live output.
+    ok(c.call_on(5, subscribe_cmd(&s.terminal_id, 1000)));
+    let mut kinds = Vec::new();
+    let mut window: Option<agora_vt::AlacrittyTerminal> = None;
+    let mut fed = Vec::new();
+    wait_frame(&mut c, 5, |f| {
+        kinds.push(f.kind);
+        if f.kind == KIND_TERM_HISTORY || f.kind == KIND_TERM_SNAPSHOT {
+            fed.push(f.payload.clone());
+        }
+        if f.kind == KIND_TERM_RESIZE {
+            let size = agora_vt::Size {
+                cols: u16::from_le_bytes([f.payload[0], f.payload[1]]),
+                rows: u16::from_le_bytes([f.payload[2], f.payload[3]]),
+            };
+            let mut w = agora_vt::AlacrittyTerminal::new(size);
+            for b in &fed {
+                agora_vt::Terminal::feed(&mut w, b);
+            }
+            window = Some(w);
+        }
+        f.kind == KIND_TERM_RESIZE
+    });
+    let snapshot_at = kinds.iter().position(|&k| k == KIND_TERM_SNAPSHOT).unwrap();
+    assert!(snapshot_at > 0, "history first: {kinds:?}");
+    assert!(
+        kinds[..snapshot_at].iter().all(|&k| k == KIND_TERM_HISTORY),
+        "{kinds:?}"
+    );
+    assert_eq!(kinds[snapshot_at + 1..], [KIND_TERM_RESIZE], "{kinds:?}");
+    let window = window.unwrap();
+    let (node_history, node_screen) = {
+        let sup = n.supervisor.lock().unwrap();
+        let t = sup.terminal(&id).unwrap();
+        t.inspect(|t| (history_lines(t), t.bottom_lines(usize::from(t.size().rows))))
+    };
+    assert!(
+        node_history.iter().any(|l| l == "hist-1"),
+        "{node_history:?}"
+    );
+    assert_eq!(history_lines(&window), node_history);
+    assert_eq!(
+        agora_vt::Terminal::bottom_lines(&window, node_screen.len()),
+        node_screen
+    );
+    ok(c.call(Cmd::TerminalInput(v1::TerminalInput {
+        terminal_id: s.terminal_id.clone(),
+        data: b"echo live-$((6*7))\n".to_vec(),
+    })));
+    let mut live = Vec::new();
+    wait_frame(&mut c, 5, |f| {
+        assert_eq!(f.kind, KIND_TERM_DATA, "live output after the size");
+        live.extend_from_slice(&f.payload);
+        String::from_utf8_lossy(&live).contains("live-42")
+    });
+
+    // A resync after falling behind: the client stops reading while the terminal floods, so the node's queue for it overflows; the
+    // next snapshot on the stream that asked for history comes without any.
+    ok(c.call_on(7, subscribe_cmd(&s.terminal_id, 2000)));
+    ok(c.call(Cmd::TerminalInput(v1::TerminalInput {
+        terminal_id: s.terminal_id.clone(),
+        data: b"yes 'resync flood resync flood' | head -n 1500000; echo flood-$((6*7))-done\n"
+            .to_vec(),
+    })));
+    std::thread::sleep(Duration::from_secs(3));
+    let mut snapshots = 0;
+    let mut kinds = Vec::new();
+    let end = Instant::now() + Duration::from_secs(60);
+    while snapshots < 2 && Instant::now() < end {
+        if let Some(f) = c.read_frame(Some(Duration::from_millis(200))).unwrap() {
+            if f.stream_id != 7 {
+                continue;
+            }
+            if f.kind != KIND_TERM_DATA && kinds.len() < 200 {
+                kinds.push(f.kind);
+            }
+            if f.kind == KIND_TERM_SNAPSHOT {
+                snapshots += 1;
+            } else if f.kind == KIND_TERM_HISTORY {
+                assert_eq!(
+                    snapshots, 0,
+                    "history only before the first snapshot: {kinds:?}"
+                );
+            }
+        }
+    }
+    assert_eq!(snapshots, 2, "the flood made the stream resync: {kinds:?}");
+    assert!(kinds[0] == KIND_TERM_HISTORY, "{kinds:?}");
+    let _ = c.call(Cmd::TerminalInput(v1::TerminalInput {
+        terminal_id: s.terminal_id.clone(),
+        data: vec![0x03],
+    }));
+    let _ = std::fs::remove_dir_all(&e.dir);
 }
 
 /// What a hub needs to build its view: the node, its checkout, then for each agent its workspace, the agent and its
@@ -1749,6 +1896,7 @@ fn a_subscriber_that_fell_behind_still_gets_the_exit_frame() {
         Cmd::TerminalSubscribe(v1::TerminalSubscribe {
             terminal_id: s.terminal_id.clone(),
             format: "terminal.raw".into(),
+            history_lines: 0,
         }),
     ));
     ok(c.call(Cmd::TerminalInput(v1::TerminalInput {

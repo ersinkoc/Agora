@@ -11,7 +11,7 @@ phase exit.
 | Ability to execute code on machines | nodes |
 | Source code and uncommitted work | nodes (checkouts, worktrees) |
 | Agent and API credentials | nodes only |
-| Terminal output (may contain secrets) | nodes; streamed through hub |
+| Terminal output (may contain secrets) | nodes; streamed through hub, never stored there. A window that subscribes with `history_lines` (ADR-0100) also gets up to 2000 earlier lines (512 KiB at most) from the node's memory: the same people who may watch the terminal live (`TerminalSubscribe` scope), re-encoded from the emulator's cells, so the escape sequences, OSC strings (titles, OSC 52 clipboard, OSC 8 links) and control bytes the program printed are not replayed |
 | Coordination data, approvals, audit log | hub |
 | User and device keys | client devices, nodes |
 

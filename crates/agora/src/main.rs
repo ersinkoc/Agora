@@ -1167,6 +1167,7 @@ fn terminal_attach(say: &Say, o: &Opts) -> ExitCode {
         Cmd::TerminalSubscribe(v1::TerminalSubscribe {
             terminal_id: terminal_id.clone(),
             format: "terminal.raw".into(),
+            history_lines: 0,
         }),
     );
     match subscribed {

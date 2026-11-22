@@ -14,6 +14,7 @@ pub fn run_all<T: Terminal>(make: impl Fn(Size) -> T) {
     resize_updates_size_and_keeps_in_range_cells(&make);
     bottom_lines_never_include_scrollback(&make);
     history_is_what_scrolled_off_in_order(&make);
+    history_knows_its_wrapped_lines(&make);
     bottom_non_empty_lines_skip_blank_rows(&make);
     alt_screen_is_separate_and_restores(&make);
     title_from_osc(&make);
@@ -113,6 +114,32 @@ fn history_is_what_scrolled_off_in_order<T: Terminal>(make: &impl Fn(Size) -> T)
     assert_eq!(t.history_cell(1, 20), None);
     // The live screen is untouched by reading history.
     assert_eq!(t.line(0), "line 27");
+}
+
+/// A scrolled-off line the terminal wrapped says so, a line the program ended does not (ADR-0100: a history replay writes a wrapped
+/// line without a break); a backend that does not know says `false` everywhere. The inactive screen's history is empty unless the
+/// backend can read it, and never while the main screen is active.
+fn history_knows_its_wrapped_lines<T: Terminal>(make: &impl Fn(Size) -> T) {
+    let mut t = make(size(10, 3));
+    // "0123456789abcd" wraps after 10 columns; then "end", then enough lines to push them all off.
+    t.feed(b"0123456789abcd\r\nend\r\n1\r\n2\r\n3\r\n");
+    assert_eq!(t.inactive_history_len(), 0);
+    assert_eq!(t.inactive_history_cell(1, 0), None);
+    assert!(!t.inactive_history_wrapped(1));
+    let n = t.history_len();
+    if n == 0 {
+        assert!(!t.history_wrapped(1));
+        return;
+    }
+    assert_eq!(t.history_line(n), "0123456789");
+    assert_eq!(t.history_line(n - 1), "abcd");
+    assert_eq!(t.history_line(n - 2), "end");
+    let any = t.history_wrapped(n);
+    assert!(!t.history_wrapped(n - 1) && !t.history_wrapped(n - 2));
+    if any {
+        assert!(t.history_wrapped(n), "the wrapped row is the first part");
+    }
+    assert!(!t.history_wrapped(0) && !t.history_wrapped(n + 1));
 }
 
 fn bottom_non_empty_lines_skip_blank_rows<T: Terminal>(make: &impl Fn(Size) -> T) {

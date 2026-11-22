@@ -453,6 +453,23 @@ impl Terminal for AlacrittyTerminal {
         })
     }
 
+    fn history_wrapped(&self, back: usize) -> bool {
+        if back == 0 || back > self.history_len() {
+            return false;
+        }
+        let Ok(back) = i32::try_from(back) else {
+            return false;
+        };
+        // The backend marks a wrapped row on its last cell.
+        let last = Column(usize::from(self.size.cols).saturating_sub(1));
+        self.term.grid()[Line(-back)][last]
+            .flags
+            .contains(Flags::WRAPLINE)
+    }
+
+    // The inactive screen's history (`inactive_history_len` and the rest) keeps the trait's defaults: `alacritty_terminal` 0.26 keeps
+    // the inactive grid private, and switching screens to peek would clear the alternate one (ADR-0100, Context).
+
     /// Like the default, but keeps the zero-width characters (combining accents, variation selectors, joiners) the
     /// backend stores on each cell, which [`Cell`] cannot carry (F703).
     fn line(&self, row: u16) -> String {
@@ -696,6 +713,25 @@ mod tests {
         );
         t.feed(b"\x1b[=8;1u");
         assert_eq!(t.modes().keyboard_flags, 8, "set without a push");
+    }
+
+    /// This backend knows which scrollback rows it wrapped (ADR-0100 decision 2), and while the alternate screen is active it shows no
+    /// history at all: the active grid is the alternate one, and the main screen's (the inactive one) cannot be read.
+    #[test]
+    fn wrapped_history_rows_are_marked_and_the_alternate_screen_has_none() {
+        let mut t = AlacrittyTerminal::new(Size { cols: 10, rows: 3 });
+        t.feed(b"0123456789abcd\r\nend\r\n1\r\n2\r\n3\r\n");
+        let n = t.history_len();
+        assert_eq!(n, 4);
+        assert!(t.history_wrapped(4), "0123456789 continues on the next row");
+        assert!(!t.history_wrapped(3) && !t.history_wrapped(2) && !t.history_wrapped(1));
+        t.feed(b"\x1b[?1049h");
+        assert_eq!(t.history_len(), 0);
+        assert_eq!(t.history_cell(1, 0), None);
+        assert!(!t.history_wrapped(1));
+        assert_eq!(t.inactive_history_len(), 0, "not readable in this backend");
+        t.feed(b"\x1b[?1049l");
+        assert_eq!(t.history_len(), n);
     }
 
     /// A synchronized update the program never ends is applied once its timeout has passed (F702).

@@ -20,6 +20,8 @@ use agora_vt::{
     Terminal,
 };
 
+use crate::history::HistoryCapture;
+
 /// Settings for a terminal actor.
 #[derive(Debug, Clone, Copy)]
 pub struct TerminalOptions {
@@ -483,22 +485,29 @@ impl TerminalHandle {
     /// the process writes after exactly that screen: registration and snapshot happen under one lock, so
     /// there is no gap and no duplicate. A client renders the snapshot, then applies the items in order.
     pub fn subscribe(&self) -> (Snapshot, OutputSubscription) {
-        let (tx, rx) = sync_channel(SUBSCRIBER_QUEUE);
-        let lagged = Arc::new(AtomicBool::new(false));
-        let repaint = {
-            let mut g = self.inner.lock();
-            let repaint = Repaint::capture(g.term.as_ref(), g.seq, g.exit);
-            g.subscribers.push(Subscriber {
-                tx,
-                lagged: Arc::clone(&lagged),
-            });
-            repaint
-        };
-        (repaint.into_snapshot(), OutputSubscription { rx, lagged })
+        let (_, snapshot, sub) = self.subscribe_with_history(0);
+        (snapshot, sub)
+    }
+
+    /// [`Self::subscribe`] for a window that asks for `lines` lines of history (ADR-0100 decision 2); see
+    /// [`TerminalWatch::subscribe_with_history`].
+    pub fn subscribe_with_history(
+        &self,
+        lines: usize,
+    ) -> (Vec<Vec<u8>>, Snapshot, OutputSubscription) {
+        self.watch().subscribe_with_history(lines)
+    }
+
+    /// A handle to subscribe with after letting go of whatever lock reached this terminal (the supervisor's), so copying and
+    /// formatting a history (ADR-0100) never holds up other commands, input among them. It does not keep the process running.
+    pub fn watch(&self) -> TerminalWatch {
+        TerminalWatch {
+            inner: Arc::clone(&self.inner),
+        }
     }
 
     /// After [`Output::Lagged`]: discard what is queued, clear the lag, and return a fresh snapshot that
-    /// the following items continue from.
+    /// the following items continue from. Never with history (ADR-0100 decision 2): a window that wants it subscribes again.
     pub fn resync(&self, sub: &OutputSubscription) -> Snapshot {
         let repaint = {
             let g = self.inner.lock();
@@ -545,6 +554,41 @@ impl TerminalHandle {
             guard.waiters -= 1;
         }
         snapshot_of(&guard)
+    }
+}
+
+/// A terminal to subscribe to, held without its [`TerminalHandle`] (see [`TerminalHandle::watch`]).
+pub struct TerminalWatch {
+    inner: Arc<Inner>,
+}
+
+impl TerminalWatch {
+    /// [`TerminalHandle::subscribe`] that also returns the kind 4 frames putting the newest `lines` scrollback lines into the
+    /// window's own scrollback (ADR-0100 decision 2), sent before the snapshot: none for 0, while the program is on the alternate
+    /// screen, or when nothing is kept. History, screen and registration are captured under one lock, so the history ends where the
+    /// snapshot begins; the cells are copied under it (bounded by the byte cap) and formatted after it is released.
+    pub fn subscribe_with_history(
+        &self,
+        lines: usize,
+    ) -> (Vec<Vec<u8>>, Snapshot, OutputSubscription) {
+        let (tx, rx) = sync_channel(SUBSCRIBER_QUEUE);
+        let lagged = Arc::new(AtomicBool::new(false));
+        let (history, repaint) = {
+            let mut g = self.inner.lock();
+            let history = (lines > 0).then(|| HistoryCapture::capture(g.term.as_ref(), lines));
+            let repaint = Repaint::capture(g.term.as_ref(), g.seq, g.exit);
+            g.subscribers.push(Subscriber {
+                tx,
+                lagged: Arc::clone(&lagged),
+            });
+            (history, repaint)
+        };
+        let frames = history.map(HistoryCapture::into_frames).unwrap_or_default();
+        (
+            frames,
+            repaint.into_snapshot(),
+            OutputSubscription { rx, lagged },
+        )
     }
 }
 
