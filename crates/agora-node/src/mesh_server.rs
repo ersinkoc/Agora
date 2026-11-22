@@ -36,6 +36,46 @@ fn now_ms() -> u64 {
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
+/// Beside the ledger (`<data>/sessions/mesh-ids`): the end of the ids this node's broker reserved, where the next reservation
+/// starts (#965).
+pub const MESH_IDS_FILE: &str = "mesh-ids";
+
+/// Ids one reservation covers. The per-agent rate limit (30 messages a minute) keeps even a thousand agents far below it for
+/// months; a run that nears the end reserves the next range.
+const IDS_PER_RESERVATION: u64 = 1_000_000_000;
+
+/// Reserves the next range of ids for `mesh` in `file` before any of it is handed out (#965), so no run of the broker numbers a
+/// message with an id an earlier run used: an agent kept across a restart (ADR-0079) carries its `inbox` cursor over, and a new
+/// message numbered at or below it would be hidden from it. The range starts at the largest of the end the last reservation wrote,
+/// the clock in microseconds and the broker's next id. When the file cannot be read (other than missing) or written, nothing new is
+/// reserved and a broker with no range hands out no id until a later try succeeds: a reused id would be lost silently, a
+/// refused message is said (`mesh.unavailable`). Returns whether a range was reserved.
+fn reserve_ids(mesh: &Mutex<Mesh>, file: &Path) -> bool {
+    let lock = || mesh.lock().unwrap_or_else(|e| e.into_inner());
+    let floor = match std::fs::read_to_string(file) {
+        Ok(text) => text.trim().parse::<u64>().ok(),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Some(0),
+        Err(_) => None,
+    };
+    let Some(floor) = floor else {
+        lock().hold_unreserved_ids();
+        return false;
+    };
+    let next = lock().next_id();
+    // Capped far below the end of the numbers, so a damaged file can never make the counter overflow.
+    let first = floor
+        .max(now_ms().saturating_mul(1000))
+        .max(next)
+        .clamp(1, u64::MAX / 2);
+    let ceiling = first.saturating_add(IDS_PER_RESERVATION);
+    if agora_platform::write_private(file, ceiling.to_string().as_bytes()).is_err() {
+        lock().hold_unreserved_ids();
+        return false;
+    }
+    lock().reserve_ids(first, ceiling);
+    true
+}
+
 /// How a mesh message for an agent on another node leaves this node (ADR-0031). The uplink implements it.
 pub trait RemoteLink: Send + Sync {
     /// Hands one message to the hub. `done` is called once: `Ok(())` when the target node took it, or the error code
@@ -502,6 +542,8 @@ pub struct MeshServer {
     agents: Mutex<HashMap<AgentId, AgentServer>>,
     stop: Arc<AtomicBool>,
     ticker: Option<JoinHandle<()>>,
+    /// Where this node reserves its broker's ids (#965); the ticker reserves again when a range nears its end or none was had.
+    ids_file: Arc<Mutex<Option<PathBuf>>>,
     /// ADR-0095: the dispatches that have not reached their agent yet.
     dispatches: crate::task_dispatch::Dispatches,
 }
@@ -563,16 +605,27 @@ impl MeshServer {
         std::fs::create_dir_all(dir)?;
         let mesh = Arc::new(Mutex::new(Mesh::new(limits)));
         let stop = Arc::new(AtomicBool::new(false));
+        let ids_file: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
         // Leases expire on a clock, not on a call: sweep so a path frees up even if nobody asks about it.
         let ticker = {
-            let (mesh, stop) = (Arc::clone(&mesh), Arc::clone(&stop));
+            let (mesh, stop, ids_file) =
+                (Arc::clone(&mesh), Arc::clone(&stop), Arc::clone(&ids_file));
             std::thread::Builder::new()
                 .name("agora-mesh-tick".into())
                 .spawn(move || {
                     while !stop.load(Ordering::Acquire) {
-                        mesh.lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .expire_leases(now_ms());
+                        let left = {
+                            let mut m = mesh.lock().unwrap_or_else(|e| e.into_inner());
+                            m.expire_leases(now_ms());
+                            m.message_ids_left()
+                        };
+                        // Off the message path: a range near its end, or none had, is reserved here (file I/O, not under the lock).
+                        if left.is_some_and(|n| n < IDS_PER_RESERVATION / 2) {
+                            let file = ids_file.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                            if let Some(file) = file {
+                                reserve_ids(&mesh, &file);
+                            }
+                        }
                         std::thread::sleep(Duration::from_millis(500));
                     }
                 })?
@@ -587,6 +640,7 @@ impl MeshServer {
             agents: Mutex::new(HashMap::new()),
             stop,
             ticker: Some(ticker),
+            ids_file,
             dispatches: crate::task_dispatch::Dispatches::default(),
         })
     }
@@ -692,6 +746,15 @@ impl MeshServer {
                 })
                 .collect(),
         })
+    }
+
+    /// Reserves this node's broker ids in `<data_dir>/sessions/mesh-ids` (see [`reserve_ids`]); called before any agent joins. When
+    /// that fails, agents keep running and their mesh answers, but no id is handed out (sends, tasks, leases and handoffs are
+    /// refused with `mesh.unavailable`) until the ticker's next try, every half second, succeeds. Returns whether ids were reserved.
+    pub fn reserve_ids(&self, data_dir: &Path) -> bool {
+        let file = data_dir.join(crate::ledger::LEDGER_DIR).join(MESH_IDS_FILE);
+        *self.ids_file.lock().unwrap_or_else(|e| e.into_inner()) = Some(file.clone());
+        reserve_ids(&self.mesh, &file)
     }
 
     pub fn mesh(&self) -> Arc<Mutex<Mesh>> {
@@ -1941,6 +2004,116 @@ mod tests {
         let later = Instant::now();
         shares.set_not_shared_since("p", later);
         assert!(matches!(shares.get("p"), Some((false, _))));
+    }
+
+    fn member(id: &str) -> AgentInfo {
+        AgentInfo {
+            id: AgentId::new(id),
+            kind: "shell".into(),
+            node: "n1".into(),
+            project: "p".into(),
+            label: id.into(),
+            worktree: "/w".into(),
+            state: "idle".into(),
+        }
+    }
+
+    /// One run of a node's broker: a server whose ids are reserved in `data`, with agents `a` and `b`. Returns it and whether the
+    /// reservation succeeded.
+    fn run(data: &Path, sockets: &Path) -> (MeshServer, bool) {
+        let server = MeshServer::new(sockets, Limits::default()).unwrap();
+        let reserved = server.reserve_ids(data);
+        {
+            let mesh = server.mesh();
+            let mut m = mesh.lock().unwrap();
+            m.register(member("a"));
+            m.register(member("b"));
+        }
+        (server, reserved)
+    }
+
+    fn send(server: &MeshServer, body: &str) -> Result<String, agora_mesh::broker::MeshError> {
+        server.mesh().lock().unwrap().send_message(
+            &AgentId::new("a"),
+            "b",
+            body,
+            &[],
+            None,
+            now_ms(),
+        )
+    }
+
+    fn number(id: &str) -> u64 {
+        id.strip_prefix("m-").unwrap().parse().unwrap()
+    }
+
+    /// #965: each run's ids start above every id an earlier run handed out: from the reserved end even when the clock is behind
+    /// it, and never from a range a run could not reserve (Codex's review of #976: a run whose reservation failed handed out ids
+    /// the next run handed out again, so the carried cursor hid the new message).
+    #[test]
+    fn no_run_of_the_broker_numbers_a_message_with_an_id_an_earlier_run_used() {
+        let dir = std::env::temp_dir().join(format!("agora-ids-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (data, sockets) = (dir.join("data"), dir.join("m"));
+        let file = data.join(crate::ledger::LEDGER_DIR).join(MESH_IDS_FILE);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+
+        let started = now_ms();
+        let (first, ok) = run(&data, &sockets);
+        assert!(ok);
+        let cursor = send(&first, "one").unwrap();
+        assert!(number(&cursor) >= started * 1000, "{cursor} {started}");
+        drop(first);
+
+        // A run that cannot write its reservation (a directory where its temporary file goes) numbers no message, and says so.
+        let blocker = PathBuf::from(format!("{}.tmp-{}", file.display(), std::process::id()));
+        std::fs::create_dir_all(&blocker).unwrap();
+        let (second, ok) = run(&data, &sockets);
+        assert!(!ok);
+        let refused = send(&second, "two").unwrap_err();
+        assert_eq!(
+            refused.to_error(&Limits::default()).code,
+            agora_protocol::ErrorCode::MeshUnavailable
+        );
+        // Once it can, the ticker reserves and the run numbers messages above the earlier run's.
+        std::fs::remove_dir_all(&blocker).unwrap();
+        let end = Instant::now() + Duration::from_secs(10);
+        let two = loop {
+            if let Ok(id) = send(&second, "two") {
+                break id;
+            }
+            assert!(Instant::now() < end, "the ticker never reserved ids");
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        assert!(number(&two) > number(&cursor), "{two} {cursor}");
+        drop(second);
+
+        // The next run starts above both, also when the clock is far behind the reserved end.
+        let (third, ok) = run(&data, &sockets);
+        assert!(ok);
+        let three = send(&third, "three").unwrap();
+        assert!(number(&three) > number(&two), "{three} {two}");
+        let got = third
+            .mesh()
+            .lock()
+            .unwrap()
+            .inbox(&AgentId::new("b"), Some(&two), 10)
+            .unwrap();
+        assert_eq!(got.len(), 1);
+        drop(third);
+        let ahead = now_ms().saturating_mul(1000).saturating_mul(4);
+        std::fs::write(&file, ahead.to_string()).unwrap();
+        let (fourth, _) = run(&data, &sockets);
+        assert_eq!(number(&send(&fourth, "four").unwrap()), ahead);
+        drop(fourth);
+
+        // A reservation that cannot be read (not missing) is not guessed at: no message is numbered.
+        std::fs::write(&file, "not a number").unwrap();
+        let (fifth, ok) = run(&data, &sockets);
+        assert!(!ok);
+        assert!(send(&fifth, "five").is_err());
+        drop(fifth);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

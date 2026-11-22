@@ -72,7 +72,11 @@ impl std::fmt::Display for FilesError {
 impl std::error::Error for FilesError {}
 
 fn io_err(path: &str, e: &std::io::Error) -> FilesError {
-    if e.kind() == std::io::ErrorKind::NotFound {
+    // A file where the path needs a folder (`README.md/x`, or listing `README.md`) names nothing there either (audit F18).
+    if matches!(
+        e.kind(),
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+    ) {
         FilesError::NotFound(path.to_string())
     } else {
         FilesError::Io(format!("{path}: {e}"))
@@ -343,7 +347,14 @@ impl Files {
             return Err(FilesError::Secret(rel.to_string()));
         }
         // Without waiting: a FIFO swapped in for the file would block the open until something writes to it.
-        let file = agora_platform::open_read(&path).map_err(|e| io_err(rel, &e))?;
+        let file = agora_platform::open_read(&path).map_err(|e| {
+            // Something that is not a regular file and cannot be opened (a socket): not a file, as a folder or FIFO reads (audit F18).
+            if fs::metadata(&path).is_ok_and(|m| !m.is_file()) {
+                FilesError::NotFound(rel.to_string())
+            } else {
+                io_err(rel, &e)
+            }
+        })?;
         let real = agora_platform::opened_path(&file).map_err(|e| io_err(rel, &e))?;
         if !real.starts_with(&self.root) {
             return Err(FilesError::OutsideRoot(rel.to_string()));
@@ -708,6 +719,31 @@ mod tests {
             f.read("nope.txt"),
             Err(FilesError::NotFound("nope.txt".into()))
         );
+    }
+
+    #[test]
+    fn a_path_through_a_file_or_to_a_socket_is_not_found() {
+        // Audit F18: these answered `Io("Not a directory")` / `Io("No such device or address")`, shown as internal.
+        let (d, f) = setup();
+        assert_eq!(
+            f.read_file("README.md/x"),
+            Err(FilesError::NotFound("README.md/x".into()))
+        );
+        assert_eq!(
+            f.list("README.md"),
+            Err(FilesError::NotFound("README.md".into()))
+        );
+        #[cfg(unix)]
+        {
+            let _sock = std::os::unix::net::UnixListener::bind(d.join("wt/sock")).unwrap();
+            assert!(f.list("").unwrap().iter().any(|e| e.name == "sock"));
+            assert_eq!(
+                f.read_file("sock"),
+                Err(FilesError::NotFound("sock".into()))
+            );
+        }
+        #[cfg(not(unix))]
+        let _ = d;
     }
 
     #[test]

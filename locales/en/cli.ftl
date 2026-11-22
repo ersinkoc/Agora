@@ -183,8 +183,14 @@ cli-password-needs-terminal = Setting the screen password needs an interactive t
 cli-password-too-short = That is too short: use at least { $min } characters.
 cli-password-too-long = That is too long.
 cli-password-mismatch = The two did not match; nothing was changed.
-cli-password-set = Screen password set. A sign-in from another machine now needs it; this machine's own browser is never asked. { $count } open sessions were signed out.
-cli-password-cleared = Screen password removed. A sign-in code alone is enough again. { $count } open sessions were signed out.
+cli-password-set = Screen password set. A sign-in from another machine now needs it; this machine's own browser is never asked. { $count ->
+    [one] 1 open session was signed out.
+   *[other] { $count } open sessions were signed out.
+  }
+cli-password-cleared = Screen password removed. A sign-in code alone is enough again. { $count ->
+    [one] 1 open session was signed out.
+   *[other] { $count } open sessions were signed out.
+  }
 cli-password-on = A screen password is set: sign-ins from other machines need it.
 cli-password-off = No screen password is set: a sign-in code alone is enough.
 cli-trusted = Device { $id } can now answer approvals on this node.
