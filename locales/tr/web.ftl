@@ -766,13 +766,13 @@ start-option-forbidden = Bu makine ajanların sormadan çalışmasına izin verm
 start-option-confined-only = Bu makine bir ajanın sormadan çalışmasına yalnızca klasörüyle sınırlıyken izin veriyor; burada sınırlı olmazdı.
 start-options-unsupported = Bu makine başlatma seçenekleri için fazla eski. Güncelleyin ya da "Önce sorsun"u seçin.
 agent-does-not-ask = Onay istemeden çalışır
-agent-does-not-ask-short = Serbest
 agent-does-not-ask-explain = Size önce sormadan çalışacak şekilde başlatıldı
 agent-does-not-ask-session-neutral-explain = Size önce sormadan çalışır; sona erene veya geri alınana kadar sürer
 agent-does-not-ask-session-explain = Onayınızla, sona erene veya siz geri alana kadar size önce sormadan çalışacak şekilde geçirildi
 agent-always-allowed-short = Daha az sorar
 agent-always-allowed-explain = Bu oturum için { $count } isteğine izin verdin. Sona erene kadar bunlar için bir daha sormaz.
 agent-always-allowed-explain-kept = { $count } isteğinin yanıtını hatırlamasına izin verdin. Bunlar için bir daha sormaz; yanıtları ne kadar tutacağına kendisi karar verir.
+agent-does-not-ask-cause = Nedeni: { $value }
 start-option-unconfirmed = Bu makineye göre o seçenek ajanın sormadan çalışmasını sağlıyor ve bu pencere önce size sormadı. Hiçbir şey başlatılmadı; başlatma penceresini yeniden açın.
 start-option-invalid = Bu makine o başlatma seçeneğini sunmuyor. Hiçbir şey başlatılmadı; başlatma penceresini yeniden açın.
 # Yerleşimler (ADR-0068): yan yana bölmeler, sekmeler, kayıtlı yerleşimler.

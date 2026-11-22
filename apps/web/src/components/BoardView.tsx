@@ -20,7 +20,7 @@ function Card({ task, give }: { task: BoardTaskModel; give?: { projectId: string
       {task.status !== 'open' && task.owner && <span className="flex min-w-0 flex-wrap items-center gap-1.5 text-xs text-muted">
         <span className="min-w-0 break-words">{t('board-card-owner', { name: plain(task.owner, OWNER_MAX) })}</span>
         {task.status === 'claimed' && task.ownerState && <StateBadge state={task.ownerState} />}
-        {task.status === 'claimed' && <NoAskBadge agent={{ skipsPermissions: task.ownerSkips }} compact />}
+        {task.status === 'claimed' && <NoAskBadge agent={{ skipsPermissions: task.ownerSkips }} />}
       </span>}
       {task.status === 'claimed' && held.length > 0 && <span className="grid min-w-0 gap-0.5 text-xs text-muted">
         <span>{t('board-card-holds', { count: held.length })}</span>

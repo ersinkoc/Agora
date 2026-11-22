@@ -6,7 +6,7 @@ Per project. Backed by the mesh task model (`docs/specs/mesh-tools.md`).
 - **Give to an agent** (ADR-0095 step 2): a Backlog card has the action (keyboard reachable; on a touch screen it is a 44 px target), and every
   Backlog task is also found in the command palette as "Give to an agent: <title>". The picker lists only the running agents of the task's
   project on a connected machine, helpers right under the agent that started them; plain terminals and other projects' agents are never
-  offered. Each row shows the agent's name, kind, machine, state, and the "Acts freely" badge for an agent that acts without asking (started so, or now in a mode or setting that skips
+  offered. Each row shows the agent's name, kind, machine, state, and the acts-without-asking sign (a red bolt with its meaning as tooltip and name) for an agent that acts without asking (started so, or now in a mode or setting that skips
   approvals). A running agent whose last turn is Finished is between turns and is offered; a closed or interrupted one is not. The
   confirmation names task, agent, kind, machine and project in full and, for an agent that acts without asking, says so; nothing is sent
   before "Give the task". The confirmation shows the agent as it is now (a switch to or from acting freely appears while it is open) and

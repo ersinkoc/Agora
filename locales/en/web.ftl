@@ -786,7 +786,6 @@ start-option-forbidden = This machine does not let agents act without asking. Ch
 start-option-confined-only = This machine lets an agent act without asking only while it is confined to its folder, and it would not be here.
 start-options-unsupported = This machine is too old for start options. Update it, or choose "Ask before acting".
 agent-does-not-ask = Runs without asking
-agent-does-not-ask-short = Acts freely
 agent-does-not-ask-explain = Started so that it acts without asking you first
 agent-does-not-ask-session-neutral-explain = Acts without asking you first, until it ends or is switched back
 agent-does-not-ask-session-explain = Switched, with your approval, so that it acts without asking you first, until it ends or you switch it back
@@ -796,6 +795,7 @@ agent-always-allowed-explain-kept = { $count ->
     [one] You let it remember the answer to one of its requests. It does not ask again for that; it decides how long it keeps the answer.
    *[other] You let it remember the answers to { $count } of its requests. It does not ask again for those; it decides how long it keeps them.
 }
+agent-does-not-ask-cause = Because of: { $value }
 start-option-unconfirmed = This machine says that option lets the agent act without asking, and this window did not ask you first. Nothing was started; open the start window again.
 start-option-invalid = This machine does not offer that start option. Nothing was started; open the start window again.
 # Layouts (ADR-0068): panes side by side, tabs, saved layouts.

@@ -252,10 +252,10 @@ not built: nothing to check.
 - **See:** `--check` says "Agora 0.3.33 is the newest release." (or which is available); each update says "Updated to Agora …"
   only after the checksum and signature checked out ("Nothing was changed." otherwise);
   `$RM/bin/agora --version` follows; the machine's own `agora` is untouched. On Windows, note any Microsoft Defender verdict. On
-  0.3.33 `--check` fails on Windows ("could not find the newest release": `curl -o /dev/null`, #939); `--version` works.
+  0.3.33 `--check` failed on Windows ("could not find the newest release": `curl -o /dev/null`, #939); `--version` works. Fixed by #952: [2026-11-22 follow-ups](2026-11-22-real-machine-followups.md).
 - **Evidence so far:** [macOS 2026-11-21](2026-11-21-macos-update-0333.md): the LAN Mac updated to 0.3.33 with `--version` and
   `--release-key`, the checksum equal to the published one, Local Network asked again after the update; Windows: none recorded
-  (lan-test-findings L13 lists the self-replace among the suspects of a Defender verdict). [Windows 2026-11-21](2026-11-21-real-machine-windows.md): `--version` passed, Defender silent; `--check` fails (#939).
+  (lan-test-findings L13 lists the self-replace among the suspects of a Defender verdict). [Windows 2026-11-21](2026-11-21-real-machine-windows.md): `--version` passed, Defender silent; `--check` failed (#939). [2026-11-22 follow-ups](2026-11-22-real-machine-followups.md): `--check` passes on Windows after #952 (exit 0; a wrong address exits 1); all three machines updated to 0.3.34.
 
 ## Agents
 
@@ -306,7 +306,7 @@ not built: nothing to check.
 ### RM-15 Launch options, including "do not ask" modes
 - **OS:** Linux, macOS, Windows.
 - **Do:** S2. Start an agent > `rm-probe` > How it acts > Don't ask > Start; confirm "Start without asking". Read `$RM/probe-*.json`.
-- **See:** the confirmation appears before the start; the agent is marked "Runs without asking" ("Acts freely"); the probe's
+- **See:** the confirmation appears before the start; the agent is marked with the red bolt (no words; its tooltip, on hover, focus or tap, says "Runs without asking: …"); the probe's
   arguments end with `--fake-skip-permissions`; without the option they do not.
 - **Evidence so far:** [Windows 2026-11-21](2026-11-21-real-machine-windows.md): pass.
 
@@ -447,6 +447,8 @@ not built: nothing to check.
   [macOS 2026-11-21](2026-11-21-real-machine-macos.md): a message to the stopped `rm-two` got no `delivery_failed` (#915, not
   reproduced in tests; a post the hub never answers now fails with `node.timeout` after 40 s on the sender's machine). Check again:
   the notice `node.offline` (or `node.timeout`) comes back within 40 s, also right after the other machine's Ctrl-C.
+  [2026-11-22 follow-ups](2026-11-22-real-machine-followups.md): macOS, a stopped recipient: the sender got one `delivery_failed` with `node.offline` and the original `reply_to`, and no late
+  delivery after resuming (#915 closed).
 
 ### RM-28 A reply keeps its link across machines
 not built: nothing to check.
@@ -466,7 +468,7 @@ not built: nothing to check.
 - **Do:** start a Shell; open its bridge with S5 and call `workspace_status`; `agora down` (the agent stays with its holder), then
   `agora`; within 15 minutes call `workspace_status` again on the same bridge (unverified: a bridge run by hand, not by an agent).
 - **See:** the second call answers without restarting the bridge (during the gap a call may fail with `mesh.unavailable`).
-- **Evidence so far:** none recorded.
+- **Evidence so far:** [2026-11-22 follow-ups](2026-11-22-real-machine-followups.md): macOS, a kept agent read the messages posted after `agora down` and `agora` (#965), each call over a fresh `agora mesh stdio`; the same running bridge reconnecting (this entry) is still unverified. The 2026-11-21 failure (#906) is in [macOS 2026-11-21](2026-11-21-real-machine-macos.md).
 
 ### RM-31 A read-only metrics token
 - **OS:** Linux, macOS, Windows.
@@ -584,7 +586,7 @@ not built: nothing to check.
   composer no longer says "Waiting for this turn to end." once the agent is Idle, and each waiting prompt is shown above its own answer,
   each answer its own message ("queued one", then "queued two", never "queued onequeued two"; #908); the mode switch opens a card at once (Setting: Approvals,
   Switch to: Turbo, "This covers this agent's session only.", Allow / Deny) and Mode shows "Waiting for your approval" ("Answer the
-  request to switch. Nothing has changed yet.") until Allow; then "Acts freely".
+  request to switch. Nothing has changed yet.") until Allow; then the red bolt, whose tooltip names the mode ("Because of: Mode: Turbo").
 - **Evidence so far:** [Linux 2026-11-21](2026-11-21-real-machine-linux.md): fail (#908: after Stop turn the tool call keeps spinning and the answers are glued). [Windows 2026-11-21](2026-11-21-real-machine-windows.md): fail (#908).
 
 ### RM-45 Plan limits of subscription agents

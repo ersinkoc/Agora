@@ -56,9 +56,10 @@ For an SSH-only machine, the hub can maintain a reverse tunnel and install and e
   reports. Run `agora doctor` on the machine for local diagnostics. [Agent manifests](manifests/agents/README.md)
 - **Coordinate across machines.** Agents use MCP to exchange messages, claim shared tasks and file leases,
   and hand off work. From a Backlog card on the web board, give a task to a running agent in that project
-  or start a new agent for it.
+  or start a new agent for it. In the TUI, `b` opens the board and gives a Backlog task to a running agent.
   Agents can request a helper on their own node with signed approval.
-  [Task board](docs/ux/task-board.md) · [Mesh tools](docs/specs/mesh-tools.md)
+  [Task board](docs/ux/task-board.md) · [Mesh tools](docs/specs/mesh-tools.md) ·
+  [Board and dispatch decision](docs/adr/0095-a-project-has-a-kanban-board-and-a-task-can-be-dispatched-to-an-agent.md)
 - **Reconnect to live agents.** Closing a client or losing the hub link leaves agent processes running.
   On Linux and macOS, unconfined terminal and structured agents launched through the background holder
   can also survive a node restart. Windows and confined agents rely on session resume when available.
@@ -88,8 +89,6 @@ tool calls, diffs, and approvals. See the [integration guide](docs/architecture.
   single executable from a signed package list, with confirmation at the local terminal. Terminal agent kinds
   can use the installed executable. Installation and updates from the web app are planned.
   [Agent package decision](docs/adr/0087-install-and-update-coding-agents-from-the-window.md)
-- **Task dispatch.** Giving a board task to an agent from the terminal client is planned.
-  [Board and dispatch decision](docs/adr/0095-a-project-has-a-kanban-board-and-a-task-can-be-dispatched-to-an-agent.md)
 - **Session tools.** Persistent, paged chat history and a preview of an agent's local web server are planned.
   [Chat history decision](docs/adr/0089-the-chat-history-survives-the-node-and-is-read-in-pages.md) ·
   [Web preview decision](docs/adr/0088-preview-an-agents-local-web-server-in-the-window.md)

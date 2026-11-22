@@ -40,13 +40,16 @@ describe('an Agents-list row (#945)', () => {
       expect(row.title.startsWith(a.name)).toBe(true); // the full name when it is cut
       expect(row.title).toContain('Shared');
       if (a.parentName) expect(cell.textContent).toContain(`started by ${a.parentName}`);
-      // Acts freely keeps its words at every width (a lone sign would read as the limit chip); the row wraps instead.
+      // An agent that acts without asking is one sign, a red bolt, never words; its meaning is its name, its tooltip and the row's title.
       expect(row.className).toContain('flex-wrap');
-      const badge = row.querySelector('[role="img"]') as HTMLElement;
-      expect(badge.getAttribute('aria-label')).toMatch(/^Runs without asking/);
-      const word = badge.querySelector('span[aria-hidden]') as HTMLElement;
-      expect(word.textContent).toBe('Acts freely');
-      expect(word.className).not.toContain('hidden');
+      const badge = row.querySelector('[data-no-ask]') as HTMLElement;
+      expect(badge.getAttribute('role')).toBe('img');
+      expect(badge.getAttribute('aria-label')).toMatch(/^Runs without asking: /);
+      expect(badge.textContent).toBe('');
+      expect(badge.className).toContain('text-risk');
+      expect(badge.className).toContain('flex-none');
+      expect(badge.hasAttribute('tabindex')).toBe(false); // inside the row's button, which stays the one stop
+      expect(row.title).toContain('Runs without asking');
     }
   });
 });

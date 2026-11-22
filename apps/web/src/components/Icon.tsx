@@ -22,6 +22,8 @@ const PATHS = {
   play: 'M5 3.5l7 4.5-7 4.5z',
   shieldOff: 'M8 2l5 2v4c0 3-2.2 5-5 6-2.8-1-5-3-5-6V4zM3 3l10 10',
   lock: 'M4 7.5h8v6H4zM5.5 7.5V5a2.5 2.5 0 0 1 5 0v2.5',
+  // An agent that acts without asking (NoAskBadge): a lightning bolt, never the warning sign the quota chip uses.
+  bolt: 'M9 1.5L3.5 9H8l-1 5.5L12.5 7H8z',
   // ADR-0068 layouts: split beside, split below, restore from maximized, the layout menu, more actions.
   splitRight: 'M2.5 3.5h11v9h-11zM8 3.5v9',
   splitDown: 'M2.5 3.5h11v9h-11zM2.5 8h11',

@@ -48,11 +48,14 @@ describe('a mode that skips permission questions', () => {
     expect(html).not.toContain('alertdialog');
     expect(html).not.toContain('Switch anyway');
   });
-  it('says "Acts freely" while the current mode is one that skips, and not when it is a safe one', () => {
-    expect(renderToStaticMarkup(<SessionBar part="controls" agentKey="n/a" session={{ ...session, currentMode: 'yolo' }} />)).toContain('Acts freely');
-    expect(renderToStaticMarkup(<SessionBar part="controls" agentKey="n/a" session={session} />)).not.toContain('Acts freely');
+  it('shows the acts-without-asking sign while the current mode is one that skips, naming the mode, and not when it is a safe one', () => {
+    const html = renderToStaticMarkup(<SessionBar part="controls" agentKey="n/a" session={{ ...session, currentMode: 'yolo' }} />);
+    expect(html).toContain('data-no-ask="session"');
+    expect(html).toContain('aria-label="Runs without asking: Acts without asking you first, until it ends or is switched back. Because of: Mode: ');
+    expect(html).not.toContain('Acts freely');
+    expect(renderToStaticMarkup(<SessionBar part="controls" agentKey="n/a" session={session} />)).not.toContain('data-no-ask');
   });
   it('does not repeat the badge of an agent that was started that way', () => {
-    expect(renderToStaticMarkup(<SessionBar part="controls" agentKey="n/a" session={{ ...session, currentMode: 'yolo' }} launchedFree />)).not.toContain('Acts freely');
+    expect(renderToStaticMarkup(<SessionBar part="controls" agentKey="n/a" session={{ ...session, currentMode: 'yolo' }} launchedFree />)).not.toContain('data-no-ask');
   });
 });

@@ -345,6 +345,9 @@ Codex reviewed this ADR at 4c81e007; the implementation applies its findings, wh
 5. **Error parameters.** `approval.scope_forbidden`, `approval.scope_unavailable` and `approval.adapter_outdated` carry no parameter (their
    text does not show the random approval id; the window knows which card it answered).
 6. **Event number.** `AgentAlwaysAllowed` is `Event.body` 69 (after 66 to 68, the agent and task events added since ADR-0090).
+
+Codex then reviewed the implementation (PR #1007 at e79a2011); its findings refine the text again, without changing a decision:
+
 7. **Confinement is the agent's own launch.** `confined_only` asks whether the agent's process was launched confined, never what the
    node's sandbox setting says now. The node records it on every launch path: confined only for an adapter it started itself under a
    sandbox the platform enforces in full; unconfined for one started without one, or run by the holder (which takes no adapter with a
@@ -378,7 +381,6 @@ Codex reviewed this ADR at 4c81e007; the implementation applies its findings, wh
    conversation entry. An always-only request is never answered from a one-line row (the fleet console, the phone's bar, the attention
    dialog); its full card shows the always button in the place of Allow.
 
-Codex then reviewed the implementation (PR #1007 at e79a2011); its findings refine the text again, without changing a decision:
 
 ## Consequences
 
