@@ -81,15 +81,22 @@ export function readCode(hash: string): { code?: string; rest: string } {
 // machine), and is one set at all. An older hub answers with the page itself or nothing: then no password is asked.
 export interface SignInInfo { passwordRequired: boolean; passwordSet: boolean }
 
-export async function signInInfo(fetcher: typeof fetch = fetch): Promise<SignInInfo> {
+// `undefined` when there is no answer: the hub is unreachable, failed, or is an older hub that answers with the page itself.
+export async function readSignInInfo(fetcher: typeof fetch = fetch): Promise<SignInInfo | undefined> {
   try {
     const r = await fetcher('/api/session', { method: 'GET', headers: { accept: 'application/json' } });
-    if (!r.ok) return { passwordRequired: false, passwordSet: false };
+    if (!r.ok) return undefined;
     const body = (await r.json()) as { passwordRequired?: unknown; passwordSet?: unknown };
     return { passwordRequired: body.passwordRequired === true, passwordSet: body.passwordSet === true };
   } catch {
-    return { passwordRequired: false, passwordSet: false };
+    return undefined;
   }
+}
+
+// What the sign-in screen goes by: without an answer, no password is asked (the hub still refuses a sign-in that needs one).
+export const NO_PASSWORD: SignInInfo = { passwordRequired: false, passwordSet: false };
+export async function signInInfo(fetcher: typeof fetch = fetch): Promise<SignInInfo> {
+  return (await readSignInInfo(fetcher)) ?? NO_PASSWORD;
 }
 
 // Ends this session at the hub ("Lock" in the window, or the idle lock) and forgets it here. Agents are not touched.

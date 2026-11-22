@@ -22,6 +22,7 @@ fn main() -> ExitCode {
         }
         Some("run") => run(&args[1..]),
         Some("footprint") => footprint(&args[1..]),
+        Some("history") => history(&args[1..]),
         Some("bestof") => bestof(&args[1..]),
         Some("compare") => cmp(&args[1..]),
         _ => {
@@ -181,6 +182,85 @@ fn cmp(args: &[String]) -> ExitCode {
             eprintln!("agora-bench: {e}");
             ExitCode::from(2)
         }
+    }
+}
+
+/// `agora-bench history [--runs N] [--commit SHA] [--out FILE] [--check]`
+/// Measures the history replay a window may ask for (ADR-0100 decision 2): the lock hold for a full 2000-line, 200-column history,
+/// the bytes per attach, and the terminal snapshot after switching with a full history (budget 150 ms). With `--check`, exits 1 if
+/// the switch is over that budget.
+fn history(args: &[String]) -> ExitCode {
+    let (mut runs, mut commit, mut out, mut check) = (20usize, "unknown".to_string(), None, false);
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--runs" => {
+                runs = it
+                    .next()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(runs)
+                    .max(1)
+            }
+            "--commit" => commit = it.next().cloned().unwrap_or(commit),
+            "--out" => out = it.next().cloned(),
+            "--check" => check = true,
+            _ => {
+                eprintln!(
+                    "usage: agora-bench history [--runs N] [--commit SHA] [--out FILE] [--check]"
+                );
+                return ExitCode::from(2);
+            }
+        }
+    }
+    let report = match agora_bench::history::run(&commit, runs) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("agora-bench: history: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    for c in &report.capture {
+        println!(
+            "{:<28} kept {:>4} replayed {:>4} lines | lock p50 {:>6.2} ms max {:>6.2} ms | format p50 {:>6.2} ms | {:>7} bytes in {:>2} frames",
+            c.content, c.kept_lines, c.replayed_lines, c.lock_p50_ms, c.lock_max_ms, c.format_p50_ms, c.bytes, c.frames
+        );
+    }
+    println!(
+        "attach with a full history: {} bytes of history in {} frames, {} bytes of repaint",
+        report.attach_history_bytes, report.attach_history_frames, report.attach_repaint_bytes
+    );
+    let over =
+        report.switch_history_p95_ms > 150.0 || report.switch_history_new_connection_p95_ms > 150.0;
+    println!(
+        "snapshot after switching, full history: p50 {:.2} ms p95 {:.2} ms (budget 150 ms) {}; without history: p50 {:.2} ms p95 {:.2} ms",
+        report.switch_history_p50_ms,
+        report.switch_history_p95_ms,
+        if over { "OVER BUDGET" } else { "ok" },
+        report.switch_plain_p50_ms,
+        report.switch_plain_p95_ms
+    );
+    println!(
+        "  on a new connection per subscription (as the uplink routes one): full history p95 {:.2} ms, without history p95 {:.2} ms",
+        report.switch_history_new_connection_p95_ms, report.switch_plain_new_connection_p95_ms
+    );
+    if let Some(path) = out {
+        match serde_json::to_string_pretty(&report) {
+            Ok(j) => {
+                if let Err(e) = std::fs::write(&path, j) {
+                    eprintln!("agora-bench: {path}: {e}");
+                    return ExitCode::from(1);
+                }
+            }
+            Err(e) => {
+                eprintln!("agora-bench: {e}");
+                return ExitCode::from(1);
+            }
+        }
+    }
+    if check && over {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
     }
 }
 

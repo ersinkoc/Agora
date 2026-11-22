@@ -151,3 +151,8 @@ The approval card an agent's `agent_start` with `options: ["skip-permissions"]` 
 ![](helper-no-ask/helper-no-ask-card-dark.png) ![](helper-no-ask/helper-no-ask-card-light.png)
 
 ![](helper-no-ask/helper-no-ask-confirm-dark.png) ![](helper-no-ask/helper-no-ask-confirm-light.png)
+
+A chat agent after Stop turn with two messages waiting (#908): the step that ran reads "Stopped" (a still square, no spinner), each
+waiting message is above its own answer, and the input no longer says it waits:
+
+![](0908-stop-turn-queue-dark.png) ![](0908-stop-turn-queue-light.png)

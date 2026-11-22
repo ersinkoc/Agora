@@ -75,6 +75,51 @@ fn a_confined_process_writes_only_where_it_was_allowed() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn an_unopenable_git_config_leaves_the_launch_environment_alone() {
+    use std::os::unix::fs::PermissionsExt;
+
+    if !sandbox_supported() {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("agora-unreadable-git-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("git-config");
+    std::fs::write(&file, "[user]\nname = Ada Example\n").unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::File::open(&file).is_ok() {
+        // A process with CAP_DAC_OVERRIDE cannot reproduce this open failure.
+        let _ = std::fs::remove_dir_all(dir);
+        return;
+    }
+    let sb = Sandbox {
+        read: ["/usr", "/lib", "/lib64", "/bin"].map(Into::into).to_vec(),
+        write: vec!["/dev".into()],
+        git_config: Some(file),
+        ..Default::default()
+    };
+
+    let mut cmd = std::process::Command::new("/bin/sh");
+    assert!(agora_platform::confine_command(&mut cmd, &sb)
+        .unwrap()
+        .is_none());
+
+    let script = "printf 'git-config=%s\\n' \"$GIT_CONFIG_GLOBAL\"";
+    let mut cfg = PtyConfig::new(vec!["/bin/sh".into(), "-c".into(), script.into()]);
+    cfg.sandbox = Some(sb);
+    cfg.env
+        .push(("GIT_CONFIG_GLOBAL".into(), "original".into()));
+    let pty = spawn(&cfg).unwrap();
+    let mut bytes = Vec::new();
+    while let Ok(chunk) = pty.output().recv_timeout(Duration::from_secs(2)) {
+        bytes.extend(chunk);
+    }
+    let out = String::from_utf8_lossy(&bytes);
+    assert!(out.contains("git-config=original"), "{out}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn asking_for_a_sandbox_that_cannot_be_enforced_is_an_error_not_a_free_pass() {
     if sandbox_supported() {

@@ -16,6 +16,7 @@ dependencies = [
  "agora-platform",
  "agora-protocol",
  "agora-tui",
+ "agora-vt",
  "getrandom",
  "prost",
  "ring",

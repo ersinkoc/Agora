@@ -1,20 +1,26 @@
 // What a turn of the mouse wheel (or a two-finger swipe) does in a terminal, decided as a real terminal does. Pure: the renderer passes
 // what the program asked for and the event, and does what this says.
 //
+//   Ctrl held (or a trackpad pinch)   the browser's own zoom; nothing reaches the terminal
 //   mouse reporting on, plain wheel   the program gets the wheel as mouse buttons 4 and 5 (xterm sends them)
 //   mouse reporting on, Shift held    the window scrolls its own history (Shift is the "ignore the program's mouse" key)
 //   alternate screen, no mouse        arrow keys (xterm's alternateScroll, DEC mode 1007): `less` and `man` scroll with the wheel
 //   otherwise                         the history scrolls
 //
-// A wheel notch moves three lines; a trackpad moves the lines its swipe covers (one line per cell height), and keeps the
-// remainder so a slow swipe still moves.
+// A wheel notch moves three lines. A trackpad moves the lines its swipe covers: on the main screen xterm.js's own scroll bar scrolls
+// it by its pixels, as before; elsewhere one line per row height, keeping the remainder so a slow swipe still moves.
 
 export interface WheelEventLike {
   deltaY: number;
+  /** Browsers turn Shift+wheel into a sideways scroll: `deltaY` is 0 and this carries the turn. */
+  deltaX?: number;
   /** 0 pixels, 1 lines, 2 pages. */
   deltaMode: number;
-  /** The legacy field: a multiple of 120 for a wheel notch, anything for a trackpad. */
+  /** The legacy field: 120 per notch in Chromium's wheel; three times `deltaY` in Firefox and WebKit, where it says nothing more. */
   wheelDeltaY?: number;
+  wheelDeltaX?: number;
+  /** Milliseconds; events close together are one gesture. */
+  timeStamp?: number;
   shiftKey: boolean;
   ctrlKey: boolean;
   altKey: boolean;
@@ -30,8 +36,10 @@ export interface WheelState {
 }
 
 export type WheelAction =
-  /** Let the renderer's own handling run (it sends the mouse report). */
+  /** Let the terminal's own handling run (the mouse report, or its scroll bar for a trackpad on the main screen). */
   | { kind: 'pass' }
+  /** Not the terminal's: the browser does what it does with it (Ctrl+wheel and a pinch zoom the page). */
+  | { kind: 'browser' }
   /** Do nothing. */
   | { kind: 'ignore' }
   /** Scroll the history by this many lines (negative: towards older lines). */
@@ -40,31 +48,74 @@ export type WheelAction =
   | { kind: 'arrows'; count: number; up: boolean };
 
 export const LINES_PER_NOTCH = 3;
+/** Wheel events closer together than this are one gesture: a swipe and its momentum, or a wheel spun fast. */
+export const GESTURE_GAP_MS = 200;
+/** A step smaller than this is never a notch. */
+const NOTCH_MIN_PX = 40;
 
-// A notch is a big step that the legacy field counts in whole 120s; a trackpad sends small steps (a browser may still report the
-// legacy field as a multiple of 120 for them, so the size is checked too).
-const isNotch = (e: WheelEventLike) => e.deltaMode === 0 && Math.abs(e.deltaY) >= 40 && !!e.wheelDeltaY && Math.abs(e.wheelDeltaY) % 120 === 0;
+// Chromium's wheel counts the legacy field in whole 120s, whatever the pixel size of its notch. Firefox and WebKit make it three times
+// the pixels, for a wheel and a trackpad alike, so there it counts nothing.
+function legacyNotches(e: WheelEventLike): number {
+  const legacy = Math.abs(e.wheelDeltaY ?? 0);
+  if (!legacy || Math.abs(legacy - 3 * Math.abs(e.deltaY)) < 1.5 || legacy % 120 !== 0) return 0;
+  return legacy / 120;
+}
+
+// Tells a wheel's notches from a trackpad's pixels, in pixel mode, in any engine, without knowing a device's notch size. A trackpad's
+// gesture starts with small steps and keeps going (momentum included) with steps of any size; a wheel turns in steps of one size (a
+// multiple when the engine joins several). So: a big step after a pause is a notch, and its size is the notch's; within a gesture a step
+// is a notch only after a notch and only as a whole multiple of that size; anything else, and everything after a trackpad's step in the
+// same gesture, is pixels. Before, any step of 40 px or more was a notch, and a fast swipe in Firefox or WebKit jumped three lines at a
+// time. Not driven by a real trackpad or wheel here: the browsers' synthetic wheel is a notch of 100 px.
+export class NotchDetector {
+  private last: number | undefined;
+  private notch = false;
+  private size = 0;
+
+  /** How many notches this pixel-mode event is; 0 for a trackpad's pixels. */
+  classify(e: WheelEventLike): number {
+    const t = e.timeStamp;
+    const pause = t === undefined || this.last === undefined || t - this.last > GESTURE_GAP_MS;
+    if (t !== undefined) this.last = t;
+    const px = Math.abs(e.deltaY);
+    let n = 0;
+    if (px >= NOTCH_MIN_PX && (pause || this.notch)) {
+      const legacy = legacyNotches(e);
+      if (pause) { n = legacy || 1; this.size = px / n; }
+      else {
+        const r = px / this.size;
+        n = legacy || (Math.round(r) >= 1 && Math.abs(r - Math.round(r)) < 0.05 ? Math.round(r) : 0);
+      }
+    }
+    this.notch = n > 0;
+    return n;
+  }
+}
 
 export class Wheel {
   private carry = 0;
+  private notches = new NotchDetector();
 
-  /** Lines (a fraction) this event covers; positive is down (newer). */
-  private lines(e: WheelEventLike, s: WheelState): number {
-    if (e.deltaMode === 1) return e.deltaY;
-    if (e.deltaMode === 2) return e.deltaY * s.rows;
-    if (isNotch(e)) return (Math.sign(e.deltaY) * Math.abs((e.wheelDeltaY ?? 0) / 120)) * LINES_PER_NOTCH;
-    return e.deltaY / Math.max(1, s.cellHeight);
-  }
-
-  decide(e: WheelEventLike, s: WheelState): WheelAction {
-    if (e.deltaY === 0) return { kind: 'ignore' };
-    const exact = this.lines(e, s);
+  decide(raw: WheelEventLike, s: WheelState): WheelAction {
+    // Ctrl+wheel and a trackpad pinch (which browsers send as Ctrl+wheel) zoom, as everywhere else in the window.
+    if (raw.ctrlKey) return { kind: 'browser' };
+    // Shift+wheel arrives sideways; it is the history's (or the program's arrows').
+    const e = raw.shiftKey && raw.deltaY === 0 && raw.deltaX ? { ...raw, deltaY: raw.deltaX, wheelDeltaY: raw.wheelDeltaX } : raw;
+    // A sideways swipe is not the terminal's to decide.
+    if (e.deltaY === 0) return { kind: 'pass' };
+    const n = e.deltaMode === 0 ? this.notches.classify(e) : 0;
+    const mouseMode = s.mouse && !e.shiftKey;
+    // A trackpad over the main screen: xterm.js's scroll bar scrolls it smoothly by its pixels.
+    if (!mouseMode && !s.altScreen && !e.shiftKey && e.deltaMode === 0 && n === 0) return { kind: 'pass' };
+    const exact = e.deltaMode === 1 ? e.deltaY
+      : e.deltaMode === 2 ? e.deltaY * s.rows
+      : n ? Math.sign(e.deltaY) * n * LINES_PER_NOTCH
+      : e.deltaY / Math.max(1, s.cellHeight);
     this.carry += exact;
     const whole = Math.trunc(this.carry);
     // Report mouse wheel events only when a whole line of swipe has gone by, so a trackpad does not flood the program.
-    const mouseMode = s.mouse && !e.shiftKey;
     if (mouseMode) {
-      if (isNotch(e) || e.deltaMode !== 0 || whole !== 0) { this.carry -= whole; return { kind: 'pass' }; }
+      if (n || e.deltaMode !== 0 || whole !== 0) { this.carry -= whole; return { kind: 'pass' }; }
       return { kind: 'ignore' };
     }
     if (whole === 0) return { kind: 'ignore' };

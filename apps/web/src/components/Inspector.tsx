@@ -152,7 +152,7 @@ export function Details({ tab, fleet = [], now = Date.now(), attention, approval
     {tab === 'board' && <div className="grid gap-2">{boards.map(b => <ProjectBoard key={b.projectId} board={b} machines={boardMachines} />)}</div>}
     {tab === 'messages' && (messages.length === 0 ? <EmptyState icon="chat" title={t('empty-messages-title')} hint={t('empty-messages-hint')} /> : <ul className="m-0 grid list-none gap-2 p-0">
         {messages.map((m, i) => <li key={`${m.atMs}-${i}`} className="rounded-xs border border-line bg-surface-0 p-2.5">
-          <div className="text-xs"><strong>{m.from}</strong> <span className="inline-block rtl:-scale-x-100" aria-hidden="true">→</span> <strong>{m.to}</strong>{m.crossMachine ? <span className="ide-chip ms-1.5">{t('message-cross')}</span> : null}</div>
+          <div className="text-xs"><strong>{m.from}</strong> <span className="inline-block rtl:-scale-x-100" aria-hidden="true">→</span> <strong>{m.to}</strong>{m.crossMachine ? <span className="ide-chip ms-1.5">{t('message-cross')}</span> : null}{m.via ? <span className="ide-chip ms-1.5">{t('message-via', { machine: m.via })}</span> : null}</div>
           <div className="mt-1 break-words text-muted">{m.body}</div>
         </li>)}
       </ul>)}

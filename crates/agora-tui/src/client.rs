@@ -630,6 +630,7 @@ impl Session {
             command_request::Command::TerminalSubscribe(agora_protocol::v1::TerminalSubscribe {
                 terminal_id: terminal_id.to_string(),
                 format: String::new(),
+                history_lines: 0,
             }),
         )
     }

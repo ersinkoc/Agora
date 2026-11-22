@@ -5,7 +5,7 @@
 //! when the hub is unreachable and the caller buffers the events (AGENTS.md, nodes are autonomous). Time is
 //! passed in, so restart and detection timing is testable without sleeping.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -168,8 +168,11 @@ pub enum SupervisorEvent {
         attempt: u32,
         after: Duration,
     },
+    /// The node stopped restarting the agent. `exit_code` (#902): how its last process ended, as reported (`AgentExited`), when the
+    /// node knows it; `None` when it does not (its status could not be read, or the last restart did not start).
     GaveUp {
         agent: AgentId,
+        exit_code: Option<i32>,
     },
     Stopped {
         agent: AgentId,
@@ -189,6 +192,13 @@ pub enum SupervisorEvent {
     /// An adapter process died. Its agent is `unknown` until it is started again.
     AdapterCrashed {
         agent: AgentId,
+    },
+    /// ADR-0090, #908: a prompt that waited behind a turn became the turn and is being sent now, before anything the agent says in
+    /// answer can arrive. `tag` is what the caller gave when it queued it (the id of its chat entry); [`Self::PromptDequeued`]
+    /// follows with the outcome.
+    PromptSending {
+        agent: AgentId,
+        tag: u64,
     },
     /// ADR-0090: a prompt that waited behind a turn was sent (`sent`), or could not be (the adapter refused it). `tag` is what the
     /// caller gave when it queued it (the id of its chat entry).
@@ -220,6 +230,12 @@ pub struct Reattach {
     pub capabilities: Vec<String>,
     /// The state the ledger last saw it in.
     pub state: Option<AgentState>,
+    /// #932: what it last reported of its session (modes and models, config options, commands), as the last node recorded it. The
+    /// adapter is not initialised again and does not report them again by itself, so they are the agent's until it reports new ones:
+    /// a mode or option in use that makes it act without asking keeps it shown so, and checked so (`skips_permissions_now`).
+    pub options: SessionOptions,
+    pub config: Vec<ConfigOption>,
+    pub commands: Vec<AdapterCommand>,
 }
 
 /// ADR-0090: the most prompts that wait behind a turn, per agent (`agent.queue_full`).
@@ -324,6 +340,8 @@ pub enum SupervisorError {
     Git(GitError),
     /// Starting the process failed; the text is for logs only.
     Spawn(String),
+    /// RM-19 (#903): the start failed and this machine cannot find the kind's program: `(kind, program)`. Nothing was started.
+    ProgramMissing(String, String),
     /// ADR-0058: the adapter answered with one of the stable reasons the node passes on (`adapter.agent_exited`,
     /// `adapter.agent_refused`, `adapter.option_refused`), with its parameters already checked and bounded.
     Adapter {
@@ -397,6 +415,9 @@ impl SupervisorError {
                 eprintln!("agent start failed: {text:?}");
                 Error::new(ErrorCode::Internal).with("incident_id", "unassigned")
             }
+            Self::ProgramMissing(k, p) => Error::new(ErrorCode::AgentProgramMissing)
+                .with("kind", k.as_str())
+                .with("program", p.as_str()),
             Self::Adapter { code, params } => params
                 .iter()
                 .fold(Error::new(ErrorCode::parse(code)), |e, (k, v)| {
@@ -869,6 +890,9 @@ pub struct Supervisor {
     skip_permissions: SkipPermissions,
     /// ADR-0079: the terminal holder agents are started through, when this node has one (Unix); `None` runs every agent in the node.
     holder: Option<std::sync::Arc<HolderHub>>,
+    /// Agents taken up from the holder whose launch options came from the ledger without their arguments (`set_kept_launch`): their
+    /// next process (a restart after a crash) runs without them, so it is not shown with them.
+    kept_launch: BTreeSet<AgentId>,
 }
 
 impl Supervisor {
@@ -888,6 +912,7 @@ impl Supervisor {
             parents: BTreeMap::new(),
             skip_permissions: SkipPermissions::default(),
             holder: None,
+            kept_launch: BTreeSet::new(),
         }
     }
 
@@ -973,6 +998,10 @@ impl Supervisor {
         e.adapter = Some(adapter);
         e.session_id = reattach.session_id;
         e.capabilities = reattach.capabilities;
+        // Bounded and judged again as a report is (`perm`): the file is the node's own, the words in it are the adapter's.
+        e.options = bounded_options(reattach.options);
+        e.rich.config = bounded_config(reattach.config);
+        e.rich.commands = bounded_commands(reattach.commands);
         e.mesh = mesh;
         e.running = true;
         if let Some(state) = reattach.state {
@@ -1046,6 +1075,75 @@ impl Supervisor {
                 e.agent.observe(state, StateSource::Screen);
             }
         }
+    }
+
+    /// ADR-0079/0093 with ADR-0059: an agent taken up from the holder is the process that was started with these launch options (the
+    /// ledger's record of its `AgentStarted`), so it is shown with them, and acting without asking when it does (#907). It skips when
+    /// the launch said so (`recorded_skips`), when this node's manifest says one of the options does, and when an option is no longer
+    /// in the manifest (it cannot be told, so it is shown as skipping). Their arguments are not known again: a restart after a crash
+    /// runs without them, as a resume does, and then the agent is shown without them (see `restart`).
+    pub fn set_kept_launch(&mut self, id: &AgentId, ids: &[String], recorded_skips: bool) {
+        let kind = self
+            .agents
+            .get(id)
+            .map(|e| e.agent.kind.clone())
+            .or_else(|| self.adapters.get(id).map(|e| e.agent.kind.clone()));
+        let Some(kind) = kind else {
+            return;
+        };
+        let manifest = self.kinds.get(&kind).map(|k| &k.manifest);
+        let skips = recorded_skips
+            || ids.iter().any(|o| {
+                manifest
+                    .and_then(|m| m.launch_option(o))
+                    .is_none_or(|o| o.skips_permissions)
+            });
+        let launch = LaunchChoice {
+            ids: ids.to_vec(),
+            args: Vec::new(),
+            skips_permissions: skips,
+        };
+        if let Some(e) = self.agents.get_mut(id) {
+            e.launch = launch;
+        } else if let Some(e) = self.adapters.get_mut(id) {
+            e.launch = launch;
+        }
+        if !ids.is_empty() {
+            self.kept_launch.insert(id.clone());
+        }
+    }
+
+    /// #932: what an adapter agent reported of its session, as this node holds it now (bounded and judged, also when it was put back
+    /// from the ledger at a take-up), as the events a report gives. Nothing for an agent that is not hosted by an adapter, and nothing
+    /// for a part it never reported.
+    pub fn session_events(&self, id: &AgentId) -> Vec<SupervisorEvent> {
+        let Some(e) = self.adapters.get(id) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        let event = |event| SupervisorEvent::Adapter {
+            agent: id.clone(),
+            event,
+        };
+        if e.options != SessionOptions::default() {
+            out.push(event(AdapterEvent::Options {
+                session_id: e.session_id.clone(),
+                options: e.options.clone(),
+            }));
+        }
+        if !e.rich.config.is_empty() {
+            out.push(event(AdapterEvent::Config {
+                session_id: e.session_id.clone(),
+                options: e.rich.config.clone(),
+            }));
+        }
+        if !e.rich.commands.is_empty() {
+            out.push(event(AdapterEvent::Commands {
+                session_id: e.session_id.clone(),
+                commands: e.rich.commands.clone(),
+            }));
+        }
+        out
     }
 
     /// ADR-0060: agent ids start at `next` (the session ledger's), so an id is never given twice across the node's restarts.
@@ -1289,11 +1387,7 @@ impl Supervisor {
             .kinds
             .get(kind)
             .and_then(|k| k.manifest.sandbox.as_ref());
-        let mut profile = self.sandbox.profile(kind, needs, worktree, program)?;
-        // ADR-0078: the file of git settings the node wrote for this start, readable and not writable.
-        let file = self.sandbox.git_config(worktree, &profile.write);
-        profile.read.extend(file);
-        Some(profile)
+        self.sandbox.profile(kind, needs, worktree, program)
     }
 
     /// The confinement of one adapter agent of `kind` ([`Self::sandbox_for`]), refused as a terminal agent's is
@@ -1304,9 +1398,10 @@ impl Supervisor {
         worktree: &Path,
         program: &str,
     ) -> Result<Option<agora_platform::Sandbox>, SupervisorError> {
-        let profile = self.sandbox_for(kind, worktree, program);
-        if let Some(p) = &profile {
+        let mut profile = self.sandbox_for(kind, worktree, program);
+        if let Some(p) = &mut profile {
             self.refuse_reachable(kind, p)?;
+            p.git_config = self.sandbox.git_config(p);
         }
         Ok(profile)
     }
@@ -1700,7 +1795,8 @@ impl Supervisor {
                         self.credential_vars(&req.kind),
                         folder,
                     )
-                });
+                })
+                .map_err(|e| self.program_missing(&req.kind, e));
             let (adapter, session_id, capabilities) = match launched {
                 Ok(l) => l,
                 Err(e) => {
@@ -1950,7 +2046,8 @@ impl Supervisor {
                     self.credential_vars(&req.kind),
                     None,
                 )
-            });
+            })
+            .map_err(|e| self.program_missing(&req.kind, e));
         let (adapter, session_id, capabilities) = match result {
             Ok(started) => started,
             Err(error) => {
@@ -2019,7 +2116,7 @@ impl Supervisor {
                         sent: was_sent,
                     });
                     if let Some(next) = next {
-                        begin_send(e, &id, next, &sent);
+                        begin_send(e, &id, next, &sent, events);
                     }
                 }
                 None => events.push(SupervisorEvent::PromptDequeued {
@@ -2032,7 +2129,7 @@ impl Supervisor {
         for (id, e) in &mut self.adapters {
             // ADR-0090: a cancelled turn the adapter never ended is over after the grace.
             if let Some(next) = e.rich.expire(now) {
-                begin_send(e, id, next, &sent);
+                begin_send(e, id, next, &sent, events);
             }
             let polled = match &e.adapter {
                 Some(adapter) if e.running => adapter.poll(),
@@ -2047,7 +2144,7 @@ impl Supervisor {
                         // out when it ends, one per end.
                         if e.capabilities.iter().any(|c| c == "turns") {
                             if let Some(next) = e.rich.observe(state, now) {
-                                begin_send(e, id, next, &sent);
+                                begin_send(e, id, next, &sent, events);
                             }
                         }
                         if e.agent.observe(state, StateSource::Reported) {
@@ -2124,8 +2221,14 @@ impl Supervisor {
                                 state: AgentState::Unknown,
                             });
                         }
+                        // #902: how its process ended, for the end the node reports if it gives up on it now. A crash path only
+                        // (rare), and at most 50 ms under this lock; a held adapter's is what its output's reader heard from the holder, never a question.
+                        let status = e
+                            .adapter
+                            .as_mut()
+                            .and_then(|a| a.exit_status(Duration::from_millis(50)));
                         events.push(SupervisorEvent::AdapterCrashed { agent: id.clone() });
-                        schedule_adapter_restart(id, e, now, &policy, events);
+                        schedule_adapter_restart(id, e, now, &policy, status, events);
                     }
                     other => events.push(SupervisorEvent::Adapter {
                         agent: id.clone(),
@@ -2166,6 +2269,7 @@ impl Supervisor {
             .map(|e| self.credential_vars(&e.agent.kind))
             .unwrap_or_default();
         let holder = self.holder.clone();
+        let kept_launch = self.kept_launch.contains(id);
         let Some(e) = self.adapters.get_mut(id) else {
             return;
         };
@@ -2199,10 +2303,15 @@ impl Supervisor {
                 e.rich.forget();
                 e.running = true;
                 e.agent.process_restarted();
+                // As for a terminal agent (`restart`): one taken up from the holder restarts without its options' arguments.
+                if kept_launch {
+                    e.launch = LaunchChoice::default();
+                    self.kept_launch.remove(id);
+                }
                 events.push(SupervisorEvent::Started { agent: id.clone() });
                 events.extend(session_report(&e.agent));
             }
-            Err(_) => schedule_adapter_restart(id, e, now, &policy, events),
+            Err(_) => schedule_adapter_restart(id, e, now, &policy, None, events),
         }
     }
 
@@ -2771,9 +2880,10 @@ impl Supervisor {
             // ADR-0083: what points at a socket the user's session offers is not inherited by a confined agent.
             cfg.env_remove.extend(self.sandbox.scrubbed_env());
         }
-        // ADR-0082 and ADR-0084: checked with the final read grants (the private configuration folder included).
-        if let Some(profile) = &cfg.sandbox {
+        // Check the final ordinary grants before writing the file for this launch (ADR-0098).
+        if let Some(profile) = &mut cfg.sandbox {
             self.refuse_reachable(kind, profile)?;
+            profile.git_config = self.sandbox.git_config(profile);
         }
         if let Some(k) = self.kinds.get(kind) {
             cfg.env = k
@@ -2792,9 +2902,6 @@ impl Supervisor {
         for (name, value) in plan.set {
             cfg.env.retain(|(k, _)| k != &name);
             cfg.env.push((name, value.expose().to_string()));
-        }
-        if let Some(profile) = &cfg.sandbox {
-            cfg.env.extend(git_env(profile, worktree));
         }
         if cfg.sandbox.is_some() && agora_platform::PRIVATE_TEMP {
             let temp = crate::sandbox::agent_temp(worktree).display().to_string();
@@ -2828,7 +2935,7 @@ impl Supervisor {
                     self.sandbox.level.name(),
                     why.token(),
                 ),
-                None => SupervisorError::Spawn(e.to_string()),
+                None => self.program_missing(kind, SupervisorError::Spawn(e.to_string())),
             }
         })?;
         TerminalHandle::start(pty, self.cfg.terminal)
@@ -2889,8 +2996,8 @@ impl Supervisor {
                 // The link failed: the holder may have started the agent all the same. Ask before anything else is done: an agent it
                 // has is ended (the node never got its terminal) and only then is another start made, so two copies never run. When
                 // that cannot be settled the start fails rather than run a second copy, unless the holder itself is gone.
-                Err(_) => {
-                    if session.end_agent(id.as_str()).is_ok() || session.holder_ended() {
+                Err(e) => {
+                    if session.end_agent(id.as_str()).is_ok() || session.ended_after(&e) {
                         continue;
                     }
                     return Some(Err(SupervisorError::Spawn("holder link failed".into())));
@@ -2981,7 +3088,10 @@ impl Supervisor {
             } else {
                 entry.gave_up = true;
                 set_state(entry, AgentState::Unknown, StateSource::Reported, events);
-                events.push(SupervisorEvent::GaveUp { agent: id.clone() });
+                events.push(SupervisorEvent::GaveUp {
+                    agent: id.clone(),
+                    exit_code: status.code.or_else(|| status.signal.map(|s| -s)),
+                });
             }
             return;
         }
@@ -3021,6 +3131,7 @@ impl Supervisor {
         );
         // A restart of a process that died is never a resume by the node after its own stop: no "carry on" message here.
         let fresh_next = entry.fresh_next;
+        let kept_launch = self.kept_launch.contains(id);
         let (argv, native, fresh, _) =
             self.argv_for_resume(&kind, session.as_deref(), false, fresh_next);
         // F1020: a selected folder is held again, so a restart never follows a link swapped in for it since the agent started.
@@ -3042,6 +3153,12 @@ impl Supervisor {
                 entry.pacer = Pacer::default();
                 entry.next_check = now;
                 entry.agent.process_restarted();
+                // An agent taken up from the holder knows its launch options but not their arguments (`set_kept_launch`): the
+                // restarted process runs without them, so it is not shown with them any more.
+                if kept_launch {
+                    entry.launch = LaunchChoice::default();
+                    self.kept_launch.remove(id);
+                }
                 // A new session when its own could not be continued (ADR-0060): that one is its session now.
                 if !native {
                     entry.agent.session = fresh;
@@ -3061,7 +3178,10 @@ impl Supervisor {
                     });
                 } else {
                     entry.gave_up = true;
-                    events.push(SupervisorEvent::GaveUp { agent: id.clone() });
+                    events.push(SupervisorEvent::GaveUp {
+                        agent: id.clone(),
+                        exit_code: None,
+                    });
                 }
             }
         }
@@ -3290,6 +3410,28 @@ impl Supervisor {
         self.parents.remove(id);
     }
 
+    /// RM-19 (#903): a start that failed without a stable reason of its own (its process could not be started, or an adapter or the
+    /// ACP bridge ended before it answered) for a kind whose program this machine cannot find is said as that
+    /// (`agent.program_missing`), by the same check that marks the kind "not installed" ([`Self::kinds`]), instead of as an internal
+    /// error. The cause still goes to the node's log.
+    fn program_missing(&self, kind: &str, e: SupervisorError) -> SupervisorError {
+        let SupervisorError::Spawn(text) = &e else {
+            return e;
+        };
+        let Some(program) = self
+            .kinds
+            .get(kind)
+            .and_then(|k| crate::manifests::program(&k.manifest))
+        else {
+            return e;
+        };
+        if crate::doctor::locate_in(&agora_adapters::package::agora_home(), program).is_some() {
+            return e;
+        }
+        eprintln!("agent start failed: {text:?}");
+        SupervisorError::ProgramMissing(kind.to_string(), program.to_string())
+    }
+
     /// Start a stopped (or given-up) agent again in its worktree.
     pub fn resume(
         &mut self,
@@ -3359,7 +3501,8 @@ impl Supervisor {
                 mesh.as_ref(),
                 self.credential_vars(&entry.agent.kind),
                 folder.as_ref(),
-            );
+            )
+            .map_err(|e| self.program_missing(&entry.agent.kind, e));
             let (adapter, session_id, capabilities) = match launched {
                 Ok(l) => l,
                 Err(e) => {
@@ -3830,8 +3973,19 @@ fn bounded_options(o: SessionOptions) -> SessionOptions {
 /// ADR-0090: a queued prompt becomes the turn. The send itself is made on a thread of its own, so a hung adapter cannot stall the tick
 /// (which holds the supervisor's lock); its outcome comes back through `sent`, with the turn's generation, and the next poll reports
 /// it (once) and, when it failed, goes on with the next prompt.
-fn begin_send(e: &AdapterEntry, id: &AgentId, next: Next, sent: &SentResults) {
+fn begin_send(
+    e: &AdapterEntry,
+    id: &AgentId,
+    next: Next,
+    sent: &SentResults,
+    events: &mut Vec<SupervisorEvent>,
+) {
     let (next, generation) = next;
+    // #908: said before the send starts, so the conversation marks where this turn begins ahead of anything the agent answers.
+    events.push(SupervisorEvent::PromptSending {
+        agent: id.clone(),
+        tag: next.tag,
+    });
     let caller = e
         .adapter
         .as_ref()
@@ -4087,9 +4241,6 @@ fn launch_adapter(
     if let Some(profile) = &mut sandbox {
         own_socket(profile, mesh.map(|m| m.socket.as_path()));
     }
-    if let Some(profile) = &sandbox {
-        env.extend(git_env(profile, worktree));
-    }
     // A confined adapter works in its own private temporary folder, as a confined terminal agent does.
     if sandbox.is_some() && agora_platform::PRIVATE_TEMP {
         let temp = crate::sandbox::agent_temp(worktree).display().to_string();
@@ -4183,8 +4334,8 @@ fn launch_held_adapter(
             // The link failed: the holder may have started it all the same. Ask before anything else is done: one it has is ended and
             // only then is another start made, so two copies never run; when that cannot be settled the start fails, unless the holder
             // itself is gone.
-            Err(_) => {
-                if session.end_agent(agent.as_str()).is_ok() || session.holder_ended() {
+            Err(e) => {
+                if session.end_agent(agent.as_str()).is_ok() || session.ended_after(&e) {
                     continue;
                 }
                 return Some(Err(SupervisorError::Spawn("holder link failed".into())));
@@ -4267,29 +4418,23 @@ fn open_session(
     Ok((session_id, init.capabilities))
 }
 
-/// ADR-0078: points a confined agent's git at the file the node wrote, when the profile grants that file for reading (it does not when
-/// the owner grants `~/.gitconfig` themselves, or the file could not be written).
-fn git_env(profile: &agora_platform::Sandbox, worktree: &Path) -> Vec<(String, String)> {
-    let file = crate::gitconfig::path_for(worktree);
-    if profile.read.contains(&file) {
-        crate::gitconfig::env_for(&file)
-    } else {
-        Vec::new()
-    }
-}
-
 /// The agent's own mesh socket joins the unix sockets a confined agent may reach (#475, ADR-0083): it lies in a folder of the node's,
 /// which is closed to every agent but this one's socket. Other agents' sockets and the node's are not added.
 fn own_socket(profile: &mut agora_platform::Sandbox, socket: Option<&Path>) {
     profile.sockets.extend(socket.map(Path::to_path_buf));
 }
 
-/// After an adapter died on its own: wait out the backoff and try again, or give up for good.
+/// After an adapter died on its own: wait out the backoff and try again, or give up for good. `last` is how its process ended, when
+/// the node could read it (`None` for a restart that could not start).
+///
+/// #902 (RM-13): giving up ends the agent: it is reported as exited ([`gave_up_status`]) before [`SupervisorEvent::GaveUp`], as a
+/// terminal agent's last crash is, so a window shows it ended with an error and takes no more prompts instead of keeping it unknown.
 fn schedule_adapter_restart(
     id: &AgentId,
     e: &mut AdapterEntry,
     now: Instant,
     policy: &RestartPolicy,
+    last: Option<ExitStatus>,
     events: &mut Vec<SupervisorEvent>,
 ) {
     if e.restarts < policy.max_restarts {
@@ -4301,8 +4446,40 @@ fn schedule_adapter_restart(
             after,
         });
     } else {
-        events.push(SupervisorEvent::GaveUp { agent: id.clone() });
+        let (status, known) = gave_up_status(last);
+        events.push(SupervisorEvent::Exited {
+            agent: id.clone(),
+            status,
+        });
+        events.push(SupervisorEvent::GaveUp {
+            agent: id.clone(),
+            exit_code: known,
+        });
     }
+}
+
+/// #902: the end reported for an adapter the node gave up on, and the exit code it may say (`None`: not known). An adapter does not end
+/// on its own, so this end is always a failure and must read as one wherever an end is shown, whatever ended the last process:
+/// - its own non-zero exit code is kept;
+/// - a signal is reported as an exit code the way a shell reports it, 128 + the signal (SIGKILL 137), because a window reads only some
+///   signals (a crash) as a failure and the others (a stop) as a plain end; this mapping is only for an agent the node gave up on, so an
+///   agent a person ends keeps being shown as before;
+/// - exit code 1 goes on the wire when the status is not known or was 0 (so it is never a success), and is not said as its exit code.
+fn gave_up_status(last: Option<ExitStatus>) -> (ExitStatus, Option<i32>) {
+    let code = match last {
+        Some(ExitStatus {
+            signal: Some(sig), ..
+        }) => Some(sig.saturating_add(128)),
+        Some(ExitStatus { code: Some(c), .. }) if c != 0 => Some(c),
+        _ => None,
+    };
+    (
+        ExitStatus {
+            code: Some(code.unwrap_or(1)),
+            signal: None,
+        },
+        code,
+    )
 }
 
 fn set_state(
@@ -4434,6 +4611,37 @@ fn session_report(agent: &Agent) -> Option<SupervisorEvent> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod adapter_option_tests {
     use super::*;
+
+    /// #902: an adapter the node gave up on always ends as a failure: its own failing code is kept, a signal (a crash, or SIGKILL from
+    /// an out-of-memory killer) becomes the positive code a shell reports (never the negative value a window reads as a stop), and a
+    /// status that is not known or says success goes out as exit code 1 without being said as its code.
+    #[test]
+    fn an_adapter_given_up_on_ends_as_a_failure() {
+        let st = |code, signal| ExitStatus { code, signal };
+        let wire = |code| st(Some(code), None);
+        assert_eq!(gave_up_status(Some(st(Some(3), None))), (wire(3), Some(3)));
+        assert_eq!(
+            gave_up_status(Some(st(None, Some(9)))),
+            (wire(137), Some(137))
+        );
+        assert_eq!(
+            gave_up_status(Some(st(None, Some(15)))),
+            (wire(143), Some(143))
+        );
+        assert_eq!(
+            gave_up_status(Some(st(None, Some(11)))),
+            (wire(139), Some(139))
+        );
+        assert_eq!(gave_up_status(Some(st(Some(0), None))), (wire(1), None));
+        assert_eq!(gave_up_status(Some(st(None, None))), (wire(1), None));
+        assert_eq!(gave_up_status(None), (wire(1), None));
+        for (status, _) in [
+            gave_up_status(Some(st(None, Some(9)))),
+            gave_up_status(None),
+        ] {
+            assert!(!status.success() && status.code.is_some_and(|c| c > 0));
+        }
+    }
 
     /// ADR-0095: `TaskDispatched.agent_skips_permissions` is true for a launch option that skips, the current mode that skips, a boolean
     /// option that skips and is on, or a select whose current choice skips; never for one that is offered but not in use.
