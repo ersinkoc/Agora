@@ -736,6 +736,15 @@ pub fn snapshot_of(view: &View, pos: u64) -> v1::Snapshot {
                 still_running: a.interrupted.as_ref().is_some_and(|i| i.still_running),
                 launch_options: a.launch_options.clone(),
                 skips_permissions: a.skips_permissions,
+                // ADR-0101: only a running agent holds always answers.
+                always_allowed: if a.running {
+                    a.always_allowed
+                        .iter()
+                        .map(|(_, action)| action.clone())
+                        .collect()
+                } else {
+                    Vec::new()
+                },
                 ..session_snapshot(&a.session)
             })
             .collect(),
@@ -758,6 +767,9 @@ pub fn snapshot_of(view: &View, pos: u64) -> v1::Snapshot {
                 action: a.action.clone(),
                 detail: a.detail.clone(),
                 expires_at_ms: a.expires_at_ms,
+                scopes: a.scopes.clone(),
+                always_label: a.always_label.clone(),
+                always_option_id: a.always_option_id.clone(),
             })
             .collect(),
         tasks: view

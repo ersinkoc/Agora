@@ -244,6 +244,163 @@ pub fn skip_signed_message(
     m
 }
 
+/// ADR-0101: what a device signs to allow an adapter's request always: the domain `agora-approval-always-v1`, one NUL, then
+/// `F(node_id) F(approval_id) F(verdict) F(agent_id) F(sha256(action)) F(sha256(detail)) F(always_label) F(always_option_id)`, the verdict
+/// always `1` (an always decision is never a denial), the hashes in lowercase hex over the action and detail exactly as announced, and
+/// the label and option id exactly as announced. Shared vectors: `schema/fixtures/signing/approval-always-v1.json`.
+pub fn always_signed_message(node_id: &str, approval_id: &str, request: &Pending) -> Vec<u8> {
+    let hash = |s: &str| -> String {
+        ring::digest::digest(&ring::digest::SHA256, s.as_bytes())
+            .as_ref()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    };
+    let (label, option) = request
+        .offer
+        .always
+        .as_ref()
+        .map_or(("", ""), |a| (a.label.as_str(), a.option_id.as_str()));
+    let mut m = b"agora-approval-always-v1\0".to_vec();
+    for part in [
+        node_id,
+        approval_id,
+        "1",
+        &request.agent_id,
+        &hash(&request.action),
+        &hash(&request.detail),
+        label,
+        option,
+    ] {
+        framed(&mut m, part);
+    }
+    m
+}
+
+/// ADR-0101: the longest agent label for an always option a card shows (characters).
+pub const MAX_ALWAYS_LABEL_CHARS: usize = 120;
+
+/// ADR-0101: the agent's always option as announced: its own name (cleaned, bounded) and its exact id (signable as it is).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlwaysOption {
+    pub label: String,
+    pub option_id: String,
+}
+
+/// ADR-0101: the answers a request offers the person, after the node's policy: what the node announced and what a decision is checked
+/// against. A request made before ADR-0101, and every node-made one, offers the single answer only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Offer {
+    pub once: bool,
+    pub always: Option<AlwaysOption>,
+}
+
+impl Default for Offer {
+    fn default() -> Self {
+        Self::once_only()
+    }
+}
+
+impl Offer {
+    pub fn once_only() -> Self {
+        Self {
+            once: true,
+            always: None,
+        }
+    }
+
+    /// `ApprovalRequested.scopes` (empty for the single answer only, as every node before ADR-0101 said it).
+    pub fn scopes(&self) -> Vec<i32> {
+        if self.always.is_none() {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        if self.once {
+            out.push(agora_protocol::v1::ApprovalScope::Once as i32);
+        }
+        out.push(agora_protocol::v1::ApprovalScope::Always as i32);
+        out
+    }
+}
+
+/// ADR-0101: what the node makes of an adapter's request, given its offer and the policy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Raise {
+    /// A card offering these answers.
+    Card(Offer),
+    /// The agent offered only an answer it would remember, and the policy (or the kind's manifest) refuses that: no card, the
+    /// adapter is answered denied at once, and the person is told (`approval.always_only_forbidden`).
+    AlwaysOnlyForbidden,
+    /// Nothing the person could allow (an always option whose id cannot be signed as it is, and no single answer): no card, denied,
+    /// and the person is told (`adapter.permission_unanswerable`).
+    Unanswerable,
+}
+
+/// ADR-0101: the card for an adapter's request. `strict`: the adapter declared `approval_scopes` (its `scopes` are read, and it never
+/// answers a single Allow with a remembered option); otherwise the request offers the single answer only, whatever it says.
+/// `always_permitted`: the node's `skip_permissions` policy and the kind's manifest let this agent be allowed always.
+pub fn raise_for(
+    strict: bool,
+    scopes: &[agora_protocol::v1::ApprovalScope],
+    always_label: &str,
+    always_option_id: &str,
+    always_permitted: bool,
+) -> Raise {
+    use agora_protocol::v1::ApprovalScope;
+    if !strict || scopes.is_empty() {
+        return Raise::Card(Offer::once_only());
+    }
+    let once = scopes.contains(&ApprovalScope::Once);
+    let offered = scopes.contains(&ApprovalScope::Always);
+    let always = (offered && signable(always_option_id)).then(|| AlwaysOption {
+        label: card_text(always_label, MAX_ALWAYS_LABEL_CHARS),
+        option_id: always_option_id.to_string(),
+    });
+    match (once, always) {
+        (once, Some(a)) if always_permitted => Raise::Card(Offer {
+            once,
+            always: Some(a),
+        }),
+        (true, _) => Raise::Card(Offer::once_only()),
+        (false, Some(_)) => Raise::AlwaysOnlyForbidden,
+        (false, None) => Raise::Unanswerable,
+    }
+}
+
+/// ADR-0101: what the node's policy says when a decision arrives: the `skip_permissions` line the node read at start, for the agent's
+/// launch as it is then (a card raised by an earlier node, or for a process replaced since, is checked against the current ones).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Decide {
+    /// The policy and the kind's manifest let this agent be allowed always now.
+    pub always: bool,
+    /// A single Allow may be delivered. False only for an agent behind an ACP bridge from before ADR-0101 (it did not declare
+    /// `approval_scopes`, so it may answer a single Allow with a remembered option) under a policy that refuses "always".
+    pub once: bool,
+}
+
+impl Decide {
+    /// The policy for an adapter agent's request: `always_permitted` (the `skip_permissions` policy and the manifest), `strict` (its
+    /// adapter declared `approval_scopes`) and `acp_bridge` (it runs behind the ACP bridge). "Always" only through a strict adapter; a
+    /// single Allow refused only through a bridge that is not strict while "always" is not permitted (Codex review of ADR-0101: such a
+    /// bridge, from before ADR-0101, may answer it with the agent's remembered option).
+    pub fn for_adapter(always_permitted: bool, strict: bool, acp_bridge: bool) -> Self {
+        Self {
+            always: always_permitted && strict,
+            once: always_permitted || strict || !acp_bridge,
+        }
+    }
+}
+
+impl Default for Decide {
+    /// What a caller that does not know the policy gets: never "always" (fail closed), single answers as before.
+    fn default() -> Self {
+        Self {
+            always: false,
+            once: true,
+        }
+    }
+}
+
 /// The agent, option and value a skip decision is bound to (the signed `agent_id`, `option_id` and `value`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkipBinding {
@@ -279,6 +436,8 @@ pub struct Pending {
     pub expires_ms: u64,
     /// Only for [`SKIP_ACTION`]: what the decision is bound to, taken from the node's own record of the request, never from the detail.
     pub binding: Option<SkipBinding>,
+    /// ADR-0101: the answers announced (after the policy); a decision is checked against this, never against anything it carries.
+    pub offer: Offer,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -297,6 +456,15 @@ pub enum ApprovalError {
     BadSignature,
     /// The device is limited by the node's policy to other projects than this request's (ADR-0049).
     Forbidden,
+    /// ADR-0101: a scope this build does not know.
+    InvalidScope,
+    /// ADR-0101: the request did not offer that answer (`approval.scope_unavailable`). Nothing was spent.
+    ScopeUnavailable,
+    /// ADR-0101: the policy refuses "always" for this agent now (`approval.scope_forbidden`). Nothing was spent.
+    ScopeForbidden,
+    /// ADR-0101 (Codex review): a single Allow through an ACP bridge from before ADR-0101 under a policy that refuses "always"
+    /// (`approval.adapter_outdated`). Nothing was spent.
+    AdapterOutdated,
 }
 
 pub struct Approvals<V: Verifier> {
@@ -348,6 +516,23 @@ impl<V: Verifier> Approvals<V> {
         self.request_bound(agent_id, action, detail, now_ms, ttl_ms, None)
     }
 
+    /// ADR-0101: [`Self::request`] offering the answers in `offer`.
+    pub fn request_offered(
+        &mut self,
+        agent_id: &str,
+        action: &str,
+        detail: &str,
+        now_ms: u64,
+        offer: Offer,
+    ) -> Option<Pending> {
+        let mut p = self.request_bound(agent_id, action, detail, now_ms, 0, None)?;
+        p.offer = offer;
+        if let Some(stored) = self.pending.get_mut(&p.id) {
+            stored.offer = p.offer.clone();
+        }
+        Some(p)
+    }
+
     /// [`Self::request`] with the binding a skip decision is signed over.
     pub fn request_bound(
         &mut self,
@@ -371,6 +556,7 @@ impl<V: Verifier> Approvals<V> {
             requested_ms: now_ms,
             expires_ms: now_ms.saturating_add(ttl),
             binding,
+            offer: Offer::once_only(),
         };
         self.pending.insert(id, p.clone());
         Some(p)
@@ -380,15 +566,60 @@ impl<V: Verifier> Approvals<V> {
         self.pending.values()
     }
 
-    /// Applies a signed decision. On success the request is removed and its id spent.
+    /// Applies a signed decision. On success the request is removed and its id spent. Never "always" (see [`Self::resolve_decided`]).
     pub fn resolve(
         &mut self,
         r: &ApprovalResolve,
         now_ms: u64,
     ) -> Result<(Pending, Verdict), ApprovalError> {
+        self.resolve_decided(r, now_ms, Decide::default())
+    }
+
+    /// Applies a signed decision under the policy `decide` (ADR-0101). The checks, in order: the scope's shape (a value this build does
+    /// not know; ALWAYS with a denial or on a node-made request), which reveals nothing about the request; the signature, over the bytes
+    /// the decision's scope names (ALWAYS: `agora-approval-always-v1`, anything else: as before), so a hub that changes the scope in
+    /// either direction fails here; then the offer stored with the request, the policy, and expiry. A refusal before expiry spends
+    /// nothing: the card stays waiting.
+    pub fn resolve_decided(
+        &mut self,
+        r: &ApprovalResolve,
+        now_ms: u64,
+        decide: Decide,
+    ) -> Result<(Pending, Verdict), ApprovalError> {
+        use agora_protocol::v1::ApprovalScope;
+        let always = match ApprovalScope::try_from(r.scope) {
+            Ok(ApprovalScope::Unspecified | ApprovalScope::Once) => false,
+            Ok(ApprovalScope::Always) => true,
+            Err(_) => return Err(ApprovalError::InvalidScope),
+        };
         let Some(p) = self.pending.get(&r.approval_id) else {
             return Err(ApprovalError::Unknown);
         };
+        if always {
+            // An always answer is an Allow on an adapter's request, never a denial ("deny always" is reserved) and never a node-made
+            // request (those have signed grants of their own); a grant means nothing here.
+            if !r.approved
+                || is_reserved_action(&p.action)
+                || r.helper_grant != 0
+                || r.helpers_may_start
+            {
+                return Err(ApprovalError::BadSignature);
+            }
+            let msg = always_signed_message(&self.node_id, &r.approval_id, p);
+            if !self
+                .verifier
+                .verify(&r.signer_device_id, &msg, &r.signature)
+            {
+                return Err(ApprovalError::BadSignature);
+            }
+            if p.offer.always.is_none() {
+                return Err(ApprovalError::ScopeUnavailable);
+            }
+            if !decide.always {
+                return Err(ApprovalError::ScopeForbidden);
+            }
+            return self.take(r, now_ms);
+        }
         // Verify before anything changes, and before saying whether the request expired: a peer without a trusted
         // key cannot learn the state of a request it can name (ids are 128 random bits, so it cannot guess one).
         let (settings, options) = if p.action == START_ACTION {
@@ -454,6 +685,26 @@ impl<V: Verifier> Approvals<V> {
         {
             return Err(ApprovalError::BadSignature);
         }
+        // ADR-0101: a single Allow on a request that offers only "always" would be remembered by the agent: refused, the card stays.
+        // A denial needs no offer (it never widens anything).
+        if r.approved && !p.offer.once {
+            return Err(ApprovalError::ScopeUnavailable);
+        }
+        if r.approved && !decide.once && !is_reserved_action(&p.action) {
+            return Err(ApprovalError::AdapterOutdated);
+        }
+        self.take(r, now_ms)
+    }
+
+    /// The decision verified and passed every check: expiry, then the request is removed and its id spent.
+    fn take(
+        &mut self,
+        r: &ApprovalResolve,
+        now_ms: u64,
+    ) -> Result<(Pending, Verdict), ApprovalError> {
+        let Some(p) = self.pending.get(&r.approval_id) else {
+            return Err(ApprovalError::Unknown);
+        };
         if now_ms >= p.expires_ms {
             let p = self.pending.remove(&r.approval_id);
             self.spend(&r.approval_id);
@@ -875,6 +1126,8 @@ pub struct Resolution {
     pub request: Pending,
     /// For a [`SKIP_ACTION`] request: what the node rendered and applies when it was approved.
     pub skip: Option<SkipAsk>,
+    /// ADR-0101: the verified decision is "always" (only ever with [`Verdict::Approved`]).
+    pub always: bool,
 }
 
 impl NodeApprovals {
@@ -1124,6 +1377,26 @@ impl NodeApprovals {
         detail: &str,
         now_ms: u64,
     ) -> Option<Pending> {
+        self.request_offered(
+            agent,
+            adapter_approval_id,
+            action,
+            detail,
+            now_ms,
+            Offer::once_only(),
+        )
+    }
+
+    /// ADR-0101: [`Self::request`] offering the answers in `offer` (see [`raise_for`]).
+    pub fn request_offered(
+        &self,
+        agent: &agora_core::AgentId,
+        adapter_approval_id: &str,
+        action: &str,
+        detail: &str,
+        now_ms: u64,
+        offer: Offer,
+    ) -> Option<Pending> {
         // The `agent.*` actions are the node's own (`agent.start`, `agent.skip_permissions`): their cards come from the node's own
         // records and their decisions are applied from them. An adapter that names one gets no card and nothing is consumed; the
         // caller answers it "denied" at once. An adapter's own actions (`run_command`, `write_file`) are not in that namespace.
@@ -1132,7 +1405,7 @@ impl NodeApprovals {
         }
         let p = self
             .q()
-            .request(agent.as_str(), action, detail, now_ms, 0)?;
+            .request_offered(agent.as_str(), action, detail, now_ms, offer)?;
         self.r().insert(
             p.id.clone(),
             (agent.clone(), adapter_approval_id.to_string()),
@@ -1282,11 +1555,28 @@ impl NodeApprovals {
             .map(|x| (x.agent, x.adapter_approval_id, x.verdict))
     }
 
-    /// Like [`Self::resolve`], with the request that was decided (its action and detail).
+    /// Like [`Self::resolve`], with the request that was decided (its action and detail). Never "always" (see
+    /// [`Self::resolve_decided`]).
     pub fn resolve_request(
         &self,
         r: &ApprovalResolve,
         now_ms: u64,
+    ) -> Result<Resolution, ApprovalError> {
+        self.resolve_decided(r, now_ms, Decide::default())
+    }
+
+    /// ADR-0101: the agent a waiting request is routed back to (the one whose policy decides it), if any.
+    pub fn agent_of(&self, approval_id: &str) -> Option<agora_core::AgentId> {
+        self.r().get(approval_id).map(|(agent, _)| agent.clone())
+    }
+
+    /// [`Self::resolve_request`] under the policy `decide`, read by the caller for [`Self::agent_of`] before this is called (the
+    /// supervisor's lock is never taken under this queue's).
+    pub fn resolve_decided(
+        &self,
+        r: &ApprovalResolve,
+        now_ms: u64,
+        decide: Decide,
     ) -> Result<Resolution, ApprovalError> {
         self.reload_trust_if_changed();
         // Before anything is consumed: a device limited to other projects cannot answer this agent's request. The ids are 128
@@ -1301,7 +1591,7 @@ impl NodeApprovals {
                 return Err(ApprovalError::Forbidden);
             }
         }
-        let resolved = self.q().resolve(r, now_ms);
+        let resolved = self.q().resolve_decided(r, now_ms, decide);
         let (request, verdict) = match resolved {
             Ok(v) => v,
             Err(ApprovalError::Expired) => {
@@ -1327,6 +1617,7 @@ impl NodeApprovals {
                 verdict,
                 request,
                 skip,
+                always: r.scope == agora_protocol::v1::ApprovalScope::Always as i32,
             })
             .ok_or(ApprovalError::Unknown)
     }
@@ -1444,6 +1735,7 @@ mod tests {
             signature: sign(secret, &signed_message(node, id, approved)),
             helper_grant: 0,
             helpers_may_start: false,
+            ..Default::default()
         }
     }
 
@@ -1479,6 +1771,7 @@ mod tests {
                 ),
                 helper_grant: 0,
                 helpers_may_start: false,
+                ..Default::default()
             },
             now,
         )
@@ -1486,6 +1779,390 @@ mod tests {
 
     fn node_approvals() -> NodeApprovals {
         NodeApprovals::new("node-1", Box::new(Fake(vec![("phone", "s3cret")])))
+    }
+
+    // ---- ADR-0101: an "always" answer ----
+
+    const ONCE: i32 = agora_protocol::v1::ApprovalScope::Once as i32;
+    const ALWAYS: i32 = agora_protocol::v1::ApprovalScope::Always as i32;
+
+    fn offer(once: bool, always: bool) -> Offer {
+        Offer {
+            once,
+            always: always.then(|| AlwaysOption {
+                label: "Always allow git status".into(),
+                option_id: "aa".into(),
+            }),
+        }
+    }
+
+    fn offered(a: &mut Approvals<Fake>, o: Offer) -> Pending {
+        a.request_offered(
+            "agent-1",
+            "run_command",
+            "{\"command\":\"git status\"}",
+            1,
+            o,
+        )
+        .unwrap()
+    }
+
+    /// A decision signed by the phone: over the always bytes for `sign_always`, else over the v1 bytes; sent with `scope`.
+    fn decision(p: &Pending, approved: bool, sign_always: bool, scope: i32) -> ApprovalResolve {
+        let msg = if sign_always {
+            always_signed_message("node-1", &p.id, p)
+        } else {
+            signed_message("node-1", &p.id, approved)
+        };
+        ApprovalResolve {
+            approval_id: p.id.clone(),
+            approved,
+            signer_device_id: "phone".into(),
+            signature: sign("s3cret", &msg),
+            scope,
+            ..Default::default()
+        }
+    }
+
+    const ALLOWED: Decide = Decide {
+        always: true,
+        once: true,
+    };
+
+    /// The vectors every client signs by (`schema/fixtures/signing/approval-always-v1.json`, also checked by agora-protocol).
+    #[test]
+    fn the_shared_always_vectors_match() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../schema/fixtures/signing/approval-always-v1.json");
+        let v: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        for c in v["cases"].as_array().unwrap() {
+            let s = |k: &str| c[k].as_str().unwrap().to_string();
+            let p = Pending {
+                id: s("approval_id"),
+                agent_id: s("agent_id"),
+                action: s("action"),
+                detail: s("detail"),
+                requested_ms: 0,
+                expires_ms: 0,
+                binding: None,
+                offer: Offer {
+                    once: true,
+                    always: Some(AlwaysOption {
+                        label: s("always_label"),
+                        option_id: s("always_option_id"),
+                    }),
+                },
+            };
+            let m = always_signed_message(&s("node"), &s("approval_id"), &p);
+            let hex: String = m.iter().map(|b| format!("{b:02x}")).collect();
+            assert_eq!(hex, s("hex"), "{}", c["name"]);
+        }
+    }
+
+    #[test]
+    fn an_always_answer_signed_over_its_domain_is_accepted_once() {
+        let mut a = approvals();
+        let p = offered(&mut a, offer(true, true));
+        let (got, v) = a
+            .resolve_decided(&decision(&p, true, true, ALWAYS), 2, ALLOWED)
+            .unwrap();
+        assert_eq!((got.id.as_str(), v), (p.id.as_str(), Verdict::Approved));
+        assert_eq!(
+            a.resolve_decided(&decision(&p, true, true, ALWAYS), 3, ALLOWED),
+            Err(ApprovalError::Unknown),
+            "single use"
+        );
+    }
+
+    /// A hub that turns a single answer into "always", or "always" into a single answer, makes the node check the signature against
+    /// the other domain's bytes: refused, and the card still waits (nothing spent, nothing sent).
+    #[test]
+    fn a_scope_changed_in_transit_fails_the_signature_both_ways() {
+        let mut a = approvals();
+        let p = offered(&mut a, offer(true, true));
+        // ONCE signed, ALWAYS sent.
+        assert_eq!(
+            a.resolve_decided(&decision(&p, true, false, ALWAYS), 2, ALLOWED),
+            Err(ApprovalError::BadSignature)
+        );
+        // ALWAYS signed, ONCE (and unset) sent.
+        for scope in [ONCE, 0] {
+            assert_eq!(
+                a.resolve_decided(&decision(&p, true, true, scope), 2, ALLOWED),
+                Err(ApprovalError::BadSignature),
+                "{scope}"
+            );
+        }
+        assert_eq!(a.pending().count(), 1, "the card still waits");
+        // The honest answer still goes through.
+        assert!(a
+            .resolve_decided(&decision(&p, true, true, ALWAYS), 2, ALLOWED)
+            .is_ok());
+    }
+
+    /// The always bytes bind what the card showed: a label, option id, action or detail the hub rewrote does not verify against what the
+    /// node holds.
+    #[test]
+    fn an_always_signature_over_other_words_fails() {
+        let mut a = approvals();
+        let p = offered(&mut a, offer(true, true));
+        let mut shown = p.clone();
+        for change in 0..4 {
+            match change {
+                0 => shown.offer.always.as_mut().unwrap().label = "Allow once".into(),
+                1 => shown.offer.always.as_mut().unwrap().option_id = "other".into(),
+                2 => shown.action = "read_file".into(),
+                _ => shown.detail = "{}".into(),
+            }
+            let mut r = decision(&p, true, true, ALWAYS);
+            r.signature = sign("s3cret", &always_signed_message("node-1", &p.id, &shown));
+            assert_eq!(
+                a.resolve_decided(&r, 2, ALLOWED),
+                Err(ApprovalError::BadSignature),
+                "{change}"
+            );
+            shown = p.clone();
+        }
+    }
+
+    /// "Always" is never a denial and never an answer to a node-made request (`agent.start`, `agent.skip_permissions`), and a grant
+    /// means nothing on it; a value this build does not know is refused before anything else.
+    #[test]
+    fn always_is_refused_where_it_cannot_apply() {
+        let mut a = approvals();
+        let p = offered(&mut a, offer(true, true));
+        let mut denied = decision(&p, false, true, ALWAYS);
+        denied.signature = sign("s3cret", &always_signed_message("node-1", &p.id, &p));
+        assert_eq!(
+            a.resolve_decided(&denied, 2, ALLOWED),
+            Err(ApprovalError::BadSignature)
+        );
+        let mut granted = decision(&p, true, true, ALWAYS);
+        granted.helper_grant = 2;
+        assert_eq!(
+            a.resolve_decided(&granted, 2, ALLOWED),
+            Err(ApprovalError::BadSignature)
+        );
+        for scope in [3, 7, -1] {
+            assert_eq!(
+                a.resolve_decided(&decision(&p, true, true, scope), 2, ALLOWED),
+                Err(ApprovalError::InvalidScope),
+                "{scope}"
+            );
+        }
+        for action in [START_ACTION, SKIP_ACTION, "agent.other"] {
+            let mut q = a
+                .request_offered("agent-1", action, "{}", 1, offer(true, true))
+                .unwrap();
+            q.offer = offer(true, true);
+            assert_eq!(
+                a.resolve_decided(&decision(&q, true, true, ALWAYS), 2, ALLOWED),
+                Err(ApprovalError::BadSignature),
+                "{action}"
+            );
+        }
+        assert_eq!(a.pending().count(), 4, "nothing was spent");
+    }
+
+    /// The decision is checked against the offer the node stored, never against anything it carries: "always" on a request that
+    /// did not offer it, and a single Allow on one that offers only "always", are refused and leave the card waiting. A single Deny
+    /// stays valid everywhere.
+    #[test]
+    fn an_answer_the_request_did_not_offer_is_refused_and_spends_nothing() {
+        let mut a = approvals();
+        let once_only = offered(&mut a, Offer::once_only());
+        assert_eq!(
+            a.resolve_decided(&decision(&once_only, true, true, ALWAYS), 2, ALLOWED),
+            Err(ApprovalError::ScopeUnavailable)
+        );
+        let always_only = offered(&mut a, offer(false, true));
+        for scope in [0, ONCE] {
+            assert_eq!(
+                a.resolve_decided(&decision(&always_only, true, false, scope), 2, ALLOWED),
+                Err(ApprovalError::ScopeUnavailable),
+                "{scope}"
+            );
+        }
+        assert_eq!(a.pending().count(), 2);
+        assert_eq!(
+            a.resolve_decided(&decision(&always_only, false, false, ONCE), 2, ALLOWED)
+                .unwrap()
+                .1,
+            Verdict::Denied
+        );
+        assert_eq!(
+            a.resolve_decided(&decision(&once_only, true, false, ONCE), 2, ALLOWED)
+                .unwrap()
+                .1,
+            Verdict::Approved
+        );
+    }
+
+    /// The policy checked at decision time refuses "always" (it may differ from the one the card was raised under: an earlier node's,
+    /// or another launch of the agent); the card still waits and can be allowed once. Without the policy (`resolve`), "always" is never given.
+    #[test]
+    fn a_policy_that_refuses_always_refuses_it_at_decision_time() {
+        let mut a = approvals();
+        let p = offered(&mut a, offer(true, true));
+        let forbid = Decide {
+            always: false,
+            once: true,
+        };
+        assert_eq!(
+            a.resolve_decided(&decision(&p, true, true, ALWAYS), 2, forbid),
+            Err(ApprovalError::ScopeForbidden)
+        );
+        assert_eq!(
+            a.resolve(&decision(&p, true, true, ALWAYS), 2),
+            Err(ApprovalError::ScopeForbidden)
+        );
+        assert_eq!(a.pending().count(), 1);
+        assert!(a
+            .resolve_decided(&decision(&p, true, false, ONCE), 2, forbid)
+            .is_ok());
+    }
+
+    /// Codex review of ADR-0101: an Allow through an ACP bridge from before ADR-0101 under a policy that refuses "always" is refused
+    /// (that bridge may remember it); a Deny still goes through.
+    #[test]
+    fn an_allow_through_an_outdated_bridge_is_refused_under_a_strict_policy() {
+        let mut a = approvals();
+        let p = offered(&mut a, Offer::once_only());
+        let legacy = Decide {
+            always: false,
+            once: false,
+        };
+        assert_eq!(
+            a.resolve_decided(&decision(&p, true, false, 0), 2, legacy),
+            Err(ApprovalError::AdapterOutdated)
+        );
+        assert_eq!(a.pending().count(), 1);
+        assert_eq!(
+            a.resolve_decided(&decision(&p, false, false, 0), 2, legacy)
+                .unwrap()
+                .1,
+            Verdict::Denied
+        );
+    }
+
+    /// T4: agent text never chooses "always": an adapter that dresses its request as a node-made one gets no card, whatever it offers,
+    /// and the offer alone allows nothing (only a decision signed over the always bytes does).
+    #[test]
+    fn an_adapters_offer_never_decides_by_itself() {
+        let n = node_approvals();
+        let agent = agora_core::AgentId::new("agent-1");
+        for action in [START_ACTION, SKIP_ACTION, "agent.anything"] {
+            assert!(n
+                .request_offered(&agent, "a-1", action, "{}", 1, offer(true, true))
+                .is_none());
+        }
+        let p = n
+            .request_offered(&agent, "a-2", "run_command", "ls", 1, offer(false, true))
+            .unwrap();
+        let mut unsigned = decision(&p, true, true, ALWAYS);
+        unsigned.signature = Vec::new();
+        assert_eq!(
+            n.resolve_decided(&unsigned, 2, ALLOWED).unwrap_err(),
+            ApprovalError::BadSignature
+        );
+        let r = n
+            .resolve_decided(&decision(&p, true, true, ALWAYS), 2, ALLOWED)
+            .unwrap();
+        assert!(r.always && r.verdict == Verdict::Approved);
+        assert_eq!(r.adapter_approval_id, "a-2");
+    }
+
+    /// Which policy a decision meets, from the node's policy, the adapter's declaration and whether it is the ACP bridge.
+    #[test]
+    fn the_policy_for_an_adapter_follows_its_declaration() {
+        let d = |always, once| Decide { always, once };
+        // permitted, strict, bridge
+        assert_eq!(Decide::for_adapter(true, true, true), d(true, true));
+        assert_eq!(Decide::for_adapter(false, true, true), d(false, true));
+        // An outdated bridge: single answers as before under `allow` (the named residual), refused under a refusing policy.
+        assert_eq!(Decide::for_adapter(true, false, true), d(false, true));
+        assert_eq!(Decide::for_adapter(false, false, true), d(false, false));
+        // An L3 adapter that does not declare it: single answers only, under any policy.
+        assert_eq!(Decide::for_adapter(true, false, false), d(false, true));
+        assert_eq!(Decide::for_adapter(false, false, false), d(false, true));
+    }
+
+    /// A client from before ADR-0101 sends no scope: Allow and Deny work exactly as before on a request that offers the single answer.
+    #[test]
+    fn an_old_client_without_a_scope_is_answered_as_before() {
+        let mut a = approvals();
+        let p = a.request("agent-1", "run_command", "ls", 1, 0).unwrap();
+        let r = resolve_msg(&p.id, true, "phone", "s3cret", "node-1");
+        assert_eq!(r.scope, 0);
+        assert_eq!(a.resolve(&r, 2).unwrap().1, Verdict::Approved);
+        assert!(p.offer.scopes().is_empty(), "announced as before");
+    }
+
+    /// What a card offers, from the adapter's offer and the policy.
+    #[test]
+    fn the_card_offers_what_the_agent_offers_and_the_policy_allows() {
+        use agora_protocol::v1::ApprovalScope as S;
+        let card = |once: bool, always: bool| {
+            Raise::Card(Offer {
+                once,
+                always: always.then(|| AlwaysOption {
+                    label: "Always".into(),
+                    option_id: "aa".into(),
+                }),
+            })
+        };
+        let both = [S::Once, S::Always];
+        assert_eq!(
+            raise_for(true, &both, "Always", "aa", true),
+            card(true, true)
+        );
+        // An adapter that did not declare `approval_scopes` is offered the single answer, whatever it says.
+        assert_eq!(
+            raise_for(false, &both, "Always", "aa", true),
+            card(true, false)
+        );
+        assert_eq!(
+            raise_for(true, &[], "Always", "aa", true),
+            card(true, false)
+        );
+        // The policy (or the manifest) removes the offer; an always-only request then gets no card.
+        assert_eq!(
+            raise_for(true, &both, "Always", "aa", false),
+            card(true, false)
+        );
+        assert_eq!(
+            raise_for(true, &[S::Always], "Always", "aa", true),
+            card(false, true)
+        );
+        assert_eq!(
+            raise_for(true, &[S::Always], "Always", "aa", false),
+            Raise::AlwaysOnlyForbidden
+        );
+        // An option id that cannot be signed as it is is never offered.
+        assert_eq!(
+            raise_for(true, &both, "Always", "a\u{202e}a", true),
+            card(true, false)
+        );
+        assert_eq!(
+            raise_for(true, &[S::Always], "Always", "", true),
+            Raise::Unanswerable
+        );
+        // The label is the agent's text: cleaned and bounded.
+        let Raise::Card(o) = raise_for(
+            true,
+            &both,
+            &format!("A\u{200b}{}", "x".repeat(300)),
+            "aa",
+            true,
+        ) else {
+            panic!("no card");
+        };
+        let label = o.always.unwrap().label;
+        assert!(label.chars().count() <= MAX_ALWAYS_LABEL_CHARS && !label.contains('\u{200b}'));
+        // What the node announces: empty for the single answer (as before ADR-0101), else the scopes in order.
+        assert_eq!(offer(true, true).scopes(), vec![ONCE, ALWAYS]);
+        assert_eq!(offer(false, true).scopes(), vec![ALWAYS]);
+        assert!(Offer::once_only().scopes().is_empty());
     }
 
     /// The vectors every client signs by (`schema/fixtures/signing/approval-skip-v1.json`, also checked by agora-protocol).
@@ -1566,6 +2243,7 @@ mod tests {
             signature: sign("s3cret", &signed_message("node-1", &p.id, true)),
             helper_grant: 0,
             helpers_may_start: false,
+            ..Default::default()
         };
         assert_eq!(
             n.resolve_request(&plain, 2_000).unwrap_err(),
@@ -1658,6 +2336,7 @@ mod tests {
             signature: sign("s3cret", &signed_message("node-1", &p.id, true)),
             helper_grant: 0,
             helpers_may_start: false,
+            ..Default::default()
         };
         assert_eq!(a.resolve(&r, 2_000), Err(ApprovalError::BadSignature));
     }
@@ -2587,6 +3266,7 @@ mod tests {
                 signature: sig.as_ref().to_vec(),
                 helper_grant: 0,
                 helpers_may_start: false,
+                ..Default::default()
             }
         };
         assert_eq!(
@@ -2625,6 +3305,7 @@ mod tests {
             signature: sig.as_ref().to_vec(),
             helper_grant: 0,
             helpers_may_start: false,
+            ..Default::default()
         };
         assert_eq!(
             n.resolve(&resolve, 4).unwrap_err(),
@@ -2672,6 +3353,7 @@ mod tests {
             signature: pair.sign(&rng, &m).unwrap().as_ref().to_vec(),
             helper_grant: 0,
             helpers_may_start: false,
+            ..Default::default()
         };
         assert_eq!(a.resolve(&r, 1).unwrap().1, Verdict::Approved);
     }

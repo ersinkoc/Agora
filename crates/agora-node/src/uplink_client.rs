@@ -46,6 +46,8 @@ pub const CAPABILITIES: &[&str] = &[
     // ADR-0090 Amendment A: a switch of a running agent to a mode or option that skips permission questions becomes an
     // `agent.skip_permissions` approval, decided over `agora-approval-skip-v1`; the command is answered `agent.approval_needed`.
     "approval.skip_permissions",
+    // ADR-0101: requests carry the answers an agent offers, and an "always" answer is verified over `agora-approval-always-v1`.
+    "approval.always",
     // ADR-0091: reads the plan windows a tool reports in its usage file (`[quota]`) and sends `AgentQuotaObserved`.
     "usage.quota",
     // ADR-0095: claims a task for an agent, sends it the data-wrapped prompt (never over a running turn) and records `TaskDispatched`.

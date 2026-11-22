@@ -1,0 +1,10 @@
+{
+  "entryId": "7",
+  "atMs": "1700000009000",
+  "role": "CHAT_ROLE_AGENT",
+  "kind": "CHAT_KIND_PERMISSION",
+  "text": "run_command",
+  "approvalId": "ap-0123456789abcdef0123456789abcdef",
+  "permissionOutcome": "PERMISSION_OUTCOME_APPROVED",
+  "permissionAlways": true
+}

@@ -833,6 +833,7 @@ mod tests {
             action: "agent.start".into(),
             detail: "{}".into(),
             expires_at_ms: 9,
+            ..Default::default()
         }));
         let row = spawn_audit(&view, &asked).unwrap();
         assert_eq!(
@@ -846,6 +847,7 @@ mod tests {
             signer_device_id: "phone".into(),
             helper_grant: 3,
             helpers_may_start: false,
+            ..Default::default()
         }));
         let row = spawn_audit(&view, &decided).unwrap();
         assert_eq!(

@@ -1,0 +1,26 @@
+{
+  "pos": "62",
+  "agents": [
+    {
+      "agentId": "n1/agent-1",
+      "nodeId": "n1",
+      "kind": "wrongstack-acp",
+      "state": "AGENT_STATE_WORKING",
+      "reported": true,
+      "running": true,
+      "alwaysAllowed": ["run_command"]
+    }
+  ],
+  "approvals": [
+    {
+      "approvalId": "ap-1",
+      "agentId": "n1/agent-1",
+      "action": "write_file",
+      "detail": "src/main.rs",
+      "expiresAtMs": "1700000608000",
+      "scopes": ["APPROVAL_SCOPE_ONCE", "APPROVAL_SCOPE_ALWAYS"],
+      "alwaysLabel": "Always allow edits",
+      "alwaysOptionId": "edits"
+    }
+  ]
+}

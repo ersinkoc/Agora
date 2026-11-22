@@ -1,0 +1,41 @@
+{
+ "about": "ADR-0101 agora-approval-always-v1: the signed bytes of an \"always\" decision (`ApprovalResolve.scope` = APPROVAL_SCOPE_ALWAYS, approved) on an approval an agent's adapter asked for. The domain `agora-approval-always-v1`, one NUL byte, then F(node_id) F(approval_id) F(verdict) F(agent_id) F(sha256(action)) F(sha256(detail)) F(always_label) F(always_option_id), concatenated, where F(x) is the decimal byte length of x (UTF-8 bytes), `:`, then x (no separators between fields). verdict is always `1` (an always decision is never a denial). `agent_id` is the node's own id of the agent (`ApprovalRequested.agent_id` as the node sent it; in an `ApprovalSnapshot` the part after `<node_id>/`); the hashes are SHA-256 of `action` and `detail` exactly as announced, lowercase hex; `always_label` and `always_option_id` are `ApprovalRequested.always_label` and `always_option_id` exactly as announced. A decision with scope UNSPECIFIED or ONCE is signed over `agora-approval-v1` as before. Checked by crates/agora-protocol/tests/approval_always_signing.rs and the node (crates/agora-node/src/approvals.rs).",
+ "cases": [
+  {
+   "name": "an always answer to a command",
+   "node": "laptop",
+   "approval_id": "ap-0123456789abcdef0123456789abcdef",
+   "approved": true,
+   "agent_id": "agent-1",
+   "action": "run_command",
+   "detail": "{\"command\":\"git status\"}",
+   "always_label": "Always allow git status",
+   "always_option_id": "allow-always-1",
+   "hex": "61676f72612d617070726f76616c2d616c776179732d763100363a6c6170746f7033353a61702d3031323334353637383961626364656630313233343536373839616263646566313a31373a6167656e742d3136343a6165616639613330386333613635646637623431653237383166653030306635373135373631356133326633663735633335623366643536393635646639663836343a6530643365333931373630643061396236633234626636366365636663356136363535373738343738326362633730343035323338356266366539626232383732333a416c7761797320616c6c6f77206769742073746174757331343a616c6c6f772d616c776179732d31"
+  },
+  {
+   "name": "an always-only request, the agent's label empty",
+   "node": "laptop",
+   "approval_id": "ap-2",
+   "approved": true,
+   "agent_id": "agent-2",
+   "action": "write_file",
+   "detail": "src/main.rs",
+   "always_label": "",
+   "always_option_id": "edits",
+   "hex": "61676f72612d617070726f76616c2d616c776179732d763100363a6c6170746f70343a61702d32313a31373a6167656e742d3236343a3135323233623633613461353131633331303536316137633834373862363939666438373939346238616438666235373731613439626163376533383437303236343a34326362363830376164373462336532303163356137636139386239313163356661303833383065393432626536653461633538303766383337376638376663303a353a6564697473"
+  },
+  {
+   "name": "fields with a colon, a space, a non-ASCII letter and an empty detail",
+   "node": "my:box 1",
+   "approval_id": "ap-3",
+   "approved": true,
+   "agent_id": "agent-é",
+   "action": "Edit `a b`",
+   "detail": "",
+   "always_label": "Hep izin ver: düzenle",
+   "always_option_id": "opt:1 2",
+   "hex": "61676f72612d617070726f76616c2d616c776179732d763100383a6d793a626f782031343a61702d33313a31383a6167656e742dc3a936343a6463396165633265633065623239316462636335616634633234613335356232363333303765376131396562356336306661323433396561656465366631663336343a6533623063343432393866633163313439616662663463383939366662393234323761653431653436343962393334636134393539393162373835326238353532323a48657020697a696e207665723a2064c3bc7a656e6c65373a6f70743a312032"
+  }
+ ]
+}

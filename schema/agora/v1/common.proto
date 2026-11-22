@@ -21,6 +21,15 @@ enum IntegrationLevel {
   INTEGRATION_LEVEL_L3_ADAPTER = 4;
 }
 
+// ADR-0101: how far a person's answer to an approval reaches. A value this build does not know is refused, never read as either.
+enum ApprovalScope {
+  // Read as ONCE everywhere: what every decision meant before ADR-0101.
+  APPROVAL_SCOPE_UNSPECIFIED = 0;
+  APPROVAL_SCOPE_ONCE = 1;
+  // The agent remembers the answer, as the agent defines it (ACP `allow_always`), for the rest of its session.
+  APPROVAL_SCOPE_ALWAYS = 2;
+}
+
 enum TerminalPurpose {
   TERMINAL_PURPOSE_UNSPECIFIED = 0;
   TERMINAL_PURPOSE_AGENT = 1;

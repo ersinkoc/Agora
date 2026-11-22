@@ -49,7 +49,12 @@ pub const FOLLOWER_QUEUE: usize = 1024;
 /// cannot make the node spend more than a bounded pass on one item.
 const PRE_BOUND: usize = 64 * 1024;
 /// Notice codes only the node makes. An adapter's item with one of them is dropped: it could otherwise forge the node's own words.
-pub const NODE_NOTICES: &[&str] = &["adapter.queue_dropped", "adapter.output_dropped"];
+pub const NODE_NOTICES: &[&str] = &[
+    "adapter.queue_dropped",
+    "adapter.output_dropped",
+    // ADR-0101: the node refused an always-only request under its policy.
+    "approval.always_only_forbidden",
+];
 /// ADR-0058: a notice's code is at most this long and has this many parameters at most, each key at most `MAX_PARAM_KEY` bytes and
 /// each value at most `MAX_PARAM_BYTES` (more is cut). An adapter is untrusted; a notice that does not fit the shape is dropped.
 pub const MAX_CODE: usize = 64;
@@ -844,6 +849,21 @@ impl ChatBoard {
 
     /// ADR-0093: the holder kept only the newest of what the agent wrote while no node read it. A notice with the stable code
     /// `adapter.output_dropped` and the count of bytes says so to everyone following.
+    /// ADR-0101: an adapter's request was refused with no card: `approval.always_only_forbidden` (it offered only "always" under a
+    /// policy that refuses it) or `adapter.permission_unanswerable` (nothing the person could allow). `action` is the request's, as
+    /// the agent named it, bounded like a permission entry's.
+    pub fn refused_request(&self, agent: &AgentId, code: &'static str, action: &str, now_ms: u64) {
+        let mut g = self.lock();
+        let t = g.entry(agent.clone()).or_default();
+        let mut n = entry(ChatRole::Agent, ChatKind::Notice, String::new(), now_ms);
+        n.code = code.into();
+        n.params = HashMap::from([(
+            "action".to_string(),
+            tidy(action, MAX_PERMISSION_BYTES, Style::Label).0,
+        )]);
+        t.add(n, now_ms);
+    }
+
     pub fn output_dropped(&self, agent: &AgentId, bytes: u64, now_ms: u64) {
         let mut g = self.lock();
         let t = g.entry(agent.clone()).or_default();
@@ -899,6 +919,18 @@ impl ChatBoard {
         outcome: PermissionOutcome,
         now_ms: u64,
     ) {
+        self.set_permission_as(agent, approval_id, outcome, false, now_ms);
+    }
+
+    /// ADR-0101: [`Self::set_permission`], marking an approved "always" decision (`ChatEntry.permission_always`).
+    pub fn set_permission_as(
+        &self,
+        agent: &AgentId,
+        approval_id: &str,
+        outcome: PermissionOutcome,
+        always: bool,
+        now_ms: u64,
+    ) {
         if approval_id.is_empty() {
             return;
         }
@@ -914,6 +946,7 @@ impl ChatBoard {
         if let Some(id) = found.map(|e| e.entry_id) {
             t.modify(id, now_ms, false, |e| {
                 e.permission_outcome = outcome as i32;
+                e.permission_always = always && outcome == PermissionOutcome::Approved;
             });
         }
     }

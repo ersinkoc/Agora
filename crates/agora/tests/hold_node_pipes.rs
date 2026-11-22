@@ -471,6 +471,60 @@ fn a_kept_structured_agent_is_on_the_mesh_again_and_shown_running_after_its_node
 /// #932: a structured agent the holder kept runs on in the mode it was in, and that mode makes it act without asking. After the node
 /// restarts it is shown and checked so: the new node puts back what the agent last reported of its session (the adapter is not asked
 /// again), so the hub's view has its modes with the skipping one in use, and `skips_permissions_now` says so.
+/// ADR-0101, Codex review of PR #1007: an adapter the holder runs is unconfined by design. A node that confines agents and allows
+/// "always" only for confined ones (`skip_permissions = confined_only`) still takes it up, and never counts it as confined: the
+/// card offers no "always" and an always answer is refused. (The node's sandbox setting alone, which the check read before, says
+/// confined.)
+#[test]
+fn a_kept_structured_agent_is_not_counted_confined_by_a_node_that_now_confines() {
+    use agora_node::supervisor::Confinement;
+    if !agora_platform::sandbox_supported() {
+        return;
+    }
+    let _serial = serial();
+    let rig = Rig::new("confine");
+    let node = rig.node();
+    let id = started(&rig, &node);
+    let agent = AgentId::new(id.clone());
+    assert_eq!(
+        node.supervisor.lock().unwrap().confinement(&agent),
+        Some(Confinement::Unconfined)
+    );
+    let pid = pid_of(&node, &id);
+    drop(node);
+    std::thread::sleep(Duration::from_millis(500));
+    // The owner turns confinement on and allows "always" only for confined agents; the next node reads that at its start.
+    std::fs::write(
+        rig.root.join("data/policy"),
+        "sandbox = worktree\nskip_permissions = confined_only\n",
+    )
+    .expect("policy");
+    let node = rig.node();
+    assert!(held(&node, &id), "the agent was not taken up again");
+    assert_eq!(pid_of(&node, &id), pid, "a new process stands for it");
+    // Read under the lock, checked after it is let go (a failed check must not leave the lock poisoned for the clean-up).
+    let (level, enforceable, confinement, offered, decided) = {
+        let sup = node.supervisor.lock().unwrap();
+        (
+            sup.sandbox_policy().level,
+            sup.sandbox_policy().enforceable(),
+            sup.confinement(&agent),
+            sup.approval_raise_terms(&agent)
+                .map(|(_, permitted)| permitted),
+            sup.approval_decide(&agent).always,
+        )
+    };
+    assert_eq!(
+        level,
+        agora_node::sandbox::Level::Worktree,
+        "the new node confines agents"
+    );
+    assert!(enforceable);
+    assert_eq!(confinement, Some(Confinement::Unconfined));
+    assert_eq!(offered, Some(false), "no \"always\" is offered for it");
+    assert!(!decided, "an always answer is refused");
+}
+
 #[test]
 fn a_kept_structured_agent_in_a_mode_that_skips_permissions_is_still_shown_skipping_after_its_node_restarts(
 ) {

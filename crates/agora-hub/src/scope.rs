@@ -227,6 +227,8 @@ impl Scope {
             // ADR-0090
             Body::AgentSessionConfig(e) => self.granted(self.agents.get(&q(&e.agent_id))),
             Body::AgentCommands(e) => self.granted(self.agents.get(&q(&e.agent_id))),
+            // ADR-0101
+            Body::AgentAlwaysAllowed(e) => self.granted(self.agents.get(&q(&e.agent_id))),
             Body::AgentExited(e) => self.granted(self.agents.get(&q(&e.agent_id))),
             Body::AgentStartRefused(e) => self.granted(self.agents.get(&q(&e.agent_id))),
             // Made by the hub, which names the agent by its hub-wide key already (ADR-0053).
@@ -437,6 +439,32 @@ mod tests {
         let replay = s.filter_view(&full).session_replay();
         assert_eq!(replay.len(), 1);
         assert_eq!(replay[0].producer_id, "n1");
+    }
+
+    /// ADR-0101: an agent's always answer reaches only the people who may see that agent.
+    #[test]
+    fn an_always_answer_is_seen_only_with_its_agent() {
+        let mut s = scope(&["n1/id:shared"]);
+        let always = |node: &str, id: &str| {
+            ev(
+                node,
+                Body::AgentAlwaysAllowed(v1::AgentAlwaysAllowed {
+                    agent_id: id.into(),
+                    approval_id: "ap-1".into(),
+                    action: "run_command".into(),
+                    ..Default::default()
+                }),
+            )
+        };
+        for (event, visible) in [
+            (agent("n1", "a1", "id:shared"), true),
+            (agent("n1", "a2", "id:private"), false),
+            (always("n1", "a1"), true),
+            (always("n1", "a2"), false),
+            (always("n1", "never-seen"), false),
+        ] {
+            assert_eq!(s.admit(&event), visible);
+        }
     }
 
     #[test]
@@ -694,6 +722,7 @@ mod tests {
                     action: "x".into(),
                     detail: "secret".into(),
                     expires_at_ms: 0,
+                    ..Default::default()
                 }),
             ),
             ev(

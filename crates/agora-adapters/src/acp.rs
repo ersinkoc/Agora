@@ -9,8 +9,9 @@
 //! Mapping (ACP → adapter protocol):
 //! - `session/update` `agent_message_chunk` → `chat/append` text (chunks are joined for up to 150 ms); `tool_call` → a tool call
 //!   item; `plan` → a plan item; a `diff` in a tool call's content → a diff item; `agent_thought_chunk` is dropped.
-//! - `session/request_permission` → `approval/request` and state `blocked`; `approval/resolve` picks the agent's own allow or reject
-//!   option (`allow_once` before `allow_always`, `reject_once` before `reject_always`, otherwise the first option or `cancelled`).
+//! - `session/request_permission` → `approval/request` and state `blocked`, with the answers the agent offers (ADR-0101: `scopes`, the
+//!   always option's name and id); `approval/resolve` picks exactly one option: ONCE → `allow_once`, never anything else; ALWAYS →
+//!   the one `allow_always`; a denial → `reject_once`, else `cancelled`. A request with no way to allow it raises no card.
 //! - A prompt turn: `session/prompt` → state `working`, and the agent's answer (its stop reason) → state `idle`. A turn that failed,
 //!   was stopped by the agent (`refusal`, `max_tokens`, ...) or ended with nothing said carries a stable reason code in the state's
 //!   `message` and in a `log` line (docs/specs/adapter-protocol.md "Turn and exit reasons"); never text.
@@ -24,8 +25,8 @@
 use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::ops::ControlFlow;
-use std::process::{Child, ChildStderr, ChildStdin, Command, Stdio};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::process::{Child, ChildStderr, Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{
     channel, sync_channel, Receiver, RecvTimeoutError, SyncSender, TrySendError,
 };
@@ -77,6 +78,11 @@ const EXIT_WAIT: Duration = Duration::from_secs(2);
 const STDERR_SETTLE: Duration = Duration::from_millis(100);
 /// How long the bridge waits for a late request after its agent dies before opening a session.
 const LATE_REQUEST_WAIT: Duration = Duration::from_secs(2);
+/// ADR-0101 (Codex review of PR #1007): how long a person's answer may wait for the writer's report before the agent is ended (as for
+/// a full writer queue) and the node is told its delivery was not confirmed. Expiry does not prove no byte reached the agent (the
+/// success report may be queued behind another event), so the agent is ended first: whatever it got, it holds no grant afterwards.
+/// Shorter than the node's wait for the answer to `approval/resolve`.
+const DELIVER_WAIT: Duration = Duration::from_secs(5);
 /// ADR-0058: the most modes or models passed on, and the longest id, name and description kept. An option whose id is longer is
 /// dropped (a cut id would name another option).
 const OPTIONS_MAX: usize = 200;
@@ -86,6 +92,9 @@ const OPTION_DESCRIPTION_MAX: usize = 500;
 enum Ev {
     Node(Input),
     Agent(Input),
+    /// ADR-0101: the writer's outcome for a line queued with a report token ([`AgentInput::flush_reported`]): whether it was written
+    /// to the agent's stdin and flushed.
+    Written(u64, bool),
 }
 
 enum Input {
@@ -126,7 +135,30 @@ enum Waiting {
 struct Permission {
     /// The id of the agent's `session/request_permission` request.
     request: Value,
-    options: Vec<(String, String)>, // (option id, kind)
+    /// ADR-0101: the options captured when the agent asked, used until the request is answered. `once`: the first `allow_once`;
+    /// `always`: the one `allow_always` (none when the agent offered two or more: ambiguous, Codex review of ADR-0101); `reject`:
+    /// the first `reject_once`. Nothing else is ever selected (`reject_always` is a remembered refusal, an unknown kind may do
+    /// anything).
+    once: Option<String>,
+    always: Option<String>,
+    reject: Option<String>,
+}
+
+/// ADR-0101: how far a decision from the node reaches. `None`: a value this build does not know (refused, never guessed).
+fn decision_scope(params: &Value) -> Option<bool> {
+    match params.get("scope") {
+        None | Some(Value::Null) => Some(false),
+        Some(Value::String(s)) => match s.as_str() {
+            "APPROVAL_SCOPE_UNSPECIFIED" | "APPROVAL_SCOPE_ONCE" => Some(false),
+            "APPROVAL_SCOPE_ALWAYS" => Some(true),
+            _ => None,
+        },
+        Some(v) => match v.as_u64() {
+            Some(0 | 1) => Some(false),
+            Some(2) => Some(true),
+            _ => None,
+        },
+    }
 }
 
 fn lines<R: Read + Send + 'static>(r: R, wrap: fn(Input) -> Ev, tx: SyncSender<Ev>) {
@@ -162,23 +194,51 @@ fn write_line<W: Write>(w: &mut W, v: &Value) -> io::Result<()> {
     w.flush()
 }
 
+/// The agent's stdin as the bridge writes it: a line is written, then flushed (queued, for the writer thread).
+trait AgentInput: Write {
+    /// ADR-0101 (Codex review of PR #1007): queues what was written since the last flush, as `flush` does, and has its outcome reported
+    /// as [`Ev::Written`]`(token, ok)` once it was written to the agent and flushed (or could not be). `Ok(false)`: this input writes
+    /// before it returns (a buffer in tests), so success means the line was given to the agent and nothing is reported.
+    fn flush_reported(&mut self, _token: u64) -> io::Result<bool> {
+        self.flush().map(|()| false)
+    }
+}
+
+impl AgentInput for io::Sink {}
+
+/// A queued line and its report token (0: not reported).
+type Queued = (Box<[u8]>, u64);
+
 struct AgentWriter {
     line: Vec<u8>,
-    pending: SyncSender<Box<[u8]>>,
+    pending: SyncSender<Queued>,
     /// Bytes queued and not yet taken by the writer thread.
     queued: Arc<AtomicUsize>,
+    /// Set by the writer thread once a write failed: nothing more is queued, and every line still queued is reported failed.
+    broken: Arc<AtomicBool>,
 }
 
 impl AgentWriter {
-    fn start(mut stdin: ChildStdin) -> Self {
-        let (pending, lines) = sync_channel::<Box<[u8]>>(AGENT_WRITE_QUEUE);
+    /// Writes to `stdin` on a thread of its own; a line queued with a report token has its outcome sent on `report`.
+    fn start<S: Write + Send + 'static>(mut stdin: S, report: SyncSender<Ev>) -> Self {
+        let (pending, lines) = sync_channel::<Queued>(AGENT_WRITE_QUEUE);
         let queued = Arc::new(AtomicUsize::new(0));
         let taken = Arc::clone(&queued);
+        let broken = Arc::new(AtomicBool::new(false));
+        let failed = Arc::clone(&broken);
         std::thread::spawn(move || {
-            while let Ok(line) = lines.recv() {
+            // Runs until the bridge lets the writer go. After a failed write nothing more is written; the lines still queued are only
+            // reported (so no answer waits for an outcome that never comes).
+            while let Ok((line, token)) = lines.recv() {
                 taken.fetch_sub(line.len(), Ordering::SeqCst);
-                if stdin.write_all(&line).and_then(|()| stdin.flush()).is_err() {
-                    break;
+                let ok = !failed.load(Ordering::SeqCst)
+                    && stdin.write_all(&line).and_then(|()| stdin.flush()).is_ok();
+                if !ok {
+                    failed.store(true, Ordering::SeqCst);
+                }
+                if token != 0 {
+                    // The bridge may be ending (its queue is gone): nobody waits for the outcome then.
+                    let _ = report.send(Ev::Written(token, ok));
                 }
             }
         });
@@ -186,7 +246,30 @@ impl AgentWriter {
             line: Vec::new(),
             pending,
             queued,
+            broken,
         }
+    }
+
+    fn queue(&mut self, token: u64) -> io::Result<()> {
+        let line = std::mem::take(&mut self.line).into_boxed_slice();
+        if self.broken.load(Ordering::SeqCst) {
+            return Err(io::ErrorKind::BrokenPipe.into());
+        }
+        let len = line.len();
+        // Only this thread adds, so the check cannot race another add; the writer thread only subtracts.
+        let held = self.queued.load(Ordering::SeqCst);
+        if held > 0 && held.saturating_add(len) > AGENT_WRITE_BYTES {
+            return Err(io::ErrorKind::WouldBlock.into());
+        }
+        self.queued.fetch_add(len, Ordering::SeqCst);
+        self.pending.try_send((line, token)).map_err(|error| {
+            self.queued.fetch_sub(len, Ordering::SeqCst);
+            match error {
+                TrySendError::Full(_) => io::ErrorKind::WouldBlock,
+                TrySendError::Disconnected(_) => io::ErrorKind::BrokenPipe,
+            }
+            .into()
+        })
     }
 }
 
@@ -197,23 +280,32 @@ impl Write for AgentWriter {
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        let line = std::mem::take(&mut self.line).into_boxed_slice();
-        let len = line.len();
-        // Only this thread adds, so the check cannot race another add; the writer thread only subtracts.
-        let held = self.queued.load(Ordering::SeqCst);
-        if held > 0 && held.saturating_add(len) > AGENT_WRITE_BYTES {
-            return Err(io::ErrorKind::WouldBlock.into());
-        }
-        self.queued.fetch_add(len, Ordering::SeqCst);
-        self.pending.try_send(line).map_err(|error| {
-            self.queued.fetch_sub(len, Ordering::SeqCst);
-            match error {
-                TrySendError::Full(_) => io::ErrorKind::WouldBlock,
-                TrySendError::Disconnected(_) => io::ErrorKind::BrokenPipe,
-            }
-            .into()
-        })
+        self.queue(0)
     }
+}
+
+impl AgentInput for AgentWriter {
+    fn flush_reported(&mut self, token: u64) -> io::Result<bool> {
+        self.queue(token).map(|()| true)
+    }
+}
+
+/// ADR-0101: what became of a line sent with [`Bridge::send_agent_reported`].
+#[derive(Debug, PartialEq, Eq)]
+enum Delivery {
+    /// It could not be queued (or written): the agent was not given it.
+    Failed,
+    /// It was written to the agent before the send returned.
+    Done,
+    /// It is queued; [`Ev::Written`] with this token says whether it was written.
+    Pending(u64),
+}
+
+/// ADR-0101: a node request answered only once the line it sent the agent was written ([`Bridge::written`]), or refused when that
+/// takes longer than `by`.
+struct Delivering {
+    node_id: Value,
+    by: Instant,
 }
 
 /// A unified diff that replaces `old` by `new` as a whole (ACP gives both texts, not a patch).
@@ -1006,8 +1098,12 @@ struct Rich {
 struct Bridge<W: Write> {
     out: W,
     /// The agent's stdin (a buffer in tests, so what the agent was sent can be read on every platform).
-    agent: Box<dyn Write>,
+    agent: Box<dyn AgentInput>,
     agent_writer_full: bool,
+    /// ADR-0101: the last report token given out ([`Self::send_agent_reported`]); 0 is never one.
+    next_report: u64,
+    /// ADR-0101: the node requests (`approval/resolve`) waiting for the writer's outcome of their line, by report token.
+    delivering: HashMap<u64, Delivering>,
     next: u64,
     waiting: HashMap<u64, Waiting>,
     session: Option<String>,
@@ -1164,6 +1260,69 @@ impl<W: Write> Bridge<W> {
         }
     }
 
+    /// ADR-0101 (Codex review of PR #1007): [`Self::send_agent`] for a line whose delivery the node is told about: the caller answers
+    /// the node only once the line was written to the agent (now for [`Delivery::Done`], on [`Ev::Written`] for
+    /// [`Delivery::Pending`]).
+    fn send_agent_reported(&mut self, v: &Value) -> Delivery {
+        if self.agent_writer_full {
+            return Delivery::Failed;
+        }
+        self.next_report += 1;
+        let token = self.next_report;
+        match writeln!(self.agent, "{v}").and_then(|()| self.agent.flush_reported(token)) {
+            Ok(true) => Delivery::Pending(token),
+            Ok(false) => Delivery::Done,
+            Err(e) => {
+                self.agent_writer_full = e.kind() == io::ErrorKind::WouldBlock;
+                Delivery::Failed
+            }
+        }
+    }
+
+    /// The node's request `id` sent the agent something that did not reach it.
+    fn undelivered(&mut self, id: &Value) -> io::Result<()> {
+        self.send_node(&json!({"jsonrpc": "2.0", "id": id,
+            "error": {"code": -32603, "message": "adapter.approval_undelivered"}}))
+    }
+
+    /// ADR-0101: the writer's outcome for the line of report `token`: the node request waiting for it is answered (success only when
+    /// the line was written to the agent and flushed).
+    fn written(&mut self, token: u64, ok: bool) -> io::Result<()> {
+        let Some(d) = self.delivering.remove(&token) else {
+            return Ok(());
+        };
+        if ok {
+            self.reply(&d.node_id, json!({}))
+        } else {
+            self.undelivered(&d.node_id)
+        }
+    }
+
+    /// ADR-0101: takes every node request whose line waited longer than [`DELIVER_WAIT`] for the writer's report, oldest first. The
+    /// caller ends the agent before [`Self::unconfirmed`] tells the node, so an answer whose delivery was not confirmed cannot reach a
+    /// running agent after the node heard it failed.
+    fn take_overdue(&mut self, now: Instant) -> Vec<Value> {
+        let mut late: Vec<u64> = self
+            .delivering
+            .iter()
+            .filter(|(_, d)| now >= d.by)
+            .map(|(t, _)| *t)
+            .collect();
+        late.sort_unstable();
+        late.iter()
+            .filter_map(|t| self.delivering.remove(t).map(|d| d.node_id))
+            .collect()
+    }
+
+    /// ADR-0101: the node requests [`Self::take_overdue`] took get `adapter.approval_undelivered` (delivery not confirmed; the agent was
+    /// ended first).
+    fn unconfirmed(&mut self, ids: &[Value]) -> io::Result<()> {
+        for id in ids {
+            self.undelivered(id)?;
+        }
+        Ok(())
+    }
+
     fn ask_agent(&mut self, method: &str, params: Value, waiting: Waiting) {
         self.next += 1;
         self.waiting.insert(self.next, waiting);
@@ -1219,6 +1378,12 @@ impl<W: Write> Bridge<W> {
     /// idle is reported too.
     fn agent_gone(&mut self, exit_code: Option<i32>, stderr_tail: &str) -> io::Result<()> {
         self.flush_text()?;
+        // ADR-0101: an answer whose write was not confirmed before the agent ended is not said to have reached it.
+        let mut delivering: Vec<(u64, Delivering)> = self.delivering.drain().collect();
+        delivering.sort_by_key(|(t, _)| *t);
+        for (_, d) in delivering {
+            self.undelivered(&d.node_id)?;
+        }
         let mut waiting: Vec<(u64, Waiting)> = self.waiting.drain().collect();
         waiting.sort_by_key(|(n, _)| *n);
         let stage_of = |w: &Waiting| match w {
@@ -1526,6 +1691,8 @@ impl<W: Write> Bridge<W> {
         let mut c = vec![
             "chat",
             "approvals",
+            // ADR-0101: `approval/request` carries `scopes`, and a plain Allow is never answered with a remembered option.
+            "approval_scopes",
             "plan",
             "diff",
             "cancel",
@@ -1678,7 +1845,16 @@ impl<W: Write> Bridge<W> {
                     .get("approved")
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
-                let Some(p) = self.perms.remove(approval) else {
+                // ADR-0101: the scope is read first; a value this build does not know is refused and nothing is sent.
+                let Some(always) = decision_scope(&params) else {
+                    if let Some(id) = &id {
+                        self.send_node(&json!({"jsonrpc": "2.0", "id": id,
+                            "error": {"code": -32602, "message": "protocol.invalid_message",
+                                      "data": {"code": "protocol.invalid_message", "params": {"field": "scope"}}}}))?;
+                    }
+                    return Ok(ControlFlow::Continue(()));
+                };
+                let Some(p) = self.perms.get(approval) else {
                     // A permission the bridge already answered `cancelled` (a prompt's reply, a cancel, a change of session), or
                     // never knew: the decision cannot reach the agent, so it is refused and the node cancels its entry.
                     if let Some(id) = &id {
@@ -1687,29 +1863,63 @@ impl<W: Write> Bridge<W> {
                     }
                     return Ok(ControlFlow::Continue(()));
                 };
-                let want: &[&str] = if approved {
-                    &["allow_once", "allow_always"]
-                } else {
-                    &["reject_once", "reject_always"]
+                // ADR-0101: exactly the option the person's answer names, captured when the agent asked. An answer the agent did not
+                // offer is refused before anything is sent, and the request stays held (answered again, or `cancelled` at turn end).
+                let chosen = match (approved, always) {
+                    (true, false) => Ok(p.once.clone()),
+                    (true, true) => Ok(p.always.clone()),
+                    (false, false) => Err(p.reject.clone()),
+                    (false, true) => {
+                        // A remembered refusal is reserved: never sent.
+                        if let Some(id) = &id {
+                            self.send_node(&json!({"jsonrpc": "2.0", "id": id,
+                                "error": {"code": -32602, "message": "protocol.invalid_message",
+                                          "data": {"code": "protocol.invalid_message", "params": {"field": "scope"}}}}))?;
+                        }
+                        return Ok(ControlFlow::Continue(()));
+                    }
                 };
-                let chosen = want
-                    .iter()
-                    .find_map(|k| p.options.iter().find(|(_, kind)| kind == k))
-                    .or_else(|| if approved { p.options.first() } else { None });
                 let outcome = match chosen {
-                    Some((option, _)) => json!({"outcome": "selected", "optionId": option}),
-                    None => json!({"outcome": "cancelled"}),
+                    Ok(Some(option)) | Err(Some(option)) => {
+                        json!({"outcome": "selected", "optionId": option})
+                    }
+                    Err(None) => json!({"outcome": "cancelled"}),
+                    Ok(None) => {
+                        if let Some(id) = &id {
+                            self.send_node(&json!({"jsonrpc": "2.0", "id": id,
+                                "error": {"code": -32602, "message": "approval.scope_unavailable",
+                                          "data": {"code": "approval.scope_unavailable"}}}))?;
+                        }
+                        return Ok(ControlFlow::Continue(()));
+                    }
                 };
-                if !self.send_agent(
+                let Some(p) = self.perms.remove(approval) else {
+                    return Ok(ControlFlow::Continue(()));
+                };
+                // Codex review of PR #1007: the node is answered only once the answer was written to the agent's stdin (the node
+                // records an always answer as one the agent holds on this success).
+                match self.send_agent_reported(
                     &json!({"jsonrpc": "2.0", "id": p.request, "result": {"outcome": outcome}}),
                 ) {
-                    if let Some(id) = &id {
-                        self.send_node(&json!({"jsonrpc": "2.0", "id": id,
-                            "error": {"code": -32603, "message": "adapter.approval_undelivered"}}))?;
+                    Delivery::Failed => {
+                        if let Some(id) = &id {
+                            self.undelivered(id)?;
+                        }
+                        return Ok(ControlFlow::Continue(()));
                     }
-                    return Ok(ControlFlow::Continue(()));
+                    Delivery::Done => done(self)?,
+                    Delivery::Pending(token) => {
+                        if let Some(id) = &id {
+                            self.delivering.insert(
+                                token,
+                                Delivering {
+                                    node_id: id.clone(),
+                                    by: Instant::now() + DELIVER_WAIT,
+                                },
+                            );
+                        }
+                    }
                 }
-                done(self)?;
                 // Permissions are kept only while a prompt runs (one outside a turn is refused, any prompt's reply cancels them).
                 if self.perms.is_empty() {
                     self.state("WORKING")?;
@@ -2053,31 +2263,82 @@ impl<W: Write> Bridge<W> {
                     .unwrap_or("permission")
                     .to_string();
                 let detail = call.get("rawInput").map(short).unwrap_or_default();
-                let options = p
+                // (option id, name, kind) of every option with an id.
+                let options: Vec<(String, String, String)> = p
                     .get("options")
                     .and_then(Value::as_array)
                     .map(|a| {
                         a.iter()
                             .filter_map(|o| {
+                                let text = |k: &str| {
+                                    o.get(k).and_then(Value::as_str).unwrap_or("").to_string()
+                                };
                                 Some((
                                     o.get("optionId")?.as_str()?.to_string(),
-                                    o.get("kind")
-                                        .and_then(Value::as_str)
-                                        .unwrap_or("")
-                                        .to_string(),
+                                    text("name"),
+                                    text("kind"),
                                 ))
                             })
                             .collect()
                     })
                     .unwrap_or_default();
+                let first = |kind: &str| {
+                    options
+                        .iter()
+                        .find(|(_, _, k)| k == kind)
+                        .map(|(id, _, _)| id.clone())
+                };
+                let mut always_options = options.iter().filter(|(_, _, k)| k == "allow_always");
+                // ADR-0101 (Codex review): exactly one always option, or none is offered; two would leave the signed answer ambiguous.
+                let always = match (always_options.next(), always_options.next()) {
+                    (Some(one), None) => Some(one.clone()),
+                    _ => None,
+                };
+                let once = first("allow_once");
+                let reject = first("reject_once");
+                if once.is_none() && always.is_none() {
+                    // ADR-0101: nothing to allow, so nobody is asked: refused at once, and the person is told why.
+                    match &reject {
+                        Some(option) => self.send_agent(&json!({"jsonrpc": "2.0", "id": request,
+                            "result": {"outcome": {"outcome": "selected", "optionId": option}}})),
+                        None => self.send_agent(&json!({"jsonrpc": "2.0", "id": request,
+                            "result": {"outcome": {"outcome": "cancelled"}}})),
+                    };
+                    let reason = json!({"action": action});
+                    self.log_reason("WARN", "adapter.permission_unanswerable", &reason)?;
+                    self.notice("adapter.permission_unanswerable", &reason)?;
+                    return Ok(());
+                }
+                let mut scopes = Vec::new();
+                if once.is_some() {
+                    scopes.push("APPROVAL_SCOPE_ONCE");
+                }
+                let (always_label, always_option_id) = match &always {
+                    Some((id, name, _)) => {
+                        scopes.push("APPROVAL_SCOPE_ALWAYS");
+                        (name.clone(), id.clone())
+                    }
+                    None => (String::new(), String::new()),
+                };
                 self.next += 1;
                 let approval = format!("acp-{}", self.next);
-                self.perms
-                    .insert(approval.clone(), Permission { request, options });
+                self.perms.insert(
+                    approval.clone(),
+                    Permission {
+                        request,
+                        once,
+                        always: always.map(|(id, _, _)| id),
+                        reject,
+                    },
+                );
                 let sid = self.session.clone().unwrap_or_default();
                 self.said = true;
                 self.state("BLOCKED")?;
-                self.note("approval/request", json!({"sessionId": sid, "approvalId": approval, "action": action, "detail": detail}))?;
+                self.note(
+                    "approval/request",
+                    json!({"sessionId": sid, "approvalId": approval, "action": action, "detail": detail,
+                           "scopes": scopes, "alwaysLabel": always_label, "alwaysOptionId": always_option_id}),
+                )?;
             }
             // Files and terminals are the agent's own business in its worktree; the bridge offers neither.
             (Some(_), Some(id)) => {
@@ -2321,11 +2582,13 @@ where
     let stderr_done = keep_stderr(stderr, Arc::clone(&kept));
     let (tx, rx) = sync_channel(INPUT_QUEUE);
     lines(input, Ev::Node, tx.clone());
-    lines(stdout, Ev::Agent, tx);
+    lines(stdout, Ev::Agent, tx.clone());
     let mut b = Bridge {
         out: output,
-        agent: Box::new(AgentWriter::start(stdin)),
+        agent: Box::new(AgentWriter::start(stdin, tx)),
         agent_writer_full: false,
+        next_report: 0,
+        delivering: HashMap::new(),
         next: 0,
         waiting: HashMap::new(),
         session: None,
@@ -2367,11 +2630,19 @@ where
                 Ok(Ev::Node(Input::TooLong)) => return Err(io::ErrorKind::InvalidData.into()),
                 Ok(Ev::Agent(Input::Gone)) => break None,
                 Ok(Ev::Agent(Input::TooLong)) => break Some(io::ErrorKind::InvalidData),
+                Ok(Ev::Written(token, ok)) => b.written(token, ok)?,
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => return Ok(None),
             }
             if b.agent_writer_full {
                 break Some(io::ErrorKind::WouldBlock);
+            }
+            let late = b.take_overdue(Instant::now());
+            if !late.is_empty() {
+                // End the agent before the node hears the answer failed: expiry does not prove nothing reached it.
+                let _ = child.kill();
+                b.unconfirmed(&late)?;
+                break Some(io::ErrorKind::TimedOut);
             }
             if !b.text.is_empty() && b.text_since.elapsed() >= JOIN {
                 b.flush_text()?;
@@ -2428,6 +2699,8 @@ mod tests {
             out: Vec::new(),
             agent: Box::new(io::sink()),
             agent_writer_full: false,
+            next_report: 0,
+            delivering: HashMap::new(),
             next: 0,
             waiting: HashMap::new(),
             session: Some("s".to_string()),
@@ -2639,6 +2912,7 @@ mod tests {
                     line: Vec::new(),
                     pending,
                     queued: Default::default(),
+                    broken: Default::default(),
                 },
                 rx,
             )
@@ -3168,6 +3442,8 @@ mod tests {
         }
     }
 
+    impl super::AgentInput for Sent {}
+
     impl Sent {
         /// The lines sent since the last call, as JSON.
         fn take(&self) -> Vec<serde_json::Value> {
@@ -3398,7 +3674,7 @@ mod tests {
             b.out.clear();
             let (pending, rx) = std::sync::mpsc::sync_channel(1);
             let queued = if full {
-                pending.try_send(Box::from(&b"pending\n"[..]))?;
+                pending.try_send((Box::from(&b"pending\n"[..]), 0))?;
                 Some(rx)
             } else {
                 drop(rx);
@@ -3408,6 +3684,7 @@ mod tests {
                 line: Vec::new(),
                 pending,
                 queued: Default::default(),
+                broken: Default::default(),
             });
             resolve(&mut b, 23, &approval)?;
             let reply = answer(&b.out, 23).ok_or("no reply")?;
@@ -3416,7 +3693,7 @@ mod tests {
             assert!(states(&b.out).is_empty());
             assert_eq!(b.agent_writer_full, full);
             if let Some(rx) = queued {
-                assert_eq!(&*rx.try_recv()?, b"pending\n");
+                assert_eq!(&*rx.try_recv()?.0, b"pending\n");
                 assert!(rx.try_recv().is_err());
             }
         }
@@ -3432,6 +3709,137 @@ mod tests {
         assert_eq!(
             answer_to(&sent.take(), "perm-2").as_deref(),
             Some("selected")
+        );
+        Ok(())
+    }
+
+    /// ADR-0101, Codex review of PR #1007: `approval/resolve` succeeds only once the writer wrote the answer to the agent's stdin and
+    /// flushed it, never when it was only queued. A write that fails (or an agent that ends first) is an error, so the node records no
+    /// always answer; one that waits longer than [`super::DELIVER_WAIT`] is an error too, and the bridge ends the agent.
+    #[test]
+    fn an_answer_is_acknowledged_only_once_the_writer_gave_it_to_the_agent(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use serde_json::json;
+        use std::sync::mpsc::sync_channel;
+        struct Broken;
+        impl std::io::Write for Broken {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        #[derive(Clone, Default)]
+        struct Shared(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Shared {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let always = |b: &mut super::Bridge<Vec<u8>>, id: u64| {
+            let approval = b.perms.keys().next().cloned().unwrap_or_default();
+            b.handle_node(&json!({"jsonrpc":"2.0","id":id,"method":"approval/resolve",
+                "params":{"approvalId":approval,"approved":true,"scope":"APPROVAL_SCOPE_ALWAYS"}}))
+                .map(drop)
+        };
+        let outcome = |rx: &std::sync::mpsc::Receiver<super::Ev>| match rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+        {
+            Ok(super::Ev::Written(token, ok)) => Some((token, ok)),
+            _ => None,
+        };
+        let ready = |agent: Box<dyn super::AgentInput>| -> std::io::Result<super::Bridge<Vec<u8>>> {
+            let mut b = bridge_in_session()?;
+            prompt(&mut b, 10, "t")?;
+            ask_with(&mut b, "perm-1", all_four())?;
+            b.agent = agent;
+            b.out.clear();
+            Ok(b)
+        };
+
+        // Written and flushed: the node hears success only after the writer said so.
+        let (tx, rx) = sync_channel(8);
+        let stdin = Shared::default();
+        let mut b = ready(Box::new(super::AgentWriter::start(stdin.clone(), tx)))?;
+        always(&mut b, 30)?;
+        assert!(
+            reply_to(&b.out, 30).is_none(),
+            "acknowledged when only queued"
+        );
+        let (token, ok) = outcome(&rx).ok_or("no outcome")?;
+        assert!(ok);
+        b.written(token, ok)?;
+        assert_eq!(reply_to(&b.out, 30).ok_or("no reply")?["result"], json!({}));
+        let written = String::from_utf8(stdin.0.lock().unwrap_or_else(|e| e.into_inner()).clone())?;
+        assert!(written.contains("\"optionId\":\"aa\""), "{written}");
+
+        // The write fails: an error, never a success, and nothing more is queued.
+        let (tx, rx) = sync_channel(8);
+        let mut b = ready(Box::new(super::AgentWriter::start(Broken, tx)))?;
+        always(&mut b, 31)?;
+        assert!(reply_to(&b.out, 31).is_none());
+        let (token, ok) = outcome(&rx).ok_or("no outcome")?;
+        assert!(!ok);
+        b.written(token, ok)?;
+        let reply = reply_to(&b.out, 31).ok_or("no reply")?;
+        assert_eq!(
+            reply["error"]["message"], "adapter.approval_undelivered",
+            "{reply}"
+        );
+        assert!(reply.get("result").is_none(), "{reply}");
+        // A late or repeated outcome changes nothing.
+        b.out.clear();
+        b.written(token, true)?;
+        assert!(b.out.is_empty());
+
+        // The agent ends before the write was confirmed: an error.
+        let (pending, _held) = sync_channel(4);
+        let stuck = super::AgentWriter {
+            line: Vec::new(),
+            pending,
+            queued: Default::default(),
+            broken: Default::default(),
+        };
+        let mut b = ready(Box::new(stuck))?;
+        always(&mut b, 32)?;
+        assert!(reply_to(&b.out, 32).is_none());
+        b.agent_gone(Some(1), "")?;
+        let reply = reply_to(&b.out, 32).ok_or("no reply")?;
+        assert_eq!(
+            reply["error"]["message"], "adapter.approval_undelivered",
+            "{reply}"
+        );
+
+        // The writer never gets to it: refused after the wait, and the caller ends the agent.
+        let (pending, _held) = sync_channel(4);
+        let stuck = super::AgentWriter {
+            line: Vec::new(),
+            pending,
+            queued: Default::default(),
+            broken: Default::default(),
+        };
+        let mut b = ready(Box::new(stuck))?;
+        always(&mut b, 33)?;
+        let now = std::time::Instant::now();
+        assert!(b.take_overdue(now).is_empty());
+        assert!(reply_to(&b.out, 33).is_none());
+        let late = b.take_overdue(now + super::DELIVER_WAIT);
+        assert_eq!(late.len(), 1);
+        // Taking it tells the node nothing yet: the bridge ends the agent first, then reports.
+        assert!(reply_to(&b.out, 33).is_none());
+        b.unconfirmed(&late)?;
+        let reply = reply_to(&b.out, 33).ok_or("no reply")?;
+        assert_eq!(
+            reply["error"]["message"], "adapter.approval_undelivered",
+            "{reply}"
         );
         Ok(())
     }
@@ -3491,6 +3899,304 @@ mod tests {
         b.out.clear();
         b.handle_agent(&json!({"jsonrpc":"2.0","id":1,"result":{"stopReason":"end_turn"}}))?;
         assert_eq!(states(&b.out), ["AGENT_STATE_IDLE"]);
+        Ok(())
+    }
+
+    // ---- ADR-0101: the offer travels with the request, and the decision's scope picks exactly one option ----
+
+    fn ask_with(
+        b: &mut super::Bridge<Vec<u8>>,
+        id: &str,
+        options: serde_json::Value,
+    ) -> std::io::Result<()> {
+        b.handle_agent(&serde_json::json!({"jsonrpc":"2.0","id":id,"method":"session/request_permission",
+            "params":{"sessionId":"s","toolCall":{"title":"run_command","rawInput":{"command":"git status"}},"options":options}}))
+    }
+
+    /// The node's notes of one method.
+    fn notes_of(out: &[u8], method: &str) -> Vec<serde_json::Value> {
+        out.split(|b| *b == b'\n')
+            .filter_map(|l| serde_json::from_slice::<serde_json::Value>(l).ok())
+            .filter(|v| v["method"] == method)
+            .map(|v| v["params"].clone())
+            .collect()
+    }
+
+    /// The option the agent was sent for its permission request `id`, if one was selected.
+    fn option_sent(sent: &[serde_json::Value], id: &str) -> Option<String> {
+        sent.iter()
+            .find(|v| v["id"] == id && v.get("method").is_none())
+            .and_then(|v| {
+                v["result"]["outcome"]["optionId"]
+                    .as_str()
+                    .map(str::to_string)
+            })
+    }
+
+    fn reply_to(out: &[u8], id: u64) -> Option<serde_json::Value> {
+        out.split(|b| *b == b'\n')
+            .filter_map(|l| serde_json::from_slice::<serde_json::Value>(l).ok())
+            .find(|v| v["id"] == id && v.get("method").is_none())
+    }
+
+    fn all_four() -> serde_json::Value {
+        serde_json::json!([
+            {"optionId":"ra","name":"Never","kind":"reject_always"},
+            {"optionId":"aa","name":"Always allow git","kind":"allow_always"},
+            {"optionId":"ro","name":"No","kind":"reject_once"},
+            {"optionId":"ao","name":"Yes","kind":"allow_once"}
+        ])
+    }
+
+    #[test]
+    fn the_bridge_declares_strict_scopes() -> Result<(), Box<dyn std::error::Error>> {
+        let b = bridge_in_session()?;
+        assert!(b.capabilities().contains(&"approval_scopes"));
+        Ok(())
+    }
+
+    /// The request names which answers the agent offers, the always option's own name and its exact id.
+    #[test]
+    fn the_offer_travels_with_the_request() -> Result<(), Box<dyn std::error::Error>> {
+        use serde_json::json;
+        for (options, scopes, label, option) in [
+            (
+                all_four(),
+                json!(["APPROVAL_SCOPE_ONCE", "APPROVAL_SCOPE_ALWAYS"]),
+                "Always allow git",
+                "aa",
+            ),
+            (
+                json!([{"optionId":"ao","name":"Yes","kind":"allow_once"}]),
+                json!(["APPROVAL_SCOPE_ONCE"]),
+                "",
+                "",
+            ),
+            (
+                json!([{"optionId":"aa","name":"Always","kind":"allow_always"},{"optionId":"ro","name":"No","kind":"reject_once"}]),
+                json!(["APPROVAL_SCOPE_ALWAYS"]),
+                "Always",
+                "aa",
+            ),
+            // Two always options are ambiguous (Codex review of ADR-0101): ALWAYS is withheld, the single answer stays.
+            (
+                json!([{"optionId":"a1","name":"A","kind":"allow_always"},{"optionId":"a2","name":"A","kind":"allow_always"},
+                    {"optionId":"ao","name":"Yes","kind":"allow_once"}]),
+                json!(["APPROVAL_SCOPE_ONCE"]),
+                "",
+                "",
+            ),
+        ] {
+            let (mut b, _) = bridge_with_agent()?;
+            prompt(&mut b, 10, "t")?;
+            b.out.clear();
+            ask_with(&mut b, "p", options.clone())?;
+            let req = notes_of(&b.out, "approval/request");
+            assert_eq!(req.len(), 1, "{options}");
+            assert_eq!(req[0]["scopes"], scopes, "{options}");
+            assert_eq!(req[0]["alwaysLabel"], json!(label), "{options}");
+            assert_eq!(req[0]["alwaysOptionId"], json!(option), "{options}");
+        }
+        Ok(())
+    }
+
+    /// A plain Allow (ONCE, or a node that sends no scope) is never answered with a remembered option, and ALWAYS selects only the
+    /// one always option the request offered. An option of an unknown kind is never selected.
+    #[test]
+    fn once_never_selects_allow_always_and_always_selects_only_it(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use serde_json::json;
+        let cases: Vec<(serde_json::Value, serde_json::Value, bool, Option<&str>)> = vec![
+            (all_four(), json!(null), true, Some("ao")),
+            (
+                all_four(),
+                json!("APPROVAL_SCOPE_UNSPECIFIED"),
+                true,
+                Some("ao"),
+            ),
+            (all_four(), json!("APPROVAL_SCOPE_ONCE"), true, Some("ao")),
+            (all_four(), json!("APPROVAL_SCOPE_ALWAYS"), true, Some("aa")),
+            // Denying never widens: `reject_once`, else `cancelled`, never `reject_always`.
+            (all_four(), json!("APPROVAL_SCOPE_ONCE"), false, Some("ro")),
+            (
+                json!([{"optionId":"ra","kind":"reject_always"},{"optionId":"ao","kind":"allow_once"}]),
+                json!(null),
+                false,
+                None,
+            ),
+        ];
+        for (options, scope, approved, want) in cases {
+            let (mut b, sent) = bridge_with_agent()?;
+            prompt(&mut b, 10, "t")?;
+            ask_with(&mut b, "p", options.clone())?;
+            let approval = b.perms.keys().next().cloned().ok_or("no approval")?;
+            let _ = sent.take();
+            b.out.clear();
+            let mut params = json!({"approvalId": approval, "approved": approved});
+            if !scope.is_null() {
+                params["scope"] = scope.clone();
+            }
+            let _ = b.handle_node(
+                &json!({"jsonrpc":"2.0","id":30,"method":"approval/resolve","params":params}),
+            )?;
+            let reply = reply_to(&b.out, 30).ok_or("no reply")?;
+            assert_eq!(reply["result"], json!({}), "{options} {scope}: {reply}");
+            let sent = sent.take();
+            assert_eq!(
+                option_sent(&sent, "p").as_deref(),
+                want,
+                "{options} {scope} {approved}"
+            );
+            if want.is_none() {
+                assert_eq!(answer_to(&sent, "p").as_deref(), Some("cancelled"));
+            }
+        }
+        Ok(())
+    }
+
+    /// The decision names an answer the request did not offer (ONCE on an always-only request, ALWAYS on a once-only one), or a scope
+    /// this build does not know: refused with `approval.scope_unavailable` / an invalid scope, the agent is sent nothing, and the
+    /// request is still held (it can be answered again, or is answered `cancelled` when the turn ends).
+    #[test]
+    fn an_answer_the_agent_did_not_offer_is_refused_and_keeps_the_request(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use serde_json::json;
+        let always_only = json!([{"optionId":"aa","name":"Always","kind":"allow_always"},{"optionId":"ro","kind":"reject_once"}]);
+        let once_only =
+            json!([{"optionId":"ao","kind":"allow_once"},{"optionId":"x","kind":"something_new"}]);
+        for (options, scope, approved, code) in [
+            (
+                always_only.clone(),
+                json!("APPROVAL_SCOPE_ONCE"),
+                true,
+                "approval.scope_unavailable",
+            ),
+            (
+                always_only.clone(),
+                json!(null),
+                true,
+                "approval.scope_unavailable",
+            ),
+            (
+                once_only.clone(),
+                json!("APPROVAL_SCOPE_ALWAYS"),
+                true,
+                "approval.scope_unavailable",
+            ),
+            (
+                once_only.clone(),
+                json!("APPROVAL_SCOPE_BOGUS"),
+                true,
+                "protocol.invalid_message",
+            ),
+            (
+                once_only.clone(),
+                json!(7),
+                true,
+                "protocol.invalid_message",
+            ),
+            // A remembered refusal is reserved (ADR-0101): never sent.
+            (
+                all_four(),
+                json!("APPROVAL_SCOPE_ALWAYS"),
+                false,
+                "protocol.invalid_message",
+            ),
+        ] {
+            let (mut b, sent) = bridge_with_agent()?;
+            prompt(&mut b, 10, "t")?;
+            ask_with(&mut b, "p", options.clone())?;
+            let approval = b.perms.keys().next().cloned().ok_or("no approval")?;
+            let _ = sent.take();
+            b.out.clear();
+            let mut params = json!({"approvalId": approval, "approved": approved});
+            if !scope.is_null() {
+                params["scope"] = scope.clone();
+            }
+            let _ = b.handle_node(
+                &json!({"jsonrpc":"2.0","id":31,"method":"approval/resolve","params":params}),
+            )?;
+            let reply = reply_to(&b.out, 31).ok_or("no reply")?;
+            assert_eq!(reply["error"]["code"], -32602, "{options} {scope}: {reply}");
+            assert_eq!(
+                reply["error"]["data"]["code"],
+                json!(code),
+                "{options} {scope}: {reply}"
+            );
+            assert!(
+                sent.take().is_empty(),
+                "{options} {scope}: the agent is sent nothing"
+            );
+            assert!(
+                b.perms.contains_key(&approval),
+                "{options} {scope}: the request is still held"
+            );
+            assert!(states(&b.out).is_empty());
+        }
+        // A deny still works on an always-only request (a signed ONCE deny stays valid there).
+        let (mut b, sent) = bridge_with_agent()?;
+        prompt(&mut b, 10, "t")?;
+        ask_with(&mut b, "p", always_only)?;
+        let approval = b.perms.keys().next().cloned().ok_or("no approval")?;
+        let _ = sent.take();
+        let _ = b.handle_node(&json!({"jsonrpc":"2.0","id":32,"method":"approval/resolve",
+            "params":{"approvalId": approval, "approved": false, "scope": "APPROVAL_SCOPE_ONCE"}}))?;
+        assert_eq!(option_sent(&sent.take(), "p").as_deref(), Some("ro"));
+        Ok(())
+    }
+
+    /// A request that offers no way to allow it (no `allow_once`, and no single `allow_always`) raises no card: the agent is answered
+    /// `reject_once` (else `cancelled`), and the node gets a log line and a notice with the action.
+    #[test]
+    fn a_request_that_cannot_be_allowed_raises_no_card() -> Result<(), Box<dyn std::error::Error>> {
+        use serde_json::json;
+        for (options, want) in [
+            (
+                json!([{"optionId":"ro","kind":"reject_once"},{"optionId":"ra","kind":"reject_always"}]),
+                Some("ro"),
+            ),
+            (
+                json!([{"optionId":"ra","kind":"reject_always"},{"optionId":"x","kind":"something_new"}]),
+                None,
+            ),
+            (
+                json!([{"optionId":"a1","kind":"allow_always"},{"optionId":"a2","kind":"allow_always"}]),
+                None,
+            ),
+            (json!([]), None),
+        ] {
+            let (mut b, sent) = bridge_with_agent()?;
+            prompt(&mut b, 10, "t")?;
+            let _ = sent.take();
+            b.out.clear();
+            ask_with(&mut b, "p", options.clone())?;
+            assert!(notes_of(&b.out, "approval/request").is_empty(), "{options}");
+            assert!(states(&b.out).is_empty(), "{options}: not blocked");
+            assert!(b.perms.is_empty(), "{options}");
+            let sent = sent.take();
+            assert_eq!(option_sent(&sent, "p").as_deref(), want, "{options}");
+            if want.is_none() {
+                assert_eq!(
+                    answer_to(&sent, "p").as_deref(),
+                    Some("cancelled"),
+                    "{options}"
+                );
+            }
+            let notices = notes_of(&b.out, "chat/append");
+            assert_eq!(notices.len(), 1, "{options}");
+            assert_eq!(
+                notices[0]["notice"]["code"],
+                "adapter.permission_unanswerable"
+            );
+            assert_eq!(notices[0]["notice"]["params"]["action"], "run_command");
+            let logs = notes_of(&b.out, "log");
+            assert!(
+                logs.iter().any(|l| l["message"]
+                    .as_str()
+                    .is_some_and(|m| m.contains("adapter.permission_unanswerable"))),
+                "{options}: {logs:?}"
+            );
+        }
         Ok(())
     }
 }

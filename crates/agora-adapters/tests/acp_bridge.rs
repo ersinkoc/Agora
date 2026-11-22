@@ -1464,7 +1464,7 @@ fn send_cancel_fixture_confirmations(
         edge_child_send(
             out,
             json!({"jsonrpc":"2.0","id":id,"method":"session/request_permission","params":{
-                "sessionId":"cancel-fixture","toolCall":{"title":title},"options":[]
+                "sessionId":"cancel-fixture","toolCall":{"title":title},"options":[{"optionId":"yes","kind":"allow_once"}]
             }}),
         );
     }
@@ -1617,6 +1617,7 @@ fn a_node_without_rich_chat_gets_the_old_items_byte_for_byte() {
         json!([
             "chat",
             "approvals",
+            "approval_scopes",
             "plan",
             "diff",
             "cancel",

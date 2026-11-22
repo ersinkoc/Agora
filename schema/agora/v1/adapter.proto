@@ -77,6 +77,9 @@ message ApprovalResolveParams {
   string session_id = 1;
   string approval_id = 2;
   bool approved = 3;
+  // ADR-0101: how far an approved decision reaches, as the person signed it. Set only for an adapter that declared `approval_scopes`;
+  // ALWAYS only when its request offered it. An adapter that takes ONCE must never answer the agent with a remembered option.
+  ApprovalScope scope = 4;
 }
 
 // method "mesh/deliver"
@@ -159,6 +162,13 @@ message ApprovalRequestParams {
   string approval_id = 2;
   string action = 3;
   string detail = 4;
+  // ADR-0101, read only from an adapter that declared the capability `approval_scopes`: which answers the agent offers for this
+  // request (empty: ONCE only, every adapter before ADR-0101). ALWAYS is an answer the agent remembers (ACP `allow_always`).
+  repeated ApprovalScope scopes = 5;
+  // With ALWAYS in `scopes`: the agent's own name for its always option (untrusted text, the node cleans and bounds it) and the
+  // exact id of that one option (ACP `optionId`), which the decision is bound to. Empty otherwise.
+  string always_label = 6;
+  string always_option_id = 7;
 }
 
 // method "usage/report" (notification)

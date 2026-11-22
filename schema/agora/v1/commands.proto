@@ -334,6 +334,11 @@ message ApprovalResolve {
   // then F(node_id) F(approval_id) F(verdict) F(agent_id) F(option_id) F(value) F(sha256(detail)), where F(x) is the decimal byte
   // length of x, `:`, then x (docs/specs/protocol.md). `helper_grant` and `helpers_may_start` must be 0 and false there. The node
   // applies the option and value it rendered, never anything the decision carries.
+  // ADR-0101: how far the answer reaches. UNSPECIFIED and ONCE are signed over the message above; ALWAYS (only with `approved`, only
+  // on a request whose `scopes` offer it, never on an `agent.` request) over `agora-approval-always-v1`, one NUL, then
+  // F(node_id) F(approval_id) F(verdict) F(agent_id) F(sha256(action)) F(sha256(detail)) F(always_label) F(always_option_id)
+  // (docs/specs/protocol.md). Any other value is refused.
+  ApprovalScope scope = 7;
 }
 
 // ADR-0041. Signed by a trusted device (the same ES256 scheme as ApprovalResolve) over
@@ -634,6 +639,8 @@ message ChatEntry {
   // ADR-0090, `CHAT_KIND_PERMISSION`: the approval (`ApprovalRequested.approval_id`) this entry shows and how it stands.
   string approval_id = 19;
   PermissionOutcome permission_outcome = 20;
+  // ADR-0101: the approved decision was "always" (the agent remembers it for its session).
+  bool permission_always = 21;
 }
 
 message ChatSnapshot {

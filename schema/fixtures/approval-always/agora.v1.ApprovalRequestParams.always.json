@@ -1,0 +1,9 @@
+{
+  "sessionId": "s1",
+  "approvalId": "acp-1",
+  "action": "run_command",
+  "detail": "{\"command\":\"git status\"}",
+  "scopes": ["APPROVAL_SCOPE_ONCE", "APPROVAL_SCOPE_ALWAYS"],
+  "alwaysLabel": "Always allow git status",
+  "alwaysOptionId": "allow-always-1"
+}

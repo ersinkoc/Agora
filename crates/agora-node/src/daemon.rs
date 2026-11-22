@@ -847,11 +847,54 @@ impl EventSink {
             action: p.action.clone(),
             detail: p.detail.clone(),
             expires_at_ms: p.expires_ms,
+            scopes: p.offer.scopes(),
+            always_label: p
+                .offer
+                .always
+                .as_ref()
+                .map(|a| a.label.clone())
+                .unwrap_or_default(),
+            always_option_id: p
+                .offer
+                .always
+                .as_ref()
+                .map(|a| a.option_id.clone())
+                .unwrap_or_default(),
         }));
     }
 
     pub fn approval_resolved(&self, approval_id: &str, approved: bool, signer_device_id: &str) {
         self.start_resolved(approval_id, approved, signer_device_id, 0, false);
+    }
+
+    /// ADR-0101: a person's decision on an adapter's request was delivered "always": the audit record says so, and, when `holder` is
+    /// the agent whose current process was given it, the agent's `AgentAlwaysAllowed` follows (the hub derives the "Asks less" chip
+    /// from it; the session ledger keeps it for a kept agent). `None`: the process it was delivered to was replaced meanwhile (Codex
+    /// review of PR #1007), so nothing is said about the agent's current process.
+    pub fn approval_resolved_always(
+        &self,
+        holder: Option<&AgentId>,
+        approval_id: &str,
+        action: &str,
+        signer_device_id: &str,
+    ) {
+        self.record(Body::ApprovalResolved(v1::ApprovalResolved {
+            approval_id: approval_id.to_string(),
+            approved: true,
+            signer_device_id: signer_device_id.to_string(),
+            scope: v1::ApprovalScope::Always as i32,
+            ..Default::default()
+        }));
+        let Some(agent) = holder else {
+            return;
+        };
+        self.record(Body::AgentAlwaysAllowed(v1::AgentAlwaysAllowed {
+            agent_id: agent.as_str().to_string(),
+            approval_id: approval_id.to_string(),
+            action: crate::approvals::card_text(action, crate::approvals::MAX_ALWAYS_LABEL_CHARS),
+            signer_device_id: signer_device_id.to_string(),
+            at_ms: now_ms(),
+        }));
     }
 
     /// The decision on an `agent.start` request (ADR-0057), with the grant that was signed.
@@ -869,6 +912,12 @@ impl EventSink {
             signer_device_id: signer_device_id.to_string(),
             helper_grant,
             helpers_may_start,
+            // ADR-0101: a person's decision is a single answer here; a request nobody decided has no scope.
+            scope: if signer_device_id.is_empty() {
+                v1::ApprovalScope::Unspecified as i32
+            } else {
+                v1::ApprovalScope::Once as i32
+            },
         }));
     }
 
@@ -1729,6 +1778,10 @@ impl Node {
                     // #932: its modes, settings and commands as the supervisor holds them, judged again as a report is, so what the
                     // window shows matches `skips_permissions_now`.
                     events.supervisor_events(&sup.session_events(id), &views);
+                    // ADR-0101: the kept process still holds its always answers; the hub cleared them on the `AgentStarted` above.
+                    for a in ledger.kept_session(id.as_str()).always {
+                        events.restate(Body::AgentAlwaysAllowed(a));
+                    }
                 }
             }
         }
@@ -2144,13 +2197,74 @@ impl Node {
                                             approval_id,
                                             action,
                                             detail,
+                                            scopes,
+                                            always_label,
+                                            always_option_id,
                                             ..
                                         },
                                 } => {
                                     mesh.set_activity(agent, "asking the user");
-                                    if let Some(p) =
-                                        approvals.request(agent, approval_id, action, detail, now)
-                                    {
+                                    // ADR-0101: which answers the card offers, after the policy (read under the supervisor's lock,
+                                    // let go before the queue's is taken).
+                                    let terms = sup
+                                        .lock()
+                                        .unwrap_or_else(|e| e.into_inner())
+                                        .approval_raise_terms(agent);
+                                    let (strict, permitted) = terms.unwrap_or((false, false));
+                                    let raise = crate::approvals::raise_for(
+                                        strict,
+                                        scopes,
+                                        always_label,
+                                        always_option_id,
+                                        permitted,
+                                    );
+                                    let offer = match raise {
+                                        crate::approvals::Raise::Card(offer) => Some(offer),
+                                        refused => {
+                                            // No card a person could allow: the request is said and withdrawn at once (as one the
+                                            // agent stopped waiting for), the adapter is answered denied, and the person is told why.
+                                            if let Some(p) = approvals.request(
+                                                agent,
+                                                approval_id,
+                                                action,
+                                                detail,
+                                                now,
+                                            ) {
+                                                ev.approval_requested(&p);
+                                                approvals.withdraw(&p.id);
+                                                ev.approval_resolved(&p.id, false, "");
+                                            }
+                                            let call = sup
+                                                .lock()
+                                                .unwrap_or_else(|e| e.into_inner())
+                                                .prepare_resolve_approval(
+                                                    agent,
+                                                    approval_id,
+                                                    false,
+                                                );
+                                            let _ = call.and_then(|c| c.run());
+                                            let code = if refused
+                                                == crate::approvals::Raise::AlwaysOnlyForbidden
+                                            {
+                                                "approval.always_only_forbidden"
+                                            } else {
+                                                "adapter.permission_unanswerable"
+                                            };
+                                            chat.refused_request(agent, code, action, now);
+                                            None
+                                        }
+                                    };
+                                    let Some(offer) = offer else {
+                                        continue;
+                                    };
+                                    if let Some(p) = approvals.request_offered(
+                                        agent,
+                                        approval_id,
+                                        action,
+                                        detail,
+                                        now,
+                                        offer,
+                                    ) {
                                         // ADR-0090: the request also appears in the conversation. The entry points at the id the node
                                         // minted (`p.id`), never at the adapter's own.
                                         chat.push_permission(agent, &p.id, action, now);

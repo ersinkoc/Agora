@@ -2573,6 +2573,7 @@ flag = ["--mcp-config", "{config_file}"]
                 signature,
                 helper_grant: 0,
                 helpers_may_start: false,
+                ..Default::default()
             }),
             Duration::from_secs(15),
         )

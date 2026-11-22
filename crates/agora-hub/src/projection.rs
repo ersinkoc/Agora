@@ -124,7 +124,13 @@ pub struct AgentView {
     pub skips_permissions: bool,
     /// ADR-0060: the node found this agent interrupted (running when the node stopped). Cleared by its next `AgentStarted`.
     pub interrupted: Option<InterruptedView>,
+    /// ADR-0101: the "always" answers the agent's process holds, as `(approval id, action)`, newest last, at most
+    /// [`MAX_ALWAYS_ALLOWED`]. Cleared when it ends, is interrupted or starts again.
+    pub always_allowed: Vec<(String, String)>,
 }
+
+/// ADR-0101: how many "always" answers the hub lists per agent (the newest are kept).
+pub const MAX_ALWAYS_ALLOWED: usize = 16;
 
 /// ADR-0060: what `AgentInterrupted` said about an agent.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -152,6 +158,10 @@ pub struct ApprovalView {
     pub expires_at_ms: u64,
     /// When the machine asked (its clock): with the answer's time, also the machine's, how long the agent waited.
     pub requested_at_ms: u64,
+    /// ADR-0101: `ApprovalRequested.scopes`, `always_label` and `always_option_id`, relayed as the node said them.
+    pub scopes: Vec<i32>,
+    pub always_label: String,
+    pub always_option_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -234,6 +244,8 @@ pub(crate) fn named_node(body: &Body) -> Result<Option<&str>, &'static str> {
         | Body::AgentSessionConfig(_)
         | Body::AgentCommands(_)
         | Body::AgentInterrupted(_)
+        // ADR-0101: names an agent of the producer.
+        | Body::AgentAlwaysAllowed(_)
         | Body::TerminalTitleChanged(_)
         | Body::TerminalClosed(_)
         | Body::ApprovalRequested(_)
@@ -417,6 +429,8 @@ impl View {
                 {
                     a.running = false;
                     a.state = AgentState::Done;
+                    // ADR-0101: an always answer lives in the agent's process.
+                    a.always_allowed.clear();
                 }
                 let prefix = format!("{producer}/");
                 self.approvals.retain(|k, _| !k.starts_with(&prefix));
@@ -554,6 +568,7 @@ impl View {
                         interrupted: None,
                         launch_options: e.launch_options.clone(),
                         skips_permissions: e.skips_permissions,
+                        always_allowed: Vec::new(),
                     },
                 );
             }
@@ -586,8 +601,10 @@ impl View {
                         interrupted: None,
                         launch_options: Vec::new(),
                         skips_permissions: false,
+                        always_allowed: Vec::new(),
                     });
                 a.running = false;
+                a.always_allowed.clear();
                 a.session.config = None;
                 a.session.commands = None;
                 a.state = AgentState::Done;
@@ -716,6 +733,24 @@ impl View {
                     a.running = false;
                     a.exit_code = Some(e.exit_code);
                     a.state = AgentState::Done;
+                    a.always_allowed.clear();
+                }
+            }
+            // ADR-0101: an agent that runs holds one more "always" answer (a repeat of one it holds, as a resync says it again, changes
+            // nothing).
+            Body::AgentAlwaysAllowed(e) => {
+                if let Some(a) = self
+                    .agents
+                    .get_mut(&q(&e.agent_id))
+                    .filter(|a| a.running)
+                {
+                    if !a.always_allowed.iter().any(|(id, _)| *id == e.approval_id) {
+                        if a.always_allowed.len() == MAX_ALWAYS_ALLOWED {
+                            a.always_allowed.remove(0);
+                        }
+                        a.always_allowed
+                            .push((e.approval_id.clone(), e.action.clone()));
+                    }
                 }
             }
             Body::TerminalOpened(e) => {
@@ -745,6 +780,9 @@ impl View {
                         detail: e.detail.clone(),
                         expires_at_ms: e.expires_at_ms,
                         requested_at_ms: ev.at_ms,
+                        scopes: e.scopes.clone(),
+                        always_label: e.always_label.clone(),
+                        always_option_id: e.always_option_id.clone(),
                     },
                 );
             }
@@ -1464,6 +1502,7 @@ mod tests {
                 action: "run_command".into(),
                 detail: String::new(),
                 expires_at_ms: 0,
+                ..Default::default()
             }),
         ));
         assert_eq!(v.approvals.len(), 1);
@@ -1501,6 +1540,7 @@ mod tests {
                 action: "run_command".into(),
                 detail: String::new(),
                 expires_at_ms: 0,
+                ..Default::default()
             })
         };
         let mut v = View::default();
@@ -1745,6 +1785,118 @@ mod tests {
         assert_eq!((a.exit_code, a.state), (Some(3), AgentState::Done));
     }
 
+    fn always(agent: &str, approval: &str, action: &str) -> Body {
+        Body::AgentAlwaysAllowed(AgentAlwaysAllowed {
+            agent_id: agent.into(),
+            approval_id: approval.into(),
+            action: action.into(),
+            signer_device_id: "phone".into(),
+            at_ms: 1,
+        })
+    }
+
+    fn held(v: &View) -> Vec<String> {
+        crate::server::snapshot_of(v, 0)
+            .agents
+            .into_iter()
+            .find(|a| a.agent_id == "n1/a")
+            .map(|a| a.always_allowed)
+            .unwrap_or_default()
+    }
+
+    /// ADR-0101: the request's offer reaches the window's snapshot as the node said it.
+    #[test]
+    fn an_approvals_offer_is_relayed_into_the_snapshot() {
+        let mut v = View::default();
+        v.apply(&ev("n1", 1, started("a")));
+        v.apply(&ev(
+            "n1",
+            2,
+            Body::ApprovalRequested(ApprovalRequested {
+                approval_id: "ap-1".into(),
+                agent_id: "a".into(),
+                action: "run_command".into(),
+                detail: "git status".into(),
+                expires_at_ms: 99,
+                scopes: vec![ApprovalScope::Once as i32, ApprovalScope::Always as i32],
+                always_label: "Always allow git".into(),
+                always_option_id: "aa".into(),
+            }),
+        ));
+        let snap = crate::server::snapshot_of(&v, 2);
+        let a = &snap.approvals[0];
+        assert_eq!(a.agent_id, "n1/a");
+        assert_eq!(
+            a.scopes,
+            vec![ApprovalScope::Once as i32, ApprovalScope::Always as i32]
+        );
+        assert_eq!(
+            (a.always_label.as_str(), a.always_option_id.as_str()),
+            ("Always allow git", "aa")
+        );
+    }
+
+    /// ADR-0101: an agent's always answers, from `AgentAlwaysAllowed` (a repeat of one changes nothing, at most 16, newest kept),
+    /// cleared when it ends or starts again; a resync that says its start again and then its answers keeps them.
+    #[test]
+    fn an_agents_always_answers_are_derived_and_cleared_with_its_process() {
+        let mut v = View::default();
+        v.apply(&ev("n1", 1, started("a")));
+        v.apply(&ev("n1", 2, always("a", "ap-1", "run_command")));
+        v.apply(&ev("n1", 3, always("a", "ap-1", "run_command")));
+        v.apply(&ev("n1", 4, always("a", "ap-2", "write_file")));
+        assert_eq!(held(&v), ["run_command", "write_file"]);
+        // Another node cannot add to this agent (its events name its own agents).
+        v.apply(&ev("n2", 5, always("a", "ap-3", "rm -rf")));
+        assert_eq!(held(&v), ["run_command", "write_file"]);
+        // Bounded: the newest 16.
+        for i in 0..20 {
+            v.apply(&ev(
+                "n1",
+                10 + i,
+                always("a", &format!("x-{i}"), &format!("act-{i}")),
+            ));
+        }
+        let h = held(&v);
+        assert_eq!(h.len(), MAX_ALWAYS_ALLOWED);
+        assert_eq!(h.first().map(String::as_str), Some("act-4"));
+        assert_eq!(h.last().map(String::as_str), Some("act-19"));
+        // A start (a new process, or a resync's restatement) clears; the restated answers that follow bring them back.
+        v.apply(&ev("n1", 40, started("a")));
+        assert!(held(&v).is_empty());
+        v.apply(&ev("n1", 41, always("a", "ap-1", "run_command")));
+        assert_eq!(held(&v), ["run_command"]);
+        // The end clears, and an ended agent takes none.
+        v.apply(&ev(
+            "n1",
+            42,
+            Body::AgentExited(AgentExited {
+                agent_id: "a".into(),
+                exit_code: 0,
+            }),
+        ));
+        assert!(held(&v).is_empty());
+        v.apply(&ev("n1", 43, always("a", "ap-9", "late")));
+        assert!(held(&v).is_empty());
+        // A node's start (its agents died with it) clears too.
+        v.apply(&ev("n1", 47, started("a")));
+        v.apply(&ev("n1", 48, always("a", "ap-1", "run_command")));
+        v.apply(&ev("n1", 49, node_online("n1")));
+        assert!(held(&v).is_empty());
+        // An interruption clears too (a resumed agent's answers are not replayed).
+        v.apply(&ev("n1", 44, started("a")));
+        v.apply(&ev("n1", 45, always("a", "ap-1", "run_command")));
+        v.apply(&ev(
+            "n1",
+            46,
+            Body::AgentInterrupted(AgentInterrupted {
+                agent_id: "a".into(),
+                ..Default::default()
+            }),
+        ));
+        assert!(held(&v).is_empty());
+    }
+
     #[test]
     fn events_for_unknown_entities_are_ignored_not_fatal() {
         let mut v = View::default();
@@ -1777,6 +1929,7 @@ mod tests {
                 action: "run_command".into(),
                 detail: "rm".into(),
                 expires_at_ms: 0,
+                ..Default::default()
             }),
         ));
         assert_eq!(v.needs_attention(), ["n1/a", "n1/b"]);
@@ -1789,6 +1942,7 @@ mod tests {
                 signer_device_id: "d".into(),
                 helper_grant: 0,
                 helpers_may_start: false,
+                ..Default::default()
             }),
         ));
         assert_eq!(v.needs_attention(), ["n1/a"]);
