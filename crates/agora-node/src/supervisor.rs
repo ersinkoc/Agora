@@ -1806,8 +1806,8 @@ impl Supervisor {
                         mesh.as_ref(),
                         self.credential_vars(&req.kind),
                         folder,
+                        file,
                     )
-                    .map(|(a, s, c)| (a, s, c, file))
                 })
                 .map_err(|e| self.program_missing(&req.kind, e));
             let (adapter, session_id, capabilities, git_config) = match launched {
@@ -2059,8 +2059,8 @@ impl Supervisor {
                     mesh.as_ref(),
                     self.credential_vars(&req.kind),
                     None,
+                    file,
                 )
-                .map(|(a, s, c)| (a, s, c, file))
             })
             .map_err(|e| self.program_missing(&req.kind, e));
         let (adapter, session_id, capabilities, git_config) = match result {
@@ -2147,6 +2147,16 @@ impl Supervisor {
             if let Some(next) = e.rich.expire(now) {
                 begin_send(e, id, next, &sent, events);
             }
+            // #933: an adapter whose output ended keeps its launch's Git file until its process is collected (a look that never waits;
+            // only an ended adapter that still has a file is asked).
+            if !e.running
+                && e.git_config.is_some()
+                && e.adapter
+                    .as_mut()
+                    .is_none_or(|a| a.exit_status(Duration::ZERO).is_some())
+            {
+                e.git_config = None;
+            }
             let polled = match &e.adapter {
                 Some(adapter) if e.running => adapter.poll(),
                 _ => continue,
@@ -2223,8 +2233,6 @@ impl Supervisor {
                     }
                     AdapterEvent::Exited => {
                         e.running = false;
-                        // #933: its process ended, and with it this launch's Git file; a restart writes a fresh one.
-                        e.git_config = None;
                         e.options = SessionOptions::default();
                         let dropped = e.rich.forget();
                         if !dropped.is_empty() {
@@ -2245,6 +2253,11 @@ impl Supervisor {
                             .adapter
                             .as_mut()
                             .and_then(|a| a.exit_status(Duration::from_millis(50)));
+                        // #933: `Exited` is the end of its output, not of its process: the launch's Git file goes once the process is
+                        // collected (here, or by a later poll, or when a restart, a stop or the node's end lets it go).
+                        if status.is_some() {
+                            e.git_config = None;
+                        }
                         events.push(SupervisorEvent::AdapterCrashed { agent: id.clone() });
                         schedule_adapter_restart(id, e, now, &policy, status, events);
                     }
@@ -2311,8 +2324,8 @@ impl Supervisor {
                 e.mesh.as_ref(),
                 creds,
                 held.as_ref(),
+                file,
             )
-            .map(|(a, s, c)| (a, s, c, file))
         });
         match launched {
             Ok((adapter, session_id, capabilities, git_config)) => {
@@ -3303,8 +3316,14 @@ impl Supervisor {
                 }
                 e.running = false;
             }
-            // #933: once its process is ended, so is this launch's Git file.
-            e.git_config = None;
+            // #933: once its process is ended and collected, so is this launch's Git file. An adapter whose output ended earlier but
+            // whose process has not been collected keeps it until a later poll sees the process gone.
+            if e.adapter
+                .as_mut()
+                .is_none_or(|a| a.exit_status(Duration::ZERO).is_some())
+            {
+                e.git_config = None;
+            }
             if e.agent.observe(AgentState::Done, StateSource::Reported) {
                 events.push(SupervisorEvent::StateChanged {
                     agent: id.clone(),
@@ -3540,9 +3559,10 @@ impl Supervisor {
                 mesh.as_ref(),
                 self.credential_vars(&entry.agent.kind),
                 folder.as_ref(),
+                git_config,
             )
             .map_err(|e| self.program_missing(&entry.agent.kind, e));
-            let (adapter, session_id, capabilities) = match launched {
+            let (adapter, session_id, capabilities, git_config) = match launched {
                 Ok(l) => l,
                 Err(e) => {
                     if let Some(hook) = &self.abort_hook {
@@ -4284,7 +4304,16 @@ fn launch_adapter(
     mesh: Option<&agora_adapters::inject::Endpoint>,
     credentials: Vec<(String, String)>,
     folder: Option<&agora_platform::HeldFolder>,
-) -> Result<(Adapter, String, Vec<String>), SupervisorError> {
+    git_config: Option<crate::gitconfig::LaunchFile>,
+) -> Result<
+    (
+        Adapter,
+        String,
+        Vec<String>,
+        Option<crate::gitconfig::LaunchFile>,
+    ),
+    SupervisorError,
+> {
     let (program, args) = spec
         .command
         .split_first()
@@ -4328,12 +4357,12 @@ fn launch_adapter(
     };
     match open_session(&adapter, checkout_root, worktree, resume, mesh) {
         Ok(_) if moved() => {
-            discard_adapter(adapter);
+            discard_adapter(adapter, git_config);
             Err(SupervisorError::FolderMoved)
         }
-        Ok((session_id, capabilities)) => Ok((adapter, session_id, capabilities)),
+        Ok((session_id, capabilities)) => Ok((adapter, session_id, capabilities, git_config)),
         Err(e) => {
-            discard_adapter(adapter);
+            discard_adapter(adapter, git_config);
             Err(e)
         }
     }
@@ -4417,7 +4446,9 @@ fn launch_held_adapter(
 /// Ends an adapter that is not kept (its start failed or was refused after the process began): the processes below it first, then the
 /// adapter itself, whose last wait (for its output to close) runs on a thread of its own. A process below it that outlived the kill
 /// would keep that output open, and the caller (which holds the supervisor) must not wait for it (Codex review of F1023).
-fn discard_adapter(adapter: Adapter) {
+///
+/// #933: its launch's Git file (`git_config`) is removed only once the adapter is ended and collected, on that same thread.
+fn discard_adapter(adapter: Adapter, git_config: Option<crate::gitconfig::LaunchFile>) {
     // Unix: every process found below the adapter, each only while it is still the process that was found (ADR-0060). Elsewhere the
     // adapter alone is ended, as by any stop.
     let tree = |root| agora_platform::process_tree(root).unwrap_or_default();
@@ -4434,7 +4465,10 @@ fn discard_adapter(adapter: Adapter) {
     // When no thread can be started the adapter is ended here, as before.
     let _ = std::thread::Builder::new()
         .name("agora-adapter-end".into())
-        .spawn(move || drop(adapter));
+        .spawn(move || {
+            drop(adapter);
+            drop(git_config);
+        });
 }
 
 /// The adapter's `initialize` and its session's start (or resume): the session id and the capabilities it declared.

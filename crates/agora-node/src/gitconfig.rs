@@ -185,13 +185,56 @@ pub fn write_for_result(data_dir: &Path) -> std::io::Result<PathBuf> {
     agora_platform::ensure_private_dir(&dir)?;
     let mut nonce = [0u8; 16];
     getrandom::getrandom(&mut nonce).map_err(|e| std::io::Error::other(e.to_string()))?;
-    let path = dir.join(format!("agent-{:032x}", u128::from_ne_bytes(nonce)));
+    let path = dir.join(launch_name(owner(), u128::from_ne_bytes(nonce)));
     write_to(&path, &read_allowed())
 }
 
+/// The node process that writes launch files: its pid and start time (`None` where the start time cannot be read).
+fn owner() -> Option<(u32, u64)> {
+    static OWNER: std::sync::OnceLock<Option<(u32, u64)>> = std::sync::OnceLock::new();
+    *OWNER.get_or_init(|| {
+        let pid = std::process::id();
+        agora_platform::process_start_time(pid).map(|start| (pid, start))
+    })
+}
+
+/// #933: the name of a launch's file: `agent-<pid>-<start>-<32 hex>`, the writing node's pid and start time, so a sweep can tell a
+/// file whose node is gone from one a live node (even another node on the same data folder) still uses; `agent-<32 hex>` when the
+/// owner is not known (written before #933, or where a start time cannot be read), which no sweep removes.
+pub fn launch_name(owner: Option<(u32, u64)>, nonce: u128) -> String {
+    match owner {
+        Some((pid, start)) => format!("agent-{pid}-{start}-{nonce:032x}"),
+        None => format!("agent-{nonce:032x}"),
+    }
+}
+
+/// What a name in the folder is: `None` when it is not a launch's file (or its `.new` staging copy), `Some(None)` for one with no
+/// owner ([`launch_name`]), `Some(Some((pid, start)))` for one a node wrote. Nothing but a launch's file is the node's to remove.
+fn launch_owner(name: &str) -> Option<Option<(u32, u64)>> {
+    let base = name.strip_suffix(".new").unwrap_or(name);
+    let rest = base.strip_prefix("agent-")?;
+    let hex = |h: &str| h.len() == 32 && h.bytes().all(|b| b.is_ascii_hexdigit());
+    let digits = |d: &str| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit());
+    let mut parts = rest.split('-');
+    match (parts.next(), parts.next(), parts.next(), parts.next()) {
+        (Some(h), None, None, None) if hex(h) => Some(None),
+        (Some(pid), Some(start), Some(h), None) if digits(pid) && digits(start) && hex(h) => {
+            Some(Some((pid.parse().ok()?, start.parse().ok()?)))
+        }
+        _ => None,
+    }
+}
+
+/// The folder `git-config` under `data_dir`, held open: the data folder is opened once by path, the `git-config` step never follows a
+/// link (one there is refused).
+fn held_directory(data_dir: &Path) -> std::io::Result<agora_platform::ConfinedDir> {
+    let name = directory(Path::new(""));
+    agora_platform::ConfinedDir::open_root(data_dir)?.subdir(name.as_os_str(), false)
+}
+
 /// One launch's generated file (#933): it is removed when this is dropped. The node keeps it beside what the launch started (the
-/// terminal's handle, the adapter's entry), so the file goes when that process ends, is stopped or is replaced by a restart (which
-/// writes a fresh file of its own), and with a start that fails after the file was written.
+/// terminal's handle, the adapter's entry), and drops it once that process is ended and collected, is replaced by a restart (which
+/// writes a fresh file of its own), or never started (a start that fails after the file was written).
 #[derive(Debug)]
 pub struct LaunchFile(PathBuf);
 
@@ -209,40 +252,56 @@ impl LaunchFile {
 
 impl Drop for LaunchFile {
     fn drop(&mut self) {
-        // Already gone (removed by hand, or the folder with it) is fine: there is nothing left to remove.
-        let _ = std::fs::remove_file(&self.0);
+        // Through the held folder, as the sweep removes (a link where the folder was is not followed). Already gone (removed by
+        // hand, or the folder with it) is fine: there is nothing left to remove.
+        let (Some(folder), Some(name)) = (self.0.parent(), self.0.file_name()) else {
+            return;
+        };
+        let (Some(root), Some(sub)) = (folder.parent(), folder.file_name()) else {
+            return;
+        };
+        if let Ok(dir) =
+            agora_platform::ConfinedDir::open_root(root).and_then(|r| r.subdir(sub, false))
+        {
+            let _ = dir.remove_file(name);
+        }
     }
 }
 
-/// Whether `name` is one the node gives a launch's file ([`write_for`]: `agent-` and 32 hex digits), or that file's staging copy
-/// (`.new`). Nothing else in the folder is the node's to remove.
-fn is_launch_name(name: &str) -> bool {
-    let base = name.strip_suffix(".new").unwrap_or(name);
-    base.strip_prefix("agent-")
-        .is_some_and(|hex| hex.len() == 32 && hex.bytes().all(|b| b.is_ascii_hexdigit()))
-}
-
-/// #933: removes from the node's generated Git folder under `data_dir` every launch file (and staging copy) whose name is not in
-/// `keep`, the files of the agents this node runs. A node calls it at its start, for the files of launches an earlier run never ended
-/// (it was killed, or the machine stopped). Only this folder: the legacy `~/.agora/git-config` copies are not touched (ADR-0098,
-/// decision 4). A folder that is a link is left alone, and so is anything that is not a file. Returns how many were removed.
+/// #933: removes from the node's generated Git folder under `data_dir` the launch files (and staging copies) no live node uses: one
+/// this node wrote whose name is not in `keep` (the files of the agents it runs), and one whose writing node is gone (its pid no longer
+/// names a process started at the time in the name: a run that was killed, or a machine that stopped). A file of another live node
+/// (two nodes on one data folder) is kept, and so is one with no owner in its name. Only this folder, listed and emptied through one
+/// held handle: the legacy `~/.agora/git-config` copies are not touched (ADR-0098, decision 4), a `git-config` that is a link is left
+/// alone, and so is anything that is not a file. Returns how many were removed.
 pub fn sweep(data_dir: &Path, keep: &[&std::ffi::OsStr]) -> usize {
-    let dir = directory(data_dir);
-    if !std::fs::symlink_metadata(&dir).is_ok_and(|m| m.is_dir()) {
+    sweep_as(data_dir, keep, owner(), agora_platform::process_start_time)
+}
+
+/// [`sweep`] for the node `me`, asking `started` when a process began.
+fn sweep_as(
+    data_dir: &Path,
+    keep: &[&std::ffi::OsStr],
+    me: Option<(u32, u64)>,
+    started: impl Fn(u32) -> Option<u64>,
+) -> usize {
+    let Ok(dir) = held_directory(data_dir) else {
         return 0;
-    }
-    let Ok(entries) = std::fs::read_dir(&dir) else {
+    };
+    let Ok(items) = dir.list() else {
         return 0;
     };
     let mut removed = 0;
-    for entry in entries.filter_map(Result::ok) {
-        let name = entry.file_name();
-        if keep.contains(&name.as_os_str()) || !name.to_str().is_some_and(is_launch_name) {
+    for item in items {
+        let Some(Some(owner)) = item.name.to_str().and_then(launch_owner) else {
             continue;
-        }
-        if entry.file_type().is_ok_and(|t| !t.is_dir())
-            && std::fs::remove_file(entry.path()).is_ok()
-        {
+        };
+        let gone = if Some(owner) == me {
+            !keep.contains(&item.name.as_os_str())
+        } else {
+            started(owner.0) != Some(owner.1)
+        };
+        if gone && !item.is_dir && dir.remove_file(&item.name).is_ok() {
             removed += 1;
         }
     }
@@ -391,8 +450,20 @@ mod tests {
     #[test]
     fn only_the_nodes_own_launch_names_are_swept() {
         let hex = "0123456789abcdef0123456789ABCDEF";
-        assert!(is_launch_name(&format!("agent-{hex}")));
-        assert!(is_launch_name(&format!("agent-{hex}.new")));
+        assert_eq!(launch_owner(&format!("agent-{hex}")), Some(None));
+        assert_eq!(
+            launch_owner(&format!("agent-12-345-{hex}.new")),
+            Some(Some((12, 345)))
+        );
+        assert_eq!(
+            launch_name(Some((7, 9)), 0xab),
+            format!("agent-7-9-{:032x}", 0xab)
+        );
+        assert_eq!(
+            launch_owner(&launch_name(Some((7, 9)), 0xab)),
+            Some(Some((7, 9)))
+        );
+        assert_eq!(launch_owner(&launch_name(None, 1)), Some(None));
         for name in [
             "agent-",
             "agent-123",
@@ -401,9 +472,52 @@ mod tests {
             "agent-0123456789abcdef0123456789abcdef0",
             "agent-0123456789abcdef0123456789abcdef.old",
             "xagent-0123456789abcdef0123456789abcdef",
+            "agent-1--0123456789abcdef0123456789abcdef",
+            "agent-x-1-0123456789abcdef0123456789abcdef",
+            "agent-1-2-3-0123456789abcdef0123456789abcdef",
+            "agent-99999999999-1-0123456789abcdef0123456789abcdef",
         ] {
-            assert!(!is_launch_name(name), "{name}");
+            assert_eq!(launch_owner(name), None, "{name}");
         }
+    }
+
+    #[test]
+    fn a_sweep_removes_only_files_whose_node_is_gone_or_that_this_node_no_longer_uses() {
+        let data = std::env::temp_dir().join(format!("agora-gc-sweep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data);
+        let folder = directory(&data);
+        std::fs::create_dir_all(&folder).unwrap();
+        let me = Some((10, 100));
+        let names = [
+            launch_name(me, 1),              // this node's, in use
+            launch_name(me, 2),              // this node's, no longer used
+            launch_name(Some((20, 200)), 3), // a live node's
+            launch_name(Some((30, 300)), 4), // a node that is gone
+            format!("{}.new", launch_name(Some((30, 300)), 5)),
+            launch_name(Some((20, 999)), 6), // pid 20 now names another process
+            launch_name(None, 7),            // no owner
+            "neighbor".to_string(),
+        ];
+        for n in &names {
+            std::fs::write(folder.join(n), "x").unwrap();
+        }
+        let keep = [std::ffi::OsStr::new(&names[0])];
+        let started = |pid| (pid == 20).then_some(200);
+        assert_eq!(sweep_as(&data, &keep, me, started), 4);
+        let mut left: Vec<String> = std::fs::read_dir(&folder)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        left.sort();
+        let mut want = vec![
+            names[0].clone(),
+            names[2].clone(),
+            names[6].clone(),
+            names[7].clone(),
+        ];
+        want.sort();
+        assert_eq!(left, want);
+        let _ = std::fs::remove_dir_all(&data);
     }
 
     #[test]

@@ -49,8 +49,11 @@ protected directories. A directory-wide exception would make sibling files visib
 ## Implementation notes
 
 - 2026-11-22 (#933): each launch's file lasts as long as the launch. The node keeps it with what the launch started (a terminal
-  agent's handle, an adapter agent's entry) and removes it when that process ends, is stopped or is replaced by a restart,
-  which writes a fresh file of its own. A start that fails after the file was written removes it. At its start, after taking
-  up what the terminal holder kept, the node removes the `agent-<32 hex>` files (and their `.new` staging copies) in its own
-  `git-config/` folder that no agent of it uses. An agent the holder keeps is never confined (ADR-0079), so it has no file
-  there. Other names in that folder and the legacy copies of decision 4 are not touched.
+  agent's handle, an adapter agent's entry) and removes it once that process has ended and been collected, is stopped or is
+  replaced by a restart, which writes a fresh file of its own. An adapter whose output closed keeps its file until its process
+  is collected. A start that fails after the file was written removes it. Each file is named `agent-<pid>-<start>-<32 hex>`
+  after the node process that wrote it. At its start, after taking up what the terminal holder kept, the node lists its own
+  `git-config/` folder through one held handle and removes the files (and `.new` staging copies) of nodes that are gone, and
+  its own that no agent of it uses; a live node's files are kept, also when two nodes share a data folder. An agent the holder
+  keeps is never confined (ADR-0079), so it has no file there. Files with no owner in their name (written before #933), other
+  names in that folder and the legacy copies of decision 4 are not touched.

@@ -469,7 +469,10 @@ fn a_node_restart_sweeps_left_git_files_and_the_kept_agent_runs_on() {
     drop(node);
     let folder = agora_node::gitconfig::directory(&rig.root.join("data"));
     agora_platform::ensure_private_dir(&folder).expect("git-config folder");
-    let left = folder.join(format!("agent-{:032x}", 0x933u128));
+    // Named for a node that is gone: this process, at a time it did not start.
+    let me = std::process::id();
+    let gone = agora_platform::process_start_time(me).expect("start time") + 1;
+    let left = folder.join(agora_node::gitconfig::launch_name(Some((me, gone)), 0x933));
     std::fs::write(&left, "[user]\n").expect("left file");
     std::fs::write(folder.join("neighbor"), "x").expect("neighbor");
 

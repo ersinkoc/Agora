@@ -291,7 +291,14 @@ fn a_start_that_fails_after_the_file_was_written_leaves_none() {
         RestartPolicy::default(),
         vec![],
     );
-    assert!(sup.start(&rig.request("one"), Instant::now()).is_err());
+    // Refused at once where the program itself is started; on macOS the started program is `sandbox-exec`, which starts and then
+    // fails to run it, so the failure is that launch's end (CI job 137232241796).
+    if sup.start(&rig.request("one"), Instant::now()).is_ok() {
+        tick_until(&mut sup, |e| {
+            e.iter()
+                .any(|e| matches!(e, SupervisorEvent::Exited { .. }))
+        });
+    }
     assert_eq!(rig.files(), Vec::<String>::new());
     // An adapter that ends before it answers.
     let mut sup = rig.supervisor(
@@ -340,8 +347,50 @@ fn a_structured_agent_keeps_its_file_while_it_runs_and_a_stop_removes_it() {
     assert_eq!(rig.files(), Vec::<String>::new());
 }
 
-/// What a node start sweeps: the node's own per-launch names (and their staging files) that no agent of this node uses. Anything else
-/// in the folder is not the node's to judge and stays.
+/// An adapter's `Exited` is the end of its output, not of its process (Codex review of #998): the launch's file stays while the
+/// process runs on with its output closed, and goes once the process is collected.
+#[test]
+fn an_adapter_whose_output_ended_keeps_its_file_until_its_process_is_collected() {
+    let _serial = serial();
+    if !confinement() {
+        return;
+    }
+    let rig = Rig::new("eof");
+    let fake = fake_agent();
+    // The fake adapter runs below the shell (not `exec`), so when it crashes the shell closes its output and lives on for a while.
+    let table = format!(
+        "[adapter]\ncommand = [\"/bin/sh\", \"-c\", {:?}, {:?}]",
+        format!("{RECORD}; \"$0\" --adapter; exec >&-; sleep 2"),
+        fake.to_str().unwrap()
+    );
+    let restart = RestartPolicy {
+        max_restarts: 1,
+        base_delay: Duration::from_secs(60),
+        max_delay: Duration::from_secs(60),
+    };
+    let mut sup = rig.supervisor(&table, restart, vec![fake.clone()]);
+    let id = sup.start(&rig.request("one"), Instant::now()).unwrap();
+    let seen = rig.seen(&mut sup, "one", 1);
+    let _ = sup.adapter_prompt(&id, "crash", false);
+    tick_until(&mut sup, |e| {
+        e.iter()
+            .any(|e| matches!(e, SupervisorEvent::AdapterCrashed { .. }))
+    });
+    // Its output ended; its process has not.
+    assert_eq!(rig.files(), [name_of(&seen[0])]);
+    tick_until(&mut sup, |_| rig.files().is_empty());
+    sup.stop(&id).unwrap();
+}
+
+/// A file that names its node: written by this process at a time it did not start, so by a node that is gone.
+fn left_by_a_gone_node(nonce: u128) -> String {
+    let me = std::process::id();
+    let start = agora_platform::process_start_time(me).unwrap();
+    gitconfig::launch_name(Some((me, start + 1)), nonce)
+}
+
+/// What a node start sweeps: launch files (and their staging copies) of a node that is gone, and this node's own that none of its
+/// agents uses. A file with no owner in its name, and anything else in the folder, is not the node's to judge and stays.
 #[test]
 fn a_sweep_removes_left_files_and_spares_those_of_running_agents() {
     let _serial = serial();
@@ -357,37 +406,33 @@ fn a_sweep_removes_left_files_and_spares_those_of_running_agents() {
     let id = sup.start(&rig.request("one"), Instant::now()).unwrap();
     let seen = rig.seen(&mut sup, "one", 1);
     let folder = gitconfig::directory(&rig.data());
-    let stale = format!("agent-{:032x}", 0xabcu128);
-    for name in [stale.clone(), format!("{stale}.new"), "neighbor".into()] {
+    let stale = left_by_a_gone_node(0xabc);
+    let unowned = gitconfig::launch_name(None, 0xdef);
+    for name in [
+        stale.clone(),
+        format!("{stale}.new"),
+        unowned.clone(),
+        "neighbor".into(),
+    ] {
         std::fs::write(folder.join(name), "x").unwrap();
     }
-    sup.sweep_launch_files();
-    let mut want = vec![name_of(&seen[0]), "neighbor".to_string()];
+    assert_eq!(sup.sweep_launch_files(), 2);
+    let mut want = vec![name_of(&seen[0]), unowned.clone(), "neighbor".to_string()];
     want.sort();
     assert_eq!(rig.files(), want);
     sup.stop(&id).unwrap();
-    assert_eq!(rig.files(), ["neighbor"]);
+    let mut want = vec![unowned, "neighbor".to_string()];
+    want.sort();
+    assert_eq!(rig.files(), want);
 }
 
-/// A node that starts again finds what its earlier run left (it was killed, so nothing ended its agents' launches) and removes it,
-/// whatever its confinement is now.
-#[test]
-fn a_node_start_removes_what_an_earlier_run_left() {
+fn start_node(rig: &Rig, socket: &str) -> agora_node::daemon::Node {
     use agora_node::daemon::{Node, NodeConfig};
-
-    let _serial = serial();
-    let rig = Rig::new("nodestart");
-    let folder = gitconfig::directory(&rig.data());
-    std::fs::create_dir_all(&folder).unwrap();
-    let stale = format!("agent-{:032x}", 0x1234u128);
-    for name in [stale.clone(), format!("{stale}.new"), "neighbor".into()] {
-        std::fs::write(folder.join(name), "x").unwrap();
-    }
     let manifests = rig.dir.join("manifests");
     std::fs::create_dir_all(&manifests).unwrap();
-    let node = Node::start(&NodeConfig {
+    Node::start(&NodeConfig {
         node_id: "n".into(),
-        socket: rig.dir.join("n.sock"),
+        socket: rig.dir.join(socket),
         data_dir: rig.data(),
         worktree_root: rig.dir.join("worktrees"),
         manifests_dir: manifests,
@@ -395,7 +440,48 @@ fn a_node_start_removes_what_an_earlier_run_left() {
         limits: NodeLimits::default(),
         resume_all: false,
     })
-    .unwrap();
+    .unwrap()
+}
+
+/// A node that starts again finds what its earlier run left (it was killed, so nothing ended its agents' launches) and removes it,
+/// whatever its confinement is now.
+#[test]
+fn a_node_start_removes_what_an_earlier_run_left() {
+    let _serial = serial();
+    let rig = Rig::new("nodestart");
+    let folder = gitconfig::directory(&rig.data());
+    std::fs::create_dir_all(&folder).unwrap();
+    let stale = left_by_a_gone_node(0x1234);
+    for name in [stale.clone(), format!("{stale}.new"), "neighbor".into()] {
+        std::fs::write(folder.join(name), "x").unwrap();
+    }
+    let node = start_node(&rig, "n.sock");
     assert_eq!(rig.files(), ["neighbor"]);
     drop(node);
+}
+
+/// Codex review of #998: a second node that starts on the same data folder (whether or not it then wins its control socket) must not
+/// remove the files of the node that runs there. The running node is another process: its files name it, and it is alive.
+#[test]
+fn a_second_node_on_the_same_data_folder_keeps_the_running_nodes_files() {
+    let _serial = serial();
+    let rig = Rig::new("2nd");
+    let folder = gitconfig::directory(&rig.data());
+    std::fs::create_dir_all(&folder).unwrap();
+    // The first node: a live process other than this one.
+    let mut first = Command::new("sleep").arg("30").spawn().unwrap();
+    let start = agora_platform::process_start_time(first.id()).unwrap();
+    let in_use = gitconfig::launch_name(Some((first.id(), start)), 0x5);
+    std::fs::write(folder.join(&in_use), "x").unwrap();
+    let node = start_node(&rig, "b.sock");
+    let kept = rig.files();
+    drop(node);
+    // Once the first node is gone, the next start removes what it left.
+    first.kill().unwrap();
+    first.wait().unwrap();
+    let node = start_node(&rig, "c.sock");
+    let after = rig.files();
+    drop(node);
+    assert_eq!(kept, [in_use]);
+    assert_eq!(after, Vec::<String>::new());
 }

@@ -188,6 +188,12 @@ impl ConfinedDir {
         imp::remove_owned(&self.dir, file, name)
     }
 
+    /// The entries of this folder, read through the handle (its path is never looked up again), each described without following a
+    /// link ([`crate::list_dir`]), so what is listed is what [`Self::remove_file`] addresses.
+    pub fn list(&self) -> io::Result<Vec<crate::DirItem>> {
+        crate::list_dir(&self.dir)
+    }
+
     /// Removes the file (or link, as itself) `name`. Close any handle to it first.
     pub fn remove_file(&self, name: &OsStr) -> io::Result<()> {
         if !valid_component(name) {
