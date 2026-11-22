@@ -63,6 +63,12 @@ this machine, from the `TerminalSubscribe` sent on its control socket until the 
 The budget holds, so the cap stays at 512 KiB. The lock hold delays that terminal's own output by up to about 6 ms once per attach that
 asks for history; input is not behind it (it goes to the PTY on the caller's thread).
 
+The window writes the history and the repaint in one synchronized write (ADR-0100 step 3, `renderer.ts`, `reset`), once per attach that
+asked for it, never on the output path. Measured in Chromium (xterm.js 6.0.0, DOM renderer, 15 runs, from the write until the frame
+after it was parsed) for a 200×50 terminal with a full 2000-line, 200-column history: p50 23 ms, p95 75 ms (415 KB, plain); p50 29 ms,
+p95 42 ms (923 KB, a colour every 4 characters, above the node's 512 KiB cap). With the node's p95 of 6.7 ms that keeps "terminal
+snapshot after switching" under 150 ms, and it is one paint: the screen is not drawn until the repaint has been parsed.
+
 ### Hub cold start against history size (architecture review R4, 2026-11-14)
 
 The hub rebuilds its view by replaying its whole event log at start (`View::rebuild`), so its cold start grows with history. Measured
