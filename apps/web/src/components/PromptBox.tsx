@@ -1,12 +1,12 @@
 import { useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { t } from '../i18n';
 import type { AgentTileModel, SessionModel } from '../model';
-import { isRich, mergeLines, noticeText, queueState, trimLines, type ChatLine, type ChatSource } from '../net/chat';
+import { isRich, mergeLines, noticeText, queuedNote, queueState, trimLines, type ChatLine, type ChatSource } from '../net/chat';
 import { groupTurns, pairDiffs, type TurnItem } from '../net/chatView';
 import { atBottom, grew, jumped, keepPosition, scrolled, start, type Follow } from '../net/follow';
 import { refusalKey, type ActionResult } from '../net/refusal';
 import { applyCommand, filterCommands, slashQuery, stepIndex, uniqueCommands } from '../net/slash';
-import { flagOf, transcript, windowed } from '../net/transcript';
+import { endedGroups, flagOf, transcript, windowed } from '../net/transcript';
 import { FilesChanged, Item, Turn } from './ChatEntry';
 import { CloseAgentContext } from './CloseAgent';
 import { closeAsk, isCloseCommand } from '../net/closeAgent';
@@ -39,6 +39,8 @@ export function PromptBox({ agent, send, source, choose, approvals, onReview }: 
   const canClose = !!useContext(CloseAgentContext);
   const [text, setText] = useState('');
   const [sent, setSent] = useState<'ok' | 'queued' | 'full' | 'failed' | undefined>();
+  // #908: a prompt of the person's was seen waiting since the last send, so "waiting for this turn" ends when none waits any more.
+  const [seenWaiting, setSeenWaiting] = useState(false);
   const [busy, setBusy] = useState(false);
   // At most MAX_LINES entries are held; older ones are dropped and counted, so a stream of new ids cannot grow memory or the per-chunk work.
   const [held, setHeld] = useState<{ lines: ChatLine[]; trimmed: number }>({ lines: [], trimmed: 0 });
@@ -64,10 +66,13 @@ export function PromptBox({ agent, send, source, choose, approvals, onReview }: 
   const composedAt = useRef(0);
   const all = useMemo(() => transcript(lines), [lines]);
   const view = useMemo(() => windowed(all, shown), [all, shown]);
-  const last = view.items.length ? view.items[view.items.length - 1] : undefined;
+  // The newest item the agent is on: prompts still waiting are drawn after everything (#908) and are not it.
+  const last = [...view.items].reverse().find((i) => !(i.kind === 'user' && i.line.queued));
   const newestSteps = [...view.items].reverse().find((i) => i.kind === 'steps');
   const rows = useMemo(() => groupTurns(view.items).map((row) => ({ row, paired: row.kind === 'turn' ? pairDiffs(row.items) : undefined })), [view.items]);
   const queue = useMemo(() => queueState(lines), [lines]);
+  const waitingCount = queue.waiting.length;
+  useEffect(() => { if (waitingCount > 0) setSeenWaiting(true); }, [waitingCount]);
   const modelId = agent.session?.currentModel;
   const model = agent.session?.models.find((m) => m.id === modelId)?.name || undefined;
   const offered = agent.session?.commands;
@@ -129,6 +134,7 @@ export function PromptBox({ agent, send, source, choose, approvals, onReview }: 
     if (canClose && !agent.closed && isCloseCommand(body, commands)) { closeAsk.ask(agent.id, 'pane'); setText(''); return; }
     if (!body || !send || busy || agent.closed) return;
     setBusy(true);
+    setSeenWaiting(false);
     const r = await send(agent, body);
     setBusy(false);
     const res: PromptResult = typeof r === 'boolean' ? { ok: r } : r;
@@ -139,6 +145,9 @@ export function PromptBox({ agent, send, source, choose, approvals, onReview }: 
   // The composer grows with what is typed, up to a limit, then scrolls.
   const rowCount = Math.min(8, Math.max(2, text.split('\n').length));
   const working = agent.state === 'working' && !agent.closed;
+  // #908: the groups of calls whose turn is over (a later prompt went, or the agent is in no turn): what still says it runs is stopped.
+  const live = !agent.closed && (agent.state === 'working' || agent.state === 'needs-you');
+  const ended = useMemo(() => endedGroups(view.items, live), [view.items, live]);
 
   // ADR-0090. The window cannot read a node's capabilities, so "this node speaks the rich form" is what it has seen: rich entries, the
   // agent's settings or commands, or a prompt answered in the rich form. Stop turn is offered only then, while the agent works.
@@ -172,7 +181,7 @@ export function PromptBox({ agent, send, source, choose, approvals, onReview }: 
     field.current.setSelectionRange(caretTo.current, caretTo.current);
     caretTo.current = undefined;
   }, [text]);
-  const sentText = sent && t({ ok: 'prompt-sent', queued: 'prompt-queued', full: 'prompt-queue-full', failed: 'prompt-failed' }[sent]);
+  const sentText = sent && (sent !== 'queued' || queuedNote(sent, waitingCount, seenWaiting, working)) && t({ ok: 'prompt-sent', queued: 'prompt-queued', full: 'prompt-queue-full', failed: 'prompt-failed' }[sent]);
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-surface-0">
@@ -190,7 +199,7 @@ export function PromptBox({ agent, send, source, choose, approvals, onReview }: 
               if (row.kind !== 'turn' || !paired) return row.kind === 'turn' ? null : <Item key={row.id} item={row} notice={notice} queued={row.kind === 'user' ? (queue.notSent.has(row.line.id) ? 'not-sent' : row.line.queued ? 'waiting' : undefined) : undefined} />;
               // An edit and the diff it made are one row; every other item is drawn as it is. A group with a failed call, or right before a
               // request that waits for you, opens and says so, wherever it is.
-              const draw = (item: TurnItem, i: number) => <Item key={item.id} item={item} running={working && item === last} open={item === newestSteps} diffs={paired.attached}
+              const draw = (item: TurnItem, i: number) => <Item key={item.id} item={item} running={working && item === last} ended={ended.has(item.id)} open={item === newestSteps} diffs={paired.attached}
                 flag={item.kind === 'steps' ? flagOf(agent, item === newestSteps, item.lines, paired.items[i + 1]) : undefined} onShowRequest={showRequest} notice={notice} />;
               return <Turn key={row.id} name={agent.name} model={model} atMs={row.atMs}>{paired.items.map(draw)}</Turn>;
             })}
@@ -262,7 +271,7 @@ export function PromptBox({ agent, send, source, choose, approvals, onReview }: 
           {agent.session && <SessionBar key={agent.id} part="controls" agentKey={agent.id} session={agent.session} disabled={agent.closed} choose={choose} setConfig={actions.setConfig} approvals={actions.approvals} launchedFree={agent.skipsPermissions} />}
           <NoAskBadge agent={agent} />
           <span className="flex-1" />
-          {sent && <span role="status" className={`text-xs ${sent === 'ok' || sent === 'queued' ? 'text-finished' : 'text-needs-you'}`}>{sentText}</span>}
+          {sentText && <span role="status" className={`text-xs ${sent === 'ok' || sent === 'queued' ? 'text-finished' : 'text-needs-you'}`}>{sentText}</span>}
           {stopFailed && <span role="status" className="text-xs text-needs-you">{t(stopFailed)}</span>}
           <span className="hidden text-xs text-muted md:inline">{t(agent.closed ? 'prompt-closed' : 'prompt-hint')}</span>
           {/* Ends this turn only: the agent stays and can be asked again. Not the same as stopping the agent. */}

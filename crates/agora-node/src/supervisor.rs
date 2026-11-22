@@ -193,6 +193,13 @@ pub enum SupervisorEvent {
     AdapterCrashed {
         agent: AgentId,
     },
+    /// ADR-0090, #908: a prompt that waited behind a turn became the turn and is being sent now, before anything the agent says in
+    /// answer can arrive. `tag` is what the caller gave when it queued it (the id of its chat entry); [`Self::PromptDequeued`]
+    /// follows with the outcome.
+    PromptSending {
+        agent: AgentId,
+        tag: u64,
+    },
     /// ADR-0090: a prompt that waited behind a turn was sent (`sent`), or could not be (the adapter refused it). `tag` is what the
     /// caller gave when it queued it (the id of its chat entry).
     PromptDequeued {
@@ -2109,7 +2116,7 @@ impl Supervisor {
                         sent: was_sent,
                     });
                     if let Some(next) = next {
-                        begin_send(e, &id, next, &sent);
+                        begin_send(e, &id, next, &sent, events);
                     }
                 }
                 None => events.push(SupervisorEvent::PromptDequeued {
@@ -2122,7 +2129,7 @@ impl Supervisor {
         for (id, e) in &mut self.adapters {
             // ADR-0090: a cancelled turn the adapter never ended is over after the grace.
             if let Some(next) = e.rich.expire(now) {
-                begin_send(e, id, next, &sent);
+                begin_send(e, id, next, &sent, events);
             }
             let polled = match &e.adapter {
                 Some(adapter) if e.running => adapter.poll(),
@@ -2137,7 +2144,7 @@ impl Supervisor {
                         // out when it ends, one per end.
                         if e.capabilities.iter().any(|c| c == "turns") {
                             if let Some(next) = e.rich.observe(state, now) {
-                                begin_send(e, id, next, &sent);
+                                begin_send(e, id, next, &sent, events);
                             }
                         }
                         if e.agent.observe(state, StateSource::Reported) {
@@ -3966,8 +3973,19 @@ fn bounded_options(o: SessionOptions) -> SessionOptions {
 /// ADR-0090: a queued prompt becomes the turn. The send itself is made on a thread of its own, so a hung adapter cannot stall the tick
 /// (which holds the supervisor's lock); its outcome comes back through `sent`, with the turn's generation, and the next poll reports
 /// it (once) and, when it failed, goes on with the next prompt.
-fn begin_send(e: &AdapterEntry, id: &AgentId, next: Next, sent: &SentResults) {
+fn begin_send(
+    e: &AdapterEntry,
+    id: &AgentId,
+    next: Next,
+    sent: &SentResults,
+    events: &mut Vec<SupervisorEvent>,
+) {
     let (next, generation) = next;
+    // #908: said before the send starts, so the conversation marks where this turn begins ahead of anything the agent answers.
+    events.push(SupervisorEvent::PromptSending {
+        agent: id.clone(),
+        tag: next.tag,
+    });
     let caller = e
         .adapter
         .as_ref()

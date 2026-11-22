@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { agora } from '../gen/agora.js';
-import { chatLine, isRich, mergeLines, queueState, type ChatLine } from './chat';
+import { chatLine, isRich, mergeLines, queuedNote, queueState, type ChatLine } from './chat';
 import { callMs, currentStep, outputTail, planProgress, planSteps } from './chatView';
 import { filterCommands, insertText, slashQuery, stepIndex } from './slash';
-import { actionOf, asksBefore, failedCalls, flagOf, stepsSummary, transcript } from './transcript';
+import { actionOf, asksBefore, endedGroups, failedCalls, flagOf, ordered, stepsSummary, transcript } from './transcript';
 import { applyEvent, commandsOf, configOf, type View } from './view';
 import { fromSnapshot } from './view';
 
@@ -238,5 +238,39 @@ describe('an agent\'s settings and commands in the window\'s copy of the hub vie
   it('an old hub or node never sends them and the session stays as it was', () => {
     const v = view();
     expect(v.agents.get('n1/a')?.session).toBeUndefined();
+  });
+});
+
+describe('the order a person reads, and turns that are over (#908)', () => {
+  const ids = (lines: ChatLine[]) => ordered(lines).map((l) => l.id);
+  it('places a sent prompt by its time, before the first other entry that is not older; ties go to the prompt', () => {
+    // 3 and 4 waited behind the turn (smaller ids than the answers 5 and 6) and were sent at 20 and 22.
+    const lines = [L(1, { role: 'user', atMs: 10 }), call(2, { atMs: 11 }), L(3, { role: 'user', atMs: 20 }), L(4, { role: 'user', atMs: 22 }), L(5, { atMs: 20 }), L(6, { atMs: 22 })];
+    expect(ids(lines)).toEqual([1, 2, 3, 5, 4, 6]);
+    const replies = transcript(lines).filter((i) => i.kind === 'reply');
+    expect(replies).toHaveLength(2);
+  });
+  it('keeps the node\'s order when the times agree with it (every normal conversation), and for entries without a time', () => {
+    const lines = [L(1, { role: 'user' }), L(2), L(3, { role: 'user' }), L(4), L(5)];
+    expect(ids(lines)).toEqual([1, 2, 3, 4, 5]);
+    expect(ids([L(1, { role: 'user', atMs: 0 }), L(2, { atMs: 0 }), L(3, { role: 'user', atMs: 0 }), L(4, { atMs: 0 })])).toEqual([1, 2, 3, 4]);
+  });
+  it('draws a waiting prompt after everything, and a prompt the node will not send where it was', () => {
+    expect(ids([L(1, { role: 'user' }), L(2, { role: 'user', queued: true }), L(3), L(4)])).toEqual([1, 3, 4, 2]);
+    const dropped = [L(1, { role: 'user' }), L(2, { role: 'user', queued: true }), L(3), L(4, { kind: 'notice', code: 'adapter.queue_dropped' })];
+    expect(ids(dropped)).toEqual([1, 2, 3, 4]);
+  });
+  it('a group of calls is over when a later prompt went or the agent is in no turn; a waiting prompt starts no turn', () => {
+    const items = transcript([L(1, { role: 'user' }), call(2), L(3, { role: 'user' }), call(4), L(5, { role: 'user', queued: true })]);
+    const [first, second] = items.filter((i) => i.kind === 'steps').map((i) => i.id);
+    expect([...endedGroups(items, true)]).toEqual([first]);
+    expect(new Set(endedGroups(items, false))).toEqual(new Set([first, second]));
+  });
+  it('the composer\'s "waiting" note: while a prompt waits; before its entry arrived only while the agent works; never after it went', () => {
+    expect(queuedNote('queued', 1, true, false)).toBe(true);
+    expect(queuedNote('queued', 0, false, true)).toBe(true);
+    expect(queuedNote('queued', 0, false, false)).toBe(false);
+    expect(queuedNote('queued', 0, true, true)).toBe(false);
+    expect(queuedNote('ok', 1, true, true)).toBe(false);
   });
 });

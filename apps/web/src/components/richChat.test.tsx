@@ -212,6 +212,67 @@ describe('the queue', () => {
   });
 });
 
+describe('after Stop turn (#908, RM-44)', () => {
+  // A call ran, two prompts waited, the turn was stopped and both went in order. The node gave each sent prompt the time it went (later
+  // than everything before it, no later than its answer); ids are the order the entries arrived.
+  const afterStop = (): ChatLine[] => [
+    L(1, { role: 'user', text: 'slow', atMs: 10 }),
+    call(2, { text: '{"tool":"sleep","arguments":null}', callKind: 'run', status: 'in_progress', startedMs: 11, atMs: 11 }),
+    L(3, { role: 'user', text: 'queued one', atMs: 20 }),
+    L(4, { role: 'user', text: 'queued two', atMs: 22 }),
+    L(5, { text: 'queued one', atMs: 20 }),
+    L(6, { text: 'queued two', atMs: 22 }),
+  ];
+  const said = () => [...host.querySelectorAll('[data-role]')].map((e) => `${(e as HTMLElement).dataset.role}:${e.querySelector('div')?.textContent?.replace(/^(You|Agent): /, '')}`);
+  it('the call that was running reads Stopped and nothing spins once the agent is idle', () => {
+    mount(afterStop(), agent({ state: 'idle' }), { cancelTurn: async () => true });
+    expect(host.innerHTML).not.toContain('aria-label="Running"');
+    expect(host.querySelector('[data-steps] .animate-spin')).toBeNull();
+    expect(host.querySelector('[data-steps] [role=img][aria-label="Stopped"]')).not.toBeNull();
+    expect(host.querySelector('[data-status=stopped]')).not.toBeNull();
+  });
+  it('a call of an earlier turn reads Stopped while the agent works on a later prompt; the call of the turn that runs still spins', () => {
+    mount([...afterStop().slice(0, 3), L(5, { text: 'queued one', atMs: 20 })], agent({ state: 'working' }), { cancelTurn: async () => true });
+    expect(host.querySelector('[data-steps] [aria-label="Stopped"]')).not.toBeNull();
+    act(() => root.unmount());
+    root = createRoot(host);
+    mount(rich(), agent({ state: 'working' }), { cancelTurn: async () => true });
+    expect(host.innerHTML).toContain('aria-label="Running"');
+    expect(host.innerHTML).not.toContain('aria-label="Stopped"');
+  });
+  it('each sent prompt is drawn before its own answer, and the two answers are two replies, not one glued text', () => {
+    mount(afterStop(), agent({ state: 'idle' }), { cancelTurn: async () => true });
+    expect(said()).toEqual(['user:slow', 'user:queued one', 'agent:queued one', 'user:queued two', 'agent:queued two']);
+    expect(host.textContent).not.toContain('queued onequeued two');
+  });
+  it('a prompt still waiting is drawn after what the turn says, and moves to its place once it is sent', () => {
+    const s = mount([L(1, { role: 'user', text: 'slow', atMs: 10 }), L(2, { role: 'user', text: 'next', atMs: 11, queued: true }), L(3, { text: 'still going', atMs: 12 })], agent({ state: 'working' }), { cancelTurn: async () => true });
+    expect(said()).toEqual(['user:slow', 'agent:still going', 'user:next']);
+    s.push([L(2, { role: 'user', text: 'next', atMs: 13 }), L(4, { text: 'answer', atMs: 13 })]);
+    expect(said()).toEqual(['user:slow', 'agent:still going', 'user:next', 'agent:answer']);
+  });
+  it('the composer stops saying "Waiting for this turn to end." once nothing waits, without another send', async () => {
+    let push: (l: ChatLine[]) => void = () => {};
+    const source: ChatSource = { connect(on) { push = (l) => on(l, false); on(rich(), true); return { close() {} }; } };
+    const send = vi.fn(async () => ({ ok: true, queued: true }));
+    const view = (state: AgentTileModel['state']) => act(() => root.render(<ChatActionsContext.Provider value={{ cancelTurn: async () => true }}><PromptBox agent={agent({ state })} source={source} send={send} /></ChatActionsContext.Provider>));
+    view('working');
+    const box = host.querySelector('textarea') as HTMLTextAreaElement;
+    act(() => { Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set?.call(box, 'queued one'); box.dispatchEvent(new Event('input', { bubbles: true })); });
+    await act(async () => { (host.querySelector('form') as HTMLFormElement).requestSubmit(); });
+    expect(send).toHaveBeenCalled();
+    // The answer to the send came before the queued entry: the note shows while the agent works.
+    expect(host.textContent).toContain('Waiting for this turn to end.');
+    act(() => push([L(3, { role: 'user', text: 'queued one', atMs: 5, queued: true })]));
+    expect(host.textContent).toContain('Waiting for this turn to end.');
+    // Stop turn: the prompt is sent (the same entry, no longer waiting) and the agent works on it, then is idle.
+    act(() => push([L(3, { role: 'user', text: 'queued one', atMs: 6 })]));
+    expect(host.textContent).not.toContain('Waiting for this turn to end.');
+    view('idle');
+    expect(host.textContent).not.toContain('Waiting for this turn to end.');
+  });
+});
+
 describe('updates in place on the screen', () => {
   it('one row for a call however often it is updated, and the tail is followed without a jump pill', () => {
     const s = mount(rich(), agent({ state: 'working' }));
@@ -518,7 +579,7 @@ describe('words', () => {
     for (const lang of ['en', 'tr']) {
       const src = readFileSync(`../../locales/${lang}/web.ftl`, 'utf8');
       const ids = new Set([...src.matchAll(/^([a-z0-9-]+) =/gm)].map((m) => m[1]));
-      for (const k of ['tool-status-pending', 'tool-status-running', 'tool-status-done', 'tool-status-failed', 'permission-pending', 'permission-approved', 'permission-denied', 'permission-cancelled',
+      for (const k of ['tool-status-pending', 'tool-status-running', 'tool-status-done', 'tool-status-failed', 'tool-status-stopped', 'permission-pending', 'permission-approved', 'permission-denied', 'permission-cancelled',
         'prompt-sent', 'prompt-queued', 'prompt-queue-full', 'prompt-failed', 'session-effort', 'session-mode', 'session-model', 'chat-steps-call-failed']) expect(ids.has(k), `${lang} ${k}`).toBe(true);
     }
     setLanguage('tr');

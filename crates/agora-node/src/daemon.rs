@@ -2146,6 +2146,10 @@ impl Node {
                                         let _ = call.and_then(|c| c.run());
                                     }
                                 }
+                                // #908: a queued prompt became the turn: its entry takes the time it went, before any answer.
+                                SupervisorEvent::PromptSending { agent, tag } => {
+                                    chat.sending(agent, *tag, now);
+                                }
                                 // ADR-0090: a queued prompt went out (or could not), or was lost with its adapter.
                                 SupervisorEvent::PromptDequeued { agent, tag, sent } => {
                                     if *sent {

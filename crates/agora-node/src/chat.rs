@@ -78,6 +78,9 @@ struct Transcript {
     /// When each entry that changes in place was last sent, and which ones hold a change not yet sent.
     sent_ms: HashMap<u64, u64>,
     dirty: BTreeSet<u64>,
+    /// #908: the latest `at_ms` given to an entry. Entries never go back in time (a clock that steps back holds at this), and a
+    /// queued prompt that is sent gets a later time than every entry before it (see [`ChatBoard::sending`]).
+    last_ms: u64,
 }
 
 /// The transcripts of every chat agent on this node.
@@ -459,6 +462,8 @@ impl Transcript {
     fn add(&mut self, mut entry: ChatEntry, now_ms: u64) -> u64 {
         self.next_id += 1;
         entry.entry_id = self.next_id;
+        entry.at_ms = entry.at_ms.max(self.last_ms);
+        self.last_ms = entry.at_ms;
         self.bytes += Self::size(&entry);
         self.entries.push_back(entry.clone());
         self.sent_ms.insert(entry.entry_id, now_ms);
@@ -787,6 +792,22 @@ impl ChatBoard {
                     let e = t.entries[i].clone();
                     t.sent_ms.insert(id, now_ms);
                     t.send(&e);
+                }
+            }
+        }
+    }
+
+    /// ADR-0090, #908: the queued prompt of this entry became the turn and is being sent. Its `at_ms` becomes the time it went,
+    /// strictly later than every entry before it, and every later entry's time is at least that: a client places the prompt by
+    /// that time, before the answer it gets, so the replies of two turns never read as one. Nothing is sent to followers here; the
+    /// new time goes out with [`Self::unqueue`] (or the entry leaves with [`Self::drop_queued`]).
+    pub fn sending(&self, agent: &AgentId, entry_id: u64, now_ms: u64) {
+        if let Some(t) = self.lock().get_mut(agent) {
+            if let Some(i) = t.index(entry_id) {
+                if t.entries[i].queued {
+                    let at = now_ms.max(t.last_ms.saturating_add(1));
+                    t.entries[i].at_ms = at;
+                    t.last_ms = at;
                 }
             }
         }
@@ -1887,6 +1908,76 @@ mod tests {
         assert_eq!(s.len(), 2);
         assert_eq!(s[1].code, "adapter.queue_dropped");
         assert_eq!(s[1].params["count"], "1");
+        accounted(&b, &a);
+    }
+
+    /// #908 (RM-44): two prompts wait behind a call that runs, the turn is cancelled and they go one after the other. Each prompt's
+    /// time is when it went, later than everything before it, and its answer's time is not earlier: a client that places entries
+    /// by time reads prompt, answer, prompt, answer (never both answers as one reply), even when everything happens in one
+    /// millisecond. The call that ran keeps the status the agent last gave it (the node invents none).
+    #[test]
+    fn queued_prompts_sent_after_a_cancel_are_placed_before_their_own_answers() {
+        let b = ChatBoard::new();
+        let a = AgentId::new("a");
+        b.push_user(&a, "slow".into(), 10);
+        let mut call = tool("t4");
+        call.status = "in_progress".into();
+        b.push_item(&a, &ChatItem::Tool(call), 10);
+        let one = b.push_queued(&a, "queued one".into(), 10);
+        let two = b.push_queued(&a, "queued two".into(), 10);
+        let (_, rx) = b.follow(&a);
+        // The turn is cancelled; the first queued prompt becomes the turn, then the agent answers it (all in the same millisecond).
+        b.sending(&a, one, 10);
+        b.unqueue(&a, one, 10);
+        b.push_item(&a, &ChatItem::Text("queued one".into()), 10);
+        b.sending(&a, two, 10);
+        b.unqueue(&a, two, 10);
+        b.push_item(&a, &ChatItem::Text("queued two".into()), 10);
+        // Followers get each sent prompt again, no longer waiting, with the time it went.
+        let got: Vec<ChatEntry> = rx.try_iter().collect();
+        let first = got.iter().find(|e| e.entry_id == one).unwrap();
+        assert!(!first.queued && first.at_ms > 10, "{first:?}");
+        let s = b.snapshot(&a);
+        let at = |role: ChatRole, text: &str| {
+            s.iter()
+                .find(|e| {
+                    e.role == role as i32 && e.text == text && e.kind == ChatKind::Text as i32
+                })
+                .unwrap()
+                .at_ms
+        };
+        let latest_before = |id: u64| {
+            s.iter()
+                .filter(|e| e.entry_id < id && e.role == ChatRole::Agent as i32)
+                .map(|e| e.at_ms)
+                .max()
+                .unwrap_or(0)
+        };
+        let (u1, a1, u2, a2) = (
+            at(ChatRole::User, "queued one"),
+            at(ChatRole::Agent, "queued one"),
+            at(ChatRole::User, "queued two"),
+            at(ChatRole::Agent, "queued two"),
+        );
+        assert!(u1 > latest_before(one) && a1 >= u1, "{s:#?}");
+        assert!(u2 > a1 && a2 >= u2, "{s:#?}");
+        // The ids are unchanged: the entries stay where they were, only their times say when each prompt went.
+        assert!(s.iter().all(|e| !e.queued));
+        assert!(s.windows(2).all(|w| w[0].entry_id < w[1].entry_id));
+        let running = s.iter().find(|e| e.call_id == "t4").unwrap();
+        assert_eq!(running.status, ToolStatus::InProgress as i32);
+        // A prompt that is not waiting is not moved; an entry never gets an earlier time than the one before it.
+        b.sending(&a, one, 99);
+        assert_eq!(
+            b.snapshot(&a)
+                .iter()
+                .find(|e| e.entry_id == one)
+                .unwrap()
+                .at_ms,
+            u1
+        );
+        b.push_user(&a, "late clock".into(), 1);
+        assert_eq!(b.snapshot(&a).last().unwrap().at_ms, a2);
         accounted(&b, &a);
     }
 }

@@ -1199,6 +1199,7 @@ tool-status-pending = Başlamayı bekliyor
 tool-status-running = Çalışıyor
 tool-status-done = Bitti
 tool-status-failed = Başarısız
+tool-status-stopped = Durduruldu
 tool-output-cut = Çıktı kısaltıldı.
 chat-thinking = Düşünüyor…
 chat-steps-call-failed = { $count ->

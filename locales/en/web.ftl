@@ -1256,6 +1256,8 @@ tool-status-pending = Waiting to start
 tool-status-running = Running
 tool-status-done = Done
 tool-status-failed = Failed
+# #908: a call that was still running or waiting when its turn ended (Stop turn, or the agent moved on): it will not finish.
+tool-status-stopped = Stopped
 tool-output-cut = The output was shortened.
 chat-thinking = Thinking…
 chat-steps-call-failed = { $count ->

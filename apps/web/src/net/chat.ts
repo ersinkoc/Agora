@@ -150,3 +150,12 @@ export function queueState(lines: readonly ChatLine[]): { waiting: ChatLine[]; n
 // read a node's capabilities (the snapshot carries none), so it goes by what the node sent: a call with an id or a status, a thought, a
 // plan with steps, a permission record, a queued prompt.
 export const isRich = (lines: readonly ChatLine[]): boolean => lines.some((l) => l.callId !== undefined || l.status !== undefined || l.kind === 'thought' || l.kind === 'permission' || l.steps !== undefined || l.queued === true);
+
+// #908 (RM-44): whether the composer still says "Waiting for this turn to end." after the person's prompt was queued. While a prompt
+// of theirs waits, yes. Once none waits (it was sent, or dropped) and one was seen waiting, no: the note goes when the turn it waited
+// for ends, not at the next send. Before the queued entry has arrived at all (the answer to the send can come first), the note stays
+// while the agent works.
+export function queuedNote(sent: string | undefined, waiting: number, seenWaiting: boolean, working: boolean): boolean {
+  if (sent !== 'queued') return false;
+  return waiting > 0 || (!seenWaiting && working);
+}

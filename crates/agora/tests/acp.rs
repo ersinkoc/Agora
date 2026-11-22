@@ -854,6 +854,25 @@ fn cancelling_a_turn_keeps_the_queue_unless_told_to_drop_it() {
     assert!(all
         .iter()
         .any(|e| e.role == v1::ChatRole::User as i32 && e.text == "k1"));
+    // #908 (RM-44): each sent prompt carries the time it went, later than everything before it (the stopped call too), and its
+    // answer is not earlier; so a client that places prompts by time shows prompt, answer, prompt, answer, never one glued reply.
+    let at = |role: v1::ChatRole, t: &str| {
+        all.iter()
+            .find(|e| e.role == role as i32 && e.text == t)
+            .unwrap()
+            .at_ms
+    };
+    let call = all.iter().find(|e| e.call_id == "t4").unwrap().at_ms;
+    let (u1, a1, u2, a2) = (
+        at(v1::ChatRole::User, "k1"),
+        at(v1::ChatRole::Agent, "k1"),
+        at(v1::ChatRole::User, "k2"),
+        at(v1::ChatRole::Agent, "k2"),
+    );
+    assert!(
+        call < u1 && u1 <= a1 && a1 < u2 && u2 <= a2,
+        "{call} {u1} {a1} {u2} {a2}: {all:#?}"
+    );
     drop(node);
     let _ = std::fs::remove_dir_all(&home);
 }
