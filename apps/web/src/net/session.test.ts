@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { endSession, readCode, readToken, setPassword, signIn, signInFromLink, signInInfo } from './session';
+import { endSession, readCode, readSignInInfo, readToken, setPassword, signIn, signInFromLink, signInInfo } from './session';
 
 function store() {
   const m = new Map<string, string>();
@@ -72,6 +72,12 @@ describe('screen password', () => {
     expect(await signInInfo(reply(200, { passwordRequired: true, passwordSet: true }))).toEqual({ passwordRequired: true, passwordSet: true });
     expect(await signInInfo(reply(404))).toEqual({ passwordRequired: false, passwordSet: false });
     expect(await signInInfo((async () => new Response('<html>', { status: 200 })) as unknown as typeof fetch)).toEqual({ passwordRequired: false, passwordSet: false });
+    // Without an answer the raw read says so, rather than that no password is set (#960 review).
+    expect(await readSignInInfo(reply(200, { passwordRequired: false, passwordSet: true }))).toEqual({ passwordRequired: false, passwordSet: true });
+    expect(await readSignInInfo(reply(404))).toBeUndefined();
+    expect(await readSignInInfo(reply(503))).toBeUndefined();
+    expect(await readSignInInfo((async () => new Response('<html>', { status: 200 })) as unknown as typeof fetch)).toBeUndefined();
+    expect(await readSignInInfo((async () => { throw new TypeError('Failed to fetch'); }) as unknown as typeof fetch)).toBeUndefined();
   });
 
   it('ends the session at the hub when the window locks', async () => {
