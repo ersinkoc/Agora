@@ -1975,29 +1975,45 @@ impl Node {
                         }
                         // ADR-0060: a new process (a start, a restart, a resume) is written to the ledger with its start time, so one
                         // that outlives a crashed node is recognised at the next start. Read only when the pid changed.
+                        // #925: with when each process discovery waits for was spawned, so a node that takes it up from the holder later
+                        // reads its files from the same start.
+                        let starts: std::collections::HashMap<AgentId, u64> = session_targets
+                            .iter()
+                            .filter_map(|t| Some((t.agent.clone(), ms_after(t.started?))))
+                            .collect();
                         record_new_processes(
                             &ledger_tick,
                             &mut processes,
                             &pids,
+                            &starts,
                             agora_platform::process_identity,
                             now_ms(),
                         );
                         // ADR-0060: the session ids terminal agents write to their own files (`[session.file]`), read outside the lock.
-                        if !session_targets.is_empty() {
-                            let known = sup
+                        // Polled with no targets too, so what was kept for a process that ended is let go at once (#925).
+                        let known = if session_targets.is_empty() {
+                            Default::default()
+                        } else {
+                            sup.lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .known_sessions()
+                        };
+                        for (agent, id) in sessions.poll(Instant::now(), &session_targets, &known) {
+                            // #925: set only for the process it was found for (the lock was let go meanwhile; a restart or a resume
+                            // may have replaced it).
+                            let Some(launch) = session_targets
+                                .iter()
+                                .find(|t| t.agent == agent)
+                                .map(|t| t.launch)
+                            else {
+                                continue;
+                            };
+                            let set = sup
                                 .lock()
                                 .unwrap_or_else(|e| e.into_inner())
-                                .known_sessions();
-                            for (agent, id) in
-                                sessions.poll(Instant::now(), &session_targets, &known)
-                            {
-                                let set = sup
-                                    .lock()
-                                    .unwrap_or_else(|e| e.into_inner())
-                                    .report_session(&agent, &id);
-                                if set.is_ok() {
-                                    ev.session_reported(&agent, &id);
-                                }
+                                .report_found_session(&agent, launch, &id);
+                            if matches!(set, Ok(true)) {
+                                ev.session_reported(&agent, &id);
                             }
                         }
                         // Usage that terminal agents wrote to their own files (ADR-0042); the files are read outside the lock.
@@ -2616,7 +2632,13 @@ fn take_up_held(
         };
         // A failed take-up consumes the terminal: the agent is ended by name below, like the others.
         if sup
-            .adopt_held(restore, h, &session, Instant::now())
+            .adopt_held(
+                restore,
+                h,
+                &session,
+                held_since(entry.process_since_ms),
+                Instant::now(),
+            )
             .is_err()
         {
             ended.push(crate::holder_link::Held {
@@ -2811,22 +2833,38 @@ fn kept_session_parts(
     (options, config, commands)
 }
 
+/// #925: a time before an agent taken up from the holder started, as the earlier node recorded it (`Entry::process_since_ms`, 0: unknown).
+fn held_since(ms: u64) -> Option<SystemTime> {
+    (ms != 0).then(|| UNIX_EPOCH + Duration::from_millis(ms))
+}
+
+/// `t` in ms since the epoch, rounded up: never earlier than `t`, so a bound stays a bound.
+fn ms_after(t: SystemTime) -> u64 {
+    let d = t.duration_since(UNIX_EPOCH).unwrap_or_default();
+    u64::try_from(d.as_nanos().div_ceil(1_000_000)).unwrap_or(u64::MAX)
+}
+
 /// ADR-0060: writes the process of every agent whose pid is new to `recorded` into the ledger, and remembers it only once the ledger
 /// has taken it. Two things make a write not happen yet, and both are tried again on the next tick: the process cannot be read (it
 /// is just starting), and the ledger has no entry for the agent (the supervisor starts the process and releases its lock before the
 /// node records `AgentStarted`, which makes the entry: a tick between the two used to remember the pid as written, so the ledger
 /// never got it and a survivor of a crashed node was not recognised; seen on slow macOS runners).
+/// #925: `starts` holds, per agent, a time before its process was spawned (ms, rounded up): written with the process in one write, so a
+/// node that takes the agent up from the holder never finds a later time recorded as its start. An agent not in it is recorded with
+/// none (0).
 fn record_new_processes(
     ledger: &crate::ledger::Ledger,
     recorded: &mut std::collections::HashMap<AgentId, u32>,
     pids: &[(AgentId, u32)],
+    starts: &std::collections::HashMap<AgentId, u64>,
     identity: impl Fn(u32) -> io::Result<agora_platform::ProcessIdentity>,
     now_ms: u64,
 ) {
     for (agent, pid) in pids {
         if recorded.get(agent) != Some(pid) {
             if let Ok(identity) = identity(*pid) {
-                if ledger.set_process(agent.as_str(), Some(identity), now_ms) {
+                let since = starts.get(agent).copied().unwrap_or(0);
+                if ledger.set_process(agent.as_str(), Some(identity), since, now_ms) {
                     recorded.insert(agent.clone(), *pid);
                 }
             }
@@ -3325,7 +3363,7 @@ mod process_record_tests {
         let pids = vec![(agent.clone(), 4242)];
         let mut recorded = HashMap::new();
 
-        record_new_processes(&ledger, &mut recorded, &pids, identity, 2);
+        record_new_processes(&ledger, &mut recorded, &pids, &HashMap::new(), identity, 2);
         assert!(ledger.get("agent-1").is_none());
         assert!(
             recorded.is_empty(),
@@ -3344,15 +3382,85 @@ mod process_record_tests {
             }),
             3,
         );
-        record_new_processes(&ledger, &mut recorded, &pids, identity, 4);
+        record_new_processes(&ledger, &mut recorded, &pids, &HashMap::new(), identity, 4);
         assert_eq!(ledger.get("agent-1").unwrap().process().unwrap().pid, 4242);
         assert_eq!(recorded.get(&agent), Some(&4242));
 
         // Written once: a later tick with the same pid reads nothing again.
-        record_new_processes(&ledger, &mut recorded, &pids, |_| panic!("read again"), 5);
+        record_new_processes(
+            &ledger,
+            &mut recorded,
+            &pids,
+            &HashMap::new(),
+            |_| panic!("read again"),
+            5,
+        );
         // An agent that is gone is forgotten, so a new process of it is written.
-        record_new_processes(&ledger, &mut recorded, &[], identity, 6);
+        record_new_processes(&ledger, &mut recorded, &[], &HashMap::new(), identity, 6);
         assert!(recorded.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #925: the time before a process was spawned is written with the process, in one ledger write, so a node that ends right after it
+    /// leaves the bound for the node that takes the agent up from the holder, never a later time. A process whose start the node does
+    /// not know is recorded with none, not with the time it was seen; the next node's take-up does not change it.
+    #[test]
+    fn a_processs_start_bound_is_written_with_the_process_and_outlives_the_node() {
+        use super::{held_since, ms_after};
+        use std::time::{Duration, UNIX_EPOCH};
+        let dir = std::env::temp_dir().join(format!("agora-procsince-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let started = UNIX_EPOCH + Duration::from_nanos(1_700_000_000_123_400_001);
+        assert_eq!(ms_after(started), 1_700_000_000_124);
+        assert!(held_since(ms_after(started)).unwrap() >= started);
+        assert_eq!(held_since(0), None);
+        let (known, unknown) = (AgentId::new("agent-1"), AgentId::new("agent-2"));
+        let pids = vec![(known.clone(), 4242), (unknown.clone(), 4343)];
+        let starts: HashMap<AgentId, u64> = [(known.clone(), ms_after(started))].into();
+        {
+            let ledger = crate::ledger::Ledger::open(&dir, 1).unwrap();
+            for id in ["agent-1", "agent-2"] {
+                ledger.observe(
+                    &Body::AgentStarted(v1::AgentStarted {
+                        agent_id: id.into(),
+                        kind: "fake".into(),
+                        level: 2,
+                        ..Default::default()
+                    }),
+                    3,
+                );
+            }
+            let mut recorded = HashMap::new();
+            record_new_processes(
+                &ledger,
+                &mut recorded,
+                &pids,
+                &starts,
+                identity,
+                1_700_000_000_500,
+            );
+            // The node ends here, right after the one write.
+        }
+        let ledger = crate::ledger::Ledger::open(&dir, 1).unwrap();
+        let since = |id: &str| ledger.get(id).unwrap().process_since_ms;
+        assert_eq!(since("agent-1"), 1_700_000_000_124);
+        assert_eq!(
+            since("agent-2"),
+            0,
+            "a time the process was only seen at was kept as its start"
+        );
+        // The next node takes the same processes up: what was recorded stays.
+        let mut recorded = HashMap::new();
+        record_new_processes(
+            &ledger,
+            &mut recorded,
+            &pids,
+            &HashMap::new(),
+            identity,
+            1_700_000_009_000,
+        );
+        assert_eq!((since("agent-1"), since("agent-2")), (1_700_000_000_124, 0));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3369,6 +3477,7 @@ mod process_record_tests {
             &ledger,
             &mut recorded,
             &pids,
+            &HashMap::new(),
             |_| Err(std::io::Error::from(std::io::ErrorKind::NotFound)),
             2,
         );
@@ -3425,12 +3534,26 @@ mod process_record_tests {
             // The tick writes each new process the way it does in the node (#696).
             let mut recorded = HashMap::new();
             let pid = |p: u32| [(AgentId::new("agent-1"), p)];
-            record_new_processes(&ledger, &mut recorded, &pid(4242), identity, 2);
+            record_new_processes(
+                &ledger,
+                &mut recorded,
+                &pid(4242),
+                &HashMap::new(),
+                identity,
+                2,
+            );
             let copy = if restarted {
                 // Crashed, restart pending: copied now; the tick then restarts it with a new process.
                 let down = [view(false, AgentState::Unknown)];
                 sink.supervisor_events(&[exited(1)], &down);
-                record_new_processes(&ledger, &mut recorded, &pid(5151), identity, 3);
+                record_new_processes(
+                    &ledger,
+                    &mut recorded,
+                    &pid(5151),
+                    &HashMap::new(),
+                    identity,
+                    3,
+                );
                 sink.supervisor_events(std::slice::from_ref(&started), &up);
                 down.to_vec()
             } else {

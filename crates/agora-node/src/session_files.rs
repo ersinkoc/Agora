@@ -1,8 +1,9 @@
 //! A terminal agent's own session id, read from the session file the agent writes (ADR-0060, manifest `[session.file]`). Used for
 //! agents whose id the node cannot choose (Codex: no flag sets it), so that Resume after a node restart can continue the conversation.
 //!
-//! A file is the agent's when it was written after the agent started, its first line passes `select`, names the agent's folder as its
-//! working directory, and its id is no other agent's. This is a guess that can be wrong, so it is made only when it cannot be confused.
+//! A file is the agent's when it was written after the agent's process started, its first line passes `select`, names the agent's
+//! folder as its working directory, and its id is no other agent's. This is a guess that can be wrong, so it is made only when it cannot
+//! be confused. Everything is kept per process ([`Target::launch`]): a restart or a resume under the same agent id waits afresh (#925).
 //! Two agents waiting in one folder are rivals when they are of one kind, or of kinds whose globs could match the same files: the fixed
 //! directory of one glob, before its first `*`, is the other's or holds it, as written or with links resolved (even links whose target
 //! does not exist yet), compared without case (one folder on Windows and macOS; elsewhere this only adds rivals). A root that cannot be
@@ -33,7 +34,7 @@ use serde_json::Value;
 const SCAN_EVERY: Duration = Duration::from_secs(3);
 /// How long an agent waits for its session file (the tool may write it only once it has been asked something).
 pub const GIVE_UP_AFTER: Duration = Duration::from_secs(30 * 60);
-/// A file may have been written this long before the node noticed the agent.
+/// A file may have been written this long before the node noticed the agent, when it does not know when the process started.
 const SLACK: Duration = Duration::from_secs(2);
 /// Longest first line read.
 const FIRST_LINE_MAX: u64 = 64 * 1024;
@@ -44,12 +45,22 @@ const MAX_ID: usize = 128;
 #[derive(Debug, Clone)]
 pub struct Target {
     pub agent: AgentId,
+    /// The agent's process ([`TerminalHandle::launch`](crate::terminal::TerminalHandle::launch)): a restart or a resume runs a new one,
+    /// which waits for its own file from its own start (#925).
+    pub launch: u64,
+    /// A time before the process started ([`TerminalHandle::started`](crate::terminal::TerminalHandle::started)): its files are the ones
+    /// written since, with no slack, so a restart moments after the earlier process wrote its file never gets that file. `None`: from
+    /// when the watcher first sees the process, less [`SLACK`].
+    pub started: Option<SystemTime>,
     pub kind: String,
     pub folder: PathBuf,
     pub spec: SessionFile,
 }
 
 struct Waiting {
+    /// The process this is for ([`Target::launch`]): another process of the agent waits afresh (#925).
+    launch: u64,
+    /// Files written since this may be the process's ([`Target::started`], or its first look less [`SLACK`]).
     since: SystemTime,
     give_up_at: Instant,
     next_scan: Instant,
@@ -113,8 +124,9 @@ struct Worker {
 pub struct SessionWatcher {
     home: Option<PathBuf>,
     waiting: HashMap<AgentId, Waiting>,
-    /// Agents that will get no id from a file (ambiguous, or none came in time), until they end.
-    gave_up: HashSet<AgentId>,
+    /// Agents that will get no id from a file (ambiguous, or none came in time), until their process ([`Target::launch`]) ends: the
+    /// agent's next process (a restart, a resume) is looked for again (#925).
+    gave_up: HashMap<AgentId, u64>,
     /// How a workspace folder and a session root are looked at on disk ([`workspace`], [`resolve`]); replaced in tests to count them.
     probe: fn(&Path) -> PathBuf,
     resolver: fn(&Path) -> Option<PathBuf>,
@@ -328,7 +340,7 @@ fn with_rivals(targets: &[Target], home: &Path) -> HashSet<AgentId> {
     with_rivals_using(
         targets,
         home,
-        &HashSet::new(),
+        &HashMap::new(),
         &mut HashMap::new(),
         &mut workspace,
         &mut |p| resolve(p),
@@ -340,7 +352,7 @@ fn with_rivals(targets: &[Target], home: &Path) -> HashSet<AgentId> {
 fn with_rivals_using(
     targets: &[Target],
     home: &Path,
-    settled: &HashSet<AgentId>,
+    settled: &HashMap<AgentId, u64>,
     looked: &mut HashMap<AgentId, Looked>,
     probe: &mut dyn FnMut(&Path) -> PathBuf,
     resolver: &mut dyn FnMut(&Path) -> Option<PathBuf>,
@@ -412,7 +424,7 @@ fn lookup(
 fn compare_rivals(
     targets: &[Target],
     home: &Path,
-    settled: &HashSet<AgentId>,
+    settled: &HashMap<AgentId, u64>,
     looked: &mut HashMap<AgentId, Looked>,
     now: Instant,
     ask: &mut Asker<'_>,
@@ -428,7 +440,7 @@ fn compare_rivals(
         for j in i + 1..targets.len() {
             let (a, b) = (&targets[i], &targets[j]);
             if a.agent == b.agent
-                || (settled.contains(&a.agent) && settled.contains(&b.agent))
+                || (settled.contains_key(&a.agent) && settled.contains_key(&b.agent))
                 || (a.kind != b.kind && exclusive(&a.spec, &b.spec))
             {
                 continue;
@@ -523,7 +535,7 @@ impl SessionWatcher {
         Self {
             home,
             waiting: HashMap::new(),
-            gave_up: HashSet::new(),
+            gave_up: HashMap::new(),
             probe: workspace,
             resolver: resolve,
             looked: HashMap::new(),
@@ -615,21 +627,28 @@ impl SessionWatcher {
         targets: &[Target],
         known: &HashSet<String>,
     ) -> Vec<(AgentId, String)> {
-        let live: HashSet<&AgentId> = targets.iter().map(|t| &t.agent).collect();
-        self.waiting.retain(|a, _| live.contains(a));
-        self.gave_up.retain(|a| live.contains(a));
-        self.looked.retain(|a, _| live.contains(a));
+        // #925: what was kept for an agent is for one process of it; a restart or a resume under the same id runs another, which waits
+        // from its own start (its earlier process's file is that conversation, never this one's).
+        let live: HashMap<&AgentId, u64> = targets.iter().map(|t| (&t.agent, t.launch)).collect();
+        self.waiting.retain(|a, w| live.get(a) == Some(&w.launch));
+        self.gave_up.retain(|a, launch| live.get(a) == Some(launch));
+        self.looked.retain(|a, _| live.contains_key(a));
         let Some(home) = self.home.clone() else {
             return Vec::new();
         };
         for t in targets {
-            if self.gave_up.contains(&t.agent) {
+            if self.gave_up.contains_key(&t.agent) {
                 continue;
             }
             self.waiting
                 .entry(t.agent.clone())
                 .or_insert_with(|| Waiting {
-                    since: SystemTime::now(),
+                    launch: t.launch,
+                    since: t.started.unwrap_or_else(|| {
+                        SystemTime::now()
+                            .checked_sub(SLACK)
+                            .unwrap_or(SystemTime::UNIX_EPOCH)
+                    }),
                     give_up_at: now + GIVE_UP_AFTER,
                     next_scan: now,
                 });
@@ -679,7 +698,9 @@ impl SessionWatcher {
             pending = p;
             for a in rivals {
                 self.waiting.remove(&a);
-                self.gave_up.insert(a);
+                if let Some(&launch) = live.get(&a) {
+                    self.gave_up.insert(a, launch);
+                }
             }
         }
         let mut found = Vec::new();
@@ -690,13 +711,13 @@ impl SessionWatcher {
             };
             if now >= w.give_up_at {
                 self.waiting.remove(&t.agent);
-                self.gave_up.insert(t.agent.clone());
+                self.gave_up.insert(t.agent.clone(), t.launch);
                 continue;
             }
             if now < w.next_scan || pending.contains(&t.agent) {
                 continue;
             }
-            let since = w.since.checked_sub(SLACK).unwrap_or(SystemTime::UNIX_EPOCH);
+            let since = w.since;
             let glob = t.spec.glob.replacen("{home}", &home.to_string_lossy(), 1);
             let mut ids: Vec<String> = crate::usage_files::expand(Path::new(&glob))
                 .into_iter()
@@ -722,7 +743,7 @@ impl SessionWatcher {
                 }
                 _ => {
                     self.waiting.remove(&t.agent);
-                    self.gave_up.insert(t.agent.clone());
+                    self.gave_up.insert(t.agent.clone(), t.launch);
                 }
             }
         }
@@ -779,6 +800,8 @@ mod tests {
     fn target(agent: &str, folder: PathBuf) -> Target {
         Target {
             agent: AgentId::new(agent),
+            launch: 1,
+            started: None,
             kind: "tool".into(),
             folder,
             spec: spec(),
@@ -1546,7 +1569,7 @@ mod tests {
                 with_rivals_using(
                     &targets,
                     &root.join("home"),
-                    &HashSet::new(),
+                    &HashMap::new(),
                     &mut HashMap::new(),
                     &mut workspace,
                     &mut unknown
@@ -1608,7 +1631,7 @@ mod tests {
             let found = with_rivals_using(
                 &targets,
                 &root.join("home"),
-                &HashSet::new(),
+                &HashMap::new(),
                 &mut HashMap::new(),
                 &mut workspace,
                 &mut counting,
@@ -1768,8 +1791,8 @@ mod tests {
             ];
             assert!(w.poll(now, &targets, &HashSet::new()).is_empty());
             assert!(
-                w.gave_up.contains(&AgentId::new("tool-1"))
-                    && w.gave_up.contains(&AgentId::new("tool-2"))
+                w.gave_up.contains_key(&AgentId::new("tool-1"))
+                    && w.gave_up.contains_key(&AgentId::new("tool-2"))
             );
             // An unrelated agent (exclusive selector) arrives and is due: nothing is probed for the settled pair.
             targets.push(Target {
@@ -1797,7 +1820,7 @@ mod tests {
                 .poll(now + SCAN_EVERY / 2, &targets, &HashSet::new())
                 .is_empty());
             assert!(
-                w.gave_up.contains(&AgentId::new("tool-3")),
+                w.gave_up.contains_key(&AgentId::new("tool-3")),
                 "reverse={reverse}"
             );
         }
@@ -1910,7 +1933,7 @@ mod tests {
                 let found = with_rivals_using(
                     &targets,
                     &root.join("home"),
-                    &HashSet::new(),
+                    &HashMap::new(),
                     &mut HashMap::new(),
                     &mut folder,
                     &mut roots,
@@ -2048,9 +2071,9 @@ mod tests {
         let second = with_glob(target("second", b), "k1", "{home}/r1/*.jsonl");
         let all = [first, other, second];
         w.poll(now + REVERIFY_AFTER + SCAN_EVERY, &all, &HashSet::new());
-        assert!(w.gave_up.contains(&AgentId::new("first")));
-        assert!(w.gave_up.contains(&AgentId::new("second")));
-        assert!(!w.gave_up.contains(&AgentId::new("other")));
+        assert!(w.gave_up.contains_key(&AgentId::new("first")));
+        assert!(w.gave_up.contains_key(&AgentId::new("second")));
+        assert!(!w.gave_up.contains_key(&AgentId::new("other")));
     }
 
     #[test]
@@ -2271,5 +2294,167 @@ mod tests {
             .iter()
             .any(|a| a.agent == AgentId::new("a") && a.seq > first.seq));
         assert!(w.gave_up.is_empty());
+    }
+
+    /// #925: the agent's process `launch`, started (spawned) just now, as after a restart or a resume under the same agent id.
+    fn relaunched(t: &Target, launch: u64) -> Vec<Target> {
+        vec![Target {
+            launch,
+            started: Some(SystemTime::now()),
+            ..t.clone()
+        }]
+    }
+
+    /// Longer than the tick a file system's clock may trail the system clock by (Linux stamps files from a coarse clock, Windows file
+    /// times tick every 15.6 ms), far shorter than [`SLACK`]: a file written this long after a process started is newer than its start.
+    const TICK: Duration = Duration::from_millis(60);
+
+    #[test]
+    fn a_process_restarted_at_once_never_gets_the_file_the_one_before_it_just_wrote() {
+        let root = tmp("restart-window");
+        let mut w = SessionWatcher::new(Some(root.join("home")));
+        let first = relaunched(&target("agent-1", root.join("work/a")), 1).remove(0);
+        let now = Instant::now();
+        assert!(w
+            .poll(now, std::slice::from_ref(&first), &HashSet::new())
+            .is_empty());
+        // The first process writes its file and dies; the agent is restarted (a new process) at once.
+        write(
+            &root,
+            "rollout-old.jsonl",
+            "0199aaaa-0000-4000-8000-0000000009a1",
+            &root.join("work/a"),
+        );
+        let second = relaunched(&first, 2);
+        assert!(
+            w.poll(now + SCAN_EVERY, &second, &HashSet::new())
+                .is_empty(),
+            "the new process was given the session of the process before it"
+        );
+        // The new process's own file, written moments after its start, is its session.
+        std::thread::sleep(TICK);
+        write(
+            &root,
+            "rollout-new.jsonl",
+            "0199aaaa-0000-4000-8000-0000000009a2",
+            &root.join("work/a"),
+        );
+        assert_eq!(
+            w.poll(now + SCAN_EVERY * 2, &second, &HashSet::new()),
+            vec![(
+                AgentId::new("agent-1"),
+                "0199aaaa-0000-4000-8000-0000000009a2".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn discovery_that_gave_up_on_a_process_looks_again_for_the_agents_next_process() {
+        let root = tmp("restart-gave-up");
+        let mut w = SessionWatcher::new(Some(root.join("home")));
+        let first = relaunched(&target("agent-1", root.join("work/a")), 1).remove(0);
+        let now = Instant::now();
+        assert!(w
+            .poll(now, std::slice::from_ref(&first), &HashSet::new())
+            .is_empty());
+        // Two files fit the first process: it gets none.
+        std::thread::sleep(TICK);
+        for (name, id) in [
+            ("rollout-1.jsonl", "0199aaaa-0000-4000-8000-0000000009b1"),
+            ("rollout-2.jsonl", "0199aaaa-0000-4000-8000-0000000009b2"),
+        ] {
+            write(&root, name, id, &root.join("work/a"));
+        }
+        assert!(w
+            .poll(
+                now + SCAN_EVERY,
+                std::slice::from_ref(&first),
+                &HashSet::new()
+            )
+            .is_empty());
+        assert!(w.gave_up.contains_key(&AgentId::new("agent-1")));
+        // The same process is still given up on at later looks.
+        assert!(w
+            .poll(
+                now + SCAN_EVERY * 2,
+                std::slice::from_ref(&first),
+                &HashSet::new()
+            )
+            .is_empty());
+        // Its next process, started at once, waits afresh, and its own file is its session.
+        let second = relaunched(&first, 2);
+        assert!(w
+            .poll(now + SCAN_EVERY * 3, &second, &HashSet::new())
+            .is_empty());
+        std::thread::sleep(TICK);
+        write(
+            &root,
+            "rollout-3.jsonl",
+            "0199aaaa-0000-4000-8000-0000000009b3",
+            &root.join("work/a"),
+        );
+        assert_eq!(
+            w.poll(now + SCAN_EVERY * 4, &second, &HashSet::new()),
+            vec![(
+                AgentId::new("agent-1"),
+                "0199aaaa-0000-4000-8000-0000000009b3".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn the_same_process_keeps_waiting_from_its_start_across_looks() {
+        for started in [false, true] {
+            let root = tmp(if started {
+                "same-launch-started"
+            } else {
+                "same-launch"
+            });
+            let mut w = SessionWatcher::new(Some(root.join("home")));
+            let mut t = target("agent-1", root.join("work/a"));
+            if started {
+                t = relaunched(&t, 1).remove(0);
+            }
+            let t = vec![t];
+            let now = Instant::now();
+            assert!(w.poll(now, &t, &HashSet::new()).is_empty());
+            std::thread::sleep(SLACK + Duration::from_millis(500));
+            assert!(w.poll(now + SCAN_EVERY, &t, &HashSet::new()).is_empty());
+            // Written after the process started, though long after the first look: still its own (a look does not move the window).
+            write(
+                &root,
+                "rollout-1.jsonl",
+                "0199aaaa-0000-4000-8000-0000000009c1",
+                &root.join("work/a"),
+            );
+            assert_eq!(w.poll(now + SCAN_EVERY * 2, &t, &HashSet::new()).len(), 1);
+        }
+    }
+
+    #[test]
+    fn a_process_taken_up_later_keeps_the_files_it_wrote_since_its_start() {
+        let root = tmp("taken-up");
+        let mut w = SessionWatcher::new(Some(root.join("home")));
+        let started = SystemTime::now();
+        std::thread::sleep(TICK);
+        // Written under the earlier node, well before this watcher first sees the process.
+        write(
+            &root,
+            "rollout-1.jsonl",
+            "0199aaaa-0000-4000-8000-0000000009d1",
+            &root.join("work/a"),
+        );
+        std::thread::sleep(SLACK + Duration::from_millis(500));
+        let t = vec![Target {
+            started: Some(started),
+            ..target("agent-1", root.join("work/a"))
+        }];
+        assert_eq!(
+            w.poll(Instant::now(), &t, &HashSet::new()),
+            vec![(
+                AgentId::new("agent-1"),
+                "0199aaaa-0000-4000-8000-0000000009d1".to_string()
+            )]
+        );
     }
 }

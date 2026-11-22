@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use crate::approvals::{SkipAsk, SkipKind};
 use agora_adapters::host::{
@@ -1021,6 +1021,7 @@ impl Supervisor {
         r: Restore,
         held: Held,
         session: &std::sync::Arc<HolderSession>,
+        started: Option<SystemTime>,
         now: Instant,
     ) -> Result<(), SupervisorError> {
         let id = r.id.clone();
@@ -1033,6 +1034,11 @@ impl Supervisor {
         self.restore(r)?;
         let made = agora_platform::held_pty(master, info.info.pid, session.control_of(id.as_str()))
             .and_then(|pty| TerminalHandle::start_with_output(pty, self.cfg.terminal, &info.buffer))
+            // #925: the process started under the earlier node; files it wrote then are still its own.
+            .map(|t| match started {
+                Some(bound) => t.started_after(bound),
+                None => t,
+            })
             .map(TerminalHandle::into_held);
         let terminal = match made {
             Ok(t) => t,
@@ -2864,8 +2870,10 @@ impl Supervisor {
     pub fn session_file_targets(&self) -> Vec<crate::session_files::Target> {
         self.agents
             .iter()
-            .filter(|(_, e)| e.terminal.is_some() && e.agent.session.is_none())
+            .filter(|(_, e)| e.agent.session.is_none())
             .filter_map(|(id, e)| {
+                let terminal = e.terminal.as_ref()?;
+                let (launch, started) = (terminal.launch(), terminal.started());
                 let spec = self
                     .kinds
                     .get(&e.agent.kind)?
@@ -2876,6 +2884,8 @@ impl Supervisor {
                     .clone()?;
                 Some(crate::session_files::Target {
                     agent: id.clone(),
+                    launch,
+                    started,
                     kind: e.agent.kind.clone(),
                     folder: e.worktree.clone(),
                     spec,
@@ -2886,6 +2896,21 @@ impl Supervisor {
 
     /// Starts a terminal agent's process, in `folder` when it is given (F1012): `worktree` is that folder's path.
     fn launch_in(
+        &self,
+        id: &AgentId,
+        kind: &str,
+        argv: &[String],
+        worktree: &std::path::Path,
+        extras: &Extras,
+        folder: Option<&agora_platform::HeldFolder>,
+    ) -> Result<TerminalHandle, SupervisorError> {
+        // #925: taken before anything is spawned, so a file written after it may be this process's and one written before never is.
+        let before = SystemTime::now();
+        self.spawn_terminal(id, kind, argv, worktree, extras, folder)
+            .map(|t| t.started_after(before))
+    }
+
+    fn spawn_terminal(
         &self,
         id: &AgentId,
         kind: &str,
@@ -3701,6 +3726,39 @@ impl Supervisor {
             .ok_or_else(|| SupervisorError::NotFound(id.clone()))?;
         entry.agent.session = Some(session.to_string());
         Ok(())
+    }
+
+    /// ADR-0060: the session id found in a session file for the agent's process `launch` ([`session_files::Target`]). Set only while
+    /// that process still runs and the agent has no session yet: one found for a process that has since been restarted, resumed or
+    /// stopped is dropped (the file is that process's conversation, never the next one's, #925), and so is an id another agent holds
+    /// now (one reported while the files were read). Returns whether it was set.
+    ///
+    /// [`session_files::Target`]: crate::session_files::Target
+    pub fn report_found_session(
+        &mut self,
+        id: &AgentId,
+        launch: u64,
+        session: &str,
+    ) -> Result<bool, SupervisorError> {
+        if !crate::session_files::argv_safe(session) {
+            return Err(SupervisorError::OptionUnknown("session_id"));
+        }
+        if !self.agents.contains_key(id) {
+            return Err(SupervisorError::NotFound(id.clone()));
+        }
+        if self.known_sessions().contains(session) {
+            return Ok(false);
+        }
+        let entry = self
+            .agents
+            .get_mut(id)
+            .ok_or_else(|| SupervisorError::NotFound(id.clone()))?;
+        let same = entry.terminal.as_ref().map(TerminalHandle::launch) == Some(launch);
+        if !same || entry.agent.session.is_some() {
+            return Ok(false);
+        }
+        entry.agent.session = Some(session.to_string());
+        Ok(true)
     }
 
     /// Whether anyone is looking at the agent's terminal; hidden terminals are still checked, less often.
