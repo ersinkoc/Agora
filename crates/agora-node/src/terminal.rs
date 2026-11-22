@@ -220,7 +220,9 @@ fn private_mode(out: &mut String, n: u16, on: bool) {
 /// modifyOtherKeys, 47/1047, the scroll region) are left alone: resetting what the node cannot see could switch off what the
 /// program switched on while the window watched. Origin mode (DECOM) is not restored either: cursor positions under it are relative to
 /// the scroll region, which is not tracked, so restoring it would put the cursor, and every later position the program sends, on
-/// the wrong row (Codex review of ADR-0100); it waits until the margins can be restored.
+/// the wrong row (Codex review of ADR-0100); it waits until the margins can be restored. Two known gaps: xterm.js (the web window)
+/// switches mouse mode 9 off on any of the 1000/1002/1003 resets, so there the repaint does end a 9 the window had; and only the
+/// kitty keyboard protocol's current flags are carried, not the program's stack, so a pop after a late attach gives the window none.
 fn append_modes(out: &mut String, m: &Modes) {
     for n in [1000, 1002, 1003] {
         private_mode(out, n, false);
@@ -257,7 +259,9 @@ fn append_modes(out: &mut String, m: &Modes) {
 }
 
 /// The cursor (ADR-0100 decision 1, step 5): position, visibility and shape. The default shape is `CSI 0 SP q`, which gives the
-/// window its user's own cursor back; a blink without a shape the program chose is mode 12.
+/// window its user's own cursor back. Mode 12 (blink alone) is never written: xterm.js applies it to the window's own cursor-blink
+/// setting, which would outlive the program, so a blink without a shape the program chose is not carried (a known gap); a chosen
+/// shape carries its blink in DECSCUSR.
 fn append_cursor(out: &mut String, c: &Cursor) {
     let _ = write!(
         out,
@@ -274,9 +278,6 @@ fn append_cursor(out: &mut String, c: &Cursor) {
     };
     if shape == 0 {
         out.push_str("\x1b[0 q");
-        if c.blink {
-            out.push_str("\x1b[?12h");
-        }
     } else {
         // DECSCUSR: the odd value of each pair blinks.
         let _ = write!(out, "\x1b[{} q", shape - u8::from(c.blink));
@@ -328,8 +329,10 @@ impl Repaint {
         } else {
             "\x1b[?1049l"
         });
-        // 2. Rows land at absolute positions (origin off), characters overwrite (insert off), from a plain pen.
-        out.push_str("\x1b[?6l\x1b[4l\x1b[0m");
+        // 2. Rows land at absolute positions (origin off), characters overwrite (insert off), from a plain pen, in ASCII (G0 is ASCII and
+        // shifted in: a window left in the line-drawing set by an earlier program would draw the whole screen in it). The node does
+        // not track the character sets, so this is a protective reset, not the program's state.
+        out.push_str("\x1b[?6l\x1b[4l\x1b[0m\x1b(B\x0f");
         // 3. The screen, every row at an absolute position with its styles.
         out.push_str("\x1b[2J");
         for (row, paint) in self.rows.into_iter().enumerate() {
@@ -697,7 +700,7 @@ mod tests {
         ] {
             at(&off, seq);
         }
-        assert!(!off.contains("\x1b[?1000h") && !off.contains("\x1b[?12h"));
+        assert!(!off.contains("\x1b[?1000h") && !off.contains("\x1b[?12"));
         // Each mouse mode and encoding on its own.
         for (prog, set) in [
             ("\x1b[?1000h", "\x1b[?1003l\x1b[?1000h"),
@@ -706,8 +709,8 @@ mod tests {
             ("\x1b[4 q", "\x1b[4 q"),
             ("\x1b[1 q", "\x1b[1 q"),
             ("\x1b[6 q", "\x1b[6 q"),
-            // A blink with no shape chosen keeps the window's own shape.
-            ("\x1b[?12h", "\x1b[0 q\x1b[?12h"),
+            // A blink with no shape chosen keeps the window's own shape, and mode 12 is never written (see `append_cursor`).
+            ("\x1b[?12h", "\x1b[0 q\x1b[0m"),
             ("\x1b[3 q\x1b[0 q", "\x1b[0 q\x1b[0m"),
         ] {
             at(&source(size, prog.as_bytes()).1, set);
@@ -722,7 +725,7 @@ mod tests {
         let (_, r) = source(size, ALL_ON);
         let order = [
             at(&r, "\x1b[?1049h"),
-            at(&r, "\x1b[?6l\x1b[4l\x1b[0m"),
+            at(&r, "\x1b[?6l\x1b[4l\x1b[0m\x1b(B\x0f"),
             at(&r, "\x1b[2J"),
             at(&r, "\x1b[1;1HALT"),
             at(&r, "\x1b[?1000l"),
@@ -813,6 +816,40 @@ mod tests {
             returning.cursor().row,
             1,
             "absolute: the margins are not restored"
+        );
+    }
+
+    /// A window left in the line-drawing character set (`ESC ( 0`, or G1 shifted out) still draws the repaint's text as text.
+    #[test]
+    fn a_window_left_in_line_drawing_draws_the_repaint_as_text() {
+        let size = Size { cols: 16, rows: 4 };
+        let (src, r) = source(size, b"plain text qx");
+        for stale in [&b"\x1b(0"[..], b"\x1b)0\x0e"] {
+            let mut window = AlacrittyTerminal::new(size);
+            window.feed(stale);
+            window.feed(r.as_bytes());
+            assert_eq!(window.line(0), src.line(0));
+            window.feed(b"\r\nqx");
+            assert_eq!(window.line(1), "qx", "live output after it is ASCII too");
+        }
+    }
+
+    /// The pinned limitation of the keyboard flags (ADR-0100 known gaps): the repaint carries the current flags, not the program's
+    /// stack, so when the program pops after a late attach, the node goes back to the flags below and the window to none.
+    #[test]
+    fn a_keyboard_pop_after_a_late_attach_still_diverges() {
+        let size = Size { cols: 16, rows: 4 };
+        let (mut src, r) = source(size, b"\x1b[>1u\x1b[>3u");
+        let mut window = AlacrittyTerminal::new(size);
+        window.feed(r.as_bytes());
+        assert_eq!(window.modes().keyboard_flags, 3, "the current flags arrive");
+        src.feed(b"\x1b[<u");
+        window.feed(b"\x1b[<u");
+        assert_eq!(src.modes().keyboard_flags, 1);
+        assert_eq!(
+            window.modes().keyboard_flags,
+            0,
+            "the stack below is not carried"
         );
     }
 

@@ -103,7 +103,8 @@ fn a_view_that_kept_old_modes_gets_the_programs_current_ones() {
 
 #[test]
 fn modes_the_node_does_not_track_are_left_alone() {
-    // Mouse 9 and the urxvt encoding are known to the scanner only from the live stream; a repaint must not switch them off.
+    // Mouse 9 and the urxvt encoding are known to the scanner only from the live stream; a repaint must not switch them off here.
+    // (This holds for the terminal client: xterm.js, in the web window, ends 9 on any of the 1000/1002/1003 resets.)
     let mut view = View::new();
     view.feed(b"\x1b[?9h\x1b[?1015h");
     let (_, repaint) = node(b"");

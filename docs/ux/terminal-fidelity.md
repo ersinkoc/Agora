@@ -225,7 +225,10 @@ Items 1, 3 and 6 change the protocol or a recorded decision, so each needs an AD
    shape and blink), and the repaint writes each one as an explicit set or reset after entering the program's screen and drawing it,
    so a window that opens, reloads or reconnects gets the mouse, the wheel, focus reports and the alternate screen (D1, D2, D3, D5 of
    the ADR; `scripts/e2e-terminal-repaint.mjs` in Chromium and the terminal client, node and client tests). Not carried: modes the node
-   does not track (9, 1015, modifyOtherKeys, 47/1047, the scroll region) and origin mode, which waits for the scroll region. The history
+   does not track (9, 1015, modifyOtherKeys, 47/1047, the scroll region) and origin mode, which waits for the scroll region; in the
+   web window xterm.js switches 9 off on the repaint's 1000/1002/1003 resets (the terminal client keeps it); the keyboard flags are
+   the current ones, not the program's stack (a pop after a late attach gives the window none, pinned by a node test); mode 12 is not
+   written (xterm.js would keep it as the window's own blink setting). The history
    replay (step 2) and the clients' part (step 3) are not built.
 2. **Nobody owns the answers to terminal queries.** The node's emulator drops `PtyWrite` events (`crates/agora-vt/src/alacritty.rs:41`,
    only titles are kept), so a program that asks for the device attributes, the cursor position, the colours or the keyboard protocol

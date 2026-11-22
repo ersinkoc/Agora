@@ -204,6 +204,89 @@ fn start_attach_stop_from_the_command_line() {
     assert_eq!(out.trim(), "Stopped agent agent-1");
 }
 
+/// Runs `agora terminal attach agent-1` in a real terminal, types `typed` once `ready` shows (if any), waits for `until` in its output,
+/// detaches with Ctrl-], and returns everything it wrote to the terminal.
+fn attach_session(s: &Setup, typed: &[u8], until: &str) -> Vec<u8> {
+    let mut cfg = PtyConfig::new(vec![
+        AGORA.into(),
+        "terminal".into(),
+        "attach".into(),
+        "agent-1".into(),
+    ]);
+    cfg.env
+        .push(("AGORA_HOME".into(), s.home.display().to_string()));
+    cfg.env.push(("AGORA_LANG".into(), "en".into()));
+    let mut attach = spawn(&cfg).expect("spawn attach");
+    if !typed.is_empty() {
+        attach.write_input(typed).unwrap();
+    }
+    let mut seen = Vec::new();
+    let end = Instant::now() + Duration::from_secs(15);
+    while !String::from_utf8_lossy(&seen).contains(until) {
+        assert!(
+            Instant::now() < end,
+            "never saw {until:?}; got: {:?}",
+            String::from_utf8_lossy(&seen)
+        );
+        if let Ok(chunk) = attach.output().recv_timeout(Duration::from_millis(100)) {
+            seen.extend_from_slice(&chunk);
+        }
+    }
+    attach.write_input(&[0x1d]).unwrap();
+    let status = attach.wait().unwrap();
+    assert!(status.success(), "attach exited with {status:?}");
+    while let Ok(chunk) = attach.output().recv_timeout(Duration::from_millis(500)) {
+        seen.extend_from_slice(&chunk);
+    }
+    seen
+}
+
+/// ADR-0100 and the review of #953: the node's repaint switches the program's modes on in the user's own terminal when attaching
+/// late, and detaching switches them off again and gives the terminal back its own keyboard flags (the repaint's kitty pop is not
+/// passed on, and only the entry attach pushed is popped).
+#[test]
+fn detaching_gives_the_users_terminal_back_its_own_modes() {
+    use agora_vt::{AlacrittyTerminal, CursorShape, MouseEncoding, MouseTracking, Size, Terminal};
+    if !shell_agents_supported() {
+        return;
+    }
+    let s = setup("attach-modes");
+    let _node = start_node(&s);
+    let (code, _, err) = cli(&s, &["agent", "start", "shell", "--project", "demo"]);
+    assert_eq!(code, 0, "stderr: {err}");
+    // The program switches the alternate screen, mouse, focus, keypad, paste, keyboard flags and a cursor shape on.
+    attach_session(
+        &s,
+        b"printf '\\033[?1049h\\033[?1003h\\033[?1006h\\033[?1004h\\033=\\033[?2004h\\033[>5u\\033[5 q'; echo MODES-$((1+1))\r",
+        "MODES-2",
+    );
+    // A late attach: the repaint carries those modes.
+    let late = attach_session(&s, b"", "\x1b[?1003h");
+    assert!(
+        late.starts_with(b"\x1b[>0u"),
+        "attach pushes its own keyboard entry first"
+    );
+    let text = String::from_utf8_lossy(&late);
+    assert!(
+        !text.contains("\x1b[<32u"),
+        "the repaint's pop is not passed on"
+    );
+    // The user's terminal, with keyboard flags of its own (a shell or tmux pushed 1), after the whole session.
+    let mut host = AlacrittyTerminal::new(Size { cols: 80, rows: 24 });
+    host.feed(b"\x1b[>1u");
+    let before = host.modes();
+    host.feed(&late);
+    let m = host.modes();
+    assert!(!m.alt_screen, "back on the main screen");
+    assert_eq!(m.mouse_tracking, MouseTracking::Off);
+    assert_eq!(m.mouse_encoding, MouseEncoding::Default);
+    assert!(!m.focus_reporting && !m.application_keypad && !m.bracketed_paste);
+    assert_eq!(m.keyboard_flags, 1, "the terminal's own keyboard flags");
+    assert_eq!(m, before);
+    assert!(host.cursor().visible);
+    assert_eq!(host.cursor().shape, CursorShape::Default);
+}
+
 #[test]
 fn errors_are_rendered_from_codes_and_exit_nonzero() {
     if !shell_agents_supported() {

@@ -486,6 +486,19 @@ mod tests {
             t.feed(b"\x1b[<u");
             assert_eq!(t.modes().keyboard_flags & !5, 0, "{what}");
         }
+        // Ending exactly on the bound: the push that reaches it empties the stacks, and its flags (not 0) stay on.
+        for split in [1 << 20, 1, 5] {
+            let mut t = AlacrittyTerminal::new(Size { cols: 20, rows: 3 });
+            let bytes = "\x1b[>1u".repeat(PUSH_LIMIT - 1) + "\x1b[>6u";
+            for c in bytes.as_bytes().chunks(split) {
+                t.feed(c);
+            }
+            assert_eq!(t.pushes, 0, "split {split}: the bound was reached");
+            assert_eq!(t.modes().keyboard_flags, 6, "split {split}");
+            // The stacks are empty now: a pop leaves no flags (the entries below were dropped with the bound).
+            t.feed(b"\x1b[<u");
+            assert_eq!(t.modes().keyboard_flags, 0, "split {split}");
+        }
         let mut t = AlacrittyTerminal::new(Size { cols: 20, rows: 3 });
         t.feed(b"\x1b[>1u\x1b[>3u");
         assert_eq!(t.modes().keyboard_flags, 3);

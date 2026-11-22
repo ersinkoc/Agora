@@ -132,7 +132,8 @@ pub struct Modes {
 }
 
 impl Default for Modes {
-    /// A terminal's power-on modes: everything off but autowrap.
+    /// Everything off but autowrap (xterm's power-on modes). Not every backend starts so: `AlacrittyTerminal` starts with
+    /// alternate scroll (1007) on, so the repaint of a plain shell says `CSI ? 1007 h`.
     fn default() -> Self {
         Self {
             alt_screen: false,

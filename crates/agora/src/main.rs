@@ -22,6 +22,29 @@ use agora_protocol::v1::{
 
 /// Ctrl-] detaches from an attached terminal (like telnet), since everything else is the agent's input.
 const DETACH: u8 = 0x1d;
+
+/// Written to the user's own terminal before anything of the agent's (`terminal attach`): a kitty keyboard entry of our own on top
+/// of the terminal's stack, so the flags the agent sets change only our entry and detaching pops exactly it.
+const ATTACH_START: &[u8] = b"\x1b[>0u";
+
+/// Written to the user's own terminal on detach: back to the main screen (where our keyboard entry is), our entry popped, and every
+/// mode the node's repaint (ADR-0100) or the agent may have switched on switched off again: mouse tracking and encodings, focus,
+/// bracketed paste, application cursor keys and keypad, insert and newline off, autowrap on, a plain pen in ASCII, the cursor shown
+/// in the terminal's own shape.
+const DETACH_RESET: &[u8] =
+    b"\x1b[?1049l\x1b[<u\x1b[?9l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l\
+\x1b[?1004l\x1b[?2004l\x1b[?1l\x1b>\x1b[4l\x1b[20l\x1b[?7h\x1b[0m\x1b(B\x0f\x1b[?25h\x1b[0 q";
+
+/// The node's repaint as the user's own terminal gets it: without the kitty keyboard pop (`CSI < 32 u`) the node writes for a
+/// window, which here would pop the user's terminal's own entries (a shell's or tmux's) below ours. The node writes it once, as
+/// these exact bytes, after the drawing; nothing a program printed is in a repaint.
+fn repaint_for_host(repaint: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+    const POP: &[u8] = b"\x1b[<32u";
+    match repaint.windows(POP.len()).position(|w| w == POP) {
+        Some(at) => std::borrow::Cow::Owned([&repaint[..at], &repaint[at + POP.len()..]].concat()),
+        None => std::borrow::Cow::Borrowed(repaint),
+    }
+}
 const TERMINAL_STREAM: u32 = 3;
 
 mod adaptercmd;
@@ -1081,6 +1104,7 @@ fn terminal_attach(say: &Say, o: &Opts) -> ExitCode {
     let resizer = c.writer().ok();
     let mut last_size = agora_platform::terminal_size();
     let mut stdout = std::io::stdout();
+    let _ = stdout.write_all(ATTACH_START).and_then(|()| stdout.flush());
     loop {
         let now = agora_platform::terminal_size();
         if now != last_size {
@@ -1095,7 +1119,12 @@ fn terminal_attach(say: &Say, o: &Opts) -> ExitCode {
         }
         match c.read_frame(Some(Duration::from_millis(100))) {
             Ok(Some(f)) if f.stream_id == TERMINAL_STREAM => match f.kind {
-                KIND_TERM_SNAPSHOT | KIND_TERM_DATA => {
+                KIND_TERM_SNAPSHOT => {
+                    let _ = stdout
+                        .write_all(&repaint_for_host(&f.payload))
+                        .and_then(|()| stdout.flush());
+                }
+                KIND_TERM_DATA => {
                     let _ = stdout.write_all(&f.payload).and_then(|()| stdout.flush());
                 }
                 KIND_TERM_EXIT => break,
@@ -1110,6 +1139,7 @@ fn terminal_attach(say: &Say, o: &Opts) -> ExitCode {
             break;
         }
     }
+    let _ = stdout.write_all(DETACH_RESET).and_then(|()| stdout.flush());
     drop(raw);
     println!();
     say.out(
