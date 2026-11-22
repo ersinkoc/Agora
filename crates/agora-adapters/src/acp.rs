@@ -365,12 +365,64 @@ const LOCATIONS_MAX: usize = 64;
 /// ADR-0090: a tool's output is cut here (head and tail kept) before secrets are removed; the node cuts it to its own cap after.
 const OUTPUT_MAX: usize = 64 * 1024;
 /// Audit F54: a tool call's arguments and a diff are cut here (head and tail kept), and a rich plan to this many entries of this much
-/// text (each is sent twice, as a step and as an entry), so a line from the agent that fits `MAX_LINE` cannot grow past it on its
-/// way to the node, whose host drops such a line whole. The node keeps less of each (16 KiB, 64 entries of 512 bytes).
+/// text (each is sent twice, as a step and as an entry), so an ordinary item stays far below `MAX_LINE` on its way to the node,
+/// whose host drops a longer line whole; [`fit_line`] enforces the bound on the line itself. The node keeps less of each (16 KiB, 64
+/// entries of 512 bytes).
 const ARGUMENTS_MAX: usize = 64 * 1024;
 const DIFF_MAX: usize = 64 * 1024;
 const PLAN_ENTRIES_MAX: usize = 256;
 const PLAN_TEXT_MAX: usize = 4096;
+
+/// Audit F54 (review of #920): a string at most this long is never cut by [`fit_line`].
+const FIT_FLOOR: usize = 256;
+
+/// A `chat/append` line with `params`, serialized as the node will read it. The per-field caps above count decoded bytes, while
+/// JSON escaping can make each one up to six bytes and a rich plan carries its text twice, so the bound is enforced here on the
+/// complete line, envelope and escaping included: while it is longer than `MAX_LINE`, every string of the item longer than
+/// `FIT_FLOOR` (head and tail kept) and every list of more than one element is cut to half, the session id excepted. A line that
+/// fits, which is every ordinary one, is sent as it is. Cutting ends once nothing is left to cut (the item is then a few KiB: the
+/// session id is the node's own).
+fn fit_line(params: Value) -> String {
+    let mut line = json!({"jsonrpc": "2.0", "method": "chat/append", "params": params});
+    loop {
+        let text = line.to_string();
+        if text.len() <= MAX_LINE {
+            return text;
+        }
+        let Some(params) = line.get_mut("params").and_then(Value::as_object_mut) else {
+            return text;
+        };
+        let mut cut = false;
+        for (k, v) in params.iter_mut() {
+            if k != "sessionId" {
+                cut |= halve(v);
+            }
+        }
+        if !cut {
+            return text;
+        }
+    }
+}
+
+/// Cuts every string in `v` longer than `FIT_FLOOR` and every list of more than one element to half; whether anything was cut.
+fn halve(v: &mut Value) -> bool {
+    match v {
+        Value::String(s) if s.len() > FIT_FLOOR => {
+            *s = head_tail(s, s.len() / 2);
+            true
+        }
+        Value::Array(a) => {
+            let mut cut = a.len() > 1;
+            a.truncate(a.len().div_ceil(2));
+            for e in a.iter_mut() {
+                cut |= halve(e);
+            }
+            cut
+        }
+        Value::Object(o) => o.values_mut().fold(false, |cut, e| halve(e) | cut),
+        _ => false,
+    }
+}
 
 /// `s` as is when it fits `max` bytes, otherwise its first and last `max / 2` bytes (cut on character boundaries).
 fn head_tail(s: &str, max: usize) -> String {
@@ -1051,7 +1103,14 @@ impl<W: Write> Bridge<W> {
         let sid = replay_id.or(self.session.as_deref()).unwrap_or_default();
         let mut p = item;
         p["sessionId"] = json!(sid);
-        self.note("chat/append", p)
+        self.append(p)
+    }
+
+    /// A `chat/append` of an item made from the agent's content, kept within the node's line limit (audit F54, [`fit_line`]).
+    fn append(&mut self, params: Value) -> io::Result<()> {
+        let line = fit_line(params);
+        writeln!(self.out, "{line}")?;
+        self.out.flush()
     }
 
     fn flush_text(&mut self) -> io::Result<()> {
@@ -1064,7 +1123,7 @@ impl<W: Write> Bridge<W> {
             // Thinking is not the agent saying something: a turn of nothing else is still an empty turn.
             let mut p = json!({"thought": {"text": t}});
             p["sessionId"] = json!(sid);
-            return self.note("chat/append", p);
+            return self.append(p);
         }
         self.chat(json!({"text": {"text": t}}), Some(&sid))
     }
@@ -2865,6 +2924,11 @@ mod tests {
             )],
             vec![update(json!({"sessionUpdate": "plan",
                 "entries": (0..270_000).map(|_| json!({"content": ""})).collect::<Vec<_>>()}))],
+            // A title is not capped: what the arguments grow by (escaped twice) takes a line that fits past the limit.
+            vec![update(
+                json!({"sessionUpdate": "tool_call", "toolCallId": "c1", "rawInput": {"a": "\"".repeat(60_000)},
+                       "title": "\u{1}".repeat((MAX_LINE - 130_000) / 6)}),
+            )],
             vec![
                 update(
                     json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "x".repeat(4000)}}),
@@ -2894,6 +2958,58 @@ mod tests {
                     "rich={rich}: {:?}",
                     sent.iter().map(|l| l.len()).collect::<Vec<_>>()
                 );
+            }
+        }
+        Ok(())
+    }
+
+    /// Audit F54 (review of #920): the per-field caps count decoded bytes and a rich plan carries its text twice, so a plan whose
+    /// text is escaped (each control character six bytes, a quote or backslash two) stays under every cap and still doubled past
+    /// `MAX_LINE`. The whole serialized line is bounded: the plan arrives cut, not dropped by the node's host.
+    #[test]
+    fn a_rich_plan_of_escaped_text_stays_within_the_line_limit(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // 3600 decoded bytes (under `PLAN_TEXT_MAX`) that take 12000 escaped; 256 entries (`PLAN_ENTRIES_MAX`): a 3 MB line that
+        // was sent to the node as a 6 MB one.
+        let text = "\"\\\u{1}".repeat(1200);
+        let entries: Vec<Value> = (0..PLAN_ENTRIES_MAX)
+            .map(|_| json!({"content": text, "status": "pending", "priority": "high"}))
+            .collect();
+        let line = json!({"jsonrpc": "2.0", "method": "session/update",
+            "params": {"sessionId": "s", "update": {"sessionUpdate": "plan", "entries": entries}}});
+        assert!(line.to_string().len() <= MAX_LINE);
+        for rich in [false, true] {
+            let mut b = bridge_in_session()?;
+            b.rich.on = rich;
+            b.handle_agent(&line)?;
+            let sent: Vec<&[u8]> = b
+                .out
+                .split(|c| *c == b'\n')
+                .filter(|l| !l.is_empty())
+                .collect();
+            assert_eq!(sent.len(), 1, "rich={rich}");
+            assert!(
+                sent[0].len() <= MAX_LINE,
+                "rich={rich}: {} bytes",
+                sent[0].len()
+            );
+            let v: Value = serde_json::from_slice(sent[0])?;
+            let plan = &v["params"]["plan"];
+            let steps = plan["steps"].as_array().ok_or("no steps")?;
+            assert!(!steps.is_empty(), "rich={rich}");
+            // What is kept is the plan's own text, from its start.
+            assert!(steps[0]
+                .as_str()
+                .ok_or("step")?
+                .starts_with("\"\\\u{1}\"\\"));
+            if rich {
+                let kept = plan["entries"].as_array().ok_or("no entries")?;
+                assert!(!kept.is_empty());
+                assert_eq!(kept[0]["status"], "pending");
+            } else {
+                // A plain plan carries each text once, which cannot outgrow the agent's line: nothing is cut.
+                assert_eq!(steps.len(), PLAN_ENTRIES_MAX);
+                assert!(steps.iter().all(|s| s == &json!(text)));
             }
         }
         Ok(())
