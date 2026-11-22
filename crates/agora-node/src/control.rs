@@ -1833,9 +1833,10 @@ impl Drop for ControlServer {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
         if let Some(t) = self.thread.take() {
-            // Wake the accept wait with a connection of our own, so stopping does not wait out `POLL`. Only while the accept thread
-            // runs, so something drains the socket's queue and the connect cannot wait on a full one; if it fails, the wait still
-            // ends within `POLL`.
+            // Best effort: wake the accept wait with a connection of our own, so stopping usually does not wait out `POLL`. Only while
+            // the accept thread runs, so something drains the socket's queue (a Unix connect does not wait on a full one). The
+            // connect can still take its time: on Windows a busy pipe makes it wait up to 2 s (`WaitNamedPipeW`) before it fails.
+            // The stop does not depend on it: the accept loop sees the flag within `POLL` either way.
             if !t.is_finished() {
                 let _ = local_connect(&self.path);
             }
