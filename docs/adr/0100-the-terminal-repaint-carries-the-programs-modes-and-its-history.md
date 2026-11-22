@@ -246,7 +246,8 @@ step 2 is built.
   back on its first flags while the window has none; xterm.js switches mouse mode 9 off on any 1000/1002/1003 reset, so in the web
   window (not the terminal client) the repaint ends a 9 the window had; mode 12 (blink without a chosen shape) is not written,
   because xterm.js applies it to the window's own cursor-blink setting; and `agora terminal attach`, which writes the repaint to the
-  user's own terminal, leaves out its keyboard pop, pushes an entry of its own on attach and resets the modes on detach.
+  user's own terminal, leaves out its keyboard pop, pushes an entry of its own on attach, and on detach pops it with the entries
+  the program left pushed on the main screen and resets the modes.
 - The node's scrollback stays fixed at 2000 lines (item 6 is separate).
 
 ## Open questions

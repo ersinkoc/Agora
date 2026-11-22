@@ -287,6 +287,29 @@ fn detaching_gives_the_users_terminal_back_its_own_modes() {
     assert_eq!(host.cursor().shape, CursorShape::Default);
 }
 
+/// The agent pushes keyboard entries on the main screen while attached and is still running at detach: detaching pops them and its
+/// own entry, so the user's terminal is back on its own flags (review of #953).
+#[test]
+fn detaching_pops_what_the_agent_pushed_on_the_main_screen() {
+    use agora_vt::{AlacrittyTerminal, Size, Terminal};
+    if !shell_agents_supported() {
+        return;
+    }
+    let s = setup("attach-pushes");
+    let _node = start_node(&s);
+    let (code, _, err) = cli(&s, &["agent", "start", "shell", "--project", "demo"]);
+    assert_eq!(code, 0, "stderr: {err}");
+    let session = attach_session(
+        &s,
+        b"printf '\\033[>5u\\033[>7u'; echo PUSHED-$((1+1))\r",
+        "PUSHED-2",
+    );
+    let mut host = AlacrittyTerminal::new(Size { cols: 80, rows: 24 });
+    host.feed(b"\x1b[>1u");
+    host.feed(&session);
+    assert_eq!(host.modes().keyboard_flags, 1, "the terminal's own flags");
+}
+
 #[test]
 fn errors_are_rendered_from_codes_and_exit_nonzero() {
     if !shell_agents_supported() {

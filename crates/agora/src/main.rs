@@ -24,15 +24,16 @@ use agora_protocol::v1::{
 const DETACH: u8 = 0x1d;
 
 /// Written to the user's own terminal before anything of the agent's (`terminal attach`): a kitty keyboard entry of our own on top
-/// of the terminal's stack, so the flags the agent sets change only our entry and detaching pops exactly it.
+/// of the terminal's stack, so the flags the agent sets change only our entry; detaching pops it and whatever the agent left
+/// pushed above it ([`HostKeyboard`]).
 const ATTACH_START: &[u8] = b"\x1b[>0u";
 
-/// Written to the user's own terminal on detach: back to the main screen (where our keyboard entry is), our entry popped, and every
-/// mode the node's repaint (ADR-0100) or the agent may have switched on switched off again: mouse tracking and encodings, focus,
-/// bracketed paste, application cursor keys and keypad, insert and newline off, autowrap on, a plain pen in ASCII, the cursor shown
-/// in the terminal's own shape.
+/// Written to the user's own terminal on detach, after `CSI ? 1049 l` (back to the main screen, where our keyboard entry is) and
+/// the pop of our entry and the agent's ([`HostKeyboard::detach`]): every mode the node's repaint (ADR-0100) or the agent may have
+/// switched on switched off again: mouse tracking and encodings, focus, bracketed paste, application cursor keys and keypad, insert
+/// and newline off, autowrap on, a plain pen in ASCII, the cursor shown in the terminal's own shape.
 const DETACH_RESET: &[u8] =
-    b"\x1b[?1049l\x1b[<u\x1b[?9l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l\
+    b"\x1b[?9l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l\
 \x1b[?1004l\x1b[?2004l\x1b[?1l\x1b>\x1b[4l\x1b[20l\x1b[?7h\x1b[0m\x1b(B\x0f\x1b[?25h\x1b[0 q";
 
 /// The node's repaint as the user's own terminal gets it: without the kitty keyboard pop (`CSI < 32 u`) the node writes for a
@@ -46,6 +47,103 @@ fn repaint_for_host(repaint: &[u8]) -> std::borrow::Cow<'_, [u8]> {
     }
 }
 const TERMINAL_STREAM: u32 = 3;
+
+/// What `terminal attach` has to pop from the user's own terminal on detach: its own kitty keyboard entry and the entries the agent
+/// pushed above it on the main screen and did not pop (`CSI > f u` adds one, `CSI < n u` removes n, at least 1). Pushes on the
+/// alternate screen are not counted: the terminal keeps a stack per screen and the alternate one goes with `CSI ? 1049 l`. Reads the
+/// bytes written to the terminal (the repaint and the live output), across frame boundaries; not a hot path (one client).
+#[derive(Default)]
+struct HostKeyboard {
+    /// 0 ground, 1 after ESC, 2 inside a CSI sequence.
+    state: u8,
+    started: bool,
+    private: u8,
+    number: u32,
+    digits: bool,
+    first: Option<u32>,
+    /// The sequence names 47, 1047 or 1049 (the alternate screen).
+    screen: bool,
+    alt: bool,
+    pushed: u32,
+}
+
+impl HostKeyboard {
+    fn feed(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            match (self.state, b) {
+                (_, 0x1b) => self.state = 1,
+                (0, _) => {}
+                (1, b'[') => {
+                    *self = Self {
+                        state: 2,
+                        alt: self.alt,
+                        pushed: self.pushed,
+                        ..Self::default()
+                    };
+                }
+                (1, b'c') => {
+                    // A full reset empties the terminal's stacks.
+                    self.state = 0;
+                    self.alt = false;
+                    self.pushed = 0;
+                }
+                (1, _) => self.state = 0,
+                (_, 0x18 | 0x1a) => self.state = 0,
+                (_, b'<' | b'=' | b'>' | b'?') if !self.started => {
+                    self.started = true;
+                    self.private = b;
+                }
+                (_, b'0'..=b'9') => {
+                    self.started = true;
+                    self.digits = true;
+                    self.number = self
+                        .number
+                        .saturating_mul(10)
+                        .saturating_add(u32::from(b - b'0'));
+                }
+                (_, b';' | b':') => {
+                    self.started = true;
+                    self.end_number();
+                }
+                (_, 0x40..=0x7e) => {
+                    self.end_number();
+                    self.finish(b);
+                    self.state = 0;
+                }
+                _ => self.started = true,
+            }
+        }
+    }
+
+    fn end_number(&mut self) {
+        if self.digits {
+            self.first.get_or_insert(self.number);
+            if self.private == b'?' && matches!(self.number, 47 | 1047 | 1049) {
+                self.screen = true;
+            }
+        }
+        self.number = 0;
+        self.digits = false;
+    }
+
+    fn finish(&mut self, fin: u8) {
+        match (self.private, fin) {
+            (b'>', b'u') if !self.alt => self.pushed = self.pushed.saturating_add(1),
+            (b'<', b'u') if !self.alt => {
+                let n = self.first.unwrap_or(1).max(1);
+                self.pushed = self.pushed.saturating_sub(n);
+            }
+            (b'?', b'h') if self.screen => self.alt = true,
+            (b'?', b'l') if self.screen => self.alt = false,
+            _ => {}
+        }
+    }
+
+    /// The main screen, then the pop of our entry and of what the agent left pushed on it.
+    fn detach(&self) -> Vec<u8> {
+        format!("\x1b[?1049l\x1b[<{}u", self.pushed.saturating_add(1)).into_bytes()
+    }
+}
 
 mod adaptercmd;
 mod agentcmd;
@@ -1105,6 +1203,7 @@ fn terminal_attach(say: &Say, o: &Opts) -> ExitCode {
     let mut last_size = agora_platform::terminal_size();
     let mut stdout = std::io::stdout();
     let _ = stdout.write_all(ATTACH_START).and_then(|()| stdout.flush());
+    let mut keyboard = HostKeyboard::default();
     loop {
         let now = agora_platform::terminal_size();
         if now != last_size {
@@ -1120,11 +1219,12 @@ fn terminal_attach(say: &Say, o: &Opts) -> ExitCode {
         match c.read_frame(Some(Duration::from_millis(100))) {
             Ok(Some(f)) if f.stream_id == TERMINAL_STREAM => match f.kind {
                 KIND_TERM_SNAPSHOT => {
-                    let _ = stdout
-                        .write_all(&repaint_for_host(&f.payload))
-                        .and_then(|()| stdout.flush());
+                    let repaint = repaint_for_host(&f.payload);
+                    keyboard.feed(&repaint);
+                    let _ = stdout.write_all(&repaint).and_then(|()| stdout.flush());
                 }
                 KIND_TERM_DATA => {
+                    keyboard.feed(&f.payload);
                     let _ = stdout.write_all(&f.payload).and_then(|()| stdout.flush());
                 }
                 KIND_TERM_EXIT => break,
@@ -1139,7 +1239,10 @@ fn terminal_attach(say: &Say, o: &Opts) -> ExitCode {
             break;
         }
     }
-    let _ = stdout.write_all(DETACH_RESET).and_then(|()| stdout.flush());
+    let _ = stdout
+        .write_all(&keyboard.detach())
+        .and_then(|()| stdout.write_all(DETACH_RESET))
+        .and_then(|()| stdout.flush());
     drop(raw);
     println!();
     say.out(
@@ -1147,6 +1250,55 @@ fn terminal_attach(say: &Say, o: &Opts) -> ExitCode {
         &[("agent_id", agent.as_str().into())],
     );
     ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+mod host_keyboard_tests {
+    use super::HostKeyboard;
+
+    fn pops(stream: &[u8], split: usize) -> String {
+        let mut k = HostKeyboard::default();
+        for c in stream.chunks(split) {
+            k.feed(c);
+        }
+        String::from_utf8_lossy(&k.detach()).into_owned()
+    }
+
+    #[test]
+    fn detach_pops_our_entry_and_what_the_agent_left_on_the_main_screen() {
+        for split in [1, 3, 1 << 16] {
+            assert_eq!(pops(b"", split), "\x1b[?1049l\x1b[<1u");
+            assert_eq!(pops(b"\x1b[>5u\x1b[>7u", split), "\x1b[?1049l\x1b[<3u");
+            assert_eq!(
+                pops(b"\x1b[>5u\x1b[>7u\x1b[<u", split),
+                "\x1b[?1049l\x1b[<2u"
+            );
+            assert_eq!(
+                pops(b"\x1b[>5u\x1b[<9u", split),
+                "\x1b[?1049l\x1b[<1u",
+                "never below ours"
+            );
+            // On the alternate screen the stack is the screen's own and goes with it.
+            assert_eq!(
+                pops(b"\x1b[>1u\x1b[?1049h\x1b[>5u\x1b[>7u", split),
+                "\x1b[?1049l\x1b[<2u"
+            );
+            assert_eq!(
+                pops(b"\x1b[?1049h\x1b[>5u\x1b[?1049l\x1b[>3u", split),
+                "\x1b[?1049l\x1b[<2u"
+            );
+            assert_eq!(
+                pops(b"\x1b[?1;1049h\x1b[>5u", split),
+                "\x1b[?1049l\x1b[<1u",
+                "1049 in a list"
+            );
+            // Other sequences ending in u or h change nothing: restore cursor, set flags, an ordinary mode.
+            assert_eq!(
+                pops(b"\x1b[u\x1b[=5;1u\x1b[?2004h\x1b[>5u", split),
+                "\x1b[?1049l\x1b[<2u"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
