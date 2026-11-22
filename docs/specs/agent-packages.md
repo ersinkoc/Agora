@@ -77,9 +77,12 @@ typing at. Code: `crates/agora-adapters/src/agent_install.rs` (the logic, with t
 1. **The list.** Read from `--list`, opened with `verify_list` under the root key (`--root-key` as 64 hex characters or a file; default
    `<AGORA_HOME>/agent-list-root-key`). The newest accepted version is kept in `<AGORA_HOME>/agents/list-state.json` (`{"version":N}`,
    replaced only by a rename so a crash leaves the old file whole, only goes up), so an older list is refused as a rollback
-   (`agent.install.index_invalid`, detail `rollback`). The check fails closed (#923): only a missing file means "no list accepted
-   yet" (the list is accepted and its version recorded). A file that is there but cannot be read or understood (no permission, a
-   folder or link at that path, larger than 4 KiB, not `{"version":N}`) refuses **every** list, older or newer, with
+   (`agent.install.index_invalid`, detail `rollback`). The version is recorded under the install lock after the record is read
+   again there: a list checked against an older record is refused as `rollback` when another install recorded a newer list
+   meanwhile, and the same version is already recorded. The check fails closed (#923): only a missing file means "no list accepted
+   yet" (the list is accepted and its version recorded). The file is opened without following a link at its name and checked on the
+   opened handle. A file that is there but cannot be read or understood (no permission, a folder or link at that path, larger than
+   4 KiB, not a JSON object with a whole-number `version`) refuses **every** list, older or newer, with
    `agent.install.index_invalid`, detail `list_state_unreadable`, and is never overwritten. The owner recovers by removing the file
    and running the install again with the newest list from its publisher, which is then accepted as the first one; the message says
    so and names the file. Removing it is the owner's own decision on their own machine, the same trust as writing it.

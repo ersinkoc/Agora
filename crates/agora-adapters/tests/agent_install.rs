@@ -755,10 +755,81 @@ fn the_list_version_seen_only_goes_up() {
     assert_eq!(last_seen_version(&home.0).unwrap(), 0);
     remember_list_version(&home.0, 5).unwrap();
     assert_eq!(last_seen_version(&home.0).unwrap(), 5);
-    remember_list_version(&home.0, 3).unwrap();
+    // Recording an older list is refused as a rollback (Codex's review of #997); the same version is already recorded.
+    let e = remember_list_version(&home.0, 3).unwrap_err();
+    assert_eq!(
+        (e.code, e.detail.as_str()),
+        (Code::IndexInvalid, "rollback")
+    );
     assert_eq!(last_seen_version(&home.0).unwrap(), 5);
+    remember_list_version(&home.0, 5).unwrap();
     remember_list_version(&home.0, 6).unwrap();
     assert_eq!(last_seen_version(&home.0).unwrap(), 6);
+}
+
+/// Codex's review of #997: a list is checked against the record, then recorded. A newer list recorded by another install between
+/// those two steps must not let the older one through: recording it is refused as a rollback and the newer record stays.
+#[test]
+fn a_newer_list_recorded_after_the_check_refuses_the_older_one() {
+    let home = Home::new();
+    let o = Opts::new("1.2.3", GOOD);
+    remember_list_version(&home.0, 4).unwrap();
+    let seen = last_seen_version(&home.0).unwrap();
+    let (envelope, key) = signed_list(&o, 5);
+    let older = verify_list(&envelope, &key, 1, seen).unwrap();
+    // Another ordinary install records list 7 meanwhile.
+    remember_list_version(&home.0, 7).unwrap();
+    let e = remember_list_version(&home.0, older.version).unwrap_err();
+    assert_eq!(
+        (e.code, e.detail.as_str()),
+        (Code::IndexInvalid, "rollback")
+    );
+    assert_eq!(last_seen_version(&home.0).unwrap(), 7);
+}
+
+/// Codex's review of #997: the record is opened without following a link at its name, and what was opened is checked on the handle.
+/// A link there (to a readable record, or to nothing) is refused, never read and never taken as "no record yet".
+#[test]
+fn a_link_at_the_list_state_is_refused_not_followed() {
+    let home = Home::new();
+    std::fs::create_dir_all(home.agents()).unwrap();
+    let target = home.0.join("elsewhere.json");
+    std::fs::write(&target, "{\"version\":1}\n").unwrap();
+    let state = home.agents().join("list-state.json");
+    #[cfg(unix)]
+    let linked = std::os::unix::fs::symlink(&target, &state).is_ok();
+    #[cfg(windows)]
+    let linked = std::os::windows::fs::symlink_file(&target, &state).is_ok();
+    #[cfg(not(any(unix, windows)))]
+    let linked = false;
+    if !linked {
+        // Windows without the right to make links: nothing to test.
+        return;
+    }
+    let refused = || {
+        let e = last_seen_version(&home.0).unwrap_err();
+        assert_eq!(
+            (e.code, e.detail.as_str()),
+            (Code::IndexInvalid, "list_state_unreadable")
+        );
+        assert_eq!(
+            remember_list_version(&home.0, 2).unwrap_err().detail,
+            "list_state_unreadable"
+        );
+    };
+    refused();
+    assert_eq!(
+        std::fs::read_to_string(&target).unwrap(),
+        "{\"version\":1}\n"
+    );
+    // A link to nothing is not "no record yet" either, and nothing is written through it.
+    std::fs::remove_file(&target).unwrap();
+    refused();
+    assert!(!target.exists());
+    assert!(std::fs::symlink_metadata(&state)
+        .unwrap()
+        .file_type()
+        .is_symlink());
 }
 
 /// #923: a `list-state.json` that is there but cannot be read or understood is never taken as "no list seen yet" (version 0): that
@@ -776,6 +847,12 @@ fn unreadable_states() -> Vec<(&'static str, MakeState)> {
         ("negative", write("{\"version\":-1}\n".into())),
         ("fraction", write("{\"version\":5.5}\n".into())),
         ("not_an_object", write("5\n".into())),
+        // Other containers and values (Codex's review of #997): a derived reader took a positional array.
+        ("array", write("[5]\n".into())),
+        ("string", write("\"5\"\n".into())),
+        ("null", write("null\n".into())),
+        ("version_null", write("{\"version\":null}\n".into())),
+        ("version_string", write("{\"version\":\"5\"}\n".into())),
         (
             "trailing",
             write("{\"version\":5}\n{\"version\":1}\n".into()),

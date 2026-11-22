@@ -870,50 +870,67 @@ pub fn list_state_path(home: &Path) -> PathBuf {
     agents_dir(home).join("list-state.json")
 }
 
-#[derive(serde::Deserialize)]
-struct ListState {
-    version: u64,
-}
-
 /// The newest list version this machine accepted (`<AGORA_HOME>/agents/list-state.json`): 0 only when the file does not exist (no
-/// list accepted yet). A file that is there but cannot be read or understood (no permission, not a plain file, larger than
-/// [`MAX_LIST_STATE_BYTES`], not `{"version":N}`) is `agent.install.index_invalid` with the detail [`LIST_STATE_UNREADABLE`], never
-/// 0: an unknown version would let an older list through (#923). The file is only ever replaced by a rename (`write_private`), so a
-/// crash leaves the old one whole; the owner recovers from a damaged one by removing it (docs/specs/agent-packages.md, rung 3).
+/// list accepted yet). A file that is there but cannot be read or understood (no permission, a link or anything but a plain file,
+/// larger than [`MAX_LIST_STATE_BYTES`], not `{"version":N}`) is `agent.install.index_invalid` with the detail
+/// [`LIST_STATE_UNREADABLE`], never 0: an unknown version would let an older list through (#923). The file is opened without
+/// following a link at its name and checked on the opened handle, so a link swapped in after any earlier look is refused, not read.
+/// It is only ever replaced by a rename (`write_private`), so a crash leaves the old one whole; the owner recovers from a damaged one
+/// by removing it (docs/specs/agent-packages.md, rung 3).
 pub fn last_seen_version(home: &Path) -> Result<u64, InstallError> {
-    let path = list_state_path(home);
     let unreadable = || InstallError {
         code: Code::IndexInvalid,
         detail: LIST_STATE_UNREADABLE.into(),
     };
-    match std::fs::symlink_metadata(&path) {
+    let file = match agora_platform::open_read_no_follow(&list_state_path(home)) {
+        Ok(f) => f,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(0),
         Err(_) => return Err(unreadable()),
-        Ok(m) if !m.is_file() => return Err(unreadable()),
-        Ok(_) => {}
+    };
+    if !file.metadata().is_ok_and(|m| m.is_file()) {
+        return Err(unreadable());
     }
     // One byte past the cap is read, so a larger file is refused, never read into memory or cut.
     let mut bytes = Vec::new();
-    File::open(&path)
-        .and_then(|f| f.take(MAX_LIST_STATE_BYTES + 1).read_to_end(&mut bytes))
+    file.take(MAX_LIST_STATE_BYTES + 1)
+        .read_to_end(&mut bytes)
         .map_err(|_| unreadable())?;
     if bytes.len() as u64 > MAX_LIST_STATE_BYTES {
         return Err(unreadable());
     }
-    serde_json::from_slice::<ListState>(&bytes)
-        .map(|s| s.version)
-        .map_err(|_| unreadable())
+    // Only the documented object: a derived reader would also take a positional array (`[5]`), which no writer emits (Codex's
+    // review of #997).
+    serde_json::from_slice::<serde_json::Value>(&bytes)
+        .ok()
+        .as_ref()
+        .and_then(serde_json::Value::as_object)
+        .and_then(|o| o.get("version"))
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(unreadable)
 }
 
-/// Remembers `version` as the newest accepted, atomically, under the install lock (two processes cannot interleave a read and a
-/// write); an older number never replaces a newer one, and a state that cannot be read is never replaced (#923).
+fn rolled_back(seen: u64, version: u64) -> Result<(), InstallError> {
+    if version < seen {
+        return err(Code::IndexInvalid, "rollback");
+    }
+    Ok(())
+}
+
+/// Records `version`, the list just opened, as the newest accepted, atomically, under the install lock (two processes cannot
+/// interleave a read and a write). The record is read again here, so a list that was checked against an older record is refused
+/// when a newer one was recorded meanwhile (`agent.install.index_invalid`, detail `rollback`); the same version is already recorded
+/// and is accepted. A record that cannot be read is never replaced (#923).
 pub fn remember_list_version(home: &Path, version: u64) -> Result<(), InstallError> {
-    if version <= last_seen_version(home)? {
+    let seen = last_seen_version(home)?;
+    rolled_back(seen, version)?;
+    if version == seen {
         return Ok(());
     }
     let (_root, dir) = open_agents(home)?;
     let _lock = Lock::acquire(&dir)?;
-    if version <= last_seen_version(home)? {
+    let seen = last_seen_version(home)?;
+    rolled_back(seen, version)?;
+    if version == seen {
         return Ok(());
     }
     agora_platform::write_private(
