@@ -91,6 +91,7 @@ tui-stop-failed = Could not stop it ({ $code }).
 tui-stop-helpers = It started { $count } helpers that still run. Stop them too? Press n to keep them, any other key stops them.
 tui-send-failed = Could not send it ({ $code }).
 tui-start-pick = Start which agent on { $machine }? Press its number, any other key cancels.
+tui-start-pick-page = Start which agent on { $machine }? Press its number, n for the next page ({ $page } of { $pages }), any other key cancels.
 tui-start-item = { $n }  { $name }
 tui-start-none = No agent is installed on { $machine }.
 tui-start-missing-item = { $name } (`{ $program }`)
