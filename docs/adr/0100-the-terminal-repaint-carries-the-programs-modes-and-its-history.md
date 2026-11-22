@@ -68,7 +68,9 @@ the node cannot see would switch off something the program did switch on while t
 
 1. **Enter the program's screen**: `CSI ? 1049 h` when the program is on the alternate screen, `CSI ? 1049 l` when not (D2, D3).
 2. **Reset what the drawing depends on**: origin off (`CSI ? 6 l`, so rows land at absolute positions), insert off (`CSI 4 l`),
-   `CSI 0 m`. The scroll region is not touched (untracked, see above).
+   `CSI 0 m`, and ASCII in G0 shifted in (`ESC ( B`, SI; added in step 1 after the review of #953: a window left in the line-drawing
+   set by an earlier program drew the whole repaint in it; the character sets stay untracked, so this is a protective reset, not the
+   program's state). The scroll region is not touched (untracked, see above): stale margins in a returning window remain a gap.
 3. **Draw** the screen as today (`CSI 2 J`, every row at an absolute position with its styles).
 4. **Modes**: mouse tracking (reset 1000, 1002, 1003, then set the program's one), mouse encoding (reset 1005, 1006, then set),
    1004, 1007, 2004, DECCKM, DECKPAM or DECKPNM, DECAWM, IRM, LNM; **not DECOM** (see below); the keyboard flags (`CSI < 32 u` pops whatever stack the
@@ -239,7 +241,13 @@ step 2 is built.
 - One appended schema field and one new terminal frame kind; nothing published changes meaning.
 - Known gaps, each named above: modes the backend does not track (9, 1015, modifyOtherKeys, 47/1047, the scroll region, the saved
   cursor, character sets), the kitty keyboard stack's depth, history and the main screen while a program is on the alternate screen,
-  and combining marks in history (a `Cell` cannot carry them, as in today's screen repaint).
+  and combining marks in history (a `Cell` cannot carry them, as in today's screen repaint). Pinned in step 1's tests or noted there
+  (review of #953): only the current keyboard flags are carried, so a program that pushed twice and pops after a late attach is
+  back on its first flags while the window has none; xterm.js switches mouse mode 9 off on any 1000/1002/1003 reset, so in the web
+  window (not the terminal client) the repaint ends a 9 the window had; mode 12 (blink without a chosen shape) is not written,
+  because xterm.js applies it to the window's own cursor-blink setting; and `agora terminal attach`, which writes the repaint to the
+  user's own terminal, leaves out its keyboard pop, pushes an entry of its own on attach, and on detach pops it with the entries
+  the program left pushed on the main screen and resets the modes.
 - The node's scrollback stays fixed at 2000 lines (item 6 is separate).
 
 ## Open questions

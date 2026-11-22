@@ -20,6 +20,8 @@ pub fn run_all<T: Terminal>(make: impl Fn(Size) -> T) {
     wide_characters_use_two_cells(&make);
     line_keeps_zero_width_characters(&make);
     modes_toggle(&make);
+    repaint_modes_are_tracked(&make);
+    cursor_shape_is_tracked(&make);
     styles_are_kept_per_cell(&make);
     pen_is_the_style_of_the_next_character(&make);
     styling_sequences_print_nothing(&make);
@@ -174,6 +176,64 @@ fn modes_toggle<T: Terminal>(make: &impl Fn(Size) -> T) {
     t.feed(b"\x1b[?2004l\x1b[?1l");
     let m = t.modes();
     assert!(!m.bracketed_paste && !m.application_cursor);
+}
+
+/// The modes the node's repaint carries (ADR-0100) follow the program's switches.
+fn repaint_modes_are_tracked<T: Terminal>(make: &impl Fn(Size) -> T) {
+    use crate::{Modes, MouseEncoding, MouseTracking};
+    let mut t = make(size(10, 2));
+    let power_on = t.modes();
+    assert!(power_on.autowrap && power_on.mouse_tracking == MouseTracking::Off);
+    t.feed(
+        b"\x1b[?1000h\x1b[?1006h\x1b[?1004h\x1b[?1007h\x1b=\x1b[?6h\x1b[4h\x1b[20h\x1b[?7l\x1b[>5u",
+    );
+    let m = t.modes();
+    assert_eq!(
+        m,
+        Modes {
+            mouse_tracking: MouseTracking::Click,
+            mouse_encoding: MouseEncoding::Sgr,
+            focus_reporting: true,
+            alternate_scroll: true,
+            application_keypad: true,
+            origin: true,
+            insert: true,
+            newline: true,
+            autowrap: false,
+            keyboard_flags: 5,
+            ..Modes::default()
+        }
+    );
+    // Mouse tracking and encodings are one at a time.
+    t.feed(b"\x1b[?1002h\x1b[?1005h");
+    assert_eq!(t.modes().mouse_tracking, MouseTracking::Drag);
+    assert_eq!(t.modes().mouse_encoding, MouseEncoding::Utf8);
+    t.feed(b"\x1b[?1003h");
+    assert_eq!(t.modes().mouse_tracking, MouseTracking::Motion);
+    t.feed(
+        b"\x1b[?1003l\x1b[?1005l\x1b[?1004l\x1b[?1007l\x1b>\x1b[?6l\x1b[4l\x1b[20l\x1b[?7h\x1b[<u",
+    );
+    assert_eq!(t.modes(), Modes::default());
+}
+
+fn cursor_shape_is_tracked<T: Terminal>(make: &impl Fn(Size) -> T) {
+    use crate::CursorShape;
+    let mut t = make(size(10, 2));
+    let shape = |t: &T| (t.cursor().shape, t.cursor().blink);
+    assert_eq!(shape(&t), (CursorShape::Default, false));
+    for (seq, want) in [
+        (&b"\x1b[1 q"[..], (CursorShape::Block, true)),
+        (b"\x1b[2 q", (CursorShape::Block, false)),
+        (b"\x1b[3 q", (CursorShape::Underline, true)),
+        (b"\x1b[4 q", (CursorShape::Underline, false)),
+        (b"\x1b[5 q", (CursorShape::Bar, true)),
+        (b"\x1b[6 q", (CursorShape::Bar, false)),
+        (b"\x1b[0 q", (CursorShape::Default, false)),
+        (b"\x1b[?12h", (CursorShape::Default, true)),
+    ] {
+        t.feed(seq);
+        assert_eq!(shape(&t), want, "{:?}", String::from_utf8_lossy(seq));
+    }
 }
 
 fn styles_are_kept_per_cell<T: Terminal>(make: &impl Fn(Size) -> T) {

@@ -4,6 +4,7 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+- A terminal you open, reload or come back to after a lost connection now gets the program's mouse, wheel, focus and full-screen state as if you had watched from the start: clicks and the wheel reach an editor or monitor started before the window opened, the wheel sends arrow keys to a full-screen program, and a window that was away while a program switched the mouse off no longer sends it stray mouse reports. This works in the web window and the terminal client once the machine runs this version. The scrolled-away history after a reload is not there yet.
 - After Stop turn in a chat agent's conversation, a step that was still running reads "Stopped" instead of spinning for ever, the input no longer says "Waiting for this turn to end." once nothing waits, and the messages you sent while the turn ran are each shown above their own answer instead of the answers being glued into one reply (#908).
 - After `agora down` and `agora`, an agent the terminal holder kept is shown running again in the window and the terminal client, with its terminal, instead of "Finished", and one started with an option that acts without asking, or a chat agent in a mode that does, is still marked so, with its modes and settings (#907, #932).
 - After a node restart, an agent the terminal holder kept is on the mesh again: its mesh tools answer, and an `agora mesh stdio` bridge that was open reconnects (#906).

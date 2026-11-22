@@ -61,16 +61,96 @@ pub struct Cursor {
     pub row: u16,
     pub col: u16,
     pub visible: bool,
+    /// The shape the program set (DECSCUSR), or [`CursorShape::Default`] when it never set one or set the default, so a window keeps
+    /// the user's own cursor in that case (ADR-0100).
+    pub shape: CursorShape,
+    /// The cursor blinks (DECSCUSR's odd values, or mode 12).
+    pub blink: bool,
 }
 
-/// Terminal modes clients and detection care about.
+/// The cursor's shape as the program set it (DECSCUSR).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CursorShape {
+    /// The program never set one, or set the default (`CSI 0 SP q`): the window's own cursor.
+    #[default]
+    Default,
+    Block,
+    Underline,
+    Bar,
+}
+
+/// Which pointer events the program asked to be told about (DECSET 1000, 1002, 1003; one at a time).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MouseTracking {
+    #[default]
+    Off,
+    /// 1000: presses, releases and the wheel.
+    Click,
+    /// 1002: and motion with a button down.
+    Drag,
+    /// 1003: and motion with no button.
+    Motion,
+}
+
+/// How the program wants mouse reports written (DECSET 1005, 1006; none is the classic one-byte form).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MouseEncoding {
+    #[default]
+    Default,
+    /// 1005.
+    Utf8,
+    /// 1006.
+    Sgr,
+}
+
+/// Terminal modes the program set: what clients, detection and the node's repaint (ADR-0100) need. Plain data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Modes {
-    /// The alternate screen is active (full-screen programs).
+    /// The alternate screen is active (full-screen programs; 1049).
     pub alt_screen: bool,
     pub bracketed_paste: bool,
-    /// Arrow keys send application sequences.
+    /// Arrow keys send application sequences (DECCKM).
     pub application_cursor: bool,
+    /// The keypad sends application sequences (DECKPAM; DECKPNM is off).
+    pub application_keypad: bool,
+    pub mouse_tracking: MouseTracking,
+    pub mouse_encoding: MouseEncoding,
+    /// 1004: the program is told when it gains or loses the keyboard.
+    pub focus_reporting: bool,
+    /// 1007: the wheel sends arrow keys on the alternate screen.
+    pub alternate_scroll: bool,
+    /// DECAWM (on by default).
+    pub autowrap: bool,
+    /// DECOM: cursor positions are relative to the scroll region.
+    pub origin: bool,
+    /// IRM: printed characters push the rest of the row right.
+    pub insert: bool,
+    /// LNM: a line feed also returns the carriage.
+    pub newline: bool,
+    /// The kitty keyboard protocol's current flags (`CSI > / < / = u`), 0 when off.
+    pub keyboard_flags: u8,
+}
+
+impl Default for Modes {
+    /// Everything off but autowrap (xterm's power-on modes). Not every backend starts so: `AlacrittyTerminal` starts with
+    /// alternate scroll (1007) on, so the repaint of a plain shell says `CSI ? 1007 h`.
+    fn default() -> Self {
+        Self {
+            alt_screen: false,
+            bracketed_paste: false,
+            application_cursor: false,
+            application_keypad: false,
+            mouse_tracking: MouseTracking::Off,
+            mouse_encoding: MouseEncoding::Default,
+            focus_reporting: false,
+            alternate_scroll: false,
+            autowrap: true,
+            origin: false,
+            insert: false,
+            newline: false,
+            keyboard_flags: 0,
+        }
+    }
 }
 
 impl Style {

@@ -204,6 +204,156 @@ fn start_attach_stop_from_the_command_line() {
     assert_eq!(out.trim(), "Stopped agent agent-1");
 }
 
+/// Runs `agora terminal attach agent-1` in a real terminal, types `typed` once `ready` shows (if any), waits for `until` in its output,
+/// detaches with Ctrl-], and returns everything it wrote to the terminal.
+fn attach_session(s: &Setup, typed: &[u8], until: &str) -> Vec<u8> {
+    let mut cfg = PtyConfig::new(vec![
+        AGORA.into(),
+        "terminal".into(),
+        "attach".into(),
+        "agent-1".into(),
+    ]);
+    cfg.env
+        .push(("AGORA_HOME".into(), s.home.display().to_string()));
+    cfg.env.push(("AGORA_LANG".into(), "en".into()));
+    let mut attach = spawn(&cfg).expect("spawn attach");
+    if !typed.is_empty() {
+        attach.write_input(typed).unwrap();
+    }
+    let mut seen = Vec::new();
+    let end = Instant::now() + Duration::from_secs(15);
+    while !String::from_utf8_lossy(&seen).contains(until) {
+        assert!(
+            Instant::now() < end,
+            "never saw {until:?}; got: {:?}",
+            String::from_utf8_lossy(&seen)
+        );
+        if let Ok(chunk) = attach.output().recv_timeout(Duration::from_millis(100)) {
+            seen.extend_from_slice(&chunk);
+        }
+    }
+    attach.write_input(&[0x1d]).unwrap();
+    let status = attach.wait().unwrap();
+    assert!(status.success(), "attach exited with {status:?}");
+    while let Ok(chunk) = attach.output().recv_timeout(Duration::from_millis(500)) {
+        seen.extend_from_slice(&chunk);
+    }
+    seen
+}
+
+/// The first `n` bytes of `b` with control bytes escaped, for assertion messages.
+fn shown(b: &[u8], n: usize) -> String {
+    b.iter()
+        .take(n)
+        .map(|&c| match c {
+            0x1b => "\\e".to_string(),
+            0x20..=0x7e => (c as char).to_string(),
+            _ => format!("\\x{c:02x}"),
+        })
+        .collect()
+}
+
+/// ADR-0100 and the review of #953: the node's repaint switches the program's modes on in the user's own terminal when attaching
+/// late, and detaching switches them off again and gives the terminal back its own keyboard flags (the repaint's kitty pop is not
+/// passed on, and only the entry attach pushed is popped).
+#[test]
+fn detaching_gives_the_users_terminal_back_its_own_modes() {
+    use agora_vt::{AlacrittyTerminal, CursorShape, MouseEncoding, MouseTracking, Size, Terminal};
+    if !shell_agents_supported() {
+        return;
+    }
+    let s = setup("attach-modes");
+    let _node = start_node(&s);
+    let (code, _, err) = cli(&s, &["agent", "start", "shell", "--project", "demo"]);
+    assert_eq!(code, 0, "stderr: {err}");
+    // The program switches the alternate screen, mouse, focus, keypad, paste, keyboard flags and a cursor shape on.
+    attach_session(
+        &s,
+        b"printf '\\033[?1049h\\033[?1003h\\033[?1006h\\033[?1004h\\033=\\033[?2004h\\033[>5u\\033[5 q'; echo MODES-$((1+1))\r",
+        "MODES-2",
+    );
+    // A late attach: the repaint carries those modes.
+    let late = attach_session(&s, b"", "\x1b[?1003h");
+    // Printed (shown only when the test fails): what the user's terminal got, start and end.
+    println!("start: {}", shown(&late, 300));
+    println!(
+        "end: {}",
+        shown(&late[late.len().saturating_sub(300)..], 300)
+    );
+    // On Windows the test's terminal is ConPTY, which is a terminal itself: it writes its own start (win32-input-mode and focus
+    // reports, `CSI ? 9001 h CSI ? 1004 h`) before anything of the program's, then passes through the modes it does not keep and
+    // keeps the ones it does (pen, cursor visibility, autowrap, focus), writing its own at the end. Only that start is set aside here;
+    // everything after it is checked as on the other systems.
+    let body = late
+        .strip_prefix(b"\x1b[?9001h\x1b[?1004h")
+        .unwrap_or(&late);
+    assert!(
+        body.starts_with(b"\x1b[>0u"),
+        "attach pushes its own keyboard entry first: {}",
+        shown(&late, 300)
+    );
+    let text = String::from_utf8_lossy(&late);
+    assert!(
+        !text.contains("\x1b[<32u"),
+        "the repaint's pop is not passed on"
+    );
+    let tail = &text[text.rfind("\x1b[?1003h").unwrap_or(0)..];
+    assert!(
+        tail.contains("\x1b[?1049l"),
+        "detach leaves the alternate screen: {tail:?}"
+    );
+    // The user's terminal, with keyboard flags of its own (a shell or tmux pushed 1), after the whole session.
+    let mut host = AlacrittyTerminal::new(Size { cols: 80, rows: 24 });
+    host.feed(b"\x1b[>1u");
+    let before = host.modes();
+    host.feed(&late);
+    let m = host.modes();
+    assert!(!m.alt_screen, "back on the main screen");
+    assert_eq!(m.mouse_tracking, MouseTracking::Off);
+    assert_eq!(m.mouse_encoding, MouseEncoding::Default);
+    assert!(!m.focus_reporting && !m.application_keypad && !m.bracketed_paste);
+    assert_eq!(m.keyboard_flags, 1, "the terminal's own keyboard flags");
+    // Alternate scroll is restored by XTRESTORE where the terminal has it; this emulator has not, so it ends off (xterm's default).
+    assert!(!m.alternate_scroll);
+    assert_eq!(
+        m,
+        agora_vt::Modes {
+            alternate_scroll: false,
+            ..before
+        }
+    );
+    assert!(host.cursor().visible);
+    assert_eq!(host.cursor().shape, CursorShape::Default);
+}
+
+/// The agent pushes keyboard entries on the main screen while attached and is still running at detach: detaching pops them and its
+/// own entry, so the user's terminal is back on its own flags (review of #953).
+#[test]
+fn detaching_pops_what_the_agent_pushed_on_the_main_screen() {
+    use agora_vt::{AlacrittyTerminal, Size, Terminal};
+    if !shell_agents_supported() {
+        return;
+    }
+    let s = setup("attach-pushes");
+    let _node = start_node(&s);
+    let (code, _, err) = cli(&s, &["agent", "start", "shell", "--project", "demo"]);
+    assert_eq!(code, 0, "stderr: {err}");
+    let session = attach_session(
+        &s,
+        b"printf '\\033[>5u\\033[>7u'; echo PUSHED-$((1+1))\r",
+        "PUSHED-2",
+    );
+    let mut host = AlacrittyTerminal::new(Size { cols: 80, rows: 24 });
+    host.feed(b"\x1b[>1u");
+    host.feed(&session);
+    assert_eq!(host.modes().keyboard_flags, 1, "the terminal's own flags");
+    // Detaching from the main screen does not send `CSI ? 1049 l`: xterm and xterm.js would restore an old saved cursor on it and
+    // write the next lines over the top of the screen.
+    let text = String::from_utf8_lossy(&session);
+    let tail = &text[text.rfind("PUSHED-2").unwrap_or(0)..];
+    assert!(!tail.contains("\x1b[?1049l"), "{tail:?}");
+}
+
 #[test]
 fn errors_are_rendered_from_codes_and_exit_nonzero() {
     if !shell_agents_supported() {

@@ -156,7 +156,7 @@ mouse reports, now with button, Shift/Alt/Ctrl and motion), `preview.rs` (reads 
 
 - **Mouse modes** 9, 1000, 1002, 1003 with the encodings default (X10), UTF-8 (1005), SGR (1006) and urxvt (1015). The modes come from
   the program's own output: `ModeScanner` reads `CSI ? Pm h/l` (also `ESC c`, `CSI ! p`) across chunk boundaries, in the same
-  bytes the client feeds its emulator, because the emulator and the repaint do not carry them (Phase 3, item 1). It is tested against
+  bytes the client feeds its emulator, the node's repaint included, which sets or resets 1000/1002/1003, 1005/1006 and 1004 (Phase 3, item 1, step 1). It is tested against
   the emulator for every byte that can sit inside an escape (`ESC <byte> c` resets only where the emulator resets). The client keeps
   asking its own terminal for presses, drags and the wheel; it asks for motion with no button (1003) only while the program in front
   asked for it. A coordinate that does not fit the form (column over 223 in the classic one) is dropped, never wrapped.
@@ -207,8 +207,8 @@ pane, polling for a stop request, switching 1003 on and off) has no automated te
 
 ## Phase 3: what the web client cannot fix
 
-In priority order; each needs work outside `apps/web`. None of this was built. Items 1, 3 and 6 change the protocol or a recorded
-decision, so each needs an ADR first.
+In priority order; each needs work outside `apps/web`. Item 1's first step (the modes in the repaint) is built; nothing else here is.
+Items 1, 3 and 6 change the protocol or a recorded decision, so each needs an ADR first.
 
 1. **The repaint a window receives loses the program's modes and the history.** `subscribed_snapshot`
    (`crates/agora-node/src/terminal.rs:175`) writes the screen, the cursor, bracketed paste and application cursor keys, and nothing else;
@@ -220,6 +220,28 @@ decision, so each needs an ADR first.
    history replay (the node already keeps 2000 lines, `alacritty.rs:16`; "never read by clients" is the comment to remove) sent before
    the repaint and bounded by a client-chosen count. Needs an ADR (it extends the snapshot). The ADR is ADR-0100 (modes in the repaint, then a
    history replay the window asks for).
+   **Step 1 is done** (ADR-0100 decision 1): `Modes` and `Cursor` carry every mode the node's emulator tracks (mouse tracking and
+   encoding, focus, alternate scroll, the alternate screen, keypad, autowrap, insert, newline, the kitty keyboard flags, the cursor's
+   shape and blink), and the repaint writes each one as an explicit set or reset after entering the program's screen and drawing it,
+   so a window that opens, reloads or reconnects gets the mouse, the wheel, focus reports and the alternate screen (D1, D2, D3, D5 of
+   the ADR; `scripts/e2e-terminal-repaint.mjs` in Chromium and the terminal client, node and client tests). Not carried: modes the node
+   does not track (9, 1015, modifyOtherKeys, 47/1047, the scroll region) and origin mode, which waits for the scroll region; in the
+   web window xterm.js switches 9 off on the repaint's 1000/1002/1003 resets (the terminal client keeps it); the keyboard flags are
+   the current ones, not the program's stack (a pop after a late attach gives the window none, pinned by a node test); mode 12 is not
+   written (xterm.js would keep it as the window's own blink setting).
+   `agora terminal attach` writes the repaint to the user's own terminal. It leaves out the repaint's keyboard pop, pushes a
+   keyboard entry of its own, and on detach pops that entry together with any the program left on the main screen, then resets the
+   modes. On Windows the console host (ConPTY) sits between `agora` and the user's terminal, and it is a terminal itself:
+   - it adds its own start (`CSI ? 9001 h`, `CSI ? 1004 h`);
+   - it keeps the pen, cursor visibility, autowrap, insert, newline, the character set and focus reporting itself, re-rendering them
+     for the real terminal;
+   - it passes the other modes through (mouse tracking and encodings, the alternate screen, keypad, bracketed paste, the kitty
+     keyboard flags, the cursor shape);
+   - at the end it writes its own reset (`CSI ? 9001 l`, `CSI ? 1004 l`).
+
+   So a Windows user's terminal ends a session with the same modes as elsewhere, as `crates/agora/tests/cli.rs` checks on all three
+   systems. The history
+   replay (step 2) and the clients' part (step 3) are not built.
 2. **Nobody owns the answers to terminal queries.** The node's emulator drops `PtyWrite` events (`crates/agora-vt/src/alacritty.rs:41`,
    only titles are kept), so a program that asks for the device attributes, the cursor position, the colours or the keyboard protocol
    when **no window is attached** gets no answer, and with **two windows** it gets two, each with its own theme's colours. Proposed
@@ -238,10 +260,10 @@ decision, so each needs an ADR first.
      **clipboard** (OSC 52 from a program) are interpreted and dropped by the emulator, so only plain addresses are links and a program
      cannot write the clipboard (which is also the safe policy, see the threat model, T46);
    - **graphics** (sixel, image protocols) cannot exist, and the keyboard protocols (Shift+Enter) are not passed on;
-   - **a program already running when the client starts watching** is not known to have the mouse (or focus reporting) on until it
-     switches the mode on again: the client learns the modes from the bytes it receives (`termio::ModeScanner`), and the repaint a
-     watcher gets carries none of them (item 1). Until then the wheel on an alternate-screen program is still arrow keys, but clicks
-     select text locally. The fix is item 1 (the modes in the repaint, an ADR); nothing in the client can recover them without it;
+   - ~~**a program already running when the client starts watching** is not known to have the mouse (or focus reporting) on~~: done
+     by item 1's first step. The repaint now sets or resets mouse tracking 1000/1002/1003, encodings 1005/1006, focus 1004 and the
+     alternate screen, and the client's `termio::ModeScanner` and emulator read them from it like live output
+     (`crates/agora-tui/tests/repaint_modes.rs`). Mouse 9 and the urxvt encoding 1015 are still learned only from live output;
    - **focus of the user's own terminal window** (not the pane) is not forwarded: the client does not switch on its own terminal's
      focus reports.
    Passthrough of the raw stream would fix all of it but gives up the cell model ADR-0063 chose; that is a decision for the maintainer,
