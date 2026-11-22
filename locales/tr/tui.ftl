@@ -88,6 +88,7 @@ tui-stop-failed = Durdurulamadı ({ $code }).
 tui-stop-helpers = Başlattığı { $count } yardımcı hâlâ çalışıyor. Onlar da dursun mu? Çalışmaya devam etmeleri için n'ye, durmaları için başka bir tuşa basın.
 tui-send-failed = Gönderilemedi ({ $code }).
 tui-start-pick = { $machine } makinesinde hangi ajan başlatılsın? Numarasına basın; başka bir tuşa basarsanız işlem iptal edilir.
+tui-start-pick-page = { $machine } makinesinde hangi ajan başlatılsın? Numarasına basın; sonraki sayfa için n'ye basın ({ $page } / { $pages }); başka bir tuşa basarsanız işlem iptal edilir.
 tui-start-item = { $n }  { $name }
 tui-start-none = { $machine } makinesinde kurulu bir ajan yok.
 tui-start-missing-item = { $name } (`{ $program }`)
