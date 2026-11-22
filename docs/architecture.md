@@ -151,13 +151,13 @@ Compatibility rules:
 
 ### Terminal streaming
 
-Clients choose a format at handshake:
+Built: the node forwards the program's raw VT bytes and every client (web, desktop, terminal client) runs its own
+emulator. When a client subscribes, the node first sends a repaint of the screen with the program's modes, and, when
+the client asks, the history before it (ADR-0100).
 
-- **Raw VT + periodic snapshot:** node forwards bytes; the client runs its own emulator. Default for web/desktop.
-- **Rendered cell deltas:** node renders and sends diffs. Default for TUI and low-bandwidth links.
-
-Terminal streams are relayed by the hub without decoding or storing them, or carried on a direct client ↔ node
-path when available (ADR-0023). Remote terminals support predictive local echo. See `design/performance.md`.
+Terminal streams are relayed by the hub without decoding or storing them. Not built: rendered cell deltas (`terminal.cells`
+is named in the schema, and the node refuses it as `protocol.capability_missing`), the direct client ↔ node path
+(ADR-0023), and predictive local echo (a design intent in `design/performance.md`).
 
 ## 5. Clients
 

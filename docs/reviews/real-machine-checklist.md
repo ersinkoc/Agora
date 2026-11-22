@@ -252,10 +252,10 @@ not built: nothing to check.
 - **See:** `--check` says "Agora 0.3.33 is the newest release." (or which is available); each update says "Updated to Agora …"
   only after the checksum and signature checked out ("Nothing was changed." otherwise);
   `$RM/bin/agora --version` follows; the machine's own `agora` is untouched. On Windows, note any Microsoft Defender verdict. On
-  0.3.33 `--check` fails on Windows ("could not find the newest release": `curl -o /dev/null`, #939); `--version` works.
+  0.3.33 `--check` failed on Windows ("could not find the newest release": `curl -o /dev/null`, #939); `--version` works. Fixed by #952: [2026-11-22 follow-ups](2026-11-22-real-machine-followups.md).
 - **Evidence so far:** [macOS 2026-11-21](2026-11-21-macos-update-0333.md): the LAN Mac updated to 0.3.33 with `--version` and
   `--release-key`, the checksum equal to the published one, Local Network asked again after the update; Windows: none recorded
-  (lan-test-findings L13 lists the self-replace among the suspects of a Defender verdict). [Windows 2026-11-21](2026-11-21-real-machine-windows.md): `--version` passed, Defender silent; `--check` fails (#939).
+  (lan-test-findings L13 lists the self-replace among the suspects of a Defender verdict). [Windows 2026-11-21](2026-11-21-real-machine-windows.md): `--version` passed, Defender silent; `--check` failed (#939). [2026-11-22 follow-ups](2026-11-22-real-machine-followups.md): `--check` passes on Windows after #952 (exit 0; a wrong address exits 1); all three machines updated to 0.3.34.
 
 ## Agents
 
@@ -447,6 +447,8 @@ not built: nothing to check.
   [macOS 2026-11-21](2026-11-21-real-machine-macos.md): a message to the stopped `rm-two` got no `delivery_failed` (#915, not
   reproduced in tests; a post the hub never answers now fails with `node.timeout` after 40 s on the sender's machine). Check again:
   the notice `node.offline` (or `node.timeout`) comes back within 40 s, also right after the other machine's Ctrl-C.
+  [2026-11-22 follow-ups](2026-11-22-real-machine-followups.md): macOS, a stopped recipient: the sender got one `delivery_failed` with `node.offline` and the original `reply_to`, and no late
+  delivery after resuming (#915 closed).
 
 ### RM-28 A reply keeps its link across machines
 not built: nothing to check.
@@ -466,7 +468,7 @@ not built: nothing to check.
 - **Do:** start a Shell; open its bridge with S5 and call `workspace_status`; `agora down` (the agent stays with its holder), then
   `agora`; within 15 minutes call `workspace_status` again on the same bridge (unverified: a bridge run by hand, not by an agent).
 - **See:** the second call answers without restarting the bridge (during the gap a call may fail with `mesh.unavailable`).
-- **Evidence so far:** none recorded.
+- **Evidence so far:** [2026-11-22 follow-ups](2026-11-22-real-machine-followups.md): macOS, a kept agent read the messages posted after `agora down` and `agora` (#965), each call over a fresh `agora mesh stdio`; the same running bridge reconnecting (this entry) is still unverified. The 2026-11-21 failure (#906) is in [macOS 2026-11-21](2026-11-21-real-machine-macos.md).
 
 ### RM-31 A read-only metrics token
 - **OS:** Linux, macOS, Windows.

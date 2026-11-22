@@ -48,7 +48,7 @@ done in a web page). "Now" is the state after this change.
 | --- | --- | --- | --- | --- |
 | History kept | configurable, often 10 000 lines | 2000, fixed (`renderer.ts:63`; the node keeps 2000 too, `agora-vt/src/alacritty.rs:16`) | partial | 5000 by default; 1000 to 20 000 in "Terminal settings" (memory: this window only, about 1.5 MB per 1000 lines of 120 columns) |
 | Scroll position when output arrives while scrolled up | the view stays | stays (lab: `line 2902` before and after 50 new lines) | ok | unchanged; **new** "Jump to latest" button appears while scrolled up |
-| History after opening or reconnecting | what happened before | only what arrived since: the repaint is the live screen (`agora-node/src/terminal.rs:175`) | see Phase 3 | unchanged |
+| History after opening or reconnecting | what happened before | only what arrived since: the repaint is the live screen (`agora-node/src/terminal.rs:175`) | see Phase 3 | replayed on open: a first open, a reload or a remount asks the node for its history before the repaint; a reconnect keeps the window's own (ADR-0100 step 3, Phase 3 item 1) |
 | Double / triple click, Alt+drag | word / line / rectangle | all work (lab) | ok | unchanged (checks 2) |
 | Copy | Ctrl+Shift+C (Cmd+C on a Mac); Ctrl+C is the program's | **no shortcut**: Ctrl+Shift+C copied nothing (lab: clipboard empty) | **wrong** | Ctrl+Shift+C, Ctrl+Insert, Cmd+C copy the selection; Ctrl+C still interrupts; check 2 |
 | Copy on select | X11 terminals do it for the primary selection | none | partial | a setting (off by default: the browser has no primary selection, so it would replace the clipboard) |
@@ -144,9 +144,9 @@ real PTY behind a throw-away hub and node, 100, 125 and 150 % zoom) found three 
   instance for each of these transitions (`mouse.test.ts`). Proof: a click on (5,3) with 1015 is `\e[32;6;4M\e[35;6;4M` in all three
   engines.
 
-Not changed by this, and still failing in all three engines: a window opened, reloaded or reconnected while a program has the mouse,
-focus reporting or the alternate screen on does not know it, and its history starts at the repaint. That is Phase 3 item 1 below (the
-repaint carrying the modes and the history); it changes the snapshot, so it waits for an ADR.
+Not changed by this, and failing in all three engines when it was written: a window opened, reloaded or reconnected while a program
+has the mouse, focus reporting or the alternate screen on did not know it, and its history started at the repaint. Fixed since by
+ADR-0100 (Phase 3 item 1 below: the repaint carries the modes, and the history comes before it when a window asks).
 
 ## The terminal client (TUI): what a program now gets
 
@@ -217,7 +217,7 @@ Items 1, 3 and 6 change the protocol or a recorded decision, so each needs an AD
    alternate-screen switch, no cursor shape, and no history: the wheel cannot reach an editor or a monitor that was started before
    the window opened, until the program switches the mode on again, and the history starts empty. Proposed fix: extend `Modes` with
    the mouse tracking and encoding modes, focus reporting, cursor style and the alternate screen, emit them in the repaint, and add a
-   history replay (the node already keeps 2000 lines, `alacritty.rs:16`; "never read by clients" is the comment to remove) sent before
+   history replay (the node already keeps 2000 lines, `alacritty.rs:20`; "never read by clients" is the comment to remove) sent before
    the repaint and bounded by a client-chosen count. Needs an ADR (it extends the snapshot). The ADR is ADR-0100 (modes in the repaint, then a
    history replay the window asks for).
    **Step 1 is done** (ADR-0100 decision 1): `Modes` and `Cursor` carry every mode the node's emulator tracks (mouse tracking and

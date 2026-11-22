@@ -21,4 +21,4 @@ Measured: after a hub restart the machine returns (its link resyncs); after a *s
 - Show "last seen 3 min ago" in the window and the TUI (proposed: yes).
 
 ## Consequences
-One new event and fixtures, projection change, hub/node/web silence logic (the tested parts of #453 are the starting point), tests with a fake peer (frozen node, frozen hub, a real hub outage, a flapping link), `observability.md` and the backlog item R1 closed, and probes `scripts/link-silent.mjs`/`link-resilience.mjs` (Windows) as the acceptance tests on all three platforms.
+One new event and fixtures, projection change, hub/node/web silence logic (the tested parts of #453 are the starting point), tests with a fake peer (frozen node, frozen hub, a real hub outage, a flapping link), `observability.md` and the backlog item R1 closed, and probes `scripts/e2e-link-silent.mjs`/`e2e-link-resilience.mjs` (Windows) as the acceptance tests on all three platforms.

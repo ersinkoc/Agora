@@ -203,10 +203,12 @@ re-issue of the hub's leaf while it runs is **T35**.
 1. The messages, error codes and golden fixtures (append-only), and this document updated with the ids. (Done: schema only, capability `pairing.v1`.)
 2. The pairing core in the hub, pure and unit-tested (states, limits, SAS, commitment), audit; the owner's commands, `PairRequested` and `PairDecided` to owner windows, the machine handshake over the hub's TLS and the certificate at approval. (Done: `agora-hub` `pairing.rs` and `pairing_net.rs`; section 12 lists what was decided.)
 3. `agora pair open|close|status`, provisioning the leaf's names (section 5b), the push notice (ADR-0051) and the browser path (section 6) on the hub.
-   (Done in part: `agora pair open|close|status` and the machine's client, section 13. Provisioning, the push notice and the browser path are not.)
+   (Done in part: `agora pair open|close|status` and the machine's client, section 13, and provisioning the leaf's names, section 15. The push
+   notice (only its once-a-minute limit is in `pairing.rs`, nothing sends it) and the browser path are not.)
 4. The discovery responder (hub) and the finder, `agora join`, with the trust question (node). (Built: provisioning the leaf's names, the responder and the finder, section 15;
-   the trust question is not.)
-5. The window cards wired in (web #610 and TUI #611 already have the layout), then the browser sign-in by approval (section 6).
+   the trust question too: `agora join` shows the hub's fingerprint and asks whether it matches what `agora pair open` shows, `docs/getting-started.md`.)
+5. The window cards wired in (web #610 and TUI #611 already have the layout), then the browser sign-in by approval (section 6). (Built: the cards
+   in the web window and the terminal client, section 14; the browser sign-in by approval is not.)
 
 ## 11. Decisions taken after the first review, and what is still open
 - **Exporter and leaf both.** `leaf_hash` binds the endpoint certificate; the exporter (TLS 1.3, RFC 9266 style, 32 bytes, label
