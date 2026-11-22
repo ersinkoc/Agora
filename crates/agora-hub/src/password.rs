@@ -179,28 +179,46 @@ const VOUCHED: &str = "passkeys_vouched";
 /// Records that the passkey `id` was added where the screen password would not have been asked (the hub's own machine) or was
 /// given. Such passkeys outlive a password change; every other one does not ([`drop_unvouched_passkeys`]).
 pub fn vouch_passkey(store: &SqliteStore, id: &str) -> Result<(), PasswordError> {
-    let conn = store.lock()?;
-    let mut ids = vouched_in(&conn)?;
-    if !ids.iter().any(|v| v == id) {
-        ids.push(id.to_string());
-    }
-    write_vouched_in(&conn, &ids)
+    let mut conn = store.lock()?;
+    let tx = crate::store::write_tx(&mut conn)?;
+    set_vouch_in(&tx, id, true)?;
+    tx.commit()?;
+    Ok(())
 }
 
 /// Forgets the vouch for `id` when no passkey has that id (its passkey went with its person): ids are chosen by the client, so a
 /// passkey added later under the same id without the password must not inherit it ([`drop_unvouched_passkeys`]).
 pub fn forget_stale_vouch(store: &SqliteStore, id: &str) -> Result<(), PasswordError> {
-    let conn = store.lock()?;
-    let exists = conn
+    let mut conn = store.lock()?;
+    let tx = crate::store::write_tx(&mut conn)?;
+    let exists = tx
         .query_row("SELECT 1 FROM passkeys WHERE id = ?1", [id], |_| Ok(()))
         .optional()?
         .is_some();
-    let mut ids = vouched_in(&conn)?;
-    if exists || !ids.iter().any(|v| v == id) {
+    if !exists {
+        set_vouch_in(&tx, id, false)?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+/// Within the caller's transaction: `id` vouched for (`true`) or not (`false`) in the list of vouched passkeys. An unreadable list
+/// is an error, never an empty one.
+pub(crate) fn set_vouch_in(
+    conn: &rusqlite::Connection,
+    id: &str,
+    vouched: bool,
+) -> Result<(), PasswordError> {
+    let mut ids = vouched_in(conn)?;
+    let has = ids.iter().any(|v| v == id);
+    if vouched && !has {
+        ids.push(id.to_string());
+    } else if !vouched && has {
+        ids.retain(|v| v != id);
+    } else {
         return Ok(());
     }
-    ids.retain(|v| v != id);
-    write_vouched_in(&conn, &ids)
+    write_vouched_in(conn, &ids)
 }
 
 fn vouched_in(conn: &rusqlite::Connection) -> Result<Vec<String>, PasswordError> {
@@ -234,8 +252,16 @@ fn write_vouched_in(conn: &rusqlite::Connection, ids: &[String]) -> Result<(), P
 /// Removes every passkey that was added from another machine without the screen password (when none was set, or before this
 /// rule existed): setting, changing or clearing the password must not leave a way in that never knew it. Returns how many.
 pub fn drop_unvouched_passkeys(store: &SqliteStore) -> Result<usize, PasswordError> {
-    let conn = store.lock()?;
-    let keep = vouched_in(&conn)?;
+    let mut conn = store.lock()?;
+    let tx = crate::store::write_tx(&mut conn)?;
+    let dropped = drop_unvouched_in(&tx)?;
+    tx.commit()?;
+    Ok(dropped)
+}
+
+/// [`drop_unvouched_passkeys`] within the caller's transaction.
+fn drop_unvouched_in(conn: &rusqlite::Connection) -> Result<usize, PasswordError> {
+    let keep = vouched_in(conn)?;
     let ids: Vec<String> = conn
         .prepare("SELECT id FROM passkeys")?
         .query_map([], |r| r.get(0))?
@@ -245,8 +271,32 @@ pub fn drop_unvouched_passkeys(store: &SqliteStore) -> Result<usize, PasswordErr
         dropped += conn.execute("DELETE FROM passkeys WHERE id = ?1", params![id])?;
     }
     let still: Vec<String> = keep.into_iter().filter(|k| ids.contains(k)).collect();
-    write_vouched_in(&conn, &still)?;
+    write_vouched_in(conn, &still)?;
     Ok(dropped)
+}
+
+/// A password change as one transaction (Codex review of #1027): the new hash is stored, every session but the one whose token
+/// hash is `keep_session` ends, and every unvouched passkey goes, or nothing changes. The hash is derived before, outside it.
+/// Returns how many sessions ended.
+pub(crate) fn commit_change(
+    store: &SqliteStore,
+    hashed: &str,
+    keep_session: &[u8],
+) -> Result<usize, PasswordError> {
+    let mut conn = store.lock()?;
+    let tx = crate::store::write_tx(&mut conn)?;
+    tx.execute(
+        "INSERT INTO settings (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![SETTING, hashed.as_bytes()],
+    )?;
+    let revoked = tx.execute(
+        "DELETE FROM sessions WHERE token_hash != ?1",
+        params![keep_session],
+    )?;
+    drop_unvouched_in(&tx)?;
+    tx.commit()?;
+    Ok(revoked)
 }
 
 /// Who is asking, as far as the hub can tell: the TCP peer address and a short summary of the user agent, for rate limits and the
