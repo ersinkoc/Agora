@@ -325,6 +325,14 @@ impl Mesh {
         }
     }
 
+    /// Hands out ids (`m-`, `t-`, `l-`, `h-`) from `first` on, never lower than one already handed out. A node calls it once at its
+    /// start with a number above every id an earlier run of its broker may have used (#965): an agent kept across the restart
+    /// still holds those ids (the `since` cursor of `inbox`, a task or ask id), and a new message numbered at or below its cursor
+    /// would be hidden from it.
+    pub fn start_ids_at(&mut self, first: u64) {
+        self.next = self.next.max(first);
+    }
+
     fn id(&mut self, prefix: &str) -> String {
         let n = self.next;
         self.next += 1;
@@ -1692,6 +1700,29 @@ mod tests {
                 .unwrap_err(),
             MeshError::UnknownAgent("ghost".into())
         );
+    }
+
+    /// #965: a broker started above the ids an earlier one used shows its messages after a cursor from that earlier one, and never
+    /// goes back to a lower id.
+    #[test]
+    fn ids_start_where_the_node_says_and_a_carried_cursor_still_sees_new_messages() {
+        let mut before = mesh();
+        for i in 0..5 {
+            before
+                .send_message(&id("a"), "b", &format!("old {i}"), &[], None, i)
+                .unwrap();
+        }
+        let cursor = before.inbox(&id("b"), None, 10).unwrap()[4].id.clone();
+        let mut after = mesh();
+        after.start_ids_at(1_000);
+        after.start_ids_at(10);
+        after
+            .send_message(&id("a"), "b", "new", &[], None, 9)
+            .unwrap();
+        let got = after.inbox(&id("b"), Some(&cursor), 10).unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].body, "new");
+        assert_eq!(got[0].id, "m-1000");
     }
 
     #[test]

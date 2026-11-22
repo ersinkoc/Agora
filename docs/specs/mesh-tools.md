@@ -44,6 +44,14 @@ and a reply to an open `ask` is what answers it; `agents_list` items also carry 
 and `summary`; `inbox` items carry `kind` (`message`, `ask`, `reply`, `handoff`), `reply_to` and a `provenance` object. `reason` on
 `lease_acquire` is accepted but only the audit trail of the call would hold it (not stored yet).
 
+**Message ids.** `message_id` is `m-<number>`, numbered by the node's broker, and `inbox(since)` returns the messages numbered above
+`since`. Ids never go back across a node restart: each run of the broker starts its numbers (for messages, tasks, leases and handoffs)
+at the larger of the clock in microseconds and a floor the previous run wrote beside the ledger (`<data>/sessions/mesh-ids`, set one
+billion above that run's first id before any id is handed out). So an agent kept across the restart (ADR-0079) still sees what arrives
+after the cursor it carried over, and a `since` from an earlier run, or one no message has, just returns what is numbered above it
+(#965: the numbers started over at `m-1`, so a kept agent's cursor hid every new message). Numbers are per node: the same number on
+two nodes names two messages.
+
 Tool errors are results with `isError: true` whose text is JSON `{"error": {"code", "params"}}` using the codes in
 `error-codes.md` (new: `mesh.rate_limited`, `mesh.body_too_large`, `mesh.too_many_refs`, `mesh.too_many_asks`, `mesh.timeout`,
 `task.not_found`, `task.not_open`, `task.blocked`, `task.not_owner`, `lease.not_found`, `lease.invalid_path`). Bad arguments are

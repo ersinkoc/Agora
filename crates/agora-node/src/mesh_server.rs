@@ -36,6 +36,32 @@ fn now_ms() -> u64 {
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
+/// Beside the ledger (`<data>/sessions/mesh-ids`): the lowest id the next run of this node's broker may hand out (#965).
+pub const MESH_IDS_FILE: &str = "mesh-ids";
+
+/// More ids than one run of a broker hands out: the per-agent rate limit (30 messages a minute) keeps even a thousand agents
+/// running for a year far below it.
+const IDS_PER_RUN: u64 = 1_000_000_000;
+
+/// The first id this run of the node's broker hands out, above every id an earlier run used, so an agent kept across the restart
+/// (ADR-0079) never sees a new message numbered at or below the `inbox` cursor it carried over (#965). It is the larger of the floor
+/// the previous run wrote and the clock in microseconds, and the floor for the next run is written before any id is handed out:
+/// either alone keeps ids rising (the file when the clock stepped back, the clock when the file could not be written).
+pub fn first_id_for_this_run(data_dir: &Path) -> u64 {
+    let file = data_dir.join(crate::ledger::LEDGER_DIR).join(MESH_IDS_FILE);
+    let floor = std::fs::read_to_string(&file)
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(0);
+    // Capped far below the end of the numbers, so a damaged floor file can never make the counter overflow.
+    let first = floor
+        .max(now_ms().saturating_mul(1000))
+        .clamp(1, u64::MAX / 2);
+    let next = first.saturating_add(IDS_PER_RUN);
+    let _ = agora_platform::write_private(&file, next.to_string().as_bytes());
+    first
+}
+
 /// How a mesh message for an agent on another node leaves this node (ADR-0031). The uplink implements it.
 pub trait RemoteLink: Send + Sync {
     /// Hands one message to the hub. `done` is called once: `Ok(())` when the target node took it, or the error code
@@ -692,6 +718,14 @@ impl MeshServer {
                 })
                 .collect(),
         })
+    }
+
+    /// Ids from `first` on (see [`first_id_for_this_run`]); called before any agent joins.
+    pub fn start_ids_at(&self, first: u64) {
+        self.mesh
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .start_ids_at(first);
     }
 
     pub fn mesh(&self) -> Arc<Mutex<Mesh>> {
@@ -1941,6 +1975,28 @@ mod tests {
         let later = Instant::now();
         shares.set_not_shared_since("p", later);
         assert!(matches!(shares.get("p"), Some((false, _))));
+    }
+
+    /// #965: each run's ids start above the last run's, from the floor file even when the clock is behind it, and the file is
+    /// written for the next run.
+    #[test]
+    fn each_run_of_the_broker_starts_its_ids_above_the_last_runs() {
+        let dir = std::env::temp_dir().join(format!("agora-ids-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let file = dir.join(crate::ledger::LEDGER_DIR).join(MESH_IDS_FILE);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        let started = now_ms();
+        let first = first_id_for_this_run(&dir);
+        assert!(first >= started * 1000, "{first} {started}");
+        let second = first_id_for_this_run(&dir);
+        assert!(second >= first + IDS_PER_RUN, "{first} {second}");
+        // A clock that stepped back: the floor the last run wrote still wins.
+        let ahead = now_ms().saturating_mul(1000).saturating_mul(4);
+        std::fs::write(&file, ahead.to_string()).unwrap();
+        assert_eq!(first_id_for_this_run(&dir), ahead);
+        let written: u64 = std::fs::read_to_string(&file).unwrap().parse().unwrap();
+        assert_eq!(written, ahead + IDS_PER_RUN);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

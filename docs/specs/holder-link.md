@@ -124,7 +124,10 @@ next frame's.
   agent, builds its terminal from the master, feeds it what the holder buffered, nudges its size (two resizes) so full-screen programs
   redraw, registers its mesh endpoint again at the same path, and clears the interruption (`Ledger::reclaim`). The mesh endpoint is made
   through the launch hook, so the hook is set before the agents are taken up (#906: it was set after, and a kept agent's socket was never
-  served again, so its open `agora mesh stdio` bridge got `mesh.unavailable` for good). After the node's `NodeOnline` (which tells the hub
+  served again, so its open `agora mesh stdio` bridge got `mesh.unavailable` for good). The new broker's ids (messages, tasks, leases,
+  handoffs) start above every id an earlier run handed out (`mesh_server::first_id_for_this_run`, see mesh-tools.md "Message ids"), so the
+  `inbox` cursor the kept agent carried over still shows what arrives for it (#965: they started over at `m-1` and every new message,
+  presence notice and message from another machine was hidden behind it). After the node's `NodeOnline` (which tells the hub
   that everything the node ran before is gone) and its `CheckoutDiscovered`, each agent taken up is said up again as a resync
   announcement says it: `AgentStarted`, `AgentStateChanged` (the state the ledger knew), `AgentSessionReported` when the ledger has a
   session, and `TerminalOpened` (`EventSink::agent_taken_up`, re-stated, so the ledger does not learn it again). Without them the hub, the
