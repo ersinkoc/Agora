@@ -6,8 +6,8 @@ use std::io;
 use std::path::Path;
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, GetLastError, SetHandleInformation, ERROR_ACCESS_DENIED, FILETIME, HANDLE,
-    HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, STILL_ACTIVE,
+    CloseHandle, GetLastError, SetHandleInformation, ERROR_ACCESS_DENIED, ERROR_INVALID_PARAMETER,
+    FILETIME, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, STILL_ACTIVE, WAIT_OBJECT_0,
 };
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
@@ -21,10 +21,11 @@ use windows_sys::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_ME
 use windows_sys::Win32::System::Threading::{
     CreateProcessW, DeleteProcThreadAttributeList, GetCurrentProcess, GetExitCodeProcess,
     GetProcessTimes, InitializeProcThreadAttributeList, OpenProcess, QueryFullProcessImageNameW,
-    TerminateProcess, UpdateProcThreadAttribute, CREATE_BREAKAWAY_FROM_JOB,
+    TerminateProcess, UpdateProcThreadAttribute, WaitForSingleObject, CREATE_BREAKAWAY_FROM_JOB,
     CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, CREATE_UNICODE_ENVIRONMENT, DETACHED_PROCESS,
     EXTENDED_STARTUPINFO_PRESENT, PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION,
-    PROCESS_TERMINATE, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, STARTF_USESTDHANDLES, STARTUPINFOEXW,
+    PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+    STARTF_USESTDHANDLES, STARTUPINFOEXW,
 };
 
 fn last_error() -> io::Error {
@@ -49,6 +50,41 @@ impl Drop for Process {
     fn drop(&mut self) {
         // SAFETY: owned and closed once.
         unsafe { CloseHandle(self.0) };
+    }
+}
+
+/// See [`crate::process_exists`]. A process that has ended stays queryable while any handle to it is open (the parent that started
+/// it, a process viewer), so a lookup that succeeds says nothing; an ended process is a signalled object, so a wait of zero answers
+/// it (Codex's review of #934). No: a pid that names nothing (`ERROR_INVALID_PARAMETER`), or a process that has ended. Yes: running,
+/// or anything that cannot tell (access denied and an exit code of `STILL_ACTIVE`, an unexpected answer).
+pub(crate) fn exists(pid: u32) -> bool {
+    // SAFETY: plain call; the handle is closed on drop.
+    let h = unsafe {
+        OpenProcess(
+            PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+            0,
+            pid,
+        )
+    };
+    if !h.is_null() {
+        let p = Process(h);
+        // SAFETY: a live process handle opened with SYNCHRONIZE.
+        return unsafe { WaitForSingleObject(p.0, 0) } != WAIT_OBJECT_0;
+    }
+    // SAFETY: plain call, right after the failed open.
+    match unsafe { GetLastError() } {
+        ERROR_INVALID_PARAMETER => false,
+        // Some processes may be queried but not waited on: their exit code tells, unless it is the one that also means running.
+        ERROR_ACCESS_DENIED => match Process::open(pid) {
+            Ok(p) => {
+                let mut code = 0u32;
+                // SAFETY: a live handle opened with PROCESS_QUERY_LIMITED_INFORMATION and a valid out pointer.
+                let ok = unsafe { GetExitCodeProcess(p.0, &mut code) } != 0;
+                !ok || code == STILL_ACTIVE as u32
+            }
+            Err(e) => e.raw_os_error() != Some(ERROR_INVALID_PARAMETER as i32),
+        },
+        _ => true,
     }
 }
 
