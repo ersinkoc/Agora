@@ -30,11 +30,11 @@ async function open({ width = 900, height = 520, scheme = 'dark', dpr = 1, touch
   await page.addInitScript((p) => { try { if (!localStorage.getItem('agora.terminal.prefs')) localStorage.setItem('agora.terminal.prefs', JSON.stringify(p)); } catch {} }, prefs);
   await page.goto(URL);
   await page.waitForSelector('.xterm-screen');
-  await page.waitForFunction(() => document.querySelector('.terminal')?.dataset.cols);
+  await page.waitForFunction(() => document.querySelector('.terminal-host')?.dataset.cols);
   const geo = async () => {
     const b = await page.locator('.xterm-screen').boundingBox();
-    const cols = Number(await page.locator('[role=region].terminal').getAttribute('data-cols'));
-    const rows = Number(await page.locator('[role=region].terminal').getAttribute('data-rows'));
+    const cols = Number(await page.locator('[role=region].terminal-host').getAttribute('data-cols'));
+    const rows = Number(await page.locator('[role=region].terminal-host').getAttribute('data-rows'));
     return { x: b.x, y: b.y, cols, rows, cw: b.width / cols, ch: b.height / rows, w: b.width, h: b.height };
   };
   const sent = () => page.evaluate(() => window.__sent.splice(0));
@@ -237,7 +237,7 @@ const lines = (n, f = (i) => `line ${i} hello world foo-bar`) => Array.from({ le
   p = await at('https://example.org/auto'); await page.keyboard.down('Control'); await page.mouse.click(p.x, p.y); await page.keyboard.up('Control'); await wait(500);
   check('Ctrl+click on a plain address in the output opens it', popups.some((u) => u.startsWith('https://example.org/auto')), J(popups));
   await emit('\x07'); await wait(50);
-  check('the bell rings the terminal visibly', (await page.locator('[role=region].terminal[data-bell]').count()) === 1);
+  check('the bell rings the terminal visibly', (await page.locator('[role=region].terminal-host[data-bell]').count()) === 1);
 
   // Find.
   await emit('\x1b[2J\x1b[H' + lines(200, (i) => `needle-${i % 50 === 0 ? 'X' : 'y'} ${i}`)); await wait(300);
@@ -282,7 +282,7 @@ const lines = (n, f = (i) => `line ${i} hello world foo-bar`) => Array.from({ le
   check('full blocks are solid with the graphics card drawing (the default)', gl === 0, `${gl.toFixed(2)}% holes`);
   check('the page\'s own text drawing leaves holes in them, more at row height 1.1 (why the card draws and 1.0 is the default)', dom1 > gl && dom11 > dom1, `${dom1.toFixed(2)}% at 1.0, ${dom11.toFixed(2)}% at 1.1`);
   // Fit: the columns use the window width (less the scrollbar's strip and the padding).
-  const free = await page.evaluate(() => { const el = document.querySelector('.terminal'); const cs = getComputedStyle(el); return el.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight); });
+  const free = await page.evaluate(() => { const el = document.querySelector('.terminal-host'); const cs = getComputedStyle(el.querySelector('.xterm')); return el.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight); });
   check('fit: the unused width is under two cells and the scrollbar strip', free - g.w < 2 * g.cw + 16, `${(free - g.w).toFixed(1)}px left of ${free}`);
   // Flicker: replacing the screen with a snapshot never paints an empty screen.
   await emit(lines(30, (i) => `stable ${i}`)); await wait(200);

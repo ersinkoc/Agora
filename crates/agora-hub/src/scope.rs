@@ -591,6 +591,49 @@ mod tests {
         assert_eq!(s.filter_view(&full), cut);
     }
 
+    /// #905: a message between machines is recorded by both nodes. The sender's copy is the member's when the sender is theirs; the
+    /// receiver's copy names the sender `<origin>/<agent>` in its producer's words, which no node may say for another node, so it
+    /// grants nothing (the window folds the two copies into one row for whoever sees both).
+    #[test]
+    fn a_message_between_machines_is_the_members_by_the_senders_own_copy_only() {
+        let mut s = scope(&["n1/mine"]);
+        for e in [
+            checkout("n1", "c1", "mine"),
+            agent("n1", "a1", "mine"),
+            checkout("n2", "c2", "theirs"),
+            agent("n2", "b1", "theirs"),
+        ] {
+            s.admit(&e);
+        }
+        let posted = |node: &str, from: &str, to: &str| {
+            ev(
+                node,
+                Body::MessagePosted(v1::MessagePosted {
+                    message_id: "m-1".into(),
+                    from_agent_id: from.into(),
+                    to: to.into(),
+                    body: "ping".into(),
+                }),
+            )
+        };
+        assert!(s.admit(&posted("n1", "a1", "n2/b1")), "the sender's copy");
+        assert!(
+            !s.admit(&posted("n2", "n1/a1", "b1")),
+            "the receiver's copy is not admitted by the name it gives the sender"
+        );
+        // A member of the receiving project does not see what another project's agent said.
+        let mut r = scope(&["n2/theirs"]);
+        for e in [
+            agent("n1", "a1", "mine"),
+            checkout("n2", "c2", "theirs"),
+            agent("n2", "b1", "theirs"),
+        ] {
+            r.admit(&e);
+        }
+        assert!(!r.admit(&posted("n1", "a1", "n2/b1")));
+        assert!(!r.admit(&posted("n2", "n1/a1", "b1")));
+    }
+
     #[test]
     fn a_member_sees_what_belongs_to_a_granted_project_and_nothing_of_another() {
         let mut s = scope(&["n1/mine"]);

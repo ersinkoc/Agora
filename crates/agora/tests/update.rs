@@ -34,7 +34,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
         .to_string()
 }
 
-/// A server for a fixed set of paths; `/releases/latest` redirects to the tag page of `latest`.
+/// A server for a fixed set of paths; `/releases/latest` redirects to the tag page of `latest`, which can be missing.
 fn serve(files: HashMap<String, Vec<u8>>, latest: &str) -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -49,8 +49,6 @@ fn serve(files: HashMap<String, Vec<u8>>, latest: &str) -> u16 {
             let path = req.split_whitespace().nth(1).unwrap_or("/").to_string();
             let reply: Vec<u8> = if path == "/releases/latest" {
                 format!("HTTP/1.1 302 Found\r\nLocation: /releases/tag/v{latest}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").into_bytes()
-            } else if path.starts_with("/releases/tag/") {
-                b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok".to_vec()
             } else if let Some(body) = files.get(&path) {
                 let mut r = format!(
                     "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -113,6 +111,40 @@ fn sign(file: &Path, key: &Path) -> Vec<u8> {
 }
 
 #[test]
+fn update_check_follows_the_latest_redirect_and_reports_a_missing_release() {
+    let latest = "9.9.9";
+    let present = serve(
+        HashMap::from([(format!("/releases/tag/v{latest}"), b"release page".to_vec())]),
+        latest,
+    );
+    let missing = serve(HashMap::new(), latest);
+    let check = |port| {
+        let base = format!("http://127.0.0.1:{port}/releases/download");
+        Command::new(AGORA)
+            .args(["update", "--check", "--release-url", &base])
+            .env("AGORA_LANG", "en")
+            .env("no_proxy", "127.0.0.1")
+            .output()
+            .unwrap()
+    };
+
+    let out = check(present);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success() && stdout.contains(latest),
+        "{stdout} {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let out = check(missing);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success() && stderr.contains("Could not check for updates"),
+        "{stderr}"
+    );
+}
+
+#[test]
 fn a_release_replaces_the_program_only_when_its_checksum_and_signature_check_out() {
     let Some((triple, ext)) = triple_and_ext() else {
         return;
@@ -134,6 +166,7 @@ fn a_release_replaces_the_program_only_when_its_checksum_and_signature_check_out
 
     let name = format!("agora-{triple}{ext}");
     let mut files = HashMap::new();
+    files.insert("/releases/tag/v9.9.9".into(), b"release page".to_vec());
     files.insert(
         format!("/releases/download/v9.9.9/{name}"),
         new_program.clone(),

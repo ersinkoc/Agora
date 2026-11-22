@@ -15,7 +15,12 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use agora_platform::{ExitStatus, Pty, PtyControl};
-use agora_vt::{AlacrittyTerminal, Cursor, Modes, Size, Style, Terminal};
+use agora_vt::{
+    AlacrittyTerminal, Cursor, CursorShape, Modes, MouseEncoding, MouseTracking, Size, Style,
+    Terminal,
+};
+
+use crate::history::HistoryCapture;
 
 /// Settings for a terminal actor.
 #[derive(Debug, Clone, Copy)]
@@ -168,17 +173,30 @@ impl Inner {
 }
 
 fn snapshot_of(s: &Shared) -> Snapshot {
-    let size = s.term.size();
+    snapshot_from(s.term.as_ref(), s.seq, s.exit)
+}
+
+fn snapshot_from(term: &dyn Terminal, seq: u64, exit: Option<ExitStatus>) -> Snapshot {
+    let size = term.size();
     Snapshot {
-        seq: s.seq,
+        seq,
         size,
-        lines: (0..size.rows).map(|r| s.term.line(r)).collect(),
-        cursor: s.term.cursor(),
-        modes: s.term.modes(),
-        title: s.term.title(),
-        exit: s.exit,
+        lines: (0..size.rows).map(|r| term.line(r)).collect(),
+        cursor: term.cursor(),
+        modes: term.modes(),
+        title: term.title(),
+        exit,
         repaint: None,
     }
+}
+
+/// The repaint a subscriber of `term` gets (the kind 1 frame, ADR-0100): the same bytes [`TerminalHandle::subscribe`] sends, for
+/// clients' tests and tools that hold an emulator rather than a running terminal.
+pub fn repaint_of(term: &dyn Terminal) -> Vec<u8> {
+    Repaint::capture(term, 0, None)
+        .into_snapshot()
+        .repaint
+        .unwrap_or_default()
 }
 
 struct PaintRow {
@@ -194,9 +212,83 @@ struct Repaint {
     pen: Style,
 }
 
+/// `CSI ? n h` or `CSI ? n l`.
+fn private_mode(out: &mut String, n: u16, on: bool) {
+    let _ = write!(out, "\x1b[?{n}{}", if on { 'h' } else { 'l' });
+}
+
+/// Every mode the node's emulator tracks, as an explicit set or reset (ADR-0100 decision 1, step 4), so a window that kept modes
+/// from before (a reconnect) ends with the program's. Modes the emulator does not track (mouse 9, the urxvt encoding 1015,
+/// modifyOtherKeys, 47/1047, the scroll region) are left alone: resetting what the node cannot see could switch off what the
+/// program switched on while the window watched. Origin mode (DECOM) is not restored either: cursor positions under it are relative to
+/// the scroll region, which is not tracked, so restoring it would put the cursor, and every later position the program sends, on
+/// the wrong row (Codex review of ADR-0100); it waits until the margins can be restored. Two known gaps: xterm.js (the web window)
+/// switches mouse mode 9 off on any of the 1000/1002/1003 resets, so there the repaint does end a 9 the window had; and only the
+/// kitty keyboard protocol's current flags are carried, not the program's stack, so a pop after a late attach gives the window none.
+fn append_modes(out: &mut String, m: &Modes) {
+    for n in [1000, 1002, 1003] {
+        private_mode(out, n, false);
+    }
+    match m.mouse_tracking {
+        MouseTracking::Off => {}
+        MouseTracking::Click => private_mode(out, 1000, true),
+        MouseTracking::Drag => private_mode(out, 1002, true),
+        MouseTracking::Motion => private_mode(out, 1003, true),
+    }
+    for n in [1005, 1006] {
+        private_mode(out, n, false);
+    }
+    match m.mouse_encoding {
+        MouseEncoding::Default => {}
+        MouseEncoding::Utf8 => private_mode(out, 1005, true),
+        MouseEncoding::Sgr => private_mode(out, 1006, true),
+    }
+    private_mode(out, 1004, m.focus_reporting);
+    private_mode(out, 1007, m.alternate_scroll);
+    private_mode(out, 2004, m.bracketed_paste);
+    private_mode(out, 1, m.application_cursor);
+    // DECKPAM or DECKPNM.
+    out.push_str(if m.application_keypad {
+        "\x1b="
+    } else {
+        "\x1b>"
+    });
+    private_mode(out, 7, m.autowrap);
+    out.push_str(if m.insert { "\x1b[4h" } else { "\x1b[4l" });
+    out.push_str(if m.newline { "\x1b[20h" } else { "\x1b[20l" });
+    // The kitty keyboard flags: pop whatever stack the window holds, then set the program's flags without a stack entry.
+    let _ = write!(out, "\x1b[<32u\x1b[={};1u", m.keyboard_flags);
+}
+
+/// The cursor (ADR-0100 decision 1, step 5): position, visibility and shape. The default shape is `CSI 0 SP q`, which gives the
+/// window its user's own cursor back. Mode 12 (blink alone) is never written: xterm.js applies it to the window's own cursor-blink
+/// setting, which would outlive the program, so a blink without a shape the program chose is not carried (a known gap); a chosen
+/// shape carries its blink in DECSCUSR.
+fn append_cursor(out: &mut String, c: &Cursor) {
+    let _ = write!(
+        out,
+        "\x1b[{};{}H{}",
+        c.row + 1,
+        c.col + 1,
+        if c.visible { "\x1b[?25h" } else { "\x1b[?25l" }
+    );
+    let shape = match c.shape {
+        CursorShape::Default => 0,
+        CursorShape::Block => 2,
+        CursorShape::Underline => 4,
+        CursorShape::Bar => 6,
+    };
+    if shape == 0 {
+        out.push_str("\x1b[0 q");
+    } else {
+        // DECSCUSR: the odd value of each pair blinks.
+        let _ = write!(out, "\x1b[{} q", shape - u8::from(c.blink));
+    }
+}
+
 impl Repaint {
-    fn capture(s: &Shared) -> Self {
-        let snapshot = snapshot_of(s);
+    fn capture(term: &dyn Terminal, seq: u64, exit: Option<ExitStatus>) -> Self {
+        let snapshot = snapshot_from(term, seq, exit);
         let size = snapshot.size;
         let rows = (0..size.rows)
             .map(|row| {
@@ -206,7 +298,7 @@ impl Repaint {
                 };
                 let mut current = Style::default();
                 for col in 0..size.cols {
-                    let Some(cell) = s.term.cell(row, col) else {
+                    let Some(cell) = term.cell(row, col) else {
                         break;
                     };
                     if cell.spacer {
@@ -224,12 +316,27 @@ impl Repaint {
         Self {
             snapshot,
             rows,
-            pen: s.term.pen(),
+            pen: term.pen(),
         }
     }
 
+    /// The kind 1 repaint (ADR-0100 decision 1), in this order: the program's screen (normal or alternate), the state the drawing
+    /// depends on, the drawing, the modes, the cursor, the pen. Every byte is made here from the captured state; nothing is copied
+    /// from the program's output.
     fn into_snapshot(mut self) -> Snapshot {
-        let mut out = String::from("\x1b[0m\x1b[2J");
+        let m = self.snapshot.modes;
+        // 1. The program's screen first, so the drawing lands on it.
+        let mut out = String::from(if m.alt_screen {
+            "\x1b[?1049h"
+        } else {
+            "\x1b[?1049l"
+        });
+        // 2. Rows land at absolute positions (origin off), characters overwrite (insert off), from a plain pen, in ASCII (G0 is ASCII and
+        // shifted in: a window left in the line-drawing set by an earlier program would draw the whole screen in it). The node does
+        // not track the character sets, so this is a protective reset, not the program's state.
+        out.push_str("\x1b[?6l\x1b[4l\x1b[0m\x1b(B\x0f");
+        // 3. The screen, every row at an absolute position with its styles.
+        out.push_str("\x1b[2J");
         for (row, paint) in self.rows.into_iter().enumerate() {
             let _ = write!(out, "\x1b[{};1H", row + 1);
             let mut start = 0;
@@ -241,26 +348,9 @@ impl Repaint {
             out.push_str(&paint.text[start..]);
             out.push_str("\x1b[0m\x1b[K");
         }
-        let c = self.snapshot.cursor;
-        let _ = write!(
-            out,
-            "\x1b[{};{}H{}",
-            c.row + 1,
-            c.col + 1,
-            if c.visible { "\x1b[?25h" } else { "\x1b[?25l" }
-        );
-        // Live output continues from the captured cursor, input modes and pen.
-        let m = self.snapshot.modes;
-        out.push_str(if m.bracketed_paste {
-            "\x1b[?2004h"
-        } else {
-            "\x1b[?2004l"
-        });
-        out.push_str(if m.application_cursor {
-            "\x1b[?1h"
-        } else {
-            "\x1b[?1l"
-        });
+        // 4-6. Live output continues from the captured modes, cursor and pen.
+        append_modes(&mut out, &m);
+        append_cursor(&mut out, &self.snapshot.cursor);
         self.pen.append_sgr(&mut out);
         self.snapshot.repaint = Some(out.into_bytes());
         self.snapshot
@@ -395,28 +485,35 @@ impl TerminalHandle {
     /// the process writes after exactly that screen: registration and snapshot happen under one lock, so
     /// there is no gap and no duplicate. A client renders the snapshot, then applies the items in order.
     pub fn subscribe(&self) -> (Snapshot, OutputSubscription) {
-        let (tx, rx) = sync_channel(SUBSCRIBER_QUEUE);
-        let lagged = Arc::new(AtomicBool::new(false));
-        let repaint = {
-            let mut g = self.inner.lock();
-            let repaint = Repaint::capture(&g);
-            g.subscribers.push(Subscriber {
-                tx,
-                lagged: Arc::clone(&lagged),
-            });
-            repaint
-        };
-        (repaint.into_snapshot(), OutputSubscription { rx, lagged })
+        let (_, snapshot, sub) = self.subscribe_with_history(0);
+        (snapshot, sub)
+    }
+
+    /// [`Self::subscribe`] for a window that asks for `lines` lines of history (ADR-0100 decision 2); see
+    /// [`TerminalWatch::subscribe_with_history`].
+    pub fn subscribe_with_history(
+        &self,
+        lines: usize,
+    ) -> (Vec<Vec<u8>>, Snapshot, OutputSubscription) {
+        self.watch().subscribe_with_history(lines)
+    }
+
+    /// A handle to subscribe with after letting go of whatever lock reached this terminal (the supervisor's), so copying and
+    /// formatting a history (ADR-0100) never holds up other commands, input among them. It does not keep the process running.
+    pub fn watch(&self) -> TerminalWatch {
+        TerminalWatch {
+            inner: Arc::clone(&self.inner),
+        }
     }
 
     /// After [`Output::Lagged`]: discard what is queued, clear the lag, and return a fresh snapshot that
-    /// the following items continue from.
+    /// the following items continue from. Never with history (ADR-0100 decision 2): a window that wants it subscribes again.
     pub fn resync(&self, sub: &OutputSubscription) -> Snapshot {
         let repaint = {
             let g = self.inner.lock();
             while sub.rx.try_recv().is_ok() {}
             sub.lagged.store(false, Ordering::Release);
-            Repaint::capture(&g)
+            Repaint::capture(g.term.as_ref(), g.seq, g.exit)
         };
         repaint.into_snapshot()
     }
@@ -457,6 +554,41 @@ impl TerminalHandle {
             guard.waiters -= 1;
         }
         snapshot_of(&guard)
+    }
+}
+
+/// A terminal to subscribe to, held without its [`TerminalHandle`] (see [`TerminalHandle::watch`]).
+pub struct TerminalWatch {
+    inner: Arc<Inner>,
+}
+
+impl TerminalWatch {
+    /// [`TerminalHandle::subscribe`] that also returns the kind 4 frames putting the newest `lines` scrollback lines into the
+    /// window's own scrollback (ADR-0100 decision 2), sent before the snapshot: none for 0, while the program is on the alternate
+    /// screen, or when nothing is kept. History, screen and registration are captured under one lock, so the history ends where the
+    /// snapshot begins; the cells are copied under it (bounded by the byte cap) and formatted after it is released.
+    pub fn subscribe_with_history(
+        &self,
+        lines: usize,
+    ) -> (Vec<Vec<u8>>, Snapshot, OutputSubscription) {
+        let (tx, rx) = sync_channel(SUBSCRIBER_QUEUE);
+        let lagged = Arc::new(AtomicBool::new(false));
+        let (history, repaint) = {
+            let mut g = self.inner.lock();
+            let history = (lines > 0).then(|| HistoryCapture::capture(g.term.as_ref(), lines));
+            let repaint = Repaint::capture(g.term.as_ref(), g.seq, g.exit);
+            g.subscribers.push(Subscriber {
+                tx,
+                lagged: Arc::clone(&lagged),
+            });
+            (history, repaint)
+        };
+        let frames = history.map(HistoryCapture::into_frames).unwrap_or_default();
+        (
+            frames,
+            repaint.into_snapshot(),
+            OutputSubscription { rx, lagged },
+        )
     }
 }
 
@@ -535,7 +667,10 @@ mod tests {
         live.feed("\x1b[?2004h\x1b[?1h\x1b[31m界\x1b[32mX".as_bytes());
         let pen = live.pen();
         let original = inner(live);
-        let captured = Repaint::capture(&original.lock());
+        let captured = {
+            let g = original.lock();
+            Repaint::capture(g.term.as_ref(), g.seq, g.exit)
+        };
 
         bump(&original, |s| {
             s.term.feed(b"\x1b[0m\x1b[2J\x1b[?2004l\x1b[?1l")
@@ -549,6 +684,234 @@ mod tests {
         assert_eq!(mirror.cursor(), snap.cursor);
         assert_eq!(mirror.modes(), snap.modes);
         assert_ne!(mirror.modes(), original.lock().term.modes());
+    }
+
+    /// The repaint of a terminal fed `bytes`, and that terminal.
+    fn source(size: Size, bytes: &[u8]) -> (AlacrittyTerminal, String) {
+        let mut t = AlacrittyTerminal::new(size);
+        t.feed(bytes);
+        let r = String::from_utf8_lossy(&repaint_of(&t)).into_owned();
+        (t, r)
+    }
+
+    /// Where `needle` is in `hay`; fails the test when it is missing.
+    #[allow(clippy::unwrap_used)]
+    fn at(hay: &str, needle: &str) -> usize {
+        hay.find(needle)
+            .ok_or_else(|| format!("{needle:?} missing from {hay:?}"))
+            .unwrap()
+    }
+
+    /// Every switch the program can make, all on (and an alternate screen with its own text).
+    const ALL_ON: &[u8] = b"main\x1b[?1049h\x1b[HALT\x1b[?1002h\x1b[?1006h\x1b[?1004h\x1b[?2004h\x1b[?1h\x1b=\x1b[4h\x1b[20h\x1b[>5u\x1b[5 q\x1b[2;3H";
+    /// The opposite of every power-on mode (autowrap and alternate scroll are on at power-on).
+    const ALL_OFF: &[u8] = b"\x1b[?7l\x1b[?1007l\x1b[?25l";
+
+    /// ADR-0100 decision 1: every mode the emulator tracks is written as an explicit set (all on) or reset (all off).
+    #[test]
+    fn every_tracked_mode_is_set_or_reset_explicitly() {
+        let size = Size { cols: 16, rows: 4 };
+        let (_, on) = source(size, ALL_ON);
+        for seq in [
+            "\x1b[?1049h",
+            "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1002h",
+            "\x1b[?1005l\x1b[?1006l\x1b[?1006h",
+            "\x1b[?1004h",
+            "\x1b[?1007h",
+            "\x1b[?2004h",
+            "\x1b[?1h",
+            "\x1b=",
+            "\x1b[?7h",
+            "\x1b[4h",
+            "\x1b[20h",
+            "\x1b[<32u\x1b[=5;1u",
+            "\x1b[2;3H\x1b[?25h\x1b[5 q",
+        ] {
+            at(&on, seq);
+        }
+        let (_, off) = source(size, ALL_OFF);
+        for seq in [
+            "\x1b[?1049l",
+            "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1004l",
+            "\x1b[?1007l",
+            "\x1b[?2004l",
+            "\x1b[?1l",
+            "\x1b>",
+            "\x1b[?7l",
+            "\x1b[20l",
+            "\x1b[<32u\x1b[=0;1u",
+            "\x1b[1;1H\x1b[?25l\x1b[0 q",
+        ] {
+            at(&off, seq);
+        }
+        assert!(!off.contains("\x1b[?1000h") && !off.contains("\x1b[?12"));
+        // Each mouse mode and encoding on its own.
+        for (prog, set) in [
+            ("\x1b[?1000h", "\x1b[?1003l\x1b[?1000h"),
+            ("\x1b[?1003h", "\x1b[?1003l\x1b[?1003h"),
+            ("\x1b[?1005h", "\x1b[?1006l\x1b[?1005h"),
+            ("\x1b[4 q", "\x1b[4 q"),
+            ("\x1b[1 q", "\x1b[1 q"),
+            ("\x1b[6 q", "\x1b[6 q"),
+            // A blink with no shape chosen keeps the window's own shape, and mode 12 is never written (see `append_cursor`).
+            ("\x1b[?12h", "\x1b[0 q\x1b[0m"),
+            ("\x1b[3 q\x1b[0 q", "\x1b[0 q\x1b[0m"),
+        ] {
+            at(&source(size, prog.as_bytes()).1, set);
+        }
+    }
+
+    /// The order of ADR-0100 decision 1: screen, drawing state, drawing, modes, cursor, pen. On the alternate screen the drawing comes
+    /// after entering it, so it lands there and the window's main screen is not overwritten.
+    #[test]
+    fn the_repaint_enters_the_screen_then_draws_then_sets_modes_cursor_and_pen() {
+        let size = Size { cols: 16, rows: 4 };
+        let (_, r) = source(size, ALL_ON);
+        let order = [
+            at(&r, "\x1b[?1049h"),
+            at(&r, "\x1b[?6l\x1b[4l\x1b[0m\x1b(B\x0f"),
+            at(&r, "\x1b[2J"),
+            at(&r, "\x1b[1;1HALT"),
+            at(&r, "\x1b[?1000l"),
+            at(&r, "\x1b[=5;1u"),
+            at(&r, "\x1b[2;3H\x1b[?25h"),
+            at(&r, "\x1b[5 q"),
+        ];
+        assert!(order.windows(2).all(|w| w[0] < w[1]), "{order:?} in {r:?}");
+        assert!(r.ends_with("\x1b[0m"), "the pen is last: {r:?}");
+        // Fed to a window on its main screen, the drawing is on the alternate screen; leaving it shows the window's own main screen.
+        let mut window = AlacrittyTerminal::new(size);
+        window.feed(b"window's own");
+        window.feed(r.as_bytes());
+        assert!(window.modes().alt_screen);
+        assert_eq!(window.line(0), "ALT");
+        window.feed(b"\x1b[?1049l");
+        assert_eq!(window.line(0), "window's own");
+    }
+
+    /// A repaint fed to a fresh window, and to one that kept every mode from before (a reconnect: D3), gives the source's modes,
+    /// cursor and screen.
+    #[test]
+    fn a_repaint_reproduces_the_modes_on_a_fresh_and_on_a_stale_window() {
+        let size = Size { cols: 16, rows: 4 };
+        for bytes in [ALL_ON, ALL_OFF, b"" as &[u8], b"x\x1b[?1000h\x1b[?1015h"] {
+            let (src, r) = source(size, bytes);
+            for stale in [b"" as &[u8], ALL_ON, ALL_OFF] {
+                let mut window = AlacrittyTerminal::new(size);
+                window.feed(stale);
+                window.feed(r.as_bytes());
+                let what = format!(
+                    "{:?} over {:?}",
+                    String::from_utf8_lossy(bytes),
+                    String::from_utf8_lossy(stale)
+                );
+                assert_eq!(window.modes(), src.modes(), "{what}");
+                assert_eq!(window.cursor(), src.cursor(), "{what}");
+                assert_eq!(window.pen(), src.pen(), "{what}");
+                for row in 0..size.rows {
+                    assert_eq!(window.line(row), src.line(row), "{what}");
+                }
+            }
+        }
+    }
+
+    /// Origin mode (DECOM) is not restored while the scroll margins are untracked (ADR-0100, Codex review): the repaint leaves it
+    /// off, and the cursor of a fresh and of a reconnecting window (stale margins and origin mode) is the node's right after it.
+    #[test]
+    fn origin_mode_is_left_off_and_the_cursor_lands_where_the_nodes_is() {
+        let size = Size { cols: 16, rows: 10 };
+        for prog in [&b"\x1b[4;8r\x1b[?6h\x1b[2;3H"[..], b"\x1b[4;8r\x1b[5;3H"] {
+            let (src, r) = source(size, prog);
+            assert!(!r.contains("\x1b[?6h"), "{r:?}");
+            let mut fresh = AlacrittyTerminal::new(size);
+            fresh.feed(r.as_bytes());
+            let mut returning = AlacrittyTerminal::new(size);
+            returning.feed(b"\x1b[3;8r\x1b[?6h");
+            returning.feed(r.as_bytes());
+            for window in [&fresh, &returning] {
+                assert_eq!(window.cursor(), src.cursor());
+                assert!(!window.modes().origin);
+            }
+        }
+    }
+
+    /// The known divergence this pins (ADR-0100: until the margins are tracked and restored): a program in origin mode with margins
+    /// moves the cursor relative to them; the window, with origin mode off, puts it at the absolute row. When the follow-up restores
+    /// the margins, this test changes to equality.
+    #[test]
+    fn a_live_origin_relative_move_still_diverges_while_the_margins_are_untracked() {
+        let size = Size { cols: 16, rows: 10 };
+        let (mut src, r) = source(size, b"\x1b[4;8r\x1b[?6h\x1b[2;3H");
+        let mut fresh = AlacrittyTerminal::new(size);
+        fresh.feed(r.as_bytes());
+        let mut returning = AlacrittyTerminal::new(size);
+        returning.feed(b"\x1b[3;8r\x1b[?6h");
+        returning.feed(r.as_bytes());
+        src.feed(b"\x1b[2;3H");
+        fresh.feed(b"\x1b[2;3H");
+        returning.feed(b"\x1b[2;3H");
+        assert_eq!(src.cursor().row, 4, "relative to the top margin (row 3)");
+        assert_eq!(
+            fresh.cursor().row,
+            1,
+            "absolute: the margins are not restored"
+        );
+        assert_eq!(
+            returning.cursor().row,
+            1,
+            "absolute: the margins are not restored"
+        );
+    }
+
+    /// A window left in the line-drawing character set (`ESC ( 0`, or G1 shifted out) still draws the repaint's text as text.
+    #[test]
+    fn a_window_left_in_line_drawing_draws_the_repaint_as_text() {
+        let size = Size { cols: 16, rows: 4 };
+        let (src, r) = source(size, b"plain text qx");
+        for stale in [&b"\x1b(0"[..], b"\x1b)0\x0e"] {
+            let mut window = AlacrittyTerminal::new(size);
+            window.feed(stale);
+            window.feed(r.as_bytes());
+            assert_eq!(window.line(0), src.line(0));
+            window.feed(b"\r\nqx");
+            assert_eq!(window.line(1), "qx", "live output after it is ASCII too");
+        }
+    }
+
+    /// The pinned limitation of the keyboard flags (ADR-0100 known gaps): the repaint carries the current flags, not the program's
+    /// stack, so when the program pops after a late attach, the node goes back to the flags below and the window to none.
+    #[test]
+    fn a_keyboard_pop_after_a_late_attach_still_diverges() {
+        let size = Size { cols: 16, rows: 4 };
+        let (mut src, r) = source(size, b"\x1b[>1u\x1b[>3u");
+        let mut window = AlacrittyTerminal::new(size);
+        window.feed(r.as_bytes());
+        assert_eq!(window.modes().keyboard_flags, 3, "the current flags arrive");
+        src.feed(b"\x1b[<u");
+        window.feed(b"\x1b[<u");
+        assert_eq!(src.modes().keyboard_flags, 1);
+        assert_eq!(
+            window.modes().keyboard_flags,
+            0,
+            "the stack below is not carried"
+        );
+    }
+
+    /// The terminal client re-feeds the last repaint when its size arrives (`agora-tui` `preview.rs`): a second feed changes nothing.
+    #[test]
+    fn feeding_the_repaint_twice_changes_nothing() {
+        let size = Size { cols: 16, rows: 4 };
+        for bytes in [ALL_ON, ALL_OFF] {
+            let (_, r) = source(size, bytes);
+            let mut once = AlacrittyTerminal::new(size);
+            once.feed(r.as_bytes());
+            let mut twice = AlacrittyTerminal::new(size);
+            twice.feed(r.as_bytes());
+            twice.feed(r.as_bytes());
+            assert_eq!(twice.modes(), once.modes());
+            assert_eq!(twice.cursor(), once.cursor());
+            assert_eq!(twice.bottom_lines(4), once.bottom_lines(4));
+        }
     }
 
     #[test]

@@ -112,4 +112,5 @@ agent-queue_full = { $limit } messages are already waiting for this agent. Wait 
 agent-approval_needed = This choice lets the agent act without asking, so it waits for your approval ({ $approval_id }). Nothing has changed yet.
 enroll-renew_refused = This machine's certificate could not be renewed ({ $reason }). It keeps the one it has; if that one is revoked or has ended, join the hub again.
 task-dispatch_limited = You tried to give { $limit } tasks to agents in the last minute. Wait a moment, then try again.
+agent-program_missing = { $kind } did not start: this machine cannot find { $program } in its PATH. Install it there, or start the node from a terminal where { $program } runs.
 internal = Something went wrong. Reference: { $incident_id }.

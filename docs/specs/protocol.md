@@ -105,7 +105,9 @@ a peer that does not look at it sees an ordinary close. Order is `Hello` (role m
 a `SnapshotRequired` not followed by such an event changes nothing, and it does not carry over to the next connection. The
 hub logs a resync (`node resync: <node> skipped <from>..=<to>`) and writes an audit row (`who` = `hub`, action
 `node.resynced`, the node, outcome `<from>..=<to>`). `NodeOnline` in the hub's view ends that node's running agents and drops
-its waiting approvals and its terminals; a resync announcement then re-adds what still runs.
+its waiting approvals and its terminals; a resync announcement then re-adds what still runs. A node that takes up agents its terminal
+holder kept (ADR-0079, ADR-0093) re-adds each right after its start `NodeOnline` the same way (`AgentStarted`, `AgentStateChanged`, the
+session it knew, `TerminalOpened` for a terminal agent; `docs/specs/holder-link.md`).
 
 SSH stdio transport (ADR-0011): `agora node stdio` copies the node's local-socket frames to stdin/stdout, so a hub (or
 a person) can reach a node with `ssh host agora node stdio` and no open port. Frames are exactly those of the local
@@ -192,7 +194,7 @@ rules of a local command (the hub cannot widen them).
 Terminal relay (ADR-0029): a client sends `TerminalSubscribe` (with `target_node`) on a dynamic stream id it chooses (3+; any
 other command on a dynamic stream, or a subscription on stream 1, is `protocol.invalid_message`). The hub reserves a dynamic
 stream on the node's connection, forwards the request on it, answers on stream 1, and then copies the node's terminal frames
-(kinds 0..=3 above) to the client's stream without decoding or storing them. Input and resize are ordinary routed commands.
+(kinds 0..=4 above; any kind is copied) to the client's stream without decoding or storing them. Input and resize are ordinary routed commands.
 Kind 255 (`STREAM_CLOSE`, empty payload) ends a dynamic stream from either side: the client closing, the node leaving, or the
 terminal exiting (after the exit frame) ends the relay. A client that falls 512 frames behind is not waited for: the hub closes
 its relay on both sides and the client resubscribes for a fresh snapshot (a hub-side simplification of ADR-0029's "the node
@@ -316,6 +318,11 @@ create a worktree. New clients refuse an unavailable directory launch rather tha
 | `agent.launch` / `AgentLaunch` (82) | canonical `path`, expected `project_id`, `kind`, `separate_worktree`, `authorization`, `accept_identity_change` → `AgentLaunchResult` (Ok tag 19): `agent_id`, `terminal_id`, `workspace_id`, actual cwd `path` |
 | `workspace.query` / `WorkspaceQuery` (83) | `workspace_id`, `operation` (`list`, `read`, `status`, `diff`, `history`), relative `path`, `limit` → existing file/Git results |
 
+A start of a kind whose program the machine cannot find (`AgentStart`, `AgentLaunch`, `AgentResume`, and the mesh `agent_start`) is
+refused with `agent.program_missing` (`kind`, `program`; #903): the program the node looks for (the adapter command, the ACP command
+or the launch command) is not installed by `agora agent install`, not on the node's `PATH`, and not an existing path, the same check that
+marks the kind `installed: false` in `AgentKinds`. Older nodes answered `internal`.
+
 The node canonicalizes and re-inspects before launch; a path or project ID mismatch is refused. It persists confirmed
 path/identity associations; changed metadata requires `accept_identity_change`. Metadata creation is explicit, uses
 create-new semantics and never commits or overwrites `.agent-project.json`. The metadata contains `{"project_id":"UUID"}`;
@@ -368,10 +375,19 @@ so it can be driven with no hub. Frames are the envelope above. `CommandRequest`
 `CommandResponse` comes back on stream 1 with kind 1, matched by `request_id`; a retry with the same
 `idempotency_key` gets the stored response (addressed to the retry) and repeats nothing. A terminal stream is
 opened by sending `TerminalSubscribe` on a dynamic stream id (3+) chosen by the client. After the response the
-node writes that terminal's frames on that stream: kind 1 snapshot (ANSI that repaints the screen, with its colours and
-attributes, then restores the program's bracketed-paste and application-cursor modes and its current style), each one followed by kind 2 with the size it was painted at, kind 0 raw
+node writes that terminal's frames on that stream. When the subscription asks for history (`history_lines`, ADR-0100 decision 2; 0
+or absent asks for none, and a client that knows nothing of the field never gets any), they start with kind 4 history frames: ANSI
+that puts the newest `min(history_lines, lines the node keeps)` scrollback lines (2000 kept today; at most 512 KiB, the oldest
+dropped past that) into the client's scrollback at the size of the snapshot that follows. A kind 4 frame is at most 16 KiB and
+is cut only between sequences and characters, never inside one; there are at most 32. Their shape: `CSI ? 1049 l`; full-screen
+margins (`CSI r`), origin and insert off, autowrap on, a plain pen and ASCII in G0; `CSI 2 J`, then `CSI 3 J`; each line from the top
+row with its colours and attributes (re-encoded from the node's cells; nothing the program printed is copied), a line the node holds
+as wrapped without a line break (the newest line always ends in one); then the bottom row and one line feed per replayed line still
+on the screen. Fed to an empty emulator of that size, its scrollback holds exactly the replayed lines and its screen is clear. No
+history is sent while the program is on the alternate screen, or when the node keeps none. A client holds the kind 4 frames with
+the snapshot and paints both once it has the size. Then: kind 1 snapshot (ANSI that repaints the screen; ADR-0100 decision 1, in this order: the program's screen, `CSI ? 1049 h` or `l`; origin and insert off, a plain pen and ASCII in G0 shifted in (`ESC ( B`, SI); the screen cleared and every row drawn at an absolute position with its colours and attributes; every mode the node's emulator tracks as an explicit set or reset: mouse tracking 1000/1002/1003 (all reset, then the program's one), encodings 1005/1006 (the same), 1004, 1007, 2004, DECCKM, DECKPAM or DECKPNM, DECAWM, IRM, LNM and the kitty keyboard flags (`CSI < 32 u`, then `CSI = flags ; 1 u`; a client that writes the repaint to a user's own terminal, as `agora terminal attach` does, leaves that pop out, pushes an entry of its own and on detach pops it and the entries the program left pushed on the main screen); the cursor's position, visibility and shape (`CSI 0 SP q` when the program set none, keeping the window's own; mode 12 is never written); the program's current style last. Modes the node does not track (mouse 9, 1015, modifyOtherKeys, 47/1047, the scroll region) are left alone, and so is origin mode (DECOM) until the scroll region is tracked, though xterm.js switches 9 off on the 1000/1002/1003 resets; a client applies it all as ordinary ANSI), each one followed by kind 2 with the size it was painted at, kind 0 raw
 output, kind 2 resize (cols, rows as u16 LE), kind 3 exit (i32 LE; negative = signal). A client takes the size of the kind 2 frame that follows a snapshot before it paints the snapshot (a snapshot is made at the node's size; parsed at another width it wraps and scrolls its first rows away); the web window waits for that frame, at most 150 ms. A client that falls behind
-gets a fresh snapshot instead of the dropped output; it never slows the terminal. When the exit was among what it
+gets a fresh snapshot instead of the dropped output, never with history (a client that wants it subscribes again); it never slows the terminal. When the exit was among what it
 missed it still gets the exit frame, with `i32::MIN` (unknown) when the node no longer has the code. Input and resize are ordinary
 commands. Terminal ids are `t-<agent id>` (one terminal per agent). Implemented commands: `project.list`,
 `agent.start`, `agent.stop`, `agent.prompt`, `terminal.input`, `terminal.resize`, `terminal.subscribe`; the rest
@@ -940,8 +956,18 @@ forwards either to a node that did not offer it.
   `AgentPromptResult` (`CommandOk` field 29: `queued`, `queue_len`); a node without it, and every terminal agent, answers `empty`, read as
   sent. The node queues a prompt that arrives while the agent's turn is open (its adapter declared `turns`, a prompt was sent and no `idle`
   followed), at most 8 per agent (`agent.queue_full`, `limit` 8), and sends them one per `idle`, in order. A queued prompt is a user entry
-  with `queued` set until it is sent, then the same entry is sent again with `queued` unset. Prompts that will not be sent (the adapter
-  ended, or `AgentCancelTurn` with `drop_queue`) leave the transcript and a notice `adapter.queue_dropped` (`count`) says so: the
+  with `queued` set until it is sent, then the same entry is sent again with `queued` unset. Clarification (#908): `at_ms` is the
+  node's wall-clock time of the entry's event, never adjusted; for a queued prompt that event is its send, so the unqueued version
+  carries the time it was sent (the id stays: ids are never reused). A client places the person's entries by `at_ms`, ties and
+  out-of-order times broken by entry id, each just before the first other entry that is not older, and draws a prompt still waiting
+  after everything; a client that saw the entry become unqueued may place it after the newest agent entry it held at that moment
+  (times can tie within a millisecond). Otherwise two turns' answers read as one reply (RM-44). A tool call that is `pending` or
+  `in_progress` when its turn is over will not finish; ACP has no cancelled status and leaves marking such calls to the client, so the
+  window shows them as stopped once a later prompt was sent, or once the agent has been `idle` or finished for a moment (not while
+  `unknown`), and the node sends no invented status. Prompts that will not be sent (the adapter
+  ended, or `AgentCancelTurn` with `drop_queue`, or its send failed) leave the transcript and a notice `adapter.queue_dropped` (`count`,
+  and since #908 `entries`: the ids of exactly those entries joined by commas, so a client marks only them; a notice without it covers
+  every queued entry older than it) says so: the
   schema has no way to delete an entry, so a client that holds one clears its waiting mark when it sees that notice (a tombstone entry would
   need an ADR). The queue is node memory: it is lost when the node restarts (ADR-0089). A prompt that would wait is at most 64 KiB
   (`protocol.invalid_message`, `field` `text`); one sent at once is not bounded here. The turn is an explicit state, `Idle` or
