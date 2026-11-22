@@ -35,16 +35,20 @@ A structured agent can offer an answer it remembers (ACP `allow_always`); the wi
   of the agent: it lists only answers the agent was confirmed to have received; one whose delivery could not be confirmed shows as
   cancelled and the agent is ended. What the agent keeps in its own settings is up to the agent, as the note under the button says. The conversation's record of such a
   permission reads "Permission given; the agent remembers it".
-- **Terminal client:** in the box that shows a request, `A` allows it always (`y` once, `n` denies); in a tab or chat, **Alt+A** does,
-  only while the agent in front has a request that offers it (otherwise Alt+A is the agent's key). Never in the list, where `a` is Ask:
+- **Terminal client:** "always" is given only in the box that shows the whole request, the agent's own words and the duration
+  warning, with `A` there (`y` once, `n` denies). In a tab or chat, **Alt+A** opens that box for the tab's own request, only while it
+  offers "always" (otherwise Alt+A is the agent's key); so do the commands (Alt+K) and every other way in. Nothing is signed until a key
+  in the box. Never in the list, where `a` is Ask:
   Enter opens the agent's tab, or the commands (Alt+K) name it. The hints say Alt+A or `A` only when offered; `A` on a request that does
   not offer it says "This request can only be allowed once." and sends nothing. Alt+Y, Alt+N and Alt+A in a tab answer exactly that tab's own request, whatever the tree has selected, and nothing if it is gone
   (never another request). Wherever the request is read before it is answered (the request box, the chat's waiting block, the inspector)
   it shows the agent's own name for its option ("In its own words: “…”", one plain line, at most 64 characters) and the warning that the
   agent decides what "always" covers and how long it keeps the answer, possibly longer than this session. The request box takes its
-  answer as one deliberate key (a key typed before it appeared, or a paste, never answers). A request counts as read in the chat or the
-  inspector only when all of it fits there as drawn (in the inspector, only when it shows that agent's request); otherwise the box opens.
-  "Always" is never taken from a box the window cuts: it says the window is too small and sends nothing. The agent's line says `[asks less]`.
+  answer as one deliberate key (a key typed before it appeared, or a paste, never answers). A single Allow or a Deny goes at once only when that
+  exact request is in view: its own card whole in the inspector (beside a tab the inspector shows only the selected agent's own request,
+  so a command from a tab never answers another agent's request unseen) or whole in its chat tab; otherwise the box opens. "Always" is
+  never taken from a box last drawn cut: it says the window is too small and sends nothing. A key that comes with a change of the
+  window's size is dropped until the box is drawn again. The agent's line says `[asks less]`.
 - Bulk actions only for identical low-risk requests.
 - Mobile layout first: approvals are the main mobile use case.
 - Expired approvals show as expired; the agent is informed.

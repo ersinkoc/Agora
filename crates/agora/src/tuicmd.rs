@@ -3547,6 +3547,9 @@ struct Over<'a> {
     /// The terminal reports the mouse: while a box is open (when the console holds the mouse), never while a screen the question
     /// drew itself reads plain bytes.
     mouse: bool,
+    /// The window's area when the box was last drawn: a key is read against it, and a size that changed since drops the keys that
+    /// came with the change until the box is drawn again.
+    drawn: Option<Area>,
 }
 
 impl Asker for Over<'_> {
@@ -3572,15 +3575,9 @@ impl Asker for Over<'_> {
             .as_ref()
             .map(|s| app_rows(s, now_ms(), &text))
             .unwrap_or_default();
-        draw_console(
-            self.say,
-            self.c,
-            &rows,
-            None,
-            self.chat,
-            window_area(),
-            Some(lines),
-        );
+        let area = window_area();
+        draw_console(self.say, self.c, &rows, None, self.chat, area, Some(lines));
+        self.drawn = Some(area);
     }
 
     fn frame(&mut self, bytes: &[u8]) {
@@ -3629,9 +3626,8 @@ impl Over<'_> {
         wait: Duration,
         pick: fn(&[AppEvent], Area, &[String]) -> Option<u8>,
     ) -> Option<u8> {
-        // `lines` is on the screen already.
+        // `lines` is on the screen already, drawn at `self.drawn`.
         let end = Instant::now() + wait;
-        let mut area = window_area();
         loop {
             let left = end.saturating_duration_since(Instant::now());
             if left.is_zero() {
@@ -3648,16 +3644,40 @@ impl Over<'_> {
                 Err(mpsc::RecvTimeoutError::Timeout) => self.c.parser.flush(),
                 Err(mpsc::RecvTimeoutError::Disconnected) => return None,
             };
-            if let Some(k) = pick(&events, area, lines) {
-                return Some(k);
-            }
-            if window_area() != area {
-                area = window_area();
-                let _ = self.c.window.resized();
-                self.show(lines);
+            let drawn = self.drawn.unwrap_or_else(window_area);
+            match box_step(drawn, window_area(), &events, lines, pick) {
+                BoxStep::Key(k) => return Some(k),
+                BoxStep::Wait => {}
+                // The window changed size: what came with the change is dropped (it was aimed at the box as it was), and the box is
+                // drawn again for the new size before any key counts.
+                BoxStep::Redraw => {
+                    let _ = self.c.window.resized();
+                    self.show(lines);
+                }
             }
         }
     }
+}
+
+/// One read of a box's keys: the window's size now against the size the box was drawn at.
+#[derive(Debug, PartialEq, Eq)]
+enum BoxStep {
+    Key(u8),
+    Wait,
+    Redraw,
+}
+
+fn box_step(
+    drawn: Area,
+    now: Area,
+    events: &[AppEvent],
+    lines: &[String],
+    pick: fn(&[AppEvent], Area, &[String]) -> Option<u8>,
+) -> BoxStep {
+    if now != drawn {
+        return BoxStep::Redraw;
+    }
+    pick(events, drawn, lines).map_or(BoxStep::Wait, BoxStep::Key)
 }
 
 /// Asks over the console (`run` shows its questions with the [`Over`] it is given): the panel's terminal stays open meanwhile (its
@@ -3681,6 +3701,7 @@ fn over_console<T>(
         rx,
         stale: false,
         mouse,
+        drawn: None,
     };
     let out = run(session, &mut ask);
     let stale = ask.stale;
@@ -3768,15 +3789,6 @@ fn inspector_details(
     }
 }
 
-/// Whether the inspector's details (always the tree's selected agent) are the details of the request `target` names: the tree's own
-/// keys answer what it shows; a tab's request only when the tree has that same agent selected.
-fn target_displayed(target: &Target, owner: &str, selected: &str) -> bool {
-    match target {
-        Target::Selected => true,
-        Target::Tab { .. } => owner == selected,
-    }
-}
-
 /// ADR-0057 with Codex's re-review of ADR-0101 part B: a start request counts as read from the inspector only when the inspector shows
 /// that request's card (`displayed`) and showed it whole.
 fn start_read_in_inspector(displayed: bool, shown: Option<&(String, bool)>, id: &str) -> bool {
@@ -3788,8 +3800,50 @@ fn always_box_shown(lines: &[String], area: Area) -> bool {
     agora_tui::app::dialog_fits(area, lines)
 }
 
-/// Answers the request `target` names with `reply`, once it was in view (in the inspector, in the chat tab that shows it, or in a box
-/// that shows it now and takes the answer as one deliberate key). Returns whether the hub's state will change.
+/// The request the inspector shows, as it is drawn: beside a tab with the keyboard, only the selected agent's own request; in the tree,
+/// the selected agent's request, else the first waiting (`app_details`).
+fn displayed_request<'a>(
+    s: &'a Snapshot,
+    selected: &str,
+    terminal_focus: bool,
+) -> Option<&'a agora_protocol::v1::ApprovalSnapshot> {
+    if terminal_focus {
+        waiting_for(s, selected)
+    } else {
+        agora_tui::client::answered_approval(s, Some(selected))
+    }
+}
+
+/// How an answer is taken (ADR-0101 and Codex's reviews of #1012): "always" only ever from the request box, which shows the whole request,
+/// the agent's own words and the duration warning, after one deliberate key there; a single Allow or a Deny at once when the request is
+/// in view (its own card whole in the inspector, or whole in its chat tab), else in the box too.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Take {
+    Box,
+    Send(Answer),
+}
+
+fn take_answer(reply: Answer, in_view: bool) -> Take {
+    if reply == Answer::AllowAlways || !in_view {
+        Take::Box
+    } else {
+        Take::Send(reply)
+    }
+}
+
+/// Whether the request `a` is in view where the person looks: the inspector shows exactly that request (`displayed`) and all of its rows
+/// (`fits`), or its chat tab showed it whole (`shown`, the id set when all of its block fitted the pane).
+fn request_in_view(
+    a: &agora_protocol::v1::ApprovalSnapshot,
+    displayed: Option<&agora_protocol::v1::ApprovalSnapshot>,
+    fits: bool,
+    shown: Option<&str>,
+) -> bool {
+    (fits && displayed.is_some_and(|d| d.approval_id == a.approval_id))
+        || shown == Some(a.approval_id.as_str())
+}
+
+/// Answers the request `target` names with `reply`. Returns whether the hub's state will change.
 fn answer_command(
     say: &Say,
     session: &mut Session,
@@ -3797,27 +3851,39 @@ fn answer_command(
     c: &mut Console,
     area: Area,
     target: &Target,
-    mut reply: Answer,
+    reply: Answer,
 ) -> bool {
     let text = |id: &str, args: &[(&str, Arg)]| say.text(id, args);
     let Some(s) = c.snapshot.clone() else {
         return false;
     };
     let selected = c.selected.clone();
-    let Some((a, owner)) = target_request(&s, &selected, target) else {
+    let Some((a, _owner)) = target_request(&s, &selected, target) else {
         // A tab's request that is no longer waiting: nothing is answered, and never another request instead.
         c.shown_request = None;
         return false;
     };
+    let shown = c.shown_request.take();
+    // ADR-0101: "always" on a request that does not offer it is refused at once; nothing is shown or sent.
+    if let Some(id) = agora_tui::client::not_offered(&a, reply) {
+        c.notice = say.text(id, &[]);
+        return false;
+    }
     let inspector = c.app.areas(area).inspector;
-    // What the inspector shows, exactly as it is drawn: the selected agent's details (beside a tab with the keyboard, only its own
-    // request). A tab's request is in view there only when the tree has that same agent selected (Codex's re-review).
+    // What the inspector shows, exactly as it is drawn (the tree's selected agent; beside a tab with the keyboard, only its own request).
     let details = inspector_details(c, &s, area, &text);
-    let displayed = target_displayed(target, &owner, &selected);
-    let start = (a.action == "agent.start").then(|| a.approval_id.clone());
-    // ADR-0057: a start request is allowed only once all of it was in view: in the inspector, or in the reader, which y opens.
-    if let Some(id) = start.clone() {
-        if start_read_in_inspector(displayed, details.start.as_ref(), &id) {
+    let displayed = displayed_request(
+        &s,
+        &selected,
+        c.app.focus == agora_tui::app::Focus::Terminal,
+    );
+    let fits = inspector.width > 0 && details.lines.len() <= usize::from(inspector.height);
+    // ADR-0057: a start request is allowed only once all of it was in view: its own card whole in the inspector, or the reader, which
+    // y opens.
+    if a.action == "agent.start" {
+        let id = a.approval_id.clone();
+        let own_card = displayed.is_some_and(|d| d.approval_id == id);
+        if start_read_in_inspector(own_card, details.start.as_ref(), &id) {
             c.read_whole.insert(id.clone());
         }
         if reply == Answer::Allow && !c.read_whole.contains(&id) {
@@ -3832,42 +3898,60 @@ fn answer_command(
             }
             return false;
         }
-    } else {
-        let inspector_shows = displayed
-            && inspector.width > 0
-            && details.lines.len() <= usize::from(inspector.height);
-        let in_view = inspector_shows || c.shown_request.as_deref() == Some(a.approval_id.as_str());
-        if !in_view {
+        if reply == Answer::Allow
+            && !over_console(say, c, session, None, rx, |_, ask| {
+                confirm_skipping_request(say, &a, &text, ask)
+            })
+        {
+            c.notice = String::new();
+            return false;
+        }
+        c.notice = answer_request(say, session, &s, &a, reply);
+        return true;
+    }
+    let in_view = request_in_view(&a, displayed, fits, shown.as_deref());
+    let reply = match take_answer(reply, in_view) {
+        Take::Send(r) => r,
+        Take::Box => {
             let lines = request_box_lines(say, &s, &a);
-            // One deliberate key or click, never a paste or a key typed before the box was shown (as every signed prompt).
-            let key = over_console(say, c, session, None, rx, |_, ask| {
-                ask.answer(&lines, Duration::from_secs(120))
+            // One deliberate key or click, never a paste, a key typed before the box was shown, or one that came with a resize
+            // before the box was drawn again (`Over::read`); the box's size is the one it was last drawn at.
+            let (key, drawn) = over_console(say, c, session, None, rx, |_, ask| {
+                let key = ask.answer(&lines, Duration::from_secs(120));
+                (key, ask.drawn)
             });
-            match agora_tui::client::box_answer(key) {
-                // Codex's re-review: never "always" from a box the window cuts (the duration warning may be below its last row).
-                Some(Answer::AllowAlways) if !always_box_shown(&lines, window_area()) => {
-                    c.notice = say.text(key!("tui-always-too-small"), &[]);
+            match box_reply(agora_tui::client::box_answer(key), &lines, drawn) {
+                Ok(r) => r,
+                Err(Some(id)) => {
+                    c.notice = say.text(id, &[]);
                     return false;
                 }
-                Some(r) => reply = r,
-                None => {
+                Err(None) => {
                     c.notice = String::new();
                     return false;
                 }
             }
         }
-    }
-    c.shown_request = None;
-    if reply == Answer::Allow
-        && !over_console(say, c, session, None, rx, |_, ask| {
-            confirm_skipping_request(say, &a, &text, ask)
-        })
-    {
-        c.notice = String::new();
-        return false;
-    }
+    };
     c.notice = answer_request(say, session, &s, &a, reply);
     true
+}
+
+/// The answer a key in the request box gives, checked against the box as it was last drawn (`drawn`): "always" only from a box that
+/// showed all of its lines (Codex's re-review: the duration warning may be below a cut box's last row), else the line that says why
+/// nothing was sent. `Err(None)`: no answer (another key, or none).
+fn box_reply(
+    key: Option<Answer>,
+    lines: &[String],
+    drawn: Option<Area>,
+) -> Result<Answer, Option<&'static str>> {
+    match key {
+        Some(Answer::AllowAlways) if !drawn.is_some_and(|area| always_box_shown(lines, area)) => {
+            Err(Some(key!("tui-always-too-small")))
+        }
+        Some(r) => Ok(r),
+        None => Err(None),
+    }
 }
 
 /// A letter for the selected agent. Returns whether the hub's state will change (a fresh snapshot is wanted).
@@ -6602,14 +6686,12 @@ mod tab_answer_tests {
         // What the inspector draws beside the tab: the tree's selection (agent-1), whole at this size.
         let shown = agora_tui::split::app_details_in_tab(&s, "mac/agent-1", 80, 40, &text).start;
         assert_eq!(shown, Some(("mac/ap-1".to_string(), true)));
-        let tab = Target::Tab {
-            agent: "mac/agent-2".into(),
-            approval: "mac/ap-2".into(),
-        };
-        let displayed = target_displayed(&tab, "mac/agent-2", "mac/agent-1");
-        assert!(!displayed);
+        // The inspector shows agent-1's own request beside the tab, not the tab's (agent-2's).
+        let displayed = displayed_request(&s, "mac/agent-1", true).map(|d| d.approval_id.clone());
+        assert_eq!(displayed.as_deref(), Some("mac/ap-1"));
+        let own_card = displayed.as_deref() == Some("mac/ap-2");
         assert!(!start_read_in_inspector(
-            displayed,
+            own_card,
             shown.as_ref(),
             "mac/ap-2"
         ));
@@ -6621,23 +6703,138 @@ mod tab_answer_tests {
         ));
         // The tab's own agent selected: its own card counts.
         let own = agora_tui::split::app_details_in_tab(&s, "mac/agent-2", 80, 40, &text).start;
-        assert!(start_read_in_inspector(
-            target_displayed(&tab, "mac/agent-2", "mac/agent-2"),
-            own.as_ref(),
-            "mac/ap-2"
-        ));
+        let own_card =
+            displayed_request(&s, "mac/agent-2", true).is_some_and(|d| d.approval_id == "mac/ap-2");
+        assert!(start_read_in_inspector(own_card, own.as_ref(), "mac/ap-2"));
         // A card shown cut is never read.
         assert!(!start_read_in_inspector(
             true,
             Some(&("mac/ap-2".to_string(), false)),
             "mac/ap-2"
         ));
-        // The tree's own keys answer what the inspector shows.
-        assert!(target_displayed(
-            &Target::Selected,
-            "mac/agent-1",
-            "mac/agent-1"
+    }
+
+    /// The conservative path (Codex's third review of #1012): "always" is taken ONLY in the request box. Every entry point (the inspector
+    /// showing it whole, the commands with the keyboard in a tab, Alt+A in a tab, Alt+A in a chat that shows it whole) opens the box and
+    /// signs nothing itself.
+    #[test]
+    fn every_always_entry_point_opens_the_box_and_signs_nothing() {
+        let a = ask(2);
+        let s = two();
+        // The inspector shows exactly this request, whole (the tree on agent-2): in view, yet "always" goes to the box.
+        let shown = displayed_request(&s, "mac/agent-2", false);
+        assert!(request_in_view(&a, shown, true, None));
+        assert_eq!(take_answer(Answer::AllowAlways, true), Take::Box);
+        // A chat tab that showed all of it: still the box.
+        assert!(request_in_view(&a, None, false, Some("mac/ap-2")));
+        assert_eq!(take_answer(Answer::AllowAlways, true), Take::Box);
+        // Alt+A in a terminal tab whose request is not in the inspector: the box.
+        assert!(!request_in_view(
+            &a,
+            displayed_request(&s, "mac/agent-1", true),
+            true,
+            None
         ));
+        assert_eq!(take_answer(Answer::AllowAlways, false), Take::Box);
+        // A single Allow or a Deny of a request in view goes at once; out of view, the box too.
+        assert_eq!(take_answer(Answer::Allow, true), Take::Send(Answer::Allow));
+        assert_eq!(take_answer(Answer::Deny, true), Take::Send(Answer::Deny));
+        assert_eq!(take_answer(Answer::Allow, false), Take::Box);
+        assert_eq!(take_answer(Answer::Deny, false), Take::Box);
+    }
+
+    /// The commands (Alt+K) with the keyboard in a tab whose agent has no request: the fleet's first request is answered only in the box,
+    /// never as if the inspector (which beside a tab shows no other agent's request) had shown it.
+    #[test]
+    fn a_command_from_a_tab_never_answers_a_request_the_inspector_does_not_show() {
+        let s = Snapshot {
+            approvals: vec![ask(2)],
+            ..Default::default()
+        };
+        let (a, _) = target_request(&s, "mac/agent-1", &Target::Selected).unwrap();
+        assert_eq!(
+            a.approval_id, "mac/ap-2",
+            "the fleet's first request, for the box"
+        );
+        assert_eq!(displayed_request(&s, "mac/agent-1", true), None);
+        let in_view = request_in_view(&a, displayed_request(&s, "mac/agent-1", true), true, None);
+        assert!(!in_view);
+        for reply in [Answer::Allow, Answer::Deny, Answer::AllowAlways] {
+            assert_eq!(take_answer(reply, in_view), Take::Box, "{reply:?}");
+        }
+        // In the tree the inspector does show the first request (app_details): a single answer may go from there.
+        assert_eq!(
+            displayed_request(&s, "mac/agent-1", false).map(|d| d.approval_id.as_str()),
+            Some("mac/ap-2")
+        );
+    }
+
+    /// Only a key in the box signs, and "always" only from a box last drawn whole.
+    #[test]
+    fn only_a_key_in_a_box_drawn_whole_gives_always() {
+        let say = Say(Catalog::english());
+        let lines = request_box_lines(&say, &two(), &ask(2));
+        let big = Area {
+            x: 0,
+            y: 0,
+            width: 120,
+            height: 40,
+        };
+        let small = Area {
+            x: 0,
+            y: 0,
+            width: 120,
+            height: u16::try_from(lines.len()).unwrap(),
+        };
+        assert_eq!(
+            box_reply(Some(Answer::AllowAlways), &lines, Some(big)),
+            Ok(Answer::AllowAlways)
+        );
+        assert_eq!(
+            box_reply(Some(Answer::AllowAlways), &lines, Some(small)),
+            Err(Some("tui-always-too-small"))
+        );
+        assert_eq!(
+            box_reply(Some(Answer::AllowAlways), &lines, None),
+            Err(Some("tui-always-too-small"))
+        );
+        assert_eq!(
+            box_reply(Some(Answer::Allow), &lines, Some(small)),
+            Ok(Answer::Allow)
+        );
+        assert_eq!(box_reply(None, &lines, Some(big)), Err(None));
+    }
+
+    /// A key that comes with a change of the window's size is dropped: the box is drawn again first, and only a key after that counts.
+    #[test]
+    fn a_key_that_comes_with_a_resize_is_dropped_until_the_box_is_drawn_again() {
+        use agora_tui::app::Key;
+        let lines = vec!["question".to_string(), "A allows it always".to_string()];
+        let drawn = Area {
+            x: 0,
+            y: 0,
+            width: 40,
+            height: 10,
+        };
+        let bigger = Area {
+            x: 0,
+            y: 0,
+            width: 120,
+            height: 40,
+        };
+        let key = [AppEvent::Key(Key::Char('A'))];
+        assert_eq!(
+            box_step(drawn, bigger, &key, &lines, one_answer),
+            BoxStep::Redraw
+        );
+        assert_eq!(
+            box_step(bigger, bigger, &key, &lines, one_answer),
+            BoxStep::Key(b'A')
+        );
+        assert_eq!(
+            box_step(drawn, drawn, &[], &lines, one_answer),
+            BoxStep::Wait
+        );
     }
 
     /// Codex's re-review: Alt+A in a chat tab counts the request as read only when all of its block, the duration warning included,
