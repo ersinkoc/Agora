@@ -88,7 +88,7 @@
   [dir='rtl'] .tab-strip[data-fade-start] { mask-image: linear-gradient(to right, #000 calc(100% - 2rem), transparent); }
   /* A sign's whole meaning, shown on hover, keyboard focus and tap (NoAskBadge): drawn over the page, above dialogs and menus, so a clipping
      row or the window's edge never cuts it. */
-  .tip-bubble { @apply pointer-events-none fixed z-60 w-max max-w-64 rounded-xs border border-line bg-surface-1 px-2 py-1 text-xs font-normal whitespace-normal text-ink; box-shadow: var(--shadow); }
+  .tip-bubble { @apply fixed z-60 w-max max-w-64 rounded-xs border border-line bg-surface-1 px-2 py-1 text-xs font-normal whitespace-normal text-ink; box-shadow: var(--shadow); }
   .ide-section { @apply px-3 pb-1 pt-3 text-xs font-semibold tracking-wider text-muted uppercase; }
   .page { @apply mx-auto grid max-w-3xl gap-6 px-4 py-8; }
   .topbar { @apply flex items-center justify-between gap-4; }

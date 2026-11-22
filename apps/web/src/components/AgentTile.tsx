@@ -40,7 +40,7 @@ function Tile({ agent, onOpen, context }: { agent: AgentTileModel; onOpen?: (id:
         className={`tile tile--${agent.state}`}
         style={{ ['--tile-accent' as string]: agent.accent }}
         onClick={() => onOpen?.(agent.id)}
-        aria-label={`${agent.name}, ${stateWord}`}
+        aria-label={`${agent.name}, ${stateWord}${agent.skipsPermissions ? `, ${t('agent-does-not-ask')}` : ''}`}
       >
         <span className="tile__name">{agent.name}</span>
         <StateBadge state={agent.state} failed={failed} />
@@ -65,7 +65,7 @@ function Tile({ agent, onOpen, context }: { agent: AgentTileModel; onOpen?: (id:
       className={`tile tile--compact tile--${failed ? 'failed' : agent.state}${agent.closed ? ' tile--closed' : ''}`}
       style={{ ['--tile-accent' as string]: agent.accent }}
       onClick={() => onOpen?.(agent.id)}
-      aria-label={t('fleet-open-for', { name: `${agent.name}, ${stateWord}` })}
+      aria-label={t('fleet-open-for', { name: `${agent.name}, ${stateWord}${agent.skipsPermissions ? `, ${t('agent-does-not-ask')}` : ''}` })}
     >
       <span className="tile__head">
         <span className="tile__name">{agent.name}</span>

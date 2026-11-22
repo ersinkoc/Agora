@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from 'react';
 import { createPortal } from 'react-dom';
 import { t } from '../i18n';
 import { plain } from './boardColumns';
@@ -9,9 +9,11 @@ import { Icon } from './Icon';
 // It is one sign and no words: a lightning bolt in the "risk" colour (the fixed red of `--diff-removed`), so it can never be read as the
 // quota chip (an amber warning sign with its percentage) or as "needs you" (amber). The whole meaning ("Runs without asking: Started so
 // that it acts without asking you first") is its accessible name and its tooltip. The tooltip opens on hover, on keyboard focus and on a
-// tap; it is drawn over the page (a portal), so a row that clips its content or the window's edge never cuts it, and Esc closes it.
+// tap; it is drawn over the page (a portal), so a row that clips its content or the window's edge never cuts it, it stays open while the
+// pointer is on it, and Esc closes it.
 // `nested`: it sits inside a button or a tab, which must stay the one stop, so it is not focusable there; the tooltip then opens when that
-// control has keyboard focus, and the meaning is part of the control's name.
+// control has keyboard focus, a tap on the sign shows it without pressing the control, and the meaning is part of the control's name
+// (a control with its own aria-label must say it there: AgentTile).
 // `cause`: the agent's own name for the mode or setting that makes it act so, when the window knows it (a session switch); agent text, so
 // it is shown as one plain short line.
 export function NoAskBadge({ agent, nested, session, approved, cause }: { agent: { skipsPermissions?: boolean }; nested?: boolean; session?: boolean; approved?: boolean; cause?: string }) {
@@ -29,8 +31,14 @@ const CONTROL = 'button, a[href], [tabindex], [role="tab"], input, select, texta
 function Badge({ full, nested, kind }: { full: string; nested: boolean; kind: string }) {
   const ref = useRef<HTMLSpanElement>(null);
   const [anchor, setAnchor] = useState<HTMLElement | null>(null);
-  const show = () => setAnchor(ref.current);
-  const hide = () => setAnchor(null);
+  const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const pointer = useRef('');
+  const show = () => { clearTimeout(timer.current); setAnchor(ref.current); };
+  const hide = () => { clearTimeout(timer.current); setAnchor(null); };
+  // The pointer may move from the sign onto its tooltip and stay there (WCAG 1.4.13, hoverable): leaving waits a moment, and entering the
+  // tooltip keeps it open.
+  const leave = () => { if (document.activeElement === ref.current) return; clearTimeout(timer.current); timer.current = setTimeout(() => setAnchor(null), 300); };
+  useEffect(() => () => clearTimeout(timer.current), []);
   // Inside a control: the tooltip follows that control's keyboard focus (not a mouse click, which would only flash it).
   useEffect(() => {
     const ctrl = nested ? ref.current?.parentElement?.closest<HTMLElement>(CONTROL) : null;
@@ -42,20 +50,28 @@ function Badge({ full, nested, kind }: { full: string; nested: boolean; kind: st
     ctrl.addEventListener('focusout', off);
     return () => { ctrl.removeEventListener('focusin', on); ctrl.removeEventListener('focusout', off); };
   }, [nested]);
-  // Esc closes it (WCAG 1.4.13); a scroll would leave it behind, so a scroll closes it too.
+  // Esc closes it (WCAG 1.4.13); a scroll would leave it behind, so a scroll closes it too; so does a tap or click anywhere else.
   useEffect(() => {
     if (!anchor) return;
-    const key = (e: KeyboardEvent) => { if (e.key === 'Escape') setAnchor(null); };
+    const key = (e: KeyboardEvent) => { if (e.key === 'Escape') hide(); };
+    const away = (e: PointerEvent) => { const at = e.target as Node | null; if (at && !ref.current?.contains(at) && !(at instanceof Element && at.closest('[data-no-ask-tip]'))) hide(); };
     document.addEventListener('keydown', key, true);
+    document.addEventListener('pointerdown', away, true);
     window.addEventListener('scroll', hide, true);
-    return () => { document.removeEventListener('keydown', key, true); window.removeEventListener('scroll', hide, true); };
+    return () => { document.removeEventListener('keydown', key, true); document.removeEventListener('pointerdown', away, true); window.removeEventListener('scroll', hide, true); };
   }, [anchor]);
-  const own = nested ? {} : { tabIndex: 0, onFocus: show, onBlur: hide };
+  // A tap on a sign inside a row, tab or tile shows what it means and does not press that control (a tap elsewhere on it still does). A
+  // mouse click goes to the control as before: hovering already shows the tooltip.
+  const tap = nested ? {
+    onPointerDown: (e: ReactPointerEvent) => { pointer.current = e.pointerType; },
+    onClick: (e: ReactMouseEvent) => { if (pointer.current === 'touch' || pointer.current === 'pen') { e.preventDefault(); e.stopPropagation(); show(); } pointer.current = ''; },
+  } : {};
+  const own = nested ? tap : { tabIndex: 0, onFocus: show, onBlur: hide };
   return (
     <span ref={ref} role="img" aria-label={full} data-no-ask={kind} className="ide-chip w-fit flex-none self-center justify-self-start border-risk/60 px-1 text-risk"
-      onMouseEnter={show} onMouseLeave={() => { if (document.activeElement !== ref.current) hide(); }} {...own}>
+      onMouseEnter={show} onMouseLeave={leave} {...own}>
       <Icon name="bolt" className="size-3.5" />
-      {anchor && <Bubble anchor={anchor} text={full} />}
+      {anchor && <Bubble anchor={anchor} text={full} onEnter={show} onLeave={leave} />}
     </span>
   );
 }
@@ -66,7 +82,7 @@ function focusVisible(el: Element): boolean {
 
 // The tooltip itself (app.css `.tip-bubble`), placed under the sign (above it at the bottom of the window) and kept
 // inside the window on both sides. Hidden from screen readers: the sign's name already says the same.
-function Bubble({ anchor, text }: { anchor: HTMLElement; text: string }) {
+function Bubble({ anchor, text, onEnter, onLeave }: { anchor: HTMLElement; text: string; onEnter: () => void; onLeave: () => void }) {
   const ref = useRef<HTMLSpanElement>(null);
   const [pos, setPos] = useState<{ left: number; top: number }>();
   useLayoutEffect(() => {
@@ -83,7 +99,8 @@ function Bubble({ anchor, text }: { anchor: HTMLElement; text: string }) {
     setPos({ left, top });
   }, [anchor, text]);
   return createPortal(
-    <span ref={ref} aria-hidden data-no-ask-tip className="tip-bubble" style={pos ? { left: pos.left, top: pos.top } : { left: 0, top: 0, visibility: 'hidden' }}>{text}</span>,
+    // It is a React child of the sign: a press on it must not reach the row or tab that holds the sign.
+    <span ref={ref} aria-hidden data-no-ask-tip className="tip-bubble" onMouseEnter={onEnter} onMouseLeave={onLeave} onClick={(e) => e.stopPropagation()} onPointerDown={(e) => e.stopPropagation()} style={pos ? { left: pos.left, top: pos.top } : { left: 0, top: 0, visibility: 'hidden' }}>{text}</span>,
     document.body,
   );
 }

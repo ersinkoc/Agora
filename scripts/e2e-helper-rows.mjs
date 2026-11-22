@@ -62,7 +62,7 @@ createRoot(document.getElementById('root')).render(params.get('page') === 'sessi
     h('div', { className: 'flex flex-wrap items-center gap-x-3 gap-y-1.5' }, h(SessionBar, { part: 'controls', agentKey: 'white/a1', session, choose: async () => true })))
   : h('div', { id: 'list', style: { width: width + 'px', height: '480px', display: 'grid', gridTemplateColumns: 'minmax(0,1fr)' } },
     h(QuotaProvider, { obs, machines: new Map([['white', 'WHITE']]) },
-      h(Explorer, { by: 'machine', onBy: noop, spread: new Map(), fleet, machines, open: [], current: 'white/a3', projects: [], project: '', onProject: noop, onToggle: noop, onCollapse: noop, onDismiss: noop }))));
+      h(Explorer, { by: 'machine', onBy: noop, spread: new Map(), fleet, machines, open: [], current: 'white/a3', projects: [], project: '', onProject: noop, onToggle: () => { window.__toggled = (window.__toggled ?? 0) + 1; }, onCollapse: noop, onDismiss: noop }))));
 window.__ready = true;
 `;
 const server = await createServer({
@@ -210,6 +210,40 @@ try {
         await page.screenshot({ path: join(shots, `session-no-ask-tip-${theme}.png`), clip: await around(page, '#bar'), animations: 'disabled' });
       }
     }
+    await ctx.close();
+  }
+  // Codex review of #1004. A tap on the bolt inside an Agents-list row shows its tooltip and does not open the row (a tap on the name
+  // still does); and the pointer can move from the bolt onto the tooltip and rest there without it closing (WCAG 1.4.13).
+  {
+    const touch = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, hasTouch: true, isMobile: true, colorScheme: 'dark' });
+    const phone = await touch.newPage();
+    await phone.goto(`${base}?w=370`);
+    await phone.waitForFunction(() => window.__ready === true && document.querySelectorAll('[data-agent-row]').length === 7);
+    await phone.tap('[data-agent-row="white/a6"] [data-no-ask]');
+    if (!(await tipCheck(phone, 'Agents list phone tap on the bolt'))) failed++;
+    const kept = (await phone.evaluate(() => window.__toggled ?? 0)) === 0;
+    if (!kept) failed++;
+    console.log(`${kept ? 'ok  ' : 'FAIL'} Agents list phone: a tap on the bolt does not open the row`);
+    await phone.tap('[data-agent-row="white/a6"] [data-agent-name]');
+    const opened = (await phone.evaluate(() => window.__toggled ?? 0)) === 1 && (await phone.$('[data-no-ask-tip]')) === null;
+    if (!opened) failed++;
+    console.log(`${opened ? 'ok  ' : 'FAIL'} Agents list phone: a tap on the name opens the row and closes the tooltip`);
+    await touch.close();
+    const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 }, colorScheme: 'dark' });
+    const page = await ctx.newPage();
+    await page.goto(`${base}?w=272`);
+    await page.waitForFunction(() => window.__ready === true && document.querySelectorAll('[data-agent-row]').length === 7);
+    await page.hover('[data-agent-row="white/a6"] [data-no-ask]');
+    await page.waitForSelector('[data-no-ask-tip]');
+    const b = await page.$eval('[data-no-ask-tip]', (el) => { const r = el.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; });
+    await page.mouse.move(b.x, b.y, { steps: 8 });
+    await page.waitForTimeout(800);
+    if (!(await tipCheck(page, 'Agents list: the pointer rests on the tooltip'))) failed++;
+    await page.mouse.move(1200, 700, { steps: 4 });
+    await page.waitForTimeout(800);
+    const shut = (await page.$('[data-no-ask-tip]')) === null;
+    if (!shut) failed++;
+    console.log(`${shut ? 'ok  ' : 'FAIL'} Agents list: leaving the tooltip closes it`);
     await ctx.close();
   }
 } finally {
