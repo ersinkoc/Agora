@@ -347,8 +347,7 @@ fn terminal_subscription_streams_snapshot_data_resize_and_exit() {
     );
 }
 
-/// What a hub needs to build its view: the node, its checkout, then for each agent its workspace, the agent and its
-/// terminal, in that order, and the matching closings.
+/// A `terminal.subscribe` for `terminal_id` that asks for `history_lines` lines of history (ADR-0100).
 fn subscribe_cmd(terminal_id: &str, history_lines: u32) -> Cmd {
     Cmd::TerminalSubscribe(v1::TerminalSubscribe {
         terminal_id: terminal_id.into(),
@@ -491,6 +490,8 @@ fn history_comes_before_the_snapshot_only_when_asked_and_never_with_a_resync() {
     let _ = std::fs::remove_dir_all(&e.dir);
 }
 
+/// What a hub needs to build its view: the node, its checkout, then for each agent its workspace, the agent and its
+/// terminal, in that order, and the matching closings.
 #[test]
 fn the_node_reports_what_the_hub_needs_to_show_it() {
     use v1::event::Body;

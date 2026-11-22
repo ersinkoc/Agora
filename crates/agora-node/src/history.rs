@@ -113,17 +113,30 @@ impl HistoryCapture {
         let rows = usize::from(self.size.rows.max(1));
         // The tail, at its longest: the bottom row's position and one line feed per screen row but the last.
         let tail_max = format!("\x1b[{rows};1H").len() + rows - 1;
-        // How many of the newest lines fit, measured as they will be written.
+        // How many of the newest lines fit, measured exactly as they will be written. A line's cost depends on whether it is the oldest
+        // written (an empty line after a wrapped one prints a space to reach its own row, the oldest does not), so adding line `i` as the
+        // new oldest also re-measures line `i + 1`, which stops being the oldest.
         let mut scratch = String::new();
+        let mut measure = |i: usize, oldest: usize| {
+            let mut count = Count(0);
+            write_row(&mut count, &self.rows, i, oldest, &mut scratch);
+            count.0
+        };
         let mut total = HEAD.len() + tail_max;
         let mut first = self.rows.len();
+        let mut oldest_cost = 0;
         for i in (0..self.rows.len()).rev() {
-            let mut count = Count(0);
-            write_row(&mut count, &self.rows, i, i, &mut scratch);
-            if total + count.0 > BUDGET {
+            let own = measure(i, i);
+            let next = if i + 1 < self.rows.len() {
+                measure(i + 1, i) - oldest_cost
+            } else {
+                0
+            };
+            if total + own + next > BUDGET {
                 break;
             }
-            total += count.0;
+            total += own + next;
+            oldest_cost = own;
             first = i;
         }
         let kept = &self.rows[first..];
@@ -419,6 +432,40 @@ mod tests {
         let (w, frames) = window(&src, 2000, false);
         assert_eq!(history(&w), history(&src));
         assert!(frames.len() <= HISTORY_MAX_FRAMES);
+    }
+
+    /// The budget counts exactly what is written: an empty line after a wrapped one costs the space that moves it onto its own row,
+    /// and the oldest line written costs nothing of the kind (review of #959: alternating wrapped lines with the longest SGRs and
+    /// blank continuations went past the budget when every line was measured as the oldest).
+    #[test]
+    fn the_budget_counts_blank_continuations_of_wrapped_lines() {
+        let mut src = AlacrittyTerminal::new(size(10, 3));
+        for i in 0..2100usize {
+            // Ten cells, each in a style of its own with every attribute and two 24-bit colours (a 52-byte SGR), then a plain space
+            // that wraps onto the next row and is all that row holds.
+            let mut line = String::new();
+            for c in 0..10usize {
+                let v = 100 + (i + c) % 2 * 100;
+                line.push_str(&format!(
+                    "\x1b[1;2;3;4;7;8;9;38;2;{v};{v};{v};48;2;{v};{v};{v}m{}",
+                    (b'a' + c as u8) as char
+                ));
+            }
+            src.feed(line.as_bytes());
+            src.feed(b"\x1b[0m \r\n");
+        }
+        assert_eq!(src.history_len(), 2000);
+        let frames = history_of(&src, 2000);
+        let total: usize = frames.iter().map(Vec::len).sum();
+        assert!(total <= BUDGET, "{total} > {BUDGET}");
+        assert!(frames.len() <= HISTORY_MAX_FRAMES, "{}", frames.len());
+        let mut w = AlacrittyTerminal::new(src.size());
+        for f in &frames {
+            w.feed(f);
+        }
+        let (got, all) = (history(&w), history(&src));
+        assert!(!got.is_empty() && got.len() < all.len(), "{}", got.len());
+        assert_eq!(got, all[all.len() - got.len()..]);
     }
 
     /// A line the node holds as wrapped is written without a break: the window has the same rows, and rewraps them on a resize.
