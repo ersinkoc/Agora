@@ -40,10 +40,13 @@ describe('an Agents-list row (#945)', () => {
       expect(row.title.startsWith(a.name)).toBe(true); // the full name when it is cut
       expect(row.title).toContain('Shared');
       if (a.parentName) expect(cell.textContent).toContain(`started by ${a.parentName}`);
-      // The badge keeps its sign and accessible name; its word waits for a row of 16rem.
+      // Acts freely keeps its words at every width (a lone sign would read as the limit chip); the row wraps instead.
+      expect(row.className).toContain('flex-wrap');
       const badge = row.querySelector('[role="img"]') as HTMLElement;
       expect(badge.getAttribute('aria-label')).toMatch(/^Runs without asking/);
-      expect(badge.querySelector('span[aria-hidden]')?.className).toBe('hidden @3xs:inline');
+      const word = badge.querySelector('span[aria-hidden]') as HTMLElement;
+      expect(word.textContent).toBe('Acts freely');
+      expect(word.className).not.toContain('hidden');
     }
   });
 });

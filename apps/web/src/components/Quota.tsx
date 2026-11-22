@@ -27,16 +27,18 @@ export function QuotaProvider({ obs, machines, children }: { obs: readonly Quota
 export const useQuota = (): QuotaValue => useContext(Ctx);
 
 /** "Limit 82 %" on an agent's card or row, only from 80 percent and only for a fresh observation; amber, stronger from 95 percent.
- *  `fit`: the sign alone until the nearest `@container` (an Agents-list row) is 16rem wide, as NoAskBadge's `fit`. */
+ *  `fit`: "82 %" without the word until the nearest `@container` (an Agents-list row) is 16rem wide; never the sign alone, which would read
+ *  as the Acts freely badge (#945). */
 export function LimitChip({ agent, compact, fit }: { agent: AgentTileModel; compact?: boolean; fit?: boolean }) {
   const { obs, now } = useQuota();
   const chip = useMemo(() => (obs.length ? chipFor(agent, obs, now) : undefined), [agent, obs, now]);
   if (!chip || agent.closed) return null; // a closed agent uses nothing more of the plan
   const full = `${t('quota-chip-title', { kind: toolName(agentKindOf(agent)), what: windowLabel(chip.window), percent: chip.percent })}${chip.resetsAtMs > now ? ` ${resetsText(chip.resetsAtMs, now)}` : ''}`;
   const tone = chip.level === 'critical' ? 'border-needs-you bg-needs-you/15 font-semibold text-needs-you' : 'border-needs-you/60 text-needs-you';
-  return <span role="img" aria-label={full} title={full} className={`ide-chip w-fit flex-none self-center justify-self-start ${tone} ${compact ? 'text-xs' : ''} ${fit ? 'px-1 @3xs:px-2' : ''}`} data-level={chip.level}>
+  return <span role="img" aria-label={full} title={full} className={`ide-chip w-fit flex-none self-center justify-self-start ${tone} ${compact ? 'text-xs' : ''} ${fit ? 'px-1.5 @3xs:px-2' : ''}`} data-level={chip.level}>
     <Icon name="warn" className="size-3.5" />
     <span aria-hidden className={fit ? 'hidden @3xs:inline' : undefined}>{t('quota-chip', { percent: chip.percent })}</span>
+    {fit && <span aria-hidden className="@3xs:hidden">{t('quota-chip-short', { percent: chip.percent })}</span>}
   </span>;
 }
 
