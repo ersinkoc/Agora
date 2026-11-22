@@ -16,8 +16,8 @@ session"), `docs/specs/adapter-protocol.md` (`approval/request`, `approval/resol
 ## Context
 
 An ACP agent asks for permission with `session/request_permission`, offering options of four kinds: `allow_once`, `allow_always`,
-`reject_once`, `reject_always` (ACP: `allow_always` means "allow this operation and remember the choice"; the agent decides what the choice
-covers and for how long). The bridge (`crates/agora-adapters/src/acp.rs`, `approval/resolve`, about line 1690) turns the request into an
+`reject_once`, `reject_always` (in ACP, `allow_always` allows the operation and asks the agent to remember the choice; the protocol says nothing
+about what the choice covers or for how long, so the agent decides both). The bridge (`crates/agora-adapters/src/acp.rs`, `approval/resolve`, about line 1690) turns the request into an
 `approval/request` and, when the node passes the person's decision, picks the agent's option:
 
 - approved: `allow_once`, else `allow_always`, else the first option, whatever its kind;
@@ -60,12 +60,14 @@ one muted line in the window's own words, and the agent's own name for its optio
 | `agent-always-allowed-explain` | You allowed { $count } of its requests for this session. It does not ask again for those until it ends. | Bu oturum için { $count } isteğine izin verdin. Sona erene kadar bunlar için bir daha sormaz. |
 | `permission-approved-always` | Permission given for this session | Bu oturum için izin verildi |
 
-Errors (`locales/<lang>/errors.ftl`, `docs/specs/error-codes.md`, decision 3):
+Error and notice codes (`locales/<lang>/errors.ftl`, `docs/specs/error-codes.md`, decisions 2 and 3):
 
 | Code | en | tr |
 | --- | --- | --- |
 | `approval.scope_forbidden { approval_id }` | This machine does not let agents act without asking, so only this one request can be allowed. | Bu makine ajanların sormadan iş yapmasına izin vermiyor; yalnızca bu istek için izin verilebilir. |
 | `approval.scope_unavailable { approval_id }` | The agent does not offer that answer for this request. Nothing was sent; answer it again. | Ajan bu istek için bu yanıtı sunmuyor. Hiçbir şey gönderilmedi; yeniden yanıtla. |
+| `approval.always_only_forbidden { action }` (conversation notice) | The agent asked for “{ $action }” and offered only an answer it would remember. This machine allows single answers only, so it was refused. | Ajan “{ $action }” için izin istedi ve yalnızca hatırlayacağı bir yanıt sundu. Bu makine yalnızca tek seferlik yanıtlara izin veriyor, bu yüzden reddedildi. |
+| `adapter.permission_unanswerable { action }` (conversation notice) | The agent asked for “{ $action }” without offering a way to allow it, so it was refused. | Ajan “{ $action }” için izin istedi ama izin vermenin bir yolunu sunmadı, bu yüzden reddedildi. |
 
 - **Where it shows.** Every web surface that shows the request itself: the card (`ApprovalCard`, Inspector), the attention layer
   (`AttentionLayer`), the banner in the centre panel (`ApprovalBanner`) and the phone's card (`Phone.tsx`). The fleet console's one-line rows
@@ -74,15 +76,18 @@ Errors (`locales/<lang>/errors.ftl`, `docs/specs/error-codes.md`, decision 3):
 - **A request that offers only "always"** (the agent has no single answer, decision 2) shows **Allow always for this session** in the place of
   Allow, as the primary button, with `approval-always-only` above it, and Deny. The person is never shown "Allow" for something the agent
   will remember.
-- **The terminal client.** In the list and the request view `Y` (shift) allows always, beside `y` and `n` (`a` is Ask); in a tab or a
-  chat, `Alt+Shift+Y` beside `Alt+Y` and `Alt+N`. The hints that list keys grow the choice only when the request offers it
-  (`tui-request-answer-always` = "y allows it · Y allows it always for this session · n denies it · any other key leaves it waiting",
-  `tui-chat-answer-always`, `tui-tab-answer-always`, `tui-allowed-always` = "Allowed for this session.", and the palette's
-  `tui-app-cmd-allow-always` = "Allow the request that waits, always for this session (Y)"; tr alongside). `Y` on a request that does not offer
-  it says `tui-allow-always-not-offered` = "This request can only be allowed once." and sends nothing.
+- **The terminal client.** `A` allows always in the request view (the full request on screen, where `y` and `n` answer today), and
+  `Alt+A` does so in a tab or a chat, only while the agent in front has a request that offers it (otherwise `Alt+A` stays the agent's key,
+  as `Alt+Y` and `Alt+N` do). Not in the list: there `a` is Ask and `Alt+Y` is already case-folded (`Alt+Shift+Y` allows once), so a
+  one-letter case difference must never be the gap between a single and a remembered answer; from the list, Enter opens the request. The
+  build checks that neither key folds into an existing one. The hints grow the choice only when the request offers it
+  (`tui-request-answer-always` = "y allows it · A allows it always for this session · n denies it · any other key leaves it waiting",
+  `tui-chat-answer-always`, `tui-tab-answer-always` with `Alt+A`, `tui-allowed-always` = "Allowed for this session.", and the palette's
+  `tui-app-cmd-allow-always` = "Allow the request that waits, always for this session"; tr alongside). `A` on a request that does not offer it
+  says `tui-allow-always-not-offered` = "This request can only be allowed once." and sends nothing.
 - **The indicator.** While an agent holds at least one always answer (decision 4), its tile, header and session bar show a quiet
-  **"Asks less"** chip with `agent-always-allowed-explain` on hover or focus, listing the requests (their `action`, bounded). It is not the
-  amber "Acts freely" badge (ADR-0059, ADR-0090 Amendment A): one remembered answer is narrower than a mode that skips every question, and
+  **"Asks less"** chip with `agent-always-allowed-explain` on hover or focus, listing the requests (their `action`, bounded), in neutral
+  chrome colours, not a state colour. It is not the "Acts freely" badge (ADR-0059, ADR-0090 Amendment A): one remembered answer is narrower than a mode that skips every question, and
   the two must not read alike. An agent that both acts freely and holds always answers shows "Acts freely" only. The conversation's
   permission entry for such a decision reads `permission-approved-always`.
 - `docs/ux/approvals.md`'s "Allow for this session" becomes "Allow always for this session", shown only when the agent offers it.
@@ -135,17 +140,22 @@ ALWAYS.
 | true | ONCE (or unset) | today's Allow: the agent's single answer |
 | false | ONCE (or unset) | today's Deny |
 | true | ALWAYS | Allow always for this session |
-| false | ALWAYS | refused (`protocol.invalid_message`, `field: scope`); nothing is sent to the agent. See "never" below |
+| false | ALWAYS | refused like a grant on a request that cannot carry one (`approval.signature_invalid`, decision 3); nothing is sent to the agent. See "never" below |
 
 `scope` must be unset or ONCE for every node-made approval (`agent.start`, `agent.skip_permissions`, any `agent.` action): they have their own
 signed grants (ADR-0057, ADR-0090 Amendment A), and an ALWAYS there is refused the same way. Such requests never carry ALWAYS in `scopes`.
 
 **The bridge's mapping** (`acp.rs` and `docs/specs/adapter-protocol.md`), replacing today's fallback:
 
-- Offered: ONCE when the agent offers `allow_once`, or an allowing option of a kind the bridge does not know (anything that is not one of the
-  four ACP kinds); ALWAYS when it offers `allow_always`. `always_label` is that option's `name`.
-- approved + ONCE → `allow_once`, else the first option whose kind is none of the four ACP kinds. **Never `allow_always`.** With none, the
-  bridge refuses the decision (JSON-RPC `-32602`, `data` `{code: "approval.scope_unavailable"}`) and sends the agent nothing.
+- Offered: ONCE when the agent offers `allow_once`; ALWAYS when it offers `allow_always`. `always_label` is the `allow_always` option's
+  `name`. An option of any other kind is never selected for an approval: ACP defines exactly the four kinds, and the bridge cannot tell
+  whether an unknown one allows, refuses or does something else (today's "first option" fallback is removed).
+- A request that offers neither `allow_once` nor `allow_always` cannot be allowed at all. The bridge raises no approval for it: it answers
+  the agent `reject_once` if offered, else `cancelled`, and reports `adapter.permission_unanswerable` (params `action`) as a `log` line and a
+  conversation notice (ADR-0058), so the person sees that the agent asked for something Agora could not offer to allow. So every
+  `approval/request` from a current bridge has `scopes` of `[ONCE]`, `[ALWAYS]` or `[ONCE, ALWAYS]`.
+- approved + ONCE → `allow_once`. **Never `allow_always`.** With none, the bridge refuses the decision (JSON-RPC `-32602`, `data`
+  `{code: "approval.scope_unavailable"}`) and sends the agent nothing.
 - approved + ALWAYS → `allow_always`, never anything narrower or wider. With none, refused the same way.
 - denied → `reject_once`, else `reject_always`, else `cancelled` (unchanged: denying never widens anything).
 
@@ -158,6 +168,12 @@ offers only the always button (decision 1), and an older window's plain Allow (O
 before anything reaches the agent. That card stays waiting and can be answered from a current window. This is a deliberate, small regression
 for such agents in old windows, in exchange for a signed answer that always means what the button said.
 
+**An always-only request the node may not offer** (`[ALWAYS]` from the adapter, but the policy refuses ALWAYS for this agent or its manifest
+switches it off, decision 3) would be a card nobody can allow. The node raises no card for it: it answers the adapter denied at once
+(the agent gets `reject_once` or `cancelled`), records `ApprovalRequested` and `ApprovalResolved { approved: false }` with no signer as for a
+withdrawn request, and adds a conversation notice `approval.always_only_forbidden` (params `action`), whose text says this machine only
+allows single answers and this agent offered none for that request. The person learns why the agent was refused; nothing was allowed.
+
 **"Never" (`reject_always`) is not offered in this ADR.** Denying once already stops the call. A remembered refusal would make the agent fail
 later calls silently, with nothing in Agora to explain or undo it, and a fourth button costs simplicity (ADR-0024). The table above reserves
 the combination: a later ADR can allow `approved = false, scope = ALWAYS` without a schema change.
@@ -167,6 +183,20 @@ hub. The window does not branch on it (it cannot read node capabilities, `NodeSn
 request's `scopes`, which only a node that implements this ADR, under a policy that allows it, ever sets. No capability is needed to keep
 ALWAYS from older nodes: a window sends it only in answer to such an offer, and if it ever reached an older node, that node would ignore the
 unknown field, check the signature against the v1 bytes, and refuse it (decision 3).
+
+**Compatibility, case by case:**
+
+- **Old window, new node.** It never reads `scopes` and always sends ONCE over the v1 bytes: Allow and Deny work as today, except on an
+  always-only request, where Allow is refused with `approval.scope_unavailable` (the regression named above) and Deny works.
+- **New window, old node.** No request carries `scopes`, so no always button appears; nothing changes.
+- **Old hub between new ends.** It decodes and re-encodes, dropping unknown fields: requests reach the window without `scopes`, so no always
+  button appears and every answer is ONCE. On an always-only request that means Allow is refused (`approval.scope_unavailable`, the card
+  stays) and only Deny works until the hub is updated. If an ALWAYS ever crossed an old hub, the dropped field would make the node check the
+  v1 bytes and refuse it. Hub and node usually ship together in one binary.
+- **Old bridge kept across a node update** (ADR-0075 in-place update, ADR-0093 holder): until that agent restarts it sends no `scopes` (read
+  as `[ONCE]`) and keeps today's fallback, so a plain Allow can still reach `allow_always` for an agent that offers no `allow_once`. This is
+  unrecorded, as today. It ends when the agent restarts with the new bridge. Named as a residual; not worth a version check on the link.
+- **L3 adapters** that do not set `scopes` are offered ONCE only and never receive `scope`.
 
 ### 3. Security: still a user-signed approval; the node decides
 
@@ -187,18 +217,25 @@ the cleaned text announced. Vectors go in `schema/fixtures/signing/approval-alwa
   against the v1 bytes. Both fail with `approval.signature_invalid`; nothing is sent to the agent, the card stays waiting until it expires,
   and the window shows its usual "the answer did not go through" (`approval-failed`). The person can answer again (from a window that
   reaches the node through an honest hub).
-- **It binds what the person read.** v1 binds only node, approval and verdict, so a hub could show other words than the node holds. For a
-  single answer that risk is accepted today (T55); a remembered answer multiplies it, so the always domain binds the agent, the action, the
-  detail and the agent's own label as announced. A hub that rewrites the card's text cannot get an ALWAYS signature that verifies.
-- **The node checks, in this order** (the cheap checks before the signature): the request is an adapter-raised one (not `agent.*`);
-  `approved` is true; the request's stored `scopes` (what the adapter offered, never anything in the decision) hold ALWAYS, else
-  `approval.scope_unavailable`; the policy allows it (below), else `approval.scope_forbidden`; then the signature against `trusted-devices`,
-  single use and expiry as for every approval (ADR-0020, ADR-0028). A refused ALWAYS leaves the card waiting, so the person can still
-  allow it once or deny it.
+- **It binds what the person read.** v1 binds only node, approval and verdict, so a hub that relays the request could show the person other
+  words than the node holds, and a single answer signed that way still verifies (accepted today for single answers). A remembered answer
+  multiplies the harm, so the always domain binds the agent, the action, the detail and the agent's own label as announced: a relaying hub
+  that rewrites the card's text cannot get an ALWAYS signature that verifies. This does not help against a hub that serves the signing page
+  itself (T55: such a page can sign whatever bytes it likes with a browser key); keys outside the hub's page (the terminal client) are
+  unaffected, as for every approval.
+- **The node checks, in this order.** First the shape, which reveals nothing about the request: an ALWAYS on a node-made request
+  (`agent.*`) or with `approved = false` is refused as a helper grant on a request that cannot carry one is today
+  (`approval.signature_invalid`). Then the signature against `trusted-devices`, before anything else is said about the request, as today
+  (`approvals.rs`, `resolve`: "verify before anything changes"), so a peer without a trusted key learns nothing. Then the request's stored
+  `scopes` (what the adapter offered, never anything in the decision) must hold the decided scope, else `approval.scope_unavailable`; then the
+  policy (below), else `approval.scope_forbidden`; then expiry and single use as for every approval (ADR-0020, ADR-0028). A refusal before
+  expiry spends nothing: the card stays waiting, so the person can still allow it once or deny it (`resolve` removes and spends a request
+  only after it verified and passed every check; today a bad signature already leaves it pending).
 - **Node policy can forbid it, by the existing `skip_permissions` line** (ADR-0059: `forbid | allow | confined_only`, default `allow`, set
   only on the machine). `forbid` refuses every ALWAYS; `confined_only` refuses it for an agent that is not confined (ADR-0047/0050); `allow`
   permits it. Under a policy that refuses, the node also leaves ALWAYS out of the `scopes` it announces (so the window shows no button that
-  would fail) and still refuses an ALWAYS that arrives (the policy is read again at decision time, it may have changed). Why the same line:
+  would fail) and still refuses an ALWAYS that arrives (the policy is read again at decision time, it may have changed). An always-only
+  request under such a policy gets no card at all (decision 2). Why the same line:
   an always answer lets the agent act without asking for whatever it counts as the same request; that is a narrower case of what
   `skip_permissions` already governs, and an owner who wrote `forbid` must not find agents on that machine acting unasked. A second policy
   line would be a setting no default fails to cover (`visual-language.md`, "every setting must justify itself"). It is not widened:
@@ -256,12 +293,15 @@ The agent holds the answer; Agora only records it. The record follows the agent'
 
 1. **Schema** (needs this ADR accepted, the schema step with it): `ApprovalScope`, the appended fields, `AgentAlwaysAllowed`, golden fixtures for
    each changed message (new fixtures only, none edited), the signing vectors `approval-always-v1.json` with an `agora-protocol` test, error
-   codes `approval.scope_forbidden` and `approval.scope_unavailable` (en, tr, `error-codes.md`), `protocol.md` and `adapter-protocol.md`,
+   codes `approval.scope_forbidden`, `approval.scope_unavailable`, `approval.always_only_forbidden` and `adapter.permission_unanswerable`
+   (en, tr, `error-codes.md`), `protocol.md` and `adapter-protocol.md`,
    threat-model row T60, `agent-manifest.md` for `allow_always`. `schema-breaking` stays green.
 2. **Bridge and node** (`agora-adapters`, `agora-node`): the bridge's offer and mapping (never `allow_always` for ONCE), the node's stored
    offer, policy filter on announce and on decide, the always domain in `approvals.rs`, `ApprovalResolved.scope`, `AgentAlwaysAllowed`, the
    kept-agent restate, the manifest switch, capability `approval.always`. Tests: the fake ACP agent (`agora-fake-agent --acp`) offering each
-   combination of the four kinds (ONCE never selects `allow_always`; ALWAYS selects only `allow_always`; an only-always request refuses ONCE);
+   combination of the four kinds (ONCE never selects `allow_always`; ALWAYS selects only `allow_always`; an only-always request refuses ONCE;
+   a request with neither allow kind raises no card and gets the notice; an only-always request under `forbid` gets no card, is denied and
+   gets the notice; an option of an unknown kind is never selected);
    a hub-flipped scope in both directions fails the signature; ALWAYS for an `agent.start` and an `agent.skip_permissions` request is refused;
    `approved = false` with ALWAYS is refused; each policy value (announce and decide, and a policy changed between the two); an ALWAYS for a
    request that did not offer it; the kept agent restates its records across a node restart; a resumed agent does not; a mesh message cannot
@@ -271,7 +311,7 @@ The agent holds the answer; Agora only records it. The record follows the agent'
 4. **Web** (`apps/web`): `signAlways` over the always domain (`net/approval.ts`, vectors reproduced in a test), the third button on the four
    surfaces of decision 1, the always-only shape, the chip, the conversation entry, the error texts, en and tr; screenshots in both themes
    (ADR-0024). Tests: the button appears only when offered; it signs ALWAYS and the right bytes; a card that does not offer it never sends it.
-5. **Terminal client** (`agora-tui`: `client.rs`, `device.rs`): `Y` and `Alt+Shift+Y`, the hints, the always signer, the chip in the agent
+5. **Terminal client** (`agora-tui`: `client.rs`, `device.rs`): `A` in the request view and `Alt+A` in a tab or chat, the hints, the always signer, the chip in the agent
    line; tests on the key paths and the bytes.
 6. **Docs**: `docs/ux/approvals.md`, `docs/specs/adapter-protocol.md` (the mapping, replacing "`allow_once`, else `allow_always`"),
    `wrongstack-acp.toml` and the other structured manifests unchanged unless a real check finds a kind that persists the answer.
@@ -284,8 +324,8 @@ The native desktop client (ADR-0099), when it signs approvals, uses the same dom
 - A structured agent that offers `allow_always` can be told once, and stops asking for what it counts as the same request, for the rest of
   its session; the window shows that it does.
 - A plain Allow never again becomes a remembered answer behind the person's back; an agent that only offers "always" says so on the card.
-  Older windows cannot answer such a request (it waits for a current one).
-- One enum, appended fields on eight messages, one event, two error codes and one signing domain; nothing published changes meaning.
+  Older windows can only deny such a request; a current window can allow it.
+- One enum, appended fields on eight messages, one event, two error codes, two notice codes and one signing domain; nothing published changes meaning.
 - Agora still never answers an agent by itself, and the hub still cannot widen what a person signed.
 - Known residual: the extent and lifetime of an always answer are the agent's; Agora records and shows, it does not enforce.
 
