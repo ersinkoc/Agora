@@ -20,8 +20,9 @@ use agora_node::terminal::TerminalOptions;
 
 /// How often the watcher looks at the files of an agent that waits.
 const SCAN_EVERY: Duration = Duration::from_secs(3);
-/// Longer than the slack a session file may predate its process by: a file written this long before a process started is not its.
-const PAST_SLACK: Duration = Duration::from_millis(2500);
+/// Longer than the tick a file system's clock may trail the system clock by (Linux stamps files from a coarse clock, Windows file
+/// times tick every 15.6 ms), far shorter than the 2 s slack the watcher allows when it does not know when a process started.
+const TICK: Duration = Duration::from_millis(60);
 
 const OLD: &str = "0199aaaa-0000-4000-8000-000000000925";
 const NEW: &str = "0199aaaa-0000-4000-8000-000000000926";
@@ -113,12 +114,16 @@ impl Env {
     }
 
     fn start(&self, sup: &mut Supervisor) -> AgentId {
+        self.start_named(sup, "a1")
+    }
+
+    fn start_named(&self, sup: &mut Supervisor, name: &str) -> AgentId {
         sup.start(
             &StartRequest {
                 kind: "tool".into(),
                 checkout: self.repo.clone(),
                 worktree_root: self.root.join("worktrees"),
-                name: "a1".into(),
+                name: name.into(),
                 base: None,
             },
             Instant::now(),
@@ -195,9 +200,8 @@ fn a_restarted_agent_waits_for_its_new_processs_own_session_file() {
     assert!(w
         .poll(now, std::slice::from_ref(&first), &HashSet::new())
         .is_empty());
-    // The first process starts a session, then crashes before the next look; it is started again after the slack.
+    // The first process starts a session, then crashes before the next look; it is started again at once.
     e.write_session("rollout-old.jsonl", OLD, &first.folder);
-    std::thread::sleep(PAST_SLACK);
     crash_and_restart(&mut sup, &id);
     let second = the_target(&sup);
     assert_ne!(first.launch, second.launch, "a restart runs a new process");
@@ -210,7 +214,8 @@ fn a_restarted_agent_waits_for_its_new_processs_own_session_file() {
         .is_empty(),
         "the restarted process was given the session of the process before it"
     );
-    // The new process's own session is found and set.
+    // The new process writes its own file moments after its start: that is found and set, never the old one.
+    std::thread::sleep(TICK);
     e.write_session("rollout-new.jsonl", NEW, &second.folder);
     let found = w.poll(
         now + SCAN_EVERY * 2,
@@ -240,6 +245,30 @@ fn a_session_found_for_the_process_before_a_restart_is_not_set_for_the_next() {
     // The new process still waits for its own.
     assert_ne!(the_target(&sup).launch, first.launch);
     sup.stop(&id).unwrap();
+}
+
+#[test]
+fn a_session_another_agent_got_while_the_files_were_read_is_not_set_twice() {
+    if !supported() {
+        return;
+    }
+    let e = Env::new("owned");
+    let mut sup = e.supervisor();
+    let first = e.start_named(&mut sup, "a1");
+    let second = e.start_named(&mut sup, "a2");
+    let launch = sup
+        .session_file_targets()
+        .into_iter()
+        .find(|t| t.agent == first)
+        .unwrap()
+        .launch;
+    // Discovery read the known sessions, then the files; meanwhile the other agent reported that id as its own.
+    sup.report_session(&second, OLD).unwrap();
+    assert_eq!(sup.report_found_session(&first, launch, OLD), Ok(false));
+    assert_eq!(sup.session_of(&first), None);
+    assert_eq!(sup.session_of(&second).as_deref(), Some(OLD));
+    sup.stop(&first).unwrap();
+    sup.stop(&second).unwrap();
 }
 
 #[test]

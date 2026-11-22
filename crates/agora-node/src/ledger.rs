@@ -83,6 +83,10 @@ pub struct Entry {
     /// The boot it started in (Linux) and its program's name: a process is the recorded one only when both match too.
     pub process_boot: String,
     pub process_name: String,
+    /// A time before that process started (ms since the epoch): taken before it was spawned when the node knows it
+    /// ([`Ledger::set_process_since`]), otherwise when the node first saw it. What a node that takes the agent up from the holder
+    /// knows of when it started, for session discovery (#925). 0: none.
+    pub process_since_ms: u64,
     /// ADR-0062 item 4: when the node last brought it back by itself (0: never), so an agent interrupted again soon after (a crash
     /// loop) is not brought back again by itself.
     pub auto_resumed_at_ms: u64,
@@ -401,6 +405,7 @@ impl Entry {
             "process_started": self.process_started,
             "process_boot": self.process_boot,
             "process_name": self.process_name,
+            "process_since_ms": self.process_since_ms,
             "auto_resumed_at_ms": self.auto_resumed_at_ms,
             "continue_sent_ms": self.continue_sent_ms,
             "holder_pid": self.holder_pid,
@@ -449,6 +454,7 @@ impl Entry {
             process_started: number(v, "process_started"),
             process_boot: field(v, "process_boot"),
             process_name: field(v, "process_name"),
+            process_since_ms: number(v, "process_since_ms"),
             auto_resumed_at_ms: number(v, "auto_resumed_at_ms"),
             continue_sent_ms: number(v, "continue_sent_ms"),
             holder_pid: u32::try_from(number(v, "holder_pid")).unwrap_or(0),
@@ -681,7 +687,28 @@ impl Ledger {
             e.process_boot,
             e.process_name,
         ) = now;
+        e.process_since_ms = if e.pid == 0 { 0 } else { now_ms };
         e.updated_at_ms = now_ms;
+        st.dirty = true;
+        drop(st);
+        let _ = self.flush();
+        true
+    }
+
+    /// #925: a time before the agent's current process started, taken before it was spawned (`Entry::process_since_ms`). Written when
+    /// it changed and the ledger holds a process for the agent; `false` otherwise (try again later).
+    pub fn set_process_since(&self, agent_id: &str, since_ms: u64) -> bool {
+        let mut st = self.st();
+        let Some(e) = st.entries.get_mut(agent_id) else {
+            return false;
+        };
+        if e.pid == 0 {
+            return false;
+        }
+        if e.process_since_ms == since_ms {
+            return true;
+        }
+        e.process_since_ms = since_ms;
         st.dirty = true;
         drop(st);
         let _ = self.flush();
@@ -1108,6 +1135,7 @@ fn apply(st: &mut State, body: &Body, now: u64) -> bool {
                 e.ended = true;
                 e.interrupted_at_ms = 0;
                 (e.pid, e.process_group, e.process_started) = (0, 0, 0);
+                e.process_since_ms = 0;
                 e.process_boot.clear();
                 e.process_name.clear();
                 e.updated_at_ms = now;

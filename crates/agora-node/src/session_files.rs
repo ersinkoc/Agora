@@ -34,7 +34,7 @@ use serde_json::Value;
 const SCAN_EVERY: Duration = Duration::from_secs(3);
 /// How long an agent waits for its session file (the tool may write it only once it has been asked something).
 pub const GIVE_UP_AFTER: Duration = Duration::from_secs(30 * 60);
-/// A file may have been written this long before the node noticed the agent.
+/// A file may have been written this long before the node noticed the agent, when it does not know when the process started.
 const SLACK: Duration = Duration::from_secs(2);
 /// Longest first line read.
 const FIRST_LINE_MAX: u64 = 64 * 1024;
@@ -48,6 +48,10 @@ pub struct Target {
     /// The agent's process ([`TerminalHandle::launch`](crate::terminal::TerminalHandle::launch)): a restart or a resume runs a new one,
     /// which waits for its own file from its own start (#925).
     pub launch: u64,
+    /// A time before the process started ([`TerminalHandle::started`](crate::terminal::TerminalHandle::started)): its files are the ones
+    /// written since, with no slack, so a restart moments after the earlier process wrote its file never gets that file. `None`: from
+    /// when the watcher first sees the process, less [`SLACK`].
+    pub started: Option<SystemTime>,
     pub kind: String,
     pub folder: PathBuf,
     pub spec: SessionFile,
@@ -56,6 +60,7 @@ pub struct Target {
 struct Waiting {
     /// The process this is for ([`Target::launch`]): another process of the agent waits afresh (#925).
     launch: u64,
+    /// Files written since this may be the process's ([`Target::started`], or its first look less [`SLACK`]).
     since: SystemTime,
     give_up_at: Instant,
     next_scan: Instant,
@@ -639,7 +644,11 @@ impl SessionWatcher {
                 .entry(t.agent.clone())
                 .or_insert_with(|| Waiting {
                     launch: t.launch,
-                    since: SystemTime::now(),
+                    since: t.started.unwrap_or_else(|| {
+                        SystemTime::now()
+                            .checked_sub(SLACK)
+                            .unwrap_or(SystemTime::UNIX_EPOCH)
+                    }),
                     give_up_at: now + GIVE_UP_AFTER,
                     next_scan: now,
                 });
@@ -708,7 +717,7 @@ impl SessionWatcher {
             if now < w.next_scan || pending.contains(&t.agent) {
                 continue;
             }
-            let since = w.since.checked_sub(SLACK).unwrap_or(SystemTime::UNIX_EPOCH);
+            let since = w.since;
             let glob = t.spec.glob.replacen("{home}", &home.to_string_lossy(), 1);
             let mut ids: Vec<String> = crate::usage_files::expand(Path::new(&glob))
                 .into_iter()
@@ -792,6 +801,7 @@ mod tests {
         Target {
             agent: AgentId::new(agent),
             launch: 1,
+            started: None,
             kind: "tool".into(),
             folder,
             spec: spec(),
@@ -2286,39 +2296,43 @@ mod tests {
         assert!(w.gave_up.is_empty());
     }
 
-    /// #925: the agent's process `launch`, as after a restart or a resume under the same agent id.
+    /// #925: the agent's process `launch`, started (spawned) just now, as after a restart or a resume under the same agent id.
     fn relaunched(t: &Target, launch: u64) -> Vec<Target> {
         vec![Target {
             launch,
+            started: Some(SystemTime::now()),
             ..t.clone()
         }]
     }
 
+    /// Longer than the tick a file system's clock may trail the system clock by (Linux stamps files from a coarse clock, Windows file
+    /// times tick every 15.6 ms), far shorter than [`SLACK`]: a file written this long after a process started is newer than its start.
+    const TICK: Duration = Duration::from_millis(60);
+
     #[test]
-    fn a_restarted_process_waits_from_its_own_start_and_never_gets_the_earlier_processs_file() {
+    fn a_process_restarted_at_once_never_gets_the_file_the_one_before_it_just_wrote() {
         let root = tmp("restart-window");
         let mut w = SessionWatcher::new(Some(root.join("home")));
-        let first = target("agent-1", root.join("work/a"));
+        let first = relaunched(&target("agent-1", root.join("work/a")), 1).remove(0);
         let now = Instant::now();
         assert!(w
             .poll(now, std::slice::from_ref(&first), &HashSet::new())
             .is_empty());
-        // The first process writes its file, then dies before the next look; the agent is restarted (a new process) only after the
-        // slack a file may predate its process by, so the file is plainly the first process's conversation.
+        // The first process writes its file and dies; the agent is restarted (a new process) at once.
         write(
             &root,
             "rollout-old.jsonl",
             "0199aaaa-0000-4000-8000-0000000009a1",
             &root.join("work/a"),
         );
-        std::thread::sleep(SLACK + Duration::from_millis(500));
         let second = relaunched(&first, 2);
         assert!(
             w.poll(now + SCAN_EVERY, &second, &HashSet::new())
                 .is_empty(),
             "the new process was given the session of the process before it"
         );
-        // The new process's own file is its session.
+        // The new process's own file, written moments after its start, is its session.
+        std::thread::sleep(TICK);
         write(
             &root,
             "rollout-new.jsonl",
@@ -2338,12 +2352,13 @@ mod tests {
     fn discovery_that_gave_up_on_a_process_looks_again_for_the_agents_next_process() {
         let root = tmp("restart-gave-up");
         let mut w = SessionWatcher::new(Some(root.join("home")));
-        let first = target("agent-1", root.join("work/a"));
+        let first = relaunched(&target("agent-1", root.join("work/a")), 1).remove(0);
         let now = Instant::now();
         assert!(w
             .poll(now, std::slice::from_ref(&first), &HashSet::new())
             .is_empty());
         // Two files fit the first process: it gets none.
+        std::thread::sleep(TICK);
         for (name, id) in [
             ("rollout-1.jsonl", "0199aaaa-0000-4000-8000-0000000009b1"),
             ("rollout-2.jsonl", "0199aaaa-0000-4000-8000-0000000009b2"),
@@ -2366,12 +2381,12 @@ mod tests {
                 &HashSet::new()
             )
             .is_empty());
-        std::thread::sleep(SLACK + Duration::from_millis(500));
-        // Its next process waits afresh, and its own file is its session.
+        // Its next process, started at once, waits afresh, and its own file is its session.
         let second = relaunched(&first, 2);
         assert!(w
             .poll(now + SCAN_EVERY * 3, &second, &HashSet::new())
             .is_empty());
+        std::thread::sleep(TICK);
         write(
             &root,
             "rollout-3.jsonl",
@@ -2389,20 +2404,57 @@ mod tests {
 
     #[test]
     fn the_same_process_keeps_waiting_from_its_start_across_looks() {
-        let root = tmp("same-launch");
+        for started in [false, true] {
+            let root = tmp(if started {
+                "same-launch-started"
+            } else {
+                "same-launch"
+            });
+            let mut w = SessionWatcher::new(Some(root.join("home")));
+            let mut t = target("agent-1", root.join("work/a"));
+            if started {
+                t = relaunched(&t, 1).remove(0);
+            }
+            let t = vec![t];
+            let now = Instant::now();
+            assert!(w.poll(now, &t, &HashSet::new()).is_empty());
+            std::thread::sleep(SLACK + Duration::from_millis(500));
+            assert!(w.poll(now + SCAN_EVERY, &t, &HashSet::new()).is_empty());
+            // Written after the process started, though long after the first look: still its own (a look does not move the window).
+            write(
+                &root,
+                "rollout-1.jsonl",
+                "0199aaaa-0000-4000-8000-0000000009c1",
+                &root.join("work/a"),
+            );
+            assert_eq!(w.poll(now + SCAN_EVERY * 2, &t, &HashSet::new()).len(), 1);
+        }
+    }
+
+    #[test]
+    fn a_process_taken_up_later_keeps_the_files_it_wrote_since_its_start() {
+        let root = tmp("taken-up");
         let mut w = SessionWatcher::new(Some(root.join("home")));
-        let t = vec![target("agent-1", root.join("work/a"))];
-        let now = Instant::now();
-        assert!(w.poll(now, &t, &HashSet::new()).is_empty());
-        std::thread::sleep(SLACK + Duration::from_millis(500));
-        assert!(w.poll(now + SCAN_EVERY, &t, &HashSet::new()).is_empty());
-        // Written after the process started, though long after the first look: still its own (the window was not moved by a look).
+        let started = SystemTime::now();
+        std::thread::sleep(TICK);
+        // Written under the earlier node, well before this watcher first sees the process.
         write(
             &root,
             "rollout-1.jsonl",
-            "0199aaaa-0000-4000-8000-0000000009c1",
+            "0199aaaa-0000-4000-8000-0000000009d1",
             &root.join("work/a"),
         );
-        assert_eq!(w.poll(now + SCAN_EVERY * 2, &t, &HashSet::new()).len(), 1);
+        std::thread::sleep(SLACK + Duration::from_millis(500));
+        let t = vec![Target {
+            started: Some(started),
+            ..target("agent-1", root.join("work/a"))
+        }];
+        assert_eq!(
+            w.poll(Instant::now(), &t, &HashSet::new()),
+            vec![(
+                AgentId::new("agent-1"),
+                "0199aaaa-0000-4000-8000-0000000009d1".to_string()
+            )]
+        );
     }
 }

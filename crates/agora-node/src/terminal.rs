@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use agora_platform::{ExitStatus, Pty, PtyControl};
 use agora_vt::{
@@ -366,6 +366,8 @@ pub struct TerminalHandle {
     control: Option<PtyControl>,
     pid: u32,
     launch: u64,
+    /// No file this process wrote is older than this (see [`Self::started`]).
+    started: Option<SystemTime>,
     thread: Option<JoinHandle<()>>,
     /// ADR-0079: the process belongs to the node's terminal holder (it outlives the node).
     held: bool,
@@ -409,6 +411,7 @@ impl TerminalHandle {
             control: Some(control),
             pid,
             launch: LAUNCHES.fetch_add(1, Ordering::Relaxed),
+            started: None,
             thread: Some(thread),
             held: false,
         })
@@ -442,6 +445,19 @@ impl TerminalHandle {
     /// learns about one process of an agent (its session file, #925) is kept under it, so it is never taken for the agent's next one.
     pub fn launch(&self) -> u64 {
         self.launch
+    }
+
+    /// A time before this process started (taken before it was spawned, or for one taken up from the holder, a bound the ledger kept):
+    /// no file it wrote is older (#925). `None` when the node does not know one.
+    pub fn started(&self) -> Option<SystemTime> {
+        self.started
+    }
+
+    /// Records [`Self::started`].
+    #[must_use]
+    pub fn started_after(mut self, bound: SystemTime) -> Self {
+        self.started = Some(bound);
+        self
     }
 
     fn control(&self) -> io::Result<&PtyControl> {
@@ -933,6 +949,7 @@ mod tests {
             control: None,
             pid: 0,
             launch: 0,
+            started: None,
             thread: None,
             held: false,
         };
