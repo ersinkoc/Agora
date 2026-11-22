@@ -128,7 +128,7 @@ fixes it.
   - [ ] export and import; the signed hub record (**schema**); manual takeover with partition tests; continuous replication with a drill; automatic takeover (3+ machines)
 - [ ] **M3.10 Agent login and accounts** (design only): an ADR first (**decision**), then build
 - [ ] **M3.11 A structured agent can be allowed always for its session** (ADR-0101, Accepted 2026-11-22): not built on `main`
-  - [ ] part A, steps 1 to 3 (**schema**, bridge and node, hub): on the branch `claude/adr0101-core`, no PR yet
+  - [ ] part A, steps 1 to 3 (**schema**, bridge and node, hub): #1007, in review (Codex's confinement and delivery findings being fixed)
   - [ ] part B, steps 4 to 6 (the window, the terminal client, docs): next
 
 ## M4. Ready for other people

@@ -252,10 +252,10 @@ not built: nothing to check.
 - **See:** `--check` says "Agora 0.3.33 is the newest release." (or which is available); each update says "Updated to Agora …"
   only after the checksum and signature checked out ("Nothing was changed." otherwise);
   `$RM/bin/agora --version` follows; the machine's own `agora` is untouched. On Windows, note any Microsoft Defender verdict. On
-  0.3.33 `--check` fails on Windows ("could not find the newest release": `curl -o /dev/null`, #939); `--version` works.
+  0.3.33 `--check` failed on Windows ("could not find the newest release": `curl -o /dev/null`, #939, fixed by #952, not run again); `--version` works.
 - **Evidence so far:** [macOS 2026-11-21](2026-11-21-macos-update-0333.md): the LAN Mac updated to 0.3.33 with `--version` and
   `--release-key`, the checksum equal to the published one, Local Network asked again after the update; Windows: none recorded
-  (lan-test-findings L13 lists the self-replace among the suspects of a Defender verdict). [Windows 2026-11-21](2026-11-21-real-machine-windows.md): `--version` passed, Defender silent; `--check` fails (#939).
+  (lan-test-findings L13 lists the self-replace among the suspects of a Defender verdict). [Windows 2026-11-21](2026-11-21-real-machine-windows.md): `--version` passed, Defender silent; `--check` failed (#939, fixed by #952, not run again).
 
 ## Agents
 
