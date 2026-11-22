@@ -210,51 +210,53 @@ fn kept_file(dir: &Path, agent: &str) -> Option<PathBuf> {
     .then(|| dir.join(format!("kept-{agent}.pb")))
 }
 
-/// Writes the kept session file of every agent in `kept_pending` from what the ledger holds now, or removes it when there is none, then
-/// drops each mark that no newer change replaced meanwhile. Under the write lock. A failed write is not retried: the next change writes
-/// it again.
-fn write_kept_pending(state: &Mutex<State>, write: &Mutex<()>, dir: Option<&Path>) {
+/// Attempts each pending change under the write lock and returns the last change number in the snapshot. A failed write or removal
+/// retains its mark for the next batch; a reader cannot recover an old report from a file whose removal failed.
+fn write_kept_pending(state: &Mutex<State>, write: &Mutex<()>, dir: Option<&Path>) -> u64 {
     let _writing = write.lock().unwrap_or_else(|e| e.into_inner());
     let lock = || state.lock().unwrap_or_else(|e| e.into_inner());
     let Some(dir) = dir else {
-        lock().kept_pending.clear();
-        return;
+        let mut st = lock();
+        st.kept_pending.clear();
+        return st.kept_seq;
     };
-    let batch: Vec<(String, u64, Option<Vec<u8>>)> = {
+    let (through, mut batch) = {
         let st = lock();
-        st.kept_pending
+        let batch: Vec<_> = st
+            .kept_pending
             .iter()
             .map(|(a, n)| (a.clone(), *n, st.kept.get(a).map(KeptSession::encode)))
-            .collect()
+            .collect();
+        (st.kept_seq, batch)
     };
-    for (agent, _, bytes) in &batch {
+    batch.retain(|(agent, _, bytes)| {
         let Some(file) = kept_file(dir, agent) else {
-            continue;
+            return true;
         };
         match bytes {
-            Some(b) => {
-                let _ = agora_platform::write_private(&file, b);
-            }
-            None => {
-                let _ = std::fs::remove_file(&file);
-            }
+            Some(b) => agora_platform::write_private(&file, b).is_ok(),
+            None => match std::fs::remove_file(&file) {
+                Ok(()) => true,
+                Err(e) => e.kind() == io::ErrorKind::NotFound,
+            },
         }
-    }
+    });
     let mut st = lock();
     for (agent, n, _) in batch {
         if st.kept_pending.get(&agent) == Some(&n) {
             st.kept_pending.remove(&agent);
         }
     }
+    through
 }
 
-/// The writer thread: writes until nothing is pending, then says it ended (in the same step as it finds nothing, so a change that comes
-/// after starts a new one).
+/// The writer retries when a newer change arrives while it is working. With no newer change it stops, leaving failures for the next
+/// change or a clean flush, so a persistent I/O error does not keep the writer running.
 fn kept_writer(state: &Mutex<State>, write: &Mutex<()>, dir: Option<&Path>) {
     loop {
-        write_kept_pending(state, write, dir);
+        let through = write_kept_pending(state, write, dir);
         let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
-        if st.kept_pending.is_empty() {
+        if st.kept_seq == through {
             st.kept_writer = false;
             return;
         }
@@ -1430,6 +1432,58 @@ mod tests {
         assert!(!st.kept_writer && st.kept_pending.is_empty());
         drop(st);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_kept_removal_hides_the_old_report_and_can_be_retried() {
+        let dir = temp("kept-remove-failed");
+        let sessions = dir.join(LEDGER_DIR);
+        let file = sessions.join("kept-agent-1.pb");
+        let backup = sessions.join("original.pb");
+        let options = |agent_id: &str| {
+            Body::AgentSessionOptions(v1::AgentSessionOptions {
+                agent_id: agent_id.into(),
+                current_mode: "bypassPermissions".into(),
+                ..Default::default()
+            })
+        };
+        let start = started("agent-1", "/wt/a", "");
+        let old = Ledger::open(&dir, 1).unwrap();
+        old.observe(&start, 2);
+        old.observe(&options("agent-1"), 3);
+        old.flush_all().unwrap();
+        drop(old);
+
+        // A directory at the sidecar path makes remove_file fail on every platform. Restore the sidecar itself after the attempt.
+        std::fs::rename(&file, &backup).unwrap();
+        std::fs::create_dir(&file).unwrap();
+        let ledger = Ledger::open(&dir, 4).unwrap();
+        // Drive the single writer ourselves so both pending changes are in its batch.
+        ledger.st().kept_writer = true;
+        ledger.observe(
+            &Body::AgentInterrupted(v1::AgentInterrupted {
+                agent_id: "agent-1".into(),
+                ..Default::default()
+            }),
+            5,
+        );
+        ledger.observe(&start, 6);
+        ledger.observe(&options("agent-2"), 7);
+        kept_writer(&ledger.state, &ledger.write, Some(&sessions));
+        assert!(!ledger.st().kept_writer);
+        assert!(sessions.join("kept-agent-2.pb").is_file());
+        std::fs::remove_dir(&file).unwrap();
+        std::fs::rename(&backup, &file).unwrap();
+
+        let report = ledger.kept_session("agent-1");
+        let still_on_disk = file.is_file();
+        ledger.flush_all().unwrap();
+        let removed_on_retry = !file.exists();
+        drop(ledger);
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(still_on_disk);
+        assert_eq!(report, KeptSession::default());
+        assert!(removed_on_retry);
     }
 
     #[test]

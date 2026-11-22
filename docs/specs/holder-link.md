@@ -252,9 +252,10 @@ wants to write that cannot fit one frame fails that write on the node's side, be
   so the node keeps the last ones it recorded for each adapter agent in `<data>/sessions/kept-<id>.pb` (beside the ledger, owner-only; a report larger
   than the hub keeps, 64 KiB encoded, is not kept). The file goes when the agent ends or is interrupted (also when only the file has it), when an agent
   that runs restarts after a crash (a resume, which follows an end or an interruption, keeps what its new process reported before its start was recorded),
-  and at every start for each agent not taken up, with any unfinished write. On take-up the node puts them back on the agent (bounded and judged again as
-  a report is) and re-states them from the supervisor's copy (`Supervisor::session_events`), so the window's badge matches `skips_permissions_now`; a
-  resync announcement re-states them after `AgentStarted` too. A mode or config
+  and at every start for each agent not taken up, with any unfinished write. If the running node cannot remove an invalidated report,
+  it keeps the report unavailable and retries on the next kept-session change or a clean flush. On take-up the node puts them back on
+  the agent (bounded and judged again as a report is) and re-states them from the supervisor's copy (`Supervisor::session_events`), so
+  the window's badge matches `skips_permissions_now`. A resync announcement re-states them after `AgentStarted` too. A mode or config
   option in use that makes the agent act without asking (switched to after the start, by the person or by the agent) is so shown and checked
   (`skips_permissions_now`) until the agent reports new ones. Not built: its usage counters in the hub's view start again from 0 (#930); its earlier
   conversation is not shown (the chat history is in memory, ADR-0089; #931).
