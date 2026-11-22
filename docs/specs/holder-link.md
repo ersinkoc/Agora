@@ -41,7 +41,9 @@ Holder to node: `HelloOk`(64: version, holder pid, holder start time), `Refused`
    its frame was sent**, so a link that breaks mid-way loses nothing (what was sent into a socket nobody reads is the one unavoidable
    loss); an ended agent's status and buffer are sent without a terminal and **kept** until the node sends `Release` (it may die
    between the two). Terminals are never read by the holder while a node is attached, and it never writes to them.
-4. `Start` returns `Started` with the new terminal attached. The launch is the node's: the holder adds and widens nothing. (The
+4. `Start` returns `Started` with the new terminal attached. The launch is the node's: the holder adds and widens nothing. An agent id
+   that is empty or longer than `MAX_AGENT_ID` (256 bytes) is `Refused(BadRequest)` and nothing starts (#929), so every reply that names
+   an agent fits a frame (below, "Limits of the holder itself"). (The
    confinement a node builds is not carried yet; a later step adds it as a new tag.)
 5. **The holder reads a terminal only once the node's process has ended** (a pidfd on Linux, `kqueue` on macOS, else the start time): it
    then reads each terminal into a 1 MiB buffer (oldest dropped first), so no agent blocks on a full terminal. A link that drops while
@@ -69,6 +71,15 @@ next frame's.
   most. A peer that is the lock holder and starts a frame then stalls holds the holder for up to `FRAME_TIMEOUT` (5 s): once a frame
   has begun each receive waits at most `WRITE_SLICE` (1 s) or what is left of the 5 s, and a frame whose last bytes come later is
   refused (tested); sends have a write timeout of the same length, so a node that never reads cannot hang the holder.
+- **Agent ids** are at most `MAX_AGENT_ID` (256 bytes; the node's own are `agent-<n>`, at most 26), refused on `Start` and `StartPipe`
+  (#929). Before, an id of a few MiB still fitted its `Start`, but every later `Attach` reply (the id and up to 1 MiB of buffer) was
+  larger than `MAX_FRAME`: the holder could not send it and dropped the node on every try. With the bound a `Terminal` frame (one id and
+  the whole 1 MiB buffer) and a `PipeData` frame (one id and everything kept) always fit (checked at compile time and tested), and one
+  agent costs at most `MAX_LIST_ENTRY` (275 bytes) in `List`. **Not bounded: the number of agents.** `List` (one frame for every agent)
+  fits up to 15,251 agents in one holder; a holder holding more could not send it (`write_frame` refuses a frame larger than `MAX_FRAME`
+  and the holder drops the node, which then sees the link fail). That is far past what a machine runs (every terminal agent is a PTY,
+  every pipe agent two threads of the holder), so no count is enforced and `List` is not paged; doing either is a new rule for a later
+  step.
 - A holder agent starts with **exactly** the environment in `Start` (the holder runs it with an empty environment plus that list; the
   holder's own environment is a stale snapshot of whoever started it and is never passed on). `env_remove` is therefore redundant for
   the holder and kept only for the format.
@@ -100,6 +111,8 @@ next frame's.
 - **What goes through it:** only an agent the node does not confine (`cfg.sandbox` is `None`). A confined agent (Landlock, Seatbelt) is
   started by the node as before: the holder does not carry a confinement yet, and `Start` is unchanged. A start the holder refuses
   (`Failed`: the program is not there; `AgentExists`) is the node's own start's to report.
+- **Agent ids:** the node sends no id the holder would refuse (`holder_link::agent_id_fits`): an agent whose id is longer than
+  `MAX_AGENT_ID` (none the node makes; a resumed agent keeps its id from the ledger, which takes up to 4 KiB) is run by the node itself, terminal or adapter, never refused.
 - **Environment:** the node sends the complete environment `spawn` would have given the agent (its own, minus the removed names,
   plus the kind's and the node's additions). The link carries text: when a variable is not UTF-8 the agent is **not** started through
   the holder (the node runs it itself), never with a smaller environment than the node's own start gives it.
@@ -221,7 +234,8 @@ wants to write that cannot fit one frame fails that write on the node's side, be
 2. `StartPipe` runs `argv` in `cwd` with **exactly** `env` (as for terminals: the holder passes nothing of its own), stdin and stdout piped, stderr the
    holder's own (its log), in a session of its own (so a process group of its own, as a terminal agent). Every descriptor beyond 0, 1 and 2 is
    close-on-exec. The launch is the node's: it is sent the complete environment `Adapter::spawn` would have given (`Adapter::held_env`); a variable that
-   is not UTF-8 means the node runs the adapter itself. `Failed`: the program is not there (the node's own start says why); `AgentExists`: the id is in use.
+   is not UTF-8 means the node runs the adapter itself. `Failed`: the program is not there (the node's own start says why); `AgentExists`: the id is in use;
+   `BadRequest`: the id is empty or longer than `MAX_AGENT_ID`, as for `Start`.
    `argv` and `env` are the node's launch, never ACP: the holder cannot tell an adapter from any other program.
 3. **Output.** A thread per agent reads stdout into a buffer of at most 1 MiB (`HELD_BUFFER`) of whole lines, oldest dropped first. A line longer than
    1 MiB (`HELD_LINE_MAX`) is dropped and counted. Empty lines are nothing. A last line without a newline is a line when the output ends.

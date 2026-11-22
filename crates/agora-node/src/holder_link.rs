@@ -30,6 +30,26 @@ pub fn version_spoken(v: u16) -> bool {
 /// The largest frame either side accepts: a terminal's whole buffer (1 MiB, [`agora_platform::HELD_BUFFER`]) and generous room for the rest.
 pub const MAX_FRAME: usize = 4 << 20;
 
+/// The longest agent id (in bytes) the holder takes in `Start` and `StartPipe` (#929); a longer or empty one is `Refused(BadRequest)`.
+/// The node's ids are `agent-<n>` (at most 26 bytes), so this is room to spare, and it keeps every reply that names an agent within
+/// [`MAX_FRAME`]: a `Terminal` or `PipeData` frame is one id and at most one buffer, and a `List` entry costs at most
+/// [`MAX_LIST_ENTRY`] bytes. A node never sends a longer id: it runs such an agent itself ([`agent_id_fits`]).
+pub const MAX_AGENT_ID: usize = 256;
+
+/// The most one agent costs in a `List` (`Agents`) reply: its id (length and bytes), pid, and state (a tag and two optional `i32`s).
+pub const MAX_LIST_ENTRY: usize = 4 + MAX_AGENT_ID + 4 + 1 + 5 + 5;
+
+// A `Terminal` frame (tag, entry, buffer-dropped flag, buffer length and the whole buffer) and a `PipeData` frame (tag, entry, dropped,
+// eof, two line counts, and everything kept, whose bound is on its encoded size) fit a frame with any id the holder takes.
+const _: () = assert!(1 + MAX_LIST_ENTRY + 1 + 4 + agora_platform::HELD_BUFFER <= MAX_FRAME);
+const _: () =
+    assert!(1 + MAX_LIST_ENTRY + 8 + 1 + 4 + 4 + agora_platform::HELD_BUFFER <= MAX_FRAME);
+
+/// Whether `id` may be sent to the holder as an agent's id: not empty and at most [`MAX_AGENT_ID`] bytes.
+pub fn agent_id_fits(id: &str) -> bool {
+    !id.is_empty() && id.len() <= MAX_AGENT_ID
+}
+
 /// How long a peer may take to finish a frame it began.
 pub const FRAME_TIMEOUT: Duration = Duration::from_secs(5);
 
