@@ -4,7 +4,15 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
-_Nothing yet._
+- A hub whose stored screen password or list of vouched passkeys cannot be read now refuses a sign-in from another machine and a password change instead of acting as if no password were set; a password change whose sign-out of other sessions or passkey cleanup fails now reports an error instead of success.
+- A terminal, approval or worktree id that a restarted machine uses again no longer shows to people who could see the old one only.
+- When a slow window is dropped from a shared terminal, the terminal grows back to the size of the windows still watching.
+- A handoff whose receiving agent cannot take it now goes back to the giver even when the giver's machine disconnected first.
+- Stopping a chat agent's turn no longer withdraws its waiting request to start a helper.
+- A malformed `%` escape in a window link (`#/agent/…`, `#/machines/…`) no longer blanks the page, and a file view no longer stops responding on highlighted text with an unclosed tag.
+- `agora hub notify` refuses an address with a line break in it, and `agora hub run`, `agora hub notify` and `agora hub ssh` stop with an error instead of overwriting a token or list they cannot read; `agora update` downloads into a new private folder with a random name.
+- A machine whose hub listens on IPv6 (`[::1]` or `[::]`) now reaches it on IPv6 loopback.
+- A node no longer crashes on a policy line `device.projects = ...`, and a failed `agora agent install` leaves the previous version recorded as current.
 
 ## 0.3.35
 
