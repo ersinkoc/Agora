@@ -48,7 +48,7 @@ const IDS_PER_RESERVATION: u64 = 1_000_000_000;
 /// message with an id an earlier run used: an agent kept across a restart (ADR-0079) carries its `inbox` cursor over, and a new
 /// message numbered at or below it would be hidden from it. The range starts at the largest of the end the last reservation wrote,
 /// the clock in microseconds and the broker's next id. When the file cannot be read (other than missing) or written, nothing new is
-/// reserved and a broker with no range numbers no message until a later try succeeds: a reused id would be lost silently, a
+/// reserved and a broker with no range hands out no id until a later try succeeds: a reused id would be lost silently, a
 /// refused message is said (`mesh.unavailable`). Returns whether a range was reserved.
 fn reserve_ids(mesh: &Mutex<Mesh>, file: &Path) -> bool {
     let lock = || mesh.lock().unwrap_or_else(|e| e.into_inner());
@@ -749,8 +749,8 @@ impl MeshServer {
     }
 
     /// Reserves this node's broker ids in `<data_dir>/sessions/mesh-ids` (see [`reserve_ids`]); called before any agent joins. When
-    /// that fails, agents keep running and their mesh answers, but no message is numbered (sends are refused with
-    /// `mesh.unavailable`) until the ticker's next try, every half second, succeeds. Returns whether ids were reserved.
+    /// that fails, agents keep running and their mesh answers, but no id is handed out (sends, tasks, leases and handoffs are
+    /// refused with `mesh.unavailable`) until the ticker's next try, every half second, succeeds. Returns whether ids were reserved.
     pub fn reserve_ids(&self, data_dir: &Path) -> bool {
         let file = data_dir.join(crate::ledger::LEDGER_DIR).join(MESH_IDS_FILE);
         *self.ids_file.lock().unwrap_or_else(|e| e.into_inner()) = Some(file.clone());

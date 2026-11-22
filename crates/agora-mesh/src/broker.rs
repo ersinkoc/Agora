@@ -306,7 +306,7 @@ pub struct Mesh {
     files: BTreeMap<String, u32>,
     /// When each inbox got its recent presence notices.
     presence_sent: BTreeMap<AgentId, VecDeque<u64>>,
-    /// Message ids are handed out below this only (`None`: no bound). A node bounds them by the ids it reserved on disk (#965).
+    /// Ids are handed out below this only (`None`: no bound). A node bounds them by the ids it reserved on disk (#965).
     id_ceiling: Option<u64>,
 }
 
@@ -331,8 +331,7 @@ impl Mesh {
         }
     }
 
-    /// Hands out ids (`m-`, `t-`, `l-`, `h-`) from `first` on (never lower than one already handed out) and message ids below
-    /// `ceiling` only. A node reserves `[first, ceiling)` on disk first, above every id an earlier run of its broker may have used
+    /// Hands out ids (`m-`, `t-`, `l-`, `h-`) from `first` on (never lower than one already handed out) and below `ceiling` only. A node reserves `[first, ceiling)` on disk first, above every id an earlier run of its broker may have used
     /// (#965): an agent kept across the restart still holds those ids (the `since` cursor of `inbox`), and a new message numbered
     /// at or below its cursor would be hidden from it.
     pub fn reserve_ids(&mut self, first: u64, ceiling: u64) {
@@ -340,8 +339,8 @@ impl Mesh {
         self.id_ceiling = Some(ceiling.max(self.next));
     }
 
-    /// The node could not reserve ids: until it does, no message is numbered (a message would fail with
-    /// [`MeshError::IdsUnreserved`]) unless a range is already reserved, which stays good.
+    /// The node could not reserve ids: until it does, no id is handed out (a message, task, lease or handoff fails with
+    /// [`MeshError::IdsUnreserved`], and notices are not made) unless a range is already reserved, which stays good.
     pub fn hold_unreserved_ids(&mut self) {
         if self.id_ceiling.is_none() {
             self.id_ceiling = Some(self.next);
@@ -353,13 +352,20 @@ impl Mesh {
         self.next
     }
 
-    /// Message ids left below the reserved bound, `None` when unbounded.
+    /// Ids left below the reserved bound, `None` when unbounded.
     pub fn message_ids_left(&self) -> Option<u64> {
         self.id_ceiling.map(|c| c.saturating_sub(self.next))
     }
 
+    /// Whether `n` more ids are reserved. Every id (`m-`, `t-`, `l-`, `h-`) is checked before anything changes: a kept agent holds
+    /// task and lease ids across a restart as it holds its cursor.
+    fn ids_open(&self, n: u64) -> bool {
+        self.id_ceiling
+            .is_none_or(|c| self.next.saturating_add(n) <= c)
+    }
+
     fn message_ids_open(&self) -> bool {
-        self.id_ceiling.is_none_or(|c| self.next < c)
+        self.ids_open(1)
     }
 
     fn id(&mut self, prefix: &str) -> String {
@@ -1022,6 +1028,9 @@ impl Mesh {
         depends_on: &[String],
     ) -> Result<TaskId, MeshError> {
         let project = self.caller(by)?.project.clone();
+        if !self.ids_open(1) {
+            return Err(MeshError::IdsUnreserved);
+        }
         // A task's text reaches every peer like a message body, so it has the same limit.
         if title.len().max(detail.len()) > self.limits.max_body_bytes {
             return Err(MeshError::BodyTooLarge);
@@ -1343,6 +1352,9 @@ impl Mesh {
         now_ms: u64,
     ) -> Result<String, MeshError> {
         let project = self.caller(by)?.project.clone();
+        if !self.ids_open(1) {
+            return Err(MeshError::IdsUnreserved);
+        }
         // `LeaseTable::acquire` drops ended leases silently: end them here first, so each is recorded and leaves its grant.
         self.expire_leases(now_ms);
         let table = self.leases.entry(project.clone()).or_default();
@@ -1476,6 +1488,10 @@ impl Mesh {
         now_ms: u64,
     ) -> Result<String, MeshError> {
         let info = self.caller(from)?.clone();
+        // The handoff's message and its own id.
+        if !self.ids_open(2) {
+            return Err(MeshError::IdsUnreserved);
+        }
         let target = self.recipients(&info, to)?;
         let (Some(target), true) = (target.first().cloned(), !to.starts_with('#')) else {
             return Err(MeshError::RecipientUnknown(to.to_string()));
@@ -1792,12 +1808,39 @@ mod tests {
         ));
         m.delivery_failed(&id("a"), "m-1", "n2/z", "node.offline", 0);
         assert!(m.inbox(&id("a"), None, 10).unwrap().is_empty());
+        // Task, lease and handoff ids are held too, and a refused call changes nothing.
+        assert!(matches!(
+            m.task_create(&id("a"), "t", "", &[]),
+            Err(MeshError::IdsUnreserved)
+        ));
+        assert!(matches!(
+            m.lease_acquire(&id("a"), &["src/x.rs".to_string()], 60_000, 0),
+            Err(MeshError::IdsUnreserved)
+        ));
+        assert!(m.live_leases("p", 0).is_empty());
+        assert!(matches!(
+            m.handoff(&id("a"), "b", None, "s", &[], 0),
+            Err(MeshError::IdsUnreserved)
+        ));
+        assert!(m.inbox(&id("b"), None, 10).unwrap().is_empty());
         m.reserve_ids(50, 60);
         m.hold_unreserved_ids();
         assert_eq!(
             m.send_message(&id("a"), "b", "x", &[], None, 0).unwrap(),
             "m-50"
         );
+        assert_eq!(
+            m.task_create(&id("a"), "t", "", &[]).unwrap().as_str(),
+            "t-51"
+        );
+        // A handoff needs two ids (its message and its own): with one left it is refused whole.
+        m.reserve_ids(0, 53);
+        assert_eq!(m.message_ids_left(), Some(1));
+        assert!(matches!(
+            m.handoff(&id("a"), "b", None, "s", &[], 0),
+            Err(MeshError::IdsUnreserved)
+        ));
+        assert_eq!(m.inbox(&id("b"), None, 10).unwrap().len(), 1);
     }
 
     #[test]
