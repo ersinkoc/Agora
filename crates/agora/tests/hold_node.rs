@@ -97,6 +97,11 @@ impl Rig {
 
     /// A user-started agent of kind `k` in the work folder; returns its id.
     fn launch(&self, node: &Node) -> String {
+        self.launch_with(node, &[])
+    }
+
+    /// [`Self::launch`] with these launch options, each confirmed (as the window does for one that skips permissions).
+    fn launch_with(&self, node: &Node, options: &[&str]) -> String {
         let mut c = Client::connect(node.socket().unwrap()).expect("control");
         let info = match c
             .call(Cmd::DirectoryInspect(v1::DirectoryInspect {
@@ -116,6 +121,8 @@ impl Rig {
                 path: info.path.clone(),
                 project_id: info.project_id.clone(),
                 kind: "k".into(),
+                launch_options: options.iter().map(|o| (*o).to_string()).collect(),
+                confirmed_launch_options: options.iter().map(|o| (*o).to_string()).collect(),
                 ..Default::default()
             }))
             .unwrap()
@@ -577,4 +584,191 @@ fn an_environment_that_cannot_be_sent_makes_the_node_run_the_agent_itself() {
         "started through the holder with a smaller environment than the node's own"
     );
     wait_for("the agent", || screen(&node, &id).contains("up"));
+}
+
+/// A hand-run `agora mesh stdio` bridge (the MCP server an agent's client starts) on an agent's mesh socket.
+struct Bridge {
+    child: std::process::Child,
+    stdin: Option<std::process::ChildStdin>,
+    lines: std::sync::mpsc::Receiver<serde_json::Value>,
+    next: u64,
+}
+
+impl Bridge {
+    fn start(socket: &std::path::Path) -> Bridge {
+        use std::io::BufRead;
+        use std::process::Stdio;
+        let mut child = Command::new(AGORA)
+            .args(["mesh", "stdio", "--socket"])
+            .arg(socket)
+            .env("AGORA_LANG", "en")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("run the bridge");
+        let stdin = child.stdin.take();
+        let stdout = child.stdout.take().expect("stdout");
+        let (tx, lines) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for line in std::io::BufReader::new(stdout).lines() {
+                let Ok(line) = line else { return };
+                let Ok(v) = serde_json::from_str(&line) else {
+                    return;
+                };
+                if tx.send(v).is_err() {
+                    return;
+                }
+            }
+        });
+        Bridge {
+            child,
+            stdin,
+            lines,
+            next: 0,
+        }
+    }
+
+    fn send(&mut self, msg: &serde_json::Value) {
+        use std::io::Write;
+        let stdin = self.stdin.as_mut().expect("stdin");
+        writeln!(stdin, "{msg}").expect("write");
+        stdin.flush().expect("flush");
+    }
+
+    fn request(&mut self, method: &str, params: serde_json::Value) -> serde_json::Value {
+        self.next += 1;
+        let id = self.next;
+        self.send(&serde_json::json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}));
+        let a = self
+            .lines
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap_or_else(|_| panic!("no answer to {method}"));
+        assert_eq!(a["id"], id, "{a}");
+        a
+    }
+
+    fn initialize(&mut self) {
+        let a = self.request(
+            "initialize",
+            serde_json::json!({"protocolVersion":"2025-03-26"}),
+        );
+        assert!(a["result"].is_object(), "{a}");
+        self.send(&serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
+    }
+
+    fn workspace_status(&mut self) -> serde_json::Value {
+        self.request(
+            "tools/call",
+            serde_json::json!({"name": "workspace_status", "arguments": {}}),
+        )
+    }
+}
+
+impl Drop for Bridge {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn mesh_unavailable(a: &serde_json::Value) -> bool {
+    a["error"]["data"]["code"] == "mesh.unavailable"
+}
+
+/// What a hub folds from everything this node recorded, its earlier starts included.
+fn hub_view(node: &Node) -> agora_hub::projection::View {
+    let mut view = agora_hub::projection::View::default();
+    for ev in node.events.events_after(0) {
+        view.apply(&ev);
+    }
+    view
+}
+
+/// #906 and #907 (RM-30, RM-34): an agent the holder kept across a node restart is the next node's in full. Its mesh socket is served
+/// again at the same path, so a bridge that was open across the restart reconnects and its next call answers, and a new bridge
+/// connects; and the hub, which the new node's `NodeOnline` told that everything it ran is gone, shows it running with its terminal,
+/// not finished, and still acting without asking (it was started with an option that skips permissions, and it is the same process).
+#[test]
+fn a_kept_agent_is_on_the_mesh_again_and_shown_running_after_its_node_restarts() {
+    let _serial = serial();
+    let rig = Rig::new("kept", &sh("echo up; sleep 600"));
+    let manifest = rig.root.join("manifests/k.toml");
+    let mut text = std::fs::read_to_string(&manifest).expect("manifest");
+    text.push_str("[[launch.option]]\nid = \"skip\"\nlabel = \"option-skip\"\nargs = [\"--yes\"]\nskips_permissions = true\n");
+    std::fs::write(&manifest, text).expect("manifest");
+    let node = rig.node();
+    let id = rig.launch_with(&node, &["skip"]);
+    assert!(held(&node, &id), "the test agent must start in the holder");
+    wait_for("the agent", || screen(&node, &id).contains("up"));
+    let pid = pid_of(&node, &id);
+    wait_for("the holder in the ledger", || {
+        node.ledger.get(&id).is_some_and(|e| e.holder_pid != 0)
+    });
+    let socket = rig.root.join("m").join(format!("{id}.sock"));
+    let mut bridge = Bridge::start(&socket);
+    bridge.initialize();
+    let a = bridge.workspace_status();
+    assert!(a["result"].is_object(), "before the restart: {a}");
+    let before = hub_view(&node);
+    let key = agora_hub::projection::qualified("hold-node", &id);
+    assert!(before.agents[&key].running);
+    assert!(
+        before.agents[&key].skips_permissions,
+        "the test agent must start skipping permissions"
+    );
+
+    // A node's process that ends closes its agents' mesh endpoints with it. This test process stands for the node and lives on (other
+    // parts still hold the old node's mesh), so the endpoint is closed here, as the end of the process would.
+    node.mesh.unregister(&AgentId::new(id.clone()));
+    drop(node);
+    assert!(alive(pid), "the agent ended with its node");
+    let a = bridge.workspace_status();
+    assert!(mesh_unavailable(&a), "with no node: {a}");
+
+    let node = rig.node();
+    assert_eq!(pid_of(&node, &id), pid, "the agent was not taken up");
+    // The open bridge reconnects to the same path (its backoff is at most 2 s) and the call answers.
+    let end = Instant::now() + Duration::from_secs(15);
+    let a = loop {
+        let a = bridge.workspace_status();
+        if !mesh_unavailable(&a) {
+            break a;
+        }
+        assert!(
+            Instant::now() < end,
+            "the bridge never reconnected: the kept agent's mesh socket is not served"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert!(a["result"].is_object(), "after the restart: {a}");
+    assert!(a.get("error").is_none(), "after the restart: {a}");
+    // A bridge started now connects too.
+    let mut fresh = Bridge::start(&socket);
+    fresh.initialize();
+    let a = fresh.workspace_status();
+    assert!(a["result"].is_object(), "a new bridge: {a}");
+
+    // The hub's view: running, not finished, with its terminal.
+    let view = hub_view(&node);
+    let agent = &view.agents[&key];
+    assert!(agent.running, "the hub shows the kept agent finished");
+    assert_ne!(agent.state, v1::AgentState::Done);
+    assert!(agent.interrupted.is_none());
+    assert!(
+        agent.skips_permissions,
+        "the kept agent acts without asking but is shown as if it asks"
+    );
+    assert_eq!(agent.launch_options, vec!["skip".to_string()]);
+    assert!(node
+        .supervisor
+        .lock()
+        .unwrap()
+        .skips_permissions_now(&AgentId::new(id.clone())));
+    let terminal = agora_node::control::terminal_id_of(&AgentId::new(&id));
+    assert!(
+        view.terminals
+            .contains_key(&agora_hub::projection::qualified("hold-node", &terminal)),
+        "the hub has no terminal for the kept agent"
+    );
 }

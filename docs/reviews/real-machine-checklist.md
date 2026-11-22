@@ -491,7 +491,8 @@ not built: nothing to check.
 - **Do:** start a Shell; in it run a counter (`i=0; while :; do i=$((i+1)); echo $i; sleep 1; done`). `agora down`; `agora status`;
   wait 30 s; `agora`.
 - **See:** `status` counts the agent while the node is down; after `agora` the same agent (same id, same process) is back with the
-  counter still counting, no gap in its numbers; `agora down --agents` would end it.
+  counter still counting, no gap in its numbers, and the window and the terminal client show it running with its terminal, not
+  "Finished" (#907); `agora down --agents` would end it.
 - **Evidence so far:** `blackview`, 2026-11-20 (ADR-0093 "Origin", cited in `docs/capabilities.md`): a 0.3.26 node restart kept a
   Claude Code terminal agent in the same holder.
 
@@ -567,7 +568,9 @@ not built: nothing to check.
   together). Send `rich`, `plan`, `slow`, two prompts while `slow` runs, then Stop turn. Under the input, Mode > "Turbo (does not
   ask)" (the list is Default, Turbo (does not ask), Plan).
 - **See:** "Thought", the tool call with its path, and the Plan with "N of M done"; the waiting prompts show "Waiting" and "Sent when
-  this turn ends"; Stop turn ends only the turn and they go in order; the mode switch opens a card at once (Setting: Approvals,
+  this turn ends"; Stop turn ends only the turn and they go in order; after Stop turn the "sleep" call reads "Stopped" (no spinner), the
+  composer no longer says "Waiting for this turn to end." once the agent is Idle, and each waiting prompt is shown above its own answer,
+  each answer its own message ("queued one", then "queued two", never "queued onequeued two"; #908); the mode switch opens a card at once (Setting: Approvals,
   Switch to: Turbo, "This covers this agent's session only.", Allow / Deny) and Mode shows "Waiting for your approval" ("Answer the
   request to switch. Nothing has changed yet.") until Allow; then "Acts freely".
 - **Evidence so far:** [Linux 2026-11-21](2026-11-21-real-machine-linux.md): fail (#908: after Stop turn the tool call keeps spinning and the answers are glued).
@@ -587,9 +590,11 @@ not built: nothing to check.
 ### RM-47 Structured agents survive a node restart
 - **OS:** Linux, macOS (unconfined agents through a holder of link version 2); Windows: not built.
 - **Do:** start `rm-acp`; send `hello`; `agora down`; `agora`; send `hello again`.
-- **See:** the same agent and conversation, not under "Stopped when the machine shut down"; the second prompt is answered; a confined
-  `rm-acp` (only in a disposable OS account or VM, #900) instead ends with the node and comes back only as the resume policy
-  allows.
+- **See:** the same agent and session, shown running in the window and the terminal client (not "Finished", #907) with the mode
+  and settings it had (#932), not under
+  "Stopped when the machine shut down"; the second prompt is answered; the earlier turns are not shown again (the chat history is in
+  memory until ADR-0089, #931); a confined `rm-acp` (only in a disposable OS account or VM, #900) instead ends with the node and comes back
+  only as the resume policy allows.
 - **Evidence so far:** none for the built steps (the 2026-11-20 run on `blackview` in ADR-0093 "Origin" is the case that led to it).
 
 ### RM-48 A plain terminal shows the agent program running in it

@@ -510,6 +510,13 @@ impl EventSink {
                 }
             }
             self.agent_up(v, known.sessions.get(id), false);
+            // `AgentStarted` leaves the hub with no session options: what an adapter agent last reported of its session follows it
+            // (#932: a kept agent's adapter does not report it again by itself).
+            if let Some(ledger) = self.ledger.get() {
+                for b in ledger.kept_session(id).bodies() {
+                    self.restate(b);
+                }
+            }
         }
         if how == Announce::Present {
             for r in known.resolved {
@@ -519,6 +526,14 @@ impl EventSink {
         for p in waiting {
             self.approval_requested(p);
         }
+    }
+
+    /// ADR-0079/0093: an agent the holder kept running, taken up by this node at its start. The node's `NodeOnline` told the hub that
+    /// everything it ran before is gone, so the agent is said up again after it (started, its state, its session if known, its terminal
+    /// if it has one), as an announcement says it. Re-stated: the ledger already holds the agent and took it back (`Ledger::reclaim`).
+    /// What an adapter agent last reported of its session follows from the supervisor (`Supervisor::session_events`, #932).
+    pub fn agent_taken_up(&self, view: &AgentView, session: Option<&String>) {
+        self.agent_up(view, session, false);
     }
 
     /// An agent in `view` is up: started, its state, its session if known, and its terminal if it has one. `learn` false: an
@@ -1657,27 +1672,8 @@ impl Node {
             });
         }
 
-        // ADR-0079: agents the holder kept running while no node was there are this node's again, before anything is called
-        // interrupted. A holder that cannot be had changes nothing: every agent runs in the node.
-        if let Some(setup) = holder {
-            let hub = Arc::new(crate::holder::HolderHub::new(setup));
-            take_up_held(&hub, &mut sup, &ledger, cfg);
-            sup.set_holder(hub);
-        }
-        events.node_online(&cfg.node_id);
-        for p in &projects {
-            events.checkout_discovered(&cfg.node_id, &p.id, &p.root);
-        }
-        // ADR-0060: what was running when the node last stopped, offered again (Resume, or Start again in the same folder).
-        for e in ledger.interrupted() {
-            events.agent_interrupted(&e, !e.session_id.is_empty() && sup.resumable(&e.kind));
-        }
-        let known_checkouts: Vec<(String, PathBuf)> = projects
-            .iter()
-            .map(|p| (p.id.clone(), p.root.clone()))
-            .collect();
-
-        // Every agent that launches joins the mesh and, if its manifest has `[mcp]`, is handed its own endpoint.
+        // Every agent that launches joins the mesh and, if its manifest has `[mcp]`, is handed its own endpoint. Set before the holder's
+        // agents are taken up: each joins the mesh again at the same path through this hook, so its running bridge reconnects (#906).
         {
             let for_abort = Arc::clone(&mesh);
             let mesh = Arc::clone(&mesh);
@@ -1701,6 +1697,46 @@ impl Node {
             }));
             sup.set_abort_hook(Box::new(move |id| for_abort.unregister(id)));
         }
+
+        // ADR-0079: agents the holder kept running while no node was there are this node's again, before anything is called
+        // interrupted. A holder that cannot be had changes nothing: every agent runs in the node.
+        let mut taken_up = Vec::new();
+        if let Some(setup) = holder {
+            let hub = Arc::new(crate::holder::HolderHub::new(setup));
+            taken_up = take_up_held(&hub, &mut sup, &ledger, cfg);
+            sup.set_holder(hub);
+        }
+        // #932: only an agent just taken up has a session to show again; every other kept session is an earlier process's (also when
+        // there is no holder to attach to).
+        {
+            let keep: Vec<&str> = taken_up.iter().map(|(id, _)| id.as_str()).collect();
+            ledger.forget_kept_except(&keep);
+        }
+        events.node_online(&cfg.node_id);
+        for p in &projects {
+            events.checkout_discovered(&cfg.node_id, &p.id, &p.root);
+        }
+        // `NodeOnline` tells the hub that whatever this node ran before is gone; the agents taken up from the holder are not, so each is
+        // said up again after it, as an announcement does (#907).
+        if !taken_up.is_empty() {
+            let views = sup.list();
+            for (id, session) in &taken_up {
+                if let Some(v) = views.iter().find(|v| v.id == *id && v.running) {
+                    events.agent_taken_up(v, session.as_ref());
+                    // #932: its modes, settings and commands as the supervisor holds them, judged again as a report is, so what the
+                    // window shows matches `skips_permissions_now`.
+                    events.supervisor_events(&sup.session_events(id), &views);
+                }
+            }
+        }
+        // ADR-0060: what was running when the node last stopped, offered again (Resume, or Start again in the same folder).
+        for e in ledger.interrupted() {
+            events.agent_interrupted(&e, !e.session_id.is_empty() && sup.resumable(&e.kind));
+        }
+        let known_checkouts: Vec<(String, PathBuf)> = projects
+            .iter()
+            .map(|p| (p.id.clone(), p.root.clone()))
+            .collect();
 
         // Only devices the owner listed in `<data>/trusted-devices` (`agora node trust`) can answer an approval; with
         // none listed every request waits and expires as denied.
@@ -2110,6 +2146,11 @@ impl Node {
                                         let _ = call.and_then(|c| c.run());
                                     }
                                 }
+                                // #908: a queued prompt became the turn: its entry takes the time it went (the wall clock now,
+                                // not the tick's, which is older than what this tick already said).
+                                SupervisorEvent::PromptSending { agent, tag } => {
+                                    chat.sending(agent, *tag, crate::daemon::now_ms());
+                                }
                                 // ADR-0090: a queued prompt went out (or could not), or was lost with its adapter.
                                 SupervisorEvent::PromptDequeued { agent, tag, sent } => {
                                     if *sent {
@@ -2444,8 +2485,9 @@ impl Drop for Node {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .shutdown();
-        // The agents' last states. They ended without an end in the ledger: at the next start they are interrupted (ADR-0060).
-        let _ = self.ledger.flush();
+        // The agents' last states. They ended without an end in the ledger: at the next start they are interrupted (ADR-0060). And
+        // what the kept agents last reported of their session (#932).
+        let _ = self.ledger.flush_all();
     }
 }
 
@@ -2517,16 +2559,18 @@ fn ledger_state(word: &str) -> Option<agora_core::AgentState> {
 /// not take, so a running agent left like that would block on a full terminal for good. That is an agent that ended while no node was
 /// there (released; its entry stays interrupted, offered for resume), one the ledger does not know or names another holder, one whose
 /// folder or project is gone, and one that could not be taken up. When one cannot be ended the holder is not used for new agents.
+/// Returns the agents taken up, each with the session id the ledger knew, for the events that say them up again.
 fn take_up_held(
     hub: &crate::holder::HolderHub,
     sup: &mut Supervisor,
     ledger: &crate::ledger::Ledger,
     cfg: &NodeConfig,
-) {
+) -> Vec<(AgentId, Option<String>)> {
     use crate::holder_link::AgentState as Held;
     let Some((session, held, pipes)) = hub.attach_existing() else {
-        return;
+        return Vec::new();
     };
+    let mut taken_up = Vec::new();
     let mut ended = Vec::new();
     for h in held {
         let id = h.info.info.agent.clone();
@@ -2587,6 +2631,11 @@ fn take_up_held(
             continue;
         }
         sup.seed_reattached_state(&AgentId::new(id.clone()), ledger_state(&entry.last_state));
+        sup.set_kept_launch(
+            &AgentId::new(id.clone()),
+            &entry.launch_options,
+            entry.skips_permissions,
+        );
         if !entry.parent_agent_id.is_empty() {
             sup.set_parent(
                 &AgentId::new(id.clone()),
@@ -2594,6 +2643,8 @@ fn take_up_held(
             );
         }
         ledger.reclaim(&id, (session.pid, session.start), now_ms());
+        let known = (!entry.session_id.is_empty()).then(|| entry.session_id.clone());
+        taken_up.push((AgentId::new(id), known));
     }
     let mut ended_pipes = Vec::new();
     for p in pipes {
@@ -2644,10 +2695,15 @@ fn take_up_held(
             carry_on: false,
             private_config: None,
         };
+        let kept = ledger.kept_session(&id);
+        let (options, config, commands) = kept_session_parts(&kept);
         let reattach = crate::supervisor::Reattach {
             session_id: entry.adapter_session.clone(),
             capabilities: entry.adapter_capabilities.clone(),
             state: ledger_state(&entry.last_state),
+            options,
+            config,
+            commands,
         };
         if sup
             .adopt_held_pipe(restore, reattach, p, &session, Instant::now())
@@ -2656,6 +2712,11 @@ fn take_up_held(
             ended_pipes.push(gone(&id));
             continue;
         }
+        sup.set_kept_launch(
+            &AgentId::new(id.clone()),
+            &entry.launch_options,
+            entry.skips_permissions,
+        );
         if !entry.parent_agent_id.is_empty() {
             sup.set_parent(
                 &AgentId::new(id.clone()),
@@ -2663,10 +2724,88 @@ fn take_up_held(
             );
         }
         ledger.reclaim(&id, (session.pid, session.start), now_ms());
+        let known = (!entry.session_id.is_empty()).then(|| entry.session_id.clone());
+        taken_up.push((AgentId::new(id), known));
     }
     if !crate::holder::HolderHub::end_unadopted_all(&session, ended, ended_pipes) {
         hub.retire_session();
     }
+    taken_up
+}
+
+/// #932: a kept session as the supervisor holds it (the reverse of what the node records for an adapter's reports). A config option's
+/// category the protocol names only as custom comes back as `_custom`, which is judged the same way.
+fn kept_session_parts(
+    kept: &crate::ledger::KeptSession,
+) -> (
+    agora_adapters::host::SessionOptions,
+    Vec<agora_adapters::host::ConfigOption>,
+    Vec<agora_adapters::host::AdapterCommand>,
+) {
+    use agora_adapters::host::{AdapterCommand, ConfigOption, SessionOption, SessionOptions};
+    use v1::SessionConfigCategory as C;
+    let list = |l: &[v1::SessionOption]| -> Vec<SessionOption> {
+        l.iter()
+            .map(|o| SessionOption {
+                id: o.id.clone(),
+                name: o.name.clone(),
+                description: o.description.clone(),
+                skips_permissions: o.skips_permissions,
+            })
+            .collect()
+    };
+    let options = kept
+        .options
+        .as_ref()
+        .map(|o| SessionOptions {
+            modes: list(&o.modes),
+            models: list(&o.models),
+            current_mode: o.current_mode.clone(),
+            current_model: o.current_model.clone(),
+        })
+        .unwrap_or_default();
+    let config = kept
+        .config
+        .as_ref()
+        .map(|c| {
+            c.options
+                .iter()
+                .map(|o| ConfigOption {
+                    id: o.id.clone(),
+                    name: o.name.clone(),
+                    description: o.description.clone(),
+                    category: match C::try_from(o.category).unwrap_or(C::Unspecified) {
+                        C::Mode => "mode",
+                        C::Model => "model",
+                        C::ModelConfig => "model_config",
+                        C::ThoughtLevel => "thought_level",
+                        C::Custom => "_custom",
+                        C::Unspecified => "",
+                    }
+                    .to_string(),
+                    boolean: o.r#type == v1::SessionConfigType::Boolean as i32,
+                    current: o.current.clone(),
+                    choices: list(&o.choices),
+                    skips_permissions: o.skips_permissions,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let commands = kept
+        .commands
+        .as_ref()
+        .map(|c| {
+            c.commands
+                .iter()
+                .map(|c| AdapterCommand {
+                    name: c.name.clone(),
+                    description: c.description.clone(),
+                    input_hint: c.input_hint.clone(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    (options, config, commands)
 }
 
 /// ADR-0060: writes the process of every agent whose pid is new to `recorded` into the ledger, and remembers it only once the ledger

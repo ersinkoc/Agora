@@ -83,9 +83,41 @@ try {
   check(await gone(stopTurn), 'Stop turn ends the turn');
   check(await page.locator('form textarea').isEnabled(), 'the agent stays and takes another message');
 
+  // #908 (RM-44): two prompts wait behind a running call, then Stop turn. The call stops spinning and reads "Stopped", the composer no
+  // longer says it waits, and the two queued prompts are sent in order, each answered in its own reply under its own message.
+  await say('slow');
+  await stopTurn.waitFor();
+  await say('queued one');
+  await page.waitForSelector('[data-queue]');
+  await say('queued two');
+  await page.waitForFunction(() => /2 queued/.test(document.querySelector('[data-queue]')?.textContent ?? ''));
+  check(await page.getByText('Waiting for this turn to end.').count() === 1, 'the composer says the prompt waits for the turn');
+  await stopTurn.click();
+  check(await gone(page.locator('[data-queue]')), 'the queued prompts are sent');
+  // What each message and reply says, in the order drawn, without the words only a screen reader hears.
+  const said = () => page.evaluate(() => [...document.querySelectorAll('[data-role=user] > div:first-child, [data-role=agent] > div.grid')].map(e => {
+    const c = e.cloneNode(true);
+    c.querySelectorAll('.sr-only').forEach(s => s.remove());
+    return `${e.closest('[data-role]').dataset.role}:${c.textContent.trim()}`;
+  }));
+  // A wait that runs out fails the script with what it waited for.
+  const waited = (what, p) => p.catch((e) => { throw new Error(`waiting for ${what}: ${e.message}`); });
+  await waited('the answer to "queued two"', page.waitForFunction(() => /queued two/.test([...document.querySelectorAll('[data-role=agent]')].pop()?.textContent ?? ''), null, { timeout: 15000 }));
+  check(await gone(stopTurn), 'and the agent is idle');
+  // "Stopped" shows once the agent has been out of its turn for a moment (the call's last update may still be on its way).
+  await waited('a call that reads "Stopped"', page.locator('[data-steps] [role=img][aria-label="Stopped"]').first().waitFor({ timeout: 10000 }));
+  check((await page.locator('[role=img][aria-label="Running"]').count()) === 0, 'no call is still shown running after Stop turn');
+  check((await page.locator('[data-steps] [role=img][aria-label="Stopped"]').count()) >= 1, 'the stopped call reads "Stopped"');
+  check((await page.getByText('Waiting for this turn to end.').count()) === 0, 'the composer no longer says it waits for the turn');
+  const order = (await said()).filter(s => /queued (one|two)/.test(s));
+  check(!order.some(s => /queued one\s*queued two/.test(s)), `the two answers are not glued into one reply (${JSON.stringify(order)})`);
+  check(JSON.stringify(order.slice(-4)) === JSON.stringify(['user:queued one', 'agent:queued one', 'user:queued two', 'agent:queued two']), `each queued prompt comes before its own answer (${JSON.stringify(order)})`);
+
   // A request for permission is a record in the conversation and follows the user's answer in the pinned bar.
   await say('ask');
   await page.waitForSelector('[data-permission=pending]');
+  // The way to the request shows once the pinned request has arrived too (its own event, a moment after the record).
+  await waited('the way to the pinned request', page.locator('[data-permission] button').first().waitFor({ timeout: 10000 }));
   check((await page.locator('[data-permission] button').count()) === 1, 'the record has only a way to the request, no Allow or Deny');
   // The card that floats over the window for a request that needs reading: put it aside.
   const later = page.getByRole('button', { name: 'Later', exact: true });
