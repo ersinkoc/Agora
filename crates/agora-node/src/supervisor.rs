@@ -4753,7 +4753,6 @@ fn session_report(agent: &Agent) -> Option<SupervisorEvent> {
 mod adapter_option_tests {
     use super::*;
 
-    /// #902: an adapter the node gave up on always ends as a failure: its own failing code is kept, a signal (a crash, or SIGKILL from
     /// #896: an agent given the mesh may read (and so run) the mesh bridge it is told to start, the node's own executable, which may
     /// sit in a folder only the user may open; that file is added to what it may read, not its folder.
     #[test]
