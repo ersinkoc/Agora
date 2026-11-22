@@ -841,6 +841,30 @@ impl LocalListener {
         }
     }
 
+    /// Wait up to `timeout` for the next client, and return it as soon as it connects (a readiness wait, not a sleep between tries);
+    /// `None` when none came in that time. For an accept loop that must also notice a stop: the client is served at once and the
+    /// stop is seen within `timeout`. Make the listener non-blocking first ([`set_nonblocking`](Self::set_nonblocking)) so a client
+    /// that leaves between the wait and the accept cannot leave this waiting past `timeout` on Unix.
+    pub fn accept_timeout(&self, timeout: std::time::Duration) -> io::Result<Option<LocalStream>> {
+        #[cfg(unix)]
+        {
+            if !unix::wait_readable(&self.inner, timeout)? {
+                return Ok(None);
+            }
+            match self.accept() {
+                Ok(s) => Ok(Some(s)),
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => Ok(None),
+                Err(e) => Err(e),
+            }
+        }
+        #[cfg(windows)]
+        {
+            self.inner
+                .accept_timeout(timeout)
+                .map(|s| s.map(|inner| LocalStream { inner }))
+        }
+    }
+
     /// Make [`accept`](Self::accept) return `WouldBlock` instead of waiting.
     pub fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
         #[cfg(unix)]
@@ -3344,5 +3368,77 @@ mod read_timeout_tests {
             let e = read_timeout_result(Err(io::Error::from(kind))).unwrap_err();
             assert_eq!(e.kind(), kind);
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod accept_timeout_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn listener(name: &str) -> (LocalListener, PathBuf) {
+        // Short: Unix socket paths are limited to about 100 bytes.
+        let path = std::env::temp_dir().join(format!("agora-at-{}-{name}", std::process::id()));
+        let l = local_listen(&path).expect("listen");
+        l.set_nonblocking(true).expect("nonblocking");
+        (l, path)
+    }
+
+    #[test]
+    fn without_a_client_it_waits_the_timeout_and_says_none() {
+        if !LOCAL_SOCKETS_SUPPORTED {
+            return;
+        }
+        let (l, _path) = listener("none");
+        let start = Instant::now();
+        assert!(l
+            .accept_timeout(Duration::from_millis(60))
+            .unwrap()
+            .is_none());
+        let waited = start.elapsed();
+        // It waited (no spin), and not much longer than asked; generous for a loaded runner.
+        assert!(
+            waited >= Duration::from_millis(50),
+            "returned after {waited:?}"
+        );
+        assert!(waited < Duration::from_secs(5), "returned after {waited:?}");
+    }
+
+    #[test]
+    fn a_client_is_returned_as_soon_as_it_connects_not_when_the_timeout_ends() {
+        // #958: the control socket's accept loop slept 100 ms between tries, so each new connection waited up to that long.
+        if !LOCAL_SOCKETS_SUPPORTED {
+            return;
+        }
+        let (l, path) = listener("soon");
+        let (tx, rx) = std::sync::mpsc::channel::<Instant>();
+        let server = std::thread::spawn(move || {
+            for _ in 0..20 {
+                let s = loop {
+                    if let Some(s) = l.accept_timeout(Duration::from_secs(30)).unwrap() {
+                        break s;
+                    }
+                };
+                tx.send(Instant::now()).unwrap();
+                drop(s);
+            }
+        });
+        let mut slowest = Duration::ZERO;
+        for _ in 0..20 {
+            // Let the server reach its wait first, so the client arrives in the middle of it.
+            std::thread::sleep(Duration::from_millis(5));
+            let sent = Instant::now();
+            let c = local_connect(&path).expect("connect");
+            let got = rx.recv_timeout(Duration::from_secs(20)).expect("accepted");
+            slowest = slowest.max(got.saturating_duration_since(sent));
+            drop(c);
+        }
+        server.join().unwrap();
+        // A 30 s wait that returns within a second of every connect returned because of it.
+        assert!(
+            slowest < Duration::from_secs(1),
+            "slowest accept {slowest:?}"
+        );
     }
 }

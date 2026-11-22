@@ -58,7 +58,7 @@ this machine, from the `TerminalSubscribe` sent on its control socket until the 
 | Lock held for a full 2000-line, 200-column history | p50 5.4 ms, max 5.9 ms (plain); p50 4.0 ms (a colour every 4 characters) | the coloured case stops near the byte cap, at 631 lines; formatting after the lock: 0.1 ms and 2.9 ms |
 | Bytes per attach | 404 100 (plain, 2000 lines, 25 frames); 521 768 (coloured, 32 frames, the cap); repaint 11 176 | through the node: 426 100 bytes of history in 27 frames (2000 lines, a colour per line) |
 | Terminal snapshot after switching, ≤ 150 ms | full history p50 6.2 ms, p95 6.7 ms; without history p50 0.3 ms | on one connection |
-| The same on a new connection per subscription | full history p95 111 ms; without history p95 94 ms | the node's uplink opens one for each subscription the hub routes; the difference is the control socket's accept loop, which polls every 100 ms |
+| The same on a new connection per subscription | before #958: full history p95 111 ms, without history p95 94 ms. After (#967, 50 runs): Linux full history p95 9–12 ms, without history p95 0.5 ms; Windows full history p95 107.71 → 12.48 ms, without history 94.78 → 1.14 ms | the node's uplink opens one for each subscription the hub routes. The difference was the control socket's accept loop, which slept 100 ms between tries; it now waits for the connection (`LocalListener::accept_timeout`), so a new connection costs about what an open one does |
 
 The budget holds, so the cap stays at 512 KiB. The lock hold delays that terminal's own output by up to about 6 ms once per attach that
 asks for history; input is not behind it (it goes to the PTY on the caller's thread).

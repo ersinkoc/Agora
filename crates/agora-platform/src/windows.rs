@@ -579,16 +579,37 @@ impl Listener {
     }
 
     pub fn accept(&self) -> io::Result<Stream> {
+        let wait = if self.nonblocking.load(Ordering::Acquire) {
+            0
+        } else {
+            INFINITE
+        };
         // Clients that left before they were accepted are skipped, however many there were.
         loop {
-            if let Some(s) = self.accept_once()? {
+            if let Some(s) = self.accept_once(wait)? {
                 return Ok(s);
             }
         }
     }
 
-    /// One accept; `None` when the instance's client had already left (the instance is reset for the next one).
-    fn accept_once(&self) -> io::Result<Option<Stream>> {
+    /// Waits up to `timeout` for the next client and returns it as soon as it connects; `None` when none came (or the one that came
+    /// had already left). The connect started here stays pending between calls, so a client arriving between two of them is
+    /// picked up by the next one. Ignores [`Self::set_nonblocking`].
+    pub fn accept_timeout(&self, timeout: Duration) -> io::Result<Option<Stream>> {
+        // Rounded up, so a wait shorter than a millisecond still waits instead of spinning; below INFINITE, which never ends.
+        let ms = timeout
+            .as_nanos()
+            .div_ceil(1_000_000)
+            .min(u128::from(INFINITE - 1)) as u32;
+        match self.accept_once(ms) {
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => Ok(None),
+            r => r,
+        }
+    }
+
+    /// One accept, waiting up to `wait_ms` for a client (`WouldBlock` when none came); `None` when the instance's client had
+    /// already left (the instance is reset for the next one).
+    fn accept_once(&self, wait_ms: u32) -> io::Result<Option<Stream>> {
         let mut st = self
             .state
             .lock()
@@ -624,13 +645,8 @@ impl Listener {
             let Some(p) = st.pending.as_ref() else {
                 return Err(io::Error::other("no pending connection"));
             };
-            let ms = if self.nonblocking.load(Ordering::Acquire) {
-                0
-            } else {
-                INFINITE
-            };
             // SAFETY: a live event handle.
-            let w = unsafe { WaitForSingleObject(p.event.0 .0, ms) };
+            let w = unsafe { WaitForSingleObject(p.event.0 .0, wait_ms) };
             if w == WAIT_TIMEOUT {
                 return Err(io::Error::from(io::ErrorKind::WouldBlock));
             }
