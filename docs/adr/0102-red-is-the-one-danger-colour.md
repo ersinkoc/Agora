@@ -36,7 +36,10 @@ impossible to miss, and a destructive button looks as safe as a primary one.
    The diff's 2 px line bar is content, not chrome, and stays.
 5. **One elevation.** Overlays (dialogs, menus, the palette, toasts) use one raised surface and one shadow token; panels and cards stay
    flat.
-6. Every text-on-tint pair reaches 4.5:1 (UI borders 3:1) in every built-in theme; a test computes it from the real tokens.
+6. Every text-on-tint pair reaches 4.5:1 in every built-in theme, and every control indicator (a switch track and thumb, a filled
+   button, a selected or pressed ring, the focus ring, an icon chip) reaches 3:1 (WCAG 2.2, 1.4.11); a test computes both from the real
+   tokens. The thin tinted border around a callout or a tinted tile is decorative (its icon and words carry the meaning) and only has to
+   stay visible.
 
 ## Alternatives considered
 - **Keep failed neutral and use red only for errors and destructive buttons.** Rejected by the maintainer: a failed agent is something
