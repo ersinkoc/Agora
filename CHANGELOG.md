@@ -4,7 +4,13 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+_Nothing yet._
+
+## 0.3.35
+
 - A structured (ACP) agent that offers "always allow" for a request, as WrongStack's `wstack acp serve` does, can now be told so once: the approval card, the attention dialog, the banners and the phone's card show **Allow always** beside Allow and Deny (in the terminal client `A` in the request box, Alt+A in the agent's tab or chat), and the agent stops asking for what it counts as the same request. The button appears only when the agent offers it and the machine allows it (`skip_permissions = forbid`, or `confined_only` for an agent that is not confined, removes it), says that the agent remembers the answer and decides what it covers and for how long, and is signed over its own message, which binds the agent, the request and the agent's option, so a hub cannot turn a single Allow into a remembered one. A plain Allow is never sent to the agent as a remembered answer any more; an agent that offers only "always" shows that button in the place of Allow (an older window can only deny such a request). While an agent holds such an answer it shows **Asks less** (`[asks less]` in the terminal client) until it ends or starts again (ADR-0101; new error codes `approval.scope_forbidden`, `approval.scope_unavailable`, `approval.adapter_outdated`, and conversation notices `approval.always_only_forbidden` and `adapter.permission_unanswerable`).
+- An agent that acts without asking you is now marked with one small red lightning bolt wherever it appears (tree, tile, tab, pane header, board, give-task picker) instead of a warning sign with the words "Acts freely" (the chat's session bar keeps its words); hovering it, focusing it or tapping it shows what it means, it stays open while the pointer is on it and Esc closes it, and screen readers read the meaning as part of the agent's name (#1004).
+- On Windows, a confined agent (the sandbox on, `AGORA_WINDOWS_CONFINEMENT=1`) can now reach the mesh: it may read and run the node's own `agora.exe`, which its mesh tools start, and only that one file, instead of getting "Access is denied." (#896).
 
 ## 0.3.34
 
