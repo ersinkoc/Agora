@@ -5,7 +5,9 @@ import { t } from '../i18n';
 export interface HelperGrant { id: string; kind: string; folder: string; remaining: number }
 
 // ADR-0057: what an agent may still start without asking, with a way to take it back. Shown for an agent that has helpers.
-export function HelperGrants({ list, revoke, refresh }: {
+export function HelperGrants({ view, list, revoke, refresh }: {
+  /** Whose permissions these are (the agent's id): the view a revoke belongs to. The functions may be new on every render. */
+  view: string;
   list: () => Promise<HelperGrant[]>;
   revoke: (id: string) => Promise<void>;
   refresh: number; // changes when the agent's helpers change, so the remaining count is read again
@@ -13,20 +15,23 @@ export function HelperGrants({ list, revoke, refresh }: {
   const [grants, setGrants] = useState<HelperGrant[]>([]);
   const [failed, setFailed] = useState(false);
   const gen = useRef(0);
+  // The newest functions, read when used: a parent that passes new wrappers on every render neither reloads the list nor ends the view.
+  const listNow = useRef(list);
+  listNow.current = list;
   const load = useCallback(() => {
     const current = ++gen.current;
-    list()
+    listNow.current()
       .then((g) => { if (gen.current === current) { setGrants(g); setFailed(false); } })
       .catch(() => { if (gen.current === current) setFailed(true); });
-  }, [list]);
+  }, []);
   useEffect(() => {
     load();
     return () => { gen.current += 1; };
-  }, [load, refresh]);
-  // A revoke belongs to the view it was made in (this agent's list), not to the list read that was current when it was clicked: every
+  }, [load, view, refresh]);
+  // A revoke belongs to the view it was made in (this agent), not to the list read that was current when it was clicked: every
   // revoke that succeeds while the view lasts reads the list again, even when another revoke's read came in between.
   const scope = useRef(0);
-  useEffect(() => () => { scope.current += 1; }, [list]);
+  useEffect(() => () => { scope.current += 1; }, [view]);
   if (grants.length === 0 && !failed) return null;
   return <div className="flex flex-col gap-1 border-b border-line bg-surface-1 px-3 py-2 text-xs" aria-label={t('helper-grants')}>
     {grants.map((g) => <div key={g.id} className="flex flex-wrap items-center gap-2">
