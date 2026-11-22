@@ -1732,6 +1732,13 @@ pub fn dialog_layout(area: Rect, lines: &[String]) -> (Rect, Vec<String>) {
     (r, wrapped)
 }
 
+/// Whether a question's box shows every one of its lines in `area` (a box taller than the window is cut at its bottom). ADR-0101 with
+/// Codex's re-review: an "always" answer is taken only from a box that shows all of it.
+pub fn dialog_fits(area: Rect, lines: &[String]) -> bool {
+    let (r, wrapped) = dialog_layout(area, lines);
+    usize::from(r.height) >= wrapped.len() + 2
+}
+
 fn text_width(s: &str) -> usize {
     Span::raw(s).width()
 }
@@ -3470,6 +3477,42 @@ mod tests {
             })
             .collect();
         assert!(!others.contains(&ALLOW_ALWAYS));
+    }
+
+    #[test]
+    fn a_box_fits_only_when_every_line_is_on_screen() {
+        let lines: Vec<String> = (0..10).map(|i| format!("line {i}")).collect();
+        let area = |height| Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height,
+        };
+        assert!(
+            dialog_fits(area(14), &lines),
+            "10 lines, the border and the margin"
+        );
+        assert!(!dialog_fits(area(13), &lines));
+        // A long line wraps in a narrow window and takes more rows.
+        let long = vec!["word ".repeat(40)];
+        assert!(dialog_fits(
+            Rect {
+                x: 0,
+                y: 0,
+                width: 80,
+                height: 10
+            },
+            &long
+        ));
+        assert!(!dialog_fits(
+            Rect {
+                x: 0,
+                y: 0,
+                width: 30,
+                height: 10
+            },
+            &long
+        ));
     }
 
     #[test]

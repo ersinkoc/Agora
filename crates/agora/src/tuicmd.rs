@@ -2694,9 +2694,37 @@ fn console(
                     } => {
                         c.notice.clear();
                         c.note.seen.clear();
-                        // A chat tab shows its agent's request in place of the input line: it is in view there.
-                        if chat.as_ref().is_some_and(|p| p.agent == agent) {
-                            c.shown_request = Some(approval.clone());
+                        // A chat tab shows its agent's request in place of the input line: it is in view there only when all of it,
+                        // the always lines included, fits the pane as drawn (otherwise the box shows it and takes the answer).
+                        if let (Some(p), Some(a)) = (
+                            chat.as_ref().filter(|p| p.agent == agent),
+                            c.snapshot
+                                .as_ref()
+                                .and_then(|s| {
+                                    agora_tui::client::exact_approval(s, &agent, &approval)
+                                })
+                                .cloned(),
+                        ) {
+                            let pane = c.app.areas(area).terminal;
+                            let head = p
+                                .snapshot
+                                .as_ref()
+                                .and_then(|x| session_line(x, &|id, args| say.text(id, args)))
+                                .is_some();
+                            let width = usize::from(pane.width).max(12);
+                            let note_rows = if p.note.is_empty() {
+                                0
+                            } else {
+                                agora_tui::render::wrap_row(&plain(&p.note), width, width).len()
+                            };
+                            c.shown_request = chat_shows_request(
+                                say,
+                                &a,
+                                (pane.width, pane.height),
+                                head,
+                                note_rows,
+                            )
+                            .then(|| approval.clone());
                         }
                         let target = Target::Tab { agent, approval };
                         if answer_command(say, session, rx, c, area, &target, answer)
@@ -3035,25 +3063,10 @@ fn draw_console(
     dialog: Option<&[String]>,
 ) {
     let text = |id: &str, args: &[(&str, Arg)]| say.text(id, args);
-    let inspector = c.app.areas(area).inspector;
     let details = c
         .snapshot
         .as_ref()
-        .map(|s| {
-            // Beside the agent's own tab with the keyboard in it: only its request, answered with Alt+Y / Alt+N.
-            if c.app.focus == agora_tui::app::Focus::Terminal {
-                agora_tui::split::app_details_in_tab(
-                    s,
-                    &c.selected,
-                    inspector.width,
-                    inspector.height,
-                    &text,
-                )
-                .lines
-            } else {
-                app_details(s, &c.selected, inspector.width, inspector.height, &text).lines
-            }
-        })
+        .map(|s| inspector_details(c, s, area, &text).lines)
         .unwrap_or_default();
     // The footer's notice: the last thing done, or the hub's counts (machines, agents, what needs the user).
     let notice = if c.notice.is_empty() {
@@ -3107,34 +3120,7 @@ fn draw_console(
                 .snapshot
                 .as_ref()
                 .and_then(|s| waiting_for(s, &p.agent))
-                .map(|a| {
-                    let width = usize::from(pane.width).max(12);
-                    let what = plain(format!("{} {}", a.action, a.detail).trim());
-                    let mut block = vec![say.text(key!("tui-attention"), &[])];
-                    block.extend(
-                        agora_tui::render::wrap_row(&what, width, width)
-                            .into_iter()
-                            .take(4),
-                    );
-                    // ADR-0101: the agent's own words for its always option and what "always" means, before the keys.
-                    for l in agora_tui::render::always_lines(a, &text) {
-                        block.extend(agora_tui::render::wrap_row(&l, width, width));
-                    }
-                    block.extend(agora_tui::render::wrap_row(
-                        &say.text(
-                            agora_tui::client::answer_hint(
-                                a,
-                                key!("tui-chat-answer"),
-                                key!("tui-chat-answer-always"),
-                                key!("tui-chat-answer-always-only"),
-                            ),
-                            &[],
-                        ),
-                        width,
-                        width,
-                    ));
-                    block
-                })
+                .map(|a| chat_request_block(say, a, usize::from(pane.width)).0)
                 .unwrap_or_default();
             let room = room.saturating_sub(waiting.len());
             // The agent speaks under its name (as in the tree), not its id.
@@ -3240,6 +3226,57 @@ fn waiting_for<'a>(
     agent: &str,
 ) -> Option<&'a agora_protocol::v1::ApprovalSnapshot> {
     s.approvals.iter().find(|a| a.agent_id == agent)
+}
+
+/// The block a chat agent's request takes in place of its input line: what it asks (at most four rows), ADR-0101's always lines (the
+/// agent's own words and what "always" means) and the keys that answer. The flag says whether the request's own text is there whole.
+fn chat_request_block(
+    say: &Say,
+    a: &agora_protocol::v1::ApprovalSnapshot,
+    width: usize,
+) -> (Vec<String>, bool) {
+    let text = |id: &str, args: &[(&str, Arg)]| say.text(id, args);
+    let width = width.max(12);
+    let what = plain(format!("{} {}", a.action, a.detail).trim());
+    let rows = agora_tui::render::wrap_row(&what, width, width);
+    let whole = rows.len() <= CHAT_REQUEST_ROWS;
+    let mut block = vec![say.text(key!("tui-attention"), &[])];
+    block.extend(rows.into_iter().take(CHAT_REQUEST_ROWS));
+    for l in agora_tui::render::always_lines(a, &text) {
+        block.extend(agora_tui::render::wrap_row(&l, width, width));
+    }
+    block.extend(agora_tui::render::wrap_row(
+        &say.text(
+            agora_tui::client::answer_hint(
+                a,
+                key!("tui-chat-answer"),
+                key!("tui-chat-answer-always"),
+                key!("tui-chat-answer-always-only"),
+            ),
+            &[],
+        ),
+        width,
+        width,
+    ));
+    (block, whole)
+}
+
+/// The most rows a chat agent's request takes of its pane; a longer one is read in the box.
+const CHAT_REQUEST_ROWS: usize = 4;
+
+/// Whether a chat pane of `width` x `height` shows `a`'s block whole (Codex's re-review of ADR-0101 part B): the request's text uncut
+/// and every line of the block on screen, under the pane's head line (`head`) and note (`note`) and above at least the input line and
+/// one conversation row (the conversation keeps two rows; more lines than the pane are cut at its bottom). Only then is the request in
+/// view there; otherwise its answer is taken in the box, which shows it all.
+fn chat_shows_request(
+    say: &Say,
+    a: &agora_protocol::v1::ApprovalSnapshot,
+    (width, height): (u16, u16),
+    head: bool,
+    note_rows: usize,
+) -> bool {
+    let (block, whole) = chat_request_block(say, a, usize::from(width));
+    whole && usize::from(head) + note_rows + block.len() + 2 <= usize::from(height)
 }
 
 /// A chat agent's conversation shown in the console's pane (ADR-0063): its stream, what came, and the line being typed.
@@ -3709,6 +3746,48 @@ fn request_box_lines(
     lines
 }
 
+/// The inspector's details as the console draws them: the selected agent's; beside the agent's own tab with the keyboard in it, only its
+/// request, answered with Alt+Y / Alt+N.
+fn inspector_details(
+    c: &Console,
+    s: &Snapshot,
+    area: Area,
+    text: agora_tui::render::Text<'_>,
+) -> agora_tui::split::Details {
+    let inspector = c.app.areas(area).inspector;
+    if c.app.focus == agora_tui::app::Focus::Terminal {
+        agora_tui::split::app_details_in_tab(
+            s,
+            &c.selected,
+            inspector.width,
+            inspector.height,
+            text,
+        )
+    } else {
+        app_details(s, &c.selected, inspector.width, inspector.height, text)
+    }
+}
+
+/// Whether the inspector's details (always the tree's selected agent) are the details of the request `target` names: the tree's own
+/// keys answer what it shows; a tab's request only when the tree has that same agent selected.
+fn target_displayed(target: &Target, owner: &str, selected: &str) -> bool {
+    match target {
+        Target::Selected => true,
+        Target::Tab { .. } => owner == selected,
+    }
+}
+
+/// ADR-0057 with Codex's re-review of ADR-0101 part B: a start request counts as read from the inspector only when the inspector shows
+/// that request's card (`displayed`) and showed it whole.
+fn start_read_in_inspector(displayed: bool, shown: Option<&(String, bool)>, id: &str) -> bool {
+    displayed && matches!(shown, Some((d, true)) if d == id)
+}
+
+/// Whether the request box shows all of its lines in a window of `area` (ADR-0101: an "always" answer is taken only then).
+fn always_box_shown(lines: &[String], area: Area) -> bool {
+    agora_tui::app::dialog_fits(area, lines)
+}
+
 /// Answers the request `target` names with `reply`, once it was in view (in the inspector, in the chat tab that shows it, or in a box
 /// that shows it now and takes the answer as one deliberate key). Returns whether the hub's state will change.
 fn answer_command(
@@ -3731,23 +3810,14 @@ fn answer_command(
         return false;
     };
     let inspector = c.app.areas(area).inspector;
-    // What the inspector shows: the selected agent's details (beside its tab, only its own request). For a tab's request it is in view
-    // there only when the tree has that same agent selected.
-    let details = match target {
-        Target::Selected => app_details(&s, &selected, inspector.width, inspector.height, &text),
-        Target::Tab { .. } => agora_tui::split::app_details_in_tab(
-            &s,
-            &owner,
-            inspector.width,
-            inspector.height,
-            &text,
-        ),
-    };
+    // What the inspector shows, exactly as it is drawn: the selected agent's details (beside a tab with the keyboard, only its own
+    // request). A tab's request is in view there only when the tree has that same agent selected (Codex's re-review).
+    let details = inspector_details(c, &s, area, &text);
+    let displayed = target_displayed(target, &owner, &selected);
     let start = (a.action == "agent.start").then(|| a.approval_id.clone());
     // ADR-0057: a start request is allowed only once all of it was in view: in the inspector, or in the reader, which y opens.
     if let Some(id) = start.clone() {
-        let whole = matches!(details.start, Some((ref d, true)) if *d == id);
-        if whole {
+        if start_read_in_inspector(displayed, details.start.as_ref(), &id) {
             c.read_whole.insert(id.clone());
         }
         if reply == Answer::Allow && !c.read_whole.contains(&id) {
@@ -3763,7 +3833,7 @@ fn answer_command(
             return false;
         }
     } else {
-        let inspector_shows = owner == selected
+        let inspector_shows = displayed
             && inspector.width > 0
             && details.lines.len() <= usize::from(inspector.height);
         let in_view = inspector_shows || c.shown_request.as_deref() == Some(a.approval_id.as_str());
@@ -3774,6 +3844,11 @@ fn answer_command(
                 ask.answer(&lines, Duration::from_secs(120))
             });
             match agora_tui::client::box_answer(key) {
+                // Codex's re-review: never "always" from a box the window cuts (the duration warning may be below its last row).
+                Some(Answer::AllowAlways) if !always_box_shown(&lines, window_area()) => {
+                    c.notice = say.text(key!("tui-always-too-small"), &[]);
+                    return false;
+                }
                 Some(r) => reply = r,
                 None => {
                     c.notice = String::new();
@@ -6506,6 +6581,131 @@ mod tab_answer_tests {
             approval: "mac/ap-1".into(),
         };
         assert_eq!(target_request(&s, "mac/agent-1", &moved), None);
+    }
+
+    /// Codex's re-review: with the tree on agent-1 and the keyboard in agent-2's tab, agent-2's start request is never marked read from
+    /// the inspector, which shows agent-1's card.
+    #[test]
+    fn a_tabs_start_request_is_not_read_from_another_agents_card() {
+        let start = |n: u32| ApprovalSnapshot {
+            approval_id: format!("mac/ap-{n}"),
+            agent_id: format!("mac/agent-{n}"),
+            action: "agent.start".into(),
+            detail: r#"{"kind":"codex","prompt":"fix it"}"#.into(),
+            ..Default::default()
+        };
+        let s = Snapshot {
+            approvals: vec![start(1), start(2)],
+            ..Default::default()
+        };
+        let text = |id: &str, _: &[(&str, Arg)]| id.to_string();
+        // What the inspector draws beside the tab: the tree's selection (agent-1), whole at this size.
+        let shown = agora_tui::split::app_details_in_tab(&s, "mac/agent-1", 80, 40, &text).start;
+        assert_eq!(shown, Some(("mac/ap-1".to_string(), true)));
+        let tab = Target::Tab {
+            agent: "mac/agent-2".into(),
+            approval: "mac/ap-2".into(),
+        };
+        let displayed = target_displayed(&tab, "mac/agent-2", "mac/agent-1");
+        assert!(!displayed);
+        assert!(!start_read_in_inspector(
+            displayed,
+            shown.as_ref(),
+            "mac/ap-2"
+        ));
+        // Even a card of the same id is not read when the inspector shows another agent.
+        assert!(!start_read_in_inspector(
+            false,
+            Some(&("mac/ap-2".to_string(), true)),
+            "mac/ap-2"
+        ));
+        // The tab's own agent selected: its own card counts.
+        let own = agora_tui::split::app_details_in_tab(&s, "mac/agent-2", 80, 40, &text).start;
+        assert!(start_read_in_inspector(
+            target_displayed(&tab, "mac/agent-2", "mac/agent-2"),
+            own.as_ref(),
+            "mac/ap-2"
+        ));
+        // A card shown cut is never read.
+        assert!(!start_read_in_inspector(
+            true,
+            Some(&("mac/ap-2".to_string(), false)),
+            "mac/ap-2"
+        ));
+        // The tree's own keys answer what the inspector shows.
+        assert!(target_displayed(
+            &Target::Selected,
+            "mac/agent-1",
+            "mac/agent-1"
+        ));
+    }
+
+    /// Codex's re-review: Alt+A in a chat tab counts the request as read only when all of its block, the duration warning included,
+    /// fits the pane as drawn; otherwise the box opens (and nothing is signed without a key there).
+    #[test]
+    fn a_chat_shows_an_always_request_only_when_all_of_it_fits() {
+        let say = Say(Catalog::english());
+        let a = ask(2);
+        let (block, whole) = chat_request_block(&say, &a, 40);
+        assert!(whole);
+        assert!(block.iter().any(|l| l.contains("possibly")), "{block:#?}");
+        let need = block.len() + 2;
+        // A compact pane that would cut the warning: not in view (the box takes the answer).
+        assert!(!chat_shows_request(
+            &say,
+            &a,
+            (40, u16::try_from(need - 1).unwrap()),
+            false,
+            0
+        ));
+        // The head line or a note take rows too.
+        assert!(!chat_shows_request(
+            &say,
+            &a,
+            (40, u16::try_from(need).unwrap()),
+            true,
+            0
+        ));
+        assert!(!chat_shows_request(
+            &say,
+            &a,
+            (40, u16::try_from(need).unwrap()),
+            false,
+            1
+        ));
+        // Room for all of it: in view.
+        assert!(chat_shows_request(
+            &say,
+            &a,
+            (40, u16::try_from(need).unwrap()),
+            false,
+            0
+        ));
+        assert!(chat_shows_request(&say, &a, (40, 60), true, 2));
+        // A request longer than its four rows is cut in the pane: never in view there, whatever the height.
+        let mut long = ask(2);
+        long.detail = "x".repeat(400);
+        assert!(!chat_request_block(&say, &long, 40).1);
+        assert!(!chat_shows_request(&say, &long, (40, 200), false, 0));
+    }
+
+    /// Codex's re-review: in a window too small for the whole request box, its `A` signs nothing.
+    #[test]
+    fn an_always_answer_is_never_taken_from_a_cut_box() {
+        let say = Say(Catalog::english());
+        let lines = request_box_lines(&say, &two(), &ask(2));
+        let area = |width, height| Area {
+            x: 0,
+            y: 0,
+            width,
+            height,
+        };
+        assert!(always_box_shown(&lines, area(120, 40)));
+        assert!(!always_box_shown(
+            &lines,
+            area(120, u16::try_from(lines.len()).unwrap())
+        ));
+        assert!(!always_box_shown(&lines, area(30, 12)));
     }
 
     #[test]

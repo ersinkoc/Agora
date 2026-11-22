@@ -135,6 +135,7 @@ tui-request-answer-always-only-kept = A allows it always, the agent remembers it
 tui-always-label = In its own words: “{ $label }”
 tui-always-warning = If you allow it always, the agent keeps the answer until its session ends.
 tui-always-warning-kept = If you allow it always, the agent decides what that covers and how long it keeps the answer, possibly longer than this session.
+tui-always-too-small = The window is too small to show the whole request and what “always” means, so nothing was sent. Make it larger, then answer again.
 tui-note-copy = c copies the command · any key closes this
 tui-note-close = Any key closes this.
 tui-copied = Copied the command to the clipboard.

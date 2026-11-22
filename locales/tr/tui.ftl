@@ -131,6 +131,7 @@ tui-request-answer-always-only-kept = A hep izin verir, ajan hatırlar (tek sefe
 tui-always-label = Kendi sözleriyle: “{ $label }”
 tui-always-warning = Hep izin verirsen ajan yanıtı oturumu bitene kadar tutar.
 tui-always-warning-kept = Hep izin verirsen neyin kapsandığına ve yanıtı ne kadar tutacağına ajan karar verir; bu, bu oturumdan uzun sürebilir.
+tui-always-too-small = Pencere isteğin tamamını ve “hep”in ne demek olduğunu gösteremeyecek kadar küçük, bu yüzden hiçbir şey gönderilmedi. Pencereyi büyüt, sonra yeniden yanıtla.
 tui-note-copy = c komutu kopyalar · herhangi bir tuş bunu kapatır
 tui-note-close = Herhangi bir tuş bunu kapatır.
 tui-copied = Komut panoya kopyalandı.

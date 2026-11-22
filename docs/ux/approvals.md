@@ -42,7 +42,9 @@ A structured agent can offer an answer it remembers (ACP `allow_always`); the wi
   (never another request). Wherever the request is read before it is answered (the request box, the chat's waiting block, the inspector)
   it shows the agent's own name for its option ("In its own words: “…”", one plain line, at most 64 characters) and the warning that the
   agent decides what "always" covers and how long it keeps the answer, possibly longer than this session. The request box takes its
-  answer as one deliberate key (a key typed before it appeared, or a paste, never answers). The agent's line says `[asks less]`.
+  answer as one deliberate key (a key typed before it appeared, or a paste, never answers). A request counts as read in the chat or the
+  inspector only when all of it fits there as drawn (in the inspector, only when it shows that agent's request); otherwise the box opens.
+  "Always" is never taken from a box the window cuts: it says the window is too small and sends nothing. The agent's line says `[asks less]`.
 - Bulk actions only for identical low-risk requests.
 - Mobile layout first: approvals are the main mobile use case.
 - Expired approvals show as expired; the agent is informed.
