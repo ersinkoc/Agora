@@ -76,6 +76,18 @@ const ANY_WRITE: u32 = 0x2 /* FILE_WRITE_DATA / ADD_FILE */
     | WRITE_OWNER
     | 0x1000_0000 /* GENERIC_ALL */
     | 0x4000_0000 /* GENERIC_WRITE */;
+/// #898: whether a read grant left out on `path` is said for the first time by this process. The same folders (`System32`, `Program
+/// Files`) were said at every confined start; each is now said once, whatever the agent can still read there (that is not decided here).
+fn first_time_left_out(path: &Path) -> bool {
+    static SAID: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<PathBuf>>> =
+        std::sync::OnceLock::new();
+    let said = SAID.get_or_init(Default::default);
+    // A poisoned lock only loses the deduplication: say it again rather than never.
+    match said.lock() {
+        Ok(mut seen) => seen.insert(path.to_path_buf()),
+        Err(_) => true,
+    }
+}
 /// For a folder whose label the user cannot set (a data volume's default ACL, Modify through `Authenticated Users` only). `false`, as
 /// accepted ADR-0050 Amendment B, decision 2 reads: such a folder is refused before start (`label_failed`). `true` would give the
 /// node's logon SID `WRITE_OWNER` there while the label is needed (so a checkout on `D:` works); that path is kept and was measured, but
@@ -1071,10 +1083,12 @@ impl Confinement {
                 // It stays in `granted`: `drop` and recovery take back only an entry that is there, so should the call ever have written
                 // part of it before failing, that part is still taken back.
                 Err(e) if mask == READ_MASK && e.kind() == io::ErrorKind::PermissionDenied => {
-                    eprintln!(
-                        "agora-platform: confinement: read grant on {} left out: {e}",
-                        path.display()
-                    );
+                    if first_time_left_out(&path) {
+                        eprintln!(
+                            "agora-platform: confinement: read grant on {} left out: {e}",
+                            path.display()
+                        );
+                    }
                 }
                 Err(e) => return Err(e),
             }
@@ -1946,6 +1960,18 @@ mod tests {
             }
         }
         out
+    }
+
+    /// #898: a read grant left out is said once per folder and process, not at every confined start; another folder is still said.
+    #[test]
+    fn a_read_grant_left_out_is_said_once_per_folder() {
+        let root = scratch("read-said-once");
+        let (a, b) = (root.join("a"), root.join("b"));
+        assert!(first_time_left_out(&a));
+        assert!(!first_time_left_out(&a));
+        assert!(!first_time_left_out(&a));
+        assert!(first_time_left_out(&b));
+        remove(&root);
     }
 
     /// A folder to read whose permissions the user may not change (`System32`, where `cmd.exe` is) is left out, and the start goes on;
