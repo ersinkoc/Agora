@@ -72,6 +72,12 @@ function paramsOf(p: { [k: string]: agora.v1.IParamValue } | null | undefined): 
   return out;
 }
 
+// The history a terminal subscription asks for (ADR-0100 decision 2): the window's own setting while its terminal has no screen yet
+// (a first open, a reload, a remount: a new stream), 0 once it has one (a reconnect, or after falling behind), where it keeps its own.
+export function historyToAsk(t: { history: number; painted: boolean }): number {
+  return t.painted ? 0 : Math.max(0, Math.floor(t.history));
+}
+
 const browserSocket: SocketFactory = (url, protocols) => new WebSocket(url, protocols) as unknown as Socket;
 
 // A browser cannot see a connection that went silent (a frozen hub, a laptop that slept, a NAT that forgot the connection), so
@@ -140,7 +146,10 @@ export function connectLive(o: LiveOptions): Live {
   // `size`: what fits the window's view of the terminal, said again after every (re)subscription: the hub counts a window's size
   // only while it watches the terminal, and forgets it with the connection (docs/specs/protocol.md "Shared terminal size").
   // `due`: the connection (generation) on which a resubscription is already scheduled for the stream, when it fires, and its timer.
-  const terminals = new Map<number, { node: string; terminalId: string; onEvent: (e: TerminalEvent) => void; size?: { cols: number; rows: number } } & Due>();
+  // `history`: the lines of history the window asked for (ADR-0100); `painted`: a screen (kind 1) arrived on the stream, so the window
+  // has a terminal with history of its own and every later subscription (a reconnect, the hub ending a relay that fell behind) asks
+  // for none (`historyToAsk`).
+  const terminals = new Map<number, { node: string; terminalId: string; onEvent: (e: TerminalEvent) => void; size?: { cols: number; rows: number }; history: number; painted: boolean } & Due>();
 
   const chats = new Map<number, { node: string; agentId: string; onLines: (lines: ChatLine[], replace: boolean) => void } & Due>();
 
@@ -182,7 +191,7 @@ export function connectLive(o: LiveOptions): Live {
   const subscribeTerminal = (stream: number) => {
     const t = terminals.get(stream);
     if (!t) return;
-    request(stream, t.node, { terminalSubscribe: { terminalId: t.terminalId, format: '' } }).catch(() => {
+    request(stream, t.node, { terminalSubscribe: { terminalId: t.terminalId, format: '', historyLines: historyToAsk(t) } }).catch(() => {
       // The node may be away or the agent gone; try again a little later while someone is watching.
       resubscribe(terminals, stream, 2000, () => subscribeTerminal(stream));
     });
@@ -314,6 +323,7 @@ export function connectLive(o: LiveOptions): Live {
           return;
         }
         const e = decodeTerminalFrame(f.kind, f.payload);
+        if (e?.type === 'snapshot') t.painted = true;
         if (e) t.onEvent(e);
         return;
       }
@@ -366,9 +376,9 @@ export function connectLive(o: LiveOptions): Live {
   return {
     command: (node, body) => request(STREAM_COMMANDS, node, body),
     terminal: (node, terminalId) => ({
-      connect(onEvent) {
+      connect(onEvent, options) {
         const stream = nextStream++;
-        terminals.set(stream, { node, terminalId, onEvent });
+        terminals.set(stream, { node, terminalId, onEvent, history: options?.historyLines ?? 0, painted: false });
         if (isOpen) subscribeTerminal(stream);
         return {
           // A closed session is inert: a late keystroke or resize (a frame callback after the pane went) is not sent.

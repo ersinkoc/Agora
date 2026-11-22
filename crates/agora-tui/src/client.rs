@@ -147,6 +147,8 @@ pub struct Session {
     typing: Typing,
     /// What the events after the snapshot said that the snapshot has no field for (ADR-0090 config options).
     seen: Seen,
+    /// History (kind 4, ADR-0100) per terminal stream, held for the screen it comes before: [`Session::terminal_history`].
+    history: std::collections::HashMap<u32, Vec<u8>>,
 }
 
 /// The agents' config options (ADR-0090: the snapshot has no field for them; the hub replays each running agent's last
@@ -400,6 +402,7 @@ impl Session {
             snapshot: None,
             typing: Typing::default(),
             seen: Seen::default(),
+            history: std::collections::HashMap::new(),
         })
     }
 
@@ -625,14 +628,32 @@ impl Session {
     /// Opens a terminal of a machine (ADR-0029): the hub relays its screen and output on a stream of ours. `terminal_id` is the
     /// machine's own id. Returns the stream; read it with [`Session::terminal_next`].
     pub fn terminal_open(&mut self, node: &str, terminal_id: &str) -> Result<u32, String> {
+        self.terminal_open_with_history(node, terminal_id, 0)
+    }
+
+    /// [`Session::terminal_open`] for a view that wants the newest `lines` lines of history before the first screen (ADR-0100
+    /// decision 2; the machine sends at most what it keeps, an older one none). The history is held for that screen: take it with
+    /// [`Session::terminal_history`] when [`TermEvent::Screen`] arrives.
+    pub fn terminal_open_with_history(
+        &mut self,
+        node: &str,
+        terminal_id: &str,
+        lines: u32,
+    ) -> Result<u32, String> {
         self.open_stream(
             node,
             command_request::Command::TerminalSubscribe(agora_protocol::v1::TerminalSubscribe {
                 terminal_id: terminal_id.to_string(),
                 format: String::new(),
-                history_lines: 0,
+                history_lines: lines,
             }),
         )
+    }
+
+    /// The history (kind 4) that came on `stream` before the [`TermEvent::Screen`] just returned, taken: empty when none came (none
+    /// was asked for, the machine keeps none, or it is older).
+    pub fn terminal_history(&mut self, stream: u32) -> Vec<u8> {
+        self.history.remove(&stream).unwrap_or_default()
     }
 
     /// Opens the conversation of an agent that has no terminal (ADR-0038). `agent_id` is the machine's own id. Read it with
@@ -703,8 +724,29 @@ impl Session {
         })
     }
 
-    /// The next thing on a terminal stream, waiting up to `wait`.
+    /// The next thing on a terminal stream, waiting up to `wait`. History frames (kind 4) are held for the screen they come before
+    /// ([`Session::terminal_history`]) and never returned; the frame after them is.
     pub fn terminal_next(&mut self, stream: u32, wait: Duration) -> TermEvent {
+        let mut wait = wait;
+        loop {
+            let (e, history) = self.terminal_frame(stream, wait);
+            let Some(h) = history else {
+                return e;
+            };
+            self.history
+                .entry(stream)
+                .or_default()
+                .extend_from_slice(&h);
+            // The screen follows its history directly: take what is already here without waiting again.
+            wait = Duration::ZERO;
+        }
+    }
+
+    /// One frame of `stream`: its event, or the payload of a history frame (with [`TermEvent::Quiet`]).
+    fn terminal_frame(&mut self, stream: u32, wait: Duration) -> (TermEvent, Option<Vec<u8>>) {
+        fn history(f: &Frame) -> Option<Vec<u8>> {
+            (f.kind == KIND_HISTORY).then(|| f.payload.clone())
+        }
         fn event(f: &Frame) -> Option<TermEvent> {
             if f.kind == STREAM_CLOSE {
                 return Some(TermEvent::Ended);
@@ -726,7 +768,7 @@ impl Session {
         }
         if let Some(pos) = self.term_frames.iter().position(|f| f.stream_id == stream) {
             if let Some(f) = self.term_frames.remove(pos) {
-                return event(&f).unwrap_or(TermEvent::Quiet);
+                return (event(&f).unwrap_or(TermEvent::Quiet), history(&f));
             }
         }
         let conn = &mut self.conn;
@@ -738,16 +780,18 @@ impl Session {
         let seen = &mut self.seen;
         self.rt.block_on(async {
             match tokio::time::timeout(wait, conn.recv()).await {
-                Err(_) => TermEvent::Quiet,
-                Ok(Ok(Some(f))) if f.stream_id == stream => event(&f).unwrap_or(TermEvent::Quiet),
+                Err(_) => (TermEvent::Quiet, None),
+                Ok(Ok(Some(f))) if f.stream_id == stream => {
+                    (event(&f).unwrap_or(TermEvent::Quiet), history(&f))
+                }
                 Ok(Ok(Some(f))) => {
                     // The answer to something typed without waiting: only a missing grant matters.
                     if !typing.answer(&f) {
                         set_aside(f, changed, asked, kept, queue, seen);
                     }
-                    TermEvent::Quiet
+                    (TermEvent::Quiet, None)
                 }
-                Ok(_) => TermEvent::Lost,
+                Ok(_) => (TermEvent::Lost, None),
             }
         })
     }
@@ -1303,6 +1347,7 @@ impl Session {
             payload: Vec::new(),
         }));
         self.term_frames.retain(|f| f.stream_id != stream);
+        self.history.remove(&stream);
     }
 
     fn send_nowait(&mut self, node: &str, command: command_request::Command) -> u64 {
@@ -1499,6 +1544,8 @@ const MAX_QUEUED_STREAM_BYTES: usize = 2 * 1024 * 1024;
 const MEASURE_QUEUE_AT: usize = 128;
 /// A frame the client makes itself: frames of this stream were dropped, the reader must watch it again (a fresh repaint).
 const KIND_BEHIND: u8 = 200;
+/// A terminal history frame (ADR-0100 decision 2).
+const KIND_HISTORY: u8 = 4;
 
 /// Queues a terminal or chat frame for its reader. Past [`MAX_QUEUED_STREAM_BYTES`] for its stream, that stream's queued frames are
 /// dropped and a [`KIND_BEHIND`] marker stands in for them (and for what comes after, until the reader takes it).

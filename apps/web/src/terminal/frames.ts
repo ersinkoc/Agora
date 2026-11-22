@@ -1,10 +1,14 @@
 // Terminal stream frames (docs/specs/protocol.md "Node-local control socket"): the node writes, on the stream the
 // client chose, kind 1 snapshot (ANSI that repaints the screen), kind 0 raw output, kind 2 resize (cols, rows as
-// u16 LE) and kind 3 exit (i32 LE; negative = signal). A client that falls behind receives a fresh snapshot.
+// u16 LE) and kind 3 exit (i32 LE; negative = signal). A client that falls behind receives a fresh snapshot. When the
+// subscription asked for history (ADR-0100), kind 4 frames come first: ANSI that puts the newest lines into the window's
+// scrollback at the size of the snapshot that follows them.
 
 export type TerminalEvent =
   | { type: 'data'; bytes: Uint8Array }
-  | { type: 'snapshot'; bytes: Uint8Array }
+  // `history`: the kind 4 frames that came before it, joined; painted together with it (snapshotAfterSize).
+  | { type: 'snapshot'; bytes: Uint8Array; history?: Uint8Array }
+  | { type: 'history'; bytes: Uint8Array }
   | { type: 'resize'; cols: number; rows: number }
   | { type: 'exit'; code: number };
 
@@ -12,6 +16,7 @@ export const KIND_DATA = 0;
 export const KIND_SNAPSHOT = 1;
 export const KIND_RESIZE = 2;
 export const KIND_EXIT = 3;
+export const KIND_HISTORY = 4;
 
 // Unknown kinds and malformed payloads give `undefined`: newer nodes may add kinds, and a bad frame must not
 // take the terminal down.
@@ -28,6 +33,8 @@ export function decodeTerminalFrame(kind: number, payload: Uint8Array): Terminal
     case KIND_EXIT:
       if (payload.byteLength !== 4) return undefined;
       return { type: 'exit', code: view.getInt32(0, true) };
+    case KIND_HISTORY:
+      return { type: 'history', bytes: payload };
     default:
       return undefined;
   }
@@ -51,11 +58,25 @@ export function binaryBytes(data: string): Uint8Array {
 // sometimes: it depends on which the browser gets to first). So a snapshot waits for the size frame that follows it, and is painted
 // just after the window has taken that size. Anything else that arrives first (output, exit, a later snapshot, or a short wait for a
 // node that sends no size) paints it at once, so nothing is held back for long and the order is kept.
+// History (kind 4, ADR-0100) is made at the snapshot's size too and always comes directly before it, so it is held until that snapshot
+// and travels with it: the window writes both at once, at the right width (renderer.ts, `reset`). Nothing ever waits for history: a
+// node that sends none (an older one, or a window that asked for none) gives a snapshot that is painted as before. Should anything
+// else come between them (it does not), the held history is written first, so nothing is lost and the order is kept.
 export const SNAPSHOT_WAIT_MS = 150;
+
+function joined(parts: Uint8Array[]): Uint8Array {
+  if (parts.length === 1) return parts[0] as Uint8Array;
+  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+  let at = 0;
+  for (const p of parts) { out.set(p, at); at += p.length; }
+  return out;
+}
 
 export function snapshotAfterSize(apply: (e: TerminalEvent) => void): { push(e: TerminalEvent): void; dispose(): void } {
   let held: TerminalEvent | undefined;
+  let history: Uint8Array[] = [];
   let timer: ReturnType<typeof setTimeout> | undefined;
+  const takeHistory = () => { const h = history.length ? joined(history) : undefined; history = []; return h; };
   const release = () => {
     if (timer !== undefined) { clearTimeout(timer); timer = undefined; }
     const h = held;
@@ -64,16 +85,20 @@ export function snapshotAfterSize(apply: (e: TerminalEvent) => void): { push(e: 
   };
   return {
     push(e) {
+      if (e.type === 'history') { release(); history.push(e.bytes); return; }
       if (e.type === 'snapshot') {
         release();
-        held = e;
+        const h = takeHistory();
+        held = h ? { type: 'snapshot', bytes: e.bytes, history: h } : e;
         timer = setTimeout(release, SNAPSHOT_WAIT_MS);
         return;
       }
+      const h = takeHistory();
+      if (h) apply({ type: 'data', bytes: h });
       if (e.type === 'resize') { apply(e); release(); return; }
       release();
       apply(e);
     },
-    dispose() { if (timer !== undefined) clearTimeout(timer); timer = undefined; held = undefined; },
+    dispose() { if (timer !== undefined) clearTimeout(timer); timer = undefined; held = undefined; history = []; },
   };
 }

@@ -61,3 +61,38 @@ describe('a snapshot is painted after the size that follows it', () => {
     expect(out).toEqual([]);
   });
 });
+
+describe('history (kind 4) is held with the snapshot it comes before (ADR-0100)', () => {
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+  const bytes = (s: string) => new TextEncoder().encode(s);
+  const text = (b?: Uint8Array) => (b ? new TextDecoder().decode(b) : undefined);
+  const run = (...events: TerminalEvent[]) => {
+    const out: TerminalEvent[] = [];
+    const g = snapshotAfterSize((e) => out.push(e));
+    events.forEach((e) => g.push(e));
+    return { out, g };
+  };
+  const shape = (out: TerminalEvent[]) => out.map((e) => (e.type === 'snapshot' ? `snapshot(${text(e.history) ?? '-'})` : e.type));
+  it('decodes kind 4 as history bytes', () => {
+    expect(decodeTerminalFrame(4, bytes('h'))).toEqual({ type: 'history', bytes: bytes('h') });
+  });
+  it('paints the history and the snapshot together, after the size that follows them', () => {
+    const { out } = run({ type: 'history', bytes: bytes('a') }, { type: 'history', bytes: bytes('b') }, { type: 'snapshot', bytes: bytes('s') });
+    expect(out).toEqual([]);
+    expect(shape(run({ type: 'history', bytes: bytes('a') }, { type: 'history', bytes: bytes('b') }, { type: 'snapshot', bytes: bytes('s') },
+      { type: 'resize', cols: 80, rows: 24 }, { type: 'data', bytes: bytes('d') }).out)).toEqual(['resize', 'snapshot(ab)', 'data']);
+  });
+  it('never waits for history: a snapshot without it is painted as before, and a later one carries none', () => {
+    expect(shape(run({ type: 'snapshot', bytes: bytes('s') }, { type: 'resize', cols: 80, rows: 24 }).out)).toEqual(['resize', 'snapshot(-)']);
+    expect(shape(run({ type: 'history', bytes: bytes('a') }, { type: 'snapshot', bytes: bytes('s') }, { type: 'resize', cols: 80, rows: 24 },
+      { type: 'snapshot', bytes: bytes('t') }, { type: 'resize', cols: 80, rows: 24 }).out)).toEqual(['resize', 'snapshot(a)', 'resize', 'snapshot(-)']);
+  });
+  it('drops held history when disposed', () => {
+    const { out, g } = run({ type: 'history', bytes: bytes('a') });
+    g.dispose();
+    g.push({ type: 'snapshot', bytes: bytes('s') });
+    vi.advanceTimersByTime(SNAPSHOT_WAIT_MS);
+    expect(shape(out)).toEqual(['snapshot(-)']);
+  });
+});

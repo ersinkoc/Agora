@@ -598,3 +598,63 @@ describe('shared terminal size', () => {
     live.close();
   });
 });
+
+describe('terminal history (ADR-0100 decision 2)', () => {
+  function open() {
+    const sockets: FakeSocket[] = [];
+    const live = connectLive({
+      url: 'ws://hub/', token: 't', backoffMs: () => 0,
+      socket: (u, p) => { const s = new FakeSocket(u, p); sockets.push(s); return s; },
+      onState: () => {}, onView: () => {},
+    });
+    (sockets[0] as FakeSocket).onopen?.();
+    const asked = (s: FakeSocket) => s.sent.map((b) => decodeFrame(b)).filter((f) => f && f.kind === 0 && f.streamId >= 3)
+      .map((f) => v1.CommandRequest.decode(f?.payload as Uint8Array).terminalSubscribe?.historyLines ?? 0);
+    const deliver = (s: FakeSocket, stream: number, kind: number, payload: Uint8Array) => {
+      const b = encodeFrame({ streamId: stream, kind, payload });
+      s.onmessage?.({ data: b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength) });
+    };
+    const reconnect = async () => {
+      (sockets.at(-1) as FakeSocket).onclose?.();
+      await new Promise((r) => setTimeout(r, 10));
+      const next = sockets.at(-1) as FakeSocket;
+      next.onopen?.();
+      return next;
+    };
+    return { live, sockets, asked, deliver, reconnect };
+  }
+
+  it('asks for the window\'s own history when its terminal has none, and 0 once it painted a screen', async () => {
+    const { live, sockets, asked, deliver, reconnect } = open();
+    const first = sockets[0] as FakeSocket;
+    const events: string[] = [];
+    live.terminal('laptop', 't-1').connect((e) => events.push(e.type), { historyLines: 5000 });
+    expect(asked(first)).toEqual([5000]);
+    // A reconnect before any screen arrived: the terminal still has no history of its own, so it asks again.
+    const second = await reconnect();
+    expect(asked(second)).toEqual([5000]);
+    deliver(second, 3, 4, new TextEncoder().encode('old lines'));
+    deliver(second, 3, 1, new TextEncoder().encode('screen'));
+    expect(events).toEqual(['history', 'snapshot']);
+    // From now on it keeps its own (longer) history: a reconnect, or the hub ending the relay (falling behind), asks for none.
+    const third = await reconnect();
+    expect(asked(third)).toEqual([0]);
+    deliver(third, 3, STREAM_CLOSE, new Uint8Array());
+    await new Promise((r) => setTimeout(r, 600));
+    expect(asked(third)).toEqual([0, 0]);
+    live.close();
+  });
+
+  it('asks a new window (a remount) again, and none when the window asks for none', () => {
+    const { live, sockets, asked, deliver } = open();
+    const first = sockets[0] as FakeSocket;
+    const source = live.terminal('laptop', 't-1');
+    const a = source.connect(() => {}, { historyLines: 2000 });
+    deliver(first, 3, 1, new TextEncoder().encode('screen'));
+    a.close();
+    source.connect(() => {}, { historyLines: 2000 });
+    live.terminal('laptop', 't-2').connect(() => {});
+    expect(asked(first)).toEqual([2000, 2000, 0]);
+    live.close();
+  });
+});
