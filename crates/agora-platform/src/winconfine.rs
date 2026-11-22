@@ -76,24 +76,17 @@ const ANY_WRITE: u32 = 0x2 /* FILE_WRITE_DATA / ADD_FILE */
     | WRITE_OWNER
     | 0x1000_0000 /* GENERIC_ALL */
     | 0x4000_0000 /* GENERIC_WRITE */;
-/// The groups of the restricting list through which a confined agent reads what it was given no entry for (`Users`, `Everyone`).
-const READ_THROUGH: [&str; 2] = ["S-1-5-32-545", "S-1-1-0"];
-/// Access bits that let a group read a file or list a folder.
-const ANY_READ: u32 = 0x1 /* FILE_READ_DATA / LIST_DIRECTORY */
-    | 0x1000_0000 /* GENERIC_ALL */
-    | 0x8000_0000 /* GENERIC_READ */;
-
-/// #898: whether a read grant left out is worth a line in the log: not when the folder is readable through `Users`/`Everyone`
-/// anyway (`System32`, `Program Files`, at every confined start), only when the agent really goes without it.
-fn read_left_out_matters(path: &Path) -> bool {
-    let Ok(groups) = READ_THROUGH
-        .iter()
-        .map(|s| Sid::from_string(s))
-        .collect::<io::Result<Vec<Sid>>>()
-    else {
-        return true;
-    };
-    !grants_to(path, &groups, ANY_READ)
+/// #898: whether a read grant left out on `path` is said for the first time by this process. The same folders (`System32`, `Program
+/// Files`) were said at every confined start; each is now said once, whatever the agent can still read there (that is not decided here).
+fn first_time_left_out(path: &Path) -> bool {
+    static SAID: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<PathBuf>>> =
+        std::sync::OnceLock::new();
+    let said = SAID.get_or_init(Default::default);
+    // A poisoned lock only loses the deduplication: say it again rather than never.
+    match said.lock() {
+        Ok(mut seen) => seen.insert(path.to_path_buf()),
+        Err(_) => true,
+    }
 }
 /// For a folder whose label the user cannot set (a data volume's default ACL, Modify through `Authenticated Users` only). `false`, as
 /// accepted ADR-0050 Amendment B, decision 2 reads: such a folder is refused before start (`label_failed`). `true` would give the
@@ -746,11 +739,6 @@ fn has_explicit_ace_for(path: &Path, sid: PSID) -> bool {
 }
 
 fn grants_write_to(path: &Path, sids: &[Sid]) -> bool {
-    grants_to(path, sids, ANY_WRITE)
-}
-
-/// Whether `path`'s DACL lets one of `sids` do any of `mask` (an allow entry for this object, or no DACL at all).
-fn grants_to(path: &Path, sids: &[Sid], mask: u32) -> bool {
     let name = wide(path.as_os_str());
     let (mut dacl, mut descriptor) = (null_mut::<ACL>(), null_mut());
     // SAFETY: a NUL-terminated path; out pointers freed below.
@@ -785,7 +773,7 @@ fn grants_to(path: &Path, sids: &[Sid], mask: u32) -> bool {
             }
             // SAFETY: type 0 is an ACCESS_ALLOWED_ACE; its SID starts at `SidStart`.
             let allowed = unsafe { &*(ace.cast::<ACCESS_ALLOWED_ACE>()) };
-            if allowed.Mask & mask == 0 {
+            if allowed.Mask & ANY_WRITE == 0 {
                 continue;
             }
             let ace_sid: PSID = (&allowed.SidStart as *const u32).cast_mut().cast();
@@ -1095,7 +1083,7 @@ impl Confinement {
                 // It stays in `granted`: `drop` and recovery take back only an entry that is there, so should the call ever have written
                 // part of it before failing, that part is still taken back.
                 Err(e) if mask == READ_MASK && e.kind() == io::ErrorKind::PermissionDenied => {
-                    if read_left_out_matters(&path) {
+                    if first_time_left_out(&path) {
                         eprintln!(
                             "agora-platform: confinement: read grant on {} left out: {e}",
                             path.display()
@@ -1974,17 +1962,15 @@ mod tests {
         out
     }
 
-    /// #898: a read grant left out is logged only when the agent really goes without it: `System32` is read through `Users`/`Everyone`
-    /// anyway (silent at every start), a folder that grants them nothing is not (said).
+    /// #898: a read grant left out is said once per folder and process, not at every confined start; another folder is still said.
     #[test]
-    fn a_read_grant_left_out_is_said_only_where_the_agent_cannot_read_through_its_groups() {
-        let system32 = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32");
-        assert!(!read_left_out_matters(&system32));
-        let root = scratch("read-matters");
-        let locked = root.join("locked");
-        std::fs::create_dir_all(&locked).unwrap();
-        unchangeable(&locked);
-        assert!(read_left_out_matters(&locked));
+    fn a_read_grant_left_out_is_said_once_per_folder() {
+        let root = scratch("read-said-once");
+        let (a, b) = (root.join("a"), root.join("b"));
+        assert!(first_time_left_out(&a));
+        assert!(!first_time_left_out(&a));
+        assert!(!first_time_left_out(&a));
+        assert!(first_time_left_out(&b));
         remove(&root);
     }
 

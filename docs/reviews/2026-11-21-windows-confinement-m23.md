@@ -72,10 +72,10 @@ Not measured either: real Claude Code or Codex agents (no real accounts were use
   check sees only the restricting groups, which are granted read only. With a descriptor granting `Everyone` full access the same open
   works, so integrity is not the cause. Making the logon SID the token's default owner is refused (error 1307). Fixing it needs another
   confinement mechanism; #895 stays open for that decision, and `sandbox-recipes.md` states the limit.
-- **Rust (#898, item 3): works.** A Rust (std, 1.99.1) program in the same agent starts `cmd /c exit 0` with stdout null, inherited and
-  piped. So Rust agents (Codex) can run tools confined.
-- **Log noise (#898, item 2): quieted.** A read grant the user may not make is now logged only when `Users`/`Everyone` cannot read that
-  folder either, so `System32` and `Program Files` no longer add a line at every start.
+- **Rust (#898, item 3): a stand-in works.** A Rust (std, 1.99.1) stand-in program in the same agent starts `cmd /c exit 0` with stdout
+  null, inherited and piped. Rust agents (Codex) are expected to start their tools confined; no real Codex run was measured.
+- **Log noise (#898, item 2): quieted.** A read grant the user may not make is now logged once per folder and node process, not at every
+  confined start, so `System32` and `Program Files` are said once.
 - **Ports (#898, item 1):** the wildcard-listener case is in `sandbox-recipes.md`.
 - Side finding: Node resolving a `.js` file walks up for `package.json`; in a folder under the profile with none of its own it reaches
   `C:\Users\<user>\package.json`, gets `EPERM` and stops. Real projects have their own `package.json`.

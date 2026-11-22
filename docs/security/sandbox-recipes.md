@@ -166,13 +166,15 @@ create, and a directory created in advance by the (Medium) node with a Low label
 on Windows runs commands through Git Bash, so a confined Claude Code agent cannot run shell commands.** Agents that run commands through `cmd` or
 PowerShell are not affected. Run such an agent with `sandbox = off` until this is solved.
 
-**Not supported confined on Windows either: a Node.js program starting a child with piped input or output** (#895). `child_process.spawn` and
-`spawnSync` fail with `EPERM` whenever a stdio stream is a pipe (the default); with `stdio: 'ignore'` or `'inherit'` the child starts.
-libuv creates each such pipe as a named pipe and opens the child's end by name. Windows gives a named pipe created without explicit security
-its own default permissions (full access for the owner, the system and administrators, read for `Everyone`), and a restricted token passes
-only what its restricting groups (the agent, `Everyone`, `Users`, the logon session) are granted, so that end cannot be opened for writing.
-**Consequence: Node-based agents (Claude Code, Gemini CLI and others) cannot run tools or start MCP servers when confined on Windows.**
-Rust programs (Codex; Rust's own pipes work) and `cmd` can. Fixing it needs another confinement mechanism, a decision for ADR-0050.
+**Not supported confined on Windows either: a Node.js program starting a child with piped input or output** (#895). Measured with Node 26:
+`child_process.spawn` and `spawnSync` fail with `EPERM` whenever a stdio stream is a pipe (the default); with `stdio: 'ignore'` or
+`'inherit'` the child starts. libuv creates each such pipe as a named pipe and opens the child's end by name. Windows gives a named pipe
+created without explicit security its own default permissions (full access for the owner, the system and administrators, read for
+`Everyone`), and a restricted token passes only what its restricting groups (the agent, `Everyone`, `Users`, the logon session) are granted,
+so that end cannot be opened for writing. **Consequence: a Node-based agent (Claude Code, Gemini CLI and others) that starts a tool or an MCP
+server with piped stdio, Node's default, cannot do so when confined on Windows.** Real agents were not measured. A Rust stand-in program
+(Rust's standard library, piped stdio included) and `cmd` start children confined, so Rust agents such as Codex are expected to work, but no
+real Codex run was measured. Fixing the Node case needs another confinement mechanism, a decision for ADR-0050.
 
 What differs from macOS and Linux:
 
