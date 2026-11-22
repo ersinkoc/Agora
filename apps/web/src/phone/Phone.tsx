@@ -111,12 +111,12 @@ function ApprovalCard({ approval: x, machine, untrusted: notTrusted, onResolve, 
         <div className="phone-card__actions">
           {/* ADR-0101: "Allow always" only when offered; in the place of Allow when the request offers nothing else. */}
           {x.always?.only
-            ? <button type="button" className="button button--primary" disabled={busy || stale} aria-describedby={stale ? `phone-why-${x.id}` : alwaysNoteId(x)} onClick={() => answer(true, undefined, true)}>{allowAlwaysWord()}</button>
+            ? <button type="button" className="button button--primary" disabled={busy || stale} aria-describedby={stale ? `phone-why-${x.id}` : alwaysNoteId(x, 'phone')} onClick={() => answer(true, undefined, true)}>{allowAlwaysWord()}</button>
             : <button type="button" className="button button--primary" disabled={busy || stale} aria-describedby={stale ? `phone-why-${x.id}` : undefined} onClick={() => answer(true)}>{t('approval-allow')}</button>}
           <button type="button" className="button" disabled={busy || stale} aria-describedby={stale ? `phone-why-${x.id}` : undefined} onClick={() => answer(false)}>{t('approval-deny')}</button>
-          {x.always && !x.always.only && <button type="button" className="button phone-card__always" disabled={busy || stale} aria-describedby={stale ? `phone-why-${x.id}` : alwaysNoteId(x)} onClick={() => answer(true, undefined, true)}>{allowAlwaysWord()}</button>}
+          {x.always && !x.always.only && <button type="button" className="button phone-card__always" disabled={busy || stale} aria-describedby={stale ? `phone-why-${x.id}` : alwaysNoteId(x, 'phone')} onClick={() => answer(true, undefined, true)}>{allowAlwaysWord()}</button>}
         </div>
-        {x.always && <AlwaysNote approval={x} />}
+        {x.always && <AlwaysNote approval={x} surface="phone" />}
         {stale && <p id={`phone-why-${x.id}`} className="phone-card__why m-0">{t('fleet-stale-no-answer')}</p>}
       </>)}
     </article>

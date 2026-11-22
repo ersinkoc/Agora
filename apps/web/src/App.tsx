@@ -17,8 +17,8 @@ import type { TerminalSource } from './terminal/source';
 import { signDirectory, type DirectoryInfo, type DirectoryListing } from './net/directory';
 import { StartAgent, type KindChoice } from './components/StartAgent';
 import { quotaObs, approvalList, boards, costByProject, projectChoices, recentMessages, machines, machinesOnline, shown, tiles, type ApprovalModel, type View } from './net/view';
-import { approvalFailureKey, indexedDbStore, signAlways, signApproval, signStart, thisDevice, type Device } from './net/approval';
-import { answerPlan, SCOPE_ALWAYS } from './net/always';
+import { approvalFailureKey, indexedDbStore, signApproval, signStart, thisDevice, type Device } from './net/approval';
+import { answerFields, answerPlan } from './net/always';
 import type { StartChoice } from './components/StartApproval';
 import { forgetSkipAnswer, forgetSkipCapable, isSkipCapable, recordSkipAnswer, signSkip, SKIP_ACTION } from './net/skipApproval';
 import type { HelperGrant } from './components/HelperGrants';
@@ -231,8 +231,7 @@ export function App() {
   const resolve = useCallback(async (a: ApprovalModel, approved: boolean, choice?: StartChoice, always = false) => {
     if (!api || !device) { setNotice('approval-failed'); return; }
     setNotice(undefined);
-    const plan = answerPlan(a, approved, always);
-    if (plan.scope === 'none') { setNotice('approval-scope-unavailable'); return; }
+    if (answerPlan(a, approved, always).scope === 'none') { setNotice('approval-scope-unavailable'); return; }
     try {
       // ADR-0057: a start is decided over the request exactly as shown, with the grant chosen.
       const helperGrant = a.start && approved ? choice?.grant ?? 0 : 0;
@@ -241,16 +240,17 @@ export function App() {
       // to offer it and only in the shape the window expects; any other shape is never signed.
       if (a.skipUnknown || (a.action === SKIP_ACTION && !a.skip)) { setNotice('skip-approval-unknown'); return; }
       if (a.skip && !isSkipCapable(a.node)) { setNotice('skip-approval-other-window'); return; }
-      const signature = plan.scope === 'always'
-        ? await signAlways(device, a.node, a.localId, plan.agentId, a.action, a.detail, plan.offer.label, plan.offer.optionId)
-        : a.skip
-        ? await signSkip(device, a.node, a.localId, approved, a.skip, a.detail)
+      // ADR-0101: an "always" answer over its own bytes with scope ALWAYS; any other over its own message, with no scope.
+      const fields = await answerFields(device, a, approved, always, () => (a.skip
+        ? signSkip(device, a.node, a.localId, approved, a.skip, a.detail)
         : a.start
-          ? await signStart(device, a.node, a.localId, approved, helperGrant, helpersMayStart, a.detail)
-          : await signApproval(device, a.node, a.localId, approved);
+          ? signStart(device, a.node, a.localId, approved, helperGrant, helpersMayStart, a.detail)
+          : signApproval(device, a.node, a.localId, approved)));
+      if (!fields) { setNotice('approval-scope-unavailable'); return; }
+      const { signature } = fields;
       // What this window answered, kept before the answer goes so a switch applied at once is still known as approved here.
       if (a.skip) recordSkipAnswer(a.id, { approved, agent: `${a.node}/${a.skip.agent}`, option: a.skip.option, value: a.skip.value });
-      await api.command(a.node, { approvalResolve: { approvalId: a.localId, approved, signerDeviceId: device.id, signature, helperGrant, helpersMayStart, ...(plan.scope === 'always' ? { scope: SCOPE_ALWAYS } : {}) } });
+      await api.command(a.node, { approvalResolve: { approvalId: a.localId, approved, signerDeviceId: device.id, signature, helperGrant, helpersMayStart, ...(fields.scope ? { scope: fields.scope } : {}) } });
     } catch (e) {
       forgetSkipAnswer(a.id);
       const code = (e as { code?: string }).code;

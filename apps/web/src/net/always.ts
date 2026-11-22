@@ -1,4 +1,6 @@
-// ADR-0101: "Allow always", an answer the agent remembers. Pure: what a request offers, what an answer may be sent as, and which words say it.
+// ADR-0101: "Allow always", an answer the agent remembers. What a request offers, what an answer may be sent as (and its signature), and
+// which words say it.
+import { signAlways, type Device } from './approval';
 
 // `agora.v1.ApprovalScope`: 0 (unset) and 1 are a single answer, 2 is one the agent remembers. Any other value is not read as either.
 export const SCOPE_UNSPECIFIED = 0;
@@ -37,6 +39,24 @@ export function answerPlan(
   const agentId = localAgentId(a);
   if (!approved || !a.always || a.start || a.skip || a.skipUnknown || !agentId) return { scope: 'none' };
   return { scope: 'always', agentId, offer: a.always };
+}
+
+/** The signature and scope an answer goes out with (`ApprovalResolve.signature`, `.scope`), or undefined when it must not go out
+ * (`answerPlan`). An "always" answer is signed over the always bytes from the request's own fields, exactly as announced, with scope
+ * ALWAYS; any other answer is signed by `single` (the v1, start or skip message) and carries no scope. */
+export async function answerFields(
+  device: Device,
+  a: { node: string; localId: string; agentId: string; action: string; detail: string; always?: AlwaysOffer; start?: unknown; skip?: unknown; skipUnknown?: boolean },
+  approved: boolean,
+  always: boolean,
+  single: () => Promise<Uint8Array>,
+  subtle: SubtleCrypto = crypto.subtle,
+): Promise<{ signature: Uint8Array; scope?: number } | undefined> {
+  const plan = answerPlan(a, approved, always);
+  if (plan.scope === 'none') return undefined;
+  if (plan.scope === 'once') return { signature: await single() };
+  const signature = await signAlways(device, a.node, a.localId, plan.agentId, a.action, a.detail, plan.offer.label, plan.offer.optionId, subtle);
+  return { signature, scope: SCOPE_ALWAYS };
 }
 
 // Codex's review of ADR-0101: "for this session" and "until it ends" are said only for a kind known to drop the answer when its session ends.

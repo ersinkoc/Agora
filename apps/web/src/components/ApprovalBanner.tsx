@@ -20,12 +20,12 @@ export function ApprovalBanner({ approval: x, onResolve, pinned }: { approval: A
       <div className={`min-w-0 flex-1 ${x.always ? 'basis-48' : ''}`}><strong className={`block ${pinned ? 'line-clamp-2' : 'truncate'}`}>{t('approval-title', { name: approvalName(x) })}</strong><span className={`block text-xs text-muted ${pinned ? 'line-clamp-2' : 'truncate'}`} title={x.detail || undefined}>{x.action}{x.detail ? ` · ${detailText(x.detail)}` : ''}</span>{x.detail && <FullRequest detail={x.detail} />}<AlwaysOnly approval={x} className="mt-1" /></div>
       {onResolve && <div className={x.always ? 'flex flex-wrap items-center gap-2' : 'contents'}>
         {x.always?.only
-          ? <button type="button" className="button button--primary px-3 py-1 text-xs" aria-describedby={alwaysNoteId(x)} onClick={() => onResolve(x, true, undefined, true)}>{allowAlwaysWord()}</button>
+          ? <button type="button" className="button button--primary px-3 py-1 text-xs" aria-describedby={alwaysNoteId(x, 'banner')} onClick={() => onResolve(x, true, undefined, true)}>{allowAlwaysWord()}</button>
           : <button type="button" className="button button--primary px-3 py-1 text-xs" onClick={() => onResolve(x, true)}>{t('approval-allow')}</button>}
         <button type="button" className="button px-3 py-1 text-xs" onClick={() => onResolve(x, false)}>{t('approval-deny')}</button>
-        {x.always && !x.always.only && <button type="button" className="button px-3 py-1 text-xs" aria-describedby={alwaysNoteId(x)} onClick={() => onResolve(x, true, undefined, true)}>{allowAlwaysWord()}</button>}
+        {x.always && !x.always.only && <button type="button" className="button px-3 py-1 text-xs" aria-describedby={alwaysNoteId(x, 'banner')} onClick={() => onResolve(x, true, undefined, true)}>{allowAlwaysWord()}</button>}
       </div>}
-      {x.always && <AlwaysNote approval={x} className="basis-full" />}
+      {x.always && <AlwaysNote approval={x} surface="banner" className="basis-full" />}
     </div>
   );
 }

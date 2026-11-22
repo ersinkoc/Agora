@@ -3,8 +3,8 @@
 - Reachable from the top-bar indicator and as banners in the center panel.
 - Each item: agent, project, node, requested action (command, file write, network, install), the exact
   command or diff, risk label from policy, time waiting.
-- Actions: Allow, Deny, and **Allow always** when the agent offers it (below); Deny and stop agent is not built. Every
-  decision is signed by the device key (ADR-0020).
+- Actions: Allow, **Allow always** when the agent offers it (below), Deny, Deny and stop agent. Every decision is signed by
+  the device key (ADR-0020).
 
 ## Allow always (ADR-0101)
 

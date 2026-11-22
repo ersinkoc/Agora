@@ -441,20 +441,10 @@ fn answer(
     answer: Answer,
 ) -> String {
     // ADR-0101: an answer the request does not offer is never sent; the line says which one it offers.
-    if let Some(a) = agora_tui::client::answered_approval(snapshot, Some(selected)) {
-        let offer = agora_tui::client::always_offer(a);
-        match answer {
-            Answer::AllowAlways if offer.is_none() => {
-                return say.text(key!("tui-allow-always-not-offered"), &[])
-            }
-            Answer::Allow if offer.is_some_and(|o| o.only) => {
-                return say.text(
-                    agora_tui::client::always_text(key!("tui-allow-once-not-offered"), false),
-                    &[],
-                )
-            }
-            _ => {}
-        }
+    if let Some(id) = agora_tui::client::answered_approval(snapshot, Some(selected))
+        .and_then(|a| agora_tui::client::not_offered(a, answer))
+    {
+        return say.text(id, &[]);
     }
     let Some(device) = device() else {
         return say.text(
@@ -3714,11 +3704,9 @@ fn command(
                     let key = over_console(say, c, session, None, rx, |_, ask| {
                         ask.key(&lines, Duration::from_secs(120))
                     });
-                    match key {
-                        Some(b'y') => reply = Answer::Allow,
-                        Some(b'A') => reply = Answer::AllowAlways,
-                        Some(b'n') => reply = Answer::Deny,
-                        _ => {
+                    match agora_tui::client::box_answer(key) {
+                        Some(r) => reply = r,
+                        None => {
                             c.notice = String::new();
                             return false;
                         }

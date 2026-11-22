@@ -1453,6 +1453,33 @@ pub enum Answer {
     Deny,
 }
 
+/// ADR-0101: the answer a key typed in the box that shows a request gives: `y` once, `A` always, `n` denies; any other key (a lowercase
+/// `a`, a `Y`) leaves the request waiting, so a one-letter case difference is never the gap between a single and a remembered answer.
+pub fn box_answer(key: Option<u8>) -> Option<Answer> {
+    match key {
+        Some(b'y') => Some(Answer::Allow),
+        Some(b'A') => Some(Answer::AllowAlways),
+        Some(b'n') => Some(Answer::Deny),
+        _ => None,
+    }
+}
+
+/// ADR-0101: the line (a text id) that refuses an answer `a` does not offer, before anything is signed or sent: "always" on a request that
+/// offers only a single answer, a plain Allow on one that offers only "always". `None` when the answer may go.
+pub fn not_offered(
+    a: &agora_protocol::v1::ApprovalSnapshot,
+    answer: Answer,
+) -> Option<&'static str> {
+    let offer = always_offer(a);
+    match answer {
+        Answer::AllowAlways if offer.is_none() => Some(key!("tui-allow-always-not-offered")),
+        Answer::Allow if offer.is_some_and(|o| o.only) => {
+            Some(always_text(key!("tui-allow-once-not-offered"), false))
+        }
+        _ => None,
+    }
+}
+
 /// The bytes this device signs to answer `a` and the scope the answer carries, or the code it is refused with before anything is sent:
 /// `approval.scope_unavailable` for an "always" answer the request does not offer, or a plain Allow on a request that offers only
 /// "always" (the agent would remember it). A Deny is always a single answer.
@@ -1873,6 +1900,39 @@ mod always_tests {
                 approval_message("laptop", "ap-1", false),
                 ApprovalScope::Unspecified
             )
+        );
+    }
+
+    #[test]
+    fn the_request_box_reads_a_capital_a_as_always_and_nothing_else_as_it() {
+        use super::box_answer;
+        assert_eq!(box_answer(Some(b'A')), Some(Answer::AllowAlways));
+        assert_eq!(box_answer(Some(b'y')), Some(Answer::Allow));
+        assert_eq!(box_answer(Some(b'n')), Some(Answer::Deny));
+        for k in [b'a', b'Y', b'N', b'\r', 0x1b] {
+            assert_eq!(box_answer(Some(k)), None, "{k}");
+        }
+        assert_eq!(box_answer(None), None);
+    }
+
+    #[test]
+    fn an_answer_that_is_not_offered_is_named_before_anything_is_signed() {
+        use super::not_offered;
+        use ApprovalScope::{Always, Once};
+        assert_eq!(
+            not_offered(&ask(&[Once]), Answer::AllowAlways),
+            Some("tui-allow-always-not-offered")
+        );
+        assert_eq!(not_offered(&ask(&[Once]), Answer::Allow), None);
+        assert_eq!(
+            not_offered(&ask(&[Always]), Answer::Allow),
+            Some("tui-allow-once-not-offered-kept")
+        );
+        assert_eq!(not_offered(&ask(&[Always]), Answer::AllowAlways), None);
+        assert_eq!(not_offered(&ask(&[Always]), Answer::Deny), None);
+        assert_eq!(
+            not_offered(&ask(&[Once, Always]), Answer::AllowAlways),
+            None
         );
     }
 

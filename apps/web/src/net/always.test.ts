@@ -2,7 +2,9 @@
 // request offers it, and a request that does not offer it never sends it.
 import { describe, expect, it } from 'vitest';
 import { alwaysSignedMessage, approvalFailureKey, signAlways, thisDevice, toHex, type KeyStore } from './approval';
-import { alwaysOffer, alwaysText, answerPlan, localAgentId, SCOPE_ALWAYS, SCOPE_ONCE } from './always';
+import { alwaysOffer, alwaysText, answerFields, answerPlan, localAgentId, SCOPE_ALWAYS, SCOPE_ONCE } from './always';
+import { shownKey } from './attention';
+import { attentionList } from './fleet';
 import { applyEvent, approvalList, emptyView, fromSnapshot, tiles } from './view';
 import { decidableInline } from './fleet';
 import { chatLine } from './chat';
@@ -32,6 +34,50 @@ describe('the always signature', () => {
     expect(await verify(msg)).toBe(true);
     expect(await verify(await alwaysSignedMessage('laptop', 'ap-1', 'agent-1', 'run_command', 'git status', 'Always allow', 'opt-2'))).toBe(false);
     expect(await verify(await alwaysSignedMessage('laptop', 'ap-1', 'agent-1', 'run_command', 'git status ', 'Always allow', 'opt-1'))).toBe(false);
+  });
+});
+
+describe('what the window sends', () => {
+  const device = async () => {
+    let saved: Awaited<ReturnType<KeyStore['load']>>;
+    return thisDevice({ load: async () => saved, save: async (x) => { saved = x; } });
+  };
+  const model = { id: 'laptop/ap-1', node: 'laptop', localId: 'ap-1', agentId: 'laptop/agent-1', action: 'run_command', detail: '{"command":"git status"}', always: { label: 'Always allow git status', optionId: 'allow-always-1', only: false } };
+  const verify = async (d: Awaited<ReturnType<typeof device>>, sig: Uint8Array, m: Uint8Array) =>
+    crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, d.keys.publicKey, sig as BufferSource, m as BufferSource);
+
+  it('signs an always answer over the always bytes of the request\'s own fields, with scope ALWAYS', async () => {
+    const d = await device();
+    let single = 0;
+    const f = await answerFields(d, model, true, true, async () => { single++; return new Uint8Array(); });
+    expect(f?.scope).toBe(SCOPE_ALWAYS);
+    expect(single).toBe(0);
+    const want = await alwaysSignedMessage('laptop', 'ap-1', 'agent-1', model.action, model.detail, model.always.label, model.always.optionId);
+    expect(await verify(d, f!.signature, want)).toBe(true);
+    // Not over the single answer's bytes, nor over the hub-wide agent key.
+    expect(await verify(d, f!.signature, await alwaysSignedMessage('laptop', 'ap-1', 'laptop/agent-1', model.action, model.detail, model.always.label, model.always.optionId))).toBe(false);
+  });
+
+  it('sends a single answer with its own signature and no scope, and nothing for an answer the request does not offer', async () => {
+    const d = await device();
+    const mark = new Uint8Array([7]);
+    expect(await answerFields(d, model, true, false, async () => mark)).toEqual({ signature: mark });
+    expect(await answerFields(d, model, false, false, async () => mark)).toEqual({ signature: mark });
+    let called = false;
+    const { always: _, ...plain } = model;
+    expect(await answerFields(d, plain, true, true, async () => { called = true; return mark; })).toBeUndefined();
+    expect(await answerFields(d, { ...model, always: { ...model.always, only: true } }, true, false, async () => { called = true; return mark; })).toBeUndefined();
+    expect(called).toBe(false);
+  });
+
+  it('starts the attention card\'s dwell again when the offer changes what it shows', () => {
+    const base = { ...model, agentName: 'w', machineName: 'm', expiresAtMs: 0 };
+    const key = (a: Omit<typeof base, 'always'> & { always?: typeof model.always }) => shownKey(attentionList([a], [])[0]!);
+    const { always: _, ...none } = base;
+    expect(key(base)).not.toBe(key(none));
+    expect(key(base)).not.toBe(key({ ...base, always: { ...model.always, label: 'Other' } }));
+    expect(key(base)).not.toBe(key({ ...base, always: { ...model.always, only: true } }));
+    expect(key(base)).toBe(key({ ...base, always: { ...model.always } }));
   });
 });
 

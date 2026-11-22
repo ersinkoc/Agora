@@ -55,8 +55,8 @@ describe('the approval card', () => {
     expect(names()).toEqual(['Allow', 'Deny', 'Allow always']);
     const always = [...document.querySelectorAll('button')][2]!;
     expect(always.className).not.toContain('button--primary');
-    expect(always.getAttribute('aria-describedby')).toBe('always-note-n1/p1');
-    const note = document.getElementById('always-note-n1/p1')!;
+    expect(always.getAttribute('aria-describedby')).toBe('always-note-card-n1/p1');
+    const note = document.getElementById('always-note-card-n1/p1')!;
     expect(note.textContent).toContain('wstack · amber remembers this answer');
     expect(note.textContent).toContain('In its own words: “Always allow git status”');
     // Codex's review: "for this session" is not said for a kind nobody checked.

@@ -210,7 +210,7 @@ function AttentionCard({ item, more, stale, onResolve, onReview, onLater }: {
           <p className="attention-who m-0 min-w-0 flex-none break-words text-sm text-muted">{who}</p>
           <div id="attention-what" className="min-h-0 overflow-auto">
             {kind === 'answer' && x && <p className="attention-ask m-0 whitespace-pre-wrap break-words font-mono text-sm text-ink">{visible(askLine(x.action, x.detail))}</p>}
-            {kind === 'answer' && x?.always && <AlwaysNote approval={x} className="mt-2" />}
+            {kind === 'answer' && x?.always && <AlwaysNote approval={x} surface="attention" className="mt-2" />}
             {kind === 'review' && x && x.start && <p className="m-0 text-sm text-ink">{t('attention-start', { name })}</p>}
             {kind === 'review' && x && (x.skip || x.skipUnknown) && <p className="m-0 text-sm text-ink">{t('attention-skip', { name })}</p>}
             {kind === 'review' && x && !x.start && !x.skip && !x.skipUnknown && <>
@@ -227,7 +227,7 @@ function AttentionCard({ item, more, stale, onResolve, onReview, onLater }: {
             {kind === 'answer' && <>
               <button type="button" className={`button ${dead}`} aria-disabled={!canAnswer} aria-describedby={stale ? why : undefined} onClick={() => answer(false)}>{t('approval-deny')}</button>
               {/* ADR-0101: offered as well as a single answer (a request that offers only "always" is read in its full card, `decidableInline`). */}
-              {x?.always && !x.always.only && <button type="button" className={`button ${dead}`} aria-disabled={!canAnswer} aria-describedby={stale ? why : alwaysNoteId(x)} onClick={() => answer(true, true)}>{allowAlwaysWord()}</button>}
+              {x?.always && !x.always.only && <button type="button" className={`button ${dead}`} aria-disabled={!canAnswer} aria-describedby={stale ? why : alwaysNoteId(x, 'attention')} onClick={() => answer(true, true)}>{allowAlwaysWord()}</button>}
               <button type="button" className={`button button--primary ${dead}`} aria-disabled={!canAnswer} aria-describedby={stale ? why : undefined} onClick={() => answer(true)}>{t('approval-allow')}</button>
             </>}
             {(kind === 'review' || (kind === 'answer' && answered === key)) && <button type="button" className="button button--primary" onClick={() => onReview(item)}>{t('attention-review')}</button>}

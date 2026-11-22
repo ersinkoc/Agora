@@ -36,12 +36,12 @@ export function ApprovalCard({ approval, busy, onResolve }: {
       <AlwaysOnly approval={approval} />
       <div className="approval__actions">
         {approval.always?.only
-          ? <button type="button" className="button button--primary" disabled={busy} aria-describedby={alwaysNoteId(approval)} onClick={() => onResolve(true, undefined, true)}>{allowAlwaysWord()}</button>
+          ? <button type="button" className="button button--primary" disabled={busy} aria-describedby={alwaysNoteId(approval, 'card')} onClick={() => onResolve(true, undefined, true)}>{allowAlwaysWord()}</button>
           : <button type="button" className="button button--primary" disabled={busy} onClick={() => onResolve(true)}>{t('approval-allow')}</button>}
         <button type="button" className="button" disabled={busy} onClick={() => onResolve(false)}>{t('approval-deny')}</button>
-        {approval.always && !approval.always.only && <button type="button" className="button" disabled={busy} aria-describedby={alwaysNoteId(approval)} onClick={() => onResolve(true, undefined, true)}>{allowAlwaysWord()}</button>}
+        {approval.always && !approval.always.only && <button type="button" className="button" disabled={busy} aria-describedby={alwaysNoteId(approval, 'card')} onClick={() => onResolve(true, undefined, true)}>{allowAlwaysWord()}</button>}
       </div>
-      <AlwaysNote approval={approval} />
+      <AlwaysNote approval={approval} surface="card" />
     </article>
   );
 }

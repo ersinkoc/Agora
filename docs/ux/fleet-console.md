@@ -18,7 +18,9 @@ palette's "Go home" brings it back. An empty window is the fleet console too. On
    asked. Six rows are shown; the rest are one press away.
    * **Allow and Deny are in the row only for a plain yes or no that needs no reading and is shown whole**: one line each of action and
      detail, 120 characters at most in all, no structured text, no hidden character, and never a request to start an agent (it carries a
-     folder, a prompt and settings). The row grows to hold such a request; it never clamps or cuts it (`scripts/e2e-fleet-rows.mjs`
+     folder, a prompt and settings), nor one that offers only an answer the agent remembers (ADR-0101: it has no plain Allow and is
+     answered in its full card). A request that also offers **Allow always** keeps Allow and Deny here; the third button is in the full
+     card ([approvals.md](approvals.md)). The row grows to hold such a request; it never clamps or cuts it (`scripts/e2e-fleet-rows.mjs`
      measures the longest one at 340, 420 and 820 px and in Large text). While the link is down the buttons are disabled and say why.
    * **A machine that asks to join (ADR-0065) is a row of its own with one button, Review, and never an inline Approve**: the owner must compare the number on its screen with the
      card first, so the row shows the name and says what to do, never the number. It counts in the first count and sorts by when it runs out. See `docs/specs/pairing.md` section 14.
