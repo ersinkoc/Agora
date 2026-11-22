@@ -301,7 +301,7 @@ impl TermPane {
             cx.notify();
         } else if button == 1 {
             // Middle click pastes the primary selection where the system has one (X11, Wayland).
-            if let Some(text) = cx.read_from_primary().and_then(|i| i.text()) {
+            if let Some(text) = crate::os::read_primary(cx) {
                 self.paste(&text);
             }
         }
@@ -359,7 +359,7 @@ impl TermPane {
                 .selection_text()
                 .filter(|t| !t.is_empty() && !no_clipboard)
             {
-                cx.write_to_primary(ClipboardItem::new_string(text));
+                crate::os::write_primary(cx, text);
             } else if matches!(self.sel, Some(s) if s.mode == SelMode::Char && s.anchor == s.head) {
                 self.sel = None;
             }

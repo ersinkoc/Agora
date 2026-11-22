@@ -1,6 +1,7 @@
-//! What the driver reads about a process from outside: resident memory and CPU time, per operating system. The spike's only
-//! OS-specific code; it shells out to the system's own tools (`/proc`, `ps`, PowerShell) instead of adding a dependency. In the
-//! product this belongs in `agora-platform` (AGENTS.md); the spike is outside the main workspace and throwaway.
+//! The spike's only OS-specific code: what the driver reads about a process from outside (resident memory and CPU time; it shells
+//! out to the system's own tools, `/proc`, `ps`, PowerShell, instead of adding a dependency), and the primary selection, which GPUI
+//! has only on X11 and Wayland (the one compile-time branch). In the product this belongs in `agora-platform` (AGENTS.md); the spike
+//! is outside the main workspace and throwaway.
 
 use std::process::Command;
 
@@ -207,3 +208,25 @@ pub fn mapped_files(pid: u32) -> Vec<String> {
     v.dedup();
     v
 }
+
+/// The primary selection's text (middle-click paste). Only X11 and Wayland have one; GPUI offers no such call elsewhere.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+pub fn read_primary(cx: &gpui::App) -> Option<String> {
+    cx.read_from_primary().and_then(|i| i.text())
+}
+
+/// See the Linux version: no primary selection on this system.
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+pub fn read_primary(_cx: &gpui::App) -> Option<String> {
+    None
+}
+
+/// Puts a finished mouse selection in the primary selection (select to copy, X11 and Wayland).
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+pub fn write_primary(cx: &gpui::App, text: String) {
+    cx.write_to_primary(gpui::ClipboardItem::new_string(text));
+}
+
+/// See the Linux version: no primary selection on this system, so a selection is only highlighted.
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+pub fn write_primary(_cx: &gpui::App, _text: String) {}
