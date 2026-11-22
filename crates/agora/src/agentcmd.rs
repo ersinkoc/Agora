@@ -128,8 +128,9 @@ fn open_list(o: &Opts, h: &Path) -> Result<AgentList, InstallError> {
         return Err(list_error(&ListError::TooLarge));
     }
     let text = String::from_utf8(bytes).map_err(|_| unreadable())?;
-    let list = verify_list(&text, &root, now_ms(), inst::last_seen_version(h))
-        .map_err(|e| list_error(&e))?;
+    // A state file that is there but cannot be read refuses every list (#923): never read as "no list seen yet".
+    let seen = inst::last_seen_version(h)?;
+    let list = verify_list(&text, &root, now_ms(), seen).map_err(|e| list_error(&e))?;
     // A list this machine accepted is the newest it has seen: an older one is refused from now on.
     inst::remember_list_version(h, list.version)?;
     Ok(list)
@@ -146,6 +147,20 @@ pub fn install(say: &Say, o: &Opts) -> ExitCode {
         Err(e) => {
             if e.detail == "no_list_or_key" {
                 say.err(key!("cli-agent-install-no-list"), &[]);
+                return ExitCode::from(1);
+            }
+            if e.detail == inst::LIST_STATE_UNREADABLE {
+                say.err(
+                    key!("cli-agent-install-err-list-state"),
+                    &[
+                        ("code", e.code.code().into()),
+                        ("detail", e.detail.clone().into()),
+                        (
+                            "path",
+                            inst::list_state_path(&h).display().to_string().into(),
+                        ),
+                    ],
+                );
                 return ExitCode::from(1);
             }
             return failed(say, &e);

@@ -75,8 +75,20 @@ typing at. Code: `crates/agora-adapters/src/agent_install.rs` (the logic, with t
 `crates/agora/src/agentcmd.rs` (the words and the question). Nothing here involves the hub, a window or a protocol message.
 
 1. **The list.** Read from `--list`, opened with `verify_list` under the root key (`--root-key` as 64 hex characters or a file; default
-   `<AGORA_HOME>/agent-list-root-key`). The newest accepted version is kept in `<AGORA_HOME>/agents/list-state.json` (atomic, only
-   goes up), so an older list is refused as a rollback.
+   `<AGORA_HOME>/agent-list-root-key`). The newest accepted version is kept in `<AGORA_HOME>/agents/list-state.json` (`{"version":N}`,
+   replaced only by a rename so a crash leaves the old file whole, only goes up), so an older list is refused as a rollback
+   (`agent.install.index_invalid`, detail `rollback`). The version is recorded under the install lock after the record is read
+   again there: a list checked against an older record is refused as `rollback` when another install recorded a newer list
+   meanwhile, and the same version is already recorded. The check fails closed (#923): only a missing file means "no list accepted
+   yet" (the list is accepted and its version recorded). The file is opened without following a link at its last path component
+   (`list-state.json` itself) and checked on the opened handle; the folders above it are reached by path. The `agents` folder is
+   private to the user and a link there is refused before anything is written, but the lock, the read and the replace are not done
+   relative to one held folder handle, so a process running as the same user that replaces the `agents` folder between those steps
+   is not excluded (the same limit as the later install steps in item 7). A file that is there but cannot be read or understood (no permission, a folder or link at that path, larger than
+   4 KiB, not a JSON object with exactly one whole-number `version`) refuses **every** list, older or newer, with
+   `agent.install.index_invalid`, detail `list_state_unreadable`, and is never overwritten. The owner recovers by removing the file
+   and running the install again with the newest list from its publisher, which is then accepted as the first one; the message says
+   so and names the file. Removing it is the owner's own decision on their own machine, the same trust as writing it.
 2. **The plan.** `AgentList::offer` (a revoked publisher: `agent.install.revoked`), the entry's `binary-download` installer, and the
    key of this system (`agora_platform::platform_key()`: `linux-x86_64`, `darwin-aarch64`, `windows-x86_64`, `-musl` on a musl
    build); none: `agent.install.unsupported_platform`. The node prints the exact action from its own state: name, version, URL,
