@@ -13,6 +13,7 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 - The window's Messages list shows a message between machines once, from its sender and marked "between machines", instead of a second time with the sender's name doubled (`rm-two/blackview/agent-16`) and no mark (#905). A copy that only another machine than the sender's recorded says which machine reported it.
 - A mesh message to another machine whose answer never comes back now fails with a `delivery_failed` notice `node.timeout` after 40 s on the sending machine, so the sender always learns that it was not delivered (#915).
 - In the terminal client, `b` opens the board of the selected agent's project (Backlog, Doing, Done), and Enter on a Backlog task gives it to one of the project's running agents after a confirmation you answer with `g`.
+- A text file written as UTF-16 with a byte-order mark (what Windows PowerShell's `>` writes, as in `"hello" > a.txt` in the Shell) is shown as text in Files and the terminal client's file view, and its changes as a text diff in Changes and `r`, instead of "This file is not text". The file itself is never rewritten; a download is still its own bytes (#940).
 
 ## 0.3.33
 
