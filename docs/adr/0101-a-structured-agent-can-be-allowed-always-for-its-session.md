@@ -359,8 +359,9 @@ Codex reviewed this ADR at 4c81e007; the implementation applies its findings, wh
 9. **Delivered means written to the agent.** The bridge answers `approval/resolve` only once its writer wrote the answer to the agent's
    stdin and flushed it, not when the answer was queued. A failed write or an agent that ends first is the error `adapter.approval_undelivered`.
    So is a writer report not seen within five seconds; that means delivery was not confirmed, not that no byte reached the agent (the
-   report may be queued behind another event), so the bridge ends the agent before it tells the node: whatever the agent got, it holds
-   no grant afterwards. Either way the node records the request cancelled, with no `AgentAlwaysAllowed`. An `approval/resolve` result from any adapter
+   report may be queued behind another event), so the bridge asks for the agent to be ended before it tells the node, and the node
+   records no grant for that run (an agent that saved the answer in its own settings may still keep it, as the note under the button
+   says). Either way the node records the request cancelled, with no `AgentAlwaysAllowed`. An `approval/resolve` result from any adapter
    asserts this (`docs/specs/adapter-protocol.md`).
 10. **The record names the run.** The answer is sent only to the run of the agent's process the policy was checked for, and the node
    records `AgentAlwaysAllowed` only while that run is still the agent's process, checked and written under the supervisor's lock, so a

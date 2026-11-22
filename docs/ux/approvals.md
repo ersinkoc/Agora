@@ -31,7 +31,9 @@ A structured agent can offer an answer it remembers (ACP `allow_always`); the wi
 - **Asks less:** while an agent holds at least one always answer, its tile, pane header, phone row and header and the chat's controls
   show a quiet **Asks less** chip (neutral chrome, never a state colour). Its tooltip and accessible name say how many answers it
   remembers and list their actions (at most 16). An agent that acts freely shows **Acts freely** only. The chip goes when the agent ends,
-  is interrupted or started again; a resumed agent starts without it (Agora replays nothing). The conversation's record of such a
+  is interrupted or started again; a resumed agent starts without it (Agora replays nothing). The chip is Agora's record for that run
+  of the agent: it lists only answers the agent was confirmed to have received; one whose delivery could not be confirmed shows as
+  cancelled and the agent is ended. What the agent keeps in its own settings is up to the agent, as the note under the button says. The conversation's record of such a
   permission reads "Permission given; the agent remembers it".
 - **Terminal client:** in the box that shows a request, `A` allows it always (`y` once, `n` denies); in a tab or chat, **Alt+A** does,
   only while the agent in front has a request that offers it (otherwise Alt+A is the agent's key). Never in the list, where `a` is Ask:
