@@ -337,7 +337,7 @@ export function PhoneAgent({ agent, agents, approvals, machines, onResolve, untr
           </div>
         )}
         {mine.length > 0 && <div className="phone-asks">{mine.map((x) => <ApprovalCard key={x.id} approval={x} machine={agent?.machine || machineName(machines, x.node)} untrusted={!!untrusted?.(x.node)} stale={stale} docked={dock?.kind === 'answer' && dock.approval.id === x.id} onResolve={onResolve} />)}</div>}
-        {agent.closed ? <div className="min-h-0 flex-1 overflow-y-auto"><ClosedSummary agent={agent} now={now} onReview={loadDiff ? () => setShown('changes') : undefined} onFiles={files ? () => setShown('files') : undefined} onDismiss={() => { dismiss([agent.id]); onBack(); }} /></div>
+        {agent.closed ? <div className="min-h-0 flex-1 overflow-y-auto"><ClosedSummary agent={agent} now={now} source={agent.terminal === false ? chatSource : undefined} onReview={loadDiff ? () => setShown('changes') : undefined} onFiles={files ? () => setShown('files') : undefined} onDismiss={() => { dismiss([agent.id]); onBack(); }} /></div>
           : <div className="phone-pane" aria-label={agent.terminal === false ? t('chat-log') : t('focus-terminal')}>
             {agent.terminal === false ? <PromptBox key={agent.id} agent={agent} source={chatSource} send={sendPrompt} choose={chooseOption} /> : (
               <Suspense fallback={<div className="terminal-host" aria-busy="true" />}>

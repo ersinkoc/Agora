@@ -30,9 +30,9 @@ L1 is an agent in a terminal read from its screen (a manifest); L2/L3 are struct
 
 | Capability | Decision | Built on `main` | Automated evidence | Real machines |
 | --- | --- | --- | --- | --- |
-| L1: terminal agents from manifests (built-in: claude-code, codex, wrongstack) | ADR-0004 Accepted | yes | manifest fixture screens; adapter tests | [phase 4](backlog/phase-4.md) P4-05: Claude Code and Codex manifests done, WrongStack open; LAN run 2026-11-11; [Linux 2026-11-21](reviews/2026-11-21-real-machine-linux.md) (fake agent) |
+| L1: terminal agents from manifests (built-in: claude-code, codex, wrongstack) | ADR-0004 Accepted | yes (a start of any kind whose program this machine cannot find is refused as `agent.program_missing`, #903) | manifest fixture screens; adapter tests | [phase 4](backlog/phase-4.md) P4-05: Claude Code and Codex manifests done, WrongStack open; LAN run 2026-11-11; [Linux 2026-11-21](reviews/2026-11-21-real-machine-linux.md) (fake agent) |
 | L2: ACP agents (built-in: opencode-acp, wrongstack-acp, antigravity-acp) | ADR-0004 Accepted | yes | tests against the fake ACP agent | [Linux 2026-11-21](reviews/2026-11-21-real-machine-linux.md) (fake agent) |
-| L3: adapter processes, installed from the signed registry | ADR-0004 Accepted, ADR-0044 Accepted | yes | adapter host tests and the conformance transcript | none recorded here |
+| L3: adapter processes, installed from the signed registry | ADR-0004 Accepted, ADR-0044 Accepted | yes (a crash restart is said in the conversation; an adapter given up on ends with an error and its exit code, #902) | adapter host tests, node adapter-agent tests and the conformance transcript | none recorded here |
 | Agents run in the selected folder; worktrees optional | ADR-0052 Accepted | yes | node and web tests | [Linux 2026-11-21](reviews/2026-11-21-real-machine-linux.md) |
 | Launch options, including "do not ask" modes | ADR-0059 Accepted | yes | node and web tests | [Linux 2026-11-21](reviews/2026-11-21-real-machine-linux.md) |
 | Start with model, effort and mode | ADR-0066 Accepted | node and hub yes (a start with settings is signed; the approval card lists them); the start window's picker yes (`LaunchSettings.tsx`); the terminal client's start picker not built | node, hub and web tests | [Linux 2026-11-21](reviews/2026-11-21-real-machine-linux.md) |

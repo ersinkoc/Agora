@@ -13,6 +13,11 @@ import { chosenSettings, noSettings, settingName, usableSettings, type LaunchSet
 import { ASK, chosenIds, confirmedIds, confirmSkip, harmless, initialLaunch, keepAsking, labelOf, pickPermission, skipping, toggleHarmless, usableOptions, type LaunchOptionChoice } from './launchChoice';
 // ADR-0059: `options` are the kind's launch options as the machine lists them (none from an older machine).
 // ADR-0066: `settings` are the kind's launch settings as the machine lists them (none from an older machine).
+// #903: a refused start in words; a missing program is named, in the words the "not installed" note uses, when the machine said which.
+export function refusalWords(error: string, program: string | undefined): [string, Record<string, string>?] {
+  return error === 'start-program-missing' && program ? ['start-not-installed-program', { program }] : [error];
+}
+
 export interface KindChoice { kind: string; name: string; installed: boolean; level?: number; options?: LaunchOptionChoice[]; program?: string; settings?: LaunchSettingChoice[] }
 
 // The command a machine's owner runs once so the machine trusts this device (ADR-0020), with a Copy button: no hunting for it on another page.
@@ -273,7 +278,7 @@ export function StartAgent({ projects, machines, initialNode, initialKind, forTa
             ? isBareName(binary)
               ? t('trust-hint-file', { machine: online.find(m => m.id === node)?.name ?? node, file: binary })
               : t('trust-hint-binary', { machine: online.find(m => m.id === node)?.name ?? node, where: shortBinary(binary, machineOs) })
-            : t('trust-hint', { machine: online.find(m => m.id === node)?.name ?? node })) : t(error)}</p>}
+            : t('trust-hint', { machine: online.find(m => m.id === node)?.name ?? node })) : t(...refusalWords(error, kinds !== 'loading' && kinds !== 'failed' ? kinds.find((k) => k.kind === kind)?.program : undefined))}</p>}
           {error === 'approval-not-trusted' && trust && binary && shortBinary(binary, machineOs) !== binary && (wholePath
             ? <code className="break-all font-mono text-xs text-muted">{binary}</code>
             : <button type="button" className="justify-self-start text-xs text-muted underline" onClick={() => setWholePath(true)}>{t('trust-show-path')}</button>)}

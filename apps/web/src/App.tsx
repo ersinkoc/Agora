@@ -44,6 +44,7 @@ import { canStartFor, forgetGiveSupport, forgetOffline, givableTasks, giveAsk, g
 import { GiveContext, GiveDialog, type GiveApi } from './components/GiveTask';
 import { plain } from './components/boardColumns';
 import { failure, type ActionResult } from './net/refusal';
+import { startRefusalKey } from './net/startRefusal';
 import { usableId } from './components/launchChoice';
 import { launchSettingsField } from './components/launchSettingsModel';
 import { rememberStarted } from './components/launchMemory';
@@ -175,7 +176,7 @@ export function App() {
       if (code === 'agent.setting_unknown' || code === 'agent.setting_invalid') return { failure: 'start-setting-refused' };
       if (code === 'protocol.capability_missing' && launch.settings.length > 0) return { failure: 'start-settings-unsupported' };
       if (code === 'protocol.capability_missing' && launch.ids.length > 0) return { failure: 'start-options-unsupported' };
-      return { failure: code === 'agent.mode_unsupported' ? 'start-directory-agent-unsupported' : code === 'approval.signature_invalid' ? 'approval-not-trusted' : code === 'protocol.capability_missing' ? 'start-directory-unsupported' : code === 'agent.kind_unknown' ? 'start-kind-unknown' : code === 'node.resource_limit' ? 'start-limit' : code === 'auth.forbidden' ? 'start-directory-forbidden' : 'start-failed' };
+      return { failure: startRefusalKey(code) };
     }
   }, [api, device]);
   const startAgent = useCallback(async (node: string, info: DirectoryInfo, kind: string, separateWorktree: boolean, acceptIdentityChange: boolean, launch: { ids: string[]; confirmed: string[]; settings: [string, string][] }): Promise<string | undefined> => {

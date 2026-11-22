@@ -274,6 +274,58 @@ fn config_option(o: &agora_adapters::host::ConfigOption) -> v1::SessionConfigOpt
     }
 }
 
+/// How a process's end is reported (`AgentExited.exit_code`): its exit code, or on Unix the signal that ended it as a negative number;
+/// -1 when neither is known.
+fn exit_code(status: &agora_platform::ExitStatus) -> i32 {
+    status
+        .code
+        .or_else(|| status.signal.map(|s| -s))
+        .unwrap_or(-1)
+}
+
+/// A chat agent (an adapter's or an ACP agent's, ADR-0038), not one in a terminal. By its level: `AgentView::terminal` says only whether
+/// a terminal is open now, which is false for a terminal agent that just ended too.
+fn is_chat(views: &[AgentView], agent: &AgentId) -> bool {
+    views.iter().any(|v| {
+        v.id == *agent
+            && matches!(
+                v.level,
+                agora_core::IntegrationLevel::L2Acp | agora_core::IntegrationLevel::L3Adapter
+            )
+    })
+}
+
+/// #902 (RM-13): a chat agent whose adapter ended on its own: its conversation says that the node starts it again (`adapter.restarting`,
+/// `attempt`), or that it gave up on it (`adapter.gave_up`, with `restarts`, and `exit_code` only when the node knows how the last
+/// process ended). Nothing for a terminal agent (its screen says it) or for any other event.
+fn restart_notice(
+    chat: &crate::chat::ChatBoard,
+    e: &SupervisorEvent,
+    views: &[AgentView],
+    now: u64,
+) {
+    match e {
+        SupervisorEvent::Restarting { agent, attempt, .. } if is_chat(views, agent) => {
+            chat.restart_notice(
+                agent,
+                "adapter.restarting",
+                &[("attempt", attempt.to_string())],
+                now,
+            );
+        }
+        SupervisorEvent::GaveUp { agent, exit_code } if is_chat(views, agent) => {
+            let restarts = views
+                .iter()
+                .find(|v| v.id == *agent)
+                .map_or(0, |v| v.restarts);
+            let mut params = vec![("restarts", restarts.to_string())];
+            params.extend(exit_code.map(|c| ("exit_code", c.to_string())));
+            chat.restart_notice(agent, "adapter.gave_up", &params, now);
+        }
+        _ => {}
+    }
+}
+
 fn state_word(s: AgentState) -> &'static str {
     match s {
         AgentState::Working => "working",
@@ -678,14 +730,14 @@ impl EventSink {
                 SupervisorEvent::Exited { agent, status } => {
                     self.record(Body::AgentExited(v1::AgentExited {
                         agent_id: agent.as_str().to_string(),
-                        exit_code: status
-                            .code
-                            .or_else(|| status.signal.map(|s| -s))
-                            .unwrap_or(-1),
+                        exit_code: exit_code(status),
                     }));
-                    self.record(Body::TerminalClosed(v1::TerminalClosed {
-                        terminal_id: crate::control::terminal_id_of(agent),
-                    }));
+                    // #902: a chat agent the node gave up on never had a terminal.
+                    if !is_chat(views, agent) {
+                        self.record(Body::TerminalClosed(v1::TerminalClosed {
+                            terminal_id: crate::control::terminal_id_of(agent),
+                        }));
+                    }
                 }
                 SupervisorEvent::Adapter { agent, event } => match event {
                     AdapterEvent::Usage {
@@ -1950,14 +2002,14 @@ impl Node {
                                 SupervisorEvent::Exited { agent, status } if status.success() => {
                                     mesh.unregister_because(agent, "finished");
                                 }
-                                SupervisorEvent::GaveUp { agent } => {
+                                SupervisorEvent::GaveUp { agent, .. } => {
                                     mesh.unregister_because(agent, "crashed");
                                 }
                                 _ => {}
                             }
                             // ADR-0057: an agent's helper grants and waiting start end when it exits or is stopped.
                             if let SupervisorEvent::Exited { agent, .. }
-                            | SupervisorEvent::GaveUp { agent }
+                            | SupervisorEvent::GaveUp { agent, .. }
                             | SupervisorEvent::Stopped { agent } = e
                             {
                                 spawner.agent_ended(agent);
@@ -1965,7 +2017,7 @@ impl Node {
                             // ADR-0090 Amendment A: a card to switch an agent to a mode that skips permission questions names this agent's
                             // session; when it ends, crashes or is stopped, no decision may apply it later.
                             if let SupervisorEvent::Exited { agent, .. }
-                            | SupervisorEvent::GaveUp { agent }
+                            | SupervisorEvent::GaveUp { agent, .. }
                             | SupervisorEvent::Stopped { agent }
                             | SupervisorEvent::AdapterCrashed { agent } = e
                             {
@@ -2079,6 +2131,10 @@ impl Node {
                                 }
                                 SupervisorEvent::OutputDropped { agent, bytes } => {
                                     chat.output_dropped(agent, *bytes, now);
+                                }
+                                SupervisorEvent::Restarting { .. }
+                                | SupervisorEvent::GaveUp { .. } => {
+                                    restart_notice(&chat, e, &views, now);
                                 }
                                 SupervisorEvent::Stopped { agent }
                                 | SupervisorEvent::AdapterCrashed { agent } => {
@@ -2843,6 +2899,111 @@ mod announce_tests {
         assert!(!said(&s, mark)
             .iter()
             .any(|b| matches!(b, Body::AgentExited(_) | Body::TerminalClosed(_))));
+    }
+
+    /// #902: an adapter's agent the node gave up on is reported as exited without a `TerminalClosed` (it never had a terminal); a terminal
+    /// agent that just ended (its view no longer has a terminal open) still gets one.
+    #[test]
+    fn a_chat_agent_given_up_on_closes_no_terminal() {
+        let s = sink("gave-up-terminal");
+        let mut chat = view("chat", false, false);
+        chat.level = agora_core::IntegrationLevel::L3Adapter;
+        let views = [chat, view("term", false, true)];
+        let mark = s.next_seq() - 1;
+        let status = agora_platform::ExitStatus {
+            code: Some(137),
+            signal: None,
+        };
+        s.supervisor_events(
+            &[
+                SupervisorEvent::Exited {
+                    agent: AgentId::new("chat"),
+                    status,
+                },
+                SupervisorEvent::Exited {
+                    agent: AgentId::new("term"),
+                    status,
+                },
+            ],
+            &views,
+        );
+        let got: Vec<String> = said(&s, mark)
+            .iter()
+            .filter_map(|b| match b {
+                Body::AgentExited(x) => Some(format!("exited {} {}", x.agent_id, x.exit_code)),
+                Body::TerminalClosed(t) => Some(format!("closed {}", t.terminal_id)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(got, ["exited chat 137", "exited term 137", "closed t-term"]);
+    }
+
+    /// #902 (RM-13): the node's notices in a chat agent's conversation: a restart with its attempt, the give-up with the restarts and
+    /// the exit code only when it is known; nothing for a terminal agent or for another event.
+    #[test]
+    fn a_chat_agent_hears_of_its_restarts_and_of_the_give_up() {
+        let board = crate::chat::ChatBoard::new();
+        let mut chat = view("chat", false, false);
+        chat.level = agora_core::IntegrationLevel::L3Adapter;
+        chat.restarts = 5;
+        let mut acp = view("acp", false, false);
+        acp.level = agora_core::IntegrationLevel::L2Acp;
+        let views = [chat, acp, view("term", false, true)];
+        let id = |a: &str| AgentId::new(a);
+        for e in [
+            SupervisorEvent::Restarting {
+                agent: id("chat"),
+                attempt: 2,
+                after: std::time::Duration::from_secs(1),
+            },
+            SupervisorEvent::GaveUp {
+                agent: id("chat"),
+                exit_code: Some(3),
+            },
+            SupervisorEvent::GaveUp {
+                agent: id("acp"),
+                exit_code: None,
+            },
+            SupervisorEvent::Restarting {
+                agent: id("term"),
+                attempt: 1,
+                after: std::time::Duration::from_secs(1),
+            },
+            SupervisorEvent::GaveUp {
+                agent: id("term"),
+                exit_code: Some(1),
+            },
+            SupervisorEvent::Stopped { agent: id("chat") },
+        ] {
+            restart_notice(&board, &e, &views, 7);
+        }
+        let notices = |a: &str| -> Vec<(String, Vec<(String, String)>)> {
+            board
+                .snapshot(&id(a))
+                .into_iter()
+                .map(|e| {
+                    let mut p: Vec<_> = e.params.into_iter().collect();
+                    p.sort();
+                    (e.code, p)
+                })
+                .collect()
+        };
+        let kv = |k: &str, v: &str| (k.to_string(), v.to_string());
+        assert_eq!(
+            notices("chat"),
+            [
+                ("adapter.restarting".to_string(), vec![kv("attempt", "2")]),
+                (
+                    "adapter.gave_up".to_string(),
+                    vec![kv("exit_code", "3"), kv("restarts", "5")]
+                ),
+            ]
+        );
+        assert_eq!(
+            notices("acp"),
+            [("adapter.gave_up".to_string(), vec![kv("restarts", "0")])]
+        );
+        assert!(notices("term").is_empty());
     }
 
     /// ADR-0055 section 2: the last 256 resolved approvals are said again, oldest first, so one answered inside the lost window

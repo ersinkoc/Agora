@@ -833,6 +833,27 @@ impl ChatBoard {
         t.add(n, now_ms);
     }
 
+    /// #902 (RM-13): what the node did about a chat agent whose adapter ended on its own, said in its conversation: it starts it again
+    /// (`adapter.restarting`, with the attempt), or it gave up on it (`adapter.gave_up`, with the exit code it reported). The node's own
+    /// words: a fixed code and numbers, never text from the agent.
+    pub fn restart_notice(
+        &self,
+        agent: &AgentId,
+        code: &'static str,
+        params: &[(&str, String)],
+        now_ms: u64,
+    ) {
+        let mut g = self.lock();
+        let t = g.entry(agent.clone()).or_default();
+        let mut n = entry(ChatRole::Agent, ChatKind::Notice, String::new(), now_ms);
+        n.code = code.into();
+        n.params = params
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect();
+        t.add(n, now_ms);
+    }
+
     /// ADR-0090: a permission entry for an approval the node itself queued. `approval_id` is the id the node minted for it (never the
     /// adapter's own id and never text from the agent); `action` is the label the approvals list shows, cut. The entry holds no
     /// decision: it starts `pending` and only [`Self::set_permission`] changes it, from the node's approval state.
@@ -978,6 +999,44 @@ mod tests {
         assert_eq!(t, "{\"tool\":\"run \\\"x\\\"\",\"arguments\":{\"a\":1}}");
         let (k, t, _) = describe(&ChatItem::Plan(vec!["a".into(), "b".into()]));
         assert_eq!((k, t.as_str()), (ChatKind::Plan, "a\nb"));
+    }
+
+    /// #902: the node's own notices about an adapter that ended on its own are notice entries with their code and numbers only.
+    #[test]
+    fn a_restart_notice_is_a_notice_with_its_code_and_numbers() {
+        let b = ChatBoard::new();
+        let a = AgentId::new("a");
+        b.restart_notice(&a, "adapter.restarting", &[("attempt", "2".into())], 1);
+        b.restart_notice(&a, "adapter.gave_up", &[("exit_code", "3".into())], 2);
+        let got: Vec<_> = b
+            .snapshot(&a)
+            .into_iter()
+            .map(|e| {
+                (
+                    e.kind,
+                    e.code,
+                    e.params.into_iter().collect::<Vec<_>>(),
+                    e.text,
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (
+                    ChatKind::Notice as i32,
+                    "adapter.restarting".to_string(),
+                    vec![("attempt".to_string(), "2".to_string())],
+                    String::new()
+                ),
+                (
+                    ChatKind::Notice as i32,
+                    "adapter.gave_up".to_string(),
+                    vec![("exit_code".to_string(), "3".to_string())],
+                    String::new()
+                ),
+            ]
+        );
     }
 
     #[test]
