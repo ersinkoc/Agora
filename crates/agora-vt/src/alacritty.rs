@@ -43,49 +43,41 @@ enum Scan {
     Escape,
     /// Inside an OSC, with this many payload bytes given to the parser.
     Osc(usize),
-    /// After `ESC [`: `>` makes it a kitty keyboard push (`CSI > flags u`), `<` a pop (`CSI < n u`), `?` a private mode list.
+    /// After `ESC [`: `>` makes it a kitty keyboard push (`CSI > flags u`), `<` a pop (`CSI < n u`).
     Csi,
     /// Inside `ESC [ >`, reading the parameters.
     Push,
     /// Inside `ESC [ <`, reading the count (digits only: a pop in any other form is not counted, which only overstates the depth).
     Pop(u16),
-    /// Inside `ESC [ ?`, reading the list the way `vte` keeps it (see [`ModeList`]).
-    Modes(ModeList),
 }
 
-/// A `CSI ? Pm h/l` list as `vte` reads it, only to see whether it switches the alternate screen (1049, the one mode the backend
-/// swaps its screens, and its keyboard stacks, for): at most 32 numbers (parameters and `:` sub-parameters together, each saturating
-/// at 65535); a list with more is not acted on; the first number of each parameter is the mode.
-#[derive(Clone, Copy, Default)]
-struct ModeList {
-    stored: u8,
-    current: u16,
-    /// The number being read is a sub-parameter (after `:`).
-    sub: bool,
-    /// A parameter's first number was 1049.
-    screen: bool,
-    ignored: bool,
-}
-
-impl ModeList {
-    /// Ends the number being read at a `:`, `;` or the final byte.
-    fn end_number(mut self, next_sub: bool) -> Self {
-        if usize::from(self.stored) == VTE_MAX_PARAMS {
-            self.ignored = true;
-            return self;
+/// Whether the private mode list at the start of `rest` (after `ESC [ ?`) may name 1049, the one mode the backend switches screens
+/// for. Over-approximates (any number 1049, sub-parameters included) and says yes when the list runs past the chunk.
+fn may_name_1049(rest: &[u8]) -> bool {
+    let mut n: u32 = 0;
+    for &b in rest {
+        match b {
+            b'0'..=b'9' => n = n.saturating_mul(10).saturating_add(u32::from(b - b'0')),
+            b';' | b':' => {
+                if n == 1049 {
+                    return true;
+                }
+                n = 0;
+            }
+            // Executed or ignored inside the sequence by `vte`, which stays in it.
+            0x00..=0x17 | 0x19 | 0x1c..=0x1f | 0x7f..=0xff => {}
+            _ => return n == 1049,
         }
-        if !self.sub && self.current == 1049 {
-            self.screen = true;
-        }
-        self.stored += 1;
-        self.current = 0;
-        self.sub = next_sub;
-        self
     }
+    true
 }
 
-/// The most numbers `vte` keeps in one sequence (`MAX_PARAMS`).
-const VTE_MAX_PARAMS: usize = 32;
+/// A kitty keyboard stack change the scan found.
+#[derive(Clone, Copy)]
+enum KeyStack {
+    Push,
+    Pop(u16),
+}
 
 /// The depth a kitty keyboard stack may reach before the backend's stacks are emptied (see `depth`). `alacritty_terminal` 0.26 panics
 /// on a push once a stack holds 4096 entries (it evicts from the title stack, which may be empty), so a program, or a file it
@@ -174,14 +166,16 @@ pub struct AlacrittyTerminal {
     scan: Scan,
     /// The backend's settings, to empty the keyboard stacks with (see [`PUSH_LIMIT`]).
     config: Config,
-    /// Entries on the active screen's kitty keyboard stack, as the parser will have them once given the bytes scanned so far:
-    /// pushes add one, pops remove theirs (floored at 0), and it swaps with `inactive_depth` when the program switches screens, as
-    /// the backend swaps its two stacks. Never fewer than the backend holds: a sequence the scan cannot place is counted as a push
-    /// or not as a pop.
-    depth: usize,
-    inactive_depth: usize,
-    /// The program is on the alternate screen, as far as the scan has seen.
-    alt: bool,
+    /// Entries on each screen's kitty keyboard stack (main, alternate), as the backend keeps one per screen: a push adds one and a
+    /// pop removes its count (floored at 0) on the screen the backend itself is on when it applies them (read from the backend, so
+    /// whatever switches its screen is followed exactly); a full reset empties both. Never fewer than the backend holds: a sequence
+    /// the scan cannot place is counted as a push or not as a pop.
+    depth: [usize; 2],
+    /// The backend's screen (0 main, 1 alternate) when last read, and whether a sequence since could have switched it (a private
+    /// mode list naming 1049, or a full reset): a push or pop reads the screen again only then, so a program that pushes and pops
+    /// often does not split the parser's input at each change.
+    screen: usize,
+    screen_stale: bool,
 }
 
 impl AlacrittyTerminal {
@@ -221,19 +215,59 @@ impl AlacrittyTerminal {
             size,
             scan: Scan::Text,
             config,
-            depth: 0,
-            inactive_depth: 0,
-            alt: false,
+            depth: [0; 2],
+            screen: 0,
+            screen_stale: true,
         }
     }
 
-    /// Empties both keyboard stacks once the active one is [`PUSH_LIMIT`] deep, keeping the current flags. A synchronized update may
-    /// still hold some of the pushes, so it is ended first: every counted push is then applied, and the stacks never reach the
-    /// backend's panic.
-    fn bound_keyboard_stack(&mut self) {
-        if self.depth < PUSH_LIMIT {
-            return;
+    /// The screen (0 main, 1 alternate) the backend applies a kitty keyboard push or pop to, the parser having been given every byte
+    /// through it. A synchronized update may still hold it (and the screen switches before it), so that update is ended first and
+    /// the backend's screen is then the one the change applied to. Rare: once per chunk with kitty changes, and again only after a
+    /// possible screen switch (see `advance_bounded`).
+    fn read_screen(&mut self) -> usize {
+        if self.parser.sync_timeout().sync_timeout().is_some() {
+            self.parser.stop_sync(&mut self.term);
         }
+        usize::from(self.term.mode().contains(TermMode::ALT_SCREEN))
+    }
+
+    /// A kitty push or pop ending just before `bytes[end]`: counted on the backend's screen, read again (after giving the parser
+    /// everything through the change, from `start`) only when a sequence since the last read may have switched it.
+    fn key_change(&mut self, change: KeyStack, bytes: &[u8], start: &mut usize, end: usize) {
+        if self.screen_stale {
+            self.parser.advance(&mut self.term, &bytes[*start..end]);
+            *start = end;
+            self.screen = self.read_screen();
+            self.screen_stale = false;
+        }
+        if self.count_key_stack(change, self.screen) {
+            if *start < end {
+                self.parser.advance(&mut self.term, &bytes[*start..end]);
+                *start = end;
+            }
+            self.bound_keyboard_stack();
+        }
+    }
+
+    /// Counts a push or pop on `screen`; returns whether the stacks must be emptied now (the parser must have been given the push).
+    fn count_key_stack(&mut self, change: KeyStack, screen: usize) -> bool {
+        match change {
+            KeyStack::Push => {
+                self.depth[screen] += 1;
+                self.depth[screen] >= PUSH_LIMIT
+            }
+            // `vte` reads 0 or no count as 1.
+            KeyStack::Pop(n) => {
+                self.depth[screen] = self.depth[screen].saturating_sub(usize::from(n.max(1)));
+                false
+            }
+        }
+    }
+
+    /// Empties both keyboard stacks once one is [`PUSH_LIMIT`] deep, keeping the current flags. A synchronized update may still hold
+    /// some of the pushes, so it is ended first: every counted push is then applied, and the stacks never reach the backend's panic.
+    fn bound_keyboard_stack(&mut self) {
         self.parser.stop_sync(&mut self.term);
         let flags = self.modes().keyboard_flags;
         // Switching the backend's kitty tracking off and on again empties both stacks (`Term::set_options`).
@@ -247,8 +281,7 @@ impl AlacrittyTerminal {
         let _ = std::io::Write::write_fmt(&mut rest, format_args!("\x1b[={flags};1u"));
         let n = 16 - rest.len();
         self.parser.advance(&mut self.term, &buf[..n]);
-        self.depth = 0;
-        self.inactive_depth = 0;
+        self.depth = [0; 2];
     }
 
     /// Gives `bytes` to the parser, leaving out OSC payload bytes past [`MAX_OSC`].
@@ -262,17 +295,55 @@ impl AlacrittyTerminal {
                     Some(n) => i += n,
                     None => break,
                 }
+                // Most escapes are a CSI that is no kitty keyboard push or pop (colours, cursor moves, modes): its third byte already
+                // takes the scan back to `Text` (see the `Scan::Csi` arms), so step over all three at once.
+                if bytes.get(i + 1) == Some(&b'[') {
+                    match bytes.get(i + 2) {
+                        // A private mode list: if it may name 1049 (or runs past this chunk), the backend may switch screens.
+                        Some(&b'?') => {
+                            if may_name_1049(&bytes[i + 3..]) {
+                                self.screen_stale = true;
+                            }
+                            i += 3;
+                            continue;
+                        }
+                        Some(&(0x20..=0x3b | 0x3d | 0x40..=0x7e)) => {
+                            i += 3;
+                            continue;
+                        }
+                        // A kitty push or pop written plainly (digits only, all in this chunk) is read here at once; any other form
+                        // goes through the scan below, which reads it the same way.
+                        Some(&marker @ (b'>' | b'<')) => {
+                            let mut j = i + 3;
+                            let mut n: u16 = 0;
+                            while let Some(&d @ b'0'..=b'9') = bytes.get(j) {
+                                n = n.saturating_mul(10).saturating_add(u16::from(d - b'0'));
+                                j += 1;
+                            }
+                            if bytes.get(j) == Some(&b'u') {
+                                i = j + 1;
+                                let change = if marker == b'>' {
+                                    KeyStack::Push
+                                } else {
+                                    KeyStack::Pop(n)
+                                };
+                                self.key_change(change, bytes, &mut start, i);
+                                continue;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
             }
-            let mut pushed = false;
+            let mut change = None;
             self.scan = match (self.scan, bytes[i]) {
                 (_, 0x1b) => Scan::Escape,
                 (Scan::Escape, b']') => Scan::Osc(0),
                 (Scan::Escape, b'[') => Scan::Csi,
                 // A full reset (RIS) empties both stacks and leaves the alternate screen.
                 (Scan::Escape, b'c') => {
-                    self.depth = 0;
-                    self.inactive_depth = 0;
-                    self.alt = false;
+                    self.depth = [0; 2];
+                    self.screen_stale = true;
                     Scan::Text
                 }
                 // `vte` stays in its escape state for these.
@@ -290,56 +361,31 @@ impl AlacrittyTerminal {
                 }
                 (Scan::Csi, b'>') => Scan::Push,
                 (Scan::Csi, b'<') => Scan::Pop(0),
-                (Scan::Csi, b'?') => Scan::Modes(ModeList::default()),
+                // A private mode list the fast path above did not see (split by the chunk, or controls before it): it may switch.
+                (Scan::Csi, b'?') => {
+                    self.screen_stale = true;
+                    Scan::Text
+                }
                 // Executed or ignored inside a CSI sequence by `vte`, which stays in it.
                 (Scan::Csi, 0x00..=0x17 | 0x19 | 0x1c..=0x1f | 0x7f..=0xff) => Scan::Csi,
                 (Scan::Push, 0x00..=0x17 | 0x19 | 0x1c..=0x1f | 0x7f..=0xff) => Scan::Push,
                 (Scan::Push, b'0'..=b'9' | b':' | b';') => Scan::Push,
                 (Scan::Push, b'u') => {
-                    pushed = true;
+                    change = Some(KeyStack::Push);
                     Scan::Text
                 }
                 (Scan::Pop(n), d @ b'0'..=b'9') => {
                     Scan::Pop(n.saturating_mul(10).saturating_add(u16::from(d - b'0')))
                 }
                 (Scan::Pop(n), b'u') => {
-                    // `vte` reads 0 or no count as 1.
-                    self.depth = self.depth.saturating_sub(usize::from(n.max(1)));
-                    Scan::Text
-                }
-                (Scan::Modes(l), 0x00..=0x17 | 0x19 | 0x1c..=0x1f | 0x7f..=0xff) => Scan::Modes(l),
-                (Scan::Modes(mut l), d @ b'0'..=b'9') => {
-                    if usize::from(l.stored) == VTE_MAX_PARAMS {
-                        l.ignored = true;
-                    }
-                    l.current = l
-                        .current
-                        .saturating_mul(10)
-                        .saturating_add(u16::from(d - b'0'));
-                    Scan::Modes(l)
-                }
-                (Scan::Modes(l), b':') => Scan::Modes(l.end_number(true)),
-                (Scan::Modes(l), b';') => Scan::Modes(l.end_number(false)),
-                (Scan::Modes(l), fin @ (b'h' | b'l')) => {
-                    let l = l.end_number(false);
-                    let to_alt = fin == b'h';
-                    // The backend swaps only when the screen really changes.
-                    if l.screen && !l.ignored && self.alt != to_alt {
-                        std::mem::swap(&mut self.depth, &mut self.inactive_depth);
-                        self.alt = to_alt;
-                    }
+                    change = Some(KeyStack::Pop(n));
                     Scan::Text
                 }
                 _ => Scan::Text,
             };
             i += 1;
-            if pushed {
-                self.depth += 1;
-                if self.depth >= PUSH_LIMIT {
-                    self.parser.advance(&mut self.term, &bytes[start..i]);
-                    start = i;
-                    self.bound_keyboard_stack();
-                }
+            if let Some(change) = change {
+                self.key_change(change, bytes, &mut start, i);
             }
         }
         if start < bytes.len() {
@@ -568,7 +614,7 @@ mod tests {
             }
             t.parser.stop_sync(&mut t.term);
             assert_eq!(t.modes().keyboard_flags, 5, "{what}");
-            assert!(t.depth < PUSH_LIMIT, "{what}");
+            assert!(t.depth.iter().all(|&d| d < PUSH_LIMIT), "{what}");
             // The stack still works after the bound: one pop goes back to the push before.
             t.feed(b"\x1b[<u");
             assert_eq!(t.modes().keyboard_flags & !5, 0, "{what}");
@@ -580,7 +626,7 @@ mod tests {
             for c in bytes.as_bytes().chunks(split) {
                 t.feed(c);
             }
-            assert_eq!(t.depth, 0, "split {split}: the bound was reached");
+            assert_eq!(t.depth, [0, 0], "split {split}: the bound was reached");
             assert_eq!(t.modes().keyboard_flags, 6, "split {split}");
             // The stacks are empty now: a pop leaves no flags (the entries below were dropped with the bound).
             t.feed(b"\x1b[<u");
@@ -601,7 +647,11 @@ mod tests {
                 2,
                 "{what}: the entry below the balanced pairs"
             );
-            assert!(t.depth <= 2, "{what}: depth {}", t.depth);
+            assert!(
+                t.depth.iter().all(|&d| d <= 2),
+                "{what}: depth {:?}",
+                t.depth
+            );
             t.feed(b"\x1b[<u");
             let below = if screen.is_empty() { 1 } else { 0 };
             assert_eq!(t.modes().keyboard_flags, below, "{what}");
@@ -612,16 +662,29 @@ mod tests {
                 "{what}: the main screen's stack is intact"
             );
         }
-        // A pop of many and a mode list that only names 1049 among others are read as the backend reads them.
+        // A pop of many, and the screen read from the backend whatever switched it: 1049 in a list, inside a synchronized update.
         let mut t = AlacrittyTerminal::new(Size { cols: 20, rows: 3 });
         t.feed(b"\x1b[>1u\x1b[>1u\x1b[>1u\x1b[<2u\x1b[?25;1049h\x1b[>1u\x1b[?1049;7l");
-        assert_eq!((t.depth, t.inactive_depth, t.alt), (1, 1, false));
-        t.feed(b"\x1bc");
+        assert_eq!(t.depth, [1, 1]);
+        t.feed(b"\x1b[?2026h\x1b[?1049h\x1b[>1u\x1b[>1u");
         assert_eq!(
-            (t.depth, t.inactive_depth),
-            (0, 0),
-            "a full reset empties both"
+            t.depth,
+            [1, 3],
+            "the pushes inside the update count on the screen it switched to"
         );
+        t.feed(b"\x1b[?2026l");
+        assert_eq!(t.modes().keyboard_flags, 1);
+        t.feed(b"\x1b[?1049l\x1b[<u");
+        assert_eq!(t.depth, [0, 3]);
+        t.feed(b"\x1bc");
+        assert_eq!(t.depth, [0, 0], "a full reset empties both");
+        // 1049 in a list with a control inside it, and a list split between two chunks, still switch the counted screen.
+        let mut t = AlacrittyTerminal::new(Size { cols: 20, rows: 3 });
+        t.feed(b"\x1b[>1u\x1b[?10\x0749h\x1b[>1u");
+        assert_eq!(t.depth, [1, 1]);
+        t.feed(b"\x1b[?10");
+        t.feed(b"49l\x1b[>1u");
+        assert_eq!(t.depth, [2, 1]);
         let mut t = AlacrittyTerminal::new(Size { cols: 20, rows: 3 });
         t.feed(b"\x1b[>1u\x1b[>3u");
         assert_eq!(t.modes().keyboard_flags, 3);
