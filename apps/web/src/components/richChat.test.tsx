@@ -11,7 +11,7 @@ import type { ChatLine, ChatSource } from '../net/chat';
 import { transcript } from '../net/transcript';
 import { ChatActionsContext, type ChatActions } from './chatActions';
 import { Item, ToolSteps } from './ChatEntry';
-import { PromptBox } from './PromptBox';
+import { PromptBox, STOP_GRACE_MS } from './PromptBox';
 import { SessionBar } from './SessionBar';
 import { forgetSkipCapable, recordSkipAnswer } from '../net/skipApproval';
 
@@ -231,6 +231,27 @@ describe('after Stop turn (#908, RM-44)', () => {
     expect(host.querySelector('[data-steps] [role=img][aria-label="Stopped"]')).not.toBeNull();
     expect(host.querySelector('[data-status=stopped]')).not.toBeNull();
   });
+  it('at a normal turn end nothing reads Stopped at once (the last update may still come); after the grace it does; never while unknown', () => {
+    vi.useFakeTimers();
+    try {
+      const lines = afterStop().slice(0, 2);
+      const source: ChatSource = { connect(on) { on(lines, true); return { close() {} }; } };
+      const view = (state: AgentTileModel['state']) => act(() => root.render(<PromptBox agent={agent({ state })} source={source} />));
+      view('working');
+      expect(host.innerHTML).toContain('aria-label="Running"');
+      view('idle');
+      expect(host.innerHTML).not.toContain('aria-label="Stopped"');
+      act(() => { vi.advanceTimersByTime(STOP_GRACE_MS - 100); });
+      expect(host.innerHTML).not.toContain('aria-label="Stopped"');
+      act(() => { vi.advanceTimersByTime(200); });
+      expect(host.innerHTML).toContain('aria-label="Stopped"');
+      // An agent whose state is unknown (its adapter went quiet) may still be in its turn: the call keeps its own status.
+      view('unknown');
+      act(() => { vi.advanceTimersByTime(STOP_GRACE_MS * 5); });
+      expect(host.innerHTML).toContain('aria-label="Running"');
+      expect(host.innerHTML).not.toContain('aria-label="Stopped"');
+    } finally { vi.useRealTimers(); }
+  });
   it('a call of an earlier turn reads Stopped while the agent works on a later prompt; the call of the turn that runs still spins', () => {
     mount([...afterStop().slice(0, 3), L(5, { text: 'queued one', atMs: 20 })], agent({ state: 'working' }), { cancelTurn: async () => true });
     expect(host.querySelector('[data-steps] [aria-label="Stopped"]')).not.toBeNull();
@@ -269,6 +290,27 @@ describe('after Stop turn (#908, RM-44)', () => {
     act(() => push([L(3, { role: 'user', text: 'queued one', atMs: 6 })]));
     expect(host.textContent).not.toContain('Waiting for this turn to end.');
     view('idle');
+    expect(host.textContent).not.toContain('Waiting for this turn to end.');
+  });
+  it('the note is derived from what is held now: a prompt queued and sent in one batch leaves no note; a second one waiting keeps it', async () => {
+    let push: (l: ChatLine[]) => void = () => {};
+    const source: ChatSource = { connect(on) { push = (l) => on(l, false); on(rich(), true); return { close() {} }; } };
+    const send = vi.fn(async () => ({ ok: true, queued: true }));
+    act(() => root.render(<ChatActionsContext.Provider value={{ cancelTurn: async () => true }}><PromptBox agent={agent({ state: 'working' })} source={source} send={send} /></ChatActionsContext.Provider>));
+    const submit = async (text: string) => {
+      const box = host.querySelector('textarea') as HTMLTextAreaElement;
+      act(() => { Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set?.call(box, text); box.dispatchEvent(new Event('input', { bubbles: true })); });
+      await act(async () => { (host.querySelector('form') as HTMLFormElement).requestSubmit(); });
+    };
+    await submit('a');
+    // Queued and already sent, both versions in one batch: nothing waits, so no note, although the agent still works.
+    act(() => push([L(3, { role: 'user', text: 'a', atMs: 5, queued: true }), L(3, { role: 'user', text: 'a', atMs: 6 })]));
+    expect(host.textContent).not.toContain('Waiting for this turn to end.');
+    // B is queued as A is sent: B waits, so the note is right; it goes when B is sent.
+    await submit('b');
+    act(() => push([L(4, { role: 'user', text: 'b', atMs: 7, queued: true })]));
+    expect(host.textContent).toContain('Waiting for this turn to end.');
+    act(() => push([L(4, { role: 'user', text: 'b', atMs: 8 })]));
     expect(host.textContent).not.toContain('Waiting for this turn to end.');
   });
 });

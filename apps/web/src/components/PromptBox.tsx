@@ -31,6 +31,9 @@ const notice = (line: ChatLine) => (
 // How many items of a long history are drawn at once, and how many more "Show earlier" adds. The node keeps at most 500 entries, which
 // a window draws in full only when asked; the rest of the time a conversation is as light as its newest page.
 const PAGE = 120;
+/** #908: how long the agent must be out of its turn before a call that never said it finished is drawn stopped: longer than the node's
+ *  150 ms coalescing of a call's updates and the skew between the state and the conversation streams. */
+export const STOP_GRACE_MS = 1000;
 
 // A chat agent has no terminal: you talk to it with requests and read its answers, as a conversation the node keeps (ADR-0038).
 // `approvals`: what this agent waits on, pinned above the composer (the caller draws them). `onReview`: the way into the review screen.
@@ -39,8 +42,8 @@ export function PromptBox({ agent, send, source, choose, approvals, onReview }: 
   const canClose = !!useContext(CloseAgentContext);
   const [text, setText] = useState('');
   const [sent, setSent] = useState<'ok' | 'queued' | 'full' | 'failed' | undefined>();
-  // #908: a prompt of the person's was seen waiting since the last send, so "waiting for this turn" ends when none waits any more.
-  const [seenWaiting, setSeenWaiting] = useState(false);
+  // #908: the newest entry id held when the person last sent: a user entry newer than it is theirs (it has arrived).
+  const [sentMark, setSentMark] = useState(0);
   const [busy, setBusy] = useState(false);
   // At most MAX_LINES entries are held; older ones are dropped and counted, so a stream of new ids cannot grow memory or the per-chunk work.
   const [held, setHeld] = useState<{ lines: ChatLine[]; trimmed: number }>({ lines: [], trimmed: 0 });
@@ -72,7 +75,7 @@ export function PromptBox({ agent, send, source, choose, approvals, onReview }: 
   const rows = useMemo(() => groupTurns(view.items).map((row) => ({ row, paired: row.kind === 'turn' ? pairDiffs(row.items) : undefined })), [view.items]);
   const queue = useMemo(() => queueState(lines), [lines]);
   const waitingCount = queue.waiting.length;
-  useEffect(() => { if (waitingCount > 0) setSeenWaiting(true); }, [waitingCount]);
+  const arrived = useMemo(() => lines.some((l) => l.role === 'user' && l.id > sentMark), [lines, sentMark]);
   const modelId = agent.session?.currentModel;
   const model = agent.session?.models.find((m) => m.id === modelId)?.name || undefined;
   const offered = agent.session?.commands;
@@ -134,7 +137,7 @@ export function PromptBox({ agent, send, source, choose, approvals, onReview }: 
     if (canClose && !agent.closed && isCloseCommand(body, commands)) { closeAsk.ask(agent.id, 'pane'); setText(''); return; }
     if (!body || !send || busy || agent.closed) return;
     setBusy(true);
-    setSeenWaiting(false);
+    setSentMark(lines.length ? (lines[lines.length - 1] as ChatLine).id : 0);
     const r = await send(agent, body);
     setBusy(false);
     const res: PromptResult = typeof r === 'boolean' ? { ok: r } : r;
@@ -145,9 +148,18 @@ export function PromptBox({ agent, send, source, choose, approvals, onReview }: 
   // The composer grows with what is typed, up to a limit, then scrolls.
   const rowCount = Math.min(8, Math.max(2, text.split('\n').length));
   const working = agent.state === 'working' && !agent.closed;
-  // #908: the groups of calls whose turn is over (a later prompt went, or the agent is in no turn): what still says it runs is stopped.
-  const live = !agent.closed && (agent.state === 'working' || agent.state === 'needs-you');
-  const ended = useMemo(() => endedGroups(view.items, live), [view.items, live]);
+  // #908: the groups of calls whose turn is over: a later prompt went, or the agent is in no turn (idle or finished, not `unknown`)
+  // and has been for STOP_GRACE_MS (its state and its entries come on separate streams, and a call's last update can be held 150 ms).
+  // What still says it runs there is drawn stopped.
+  const inTurn = !agent.closed && agent.state !== 'idle' && agent.state !== 'finished';
+  const [outOfTurn, setOutOfTurn] = useState(!inTurn);
+  useEffect(() => {
+    if (inTurn) { setOutOfTurn(false); return; }
+    const timer = setTimeout(() => setOutOfTurn(true), STOP_GRACE_MS);
+    return () => clearTimeout(timer);
+  }, [inTurn]);
+  const turnOver = !inTurn && outOfTurn;
+  const ended = useMemo(() => endedGroups(view.items, !turnOver), [view.items, turnOver]);
 
   // ADR-0090. The window cannot read a node's capabilities, so "this node speaks the rich form" is what it has seen: rich entries, the
   // agent's settings or commands, or a prompt answered in the rich form. Stop turn is offered only then, while the agent works.
@@ -181,7 +193,7 @@ export function PromptBox({ agent, send, source, choose, approvals, onReview }: 
     field.current.setSelectionRange(caretTo.current, caretTo.current);
     caretTo.current = undefined;
   }, [text]);
-  const sentText = sent && (sent !== 'queued' || queuedNote(sent, waitingCount, seenWaiting, working)) && t({ ok: 'prompt-sent', queued: 'prompt-queued', full: 'prompt-queue-full', failed: 'prompt-failed' }[sent]);
+  const sentText = sent && (sent !== 'queued' || queuedNote(sent, waitingCount, arrived, working)) && t({ ok: 'prompt-sent', queued: 'prompt-queued', full: 'prompt-queue-full', failed: 'prompt-failed' }[sent]);
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-surface-0">

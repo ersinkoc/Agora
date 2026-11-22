@@ -100,8 +100,12 @@ try {
     c.querySelectorAll('.sr-only').forEach(s => s.remove());
     return `${e.closest('[data-role]').dataset.role}:${c.textContent.trim()}`;
   }));
-  await page.waitForFunction(() => /queued two/.test([...document.querySelectorAll('[data-role=agent]')].pop()?.textContent ?? ''), null, { timeout: 15000 }).catch(() => {});
+  // A wait that runs out fails the script with what it waited for.
+  const waited = (what, p) => p.catch((e) => { throw new Error(`waiting for ${what}: ${e.message}`); });
+  await waited('the answer to "queued two"', page.waitForFunction(() => /queued two/.test([...document.querySelectorAll('[data-role=agent]')].pop()?.textContent ?? ''), null, { timeout: 15000 }));
   check(await gone(stopTurn), 'and the agent is idle');
+  // "Stopped" shows once the agent has been out of its turn for a moment (the call's last update may still be on its way).
+  await waited('a call that reads "Stopped"', page.locator('[data-steps] [role=img][aria-label="Stopped"]').first().waitFor({ timeout: 10000 }));
   check((await page.locator('[role=img][aria-label="Running"]').count()) === 0, 'no call is still shown running after Stop turn');
   check((await page.locator('[data-steps] [role=img][aria-label="Stopped"]').count()) >= 1, 'the stopped call reads "Stopped"');
   check((await page.getByText('Waiting for this turn to end.').count()) === 0, 'the composer no longer says it waits for the turn');
@@ -113,7 +117,7 @@ try {
   await say('ask');
   await page.waitForSelector('[data-permission=pending]');
   // The way to the request shows once the pinned request has arrived too (its own event, a moment after the record).
-  await page.locator('[data-permission] button').first().waitFor({ timeout: 10000 }).catch(() => {});
+  await waited('the way to the pinned request', page.locator('[data-permission] button').first().waitFor({ timeout: 10000 }));
   check((await page.locator('[data-permission] button').count()) === 1, 'the record has only a way to the request, no Allow or Deny');
   // The card that floats over the window for a request that needs reading: put it aside.
   const later = page.getByRole('button', { name: 'Later', exact: true });

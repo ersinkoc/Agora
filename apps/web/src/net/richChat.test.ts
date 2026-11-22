@@ -255,6 +255,17 @@ describe('the order a person reads, and turns that are over (#908)', () => {
     expect(ids(lines)).toEqual([1, 2, 3, 4, 5]);
     expect(ids([L(1, { role: 'user', atMs: 0 }), L(2, { atMs: 0 }), L(3, { role: 'user', atMs: 0 }), L(4, { atMs: 0 })])).toEqual([1, 2, 3, 4]);
   });
+  it('one failed send among several waiting prompts marks only that one not sent; an older node\'s notice covers every older one', () => {
+    const q = (id: number) => L(id, { role: 'user', queued: true });
+    const lines = [L(1, { role: 'user' }), q(2), q(3), q(4), L(5, { kind: 'notice', code: 'adapter.queue_dropped', params: { count: '1', entries: '3' } })];
+    const s = queueState(lines);
+    expect([...s.notSent]).toEqual([3]);
+    expect(s.waiting.map((l) => l.id)).toEqual([2, 4]);
+    expect(ids(lines)).toEqual([1, 3, 5, 2, 4]);
+    const old = queueState([...lines.slice(0, 4), L(5, { kind: 'notice', code: 'adapter.queue_dropped', params: { count: '3' } })]);
+    expect([...old.notSent]).toEqual([2, 3, 4]);
+    expect(old.waiting).toHaveLength(0);
+  });
   it('draws a waiting prompt after everything, and a prompt the node will not send where it was', () => {
     expect(ids([L(1, { role: 'user' }), L(2, { role: 'user', queued: true }), L(3), L(4)])).toEqual([1, 3, 4, 2]);
     const dropped = [L(1, { role: 'user' }), L(2, { role: 'user', queued: true }), L(3), L(4, { kind: 'notice', code: 'adapter.queue_dropped' })];
@@ -265,6 +276,19 @@ describe('the order a person reads, and turns that are over (#908)', () => {
     const [first, second] = items.filter((i) => i.kind === 'steps').map((i) => i.id);
     expect([...endedGroups(items, true)]).toEqual([first]);
     expect(new Set(endedGroups(items, false))).toEqual(new Set([first, second]));
+  });
+  it('a prompt this window saw sent goes after the entry it followed, even when the times tie within a millisecond', () => {
+    // The answer to the turn before (5) and the send of 4 happened in the same millisecond: by time and id, 4 would come first.
+    const lines = [L(1, { role: 'user', atMs: 10 }), L(3, { role: 'user', atMs: 20 }), L(4, { role: 'user', atMs: 20 }), L(5, { atMs: 20 }), L(6, { atMs: 21 })];
+    expect(ids(lines)).toEqual([1, 3, 4, 5, 6]);
+    // This window followed it: 3 was sent, the agent answered (5), then 4 was sent; all three in one batch, in that order.
+    const held = lines.slice(0, 3).map((l) => (l.id > 1 ? { ...l, queued: true } : l));
+    const live = mergeLines(held, [lines[1] as ChatLine, lines[3] as ChatLine, lines[2] as ChatLine]);
+    expect(live.find((l) => l.id === 4)?.sentAfter).toBe(5);
+    expect(ids([...live, lines[4] as ChatLine])).toEqual([1, 3, 5, 4, 6]);
+  });
+  it('an entry\'s time is never adjusted: an older time after a newer one (a clock that stepped back) is ordered by time, then id', () => {
+    expect(ids([L(1, { role: 'user', atMs: 50 }), L(2, { atMs: 40 }), L(3, { atMs: 60 })])).toEqual([2, 1, 3]);
   });
   it('the composer\'s "waiting" note: while a prompt waits; before its entry arrived only while the agent works; never after it went', () => {
     expect(queuedNote('queued', 1, true, false)).toBe(true);
