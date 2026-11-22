@@ -1,4 +1,6 @@
+import { useEffect, useState } from 'react';
 import { t } from '../i18n';
+import { noticeText, type ChatLine, type ChatSource } from '../net/chat';
 import { forgetReasonKey } from '../net/forget';
 import { resumeReasonKey } from '../net/directory';
 import { endedWithError, shownExitCode, type AgentTileModel, type ResumeAction } from '../model';
@@ -8,9 +10,27 @@ import { StateMark } from './StateBadge';
 
 // What a closed agent leaves behind: how it ended, how long it ran, what it changed and how many tokens it used. Its terminal is gone, so this is shown
 // in its place, with the ways to look at the work and to clear it from the list.
-export function ClosedSummary({ agent, now, onReview, onHistory, onFiles, onDismiss, onForget, forgetError, onStart, onResume, resuming, resumeError }: {
+// #902: the node's give-up notice in a chat agent's conversation (`adapter.gave_up`), the last one said, or undefined. The conversation is
+// replaced by this summary once the agent is closed, so the summary says why it ended.
+function useGaveUp(source: ChatSource | undefined): ChatLine | undefined {
+  const [line, setLine] = useState<ChatLine>();
+  useEffect(() => {
+    setLine(undefined);
+    if (!source) return;
+    const sub = source.connect((lines, replace) => setLine((had) => {
+      const last = [...lines].reverse().find((l) => l.kind === 'notice' && l.code === 'adapter.gave_up');
+      return last ?? (replace ? undefined : had);
+    }));
+    return () => sub.close();
+  }, [source]);
+  return line;
+}
+
+export function ClosedSummary({ agent, now, source, onReview, onHistory, onFiles, onDismiss, onForget, forgetError, onStart, onResume, resuming, resumeError }: {
   agent: AgentTileModel;
   now: number;
+  /** A chat agent's conversation: said once closed when the node gave up restarting it (#902). */
+  source?: ChatSource;
   onReview?: () => void;
   onHistory?: () => void;
   onFiles?: () => void;
@@ -25,7 +45,9 @@ export function ClosedSummary({ agent, now, onReview, onHistory, onFiles, onDism
   resumeError?: string;
 }) {
   // A non-zero exit code is drawn as an error (a neutral cross and the words, never the green check); the code itself is stated too.
-  const code = shownExitCode(agent);
+  const gaveUp = useGaveUp(agent.terminal === false ? source : undefined);
+  // The node sends exit code 1 when it does not know how the last process ended (#902); its notice then has none, and neither has this.
+  const code = gaveUp && gaveUp.params?.exit_code === undefined ? undefined : shownExitCode(agent);
   const failed = endedWithError(agent);
   const ran = agent.startedMs && agent.endedMs ? duration(agent.endedMs - agent.startedMs) : undefined;
   const changes = agent.filesChanged ?? 0;
@@ -39,6 +61,7 @@ export function ClosedSummary({ agent, now, onReview, onHistory, onFiles, onDism
             <p className={`m-0 ${failed ? 'text-ink' : 'text-finished'}`}>{failed ? t(code === undefined ? 'closed-failed-signal' : 'closed-failed', { code: code ?? 0 }) : t('closed-ok')}</p>
           </div>
         </div>
+        {gaveUp && <p className="m-0" data-gave-up>{noticeText(gaveUp, t)}</p>}
         <p className="muted m-0">{t(agent.interrupted ? (agent.interrupted.stillRunning ? 'interrupted-note-running' : agent.interrupted.resumable ? 'interrupted-note' : 'interrupted-note-new') : 'closed-note')}</p>
         {agent.interrupted?.stillRunning && onResume && <div className="flex flex-wrap gap-2">
           <button type="button" className="button button--primary" disabled={resuming} onClick={() => onResume('stop')}>{t('action-stop-old')}</button>

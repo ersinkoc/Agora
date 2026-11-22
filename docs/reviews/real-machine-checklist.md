@@ -279,9 +279,11 @@ not built: nothing to check.
   `agora adapter install NAME --registry URL`, `agora adapter list`, `agora adapter remove NAME` (**human, dedicated account** for an
   adapter that needs a login).
 - **See:** the chat answers; `ask` brings an approval that Allow resolves (the agent says `approved`); `cwd` says the folder; one
-  `crash` is restarted by the node with backoff (adapter protocol: 5 restarts, from 1 s up to 60 s), so send `crash` again after each
-  restart: after the sixth the agent shows "Ended with an error" with its reason (on 0.3.33 it stays "Unknown", #902); an installed
-  adapter shows its version in `list` and its kind in the start window.
+  `crash` is restarted by the node with backoff (adapter protocol: 5 restarts, from 1 s up to 60 s) and the conversation says it is
+  started again (attempt N), so send `crash` again after each restart: after the sixth (`agora agent list` says `stopped`) the agent
+  shows "Ended with an error (exit code 3)", its summary (and the conversation in `agora tui`) says Agora stopped starting it again
+  after 5 restarts, and its input box is off, also after a reload (on 0.3.33 it stays "Unknown", #902; with a holder the exit code may
+  be missing until #951); an installed adapter shows its version in `list` and its kind in the start window.
 - **Evidence so far:** [Linux 2026-11-21](2026-11-21-real-machine-linux.md): fail (#902).
 
 ### RM-14 Agents run in the selected folder; worktrees optional
@@ -343,7 +345,9 @@ not built: nothing to check.
 - **Do:** add a manifest whose `launch` names a program that does not exist (`["rm-no-such-program"]`). Open Start an agent; open
   Settings > Agents; run `agora agent start` for that kind; open `agora tui` and its start list.
 - **See:** the kind is shown as "not installed"; Settings > Agents says "This machine cannot find rm-no-such-program in its PATH."; the
-  CLI and the terminal client say why in words, not a code.
+  CLI and the terminal client say why in words, not a code: `agora agent start` prints `Error agent.program_missing: rm-missing did not
+  start: this machine cannot find rm-no-such-program in its PATH. ...` (#903; also for an ACP kind such as `opencode-acp` without
+  `opencode`).
 - **Evidence so far:** none recorded.
 
 ### RM-20 Resume after the node restarts (session ledger)

@@ -309,6 +309,8 @@ enum Proc {
         /// The node has read everything the holder kept (the replay is over): only then is the loss told, so that the notice is
         /// newer than what the replay put in the conversation and a long replay cannot push it out.
         ready: Arc<AtomicBool>,
+        /// How the process ended, as `output` last heard it from the holder (#902); `None` while it runs or when it was not heard.
+        exit: Arc<Mutex<Option<agora_platform::ExitStatus>>>,
     },
 }
 
@@ -322,6 +324,9 @@ pub struct HeldIo {
     pub dropped: Arc<AtomicU64>,
     /// Set by `output` once the output the holder kept has been read to its end.
     pub ready: Arc<AtomicBool>,
+    /// #902: how the process ended, set by `output` from what the holder says with the output (before the output ends), so the node
+    /// knows it without asking the holder again.
+    pub exit: Arc<Mutex<Option<agora_platform::ExitStatus>>>,
 }
 
 pub struct Adapter {
@@ -785,6 +790,34 @@ impl Adapter {
         }
     }
 
+    /// #902: how the process ended, once its output has: its exit code, or on Unix the signal that ended it. Returns within `wait`
+    /// (it is asked under the node's supervisor lock); `None` when it has not ended by then or its status is not known.
+    ///
+    /// A process the holder runs is never asked about over the holder link here (a list with its own reply timeout, a release, the
+    /// link's lock could take far longer than `wait`): the status is the one the output's reader already heard from the holder with
+    /// the output, or unknown. Reading it changes nothing for the end of this value (a later drop kills and collects as before).
+    pub fn exit_status(&mut self, wait: Duration) -> Option<agora_platform::ExitStatus> {
+        let end = std::time::Instant::now() + wait;
+        match &mut self.proc {
+            Proc::Child(c) => loop {
+                let read = c.try_wait().map(|s| {
+                    s.map(|s| agora_platform::ExitStatus {
+                        code: s.code(),
+                        signal: agora_platform::exit_signal(&s),
+                    })
+                });
+                match read {
+                    Ok(Some(status)) => return Some(status),
+                    Ok(None) if std::time::Instant::now() < end => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    _ => return None,
+                }
+            },
+            Proc::Held { exit, .. } => exit.lock().ok().and_then(|s| *s),
+        }
+    }
+
     /// ADR-0093: whether the process is the holder's.
     pub fn is_held(&self) -> bool {
         matches!(self.proc, Proc::Held { .. })
@@ -833,6 +866,7 @@ impl Adapter {
                 detached: false,
                 dropped: io.dropped,
                 ready: io.ready,
+                exit: io.exit,
             },
             writer: None,
             pending: Arc::default(),
