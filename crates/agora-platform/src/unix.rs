@@ -89,6 +89,11 @@ pub(crate) fn winsize(cols: u16, rows: u16) -> libc::winsize {
     }
 }
 
+/// `ELOOP`: too many levels of symbolic links (a link to itself, or a ring of links), or a link refused by `O_NOFOLLOW`.
+pub(crate) fn link_loop(e: &io::Error) -> bool {
+    e.raw_os_error() == Some(libc::ELOOP)
+}
+
 pub(crate) fn cvt(r: libc::c_int) -> io::Result<libc::c_int> {
     if r < 0 {
         Err(io::Error::last_os_error())

@@ -594,6 +594,24 @@ pub fn canonicalize_plain(path: &std::path::Path) -> io::Result<std::path::PathB
     }
 }
 
+/// Whether `e` says a path never resolves because of its symbolic links: a link to itself or a ring of links ("too many levels of
+/// symbolic links"). Rust has no stable `ErrorKind` for it, so the system's own code is compared. False on systems without links.
+pub fn link_loop(e: &io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        unix::link_loop(e)
+    }
+    #[cfg(windows)]
+    {
+        windows::link_loop(e)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = e;
+        false
+    }
+}
+
 /// Creates a symbolic link at `link` pointing to `target`. Only Unix for now (Windows links need privileges and a file
 /// or directory flavour); elsewhere it returns `Unsupported`, which tests that need a link use to skip themselves.
 pub fn symlink(target: &std::path::Path, link: &std::path::Path) -> io::Result<()> {

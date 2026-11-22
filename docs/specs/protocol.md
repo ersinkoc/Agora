@@ -301,7 +301,7 @@ all-added, at most 50 files of at most 64 KiB), and an answer is cut at 512 KiB.
 every file from that folder, so each name is a path `git.diff` and `files.read` take: for a workspace that is the folder `web/`
 of a repository, `web/a.txt` is `a.txt`; a rename across the folder's edge shows as the file added or deleted inside it. At a
 repository's root the names are the repository's own. `files.list` hides `.git`; `files.read` refuses
-files above 512 KiB (`files.too_large`) and paths that leave the workspace, symlinks included (`files.outside_root`), checked again on the opened file so a link swapped in after the check is still refused.
+files above 512 KiB (`files.too_large`) and paths that leave the workspace, symlinks included, and links that never resolve (a missing target, a link to itself, a ring of links) (`files.outside_root`), checked again on the opened file so a link swapped in after the check is still refused.
 
 UTF-16 text (#940). A file that is UTF-16 with a byte-order mark (`FF FE` or `FE FF`; Windows PowerShell 5.1's `>` writes the
 former), of even length, valid UTF-16 and with no control character other than a tab, a line break, a carriage return or a form
