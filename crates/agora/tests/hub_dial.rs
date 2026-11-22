@@ -2907,3 +2907,139 @@ fn the_node_reports_its_hub_link_state_for_status() {
         LinkState::read(&up_dir) == Some(LinkState::Up)
     });
 }
+
+/// #1016: a message between two agents on one machine reaches the hub's store and a subscribed window within 2 s, on its own: no
+/// later event of the node is needed to carry it (the supervision tick drains the broker's events every 100 ms, the uplink sends
+/// what the log holds every 50 ms). Coverage for the report; it passed before any change, as did the same path with real
+/// `agora-fake-agent --acp` agents, `agora node run` and `agora hub run` in a browser.
+#[test]
+fn a_message_between_agents_on_one_machine_reaches_the_hub_and_a_window_on_its_own() {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
+        return;
+    }
+    use agora_hub::store::EventStore;
+    use agora_mesh::broker::AgentInfo;
+    use agora_protocol::frame::{kinds, STREAM_EVENTS};
+    use agora_protocol::v1::event::Body;
+    use prost::Message as _;
+    let hub = hubside("alpha");
+    let addr = hub.listen("127.0.0.1:0");
+    let dir = tmp("local-message");
+    std::fs::create_dir_all(&dir).unwrap();
+    let cfg = agora_node::daemon::NodeConfig {
+        resume_all: false,
+        node_id: "alpha".into(),
+        socket: dir.join("c.sock"),
+        data_dir: dir.join("data"),
+        worktree_root: dir.join("wt"),
+        manifests_dir: dir.join("manifests"),
+        projects: vec![],
+        limits: Default::default(),
+    };
+    let node = agora_node::daemon::Node::start(&cfg).unwrap();
+    let mut link = hub.link(addr);
+    link.commands = Some(cfg.socket.clone());
+    let _up = spawn(Arc::clone(&node.events), link).unwrap();
+    let register = |id: &str| {
+        node.mesh
+            .register(AgentInfo {
+                id: AgentId::new(id),
+                kind: "shell".into(),
+                node: "alpha".into(),
+                project: "p".into(),
+                label: String::new(),
+                worktree: String::new(),
+                state: "idle".into(),
+            })
+            .unwrap()
+    };
+    let a_sock = register("a1");
+    let _b_sock = register("a2");
+    wait("the node to be online", || {
+        hub.state
+            .hub
+            .view()
+            .0
+            .nodes
+            .get("alpha")
+            .is_some_and(|x| x.online)
+    });
+    let posted = || -> Vec<(String, String, String)> {
+        hub.state
+            .hub
+            .store()
+            .events_after(0, 10_000)
+            .unwrap()
+            .iter()
+            .filter_map(|e| {
+                let ev = agora_protocol::v1::Event::decode(e.payload.as_slice()).ok()?;
+                match ev.body? {
+                    Body::MessagePosted(m) if m.body == "hello next door" => {
+                        Some((ev.producer_id, m.from_agent_id, m.to))
+                    }
+                    _ => None,
+                }
+            })
+            .collect()
+    };
+    // A window subscribed before the message: it must get it live.
+    let mut window = hub.client(addr);
+    hub.rt.block_on(async {
+        window
+            .send(&agora_protocol::Frame {
+                stream_id: STREAM_EVENTS,
+                kind: kinds::SUBSCRIBE,
+                seq: None,
+                payload: agora_protocol::v1::Subscribe::default().encode_to_vec(),
+            })
+            .await
+            .unwrap();
+    });
+    let mut conn = agora_platform::local_connect(&a_sock).unwrap();
+    mcp(
+        &mut conn,
+        1,
+        "initialize",
+        serde_json::json!({"protocolVersion": "2025-03-26"}),
+    );
+    let sent = mcp(
+        &mut conn,
+        2,
+        "tools/call",
+        serde_json::json!({"name": "send_message", "arguments": {"to": "a2", "body": "hello next door"}}),
+    );
+    assert_ne!(sent["isError"], true, "{sent}");
+    // Nothing else happens on the node: the message alone must get there, well within the window's one second plus slack.
+    let end = Instant::now() + Duration::from_secs(2);
+    while posted().is_empty() {
+        assert!(
+            Instant::now() < end,
+            "the message between agents on one machine did not reach the hub within 2 s"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(
+        posted(),
+        [("alpha".into(), "a1".into(), "a2".into())],
+        "one copy, from the sender's node"
+    );
+    // And the window has it, live, within the same deadline.
+    let seen = hub.rt.block_on(async {
+        loop {
+            let left = end.saturating_duration_since(Instant::now());
+            let Ok(Ok(Some(f))) = tokio::time::timeout(left, window.recv()).await else {
+                break false;
+            };
+            if (f.stream_id, f.kind) != (STREAM_EVENTS, kinds::POSITIONED_EVENT) {
+                continue;
+            }
+            let Ok(d) = agora_protocol::v1::PositionedEvent::decode(f.payload.as_slice()) else {
+                continue;
+            };
+            if matches!(d.event.and_then(|e| e.body), Some(Body::MessagePosted(m)) if m.body == "hello next door") {
+                break true;
+            }
+        }
+    });
+    assert!(seen, "the window did not get the message live within 2 s");
+}
