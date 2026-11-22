@@ -898,15 +898,21 @@ pub fn last_seen_version(home: &Path) -> Result<u64, InstallError> {
     if bytes.len() as u64 > MAX_LIST_STATE_BYTES {
         return Err(unreadable());
     }
-    // Only the documented object: a derived reader would also take a positional array (`[5]`), which no writer emits (Codex's
-    // review of #997).
-    serde_json::from_slice::<serde_json::Value>(&bytes)
-        .ok()
-        .as_ref()
-        .and_then(serde_json::Value::as_object)
-        .and_then(|o| o.get("version"))
-        .and_then(serde_json::Value::as_u64)
-        .ok_or_else(unreadable)
+    // Only the documented object (a derived reader alone would also take a positional array, `[5]`, which no writer emits), then
+    // the typed reader, which refuses a repeated `version` where a generic value keeps the last one (Codex's review of #997).
+    let is_object =
+        serde_json::from_slice::<serde_json::Value>(&bytes).is_ok_and(|v| v.is_object());
+    if !is_object {
+        return Err(unreadable());
+    }
+    serde_json::from_slice::<ListState>(&bytes)
+        .map(|s| s.version)
+        .map_err(|_| unreadable())
+}
+
+#[derive(serde::Deserialize)]
+struct ListState {
+    version: u64,
 }
 
 fn rolled_back(seen: u64, version: u64) -> Result<(), InstallError> {

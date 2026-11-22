@@ -853,6 +853,11 @@ fn unreadable_states() -> Vec<(&'static str, MakeState)> {
         ("null", write("null\n".into())),
         ("version_null", write("{\"version\":null}\n".into())),
         ("version_string", write("{\"version\":\"5\"}\n".into())),
+        // A repeated `version` is not read as either value (Codex's review of #997).
+        (
+            "duplicate_version",
+            write("{\"version\":1,\"version\":9}\n".into()),
+        ),
         (
             "trailing",
             write("{\"version\":5}\n{\"version\":1}\n".into()),
