@@ -1626,6 +1626,26 @@ mod tests {
     }
 
     #[test]
+    fn a_client_waits_for_a_free_instance_only_up_to_the_limit() {
+        // #974: the bound of that wait. The one pending instance is taken by a client the server never accepts, so the next
+        // client finds every instance busy for good and fails with os error 231 after `CONNECT_BUSY_LIMIT`, not sooner or later.
+        let p = path("bound");
+        let _l = listen(&p).unwrap();
+        let _first = connect(&p).unwrap();
+        let t0 = std::time::Instant::now();
+        let second = connect(&p);
+        let waited = t0.elapsed();
+        assert_eq!(
+            second.err().and_then(|e| e.raw_os_error()),
+            Some(ERROR_PIPE_BUSY as i32)
+        );
+        assert!(
+            waited >= CONNECT_BUSY_LIMIT && waited < CONNECT_BUSY_LIMIT + Duration::from_secs(2),
+            "{waited:?}"
+        );
+    }
+
+    #[test]
     fn a_client_and_a_server_talk_both_ways_and_a_second_listener_is_refused() {
         let p = path("talk");
         let l = listen(&p).unwrap();
