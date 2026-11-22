@@ -31,7 +31,7 @@ One entry per agent program and installer kind. Unknown fields are refused. `nam
 |---|---|
 | `name` | `a-z`, `0-9`, `-`, `_`, at most 64 (the same rule as adapter names) |
 | `display` | 1 to 80 characters, no control, format, bidirectional, separator or private-use character |
-| `changelog`, `homepage` (and every download URL) | `https://` only, at most 500 bytes; the host is a DNS name of at least two labels (`a-z`, `0-9`, `-`), whose last label is not all digits, and not `localhost`, `*.local`, `*.internal`; no IP literal, no userinfo, an optional port 1 to 65535; no whitespace, quote, backslash, angle bracket or non-ASCII. **This is syntax only.** Rung 3, which downloads, MUST also refuse a name that resolves to a private, loopback or link-local address, validate the port again, and refuse a redirect to a non-https scheme or to another host |
+| `changelog`, `homepage` (and every download URL) | `https://` only, at most 500 bytes; the host is a DNS name of at least two labels (`a-z`, `0-9`, `-`), whose last label is not all digits nor `0x` and hex digits (`127.0.0.0x1` is an address), and not `localhost`, `*.local`, `*.internal`; no IP literal, no userinfo, an optional port 1 to 65535; no whitespace, quote, backslash, angle bracket or non-ASCII. **This is syntax only.** Rung 3, which downloads, MUST also refuse a name that resolves to a private, loopback or link-local address, validate the port again, and refuse a redirect to a non-https scheme or to another host |
 | `publisher` | an id declared in `publishers` |
 | `version` | the one exact version this entry installs: `major.minor.patch`, optional `-pre`/`+build`; no tags, ranges or carets |
 | `version_policy` | `pin`: exactly `version`. `track`: `version` is the newest the list names (a new list moves it). `range`: also `min` and `max` (exact), and `min <= version <= max` compared on major.minor.patch. `min`/`max` on `pin` or `track` are refused |
@@ -75,8 +75,20 @@ typing at. Code: `crates/agora-adapters/src/agent_install.rs` (the logic, with t
 `crates/agora/src/agentcmd.rs` (the words and the question). Nothing here involves the hub, a window or a protocol message.
 
 1. **The list.** Read from `--list`, opened with `verify_list` under the root key (`--root-key` as 64 hex characters or a file; default
-   `<AGORA_HOME>/agent-list-root-key`). The newest accepted version is kept in `<AGORA_HOME>/agents/list-state.json` (atomic, only
-   goes up), so an older list is refused as a rollback.
+   `<AGORA_HOME>/agent-list-root-key`). The newest accepted version is kept in `<AGORA_HOME>/agents/list-state.json` (`{"version":N}`,
+   replaced only by a rename so a crash leaves the old file whole, only goes up), so an older list is refused as a rollback
+   (`agent.install.index_invalid`, detail `rollback`). The version is recorded under the install lock after the record is read
+   again there: a list checked against an older record is refused as `rollback` when another install recorded a newer list
+   meanwhile, and the same version is already recorded. The check fails closed (#923): only a missing file means "no list accepted
+   yet" (the list is accepted and its version recorded). The file is opened without following a link at its last path component
+   (`list-state.json` itself) and checked on the opened handle; the folders above it are reached by path. The `agents` folder is
+   private to the user and a link there is refused before anything is written, but the lock, the read and the replace are not done
+   relative to one held folder handle, so a process running as the same user that replaces the `agents` folder between those steps
+   is not excluded (the same limit as the later install steps in item 7). A file that is there but cannot be read or understood (no permission, a folder or link at that path, larger than
+   4 KiB, not a JSON object with exactly one whole-number `version`) refuses **every** list, older or newer, with
+   `agent.install.index_invalid`, detail `list_state_unreadable`, and is never overwritten. The owner recovers by removing the file
+   and running the install again with the newest list from its publisher, which is then accepted as the first one; the message says
+   so and names the file. Removing it is the owner's own decision on their own machine, the same trust as writing it.
 2. **The plan.** `AgentList::offer` (a revoked publisher: `agent.install.revoked`), the entry's `binary-download` installer, and the
    key of this system (`agora_platform::platform_key()`: `linux-x86_64`, `darwin-aarch64`, `windows-x86_64`, `-musl` on a musl
    build); none: `agent.install.unsupported_platform`. The node prints the exact action from its own state: name, version, URL,
@@ -113,10 +125,26 @@ typing at. Code: `crates/agora-adapters/src/agent_install.rs` (the logic, with t
    written; if either step fails the previous launcher is put back first. A failed verify removes the new folder and leaves the old
    launcher. A folder the launcher resolves into is never removed. The new version and the one before it are kept; older
    ones are removed.
-9. **One at a time, and crashes.** `<AGORA_HOME>/agents/.lock` holds `pid start boot` of its owner (a reused pid does not look alive); a live owner is
-   `agent.install.in_progress`; a dead owner's lock is taken over by renaming it to a unique name and checking what was renamed
-   (another process's fresh lock is put back); an empty or unreadable lock is stale only after 60 seconds; the lock is removed on
-   exit only while it still holds this process's text. The list version is remembered under the same lock. Every run first removes `.tmp-*` folders and half-made launchers a crash left.
+9. **One at a time, and crashes.** `<AGORA_HOME>/agents/.lock` is held with the system's file lock (`File::try_lock`; opened by
+   `agora_platform::open_lock_private`), which the system releases when its owner ends, so a crash never leaves it held and nothing
+   is taken over (audit F100: the earlier rename-and-check takeover let two installs hold it at once). A lock held by another install
+   is `agent.install.in_progress` after a wait of at most one second (a process another thread is starting holds a copy of the
+   handle until its exec). While held, the file holds `pid start boot` of its owner (a reused pid does not look alive) for older
+   versions, which judge the lock by that text alone; a live owner named there (an older version holding it) is also
+   `agent.install.in_progress`, and empty or unreadable text never blocks. On release the file is emptied, never removed. On
+   Windows the file is opened without delete sharing, so while any process has it open it can be neither renamed nor removed. Limits
+   while versions are mixed: an older version answers `agent.install.in_progress` at once for 60 seconds after a newer one released
+   the lock (it reads the young empty file as somebody still writing); on Windows an older version cannot read a held lock (the
+   system lock is mandatory there) and judges it by its age, so after 60 seconds it tries to take it over, but its rename fails while
+   the newer one holds the file open and it answers `agent.install.in_progress`; elsewhere it reads the owner text. An older version
+   taking a fresh lock in the instant a newer one also does is not excluded (on Linux and macOS it can move the file a newer one has
+   just opened). An older version that ended between putting a lock back and removing the name it had moved it to leaves `.lock`
+   with a second name, which the private open refuses: the `.lock.stale-*` names are then removed and the open is tried once more.
+   A home on a network file system gets what that system's locks give: on Linux NFS a file lock is per process (two installs in one
+   process would not exclude each other; each `agora agent install` is its own process) and needs the server's lock service; on
+   macOS a file system without these locks makes every install fail with `agent.install.io_failed`. The list version is remembered
+   under the same lock. Every run first removes `.tmp-*` folders, `.lock.stale-*` files older versions left and half-made launchers
+   a crash left.
 10. **Never** a script from the entry, `sudo`, a shell profile edit, or a write outside `<AGORA_HOME>`.
 
 Test seams: `Tools` carries the resolver, the fetcher and the signature checker; the command line always passes the strict ones

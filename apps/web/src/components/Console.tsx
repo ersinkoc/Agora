@@ -18,6 +18,7 @@ import type { DiffSource } from '../net/diff';
 import type { WorkspaceFiles } from '../net/files';
 import { AgentAddress } from './AgentAddress';
 import { NoAskBadge } from './NoAskBadge';
+import { AsksLessChip } from './AllowAlways';
 import { LiveSummary } from './LiveSummary';
 import { Explorer } from './Explorer';
 import { FleetConsole } from './FleetConsole';
@@ -98,7 +99,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   // ADR-0060: resume an interrupted agent (or start it again in its folder); undefined when it did, else the error code.
   onResume?: (agent: AgentTileModel, action: ResumeAction) => Promise<string | undefined>;
   start?: ReactNode;
-  onResolve: (a: ApprovalModel, approved: boolean, choice?: StartChoice) => void;
+  onResolve: (a: ApprovalModel, approved: boolean, choice?: StartChoice, always?: boolean) => void;
   // ADR-0057: what an agent may still start without asking, and taking that back.
   helperGrants?: (agent: AgentTileModel) => Promise<HelperGrant[]>;
   revokeGrant?: (agent: AgentTileModel, id: string) => Promise<void>;
@@ -304,6 +305,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
           {a.branch && <><Icon name="branch" className="ms-1 size-3.5" /><span className="truncate font-mono">{a.branch}</span></>}
           {a.shared && <span className="ide-chip ms-1 flex-none" title={t('workspace-shared')}>{t('ide-shared')}</span>}
           <NoAskBadge agent={a} />
+          <AsksLessChip agent={a} />
         </div>
         <div className="flex flex-none items-center gap-1">
           {(a.filesChanged ?? 0) > 0 && (loadDiff
@@ -327,7 +329,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
       <AgentAddress agent={a} />
       {helperGrants && revokeGrant && !a.closed && fleet.some((c) => c.parentId === a.id) &&
         <HelperGrants list={() => helperGrants(a)} revoke={(id) => revokeGrant(a, id)} refresh={fleet.filter((c) => c.parentId === a.id && !c.closed).length} />}
-      {a.closed ? <ClosedSummary agent={a} now={now}
+      {a.closed ? <ClosedSummary agent={a} now={now} source={a.terminal === false ? chatOf?.(a) : undefined}
         onReview={loadDiff ? () => setReviewing(a.id) : undefined} onHistory={loadHistory && a.git !== false ? () => setHistory(a.id) : undefined} onFiles={filesOf ? () => setBrowsing(a.id) : undefined}
         onStart={onStart ? () => onStart() : undefined} onDismiss={() => dismiss([a.id])}
         onForget={onForget ? () => removeClosed([a.id]) : undefined} forgetError={forgetError}
@@ -336,7 +338,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
         {a.terminal !== false && <LiveSummary agent={a} now={now} onChanges={() => { setRailTab('changes'); setShowDetails(true); }} />}
         <div className="pane min-h-0 flex-1 p-1.5">
         {a.terminal === false ? <PromptBox key={a.id} agent={a} send={sendPrompt} source={chatOf?.(a)} choose={chooseOption} onReview={loadDiff ? () => setReviewing(a.id) : undefined} approvals={pinnedAsks(a.id)} /> : (
-          <Suspense fallback={<div className="terminal" aria-busy="true" />}>
+          <Suspense fallback={<div className="terminal-host" aria-busy="true" />}>
             <TerminalView source={terminalFor(a.id)} label={`${t('focus-terminal')} · ${a.name}`} />
           </Suspense>
         )}

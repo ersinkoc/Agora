@@ -13,14 +13,16 @@ terminals get the key bar when the screen is a touch screen.
 
 1. **The list** (`#/`): **Needs you** first, then every machine (online first) with its agents, most urgent first and closed ones
    last. A request shows who asks, on which machine, what it asks and its whole detail (any hidden character written out, as on a start request), with **Allow** and **Deny** as two large
-   buttons: one tap answers it. Tapping the request's title, or an agent, opens it.
+   buttons: one tap answers it. When the agent offers an answer it remembers (ADR-0101), **Allow always** is a third, full-width button
+   under them, with the note and the agent's own words; a request that offers only that shows it in Allow's place ([approvals.md](approvals.md)). Tapping the request's title, or an agent, opens it.
 2. **An agent** (`#/agent/<id>`): **Back** (to the list), its name, state, machine and cost in the top bar; anything it asks, with
    Allow and Deny; then its terminal, or its conversation for a chat agent. **Next · N** in the top bar opens the next thing that
    needs you. Above the terminal, **N files changed** opens the review screen ([review.md](review.md)) and **Files** the file
    browser, each full-screen with Close; a closed agent's summary offers **Review the changes** and **Files** the same way.
    **What needs you stays in reach of the thumb**: a bar above the bottom bar (alone at the bottom of an agent) shows the first thing that
    needs you and how many there are. A plain yes or no that can be read whole there (the fleet console's rule, `decidableInline`: one
-   short line each of action and detail, no hidden character, never a request to start an agent) has **Allow** and **Deny** as 52 px
+   short line each of action and detail, no hidden character, never a request to start an agent, never one that offers only an answer the
+   agent remembers, ADR-0101) has **Allow** and **Deny** as 52 px
    buttons inside the safe area, and its card above does not repeat them. Everything else (a request to start an agent, long or
    structured text, an agent that waits, a machine asking to join, which keeps its two-press card, ADR-0065) has one **Review and
    decide** button that opens the agent or brings the full card into view; nothing is answered from the bar on text that was cut.

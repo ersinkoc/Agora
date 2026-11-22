@@ -152,17 +152,25 @@ pub fn update(say: &Say, o: &Opts) -> ExitCode {
                 "{}/latest",
                 base.trim_end_matches('/').trim_end_matches("/download")
             );
-            match curl(&["-o", "/dev/null", "-w", "%{url_effective}", &latest])
-                .ok()
-                .as_deref()
-                .and_then(version_from_redirect)
+            match curl(&[
+                "-o",
+                agora_platform::NULL_DEVICE,
+                "-w",
+                "%{url_effective}",
+                &latest,
+            ])
+            .ok()
+            .as_deref()
+            .and_then(version_from_redirect)
             {
                 Some(v) => v,
                 None => {
-                    say.err(
-                        key!("cli-update-failed"),
-                        &[("reason", "could not find the newest release".into())],
-                    );
+                    let message = if o.check {
+                        key!("cli-update-check-failed")
+                    } else {
+                        key!("cli-update-release-not-found")
+                    };
+                    say.err(message, &[]);
                     return ExitCode::from(1);
                 }
             }

@@ -12,6 +12,8 @@ use std::thread::JoinHandle;
 
 use crate::{ExitStatus, Pty, PtyConfig};
 
+pub(crate) const NULL_DEVICE: &str = "/dev/null";
+
 const CHUNK: usize = 16 * 1024;
 /// Bounded queue between the reader thread and the consumer: backpressure reaches the process.
 const QUEUE: usize = 64;
@@ -85,6 +87,11 @@ pub(crate) fn winsize(cols: u16, rows: u16) -> libc::winsize {
         ws_xpixel: 0,
         ws_ypixel: 0,
     }
+}
+
+/// `ELOOP`: too many levels of symbolic links (a link to itself, or a ring of links), or a link refused by `O_NOFOLLOW`.
+pub(crate) fn link_loop(e: &io::Error) -> bool {
+    e.raw_os_error() == Some(libc::ELOOP)
 }
 
 pub(crate) fn cvt(r: libc::c_int) -> io::Result<libc::c_int> {
@@ -173,6 +180,32 @@ fn lock_beside(path: &std::path::Path) -> io::Result<File> {
         return Err(e);
     }
     Ok(lock)
+}
+
+/// Waits up to `timeout` until `fd` is readable (for a listening socket: a client is waiting to be accepted). False when the time
+/// ran out or a signal interrupted the wait: the caller looks again, so an interruption costs one more pass, never a lost client.
+pub(crate) fn wait_readable(fd: &impl AsRawFd, timeout: std::time::Duration) -> io::Result<bool> {
+    let mut p = libc::pollfd {
+        fd: fd.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // Rounded up, so a wait shorter than a millisecond still waits instead of spinning; capped at what poll takes.
+    let ms = timeout
+        .as_nanos()
+        .div_ceil(1_000_000)
+        .min(libc::c_int::MAX as u128) as libc::c_int;
+    // SAFETY: one valid pollfd that lives through the call.
+    let r = unsafe { libc::poll(&mut p, 1, ms) };
+    if r < 0 {
+        let e = io::Error::last_os_error();
+        return if e.kind() == io::ErrorKind::Interrupted {
+            Ok(false)
+        } else {
+            Err(e)
+        };
+    }
+    Ok(r > 0)
 }
 
 pub(crate) fn local_connect(path: &std::path::Path) -> io::Result<crate::LocalStream> {
@@ -417,17 +450,17 @@ pub(crate) fn start_child(
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "argv is empty"));
     };
     #[cfg(target_os = "macos")]
-    let (program, args) = match &config.sandbox {
+    let (program, args, git_config) = match &config.sandbox {
         Some(sb) => {
             let a: Vec<std::ffi::OsString> = args.iter().map(Into::into).collect();
-            let (p, a) = crate::macos::wrap(sb, program.as_ref(), &a)?;
-            (p, a)
+            crate::macos::wrap(sb, program.as_ref(), &a)?
         }
         None => (
             program.into(),
             args.iter()
                 .map(Into::into)
                 .collect::<Vec<std::ffi::OsString>>(),
+            None,
         ),
     };
     let mut cmd = Command::new(program);
@@ -461,6 +494,14 @@ pub(crate) fn start_child(
         .as_ref()
         .map(|sb| crate::linux::ruleset(sb, folder, config.cwd.as_deref()))
         .transpose()?;
+    #[cfg(target_os = "linux")]
+    let git_config = ruleset.as_ref().and_then(|r| r.git_config.as_deref());
+    #[cfg(target_os = "macos")]
+    let git_config = git_config.as_deref();
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if let Some(file) = git_config {
+        cmd.envs(crate::git_config_env(file));
+    }
     // SAFETY: runs between fork and exec and only calls async-signal-safe functions (fchdir, setsid, ioctl,
     // setrlimit). `held` is a descriptor of `folder`, which the caller keeps open until `spawn` returns.
     unsafe {
@@ -609,7 +650,7 @@ impl Drop for UnixPty {
         // cannot finish dying (macOS) until the master is drained or closed, so waiting first would hang.
         // Dropping the receiver makes the reader thread exit and close its duplicate of the master.
         self.output = sync_channel(1).1;
-        if let Ok(null) = File::open("/dev/null") {
+        if let Ok(null) = File::open(NULL_DEVICE) {
             drop(std::mem::replace(&mut self.writer, null));
         }
         let _ = self.child.wait();

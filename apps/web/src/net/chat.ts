@@ -15,6 +15,10 @@ export interface ChatLine {
   id: number; atMs: number; role: 'agent' | 'user'; kind: 'text' | 'tool' | 'plan' | 'diff' | 'notice' | 'thought' | 'permission'; text: string; path: string; code?: string; params?: Record<string, string>;
   callId?: string; callKind?: CallKind; status?: CallStatus; locations?: { path: string; line: number }[]; output?: string; outputCut?: boolean; startedMs?: number; endedMs?: number;
   steps?: PlanStepLine[]; queued?: boolean; approvalId?: string; outcome?: Outcome;
+  always?: boolean; // ADR-0101: `permission_always`, the approved answer was one the agent remembers
+  // #908, the window's own (never from the node): a queued prompt seen to be sent while this window followed the stream; the id of the
+  // newest entry of the agent's held then. It went after that entry, whatever the times say (they tie within a millisecond).
+  sentAfter?: number;
 }
 export interface ChatSource { connect(onLines: (lines: ChatLine[], replace: boolean) => void): { close(): void } }
 
@@ -64,6 +68,7 @@ export function chatLine(e: agora.v1.ChatEntry.$Properties): ChatLine {
   if (e.approvalId) line.approvalId = e.approvalId;
   const oc = OUTCOMES[e.permissionOutcome ?? 0];
   if (oc) line.outcome = oc;
+  if (e.permissionAlways) line.always = true;
   return line;
 }
 
@@ -75,14 +80,15 @@ export const noticeKey = (code: string): string => `notice-${code.replace(/\./g,
 // are passed as plain strings (a stderr tail is the agent's text, shown as text). `exit_code` and `stderr_tail` are optional on the wire.
 export function noticeText(line: ChatLine, tr: (id: string, args?: Record<string, string>) => string): string {
   const code = line.code ?? '';
-  const args = { exit_code: '?', stderr_tail: '', detail: '', rpc_code: '', ...(line.params ?? {}) };
-  const id = noticeKey(code);
+  const args = { exit_code: '?', stderr_tail: '', detail: '', rpc_code: '', restarts: '?', ...(line.params ?? {}) };
+  // #902: the node leaves the exit code out when it does not know it; the give-up then says none (never `?`, never an invented one).
+  const id = code === 'adapter.gave_up' && line.params?.exit_code === undefined ? 'notice-adapter-gave_up-no_code' : noticeKey(code);
   const said = tr(id, args);
   return said === id ? tr('notice-other', { code }) : said;
 }
 
 // The fields that change in place; a repeat that differs in none of them says nothing new.
-const SAME_KEYS: readonly (keyof ChatLine)[] = ['role', 'text', 'kind', 'path', 'code', 'approvalId', 'callId', 'status', 'callKind', 'output', 'outputCut', 'startedMs', 'endedMs', 'queued', 'outcome', 'atMs'];
+const SAME_KEYS: readonly (keyof ChatLine)[] = ['role', 'text', 'kind', 'path', 'code', 'approvalId', 'callId', 'status', 'callKind', 'output', 'outputCut', 'startedMs', 'endedMs', 'queued', 'outcome', 'always', 'atMs', 'sentAfter'];
 function same(a: ChatLine, b: ChatLine): boolean {
   return SAME_KEYS.every((k) => a[k] === b[k]) && JSON.stringify(a.steps) === JSON.stringify(b.steps) && JSON.stringify(a.locations) === JSON.stringify(b.locations) && JSON.stringify(a.params) === JSON.stringify(b.params);
 }
@@ -118,9 +124,13 @@ export function mergeLines(held: readonly ChatLine[], incoming: readonly ChatLin
     if (l.id > last) { out ??= [...held]; out.push(l); continue; }
     const { at, found } = find(cur, l.id);
     if (found) {
-      if (same(cur[at] as ChatLine, l)) continue;
+      const old = cur[at] as ChatLine;
+      // #908: a queued prompt that was sent went after everything the agent had said by then (the newest non-user entry held now).
+      const sentAfter = old.queued && !l.queued && l.role === 'user' ? newestAgentId(cur) : old.sentAfter;
+      const next = sentAfter !== undefined && l.sentAfter === undefined ? { ...l, sentAfter } : l;
+      if (same(old, next)) continue;
       out ??= [...held];
-      out[at] = l;
+      out[at] = next;
     } else {
       out ??= [...held];
       out.splice(at, 0, l);
@@ -129,18 +139,35 @@ export function mergeLines(held: readonly ChatLine[], incoming: readonly ChatLin
   return out ?? (held as ChatLine[]);
 }
 
+function newestAgentId(list: readonly ChatLine[]): number {
+  for (let i = list.length - 1; i >= 0; i--) if ((list[i] as ChatLine).role !== 'user') return (list[i] as ChatLine).id;
+  return 0;
+}
+
 // ADR-0090: prompts waiting behind a turn. A queued user entry waits until the node sends the same entry again without the flag, or
-// says it will not send it: the notice `adapter.queue_dropped` is NEWER than every entry it drops (ids grow), and the schema has no way
-// to remove an entry, so the entry stays and is marked "not sent" instead of waiting for ever.
+// says it will not send it: the schema has no way to remove an entry, so the notice `adapter.queue_dropped` does. Since #908 it names
+// the entries it drops (`entries`, ids joined by commas) and only those read "not sent" (one failed send among several waiting prompts
+// drops one). A notice without `entries` (an older node) covers every queued entry older than it, as before.
 export const QUEUE_DROPPED = 'adapter.queue_dropped';
+export function notSentIds(lines: readonly ChatLine[]): Set<number> {
+  const out = new Set<number>();
+  let before = 0; // an older node's notice: every queued entry with a smaller id
+  for (const l of lines) {
+    if (l.kind !== 'notice' || l.code !== QUEUE_DROPPED) continue;
+    const named = l.params?.entries;
+    if (named === undefined) { before = l.id; continue; }
+    for (const part of named.split(',')) { const id = Number(part); if (Number.isSafeInteger(id) && id > 0) out.add(id); }
+  }
+  if (before) for (const l of lines) if (l.role === 'user' && l.queued && l.id < before) out.add(l.id);
+  return out;
+}
 export function queueState(lines: readonly ChatLine[]): { waiting: ChatLine[]; notSent: Set<number> } {
-  let dropped = 0;
-  for (const l of lines) if (l.kind === 'notice' && l.code === QUEUE_DROPPED) dropped = l.id;
+  const dropped = notSentIds(lines);
   const waiting: ChatLine[] = [];
   const notSent = new Set<number>();
   for (const l of lines) {
     if (l.role !== 'user' || !l.queued) continue;
-    if (l.id < dropped) notSent.add(l.id); else waiting.push(l);
+    if (dropped.has(l.id)) notSent.add(l.id); else waiting.push(l);
   }
   return { waiting, notSent };
 }
@@ -149,3 +176,11 @@ export function queueState(lines: readonly ChatLine[]): { waiting: ChatLine[]; n
 // read a node's capabilities (the snapshot carries none), so it goes by what the node sent: a call with an id or a status, a thought, a
 // plan with steps, a permission record, a queued prompt.
 export const isRich = (lines: readonly ChatLine[]): boolean => lines.some((l) => l.callId !== undefined || l.status !== undefined || l.kind === 'thought' || l.kind === 'permission' || l.steps !== undefined || l.queued === true);
+
+// #908 (RM-44): whether the composer still says "Waiting for this turn to end." after the person's prompt was queued, from what is held
+// now (no latch): while a prompt of theirs waits; and, until their entry has arrived at all (`arrived`: a user entry newer than what was
+// held at the send; the answer to the send can come first), while the agent works. Once it arrived and none waits, no.
+export function queuedNote(sent: string | undefined, waiting: number, arrived: boolean, working: boolean): boolean {
+  if (sent !== 'queued') return false;
+  return waiting > 0 || (!arrived && working);
+}

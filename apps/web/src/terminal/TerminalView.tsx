@@ -66,10 +66,11 @@ export function TerminalView({ source, label }: { source: TerminalSource; label:
     });
     const ordered = snapshotAfterSize((e) => {
       if (e.type === 'data') r.write(e.bytes);
-      else if (e.type === 'snapshot') r.reset(e.bytes);
+      else if (e.type === 'snapshot') r.reset(e.bytes, e.history);
       else if (e.type === 'resize') sizing.resized({ cols: e.cols, rows: e.rows });
     });
-    s = source.connect(ordered.push);
+    // A new renderer has no history of its own: it asks for as much as it keeps (ADR-0100; the node caps it at what it keeps).
+    s = source.connect(ordered.push, { historyLines: terminalPrefs().scrollback });
     const live = s;
     session.current = live;
     r.onInput((d, binary) => {
@@ -106,7 +107,7 @@ export function TerminalView({ source, label }: { source: TerminalSource; label:
   const closeFind = () => { setFinding(false); renderer.current?.clearFind(); renderer.current?.focus(); };
   const view = (
     <div className="terminal-frame">
-      <div ref={host} className="terminal" role="region" aria-label={label} dir="ltr" />
+      <div ref={host} className="terminal-host" role="region" aria-label={label} dir="ltr" />
       {finding && <FindBar find={(q, back) => renderer.current?.find(q, back) ?? false} onClose={closeFind} />}
       <TerminalFloat atBottom={atBottom} onJump={() => renderer.current?.scrollToBottom()} link={link} offer={offer}
         onCopy={() => { if (offer !== undefined) void navigator.clipboard?.writeText(offer).catch(() => undefined); offerRef(undefined); renderer.current?.focus(); }}

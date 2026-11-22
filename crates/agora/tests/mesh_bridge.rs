@@ -113,8 +113,9 @@ fn serve(stream: LocalStream, serial: usize, mode: Mode, seen: &Seen) {
                 }
                 if mode != Mode::Refuse {
                     initialized = true;
-                    let answer =
-                        json!({"jsonrpc":"2.0","id":id,"result":{"serverInfo":{"name":"fake"}}});
+                    let answer = json!({"jsonrpc":"2.0","id":id,"result":{
+                        "protocolVersion": msg["params"]["protocolVersion"],
+                        "serverInfo":{"name":"fake"}}});
                     if mode == Mode::Chatty {
                         // One write: the answer and a line the node sends on its own.
                         let note = json!({"jsonrpc":"2.0","method":"notifications/chatty"});
@@ -483,4 +484,130 @@ fn while_disconnected_a_batch_gets_a_batch_of_errors_and_notifications_get_nothi
     client.send(&json!([{"jsonrpc":"2.0","method":"notifications/cancelled","params":{}}]));
     let a = client.call("echo", Duration::from_secs(2));
     assert!(unavailable(&a), "{a}");
+}
+
+/// #981: a client whose conversation has no batches (2025-06-18) gets the requests of a batch it sent while the node was away
+/// answered one line each, since it does not read a batch.
+#[test]
+fn while_disconnected_a_batch_without_batching_gets_one_answer_per_line() {
+    let path = socket("nobatch");
+    let mut node = FakeNode::start(&path, Mode::Accept);
+    let mut client = Client::start(&path);
+    let id = client.request("initialize", json!({"protocolVersion":"2025-06-18"}));
+    assert_eq!(
+        client.answer(Duration::from_secs(5)).expect("initialize")["id"],
+        id
+    );
+    node.stop();
+    let a = client.call("echo", Duration::from_secs(2));
+    assert!(unavailable(&a), "{a}");
+    client.send(&json!([
+        {"jsonrpc":"2.0","id":100,"method":"tools/call","params":{"name":"echo"}},
+        {"jsonrpc":"2.0","id":101,"method":"tools/list"},
+    ]));
+    for id in [100, 101] {
+        let a = client.answer(Duration::from_secs(2)).expect("an answer");
+        assert_eq!(a["id"], id, "{a}");
+        assert!(unavailable(&a), "{a}");
+    }
+}
+
+/// A real node endpoint (the node's mesh server) with one agent, for the bridge to carry a conversation to.
+struct RealNode {
+    server: agora_node::mesh_server::MeshServer,
+    dir: PathBuf,
+    socket: PathBuf,
+}
+
+impl RealNode {
+    fn start(name: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!("agora-mbr-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let server =
+            agora_node::mesh_server::MeshServer::new(&dir, agora_mesh::broker::Limits::default())
+                .unwrap();
+        let socket = server
+            .register(agora_mesh::broker::AgentInfo {
+                id: agora_core::AgentId::new("a1"),
+                kind: "fixture".into(),
+                node: "n".into(),
+                project: "p".into(),
+                label: "a1".into(),
+                worktree: String::new(),
+                state: "idle".into(),
+            })
+            .unwrap();
+        Self {
+            server,
+            dir,
+            socket,
+        }
+    }
+}
+
+impl Drop for RealNode {
+    fn drop(&mut self) {
+        self.server.unregister(&agora_core::AgentId::new("a1"));
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// #981 and #984 end to end, through `agora mesh stdio` to the node's own endpoint: a line that is not JSON is answered -32700 with
+/// id null, and after a 2025-03-26 handshake a batch of `ping` and `tools/list` is answered with an array of both.
+#[test]
+fn through_the_bridge_bad_json_and_a_batch_are_answered_by_the_node() {
+    let node = RealNode::start("e2e");
+    let mut client = Client::start(&node.socket);
+    client.initialize();
+    {
+        let stdin = client.stdin.as_mut().unwrap();
+        writeln!(stdin, r#"{{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{{"name":"inbox","arguments":{{"#).unwrap();
+        stdin.flush().unwrap();
+    }
+    let e = client
+        .answer(Duration::from_secs(5))
+        .expect("a parse error");
+    assert_eq!(e["error"]["code"], -32700, "{e}");
+    assert_eq!(e["id"], Value::Null, "{e}");
+    client.send(&json!([
+        {"jsonrpc":"2.0","id":40,"method":"ping"},
+        {"jsonrpc":"2.0","id":41,"method":"tools/list"},
+    ]));
+    let b = client
+        .answer(Duration::from_secs(5))
+        .expect("a batch answer");
+    let items = b.as_array().unwrap_or_else(|| panic!("not an array: {b}"));
+    assert_eq!(items.len(), 2, "{b}");
+    assert_eq!(items[0]["id"], 40, "{b}");
+    assert_eq!(items[1]["id"], 41, "{b}");
+    assert!(items[1]["result"]["tools"].is_array(), "{b}");
+    let id = client.request("ping", json!({}));
+    assert_eq!(
+        client.answer(Duration::from_secs(5)).expect("ping")["id"],
+        id
+    );
+    assert_eq!(client.close_and_wait(Duration::from_secs(5)), Some(0));
+}
+
+/// #981 end to end: under 2025-06-18 (no batches) the node refuses each request of a batch with -32600, and nothing is dropped.
+#[test]
+fn through_the_bridge_a_batch_without_batching_is_refused_per_request() {
+    let node = RealNode::start("e2e-nobatch");
+    let mut client = Client::start(&node.socket);
+    let id = client.request("initialize", json!({"protocolVersion":"2025-06-18"}));
+    assert_eq!(
+        client.answer(Duration::from_secs(5)).expect("initialize")["id"],
+        id
+    );
+    client.send(&json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
+    client.send(&json!([
+        {"jsonrpc":"2.0","id":40,"method":"ping"},
+        {"jsonrpc":"2.0","id":41,"method":"tools/list"},
+    ]));
+    for id in [40, 41] {
+        let e = client.answer(Duration::from_secs(5)).expect("an answer");
+        assert_eq!(e["id"], id, "{e}");
+        assert_eq!(e["error"]["code"], -32600, "{e}");
+    }
+    assert_eq!(client.close_and_wait(Duration::from_secs(5)), Some(0));
 }

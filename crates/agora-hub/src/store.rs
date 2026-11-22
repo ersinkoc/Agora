@@ -9,7 +9,7 @@ use std::fmt;
 use std::path::Path;
 use std::sync::Mutex;
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 
 /// Outcome of [`EventStore::append`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,6 +85,14 @@ pub trait EventStore {
 }
 
 const SCHEMA_VERSION: i64 = 13;
+
+/// A transaction that reads and then writes, begun with the write lock (`BEGIN IMMEDIATE`). Other processes write to the hub's
+/// database too (the front door and the terminal client make sign-in codes, `agora hub enroll` makes codes): a deferred transaction
+/// that has read cannot wait for the write lock, so SQLite answers "database is locked" at once instead of waiting the busy timeout,
+/// and the hub dropped a node's connection over it (#935). Taken first, the lock is waited for like any single write.
+pub(crate) fn write_tx(conn: &mut Connection) -> rusqlite::Result<Transaction<'_>> {
+    conn.transaction_with_behavior(TransactionBehavior::Immediate)
+}
 
 pub struct SqliteStore {
     conn: Mutex<Connection>,
@@ -409,7 +417,7 @@ impl SqliteStore {
     ) -> Result<Append, StoreError> {
         let (seq_i, at_i) = (to_i64(seq)?, to_i64(at_ms)?);
         let mut conn = self.lock()?;
-        let tx = conn.transaction()?;
+        let tx = write_tx(&mut conn)?;
         let last: i64 = tx
             .query_row(
                 "SELECT last_seq FROM producers WHERE producer = ?1",
@@ -469,7 +477,7 @@ impl SqliteStore {
         setting: Option<(&str, &[u8])>,
     ) -> Result<Vec<u64>, StoreError> {
         let mut conn = self.lock()?;
-        let tx = conn.transaction()?;
+        let tx = write_tx(&mut conn)?;
         let last: i64 = tx
             .query_row(
                 "SELECT last_seq FROM producers WHERE producer = ?1",
@@ -788,6 +796,48 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    /// Holds the database's write lock from another connection for `hold`, then commits: what another process does while it writes
+    /// (the front door or the terminal client making a sign-in code, `agora hub enroll`).
+    pub(crate) fn hold_write_lock(
+        path: &Path,
+        hold: std::time::Duration,
+    ) -> std::thread::JoinHandle<()> {
+        let other = Connection::open(path).unwrap();
+        other
+            .execute_batch(
+                "BEGIN IMMEDIATE; INSERT OR REPLACE INTO settings (key, value) VALUES ('other', x'00');",
+            )
+            .unwrap();
+        std::thread::spawn(move || {
+            std::thread::sleep(hold);
+            other.execute_batch("COMMIT;").unwrap();
+        })
+    }
+
+    /// #935: a node's event arriving while another process writes to the database waits for it. The append read before it wrote, in
+    /// a deferred transaction, and SQLite does not wait for the write lock in a transaction that already reads: it answered "database
+    /// is locked" at once, and the hub dropped the node's connection without a close (the node saw "peer closed connection without
+    /// sending TLS close_notify"). The hub's own events likewise.
+    #[test]
+    fn writes_wait_for_another_process_writing() {
+        let d = tmpdir("busy");
+        let path = d.join("hub.db");
+        let s = SqliteStore::open(&path).unwrap();
+        s.append("n", 1, 0, b"a").unwrap();
+        let hold = std::time::Duration::from_millis(300);
+        let other = hold_write_lock(&path, hold);
+        let r = s.append("n", 2, 0, b"b");
+        other.join().unwrap();
+        assert!(matches!(r, Ok(Append::Applied { .. })), "{r:?}");
+        let other = hold_write_lock(&path, hold);
+        let r = s.append_batch_with_setting("hub", 1, &[(0, b"h".to_vec())], Some(("k", b"v")));
+        other.join().unwrap();
+        assert_eq!(r.map(|p| p.len()).ok(), Some(1));
+        assert_eq!(s.acked("n").unwrap(), 2);
+        drop(s);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

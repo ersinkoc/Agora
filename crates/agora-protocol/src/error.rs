@@ -51,6 +51,14 @@ pub enum ErrorCode {
     ApprovalExpired,
     ApprovalSignatureInvalid,
     ApprovalGrantRequired,
+    /// ADR-0101: the node's `skip_permissions` policy refuses an "always" answer for this agent.
+    ApprovalScopeForbidden,
+    /// ADR-0101: the agent did not offer that answer (scope) for this request; nothing was sent.
+    ApprovalScopeUnavailable,
+    /// ADR-0101 (conversation notice): an always-only request under a policy that refuses "always" was answered denied at once.
+    ApprovalAlwaysOnlyForbidden,
+    /// ADR-0101 (Codex review): the agent's bridge predates strict answers and may remember a plain Allow; the policy refuses that.
+    ApprovalAdapterOutdated,
     /// ADR-0061: devices and the trust machines give them.
     DeviceUnknown,
     DeviceKeyMismatch,
@@ -86,6 +94,8 @@ pub enum ErrorCode {
     AdapterAgentExited,
     AdapterAgentRefused,
     AdapterOptionRefused,
+    /// ADR-0101 (conversation notice): the agent asked without offering a way to allow it, so it was refused.
+    AdapterPermissionUnanswerable,
     PairClosed,
     PairLimit,
     PairExpired,
@@ -107,6 +117,10 @@ pub enum ErrorCode {
     AgentQueueFull,
     AgentApprovalNeeded,
     EnrollRenewRefused,
+    TaskDispatchLimited,
+    /// RM-19 (#903): the kind's program could not be started because this machine cannot find it (not in the node's `PATH`, not
+    /// installed by `agora agent install`, or a path that does not exist).
+    AgentProgramMissing,
     Internal,
     /// A code this build does not know (sent by a newer peer).
     Unknown(String),
@@ -153,6 +167,10 @@ impl ErrorCode {
         ErrorCode::ApprovalExpired,
         ErrorCode::ApprovalSignatureInvalid,
         ErrorCode::ApprovalGrantRequired,
+        ErrorCode::ApprovalScopeForbidden,
+        ErrorCode::ApprovalScopeUnavailable,
+        ErrorCode::ApprovalAlwaysOnlyForbidden,
+        ErrorCode::ApprovalAdapterOutdated,
         ErrorCode::DeviceUnknown,
         ErrorCode::DeviceKeyMismatch,
         ErrorCode::DeviceUntrusted,
@@ -187,6 +205,7 @@ impl ErrorCode {
         ErrorCode::AdapterAgentExited,
         ErrorCode::AdapterAgentRefused,
         ErrorCode::AdapterOptionRefused,
+        ErrorCode::AdapterPermissionUnanswerable,
         ErrorCode::PairClosed,
         ErrorCode::PairLimit,
         ErrorCode::PairExpired,
@@ -208,6 +227,8 @@ impl ErrorCode {
         ErrorCode::AgentQueueFull,
         ErrorCode::AgentApprovalNeeded,
         ErrorCode::EnrollRenewRefused,
+        ErrorCode::TaskDispatchLimited,
+        ErrorCode::AgentProgramMissing,
         ErrorCode::Internal,
     ];
 
@@ -251,6 +272,10 @@ impl ErrorCode {
             ErrorCode::ApprovalExpired => "approval.expired",
             ErrorCode::ApprovalSignatureInvalid => "approval.signature_invalid",
             ErrorCode::ApprovalGrantRequired => "approval.grant_required",
+            ErrorCode::ApprovalScopeForbidden => "approval.scope_forbidden",
+            ErrorCode::ApprovalScopeUnavailable => "approval.scope_unavailable",
+            ErrorCode::ApprovalAlwaysOnlyForbidden => "approval.always_only_forbidden",
+            ErrorCode::ApprovalAdapterOutdated => "approval.adapter_outdated",
             ErrorCode::DeviceUnknown => "device.unknown",
             ErrorCode::DeviceKeyMismatch => "device.key_mismatch",
             ErrorCode::DeviceUntrusted => "device.untrusted",
@@ -285,6 +310,7 @@ impl ErrorCode {
             ErrorCode::AdapterAgentExited => "adapter.agent_exited",
             ErrorCode::AdapterAgentRefused => "adapter.agent_refused",
             ErrorCode::AdapterOptionRefused => "adapter.option_refused",
+            ErrorCode::AdapterPermissionUnanswerable => "adapter.permission_unanswerable",
             ErrorCode::PairClosed => "pair.closed",
             ErrorCode::PairLimit => "pair.limit",
             ErrorCode::PairExpired => "pair.expired",
@@ -306,6 +332,8 @@ impl ErrorCode {
             ErrorCode::AgentQueueFull => "agent.queue_full",
             ErrorCode::AgentApprovalNeeded => "agent.approval_needed",
             ErrorCode::EnrollRenewRefused => "enroll.renew_refused",
+            ErrorCode::TaskDispatchLimited => "task.dispatch_limited",
+            ErrorCode::AgentProgramMissing => "agent.program_missing",
             ErrorCode::Internal => "internal",
             ErrorCode::Unknown(s) => s,
         }
@@ -361,6 +389,10 @@ impl ErrorCode {
             ErrorCode::ApprovalExpired => &["approval_id"],
             ErrorCode::ApprovalSignatureInvalid => &["approval_id"],
             ErrorCode::ApprovalGrantRequired => &["command"],
+            ErrorCode::ApprovalScopeForbidden => &[],
+            ErrorCode::ApprovalScopeUnavailable => &[],
+            ErrorCode::ApprovalAlwaysOnlyForbidden => &["action"],
+            ErrorCode::ApprovalAdapterOutdated => &[],
             ErrorCode::DeviceUnknown => &["device_id"],
             ErrorCode::DeviceKeyMismatch => &["device_id"],
             ErrorCode::DeviceUntrusted => &["device_id", "node_id"],
@@ -395,6 +427,7 @@ impl ErrorCode {
             ErrorCode::AdapterAgentExited => &["stage", "exit_code", "stderr_tail"],
             ErrorCode::AdapterAgentRefused => &["stage"],
             ErrorCode::AdapterOptionRefused => &["id"],
+            ErrorCode::AdapterPermissionUnanswerable => &["action"],
             ErrorCode::PairClosed => &[],
             ErrorCode::PairLimit => &["seconds"],
             ErrorCode::PairExpired => &[],
@@ -416,6 +449,8 @@ impl ErrorCode {
             ErrorCode::AgentQueueFull => &["limit"],
             ErrorCode::AgentApprovalNeeded => &["approval_id"],
             ErrorCode::EnrollRenewRefused => &["reason"],
+            ErrorCode::TaskDispatchLimited => &["limit"],
+            ErrorCode::AgentProgramMissing => &["kind", "program"],
             ErrorCode::Internal => &["incident_id"],
             ErrorCode::Unknown(_) => &[],
         }

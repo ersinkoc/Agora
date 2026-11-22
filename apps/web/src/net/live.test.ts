@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { agora } from '../gen/agora.js';
 import { decodeFrame, encodeFrame, EVENT_KIND, STREAM_CLOSE, STREAM_COMMANDS, STREAM_EVENTS } from './frame';
 import { connectLive, type LinkState, type Socket } from './live';
+import { HISTORY_PENDING_MAX, snapshotAfterSize, type TerminalEvent } from '../terminal/frames';
 import { boards, costByProject, applyEvent, emptyView, fromSnapshot, machines, recentMessages, machinesOnline, projectChoices, tiles, type View } from './view';
 
 const v1 = agora.v1;
@@ -47,6 +48,94 @@ describe('view', () => {
     expect(m.map((x) => x.body)).toEqual(['remote', 'local']);
     expect(m.map((x) => x.crossMachine)).toEqual([true, false]);
     expect(m[1]?.from).toBe('claude · ' + m[1]?.from.split(' · ')[1]);
+  });
+
+  it('lists a message between machines once, from its sender, marked, whichever copy comes first (#905)', () => {
+    for (const senderFirst of [true, false]) {
+      const v = emptyView();
+      applyEvent(v, 1, ev('blackview', 1, { agentStarted: { agentId: 'agent-16', nodeId: 'blackview', worktreeId: 'w', kind: 'shell' } }));
+      applyEvent(v, 2, ev('rm-two', 1, { agentStarted: { agentId: 'agent-1', nodeId: 'rm-two', worktreeId: 'w', kind: 'shell' } }));
+      // The sender's node numbers it m-1 and names the recipient `<node>/<agent>`; the receiver's numbers it m-7 and names the sender so.
+      const sent = ev('blackview', 2, { messagePosted: { messageId: 'm-1', fromAgentId: 'agent-16', to: 'rm-two/agent-1', body: 'ping' } });
+      const got = ev('rm-two', 2, { messagePosted: { messageId: 'm-7', fromAgentId: 'blackview/agent-16', to: 'agent-1', body: 'ping' } });
+      const [first, second] = senderFirst ? [sent, got] : [got, sent];
+      applyEvent(v, 3, first);
+      applyEvent(v, 4, second);
+      expect(v.messages.map((m) => [m.from, m.to])).toEqual([['blackview/agent-16', 'rm-two/agent-1']]);
+      const m = recentMessages(v);
+      expect(m).toHaveLength(1);
+      expect(m[0]?.crossMachine).toBe(true);
+      expect(m[0]?.from).toMatch(/^shell · /);
+      expect(m[0]?.to).toMatch(/^shell · /);
+      expect(m[0]?.via).toBeUndefined(); // the sender's machine confirmed it, whichever came first
+    }
+  });
+
+  it('says which machine alone names the sender of a copy nobody confirmed, so a node cannot speak for another (#905)', () => {
+    const v = emptyView();
+    applyEvent(v, 1, ev('a', 1, { nodeOnline: { nodeId: 'a', hostname: 'Alpha' } }));
+    applyEvent(v, 2, ev('b', 1, { nodeOnline: { nodeId: 'b', hostname: 'Bravo' } }));
+    // b writes a message "from" a's agent that a never recorded.
+    applyEvent(v, 3, ev('b', 2, { messagePosted: { messageId: 'm-9', fromAgentId: 'a/x', to: 'z', body: 'trust me' } }));
+    // Named by its id, which the hub checked, not by the host name it reports.
+    expect(recentMessages(v)[0]).toMatchObject({ from: 'a/x', to: 'b/z', via: 'b' });
+    // Its own machine's copy of another message does not vouch for this one.
+    applyEvent(v, 4, ev('a', 2, { messagePosted: { messageId: 'm-2', fromAgentId: 'x', to: 'b/z', body: 'hello' } }));
+    expect(recentMessages(v).map((r) => r.via)).toEqual([undefined, 'b']);
+  });
+
+  it('never names the sender\'s machine as the reporter, even when another node calls itself by its host name (#905)', () => {
+    const v = emptyView();
+    applyEvent(v, 1, ev('a', 1, { nodeOnline: { nodeId: 'a', hostname: 'laptop' } }));
+    applyEvent(v, 2, ev('b', 1, { nodeOnline: { nodeId: 'b', hostname: 'laptop' } }));
+    applyEvent(v, 3, ev('b', 2, { messagePosted: { messageId: 'm-9', fromAgentId: 'a/x', to: 'z', body: 'trust me' } }));
+    expect(recentMessages(v)[0]?.via).toBe('b');
+  });
+
+  it('pairs a copy only with one the sender\'s machine or the hub recorded: two unconfirmed copies stay apart (#905)', () => {
+    const v = emptyView();
+    // b received a/x's message honestly; c writes the same "from a/x" itself.
+    applyEvent(v, 1, ev('b', 1, { messagePosted: { messageId: 'm-4', fromAgentId: 'a/x', to: 'z', body: 'ping' } }));
+    applyEvent(v, 2, ev('c', 1, { messagePosted: { messageId: 'm-1', fromAgentId: 'a/x', to: 'b/z', body: 'ping' } }));
+    expect(recentMessages(v).map((r) => r.via)).toEqual(['c', 'b']);
+    // a's own copy confirms the first unconfirmed one; the forged copy still says who reported it.
+    applyEvent(v, 3, ev('a', 1, { messagePosted: { messageId: 'm-2', fromAgentId: 'x', to: 'b/z', body: 'ping' } }));
+    const m = recentMessages(v);
+    expect(m).toHaveLength(2);
+    expect(m.map((r) => r.via)).toEqual(['c', undefined]);
+  });
+
+  it('folds a handoff the shared board recorded with the receiver\'s copy, the sender named once (#905)', () => {
+    for (const boardFirst of [true, false]) {
+      const v = emptyView();
+      // The hub's board writes hub-wide ids; the receiving node gets the handoff's message from `a/x`.
+      const board = ev('hub', 1, { messagePosted: { messageId: 'm-3', fromAgentId: 'a/x', to: 'b/y', body: 'take t-1' } });
+      const got = ev('b', 1, { messagePosted: { messageId: 'm-5', fromAgentId: 'a/x', to: 'y', body: 'take t-1' } });
+      const [first, second] = boardFirst ? [board, got] : [got, board];
+      applyEvent(v, 1, first);
+      applyEvent(v, 2, second);
+      const m = recentMessages(v);
+      expect(m.map((r) => [r.from, r.to, r.crossMachine, r.via])).toEqual([['a/x', 'b/y', true, undefined]]);
+    }
+  });
+
+  it('keeps a message sent twice as two rows, and a channel copy that has no twin (#905)', () => {
+    const v = emptyView();
+    const sent = (pos: number, seq: number) => applyEvent(v, pos, ev('a', seq, { messagePosted: { messageId: `m-${seq}`, fromAgentId: 'x', to: 'b/z', body: 'ping' } }));
+    const got = (pos: number, seq: number) => applyEvent(v, pos, ev('b', seq, { messagePosted: { messageId: `m-${seq}`, fromAgentId: 'a/x', to: 'z', body: 'ping' } }));
+    sent(1, 1); sent(2, 2); got(3, 1); got(4, 2);
+    expect(v.messages).toHaveLength(2);
+    // A shared channel's copies are recorded by their receivers only, one per receiver: the board sends every other running agent
+    // of the project a `MeshPost` with `origin` = the sender's machine, also to the agents on that same machine, whose node then
+    // records `from` = `a/x` itself (deliver_remote). The sender's own node records nothing for a shared channel.
+    applyEvent(v, 5, ev('b', 3, { messagePosted: { messageId: 'm-3', fromAgentId: 'a/x', to: 'z', body: '[#ops] hi' } }));
+    applyEvent(v, 6, ev('a', 3, { messagePosted: { messageId: 'm-3', fromAgentId: 'a/x', to: 'y', body: '[#ops] hi' } }));
+    // A channel of a project on one machine only stays on its broker: from the local id, to the channel, the text unprefixed.
+    applyEvent(v, 7, ev('a', 4, { messagePosted: { messageId: 'm-4', fromAgentId: 'x', to: '#ops', body: 'hi' } }));
+    expect(v.messages.slice(-3).map((m) => [m.from, m.to])).toEqual([['a/x', 'b/z'], ['a/x', 'a/y'], ['a/x', '#ops']]);
+    expect(recentMessages(v).slice(0, 3).map((m) => m.crossMachine)).toEqual([false, false, true]);
+    // Only b names the sender of its copy: it says so. a's copies name a's own agent, which a may.
+    expect(recentMessages(v).slice(0, 3).map((m) => m.via)).toEqual([undefined, undefined, 'b']);
   });
 
   it('shows the shared board per project: tasks with their owner, leases with their holder, from the hub\'s events', () => {
@@ -528,5 +617,114 @@ describe('shared terminal size', () => {
     sockets[1]!.onclose?.();
     expect(rejected).toBe(true);
     expect(unwakeCalls).toBe(1);
+  });
+});
+
+describe('terminal history (ADR-0100 decision 2)', () => {
+  function open() {
+    const sockets: FakeSocket[] = [];
+    const live = connectLive({
+      url: 'ws://hub/', token: 't', backoffMs: () => 0,
+      socket: (u, p) => { const s = new FakeSocket(u, p); sockets.push(s); return s; },
+      onState: () => {}, onView: () => {},
+    });
+    (sockets[0] as FakeSocket).onopen?.();
+    const asked = (s: FakeSocket) => s.sent.map((b) => decodeFrame(b)).filter((f) => f && f.kind === 0 && f.streamId >= 3)
+      .map((f) => v1.CommandRequest.decode(f?.payload as Uint8Array).terminalSubscribe?.historyLines ?? 0);
+    const deliver = (s: FakeSocket, stream: number, kind: number, payload: Uint8Array) => {
+      const b = encodeFrame({ streamId: stream, kind, payload });
+      s.onmessage?.({ data: b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength) });
+    };
+    const reconnect = async () => {
+      (sockets.at(-1) as FakeSocket).onclose?.();
+      await new Promise((r) => setTimeout(r, 10));
+      const next = sockets.at(-1) as FakeSocket;
+      next.onopen?.();
+      return next;
+    };
+    return { live, sockets, asked, deliver, reconnect };
+  }
+
+  it('asks for the window\'s own history when its terminal has none, and 0 once it painted a screen', async () => {
+    const { live, sockets, asked, deliver, reconnect } = open();
+    const first = sockets[0] as FakeSocket;
+    const events: string[] = [];
+    live.terminal('laptop', 't-1').connect((e) => events.push(e.type), { historyLines: 5000 });
+    expect(asked(first)).toEqual([5000]);
+    // A reconnect before any screen arrived: the terminal still has no history of its own, so it asks again.
+    const second = await reconnect();
+    expect(asked(second)).toEqual([5000]);
+    deliver(second, 3, 4, new TextEncoder().encode('old lines'));
+    deliver(second, 3, 1, new TextEncoder().encode('screen'));
+    expect(events).toEqual(['snapshot']); // the history travels with its snapshot
+    // From now on it keeps its own (longer) history: a reconnect, or the hub ending the relay (falling behind), asks for none.
+    const third = await reconnect();
+    expect(asked(third)).toEqual([0]);
+    deliver(third, 3, STREAM_CLOSE, new Uint8Array());
+    await new Promise((r) => setTimeout(r, 600));
+    expect(asked(third)).toEqual([0, 0]);
+    live.close();
+  });
+
+  // Codex review of #964: history from a subscription whose screen never came must not be painted with a later subscription's screen,
+  // and retries that each lose their screen never pile up more than one replay.
+  it('drops history whose screen never came when the connection is lost or the relay ends, and never holds more than one replay', async () => {
+    const { live, sockets, asked, deliver, reconnect } = open();
+    const painted: TerminalEvent[] = [];
+    const ordered = snapshotAfterSize((e) => painted.push(e));
+    live.terminal('laptop', 't-1').connect(ordered.push, { historyLines: 5000 });
+    let s = sockets[0] as FakeSocket;
+    // History arrives, then the connection is lost before its screen; three times, each with almost a whole replay.
+    const half = new Uint8Array(HISTORY_PENDING_MAX / 2 - 1).fill(0x61);
+    for (let i = 0; i < 3; i++) {
+      expect(asked(s)).toEqual([5000]);
+      deliver(s, 3, 4, half);
+      deliver(s, 3, 4, half);
+      s = await reconnect();
+    }
+    // The relay ends after history too.
+    deliver(s, 3, 4, new TextEncoder().encode('stale'));
+    deliver(s, 3, STREAM_CLOSE, new Uint8Array());
+    await new Promise((r) => setTimeout(r, 600));
+    // The next subscription sends only a screen and its size (the program went full screen meanwhile: no history).
+    deliver(s, 3, 1, new TextEncoder().encode('screen'));
+    deliver(s, 3, 2, new Uint8Array([80, 0, 24, 0]));
+    expect(painted.map((e) => e.type)).toEqual(['resize', 'snapshot']);
+    const snap = painted[1];
+    expect(snap?.type === 'snapshot' && snap.history).toBeFalsy();
+    ordered.dispose();
+    live.close();
+  });
+
+  it('pairs a whole replay with its screen and drops one larger than a replay can be', () => {
+    const { live, sockets, deliver } = open();
+    const s = sockets[0] as FakeSocket;
+    const got: TerminalEvent[] = [];
+    live.terminal('laptop', 't-1').connect((e) => got.push(e), { historyLines: 5000 });
+    deliver(s, 3, 4, new TextEncoder().encode('ab'));
+    deliver(s, 3, 4, new TextEncoder().encode('c'));
+    deliver(s, 3, 1, new TextEncoder().encode('screen'));
+    expect(got.map((e) => e.type)).toEqual(['snapshot']);
+    expect(new TextDecoder().decode(got[0]?.type === 'snapshot' ? got[0].history : undefined)).toBe('abc');
+    live.terminal('laptop', 't-2').connect((e) => got.push(e), { historyLines: 5000 });
+    deliver(s, 4, 4, new Uint8Array(HISTORY_PENDING_MAX).fill(0x61));
+    deliver(s, 4, 4, new Uint8Array(1).fill(0x62));
+    deliver(s, 4, 1, new TextEncoder().encode('screen'));
+    const last = got.at(-1);
+    expect(last?.type === 'snapshot' && last.history).toBeFalsy();
+    live.close();
+  });
+
+  it('asks a new window (a remount) again, and none when the window asks for none', () => {
+    const { live, sockets, asked, deliver } = open();
+    const first = sockets[0] as FakeSocket;
+    const source = live.terminal('laptop', 't-1');
+    const a = source.connect(() => {}, { historyLines: 2000 });
+    deliver(first, 3, 1, new TextEncoder().encode('screen'));
+    a.close();
+    source.connect(() => {}, { historyLines: 2000 });
+    live.terminal('laptop', 't-2').connect(() => {});
+    expect(asked(first)).toEqual([2000, 2000, 0]);
+    live.close();
   });
 });

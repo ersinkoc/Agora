@@ -2,7 +2,7 @@
 // Pure: no I/O but the optional last-known cache, which is read and written through the functions at the bottom.
 import { usableOptions } from '../components/launchChoice';
 import type { LaunchOptionChoice } from '../components/launchChoice';
-import { usableSettings, type LaunchSettingChoice } from '../components/launchSettings';
+import { usableSettings, type LaunchSettingChoice } from '../components/launchSettingsModel';
 
 // The wire's integration level (agora.v1.IntegrationLevel): 1 generic, 2 manifest, 3 ACP, 4 adapter process.
 export interface KindInfo { kind: string; name: string; installed: boolean; level: number; program: string; settings: LaunchSettingChoice[]; options: LaunchOptionChoice[] }

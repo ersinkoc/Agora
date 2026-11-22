@@ -247,6 +247,7 @@ impl Env {
                 signature,
                 helper_grant: grant,
                 helpers_may_start: nested,
+                ..Default::default()
             }))
             .unwrap()
     }

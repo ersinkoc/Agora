@@ -8,6 +8,8 @@ use std::process::Command;
 use std::sync::{Mutex, PoisonError};
 
 use agora_core::{ProjectId, Worktree, WorktreeError};
+
+mod utf16;
 use agora_protocol::{Error, ErrorCode};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -601,13 +603,19 @@ pub fn status(worktree: &Path) -> Result<GitStatus, GitError> {
         "--",
         ".",
     ])?);
+    // #941: on a branch with no commit yet there is no HEAD to count against; every tracked file is new (git's empty tree).
+    let base = if head_commit.is_empty() {
+        empty_tree(worktree)
+    } else {
+        "HEAD"
+    };
     let (insertions, deletions) = parse_shortstat(&git(&[
         "diff",
         "--no-ext-diff",
         "--no-textconv",
         SUBMODULE_COMMITS_ONLY,
         "--shortstat",
-        "HEAD",
+        base,
         "--",
         ".",
     ])?);
@@ -620,7 +628,7 @@ pub fn status(worktree: &Path) -> Result<GitStatus, GitError> {
 }
 
 /// Changed paths (every entry line; renames are one line, paths are quoted) and the commit (`# branch.oid`, empty on a branch with no
-/// commit yet, where the `diff HEAD` that follows fails anyway) from `git status --porcelain=v2 --branch`.
+/// commit yet) from `git status --porcelain=v2 --branch`.
 fn parse_status_v2(out: &str) -> (u32, String) {
     let mut changed = 0;
     let mut head = String::new();
@@ -634,6 +642,22 @@ fn parse_status_v2(out: &str) -> (u32, String) {
         }
     }
     (changed, head)
+}
+
+/// git's empty tree, what a branch with no commit yet is compared with (#941): every file is new. Its id depends on the repository's
+/// hash; a git too old to answer `--show-object-format` knows only SHA-1.
+fn empty_tree(dir: &Path) -> &'static str {
+    match git_refs(dir, &["rev-parse", "--show-object-format"]) {
+        Ok(format) if format.trim() == "sha256" => {
+            "6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321"
+        }
+        _ => "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+    }
+}
+
+/// Whether HEAD names no commit: a repository (or a branch) with no commit yet.
+fn no_commit_yet(dir: &Path) -> bool {
+    git_refs(dir, &["rev-parse", "--verify", "-q", "HEAD"]).is_err()
 }
 
 /// Most untracked files a diff shows, and the most bytes of one it reads.
@@ -683,7 +707,8 @@ pub fn diff(worktree: &Path, path: Option<&str>) -> Result<String, GitError> {
 }
 
 /// Unified diff of the changes against HEAD, optionally for one path. A new file that git does not track yet is shown as
-/// all-added (what a reviewer would see), without touching the index.
+/// all-added (what a reviewer would see), without touching the index. With no commit yet (#941) every file is new: the diff is
+/// against git's empty tree.
 ///
 /// ADR-0080: unless `show_secret` (the owner's policy), a file whose name is secret appears as its `diff --git` header (and its
 /// mode and rename lines, which hold names only) without hunks or blob ids; its line counts are returned beside the text.
@@ -692,29 +717,44 @@ pub fn diff_with(
     path: Option<&str>,
     show_secret: bool,
 ) -> Result<(String, Vec<SecretChange>), GitError> {
-    let mut args = vec![
-        "diff",
-        "--no-color",
-        "--no-ext-diff",
-        "--no-textconv",
-        SUBMODULE_COMMITS_ONLY,
-        // Names from the folder the diff runs in, like `ls-files` below and like the paths `git.diff` and `files.read` take: without
-        // it a workspace that is a folder inside a repository (ADR-0053) gets tracked files named from the repository's root
-        // (`web/a.txt`) and untracked ones from the folder (`b.txt`). At a checkout's root it changes nothing.
-        "--relative",
-        "HEAD",
-    ];
     // Always a pathspec: without one git diffs the whole checkout even when run in a folder inside it (a selected workspace),
     // while `ls-files` below lists only that folder. A named path is a name, not a pattern: a file name may hold `*`, `?` or `[`,
     // which git would otherwise match against other files too (`a[1].txt` would show `a1.txt`).
     let literal = path.map(|p| format!(":(literal){p}"));
-    args.extend(["--", literal.as_deref().unwrap_or(".")]);
-    let tracked = git_capped(worktree, &args, MAX_DIFF_READ)?;
+    let tracked_against = |base: &str| {
+        git_capped(
+            worktree,
+            &[
+                "diff",
+                "--no-color",
+                "--no-ext-diff",
+                "--no-textconv",
+                SUBMODULE_COMMITS_ONLY,
+                // Names from the folder the diff runs in, like `ls-files` below and like the paths `git.diff` and `files.read`
+                // take: without it a workspace that is a folder inside a repository (ADR-0053) gets tracked files named from the
+                // repository's root (`web/a.txt`) and untracked ones from the folder (`b.txt`). At a checkout's root it changes
+                // nothing.
+                "--relative",
+                base,
+                "--",
+                literal.as_deref().unwrap_or("."),
+            ],
+            MAX_DIFF_READ,
+        )
+    };
+    // HEAD is asked about only when the diff against it fails: a commit is the usual case, and each git costs time on Windows.
+    let tracked = match tracked_against("HEAD") {
+        Ok(text) => text,
+        Err(_) if no_commit_yet(worktree) => tracked_against(empty_tree(worktree))?,
+        Err(e) => return Err(e),
+    };
     let (mut out, mut secret) = if show_secret {
         (tracked, Vec::new())
     } else {
         hide_secret_sections(&tracked)
     };
+    // #940: a UTF-16 text file git called binary, as text. After the secret files were cut: no hidden one is decoded.
+    out = utf16::decode_sections(worktree, std::mem::take(&mut out), show_secret);
     let mut ls = vec!["ls-files", "--others", "--exclude-standard", "-z"];
     if let Some(p) = &literal {
         ls.extend(["--", p]);
@@ -972,10 +1012,20 @@ fn new_file_diff(name: &str, mode: &str, data: &[u8]) -> Vec<u8> {
     if data.is_empty() {
         return out;
     }
-    if data[..data.len().min(8000)].contains(&0) {
+    // #940: UTF-16 text with a byte-order mark (Windows PowerShell's `>`) is shown as its text, with or without a zero byte.
+    let decoded;
+    let data = if let Some(text) = agora_core::text::utf16_text(data) {
+        decoded = text;
+        if decoded.is_empty() {
+            return out;
+        }
+        decoded.as_bytes()
+    } else if data[..data.len().min(8000)].contains(&0) {
         let _ = writeln!(out, "Binary files /dev/null and {b} differ");
         return out;
-    }
+    } else {
+        data
+    };
     let tab = if b.contains(' ') { "\t" } else { "" };
     let lines: Vec<&[u8]> = data.split_inclusive(|c| *c == b'\n').collect();
     let range = if lines.len() == 1 {
@@ -1182,6 +1232,17 @@ diff --git a/.ssh/known b/.ssh/known\nold mode 100644\nnew mode 100755\n";
 
     impl Repo {
         fn new(remote: Option<&str>) -> Self {
+            let r = Self::unborn();
+            if let Some(url) = remote {
+                r.git(&["remote", "add", "origin", url]);
+            }
+            fs::write(r.dir.join("a.txt"), "one\n").expect("write");
+            r.commit("first");
+            r
+        }
+
+        /// A temporary repository on `main` with no commit yet.
+        fn unborn() -> Self {
             static N: AtomicU32 = AtomicU32::new(0);
             let dir = std::env::temp_dir().join(format!(
                 "agora-git-{}-{}",
@@ -1193,11 +1254,6 @@ diff --git a/.ssh/known b/.ssh/known\nold mode 100644\nnew mode 100755\n";
             let dir = plain(dir.canonicalize().expect("canonicalize"));
             let r = Self { dir };
             r.git(&["init", "-q", "-b", "main"]);
-            if let Some(url) = remote {
-                r.git(&["remote", "add", "origin", url]);
-            }
-            fs::write(r.dir.join("a.txt"), "one\n").expect("write");
-            r.commit("first");
             r
         }
 
@@ -1240,6 +1296,61 @@ diff --git a/.ssh/known b/.ssh/known\nold mode 100644\nnew mode 100755\n";
                 let _ = fs::remove_dir_all(self.wt(suffix));
             }
         }
+    }
+
+    /// #941 (RM-35): a repository with no commit yet is a normal state, not a failure. Its files are all new: what is staged and
+    /// what git does not track yet both show as added (secret files by name only), the counts are what `git status` shows, and
+    /// there is no commit.
+    #[test]
+    fn a_repository_with_no_commit_yet_shows_its_files_as_new() {
+        let r = Repo::unborn();
+        fs::write(r.dir.join("b.txt"), "hello\n").expect("write");
+        fs::write(r.dir.join("s.txt"), "staged\nfile\n").expect("write");
+        fs::write(r.dir.join(".env"), "KEY=fake\n").expect("write");
+        r.git(&["add", "s.txt"]);
+
+        let (d, secret) = diff_with(&r.dir, None, false).expect("diff");
+        assert!(
+            d.contains("diff --git a/b.txt b/b.txt\nnew file mode 100644\n"),
+            "{d}"
+        );
+        assert!(d.contains("+hello\n"), "{d}");
+        assert!(
+            d.contains("diff --git a/s.txt b/s.txt\nnew file mode 100644\n"),
+            "{d}"
+        );
+        assert!(d.contains("+staged\n+file\n"), "{d}");
+        assert!(!d.contains("KEY=fake"), "{d}");
+        let got: Vec<(&str, u32, u32)> = secret
+            .iter()
+            .map(|c| (c.path.as_str(), c.added, c.removed))
+            .collect();
+        assert_eq!(got, vec![(".env", 1, 0)]);
+        // One path, as `git.diff` with a path asks.
+        let one = diff(&r.dir, Some("s.txt")).expect("diff one");
+        assert!(one.contains("+staged\n") && !one.contains("b.txt"), "{one}");
+
+        let st = status(&r.dir).expect("status");
+        assert_eq!(st.files_changed, 3);
+        // Line counts are of tracked changes: the staged file's two lines.
+        assert_eq!((st.insertions, st.deletions), (2, 0));
+        assert_eq!(st.head_commit, "");
+        assert!(log(&r.dir, 5).expect("log").is_empty());
+    }
+
+    /// #941: the empty tree is the repository's own; a SHA-256 repository has another id for it.
+    #[test]
+    fn a_sha256_repository_with_no_commit_yet_shows_its_files_as_new() {
+        let r = Repo::unborn();
+        fs::remove_dir_all(r.dir.join(".git")).expect("rm .git");
+        if git(&r.dir, &["init", "-q", "--object-format=sha256"]).is_err() {
+            return; // a git without SHA-256 repositories
+        }
+        fs::write(r.dir.join("s.txt"), "staged\n").expect("write");
+        r.git(&["add", "s.txt"]);
+        assert!(diff(&r.dir, None).expect("diff").contains("+staged\n"));
+        let st = status(&r.dir).expect("status");
+        assert_eq!((st.files_changed, st.insertions), (1, 1));
     }
 
     #[test]
@@ -1790,6 +1901,167 @@ diff --git a/.ssh/known b/.ssh/known\nold mode 100644\nnew mode 100755\n";
             );
         }
         let _ = fs::remove_dir_all(&d);
+    }
+
+    /// `text` as UTF-16 with a byte-order mark, little-endian (what Windows PowerShell 5.1's `>` writes) or big-endian.
+    fn utf16(text: &str, little: bool) -> Vec<u8> {
+        let mut out = if little {
+            vec![0xff, 0xfe]
+        } else {
+            vec![0xfe, 0xff]
+        };
+        for u in text.encode_utf16() {
+            out.extend(if little {
+                u.to_le_bytes()
+            } else {
+                u.to_be_bytes()
+            });
+        }
+        out
+    }
+
+    #[test]
+    fn a_utf16_text_file_shows_its_changes_as_text_and_a_binary_file_stays_binary() {
+        // #940: git calls a UTF-16 file binary (it has NUL bytes); the node shows its text, decoded, as a reviewer would read it.
+        let r = Repo::new(None);
+        fs::write(r.dir.join("ps.txt"), utf16("hello\r\n", true)).expect("write");
+        let d = diff(&r.dir, Some("ps.txt")).expect("diff");
+        assert!(
+            d.contains("--- /dev/null\n+++ b/ps.txt\n@@ -0,0 +1 @@\n+hello\r\n"),
+            "{d}"
+        );
+        assert!(!d.contains("Binary files"), "{d}");
+        // The blob id is still that of the bytes on disk, as git names it.
+        assert!(
+            d.contains(&format!(
+                "index 0000000..{}\n",
+                &r.git(&["hash-object", "ps.txt"]).trim()[..7]
+            )),
+            "{d}"
+        );
+
+        fs::write(r.dir.join("be.txt"), utf16("one\ntwo\n", false)).expect("write");
+        fs::write(r.dir.join("gone.txt"), utf16("bye\n", true)).expect("write");
+        fs::write(r.dir.join("img.bin"), b"x\0y\n").expect("write");
+        let lines: String = (1..=20).map(|n| format!("line {n}\n")).collect();
+        fs::write(r.dir.join("long.txt"), utf16(&lines, true)).expect("write");
+        fs::write(r.dir.join("enc.txt"), "same\n").expect("write");
+        fs::write(r.dir.join("odd.bin"), [0xff, 0xfe, b'h', 0, b'i']).expect("write");
+        fs::write(r.dir.join(".env"), utf16("TOKEN=old-secret\n", true)).expect("write");
+        r.commit("utf16");
+        // Only the encoding changed: git's own line says so better than an empty text diff.
+        fs::write(r.dir.join("enc.txt"), utf16("same\n", true)).expect("write");
+        // A byte-order mark on what is not UTF-16 (an odd length): binary, as before.
+        fs::write(r.dir.join("odd.bin"), [0xff, 0xfe, b'h', 0, b'o']).expect("write");
+        fs::write(r.dir.join(".env"), utf16("TOKEN=new-secret\n", true)).expect("write");
+        fs::write(r.dir.join("ps.txt"), utf16("hello\r\nworld\r\n", true)).expect("write");
+        fs::write(r.dir.join("be.txt"), utf16("one\nTWO\n", false)).expect("write");
+        fs::remove_file(r.dir.join("gone.txt")).expect("rm");
+        fs::write(r.dir.join("img.bin"), b"x\0z\n").expect("write");
+        let changed = lines
+            .replace("line 2\n", "line two\n")
+            .replace("line 18\n", "");
+        fs::write(r.dir.join("long.txt"), utf16(&changed, true)).expect("write");
+        let d = diff(&r.dir, None).expect("diff");
+        assert!(
+            d.contains("--- a/ps.txt\n+++ b/ps.txt\n@@ -1 +1,2 @@\n hello\r\n+world\r\n"),
+            "{d}"
+        );
+        assert!(
+            d.contains("--- a/be.txt\n+++ b/be.txt\n@@ -1,2 +1,2 @@\n one\n-two\n+TWO\n"),
+            "{d}"
+        );
+        assert!(
+            d.contains("deleted file mode 100644\n")
+                && d.contains("--- a/gone.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-bye\n"),
+            "{d}"
+        );
+        // Two changes far apart are two hunks, each with three lines of context, as git prints them.
+        assert!(
+            d.contains(
+                "@@ -1,5 +1,5 @@\n line 1\n-line 2\n+line two\n line 3\n line 4\n line 5\n\
+                 @@ -15,6 +15,5 @@\n line 15\n line 16\n line 17\n-line 18\n line 19\n line 20\n"
+            ),
+            "{d}"
+        );
+        assert!(
+            d.contains("Binary files a/img.bin and b/img.bin differ"),
+            "{d}"
+        );
+        assert!(
+            d.contains("Binary files a/enc.txt and b/enc.txt differ")
+                && d.contains("Binary files a/odd.bin and b/odd.bin differ"),
+            "{d}"
+        );
+        assert_eq!(d.matches("Binary files").count(), 3, "{d}");
+        // A secret file is still cut to its name (ADR-0080), never decoded into the text.
+        assert!(
+            d.contains("diff --git a/.env b/.env\n") && !d.contains("secret"),
+            "{d}"
+        );
+        // The bytes on disk are never rewritten.
+        assert_eq!(
+            fs::read(r.dir.join("ps.txt")).expect("read"),
+            utf16("hello\r\nworld\r\n", true)
+        );
+    }
+
+    #[test]
+    fn a_utf16_file_without_a_zero_byte_shows_as_its_text_too() {
+        // One line of letters above U+00FF and no line break: no zero byte, so git calls it text and prints the raw bytes.
+        let r = Repo::new(None);
+        fs::write(
+            r.dir.join("greek.txt"),
+            utf16("\u{3b1}\u{3b2}\u{3b3}", true),
+        )
+        .expect("write");
+        let d = diff(&r.dir, Some("greek.txt")).expect("diff");
+        assert!(
+            d.contains("+++ b/greek.txt\n@@ -0,0 +1 @@\n+\u{3b1}\u{3b2}\u{3b3}\n\\ No newline at end of file\n"),
+            "{d}"
+        );
+        r.commit("greek");
+        fs::write(
+            r.dir.join("greek.txt"),
+            utf16("\u{3b1}\u{3b2}\u{3b3}\u{3b4}", true),
+        )
+        .expect("write");
+        let d = diff(&r.dir, None).expect("diff");
+        assert!(
+            d.contains(
+                "--- a/greek.txt\n+++ b/greek.txt\n@@ -1 +1 @@\n-\u{3b1}\u{3b2}\u{3b3}\n\\ No newline at end of file\n\
+                 +\u{3b1}\u{3b2}\u{3b3}\u{3b4}\n\\ No newline at end of file\n"
+            ),
+            "{d}"
+        );
+        assert!(!d.contains('\u{fffd}'), "{d}");
+    }
+
+    #[test]
+    fn a_utf16_file_that_leads_to_a_secret_file_is_not_read_for_the_diff() {
+        // ADR-0080: the name git printed is not secret, but the file opened is (a link swapped in after git ran). Unless the owner
+        // shows secret files, the read is refused where the opened file really is, and the section stays git's.
+        let r = Repo::new(None);
+        fs::write(r.dir.join("notes.txt"), utf16("TOKEN=old\n", true)).expect("write");
+        fs::write(r.dir.join(".env"), utf16("TOKEN=new-secret\n", true)).expect("write");
+        r.commit("notes");
+        fs::remove_file(r.dir.join("notes.txt")).expect("rm");
+        if agora_platform::symlink(Path::new(".env"), &r.dir.join("notes.txt")).is_err() {
+            return;
+        }
+        let git_says = "diff --git a/notes.txt b/notes.txt\nindex 1111111..2222222 100644\n\
+                        Binary files a/notes.txt and b/notes.txt differ\n";
+        assert_eq!(
+            utf16::decode_sections(&r.dir, git_says.to_string(), false),
+            git_says
+        );
+        let shown = utf16::decode_sections(&r.dir, git_says.to_string(), true);
+        assert!(shown.contains("-TOKEN=old\n+TOKEN=new-secret\n"), "{shown}");
+        // And a UTF-16 secret file itself, through the whole diff: named only.
+        fs::write(r.dir.join(".env"), utf16("TOKEN=newer-secret\n", true)).expect("write");
+        let (d, secret) = diff_with(&r.dir, Some(".env"), false).expect("diff");
+        assert!(!d.contains("TOKEN"), "{d}");
+        assert_eq!(secret.len(), 1, "{d}");
     }
 
     #[test]

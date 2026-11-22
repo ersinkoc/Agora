@@ -1,0 +1,6 @@
+{
+  "sessionId": "s1",
+  "approvalId": "acp-1",
+  "approved": true,
+  "scope": "APPROVAL_SCOPE_ONCE"
+}

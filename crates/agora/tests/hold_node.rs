@@ -97,6 +97,11 @@ impl Rig {
 
     /// A user-started agent of kind `k` in the work folder; returns its id.
     fn launch(&self, node: &Node) -> String {
+        self.launch_with(node, &[])
+    }
+
+    /// [`Self::launch`] with these launch options, each confirmed (as the window does for one that skips permissions).
+    fn launch_with(&self, node: &Node, options: &[&str]) -> String {
         let mut c = Client::connect(node.socket().unwrap()).expect("control");
         let info = match c
             .call(Cmd::DirectoryInspect(v1::DirectoryInspect {
@@ -116,6 +121,8 @@ impl Rig {
                 path: info.path.clone(),
                 project_id: info.project_id.clone(),
                 kind: "k".into(),
+                launch_options: options.iter().map(|o| (*o).to_string()).collect(),
+                confirmed_launch_options: options.iter().map(|o| (*o).to_string()).collect(),
                 ..Default::default()
             }))
             .unwrap()
@@ -259,16 +266,10 @@ fn an_agent_outlives_its_node_and_the_next_node_takes_it_up_with_the_output_writ
 #[test]
 fn a_reattached_idle_agent_is_idle_not_unknown_even_when_its_screen_says_nothing() {
     let _serial = serial();
-    // The agent clears its screen only when the test says so (a file appears), never after a fixed time: on a slow machine a timer
-    // could clear the screen before the state was detected or written, and the test would then wait for a state that never comes.
-    let go = std::env::temp_dir().join(format!("agora-hn-go-{}", std::process::id()));
-    let _ = std::fs::remove_file(&go);
+    // Two markers in the agent's working folder let the test order the clear between the two nodes.
     let rig = Rig::new(
         "idle",
-        &sh(&format!(
-            "echo ready-prompt; while [ ! -e '{}' ]; do sleep 0.1; done; printf '\\033[2J\\033[H'; sleep 600",
-            go.display()
-        )),
+        &sh("echo ready-prompt; while [ ! -e clear-screen ]; do sleep 0.1; done; printf '\\033[2J\\033[H' && : > screen-cleared; sleep 600"),
     );
     let manifest = rig.root.join("manifests/k.toml");
     let mut text = std::fs::read_to_string(&manifest).expect("manifest");
@@ -285,27 +286,50 @@ fn a_reattached_idle_agent_is_idle_not_unknown_even_when_its_screen_says_nothing
     };
     let node = rig.node();
     let id = rig.launch(&node);
+    assert!(held(&node, &id), "the test agent must start in the holder");
+    let holder = node
+        .supervisor
+        .lock()
+        .unwrap()
+        .held_agents()
+        .1
+        .expect("the holder's identity");
     wait_for("the idle state", || {
         state_of(&node, &id) == Some(agora_core::AgentState::Idle)
     });
-    // Not `wait_for`: when this times out, say what the ledger did know.
+    // The ledger can learn Idle before it records the holder. The next node needs both to restore the agent.
     let end = Instant::now() + Duration::from_secs(60);
-    while !node.ledger.get(&id).is_some_and(|e| e.last_state == "idle") {
+    loop {
+        let entry = node.ledger.get(&id);
+        if entry
+            .as_ref()
+            .is_some_and(|e| e.last_state == "idle" && (e.holder_pid, e.holder_started) == holder)
+        {
+            break;
+        }
         assert!(
             Instant::now() < end,
-            "timed out waiting for the ledger to know idle; it knew {:?} while the supervisor said {:?}",
-            node.ledger.get(&id).map(|e| e.last_state),
+            "timed out waiting for idle and holder {holder:?} in the ledger; it recorded {:?}, supervisor state: {:?}",
+            entry.map(|e| (e.last_state, e.holder_pid, e.holder_started)),
             state_of(&node, &id)
         );
         std::thread::sleep(Duration::from_millis(25));
     }
-    std::fs::write(&go, b"go").expect("go file");
     drop(node);
-    // While no node is there the agent clears its screen: the rule has nothing to read.
-    std::thread::sleep(Duration::from_millis(3000));
+    std::fs::write(rig.folder.join("clear-screen"), b"").expect("request screen clear");
+    let cleared = rig.folder.join("screen-cleared");
+    wait_for(
+        "the agent to clear its screen while the node is down",
+        || cleared.is_file(),
+    );
 
     let node = rig.node();
-    assert!(held(&node, &id));
+    assert!(
+        held(&node, &id),
+        "agent {id} did not reattach to holder {holder:?}; ledger: {:?}, supervisor state: {:?}",
+        node.ledger.get(&id),
+        state_of(&node, &id),
+    );
     assert_eq!(
         state_of(&node, &id),
         Some(agora_core::AgentState::Idle),
@@ -319,7 +343,6 @@ fn a_reattached_idle_agent_is_idle_not_unknown_even_when_its_screen_says_nothing
         Some(agora_core::AgentState::Idle),
         "the state was dropped while the agent stayed idle"
     );
-    let _ = std::fs::remove_file(&go);
 }
 
 #[test]
@@ -561,4 +584,323 @@ fn an_environment_that_cannot_be_sent_makes_the_node_run_the_agent_itself() {
         "started through the holder with a smaller environment than the node's own"
     );
     wait_for("the agent", || screen(&node, &id).contains("up"));
+}
+
+/// A hand-run `agora mesh stdio` bridge (the MCP server an agent's client starts) on an agent's mesh socket.
+struct Bridge {
+    child: std::process::Child,
+    stdin: Option<std::process::ChildStdin>,
+    lines: std::sync::mpsc::Receiver<serde_json::Value>,
+    next: u64,
+}
+
+impl Bridge {
+    fn start(socket: &std::path::Path) -> Bridge {
+        use std::io::BufRead;
+        use std::process::Stdio;
+        let mut child = Command::new(AGORA)
+            .args(["mesh", "stdio", "--socket"])
+            .arg(socket)
+            .env("AGORA_LANG", "en")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("run the bridge");
+        let stdin = child.stdin.take();
+        let stdout = child.stdout.take().expect("stdout");
+        let (tx, lines) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for line in std::io::BufReader::new(stdout).lines() {
+                let Ok(line) = line else { return };
+                let Ok(v) = serde_json::from_str(&line) else {
+                    return;
+                };
+                if tx.send(v).is_err() {
+                    return;
+                }
+            }
+        });
+        Bridge {
+            child,
+            stdin,
+            lines,
+            next: 0,
+        }
+    }
+
+    fn send(&mut self, msg: &serde_json::Value) {
+        use std::io::Write;
+        let stdin = self.stdin.as_mut().expect("stdin");
+        writeln!(stdin, "{msg}").expect("write");
+        stdin.flush().expect("flush");
+    }
+
+    fn request(&mut self, method: &str, params: serde_json::Value) -> serde_json::Value {
+        self.next += 1;
+        let id = self.next;
+        self.send(&serde_json::json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}));
+        let a = self
+            .lines
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap_or_else(|_| panic!("no answer to {method}"));
+        assert_eq!(a["id"], id, "{a}");
+        a
+    }
+
+    fn initialize(&mut self) {
+        let a = self.request(
+            "initialize",
+            serde_json::json!({"protocolVersion":"2025-03-26"}),
+        );
+        assert!(a["result"].is_object(), "{a}");
+        self.send(&serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
+    }
+
+    fn workspace_status(&mut self) -> serde_json::Value {
+        self.request(
+            "tools/call",
+            serde_json::json!({"name": "workspace_status", "arguments": {}}),
+        )
+    }
+}
+
+impl Drop for Bridge {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn mesh_unavailable(a: &serde_json::Value) -> bool {
+    a["error"]["data"]["code"] == "mesh.unavailable"
+}
+
+/// What a hub folds from everything this node recorded, its earlier starts included.
+fn hub_view(node: &Node) -> agora_hub::projection::View {
+    let mut view = agora_hub::projection::View::default();
+    for ev in node.events.events_after(0) {
+        view.apply(&ev);
+    }
+    view
+}
+
+/// #906 and #907 (RM-30, RM-34): an agent the holder kept across a node restart is the next node's in full. Its mesh socket is served
+/// again at the same path, so a bridge that was open across the restart reconnects and its next call answers, and a new bridge
+/// connects; and the hub, which the new node's `NodeOnline` told that everything it ran is gone, shows it running with its terminal,
+/// not finished, and still acting without asking (it was started with an option that skips permissions, and it is the same process).
+#[test]
+fn a_kept_agent_is_on_the_mesh_again_and_shown_running_after_its_node_restarts() {
+    let _serial = serial();
+    let rig = Rig::new("kept", &sh("echo up; sleep 600"));
+    let manifest = rig.root.join("manifests/k.toml");
+    let mut text = std::fs::read_to_string(&manifest).expect("manifest");
+    text.push_str("[[launch.option]]\nid = \"skip\"\nlabel = \"option-skip\"\nargs = [\"--yes\"]\nskips_permissions = true\n");
+    std::fs::write(&manifest, text).expect("manifest");
+    let node = rig.node();
+    let id = rig.launch_with(&node, &["skip"]);
+    assert!(held(&node, &id), "the test agent must start in the holder");
+    wait_for("the agent", || screen(&node, &id).contains("up"));
+    let pid = pid_of(&node, &id);
+    wait_for("the holder in the ledger", || {
+        node.ledger.get(&id).is_some_and(|e| e.holder_pid != 0)
+    });
+    let socket = rig.root.join("m").join(format!("{id}.sock"));
+    let mut bridge = Bridge::start(&socket);
+    bridge.initialize();
+    let a = bridge.workspace_status();
+    assert!(a["result"].is_object(), "before the restart: {a}");
+    let before = hub_view(&node);
+    let key = agora_hub::projection::qualified("hold-node", &id);
+    assert!(before.agents[&key].running);
+    assert!(
+        before.agents[&key].skips_permissions,
+        "the test agent must start skipping permissions"
+    );
+
+    // A node's process that ends closes its agents' mesh endpoints with it. This test process stands for the node and lives on (other
+    // parts still hold the old node's mesh), so the endpoint is closed here, as the end of the process would.
+    node.mesh.unregister(&AgentId::new(id.clone()));
+    drop(node);
+    assert!(alive(pid), "the agent ended with its node");
+    let a = bridge.workspace_status();
+    assert!(mesh_unavailable(&a), "with no node: {a}");
+
+    let node = rig.node();
+    assert_eq!(pid_of(&node, &id), pid, "the agent was not taken up");
+    // The open bridge reconnects to the same path (its backoff is at most 2 s) and the call answers.
+    let end = Instant::now() + Duration::from_secs(15);
+    let a = loop {
+        let a = bridge.workspace_status();
+        if !mesh_unavailable(&a) {
+            break a;
+        }
+        assert!(
+            Instant::now() < end,
+            "the bridge never reconnected: the kept agent's mesh socket is not served"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert!(a["result"].is_object(), "after the restart: {a}");
+    assert!(a.get("error").is_none(), "after the restart: {a}");
+    // A bridge started now connects too.
+    let mut fresh = Bridge::start(&socket);
+    fresh.initialize();
+    let a = fresh.workspace_status();
+    assert!(a["result"].is_object(), "a new bridge: {a}");
+
+    // The hub's view: running, not finished, with its terminal.
+    let view = hub_view(&node);
+    let agent = &view.agents[&key];
+    assert!(agent.running, "the hub shows the kept agent finished");
+    assert_ne!(agent.state, v1::AgentState::Done);
+    assert!(agent.interrupted.is_none());
+    assert!(
+        agent.skips_permissions,
+        "the kept agent acts without asking but is shown as if it asks"
+    );
+    assert_eq!(agent.launch_options, vec!["skip".to_string()]);
+    assert!(node
+        .supervisor
+        .lock()
+        .unwrap()
+        .skips_permissions_now(&AgentId::new(id.clone())));
+    let terminal = agora_node::control::terminal_id_of(&AgentId::new(&id));
+    assert!(
+        view.terminals
+            .contains_key(&agora_hub::projection::qualified("hold-node", &terminal)),
+        "the hub has no terminal for the kept agent"
+    );
+}
+
+impl Bridge {
+    fn tool(&mut self, name: &str, arguments: serde_json::Value) -> serde_json::Value {
+        self.request(
+            "tools/call",
+            serde_json::json!({"name": name, "arguments": arguments}),
+        )
+    }
+
+    /// The JSON a tool answered with (its one text item), or the error it answered with.
+    fn tool_json(&mut self, name: &str, arguments: serde_json::Value) -> serde_json::Value {
+        let a = self.tool(name, arguments);
+        let text = a["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{name}: {a}"))
+            .to_string();
+        serde_json::from_str(&text).unwrap_or_else(|_| panic!("{name}: {a}"))
+    }
+}
+
+fn inbox_bodies(inbox: &serde_json::Value) -> Vec<String> {
+    inbox
+        .as_array()
+        .unwrap_or_else(|| panic!("{inbox}"))
+        .iter()
+        .map(|m| m["body"].as_str().unwrap_or_default().to_string())
+        .collect()
+}
+
+/// The `inbox` call an agent's client keeps making across the node's restart: messages after the last one it read.
+fn read_after(bridge: &mut Bridge, cursor: &str) -> serde_json::Value {
+    bridge.tool_json("inbox", serde_json::json!({"since": cursor}))
+}
+
+/// #965 (RM-30): an agent the holder kept across a node restart hears the mesh again, also through the cursor its client carried
+/// over. Before the restart it read its inbox up to some `message_id`; the restarted node's broker is new, and its ids must not
+/// start over below that cursor, or every message for the kept agent (from an agent on its machine, a presence notice, one from
+/// another machine) is hidden from `inbox(since)` while the senders are told it was accepted.
+#[test]
+fn a_kept_agent_hears_the_mesh_after_its_node_restarts_through_the_cursor_it_carried() {
+    let _serial = serial();
+    let rig = Rig::new("inbox", &sh("echo up; sleep 600"));
+    let socket = |id: &str| rig.root.join("m").join(format!("{id}.sock"));
+    let node = rig.node();
+    let kept = rig.launch(&node);
+    let peer = rig.launch(&node);
+    for id in [&kept, &peer] {
+        assert!(held(&node, id), "the test agents must start in the holder");
+        wait_for("the agent", || screen(&node, id).contains("up"));
+        wait_for("the holder in the ledger", || {
+            node.ledger.get(id).is_some_and(|e| e.holder_pid != 0)
+        });
+    }
+    let mut bridge = Bridge::start(&socket(&kept));
+    bridge.initialize();
+    let mut pb = Bridge::start(&socket(&peer));
+    pb.initialize();
+    // Enough traffic before the restart that the kept agent's cursor is past the ids a new broker would hand out first.
+    for n in 0..8 {
+        let a = pb.tool_json(
+            "send_message",
+            serde_json::json!({"to": kept, "body": format!("before {n}")}),
+        );
+        assert!(a["message_id"].is_string(), "{a}");
+    }
+    let before = bridge.tool_json("inbox", serde_json::json!({}));
+    assert_eq!(inbox_bodies(&before).len(), 9, "{before}");
+    let cursor = before[8]["message_id"].as_str().expect("id").to_string();
+    assert!(read_after(&mut bridge, &cursor)
+        .as_array()
+        .unwrap()
+        .is_empty());
+
+    // The node stops (its endpoints close, as its process ending would) and the next one takes both agents up.
+    node.mesh.unregister(&AgentId::new(kept.clone()));
+    node.mesh.unregister(&AgentId::new(peer.clone()));
+    drop(node);
+    let node = rig.node();
+    assert!(node.mesh.is_registered(&AgentId::new(kept.clone())));
+    let end = Instant::now() + Duration::from_secs(15);
+    while mesh_unavailable(&bridge.workspace_status()) {
+        assert!(Instant::now() < end, "the bridge never reconnected");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    // (b) A fresh agent joins: the kept agent gets its presence notice.
+    let fresh = rig.launch(&node);
+    wait_for("the fresh agent", || screen(&node, &fresh).contains("up"));
+    // (a) A message from an agent on the same machine.
+    let mut fb = Bridge::start(&socket(&fresh));
+    fb.initialize();
+    let sent = fb.tool_json(
+        "send_message",
+        serde_json::json!({"to": kept, "body": "from the fresh agent"}),
+    );
+    assert!(sent["message_id"].is_string(), "{sent}");
+    // (c) A message from an agent on another machine, as the hub hands it to this node (`MeshPost`).
+    node.mesh
+        .deliver_remote(
+            "other-node",
+            "agent-9",
+            &AgentId::new(kept.clone()),
+            "from another machine",
+            &[],
+        )
+        .expect("the remote message is accepted");
+
+    let after = read_after(&mut bridge, &cursor);
+    let bodies = inbox_bodies(&after);
+    assert!(
+        bodies
+            .iter()
+            .any(|b| b.contains(&fresh) && b.contains("joined")),
+        "no presence notice for the fresh agent after the cursor: {after}"
+    );
+    assert!(
+        bodies.iter().any(|b| b == "from the fresh agent"),
+        "the local message is hidden behind the carried cursor: {after}"
+    );
+    assert!(
+        bodies.iter().any(|b| b == "from another machine"),
+        "the cross-node message is hidden behind the carried cursor: {after}"
+    );
+    // Nothing from before the restart comes back as new.
+    assert!(!bodies.iter().any(|b| b.starts_with("before ")), "{after}");
+    // The fresh agent's own cursor works the same way: its next read after what it saw is empty.
+    let seen = fb.tool_json("inbox", serde_json::json!({}));
+    if let Some(last) = seen.as_array().and_then(|a| a.last()) {
+        let id = last["message_id"].as_str().expect("id").to_string();
+        assert!(read_after(&mut fb, &id).as_array().unwrap().is_empty());
+    }
 }

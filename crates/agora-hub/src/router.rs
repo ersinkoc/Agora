@@ -656,6 +656,8 @@ impl Router {
             // ADR-0090: a node that cannot set an option or cancel a turn is never sent the command.
             Some(command_request::Command::AgentSetConfig(_)) => Some("agent.set_config"),
             Some(command_request::Command::AgentCancelTurn(_)) => Some("agent.cancel_turn"),
+            // ADR-0095: a node that cannot dispatch a task is never sent the command.
+            Some(command_request::Command::TaskDispatch(_)) => Some("task.dispatch"),
             _ => None,
         };
         if let Some(cap) = switch.filter(|cap| !link.capabilities.iter().any(|c| c == cap)) {
@@ -997,6 +999,27 @@ mod tests {
             assert!(r.send("new", request).is_ok());
             assert!(matches!(new_rx.try_recv(), Ok(ToNode::Command { .. })));
         }
+    }
+
+    /// ADR-0095: a dispatch goes only to a node that offers `task.dispatch`; to any other the hub refuses it and forwards nothing.
+    #[test]
+    fn a_task_dispatch_goes_only_to_a_node_that_offers_it() {
+        let r = Router::new();
+        let (_old, mut old_rx) = r.register("old");
+        let (_new, mut new_rx) = r.register_with_capabilities("new", vec!["task.dispatch".into()]);
+        let mut request = req("old");
+        request.command = Some(command_request::Command::TaskDispatch(
+            v1::TaskDispatch::default(),
+        ));
+        let refused = r.send("old", request.clone()).err().unwrap();
+        assert_eq!(refused.code, ErrorCode::ProtocolCapabilityMissing);
+        assert_eq!(
+            refused.params.get("capability"),
+            Some(&agora_protocol::ParamValue::Str("task.dispatch".into()))
+        );
+        assert!(old_rx.try_recv().is_err());
+        assert!(r.send("new", request).is_ok());
+        assert!(matches!(new_rx.try_recv(), Ok(ToNode::Command { .. })));
     }
 
     #[test]

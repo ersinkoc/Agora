@@ -176,8 +176,14 @@ cli-password-needs-terminal = Ekran parolasını ayarlamak etkileşimli bir term
 cli-password-too-short = Bu çok kısa: en az { $min } karakter kullanın.
 cli-password-too-long = Bu çok uzun.
 cli-password-mismatch = İkisi aynı değil; hiçbir şey değişmedi.
-cli-password-set = Ekran parolası ayarlandı. Başka bir makineden giriş artık bu parolayı ister; bu makinenin kendi tarayıcısına hiç sorulmaz. Açık { $count } oturum kapatıldı.
-cli-password-cleared = Ekran parolası kaldırıldı. Giriş kodu yine tek başına yeterli. Açık { $count } oturum kapatıldı.
+cli-password-set = Ekran parolası ayarlandı. Başka bir makineden giriş artık bu parolayı ister; bu makinenin kendi tarayıcısına hiç sorulmaz. { $count ->
+    [one] Açık bir oturum kapatıldı.
+   *[other] Açık { $count } oturum kapatıldı.
+  }
+cli-password-cleared = Ekran parolası kaldırıldı. Giriş kodu yine tek başına yeterli. { $count ->
+    [one] Açık bir oturum kapatıldı.
+   *[other] Açık { $count } oturum kapatıldı.
+  }
 cli-password-on = Ekran parolası ayarlı: başka makinelerden girişler bu parolayı ister.
 cli-password-off = Ekran parolası ayarlı değil: giriş kodu tek başına yeterli.
 cli-trusted = { $id } cihazı artık bu makinedeki onaylara yanıt verebilir.
@@ -257,6 +263,8 @@ cli-update-available = Agora { $version } hazır (şu an { $current } kullanıl�
 cli-update-local-network = macOS, Agora'nın yerel ağı kullanıp kullanamayacağını yeniden sorabilir: izin verin (ya da Sistem Ayarları > Gizlilik ve Güvenlik > Yerel Ağ'da `agora`yı açın), sonra düğümü bir kez daha yeniden başlatın. Çalışmakta olan düğüm, izin verdikten sonra yeniden başlatılana kadar başka bir makinedeki hub'a ulaşamaz; bağlı olup olmadığını `agora status` söyler.
 cli-update-done = Agora { $version } sürümüne güncellendi. Çalışan ajanlar çalışmaya devam eder; yeni sürümü kullanmak için düğümü yeniden başlatın.
 cli-update-failed = Güncelleme yapılamadı: { $reason }
+cli-update-check-failed = Güncellemeler denetlenemedi. En yeni sürüm bulunamadı.
+cli-update-release-not-found = Güncelleme yapılamadı: En yeni sürüm bulunamadı.
 cli-update-checksum = İndirilen dosya yayımlanan sağlama toplamıyla uyuşmuyor. Hiçbir şey değişmedi.
 cli-update-signature = İndirilen dosyanın imzası, sabitlenmiş yayın anahtarıyla doğrulanamadı. Hiçbir şey değişmedi.
 cli-update-needs-key = Yayının imzalı olması gerekir: açık anahtarını Agora klasörüne release-key adıyla kaydedin (ya da --release-key DOSYA verin). Yalnızca sağlama toplamıyla yetinmek için --unsigned kullanın. Hiçbir şey değişmedi.
@@ -476,7 +484,14 @@ pair-no-hub = { $dir } klasöründen çalışan bir hub yok. `agora` (ya da `ago
 pair-hub-unreachable = Hub yanıt vermedi ({ $reason }). Çalışıyor mu? `agora` ya da `agora hub run` ile başlatın.
 pair-minutes-usage = --minutes 1 ile { $max } arasında bir sayı alır.
 pair-opened = Hub'ınız { $minutes } dakika boyunca yeni makinelere açık.
-pair-open-next = Yeni makinede `agora join { $address }` çalıştırın (bu ad ulaşmıyorsa bu bilgisayarın ağınızdaki adresini kullanın). Yeni makine bir sayı gösterir, bu ekran da bir sayı gösterir: yalnızca aynıysa onaylayın.
+pair-open-next = Yeni makinede `agora join { $address }` çalıştırın. Yeni makine bir sayı gösterir, bu ekran da bir sayı gösterir: yalnızca aynıysa onaylayın.
+pair-open-also = Bu adres yeni makineden bu bilgisayara ulaşmıyorsa hub şu adreslerde de yanıt verir: { $addresses }.
+pair-open-next-name = Yeni makinede `agora join { $address }` çalıştırın; bu ad oradan bu bilgisayara ulaşıyorsa: hub'ın sertifikası bu adı içerir, ama adın nereye ulaştığına ağınız karar verir. Yeni makine bir sayı gösterir, bu ekran da bir sayı gösterir: yalnızca aynıysa onaylayın.
+pair-open-names = Şu adlar hub'ın sertifikasında var ve ağınız onları bu bilgisayara çözümlüyorsa hub'a ulaşabilir: { $names }.
+pair-open-local-only = Bu hub yalnızca bu bilgisayarda dinliyor ({ $listen }), bu yüzden başka bir makine ona ulaşamaz. Diğer makinelerinizin katılabilmesi için bu bilgisayarın ağınızdaki adresinde dinlemesini sağlayın: `agora --listen { $lan }` çalıştırın, sonra `agora down` ve `agora` (`agora hub run` ile başlattığınız bir hub da aynı `--listen` seçeneğini alır), ardından yeniden `agora pair open`. `0.0.0.0:{ $port }` ise bu bilgisayarın her IPv4 arayüzünde dinler, varsa genel (public) bir arayüzde de: ona ulaşabilen herkes bağlanmayı deneyebilir (yeni bir makine yine de sizin onayınıza ve sayıya ihtiyaç duyar).
+pair-open-local-only-no-lan = Bu hub yalnızca bu bilgisayarda dinliyor ({ $listen }), bu yüzden başka bir makine ona ulaşamaz. Diğer makinelerinizin katılabilmesi için bu bilgisayarın ağınızdaki adresinde (ADRES) dinlemesini sağlayın: `agora --listen ADRES:{ $port }` çalıştırın, sonra `agora down` ve `agora` (`agora hub run` ile başlattığınız bir hub da aynı `--listen` seçeneğini alır), ardından yeniden `agora pair open`. `0.0.0.0:{ $port }` ise bu bilgisayarın her IPv4 arayüzünde dinler, varsa genel (public) bir arayüzde de: ona ulaşabilen herkes bağlanmayı deneyebilir (yeni bir makine yine de sizin onayınıza ve sayıya ihtiyaç duyar).
+pair-open-local-join = Bu bilgisayardaki başka bir Agora şimdi katılabilir: orada `agora join { $address }` çalıştırın. O bir sayı gösterir, bu ekran da bir sayı gösterir: yalnızca aynıysa onaylayın.
+pair-open-no-address = Hub'ın sertifikası henüz başka bir makinenin bağlanabileceği bir adres içermiyor. Hub'ı `--name ADRES` ile başlatın (yeni makinenin bağlanacağı adres), sonra `agora pair open` komutunu yeniden çalıştırın.
 pair-open-waiting = Bir makine bekleniyor. Ctrl+C ile çıkabilirsiniz: hub, süresi dolana ya da `agora pair close` çalıştırana kadar açık kalır.
 pair-status-open = Yeni makinelere açık. { $minutes } dakika sonra kapanır.
 pair-status-closed = Yeni makinelere kapalı. Birinin katılması için `agora pair open` çalıştırın.
@@ -618,6 +633,7 @@ cli-agent-install-done = { $name } { $version } kuruldu. Program şurada: { $lau
 cli-agent-install-current = { $name } { $version } zaten kurulu.
 cli-agent-install-no-list = İmzalı listeyi ve kök anahtarını verin: --list DOSYA ve --root-key HEX ya da DOSYA (ya da anahtarı Agora klasörüne agent-list-root-key adıyla kaydedin). Hiçbir şey değişmedi.
 cli-agent-install-err-index-invalid = Ajan listesi kabul edilemedi ({ $code }: { $detail }). Hiçbir şey değişmedi.
+cli-agent-install-err-list-state = Bu makinenin kabul ettiği en yeni ajan listesinin kaydı ({ $path }) okunamıyor ({ $code }: { $detail }), bu yüzden hiçbir liste kabul edilmiyor: aksi halde eski bir liste geri getirilebilirdi. Bunu beklemiyorsanız önce o dosyayı neyin değiştirdiğini bulun. Baştan başlamak için { $path } dosyasını silin ve kurulumu yayıncının en yeni listesiyle yeniden çalıştırın: o liste ilk liste olarak kabul edilir ve sürümü kaydedilir. Hiçbir şey değişmedi.
 cli-agent-install-err-not-approved = Kurulmadı: ajanın adı burada yazılmadı ({ $code }: { $detail }). Hiçbir şey değişmedi.
 cli-agent-install-err-download-failed = İndirme yapılamadı ({ $code }: { $detail }). Hiçbir şey değişmedi.
 cli-agent-install-err-checksum-mismatch = İndirilen dosya listedeki sağlama toplamıyla uyuşmuyor ({ $code }). Hiçbir şey değişmedi.

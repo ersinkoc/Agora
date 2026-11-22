@@ -112,6 +112,65 @@ fn a_confined_process_writes_only_where_it_was_allowed_and_reads_no_user_secret(
 }
 
 #[test]
+fn a_program_file_given_to_read_runs_from_a_user_only_folder_and_nothing_beside_it_opens() {
+    // #896: the mesh bridge is the node's own executable, in a folder only the user may open (`%LOCALAPPDATA%\Programs\Agora`).
+    // Given as one file to read, it runs; the folder's other files stay closed, and the entry goes with the agent.
+    enable();
+    let root = scratch("exe");
+    let (allowed, programs) = (root.join("work"), root.join("programs"));
+    for d in [&allowed, &programs] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let exe = programs.join("bridge.exe");
+    std::fs::copy(r"C:\Windows\System32\hostname.exe", &exe).unwrap();
+    std::fs::write(programs.join("beside.txt"), "hunter2").unwrap();
+    let script = allowed.join("run.cmd");
+    std::fs::write(
+        &script,
+        format!(
+            "@echo off\r\n\
+             \"{e}\" >nul && echo RAN-PROGRAM|| echo REFUSED-PROGRAM\r\n\
+             type \"{b}\" && echo READ-BESIDE|| echo REFUSED-BESIDE\r\n",
+            e = exe.display(),
+            b = programs.join("beside.txt").display()
+        ),
+    )
+    .unwrap();
+    let confined = |read: Vec<PathBuf>| {
+        run(
+            Sandbox {
+                read,
+                write: vec![allowed.clone()],
+                ..Default::default()
+            },
+            &allowed,
+            &script,
+        )
+    };
+
+    let without = confined(vec![]);
+    assert!(without.contains("REFUSED-PROGRAM"), "{without}");
+
+    let with = confined(vec![exe.clone()]);
+    assert!(with.contains("RAN-PROGRAM"), "{with}");
+    assert!(
+        with.contains("REFUSED-BESIDE") && !with.contains("hunter2"),
+        "{with}"
+    );
+
+    // No explicit entry of a per-agent SID is left on the program or its folder.
+    for p in [&exe, &programs] {
+        let acl = acl_text(p);
+        assert!(
+            !acl.lines()
+                .any(|l| l.contains("S-1-5-21-") && !l.contains("(I)")),
+            "{acl}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn a_second_agents_folder_is_out_of_reach() {
     enable();
     let root = scratch("two");

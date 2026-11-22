@@ -6,7 +6,8 @@
 //! - answers every request in flight with `mesh.unavailable` (a JSON-RPC error whose `data` is `{code, params}`), so the agent's
 //!   client never waits for an answer that will not come; a request the client cancelled (`notifications/cancelled`) is forgotten
 //!   when the cancellation goes out, and gets no answer;
-//! - answers requests that arrive while disconnected the same way, at once;
+//! - answers requests that arrive while disconnected the same way, at once (a batch's as a batch only where the conversation has
+//!   batches, #981), and a line that is not JSON or not a valid request with the JSON-RPC error the node would send (#984);
 //! - reconnects to the SAME socket path with bounded exponential backoff, without closing its stdout or exiting, so the client's
 //!   session stays open;
 //! - on a new connection does what the client did at the start: it replays the client's own `initialize` request (and its
@@ -29,6 +30,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
+use agora_mesh::mcp::{
+    batch_item, cancelled_id, read_line, BatchItem, Line, BATCH_VERSION, INVALID_REQUEST,
+    PARSE_ERROR,
+};
 use agora_platform::LocalStream;
 use agora_protocol::jsonrpc::{app_error, parse_line, to_line, Message};
 use agora_protocol::{Error, ErrorCode};
@@ -87,6 +92,10 @@ struct Hello {
     initialize: Option<Vec<u8>>,
     /// Its `notifications/initialized` line.
     initialized: Option<Vec<u8>>,
+    /// The id of that `initialize` request, as JSON text.
+    initialize_id: Option<String>,
+    /// The node's answer to it settled on the protocol version that has JSON-RPC batches (2025-03-26, #981).
+    batches: bool,
 }
 
 struct Shared {
@@ -131,21 +140,100 @@ impl Shared {
         }
     }
 
-    /// Answers a JSON-RPC batch the node will not: a batch of one error per request in it, and nothing when it holds only
-    /// notifications (JSON-RPC 2.0, section 6).
-    fn refuse_batch(&self, items: &[serde_json::Value]) {
-        let errors: Vec<serde_json::Value> = items
-            .iter()
-            .filter_map(|item| match parse_line(&item.to_string()) {
-                Ok(Message::Request { id, .. }) => {
-                    let err = app_error(id, &Error::new(ErrorCode::MeshUnavailable));
-                    serde_json::from_str(&to_line(&err)).ok()
+    /// Answers a JSON-RPC batch the node will not, reading its values as the node does ([`batch_item`]): each request gets
+    /// `mesh.unavailable` when `owed` says it is still this bridge's to answer, notifications get nothing, and in a conversation
+    /// with batches (2025-03-26) a value that is not a valid request gets its -32600 and a `notifications/cancelled` in the batch
+    /// drops the answer to the request it names, all in one batch. Without batches the client does not read one: each answer is
+    /// its own line, and a batch holding no request is one -32600 with id null, as the node would answer it (#981).
+    fn refuse_batch(
+        &self,
+        items: &[serde_json::Value],
+        mut owed: impl FnMut(&serde_json::Value) -> bool,
+    ) {
+        let batches = lock(&self.hello).batches;
+        let mut answers: Vec<Message> = Vec::new();
+        let mut requests = false;
+        for item in items {
+            match batch_item(item) {
+                BatchItem::Handle {
+                    msg: Message::Request { id, .. },
+                    ..
+                } => {
+                    requests = true;
+                    if owed(&id) {
+                        answers.push(app_error(id, &Error::new(ErrorCode::MeshUnavailable)));
+                    }
                 }
-                _ => None,
-            })
+                BatchItem::Handle { msg, .. } => {
+                    if let Some(gone) = cancelled_id(&msg).filter(|_| batches) {
+                        answers.retain(
+                            |a| !matches!(a, Message::ErrorResponse { id, .. } if id == gone),
+                        );
+                    }
+                }
+                BatchItem::Answer(m) => {
+                    let has_id = matches!(&m, Message::ErrorResponse { id, .. } if !id.is_null());
+                    requests |= has_id;
+                    if batches || has_id {
+                        answers.push(m);
+                    }
+                }
+                BatchItem::Skip => {}
+            }
+        }
+        if !batches {
+            if !requests {
+                answers.push(Message::ErrorResponse {
+                    id: serde_json::Value::Null,
+                    code: INVALID_REQUEST,
+                    data: None,
+                });
+            }
+            for answer in &answers {
+                self.to_client(to_line(answer).as_bytes());
+            }
+            return;
+        }
+        if answers.is_empty() {
+            return;
+        }
+        let answers: Vec<serde_json::Value> = answers
+            .iter()
+            .filter_map(|a| serde_json::from_str(&to_line(a)).ok())
             .collect();
-        if !errors.is_empty() {
-            self.to_client(serde_json::Value::Array(errors).to_string().as_bytes());
+        self.to_client(serde_json::Value::Array(answers).to_string().as_bytes());
+    }
+
+    /// Bookkeeping for a line from the node on connection `generation`: the requests it answers (one, or each in a batch of
+    /// answers) are no longer in flight, and the answer to the client's `initialize` says whether the conversation has batches.
+    fn answered(&self, generation: u64, line: &[u8]) {
+        let ids: Vec<serde_json::Value> = match classify(line) {
+            Some(Message::Response { id, result }) => {
+                let mut hello = lock(&self.hello);
+                if hello.initialize_id.as_deref() == Some(id.to_string().as_str()) {
+                    hello.batches = result.get("protocolVersion").and_then(|v| v.as_str())
+                        == Some(BATCH_VERSION);
+                }
+                vec![id]
+            }
+            Some(Message::ErrorResponse { id, .. }) => vec![id],
+            None if line.iter().find(|b| !b.is_ascii_whitespace()) == Some(&b'[') => {
+                serde_json::from_slice::<Vec<serde_json::Value>>(line)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|v| v.get("id").cloned())
+                    .collect()
+            }
+            _ => Vec::new(),
+        };
+        if ids.is_empty() {
+            return;
+        }
+        let mut link = lock(&self.link);
+        if link.generation == generation {
+            for id in ids {
+                link.pending.remove(&id.to_string());
+            }
         }
     }
 
@@ -246,16 +334,7 @@ fn read_node(
                     Ok(0) | Err(_) => break,
                     Ok(_) => {}
                 }
-                if let Some(Message::Response { id, .. } | Message::ErrorResponse { id, .. }) =
-                    std::str::from_utf8(&line)
-                        .ok()
-                        .and_then(|t| parse_line(t.trim_end()).ok())
-                {
-                    let mut link = lock(&shared.link);
-                    if link.generation == generation {
-                        link.pending.remove(&id.to_string());
-                    }
-                }
+                shared.answered(generation, &line);
                 shared.to_client(&line);
             }
         }
@@ -323,20 +402,34 @@ fn classify(line: &[u8]) -> Option<Message> {
 /// Sends the client's line to the node, or answers it with `mesh.unavailable` when there is no connection.
 fn to_node(shared: &Shared, line: &[u8]) {
     let msg = classify(line);
-    let batch: Option<Vec<serde_json::Value>> =
-        match (&msg, line.iter().find(|b| !b.is_ascii_whitespace())) {
-            (None, Some(b'[')) => serde_json::from_slice(line).ok(),
-            _ => None,
-        };
+    // Not one valid message: a batch, or a line the node answers with a JSON-RPC error (#981, #984). Blank lines are nothing.
+    let other: Option<Line> = match (&msg, line.iter().any(|b| !b.is_ascii_whitespace())) {
+        (None, true) => Some(match std::str::from_utf8(line) {
+            Ok(text) => read_line(text.trim_end()),
+            Err(_) => Line::Refuse(Message::ErrorResponse {
+                id: serde_json::Value::Null,
+                code: PARSE_ERROR,
+                data: None,
+            }),
+        }),
+        _ => None,
+    };
+    let batch: Option<&Vec<serde_json::Value>> = match &other {
+        Some(Line::Batch(items)) => Some(items),
+        _ => None,
+    };
     match &msg {
-        Some(Message::Request { method, .. }) if method == "initialize" => {
-            lock(&shared.hello).initialize = Some(line.to_vec());
+        Some(Message::Request { id, method, .. }) if method == "initialize" => {
+            let mut hello = lock(&shared.hello);
+            hello.initialize = Some(line.to_vec());
+            hello.initialize_id = Some(id.to_string());
         }
         Some(Message::Notification { method, .. }) if method == "notifications/initialized" => {
             lock(&shared.hello).initialized = Some(line.to_vec());
         }
         _ => {}
     }
+    let batches = lock(&shared.hello).batches;
     let (writer, generation, tracked) = {
         let mut link = lock(&shared.link);
         let writer = link.stream.as_ref().and_then(|s| s.try_clone().ok());
@@ -345,16 +438,26 @@ fn to_node(shared: &Shared, line: &[u8]) {
             link.pending.insert(id.to_string(), m.clone());
             tracked = true;
         }
+        // The requests of a batch are in flight too: the node answers each (in an array, or one by one where the conversation
+        // has no batches), and the connection's ending answers those it did not. They are not counted in `tracked`, which is only
+        // for the single request below. Read in order as the node reads them: where the conversation has batches, a
+        // `notifications/cancelled` in the batch drops a request before it, as one on its own line does; where it has none, the
+        // node refuses the whole batch and a cancellation in it is inert.
+        if let (Some(_), Some(items)) = (&writer, batch) {
+            for item in items {
+                if let BatchItem::Handle { msg, .. } = batch_item(item) {
+                    if let Message::Request { id, .. } = &msg {
+                        link.pending.insert(id.to_string(), msg.clone());
+                    } else if let Some(id) = cancelled_id(&msg).filter(|_| batches) {
+                        link.pending.remove(&id.to_string());
+                    }
+                }
+            }
+        }
         // The client gave up on that call: the node sends nothing for it (`docs/specs/mesh-tools.md`), and neither does the
         // connection's ending. Forgotten before the line goes out, so an ending in between cannot answer it.
-        if let Some(Message::Notification { method, params }) = &msg {
-            if let Some(id) = (method == "notifications/cancelled")
-                .then(|| params.get("requestId"))
-                .flatten()
-                .filter(|id| id.is_string() || id.is_number())
-            {
-                link.pending.remove(&id.to_string());
-            }
+        if let Some(id) = msg.as_ref().and_then(cancelled_id) {
+            link.pending.remove(&id.to_string());
         }
         (writer, link.generation, tracked)
     };
@@ -383,8 +486,18 @@ fn to_node(shared: &Shared, line: &[u8]) {
             shared.refuse(m);
         }
     }
-    if let Some(items) = &batch {
-        shared.refuse_batch(items);
+    match &other {
+        // A batch's requests the ending of the connection already answered are not answered twice: only those still pending on it
+        // (or all, when there was no connection) are.
+        Some(Line::Batch(items)) => shared.refuse_batch(items, |id| {
+            !was_connected || {
+                let mut link = lock(&shared.link);
+                link.generation == generation && link.pending.remove(&id.to_string()).is_some()
+            }
+        }),
+        // Not JSON, or not a valid request: the JSON-RPC error the node would have sent.
+        Some(Line::Refuse(err)) => shared.to_client(to_line(err).as_bytes()),
+        _ => {}
     }
     if was_connected {
         // A failed write means the connection written to is finished: wake its reader so it reconnects. A newer connection is not
@@ -582,6 +695,7 @@ mod tests {
     #[test]
     fn while_disconnected_a_batch_of_notifications_gets_no_reply() {
         let (shared, seen) = disconnected();
+        lock(&shared.hello).batches = true;
         to_node(
             &shared,
             br#"[{"jsonrpc":"2.0","method":"notifications/cancelled"},{"jsonrpc":"2.0","method":"notifications/cancelled"}]"#,
@@ -596,5 +710,204 @@ mod tests {
         let items = reply.as_array().unwrap();
         assert_eq!(items.len(), 1, "{out}");
         assert_eq!(items[0]["id"], 3);
+    }
+
+    /// #984: while the node is away the bridge answers what the node would: a line that is not JSON is -32700 with id null, and
+    /// one that is not a valid request is -32600 (with its id when one can be read); an empty batch is -32600; a blank line and
+    /// a response from the client get nothing.
+    #[test]
+    fn while_disconnected_a_line_that_is_not_a_request_gets_the_json_rpc_error() {
+        let (shared, seen) = disconnected();
+        for (line, id, code) in [
+            (
+                &b"{\"jsonrpc\":\"2.0\",\"id\":4,\"method\""[..],
+                serde_json::Value::Null,
+                -32700,
+            ),
+            (b"\xff\xfe\n", serde_json::Value::Null, -32700),
+            (
+                br#"{"jsonrpc":"1.0","id":5,"method":"ping"}"#,
+                serde_json::json!(5),
+                -32600,
+            ),
+            (b"[]", serde_json::Value::Null, -32600),
+        ] {
+            lock(&seen).clear();
+            to_node(&shared, line);
+            let out = written(&seen);
+            assert_eq!(out.lines().count(), 1, "{out}");
+            let reply: serde_json::Value = serde_json::from_str(out.trim_end()).unwrap();
+            assert_eq!(reply["id"], id, "{out}");
+            assert_eq!(reply["error"]["code"], code, "{out}");
+        }
+        lock(&seen).clear();
+        to_node(&shared, b"   \n");
+        to_node(&shared, br#"{"jsonrpc":"2.0","id":9,"result":{}}"#);
+        assert_eq!(written(&seen), "");
+    }
+
+    /// #981: a client whose conversation has no batches (2025-06-18) does not read one, so while the node is away the requests of a
+    /// batch it sent are each answered on their own line.
+    #[test]
+    fn while_disconnected_a_batch_without_batching_gets_one_line_per_request() {
+        let (shared, seen) = disconnected();
+        to_node(
+            &shared,
+            br#"[{"jsonrpc":"2.0","id":3,"method":"ping"},{"jsonrpc":"2.0","method":"notifications/progress"},{"jsonrpc":"2.0","id":4,"method":"tools/list"}]"#,
+        );
+        let out = written(&seen);
+        let ids: Vec<serde_json::Value> = out
+            .lines()
+            .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap()["id"].clone())
+            .collect();
+        assert_eq!(ids, [serde_json::json!(3), serde_json::json!(4)], "{out}");
+        assert_eq!(out.matches("mesh.unavailable").count(), 2, "{out}");
+        // Only notifications: one -32600 with id null, as the node answers such a batch, so the line is not met with silence.
+        lock(&seen).clear();
+        to_node(
+            &shared,
+            br#"[{"jsonrpc":"2.0","method":"notifications/progress"}]"#,
+        );
+        let out = written(&seen);
+        let reply: serde_json::Value = serde_json::from_str(out.trim_end()).unwrap();
+        assert!(
+            reply["id"].is_null() && reply["error"]["code"] == -32600,
+            "{out}"
+        );
+    }
+
+    /// #981: the requests of a batch sent to the node are in flight like single ones: the node's array answers them, and when the
+    /// connection ends only the one still unanswered gets `mesh.unavailable`. The answer to `initialize` says whether the
+    /// conversation has batches.
+    #[test]
+    fn a_batch_in_flight_is_answered_when_the_connection_ends() {
+        let path =
+            std::env::temp_dir().join(format!("agora-bridge-batch-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let listener = agora_platform::local_listen(&path).unwrap();
+        let client = agora_platform::local_connect(&path).unwrap();
+        let node = listener.accept().unwrap();
+        let (shared, seen) = disconnected();
+        lock(&shared.link).stream = Some(client.try_clone().unwrap());
+        to_node(
+            &shared,
+            br#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-03-26"}}"#,
+        );
+        shared.answered(
+            0,
+            br#"{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":"2025-03-26"}}"#,
+        );
+        assert!(lock(&shared.hello).batches);
+        to_node(
+            &shared,
+            br#"[{"jsonrpc":"2.0","id":1,"method":"ping"},{"jsonrpc":"2.0","method":"notifications/progress"},{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"ask"}}]"#,
+        );
+        let mut got = BufReader::new(node.try_clone().unwrap());
+        let mut l = String::new();
+        for _ in 0..2 {
+            l.clear();
+            got.read_line(&mut l).unwrap();
+        }
+        assert!(l.starts_with('['), "{l:?}");
+        assert_eq!(lock(&shared.link).pending.len(), 2);
+        shared.answered(0, br#"[{"jsonrpc":"2.0","id":1,"result":{}}]"#);
+        assert_eq!(lock(&shared.link).pending.len(), 1);
+        shared.lost(0);
+        let out = written(&seen);
+        assert_eq!(out.lines().count(), 1, "{out}");
+        let reply: serde_json::Value = serde_json::from_str(out.trim_end()).unwrap();
+        assert_eq!(reply["id"], 2, "{out}");
+        assert!(out.contains("mesh.unavailable"), "{out}");
+        drop(listener);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A bridge connected to a test node socket at `path`; the node's end is returned so it stays open.
+    fn connected(name: &str) -> (Shared, Arc<Mutex<Vec<u8>>>, LocalStream, PathBuf) {
+        let path =
+            std::env::temp_dir().join(format!("agora-bridge-{name}-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let listener = agora_platform::local_listen(&path).unwrap();
+        let client = agora_platform::local_connect(&path).unwrap();
+        let node = listener.accept().unwrap();
+        let (shared, seen) = disconnected();
+        lock(&shared.link).stream = Some(client);
+        drop(listener);
+        (shared, seen, node, path)
+    }
+
+    /// Codex review of #992: in a 2025-03-26 conversation the node handles a batch's values in order, so a request cancelled by a
+    /// `notifications/cancelled` later in the same batch gets nothing from the node, and must get nothing from the bridge when the
+    /// connection ends. Where the conversation has no batches the node refuses the whole batch, so a cancellation in it is inert.
+    #[test]
+    fn a_request_cancelled_inside_its_batch_gets_no_answer_when_the_connection_ends() {
+        let (shared, seen, node, path) = connected("cancel-batch");
+        lock(&shared.hello).batches = true;
+        to_node(
+            &shared,
+            br#"[{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"ask"}},{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":7}},{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"ask"}}]"#,
+        );
+        shared.lost(0);
+        let out = written(&seen);
+        assert_eq!(out.lines().count(), 1, "{out}");
+        let reply: serde_json::Value = serde_json::from_str(out.trim_end()).unwrap();
+        assert_eq!(reply["id"], 8, "{out}");
+        drop(node);
+
+        let (shared, seen, node, _) = connected("cancel-refused");
+        to_node(
+            &shared,
+            br#"[{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"ask"}},{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":7}}]"#,
+        );
+        shared.lost(0);
+        let out = written(&seen);
+        let reply: serde_json::Value = serde_json::from_str(out.trim_end()).unwrap();
+        assert_eq!(reply["id"], 7, "{out}");
+        drop(node);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Codex review of #992: while disconnected in a 2025-03-26 conversation, a batch is answered as the node answers one: each
+    /// value that is not a valid request gets -32600 in the array, each request `mesh.unavailable`, notifications nothing, and a
+    /// request the batch itself cancels nothing.
+    #[test]
+    fn while_disconnected_invalid_values_of_a_batch_get_errors_in_the_array() {
+        let (shared, seen) = disconnected();
+        lock(&shared.hello).batches = true;
+        to_node(&shared, br#"[1,{"foo":1}]"#);
+        let out = written(&seen);
+        let reply: serde_json::Value = serde_json::from_str(out.trim_end()).unwrap();
+        let items = reply
+            .as_array()
+            .unwrap_or_else(|| panic!("not an array: {out}"));
+        assert_eq!(items.len(), 2, "{out}");
+        assert!(
+            items
+                .iter()
+                .all(|i| i["id"].is_null() && i["error"]["code"] == -32600),
+            "{out}"
+        );
+        lock(&seen).clear();
+        to_node(
+            &shared,
+            br#"[{"jsonrpc":"2.0","id":3,"method":"ping"},"x",{"jsonrpc":"2.0","method":"notifications/progress"},{"jsonrpc":"2.0","id":5,"method":"ping"},{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":5}}]"#,
+        );
+        let out = written(&seen);
+        let reply: serde_json::Value = serde_json::from_str(out.trim_end()).unwrap();
+        let items = reply
+            .as_array()
+            .unwrap_or_else(|| panic!("not an array: {out}"));
+        assert_eq!(items.len(), 2, "{out}");
+        assert_eq!(items[0]["id"], 3, "{out}");
+        assert!(unavailable_reply(&items[0]), "{out}");
+        assert_eq!(
+            (items[1]["id"].clone(), items[1]["error"]["code"].clone()),
+            (serde_json::Value::Null, serde_json::json!(-32600)),
+            "{out}"
+        );
+    }
+
+    fn unavailable_reply(v: &serde_json::Value) -> bool {
+        v["error"]["data"]["code"] == "mesh.unavailable"
     }
 }

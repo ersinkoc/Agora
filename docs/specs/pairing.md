@@ -75,7 +75,9 @@ The verifier relaxes **one** check, trust in the issuer, and nothing else:
    and sends `PairResult { approved, cert_pem, ca_pem }` on the same connection, then closes it.
 6. **The machine checks before it keeps anything.** (a) the certificate it got is for its own key and node id; (b) the leaf it saw in step 1
    chains to `ca_pem` (verified with the certificate library, with `ca_pem` as the only root, after the handshake signature was verified during the connection) and the address or name it dialled is one of that leaf's names (section 5b says how the hub's leaf gets that name; the
-   check is never skipped, and a failure is the machine-local `pair.name_unverified`, the machine says so and stores nothing); (c) only then does
+   check is never skipped, and a failure is the machine-local `pair.name_unverified`, the machine says so and stores nothing; the name half
+   needs no CA, so it is also checked as soon as the handshake ends, before step 1, and a leaf that does not name the dialled address ends
+   the pairing there: no request, no number, no card for the owner, nothing issued, so the hub keeps no name for it (#901)); (c) only then does
    it store the CA and its certificate in its link folder, as `agora node enroll` does today. A mismatch is thrown away and nothing is stored.
 7. **Device trust in the same step** (ADR-0065 decision 5, ADR-0061): the machine then asks, on the machine, once, "Trust the owner's devices on
    this machine? [y/N]" with each device's fingerprint, reusing `agora node trust --from-hub`. It is the node's own question; the hub cannot
@@ -201,10 +203,12 @@ re-issue of the hub's leaf while it runs is **T35**.
 1. The messages, error codes and golden fixtures (append-only), and this document updated with the ids. (Done: schema only, capability `pairing.v1`.)
 2. The pairing core in the hub, pure and unit-tested (states, limits, SAS, commitment), audit; the owner's commands, `PairRequested` and `PairDecided` to owner windows, the machine handshake over the hub's TLS and the certificate at approval. (Done: `agora-hub` `pairing.rs` and `pairing_net.rs`; section 12 lists what was decided.)
 3. `agora pair open|close|status`, provisioning the leaf's names (section 5b), the push notice (ADR-0051) and the browser path (section 6) on the hub.
-   (Done in part: `agora pair open|close|status` and the machine's client, section 13. Provisioning, the push notice and the browser path are not.)
+   (Done in part: `agora pair open|close|status` and the machine's client, section 13, and provisioning the leaf's names, section 15. The push
+   notice (only its once-a-minute limit is in `pairing.rs`, nothing sends it) and the browser path are not.)
 4. The discovery responder (hub) and the finder, `agora join`, with the trust question (node). (Built: provisioning the leaf's names, the responder and the finder, section 15;
-   the trust question is not.)
-5. The window cards wired in (web #610 and TUI #611 already have the layout), then the browser sign-in by approval (section 6).
+   the trust question too: `agora join` shows the hub's fingerprint and asks whether it matches what `agora pair open` shows, `docs/getting-started.md`.)
+5. The window cards wired in (web #610 and TUI #611 already have the layout), then the browser sign-in by approval (section 6). (Built: the cards
+   in the web window and the terminal client, section 14; the browser sign-in by approval is not.)
 
 ## 11. Decisions taken after the first review, and what is still open
 - **Exporter and leaf both.** `leaf_hash` binds the endpoint certificate; the exporter (TLS 1.3, RFC 9266 style, 32 bytes, label
@@ -290,6 +294,18 @@ and `frontdoor.rs` (choice 3). Tests: `crates/agora/tests/pair_node.rs` (the cli
   not a CA, its common name is the node id, and its public key is the one in this machine's own CSR. Each check has a test against a certificate wrong in just that way
   (`pairing_client.rs`, `check_delivery`), and each test was seen to fail with its check removed. The CA's fingerprint is printed in the same format as
   `agora hub fingerprint`. The module stores nothing; `agora join` stores only what `pair()` returned.
+- **The name is checked twice: first before anything is sent** (#901, real-machine run RM-07). Right after the handshake, before `PairRequest`, the machine
+  checks that the dialled host is one of the leaf's names (`pairing_client::leaf_names`: rustls' own name check, the one the final check runs, without the chain,
+  which needs the CA delivered at the end). A leaf that fails it is `pair.name_unverified` at once and the connection is closed: no number is shown, the owner gets
+  no card, the hub opens no session and issues no certificate, so it keeps no name a later join would have to replace. Before this the owner could approve, the
+  hub issued and recorded the certificate, and the machine then threw it away, leaving a name the hub refused without "replace" although no machine had joined.
+  Passing the early check proves nothing about the hub: the whole of step 6 still runs after the approval. Tested over real TLS in `pair_node.rs`
+  (`an_address_that_is_in_no_name_of_the_hubs_leaf_fails_before_the_owner_is_asked_and_leaves_no_name`) and in `pairing_client.rs`. What is not solved: a join
+  thrown away **after** the approval for another reason (the leaf does not chain to the delivered CA, a delivered certificate that fails its checks, a
+  confirmed CA fingerprint that differs, the machine stopped or could not store) still leaves the certificate the hub recorded, and the owner's next join of that
+  name must choose Replace. The hub cannot tell that the machine threw it away: `PairResult` is the last message and nothing answers it. Releasing such a name
+  needs either a new message from the machine (a schema change) or a rule for certificates that never connected (a decision on section 12's taken-name rule),
+  so it is left to an ADR.
 - **A leaf that does not chain to the delivered CA is reported as `pair.name_unverified`** too (step 6b lists both under that code), with the address as the
   parameter. The sentence tells the person to ask the owner to start the hub with `--name ADDRESS`.
 - **The address.** `host`, `host:port`, `[v6]:port` or `wss://host:port`; the default port is 7443 (the front door's). The host is both what is dialled and the name
@@ -371,6 +387,18 @@ Tests: unit tests in the first three files, `crates/agora/tests/pair_node.rs` (a
   with the new error code `pair.names_missing` (`reason` is `interfaces`, `invalid`, `too_many`, `issue` or `write`; `names` is the list concerned), the switch stays
   closed, and the sentence tells the person to start the hub with `--name ADDRESS`. Interfaces are only listed for a wildcard listen address.
 - `agora doctor` keeps reading `server-cert.pem`; the hub prints `The hub's certificate names: ...` at start.
+- **What `agora pair open` tells the owner to type (#943, RM-07).** Only an address the hub listens on **and** its certificate names, since a machine refuses
+  any other (`pair.name_unverified`). After `PairOpen` (which re-issues the leaf first when a name is missing) the command reads the listen address from
+  `<hub dir>/listen` and the names from `<hub dir>/server-cert.pem` (`paircmd::join_hint`, no I/O, unit-tested). A loopback listen address: it says the hub
+  listens on this computer only, so another machine cannot reach it, and how to make it listen on the network: first on this computer's address on it (the
+  first private or 100.64/10 IPv4 address of an interface that is up, `agora --listen ADDRESS:PORT`, then `agora down` and `agora`; `--listen` for a hub run by
+  hand), with `0.0.0.0:PORT` as the fallback, said plainly to listen on every IPv4 interface, a public one too (reaching the listener is broader than opening the
+  switch, though a join still needs the number). It offers only a join from this same computer (the loopback address it listens on, else `localhost`, whichever
+  the certificate names). Addresses are offered only where the hub surely listens: a specific address alone; for `0.0.0.0` the certificate's IPv4 addresses;
+  for `::` its IPv6 addresses only, because whether `::` also serves IPv4 depends on the system (the listener does not set `IPV6_V6ONLY`, and Windows binds it
+  IPv6-only), never a loopback one. The first address is the one to type, the rest are listed. The certificate's DNS names other than `localhost` are listed as
+  names that *may* reach the hub if the network resolves them to this computer, never as a promise; with no address to offer, the first name is suggested with
+  that condition. Neither: it says so and suggests `--name ADDRESS`. It no longer suggests the computer's host name as the address to type.
 
 **Discovery (section 3).**
 - Port `DISCOVERY_PORT` = **7446**, UDP, IPv4 only. Not IPv6: it has no broadcast, and multicast needs a group membership per interface; a finder on an IPv6-only

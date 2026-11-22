@@ -27,7 +27,7 @@ exists. A found file without the owner's execute bit is "broken" (`agent-broken`
 kind = "example-agent"          # stable id, lowercase, used in protocol and UI
 display_name = "Example Agent"  # brand name, not translated
 version = "2026.11.06.1"        # manifest version
-min_engine = 2                  # 5 with `[quota]` (ADR-0091), 4 with `[accounts] credential_env` (ADR-0084), 3 with [[launch.setting]] (ADR-0066), 2 with [[launch.option]] (ADR-0059); 1 otherwise
+min_engine = 2                  # 6 with `[structured] allow_always` (ADR-0101), 5 with `[quota]` (ADR-0091), 4 with `[accounts] credential_env` (ADR-0084), 3 with [[launch.setting]] (ADR-0066), 2 with [[launch.option]] (ADR-0059); 1 otherwise
 
 [process]
 names = ["example-agent", "exa"]        # foreground process names
@@ -60,6 +60,9 @@ credential_env = ["EXAMPLE_API_TOKEN"]
 
 [structured]
 acp = { argv = ["example-agent", "--acp"] }   # present = L2 available (run through `agora acp-bridge`, see adapter-protocol.md)
+# allow_always = false                        # ADR-0101 (min_engine 6): never offer the person "Allow always" for this kind. Set
+#                                             # only for a kind a check on a real version found to keep such an answer beyond its
+#                                             # session; absent = offered when the agent offers `allow_always` and the policy allows
 # adapter = "example-agent-adapter"           # present = L3 package from the registry
 
 [mcp]
@@ -226,7 +229,16 @@ made before `[quota]` existed gives no plan limits; the node prints one line at 
 
 ## Usage files (ADR-0042)
 The node follows the files of a running terminal agent whose kind has `[usage.file]`: a file belongs to the agent when it was touched after
-the agent started and the directory it records (`cwd`) is the agent's worktree (until a line says it, usage lines wait, at most 1000). Limits:
+the agent started and the directory it records (`cwd`) is the agent's worktree (until a line says it, usage lines wait, at most 1000).
+A file whose tokens one agent counted is that agent's: no other agent counts it, and after its owner ended the claim holds against the
+agents that were its peers then (an agent started later may reuse the path). When another live agent reads the same files (same glob)
+in the same folder as written (ADR-0052), the folder cannot tell their sessions apart: then a file's tokens count for an agent only when
+its name holds the agent's own session id (at least 8 characters; Claude Code's `<id>.jsonl`, Codex's `rollout-…-<id>.jsonl`). An
+agent whose id is not known reads such files for the tool's plan windows only and counts no tokens; a file read that way stays so,
+also after the peer has gone, until the agent's id names it (then it is read from its start, unless this agent counted it before:
+nothing is counted twice). Two Codex agents in one folder get no id from
+`[session.file]`, so their tokens are not counted: a session is counted for nobody rather than for two. Not seen as peers: two kinds
+whose different globs match the same files, or one folder spelled two ways. Limits:
 4 files per agent, 1 MiB read per second per agent, lines over 256 KiB skipped, files looked for every 5 seconds. A line that does not
 parse or lacks the numbers adds nothing. Usage is reported as `AgentUsageReported`. Shipped for `claude-code` (`delta`, de-duplicated by
 `message.id`) and `codex` (`total`).
@@ -278,7 +290,14 @@ The node holds a session id only when it learned one:
 - **`[session.file]`** (Codex, which has no flag for it: `~/.codex/sessions/YYYY/MM/DD/rollout-<time>-<id>.jsonl`, whose first line is
   `{"type":"session_meta","payload":{"id":...,"cwd":...}}`, checked on codex-cli 0.167.0 and 0.167.1): while a terminal agent runs
   without a session id, the node looks every 3 s, for at most 30 minutes, at the files the glob matches that were written after the
-  agent started, and takes the id from the first line (at most 64 KiB) when it passes `select` and its `cwd` is the agent's folder.
+  agent's process started, and takes the id from the first line (at most 64 KiB) when it passes `select` and its `cwd` is the agent's folder.
+  This is per process: a restart or a resume of an agent still without an id runs a new process, which waits (30 minutes, files newer
+  than its own start) afresh, also when discovery gave up on the process before. A process's start is the time the node took right
+  before spawning it, with no slack, so a restart moments after the earlier process wrote its file never gets that file; a file the
+  new process writes within one tick of the file system's clock after its start can be missed. A process taken up from the terminal
+  holder keeps that start as the earlier node recorded it in the ledger (`process_since_ms`); only a process whose start the node does
+  not know counts files from 2 s before it first saw it. An id found for a process that has been replaced or stopped since is dropped,
+  as is one another agent holds by the time it is set, and one found never replaces a session the agent already has (#925).
   It takes one only when exactly one new file fits and no other agent has that id. Two agents in one folder are rivals, and both get
   none (a file cannot say which is whose), when they are of one kind, or of kinds whose globs could match the same files: the fixed
   directory of one glob (before its first `*`, with `{home}` replaced, `.` and `..` resolved) is the other's or holds it, as written or

@@ -77,6 +77,12 @@ impl Opts {
 
 /// A list signed by a fake key made from a public seed, opened by the real `verify_list`.
 fn list(o: &Opts) -> AgentList {
+    let (envelope, key) = signed_list(o, 3);
+    verify_list(&envelope, &key, 1, 0).unwrap()
+}
+
+/// The signed envelope of list `version` and the root key that opens it.
+fn signed_list(o: &Opts, version: u64) -> (String, String) {
     let root = Ed25519KeyPair::from_seed_unchecked(&[1; 32]).unwrap();
     let publisher = Ed25519KeyPair::from_seed_unchecked(&[2; 32]).unwrap();
     let mut dl = json!({"url": "https://agents.example.com/fake-agent", "sha256": o.sha});
@@ -88,7 +94,7 @@ fn list(o: &Opts) -> AgentList {
         dl["signature_key"] = json!("vendor");
     }
     let payload = json!({
-        "version": 3, "expires_ms": 2_000_000_000_000_u64,
+        "version": version, "expires_ms": 2_000_000_000_000_u64,
         "publishers": [{"id": "fake-official", "key": hex(publisher.public_key().as_ref()), "revoked": o.revoked}],
         "agents": [{
             "name": "fake-agent", "display": "Fake Agent",
@@ -102,7 +108,7 @@ fn list(o: &Opts) -> AgentList {
     .to_string();
     let envelope =
         json!({"payload": payload, "sig": hex(root.sign(payload.as_bytes()).as_ref())}).to_string();
-    verify_list(&envelope, &hex(root.public_key().as_ref()), 1, 0).unwrap()
+    (envelope, hex(root.public_key().as_ref()))
 }
 
 #[derive(Default)]
@@ -203,6 +209,10 @@ fn nothing_live(home: &Home, version: &str) {
         "temporary folder left"
     );
 }
+/// The install lock is released: the file stays (it is never removed), empty, and free.
+fn released(home: &Home) -> bool {
+    std::fs::read_to_string(home.agents().join(".lock")).is_ok_and(|t| t.is_empty())
+}
 fn launcher(home: &Home) -> PathBuf {
     home.agents()
         .join("bin")
@@ -236,7 +246,7 @@ fn a_verified_download_is_installed_and_linked() {
         assert!(target.is_relative() && target.ends_with("fake-agent"));
     }
     // The lock is released.
-    assert!(!home.agents().join(".lock").exists());
+    assert!(released(&home));
     nothing_live(&home, "none");
 }
 
@@ -704,23 +714,19 @@ fn a_second_install_waits_out_a_live_lock_and_takes_over_a_dead_one() {
         return;
     }
     install(&p, &approval(&p), &home.0, &tools(&net, &Sig(true))).unwrap();
-    assert!(!lock.exists());
+    assert!(released(&home));
     // The same, in the current format (pid, start, boot): an identity that cannot be read falls back to the pid, which is gone.
     std::fs::write(&lock, format!("{dead} 12345 some-boot")).unwrap();
     let l1 = list(&Opts::new("1.2.4", GOOD));
     let p1 = plan(&l1, "fake-agent", PLATFORM, &home.0).unwrap();
     install(&p1, &approval(&p1), &home.0, &tools(&net, &Sig(true))).unwrap();
-    assert!(!lock.exists());
-    // Garbage in the lock is not ours to break.
+    assert!(released(&home));
+    // Garbage names no live owner, and nobody holds the system lock: the lock is free (audit F100).
     std::fs::write(&lock, "not a pid").unwrap();
     let l2 = list(&Opts::new("1.2.5", GOOD));
     let p2 = plan(&l2, "fake-agent", PLATFORM, &home.0).unwrap();
-    assert_eq!(
-        install(&p2, &approval(&p2), &home.0, &tools(&net, &Sig(true)))
-            .unwrap_err()
-            .code,
-        Code::InProgress
-    );
+    install(&p2, &approval(&p2), &home.0, &tools(&net, &Sig(true))).unwrap();
+    assert!(released(&home));
 }
 
 #[test]
@@ -734,21 +740,254 @@ fn what_a_crash_left_is_removed_by_the_next_install() {
     std::fs::write(left.join("stage").join("fake-agent"), "half").unwrap();
     std::fs::create_dir_all(home.agents().join("bin")).unwrap();
     std::fs::write(home.agents().join("bin").join("fake-agent.tmp-9"), "x").unwrap();
+    // A lock an older version renamed aside before it crashed.
+    let aside = home.agents().join(".lock.stale-424242-0");
+    std::fs::write(&aside, "424242").unwrap();
     run(&home, &Opts::new("1.2.3", GOOD), GOOD).unwrap();
     assert!(!left.exists());
+    assert!(!aside.exists());
     assert!(!home.agents().join("bin").join("fake-agent.tmp-9").exists());
 }
 
 #[test]
 fn the_list_version_seen_only_goes_up() {
     let home = Home::new();
-    assert_eq!(last_seen_version(&home.0), 0);
+    assert_eq!(last_seen_version(&home.0).unwrap(), 0);
     remember_list_version(&home.0, 5).unwrap();
-    assert_eq!(last_seen_version(&home.0), 5);
-    remember_list_version(&home.0, 3).unwrap();
-    assert_eq!(last_seen_version(&home.0), 5);
+    assert_eq!(last_seen_version(&home.0).unwrap(), 5);
+    // Recording an older list is refused as a rollback (Codex's review of #997); the same version is already recorded.
+    let e = remember_list_version(&home.0, 3).unwrap_err();
+    assert_eq!(
+        (e.code, e.detail.as_str()),
+        (Code::IndexInvalid, "rollback")
+    );
+    assert_eq!(last_seen_version(&home.0).unwrap(), 5);
+    remember_list_version(&home.0, 5).unwrap();
     remember_list_version(&home.0, 6).unwrap();
-    assert_eq!(last_seen_version(&home.0), 6);
+    assert_eq!(last_seen_version(&home.0).unwrap(), 6);
+}
+
+/// Codex's review of #997: a list is checked against the record, then recorded. A newer list recorded by another install between
+/// those two steps must not let the older one through: recording it is refused as a rollback and the newer record stays.
+#[test]
+fn a_newer_list_recorded_after_the_check_refuses_the_older_one() {
+    let home = Home::new();
+    let o = Opts::new("1.2.3", GOOD);
+    remember_list_version(&home.0, 4).unwrap();
+    let seen = last_seen_version(&home.0).unwrap();
+    let (envelope, key) = signed_list(&o, 5);
+    let older = verify_list(&envelope, &key, 1, seen).unwrap();
+    // Another ordinary install records list 7 meanwhile.
+    remember_list_version(&home.0, 7).unwrap();
+    let e = remember_list_version(&home.0, older.version).unwrap_err();
+    assert_eq!(
+        (e.code, e.detail.as_str()),
+        (Code::IndexInvalid, "rollback")
+    );
+    assert_eq!(last_seen_version(&home.0).unwrap(), 7);
+}
+
+/// Codex's review of #997: the record is opened without following a link at its name, and what was opened is checked on the handle.
+/// A link there (to a readable record, or to nothing) is refused, never read and never taken as "no record yet".
+#[test]
+fn a_link_at_the_list_state_is_refused_not_followed() {
+    let home = Home::new();
+    std::fs::create_dir_all(home.agents()).unwrap();
+    let target = home.0.join("elsewhere.json");
+    std::fs::write(&target, "{\"version\":1}\n").unwrap();
+    let state = home.agents().join("list-state.json");
+    #[cfg(unix)]
+    let linked = std::os::unix::fs::symlink(&target, &state).is_ok();
+    #[cfg(windows)]
+    let linked = std::os::windows::fs::symlink_file(&target, &state).is_ok();
+    #[cfg(not(any(unix, windows)))]
+    let linked = false;
+    if !linked {
+        // Windows without the right to make links: nothing to test.
+        return;
+    }
+    let refused = || {
+        let e = last_seen_version(&home.0).unwrap_err();
+        assert_eq!(
+            (e.code, e.detail.as_str()),
+            (Code::IndexInvalid, "list_state_unreadable")
+        );
+        assert_eq!(
+            remember_list_version(&home.0, 2).unwrap_err().detail,
+            "list_state_unreadable"
+        );
+    };
+    refused();
+    assert_eq!(
+        std::fs::read_to_string(&target).unwrap(),
+        "{\"version\":1}\n"
+    );
+    // A link to nothing is not "no record yet" either, and nothing is written through it.
+    std::fs::remove_file(&target).unwrap();
+    refused();
+    assert!(!target.exists());
+    assert!(std::fs::symlink_metadata(&state)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+}
+
+/// #923: a `list-state.json` that is there but cannot be read or understood is never taken as "no list seen yet" (version 0): that
+/// let any older list through and then overwrote the state with its lower version. Every list is refused until the owner acts.
+type MakeState = Box<dyn Fn(&Path)>;
+
+fn unreadable_states() -> Vec<(&'static str, MakeState)> {
+    let write =
+        |text: String| -> MakeState { Box::new(move |p: &Path| std::fs::write(p, &text).unwrap()) };
+    vec![
+        ("garbage", write("not json at all".into())),
+        ("truncated", write("{\"version\":".into())),
+        ("empty", write(String::new())),
+        ("wrong_shape", write("{\"v\":5}\n".into())),
+        ("negative", write("{\"version\":-1}\n".into())),
+        ("fraction", write("{\"version\":5.5}\n".into())),
+        ("not_an_object", write("5\n".into())),
+        // Other containers and values (Codex's review of #997): a derived reader took a positional array.
+        ("array", write("[5]\n".into())),
+        ("string", write("\"5\"\n".into())),
+        ("null", write("null\n".into())),
+        ("version_null", write("{\"version\":null}\n".into())),
+        ("version_string", write("{\"version\":\"5\"}\n".into())),
+        // A repeated `version` is not read as either value (Codex's review of #997).
+        (
+            "duplicate_version",
+            write("{\"version\":1,\"version\":9}\n".into()),
+        ),
+        (
+            "trailing",
+            write("{\"version\":5}\n{\"version\":1}\n".into()),
+        ),
+        // Valid JSON, but far larger than the state ever is: not read into memory.
+        (
+            "oversized",
+            write(format!("{{\"version\":5{}}}", " ".repeat(64 * 1024))),
+        ),
+        (
+            "directory",
+            Box::new(|p: &Path| std::fs::create_dir_all(p.join("inside")).unwrap()),
+        ),
+    ]
+}
+
+#[test]
+fn an_unreadable_list_state_refuses_every_list_and_is_left_as_it_was() {
+    for (case, make) in unreadable_states() {
+        let home = Home::new();
+        std::fs::create_dir_all(home.agents()).unwrap();
+        let state = home.agents().join("list-state.json");
+        make(&state);
+        let before = std::fs::read(&state).ok();
+        let e = last_seen_version(&home.0).unwrap_err();
+        assert_eq!(
+            (e.code, e.detail.as_str()),
+            (Code::IndexInvalid, "list_state_unreadable"),
+            "{case}"
+        );
+        for offered in [1, 3, 5, 9] {
+            let e = remember_list_version(&home.0, offered).unwrap_err();
+            assert_eq!(
+                (e.code, e.detail.as_str()),
+                (Code::IndexInvalid, "list_state_unreadable"),
+                "{case}: list version {offered} was not refused"
+            );
+        }
+        assert_eq!(
+            std::fs::read(&state).ok(),
+            before,
+            "{case}: the state was changed"
+        );
+        assert_eq!(state.is_dir(), case == "directory", "{case}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_list_state_this_user_cannot_read_refuses_every_list() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = Home::new();
+    remember_list_version(&home.0, 5).unwrap();
+    let state = home.agents().join("list-state.json");
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read(&state).is_ok() {
+        // Running as root: the permission does not stop a read, so there is nothing to test.
+        return;
+    }
+    let e = last_seen_version(&home.0).unwrap_err();
+    assert_eq!(
+        (e.code, e.detail.as_str()),
+        (Code::IndexInvalid, "list_state_unreadable")
+    );
+    let e = remember_list_version(&home.0, 3).unwrap_err();
+    assert_eq!(
+        (e.code, e.detail.as_str()),
+        (Code::IndexInvalid, "list_state_unreadable")
+    );
+    assert_eq!(
+        remember_list_version(&home.0, 9).unwrap_err().detail,
+        "list_state_unreadable"
+    );
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&state).unwrap(),
+        "{\"version\":5}\n"
+    );
+}
+
+/// #923, the way out: once the owner removes the file, the next list is the first one again (accepted and recorded); a newer list
+/// is still accepted over a readable state and an older one is still refused.
+#[test]
+fn a_missing_list_state_accepts_and_records_the_first_list() {
+    let home = Home::new();
+    std::fs::create_dir_all(home.agents()).unwrap();
+    let state = home.agents().join("list-state.json");
+    std::fs::write(&state, "{\"version\":").unwrap();
+    assert!(remember_list_version(&home.0, 4).is_err());
+    std::fs::remove_file(&state).unwrap();
+    remember_list_version(&home.0, 4).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&state).unwrap(),
+        "{\"version\":4}\n"
+    );
+    remember_list_version(&home.0, 6).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&state).unwrap(),
+        "{\"version\":6}\n"
+    );
+    // No temporary file is left beside it (the write is a rename over the old file).
+    let names: Vec<String> = std::fs::read_dir(home.agents())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with("list-state"))
+        .collect();
+    assert_eq!(names, ["list-state.json"]);
+}
+
+/// The whole check as `agora agent install` runs it (the state, then `verify_list`, then the record): over a readable state an
+/// older signed list is a rollback, an equal or newer one is accepted; over a damaged state no list is opened at all.
+#[test]
+fn an_older_signed_list_is_refused_over_a_readable_state_and_every_list_over_a_damaged_one() {
+    let home = Home::new();
+    let o = Opts::new("1.2.3", GOOD);
+    let open = |version: u64| -> Result<u64, String> {
+        let seen = last_seen_version(&home.0).map_err(|e| e.detail)?;
+        let (envelope, key) = signed_list(&o, version);
+        let l = verify_list(&envelope, &key, 1, seen).map_err(|e| format!("{e:?}"))?;
+        remember_list_version(&home.0, l.version).map_err(|e| e.detail)?;
+        Ok(l.version)
+    };
+    assert_eq!(open(5), Ok(5));
+    assert!(open(3).unwrap_err().contains("Rollback"));
+    assert_eq!(open(5), Ok(5));
+    assert_eq!(open(6), Ok(6));
+    std::fs::write(home.agents().join("list-state.json"), "{\"vers").unwrap();
+    for version in [3, 6, 7] {
+        assert_eq!(open(version), Err("list_state_unreadable".into()));
+    }
 }
 
 #[test]
@@ -810,20 +1049,17 @@ fn with_lock(home: &Home, text: &str, age_secs: u64) -> Result<(), InstallError>
 }
 
 #[test]
-fn an_empty_or_garbage_lock_blocks_only_while_it_is_young() {
+fn an_empty_or_garbage_lock_nobody_holds_is_free_whatever_its_age() {
     if skip() {
         return;
     }
+    // Audit F100: the system lock tells who holds it; text that names no live owner (a released lock is empty) never blocks.
     for text in ["", "garbage", "0x12"] {
-        let home = Home::new();
-        assert_eq!(
-            with_lock(&home, text, 0).unwrap_err().code,
-            Code::InProgress,
-            "{text:?}"
-        );
-        let home = Home::new();
-        with_lock(&home, text, 120).unwrap();
-        assert!(!home.agents().join(".lock").exists());
+        for age in [0, 120] {
+            let home = Home::new();
+            with_lock(&home, text, age).unwrap();
+            assert!(released(&home), "{text:?} {age}");
+        }
     }
 }
 
@@ -845,33 +1081,80 @@ fn a_lock_of_a_reused_pid_is_stale() {
     );
 }
 
-/// A fetcher that, while the install holds the lock, replaces the lock with somebody else's.
-struct Thief<'a>(&'a Net, PathBuf);
-impl Fetcher for Thief<'_> {
+/// What reading the lock file gave while it was held, and what `during` returned.
+type Seen = (io::Result<String>, Result<(), InstallError>);
+
+/// A fetcher that, while its install holds the lock, runs `during` and records what reading the lock file gave.
+struct During<'a> {
+    net: &'a Net,
+    lock: PathBuf,
+    during: &'a dyn Fn() -> Result<(), InstallError>,
+    seen: RefCell<Option<Seen>>,
+}
+impl Fetcher for During<'_> {
     fn fetch(&self, r: &FetchRequest<'_>, sink: &mut dyn Write) -> Result<(), InstallError> {
-        std::fs::write(&self.1, format!("{} 1 someone-else", std::process::id())).unwrap();
-        self.0.fetch(r, sink)
+        let text = std::fs::read_to_string(&self.lock);
+        *self.seen.borrow_mut() = Some((text, (self.during)()));
+        self.net.fetch(r, sink)
     }
 }
 
+/// The text a lock held by process `pid` names.
+fn owner_text(pid: u32) -> String {
+    let i = agora_platform::process_identity(pid).unwrap();
+    format!("{pid} {} {}", i.started, i.boot)
+}
+
+/// Runs on every system (review of audit F100: the Windows lock had no test). Where the fake agent cannot run, the install fails after
+/// its download, which is still inside the lock.
 #[test]
-fn the_lock_is_removed_only_while_it_is_still_ours() {
-    if skip() {
-        return;
-    }
+fn a_held_lock_names_its_owner_and_refuses_another_install_until_released() {
+    // Audit F100: the holder keeps the system lock; another install (here another thread of this process, which writes the same
+    // owner text) is refused while it is held, and the file is emptied, not removed, on release.
     let home = Home::new();
     let l = list(&Opts::new("1.2.3", GOOD));
     let p = plan(&l, "fake-agent", PLATFORM, &home.0).unwrap();
+    let l2 = list(&Opts::new("1.2.4", GOOD));
+    let p2 = plan(&l2, "fake-agent", PLATFORM, &home.0).unwrap();
+    let second = || {
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                let net = Net::serving(GOOD);
+                install(&p2, &approval(&p2), &home.0, &tools(&net, &Sig(true))).map(|_| ())
+            })
+            .join()
+            .unwrap()
+        })
+    };
     let net = Net::serving(GOOD);
-    let thief = Thief(&net, home.agents().join(".lock"));
+    let during = During {
+        net: &net,
+        lock: home.agents().join(".lock"),
+        during: &second,
+        seen: RefCell::new(None),
+    };
     let sig = Sig(true);
-    let t = Tools::new(&net, &thief, &sig);
-    install(&p, &approval(&p), &home.0, &t).unwrap();
-    let left = std::fs::read_to_string(home.agents().join(".lock")).unwrap();
-    assert!(
-        left.ends_with("someone-else"),
-        "another process's lock was removed"
-    );
+    let first = install(&p, &approval(&p), &home.0, &Tools::new(&net, &during, &sig));
+    if !skip() {
+        first.unwrap();
+    }
+    let (text, other) = during.seen.into_inner().unwrap();
+    if agora_platform::LOCK_FILES_MANDATORY {
+        // Nobody else can read a held lock there (an older version judges it by its age instead).
+        assert!(text.is_err(), "{text:?}");
+    } else {
+        assert_eq!(text.unwrap(), owner_text(std::process::id()));
+    }
+    assert_eq!(other.unwrap_err().code, Code::InProgress);
+    assert!(released(&home));
+    // Released: the next holder takes it (the list version is remembered under the same lock, on every system).
+    remember_list_version(&home.0, 3).unwrap();
+    assert_eq!(last_seen_version(&home.0).unwrap(), 3);
+    if !skip() {
+        let net = Net::serving(GOOD);
+        install(&p2, &approval(&p2), &home.0, &tools(&net, &Sig(true))).unwrap();
+    }
+    assert!(released(&home));
 }
 
 #[test]
@@ -908,11 +1191,210 @@ fn racing_installs_over_a_stale_lock_end_with_one_consistent_install() {
         }
     }
     assert!(launcher(&home).exists());
-    assert!(!home.agents().join(".lock").exists());
+    assert!(released(&home));
     assert_eq!(
         agora_adapters::agent_install::installed_version(&home.0, "fake-agent").as_deref(),
         Some("1.2.3")
     );
+}
+
+/// Set for [`lock_holder_child`]: the Agora home it installs into.
+const HOLDER_HOME: &str = "AGORA_TEST_INSTALL_LOCK_HOME";
+
+/// A fetcher that, once its install holds the lock, writes `<home>/held-<pid>` and waits until its stdin closes.
+struct HoldUntilStdinCloses {
+    net: Net,
+    home: PathBuf,
+}
+impl Fetcher for HoldUntilStdinCloses {
+    fn fetch(&self, r: &FetchRequest<'_>, sink: &mut dyn Write) -> Result<(), InstallError> {
+        std::fs::write(self.home.join(format!("held-{}", std::process::id())), "").unwrap();
+        let _ = io::copy(&mut io::stdin().lock(), &mut io::sink());
+        self.net.fetch(r, sink)
+    }
+}
+
+/// Not a test by itself (it returns at once unless [`HOLDER_HOME`] is set): the test below runs it as other processes, each one
+/// install contending for the lock. It writes `<home>/done-<pid>` with its outcome (`ok` or the error code); one that gets the lock
+/// holds it until its stdin closes or it is killed.
+#[test]
+fn lock_holder_child() {
+    let Some(home) = std::env::var_os(HOLDER_HOME).map(PathBuf::from) else {
+        return;
+    };
+    let l = list(&Opts::new("1.2.3", GOOD));
+    let p = plan(&l, "fake-agent", PLATFORM, &home).unwrap();
+    let net = Net::serving(GOOD);
+    let hold = HoldUntilStdinCloses {
+        net: Net::serving(GOOD),
+        home: home.clone(),
+    };
+    let out = match install(
+        &p,
+        &approval(&p),
+        &home,
+        &Tools::new(&net, &hold, &Sig(true)),
+    ) {
+        Ok(_) => "ok".to_string(),
+        Err(e) => e.code.code().to_string(),
+    };
+    // Written aside and renamed, so `done-<pid>` is never seen half written.
+    let aside = home.join(format!("out-{}", std::process::id()));
+    std::fs::write(&aside, out).unwrap();
+    std::fs::rename(&aside, home.join(format!("done-{}", std::process::id()))).unwrap();
+}
+
+/// The processes a test started; killed and reaped when it ends, also when it fails.
+struct Children(Vec<std::process::Child>);
+impl Drop for Children {
+    fn drop(&mut self) {
+        for c in &mut self.0 {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+    }
+}
+
+/// The pids in the names of `<dir>/<prefix><pid>` files.
+fn pids(dir: &Path, prefix: &str) -> Vec<u32> {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .flatten()
+        .filter_map(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .strip_prefix(prefix)
+                .and_then(|p| p.parse().ok())
+        })
+        .collect()
+}
+
+/// Waits until `done`, at most a minute.
+fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
+    let end = std::time::Instant::now() + Duration::from_secs(60);
+    while !done() {
+        assert!(std::time::Instant::now() < end, "timed out: {what}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Audit F100, with processes (review: the threads of the earlier test mostly took turns, and its FIFO never reached the system
+/// lock). Two installs started together in two processes contend for the lock: exactly one holds it and the other is
+/// `in_progress`. Then only the system lock is left to refuse (Unix: the owner text is wiped; Windows: nobody can read it): this
+/// process and a third process are refused, and on Windows nobody can read, rename or remove the held file (an older version judges
+/// a lock it cannot read by its age, then renames it). The holder is then killed while holding: the system frees the lock.
+/// Runs on every system: the holders wait inside their download, before the fake agent would run.
+#[test]
+fn installs_in_two_processes_never_hold_the_lock_at_once_and_a_killed_holder_frees_it() {
+    let home = Home::new();
+    std::fs::create_dir_all(home.agents()).unwrap();
+    let spawn = || {
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "lock_holder_child",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(HOLDER_HOME, &home.0)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap()
+    };
+    let mut kids = Children(vec![spawn(), spawn()]);
+    wait_until("both installs got the lock or were refused", || {
+        pids(&home.0, "held-").len() + pids(&home.0, "done-").len() >= 2
+    });
+    let (held, done) = (pids(&home.0, "held-"), pids(&home.0, "done-"));
+    assert_eq!(held.len(), 1, "two processes held the lock at once");
+    assert_eq!(done.len(), 1);
+    assert_ne!(held[0], done[0]);
+    assert_eq!(
+        std::fs::read_to_string(home.0.join(format!("done-{}", done[0]))).unwrap(),
+        "agent.install.in_progress"
+    );
+    let holder = held[0];
+    let lock = home.agents().join(".lock");
+    if agora_platform::LOCK_FILES_MANDATORY {
+        assert!(std::fs::read(&lock).is_err(), "a held lock was read");
+        assert!(
+            std::fs::rename(&lock, home.agents().join(".lock.moved")).is_err(),
+            "a held lock was renamed"
+        );
+        assert!(
+            std::fs::remove_file(&lock).is_err(),
+            "a held lock was removed"
+        );
+    } else {
+        assert_eq!(std::fs::read_to_string(&lock).unwrap(), owner_text(holder));
+        // The lock is advisory here, so the text can be wiped: from now on only the system lock refuses.
+        std::fs::write(&lock, "").unwrap();
+    }
+    // This process is refused while the other holds it, and so is a third process.
+    assert_eq!(
+        remember_list_version(&home.0, 7).unwrap_err().code,
+        Code::InProgress
+    );
+    kids.0.push(spawn());
+    let third = kids.0.last().unwrap().id();
+    let third_done = home.0.join(format!("done-{third}"));
+    wait_until("the third install was refused", || {
+        third_done.exists() || pids(&home.0, "held-").len() > 1
+    });
+    assert_eq!(
+        pids(&home.0, "held-"),
+        [holder],
+        "two processes held the lock at once"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&third_done).unwrap(),
+        "agent.install.in_progress"
+    );
+    // The holder ends without letting go.
+    let c = kids.0.iter_mut().find(|c| c.id() == holder).unwrap();
+    c.kill().unwrap();
+    c.wait().unwrap();
+    // Windows may take a moment to drop the lock of a process that was ended. The ended holder's handle stays open in `kids`, which
+    // keeps it queryable there: it must still read as gone (Codex's review of #934).
+    let end = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        match remember_list_version(&home.0, 7) {
+            Ok(()) => break,
+            Err(e) => assert!(
+                std::time::Instant::now() < end,
+                "timed out: the lock is not free once its holder was killed; last: {e:?}"
+            ),
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(last_seen_version(&home.0).unwrap(), 7);
+    assert!(released(&home));
+}
+
+/// Review of audit F100: an older version that ended between putting a lock back (`hard_link`) and removing the name it had moved it
+/// to left `.lock` with a second name, which the open refuses; that left every later install failing. The `.lock.stale-*` name goes
+/// and the lock is taken. Runs on every system.
+#[test]
+fn a_lock_an_older_version_left_with_a_second_name_is_taken() {
+    let home = Home::new();
+    std::fs::create_dir_all(home.agents()).unwrap();
+    let aside = home.agents().join(".lock.stale-424242-0");
+    std::fs::write(&aside, "").unwrap();
+    std::fs::hard_link(&aside, home.agents().join(".lock")).unwrap();
+    remember_list_version(&home.0, 4).unwrap();
+    assert_eq!(last_seen_version(&home.0).unwrap(), 4);
+    assert!(!aside.exists());
+    assert!(released(&home));
+    // A second name of any other kind is still refused.
+    let other = home.agents().join("other");
+    std::fs::hard_link(home.agents().join(".lock"), &other).unwrap();
+    assert_eq!(
+        remember_list_version(&home.0, 5).unwrap_err().code,
+        Code::IoFailed
+    );
+    assert!(other.exists());
 }
 
 #[test]
@@ -1093,7 +1575,7 @@ fn the_list_version_is_remembered_under_the_lock() {
         remember_list_version(&home.0, 4).unwrap_err().code,
         Code::InProgress
     );
-    assert_eq!(last_seen_version(&home.0), 0);
+    assert_eq!(last_seen_version(&home.0).unwrap(), 0);
 }
 
 // ---- finding what was installed (ADR-0087 item 3) ----------------------------------------------------------------------------

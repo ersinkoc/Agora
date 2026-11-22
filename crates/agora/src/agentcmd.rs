@@ -3,14 +3,14 @@
 //! the question and the words. The owner approves by typing the agent's name on this terminal: there is no `--yes`, and a
 //! stdin that is not a terminal refuses (`agent.install.not_approved`). No hub, no window, no protocol message.
 
-use std::io::{BufRead, IsTerminal, Write};
+use std::io::{BufRead, IsTerminal, Read, Write};
 use std::path::Path;
 use std::process::ExitCode;
 
 use agora_adapters::agent_install::{
     self as inst, strict_tools, Approval, Change, Code, InstallError, Tools,
 };
-use agora_adapters::agent_packages::{verify_list, AgentList, ListError};
+use agora_adapters::agent_packages::{verify_list, AgentList, ListError, MAX_LIST_BYTES};
 use agora_adapters::registry::RegistryError;
 use agora_i18n::key;
 
@@ -52,6 +52,9 @@ fn failed(say: &Say, e: &InstallError) -> ExitCode {
     ExitCode::from(1)
 }
 
+/// The most of a root-key file that is read: 64 hex characters and a line ending, with room for surrounding whitespace.
+const MAX_ROOT_KEY_FILE_BYTES: usize = 4096;
+
 /// The root key: 64 hex characters given directly, or the file that holds them.
 fn root_key(o: &Opts, h: &Path) -> Option<String> {
     let given = o
@@ -62,10 +65,20 @@ fn root_key(o: &Opts, h: &Path) -> Option<String> {
     if text.len() == 64 && text.chars().all(|c| c.is_ascii_hexdigit()) {
         return Some(text);
     }
-    std::fs::read_to_string(&given)
-        .ok()
-        .map(|t| t.trim().to_string())
-        .filter(|t| !t.is_empty())
+    // A key file is 64 characters and a line ending: never read more than a small bound of it (F31). One byte past the bound is
+    // read so a longer file is refused before trimming, never cut into a key (as `open_list` does for the list).
+    let mut bytes = Vec::new();
+    std::fs::File::open(&given)
+        .and_then(|f| {
+            f.take(MAX_ROOT_KEY_FILE_BYTES as u64 + 1)
+                .read_to_end(&mut bytes)
+        })
+        .ok()?;
+    if bytes.len() > MAX_ROOT_KEY_FILE_BYTES {
+        return None;
+    }
+    let t = String::from_utf8(bytes).ok()?;
+    Some(t.trim().to_string()).filter(|t| !t.is_empty())
 }
 
 fn list_error(e: &ListError) -> InstallError {
@@ -102,12 +115,22 @@ fn open_list(o: &Opts, h: &Path) -> Result<AgentList, InstallError> {
             detail: "no_list_or_key".into(),
         });
     };
-    let text = std::fs::read_to_string(file).map_err(|_| InstallError {
+    let unreadable = || InstallError {
         code: Code::IndexInvalid,
         detail: "unreadable".into(),
-    })?;
-    let list = verify_list(&text, &root, now_ms(), inst::last_seen_version(h))
-        .map_err(|e| list_error(&e))?;
+    };
+    // Read at most one byte past the cap, so an oversize or endless file is refused as too large, not read into memory (F31).
+    let mut bytes = Vec::new();
+    std::fs::File::open(file)
+        .and_then(|f| f.take(MAX_LIST_BYTES as u64 + 1).read_to_end(&mut bytes))
+        .map_err(|_| unreadable())?;
+    if bytes.len() > MAX_LIST_BYTES {
+        return Err(list_error(&ListError::TooLarge));
+    }
+    let text = String::from_utf8(bytes).map_err(|_| unreadable())?;
+    // A state file that is there but cannot be read refuses every list (#923): never read as "no list seen yet".
+    let seen = inst::last_seen_version(h)?;
+    let list = verify_list(&text, &root, now_ms(), seen).map_err(|e| list_error(&e))?;
     // A list this machine accepted is the newest it has seen: an older one is refused from now on.
     inst::remember_list_version(h, list.version)?;
     Ok(list)
@@ -124,6 +147,20 @@ pub fn install(say: &Say, o: &Opts) -> ExitCode {
         Err(e) => {
             if e.detail == "no_list_or_key" {
                 say.err(key!("cli-agent-install-no-list"), &[]);
+                return ExitCode::from(1);
+            }
+            if e.detail == inst::LIST_STATE_UNREADABLE {
+                say.err(
+                    key!("cli-agent-install-err-list-state"),
+                    &[
+                        ("code", e.code.code().into()),
+                        ("detail", e.detail.clone().into()),
+                        (
+                            "path",
+                            inst::list_state_path(&h).display().to_string().into(),
+                        ),
+                    ],
+                );
                 return ExitCode::from(1);
             }
             return failed(say, &e);
@@ -233,5 +270,48 @@ pub fn install(say: &Say, o: &Opts) -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(e) => failed(say, &e),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    const KEY: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    fn key_from_file(content: &[u8]) -> Option<String> {
+        let d = std::env::temp_dir().join(format!("agora-root-key-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let file = d.join(format!("key-{}", content.len()));
+        std::fs::write(&file, content).unwrap();
+        let o = Opts {
+            root_key: Some(file.clone()),
+            ..Opts::default()
+        };
+        let got = root_key(&o, &d);
+        let _ = std::fs::remove_file(&file);
+        got
+    }
+
+    /// The key file is read to at most its cap; a longer file is refused, never cut and trimmed into a key (F31 review).
+    #[test]
+    fn the_root_key_file_is_refused_past_its_cap() {
+        assert_eq!(
+            key_from_file(format!("{KEY}\n").as_bytes()),
+            Some(KEY.into())
+        );
+        // Exactly the cap: the key and whitespace to the last byte.
+        let mut at_cap = format!("{KEY}\n").into_bytes();
+        at_cap.resize(MAX_ROOT_KEY_FILE_BYTES, b' ');
+        assert_eq!(key_from_file(&at_cap), Some(KEY.into()));
+        // One byte past the cap is refused, even though the part inside the cap trims to a valid-looking key.
+        let mut over = at_cap.clone();
+        over.push(b'x');
+        assert_eq!(key_from_file(&over), None);
+        let mut over_ws = at_cap;
+        over_ws.push(b'\n');
+        assert_eq!(key_from_file(&over_ws), None);
+        assert_eq!(key_from_file(b" \n"), None);
     }
 }

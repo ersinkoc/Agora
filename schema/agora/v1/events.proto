@@ -51,6 +51,8 @@ message Event {
     // ADR-0091, capability `usage.quota`: how much of a plan window a subscription tool reports it has used, as the tool's own output
     // says it. A fact about a tool on a machine, not about one agent.
     AgentQuotaObserved agent_quota_observed = 67;
+    // ADR-0101, capability `approval.always`: an agent holds an "always" answer for its session.
+    AgentAlwaysAllowed agent_always_allowed = 69;
     // terminal
     TerminalOpened terminal_opened = 40;
     TerminalTitleChanged terminal_title_changed = 41;
@@ -64,6 +66,8 @@ message Event {
     LeaseGranted lease_granted = 62;
     LeaseReleased lease_released = 63;
     HandoffCreated handoff_created = 64;
+    // ADR-0095, capability `task.dispatch`: a person gave a task to an agent (the audit record of `TaskDispatch`).
+    TaskDispatched task_dispatched = 68;
     // ADR-0057: the node refused an agent's `agent_start` before any approval was asked (limits, folder, kind).
     AgentStartRefused agent_start_refused = 65;
     // files
@@ -314,6 +318,11 @@ message ApprovalRequested {
   string action = 3;
   string detail = 4;
   uint64 expires_at_ms = 5;
+  // ADR-0101: the answers the person may give, after the node's policy (empty: ONCE only), and with ALWAYS the agent's own name
+  // for its always option (cleaned, at most 120 characters) and that option's exact id; both are covered by an ALWAYS signature.
+  repeated ApprovalScope scopes = 6;
+  string always_label = 7;
+  string always_option_id = 8;
 }
 
 message ApprovalResolved {
@@ -326,6 +335,19 @@ message ApprovalResolved {
   uint32 helper_grant = 4;
   // ADR-0057: `ApprovalResolve.helpers_may_start` as signed.
   bool helpers_may_start = 5;
+  // ADR-0101: the scope that was signed and delivered (UNSPECIFIED for a request that was not decided by a person).
+  ApprovalScope scope = 6;
+}
+
+// ADR-0101: an agent was sent an "always" answer and holds it for its session (as the agent defines it). Written only after the
+// adapter took the answer. Its records end when the agent ends, is stopped, started again or resumed.
+message AgentAlwaysAllowed {
+  string agent_id = 1;
+  string approval_id = 2;
+  // The request's action, as the node announced it (cleaned, bounded).
+  string action = 3;
+  string signer_device_id = 4;
+  uint64 at_ms = 5;
 }
 
 message MessagePosted {
@@ -342,6 +364,21 @@ message TaskChanged {
   string title = 3;
   string claimed_by_agent_id = 4;
   bool done = 5;
+}
+
+// ADR-0095: written by the node that sent the prompt, after the claim and the send. The task's own move is `TaskChanged` as before.
+message TaskDispatched {
+  string project_id = 1;
+  string task_id = 2;
+  string agent_id = 3;
+  // `TaskDispatch.by_user` as the node received it (the sender's word; the hub's audit row is the record of who asked).
+  string by_user = 4;
+  // Lowercase hex SHA-256 of the prompt's UTF-8 bytes; the prompt itself is not stored (task text is untrusted and may be large).
+  string prompt_sha256 = 5;
+  // The prompt waits behind the agent's running turn.
+  bool queued = 6;
+  // ADR-0059: the agent acts without asking for permission (a launch option or mode that skips it), as the node knows it.
+  bool agent_skips_permissions = 7;
 }
 
 message LeaseGranted {

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { refusalKey, type ActionResult } from '../net/refusal';
 import { NoAskBadge } from './NoAskBadge';
 import { approvedHere, skipAnswerOf } from '../net/skipApproval';
-import { settingName } from './launchSettings';
+import { settingName } from './launchSettingsModel';
 import { startedWith } from './launchMemory';
 import { Icon } from './Icon';
 import { Menu, type MenuItem } from '../layout/Menu';
@@ -157,13 +157,21 @@ export function SessionBar({ agentKey, session, choose, setConfig, disabled, sta
   // when known. A model, mode or effort that the agent offers has its own menu.
   const hasEffort = groups.chips.some((o) => o.category === 'thought_level');
   const started = useMemo(() => startedWith(agentKey).filter(([id]) => !(id === 'model' && (session.models.length > 0 || groups.replaces.model)) && !(id === 'mode' && (session.modes.length > 0 || groups.replaces.mode)) && !(id === 'effort' && hasEffort)), [agentKey, session.models.length, session.modes.length, groups, hasEffort]);
+  // What makes it act without asking now, in the agent's own words ("Mode: YOLO"), for the sign's tooltip.
+  const freeCause = skippingNow(session).map(({ option, value }) => {
+    if (option === 'mode') return `${t('session-mode')}: ${session.modes.find((o) => o.id === value)?.name || value}`;
+    const o = (session.config ?? []).find((c) => c.id === option);
+    if (!o) return value;
+    const shown = o.type === 'boolean' ? t(value === 'true' ? 'session-on' : 'session-off') : configChoices(o).find((c) => c.id === value)?.name || value;
+    return `${configWord(o)}: ${shown}`;
+  }).join(', ');
   const controls = <>
     {!groups.replaces.mode && picker('mode', session.modes, session.currentMode)}
     {!groups.replaces.model && picker('model', session.models, session.currentModel)}
     {groups.chips.map(configChip)}
     {moreItems.length > 0 && <Menu label={t('session-more')} items={moreItems} align="start" className="ide-chip h-7 cursor-pointer rounded-s px-2.5 hover:border-accent hover:text-ink"><span>{t('session-more')}</span><Icon name="chevronDown" className="size-3" /></Menu>}
     {started.map(([id, value]) =><span key={id} className="ide-chip h-7 rounded-s px-2.5" title={t('session-started-hint')}>{t('session-started-with', { name: settingName({ id, label: `setting-${id}`, values: [], defaultValue: '' }, t), value })}</span>)}
-    {!disabled && !launchedFree && actsFreely(session) && <NoAskBadge agent={{ skipsPermissions: true }} session approved={skippingNow(session).every((x) => approvedHere(agentKey, x.option, x.value))} />}
+    {!disabled && !launchedFree && actsFreely(session) && <NoAskBadge agent={{ skipsPermissions: true }} session cause={freeCause} approved={skippingNow(session).every((x) => approvedHere(agentKey, x.option, x.value))} />}
     {waits.some((w) => w.state === 'asking') && <span role="status" className="text-xs text-needs-you">{t('session-waiting-approval-note')}</span>}
     {failed && <span role="status" className="text-xs text-needs-you">{t(failed)}</span>}
   </>;

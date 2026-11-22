@@ -7,13 +7,25 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use agora_node::control::{
-    Client, KIND_CHAT_ENTRY, KIND_CHAT_SNAPSHOT, KIND_TERM_DATA, KIND_TERM_EXIT, KIND_TERM_RESIZE,
-    KIND_TERM_SNAPSHOT,
+    Client, KIND_CHAT_ENTRY, KIND_CHAT_SNAPSHOT, KIND_TERM_DATA, KIND_TERM_EXIT, KIND_TERM_HISTORY,
+    KIND_TERM_RESIZE, KIND_TERM_SNAPSHOT,
 };
 use agora_node::daemon::{Node, NodeConfig};
 use agora_node::supervisor::NodeLimits;
 use agora_protocol::v1::{self, command_ok::Result as Ok_, command_request::Command as Cmd};
 use agora_protocol::Frame;
+
+/// Whether `sh` (the test agent) can be found on `PATH`, as in `crates/agora/tests/cli.rs`. Every Unix has it; on Windows it comes
+/// with Git's `usr\bin`, which CI runners put on `PATH` and a default Git for Windows install does not (#972).
+fn sh_on_path() -> bool {
+    let found = std::env::var_os("PATH").is_some_and(|p| {
+        std::env::split_paths(&p).any(|d| d.join("sh").is_file() || d.join("sh.exe").is_file())
+    });
+    if !found {
+        eprintln!("skipped: no `sh` on PATH (on Windows, add Git's usr\\bin to PATH)");
+    }
+    found
+}
 
 fn git(dir: &Path, args: &[&str]) {
     let ok = Command::new("git")
@@ -101,6 +113,9 @@ fn started(r: v1::CommandOk) -> v1::AgentStartResult {
 
 #[test]
 fn project_list_and_agent_start_stop_over_the_socket() {
+    if !sh_on_path() {
+        return;
+    }
     if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
         return;
     }
@@ -183,6 +198,9 @@ fn errors_travel_as_codes_with_params() {
 
 #[test]
 fn resource_limits_are_reported_over_the_wire() {
+    if !sh_on_path() {
+        return;
+    }
     if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
         return;
     }
@@ -210,6 +228,9 @@ fn resource_limits_are_reported_over_the_wire() {
 
 #[test]
 fn a_retried_request_does_not_repeat_its_effect() {
+    if !sh_on_path() {
+        return;
+    }
     if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
         return;
     }
@@ -249,6 +270,9 @@ fn wait_frame(c: &mut Client, stream: u32, mut want: impl FnMut(&Frame) -> bool)
 
 #[test]
 fn terminal_subscription_streams_snapshot_data_resize_and_exit() {
+    if !sh_on_path() {
+        return;
+    }
     if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
         return;
     }
@@ -263,10 +287,14 @@ fn terminal_subscription_streams_snapshot_data_resize_and_exit() {
         Cmd::TerminalSubscribe(v1::TerminalSubscribe {
             terminal_id: s.terminal_id.clone(),
             format: "terminal.raw".into(),
+            history_lines: 0,
         }),
     ));
     let snap = wait_frame(&mut c, 3, |f| f.kind == KIND_TERM_SNAPSHOT);
-    assert!(snap.payload.starts_with(b"\x1b[0m\x1b[2J"));
+    // ADR-0100: the program's screen first (the shell is on the normal one), then the drawing state (origin, insert, pen, ASCII) and the clear.
+    assert!(snap
+        .payload
+        .starts_with(b"\x1b[?1049l\x1b[?6l\x1b[4l\x1b[0m\x1b(B\x0f\x1b[2J"));
     // Right after it, the size it was painted at (the node's default terminal, 80x24).
     let size = wait_frame(&mut c, 3, |f| f.kind == KIND_TERM_RESIZE);
     assert_eq!(size.payload, [80u8, 0, 24, 0]);
@@ -316,6 +344,7 @@ fn terminal_subscription_streams_snapshot_data_resize_and_exit() {
             Cmd::TerminalSubscribe(v1::TerminalSubscribe {
                 terminal_id: "t-nope".into(),
                 format: String::new(),
+                history_lines: 0,
             })
         )),
         "agent.not_found"
@@ -326,6 +355,7 @@ fn terminal_subscription_streams_snapshot_data_resize_and_exit() {
             Cmd::TerminalSubscribe(v1::TerminalSubscribe {
                 terminal_id: s.terminal_id.clone(),
                 format: "terminal.cells".into(),
+                history_lines: 0,
             })
         )),
         "protocol.capability_missing"
@@ -335,15 +365,173 @@ fn terminal_subscription_streams_snapshot_data_resize_and_exit() {
         err_code(c.call(Cmd::TerminalSubscribe(v1::TerminalSubscribe {
             terminal_id: s.terminal_id,
             format: String::new(),
+            history_lines: 0,
         }))),
         "protocol.invalid_message"
     );
+}
+
+/// A `terminal.subscribe` for `terminal_id` that asks for `history_lines` lines of history (ADR-0100).
+fn subscribe_cmd(terminal_id: &str, history_lines: u32) -> Cmd {
+    Cmd::TerminalSubscribe(v1::TerminalSubscribe {
+        terminal_id: terminal_id.into(),
+        format: "terminal.raw".into(),
+        history_lines,
+    })
+}
+
+/// Scrollback lines of `t`, oldest first.
+fn history_lines(t: &dyn agora_vt::Terminal) -> Vec<String> {
+    (1..=t.history_len())
+        .rev()
+        .map(|b| t.history_line(b))
+        .collect()
+}
+
+/// ADR-0100 decision 2: a subscription that asks for history gets kind 4 frames, then the kind 1 repaint, then the kind 2 size,
+/// then live output; fed to an empty emulator they give the node's scrollback and screen. One that asks for none (absent or 0) gets
+/// no kind 4, and a resync after falling behind never carries history.
+#[test]
+fn history_comes_before_the_snapshot_only_when_asked_and_never_with_a_resync() {
+    if !sh_on_path() {
+        return;
+    }
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
+        return;
+    }
+    let e = env("history");
+    let n = node(&e, NodeLimits::default());
+    let mut c = Client::connect(n.socket().unwrap()).unwrap();
+    let s = started(ok(c.call(start_cmd("shell"))));
+    let id = agora_core::AgentId::new(s.agent_id.clone());
+
+    // Without history: the snapshot comes first.
+    ok(c.call_on(3, subscribe_cmd(&s.terminal_id, 0)));
+    let first = wait_frame(&mut c, 3, |_| true);
+    assert_eq!(first.kind, KIND_TERM_SNAPSHOT);
+    ok(c.call(Cmd::TerminalInput(v1::TerminalInput {
+        terminal_id: s.terminal_id.clone(),
+        data: b"i=1; while [ $i -le 60 ]; do echo hist-$i; i=$((i+1)); done\n".to_vec(),
+    })));
+    let mut seen = Vec::new();
+    wait_frame(&mut c, 3, |f| {
+        assert_ne!(f.kind, KIND_TERM_HISTORY, "no history was asked for");
+        if f.kind == KIND_TERM_DATA {
+            seen.extend_from_slice(&f.payload);
+        }
+        // The whole last line, not a prefix of it: "hist-60" followed by its line ending, or (a newer ConPTY, which writes the line
+        // ending before each line) by the escape sequence that comes next (#973).
+        let text = String::from_utf8_lossy(&seen);
+        text.match_indices("hist-60").any(|(at, m)| {
+            matches!(
+                text[at + m.len()..].chars().next(),
+                Some('\r' | '\n' | '\x1b')
+            )
+        })
+    });
+
+    // With history: kind 4 frames, kind 1, kind 2, then live output.
+    ok(c.call_on(5, subscribe_cmd(&s.terminal_id, 1000)));
+    let mut kinds = Vec::new();
+    let mut window: Option<agora_vt::AlacrittyTerminal> = None;
+    let mut fed = Vec::new();
+    wait_frame(&mut c, 5, |f| {
+        kinds.push(f.kind);
+        if f.kind == KIND_TERM_HISTORY || f.kind == KIND_TERM_SNAPSHOT {
+            fed.push(f.payload.clone());
+        }
+        if f.kind == KIND_TERM_RESIZE {
+            let size = agora_vt::Size {
+                cols: u16::from_le_bytes([f.payload[0], f.payload[1]]),
+                rows: u16::from_le_bytes([f.payload[2], f.payload[3]]),
+            };
+            let mut w = agora_vt::AlacrittyTerminal::new(size);
+            for b in &fed {
+                agora_vt::Terminal::feed(&mut w, b);
+            }
+            window = Some(w);
+        }
+        f.kind == KIND_TERM_RESIZE
+    });
+    let snapshot_at = kinds.iter().position(|&k| k == KIND_TERM_SNAPSHOT).unwrap();
+    assert!(snapshot_at > 0, "history first: {kinds:?}");
+    assert!(
+        kinds[..snapshot_at].iter().all(|&k| k == KIND_TERM_HISTORY),
+        "{kinds:?}"
+    );
+    assert_eq!(kinds[snapshot_at + 1..], [KIND_TERM_RESIZE], "{kinds:?}");
+    let window = window.unwrap();
+    let (node_history, node_screen) = {
+        let sup = n.supervisor.lock().unwrap();
+        let t = sup.terminal(&id).unwrap();
+        t.inspect(|t| (history_lines(t), t.bottom_lines(usize::from(t.size().rows))))
+    };
+    assert!(
+        node_history.iter().any(|l| l == "hist-1"),
+        "{node_history:?}"
+    );
+    assert_eq!(history_lines(&window), node_history);
+    assert_eq!(
+        agora_vt::Terminal::bottom_lines(&window, node_screen.len()),
+        node_screen
+    );
+    ok(c.call(Cmd::TerminalInput(v1::TerminalInput {
+        terminal_id: s.terminal_id.clone(),
+        data: b"echo live-$((6*7))\n".to_vec(),
+    })));
+    let mut live = Vec::new();
+    wait_frame(&mut c, 5, |f| {
+        assert_eq!(f.kind, KIND_TERM_DATA, "live output after the size");
+        live.extend_from_slice(&f.payload);
+        String::from_utf8_lossy(&live).contains("live-42")
+    });
+
+    // A resync after falling behind: the client stops reading while the terminal floods, so the node's queue for it overflows; the
+    // next snapshot on the stream that asked for history comes without any.
+    ok(c.call_on(7, subscribe_cmd(&s.terminal_id, 2000)));
+    ok(c.call(Cmd::TerminalInput(v1::TerminalInput {
+        terminal_id: s.terminal_id.clone(),
+        data: b"yes 'resync flood resync flood' | head -n 1500000; echo flood-$((6*7))-done\n"
+            .to_vec(),
+    })));
+    std::thread::sleep(Duration::from_secs(3));
+    let mut snapshots = 0;
+    let mut kinds = Vec::new();
+    let end = Instant::now() + Duration::from_secs(60);
+    while snapshots < 2 && Instant::now() < end {
+        if let Some(f) = c.read_frame(Some(Duration::from_millis(200))).unwrap() {
+            if f.stream_id != 7 {
+                continue;
+            }
+            if f.kind != KIND_TERM_DATA && kinds.len() < 200 {
+                kinds.push(f.kind);
+            }
+            if f.kind == KIND_TERM_SNAPSHOT {
+                snapshots += 1;
+            } else if f.kind == KIND_TERM_HISTORY {
+                assert_eq!(
+                    snapshots, 0,
+                    "history only before the first snapshot: {kinds:?}"
+                );
+            }
+        }
+    }
+    assert_eq!(snapshots, 2, "the flood made the stream resync: {kinds:?}");
+    assert!(kinds[0] == KIND_TERM_HISTORY, "{kinds:?}");
+    let _ = c.call(Cmd::TerminalInput(v1::TerminalInput {
+        terminal_id: s.terminal_id.clone(),
+        data: vec![0x03],
+    }));
+    let _ = std::fs::remove_dir_all(&e.dir);
 }
 
 /// What a hub needs to build its view: the node, its checkout, then for each agent its workspace, the agent and its
 /// terminal, in that order, and the matching closings.
 #[test]
 fn the_node_reports_what_the_hub_needs_to_show_it() {
+    if !sh_on_path() {
+        return;
+    }
     use v1::event::Body;
     if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
         return;
@@ -507,6 +695,9 @@ fn decode_tool(v: &serde_json::Value) -> (serde_json::Value, bool) {
 
 #[test]
 fn agents_on_one_node_coordinate_through_their_own_mesh_endpoints() {
+    if !sh_on_path() {
+        return;
+    }
     use agora_core::AgentId;
     use serde_json::json;
     if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
@@ -620,6 +811,9 @@ fn git_status(dir: &Path) -> String {
 
 #[test]
 fn a_manifest_with_mcp_gets_its_config_file_and_the_file_stays_out_of_git() {
+    if !sh_on_path() {
+        return;
+    }
     if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
         return;
     }
@@ -723,6 +917,9 @@ fn a_manifest_cannot_point_its_config_outside_the_worktree() {
 
 #[test]
 fn input_to_a_program_that_never_reads_does_not_wedge_the_node() {
+    if !sh_on_path() {
+        return;
+    }
     if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
         return;
     }
@@ -797,6 +994,9 @@ fn a_start_that_fails_gives_back_its_worktree_and_its_mesh_endpoint() {
 
 #[test]
 fn flags_and_variables_are_added_at_every_launch_including_restarts() {
+    if !sh_on_path() {
+        return;
+    }
     if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
         return;
     }
@@ -927,6 +1127,7 @@ fn an_adapter_approval_waits_for_a_signed_decision_and_is_relayed() {
             signature: signed_message(node, id, approved),
             helper_grant: 0,
             helpers_may_start: false,
+            ..Default::default()
         }))
     };
     let state_of = |n: &Node, id: &str| {
@@ -1059,6 +1260,7 @@ fn with_no_trusted_device_every_decision_is_refused() {
         signature: signed_message("node-test", &id, true),
         helper_grant: 0,
         helpers_may_start: false,
+        ..Default::default()
     }));
     assert_eq!(err_code(r), "approval.signature_invalid");
 }
@@ -1093,6 +1295,9 @@ fn a_manifest_added_while_the_node_runs_is_listed_and_startable_without_a_restar
 
 #[test]
 fn agent_kinds_lists_what_this_node_can_start() {
+    if !sh_on_path() {
+        return;
+    }
     if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
         return;
     }
@@ -1226,6 +1431,9 @@ fn a_node_with_an_empty_manifests_folder_offers_and_starts_every_built_in_kind_a
 
 #[test]
 fn uncommitted_changes_in_an_agents_workspace_are_reported() {
+    if !sh_on_path() {
+        return;
+    }
     use v1::event::Body;
     if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
         return;
@@ -1268,6 +1476,9 @@ fn uncommitted_changes_in_an_agents_workspace_are_reported() {
 
 #[test]
 fn git_status_and_diff_cover_new_and_changed_files_and_only_agent_workspaces() {
+    if !sh_on_path() {
+        return;
+    }
     if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
         return;
     }
@@ -1329,6 +1540,9 @@ fn git_status_and_diff_cover_new_and_changed_files_and_only_agent_workspaces() {
 
 #[test]
 fn files_list_and_read_stay_inside_an_agents_workspace() {
+    if !sh_on_path() {
+        return;
+    }
     if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
         return;
     }
@@ -1412,6 +1626,9 @@ fn files_list_and_read_stay_inside_an_agents_workspace() {
 
 #[test]
 fn git_log_lists_the_workspaces_commits_newest_first() {
+    if !sh_on_path() {
+        return;
+    }
     if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
         return;
     }
@@ -1654,6 +1871,9 @@ fn secret_workspace(name: &str, policy: Option<&str>) -> (Env, Node, String, Str
 
 #[test]
 fn secret_files_are_marked_refused_and_left_out_of_the_diff() {
+    if !sh_on_path() {
+        return;
+    }
     if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
         return;
     }
@@ -1710,6 +1930,9 @@ fn secret_files_are_marked_refused_and_left_out_of_the_diff() {
 
 #[test]
 fn the_owners_policy_switch_shows_secret_files() {
+    if !sh_on_path() {
+        return;
+    }
     if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
         return;
     }
@@ -1733,6 +1956,9 @@ fn the_owners_policy_switch_shows_secret_files() {
 /// hears that the terminal ended, even though the exit was among what was dropped.
 #[test]
 fn a_subscriber_that_fell_behind_still_gets_the_exit_frame() {
+    if !sh_on_path() {
+        return;
+    }
     if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
         return;
     }
@@ -1746,6 +1972,7 @@ fn a_subscriber_that_fell_behind_still_gets_the_exit_frame() {
         Cmd::TerminalSubscribe(v1::TerminalSubscribe {
             terminal_id: s.terminal_id.clone(),
             format: "terminal.raw".into(),
+            history_lines: 0,
         }),
     ));
     ok(c.call(Cmd::TerminalInput(v1::TerminalInput {
@@ -1836,6 +2063,7 @@ fn a_permission_shows_in_the_conversation_and_follows_only_the_nodes_approval_st
             signature: signed_message("node-test", id, approved),
             helper_grant: 0,
             helpers_may_start: false,
+            ..Default::default()
         })));
     };
     let outcome_is = |id: &str, want: v1::PermissionOutcome| {
@@ -1867,6 +2095,7 @@ fn a_permission_shows_in_the_conversation_and_follows_only_the_nodes_approval_st
         signature: signed_message("node-test", &first, true),
         helper_grant: 0,
         helpers_may_start: false,
+        ..Default::default()
     }));
     assert_eq!(err_code(bad), "approval.signature_invalid");
     outcome_is(&first, v1::PermissionOutcome::Pending);
@@ -1981,6 +2210,7 @@ fn a_decision_the_adapter_cannot_take_does_not_leave_the_permission_entry_pendin
         signature: signed_message("node-test", &id, true),
         helper_grant: 0,
         helpers_may_start: false,
+        ..Default::default()
     }));
     assert!(
         r_is_err(r),

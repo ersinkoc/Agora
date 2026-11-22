@@ -100,6 +100,12 @@ impl Drop for Down {
     }
 }
 
+/// Whether one row of `agora status` starts with `start` (#935: "not connected to wss://..." contains "connected to wss://...", so a
+/// substring test took a node still dialling for one that is connected).
+fn has_row(status: &str, start: &str) -> bool {
+    status.lines().any(|l| l.trim_start().starts_with(start))
+}
+
 fn wait_for(what: &str, limit: Duration, mut f: impl FnMut() -> bool) {
     let end = Instant::now() + limit;
     while !f() {
@@ -186,15 +192,17 @@ fn agora_brings_the_machine_up_and_killing_the_interface_leaves_agents_running()
             .spawn()
             .unwrap(),
     );
-    let linked = format!("connected to wss://localhost:{port}");
+    // The node's row says it is connected, as this machine's node: "connected to <hub> as <id>".
+    let linked = format!("connected to wss://localhost:{port} as ");
+    let mut s = String::new();
     wait_for("the hub and the node", Duration::from_secs(90), || {
-        let (_, s, _) = run(&home, &["status"]);
+        s = run(&home, &["status"]).1;
         s.contains("The hub is running (process")
             && s.contains("The node is running (process")
-            && s.contains(&linked)
+            && has_row(&s, &linked)
     });
-    // Negative control: a link that is up is never reported as down, and the old wording for the configured hub is not used.
-    let (_, s, _) = run(&home, &["status"]);
+    // Negative control: the status that says the link is up says nothing of it being down, and the old wording for the configured
+    // hub is not used.
     assert!(!s.contains("not connected"), "{s}");
     // The client opened the terminal client once the node showed up at the hub: it connected without any code typed.
     wait_for("the interface", Duration::from_secs(30), || {
@@ -327,7 +335,7 @@ fn status_says_not_connected_while_the_hub_refuses_the_node() {
         Duration::from_secs(60),
         || {
             last = run(&home, &["status"]).1;
-            last.contains("The node is running (process") && last.contains(&hub)
+            last.contains("The node is running (process") && has_row(&last, &hub)
         },
     );
     // The reason is shown once a dial has failed; Windows words a refusal differently from Unix, so only there it is not pinned.
@@ -337,14 +345,12 @@ fn status_says_not_connected_while_the_hub_refuses_the_node() {
             Duration::from_secs(30),
             || {
                 last = run(&home, &["status"]).1;
-                last.contains("nothing is listening")
+                has_row(&last, &format!("{hub}: nothing is listening"))
             },
         );
     }
-    assert!(
-        !last.contains("connected to wss://") || last.contains("not connected to wss://"),
-        "{last}"
-    );
+    assert!(!has_row(&last, "connected to wss://"), "{last}");
+    assert!(has_row(&last, &hub), "{last}");
     assert!(!last.contains(" as mac"), "{last}");
     let _ = run(&home, &["down"]);
     let _ = std::fs::remove_dir_all(home);
@@ -510,10 +516,11 @@ fn the_supervisor_restarts_a_crashed_node_and_never_leaves_it_behind() {
     // `agora down` while the supervisor waits to restart a second crash: both end at once and nothing starts again.
     std::thread::sleep(Duration::from_secs(11));
     agora_platform::terminate_process(again).unwrap();
+    // The second crash's own notice: until the supervisor has seen this crash, the record still ends with the first one's restart,
+    // so "it crashed" alone can be the first crash's line, and `agora down` then comes before the crash is logged (#935, macOS).
     wait_for("the second restart notice", Duration::from_secs(10), || {
-        run(&home, &["status"])
-            .1
-            .contains("The node is not running: it crashed")
+        let s = run(&home, &["status"]).1;
+        s.contains("The node is not running: it crashed") && s.contains("(restart 2 of 5)")
     });
     let stopping = Instant::now();
     let (code, out, err) = run(&home, &["down"]);

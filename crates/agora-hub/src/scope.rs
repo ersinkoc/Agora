@@ -229,6 +229,8 @@ impl Scope {
             // ADR-0090
             Body::AgentSessionConfig(e) => self.granted(self.agents.get(&q(&e.agent_id))),
             Body::AgentCommands(e) => self.granted(self.agents.get(&q(&e.agent_id))),
+            // ADR-0101
+            Body::AgentAlwaysAllowed(e) => self.granted(self.agents.get(&q(&e.agent_id))),
             Body::AgentExited(e) => self.granted(self.agents.get(&q(&e.agent_id))),
             Body::AgentStartRefused(e) => self.granted(self.agents.get(&q(&e.agent_id))),
             // Made by the hub, which names the agent by its hub-wide key already (ADR-0053).
@@ -271,6 +273,8 @@ impl Scope {
             Body::LeaseReleased(e) => self.lease_visible(node, &e.agent_id),
             // The shared board spans machines, so no single grant covers it.
             Body::TaskChanged(_) => false,
+            // ADR-0095: a dispatch is about one agent of the producer; it is theirs when that agent is.
+            Body::TaskDispatched(e) => self.granted(self.agents.get(&q(&e.agent_id))),
         }
     }
 
@@ -320,6 +324,11 @@ impl Scope {
             C::WorktreeRemove(c) => self.granted(self.worktrees.get(&q(&c.worktree_id))),
             C::ApprovalResolve(c) => self.granted(self.approvals.get(&q(&c.approval_id))),
             C::TaskUpdate(c) => self.projects.contains(&qualified(node, &c.project_id)),
+            // ADR-0095: the person needs the project and the agent (the node checks that the agent is of that project).
+            C::TaskDispatch(c) => {
+                self.projects.contains(&qualified(node, &c.project_id))
+                    && self.granted(self.agents.get(&q(&c.agent_id)))
+            }
             // What agents a machine can start is not private to a project, but only for machines the person works on.
             C::AgentKinds(_) => self.node_visible(node),
             _ => false,
@@ -436,6 +445,32 @@ mod tests {
         let replay = s.filter_view(&full).session_replay();
         assert_eq!(replay.len(), 1);
         assert_eq!(replay[0].producer_id, "n1");
+    }
+
+    /// ADR-0101: an agent's always answer reaches only the people who may see that agent.
+    #[test]
+    fn an_always_answer_is_seen_only_with_its_agent() {
+        let mut s = scope(&["n1/id:shared"]);
+        let always = |node: &str, id: &str| {
+            ev(
+                node,
+                Body::AgentAlwaysAllowed(v1::AgentAlwaysAllowed {
+                    agent_id: id.into(),
+                    approval_id: "ap-1".into(),
+                    action: "run_command".into(),
+                    ..Default::default()
+                }),
+            )
+        };
+        for (event, visible) in [
+            (agent("n1", "a1", "id:shared"), true),
+            (agent("n1", "a2", "id:private"), false),
+            (always("n1", "a1"), true),
+            (always("n1", "a2"), false),
+            (always("n1", "never-seen"), false),
+        ] {
+            assert_eq!(s.admit(&event), visible);
+        }
     }
 
     #[test]
@@ -590,6 +625,49 @@ mod tests {
         assert_eq!(s.filter_view(&full), cut);
     }
 
+    /// #905: a message between machines is recorded by both nodes. The sender's copy is the member's when the sender is theirs; the
+    /// receiver's copy names the sender `<origin>/<agent>` in its producer's words, which no node may say for another node, so it
+    /// grants nothing (the window folds the two copies into one row for whoever sees both).
+    #[test]
+    fn a_message_between_machines_is_the_members_by_the_senders_own_copy_only() {
+        let mut s = scope(&["n1/mine"]);
+        for e in [
+            checkout("n1", "c1", "mine"),
+            agent("n1", "a1", "mine"),
+            checkout("n2", "c2", "theirs"),
+            agent("n2", "b1", "theirs"),
+        ] {
+            s.admit(&e);
+        }
+        let posted = |node: &str, from: &str, to: &str| {
+            ev(
+                node,
+                Body::MessagePosted(v1::MessagePosted {
+                    message_id: "m-1".into(),
+                    from_agent_id: from.into(),
+                    to: to.into(),
+                    body: "ping".into(),
+                }),
+            )
+        };
+        assert!(s.admit(&posted("n1", "a1", "n2/b1")), "the sender's copy");
+        assert!(
+            !s.admit(&posted("n2", "n1/a1", "b1")),
+            "the receiver's copy is not admitted by the name it gives the sender"
+        );
+        // A member of the receiving project does not see what another project's agent said.
+        let mut r = scope(&["n2/theirs"]);
+        for e in [
+            agent("n1", "a1", "mine"),
+            checkout("n2", "c2", "theirs"),
+            agent("n2", "b1", "theirs"),
+        ] {
+            r.admit(&e);
+        }
+        assert!(!r.admit(&posted("n1", "a1", "n2/b1")));
+        assert!(!r.admit(&posted("n2", "n1/a1", "b1")));
+    }
+
     #[test]
     fn a_member_sees_what_belongs_to_a_granted_project_and_nothing_of_another() {
         let mut s = scope(&["n1/mine"]);
@@ -650,6 +728,7 @@ mod tests {
                     action: "x".into(),
                     detail: "secret".into(),
                     expires_at_ms: 0,
+                    ..Default::default()
                 }),
             ),
             ev(

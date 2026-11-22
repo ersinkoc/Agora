@@ -5,10 +5,10 @@
 //! when the hub is unreachable and the caller buffers the events (AGENTS.md, nodes are autonomous). Time is
 //! passed in, so restart and detection timing is testable without sleeping.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use crate::approvals::{SkipAsk, SkipKind};
 use agora_adapters::host::{
@@ -168,8 +168,11 @@ pub enum SupervisorEvent {
         attempt: u32,
         after: Duration,
     },
+    /// The node stopped restarting the agent. `exit_code` (#902): how its last process ended, as reported (`AgentExited`), when the
+    /// node knows it; `None` when it does not (its status could not be read, or the last restart did not start).
     GaveUp {
         agent: AgentId,
+        exit_code: Option<i32>,
     },
     Stopped {
         agent: AgentId,
@@ -189,6 +192,13 @@ pub enum SupervisorEvent {
     /// An adapter process died. Its agent is `unknown` until it is started again.
     AdapterCrashed {
         agent: AgentId,
+    },
+    /// ADR-0090, #908: a prompt that waited behind a turn became the turn and is being sent now, before anything the agent says in
+    /// answer can arrive. `tag` is what the caller gave when it queued it (the id of its chat entry); [`Self::PromptDequeued`]
+    /// follows with the outcome.
+    PromptSending {
+        agent: AgentId,
+        tag: u64,
     },
     /// ADR-0090: a prompt that waited behind a turn was sent (`sent`), or could not be (the adapter refused it). `tag` is what the
     /// caller gave when it queued it (the id of its chat entry).
@@ -220,6 +230,12 @@ pub struct Reattach {
     pub capabilities: Vec<String>,
     /// The state the ledger last saw it in.
     pub state: Option<AgentState>,
+    /// #932: what it last reported of its session (modes and models, config options, commands), as the last node recorded it. The
+    /// adapter is not initialised again and does not report them again by itself, so they are the agent's until it reports new ones:
+    /// a mode or option in use that makes it act without asking keeps it shown so, and checked so (`skips_permissions_now`).
+    pub options: SessionOptions,
+    pub config: Vec<ConfigOption>,
+    pub commands: Vec<AdapterCommand>,
 }
 
 /// ADR-0090: the most prompts that wait behind a turn, per agent (`agent.queue_full`).
@@ -241,6 +257,8 @@ pub struct AdapterCall {
     session: String,
     op: CallOp,
     generation: u64,
+    /// ADR-0101 (Codex review of PR #1007): the run of the adapter process this call was made to (`AdapterRich::epoch`).
+    epoch: u64,
 }
 
 /// What preparing a switch of a running agent's mode or config option came to (ADR-0090 Amendment A).
@@ -252,17 +270,38 @@ pub enum Prepared {
 }
 
 enum CallOp {
-    Prompt { text: String, from_mesh: bool },
+    Prompt {
+        text: String,
+        from_mesh: bool,
+    },
     Cancel,
-    SetConfig { id: String, value: String },
-    SetOption { kind: OptionKind, value: String },
-    Resolve { approval: String, approved: bool },
+    SetConfig {
+        id: String,
+        value: String,
+    },
+    SetOption {
+        kind: OptionKind,
+        value: String,
+    },
+    /// ADR-0101: `scope` only for an adapter that declared `approval_scopes` (`None`: left out, as before).
+    Resolve {
+        approval: String,
+        approved: bool,
+        scope: Option<agora_protocol::v1::ApprovalScope>,
+    },
 }
 
 impl AdapterCall {
     /// The turn (or restart) this call was made in: what the caller reports back about it names this, so a late report is ignored.
     pub fn generation(&self) -> u64 {
         self.generation
+    }
+
+    /// The run of the adapter process this call was made to (a restart, a resume, an exit and a stop each begin another): a result
+    /// recorded about the agent's process names this, so one that comes back after the process was replaced is not applied to the
+    /// replacement ([`Supervisor::runs`]).
+    pub fn epoch(&self) -> u64 {
+        self.epoch
     }
 
     /// Makes the request and waits for the answer.
@@ -283,9 +322,13 @@ impl AdapterCall {
                 .caller
                 .set_option(session, *kind, value, WAIT)
                 .map_err(adapter_error),
-            CallOp::Resolve { approval, approved } => self
+            CallOp::Resolve {
+                approval,
+                approved,
+                scope,
+            } => self
                 .caller
-                .resolve_approval(session, approval, *approved, WAIT)
+                .resolve_approval_scoped(session, approval, *approved, *scope, WAIT)
                 .map_err(|e| SupervisorError::Spawn(e.to_string())),
         }
     }
@@ -324,6 +367,8 @@ pub enum SupervisorError {
     Git(GitError),
     /// Starting the process failed; the text is for logs only.
     Spawn(String),
+    /// RM-19 (#903): the start failed and this machine cannot find the kind's program: `(kind, program)`. Nothing was started.
+    ProgramMissing(String, String),
     /// ADR-0058: the adapter answered with one of the stable reasons the node passes on (`adapter.agent_exited`,
     /// `adapter.agent_refused`, `adapter.option_refused`), with its parameters already checked and bounded.
     Adapter {
@@ -397,6 +442,9 @@ impl SupervisorError {
                 eprintln!("agent start failed: {text:?}");
                 Error::new(ErrorCode::Internal).with("incident_id", "unassigned")
             }
+            Self::ProgramMissing(k, p) => Error::new(ErrorCode::AgentProgramMissing)
+                .with("kind", k.as_str())
+                .with("program", p.as_str()),
             Self::Adapter { code, params } => params
                 .iter()
                 .fold(Error::new(ErrorCode::parse(code)), |e, (k, v)| {
@@ -469,6 +517,26 @@ pub struct AgentView {
     /// ADR-0059: the launch options it was started with, and whether one of them skips permissions.
     pub launch_options: Vec<String>,
     pub skips_permissions: bool,
+}
+
+/// ADR-0095: whether an agent started with `launch_skips` (a launch option that skips permissions) and with these options in use acts
+/// without asking now: the launch option, the current mode when it skips, or a config option in use that skips (a boolean that is on,
+/// or a select whose current choice skips).
+pub fn skips_now(launch_skips: bool, options: &SessionOptions, config: &[ConfigOption]) -> bool {
+    let mode = options
+        .modes
+        .iter()
+        .any(|m| m.id == options.current_mode && m.skips_permissions);
+    let config = config.iter().any(|o| {
+        if o.boolean {
+            o.skips_permissions && o.current == "true"
+        } else {
+            o.choices
+                .iter()
+                .any(|c| c.id == o.current && c.skips_permissions)
+        }
+    });
+    launch_skips || mode || config
 }
 
 /// ADR-0057: whether `program` is a shell, a wrapper or an interpreter, which runs whatever it is given. Compared by its file name,
@@ -770,6 +838,49 @@ impl AdapterRich {
     }
 }
 
+/// ADR-0101 (Codex review of PR #1007): how the adapter process that runs now was launched, recorded on every launch path. A decision
+/// that depends on confinement (`skip_permissions = confined_only`) reads this, never the node's current sandbox setting: an adapter
+/// the holder runs is unconfined by design (`launch_held_adapter` takes none with a sandbox), also after a node that confines agents
+/// took it up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Confinement {
+    /// Started by the node under a sandbox the platform enforces in full.
+    Confined,
+    /// Started without a sandbox (or with one the platform cannot enforce in full), or run by the holder.
+    Unconfined,
+    /// Nothing recorded (no process launched yet): read as not confined.
+    #[default]
+    Unknown,
+}
+
+impl Confinement {
+    /// Only a launch recorded as confined counts as confined (an unknown one fails closed).
+    pub fn confined(self) -> bool {
+        self == Self::Confined
+    }
+}
+
+/// ADR-0101: whether the `skip_permissions` policy lets an agent launched with `confinement` be allowed always (`forbid`: never,
+/// `confined_only`: only a launch recorded as confined, `allow`: always).
+pub fn always_by_policy(policy: SkipPermissions, confinement: Confinement) -> bool {
+    policy.refusal(confinement.confined()).is_none()
+}
+
+impl AdapterEntry {
+    /// ADR-0101: the adapter declared `approval_scopes`: its requests' `scopes` are read, and it never answers a single Allow with a
+    /// remembered option.
+    fn strict_scopes(&self) -> bool {
+        self.capabilities.iter().any(|c| c == "approval_scopes")
+    }
+
+    /// ADR-0101: the process runs the node's ACP bridge (`<agora> acp-bridge -- <agent>`, [`Manifest::driver`]). Read from the command
+    /// it was started with, since every adapter agent's `agent.level` is `L3Adapter`.
+    fn behind_acp_bridge(&self) -> bool {
+        self.spec.command.get(1).map(String::as_str) == Some("acp-bridge")
+            && self.spec.command.get(2).map(String::as_str) == Some("--")
+    }
+}
+
 struct AdapterEntry {
     agent: Agent,
     /// `None` once a user stop has ended the adapter process.
@@ -797,6 +908,11 @@ struct AdapterEntry {
     /// A selected folder (ADR-0052): its path as its start held it; a restart after a crash holds it again (F1023). `None` for a
     /// worktree the node made.
     folder: Option<PathBuf>,
+    /// #933: the generated Git configuration of the adapter process that runs now (ADR-0098), removed when it ends, is stopped or is
+    /// replaced by a restart (which writes its own). `None` when it is not confined or nothing runs.
+    git_config: Option<crate::gitconfig::LaunchFile>,
+    /// ADR-0101: how the adapter process that runs now (or ran last) was launched; set by every launch path.
+    confinement: Confinement,
 }
 
 struct Entry {
@@ -849,6 +965,9 @@ pub struct Supervisor {
     skip_permissions: SkipPermissions,
     /// ADR-0079: the terminal holder agents are started through, when this node has one (Unix); `None` runs every agent in the node.
     holder: Option<std::sync::Arc<HolderHub>>,
+    /// Agents taken up from the holder whose launch options came from the ledger without their arguments (`set_kept_launch`): their
+    /// next process (a restart after a crash) runs without them, so it is not shown with them.
+    kept_launch: BTreeSet<AgentId>,
 }
 
 impl Supervisor {
@@ -868,6 +987,7 @@ impl Supervisor {
             parents: BTreeMap::new(),
             skip_permissions: SkipPermissions::default(),
             holder: None,
+            kept_launch: BTreeSet::new(),
         }
     }
 
@@ -951,8 +1071,15 @@ impl Supervisor {
             return Err(SupervisorError::NotFound(id));
         };
         e.adapter = Some(adapter);
+        // ADR-0101 (Codex review of PR #1007): the holder runs only adapters without a sandbox (`launch_held_adapter`), whatever this
+        // node's confinement policy says now.
+        e.confinement = Confinement::Unconfined;
         e.session_id = reattach.session_id;
         e.capabilities = reattach.capabilities;
+        // Bounded and judged again as a report is (`perm`): the file is the node's own, the words in it are the adapter's.
+        e.options = bounded_options(reattach.options);
+        e.rich.config = bounded_config(reattach.config);
+        e.rich.commands = bounded_commands(reattach.commands);
         e.mesh = mesh;
         e.running = true;
         if let Some(state) = reattach.state {
@@ -969,6 +1096,7 @@ impl Supervisor {
         r: Restore,
         held: Held,
         session: &std::sync::Arc<HolderSession>,
+        started: Option<SystemTime>,
         now: Instant,
     ) -> Result<(), SupervisorError> {
         let id = r.id.clone();
@@ -981,6 +1109,11 @@ impl Supervisor {
         self.restore(r)?;
         let made = agora_platform::held_pty(master, info.info.pid, session.control_of(id.as_str()))
             .and_then(|pty| TerminalHandle::start_with_output(pty, self.cfg.terminal, &info.buffer))
+            // #925: the process started under the earlier node; files it wrote then are still its own.
+            .map(|t| match started {
+                Some(bound) => t.started_after(bound),
+                None => t,
+            })
             .map(TerminalHandle::into_held);
         let terminal = match made {
             Ok(t) => t,
@@ -1026,6 +1159,75 @@ impl Supervisor {
                 e.agent.observe(state, StateSource::Screen);
             }
         }
+    }
+
+    /// ADR-0079/0093 with ADR-0059: an agent taken up from the holder is the process that was started with these launch options (the
+    /// ledger's record of its `AgentStarted`), so it is shown with them, and acting without asking when it does (#907). It skips when
+    /// the launch said so (`recorded_skips`), when this node's manifest says one of the options does, and when an option is no longer
+    /// in the manifest (it cannot be told, so it is shown as skipping). Their arguments are not known again: a restart after a crash
+    /// runs without them, as a resume does, and then the agent is shown without them (see `restart`).
+    pub fn set_kept_launch(&mut self, id: &AgentId, ids: &[String], recorded_skips: bool) {
+        let kind = self
+            .agents
+            .get(id)
+            .map(|e| e.agent.kind.clone())
+            .or_else(|| self.adapters.get(id).map(|e| e.agent.kind.clone()));
+        let Some(kind) = kind else {
+            return;
+        };
+        let manifest = self.kinds.get(&kind).map(|k| &k.manifest);
+        let skips = recorded_skips
+            || ids.iter().any(|o| {
+                manifest
+                    .and_then(|m| m.launch_option(o))
+                    .is_none_or(|o| o.skips_permissions)
+            });
+        let launch = LaunchChoice {
+            ids: ids.to_vec(),
+            args: Vec::new(),
+            skips_permissions: skips,
+        };
+        if let Some(e) = self.agents.get_mut(id) {
+            e.launch = launch;
+        } else if let Some(e) = self.adapters.get_mut(id) {
+            e.launch = launch;
+        }
+        if !ids.is_empty() {
+            self.kept_launch.insert(id.clone());
+        }
+    }
+
+    /// #932: what an adapter agent reported of its session, as this node holds it now (bounded and judged, also when it was put back
+    /// from the ledger at a take-up), as the events a report gives. Nothing for an agent that is not hosted by an adapter, and nothing
+    /// for a part it never reported.
+    pub fn session_events(&self, id: &AgentId) -> Vec<SupervisorEvent> {
+        let Some(e) = self.adapters.get(id) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        let event = |event| SupervisorEvent::Adapter {
+            agent: id.clone(),
+            event,
+        };
+        if e.options != SessionOptions::default() {
+            out.push(event(AdapterEvent::Options {
+                session_id: e.session_id.clone(),
+                options: e.options.clone(),
+            }));
+        }
+        if !e.rich.config.is_empty() {
+            out.push(event(AdapterEvent::Config {
+                session_id: e.session_id.clone(),
+                options: e.rich.config.clone(),
+            }));
+        }
+        if !e.rich.commands.is_empty() {
+            out.push(event(AdapterEvent::Commands {
+                session_id: e.session_id.clone(),
+                commands: e.rich.commands.clone(),
+            }));
+        }
+        out
     }
 
     /// ADR-0060: agent ids start at `next` (the session ledger's), so an id is never given twice across the node's restarts.
@@ -1269,26 +1471,32 @@ impl Supervisor {
             .kinds
             .get(kind)
             .and_then(|k| k.manifest.sandbox.as_ref());
-        let mut profile = self.sandbox.profile(kind, needs, worktree, program)?;
-        // ADR-0078: the file of git settings the node wrote for this start, readable and not writable.
-        let file = self.sandbox.git_config(worktree, &profile.write);
-        profile.read.extend(file);
-        Some(profile)
+        self.sandbox.profile(kind, needs, worktree, program)
     }
 
     /// The confinement of one adapter agent of `kind` ([`Self::sandbox_for`]), refused as a terminal agent's is
-    /// ([`Self::refuse_reachable`]): an adapter and the agent below it run with exactly this profile.
+    /// ([`Self::refuse_reachable`]): an adapter and the agent below it run with exactly this profile. #933: with the launch's generated
+    /// Git file, which the caller keeps for as long as the adapter it starts runs (dropping it, as a failed start does, removes it).
     fn adapter_sandbox(
         &self,
         kind: &str,
         worktree: &Path,
         program: &str,
-    ) -> Result<Option<agora_platform::Sandbox>, SupervisorError> {
-        let profile = self.sandbox_for(kind, worktree, program);
-        if let Some(p) = &profile {
+    ) -> Result<
+        (
+            Option<agora_platform::Sandbox>,
+            Option<crate::gitconfig::LaunchFile>,
+        ),
+        SupervisorError,
+    > {
+        let mut profile = self.sandbox_for(kind, worktree, program);
+        let mut file = None;
+        if let Some(p) = &mut profile {
             self.refuse_reachable(kind, p)?;
+            p.git_config = self.sandbox.git_config(p);
+            file = p.git_config.clone().map(crate::gitconfig::LaunchFile::new);
         }
-        Ok(profile)
+        Ok((profile, file))
     }
 
     /// ADR-0082, decision 4: where the node requires its control token, the file must lie outside every folder the agent may read or
@@ -1418,6 +1626,29 @@ impl Supervisor {
         crate::files::disk_usage(&e.worktree).map_err(|e| SupervisorError::Spawn(e.to_string()))
     }
 
+    /// An agent that cannot be confined is not started unconfined (ADR-0047), and is refused before anything (a worktree) is created.
+    /// #897: an agent of a kind started as a plain process (an adapter or ACP bridge) also needs the platform to confine a command,
+    /// which Windows cannot yet; before, it failed only at spawn, after its worktree was made, as an internal error.
+    fn refuse_unconfinable(&self, kind: &str) -> Result<(), SupervisorError> {
+        let structured = self
+            .kinds
+            .get(kind)
+            .is_some_and(|k| k.manifest.driver(&bridge_program()).is_some());
+        let confinable = if structured {
+            self.sandbox.enforceable_for_commands()
+        } else {
+            self.sandbox.enforceable()
+        };
+        if confinable {
+            Ok(())
+        } else {
+            Err(SupervisorError::SandboxUnavailable(
+                kind.to_string(),
+                self.sandbox.level.name(),
+            ))
+        }
+    }
+
     /// Create the agent's own worktree and start it there.
     pub fn start(&mut self, req: &StartRequest, now: Instant) -> Result<AgentId, SupervisorError> {
         self.start_with_options(req, &Requested::default(), now)
@@ -1438,14 +1669,8 @@ impl Supervisor {
             .kinds
             .get(&req.kind)
             .ok_or_else(|| SupervisorError::UnknownKind(req.kind.clone()))?;
-        // An agent that cannot be confined is not started unconfined (ADR-0047). Adapter-hosted agents are not confined yet.
         let driver = kind.manifest.driver(&bridge_program());
-        if !self.sandbox.enforceable() {
-            return Err(SupervisorError::SandboxUnavailable(
-                req.kind.clone(),
-                self.sandbox.level.name(),
-            ));
-        }
+        self.refuse_unconfinable(&req.kind)?;
         if let Some(spec) = driver {
             if let Some(p) = spec.command.first().and_then(|c| {
                 agora_adapters::package::revoked_publisher_of(
@@ -1573,12 +1798,7 @@ impl Supervisor {
             return self.start_directory_impl(req, project, now, true, options, Some(&folder));
         }
         self.check_limits()?;
-        if !self.sandbox.enforceable() {
-            return Err(SupervisorError::SandboxUnavailable(
-                req.kind.clone(),
-                self.sandbox.level.name(),
-            ));
-        }
+        self.refuse_unconfinable(&req.kind)?;
         let target = req.worktree_root.join(&req.name);
         let relative = req
             .checkout
@@ -1633,12 +1853,7 @@ impl Supervisor {
     ) -> Result<AgentId, SupervisorError> {
         self.check_limits()?;
         let choice = self.launch_choice(&req.kind, options)?;
-        if !self.sandbox.enforceable() {
-            return Err(SupervisorError::SandboxUnavailable(
-                req.kind.clone(),
-                self.sandbox.level.name(),
-            ));
-        }
+        self.refuse_unconfinable(&req.kind)?;
         let kind = self
             .kinds
             .get(&req.kind)
@@ -1667,7 +1882,7 @@ impl Supervisor {
             // F1012: an adapter is started, and given its folder, by path; the folder must be where it was held before and after.
             let launched = self
                 .adapter_sandbox(&req.kind, &worktree, &spec.command[0])
-                .and_then(|profile| {
+                .and_then(|(profile, file)| {
                     launch_adapter(
                         &id,
                         self.holder.as_ref(),
@@ -1679,9 +1894,12 @@ impl Supervisor {
                         mesh.as_ref(),
                         self.credential_vars(&req.kind),
                         folder,
+                        file,
+                        self.sandbox.enforceable(),
                     )
-                });
-            let (adapter, session_id, capabilities) = match launched {
+                })
+                .map_err(|e| self.program_missing(&req.kind, e));
+            let (adapter, session_id, capabilities, git_config, confinement) = match launched {
                 Ok(l) => l,
                 Err(e) => {
                     if let Some(hook) = &self.abort_hook {
@@ -1718,6 +1936,8 @@ impl Supervisor {
                     mesh,
                     launch: choice,
                     folder: folder.map(|f| f.path().to_path_buf()),
+                    git_config,
+                    confinement,
                 },
             );
         } else {
@@ -1887,8 +2107,15 @@ impl Supervisor {
                     .map_err(|e| SupervisorError::Spawn(e.to_string()))?;
             }
         }
+        // #896: the mesh bridge the agent is told to run is the node's own executable, which may sit in a folder only the user may
+        // open (on Windows `%LOCALAPPDATA%\Programs\Agora`). A confined agent may read and run that one file, nothing beside it.
+        let read = private_config
+            .map(Path::to_path_buf)
+            .into_iter()
+            .chain(std::iter::once(endpoint.command.clone()))
+            .collect();
         Ok(Extras {
-            read: private_config.map(Path::to_path_buf).into_iter().collect(),
+            read,
             argv: plan.argv_extra,
             env: plan.env,
             identity,
@@ -1917,7 +2144,7 @@ impl Supervisor {
         let mesh = self.adapter_mesh(&id, &req.kind, &checkout.project.to_string(), &worktree);
         let result = self
             .adapter_sandbox(&req.kind, &worktree, &spec.command[0])
-            .and_then(|profile| {
+            .and_then(|(profile, file)| {
                 launch_adapter(
                     &id,
                     self.holder.as_ref(),
@@ -1929,9 +2156,12 @@ impl Supervisor {
                     mesh.as_ref(),
                     self.credential_vars(&req.kind),
                     None,
+                    file,
+                    self.sandbox.enforceable(),
                 )
-            });
-        let (adapter, session_id, capabilities) = match result {
+            })
+            .map_err(|e| self.program_missing(&req.kind, e));
+        let (adapter, session_id, capabilities, git_config, confinement) = match result {
             Ok(started) => started,
             Err(error) => {
                 self.abandon(&id, created);
@@ -1966,6 +2196,8 @@ impl Supervisor {
                 mesh,
                 launch,
                 folder: None,
+                git_config,
+                confinement,
             },
         );
         Ok(id)
@@ -1999,7 +2231,7 @@ impl Supervisor {
                         sent: was_sent,
                     });
                     if let Some(next) = next {
-                        begin_send(e, &id, next, &sent);
+                        begin_send(e, &id, next, &sent, events);
                     }
                 }
                 None => events.push(SupervisorEvent::PromptDequeued {
@@ -2012,7 +2244,17 @@ impl Supervisor {
         for (id, e) in &mut self.adapters {
             // ADR-0090: a cancelled turn the adapter never ended is over after the grace.
             if let Some(next) = e.rich.expire(now) {
-                begin_send(e, id, next, &sent);
+                begin_send(e, id, next, &sent, events);
+            }
+            // #933: an adapter whose output ended keeps its launch's Git file until its process is collected (a look that never waits;
+            // only an ended adapter that still has a file is asked).
+            if !e.running
+                && e.git_config.is_some()
+                && e.adapter
+                    .as_mut()
+                    .is_none_or(|a| a.exit_status(Duration::ZERO).is_some())
+            {
+                e.git_config = None;
             }
             let polled = match &e.adapter {
                 Some(adapter) if e.running => adapter.poll(),
@@ -2027,7 +2269,7 @@ impl Supervisor {
                         // out when it ends, one per end.
                         if e.capabilities.iter().any(|c| c == "turns") {
                             if let Some(next) = e.rich.observe(state, now) {
-                                begin_send(e, id, next, &sent);
+                                begin_send(e, id, next, &sent, events);
                             }
                         }
                         if e.agent.observe(state, StateSource::Reported) {
@@ -2104,8 +2346,19 @@ impl Supervisor {
                                 state: AgentState::Unknown,
                             });
                         }
+                        // #902: how its process ended, for the end the node reports if it gives up on it now. A crash path only
+                        // (rare), and at most 50 ms under this lock; a held adapter's is what its output's reader heard from the holder, never a question.
+                        let status = e
+                            .adapter
+                            .as_mut()
+                            .and_then(|a| a.exit_status(Duration::from_millis(50)));
+                        // #933: `Exited` is the end of its output, not of its process: the launch's Git file goes once the process is
+                        // collected (here, or by a later poll, or when a restart, a stop or the node's end lets it go).
+                        if status.is_some() {
+                            e.git_config = None;
+                        }
                         events.push(SupervisorEvent::AdapterCrashed { agent: id.clone() });
-                        schedule_adapter_restart(id, e, now, &policy, events);
+                        schedule_adapter_restart(id, e, now, &policy, status, events);
                     }
                     other => events.push(SupervisorEvent::Adapter {
                         agent: id.clone(),
@@ -2135,6 +2388,7 @@ impl Supervisor {
             .and_then(|e| e.folder.as_deref())
             .map(|p| held_again(None, p))
             .transpose();
+        // #933: the new launch's Git file is removed with the attempt when it fails (`launched` is dropped).
         let Some(profile) = self.adapters.get(id).and_then(|e| {
             Some(self.adapter_sandbox(&e.agent.kind, &e.worktree, e.spec.command.first()?))
         }) else {
@@ -2146,6 +2400,8 @@ impl Supervisor {
             .map(|e| self.credential_vars(&e.agent.kind))
             .unwrap_or_default();
         let holder = self.holder.clone();
+        let kept_launch = self.kept_launch.contains(id);
+        let enforceable = self.sandbox.enforceable();
         let Some(e) = self.adapters.get_mut(id) else {
             return;
         };
@@ -2153,8 +2409,10 @@ impl Supervisor {
         e.restarts += 1;
         // The process that ended is let go before the next starts: a held one is collected from the holder, which frees its id.
         e.adapter = None;
+        e.git_config = None;
         // A crash keeps the agent in the mesh: the restarted session gets the same endpoint.
         let launched = held.and_then(|held| {
+            let (profile, file) = profile?;
             launch_adapter(
                 id,
                 holder.as_ref(),
@@ -2162,15 +2420,19 @@ impl Supervisor {
                 &e.checkout_root,
                 &e.worktree,
                 e.agent.session.as_deref(),
-                profile?,
+                profile,
                 e.mesh.as_ref(),
                 creds,
                 held.as_ref(),
+                file,
+                enforceable,
             )
         });
         match launched {
-            Ok((adapter, session_id, capabilities)) => {
+            Ok((adapter, session_id, capabilities, git_config, confinement)) => {
                 e.adapter = Some(adapter);
+                e.confinement = confinement;
+                e.git_config = git_config;
                 e.session_id = session_id;
                 e.capabilities = capabilities;
                 // What the old process reported does not carry over: a mode that skips permissions is checked against what the new
@@ -2179,10 +2441,15 @@ impl Supervisor {
                 e.rich.forget();
                 e.running = true;
                 e.agent.process_restarted();
+                // As for a terminal agent (`restart`): one taken up from the holder restarts without its options' arguments.
+                if kept_launch {
+                    e.launch = LaunchChoice::default();
+                    self.kept_launch.remove(id);
+                }
                 events.push(SupervisorEvent::Started { agent: id.clone() });
                 events.extend(session_report(&e.agent));
             }
-            Err(_) => schedule_adapter_restart(id, e, now, &policy, events),
+            Err(_) => schedule_adapter_restart(id, e, now, &policy, None, events),
         }
     }
 
@@ -2204,6 +2471,7 @@ impl Supervisor {
             session: e.session_id.clone(),
             op,
             generation: e.rich.generation,
+            epoch: e.rich.epoch,
         })
     }
 
@@ -2627,13 +2895,94 @@ impl Supervisor {
         approval_id: &str,
         approved: bool,
     ) -> Result<AdapterCall, SupervisorError> {
+        self.prepare_resolve_approval_scoped(id, approval_id, approved, false)
+    }
+
+    /// ADR-0101: [`prepare_resolve_approval`](Self::prepare_resolve_approval) with the scope the person signed (`always`). An adapter
+    /// that declared `approval_scopes` is told ONCE or ALWAYS; any other is told nothing new and is never sent ALWAYS (refused here,
+    /// although the node never offers it one).
+    pub fn prepare_resolve_approval_scoped(
+        &self,
+        id: &AgentId,
+        approval_id: &str,
+        approved: bool,
+        always: bool,
+    ) -> Result<AdapterCall, SupervisorError> {
+        use agora_protocol::v1::ApprovalScope;
+        let strict = self.adapter_of(id)?.strict_scopes();
+        let scope = match (strict, always) {
+            (true, true) => Some(ApprovalScope::Always),
+            (true, false) => Some(ApprovalScope::Once),
+            (false, false) => None,
+            (false, true) => return Err(SupervisorError::NotFound(id.clone())),
+        };
         self.call_of(
             id,
             CallOp::Resolve {
                 approval: approval_id.to_string(),
                 approved,
+                scope,
             },
         )
+    }
+
+    /// ADR-0101: whether "always" may be offered for (and given to) this agent now: the node's `skip_permissions` policy (`forbid`
+    /// never, `confined_only` only for an agent whose process was launched confined, [`always_by_policy`]) and the kind's manifest
+    /// (`[structured] allow_always = false`). Codex review of PR #1007: the agent's own launch is read ([`Confinement`]), never the
+    /// node's sandbox setting, so a process the holder runs (unconfined) never counts as confined after a node that confines took it
+    /// up, and a launch with nothing recorded fails closed.
+    fn always_permitted(&self, e: &AdapterEntry) -> bool {
+        always_by_policy(self.skip_permissions, e.confinement)
+            && self
+                .kinds
+                .get(&e.agent.kind)
+                .and_then(|k| k.manifest.structured.as_ref())
+                .is_none_or(agora_adapters::manifest::Structured::offers_always)
+    }
+
+    /// ADR-0101: how the node raises a card for this adapter agent's request: whether its adapter declared `approval_scopes`, and
+    /// whether "always" may be offered (see [`always_permitted`](Self::always_permitted)). `None` for an agent without an adapter.
+    pub fn approval_raise_terms(&self, id: &AgentId) -> Option<(bool, bool)> {
+        let e = self.adapters.get(id)?;
+        Some((e.strict_scopes(), self.always_permitted(e)))
+    }
+
+    /// ADR-0101: the policy a decision on this agent's request is checked under, when the decision arrives: the `skip_permissions`
+    /// line the node read from its policy file at start (a change to the file applies from the next node start, as for every policy
+    /// line) and the agent's recorded launch ([`Confinement`]). The caller binds the call it then makes to the same run
+    /// ([`adapter_epoch`](Self::adapter_epoch)). A single Allow is
+    /// refused (Codex review of ADR-0101) only for an agent behind an ACP bridge that did not declare `approval_scopes` (one from
+    /// before ADR-0101, kept across a node update, which may answer it with a remembered option) while "always" is not permitted.
+    pub fn approval_decide(&self, id: &AgentId) -> crate::approvals::Decide {
+        let Some(e) = self.adapters.get(id) else {
+            return crate::approvals::Decide::default();
+        };
+        crate::approvals::Decide::for_adapter(
+            self.always_permitted(e),
+            e.strict_scopes(),
+            e.behind_acp_bridge(),
+        )
+    }
+
+    /// ADR-0101 (Codex review of PR #1007): the run of this adapter agent's process now (`None` for an agent without an adapter). A
+    /// decision checked against the agent's launch is made only to the same run ([`AdapterCall::epoch`]).
+    pub fn adapter_epoch(&self, id: &AgentId) -> Option<u64> {
+        self.adapters.get(id).map(|e| e.rich.epoch)
+    }
+
+    /// ADR-0101 (Codex review of PR #1007): whether the adapter process the call of `epoch` was made to still runs as this agent. A
+    /// result about the agent's process (an always answer it now holds) is recorded only while this holds, under the supervisor's
+    /// lock, so it is ordered before any replacement: a restart, resume, exit or stop begins another run, and the late result of a
+    /// former process never marks its replacement.
+    pub fn runs(&self, id: &AgentId, epoch: u64) -> bool {
+        self.adapters
+            .get(id)
+            .is_some_and(|e| e.running && e.rich.epoch == epoch)
+    }
+
+    /// The launch recorded for this adapter agent's process (ADR-0101), `None` for an agent without an adapter.
+    pub fn confinement(&self, id: &AgentId) -> Option<Confinement> {
+        self.adapters.get(id).map(|e| e.confinement)
     }
 
     /// [`prepare_resolve_approval`](Self::prepare_resolve_approval) and run, under the caller's lock (tests).
@@ -2699,8 +3048,10 @@ impl Supervisor {
     pub fn session_file_targets(&self) -> Vec<crate::session_files::Target> {
         self.agents
             .iter()
-            .filter(|(_, e)| e.terminal.is_some() && e.agent.session.is_none())
+            .filter(|(_, e)| e.agent.session.is_none())
             .filter_map(|(id, e)| {
+                let terminal = e.terminal.as_ref()?;
+                let (launch, started) = (terminal.launch(), terminal.started());
                 let spec = self
                     .kinds
                     .get(&e.agent.kind)?
@@ -2711,6 +3062,8 @@ impl Supervisor {
                     .clone()?;
                 Some(crate::session_files::Target {
                     agent: id.clone(),
+                    launch,
+                    started,
                     kind: e.agent.kind.clone(),
                     folder: e.worktree.clone(),
                     spec,
@@ -2721,6 +3074,21 @@ impl Supervisor {
 
     /// Starts a terminal agent's process, in `folder` when it is given (F1012): `worktree` is that folder's path.
     fn launch_in(
+        &self,
+        id: &AgentId,
+        kind: &str,
+        argv: &[String],
+        worktree: &std::path::Path,
+        extras: &Extras,
+        folder: Option<&agora_platform::HeldFolder>,
+    ) -> Result<TerminalHandle, SupervisorError> {
+        // #925: taken before anything is spawned, so a file written after it may be this process's and one written before never is.
+        let before = SystemTime::now();
+        self.spawn_terminal(id, kind, argv, worktree, extras, folder)
+            .map(|t| t.started_after(before))
+    }
+
+    fn spawn_terminal(
         &self,
         id: &AgentId,
         kind: &str,
@@ -2751,9 +3119,16 @@ impl Supervisor {
             // ADR-0083: what points at a socket the user's session offers is not inherited by a confined agent.
             cfg.env_remove.extend(self.sandbox.scrubbed_env());
         }
-        // ADR-0082 and ADR-0084: checked with the final read grants (the private configuration folder included).
-        if let Some(profile) = &cfg.sandbox {
+        // Check the final ordinary grants before writing the file for this launch (ADR-0098). #933: the file lives exactly as long as
+        // the launch: a start that fails below drops (removes) it, a started one hands it to the terminal's handle.
+        let mut launch_file = None;
+        if let Some(profile) = &mut cfg.sandbox {
             self.refuse_reachable(kind, profile)?;
+            profile.git_config = self.sandbox.git_config(profile);
+            launch_file = profile
+                .git_config
+                .clone()
+                .map(crate::gitconfig::LaunchFile::new);
         }
         if let Some(k) = self.kinds.get(kind) {
             cfg.env = k
@@ -2772,9 +3147,6 @@ impl Supervisor {
         for (name, value) in plan.set {
             cfg.env.retain(|(k, _)| k != &name);
             cfg.env.push((name, value.expose().to_string()));
-        }
-        if let Some(profile) = &cfg.sandbox {
-            cfg.env.extend(git_env(profile, worktree));
         }
         if cfg.sandbox.is_some() && agora_platform::PRIVATE_TEMP {
             let temp = crate::sandbox::agent_temp(worktree).display().to_string();
@@ -2808,10 +3180,11 @@ impl Supervisor {
                     self.sandbox.level.name(),
                     why.token(),
                 ),
-                None => SupervisorError::Spawn(e.to_string()),
+                None => self.program_missing(kind, SupervisorError::Spawn(e.to_string())),
             }
         })?;
         TerminalHandle::start(pty, self.cfg.terminal)
+            .map(|t| t.with_launch_file(launch_file))
             .map_err(|e| SupervisorError::Spawn(e.to_string()))
     }
 
@@ -2826,6 +3199,11 @@ impl Supervisor {
         folder: Option<&agora_platform::HeldFolder>,
     ) -> Option<Result<TerminalHandle, SupervisorError>> {
         let hub = self.holder.as_ref()?;
+        // An id the holder would refuse (longer than the link carries, #929) is run by the node, never refused: the node's own ids
+        // always fit, an id from an older ledger may not.
+        if !crate::holder_link::agent_id_fits(id.as_str()) {
+            return None;
+        }
         let cwd = cfg.cwd.as_ref()?.to_str()?.to_string();
         // A folder that moved is the node path's to report (`FolderMoved`).
         if folder.is_some_and(|f| !f.in_place()) {
@@ -2869,8 +3247,8 @@ impl Supervisor {
                 // The link failed: the holder may have started the agent all the same. Ask before anything else is done: an agent it
                 // has is ended (the node never got its terminal) and only then is another start made, so two copies never run. When
                 // that cannot be settled the start fails rather than run a second copy, unless the holder itself is gone.
-                Err(_) => {
-                    if session.end_agent(id.as_str()).is_ok() || session.holder_ended() {
+                Err(e) => {
+                    if session.end_agent(id.as_str()).is_ok() || session.ended_after(&e) {
                         continue;
                     }
                     return Some(Err(SupervisorError::Spawn("holder link failed".into())));
@@ -2961,7 +3339,10 @@ impl Supervisor {
             } else {
                 entry.gave_up = true;
                 set_state(entry, AgentState::Unknown, StateSource::Reported, events);
-                events.push(SupervisorEvent::GaveUp { agent: id.clone() });
+                events.push(SupervisorEvent::GaveUp {
+                    agent: id.clone(),
+                    exit_code: status.code.or_else(|| status.signal.map(|s| -s)),
+                });
             }
             return;
         }
@@ -3001,6 +3382,7 @@ impl Supervisor {
         );
         // A restart of a process that died is never a resume by the node after its own stop: no "carry on" message here.
         let fresh_next = entry.fresh_next;
+        let kept_launch = self.kept_launch.contains(id);
         let (argv, native, fresh, _) =
             self.argv_for_resume(&kind, session.as_deref(), false, fresh_next);
         // F1020: a selected folder is held again, so a restart never follows a link swapped in for it since the agent started.
@@ -3022,6 +3404,12 @@ impl Supervisor {
                 entry.pacer = Pacer::default();
                 entry.next_check = now;
                 entry.agent.process_restarted();
+                // An agent taken up from the holder knows its launch options but not their arguments (`set_kept_launch`): the
+                // restarted process runs without them, so it is not shown with them any more.
+                if kept_launch {
+                    entry.launch = LaunchChoice::default();
+                    self.kept_launch.remove(id);
+                }
                 // A new session when its own could not be continued (ADR-0060): that one is its session now.
                 if !native {
                     entry.agent.session = fresh;
@@ -3041,7 +3429,10 @@ impl Supervisor {
                     });
                 } else {
                     entry.gave_up = true;
-                    events.push(SupervisorEvent::GaveUp { agent: id.clone() });
+                    events.push(SupervisorEvent::GaveUp {
+                        agent: id.clone(),
+                        exit_code: None,
+                    });
                 }
             }
         }
@@ -3128,6 +3519,14 @@ impl Supervisor {
                 }
                 e.running = false;
             }
+            // #933: once its process is ended and collected, so is this launch's Git file. An adapter whose output ended earlier but
+            // whose process has not been collected keeps it until a later poll sees the process gone.
+            if e.adapter
+                .as_mut()
+                .is_none_or(|a| a.exit_status(Duration::ZERO).is_some())
+            {
+                e.git_config = None;
+            }
             if e.agent.observe(AgentState::Done, StateSource::Reported) {
                 events.push(SupervisorEvent::StateChanged {
                     agent: id.clone(),
@@ -3211,6 +3610,9 @@ impl Supervisor {
                     mesh: None,
                     // ADR-0060: a resumed agent gets none of its launch options back (a resumed agent asks before acting again).
                     launch: LaunchChoice::default(),
+                    git_config: None,
+                    // ADR-0101: no process yet; the launch (or the take-up) that follows records how it runs.
+                    confinement: Confinement::Unknown,
                 },
             );
             return Ok(());
@@ -3270,6 +3672,28 @@ impl Supervisor {
         self.parents.remove(id);
     }
 
+    /// RM-19 (#903): a start that failed without a stable reason of its own (its process could not be started, or an adapter or the
+    /// ACP bridge ended before it answered) for a kind whose program this machine cannot find is said as that
+    /// (`agent.program_missing`), by the same check that marks the kind "not installed" ([`Self::kinds`]), instead of as an internal
+    /// error. The cause still goes to the node's log.
+    fn program_missing(&self, kind: &str, e: SupervisorError) -> SupervisorError {
+        let SupervisorError::Spawn(text) = &e else {
+            return e;
+        };
+        let Some(program) = self
+            .kinds
+            .get(kind)
+            .and_then(|k| crate::manifests::program(&k.manifest))
+        else {
+            return e;
+        };
+        if crate::doctor::locate_in(&agora_adapters::package::agora_home(), program).is_some() {
+            return e;
+        }
+        eprintln!("agent start failed: {text:?}");
+        SupervisorError::ProgramMissing(kind.to_string(), program.to_string())
+    }
+
     /// Start a stopped (or given-up) agent again in its worktree.
     pub fn resume(
         &mut self,
@@ -3292,7 +3716,8 @@ impl Supervisor {
                 return Err(SupervisorError::StillRunning(id.clone()));
             }
             self.check_limits()?;
-            if !self.sandbox.enforceable() {
+            // An adapter is a plain process: it needs the platform to confine a command (#897).
+            if !self.sandbox.enforceable_for_commands() {
                 return Err(SupervisorError::SandboxUnavailable(
                     entry.agent.kind.clone(),
                     self.sandbox.level.name(),
@@ -3316,9 +3741,10 @@ impl Supervisor {
                 .as_deref()
                 .map(|p| held_again(checked, p))
                 .transpose()?;
-            let profile = match entry.spec.command.first() {
+            // #933: the launch's Git file goes with a resume that fails (dropped below), and stays with the adapter it starts.
+            let (profile, git_config) = match entry.spec.command.first() {
                 Some(p) => self.adapter_sandbox(&entry.agent.kind, &entry.worktree, p)?,
-                None => None,
+                None => (None, None),
             };
             let native = entry.agent.session.is_some();
             // A stopped (or given-up) agent left the mesh; resuming joins again with a fresh endpoint, given back if the start fails.
@@ -3339,8 +3765,11 @@ impl Supervisor {
                 mesh.as_ref(),
                 self.credential_vars(&entry.agent.kind),
                 folder.as_ref(),
-            );
-            let (adapter, session_id, capabilities) = match launched {
+                git_config,
+                self.sandbox.enforceable(),
+            )
+            .map_err(|e| self.program_missing(&entry.agent.kind, e));
+            let (adapter, session_id, capabilities, git_config, confinement) = match launched {
                 Ok(l) => l,
                 Err(e) => {
                     if let Some(hook) = &self.abort_hook {
@@ -3354,6 +3783,8 @@ impl Supervisor {
                 .get_mut(id)
                 .ok_or_else(|| SupervisorError::NotFound(id.clone()))?;
             entry.adapter = Some(adapter);
+            entry.confinement = confinement;
+            entry.git_config = git_config;
             entry.session_id = session_id;
             entry.capabilities = capabilities;
             entry.mesh = mesh;
@@ -3480,6 +3911,39 @@ impl Supervisor {
         Ok(())
     }
 
+    /// ADR-0060: the session id found in a session file for the agent's process `launch` ([`session_files::Target`]). Set only while
+    /// that process still runs and the agent has no session yet: one found for a process that has since been restarted, resumed or
+    /// stopped is dropped (the file is that process's conversation, never the next one's, #925), and so is an id another agent holds
+    /// now (one reported while the files were read). Returns whether it was set.
+    ///
+    /// [`session_files::Target`]: crate::session_files::Target
+    pub fn report_found_session(
+        &mut self,
+        id: &AgentId,
+        launch: u64,
+        session: &str,
+    ) -> Result<bool, SupervisorError> {
+        if !crate::session_files::argv_safe(session) {
+            return Err(SupervisorError::OptionUnknown("session_id"));
+        }
+        if !self.agents.contains_key(id) {
+            return Err(SupervisorError::NotFound(id.clone()));
+        }
+        if self.known_sessions().contains(session) {
+            return Ok(false);
+        }
+        let entry = self
+            .agents
+            .get_mut(id)
+            .ok_or_else(|| SupervisorError::NotFound(id.clone()))?;
+        let same = entry.terminal.as_ref().map(TerminalHandle::launch) == Some(launch);
+        if !same || entry.agent.session.is_some() {
+            return Ok(false);
+        }
+        entry.agent.session = Some(session.to_string());
+        Ok(true)
+    }
+
     /// Whether anyone is looking at the agent's terminal; hidden terminals are still checked, less often.
     pub fn set_visible(&mut self, id: &AgentId, visible: bool) {
         if let Some(e) = self.agents.get_mut(id) {
@@ -3516,6 +3980,8 @@ impl Supervisor {
                     adapter.shutdown(Duration::from_secs(1));
                 }
             }
+            // #933: an ended adapter's Git file goes with it. One the holder keeps running has none: it is never confined.
+            e.git_config = None;
         }
     }
 
@@ -3545,6 +4011,56 @@ impl Supervisor {
                     .filter_map(|e| e.adapter.as_ref().map(Adapter::pid)),
             )
             .collect()
+    }
+
+    /// ADR-0095: whether the agent acts without asking for permission now: a launch option that skips it (ADR-0059), or, for a
+    /// structured agent, the mode or a config option in use that does (ADR-0058, ADR-0090 Amendment A; the node's own judgement
+    /// added to the adapter's word). See [`skips_now`].
+    pub fn skips_permissions_now(&self, id: &AgentId) -> bool {
+        if let Some(e) = self.agents.get(id) {
+            return e.launch.skips_permissions;
+        }
+        self.adapters
+            .get(id)
+            .is_some_and(|e| skips_now(e.launch.skips_permissions, &e.options, &e.rich.config))
+    }
+
+    /// ADR-0095: whether a running terminal agent's kind has a screen-detection rule that says idle or done (a kind without one never
+    /// reaches a state the node pastes in, so `unknown` is all it can say). `None` for an agent that is not a running terminal agent.
+    pub fn terminal_detects(&self, id: &AgentId) -> Option<bool> {
+        let e = self.agents.get(id).filter(|e| e.terminal.is_some())?;
+        Some(self.kinds.get(&e.agent.kind).is_some_and(|k| {
+            k.manifest.rules.iter().any(|r| {
+                matches!(
+                    r.state,
+                    agora_adapters::manifest::RuleState::Idle
+                        | agora_adapters::manifest::RuleState::Done
+                )
+            })
+        }))
+    }
+
+    /// ADR-0095: a fresh look at a running terminal agent's screen, for a dispatch: its rules run now on the live bottom of the buffer
+    /// (never the user-visible viewport, and never the paced detection's last result, which an unmatched screen such as a dialog leaves
+    /// as it was): the state they detect (`unknown` when none matches), and [`Self::terminal_detects`]. `None` for an agent that is
+    /// not a running terminal agent.
+    /// ADR-0095: how long until the agent's screen is looked at again by its own detection pacing (`tick_agent`): a held dispatch
+    /// prompt's look at the live screen ([`Self::terminal_readiness`]) waits as long, so it adds no screen reads beyond normal
+    /// detection. `None` for an agent that is not a running terminal agent.
+    pub fn detection_interval(&self, id: &AgentId) -> Option<Duration> {
+        let e = self.agents.get(id).filter(|e| e.terminal.is_some())?;
+        Some(e.pacer.interval(e.visible))
+    }
+
+    pub fn terminal_readiness(&self, id: &AgentId) -> Option<(AgentState, bool)> {
+        let detects = self.terminal_detects(id)?;
+        let e = self.agents.get(id)?;
+        let term = e.terminal.as_ref()?;
+        let kind = self.kinds.get(&e.agent.kind)?;
+        let state = term
+            .inspect(|t| kind.detector.detect(t))
+            .map_or(AgentState::Unknown, |d| d.state);
+        Some((state, detects))
     }
 
     pub fn list(&self) -> Vec<AgentView> {
@@ -3598,6 +4114,7 @@ impl Supervisor {
             spec,
             tool: manifest.kind.clone(),
             quota: manifest.quota.clone(),
+            session: e.agent.session.clone(),
         })
     }
 
@@ -3759,8 +4276,19 @@ fn bounded_options(o: SessionOptions) -> SessionOptions {
 /// ADR-0090: a queued prompt becomes the turn. The send itself is made on a thread of its own, so a hung adapter cannot stall the tick
 /// (which holds the supervisor's lock); its outcome comes back through `sent`, with the turn's generation, and the next poll reports
 /// it (once) and, when it failed, goes on with the next prompt.
-fn begin_send(e: &AdapterEntry, id: &AgentId, next: Next, sent: &SentResults) {
+fn begin_send(
+    e: &AdapterEntry,
+    id: &AgentId,
+    next: Next,
+    sent: &SentResults,
+    events: &mut Vec<SupervisorEvent>,
+) {
     let (next, generation) = next;
+    // #908: said before the send starts, so the conversation marks where this turn begins ahead of anything the agent answers.
+    events.push(SupervisorEvent::PromptSending {
+        agent: id.clone(),
+        tag: next.tag,
+    });
     let caller = e
         .adapter
         .as_ref()
@@ -3785,6 +4313,7 @@ fn begin_send(e: &AdapterEntry, id: &AgentId, next: Next, sent: &SentResults) {
             from_mesh: false,
         },
         generation,
+        epoch: e.rich.epoch,
     };
     let (results, agent, tag) = (Arc::clone(sent), id.clone(), next.tag);
     let spawned = std::thread::Builder::new()
@@ -3981,12 +4510,25 @@ fn held_again(
     })
 }
 
+/// What [`launch_adapter`] started: the adapter, its session id, the capabilities it declared, its launch's Git file and how it was
+/// launched (ADR-0101).
+type Launched = (
+    Adapter,
+    String,
+    Vec<String>,
+    Option<crate::gitconfig::LaunchFile>,
+    Confinement,
+);
+
 /// Spawns an adapter process, initializes it and starts (or resumes) a session. Returns it with the session id and the capabilities
 /// it declared. An adapter's stable reason for failing (ADR-0058) becomes [`SupervisorError::Adapter`].
 ///
 /// `folder`: the selected folder the start holds (F1012, F1023). An adapter is started, and given its folder, by path, so the path
 /// must lead to the held folder right before the adapter is started and again once its session is open; otherwise nothing is started,
 /// or the adapter is ended ([`discard_adapter`]), and the start is refused ([`SupervisorError::FolderMoved`]).
+///
+/// ADR-0101: also returns how the process was launched: [`Confinement::Confined`] only for one the node started itself under `sandbox`
+/// while the node's policy is `enforceable` (as every other confinement check reads it); one the holder runs never is.
 #[allow(clippy::too_many_arguments)] // each is one part of the start the caller made
 fn launch_adapter(
     agent: &AgentId,
@@ -3999,7 +4541,9 @@ fn launch_adapter(
     mesh: Option<&agora_adapters::inject::Endpoint>,
     credentials: Vec<(String, String)>,
     folder: Option<&agora_platform::HeldFolder>,
-) -> Result<(Adapter, String, Vec<String>), SupervisorError> {
+    git_config: Option<crate::gitconfig::LaunchFile>,
+    enforceable: bool,
+) -> Result<Launched, SupervisorError> {
     let (program, args) = spec
         .command
         .split_first()
@@ -4015,9 +4559,6 @@ fn launch_adapter(
     // The agent's mesh server runs below the adapter, inside its confinement: offline, it may reach its own mesh socket and no other.
     if let Some(profile) = &mut sandbox {
         own_socket(profile, mesh.map(|m| m.socket.as_path()));
-    }
-    if let Some(profile) = &sandbox {
-        env.extend(git_env(profile, worktree));
     }
     // A confined adapter works in its own private temporary folder, as a confined terminal agent does.
     if sandbox.is_some() && agora_platform::PRIVATE_TEMP {
@@ -4040,18 +4581,31 @@ fn launch_adapter(
     };
     // ADR-0093: an adapter the node does not confine is run by the holder when this node has one (so it outlives the node), and by the
     // node itself when it cannot be: exactly as before.
-    let adapter = match launch_held_adapter(agent, &config, holder) {
-        Some(started) => started?,
-        None => Adapter::spawn(&config).map_err(|e| SupervisorError::Spawn(e.to_string()))?,
+    let (adapter, confinement) = match launch_held_adapter(agent, &config, holder) {
+        // The holder takes only an adapter without a sandbox.
+        Some(started) => (started?, Confinement::Unconfined),
+        None => {
+            let confined = config.sandbox.is_some() && enforceable;
+            let adapter =
+                Adapter::spawn(&config).map_err(|e| SupervisorError::Spawn(e.to_string()))?;
+            let confinement = if confined {
+                Confinement::Confined
+            } else {
+                Confinement::Unconfined
+            };
+            (adapter, confinement)
+        }
     };
     match open_session(&adapter, checkout_root, worktree, resume, mesh) {
         Ok(_) if moved() => {
-            discard_adapter(adapter);
+            discard_adapter(adapter, git_config);
             Err(SupervisorError::FolderMoved)
         }
-        Ok((session_id, capabilities)) => Ok((adapter, session_id, capabilities)),
+        Ok((session_id, capabilities)) => {
+            Ok((adapter, session_id, capabilities, git_config, confinement))
+        }
         Err(e) => {
-            discard_adapter(adapter);
+            discard_adapter(adapter, git_config);
             Err(e)
         }
     }
@@ -4069,15 +4623,15 @@ fn log_old_holder_once(holder_pid: u32) {
 }
 
 /// ADR-0093: starts `cfg` through the holder, on pipes. `None` means "not through the holder": the caller runs it itself (a confined
-/// adapter, no holder or an older one, a program or id the holder refuses, a variable that is not text). The environment is complete (the
-/// holder passes nothing of its own).
+/// adapter, no holder or an older one, a program or id the holder refuses, an id longer than the link carries, a variable that is not
+/// text). The environment is complete (the holder passes nothing of its own).
 fn launch_held_adapter(
     agent: &AgentId,
     cfg: &AdapterConfig,
     holder: Option<&Arc<HolderHub>>,
 ) -> Option<Result<Adapter, SupervisorError>> {
     let hub = holder?;
-    if cfg.sandbox.is_some() {
+    if cfg.sandbox.is_some() || !crate::holder_link::agent_id_fits(agent.as_str()) {
         return None;
     }
     let cwd = cfg.cwd.as_ref()?.to_str()?.to_string();
@@ -4112,8 +4666,8 @@ fn launch_held_adapter(
             // The link failed: the holder may have started it all the same. Ask before anything else is done: one it has is ended and
             // only then is another start made, so two copies never run; when that cannot be settled the start fails, unless the holder
             // itself is gone.
-            Err(_) => {
-                if session.end_agent(agent.as_str()).is_ok() || session.holder_ended() {
+            Err(e) => {
+                if session.end_agent(agent.as_str()).is_ok() || session.ended_after(&e) {
                     continue;
                 }
                 return Some(Err(SupervisorError::Spawn("holder link failed".into())));
@@ -4135,7 +4689,9 @@ fn launch_held_adapter(
 /// Ends an adapter that is not kept (its start failed or was refused after the process began): the processes below it first, then the
 /// adapter itself, whose last wait (for its output to close) runs on a thread of its own. A process below it that outlived the kill
 /// would keep that output open, and the caller (which holds the supervisor) must not wait for it (Codex review of F1023).
-fn discard_adapter(adapter: Adapter) {
+///
+/// #933: its launch's Git file (`git_config`) is removed only once the adapter is ended and collected, on that same thread.
+fn discard_adapter(adapter: Adapter, git_config: Option<crate::gitconfig::LaunchFile>) {
     // Unix: every process found below the adapter, each only while it is still the process that was found (ADR-0060). Elsewhere the
     // adapter alone is ended, as by any stop.
     let tree = |root| agora_platform::process_tree(root).unwrap_or_default();
@@ -4152,7 +4708,10 @@ fn discard_adapter(adapter: Adapter) {
     // When no thread can be started the adapter is ended here, as before.
     let _ = std::thread::Builder::new()
         .name("agora-adapter-end".into())
-        .spawn(move || drop(adapter));
+        .spawn(move || {
+            drop(adapter);
+            drop(git_config);
+        });
 }
 
 /// The adapter's `initialize` and its session's start (or resume): the session id and the capabilities it declared.
@@ -4196,29 +4755,23 @@ fn open_session(
     Ok((session_id, init.capabilities))
 }
 
-/// ADR-0078: points a confined agent's git at the file the node wrote, when the profile grants that file for reading (it does not when
-/// the owner grants `~/.gitconfig` themselves, or the file could not be written).
-fn git_env(profile: &agora_platform::Sandbox, worktree: &Path) -> Vec<(String, String)> {
-    let file = crate::gitconfig::path_for(worktree);
-    if profile.read.contains(&file) {
-        crate::gitconfig::env_for(&file)
-    } else {
-        Vec::new()
-    }
-}
-
 /// The agent's own mesh socket joins the unix sockets a confined agent may reach (#475, ADR-0083): it lies in a folder of the node's,
 /// which is closed to every agent but this one's socket. Other agents' sockets and the node's are not added.
 fn own_socket(profile: &mut agora_platform::Sandbox, socket: Option<&Path>) {
     profile.sockets.extend(socket.map(Path::to_path_buf));
 }
 
-/// After an adapter died on its own: wait out the backoff and try again, or give up for good.
+/// After an adapter died on its own: wait out the backoff and try again, or give up for good. `last` is how its process ended, when
+/// the node could read it (`None` for a restart that could not start).
+///
+/// #902 (RM-13): giving up ends the agent: it is reported as exited ([`gave_up_status`]) before [`SupervisorEvent::GaveUp`], as a
+/// terminal agent's last crash is, so a window shows it ended with an error and takes no more prompts instead of keeping it unknown.
 fn schedule_adapter_restart(
     id: &AgentId,
     e: &mut AdapterEntry,
     now: Instant,
     policy: &RestartPolicy,
+    last: Option<ExitStatus>,
     events: &mut Vec<SupervisorEvent>,
 ) {
     if e.restarts < policy.max_restarts {
@@ -4230,8 +4783,40 @@ fn schedule_adapter_restart(
             after,
         });
     } else {
-        events.push(SupervisorEvent::GaveUp { agent: id.clone() });
+        let (status, known) = gave_up_status(last);
+        events.push(SupervisorEvent::Exited {
+            agent: id.clone(),
+            status,
+        });
+        events.push(SupervisorEvent::GaveUp {
+            agent: id.clone(),
+            exit_code: known,
+        });
     }
+}
+
+/// #902: the end reported for an adapter the node gave up on, and the exit code it may say (`None`: not known). An adapter does not end
+/// on its own, so this end is always a failure and must read as one wherever an end is shown, whatever ended the last process:
+/// - its own non-zero exit code is kept;
+/// - a signal is reported as an exit code the way a shell reports it, 128 + the signal (SIGKILL 137), because a window reads only some
+///   signals (a crash) as a failure and the others (a stop) as a plain end; this mapping is only for an agent the node gave up on, so an
+///   agent a person ends keeps being shown as before;
+/// - exit code 1 goes on the wire when the status is not known or was 0 (so it is never a success), and is not said as its exit code.
+fn gave_up_status(last: Option<ExitStatus>) -> (ExitStatus, Option<i32>) {
+    let code = match last {
+        Some(ExitStatus {
+            signal: Some(sig), ..
+        }) => Some(sig.saturating_add(128)),
+        Some(ExitStatus { code: Some(c), .. }) if c != 0 => Some(c),
+        _ => None,
+    };
+    (
+        ExitStatus {
+            code: Some(code.unwrap_or(1)),
+            signal: None,
+        },
+        code,
+    )
 }
 
 fn set_state(
@@ -4364,6 +4949,121 @@ fn session_report(agent: &Agent) -> Option<SupervisorEvent> {
 mod adapter_option_tests {
     use super::*;
 
+    /// #896: an agent given the mesh may read (and so run) the mesh bridge it is told to start, the node's own executable, which may
+    /// sit in a folder only the user may open; that file is added to what it may read, not its folder.
+    #[test]
+    fn an_agent_with_the_mesh_may_read_the_bridge_program_and_only_that_file() {
+        let root = std::env::temp_dir().join(format!("agora-sup-bridge-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (worktree, programs) = (root.join("work"), root.join("programs"));
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::create_dir_all(&programs).unwrap();
+        let bridge = programs.join("agora-bridge");
+        let mut sup = Supervisor::new(SupervisorConfig {
+            node: NodeId::new("n"),
+            restart: RestartPolicy::default(),
+            terminal: TerminalOptions::default(),
+            limits: NodeLimits::default(),
+        });
+        sup.register(
+            agora_adapters::Manifest::parse(
+                "kind = \"meshy\"\ndisplay_name = \"M\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [\"claude\"]\n\
+                 [mcp]\nmethod = \"env\"\n[mcp.env]\nAGORA_MCP = \"{mcp_command} mesh stdio\"\n",
+            )
+            .unwrap(),
+        );
+        let (command, socket) = (bridge.clone(), worktree.join("mesh.sock"));
+        sup.set_launch_hook(Box::new(move |_| {
+            Some(agora_adapters::inject::Endpoint {
+                command: command.clone(),
+                socket: socket.clone(),
+            })
+        }));
+        let extras = sup
+            .inject(&AgentId::new("agent-1"), "meshy", "p", &worktree, None)
+            .unwrap();
+        assert_eq!(
+            extras.read,
+            vec![bridge],
+            "the bridge file itself, not its folder"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// #902: an adapter the node gave up on always ends as a failure: its own failing code is kept, a signal (a crash, or SIGKILL from
+    /// an out-of-memory killer) becomes the positive code a shell reports (never the negative value a window reads as a stop), and a
+    /// status that is not known or says success goes out as exit code 1 without being said as its code.
+    #[test]
+    fn an_adapter_given_up_on_ends_as_a_failure() {
+        let st = |code, signal| ExitStatus { code, signal };
+        let wire = |code| st(Some(code), None);
+        assert_eq!(gave_up_status(Some(st(Some(3), None))), (wire(3), Some(3)));
+        assert_eq!(
+            gave_up_status(Some(st(None, Some(9)))),
+            (wire(137), Some(137))
+        );
+        assert_eq!(
+            gave_up_status(Some(st(None, Some(15)))),
+            (wire(143), Some(143))
+        );
+        assert_eq!(
+            gave_up_status(Some(st(None, Some(11)))),
+            (wire(139), Some(139))
+        );
+        assert_eq!(gave_up_status(Some(st(Some(0), None))), (wire(1), None));
+        assert_eq!(gave_up_status(Some(st(None, None))), (wire(1), None));
+        assert_eq!(gave_up_status(None), (wire(1), None));
+        for (status, _) in [
+            gave_up_status(Some(st(None, Some(9)))),
+            gave_up_status(None),
+        ] {
+            assert!(!status.success() && status.code.is_some_and(|c| c > 0));
+        }
+    }
+
+    /// ADR-0095: `TaskDispatched.agent_skips_permissions` is true for a launch option that skips, the current mode that skips, a boolean
+    /// option that skips and is on, or a select whose current choice skips; never for one that is offered but not in use.
+    #[test]
+    fn an_agent_skips_permissions_by_its_launch_its_mode_or_an_option_in_use() {
+        let opt = |id: &str, skips: bool| SessionOption {
+            id: id.into(),
+            skips_permissions: skips,
+            ..SessionOption::default()
+        };
+        let mut options = SessionOptions {
+            modes: vec![opt("build", false), opt("bypass", true)],
+            current_mode: "build".into(),
+            ..SessionOptions::default()
+        };
+        let boolean = |current: &str| ConfigOption {
+            id: "auto_approve".into(),
+            boolean: true,
+            current: current.into(),
+            skips_permissions: true,
+            ..ConfigOption::default()
+        };
+        let select = |current: &str| ConfigOption {
+            id: "approvals".into(),
+            current: current.into(),
+            choices: vec![opt("ask", false), opt("turbo", true)],
+            ..ConfigOption::default()
+        };
+        assert!(!skips_now(false, &options, &[]));
+        assert!(skips_now(true, &options, &[]));
+        assert!(!skips_now(
+            false,
+            &options,
+            &[boolean("false"), select("ask")]
+        ));
+        assert!(skips_now(false, &options, &[boolean("true")]));
+        assert!(skips_now(false, &options, &[select("turbo")]));
+        options.current_mode = "bypass".into();
+        assert!(skips_now(false, &options, &[]));
+        // A mode no longer offered (the id does not match one of the list) does not count.
+        options.current_mode = String::new();
+        assert!(!skips_now(false, &options, &[]));
+    }
+
     #[test]
     fn claude_code_session_markers_are_left_out_only_when_the_node_runs_inside_a_session() {
         let names = |l: &[&str]| {
@@ -4487,6 +5187,198 @@ mod adapter_option_tests {
         for p in ["claude", "codex", "wstack", "opencode"] {
             assert!(!runs_anything(p), "{p}");
         }
+    }
+
+    /// ADR-0101, Codex review of PR #1007: "always" (and, behind an ACP bridge that did not declare `approval_scopes`, a single Allow)
+    /// under `skip_permissions = confined_only` follows how the agent's own process was launched, never the node's sandbox setting
+    /// now: an adapter the holder runs is unconfined (also once a node that confines took it up), and a launch with nothing recorded
+    /// fails closed.
+    #[test]
+    fn always_follows_the_agents_own_launch_never_the_nodes_sandbox_setting() {
+        use crate::launch_options::SkipPermissions as S;
+        use Confinement as C;
+        for (policy, confinement, want) in [
+            (S::Allow, C::Confined, true),
+            (S::Allow, C::Unconfined, true),
+            (S::Allow, C::Unknown, true),
+            (S::ConfinedOnly, C::Confined, true),
+            (S::ConfinedOnly, C::Unconfined, false),
+            (S::ConfinedOnly, C::Unknown, false),
+            (S::Forbid, C::Confined, false),
+            (S::Forbid, C::Unconfined, false),
+            (S::Forbid, C::Unknown, false),
+        ] {
+            assert_eq!(
+                always_by_policy(policy, confinement),
+                want,
+                "{policy:?} {confinement:?}"
+            );
+        }
+
+        let mut sup = Supervisor::new(SupervisorConfig {
+            node: NodeId::new("n"),
+            restart: RestartPolicy::default(),
+            terminal: TerminalOptions::default(),
+            limits: NodeLimits::default(),
+        });
+        sup.register(
+            Manifest::parse(
+                "kind = \"acp\"\ndisplay_name = \"A\"\nversion = \"1\"\nmin_engine = 1\n[structured]\nacp = { argv = [\"opencode\", \"acp\"] }\n",
+            )
+            .unwrap(),
+        );
+        // The node confines agents now (the old check read only this), and its policy allows "always" only for a confined agent.
+        sup.set_sandbox(crate::sandbox::SandboxPolicy {
+            level: crate::sandbox::Level::Worktree,
+            ..Default::default()
+        });
+        sup.set_skip_permissions(S::ConfinedOnly);
+        let id = AgentId::new("agent-1");
+        sup.restore(Restore {
+            id: id.clone(),
+            kind: "acp".into(),
+            project: agora_core::ProjectId::new(None, &"a".repeat(40)).unwrap(),
+            folder: std::env::temp_dir(),
+            directory: true,
+            branch: String::new(),
+            session: None,
+            carry_on: false,
+            private_config: None,
+        })
+        .unwrap();
+        assert!(sup.adapters[&id].behind_acp_bridge());
+        let terms = |sup: &Supervisor| {
+            let decide = sup.approval_decide(&id);
+            (sup.approval_raise_terms(&id), decide.always, decide.once)
+        };
+        // Restored, nothing launched yet: unknown, refused.
+        assert_eq!(sup.confinement(&id), Some(C::Unknown));
+        assert_eq!(terms(&sup), (Some((false, false)), false, false));
+        // Taken up from the holder (unconfined by design) by this confining node: neither "always" nor, behind a bridge from before
+        // ADR-0101, a single Allow.
+        sup.adapters.get_mut(&id).unwrap().confinement = C::Unconfined;
+        assert_eq!(terms(&sup), (Some((false, false)), false, false));
+        sup.adapters.get_mut(&id).unwrap().capabilities = vec!["approval_scopes".into()];
+        assert_eq!(terms(&sup), (Some((true, false)), false, true));
+        // Launched confined by this node: allowed.
+        sup.adapters.get_mut(&id).unwrap().confinement = C::Confined;
+        assert_eq!(terms(&sup), (Some((true, true)), true, true));
+        sup.adapters.get_mut(&id).unwrap().capabilities.clear();
+        assert_eq!(terms(&sup), (Some((false, true)), false, true));
+    }
+
+    /// ADR-0101, Codex review of PR #1007: a result about the agent's process is applied only to the run the call was made to: a
+    /// restart, a resume, an exit or a stop begins another, and the former run's late result does not count for it.
+    #[test]
+    fn a_late_result_names_the_run_it_was_made_to() {
+        let mut sup = Supervisor::new(SupervisorConfig {
+            node: NodeId::new("n"),
+            restart: RestartPolicy::default(),
+            terminal: TerminalOptions::default(),
+            limits: NodeLimits::default(),
+        });
+        sup.register(
+            Manifest::parse(
+                "kind = \"acp\"\ndisplay_name = \"A\"\nversion = \"1\"\nmin_engine = 1\n[structured]\nacp = { argv = [\"opencode\", \"acp\"] }\n",
+            )
+            .unwrap(),
+        );
+        let id = AgentId::new("agent-1");
+        sup.restore(Restore {
+            id: id.clone(),
+            kind: "acp".into(),
+            project: agora_core::ProjectId::new(None, &"a".repeat(40)).unwrap(),
+            folder: std::env::temp_dir(),
+            directory: true,
+            branch: String::new(),
+            session: None,
+            carry_on: false,
+            private_config: None,
+        })
+        .unwrap();
+        let run = sup.adapter_epoch(&id).unwrap();
+        // No process runs (restored only): nothing is applied.
+        assert!(!sup.runs(&id, run));
+        assert!(!sup.runs(&AgentId::new("agent-9"), run));
+        // Its process runs: the result applies, also after a turn began meanwhile (a turn changes the call's `generation`, not its run).
+        sup.adapters.get_mut(&id).unwrap().running = true;
+        assert!(sup.runs(&id, run));
+        let before = sup.adapters[&id].rich.generation;
+        sup.adapters
+            .get_mut(&id)
+            .unwrap()
+            .rich
+            .busy(Instant::now(), false);
+        assert_ne!(sup.adapters[&id].rich.generation, before);
+        assert!(sup.runs(&id, run));
+        // A restart (or an exit, a stop) forgets the former process: its run is over.
+        let _ = sup.adapters.get_mut(&id).unwrap().rich.forget();
+        assert_ne!(sup.adapter_epoch(&id), Some(run));
+        assert!(!sup.runs(&id, run));
+        // A resume, likewise.
+        let now = sup.adapter_epoch(&id).unwrap();
+        assert!(sup.runs(&id, now));
+        sup.adapters.get_mut(&id).unwrap().rich.epoch += 1;
+        assert!(!sup.runs(&id, now));
+        // An exit leaves it not running.
+        sup.adapters.get_mut(&id).unwrap().running = false;
+        assert!(!sup.runs(&id, now + 1));
+
+        // How the node records an always answer delivered to a run: the agent's mark only while that run is its process. A restart
+        // while the answer was on its way: the answer is audited as given, its replacement is not marked.
+        let dir = std::env::temp_dir().join(format!("agora-always-run-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let sink = crate::daemon::EventSink::open(&dir, "n1").unwrap();
+        let marked = |sink: &crate::daemon::EventSink, approval: &str| {
+            let bodies: Vec<_> = sink
+                .events_after(0)
+                .into_iter()
+                .filter_map(|e| e.body)
+                .collect();
+            let audited = bodies.iter().any(|b| matches!(b, agora_protocol::v1::event::Body::ApprovalResolved(r)
+                if r.approval_id == approval && r.scope == agora_protocol::v1::ApprovalScope::Always as i32));
+            let mark = bodies.iter().any(|b| {
+                matches!(b, agora_protocol::v1::event::Body::AgentAlwaysAllowed(a)
+                if a.approval_id == approval && a.agent_id == "agent-1")
+            });
+            (audited, mark)
+        };
+        sup.adapters.get_mut(&id).unwrap().running = true;
+        let run = sup.adapter_epoch(&id);
+        assert!(crate::control::record_always_answer(
+            &sup,
+            &sink,
+            &id,
+            run,
+            "ap-1",
+            "run_command",
+            "phone"
+        ));
+        assert_eq!(marked(&sink, "ap-1"), (true, true));
+        let former = sup.adapter_epoch(&id);
+        let _ = sup.adapters.get_mut(&id).unwrap().rich.forget();
+        assert!(!crate::control::record_always_answer(
+            &sup,
+            &sink,
+            &id,
+            former,
+            "ap-2",
+            "run_command",
+            "phone"
+        ));
+        assert_eq!(marked(&sink, "ap-2"), (true, false));
+        // A call that never reached a run marks nothing either.
+        assert!(!crate::control::record_always_answer(
+            &sup,
+            &sink,
+            &id,
+            None,
+            "ap-3",
+            "run_command",
+            "phone"
+        ));
+        assert_eq!(marked(&sink, "ap-3"), (true, false));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn opt(id: &str, skips: bool) -> SessionOption {

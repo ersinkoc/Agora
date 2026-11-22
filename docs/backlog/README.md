@@ -4,6 +4,7 @@ Tasks sized for one coding-agent session each. Copy each task into a GitHub issu
 the ID here (`P1-03`) goes in the issue title. Tasks marked `needs-decision` wait for a Proposed ADR to be
 accepted by the maintainer.
 
+- **[Roadmap: the order of the remaining work, with subtasks](roadmap.md)** (start here)
 - [Phase 0: bootstrap](phase-0.md)
 - [Phase 1: protocol and schema](phase-1.md)
 - [Phase 2: node core](phase-2.md)
@@ -22,10 +23,12 @@ Follow-up #257 closes reproduced launch, diff-root, resume and filtered-pane fin
 Evidence-audit fixes, in 0.3.14: F401 (#633), F402 (#634), F601 to F603 (#625, #626, #627), F702 to F704 (#623, #624, #630), F202 (#628).
 After 0.3.14, for the next release: F210 and F211 (#641), F221 and F222 (#646), F232 (#645), F240 (#642), F250 and F251 (#643),
 F260 to F262 (#640), F270 (#649), F271 (#644), F280 to F282 (#647), F290 (#656), F501 (#629).
-ADR-0081 to 0084 are Accepted (2026-11-17); ADR-0081 is built (#673), 0082 to 0084 are not yet built. Next, in the maintainer's order: easy
-setup (ADR-0065), then the terminal holder (ADR-0079), the later steps of ADR-0075, and the pickers of ADR-0066.
+ADR-0081 to 0084 are Accepted (2026-11-17); ADR-0081, 0082 and 0084 are built (#673, #674, #699) and ADR-0083 is partly built
+(`docs/capabilities.md`). Easy setup (ADR-0065) and the terminal holder on Linux and macOS (ADR-0079) are built. The order of the work
+from here is [the roadmap](roadmap.md).
 
-Blocked on acceptance: ADR-0087 (install and update coding agents on a machine from the window) is Proposed; nothing is built until the maintainer names it.
+ADR-0087 (install and update coding agents on a machine from the window) is Accepted: `agora doctor`'s agent checks, the signed list,
+`agora agent install` and the node starting installed agents are built (#868, #871, #876); installing from the window is not (roadmap M2.1).
 
 Deferred dependency updates (Dependabot is told to ignore these; revisit when the reason no longer holds):
 - tokio-tungstenite 0.24 to 0.30: the WebSocket stack is the hub/node link and needs a deliberate code migration with its own review (the Dependabot attempt failed CI with four failures).

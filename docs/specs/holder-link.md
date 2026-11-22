@@ -41,7 +41,9 @@ Holder to node: `HelloOk`(64: version, holder pid, holder start time), `Refused`
    its frame was sent**, so a link that breaks mid-way loses nothing (what was sent into a socket nobody reads is the one unavoidable
    loss); an ended agent's status and buffer are sent without a terminal and **kept** until the node sends `Release` (it may die
    between the two). Terminals are never read by the holder while a node is attached, and it never writes to them.
-4. `Start` returns `Started` with the new terminal attached. The launch is the node's: the holder adds and widens nothing. (The
+4. `Start` returns `Started` with the new terminal attached. The launch is the node's: the holder adds and widens nothing. An agent id
+   that is empty or longer than `MAX_AGENT_ID` (256 bytes) is `Refused(BadRequest)` and nothing starts (#929), so every reply that names
+   an agent fits a frame (below, "Limits of the holder itself"). (The
    confinement a node builds is not carried yet; a later step adds it as a new tag.)
 5. **The holder reads a terminal only once the node's process has ended** (a pidfd on Linux, `kqueue` on macOS, else the start time): it
    then reads each terminal into a 1 MiB buffer (oldest dropped first), so no agent blocks on a full terminal. A link that drops while
@@ -69,6 +71,15 @@ next frame's.
   most. A peer that is the lock holder and starts a frame then stalls holds the holder for up to `FRAME_TIMEOUT` (5 s): once a frame
   has begun each receive waits at most `WRITE_SLICE` (1 s) or what is left of the 5 s, and a frame whose last bytes come later is
   refused (tested); sends have a write timeout of the same length, so a node that never reads cannot hang the holder.
+- **Agent ids** are at most `MAX_AGENT_ID` (256 bytes; the node's own are `agent-<n>`, at most 26), refused on `Start` and `StartPipe`
+  (#929). Before, an id of a few MiB still fitted its `Start`, but every later `Attach` reply (the id and up to 1 MiB of buffer) was
+  larger than `MAX_FRAME`: the holder could not send it and dropped the node on every try. With the bound a `Terminal` frame (one id and
+  the whole 1 MiB buffer) and a `PipeData` frame (one id and everything kept) always fit (checked at compile time and tested), and one
+  agent costs at most `MAX_LIST_ENTRY` (275 bytes) in `List`. **Not bounded: the number of agents.** `List` (one frame for every agent)
+  fits up to 15,251 agents in one holder; a holder holding more could not send it (`write_frame` refuses a frame larger than `MAX_FRAME`
+  and the holder drops the node, which then sees the link fail). That is far past what a machine runs (every terminal agent is a PTY,
+  every pipe agent two threads of the holder), so no count is enforced and `List` is not paged; doing either is a new rule for a later
+  step.
 - A holder agent starts with **exactly** the environment in `Start` (the holder runs it with an empty environment plus that list; the
   holder's own environment is a stale snapshot of whoever started it and is never passed on). `env_remove` is therefore redundant for
   the holder and kept only for the format.
@@ -100,13 +111,20 @@ next frame's.
 - **What goes through it:** only an agent the node does not confine (`cfg.sandbox` is `None`). A confined agent (Landlock, Seatbelt) is
   started by the node as before: the holder does not carry a confinement yet, and `Start` is unchanged. A start the holder refuses
   (`Failed`: the program is not there; `AgentExists`) is the node's own start's to report.
+- **Agent ids:** the node sends no id the holder would refuse (`holder_link::agent_id_fits`): an agent whose id is longer than
+  `MAX_AGENT_ID` (none the node makes; a resumed agent keeps its id from the ledger, which takes up to 4 KiB) is run by the node itself, terminal or adapter, never refused.
 - **Environment:** the node sends the complete environment `spawn` would have given the agent (its own, minus the removed names,
   plus the kind's and the node's additions). The link carries text: when a variable is not UTF-8 the agent is **not** started through
   the holder (the node runs it itself), never with a smaller environment than the node's own start gives it.
 - **An ambiguous start:** when the link fails after a `Start` was sent, the holder may have started the agent. The node asks the holder
   (`List`) before anything else: an agent it has under that id is ended (stop, wait for the exit, `Release`) and only then is another
   start made, so two copies never run. If that cannot be settled and the holder's process is alive, the start fails; if the holder's
-  process is gone the node starts again.
+  process is gone the node starts again. When the link failed with anything but a reply that timed out (end of stream, a broken
+  pipe, a reset, or `EPROTOTYPE`, which macOS can give for a send to a socket whose peer is closing), the holder is given up to a second
+  for its process to end, and the node goes on only once it has: a holder ends right after it answered the `Release` of its last agent, so
+  the restart of an agent that crashed, whose end the node collected first, can meet a holder that is closing but has not exited yet.
+  Once it has, the node starts a new holder and the restart succeeds (#951: before, that first restart failed and one crash cost two
+  restarts from the give-up budget). The same applies to a pipe agent (below).
 - **After the start:** the node reads and writes the master it received itself; nothing passes through the holder per byte. Its copies
   of the master and of the link are close-on-exec. Resize and the foreground process use the master directly; a signal and the agent's
   end go over the link (`Signal`/`Stop`, `List` then `Release`). A terminal's exit is polled (the actor looks about once a second
@@ -117,8 +135,21 @@ next frame's.
 - **When the next node starts:** it attaches to the running holder before it calls anything interrupted. For each running agent whose
   ledger entry names this holder (pid and start time, written by the node's tick, `Entry::holder_pid`/`holder_started`) it restores the
   agent, builds its terminal from the master, feeds it what the holder buffered, nudges its size (two resizes) so full-screen programs
-  redraw, registers its mesh endpoint again at the same path, and clears the interruption (`Ledger::reclaim`). An agent that ended while
-  no node was attached is released and stays interrupted (offered for resume); its status and output are not replayed.
+  redraw, registers its mesh endpoint again at the same path, and clears the interruption (`Ledger::reclaim`). The mesh endpoint is made
+  through the launch hook, so the hook is set before the agents are taken up (#906: it was set after, and a kept agent's socket was never
+  served again, so its open `agora mesh stdio` bridge got `mesh.unavailable` for good). The new broker's ids (messages, tasks, leases,
+  handoffs) start above every id an earlier run handed out (reserved on disk first, `MeshServer::reserve_ids`, see mesh-tools.md "Message ids"), so the
+  `inbox` cursor the kept agent carried over still shows what arrives for it (#965: they started over at `m-1` and every new message,
+  presence notice and message from another machine was hidden behind it). After the node's `NodeOnline` (which tells the hub
+  that everything the node ran before is gone) and its `CheckoutDiscovered`, each agent taken up is said up again as a resync
+  announcement says it: `AgentStarted`, `AgentStateChanged` (the state the ledger knew), `AgentSessionReported` when the ledger has a
+  session, and `TerminalOpened` (`EventSink::agent_taken_up`, re-stated, so the ledger does not learn it again). Without them the hub, the
+  window and the terminal client showed the kept agent finished (#907). `AgentStarted` carries the launch options the agent was started
+  with and whether it acts without asking (ADR-0059), from the ledger (`Entry::launch_options`, `skips_permissions`, recorded from its
+  first `AgentStarted`; `Supervisor::set_kept_launch`): it is the same process. An option this node's manifest marks as skipping, or no
+  longer lists, counts as skipping too. The options' arguments are not known again, so a restart after a crash runs without them, as a
+  resume does, and the restarted agent is shown without them. An agent that ended while no node was attached is released and
+  stays interrupted (offered for resume); its status and output are not replayed.
   **Nothing is left attached and unread:** `Attach` made the holder stop reading each terminal and forget its buffer, and the node drops
   a master it does not take, so a running agent left like that would block on a full terminal for good. Every held agent the node does
   not take up (the ledger does not know it or names another holder, its folder or project is gone, or taking it up failed) is ended
@@ -206,7 +237,8 @@ wants to write that cannot fit one frame fails that write on the node's side, be
 2. `StartPipe` runs `argv` in `cwd` with **exactly** `env` (as for terminals: the holder passes nothing of its own), stdin and stdout piped, stderr the
    holder's own (its log), in a session of its own (so a process group of its own, as a terminal agent). Every descriptor beyond 0, 1 and 2 is
    close-on-exec. The launch is the node's: it is sent the complete environment `Adapter::spawn` would have given (`Adapter::held_env`); a variable that
-   is not UTF-8 means the node runs the adapter itself. `Failed`: the program is not there (the node's own start says why); `AgentExists`: the id is in use.
+   is not UTF-8 means the node runs the adapter itself. `Failed`: the program is not there (the node's own start says why); `AgentExists`: the id is in use;
+   `BadRequest`: the id is empty or longer than `MAX_AGENT_ID`, as for `Start`.
    `argv` and `env` are the node's launch, never ACP: the holder cannot tell an adapter from any other program.
 3. **Output.** A thread per agent reads stdout into a buffer of at most 1 MiB (`HELD_BUFFER`) of whole lines, oldest dropped first. A line longer than
    1 MiB (`HELD_LINE_MAX`) is dropped and counted. Empty lines are nothing. A last line without a newline is a line when the output ends.
@@ -237,6 +269,19 @@ wants to write that cannot fit one frame fails that write on the node's side, be
   (pid and start time) and is interrupted, it restores the agent (`restore`), reads the adapter's session id and capabilities the old node wrote to the ledger
   (`Entry::adapter_session`, `adapter_capabilities`; the node cannot ask the adapter again), starts a new adapter host over the holder's pipes (**no
   `initialize` and no `session/start`: the adapter still has its session**), makes the mesh endpoint again at the same path, and clears the interruption.
+  It is said up again to the hub after `NodeOnline` as a terminal agent is (above), with its launch options, without `TerminalOpened`, and then with what
+  it last reported of its session: `AgentSessionOptions`, `AgentSessionConfig`, `AgentCommands` (#932). The adapter does not report them again by itself,
+  so the node keeps the last ones it recorded for each adapter agent in `<data>/sessions/kept-<id>.pb` (beside the ledger, owner-only; a report larger
+  than the hub keeps, 64 KiB encoded, is not kept). The file goes when the agent ends or is interrupted (also when only the file has it), when an agent
+  that runs restarts after a crash (a resume, which follows an end or an interruption, keeps what its new process reported before its start was recorded),
+  and at every start for each agent not taken up, with any unfinished write. A failed removal keeps the report unavailable for the
+  lifetime of the node and is retried on the next kept-session change or a clean flush. A new node rebuilds those marks when its
+  startup sweep cannot remove a report for an agent it did not take up. On take-up the node puts the reports back on the agent
+  (bounded and judged again as a report is) and re-states them from the supervisor's copy (`Supervisor::session_events`), so the
+  window's badge matches `skips_permissions_now`. A resync announcement re-states them after `AgentStarted` too. A mode or config
+  option in use that makes the agent act without asking (switched to after the start, by the person or by the agent) is so shown and checked
+  (`skips_permissions_now`) until the agent reports new ones. Not built: its usage counters in the hub's view start again from 0 (#930); its earlier
+  conversation is not shown (the chat history is in memory, ADR-0089; #931).
   An agent the node does not take up (unknown to the ledger, another holder, ended, its folder gone, no session recorded) is ended through the holder.
 - **Rebuilding what waited on the person (decision 3):** the `seen` lines go through `pending_approvals`, which keeps an `approval/request` unless a later
   `state/update` shows the agent went on (a state other than `blocked`); the `fresh` lines are read as if they had just arrived. A kept request becomes an

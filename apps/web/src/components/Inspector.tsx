@@ -32,7 +32,7 @@ export function Inspector({ fleet = [], now = Date.now(), attention, approvals, 
   usage?: UsageSummary;
   projects?: readonly ProjectCost[];
   onOpen: (id: string) => void;
-  onResolve: (a: ApprovalModel, approved: boolean, choice?: StartChoice) => void;
+  onResolve: (a: ApprovalModel, approved: boolean, choice?: StartChoice, always?: boolean) => void;
   onReview?: (id: string) => void;
   // Open an agent's changes as a pane of the window, beside what is there.
   onPane?: (id: string) => void;
@@ -124,7 +124,7 @@ export function Details({ tab, fleet = [], now = Date.now(), attention, approval
   usage?: UsageSummary;
   projects?: readonly ProjectCost[];
   onOpen: (id: string) => void;
-  onResolve: (a: ApprovalModel, approved: boolean, choice?: StartChoice) => void;
+  onResolve: (a: ApprovalModel, approved: boolean, choice?: StartChoice, always?: boolean) => void;
   onReview?: (id: string) => void;
   onPane?: (id: string) => void;
   pairing?: PairingUi;
@@ -138,7 +138,7 @@ export function Details({ tab, fleet = [], now = Date.now(), attention, approval
         {attention.map(a => <button key={a.id} type="button" className="ide-row justify-between border border-needs-you/60 px-3 py-2" onClick={() => onOpen(a.id)}><span className="truncate font-medium">{a.name}</span><StateBadge state={a.state} /></button>)}
         {notice && <p role="alert" className="text-needs-you">{notice}</p>}
         {pairing && <PairCards ui={pairing} />}
-        {approvals.map(a => <ApprovalCard key={a.id} approval={a} onResolve={(ok, choice) => onResolve(a, ok, choice)} />)}
+        {approvals.map(a => <ApprovalCard key={a.id} approval={a} onResolve={(ok, choice, always) => onResolve(a, ok, choice, always)} />)}
       </div>}
     {tab === 'changes' && (changed.length === 0 ? <EmptyState icon="check" title={t('empty-changes-title')} hint={t('empty-changes-hint')} /> : <ul className="m-0 grid list-none gap-1 p-0">
         {changed.map(a => <li key={a.id} className="flex items-center gap-1">
@@ -152,7 +152,7 @@ export function Details({ tab, fleet = [], now = Date.now(), attention, approval
     {tab === 'board' && <div className="grid gap-2">{boards.map(b => <ProjectBoard key={b.projectId} board={b} machines={boardMachines} />)}</div>}
     {tab === 'messages' && (messages.length === 0 ? <EmptyState icon="chat" title={t('empty-messages-title')} hint={t('empty-messages-hint')} /> : <ul className="m-0 grid list-none gap-2 p-0">
         {messages.map((m, i) => <li key={`${m.atMs}-${i}`} className="rounded-xs border border-line bg-surface-0 p-2.5">
-          <div className="text-xs"><strong>{m.from}</strong> <span className="inline-block rtl:-scale-x-100" aria-hidden="true">→</span> <strong>{m.to}</strong>{m.crossMachine ? <span className="ide-chip ms-1.5">{t('message-cross')}</span> : null}</div>
+          <div className="text-xs"><strong>{m.from}</strong> <span className="inline-block rtl:-scale-x-100" aria-hidden="true">→</span> <strong>{m.to}</strong>{m.crossMachine ? <span className="ide-chip ms-1.5">{t('message-cross')}</span> : null}{m.via ? <span className="ide-chip ms-1.5">{t('message-via', { machine: m.via })}</span> : null}</div>
           <div className="mt-1 break-words text-muted">{m.body}</div>
         </li>)}
       </ul>)}

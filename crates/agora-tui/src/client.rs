@@ -4,6 +4,8 @@
 //! Every call blocks the calling thread (a small runtime is built per call), so the terminal loop stays plain code.
 
 use std::sync::Arc;
+
+use agora_i18n::key;
 use std::time::Duration;
 
 use crate::device::{approval_message, grant_message, new_grant_id, Device};
@@ -145,6 +147,82 @@ pub struct Session {
     snapshot: Option<Box<Snapshot>>,
     /// Typing sent without waiting for the answer, and the newest of it a machine refused (per terminal) because it wants a grant first.
     typing: Typing,
+    /// What the events after the snapshot said that the snapshot has no field for (ADR-0090 config options).
+    seen: Seen,
+    /// History (kind 4, ADR-0100) per terminal stream, held for the screen it comes before: [`Session::terminal_history`].
+    history: HeldHistory,
+}
+
+/// The agents' config options (ADR-0090: the snapshot has no field for them; the hub replays each running agent's last
+/// `AgentSessionConfig` right after the snapshot, at its position, and live changes follow the same way), by hub-wide agent id, and the
+/// snapshot's position: an event at or before it says nothing the snapshot did not.
+#[derive(Debug, Default)]
+pub struct Seen {
+    pub configs: Configs,
+    snapshot_pos: Option<u64>,
+    /// A report changed an agent's options since [`Session::take_configs_changed`] (a view that shows them draws again).
+    pub configs_changed: bool,
+}
+
+/// What the events after the snapshot said about the agents' sessions, by hub-wide agent id: their config options (ADR-0090) and, from
+/// a live `AgentSessionOptions` newer than the snapshot, their modes and current mode (ADR-0058), which then stand in for the
+/// snapshot's.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Configs {
+    pub options: std::collections::HashMap<String, Vec<agora_protocol::v1::SessionConfigOption>>,
+    pub modes: std::collections::HashMap<String, (Vec<agora_protocol::v1::SessionOption>, String)>,
+}
+
+/// At most this many agents' options are kept, each at most [`MAX_OPTIONS`] (a hub cannot make the client's memory grow).
+const MAX_CONFIG_AGENTS: usize = 4096;
+const MAX_OPTIONS: usize = 64;
+
+impl Seen {
+    /// Reads one positioned event: keeps an agent's config options (each report replaces the last), and says whether the event is
+    /// newer than the snapshot (a fresh snapshot is wanted for it).
+    fn note(&mut self, f: &Frame) -> bool {
+        let Ok(p) = agora_protocol::v1::PositionedEvent::decode(f.payload.as_slice()) else {
+            return true;
+        };
+        let newer = self.snapshot_pos.is_none_or(|at| p.pos > at);
+        match p.event.as_ref().map(|e| (&e.producer_id, &e.body)) {
+            Some((producer, Some(agora_protocol::v1::event::Body::AgentSessionConfig(c)))) => {
+                let id = format!("{producer}/{}", c.agent_id);
+                let options = &mut self.configs.options;
+                let before = options.get(&id).cloned();
+                if c.options.is_empty() {
+                    options.remove(&id);
+                } else if options.len() < MAX_CONFIG_AGENTS || options.contains_key(&id) {
+                    options.insert(
+                        id.clone(),
+                        c.options.iter().take(MAX_OPTIONS).cloned().collect(),
+                    );
+                }
+                if options.get(&id) != before.as_ref() {
+                    self.configs_changed = true;
+                }
+            }
+            // A mode change after the snapshot (an older one is in the snapshot already).
+            Some((producer, Some(agora_protocol::v1::event::Body::AgentSessionOptions(o))))
+                if newer =>
+            {
+                let id = format!("{producer}/{}", o.agent_id);
+                let modes = &mut self.configs.modes;
+                if modes.len() < MAX_CONFIG_AGENTS || modes.contains_key(&id) {
+                    let now = (
+                        o.modes.iter().take(MAX_OPTIONS).cloned().collect(),
+                        o.current_mode.clone(),
+                    );
+                    if modes.get(&id) != Some(&now) {
+                        modes.insert(id, now);
+                        self.configs_changed = true;
+                    }
+                }
+            }
+            _ => {}
+        }
+        newer
+    }
 }
 
 /// Typing a machine refused because it wants a grant first (ADR-0041): the terminal it was for, and its request's number (typing sent
@@ -325,6 +403,8 @@ impl Session {
             asked: false,
             snapshot: None,
             typing: Typing::default(),
+            seen: Seen::default(),
+            history: HeldHistory::default(),
         })
     }
 
@@ -342,6 +422,7 @@ impl Session {
         let queue = &mut self.term_frames;
         let asked = &mut self.asked;
         let typing = &mut self.typing;
+        let seen = &mut self.seen;
         self.rt.block_on(async {
             match tokio::time::timeout(wait, conn.recv()).await {
                 Err(_) => Update::Quiet,
@@ -354,7 +435,10 @@ impl Session {
                 }
                 Ok(Ok(Some(f))) if f.stream_id == STREAM_EVENTS && f.kind == kinds::SNAPSHOT => {
                     match Snapshot::decode(f.payload.as_slice()) {
-                        Ok(s) => Update::Snapshot(Box::new(s)),
+                        Ok(s) => {
+                            seen.snapshot_pos = Some(s.pos);
+                            Update::Snapshot(Box::new(s))
+                        }
                         Err(_) => Update::Closed,
                     }
                 }
@@ -364,7 +448,12 @@ impl Session {
                     if asks_the_user(&f) {
                         *asked = true;
                     }
-                    Update::Changed
+                    // The config options the hub replays right after the snapshot are kept, and want no fresh snapshot.
+                    if seen.note(&f) {
+                        Update::Changed
+                    } else {
+                        Update::Quiet
+                    }
                 }
                 Ok(Ok(Some(f))) if f.stream_id == STREAM_EVENTS && is_pair_frame(&f) => {
                     keep_pair_frame(f, queue);
@@ -397,6 +486,16 @@ impl Session {
         }
         self.term_frames = rest;
         notes
+    }
+
+    /// ADR-0090: each agent's config options as its machine last reported them in this session, by hub-wide agent id.
+    pub fn configs(&self) -> &Configs {
+        &self.seen.configs
+    }
+
+    /// Whether a report changed an agent's config options since the last call (then cleared).
+    pub fn take_configs_changed(&mut self) -> bool {
+        std::mem::take(&mut self.seen.configs_changed)
     }
 
     /// Whether a request for the user's answer arrived since the last call (then cleared).
@@ -446,6 +545,7 @@ impl Session {
         let term_frames = &mut self.term_frames;
         let typing = &mut self.typing;
         let asked = &mut self.asked;
+        let seen = &mut self.seen;
         self.rt.block_on(async {
             conn.send(&Frame {
                 stream_id: STREAM_COMMANDS,
@@ -477,7 +577,7 @@ impl Session {
                         None => Ok(CommandOk::default()),
                     };
                 }
-                set_aside(f, changed, asked, kept, term_frames);
+                set_aside(f, changed, asked, kept, term_frames, seen);
             }
         })
     }
@@ -503,40 +603,89 @@ impl Session {
         approved: bool,
         agent: Option<&str>,
     ) -> Result<bool, String> {
+        let answer = if approved {
+            Answer::Allow
+        } else {
+            Answer::Deny
+        };
+        self.resolve_answer(snapshot, device, answer, agent)
+    }
+
+    /// [`Session::resolve_approval`] with the answer the key named; ADR-0101: [`Answer::AllowAlways`] only for a request that offers it,
+    /// and a plain Allow never for one that offers only that ([`answer_message`]). Refused here, nothing sent, with
+    /// `approval.scope_unavailable` otherwise.
+    pub fn resolve_answer(
+        &mut self,
+        snapshot: &Snapshot,
+        device: &Device,
+        answer: Answer,
+        agent: Option<&str>,
+    ) -> Result<bool, String> {
         let Some(a) = answered_approval(snapshot, agent) else {
             return Ok(false);
         };
+        self.resolve_request(a, device, answer).map(|()| true)
+    }
+
+    /// Answers exactly the request `a` (an agent's tab answers its own request, never another one): signed and sent as
+    /// [`answer_message`] says, or refused before anything is sent.
+    pub fn resolve_request(
+        &mut self,
+        a: &agora_protocol::v1::ApprovalSnapshot,
+        device: &Device,
+        answer: Answer,
+    ) -> Result<(), String> {
         // Hub-wide ids are `<node>/<local id>`; the machine knows the local one.
         let (node, local) = a
             .approval_id
             .split_once('/')
             .unwrap_or(("", a.approval_id.as_str()));
-        let message = decision_message(node, local, &a.action, &a.detail, approved);
+        let (message, scope) = answer_message(a, answer).map_err(str::to_string)?;
         let signature = device
             .sign(&message)
             .ok_or_else(|| "client.sign".to_string())?;
         let cmd = command_request::Command::ApprovalResolve(agora_protocol::v1::ApprovalResolve {
             approval_id: local.to_string(),
-            approved,
+            approved: answer != Answer::Deny,
             signer_device_id: device.id.clone(),
             signature,
             helper_grant: 0,
             helpers_may_start: false,
+            // ADR-0101: UNSPECIFIED for a single answer (signed over the v1 bytes, as before), ALWAYS over its own bytes.
+            scope: scope as i32,
         });
         self.command(node, cmd, Duration::from_secs(15))
-            .map(|()| true)
     }
 
     /// Opens a terminal of a machine (ADR-0029): the hub relays its screen and output on a stream of ours. `terminal_id` is the
     /// machine's own id. Returns the stream; read it with [`Session::terminal_next`].
     pub fn terminal_open(&mut self, node: &str, terminal_id: &str) -> Result<u32, String> {
+        self.terminal_open_with_history(node, terminal_id, 0)
+    }
+
+    /// [`Session::terminal_open`] for a view that wants the newest `lines` lines of history before the first screen (ADR-0100
+    /// decision 2; the machine sends at most what it keeps, an older one none). The history is held for that screen: take it with
+    /// [`Session::terminal_history`] when [`TermEvent::Screen`] arrives.
+    pub fn terminal_open_with_history(
+        &mut self,
+        node: &str,
+        terminal_id: &str,
+        lines: u32,
+    ) -> Result<u32, String> {
         self.open_stream(
             node,
             command_request::Command::TerminalSubscribe(agora_protocol::v1::TerminalSubscribe {
                 terminal_id: terminal_id.to_string(),
                 format: String::new(),
+                history_lines: lines,
             }),
         )
+    }
+
+    /// The history (kind 4) that came on `stream` before the [`TermEvent::Screen`] just returned, taken: empty when none came (none
+    /// was asked for, the machine keeps none, or it is older).
+    pub fn terminal_history(&mut self, stream: u32) -> Vec<u8> {
+        self.history.take(stream)
     }
 
     /// Opens the conversation of an agent that has no terminal (ADR-0038). `agent_id` is the machine's own id. Read it with
@@ -570,6 +719,7 @@ impl Session {
         let kept = &mut self.snapshot;
         let term_frames = &mut self.term_frames;
         let asked = &mut self.asked;
+        let seen = &mut self.seen;
         let typing = &mut self.typing;
         self.rt.block_on(async {
             conn.send(&Frame {
@@ -600,36 +750,40 @@ impl Session {
                     }
                     typing.reply(&r);
                 } else {
-                    set_aside(f, changed, asked, kept, term_frames);
+                    set_aside(f, changed, asked, kept, term_frames, seen);
                 }
             }
         })
     }
 
-    /// The next thing on a terminal stream, waiting up to `wait`.
+    /// The next thing on a terminal stream, waiting up to `wait`. History frames (kind 4) are held for the screen they come before
+    /// ([`Session::terminal_history`]) and never returned; the frame after them is.
     pub fn terminal_next(&mut self, stream: u32, wait: Duration) -> TermEvent {
-        fn event(f: &Frame) -> Option<TermEvent> {
-            if f.kind == STREAM_CLOSE {
-                return Some(TermEvent::Ended);
+        let mut wait = wait;
+        loop {
+            let f = match self.terminal_frame(stream, wait) {
+                Ok(f) => f,
+                Err(e) => {
+                    if e == TermEvent::Lost {
+                        // Every subscription on the connection is over: history whose screen never came is dropped.
+                        self.history.clear_all();
+                    }
+                    return e;
+                }
+            };
+            if let Some(e) = self.history.route(&f) {
+                return e;
             }
-            let p = &f.payload;
-            match f.kind {
-                KIND_BEHIND => Some(TermEvent::Behind),
-                0 => Some(TermEvent::Data(p.clone())),
-                1 => Some(TermEvent::Screen(p.clone())),
-                2 if p.len() == 4 => Some(TermEvent::Resized(
-                    u16::from_le_bytes([p[0], p[1]]),
-                    u16::from_le_bytes([p[2], p[3]]),
-                )),
-                3 if p.len() == 4 => Some(TermEvent::Exit(i32::from_le_bytes([
-                    p[0], p[1], p[2], p[3],
-                ]))),
-                _ => None,
-            }
+            // The screen follows its history directly: take what is already here without waiting again.
+            wait = Duration::ZERO;
         }
+    }
+
+    /// The next frame of `stream`, or [`TermEvent::Quiet`] (nothing in time) or [`TermEvent::Lost`].
+    fn terminal_frame(&mut self, stream: u32, wait: Duration) -> Result<Frame, TermEvent> {
         if let Some(pos) = self.term_frames.iter().position(|f| f.stream_id == stream) {
             if let Some(f) = self.term_frames.remove(pos) {
-                return event(&f).unwrap_or(TermEvent::Quiet);
+                return Ok(f);
             }
         }
         let conn = &mut self.conn;
@@ -638,18 +792,19 @@ impl Session {
         let queue = &mut self.term_frames;
         let typing = &mut self.typing;
         let asked = &mut self.asked;
+        let seen = &mut self.seen;
         self.rt.block_on(async {
             match tokio::time::timeout(wait, conn.recv()).await {
-                Err(_) => TermEvent::Quiet,
-                Ok(Ok(Some(f))) if f.stream_id == stream => event(&f).unwrap_or(TermEvent::Quiet),
+                Err(_) => Err(TermEvent::Quiet),
+                Ok(Ok(Some(f))) if f.stream_id == stream => Ok(f),
                 Ok(Ok(Some(f))) => {
                     // The answer to something typed without waiting: only a missing grant matters.
                     if !typing.answer(&f) {
-                        set_aside(f, changed, asked, kept, queue);
+                        set_aside(f, changed, asked, kept, queue, seen);
                     }
-                    TermEvent::Quiet
+                    Err(TermEvent::Quiet)
                 }
-                Ok(_) => TermEvent::Lost,
+                Ok(_) => Err(TermEvent::Lost),
             }
         })
     }
@@ -681,6 +836,7 @@ impl Session {
         let kept = &mut self.snapshot;
         let queue = &mut self.term_frames;
         let asked = &mut self.asked;
+        let seen = &mut self.seen;
         let typing = &mut self.typing;
         self.rt.block_on(async {
             match tokio::time::timeout(wait, conn.recv()).await {
@@ -688,7 +844,7 @@ impl Session {
                 Ok(Ok(Some(f))) if f.stream_id == stream => take(&f).unwrap_or(ChatEvent::Quiet),
                 Ok(Ok(Some(f))) => {
                     if !typing.answer(&f) {
-                        set_aside(f, changed, asked, kept, queue);
+                        set_aside(f, changed, asked, kept, queue, seen);
                     }
                     ChatEvent::Quiet
                 }
@@ -1196,6 +1352,7 @@ impl Session {
 
     /// Tells the hub we stopped watching this stream.
     pub fn terminal_close(&mut self, stream: u32) {
+        self.history.clear(stream);
         let conn = &mut self.conn;
         let _ = self.rt.block_on(conn.send(&Frame {
             stream_id: stream,
@@ -1230,6 +1387,171 @@ fn command_error(code: &str) -> ErrorInfo {
         code: code.to_string(),
         ..Default::default()
     }
+}
+
+/// ADR-0101: what a waiting request offers beyond a single answer, as the machine announced it (after its policy).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AlwaysOffer {
+    /// The agent's own name for its "always" option: untrusted text, shown quoted, may be empty.
+    pub label: String,
+    /// The exact option the answer is bound to (signed, never shown).
+    pub option_id: String,
+    /// The request offers no single answer: only one the agent remembers.
+    pub only: bool,
+}
+
+/// ADR-0101: the "always" offer of `a`, as the web window reads it: ALWAYS in its `scopes` with the option's id, never for a request the
+/// machine itself makes (`agent.start`, `agent.skip_permissions`, any `agent.` action).
+pub fn always_offer(a: &agora_protocol::v1::ApprovalSnapshot) -> Option<AlwaysOffer> {
+    use agora_protocol::v1::ApprovalScope;
+    let has = |s: ApprovalScope| a.scopes.contains(&(s as i32));
+    if a.action.starts_with("agent.")
+        || !has(ApprovalScope::Always)
+        || a.always_option_id.is_empty()
+    {
+        return None;
+    }
+    Some(AlwaysOffer {
+        label: a.always_label.clone(),
+        option_id: a.always_option_id.clone(),
+        only: !has(ApprovalScope::Once) && !has(ApprovalScope::Unspecified),
+    })
+}
+
+/// ADR-0101 and Codex's review of it: "for this session" is said only for a kind known to drop an "always" answer when its session ends. ACP
+/// lets the agent decide what the answer covers and for how long, and no machine reports a kind as checked yet (no manifest or protocol
+/// field says so), so every kind gets the words that say the agent keeps it (`-kept`). The ADR's session words keep their own ids for the
+/// day a kind can be marked as checked (`session_limited`).
+pub fn always_text(id: &'static str, session_limited: bool) -> &'static str {
+    if session_limited {
+        return id;
+    }
+    match id {
+        "tui-request-answer-always" => key!("tui-request-answer-always-kept"),
+        "tui-request-answer-always-only" => key!("tui-request-answer-always-only-kept"),
+        "tui-chat-answer-always" => key!("tui-chat-answer-always-kept"),
+        "tui-chat-answer-always-only" => key!("tui-chat-answer-always-only-kept"),
+        "tui-tab-answer-always" => key!("tui-tab-answer-always-kept"),
+        "tui-tab-answer-always-only" => key!("tui-tab-answer-always-only-kept"),
+        "tui-allowed-always" => key!("tui-allowed-always-kept"),
+        "tui-app-cmd-allow-always" => key!("tui-app-cmd-allow-always-kept"),
+        "tui-allow-once-not-offered" => key!("tui-allow-once-not-offered-kept"),
+        "tui-always-warning" => key!("tui-always-warning-kept"),
+        other => other,
+    }
+}
+
+/// ADR-0101: the hint that says the keys answering `a`: `plain` when it offers no "always", else the `always` or `only` one (`only`: no
+/// single answer), in the words [`always_text`] picks.
+pub fn answer_hint(
+    a: &agora_protocol::v1::ApprovalSnapshot,
+    plain: &'static str,
+    always: &'static str,
+    only: &'static str,
+) -> &'static str {
+    match always_offer(a) {
+        None => plain,
+        Some(o) if o.only => always_text(only, false),
+        Some(_) => always_text(always, false),
+    }
+}
+
+/// How a request is answered: `y`, ADR-0101's `A` (Alt+A in a tab), `n`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Answer {
+    Allow,
+    AllowAlways,
+    Deny,
+}
+
+/// ADR-0101: the answer a key typed in the box that shows a request gives: `y` once, `A` always, `n` denies; any other key (a lowercase
+/// `a`, a `Y`) leaves the request waiting, so a one-letter case difference is never the gap between a single and a remembered answer.
+pub fn box_answer(key: Option<u8>) -> Option<Answer> {
+    match key {
+        Some(b'y') => Some(Answer::Allow),
+        Some(b'A') => Some(Answer::AllowAlways),
+        Some(b'n') => Some(Answer::Deny),
+        _ => None,
+    }
+}
+
+/// ADR-0101: the line (a text id) that refuses an answer `a` does not offer, before anything is signed or sent: "always" on a request that
+/// offers only a single answer, a plain Allow on one that offers only "always". `None` when the answer may go.
+pub fn not_offered(
+    a: &agora_protocol::v1::ApprovalSnapshot,
+    answer: Answer,
+) -> Option<&'static str> {
+    let offer = always_offer(a);
+    match answer {
+        Answer::AllowAlways if offer.is_none() => Some(key!("tui-allow-always-not-offered")),
+        Answer::Allow if offer.is_some_and(|o| o.only) => {
+            Some(always_text(key!("tui-allow-once-not-offered"), false))
+        }
+        _ => None,
+    }
+}
+
+/// The bytes this device signs to answer `a` and the scope the answer carries, or the code it is refused with before anything is sent:
+/// `approval.scope_unavailable` for an "always" answer the request does not offer, or a plain Allow on a request that offers only
+/// "always" (the agent would remember it). A Deny is always a single answer.
+pub fn answer_message(
+    a: &agora_protocol::v1::ApprovalSnapshot,
+    answer: Answer,
+) -> Result<(Vec<u8>, agora_protocol::v1::ApprovalScope), &'static str> {
+    use agora_protocol::v1::ApprovalScope;
+    let (node, local) = a
+        .approval_id
+        .split_once('/')
+        .unwrap_or(("", a.approval_id.as_str()));
+    let offer = always_offer(a);
+    match answer {
+        Answer::Deny => Ok((
+            decision_message(node, local, &a.action, &a.detail, false),
+            ApprovalScope::Unspecified,
+        )),
+        Answer::Allow if offer.as_ref().is_some_and(|o| o.only) => {
+            Err("approval.scope_unavailable")
+        }
+        Answer::Allow => Ok((
+            decision_message(node, local, &a.action, &a.detail, true),
+            ApprovalScope::Unspecified,
+        )),
+        Answer::AllowAlways => {
+            // The node's own id of the agent: the part of the hub-wide key after `<node>/`.
+            let agent = a
+                .agent_id
+                .strip_prefix(node)
+                .and_then(|r| r.strip_prefix('/'))
+                .filter(|r| !node.is_empty() && !r.is_empty());
+            match (offer, agent) {
+                (Some(o), Some(agent)) => Ok((
+                    crate::device::always_message(
+                        node,
+                        local,
+                        agent,
+                        &a.action,
+                        &a.detail,
+                        &o.label,
+                        &o.option_id,
+                    ),
+                    ApprovalScope::Always,
+                )),
+                _ => Err("approval.scope_unavailable"),
+            }
+        }
+    }
+}
+
+/// The request an agent's tab answers: exactly `approval`, and only while it is still `agent`'s and waiting. Never another request.
+pub fn exact_approval<'a>(
+    snapshot: &'a Snapshot,
+    agent: &str,
+    approval: &str,
+) -> Option<&'a agora_protocol::v1::ApprovalSnapshot> {
+    snapshot
+        .approvals
+        .iter()
+        .find(|a| a.approval_id == approval && a.agent_id == agent)
 }
 
 /// The request `y` / `n` answer: `agent`'s when it has one, else the first waiting.
@@ -1277,6 +1599,7 @@ pub fn place_of(snapshot: &Snapshot, agent: &str) -> Option<(String, Place)> {
 }
 
 /// What a watched terminal said.
+#[derive(Debug, PartialEq, Eq)]
 pub enum TermEvent {
     /// Output to write as it is.
     Data(Vec<u8>),
@@ -1292,6 +1615,77 @@ pub enum TermEvent {
     Quiet,
     /// The link to the hub is gone.
     Lost,
+}
+
+/// The most history held for one screen: one replay, as the machine caps it (512 KiB, docs/specs/protocol.md, kind 4).
+pub const HISTORY_HELD_MAX: usize = 512 * 1024;
+
+/// History frames (kind 4, ADR-0100) per terminal stream, held for the screen (kind 1) of the same subscription that follows them.
+/// Held history belongs to that subscription only: anything else on the stream (the relay ended, output was dropped, any other frame)
+/// or the connection's loss drops it, so it never reaches a later subscription's screen (Codex review of #964). More than one replay
+/// ([`HISTORY_HELD_MAX`]) is never held: past it the history is dropped, and the rest of it until the screen is ignored.
+#[derive(Default)]
+pub struct HeldHistory {
+    /// The bytes held, and whether they went past the cap (then nothing more is held until the screen).
+    streams: std::collections::HashMap<u32, (Vec<u8>, bool)>,
+}
+
+impl HeldHistory {
+    /// What a frame of a terminal stream means: `None` for a history frame (held), the event for any other (unknown kinds are
+    /// [`TermEvent::Quiet`]). A screen leaves the held history for [`HeldHistory::take`]; every other frame drops it.
+    pub fn route(&mut self, f: &Frame) -> Option<TermEvent> {
+        let id = f.stream_id;
+        if f.kind == KIND_HISTORY {
+            let (held, over) = self.streams.entry(id).or_default();
+            if *over || held.len() + f.payload.len() > HISTORY_HELD_MAX {
+                held.clear();
+                *over = true;
+            } else {
+                held.extend_from_slice(&f.payload);
+            }
+            return None;
+        }
+        let e = term_event(f);
+        if !matches!(e, TermEvent::Screen(_)) {
+            self.clear(id);
+        }
+        Some(e)
+    }
+
+    /// The history held for `stream`'s screen, taken (empty when none).
+    pub fn take(&mut self, stream: u32) -> Vec<u8> {
+        self.streams
+            .remove(&stream)
+            .map(|(held, _)| held)
+            .unwrap_or_default()
+    }
+
+    pub fn clear(&mut self, stream: u32) {
+        self.streams.remove(&stream);
+    }
+
+    pub fn clear_all(&mut self) {
+        self.streams.clear();
+    }
+}
+
+/// The event a terminal stream frame carries; an unknown kind or a malformed payload is [`TermEvent::Quiet`].
+fn term_event(f: &Frame) -> TermEvent {
+    if f.kind == STREAM_CLOSE {
+        return TermEvent::Ended;
+    }
+    let p = &f.payload;
+    match f.kind {
+        KIND_BEHIND => TermEvent::Behind,
+        0 => TermEvent::Data(p.clone()),
+        1 => TermEvent::Screen(p.clone()),
+        2 if p.len() == 4 => TermEvent::Resized(
+            u16::from_le_bytes([p[0], p[1]]),
+            u16::from_le_bytes([p[2], p[3]]),
+        ),
+        3 if p.len() == 4 => TermEvent::Exit(i32::from_le_bytes([p[0], p[1], p[2], p[3]])),
+        _ => TermEvent::Quiet,
+    }
 }
 
 /// What an agent's conversation said.
@@ -1371,14 +1765,18 @@ fn set_aside(
     asked: &mut bool,
     kept: &mut Option<Box<Snapshot>>,
     queue: &mut std::collections::VecDeque<Frame>,
+    seen: &mut Seen,
 ) {
     if f.stream_id == STREAM_EVENTS && f.kind == kinds::POSITIONED_EVENT {
-        *changed = true;
+        if seen.note(&f) {
+            *changed = true;
+        }
         if asks_the_user(&f) {
             *asked = true;
         }
     } else if f.stream_id == STREAM_EVENTS && f.kind == kinds::SNAPSHOT {
         if let Ok(s) = Snapshot::decode(f.payload.as_slice()) {
+            seen.snapshot_pos = Some(s.pos);
             *kept = Some(Box::new(s));
             // The snapshot is newer than any event before it.
             *changed = false;
@@ -1396,6 +1794,8 @@ const MAX_QUEUED_STREAM_BYTES: usize = 2 * 1024 * 1024;
 const MEASURE_QUEUE_AT: usize = 128;
 /// A frame the client makes itself: frames of this stream were dropped, the reader must watch it again (a fresh repaint).
 const KIND_BEHIND: u8 = 200;
+/// A terminal history frame (ADR-0100 decision 2).
+const KIND_HISTORY: u8 = 4;
 
 /// Queues a terminal or chat frame for its reader. Past [`MAX_QUEUED_STREAM_BYTES`] for its stream, that stream's queued frames are
 /// dropped and a [`KIND_BEHIND`] marker stands in for them (and for what comes after, until the reader takes it).
@@ -1445,6 +1845,153 @@ fn keep_pair_frame(f: Frame, queue: &mut std::collections::VecDeque<Frame>) {
         if let Some(pos) = queue.iter().position(is_pair_frame) {
             queue.remove(pos);
         }
+    }
+}
+
+/// ADR-0101: the bytes and scope of each answer, and what is refused before anything is sent.
+#[cfg(test)]
+mod always_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::{always_offer, answer_message, Answer};
+    use crate::device::{always_message, approval_message};
+    use agora_protocol::v1::{ApprovalScope, ApprovalSnapshot};
+
+    fn ask(scopes: &[ApprovalScope]) -> ApprovalSnapshot {
+        ApprovalSnapshot {
+            approval_id: "laptop/ap-1".into(),
+            agent_id: "laptop/agent-1".into(),
+            action: "run_command".into(),
+            detail: "{\"command\":\"git status\"}".into(),
+            scopes: scopes.iter().map(|s| *s as i32).collect(),
+            always_label: if scopes.contains(&ApprovalScope::Always) {
+                "Always allow git status".into()
+            } else {
+                String::new()
+            },
+            always_option_id: if scopes.contains(&ApprovalScope::Always) {
+                "allow-always-1".into()
+            } else {
+                String::new()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_offer_is_read_as_the_window_reads_it() {
+        use ApprovalScope::{Always, Once};
+        assert_eq!(always_offer(&ask(&[])), None);
+        assert_eq!(always_offer(&ask(&[Once])), None);
+        assert!(!always_offer(&ask(&[Once, Always])).unwrap().only);
+        assert!(always_offer(&ask(&[Always])).unwrap().only);
+        let mut start = ask(&[Once, Always]);
+        start.action = "agent.start".into();
+        assert_eq!(always_offer(&start), None);
+        let mut no_id = ask(&[Always]);
+        no_id.always_option_id.clear();
+        assert_eq!(always_offer(&no_id), None);
+    }
+
+    #[test]
+    fn always_signs_the_always_bytes_with_scope_always_and_nothing_else_does() {
+        use ApprovalScope::{Always, Once};
+        let a = ask(&[Once, Always]);
+        let (m, scope) = answer_message(&a, Answer::AllowAlways).unwrap();
+        assert_eq!(scope, ApprovalScope::Always);
+        assert_eq!(
+            m,
+            always_message(
+                "laptop",
+                "ap-1",
+                "agent-1",
+                &a.action,
+                &a.detail,
+                "Always allow git status",
+                "allow-always-1"
+            )
+        );
+        assert_eq!(
+            answer_message(&a, Answer::Allow).unwrap(),
+            (
+                approval_message("laptop", "ap-1", true),
+                ApprovalScope::Unspecified
+            )
+        );
+        assert_eq!(
+            answer_message(&a, Answer::Deny).unwrap(),
+            (
+                approval_message("laptop", "ap-1", false),
+                ApprovalScope::Unspecified
+            )
+        );
+    }
+
+    #[test]
+    fn the_request_box_reads_a_capital_a_as_always_and_nothing_else_as_it() {
+        use super::box_answer;
+        assert_eq!(box_answer(Some(b'A')), Some(Answer::AllowAlways));
+        assert_eq!(box_answer(Some(b'y')), Some(Answer::Allow));
+        assert_eq!(box_answer(Some(b'n')), Some(Answer::Deny));
+        for k in [b'a', b'Y', b'N', b'\r', 0x1b] {
+            assert_eq!(box_answer(Some(k)), None, "{k}");
+        }
+        assert_eq!(box_answer(None), None);
+    }
+
+    #[test]
+    fn an_answer_that_is_not_offered_is_named_before_anything_is_signed() {
+        use super::not_offered;
+        use ApprovalScope::{Always, Once};
+        assert_eq!(
+            not_offered(&ask(&[Once]), Answer::AllowAlways),
+            Some("tui-allow-always-not-offered")
+        );
+        assert_eq!(not_offered(&ask(&[Once]), Answer::Allow), None);
+        assert_eq!(
+            not_offered(&ask(&[Always]), Answer::Allow),
+            Some("tui-allow-once-not-offered-kept")
+        );
+        assert_eq!(not_offered(&ask(&[Always]), Answer::AllowAlways), None);
+        assert_eq!(not_offered(&ask(&[Always]), Answer::Deny), None);
+        assert_eq!(
+            not_offered(&ask(&[Once, Always]), Answer::AllowAlways),
+            None
+        );
+    }
+
+    #[test]
+    fn what_a_request_does_not_offer_is_refused_before_anything_is_sent() {
+        use ApprovalScope::{Always, Once};
+        // No offer: never ALWAYS.
+        assert_eq!(
+            answer_message(&ask(&[Once]), Answer::AllowAlways),
+            Err("approval.scope_unavailable")
+        );
+        assert_eq!(
+            answer_message(&ask(&[]), Answer::AllowAlways),
+            Err("approval.scope_unavailable")
+        );
+        // Only "always": no plain Allow (the agent would remember it); a Deny stays a single answer.
+        let only = ask(&[Always]);
+        assert_eq!(
+            answer_message(&only, Answer::Allow),
+            Err("approval.scope_unavailable")
+        );
+        assert_eq!(
+            answer_message(&only, Answer::Deny).unwrap().1,
+            ApprovalScope::Unspecified
+        );
+        assert_eq!(
+            answer_message(&only, Answer::AllowAlways).unwrap().1,
+            ApprovalScope::Always
+        );
+        // An agent that is not the machine's own: nothing is signed for it.
+        let mut other = ask(&[Once, Always]);
+        other.agent_id = "box/agent-1".into();
+        assert_eq!(
+            answer_message(&other, Answer::AllowAlways),
+            Err("approval.scope_unavailable")
+        );
     }
 }
 
@@ -1585,6 +2132,7 @@ mod set_aside_tests {
     fn a_snapshot_that_arrives_while_something_waits_is_kept_and_events_and_streams_are_not_lost() {
         let (mut changed, mut kept, mut queue) = (false, None, std::collections::VecDeque::new());
         let mut asked = false;
+        let mut seen = Seen::default();
         let frame = |stream_id, kind, payload: Vec<u8>| Frame {
             stream_id,
             kind,
@@ -1597,9 +2145,11 @@ mod set_aside_tests {
             &mut asked,
             &mut kept,
             &mut queue,
+            &mut seen,
         );
         assert!(changed && kept.is_none());
         let s = Snapshot {
+            pos: 7,
             nodes: vec![agora_protocol::v1::NodeSnapshot {
                 node_id: "mac".into(),
                 ..Default::default()
@@ -1612,16 +2162,142 @@ mod set_aside_tests {
             &mut asked,
             &mut kept,
             &mut queue,
+            &mut seen,
         );
         assert_eq!(kept.as_deref(), Some(&s));
         assert!(!changed, "a snapshot supersedes the events before it");
-        // An event after the snapshot is newer than it: it stays marked, so the caller asks again after taking the snapshot.
+        // ADR-0090: the config options the hub replays right after the snapshot, at its position, are kept and want no fresh
+        // snapshot (they would make the console refresh again and again).
+        let config = |pos: u64, options: Vec<agora_protocol::v1::SessionConfigOption>| {
+            agora_protocol::v1::PositionedEvent {
+                pos,
+                event: Some(agora_protocol::v1::Event {
+                    producer_id: "mac".into(),
+                    body: Some(agora_protocol::v1::event::Body::AgentSessionConfig(
+                        agora_protocol::v1::AgentSessionConfig {
+                            agent_id: "agent-1".into(),
+                            options,
+                        },
+                    )),
+                    ..Default::default()
+                }),
+            }
+            .encode_to_vec()
+        };
+        let skip = agora_protocol::v1::SessionConfigOption {
+            id: "yolo".into(),
+            r#type: agora_protocol::v1::SessionConfigType::Boolean as i32,
+            current: "true".into(),
+            skips_permissions: true,
+            ..Default::default()
+        };
         set_aside(
-            frame(STREAM_EVENTS, kinds::POSITIONED_EVENT, vec![]),
+            frame(
+                STREAM_EVENTS,
+                kinds::POSITIONED_EVENT,
+                config(7, vec![skip.clone()]),
+            ),
             &mut changed,
             &mut asked,
             &mut kept,
             &mut queue,
+            &mut seen,
+        );
+        assert!(!changed);
+        assert_eq!(
+            seen.configs.options.get("mac/agent-1"),
+            Some(&vec![skip.clone()])
+        );
+        assert!(
+            std::mem::take(&mut seen.configs_changed),
+            "a view draws again"
+        );
+        // The same report again changes nothing a view shows.
+        set_aside(
+            frame(
+                STREAM_EVENTS,
+                kinds::POSITIONED_EVENT,
+                config(7, vec![skip]),
+            ),
+            &mut changed,
+            &mut asked,
+            &mut kept,
+            &mut queue,
+            &mut seen,
+        );
+        assert!(!seen.configs_changed);
+        // A later report replaces it; an empty one forgets it.
+        set_aside(
+            frame(
+                STREAM_EVENTS,
+                kinds::POSITIONED_EVENT,
+                config(7, Vec::new()),
+            ),
+            &mut changed,
+            &mut asked,
+            &mut kept,
+            &mut queue,
+            &mut seen,
+        );
+        assert!(seen.configs.options.is_empty() && !changed && seen.configs_changed);
+        // A live mode change after the snapshot is kept for the agent and wants a redraw; an older one is in the snapshot already.
+        let options = |pos: u64, mode: &str| {
+            agora_protocol::v1::PositionedEvent {
+                pos,
+                event: Some(agora_protocol::v1::Event {
+                    producer_id: "mac".into(),
+                    body: Some(agora_protocol::v1::event::Body::AgentSessionOptions(
+                        agora_protocol::v1::AgentSessionOptions {
+                            agent_id: "agent-1".into(),
+                            current_mode: mode.into(),
+                            ..Default::default()
+                        },
+                    )),
+                    ..Default::default()
+                }),
+            }
+            .encode_to_vec()
+        };
+        seen.configs_changed = false;
+        set_aside(
+            frame(STREAM_EVENTS, kinds::POSITIONED_EVENT, options(6, "old")),
+            &mut changed,
+            &mut asked,
+            &mut kept,
+            &mut queue,
+            &mut seen,
+        );
+        assert!(seen.configs.modes.is_empty() && !seen.configs_changed && !changed);
+        set_aside(
+            frame(STREAM_EVENTS, kinds::POSITIONED_EVENT, options(9, "bypass")),
+            &mut changed,
+            &mut asked,
+            &mut kept,
+            &mut queue,
+            &mut seen,
+        );
+        assert_eq!(
+            seen.configs.modes.get("mac/agent-1"),
+            Some(&(Vec::new(), "bypass".to_string()))
+        );
+        assert!(seen.configs_changed && changed);
+        changed = false;
+        // An event after the snapshot is newer than it: it stays marked, so the caller asks again after taking the snapshot.
+        set_aside(
+            frame(
+                STREAM_EVENTS,
+                kinds::POSITIONED_EVENT,
+                agora_protocol::v1::PositionedEvent {
+                    pos: 8,
+                    event: None,
+                }
+                .encode_to_vec(),
+            ),
+            &mut changed,
+            &mut asked,
+            &mut kept,
+            &mut queue,
+            &mut seen,
         );
         assert!(changed && kept.is_some());
         changed = false;
@@ -1635,6 +2311,7 @@ mod set_aside_tests {
             &mut asked,
             &mut kept,
             &mut queue,
+            &mut seen,
         );
         assert_eq!(queue.len(), 1);
         // A frame that is not for a waiting caller changes nothing.
@@ -1644,6 +2321,7 @@ mod set_aside_tests {
             &mut asked,
             &mut kept,
             &mut queue,
+            &mut seen,
         );
         assert!(!changed && queue.len() == 1 && kept.is_some());
         assert!(!asked, "no request for the user's answer came");
@@ -1653,6 +2331,7 @@ mod set_aside_tests {
     fn a_request_for_the_users_answer_that_arrives_while_something_waits_is_still_said() {
         let (mut changed, mut asked, mut kept, mut queue) =
             (false, false, None, std::collections::VecDeque::new());
+        let mut seen = Seen::default();
         let event = |body| Frame {
             stream_id: STREAM_EVENTS,
             kind: kinds::POSITIONED_EVENT,
@@ -1675,6 +2354,7 @@ mod set_aside_tests {
             &mut asked,
             &mut kept,
             &mut queue,
+            &mut seen,
         );
         assert!(changed && !asked);
         set_aside(
@@ -1685,6 +2365,7 @@ mod set_aside_tests {
             &mut asked,
             &mut kept,
             &mut queue,
+            &mut seen,
         );
         assert!(changed && asked, "a full-screen view says the request");
     }
@@ -1991,5 +2672,70 @@ mod decision_tests {
             );
             assert_eq!(hex(&m), c["hex"].as_str().unwrap(), "{}", c["name"]);
         }
+    }
+}
+
+#[cfg(test)]
+mod history_tests {
+    use super::{HeldHistory, TermEvent, HISTORY_HELD_MAX, KIND_BEHIND, STREAM_CLOSE};
+    use agora_protocol::Frame;
+
+    fn frame(stream: u32, kind: u8, payload: &[u8]) -> Frame {
+        Frame {
+            stream_id: stream,
+            kind,
+            seq: None,
+            payload: payload.to_vec(),
+        }
+    }
+
+    #[test]
+    fn history_travels_with_the_screen_of_its_own_subscription() {
+        let mut h = HeldHistory::default();
+        assert_eq!(h.route(&frame(3, 4, b"ab")), None);
+        assert_eq!(h.route(&frame(3, 4, b"c")), None);
+        assert_eq!(
+            h.route(&frame(3, 1, b"s")),
+            Some(TermEvent::Screen(b"s".to_vec()))
+        );
+        assert_eq!(h.take(3), b"abc");
+        assert_eq!(h.take(3), b"", "taken once");
+    }
+
+    // Codex review of #964: history whose screen never came (the relay ended, output was dropped, the connection was lost, the
+    // view stopped watching) is never handed to a later screen.
+    #[test]
+    fn history_whose_screen_never_came_is_dropped() {
+        for end in [STREAM_CLOSE, KIND_BEHIND, 0] {
+            let mut h = HeldHistory::default();
+            assert_eq!(h.route(&frame(3, 4, b"stale")), None);
+            assert!(h.route(&frame(3, end, b"x")).is_some());
+            assert_eq!(
+                h.route(&frame(3, 1, b"s")),
+                Some(TermEvent::Screen(b"s".to_vec()))
+            );
+            assert_eq!(h.take(3), b"", "after kind {end}");
+        }
+        let mut h = HeldHistory::default();
+        h.route(&frame(3, 4, b"stale"));
+        h.route(&frame(4, 4, b"other"));
+        h.clear_all();
+        assert_eq!((h.take(3), h.take(4)), (Vec::new(), Vec::new()));
+        h.route(&frame(5, 4, b"stale"));
+        h.clear(5);
+        assert_eq!(h.take(5), b"");
+    }
+
+    #[test]
+    fn never_more_than_one_replay_is_held() {
+        let mut h = HeldHistory::default();
+        h.route(&frame(3, 4, &vec![b'a'; HISTORY_HELD_MAX - 1]));
+        h.route(&frame(3, 4, b"xy"));
+        h.route(&frame(3, 4, b"z"));
+        h.route(&frame(3, 1, b"s"));
+        assert_eq!(h.take(3), b"");
+        h.route(&frame(3, 4, b"ok"));
+        h.route(&frame(3, 1, b"s"));
+        assert_eq!(h.take(3), b"ok");
     }
 }

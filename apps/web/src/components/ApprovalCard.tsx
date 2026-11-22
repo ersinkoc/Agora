@@ -4,6 +4,7 @@ import { detailText } from '../net/tool';
 import type { ApprovalModel } from '../net/view';
 import { StartApproval, type StartChoice } from './StartApproval';
 import { SkipApproval } from './SkipApproval';
+import { AlwaysNote, AlwaysOnly, allowAlwaysWord, alwaysNoteId } from './AllowAlways';
 
 // The short form names the command or file; what the agent asked for, in full, stays one click (or key) away before Allow.
 export function FullRequest({ detail }: { detail: string }) {
@@ -19,7 +20,7 @@ export function FullRequest({ detail }: { detail: string }) {
 export function ApprovalCard({ approval, busy, onResolve }: {
   approval: ApprovalModel;
   busy?: boolean;
-  onResolve: (approved: boolean, choice?: StartChoice) => void;
+  onResolve: (approved: boolean, choice?: StartChoice, always?: boolean) => void;
 }) {
   // ADR-0057: a request to start an agent shows everything it asks for.
   if (approval.start) return <StartApproval approval={approval} start={approval.start} busy={busy} onResolve={onResolve} />;
@@ -31,10 +32,16 @@ export function ApprovalCard({ approval, busy, onResolve }: {
       <span>{approval.action}</span>
       {approval.detail && <span className="muted">{detailText(approval.detail)}</span>}
       {approval.detail && <FullRequest detail={approval.detail} />}
+      {/* ADR-0101: "Allow always" only when the request offers it; in the place of Allow (the primary) when it offers nothing else. */}
+      <AlwaysOnly approval={approval} />
       <div className="approval__actions">
-        <button type="button" className="button button--primary" disabled={busy} onClick={() => onResolve(true)}>{t('approval-allow')}</button>
+        {approval.always?.only
+          ? <button type="button" className="button button--primary" disabled={busy} aria-describedby={alwaysNoteId(approval, 'card')} onClick={() => onResolve(true, undefined, true)}>{allowAlwaysWord()}</button>
+          : <button type="button" className="button button--primary" disabled={busy} onClick={() => onResolve(true)}>{t('approval-allow')}</button>}
         <button type="button" className="button" disabled={busy} onClick={() => onResolve(false)}>{t('approval-deny')}</button>
+        {approval.always && !approval.always.only && <button type="button" className="button" disabled={busy} aria-describedby={alwaysNoteId(approval, 'card')} onClick={() => onResolve(true, undefined, true)}>{allowAlwaysWord()}</button>}
       </div>
+      <AlwaysNote approval={approval} surface="card" />
     </article>
   );
 }

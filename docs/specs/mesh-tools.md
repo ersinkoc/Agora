@@ -10,7 +10,7 @@ the node per MCP connection; agents cannot impersonate each other.
 | `send_message` | `{ to: agent_id \| "#channel", body: string, refs?: [path\|commit\|task_id] }` | `{ message_id }` |
 | `ask` | `{ to, question, timeout_s?: number (default 600) }` | `{ reply, from }` or error `mesh.timeout` |
 | `inbox` | `{ since?: message_id, limit?: number }` | `[{ message_id, from, body, refs, at, provenance }]` |
-| `task_list` | `{ status?: "open"\|"claimed"\|"done" }` | `[{ task_id, title, status, owner, depends_on }]` |
+| `task_list` | `{ status?: "open"\|"claimed"\|"done", task_id? }` | `[{ task_id, title, status, owner, depends_on }]`; with `task_id` that task alone, or `[]` (ADR-0095) |
 | `task_create` | `{ title, detail?, depends_on? }` | `{ task_id }` |
 | `task_claim` | `{ task_id }` | `{ ok }` or `lease.held`-style conflict |
 | `task_complete` | `{ task_id, summary, refs? }` | `{ ok }` |
@@ -39,10 +39,51 @@ refused. Protocol versions 2025-06-18, 2025-03-26 and 2024-11-05 are accepted; a
 and to call `workspace_status` when it starts and before it edits files others may touch.
 The caller is the agent the node bound to the connection; no argument can name another sender.
 
+**Lines that are not one valid message** (#981, #984; JSON-RPC 2.0 sections 5.1 and 6). No line is met with silence unless JSON-RPC
+says so (a notification, or a response from the client). These are JSON-RPC's own error codes, with no `data`, not Agora error
+codes:
+- A line that is not JSON, or not UTF-8 (MCP's stdio transport is UTF-8; such a line is never read with replacement
+  characters): `-32700` with `id: null`.
+- JSON that is not a valid request (not an object, `jsonrpc` not `"2.0"`, `method` not a string, an `id` that is not a string or
+  number): `-32600`, with the line's `id` when it is a string or number and `null` otherwise. A response from the client, well
+  formed or not, gets no answer.
+- A batch (a JSON array) is taken only when `initialize` settled on 2025-03-26, the one version here whose base protocol has batches
+  (2024-11-05 does not define them, 2025-06-18 removed them). Then the answer is one array with the answers to its requests, in
+  their order; notifications in it get none, a batch of only notifications gets no reply, `initialize` inside a batch is `-32600`
+  (2025-03-26 forbids it), and a value in it that is not a valid request is answered inside the array as above. A batch waits for
+  its slowest request (an `ask`, `agent_start` or `agent_wait` in it), while the connection's other calls are answered meanwhile;
+  a request of it the client cancels (`notifications/cancelled`) is left out. Before `initialize`, or under any other version, a
+  batch is refused: `-32600` for each request in it, each on its own line with its id, or one `-32600` with `id: null` when it
+  holds no request.
+- An empty batch, or one of more than 32 values (`agora_mesh::mcp::MAX_BATCH`), is one `-32600` with `id: null`, whatever the
+  version, and nothing in it runs.
+
+Bound: a batch is one line, so the node's 1 MiB line limit (a longer line closes the connection) bounds its size, and at most 32
+messages run for one line. Each message of a batch is routed and checked exactly as if it came alone, in order, one after the
+other: the node's spawn tools, the hub's board for a shared project, then the broker, with the same argument checks, size limits,
+rate counts (`mesh.rate_limited`), open-ask and `agent_wait` limits, and the user's approval for each `agent_start`; batching skips
+none of them and runs nothing in parallel. A batch still waiting holds at least one waiting call, so those limits also bound how many
+batches can wait.
+
 Differences from the table above, all additive: `send_message` takes an optional `reply_to` (a `message_id` from the inbox)
 and a reply to an open `ask` is what answers it; `agents_list` items also carry `project` and the fields under "Awareness"; `task_list` items carry `detail`
 and `summary`; `inbox` items carry `kind` (`message`, `ask`, `reply`, `handoff`), `reply_to` and a `provenance` object. `reason` on
 `lease_acquire` is accepted but only the audit trail of the call would hold it (not stored yet).
+
+**Message ids.** `message_id` is `m-<number>`, numbered by the node's broker, and `inbox(since)` returns the messages numbered above
+`since`. Ids never go back across a node restart: before it hands out any id (messages, and the task, lease and handoff ids that
+share its counter), each run of the broker reserves a range on disk (`<data>/sessions/mesh-ids`, beside the ledger, holds the end of
+the last range) that starts at the largest of that end, the clock in microseconds and its own next id, and a run that nears the end
+of its range reserves the next. So an agent kept across the restart (ADR-0079) still sees what arrives after the cursor it carried
+over (and a task or lease id it holds is never given to something new), and a `since` from an earlier run, or one no message has,
+just returns what is numbered above it (#965: the numbers started over at `m-1`, so a kept agent's cursor hid every new message).
+When the range cannot be reserved (the file cannot be written, or exists and cannot be read as a number), the node and its agents
+run on and `inbox`, `workspace_status`, `agents_list` and `task_list` answer, but the node's broker hands out no id: on it
+`send_message`, `ask`, `handoff`, `task_create` and `lease_acquire` fail with `mesh.unavailable` and change nothing, a message from
+another node is refused with it (its sender gets `delivery_failed` `mesh.unavailable`), and presence and `delivery_failed` notices
+for this node's agents are not made. Calls that go through the hub instead (a `#channel` message or board call on a shared
+project, below) are not numbered here and work as usual, except that a copy for an agent of this node is refused like any message
+from another node. The node tries again every half second. Numbers are per node: the same number on two nodes names two messages.
 
 Tool errors are results with `isError: true` whose text is JSON `{"error": {"code", "params"}}` using the codes in
 `error-codes.md` (new: `mesh.rate_limited`, `mesh.body_too_large`, `mesh.too_many_refs`, `mesh.too_many_asks`, `mesh.timeout`,
@@ -59,7 +100,7 @@ Whatever connects to a socket is that agent as far as the broker is concerned, s
 agent's process. `agora mesh stdio --socket PATH` is what an agent's MCP client runs as its server: it carries stdin/stdout to
 that socket. The bridge survives its connection ending (ADR-0075 decision 6; the node re-executing or restarting leaves the
 socket path the same): it answers each request in flight (except one the client cancelled with `notifications/cancelled`, which gets no answer), and each request that arrives while it has no connection, at once with a
-JSON-RPC error `-32000` whose `data` is `{ "code": "mesh.unavailable", "params": {} }` (the agent may repeat the call; a JSON-RPC batch gets a batch of such errors, one per request in it, and notifications get no answer), keeps its
+JSON-RPC error `-32000` whose `data` is `{ "code": "mesh.unavailable", "params": {} }` (the agent may repeat the call; a JSON-RPC batch gets one such error per request in it, as a batch when the node's answer to the client's `initialize` settled on 2025-03-26 and one line each otherwise, and notifications get no answer; the requests of a batch in flight when the connection ends are answered one line each; while it has no connection it answers a line that is not JSON or not a valid request with the same `-32700` / `-32600` the node would, and reads a batch's values as the node does: in a 2025-03-26 conversation a value that is not a valid request gets its `-32600` inside the array and a `notifications/cancelled` in the batch drops the answer to the request it names, and without batches a batch holding no request is one `-32600` with `id: null`; a batch's requests sent on a live connection are in flight, and in a 2025-03-26 conversation a cancellation inside the same batch takes its request out, as one on its own line does), keeps its
 stdout open so the client's session stays, and reconnects to the same path with a wait that doubles from 50 ms to 2 s. A new
 connection starts uninitialized on the node, so the bridge replays the client's own `initialize` request (and its
 `notifications/initialized`) and discards the answer, exactly as at start; it carries nothing else over, and a peer that does not
@@ -92,12 +133,12 @@ node wrote. The target broker delivers it to the local agent with `provenance.fr
 returns once the broker accepted the message (limits and rate are checked there); if it does not arrive, the sender's inbox
 receives a notice of kind `delivery_failed` whose body is the error code (`node.offline`, `node.unknown`, `node.timeout`,
 `mesh.recipient_unknown`, `mesh.rate_limited`, ...) and whose `reply_to` is the failed message's id (the `message_id`
-`send_message` answered with), so an agent with several messages in flight knows which one failed. Nothing is resent. Plain messages cross nodes; `ask` stays node-local, and a `#channel` message on a shared project reaches every other running agent of the project on any node (below), and a node may have 64 posts waiting at the hub. Tasks, leases and
+`send_message` answered with), so an agent with several messages in flight knows which one failed. The hub answers a post within its 30 s command deadline (`node.timeout`; `node.offline` as soon as it finds the target's link dead, which a silent link is after 25 s); a post the sending node has no answer for after 40 s fails there with `node.timeout`, so the sender is always told (#915), with one exception: while its own node has no reserved message ids ("Message ids" above, #965) no notice can be numbered, so a `delivery_failed` that comes back then is not made. `node.timeout`, from the hub or from the node, means the message may or may not have arrived: a target that answers late may already have delivered it. Nothing is resent. Plain messages cross nodes; `ask` stays node-local, and a `#channel` message on a shared project reaches every other running agent of the project on any node (below), and a node may have 64 posts waiting at the hub. Tasks, leases and
 `handoff` cross nodes through the shared board below, for a project that is on two or more online nodes. The machine's owner can turn it off:
 `<node data dir>/policy` with the line `mesh.remote = false` (default `true`; a value that is not exactly `true` or `false` counts as
 `false`, so a typo never widens the node). Then messages to other nodes fail with a `delivery_failed` notice `node.policy_denied`
 and messages from other nodes are refused with the same code; messages on this node are unaffected. The hub cannot change this
-file. `refs` travel with a cross-node message (ADR-0035, `MeshPost.refs`) and the receiver stores each as `<origin node>:<ref>` (`laptop:src/auth.rs`; one that is already qualified is qualified again), so an agent can tell a path on another machine from a local one; refs stay inert text, within the usual limits, and confer no lease or permission. The web window lists recent messages and marks the ones between machines.
+file. `refs` travel with a cross-node message (ADR-0035, `MeshPost.refs`) and the receiver stores each as `<origin node>:<ref>` (`laptop:src/auth.rs`; one that is already qualified is qualified again), so an agent can tell a path on another machine from a local one; refs stay inert text, within the usual limits, and confer no lease or permission. The web window lists recent messages and marks the ones between machines. Both machines record a message between them (`MessagePosted` from the sender's node, `to` = `<node>/<agent>`, and from the receiver's node, `from_agent_id` = `<origin>/<agent>`, each under its own per-node id); the window shows the pair as one row, matched by sender, recipient and text (#905), and a member's scope admits the sender's copy only. A node may write any sender into its own copy, so a copy that names another machine's agent and that neither that machine nor the hub's board has recorded too is shown "reported by" the machine that recorded it, named by its id (which the hub checked against its certificate, never the host name it reports), and two such copies are never paired with each other. The match is by content, not identity: a direct message that failed (recorded only on the sender's machine) can be matched with a later channel copy with the same sender, recipient and text. ADR-0074's `MeshPost.message_id` (Accepted, not built) is the key that would make the match exact.
 
 ## Shared board (ADR-0039)
 
@@ -118,7 +159,7 @@ hub's view; one that ended gives its tasks and leases back, and a lease also end
 
 A `handoff` that names a task goes only to an agent of the task's own project (an agent of another project could neither see nor finish the task): to any other it fails with `mesh.recipient_unknown` and nothing moves; a `handoff` without a task is a message and may cross projects. A `handoff` to `<node>/<agent>` moves the task and sends the receiver a message from the giver in one step; if the receiving node
 
-Dispatch (ADR-0095 step 2, partly built): the broker can claim an open task of a project for a chosen agent of that project and build the one prompt that gives it the task (`Mesh::dispatch`, `agora_mesh::dispatch::build_prompt`). An agent of another project is `mesh.recipient_unknown`, a blocked or not open task is `task.blocked` / `task.not_open`, and nothing moves on a refusal. The prompt is the node's own template around the task's title and detail in a fenced block marked untrusted task data (a fence longer than any backtick run in the text, control, hidden and bidirectional characters removed, the title on one line, the whole prompt within the message size limit: the budget counts the fence twice, a run of more than eight backticks in the text loses its extra backticks so the fence stays at most eleven long, and a detail that had to be cut ends with a `[cut: N more bytes]` line inside the fence). Dispatch does not refuse an agent that already holds a claimed task: `task_claim` has no one-task limit, no existing error code means "busy", and the prompt queues behind the agent's running turn as any prompt does; a limit would need a new error code and is left to the maintainer. It is not an approval and changes no permission. Not yet reachable: no command carries a window's request to a node, and no event records the dispatch; both need a protocol message (ADR-0095 build order, awaiting the maintainer).
+Dispatch (ADR-0095 step 2): the broker can claim an open task of a project for a chosen agent of that project and build the one prompt that gives it the task (`Mesh::dispatch`, `agora_mesh::dispatch::build_prompt`). An agent of another project is `mesh.recipient_unknown`, a blocked or not open task is `task.blocked` / `task.not_open`, and nothing moves on a refusal. The prompt is the node's own template around the task's title and detail in a fenced block marked untrusted task data (a fence longer than any backtick run in the text, control, hidden and bidirectional characters removed, the title on one line, the whole prompt within the message size limit: the budget counts the fence twice, a run of more than eight backticks in the text loses its extra backticks so the fence stays at most eleven long, and a detail that had to be cut ends with a `[cut: N more bytes]` line inside the fence). Dispatch does not refuse an agent that already holds a claimed task: `task_claim` has no one-task limit, no existing error code means "busy", and the prompt queues behind the agent's running turn as any prompt does; a limit would need a new error code and is left to the maintainer. It is not an approval and changes no permission. Reached by `TaskDispatch` (capability `task.dispatch`; `docs/specs/protocol.md`, "Giving a task to an agent"): the node runs it on its broker, or for a shared project through the hub's board as the agent (`task_list` with `task_id`, then `task_claim`; the board has no release, so a shared task whose prompt was not sent stays claimed), and records `TaskDispatched`.
 is offline it fails with `node.offline` and the task does not move. The node checks a shared project's `handoff` as it does a `#channel` message before it sends the call to the hub: wrong-type arguments are -32602, and a summary or refs over the limits are `mesh.body_too_large` / `mesh.too_many_refs`, so the task never moves on a hub that would not check them. When the hub cannot be reached, a project this node knows to
 be shared fails with `board.unavailable` (the agent's other tools and its worktree keep working); a project it does not know to be
 shared stays on the local broker. When a project becomes shared (gains its second online node with a checkout) the hub sends each such node `BoardJoin`: the node hands over its open and claimed tasks and its live leases for the project and stops keeping them; the hub puts them on the board (each task gets a board id and its owner a notice `{"board":"task_moved","from":...,"to":...}` from `hub/board`; a lease the board already holds for another agent is refused, and both holders get `lease_refused` / `lease_conflict`). Until the nodes answered, or 5 s passed, `lease_acquire` and `task_claim` on that project answer `board.unavailable` (ADR-0039 amendment B). Done tasks stay in the node's local history. A node with `mesh.remote = false` answers `node.policy_denied` and keeps its work; a late answer is still applied (only the 5 s hold ends). A node hands over at most 500 tasks and 500 leases (leases by whole grant; what does not fit stays on its broker and keeps working there), the hub takes no more from one answer, cuts titles and details to the message size limit, and runs a handed-over lease at most one hour; a task whose creator or owner no longer runs lands open, made by `hub/board`. `BoardJoin` is answered where the hub's commands enter the node; the local control socket refuses it. Not done yet: boards

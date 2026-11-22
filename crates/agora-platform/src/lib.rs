@@ -49,6 +49,11 @@ pub const LOCAL_SOCKETS_SUPPORTED: bool = cfg!(any(unix, windows));
 /// True where [`spawn`] can start a PTY.
 pub const PTY_SUPPORTED: bool = cfg!(any(unix, windows));
 
+/// True where [`confine_command`] can confine a plain process (not a PTY): Linux (Landlock) and macOS (Seatbelt), when
+/// [`sandbox_supported`] also holds. Windows confines PTY processes only (its restricted token is given at process creation, which
+/// `std::process::Command` cannot do), so adapter and ACP agents are refused there before they start (#897).
+pub const COMMAND_CONFINEMENT_SUPPORTED: bool = cfg!(any(target_os = "linux", target_os = "macos"));
+
 /// The user's shell, for the node's built-in `shell` kind: on Unix `$SHELL` when it names an existing file, else `sh`; on Windows
 /// `%ComSpec%` when set, else `cmd.exe`.
 pub fn default_shell() -> String {
@@ -288,8 +293,25 @@ pub fn set_executable(path: &std::path::Path, executable: bool) -> io::Result<()
 /// a fake agent and skip themselves elsewhere).
 pub const SHELL_SCRIPTS_RUN: bool = cfg!(unix);
 
+/// True where a file lock (`File::lock`, `File::try_lock`) keeps every other handle from reading or writing the locked file and a file
+/// open through [`open_lock_private`] can be neither renamed nor removed (Windows: `LockFileEx` is mandatory and the file is not
+/// shared for delete). Elsewhere a lock is advisory: the file can be read, renamed and removed while it is held.
+pub const LOCK_FILES_MANDATORY: bool = cfg!(windows);
+
 /// What a program's file name ends with here: `.exe` on Windows, nothing elsewhere.
 pub const EXECUTABLE_SUFFIX: &str = if cfg!(windows) { ".exe" } else { "" };
+
+/// The device name to pass to programs that take an output path when the output should be discarded.
+pub const NULL_DEVICE: &str = {
+    #[cfg(unix)]
+    {
+        unix::NULL_DEVICE
+    }
+    #[cfg(windows)]
+    {
+        windows::NULL_DEVICE
+    }
+};
 
 /// The platform key of the signed agent list (`<os>-<arch>[-musl]`: `linux-x86_64`, `darwin-aarch64`, `windows-x86_64`,
 /// `linux-aarch64-musl`), or `None` for a system the list has no keys for.
@@ -357,8 +379,9 @@ pub fn safe_search_path() -> String {
     }
 }
 
-/// Whether a process with this id exists (a lock file's owner). Only "no such process" says no; any other answer (access denied,
-/// a system that cannot tell) says yes, so a lock is never broken on a guess.
+/// Whether a process with this id exists (a lock file's owner). Only "no such process" (on Windows also: a process that has ended,
+/// even while some handle keeps it queryable) says no; any other answer (access denied, a system that cannot tell) says yes, so a lock
+/// is never broken on a guess.
 pub fn process_exists(pid: u32) -> bool {
     #[cfg(unix)]
     {
@@ -376,15 +399,15 @@ pub fn process_exists(pid: u32) -> bool {
         // Unix, unlike the name lookups, whose error for a dead pid differs (macOS leaves a stale errno).
         io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        winproc::exists(pid)
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         match process_name(pid) {
             Ok(_) => true,
-            // Windows `OpenProcess` reports a pid that does not exist as ERROR_INVALID_PARAMETER.
-            Err(e) => {
-                !(e.kind() == io::ErrorKind::NotFound
-                    || (cfg!(windows) && e.raw_os_error() == Some(87)))
-            }
+            Err(e) => e.kind() != io::ErrorKind::NotFound,
         }
     }
 }
@@ -573,6 +596,24 @@ pub fn canonicalize_plain(path: &std::path::Path) -> io::Result<std::path::PathB
     #[cfg(not(windows))]
     {
         Ok(canonical)
+    }
+}
+
+/// Whether `e` says a path never resolves because of its symbolic links: a link to itself or a ring of links ("too many levels of
+/// symbolic links"). Rust has no stable `ErrorKind` for it, so the system's own code is compared. False on systems without links.
+pub fn link_loop(e: &io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        unix::link_loop(e)
+    }
+    #[cfg(windows)]
+    {
+        windows::link_loop(e)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = e;
+        false
     }
 }
 
@@ -820,6 +861,30 @@ impl LocalListener {
         #[cfg(windows)]
         {
             self.inner.accept().map(|inner| LocalStream { inner })
+        }
+    }
+
+    /// Wait up to `timeout` for the next client, and return it as soon as it connects (a readiness wait, not a sleep between tries);
+    /// `None` when none came in that time. For an accept loop that must also notice a stop: the client is served at once and the
+    /// stop is seen within `timeout`. Make the listener non-blocking first ([`set_nonblocking`](Self::set_nonblocking)) so a client
+    /// that leaves between the wait and the accept cannot leave this waiting past `timeout` on Unix.
+    pub fn accept_timeout(&self, timeout: std::time::Duration) -> io::Result<Option<LocalStream>> {
+        #[cfg(unix)]
+        {
+            if !unix::wait_readable(&self.inner, timeout)? {
+                return Ok(None);
+            }
+            match self.accept() {
+                Ok(s) => Ok(Some(s)),
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => Ok(None),
+                Err(e) => Err(e),
+            }
+        }
+        #[cfg(windows)]
+        {
+            self.inner
+                .accept_timeout(timeout)
+                .map(|s| s.map(|inner| LocalStream { inner }))
         }
     }
 
@@ -1260,7 +1325,8 @@ pub struct Sandbox {
     pub confine_sockets: bool,
     /// The node's own folders and files (its data, identity, logs, control socket, other agents' mesh sockets): never read or written,
     /// and no unix socket below them connected to, even when they sit below an allowed folder (a node home under `/tmp`), except
-    /// `sockets`, including paths that do not exist yet when the agent starts. Enforced on macOS only (Seatbelt can say "except");
+    /// `sockets` and the dedicated generated Git file, including paths that do not exist yet when the agent starts.
+    /// Enforced on macOS only (Seatbelt can say "except");
     /// Linux and Windows ignore it, so there a node home below an allowed folder stays reachable by file rights: on Linux the node
     /// refuses to start an agent whose grants contain the control token file and the socket needs that token (ADR-0082); Windows
     /// keeps the files out by its own ACLs (see `docs/security/threat-model.md`, T16).
@@ -1270,6 +1336,9 @@ pub struct Sandbox {
     /// otherwise have the home opened at its next start. A `read` or `write` entry that resolves below `deny` is never opened.
     /// macOS only, as `deny`.
     pub reopen: Vec<PathBuf>,
+    /// The node-generated Git configuration (ADR-0098). This grant reads an exact file, including
+    /// under a protected directory. Unlike a worktree exception, it grants no writes or listing.
+    pub git_config: Option<PathBuf>,
 }
 
 impl Sandbox {
@@ -1281,6 +1350,48 @@ impl Sandbox {
             ..Self::default()
         }
     }
+
+    /// The file that can be named in the sandbox and in the launch environment.
+    pub fn git_config_file(&self) -> Option<PathBuf> {
+        let path = self.git_config.as_deref()?;
+        path.to_str()?;
+        if !path.is_absolute() || !std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_file())
+        {
+            return None;
+        }
+        #[cfg(target_os = "macos")]
+        {
+            macos::git_config_path(path)
+        }
+        #[cfg(windows)]
+        {
+            // Git for Windows ignores verbatim paths in GIT_CONFIG_GLOBAL. If the same
+            // file has no ordinary spelling, the generated configuration is optional.
+            let plain = canonicalize_plain(path).ok()?;
+            if matches!(plain.components().next(), Some(std::path::Component::Prefix(p)) if p.kind().is_verbatim())
+            {
+                return None;
+            }
+            Some(plain)
+        }
+        #[cfg(not(any(target_os = "macos", windows)))]
+        {
+            Some(path.to_path_buf())
+        }
+    }
+}
+
+/// The settings copied by the node take precedence over ambient Git environment overrides.
+pub fn git_config_env(file: &std::path::Path) -> [(String, String); 4] {
+    [
+        ("GIT_CONFIG_COUNT".into(), "0".into()),
+        ("GIT_CONFIG_PARAMETERS".into(), String::new()),
+        (
+            "GIT_CONFIG_GLOBAL".into(),
+            file.to_string_lossy().into_owned(),
+        ),
+        ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+    ]
 }
 
 /// True where a [`Sandbox`] is enforced by per-agent folder permissions (Windows, ADR-0050) rather than by a rule list the kernel
@@ -1450,8 +1561,12 @@ pub fn recover_sandbox_leftovers() {
 }
 
 /// Confines `cmd` (and what it starts) the same way [`PtyConfig::sandbox`] does a PTY process. Fails with `Unsupported` where that
-/// cannot be enforced, so the caller never runs the command unconfined by accident.
-pub fn confine_command(cmd: &mut std::process::Command, sandbox: &Sandbox) -> io::Result<()> {
+/// cannot be enforced, so the caller never runs the command unconfined by accident. Returns the
+/// generated Git file if the confinement grants read access to it.
+pub fn confine_command(
+    cmd: &mut std::process::Command,
+    sandbox: &Sandbox,
+) -> io::Result<Option<PathBuf>> {
     if !enforceable(sandbox) {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
@@ -1461,16 +1576,17 @@ pub fn confine_command(cmd: &mut std::process::Command, sandbox: &Sandbox) -> io
     #[cfg(target_os = "linux")]
     {
         use std::os::unix::process::CommandExt;
-        let ruleset = linux::ruleset(sandbox, None, None)?;
+        let mut ruleset = linux::ruleset(sandbox, None, None)?;
+        let git_config = ruleset.git_config.take();
         // SAFETY: the closure only applies a ruleset made before the fork (async-signal-safe calls).
         unsafe { cmd.pre_exec(move || ruleset.enforce()) };
-        Ok(())
+        Ok(git_config)
     }
     #[cfg(target_os = "macos")]
     {
         // The command becomes `sandbox-exec -p <profile> -- <program> <args>`. Environment and folder carry over; standard streams do
         // not (std cannot read them back), so callers confine first and set the streams after.
-        let (program, args) = {
+        let (program, args, git_config) = {
             let a: Vec<_> = cmd.get_args().map(ToOwned::to_owned).collect();
             macos::wrap(sandbox, cmd.get_program(), &a)?
         };
@@ -1486,7 +1602,7 @@ pub fn confine_command(cmd: &mut std::process::Command, sandbox: &Sandbox) -> io
             };
         }
         *cmd = wrapped;
-        Ok(())
+        Ok(git_config)
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
@@ -2066,7 +2182,8 @@ pub fn open_append_private(path: &std::path::Path) -> io::Result<std::fs::File> 
 /// Opens (creating it) a lock file a process takes with `File::lock`, with every check of [`open_append_private`]: its folder opened as
 /// itself, never through a link; a new file private from its creation (mode 0600, an owner-only ACL); an existing one a regular file
 /// with one name and (Unix) this user's, made private through its handle. Read and write, never truncated. Another local user can then
-/// neither open it to hold the lock nor plant a link that makes the lock land on another file.
+/// neither open it to hold the lock nor plant a link that makes the lock land on another file. On Windows the file is not shared for
+/// delete: while any process has it open it can be neither renamed nor removed ([`LOCK_FILES_MANDATORY`]).
 pub fn open_lock_private(path: &std::path::Path) -> io::Result<std::fs::File> {
     let dir = path
         .parent()
@@ -3274,5 +3391,77 @@ mod read_timeout_tests {
             let e = read_timeout_result(Err(io::Error::from(kind))).unwrap_err();
             assert_eq!(e.kind(), kind);
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod accept_timeout_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn listener(name: &str) -> (LocalListener, PathBuf) {
+        // Short: Unix socket paths are limited to about 100 bytes.
+        let path = std::env::temp_dir().join(format!("agora-at-{}-{name}", std::process::id()));
+        let l = local_listen(&path).expect("listen");
+        l.set_nonblocking(true).expect("nonblocking");
+        (l, path)
+    }
+
+    #[test]
+    fn without_a_client_it_waits_the_timeout_and_says_none() {
+        if !LOCAL_SOCKETS_SUPPORTED {
+            return;
+        }
+        let (l, _path) = listener("none");
+        let start = Instant::now();
+        assert!(l
+            .accept_timeout(Duration::from_millis(60))
+            .unwrap()
+            .is_none());
+        let waited = start.elapsed();
+        // It waited (no spin), and not much longer than asked; generous for a loaded runner.
+        assert!(
+            waited >= Duration::from_millis(50),
+            "returned after {waited:?}"
+        );
+        assert!(waited < Duration::from_secs(5), "returned after {waited:?}");
+    }
+
+    #[test]
+    fn a_client_is_returned_as_soon_as_it_connects_not_when_the_timeout_ends() {
+        // #958: the control socket's accept loop slept 100 ms between tries, so each new connection waited up to that long.
+        if !LOCAL_SOCKETS_SUPPORTED {
+            return;
+        }
+        let (l, path) = listener("soon");
+        let (tx, rx) = std::sync::mpsc::channel::<Instant>();
+        let server = std::thread::spawn(move || {
+            for _ in 0..20 {
+                let s = loop {
+                    if let Some(s) = l.accept_timeout(Duration::from_secs(30)).unwrap() {
+                        break s;
+                    }
+                };
+                tx.send(Instant::now()).unwrap();
+                drop(s);
+            }
+        });
+        let mut slowest = Duration::ZERO;
+        for _ in 0..20 {
+            // Let the server reach its wait first, so the client arrives in the middle of it.
+            std::thread::sleep(Duration::from_millis(5));
+            let sent = Instant::now();
+            let c = local_connect(&path).expect("connect");
+            let got = rx.recv_timeout(Duration::from_secs(20)).expect("accepted");
+            slowest = slowest.max(got.saturating_duration_since(sent));
+            drop(c);
+        }
+        server.join().unwrap();
+        // A 30 s wait that returns within a second of every connect returned because of it.
+        assert!(
+            slowest < Duration::from_secs(1),
+            "slowest accept {slowest:?}"
+        );
     }
 }

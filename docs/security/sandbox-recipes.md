@@ -7,20 +7,31 @@ write the full path). A path that does not exist is skipped; `agora doctor` name
 What is never a default, and why: `~/.gitconfig` and `~/.config/git` can hold credentials (`url.*.insteadOf` with a token, credential
 helper settings), so reading them is the owner's choice, not the node's.
 
-## Git inside a confined agent (ADR-0078)
+## Git inside a confined agent
 
-You do not need to list `~/.gitconfig` for `git status`, `commit`, `branch` and `diff` to work. At every start the node writes a small
-global git file for the agent (on Linux in a private `git-config` folder under `~/.agora` in your home folder (always there, whatever data folder the node was given; no agent profile grants it), so another confined agent that can write a folder around this one's worktree cannot rewrite it; on macOS and Windows in a private `agora-git-config` folder of the system temp folder on macOS and Windows (mode 0700; on Windows an ACL that gives only you and SYSTEM access and does not inherit the temp folder's, which on a machine with other sandboxes can let them rewrite it)), sets
-`GIT_CONFIG_GLOBAL` to it and `GIT_CONFIG_NOSYSTEM=1`, and gives the sandbox a read grant for that one file and no write grant. It holds
-only these keys, each copied if you have set it in your own global configuration: `user.name`, `user.email`, `init.defaultBranch`,
-`core.autocrlf`, `core.ignorecase`, `core.filemode`, `pull.rebase`, `push.default`, `push.autoSetupRemote`, `color.ui`. Nothing else is
-copied: no `credential.*`, `include`/`includeIf`, `url.*`, `alias.*`, `core.sshCommand`, `core.hooksPath`, `core.fsmonitor`, `core.pager`,
-`core.editor`, `http.*`, `gpg.*` or `commit.gpgsign`. The node reads the keys with `git config --global --no-includes`, so an identity that
-lives only in a file you `include` is not found; set it in the global file itself. A value that is empty, long, holds a control character
-(a newline too), or, for a key other than the two identity ones, anything but letters, digits, `_`, `-` and `.`, is dropped. The file is not written at all if its folder is one the agent may write, and it stays on disk after the agent ends (one small file per worktree, named with a hash of its path; those of removed worktrees accumulate) until the next start rewrites it. A confined agent also does not read the system git configuration, nor a `safe.directory` you set globally: git run in a repository owned by another user stops on "dubious ownership" there (a worktree the node made is owned by the user it runs as, so this is rare; the fix is to own the folder, or to list `~/.gitconfig` yourself). Other `GIT_*` variables the node inherited (`GIT_SSH_COMMAND`, `GIT_EXTERNAL_DIFF`, `GIT_ASKPASS`, `GIT_PAGER`, `GIT_EDITOR`, `GIT_EXEC_PATH`, `GIT_TEMPLATE_DIR`) are not scrubbed by this change.
+At each confined launch the node writes a small Git configuration to `<data>/git-config/` (normally
+`<AGORA_HOME>/data/git-config/`). Git uses that file for its global settings, with `GIT_CONFIG_GLOBAL` pointing to it
+and `GIT_CONFIG_NOSYSTEM=1`. The node grants read access to the one file for that launch. The grant allows opening the
+file while keeping directory listing, sibling reads and writes denied. If the agent's ordinary grants reach that folder,
+or the node cannot prepare the private file, the node skips the generated settings. Each file lasts as long as its launch:
+the node removes it when the agent ends, is stopped or crashes (a restart writes a new one), and when a start fails after
+the file was written. Files of launches a node never ended (it was killed, or the machine stopped) stay in that folder. See [ADR-0078][git-config] and
+[ADR-0098][git-config-location].
 
-If you list `~/.gitconfig` in `sandbox.read` yourself, the node does not set `GIT_CONFIG_GLOBAL` and your choice stands as before; that is also
-the way to get a key outside the list. `agora doctor` warns when a machine that confines agents has no `user.name` or `user.email` that the node can copy (one found only through an `include` or the system file counts as missing, because the agent would not get it).
+The node copies these keys when set in your own global configuration: `user.name`, `user.email`, `init.defaultBranch`,
+`core.autocrlf`, `core.ignorecase`, `core.filemode`, `pull.rebase`, `push.default`, `push.autoSetupRemote` and `color.ui`.
+It reads them with `git config --global --no-includes`, so settings defined through `include` are left out. It skips
+empty or long values and values with control characters. Keys other than the two identity keys also require values made
+up of letters, digits, `_`, `-` and `.`. The node clears `GIT_CONFIG_COUNT` and `GIT_CONFIG_PARAMETERS` overrides
+when it supplies the file. Other inherited variables such as `GIT_SSH_COMMAND` and `GIT_EXEC_PATH` are outside this setting.
+
+If you list `~/.gitconfig` in `sandbox.read`, the agent uses your configuration as before, including settings such as
+`safe.directory` for a checkout owned by another user. The node leaves generated files on disk after each launch and
+retains copies in legacy locations for agents still using them. `agora doctor` warns when it cannot find a
+`user.name` or `user.email` to copy on a machine that confines agents.
+
+[git-config]: ../adr/0078-a-confined-agent-gets-a-git-configuration-the-node-wrote.md
+[git-config-location]: ../adr/0098-generated-git-configuration-belongs-to-the-node.md
 
 ## Unix sockets, the ssh-agent and `git push` over ssh (ADR-0083)
 
@@ -155,6 +166,20 @@ create, and a directory created in advance by the (Medium) node with a Low label
 on Windows runs commands through Git Bash, so a confined Claude Code agent cannot run shell commands.** Agents that run commands through `cmd` or
 PowerShell are not affected. Run such an agent with `sandbox = off` until this is solved.
 
+**Not supported confined on Windows either: a Node.js program starting a child with piped input or output** (#895). Measured with Node 26:
+`child_process.spawnSync` fails with `EPERM` whenever a stdio stream is a pipe (the default); with `stdio: 'ignore'` or `'inherit'` the
+child starts. The asynchronous `spawn` creates its pipes the same way (not measured separately). libuv creates each such pipe as a named pipe and opens the child's end by name. Windows gives a named pipe
+created without explicit security its own default permissions (full access for the owner, the system and administrators, read for
+`Everyone`), and a restricted token passes only what its restricting groups (the agent, `Everyone`, `Users`, the logon session) are granted,
+so that end cannot be opened for writing. **Consequence: a Node-based agent (Claude Code, Gemini CLI and others) that starts a tool or an MCP
+server with piped stdio, Node's default, cannot do so when confined on Windows.** Real agents were not measured. A Rust stand-in program
+(Rust's standard library, piped stdio included) and `cmd` start children confined, so Rust agents such as Codex are expected to work, but no
+real Codex run was measured. Fixing the Node case needs another confinement mechanism, a decision for ADR-0050.
+
+**Adapter and ACP (structured) agents cannot be confined on Windows** (#897). Windows confines terminal (PTY) agents only, so with any
+`sandbox` level other than `off` such an agent is refused before anything is created: `agent.sandbox_unavailable` with
+`reason = unsupported`. Run those kinds on a node with `sandbox = off` until this is solved.
+
 What differs from macOS and Linux:
 
 - **Reads are weaker** (Amendment B, 5): a file that grants `Users` or `Everyone` read (many data-volume folders, `Program Files`) stays readable to
@@ -180,5 +205,7 @@ What differs from macOS and Linux:
   - `git branch -d` fails with the same error. Delete branches outside the agent.
   - Without `~\.config\git` in `sandbox.read`, git also warns `unable to access '...\.config/git/ignore': Permission denied`; it is
     harmless.
+- **A confined dev server cannot share a port with a wildcard listener.** If another program already listens on `0.0.0.0` on that port,
+  the agent's `listen(127.0.0.1)` fails with `EACCES` (an unconfined process may bind it next to the wildcard listener). Use a free port.
 - **rustup needs `~\.rustup` itself** (`could not create home directory ... (os error 183)` when only one toolchain folder is listed).
 - Not working yet: `cargo build` (`Access is denied` starting `rustc.exe`); npm's cache (`%LOCALAPPDATA%\npm-cache`) is too large to list per agent.

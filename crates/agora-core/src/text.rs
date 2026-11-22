@@ -56,9 +56,77 @@ pub fn visible(text: &str) -> String {
     out
 }
 
+/// The text of a file that is UTF-16 with a byte-order mark (little-endian `FF FE` or big-endian `FE FF`; Windows PowerShell 5.1's
+/// `>` writes the former), without the mark, for showing it (#940). `None` for anything else: no mark, an odd length, a lone
+/// surrogate, or a control character other than a tab, a line break, a carriage return or a form feed (a NUL among them), so
+/// binary data that happens to start with a mark is still not text. The bytes themselves are never changed or written back.
+pub fn utf16_text(data: &[u8]) -> Option<String> {
+    let little = match data.get(..2)? {
+        [0xff, 0xfe] => true,
+        [0xfe, 0xff] => false,
+        _ => return None,
+    };
+    let (pairs, odd) = data[2..].as_chunks::<2>();
+    if !odd.is_empty() {
+        return None;
+    }
+    let units = pairs.iter().map(|&p| {
+        if little {
+            u16::from_le_bytes(p)
+        } else {
+            u16::from_be_bytes(p)
+        }
+    });
+    let mut out = String::with_capacity(data.len());
+    for c in char::decode_utf16(units) {
+        let c = c.ok()?;
+        if c.is_control() && !matches!(c, '\t' | '\n' | '\r' | '\x0c') {
+            return None;
+        }
+        out.push(c);
+    }
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn utf16_with_a_byte_order_mark_is_text_and_nothing_else_is() {
+        let enc = |text: &str, little: bool| {
+            let mut out = if little {
+                vec![0xff, 0xfe]
+            } else {
+                vec![0xfe, 0xff]
+            };
+            for u in text.encode_utf16() {
+                out.extend(if little {
+                    u.to_le_bytes()
+                } else {
+                    u.to_be_bytes()
+                });
+            }
+            out
+        };
+        assert_eq!(
+            utf16_text(&enc("hello\r\n", true)).as_deref(),
+            Some("hello\r\n")
+        );
+        assert_eq!(
+            utf16_text(&enc("h\u{e9}llo \u{1f600}\tx\x0c", false)).as_deref(),
+            Some("h\u{e9}llo \u{1f600}\tx\x0c")
+        );
+        assert_eq!(utf16_text(&[0xff, 0xfe]).as_deref(), Some(""));
+        // No mark, an odd length, a lone surrogate, a NUL, another control character: not text.
+        assert_eq!(utf16_text(b"h\0i\0"), None);
+        assert_eq!(utf16_text(&[0xff, 0xfe, b'h', 0, b'i']), None);
+        assert_eq!(utf16_text(&[0xff, 0xfe, 0x00, 0xd8, b'h', 0]), None);
+        assert_eq!(utf16_text(&enc("a\0b", true)), None);
+        assert_eq!(utf16_text(&enc("a\u{1}b", true)), None);
+        assert_eq!(utf16_text(&enc("a\u{85}b", false)), None);
+        assert_eq!(utf16_text(&[]), None);
+    }
 
     #[test]
     fn the_list_is_the_shared_file() {

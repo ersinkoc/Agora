@@ -9,10 +9,15 @@ import { Icon } from './Icon';
 import { isBareName, machineFor, missingPrograms, shortBinary, trustCommand } from './startChoice';
 import { LaunchSettings } from './LaunchSettings';
 import { recall, remember } from './launchMemory';
-import { chosenSettings, noSettings, settingName, usableSettings, type LaunchSettingChoice, type SettingsState } from './launchSettings';
+import { chosenSettings, noSettings, settingName, usableSettings, type LaunchSettingChoice, type SettingsState } from './launchSettingsModel';
 import { ASK, chosenIds, confirmedIds, confirmSkip, harmless, initialLaunch, keepAsking, labelOf, pickPermission, skipping, toggleHarmless, usableOptions, type LaunchOptionChoice } from './launchChoice';
 // ADR-0059: `options` are the kind's launch options as the machine lists them (none from an older machine).
 // ADR-0066: `settings` are the kind's launch settings as the machine lists them (none from an older machine).
+// #903: a refused start in words; a missing program is named, in the words the "not installed" note uses, when the machine said which.
+export function refusalWords(error: string, program: string | undefined): [string, Record<string, string>?] {
+  return error === 'start-program-missing' && program ? ['start-not-installed-program', { program }] : [error];
+}
+
 export interface KindChoice { kind: string; name: string; installed: boolean; level?: number; options?: LaunchOptionChoice[]; program?: string; settings?: LaunchSettingChoice[] }
 
 // The command a machine's owner runs once so the machine trusts this device (ADR-0020), with a Copy button: no hunting for it on another page.
@@ -41,12 +46,16 @@ const chipOff = 'border-line bg-surface-0 text-muted hover:bg-surface-2 hover:te
 
 // "Start an agent" in one window: the machine, the folder (a known one in a click, or any path), then the agent. Choosing the
 // folder shows the folder the node resolved before anything starts (ADR-0052); the rest is a click.
-export function StartAgent({ projects, machines, initialNode, initialKind, trust, askApproval, loadKinds, inspect, list, onStart, onClose }: {
+export function StartAgent({ projects, machines, initialNode, initialKind, forTask, trust, askApproval, loadKinds, inspect, list, onStart, onClose }: {
   projects: readonly ProjectChoice[];
   machines: readonly MachineModel[];
   initialNode?: string;
   // A kind to start on (a plain terminal asks for `shell`); when the machine offers no such kind nothing is chosen for the person.
   initialKind?: string;
+  // ADR-0095 step 3: the start is for a board task. The window names the task, offers agents only (a plain terminal cannot take a task),
+  // and starts only in a folder of the task's project, since the task can only be given to an agent of its own project. The caller passes
+  // the task's project folders as `projects`, so the machine and folder are prefilled exactly as an ordinary start prefills them.
+  forTask?: { projectId: string; project: string; title: string };
   // This device's id and public key: when a machine does not trust the device yet, the command that fixes it is shown right here.
   trust?: { id: string; key: string };
   // ADR-0061: whether another device of this person that `node` trusts could approve this one, and asking it to.
@@ -111,7 +120,7 @@ export function StartAgent({ projects, machines, initialNode, initialKind, trust
     if (!node) return;
     let current = true;
     setKinds('loading'); setKind(''); setInfo(undefined); setError(undefined);
-    loadKinds(node).then(k => { if (current) { setKinds(k); setKind(k.find(x => x.installed && x.kind === initialKind)?.kind ?? (initialKind ? '' : k.find(x => x.installed)?.kind ?? '')); } }, () => { if (current) setKinds('failed'); });
+    loadKinds(node).then(all => { if (current) { const k = forTask ? all.filter(x => x.kind !== 'shell') : all; setKinds(k); setKind(k.find(x => x.installed && x.kind === initialKind)?.kind ?? (initialKind ? '' : k.find(x => x.installed)?.kind ?? '')); } }, () => { if (current) setKinds('failed'); });
     return () => { current = false; };
   }, [node, loadKinds]);
   const changePath = (value: string) => { setPath(value); setInfo(undefined); setError(undefined); setSeparate(false); setAcceptIdentityChange(false); };
@@ -134,7 +143,8 @@ export function StartAgent({ projects, machines, initialNode, initialKind, trust
   }, [projectPath]);
   const choose = async (at = path) => {
     setBusy(true); setError(undefined);
-    try { setInfo(await inspect(node, at, createIdentity)); }
+    // For a task the project is the task's: no new project identity is made for the folder (it would make it another project).
+    try { setInfo(await inspect(node, at, forTask ? false : createIdentity)); }
     catch (e) { setError(directoryReasonKey((e as { code?: string }).code)); }
     finally { setBusy(false); }
   };
@@ -157,6 +167,8 @@ export function StartAgent({ projects, machines, initialNode, initialKind, trust
   const seen = new Set<string>();
   const known = projects.flatMap(p => (p.node === node && p.path && !seen.has(sameFolder(p.path)) && seen.add(sameFolder(p.path)) ? [{ ...p, path: p.path }] : []));
   const machineName = (m: MachineModel) => (sharesName(m, machines) ? t('machine-name-id', { name: m.name, id: m.id }) : m.name);
+  // A folder of another project: the task could not be given to an agent started there.
+  const otherProject = !!forTask && !!info && info.projectId !== forTask.projectId;
 
   return <Dialog.Root open onOpenChange={open => { if (!open && !busy) onClose(); }}>
     <Dialog.Portal>
@@ -169,6 +181,7 @@ export function StartAgent({ projects, machines, initialNode, initialKind, trust
           <Dialog.Close className="ide-iconbtn" aria-label={t('start-cancel')} disabled={busy}><Icon name="close" /></Dialog.Close>
         </div>
         {!online.length ? <div className="p-4"><p className="m-0">{t('start-no-machines')}</p></div> : <div className="grid min-h-0 gap-4 overflow-y-auto p-4">
+          {forTask && <p data-start-for-task="" dir="auto" className="m-0 break-words rounded-s border border-line bg-surface-0 p-2.5 text-sm text-ink">{t('start-for-task', { title: forTask.title, project: forTask.project })}</p>}
           <div className="grid gap-1.5">
             <h2 className="m-0">{t('start-machine')}</h2>
             <div className="flex flex-wrap gap-1.5" role="radiogroup" aria-label={t('start-machine')}>
@@ -218,10 +231,11 @@ export function StartAgent({ projects, machines, initialNode, initialKind, trust
                   </button></li>)}
                 </ul>
               </div>}
-              <label className="flex items-start gap-2 text-[0.8125rem]"><input type="checkbox" className="mt-0.5" checked={createIdentity} disabled={busy} onChange={e => setCreateIdentity(e.target.checked)} /><span>{t('start-portable')}{createIdentity && <span className="mt-0.5 block text-xs text-muted">{t('start-portable-explain')}</span>}</span></label>
+              {!forTask && <label className="flex items-start gap-2 text-[0.8125rem]"><input type="checkbox" className="mt-0.5" checked={createIdentity} disabled={busy} onChange={e => setCreateIdentity(e.target.checked)} /><span>{t('start-portable')}{createIdentity && <span className="mt-0.5 block text-xs text-muted">{t('start-portable-explain')}</span>}</span></label>}
             </>}
           </div>
 
+          {otherProject && forTask && <p role="alert" className="m-0 text-sm text-needs-you">{t('start-for-task-other-project', { project: forTask.project })}</p>}
           {info && <>
             <div className="grid gap-1.5">
               <h2 className="m-0">{t('ide-agent-pick')}</h2>
@@ -270,7 +284,7 @@ export function StartAgent({ projects, machines, initialNode, initialKind, trust
             ? isBareName(binary)
               ? t('trust-hint-file', { machine: online.find(m => m.id === node)?.name ?? node, file: binary })
               : t('trust-hint-binary', { machine: online.find(m => m.id === node)?.name ?? node, where: shortBinary(binary, machineOs) })
-            : t('trust-hint', { machine: online.find(m => m.id === node)?.name ?? node })) : t(error)}</p>}
+            : t('trust-hint', { machine: online.find(m => m.id === node)?.name ?? node })) : t(...refusalWords(error, kinds !== 'loading' && kinds !== 'failed' ? kinds.find((k) => k.kind === kind)?.program : undefined))}</p>}
           {error === 'approval-not-trusted' && trust && binary && shortBinary(binary, machineOs) !== binary && (wholePath
             ? <code className="break-all font-mono text-xs text-muted">{binary}</code>
             : <button type="button" className="justify-self-start text-xs text-muted underline" onClick={() => setWholePath(true)}>{t('trust-show-path')}</button>)}
@@ -279,7 +293,7 @@ export function StartAgent({ projects, machines, initialNode, initialKind, trust
         </div>}
         <div className="flex justify-end gap-2 border-t border-line px-4 py-3">
           <button type="button" className="button" disabled={busy} onClick={onClose}>{t('start-cancel')}</button>
-          {info && <button type="button" className="button button--primary" disabled={busy || !kind || !!launch.pending || (!!info.previousProjectId && !acceptIdentityChange)} onClick={() => void go()}>{t('start-go')}</button>}
+          {info && <button type="button" className="button button--primary" disabled={busy || !kind || otherProject || !!launch.pending || (!!info.previousProjectId && !acceptIdentityChange)} onClick={() => void go()}>{t('start-go')}</button>}
         </div>
       </Dialog.Content>
     </Dialog.Portal>

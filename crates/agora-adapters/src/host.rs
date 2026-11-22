@@ -176,6 +176,12 @@ pub enum AdapterEvent {
         approval_id: String,
         action: String,
         detail: String,
+        /// ADR-0101: the answers the agent offers (empty: ONCE only). The node reads them only from an adapter that declared
+        /// `approval_scopes`. A value this build does not know is dropped.
+        scopes: Vec<agora_protocol::v1::ApprovalScope>,
+        /// ADR-0101: the agent's own name for its always option and that option's exact id (untrusted; the node cleans them).
+        always_label: String,
+        always_option_id: String,
     },
     Usage {
         session_id: String,
@@ -309,6 +315,8 @@ enum Proc {
         /// The node has read everything the holder kept (the replay is over): only then is the loss told, so that the notice is
         /// newer than what the replay put in the conversation and a long replay cannot push it out.
         ready: Arc<AtomicBool>,
+        /// How the process ended, as `output` last heard it from the holder (#902); `None` while it runs or when it was not heard.
+        exit: Arc<Mutex<Option<agora_platform::ExitStatus>>>,
     },
 }
 
@@ -322,6 +330,9 @@ pub struct HeldIo {
     pub dropped: Arc<AtomicU64>,
     /// Set by `output` once the output the holder kept has been read to its end.
     pub ready: Arc<AtomicBool>,
+    /// #902: how the process ended, set by `output` from what the holder says with the output (before the output ends), so the node
+    /// knows it without asking the holder again.
+    pub exit: Arc<Mutex<Option<agora_platform::ExitStatus>>>,
 }
 
 pub struct Adapter {
@@ -412,12 +423,25 @@ impl Caller {
         approved: bool,
         timeout: Duration,
     ) -> Result<(), HostError> {
-        self.call(
-            "approval/resolve",
-            json!({"sessionId": session, "approvalId": approval_id, "approved": approved}),
-            timeout,
-        )
-        .map(drop)
+        self.resolve_approval_scoped(session, approval_id, approved, None, timeout)
+    }
+
+    /// ADR-0101: [`Self::resolve_approval`] with the scope the person signed, sent only to an adapter that declared
+    /// `approval_scopes` (`None`: the field is left out, as for every adapter before ADR-0101).
+    pub fn resolve_approval_scoped(
+        &self,
+        session: &str,
+        approval_id: &str,
+        approved: bool,
+        scope: Option<agora_protocol::v1::ApprovalScope>,
+        timeout: Duration,
+    ) -> Result<(), HostError> {
+        let mut params =
+            json!({"sessionId": session, "approvalId": approval_id, "approved": approved});
+        if let Some(scope) = scope {
+            params["scope"] = json!(scope_name(scope));
+        }
+        self.call("approval/resolve", params, timeout).map(drop)
     }
 
     /// ADR-0058: switches the session to one of the modes or models the adapter reported. The caller checks the adapter declared
@@ -515,6 +539,34 @@ fn u(v: &Value, key: &str) -> u64 {
         Some(Value::Number(n)) => n.as_u64().unwrap_or(0),
         _ => 0,
     }
+}
+
+/// ADR-0101: `ApprovalRequestParams.scopes` as proto3 JSON (enum names or numbers). UNSPECIFIED and unknown values are dropped, and
+/// each scope is kept once.
+fn approval_scopes(v: Option<&Value>) -> Vec<agora_protocol::v1::ApprovalScope> {
+    use agora_protocol::v1::ApprovalScope;
+    let mut out = Vec::new();
+    for x in v.and_then(Value::as_array).into_iter().flatten() {
+        let scope = match x {
+            Value::String(n) => ApprovalScope::from_str_name(n),
+            Value::Number(n) => n
+                .as_i64()
+                .and_then(|n| i32::try_from(n).ok())
+                .and_then(|n| ApprovalScope::try_from(n).ok()),
+            _ => None,
+        };
+        if let Some(scope) = scope.filter(|s| *s != ApprovalScope::Unspecified) {
+            if !out.contains(&scope) {
+                out.push(scope);
+            }
+        }
+    }
+    out
+}
+
+/// The proto3 JSON name of a scope for `approval/resolve`.
+fn scope_name(scope: agora_protocol::v1::ApprovalScope) -> &'static str {
+    scope.as_str_name()
 }
 
 /// An `AgentState` as proto3 JSON: the enum name or its number. Anything else is `Unknown`.
@@ -653,6 +705,9 @@ fn to_event(method: &str, p: &Value) -> Option<AdapterEvent> {
             approval_id: s(p, "approvalId"),
             action: s(p, "action"),
             detail: s(p, "detail"),
+            scopes: approval_scopes(p.get("scopes")),
+            always_label: s(p, "alwaysLabel"),
+            always_option_id: s(p, "alwaysOptionId"),
         },
         "usage/report" => AdapterEvent::Usage {
             session_id: s(p, "sessionId"),
@@ -785,6 +840,34 @@ impl Adapter {
         }
     }
 
+    /// #902: how the process ended, once its output has: its exit code, or on Unix the signal that ended it. Returns within `wait`
+    /// (it is asked under the node's supervisor lock); `None` when it has not ended by then or its status is not known.
+    ///
+    /// A process the holder runs is never asked about over the holder link here (a list with its own reply timeout, a release, the
+    /// link's lock could take far longer than `wait`): the status is the one the output's reader already heard from the holder with
+    /// the output, or unknown. Reading it changes nothing for the end of this value (a later drop kills and collects as before).
+    pub fn exit_status(&mut self, wait: Duration) -> Option<agora_platform::ExitStatus> {
+        let end = std::time::Instant::now() + wait;
+        match &mut self.proc {
+            Proc::Child(c) => loop {
+                let read = c.try_wait().map(|s| {
+                    s.map(|s| agora_platform::ExitStatus {
+                        code: s.code(),
+                        signal: agora_platform::exit_signal(&s),
+                    })
+                });
+                match read {
+                    Ok(Some(status)) => return Some(status),
+                    Ok(None) if std::time::Instant::now() < end => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    _ => return None,
+                }
+            },
+            Proc::Held { exit, .. } => exit.lock().ok().and_then(|s| *s),
+        }
+    }
+
     /// ADR-0093: whether the process is the holder's.
     pub fn is_held(&self) -> bool {
         matches!(self.proc, Proc::Held { .. })
@@ -833,6 +916,7 @@ impl Adapter {
                 detached: false,
                 dropped: io.dropped,
                 ready: io.ready,
+                exit: io.exit,
             },
             writer: None,
             pending: Arc::default(),
@@ -895,9 +979,12 @@ impl Adapter {
         let mut cmd = Command::new(&program);
         cmd.args(&cfg.args);
         // Confined first: on macOS this rewrites the command, which must happen before the streams are set.
-        if let Some(sb) = &cfg.sandbox {
-            agora_platform::confine_command(&mut cmd, sb)?;
-        }
+        let git_config = cfg
+            .sandbox
+            .as_ref()
+            .map(|sb| agora_platform::confine_command(&mut cmd, sb))
+            .transpose()?
+            .flatten();
         // The node has no console: on Windows the adapter (and the agent it starts, which shares its console) would otherwise keep a
         // window of its own open for the agent's whole life.
         agora_platform::no_console_window(&mut cmd);
@@ -918,6 +1005,9 @@ impl Adapter {
             }
         }
         cmd.envs(cfg.env.iter().map(|(k, v)| (k, v)));
+        if let Some(file) = git_config {
+            cmd.envs(agora_platform::git_config_env(&file));
+        }
         if let Some(dir) = &cfg.cwd {
             cmd.current_dir(dir);
         }
@@ -1079,6 +1169,19 @@ impl Adapter {
     ) -> Result<(), HostError> {
         self.caller()
             .resolve_approval(session, approval_id, approved, timeout)
+    }
+
+    /// ADR-0101: [`Caller::resolve_approval_scoped`].
+    pub fn resolve_approval_scoped(
+        &self,
+        session: &str,
+        approval_id: &str,
+        approved: bool,
+        scope: Option<agora_protocol::v1::ApprovalScope>,
+        timeout: Duration,
+    ) -> Result<(), HostError> {
+        self.caller()
+            .resolve_approval_scoped(session, approval_id, approved, scope, timeout)
     }
 
     /// ADR-0058: switches the session to one of the modes or models the adapter reported. The caller checks the adapter declared
@@ -1311,6 +1414,40 @@ fn deliver(pending: &Pending, id: &Value, r: Result<Value, HostError>) {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    /// ADR-0101: the offer is read from names or numbers; UNSPECIFIED, unknown values and repeats are dropped.
+    #[test]
+    fn an_approval_request_carries_the_offer() {
+        use agora_protocol::v1::ApprovalScope as S;
+        let p = serde_json::json!({"sessionId": "s", "approvalId": "a", "action": "run", "detail": "ls",
+            "scopes": ["APPROVAL_SCOPE_ONCE", 2, "APPROVAL_SCOPE_BOGUS", 0, 9, "APPROVAL_SCOPE_ONCE"],
+            "alwaysLabel": "Always", "alwaysOptionId": "aa"});
+        let Some(super::AdapterEvent::ApprovalRequest {
+            scopes,
+            always_label,
+            always_option_id,
+            ..
+        }) = super::to_event("approval/request", &p)
+        else {
+            panic!("no approval request");
+        };
+        assert_eq!(scopes, vec![S::Once, S::Always]);
+        assert_eq!(
+            (always_label.as_str(), always_option_id.as_str()),
+            ("Always", "aa")
+        );
+        // An adapter before ADR-0101 sends none of them.
+        let old = serde_json::json!({"sessionId": "s", "approvalId": "a", "action": "run", "detail": "ls"});
+        let Some(super::AdapterEvent::ApprovalRequest {
+            scopes,
+            always_label,
+            ..
+        }) = super::to_event("approval/request", &old)
+        else {
+            panic!("no approval request");
+        };
+        assert!(scopes.is_empty() && always_label.is_empty());
+    }
+
     #[test]
     fn an_adapter_gets_the_users_folders_and_never_a_secret() {
         for ok in [

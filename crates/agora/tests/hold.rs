@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use agora_node::holder_link::{
     socket_path, write_frame, AgentState, Client, LinkError, Refusal, Reply, Request, StartRequest,
-    LINK_VERSION, LINK_VERSION_PIPES,
+    LINK_VERSION, LINK_VERSION_PIPES, MAX_AGENT_ID,
 };
 
 const AGORA: &str = env!("CARGO_BIN_EXE_agora");
@@ -801,4 +801,45 @@ fn the_buffer_keeps_exactly_the_last_mebibyte_and_says_it_dropped() {
     assert_eq!(buffer.len(), 1 << 20);
     assert!(held[0].info.buffer_dropped);
     assert_eq!(buffer.as_slice(), &text.as_bytes()[total - (1 << 20)..]);
+}
+
+/// #929: an agent id is at most `MAX_AGENT_ID` bytes. A longer one (here one byte longer, and one of 3 MiB, which still fits a `Start`
+/// frame but would have made every later `Attach` reply larger than a frame) is refused on `Start` and nothing starts; one at the bound
+/// starts, is listed, and is handed over by `Attach`.
+#[test]
+fn an_agent_id_longer_than_the_bound_is_refused_and_one_at_the_bound_is_listed_and_handed_over() {
+    let rig = Rig::new("idlen");
+    rig.lock_self();
+    let idle = script(&rig.home, "idle", &[("up", 0), ("bye", 600_000)]);
+    let mut node = rig.connect();
+    assert!(node.attach().expect("attach").is_empty());
+    for long in ["a".repeat(MAX_AGENT_ID + 1), "a".repeat(3 << 20)] {
+        match node.start(&start_request(&long, &idle)) {
+            Err(LinkError::Refused(Refusal::BadRequest, _)) => {}
+            Err(e) => panic!("refused for another reason: {e}"),
+            Ok((pid, _)) => {
+                let _ = node.stop(&long, true);
+                panic!("an id of {} bytes was started (pid {pid})", long.len());
+            }
+        }
+    }
+    assert!(node.list().expect("list").is_empty(), "nothing started");
+
+    let at = "b".repeat(MAX_AGENT_ID);
+    let (pid, master) = node.start(&start_request(&at, &idle)).expect("start");
+    let listed = node.list().expect("list");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(
+        (listed[0].agent.as_str(), listed[0].pid),
+        (at.as_str(), pid)
+    );
+    // The link drops (the node keeps its terminal) and a node attaches again: the agent comes back under its id.
+    drop(node);
+    let mut node = rig.connect();
+    let held = node.attach().expect("attach");
+    assert_eq!(held.len(), 1);
+    assert_eq!(held[0].info.info.agent, at);
+    assert!(held[0].terminal.is_some());
+    node.stop(&at, true).expect("stop");
+    drop(master);
 }

@@ -48,6 +48,10 @@ or a local response timeout has a localized retry message.
 | `approval.expired` | `approval_id` | |
 | `approval.signature_invalid` | `approval_id` | |
 | `approval.grant_required` | `command` | ADR-0041: the node's `signed_commands` policy lists this command and no live grant covers it |
+| `approval.scope_forbidden` | | ADR-0101: an "always" answer (`ApprovalResolve.scope` ALWAYS) refused by the node's `skip_permissions` policy (`forbid`, or `confined_only` while agents are not confined). Nothing was sent or spent: the card can still be allowed once or denied |
+| `approval.scope_unavailable` | | ADR-0101: the request did not offer that answer (an Allow on an always-only request, or ALWAYS on one that does not offer it), or the agent's bridge no longer holds the option. Nothing was sent; the card stays waiting |
+| `approval.always_only_forbidden` | `action` | ADR-0101, a conversation notice: the agent offered only an answer it would remember, and this machine's policy allows single answers only, so the request was answered denied at once (no card) |
+| `approval.adapter_outdated` | | ADR-0101 (Codex review): the agent runs behind an ACP bridge from before ADR-0101 (it did not declare `approval_scopes`), which may answer a plain Allow with the agent's remembered option; under a policy that refuses "always" the node refuses the Allow. Deny works; starting the agent again fixes it |
 | `device.unknown` | `device_id` | ADR-0061: the hub has no device with this id registered to the caller (another person's device looks the same) |
 | `device.key_mismatch` | `device_id` | ADR-0061: the id is registered (or trusted on the machine) with another key; a device id stays bound to its key |
 | `device.untrusted` | `device_id`, `node_id` | ADR-0061: the device that signed an endorsement or revocation (`device_id`) is not one this machine trusts, or its trust there expired |
@@ -66,7 +70,7 @@ or a local response timeout has a localized retry message.
 | `mesh.folder_not_allowed` | `folder` | ADR-0057: a helper's folder must be the asking agent's own folder or below it; an outside folder only with the user's single approval naming it (never a grant), and another machine is not offered |
 | `mesh.helper_limit` | `rule`, `limit` | ADR-0057: `rule` is `depth` (a helper cannot start helpers unless the decision that started it allowed it, and a helper of a helper never can), `helpers` (running helpers per agent), `pending` (one start waits for the user at a time) or `prompt` (first prompt over the size limit) |
 | `mesh.start_denied` | `approval_id` | ADR-0057: the user refused the start, or it was withdrawn |
-| `mesh.unavailable` | — | ADR-0075: this agent's `agora mesh stdio` bridge lost its connection to the node (the node is restarting or updating) and is reconnecting. The call was not delivered or its answer was lost; the agent may repeat it. Carried as the `data` of a JSON-RPC error with code -32000 (the bridge answers, the node never sees it) |
+| `mesh.unavailable` | — | ADR-0075: this agent's `agora mesh stdio` bridge lost its connection to the node (the node is restarting or updating) and is reconnecting. The call was not delivered or its answer was lost; the agent may repeat it. Carried as the `data` of a JSON-RPC error with code -32000 (the bridge answers, the node never sees it). Also a mesh tool's error from the node when it has not reserved ids yet (#965, mesh-tools.md "Message ids"): nothing was sent, and the agent may repeat it |
 | `task.not_found` | `task_id` | No such task in the caller's project |
 | `task.not_open` | `task_id` | The task is already claimed or done |
 | `task.blocked` | `task_id`, `depends_on` | A dependency of the task is not done |
@@ -75,13 +79,14 @@ or a local response timeout has a localized retry message.
 | `lease.invalid_path` | `path` | Empty path or one containing `..` |
 | `files.not_found` | `path` | |
 | `files.too_large` | `path`, `limit` | |
-| `files.outside_root` | `path` | Path escapes the worktree (`..`, absolute, or a symlink leading out) |
+| `files.outside_root` | `path` | Path escapes the worktree (`..`, absolute, or a symlink leading out), or a symlink never resolves (its target is missing, it points to itself, or a ring of links) |
 | `files.secret` | `path` | ADR-0080: the node treats the file as secret by its name (`.env`, a private key, ...) and does not show it; the node's owner can switch this off (`files.show_secret`) |
 | `adapter.signature_invalid` | `package` | |
 | `adapter.crashed` | `kind`, `exit_code` | |
 | `adapter.agent_exited` | `stage`, `exit_code`, `stderr_tail` | ADR-0058: the agent behind an adapter (an ACP agent behind the bridge) exited before it was ready. `stage` is `initialize` or `session`; `exit_code` is its exit code, `?` when it had none; `stderr_tail` the last lines of its error output with secrets removed (docs/specs/adapter-protocol.md), possibly empty |
 | `adapter.agent_refused` | `stage` | ADR-0058: the agent behind an adapter answered `initialize` or the new session (`stage`) with an error |
 | `adapter.option_refused` | `id` | ADR-0058: the agent did not switch to that mode or model |
+| `adapter.permission_unanswerable` | `action` | ADR-0101, a conversation notice: the agent asked for permission without offering an option of kind `allow_once` or exactly one of kind `allow_always`, so the bridge raised no card and refused it |
 | `pair.closed` | — | ADR-0065: the hub is not open for pairing (the switch is closed, or closed while this session was open) |
 | `pair.limit` | `seconds` | ADR-0065: a pairing limit: pending sessions, admissions per address or for the hub, a poll over its rate, or the address is locked out. `seconds` is how long to wait before trying again |
 | `pair.expired` | — | ADR-0065: the pairing was not decided or revealed in time |
@@ -90,7 +95,7 @@ or a local response timeout has a localized retry message.
 | `pair.unknown` | — | ADR-0065: no such session on this connection (another connection's `pair_id` looks the same); counts as a failure for the sender's address |
 | `pair.state` | `state` | ADR-0065 section 5a: the message is not allowed in the session's current state (a second request or reveal, a reveal out of order, a decision on a session that is no longer pending); ends the session. `state` is `awaiting_reveal`, `pending` or `decided` |
 | `pair.insecure_transport` | — | ADR-0065 section 6: a browser asked to pair over a transport that cannot carry the session safely (plain HTTP from another machine) |
-| `pair.name_unverified` | `name` | ADR-0065 section 5, step 6b: **machine-local, never sent.** The leaf the machine saw does not carry the name or address it dialled (`name`), or does not chain to the CA it was given; nothing is stored |
+| `pair.name_unverified` | `name` | ADR-0065 section 5, step 6b: **machine-local, never sent.** The leaf the machine saw does not carry the name or address it dialled (`name`), or does not chain to the CA it was given; nothing is stored. The name is checked right after the handshake too, before the machine sends a request, so a leaf without the dialled name fails before the owner is asked (#901) |
 | `pair.names_missing` | `reason`, `names` | ADR-0065 section 5b: the hub cannot be sure its certificate names the address a machine will dial, so `PairOpen` is refused and the switch stays closed. `reason` is `interfaces` (the system would not list the network addresses; `names` is empty), `invalid` (a `--name` a certificate cannot carry; `names` is that name), `too_many` (more `--name` values than a certificate carries), `issue` (the certificate could not be made; `names` is what it should have carried) or `write` (the new certificate could not be saved to `server-cert.pem`; nothing was switched). The sentence tells the owner to start the hub with `--name ADDRESS` |
 | `pair.discovery_unconfirmed` | — | ADR-0065 section 15: **machine-local, never sent.** `agora join` found a hub by discovery and cannot ask the person to confirm its fingerprint (no terminal), so it does not choose; nothing is stored. The person gives the address, or runs it in a terminal |
 | `pair.ca_mismatch` | — | ADR-0065 section 15: **machine-local, never sent.** The person confirmed a hub found by discovery by the fingerprint of its certificate authority, and the certificate authority the hub then delivered has another one; nothing is stored |
@@ -100,9 +105,11 @@ or a local response timeout has a localized retry message.
 | `preview.unknown` | `forward_id` | ADR-0088: no such forward on that node (never opened, closed, or the node restarted) |
 | `preview.unavailable` | `reason` | ADR-0088: the hub cannot give a forward an origin of its own in this setup (`no_origin`: no wildcard name and no separate port); nothing was opened |
 | `agent.option_unknown` | `id` | ADR-0090: `agent.set_config` names an option, or a value of it, that the agent did not report (`id` is the option id) |
-| `agent.queue_full` | `limit` | ADR-0090: the agent is in a turn and `limit` (8) prompts already wait behind it; the prompt was not queued |
+| `agent.queue_full` | `limit` | ADR-0090: the agent is in a turn and `limit` (8) prompts already wait behind it; the prompt was not queued. ADR-0095: also a dispatch to a terminal agent that already has one dispatch held or being given (`limit` 1); nothing was claimed |
 | `agent.approval_needed` | `approval_id` | ADR-0090 Amendment A: `AgentSetMode` or `AgentSetConfig` named a value that makes the agent act without asking, the node's policy allows it, and the node did **not** apply it: it raised the approval `approval_id` (kind `agent.skip_permissions`) and applies the choice only when a trusted device signs the decision. Not a failure to retry: a window shows the card. The same code and id come back while that card still waits |
 | `enroll.renew_refused` | `reason` | ADR-0085: the hub will not renew this machine's certificate. `reason` is `unknown` (the certificate's serial is not one the hub issued), `revoked` (it, or the machine, was revoked), `expired` (its own end has passed), `too_old` (the hub issued it more than a certificate lifetime ago, whatever its own end says) or `too_frequent` (a certificate was issued for this machine less than an hour ago) or `superseded` (the certificate is valid but a newer one of the machine exists: only the newest may renew; an older one may still connect during its grace). A refused machine keeps the certificate it has and asks again later; `unknown`, `revoked` and `expired` mean it must join again |
+| `task.dispatch_limited` | `limit` | ADR-0095: this person tried to give `limit` (8) tasks to agents in the last minute (every try counts, also refused ones); nothing was claimed or sent. Try again later |
+| `agent.program_missing` | `kind`, `program` | RM-19 (#903): a start of `kind` (`agora agent start`, `AgentLaunch`/`AgentStart`, `agent.resume`, the mesh `agent_start`) could not start its program (`program`, the first word of the manifest's adapter command, ACP command or launch command, as `agora agent kinds` reports it) and this machine cannot find that program: not in the node's `PATH`, not installed by `agora agent install`, or a path that does not exist (the same check that marks a kind `missing`). Nothing was started. Older nodes answered `internal` |
 | `internal` | `incident_id` | Unexpected failure; details only in logs |
 
 ### Command-line codes (ADR-0067 rung 3)

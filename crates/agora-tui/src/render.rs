@@ -44,6 +44,24 @@ fn state_text(state: AgentState, t: Text<'_>) -> String {
     )
 }
 
+/// ADR-0101: "asks less" while a running agent holds at least one "always" answer (`AgentSnapshot.always_allowed`), never beside "does not
+/// ask" (that one says more: an agent started so, or whose mode skips asking).
+pub fn asks_less(a: &AgentSnapshot, t: Text<'_>) -> Option<String> {
+    (a.running
+        && !a.always_allowed.is_empty()
+        && !crate::board::acts_freely(a, &crate::client::Configs::default()))
+    .then(|| t(key!("tui-badge-asks-less"), &[]))
+}
+
+/// The agent's badge in a line: "does not ask" (ADR-0059), else "asks less" (ADR-0101), else nothing; `sep` goes before it.
+pub fn badge(a: &AgentSnapshot, t: Text<'_>, sep: &str) -> String {
+    if a.skips_permissions {
+        format!("{sep}[{}]", t(key!("tui-badge-no-ask"), &[]))
+    } else {
+        asks_less(a, t).map_or_else(String::new, |l| format!("{sep}[{l}]"))
+    }
+}
+
 /// ADR-0060: what an interrupted agent's row says: it stopped with its machine, and `u` resumes it (or `U` starts it again).
 pub fn interrupted_text(a: &AgentSnapshot, t: Text<'_>) -> String {
     t(
@@ -265,12 +283,9 @@ pub fn render(
             } else {
                 by
             };
-            // ADR-0059: an agent started so that it acts without asking says so on its row, for its whole life.
-            let no_ask = if a.skips_permissions {
-                format!("  [{}]", t(key!("tui-badge-no-ask"), &[]))
-            } else {
-                String::new()
-            };
+            // ADR-0059: an agent started so that it acts without asking says so on its row, for its whole life (ADR-0101: else "asks
+            // less" while it holds an "always" answer).
+            let no_ask = badge(a, t, "  ");
             out.push(format!(
                 "{pointer} {indent}{on}{marker} {word:<10}{off} {}  {dim}{}  {}{by}{reset}{no_ask}",
                 local(&a.agent_id),
@@ -519,6 +534,46 @@ pub fn plain(text: &str) -> String {
         .collect()
 }
 
+/// ADR-0101: the most characters of the agent's own name for its "always" option a line shows (as the web's `plainText(…, 64)`).
+pub const ALWAYS_LABEL_MAX: usize = 64;
+
+/// ADR-0101: "In its own words: “…”", the agent's own name for the always option `a` offers, as one short plain line of agent text
+/// (control and direction characters dropped, line breaks and runs of spaces made one space, at most [`ALWAYS_LABEL_MAX`] characters).
+/// `None` when the request offers no "always" or the agent gave it no name.
+pub fn always_label_line(a: &agora_protocol::v1::ApprovalSnapshot, t: Text<'_>) -> Option<String> {
+    let offer = crate::client::always_offer(a)?;
+    let one = plain(&offer.label)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if one.is_empty() {
+        return None;
+    }
+    let label = if one.chars().count() > ALWAYS_LABEL_MAX {
+        let mut cut: String = one.chars().take(ALWAYS_LABEL_MAX - 1).collect();
+        cut.push('…');
+        cut
+    } else {
+        one
+    };
+    Some(t(key!("tui-always-label"), &[("label", Arg::Str(label))]))
+}
+
+/// ADR-0101: what is read before answering a request that offers an answer the agent remembers: the agent's own name for it (when it
+/// gave one, [`always_label_line`]) and the warning that the agent decides what it covers and how long it keeps it, possibly longer than
+/// this session (the approved words; `always_text` picks them). Empty when the request offers no "always".
+pub fn always_lines(a: &agora_protocol::v1::ApprovalSnapshot, t: Text<'_>) -> Vec<String> {
+    if crate::client::always_offer(a).is_none() {
+        return Vec::new();
+    }
+    let mut out: Vec<String> = always_label_line(a, t).into_iter().collect();
+    out.push(t(
+        crate::client::always_text(key!("tui-always-warning"), false),
+        &[],
+    ));
+    out
+}
+
 /// ADR-0058: a notice in the conversation, in words. The code picks the message; parameters are the agent's text, shown plain.
 pub fn notice_text(e: &ChatEntry, t: Text<'_>) -> String {
     let p = |k: &str| Arg::Str(plain(e.params.get(k).map_or("", String::as_str)));
@@ -558,6 +613,19 @@ pub fn notice_text(e: &ChatEntry, t: Text<'_>) -> String {
             ],
         ),
         "adapter.output_dropped" => t(key!("tui-notice-output_dropped"), &[("bytes", p("bytes"))]),
+        // #902: the node's own notices about an adapter that ended on its own.
+        "adapter.restarting" => t(key!("tui-notice-restarting"), &[("attempt", p("attempt"))]),
+        // The exit code only when the node knows it (#902): an unknown one is left out, never said as `?` or as 1.
+        "adapter.gave_up" => match e.params.get("exit_code") {
+            Some(_) => t(
+                key!("tui-notice-gave_up"),
+                &[("restarts", p("restarts")), ("exit_code", p("exit_code"))],
+            ),
+            None => t(
+                key!("tui-notice-gave_up-no_code"),
+                &[("restarts", p("restarts"))],
+            ),
+        },
         other => t(
             key!("tui-notice-other"),
             &[("code", Arg::Str(plain(other)))],
@@ -809,6 +877,49 @@ mod tests {
         format!("{id}[{}]", a.join(","))
     }
 
+    /// ADR-0101: the request box quotes the agent's own name for its always option as one short plain line, only when offered.
+    #[test]
+    fn the_always_label_is_one_short_plain_line_of_agent_text() {
+        use agora_protocol::v1::ApprovalScope;
+        let ask = |label: &str, scopes: &[ApprovalScope]| ApprovalSnapshot {
+            approval_id: "laptop/ap-1".into(),
+            agent_id: "laptop/agent-1".into(),
+            action: "run_command".into(),
+            scopes: scopes.iter().map(|s| *s as i32).collect(),
+            always_label: label.into(),
+            always_option_id: "opt".into(),
+            ..Default::default()
+        };
+        let both = [ApprovalScope::Once, ApprovalScope::Always];
+        assert_eq!(
+            always_label_line(&ask("Always allow git status", &both), &t).as_deref(),
+            Some("tui-always-label[label=Always allow git status]")
+        );
+        // Control characters, an escape sequence, a direction override and line breaks never reach the screen; spaces collapse.
+        assert_eq!(
+            always_label_line(
+                &ask("\u{1b}[2Jallow\n\n  \u{202e}all\ttabs\u{7}", &both),
+                &t
+            )
+            .as_deref(),
+            Some("tui-always-label[label=[2Jallow all tabs]")
+        );
+        // Cut at 64 characters, an ellipsis included.
+        let long = always_label_line(&ask(&"é".repeat(100), &both), &t).unwrap();
+        let label = long
+            .trim_start_matches("tui-always-label[label=")
+            .trim_end_matches(']');
+        assert_eq!(label.chars().count(), ALWAYS_LABEL_MAX);
+        assert!(label.ends_with('…'));
+        // No name, only spaces, or no "always" offered: no line.
+        assert_eq!(always_label_line(&ask("", &both), &t), None);
+        assert_eq!(always_label_line(&ask(" \n\t ", &both), &t), None);
+        assert_eq!(
+            always_label_line(&ask("Always", &[ApprovalScope::Once]), &t),
+            None
+        );
+    }
+
     /// ADR-0070: an offline machine's row says when it was last heard from, in the largest whole unit.
     #[test]
     fn an_offline_machine_says_when_it_was_last_seen() {
@@ -889,6 +1000,7 @@ mod tests {
                 action: "shell".into(),
                 detail: "rm -r build".into(),
                 expires_at_ms: 0,
+                ..Default::default()
             }],
             ..Default::default()
         }
@@ -1086,6 +1198,33 @@ mod tests {
         );
         assert!(
             said.contains("tui-notice-other[code=future.thing]"),
+            "{said}"
+        );
+        // #902: the node's own notices about an adapter that ended on its own, with their numbers.
+        let mut restarting = entry(ChatRole::Agent, ChatKind::Notice, "");
+        restarting.code = "adapter.restarting".into();
+        restarting.params.insert("attempt".into(), "2".into());
+        let mut gave_up = entry(ChatRole::Agent, ChatKind::Notice, "");
+        gave_up.code = "adapter.gave_up".into();
+        gave_up.params.insert("restarts".into(), "5".into());
+        let unknown = gave_up.clone();
+        gave_up.params.insert("exit_code".into(), "3".into());
+        let said = render_chat(
+            &[restarting, gave_up, unknown],
+            "a",
+            "",
+            (160, 24),
+            false,
+            &t,
+        )
+        .join("\n");
+        assert!(said.contains("tui-notice-restarting[attempt=2]"), "{said}");
+        assert!(
+            said.contains("tui-notice-gave_up[restarts=5,exit_code=3]"),
+            "{said}"
+        );
+        assert!(
+            said.contains("tui-notice-gave_up-no_code[restarts=5]"),
             "{said}"
         );
         let a = AgentSnapshot {

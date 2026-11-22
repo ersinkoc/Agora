@@ -999,7 +999,7 @@ fn the_screen_password_is_typed_twice_unseen_and_ctrl_c_stops_it() {
     pty.write_input(b"open sesame 42\r").unwrap();
     wait_for(&mut pty, "Type it again");
     pty.write_input(b"open sesame 42\r").unwrap();
-    wait_for(&mut pty, "open sessions were signed out");
+    wait_for(&mut pty, "signed out.");
     assert!(pty.wait().unwrap().success(), "{seen}");
     // Ctrl-C while typing stops with 130 and changes nothing (the terminal is restored before it exits).
     let mut stop = agora_platform::spawn(&agora_platform::PtyConfig {
@@ -1045,19 +1045,50 @@ fn the_screen_password_is_typed_twice_unseen_and_ctrl_c_stops_it() {
         .contains("A screen password is set"));
 }
 
-/// Starts `agora hub run` on `listen` over `hub_dir`; returns the process and the address it says it runs on.
+/// Appends to `file` (made if missing, with its folder): where a test keeps a process's output to print when it fails.
+fn log_to(file: &Path) -> std::fs::File {
+    if let Some(dir) = file.parent() {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(file)
+        .unwrap()
+}
+
+/// Prints the files (the hub's and the node's output) when the test fails: why a node did not connect is in them (#957).
+struct ShowOnFailure(Vec<PathBuf>);
+
+impl Drop for ShowOnFailure {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            for f in &self.0 {
+                let text = std::fs::read_to_string(f).unwrap_or_default();
+                eprintln!("--- {}:\n{text}", f.display());
+            }
+        }
+    }
+}
+
+/// Starts `agora hub run` on `listen` over `hub_dir`; returns the process and the address it says it runs on. Everything the hub
+/// prints is appended to `<hub_dir>.log`.
 fn start_hub(home: &Path, hub_dir: &Path, listen: &str) -> (Child, String) {
+    use std::io::Write;
+    let log = hub_dir.with_extension("log");
     let mut hub = agora(home, &["hub", "run", "--listen", listen, "--hub-dir"])
         .arg(hub_dir)
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(log_to(&log))
         .spawn()
         .unwrap();
     let mut line = String::new();
     let mut out = BufReader::new(hub.stdout.take().unwrap());
     out.read_line(&mut line).unwrap();
+    let mut keep = log_to(&log);
+    let _ = keep.write_all(line.as_bytes());
     // Keep reading what the hub prints so it never blocks on a full pipe.
-    std::thread::spawn(move || std::io::copy(&mut out, &mut std::io::sink()));
+    std::thread::spawn(move || std::io::copy(&mut out, &mut keep));
     let addr = line
         .split("running on ")
         .nth(1)
@@ -1109,6 +1140,8 @@ fn a_machine_that_has_not_come_back_after_the_hub_is_killed_is_shown_offline() {
     let (hub_dir, home, node_home) = (root.join("hub"), root.join("home"), root.join("node"));
     std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(&node_home).unwrap();
+    // Dropped last, after the processes: on a failure the hub's and the node's whole output is printed.
+    let _show = ShowOnFailure(vec![root.join("hub.log"), root.join("node.log")]);
 
     let (hub, addr) = start_hub(&home, &hub_dir, "127.0.0.1:0");
     let mut hub = Proc(hub);
@@ -1144,8 +1177,8 @@ fn a_machine_that_has_not_come_back_after_the_hub_is_killed_is_shown_offline() {
         String::from_utf8_lossy(&out.stderr)
     );
     let node = agora(&node_home, &["node", "run"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(log_to(&root.join("node.log")))
+        .stderr(log_to(&root.join("node.log")))
         .spawn()
         .unwrap();
     let _node = Proc(node);

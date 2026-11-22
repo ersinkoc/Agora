@@ -411,6 +411,8 @@ mod tests {
         assert!(!viewer_may(&C::AgentCancelTurn(
             v1::AgentCancelTurn::default()
         )));
+        // ADR-0095: a viewer may not give a task to an agent.
+        assert!(!viewer_may(&C::TaskDispatch(v1::TaskDispatch::default())));
         assert!(!viewer_may(&C::TerminalInput(v1::TerminalInput::default())));
         assert!(!viewer_may(&C::ApprovalResolve(
             v1::ApprovalResolve::default()

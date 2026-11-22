@@ -45,6 +45,9 @@ pub const KIND_TERM_SNAPSHOT: u8 = 1;
 pub const KIND_TERM_RESIZE: u8 = 2;
 /// Payload: exit code i32 LE (negative signal number when killed by a signal, `i32::MIN` if unknown).
 pub const KIND_TERM_EXIT: u8 = 3;
+/// ADR-0100: history the window asked for (`TerminalSubscribe.history_lines`), ANSI that puts the newest lines into its scrollback;
+/// sent only right after the subscription's response, before its first snapshot, never with a resync.
+pub const KIND_TERM_HISTORY: u8 = 4;
 /// Chat transcript stream (ADR-0038). Payload: an encoded `ChatSnapshot`, sent first.
 pub const KIND_CHAT_SNAPSHOT: u8 = 10;
 /// Payload: an encoded `ChatEntry`, one for every line added after the snapshot.
@@ -267,6 +270,173 @@ fn prompt_result(queued: bool, queue_len: usize) -> v1::CommandOk {
     }
 }
 
+/// ADR-0090: a prompt for an adapter agent, through its adapter: sent now, or queued behind the turn that runs (at most 8, shown as
+/// queued until it is sent). Takes the supervisor's lock and lets it go before the adapter's answer is waited for. `(queued,
+/// queue_len)`; `queue_len` is 0 when it was sent. `on_queued` gets the queued prompt's tag while the lock is held, so nothing can
+/// take the prompt out of the queue before the caller knows its tag.
+fn submit_to_adapter(
+    ctx: &ControlContext,
+    mut sup: MutexGuard<'_, Supervisor>,
+    id: &AgentId,
+    text: &str,
+    on_queued: impl FnOnce(u64),
+) -> Result<(bool, usize), Error> {
+    let now = crate::daemon::now_ms();
+    let submitted = sup
+        .adapter_submit(id, text, |_| {
+            let tag = ctx.chat.push_queued(id, text.to_string(), now);
+            on_queued(tag);
+            tag
+        })
+        .map_err(sup_err);
+    drop(sup);
+    match submitted? {
+        Submit::Queued { queue_len } => Ok((true, queue_len)),
+        Submit::Send(call) => {
+            // The user's entry is in the conversation BEFORE the agent can answer, so a fast agent's first chunk never comes ahead
+            // of the prompt it answers. A prompt that did not go out is taken back.
+            let generation = call.generation();
+            let entry = ctx.chat.push_user(id, text.to_string(), now);
+            match call.run() {
+                Ok(()) => Ok((false, 0)),
+                Err(e) => {
+                    ctx.chat.retract(id, entry);
+                    ctx.sup().adapter_send_failed(id, generation);
+                    Err(sup_err(e))
+                }
+            }
+        }
+    }
+}
+
+/// ADR-0095 decisions 3 to 5: give open task `d.task_id` of `d.project_id` to agent `d.agent_id` of this node. The task is claimed
+/// for the agent where the project's board is ([`MeshServer::dispatch_claim`]); the prompt built from it is not typed over a running
+/// turn (a structured agent queues it; a terminal agent in a turn gets it held, one at most, until it is between turns, and every
+/// terminal agent gets it as a bracketed paste); a prompt that does not reach the agent gives a task on the node's own broker back;
+/// and `TaskDispatched` records it. Not an approval: nothing about the agent's permissions changes.
+///
+/// [`MeshServer::dispatch_claim`]: crate::mesh_server::MeshServer::dispatch_claim
+fn task_dispatch(ctx: &ControlContext, d: &v1::TaskDispatch) -> Result<v1::CommandOk, Error> {
+    use crate::task_dispatch::{Given, Held, Slot};
+    let unknown = || Error::new(ErrorCode::MeshRecipientUnknown).with("to", d.agent_id.as_str());
+    let gone = || Error::new(ErrorCode::AgentNotFound).with("agent_id", d.agent_id.as_str());
+    let Some(mesh) = &ctx.mesh else {
+        return Err(unknown());
+    };
+    let id = AgentId::new(d.agent_id.clone());
+    let (terminal, skips, paste) = {
+        let sup = ctx.sup();
+        let view = sup
+            .list()
+            .into_iter()
+            .find(|v| v.id == id && v.running && v.project == d.project_id)
+            .ok_or_else(unknown)?;
+        let paste = sup
+            .terminal(&id)
+            .map(crate::terminal::TerminalHandle::bracketed_paste);
+        (view.terminal, sup.skips_permissions_now(&id), paste)
+    };
+    let dispatches = mesh.dispatches();
+    // A terminal agent: its program must take a paste (its lines then arrive together, never as several submits), and its one slot is
+    // reserved before anything is claimed.
+    let token = if terminal {
+        match paste {
+            None => return Err(gone()),
+            Some(false) => return Err(capability_missing("terminal.bracketed_paste")),
+            Some(true) => Some(dispatches.reserve(&id, Instant::now())?),
+        }
+    } else {
+        None
+    };
+    let claim = match mesh.dispatch_claim(&d.project_id, &id, &d.task_id) {
+        Ok(c) => c,
+        Err(e) => {
+            if let Some(t) = token {
+                dispatches.cancel(&id, t);
+            }
+            return Err(e);
+        }
+    };
+    let given = Given {
+        agent: id.clone(),
+        task_id: d.task_id.clone(),
+        shared: claim.shared,
+    };
+    let sent = if let Some(token) = token {
+        // Decided now, after the claim (which may have waited for the hub), from its live screen read now (never the paced
+        // detection's last result): a turn that began meanwhile, or a screen no rule names, gets the prompt held, not pasted over it.
+        let fresh = ctx.sup().terminal_readiness(&id);
+        let slot = match fresh {
+            Some((state, detects)) => dispatches.decide(&id, token, state, detects, Instant::now()),
+            None => {
+                dispatches.cancel(&id, token);
+                None
+            }
+        };
+        match slot {
+            // The reservation went with the agent (it stopped meanwhile).
+            None => Err(gone()),
+            Some(Slot::PasteNow) => {
+                // The program may have turned bracketed paste off since it was checked: then it is refused as before the claim.
+                let control = ctx
+                    .sup()
+                    .terminal(&id)
+                    .map(|h| (h.bracketed_paste(), h.input_handle().ok()));
+                match control {
+                    Some((true, Some(c))) => crate::task_dispatch::paste_prompt(&c, &claim.prompt)
+                        .map(|()| (false, 0))
+                        .map_err(|_| gone()),
+                    Some((false, _)) => Err(capability_missing("terminal.bracketed_paste")),
+                    _ => Err(gone()),
+                }
+            }
+            Some(Slot::Hold) => {
+                let held = Held {
+                    prompt: claim.prompt.clone(),
+                    given: given.clone(),
+                };
+                if dispatches.fill(token, held) {
+                    Ok((true, crate::task_dispatch::MAX_HELD))
+                } else {
+                    Err(gone())
+                }
+            }
+        }
+    } else {
+        submit_to_adapter(ctx, ctx.sup(), &id, &claim.prompt, |tag| {
+            dispatches.queued(tag, given.clone());
+        })
+    };
+    let (queued, queue_len) = match sent {
+        Ok(v) => v,
+        Err(e) => {
+            mesh.give_back(&given);
+            return Err(e);
+        }
+    };
+    let prompt_sha256 = crate::task_dispatch::prompt_sha256(&claim.prompt);
+    if let Some(ev) = &ctx.events {
+        ev.record_bodies(vec![v1::event::Body::TaskDispatched(v1::TaskDispatched {
+            project_id: d.project_id.clone(),
+            task_id: d.task_id.clone(),
+            agent_id: d.agent_id.clone(),
+            by_user: d.by_user.clone(),
+            prompt_sha256: prompt_sha256.clone(),
+            queued,
+            agent_skips_permissions: skips,
+        })]);
+    }
+    Ok(v1::CommandOk {
+        result: Some(v1::command_ok::Result::TaskDispatch(
+            v1::TaskDispatchResult {
+                queued,
+                queue_len: u32::try_from(queue_len).unwrap_or(u32::MAX),
+                prompt_sha256,
+            },
+        )),
+    })
+}
+
 fn ok_empty() -> v1::CommandOk {
     v1::CommandOk {
         result: Some(v1::command_ok::Result::Empty(v1::Empty {})),
@@ -425,6 +595,24 @@ fn sup_err(e: SupervisorError) -> Error {
     e.to_protocol()
 }
 
+/// ADR-0101 (Codex review of PR #1007): records an always answer the adapter delivered to the run `run` of `agent`'s process. The
+/// caller holds the supervisor's lock (`sup`) for the check and the record together, so a replacement of the process is ordered
+/// before the check (which then fails) or after the record. The audit record (`ApprovalResolved`, ALWAYS) is always written; the
+/// agent's `AgentAlwaysAllowed` only while that run is still the agent's process. Returns whether it was.
+pub(crate) fn record_always_answer(
+    sup: &Supervisor,
+    events: &crate::daemon::EventSink,
+    agent: &AgentId,
+    run: Option<u64>,
+    approval_id: &str,
+    action: &str,
+    signer_device_id: &str,
+) -> bool {
+    let held = run.is_some_and(|run| sup.runs(agent, run));
+    events.approval_resolved_always(held.then_some(agent), approval_id, action, signer_device_id);
+    held
+}
+
 /// Run one command. Terminal subscription is handled by the connection (it needs the stream).
 fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
     use v1::command_ok::Result as Ok_;
@@ -447,6 +635,7 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                     .collect(),
             })),
         }),
+        Cmd::TaskDispatch(d) => task_dispatch(ctx, d),
         // A mesh message another node's agent sent, routed here by the hub with `origin` set by the hub (ADR-0031).
         Cmd::MeshPost(p) => {
             if p.origin.is_empty() {
@@ -910,6 +1099,12 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                 for e in &events {
                     if let SupervisorEvent::PromptsDropped { agent, tags } = e {
                         ctx.chat.drop_queued(agent, tags, crate::daemon::now_ms());
+                        // ADR-0095: a dispatch prompt that waited in the stopped agent's queue gives its task back.
+                        if let Some(mesh) = &ctx.mesh {
+                            for g in mesh.dispatches().dropped(agent, tags) {
+                                mesh.give_back(&g);
+                            }
+                        }
                     }
                 }
                 if let Some(ev) = &ctx.events {
@@ -920,35 +1115,11 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
         }
         Cmd::AgentPrompt(a) => {
             let id = AgentId::new(a.agent_id.clone());
-            let mut sup = ctx.sup();
+            let sup = ctx.sup();
             if sup.terminal(&id).is_none() {
-                // An adapter agent takes prompts through its adapter; the request is part of its conversation. ADR-0090: a prompt
-                // that arrives during a turn waits behind it (at most 8), shown as queued until it is sent.
-                let now = crate::daemon::now_ms();
-                let submitted = sup
-                    .adapter_submit(&id, &a.text, |_| {
-                        ctx.chat.push_queued(&id, a.text.clone(), now)
-                    })
-                    .map_err(sup_err);
-                // The adapter's answer is waited for after the supervisor's lock is let go.
-                drop(sup);
-                return match submitted? {
-                    Submit::Queued { queue_len } => Ok(prompt_result(true, queue_len)),
-                    Submit::Send(call) => {
-                        // The user's entry is in the conversation BEFORE the agent can answer, so a fast agent's first chunk never
-                        // comes ahead of the prompt it answers. A prompt that did not go out is taken back.
-                        let generation = call.generation();
-                        let entry = ctx.chat.push_user(&id, a.text.clone(), now);
-                        match call.run() {
-                            Ok(()) => Ok(prompt_result(false, 0)),
-                            Err(e) => {
-                                ctx.chat.retract(&id, entry);
-                                ctx.sup().adapter_send_failed(&id, generation);
-                                Err(sup_err(e))
-                            }
-                        }
-                    }
-                };
+                // An adapter agent takes prompts through its adapter; the request is part of its conversation.
+                let (queued, queue_len) = submit_to_adapter(ctx, sup, &id, &a.text, |_| {})?;
+                return Ok(prompt_result(queued, queue_len));
             }
             let control = sup
                 .terminal(&id)
@@ -956,15 +1127,11 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                 .ok_or_else(|| {
                     Error::new(ErrorCode::AgentNotFound).with("agent_id", a.agent_id.as_str())
                 })?;
-            // The write happens after the supervisor lock is let go. The text and the Enter key are two writes: a terminal
-            // program that reads both in one go takes them for a paste and keeps the Enter as a newline in its input box
-            // (seen with WrongStack, whose prompt then never ran).
+            // The write happens after the supervisor lock is let go (seen with WrongStack: text and Enter must be two writes).
             drop(sup);
-            let gone =
-                |_| Error::new(ErrorCode::AgentNotFound).with("agent_id", a.agent_id.as_str());
-            control.write_input(a.text.as_bytes()).map_err(gone)?;
-            std::thread::sleep(std::time::Duration::from_millis(150));
-            control.write_input(b"\r").map_err(gone)?;
+            crate::task_dispatch::type_prompt(&control, &a.text).map_err(|_| {
+                Error::new(ErrorCode::AgentNotFound).with("agent_id", a.agent_id.as_str())
+            })?;
             Ok(ok_empty())
         }
         // ADR-0058: the user's own switch; the supervisor refuses a terminal agent, an adapter without the switch and an id the
@@ -1018,6 +1185,12 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                 .adapter_turn_cancelled(&id, generation, a.drop_queue);
             let now = crate::daemon::now_ms();
             ctx.chat.drop_queued(&id, &dropped, now);
+            // ADR-0095: a dropped dispatch prompt gives its task back.
+            if let Some(mesh) = &ctx.mesh {
+                for g in mesh.dispatches().dropped(&id, &dropped) {
+                    mesh.give_back(&g);
+                }
+            }
             if let Some(approvals) = &ctx.approvals {
                 for approval in approvals.cancel_adapter_requests(&id) {
                     ctx.chat
@@ -1060,16 +1233,36 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
-            let resolution = approvals.resolve_request(r, now).map_err(|e| match e {
-                ApprovalError::Unknown => invalid("approval_id"),
-                ApprovalError::Expired => Error::new(ErrorCode::ApprovalExpired)
-                    .with("approval_id", r.approval_id.as_str()),
-                ApprovalError::BadSignature => Error::new(ErrorCode::ApprovalSignatureInvalid)
-                    .with("approval_id", r.approval_id.as_str()),
-                ApprovalError::Forbidden => {
-                    Error::new(ErrorCode::AuthForbidden).with("action", "approval.resolve")
-                }
-            })?;
+            // ADR-0101: the decision is checked against the node's policy (read from its file at node start) and the launch of the
+            // agent the request is routed to, as they are now, before the queue is locked (the supervisor's lock is never taken under
+            // it). The run checked is kept: the answer goes only to that run (Codex review of PR #1007).
+            let (decide, checked_run) = approvals
+                .agent_of(&r.approval_id)
+                .map(|agent| {
+                    let sup = ctx.sup();
+                    (sup.approval_decide(&agent), sup.adapter_epoch(&agent))
+                })
+                .unwrap_or_default();
+            let resolution = approvals
+                .resolve_decided(r, now, decide)
+                .map_err(|e| match e {
+                    ApprovalError::Unknown => invalid("approval_id"),
+                    ApprovalError::Expired => Error::new(ErrorCode::ApprovalExpired)
+                        .with("approval_id", r.approval_id.as_str()),
+                    ApprovalError::BadSignature => Error::new(ErrorCode::ApprovalSignatureInvalid)
+                        .with("approval_id", r.approval_id.as_str()),
+                    ApprovalError::Forbidden => {
+                        Error::new(ErrorCode::AuthForbidden).with("action", "approval.resolve")
+                    }
+                    ApprovalError::InvalidScope => invalid("scope"),
+                    ApprovalError::ScopeUnavailable => {
+                        Error::new(ErrorCode::ApprovalScopeUnavailable)
+                    }
+                    ApprovalError::ScopeForbidden => Error::new(ErrorCode::ApprovalScopeForbidden),
+                    ApprovalError::AdapterOutdated => {
+                        Error::new(ErrorCode::ApprovalAdapterOutdated)
+                    }
+                })?;
             // ADR-0057: a start request is the node's own, not an adapter's; its decision (verified above) goes to the spawner,
             // which announces it with the grant that was signed.
             if resolution.request.action == crate::approvals::START_ACTION {
@@ -1089,9 +1282,24 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                 resolution.verdict,
             );
             let approved = verdict == crate::approvals::Verdict::Approved;
+            let always = resolution.always && approved;
             let call = ctx
                 .sup()
-                .prepare_resolve_approval(&agent, &adapter_id, approved);
+                .prepare_resolve_approval_scoped(&agent, &adapter_id, approved, always)
+                .and_then(|c| {
+                    // The process was replaced since the policy was checked: the request was the former process's.
+                    if checked_run.is_some_and(|run| run != c.epoch()) {
+                        Err(crate::supervisor::SupervisorError::NotFound(agent.clone()))
+                    } else {
+                        Ok(c)
+                    }
+                });
+            let run = call
+                .as_ref()
+                .ok()
+                .map(crate::supervisor::AdapterCall::epoch);
+            // The adapter answers only once the answer was written to the agent (the ACP bridge waits for its writer), so a success
+            // here means the agent was given it.
             if let Err(e) = call.and_then(crate::supervisor::AdapterCall::run) {
                 // The decision was verified but the adapter could not be told (it is gone, did not answer, or no longer holds the
                 // request, as when an ACP bridge already answered it `cancelled`): the request is over, and the entry in the
@@ -1110,7 +1318,7 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                 return Err(sup_err(e));
             }
             // ADR-0090: the entry in the conversation shows the verified decision, never anything the agent said.
-            ctx.chat.set_permission(
+            ctx.chat.set_permission_as(
                 &agent,
                 &r.approval_id,
                 if approved {
@@ -1118,10 +1326,28 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                 } else {
                     v1::PermissionOutcome::Denied
                 },
+                always,
                 crate::daemon::now_ms(),
             );
             if let Some(ev) = &ctx.events {
-                ev.approval_resolved(&r.approval_id, approved, &r.signer_device_id);
+                if always {
+                    // ADR-0101: only an always answer the adapter delivered is recorded as one the agent holds, and only for the run it
+                    // was delivered to. Checked and recorded under the supervisor's lock (Codex review of PR #1007): a restart, resume,
+                    // exit or stop (which begin another run and clear the agent's records with their own events) is ordered either
+                    // before the check, which then fails, or after the record. A late answer of a former process is audited as given
+                    // (`ApprovalResolved` with ALWAYS) but never marks its replacement.
+                    record_always_answer(
+                        &ctx.sup(),
+                        ev,
+                        &agent,
+                        run,
+                        &r.approval_id,
+                        &resolution.request.action,
+                        &r.signer_device_id,
+                    );
+                } else {
+                    ev.approval_resolved(&r.approval_id, approved, &r.signer_device_id);
+                }
             }
             Ok(ok_empty())
         }
@@ -1238,7 +1464,7 @@ fn stop_survivor(
         agora_platform::kill_process_if_same(&p)
             .map_err(|_| Error::new(ErrorCode::Internal).with("incident_id", "unassigned"))?;
     }
-    ledger.set_process(agent_id, None, crate::daemon::now_ms());
+    ledger.set_process(agent_id, None, 0, crate::daemon::now_ms());
     if let (Some(ev), Some(e)) = (&ctx.events, ledger.get(agent_id)) {
         let resumable = !e.session_id.is_empty() && ctx.sup().resumable(&e.kind);
         ev.agent_interrupted(&e, resumable);
@@ -1572,6 +1798,7 @@ pub(crate) fn command_name(c: &Cmd) -> &'static str {
         Cmd::UsageReport(_) => "usage.report",
         Cmd::Enroll(_) => "enroll",
         Cmd::TaskUpdate(_) => "task.update",
+        Cmd::TaskDispatch(_) => "task.dispatch",
         Cmd::BoardCall(_) => "board.call",
         Cmd::BoardJoin(_) => "board.join",
         Cmd::NodePolicyGet(_) => "node.policy.get",
@@ -1625,6 +1852,7 @@ pub struct ControlServer {
 impl ControlServer {
     pub fn start(path: &Path, ctx: Arc<ControlContext>) -> io::Result<Self> {
         let listener = local_listen(path)?;
+        // Non-blocking so the accept after the readiness wait below never waits (a client that left in between).
         listener.set_nonblocking(true)?;
         // After the bind, which holds the node's lock: a second node on the same home fails there and never replaces the token of the
         // running one. Before the accept loop, so every connection that is answered is checked against the token in the file.
@@ -1641,14 +1869,20 @@ impl ControlServer {
             .name("agora-control".into())
             .spawn(move || {
                 while !stop2.load(Ordering::Acquire) {
-                    match listener.accept() {
-                        Ok(stream) => {
+                    // A readiness wait, not a sleep between tries (#958): the hub's routed subscriptions each open a connection, and
+                    // a fixed poll made every one of them wait up to `POLL` before it was read. The stop is still seen within `POLL`,
+                    // and at once when `Drop` wakes the wait.
+                    match listener.accept_timeout(POLL) {
+                        // The wake-up connection from `Drop`, or a client that came as the server stops: not served.
+                        Ok(Some(_)) if stop2.load(Ordering::Acquire) => break,
+                        Ok(Some(stream)) => {
                             let (ctx, stop) = (Arc::clone(&ctx), Arc::clone(&stop2));
                             let _ = std::thread::Builder::new()
                                 .name("agora-control-conn".into())
                                 .spawn(move || handle_connection(stream, &ctx, &stop));
                         }
-                        Err(e) if e.kind() == io::ErrorKind::WouldBlock => std::thread::sleep(POLL),
+                        Ok(None) => {}
+                        // A failing accept (no descriptors left) must not spin: back off before the next try.
                         Err(_) => std::thread::sleep(POLL),
                     }
                 }
@@ -1670,6 +1904,14 @@ impl Drop for ControlServer {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
         if let Some(t) = self.thread.take() {
+            // Best effort: wake the accept wait with a connection of our own, so stopping usually does not wait out `POLL`. Only while
+            // the accept thread runs, so something drains the socket's queue (a Unix connect does not wait on a full one). The
+            // connect can still take its time: on Windows a busy pipe makes it wait for a free instance up to 5 s (agora-platform's
+            // `CONNECT_BUSY_LIMIT`, #974) before it fails; a busy pipe means a client is already there, which wakes the accept anyway.
+            // The stop does not depend on it: the accept loop sees the flag within `POLL` either way.
+            if !t.is_finished() {
+                let _ = local_connect(&self.path);
+            }
             let _ = t.join();
         }
         if let Some(f) = &self.token_file {
@@ -1802,7 +2044,13 @@ fn handle_request(
             outcome.as_ref().map(|_| ok_empty()).map_err(Clone::clone),
         );
         let _ = send(writer, STREAM_COMMANDS, KIND_RESPONSE, resp.encode_to_vec());
-        if let Ok((agent, snap, sub)) = outcome {
+        if let Ok(Subscribed {
+            agent,
+            history,
+            snap,
+            sub,
+        }) = outcome
+        {
             let (ctx, writer, alive, stop) = (
                 Arc::clone(ctx),
                 Arc::clone(writer),
@@ -1812,7 +2060,11 @@ fn handle_request(
             let stream_id = frame.stream_id;
             let _ = std::thread::Builder::new()
                 .name("agora-control-term".into())
-                .spawn(move || pump(&ctx, &writer, stream_id, &agent, &snap, &sub, &alive, &stop));
+                .spawn(move || {
+                    pump(
+                        &ctx, &writer, stream_id, &agent, history, &snap, &sub, &alive, &stop,
+                    )
+                });
         }
         return true;
     }
@@ -1849,11 +2101,20 @@ fn handle_request(
     true
 }
 
+/// An accepted terminal subscription: whose terminal, the history frames the window asked for (ADR-0100), the snapshot they end at,
+/// and the live output after it.
+struct Subscribed {
+    agent: AgentId,
+    history: Vec<Vec<u8>>,
+    snap: Snapshot,
+    sub: OutputSubscription,
+}
+
 fn subscribe(
     ctx: &ControlContext,
     sub: &v1::TerminalSubscribe,
     stream_id: u32,
-) -> Result<(AgentId, Snapshot, OutputSubscription), Error> {
+) -> Result<Subscribed, Error> {
     if stream_id < agora_protocol::frame::FIRST_DYNAMIC_STREAM {
         return Err(invalid("stream_id"));
     }
@@ -1867,9 +2128,18 @@ fn subscribe(
     let handle = guard.terminal(&id).ok_or_else(|| {
         Error::new(ErrorCode::AgentNotFound).with("agent_id", sub.terminal_id.as_str())
     })?;
-    let (snap, subscription) = handle.subscribe();
+    // ADR-0100: the window's count, capped by what the terminal keeps (and by the replay's byte cap).
+    // Subscribed after the supervisor's lock is let go: copying and formatting a history must not hold up other commands.
+    let lines = usize::try_from(sub.history_lines).unwrap_or(usize::MAX);
+    let watch = handle.watch();
     drop(guard);
-    Ok((id, snap, subscription))
+    let (history, snap, subscription) = watch.subscribe_with_history(lines);
+    Ok(Subscribed {
+        agent: id,
+        history,
+        snap,
+        sub: subscription,
+    })
 }
 
 fn exit_payload(st: &agora_platform::ExitStatus) -> Vec<u8> {
@@ -1898,11 +2168,18 @@ fn pump(
     writer: &SharedWriter,
     stream: u32,
     agent: &AgentId,
+    history: Vec<Vec<u8>>,
     snap: &Snapshot,
     sub: &OutputSubscription,
     alive: &AtomicBool,
     stop: &AtomicBool,
 ) {
+    // ADR-0100: the history the window asked for comes first, then the snapshot it ends at; each frame is let go once sent.
+    for frame in history {
+        if send(writer, stream, KIND_TERM_HISTORY, frame).is_err() {
+            return;
+        }
+    }
     // Each repaint is followed by the size it was made at, so a client that paints the screen itself (rather than resizing the
     // agent to fit) knows how wide the program thinks its lines are.
     let repaint = |snap: &Snapshot| {
@@ -2280,6 +2557,13 @@ mod idempotency_tests {
         assert!(ok, "git {args:?}");
     }
 
+    /// Whether `sh` (the test agent) can be found on `PATH`, as in `crates/agora/tests/cli.rs`.
+    fn sh_on_path() -> bool {
+        std::env::var_os("PATH").is_some_and(|p| {
+            std::env::split_paths(&p).any(|d| d.join("sh").is_file() || d.join("sh.exe").is_file())
+        })
+    }
+
     fn agent_of(r: io::Result<Result<v1::CommandOk, v1::ErrorInfo>>) -> String {
         match r {
             Ok(Ok(v1::CommandOk {
@@ -2295,6 +2579,11 @@ mod idempotency_tests {
         // attempt still ran (a client that timed out and reconnected) ran it again. Gated: the supervisor lock holds the first attempt
         // inside `execute` (it has taken its name number, `names`); the retry is sent; then the lock is let go.
         if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
+            return;
+        }
+        // The test agent is `sh` (#972): Git for Windows puts it on PATH only with its `usr\bin`.
+        if !sh_on_path() {
+            eprintln!("skipped: no `sh` on PATH (on Windows, add Git's usr\\bin to PATH)");
             return;
         }
         let dir = std::env::temp_dir().join(format!("agora-ctl-idem-{}", std::process::id()));
@@ -2375,5 +2664,111 @@ mod idempotency_tests {
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(started.len(), 1, "the retry started a second agent");
         assert_eq!(a, b, "both attempts get the one answer");
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod accept_tests {
+    use super::*;
+
+    fn server(name: &str) -> (ControlServer, PathBuf) {
+        // Short: Unix socket paths are limited to about 100 bytes.
+        let dir = std::env::temp_dir().join(format!("agora-ctl-acc-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let sup = Supervisor::new(crate::supervisor::SupervisorConfig {
+            node: agora_core::NodeId::new("n"),
+            restart: crate::supervisor::RestartPolicy::default(),
+            terminal: crate::terminal::TerminalOptions::default(),
+            limits: crate::supervisor::NodeLimits::default(),
+        });
+        let ctx = Arc::new(ControlContext::new(
+            Arc::new(Mutex::new(sup)),
+            Vec::new(),
+            dir.join("worktrees"),
+            "n".into(),
+            None,
+            None,
+            None,
+            Arc::new(crate::chat::ChatBoard::new()),
+        ));
+        let sock = dir.join("c.sock");
+        (ControlServer::start(&sock, ctx).unwrap(), dir)
+    }
+
+    fn list(c: &mut Client) {
+        let r = c
+            .call(Cmd::ProjectList(v1::ProjectList::default()))
+            .unwrap();
+        assert!(r.is_ok(), "{r:?}");
+    }
+
+    fn p95(mut v: Vec<Duration>) -> Duration {
+        v.sort();
+        v[(v.len() * 95).div_ceil(100) - 1]
+    }
+
+    #[test]
+    fn a_new_connection_is_served_without_waiting_for_a_poll() {
+        // #958: the accept loop slept 100 ms after every empty try, so a command on a new connection (the uplink opens one for each
+        // subscription the hub routes) waited 0-100 ms before it was read: p95 about 95 ms. Measured against the same command on a
+        // connection already open, so a slow runner moves both and only the accept wait is left in the difference.
+        if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+            return;
+        }
+        let (server, dir) = server("new");
+        let sock = server.path().to_path_buf();
+        let mut kept = Client::connect(&sock).unwrap();
+        list(&mut kept);
+        let (mut open, mut new) = (Vec::new(), Vec::new());
+        for _ in 0..60 {
+            let t = Instant::now();
+            list(&mut kept);
+            open.push(t.elapsed());
+            let t = Instant::now();
+            let mut c = Client::connect(&sock).unwrap();
+            list(&mut c);
+            new.push(t.elapsed());
+        }
+        let (open, new) = (p95(open), p95(new));
+        drop(kept);
+        drop(server);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            new < open + Duration::from_millis(40),
+            "a new connection p95 {new:?}, an open one p95 {open:?}"
+        );
+    }
+
+    #[test]
+    fn stopping_the_server_ends_its_accept_thread_at_once() {
+        if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+            return;
+        }
+        let mut took = Vec::new();
+        for round in 0..10 {
+            let (server, dir) = server(&format!("stop{round}"));
+            let sock = server.path().to_path_buf();
+            list(&mut Client::connect(&sock).unwrap());
+            let t = Instant::now();
+            drop(server);
+            took.push(t.elapsed());
+            // The thread has ended and dropped the listener: nothing answers any more.
+            assert!(
+                Client::connect(&sock).is_err(),
+                "a stopped server still accepts"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+        // Woken rather than waiting out the poll (that took 0-100 ms, about 50 ms in the middle; woken it is under a millisecond
+        // here). Generous for a loaded runner.
+        let mut sorted = took.clone();
+        sorted.sort();
+        assert!(
+            sorted[sorted.len() / 2] < Duration::from_millis(50),
+            "{took:?}"
+        );
+        assert!(p95(took.clone()) < Duration::from_secs(2), "{took:?}");
     }
 }

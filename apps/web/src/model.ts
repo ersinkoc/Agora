@@ -56,6 +56,7 @@ export interface AgentTileModel {
   session?: SessionModel; // ADR-0058, for agents whose adapter reported it
   parentId?: string; // ADR-0057: the agent that started this one (hub-wide key)
   skipsPermissions?: boolean; // ADR-0059: started with an option that lets it act without asking (the "does not ask" badge)
+  alwaysAllowed?: string[]; // ADR-0101: the actions of the "always" answers it holds (the "Asks less" chip), newest last
   parentName?: string;
   // ADR-0060: it was running when its machine stopped. `resumable`: it can continue its own conversation (Resume); otherwise only Start
   // again (a new session in the same folder).

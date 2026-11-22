@@ -76,6 +76,18 @@ const ANY_WRITE: u32 = 0x2 /* FILE_WRITE_DATA / ADD_FILE */
     | WRITE_OWNER
     | 0x1000_0000 /* GENERIC_ALL */
     | 0x4000_0000 /* GENERIC_WRITE */;
+/// #898: whether a read grant left out on `path` is said for the first time by this process. The same folders (`System32`, `Program
+/// Files`) were said at every confined start; each is now said once, whatever the agent can still read there (that is not decided here).
+fn first_time_left_out(path: &Path) -> bool {
+    static SAID: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<PathBuf>>> =
+        std::sync::OnceLock::new();
+    let said = SAID.get_or_init(Default::default);
+    // A poisoned lock only loses the deduplication: say it again rather than never.
+    match said.lock() {
+        Ok(mut seen) => seen.insert(path.to_path_buf()),
+        Err(_) => true,
+    }
+}
 /// For a folder whose label the user cannot set (a data volume's default ACL, Modify through `Authenticated Users` only). `false`, as
 /// accepted ADR-0050 Amendment B, decision 2 reads: such a folder is refused before start (`label_failed`). `true` would give the
 /// node's logon SID `WRITE_OWNER` there while the label is needed (so a checkout on `D:` works); that path is kept and was measured, but
@@ -966,6 +978,7 @@ pub(crate) struct Confinement {
     logon_text: String,
     ledger: PathBuf,
     token: Token,
+    git_config: Option<PathBuf>,
 }
 
 impl Confinement {
@@ -993,6 +1006,7 @@ impl Confinement {
         // overwrite a ledger an earlier spawn kept after a failed removal nor have its own deleted when that spawn ends.
         let spawn = random_numbers()?;
         let ledger = dir.join(format!("{sid_text}-{:08x}{:08x}.acl", spawn[0], spawn[1]));
+        let git_config = sandbox.git_config_file();
         // Folders that exist, read ones first; a folder that is also writable keeps the stronger entry.
         let mut wanted: Vec<(PathBuf, u32)> = Vec::new();
         for p in &sandbox.read {
@@ -1007,7 +1021,10 @@ impl Confinement {
         }
         // Recorded before anything is changed: a crash between the two leaves a ledger that recovery can undo.
         let all: Vec<PathBuf> = wanted.iter().map(|(p, _)| p.clone()).collect();
-        let above = ancestors_of(&all);
+        let mut destinations = all.clone();
+        destinations.extend(git_config.iter().cloned());
+        let mut above = ancestors_of(&destinations);
+        above.extend(git_config.iter().cloned());
         // A folder the user labelled on purpose is left as it is (and not undone later). One that a live agent labelled (a shared
         // `objects`, `refs`) is recorded here too, so the label stays until the last agent using it has ended.
         let label_line = |p: &Path| format!("{LABEL_LINE}\t{}", ledger_path(p));
@@ -1051,6 +1068,7 @@ impl Confinement {
             logon_text,
             ledger,
             token: Token(null_mut()),
+            git_config: None,
         };
         // Every path is recorded in `confinement` *before* it is changed: on failure `confinement` is dropped, which undoes whatever was
         // added so far, including a change that went half through.
@@ -1065,15 +1083,25 @@ impl Confinement {
                 // It stays in `granted`: `drop` and recovery take back only an entry that is there, so should the call ever have written
                 // part of it before failing, that part is still taken back.
                 Err(e) if mask == READ_MASK && e.kind() == io::ErrorKind::PermissionDenied => {
-                    eprintln!(
-                        "agora-platform: confinement: read grant on {} left out: {e}",
-                        path.display()
-                    );
+                    if first_time_left_out(&path) {
+                        eprintln!(
+                            "agora-platform: confinement: read grant on {} left out: {e}",
+                            path.display()
+                        );
+                    }
                 }
                 Err(e) => return Err(e),
             }
         }
         for path in above {
+            if git_config.as_ref() == Some(&path) {
+                // Only this file is readable. Its ancestors get traversal rights.
+                confinement.granted_here.push(path.clone());
+                if change_acl_here(&path, confinement.sid.0, FILE_GENERIC_READ, true).is_ok() {
+                    confinement.git_config = Some(path);
+                }
+                continue;
+            }
             // A folder whose permissions the user may not change (`C:\Users`) is left alone: `Users` in the restricting list covers it.
             match change_acl_here(&path, confinement.sid.0, ANCESTOR_MASK, true) {
                 Ok(()) => confinement.granted_here.push(path),
@@ -1114,6 +1142,10 @@ impl Confinement {
     /// The primary token to start the agent's process with.
     pub(crate) fn token(&self) -> HANDLE {
         self.token.0
+    }
+
+    pub(crate) fn git_config(&self) -> Option<&Path> {
+        self.git_config.as_deref()
     }
 }
 
@@ -1928,6 +1960,18 @@ mod tests {
             }
         }
         out
+    }
+
+    /// #898: a read grant left out is said once per folder and process, not at every confined start; another folder is still said.
+    #[test]
+    fn a_read_grant_left_out_is_said_once_per_folder() {
+        let root = scratch("read-said-once");
+        let (a, b) = (root.join("a"), root.join("b"));
+        assert!(first_time_left_out(&a));
+        assert!(!first_time_left_out(&a));
+        assert!(!first_time_left_out(&a));
+        assert!(first_time_left_out(&b));
+        remove(&root);
     }
 
     /// A folder to read whose permissions the user may not change (`System32`, where `cmd.exe` is) is left out, and the start goes on;

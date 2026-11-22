@@ -49,7 +49,12 @@ pub const FOLLOWER_QUEUE: usize = 1024;
 /// cannot make the node spend more than a bounded pass on one item.
 const PRE_BOUND: usize = 64 * 1024;
 /// Notice codes only the node makes. An adapter's item with one of them is dropped: it could otherwise forge the node's own words.
-pub const NODE_NOTICES: &[&str] = &["adapter.queue_dropped", "adapter.output_dropped"];
+pub const NODE_NOTICES: &[&str] = &[
+    "adapter.queue_dropped",
+    "adapter.output_dropped",
+    // ADR-0101: the node refused an always-only request under its policy.
+    "approval.always_only_forbidden",
+];
 /// ADR-0058: a notice's code is at most this long and has this many parameters at most, each key at most `MAX_PARAM_KEY` bytes and
 /// each value at most `MAX_PARAM_BYTES` (more is cut). An adapter is untrusted; a notice that does not fit the shape is dropped.
 pub const MAX_CODE: usize = 64;
@@ -792,6 +797,21 @@ impl ChatBoard {
         }
     }
 
+    /// ADR-0090, #908: the queued prompt of this entry became the turn and is being sent at `sent_ms` (wall clock). An entry's
+    /// `at_ms` is when its event happened, and a queued prompt's event is its send, so the entry takes that time: a client places
+    /// the prompt by it (ties and out-of-order times broken by entry id), before the answer it gets, so the replies of two turns
+    /// do not read as one. Nothing is sent to followers here; the new time goes out with [`Self::unqueue`] (or the entry leaves
+    /// with [`Self::drop_queued`]).
+    pub fn sending(&self, agent: &AgentId, entry_id: u64, sent_ms: u64) {
+        if let Some(t) = self.lock().get_mut(agent) {
+            if let Some(i) = t.index(entry_id) {
+                if t.entries[i].queued {
+                    t.entries[i].at_ms = sent_ms;
+                }
+            }
+        }
+    }
+
     /// ADR-0090: the prompt of this entry was sent (it no longer waits).
     pub fn unqueue(&self, agent: &AgentId, entry_id: u64, now_ms: u64) {
         if let Some(t) = self.lock().get_mut(agent) {
@@ -800,8 +820,9 @@ impl ChatBoard {
     }
 
     /// ADR-0090: queued prompts that will not be sent. Their entries leave the transcript (a new subscriber never sees them) and a
-    /// notice with the stable code `adapter.queue_dropped` and the count says so to everyone following; a client that holds one of
-    /// the entries clears its waiting mark when it sees that notice.
+    /// notice with the stable code `adapter.queue_dropped`, the count and (#908) `entries`, the ids of exactly those entries joined
+    /// by commas, says so to everyone following; a client that holds one of them clears its waiting mark, and only for those (one
+    /// failed send among several queued prompts drops that one only).
     pub fn drop_queued(&self, agent: &AgentId, entry_ids: &[u64], now_ms: u64) {
         if entry_ids.is_empty() {
             return;
@@ -818,18 +839,58 @@ impl ChatBoard {
         }
         let mut n = entry(ChatRole::Agent, ChatKind::Notice, String::new(), now_ms);
         n.code = "adapter.queue_dropped".into();
-        n.params = HashMap::from([("count".to_string(), entry_ids.len().to_string())]);
+        let ids: Vec<String> = entry_ids.iter().map(u64::to_string).collect();
+        n.params = HashMap::from([
+            ("count".to_string(), entry_ids.len().to_string()),
+            ("entries".to_string(), ids.join(",")),
+        ]);
         t.add(n, now_ms);
     }
 
     /// ADR-0093: the holder kept only the newest of what the agent wrote while no node read it. A notice with the stable code
     /// `adapter.output_dropped` and the count of bytes says so to everyone following.
+    /// ADR-0101: an adapter's request was refused with no card: `approval.always_only_forbidden` (it offered only "always" under a
+    /// policy that refuses it) or `adapter.permission_unanswerable` (nothing the person could allow). `action` is the request's, as
+    /// the agent named it, bounded like a permission entry's.
+    pub fn refused_request(&self, agent: &AgentId, code: &'static str, action: &str, now_ms: u64) {
+        let mut g = self.lock();
+        let t = g.entry(agent.clone()).or_default();
+        let mut n = entry(ChatRole::Agent, ChatKind::Notice, String::new(), now_ms);
+        n.code = code.into();
+        n.params = HashMap::from([(
+            "action".to_string(),
+            tidy(action, MAX_PERMISSION_BYTES, Style::Label).0,
+        )]);
+        t.add(n, now_ms);
+    }
+
     pub fn output_dropped(&self, agent: &AgentId, bytes: u64, now_ms: u64) {
         let mut g = self.lock();
         let t = g.entry(agent.clone()).or_default();
         let mut n = entry(ChatRole::Agent, ChatKind::Notice, String::new(), now_ms);
         n.code = "adapter.output_dropped".into();
         n.params = HashMap::from([("bytes".to_string(), bytes.to_string())]);
+        t.add(n, now_ms);
+    }
+
+    /// #902 (RM-13): what the node did about a chat agent whose adapter ended on its own, said in its conversation: it starts it again
+    /// (`adapter.restarting`, with the attempt), or it gave up on it (`adapter.gave_up`, with the exit code it reported). The node's own
+    /// words: a fixed code and numbers, never text from the agent.
+    pub fn restart_notice(
+        &self,
+        agent: &AgentId,
+        code: &'static str,
+        params: &[(&str, String)],
+        now_ms: u64,
+    ) {
+        let mut g = self.lock();
+        let t = g.entry(agent.clone()).or_default();
+        let mut n = entry(ChatRole::Agent, ChatKind::Notice, String::new(), now_ms);
+        n.code = code.into();
+        n.params = params
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect();
         t.add(n, now_ms);
     }
 
@@ -858,6 +919,18 @@ impl ChatBoard {
         outcome: PermissionOutcome,
         now_ms: u64,
     ) {
+        self.set_permission_as(agent, approval_id, outcome, false, now_ms);
+    }
+
+    /// ADR-0101: [`Self::set_permission`], marking an approved "always" decision (`ChatEntry.permission_always`).
+    pub fn set_permission_as(
+        &self,
+        agent: &AgentId,
+        approval_id: &str,
+        outcome: PermissionOutcome,
+        always: bool,
+        now_ms: u64,
+    ) {
         if approval_id.is_empty() {
             return;
         }
@@ -873,6 +946,7 @@ impl ChatBoard {
         if let Some(id) = found.map(|e| e.entry_id) {
             t.modify(id, now_ms, false, |e| {
                 e.permission_outcome = outcome as i32;
+                e.permission_always = always && outcome == PermissionOutcome::Approved;
             });
         }
     }
@@ -978,6 +1052,44 @@ mod tests {
         assert_eq!(t, "{\"tool\":\"run \\\"x\\\"\",\"arguments\":{\"a\":1}}");
         let (k, t, _) = describe(&ChatItem::Plan(vec!["a".into(), "b".into()]));
         assert_eq!((k, t.as_str()), (ChatKind::Plan, "a\nb"));
+    }
+
+    /// #902: the node's own notices about an adapter that ended on its own are notice entries with their code and numbers only.
+    #[test]
+    fn a_restart_notice_is_a_notice_with_its_code_and_numbers() {
+        let b = ChatBoard::new();
+        let a = AgentId::new("a");
+        b.restart_notice(&a, "adapter.restarting", &[("attempt", "2".into())], 1);
+        b.restart_notice(&a, "adapter.gave_up", &[("exit_code", "3".into())], 2);
+        let got: Vec<_> = b
+            .snapshot(&a)
+            .into_iter()
+            .map(|e| {
+                (
+                    e.kind,
+                    e.code,
+                    e.params.into_iter().collect::<Vec<_>>(),
+                    e.text,
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (
+                    ChatKind::Notice as i32,
+                    "adapter.restarting".to_string(),
+                    vec![("attempt".to_string(), "2".to_string())],
+                    String::new()
+                ),
+                (
+                    ChatKind::Notice as i32,
+                    "adapter.gave_up".to_string(),
+                    vec![("exit_code".to_string(), "3".to_string())],
+                    String::new()
+                ),
+            ]
+        );
     }
 
     #[test]
@@ -1828,6 +1940,77 @@ mod tests {
         assert_eq!(s.len(), 2);
         assert_eq!(s[1].code, "adapter.queue_dropped");
         assert_eq!(s[1].params["count"], "1");
+        accounted(&b, &a);
+    }
+
+    /// #908 (RM-44): two prompts wait behind a call that runs, the turn is cancelled and they go one after the other. An entry's
+    /// `at_ms` is when its event happened: a sent prompt's is when it went (its id is unchanged), so a client that places the
+    /// person's entries by time reads prompt, answer, prompt, answer. Times are the wall clock's, never adjusted (an entry from a
+    /// clock that stepped back keeps its own). The call that ran keeps the status the agent last gave it (the node invents none).
+    #[test]
+    fn a_queued_prompt_takes_the_time_it_was_sent_and_keeps_its_id() {
+        let b = ChatBoard::new();
+        let a = AgentId::new("a");
+        b.push_user(&a, "slow".into(), 10);
+        let mut call = tool("t4");
+        call.status = "in_progress".into();
+        b.push_item(&a, &ChatItem::Tool(call), 11);
+        let one = b.push_queued(&a, "queued one".into(), 12);
+        let two = b.push_queued(&a, "queued two".into(), 13);
+        let (_, rx) = b.follow(&a);
+        // The turn is cancelled; the first queued prompt becomes the turn, then the agent answers it; then the second.
+        b.sending(&a, one, 20);
+        b.unqueue(&a, one, 20);
+        b.push_item(&a, &ChatItem::Text("queued one".into()), 21);
+        b.sending(&a, two, 22);
+        b.unqueue(&a, two, 22);
+        b.push_item(&a, &ChatItem::Text("queued two".into()), 23);
+        // Followers get each sent prompt again, no longer waiting, with the time it went.
+        let got: Vec<ChatEntry> = rx.try_iter().collect();
+        let first = got.iter().find(|e| e.entry_id == one).unwrap();
+        assert_eq!((first.queued, first.at_ms), (false, 20));
+        let s = b.snapshot(&a);
+        let at = |id: u64| s.iter().find(|e| e.entry_id == id).unwrap().at_ms;
+        assert_eq!((at(one), at(two)), (20, 22));
+        // The ids are unchanged: the entries stay where they were, only their times say when each prompt went.
+        assert!(s.iter().all(|e| !e.queued));
+        assert!(s.windows(2).all(|w| w[0].entry_id < w[1].entry_id));
+        let running = s.iter().find(|e| e.call_id == "t4").unwrap();
+        assert_eq!(running.status, ToolStatus::InProgress as i32);
+        // A prompt that is not waiting is not moved; a time from a clock that stepped back is kept as it is.
+        b.sending(&a, one, 99);
+        assert_eq!(
+            b.snapshot(&a)
+                .iter()
+                .find(|e| e.entry_id == one)
+                .unwrap()
+                .at_ms,
+            20
+        );
+        b.push_user(&a, "late clock".into(), 1);
+        assert_eq!(b.snapshot(&a).last().unwrap().at_ms, 1);
+        accounted(&b, &a);
+    }
+
+    /// #908: the notice that queued prompts will not be sent names exactly those entries, so a client marks only them; one failed
+    /// send among several waiting prompts leaves the others waiting.
+    #[test]
+    fn the_queue_dropped_notice_names_the_entries_it_drops() {
+        let b = ChatBoard::new();
+        let a = AgentId::new("a");
+        let q: Vec<u64> = (0..3)
+            .map(|n| b.push_queued(&a, format!("q{n}"), n))
+            .collect();
+        b.drop_queued(&a, &[q[1]], 5);
+        let s = b.snapshot(&a);
+        let n = s.last().unwrap();
+        assert_eq!(n.code, "adapter.queue_dropped");
+        assert_eq!(n.params["count"], "1");
+        assert_eq!(n.params["entries"], q[1].to_string());
+        assert_eq!(s.iter().filter(|e| e.queued).count(), 2);
+        b.drop_queued(&a, &[q[0], q[2]], 6);
+        let n = b.snapshot(&a).last().unwrap().clone();
+        assert_eq!(n.params["entries"], format!("{},{}", q[0], q[2]));
         accounted(&b, &a);
     }
 }

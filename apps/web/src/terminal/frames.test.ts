@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { decodeTerminalFrame, inputBytes, snapshotAfterSize, SNAPSHOT_WAIT_MS, type TerminalEvent } from './frames';
+import { decodeTerminalFrame, HISTORY_PENDING_MAX, historyPairing, inputBytes, snapshotAfterSize, SNAPSHOT_WAIT_MS, type TerminalEvent } from './frames';
 
 const u16x2 = (a: number, b: number) => new Uint8Array(new Uint16Array([a, b]).buffer); // little-endian hosts
 const i32 = (v: number) => new Uint8Array(new Int32Array([v]).buffer);
@@ -59,5 +59,45 @@ describe('a snapshot is painted after the size that follows it', () => {
     g.dispose();
     vi.advanceTimersByTime(SNAPSHOT_WAIT_MS * 2);
     expect(out).toEqual([]);
+  });
+});
+
+describe('history (kind 4) is paired with the snapshot it comes before (ADR-0100)', () => {
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+  const bytes = (s: string) => new TextEncoder().encode(s);
+  const text = (b?: Uint8Array) => (b ? new TextDecoder().decode(b) : undefined);
+  const shape = (out: (TerminalEvent | undefined)[]) => out.map((e) => (e === undefined ? 'held' : e.type === 'snapshot' ? `snapshot(${text(e.history) ?? '-'})` : e.type));
+  it('decodes kind 4 as history bytes', () => {
+    expect(decodeTerminalFrame(4, bytes('h'))).toEqual({ type: 'history', bytes: bytes('h') });
+  });
+  it('holds history until its snapshot, which carries it, and never waits for history', () => {
+    const p = historyPairing();
+    expect(shape([p.frame({ type: 'history', bytes: bytes('a') }), p.frame({ type: 'history', bytes: bytes('b') }), p.frame({ type: 'snapshot', bytes: bytes('s') }),
+      p.frame({ type: 'snapshot', bytes: bytes('t') }), p.frame({ type: 'data', bytes: bytes('d') })])).toEqual(['held', 'held', 'snapshot(ab)', 'snapshot(-)', 'data']);
+  });
+  it('drops held history on reset (a subscription ended without its snapshot)', () => {
+    const p = historyPairing();
+    p.frame({ type: 'history', bytes: bytes('stale') });
+    p.reset();
+    expect(shape([p.frame({ type: 'snapshot', bytes: bytes('s') })])).toEqual(['snapshot(-)']);
+  });
+  it('never holds more than one replay', () => {
+    const p = historyPairing();
+    p.frame({ type: 'history', bytes: new Uint8Array(HISTORY_PENDING_MAX - 1) });
+    p.frame({ type: 'history', bytes: bytes('xy') });
+    p.frame({ type: 'history', bytes: bytes('z') });
+    expect(shape([p.frame({ type: 'snapshot', bytes: bytes('s') })])).toEqual(['snapshot(-)']);
+    p.frame({ type: 'history', bytes: bytes('ok') });
+    expect(shape([p.frame({ type: 'snapshot', bytes: bytes('s') })])).toEqual(['snapshot(ok)']);
+  });
+  it('paints a snapshot with its history after the size that follows it', () => {
+    const out: TerminalEvent[] = [];
+    const g = snapshotAfterSize((e) => out.push(e));
+    g.push({ type: 'snapshot', bytes: bytes('s'), history: bytes('ab') });
+    expect(out).toEqual([]);
+    g.push({ type: 'resize', cols: 80, rows: 24 });
+    g.push({ type: 'data', bytes: bytes('d') });
+    expect(shape(out)).toEqual(['resize', 'snapshot(ab)', 'data']);
   });
 });

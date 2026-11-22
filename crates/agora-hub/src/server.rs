@@ -184,6 +184,8 @@ where
             eprintln!("node silent: {node_id}");
             let _ = tokio::time::timeout(Duration::from_secs(1), conn.close()).await;
         }
+        // Said in the hub's log: the node sees only a dropped connection (#935: "database is locked" here went unlogged).
+        Err(ServeError::Store(e)) => eprintln!("node link ended: {node_id} store: {}", e.0),
         _ => {}
     }
     result
@@ -249,8 +251,10 @@ where
     // ADR-0070: the connection is open, so the hub records the node online (a first connect or a reconnect alike: nothing the node
     // runs is reset) and, when it ends, offline with why. Both come from this certificate-authenticated connection only.
     let verifies_devices = welcome.capabilities.iter().any(|c| c == "device.trust");
+    // #957: a connection whose opening the hub cannot record is ended (the node dials again and is recorded then), never kept live
+    // while every view shows the machine offline.
     let (registration, commands, generation) =
-        hub.node_link_opened(node_id, welcome.capabilities, now_ms());
+        hub.node_link_opened(node_id, welcome.capabilities, now_ms())?;
     let load = registration.load();
     // ADR-0061: a node that verifies endorsements gets every one it may have missed while it was away, and every revocation.
     if verifies_devices {
@@ -719,6 +723,15 @@ pub fn snapshot_of(view: &View, pos: u64) -> v1::Snapshot {
                 still_running: a.interrupted.as_ref().is_some_and(|i| i.still_running),
                 launch_options: a.launch_options.clone(),
                 skips_permissions: a.skips_permissions,
+                // ADR-0101: only a running agent holds always answers.
+                always_allowed: if a.running {
+                    a.always_allowed
+                        .iter()
+                        .map(|(_, action)| action.clone())
+                        .collect()
+                } else {
+                    Vec::new()
+                },
                 ..session_snapshot(&a.session)
             })
             .collect(),
@@ -741,6 +754,9 @@ pub fn snapshot_of(view: &View, pos: u64) -> v1::Snapshot {
                 action: a.action.clone(),
                 detail: a.detail.clone(),
                 expires_at_ms: a.expires_at_ms,
+                scopes: a.scopes.clone(),
+                always_label: a.always_label.clone(),
+                always_option_id: a.always_option_id.clone(),
             })
             .collect(),
         tasks: view
@@ -1141,6 +1157,24 @@ where
             .await?;
         return Ok(());
     }
+    // ADR-0095: a dispatch names the person who asks, and a person gives at most a few a minute.
+    if let Err(e) = crate::dispatch::prepare_dispatch(
+        who,
+        &mut req,
+        hub.dispatches(),
+        std::time::Instant::now(),
+    ) {
+        audit(
+            hub,
+            who,
+            &audit_action(&req),
+            &req.target_node,
+            e.code.as_str(),
+        );
+        conn.send(&frame(STREAM_COMMANDS, 1, refuse(e).encode_to_vec()))
+            .await?;
+        return Ok(());
+    }
     // Shared terminal size: the node gets the smallest size of the windows watching the terminal, and only when it changes.
     if let Some(command_request::Command::TerminalResize(t)) = req.command.as_mut() {
         if !req.target_node.is_empty() {
@@ -1520,7 +1554,7 @@ fn board_for_node(
             let _ = answers.send(error_response(rid, &e));
             return;
         }
-        Verdict::Done { result, is_error } => (result.to_string(), is_error),
+        Verdict::Done { result, is_error } => bounded_board_result(result.to_string(), is_error),
     };
     if let Some(f) = a.fanout {
         // Best effort, like any mesh post: a receiver that is gone just does not get its copy.
@@ -1607,6 +1641,19 @@ fn board_for_node(
         };
         let _ = answers.send(resp);
     });
+}
+
+/// The largest board tool result the hub sends a node (well inside one frame, `DEFAULT_MAX_PAYLOAD`, with room for the envelope).
+const MAX_BOARD_RESULT: usize = agora_protocol::frame::DEFAULT_MAX_PAYLOAD - 64 * 1024;
+
+/// A board tool result as it may be sent: one too big for a frame (a large board's whole `task_list`) becomes the tool error
+/// `mesh.body_too_large` (`limit`), so the answer never ends the node's connection.
+fn bounded_board_result(result: String, is_error: bool) -> (String, bool) {
+    if result.len() <= MAX_BOARD_RESULT {
+        return (result, is_error);
+    }
+    let e = Error::new(ErrorCode::MeshBodyTooLarge).with("limit", MAX_BOARD_RESULT as i64);
+    (agora_mesh::mcp::protocol_error_result(&e).to_string(), true)
 }
 
 /// ADR-0058: the snapshot fields that come from an agent's reported session (options, context, its own cost).
@@ -2526,7 +2573,7 @@ mod event_writer_tests {
         let mut session = NodeSession::new(hub.shared_store(), "n", &support());
         session.hello(&hello(), 1).unwrap();
         session.resume(&v1::Resume::default()).unwrap();
-        let (registration, _, generation) = hub.node_link_opened("n", vec![], 1);
+        let (registration, _, generation) = hub.node_link_opened("n", vec![], 1).unwrap();
         let (release, holder) = hold_store(&hub).await;
         let mut events = NodeEvents {
             session: Some(session),
@@ -2709,6 +2756,20 @@ mod event_writer_tests {
 #[cfg(test)]
 mod audit_cleanup_tests {
     use super::*;
+
+    /// Codex review of #883: a board answer too big for one frame (a large board's whole `task_list`) becomes a tool error instead of a
+    /// frame that would end the node's connection.
+    #[test]
+    fn a_board_answer_too_big_for_a_frame_becomes_a_tool_error() {
+        let small = "[]".to_string();
+        assert_eq!(bounded_board_result(small.clone(), false), (small, false));
+        let (text, is_error) = bounded_board_result("x".repeat(MAX_BOARD_RESULT + 1), false);
+        assert!(is_error);
+        assert!(text.len() < 1024, "{}", text.len());
+        assert!(text.contains("mesh.body_too_large"), "{text}");
+        let ok = "y".repeat(MAX_BOARD_RESULT);
+        assert_eq!(bounded_board_result(ok.clone(), false), (ok, false));
+    }
 
     /// Review F7: the audit text is bounded in count and in the length of each entry, with a mark, and the request is not touched.
     #[test]

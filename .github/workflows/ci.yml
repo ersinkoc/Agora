@@ -54,6 +54,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: sh scripts/check-docs.sh
+      - run: sh scripts/check-case.sh
 
   schema:
     runs-on: ubuntu-latest
@@ -115,6 +116,12 @@ jobs:
           # Check that events reach the open browser after a restart with room for runner scheduling.
           LIMIT_MS: "60000"
         run: node scripts/e2e-hub-restart.mjs
+        timeout-minutes: 5
+      - name: A late or returning window gets the program's terminal modes (ADR-0100)
+        run: node scripts/e2e-terminal-repaint.mjs
+        timeout-minutes: 5
+      - name: Settings knows a screen password set while the window was open (#909)
+        run: node scripts/e2e-screen-password.mjs
         timeout-minutes: 5
 
   schema-breaking:

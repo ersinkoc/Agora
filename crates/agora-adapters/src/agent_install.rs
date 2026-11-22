@@ -13,7 +13,7 @@
 use std::cmp::Ordering;
 use std::ffi::OsStr;
 use std::fs::File;
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, Write};
 use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -862,24 +862,84 @@ fn check_names(home: &Path, name: &str, exe: &str) -> Result<(), InstallError> {
 
 // ---- last seen list version ----------------------------------------------------------------------------------------------
 
-/// The newest list version this machine accepted (`<AGORA_HOME>/agents/list-state.json`), 0 when none or unreadable.
-pub fn last_seen_version(home: &Path) -> u64 {
-    std::fs::read_to_string(agents_dir(home).join("list-state.json"))
-        .ok()
-        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
-        .and_then(|v| v.get("version").and_then(serde_json::Value::as_u64))
-        .unwrap_or(0)
+/// The largest `list-state.json` that is read: it holds one number (`{"version":N}`); anything larger was not written by Agora.
+pub const MAX_LIST_STATE_BYTES: u64 = 4096;
+
+/// The detail of the refusal when `list-state.json` is there but cannot be read or understood (#923).
+pub const LIST_STATE_UNREADABLE: &str = "list_state_unreadable";
+
+/// `<AGORA_HOME>/agents/list-state.json`.
+pub fn list_state_path(home: &Path) -> PathBuf {
+    agents_dir(home).join("list-state.json")
 }
 
-/// Remembers `version` as the newest accepted, atomically, under the install lock (two processes cannot interleave a read and a
-/// write); an older number never replaces a newer one.
+/// The newest list version this machine accepted (`<AGORA_HOME>/agents/list-state.json`): 0 only when the file does not exist (no
+/// list accepted yet). A file that is there but cannot be read or understood (no permission, a link or anything but a plain file,
+/// larger than [`MAX_LIST_STATE_BYTES`], not `{"version":N}`) is `agent.install.index_invalid` with the detail
+/// [`LIST_STATE_UNREADABLE`], never 0: an unknown version would let an older list through (#923). The file is opened without
+/// following a link at its name and checked on the opened handle, so a link swapped in after any earlier look is refused, not read.
+/// It is only ever replaced by a rename (`write_private`), so a crash leaves the old one whole; the owner recovers from a damaged one
+/// by removing it (docs/specs/agent-packages.md, rung 3).
+pub fn last_seen_version(home: &Path) -> Result<u64, InstallError> {
+    let unreadable = || InstallError {
+        code: Code::IndexInvalid,
+        detail: LIST_STATE_UNREADABLE.into(),
+    };
+    let file = match agora_platform::open_read_no_follow(&list_state_path(home)) {
+        Ok(f) => f,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(_) => return Err(unreadable()),
+    };
+    if !file.metadata().is_ok_and(|m| m.is_file()) {
+        return Err(unreadable());
+    }
+    // One byte past the cap is read, so a larger file is refused, never read into memory or cut.
+    let mut bytes = Vec::new();
+    file.take(MAX_LIST_STATE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| unreadable())?;
+    if bytes.len() as u64 > MAX_LIST_STATE_BYTES {
+        return Err(unreadable());
+    }
+    // Only the documented object (a derived reader alone would also take a positional array, `[5]`, which no writer emits), then
+    // the typed reader, which refuses a repeated `version` where a generic value keeps the last one (Codex's review of #997).
+    let is_object =
+        serde_json::from_slice::<serde_json::Value>(&bytes).is_ok_and(|v| v.is_object());
+    if !is_object {
+        return Err(unreadable());
+    }
+    serde_json::from_slice::<ListState>(&bytes)
+        .map(|s| s.version)
+        .map_err(|_| unreadable())
+}
+
+#[derive(serde::Deserialize)]
+struct ListState {
+    version: u64,
+}
+
+fn rolled_back(seen: u64, version: u64) -> Result<(), InstallError> {
+    if version < seen {
+        return err(Code::IndexInvalid, "rollback");
+    }
+    Ok(())
+}
+
+/// Records `version`, the list just opened, as the newest accepted, atomically, under the install lock (two processes cannot
+/// interleave a read and a write). The record is read again here, so a list that was checked against an older record is refused
+/// when a newer one was recorded meanwhile (`agent.install.index_invalid`, detail `rollback`); the same version is already recorded
+/// and is accepted. A record that cannot be read is never replaced (#923).
 pub fn remember_list_version(home: &Path, version: u64) -> Result<(), InstallError> {
-    if version <= last_seen_version(home) {
+    let seen = last_seen_version(home)?;
+    rolled_back(seen, version)?;
+    if version == seen {
         return Ok(());
     }
-    let (root, dir) = open_agents(home)?;
-    let _lock = Lock::acquire(&root, &dir)?;
-    if version <= last_seen_version(home) {
+    let (_root, dir) = open_agents(home)?;
+    let _lock = Lock::acquire(&dir)?;
+    let seen = last_seen_version(home)?;
+    rolled_back(seen, version)?;
+    if version == seen {
         return Ok(());
     }
     agora_platform::write_private(
@@ -918,17 +978,20 @@ pub struct Outcome {
     pub unchanged: bool,
 }
 
-/// How long a `.lock` with nothing readable in it is believed to be somebody still writing it.
-const LOCK_GRACE: Duration = Duration::from_secs(60);
-
-/// The install lock: `<agents>/.lock` holding `pid started boot` of its owner (the start time and boot tell a reused pid from the
-/// owner). It is taken over only when its owner is gone, by renaming it to a unique name and checking what was renamed; it is
-/// removed on drop only while it still holds this process's own text.
-struct Lock<'a> {
-    root: &'a ConfinedDir,
-    path: PathBuf,
-    text: String,
+/// The install lock (audit F100): `<agents>/.lock`, held with the system's file lock (`File::try_lock`), which the system releases
+/// when its owner ends, so a crash never leaves it held and nothing is taken over. While held it names its owner (`pid started boot`)
+/// for versions before this one, which judge the lock by that text alone; a lock such a version holds (a live owner named in the file)
+/// is respected. It is emptied on release and never removed: a file removed while another process has it open and is about to lock
+/// it would let two processes hold locks on two different files. On Windows such a version cannot read a held lock (the system lock
+/// is mandatory there) and judges it by its age, but the file is open without delete sharing, so it can neither rename nor remove it.
+struct Lock {
+    file: File,
 }
+
+/// How long [`Lock::acquire`] waits before an install is `in_progress`. A process started by another thread of this process holds a
+/// copy of the lock's handle from its fork to its exec (the handle is close-on-exec), and the system counts that copy as holding the
+/// lock: the wait outlasts such a copy, not another install.
+const LOCK_WAIT: Duration = Duration::from_secs(1);
 
 enum Holder {
     Alive,
@@ -972,70 +1035,65 @@ fn holder(text: &str) -> Holder {
     }
 }
 
-impl<'a> Lock<'a> {
-    fn acquire(root: &'a ConfinedDir, agents: &Path) -> Result<Self, InstallError> {
-        static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        let name = OsStr::new(".lock");
-        let path = agents.join(".lock");
-        let text = own_text();
-        for _ in 0..4 {
-            match root.create_new(name, 0o600) {
-                Ok(mut f) => {
-                    f.write_all(text.as_bytes()).map_err(|e| io_err(&e))?;
-                    return Ok(Self { root, path, text });
+impl Lock {
+    fn acquire(agents: &Path) -> Result<Self, InstallError> {
+        let mut file =
+            open_lock(agents, &agora_platform::open_lock_private).map_err(|e| io_err(&e))?;
+        let end = Instant::now() + LOCK_WAIT;
+        loop {
+            match file.try_lock() {
+                Ok(()) => break,
+                Err(std::fs::TryLockError::WouldBlock) if Instant::now() < end => {
+                    std::thread::sleep(Duration::from_millis(10));
                 }
-                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-                    let seen = std::fs::read_to_string(&path);
-                    let stale = match &seen {
-                        Ok(t) => match holder(t) {
-                            Holder::Gone => true,
-                            Holder::Alive => false,
-                            Holder::Unreadable => old_enough(&path),
-                        },
-                        // Gone between create and read: try again.
-                        Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
-                        Err(_) => old_enough(&path),
-                    };
-                    if !stale {
-                        return err(Code::InProgress, "locked");
-                    }
-                    // Only one of several racing processes wins the rename. What was renamed must be what was judged stale: if
-                    // another process has taken over in between, that is its live lock, and it is put back (a hard link fails
-                    // when `.lock` exists again) rather than deleted.
-                    let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    let moved = agents.join(format!(".lock.stale-{}-{n}", std::process::id()));
-                    if std::fs::rename(&path, &moved).is_err() {
-                        continue;
-                    }
-                    let got = std::fs::read_to_string(&moved).unwrap_or_default();
-                    if got == seen.unwrap_or_default() {
-                        let _ = std::fs::remove_file(&moved);
-                    } else {
-                        let _ = std::fs::hard_link(&moved, &path);
-                        let _ = std::fs::remove_file(&moved);
-                        return err(Code::InProgress, "locked");
-                    }
-                }
-                Err(e) => return Err(io_err(&e)),
+                Err(std::fs::TryLockError::WouldBlock) => return err(Code::InProgress, "locked"),
+                Err(std::fs::TryLockError::Error(e)) => return Err(io_err(&e)),
             }
         }
-        err(Code::InProgress, "locked")
+        // What is left in the file is a crashed owner's (gone) or the lock of a version without the system lock (alive).
+        let mut seen = Vec::new();
+        file.read_to_end(&mut seen).map_err(|e| io_err(&e))?;
+        if matches!(holder(&String::from_utf8_lossy(&seen)), Holder::Alive) {
+            return err(Code::InProgress, "locked");
+        }
+        file.set_len(0)
+            .and_then(|()| file.seek(io::SeekFrom::Start(0)))
+            .and_then(|_| file.write_all(own_text().as_bytes()))
+            .map_err(|e| io_err(&e))?;
+        Ok(Self { file })
     }
 }
 
-fn old_enough(path: &Path) -> bool {
-    std::fs::metadata(path)
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| t.elapsed().ok())
-        .is_some_and(|age| age >= LOCK_GRACE)
+impl Drop for Lock {
+    fn drop(&mut self) {
+        // Emptied while still held; the system lock goes with the handle.
+        let _ = self.file.set_len(0);
+    }
 }
 
-impl Drop for Lock<'_> {
-    fn drop(&mut self) {
-        // Somebody else's lock (ours was taken over after a long stall) is not ours to remove.
-        if std::fs::read_to_string(&self.path).is_ok_and(|t| t == self.text) {
-            let _ = self.root.remove_file(OsStr::new(".lock"));
+/// Opens `<agents>/.lock` with `open` (the private open). An older version that ended between putting a lock back (`hard_link`) and
+/// removing the name it had moved it to left `.lock` with a second name, which the open refuses (`InvalidInput`). That name is only
+/// ever a `.lock.stale-*` one: those go and the open is tried once more (review of audit F100), also when this caller removed
+/// nothing, since another caller may have removed the name first (Codex's re-review of #934). A second name of any other kind is
+/// still refused. Opening is not holding: the system lock taken afterwards still admits one holder.
+fn open_lock(agents: &Path, open: &dyn Fn(&Path) -> io::Result<File>) -> io::Result<File> {
+    let path = agents.join(".lock");
+    match open(&path) {
+        Err(e) if e.kind() == io::ErrorKind::InvalidInput => {
+            remove_stale_lock_names(agents);
+            open(&path)
+        }
+        r => r,
+    }
+}
+
+/// Removes the `.lock.stale-*` names older versions left in the agents folder.
+fn remove_stale_lock_names(agents: &Path) {
+    for e in std::fs::read_dir(agents).into_iter().flatten().flatten() {
+        if e.file_name().to_string_lossy().starts_with(".lock.stale-")
+            && std::fs::symlink_metadata(e.path()).is_ok_and(|m| m.is_file())
+        {
+            let _ = std::fs::remove_file(e.path());
         }
     }
 }
@@ -1128,7 +1186,7 @@ pub fn install(
         }
     };
     let (root, agents) = open_agents(home)?;
-    let _lock = Lock::acquire(&root, &agents)?;
+    let _lock = Lock::acquire(&agents)?;
     // What the plan saw may have changed while waiting for the lock.
     let installed = installed_version(home, &plan.name);
     if installed.as_deref() == Some(plan.version.as_str()) {
@@ -1410,4 +1468,33 @@ fn run_verify(
 
 fn scrubbed_path() -> String {
     agora_platform::safe_search_path()
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod lock_open_tests {
+    use super::*;
+
+    /// Codex's re-review of #934: two callers both find `.lock` with a second name; the other one removes the `.lock.stale-*` name
+    /// first, so this caller's cleanup removes nothing. It must still open the lock again rather than fail with its first refusal.
+    #[test]
+    fn a_caller_whose_cleanup_found_the_old_name_already_gone_still_opens_the_lock() {
+        let agents = std::env::temp_dir().join(format!("agora-lock-open-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&agents);
+        std::fs::create_dir_all(&agents).unwrap();
+        // `.lock` has one name again (the other caller removed `.lock.stale-*`); this caller's first open had been refused.
+        std::fs::write(agents.join(".lock"), "").unwrap();
+        let first = std::cell::Cell::new(true);
+        let open = |p: &Path| {
+            if first.replace(false) {
+                Err(io::Error::new(io::ErrorKind::InvalidInput, "a link"))
+            } else {
+                agora_platform::open_lock_private(p)
+            }
+        };
+        // The file is closed before the folder goes (Windows cannot remove a lock file while it is open).
+        let opened = open_lock(&agents, &open).map(drop);
+        let _ = std::fs::remove_dir_all(&agents);
+        assert!(opened.is_ok(), "{opened:?}");
+    }
 }

@@ -105,7 +105,9 @@ a peer that does not look at it sees an ordinary close. Order is `Hello` (role m
 a `SnapshotRequired` not followed by such an event changes nothing, and it does not carry over to the next connection. The
 hub logs a resync (`node resync: <node> skipped <from>..=<to>`) and writes an audit row (`who` = `hub`, action
 `node.resynced`, the node, outcome `<from>..=<to>`). `NodeOnline` in the hub's view ends that node's running agents and drops
-its waiting approvals and its terminals; a resync announcement then re-adds what still runs.
+its waiting approvals and its terminals; a resync announcement then re-adds what still runs. A node that takes up agents its terminal
+holder kept (ADR-0079, ADR-0093) re-adds each right after its start `NodeOnline` the same way (`AgentStarted`, `AgentStateChanged`, the
+session it knew, `TerminalOpened` for a terminal agent; `docs/specs/holder-link.md`).
 
 SSH stdio transport (ADR-0011): `agora node stdio` copies the node's local-socket frames to stdin/stdout, so a hub (or
 a person) can reach a node with `ssh host agora node stdio` and no open port. Frames are exactly those of the local
@@ -192,7 +194,7 @@ rules of a local command (the hub cannot widen them).
 Terminal relay (ADR-0029): a client sends `TerminalSubscribe` (with `target_node`) on a dynamic stream id it chooses (3+; any
 other command on a dynamic stream, or a subscription on stream 1, is `protocol.invalid_message`). The hub reserves a dynamic
 stream on the node's connection, forwards the request on it, answers on stream 1, and then copies the node's terminal frames
-(kinds 0..=3 above) to the client's stream without decoding or storing them. Input and resize are ordinary routed commands.
+(kinds 0..=4 above; any kind is copied) to the client's stream without decoding or storing them. Input and resize are ordinary routed commands.
 Kind 255 (`STREAM_CLOSE`, empty payload) ends a dynamic stream from either side: the client closing, the node leaving, or the
 terminal exiting (after the exit frame) ends the relay. A client that falls 512 frames behind is not waited for: the hub closes
 its relay on both sides and the client resubscribes for a fresh snapshot (a hub-side simplification of ADR-0029's "the node
@@ -274,7 +276,7 @@ Initial event families:
 | --- | --- |
 | node | `NodeOnline`, `NodeOffline`, `NodeResources`, `NodeLink` (hub-written presence, ADR-0070) |
 | project | `CheckoutDiscovered`, `WorktreeCreated`, `WorktreeRemoved`, `GitStatusChanged` (the node checks each running agent's workspace every 5 s and reports when the changed-file count, line counts or HEAD differ from the last report) |
-| agent | `AgentStarted`, `AgentStateChanged`, `AgentSessionReported`, `AgentUsageReported`, `AgentQuotaObserved` (ADR-0091), `AgentExited` |
+| agent | `AgentStarted`, `AgentStateChanged`, `AgentSessionReported`, `AgentUsageReported`, `AgentQuotaObserved` (ADR-0091), `AgentAlwaysAllowed` (ADR-0101), `AgentExited` |
 | terminal | `TerminalOpened`, `TerminalTitleChanged`, `TerminalClosed` |
 | approval | `ApprovalRequested`, `ApprovalResolved`, `AgentStartRefused` (ADR-0057) |
 | mesh | `MessagePosted`, `TaskChanged`, `LeaseGranted`, `LeaseReleased`, `HandoffCreated` |
@@ -294,11 +296,24 @@ Implemented by the node today: `project.list`, `agent.*`, `terminal.*`, `approva
 `chat.subscribe` (ADR-0038: a conversation stream, below), `git.status`, `git.log` (ADR-0037: newest first, default 30, at most 200), `git.diff`, `files.list` and `files.read`. The git and files commands answer only for the workspace of one of the node's own agents (`worktree_id` is the id
 the node reported in `WorktreeCreated`); a path that is absolute, climbs with `..` or starts with `:` or `-` is refused as
 `protocol.invalid_message`. `git.diff` is the unified diff against HEAD plus the new files git does not track yet (shown as
-all-added, at most 50 files of at most 64 KiB), and an answer is cut at 512 KiB. It covers the workspace folder only and names
+all-added, at most 50 files of at most 64 KiB), and an answer is cut at 512 KiB. In a repository with no commit yet there is no HEAD:
+`git.diff` and the counts of `git.status` compare with git's empty tree, so every file is new, and `head_commit` is empty (#941). It covers the workspace folder only and names
 every file from that folder, so each name is a path `git.diff` and `files.read` take: for a workspace that is the folder `web/`
 of a repository, `web/a.txt` is `a.txt`; a rename across the folder's edge shows as the file added or deleted inside it. At a
 repository's root the names are the repository's own. `files.list` hides `.git`; `files.read` refuses
-files above 512 KiB (`files.too_large`) and paths that leave the workspace, symlinks included (`files.outside_root`), checked again on the opened file so a link swapped in after the check is still refused.
+files above 512 KiB (`files.too_large`) and paths that leave the workspace, symlinks included, and links that never resolve (a missing target, a link to itself, a ring of links) (`files.outside_root`), checked again on the opened file so a link swapped in after the check is still refused.
+
+UTF-16 text (#940). A file that is UTF-16 with a byte-order mark (`FF FE` or `FE FF`; Windows PowerShell 5.1's `>` writes the
+former), of even length, valid UTF-16 and with no control character other than a tab, a line break, a carriage return or a form
+feed, is text. `files.read` still answers its bytes as they are (a download is the file itself); clients decode it for showing.
+Where git prints `Binary files ... differ` for such a file (it holds NUL bytes, and the node runs git with `--no-textconv`), or
+prints its raw bytes as text (a file with no zero byte: one line of characters above U+00FF), the `git.diff` section is written
+by the node as git writes a text diff (three lines of context), from the decoded text of both sides (HEAD's and the workspace's,
+each at most 64 KiB, at most 50 such files); a new file that git does not track is shown decoded the same way. The `diff --git`,
+mode and `index` lines are git's, so the blob ids are those of the bytes. A section stays git's when a side is not text, cannot be
+read, or the two texts are the same (only the encoding changed). A secret file is still cut to its name, and the workspace's file
+is read with the secret check of `files.read` (on where the opened file really is) unless `files.show_secret` is on. Nothing is
+ever written back in another encoding.
 
 Secret files (ADR-0080). The node decides by file name (case-insensitive, any folder): `.env` and `.env.*` (not `.env.example`, `.env.sample`, `.env.template`), `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.kdbx`, `id_rsa`, `id_dsa`, `id_ecdsa`, `id_ed25519` (not their `.pub`), `.npmrc`, `.pypirc`, `.netrc`, `.git-credentials`, anything inside a folder named `.ssh`, `.aws` or `.gnupg`, and `.docker/config.json`. Added to the schema (old clients ignore them, so no capability): `FileEntry.secret` (4), which `files.list` sets on such entries (it still lists them); the error `files.secret` (`path`), which `files.read` answers for the requested path or for where a link leads; `GitDiffResult.secret_files` (2, `SecretFileChange { path, added, removed }`) and, in `diff`, a changed secret file as its `diff --git` line plus mode and rename lines, with no hunk, blob id or content. The change counts of `git.status` are unchanged. The owner's policy line `files.show_secret = true` (any other value is off; the hub cannot change it) turns all of this off for the machine; `agora doctor` says when it is on.
 
@@ -315,6 +330,11 @@ create a worktree. New clients refuse an unavailable directory launch rather tha
 | `node.forget` / `NodeForget` (93) | `node_id`, `refuse_return`; answered by the hub, owner only (`auth.forbidden` otherwise), with no `target_node` (`protocol.invalid_message` otherwise). `node.online` while the machine is connected, `node.unknown` for one the hub never saw. With `refuse_return` every certificate enrolled under `node_id` is revoked first. The hub appends `NodeForgotten` (event 15, producer `hub`): its snapshot leaves out that machine and everything keyed under it (folders, worktrees, terminals, approvals, agents); a later `NodeLink { up }` (or `NodeOnline`) of the same node lists it again with the agents it still runs, and the ones closed before stay forgotten. A client that joined while the machine was hidden holds none of its records and no event repeats them, so when it comes back the hub lets every live client go, and a client resuming from a position before that return gets a snapshot instead of a replay (`View::remembered_at`, rebuilt at start). History and usage stay (ADR-0073). The web window is served by its hub, so it always matches it; there is no separate client capability |
 | `agent.launch` / `AgentLaunch` (82) | canonical `path`, expected `project_id`, `kind`, `separate_worktree`, `authorization`, `accept_identity_change` → `AgentLaunchResult` (Ok tag 19): `agent_id`, `terminal_id`, `workspace_id`, actual cwd `path` |
 | `workspace.query` / `WorkspaceQuery` (83) | `workspace_id`, `operation` (`list`, `read`, `status`, `diff`, `history`), relative `path`, `limit` → existing file/Git results |
+
+A start of a kind whose program the machine cannot find (`AgentStart`, `AgentLaunch`, `AgentResume`, and the mesh `agent_start`) is
+refused with `agent.program_missing` (`kind`, `program`; #903): the program the node looks for (the adapter command, the ACP command
+or the launch command) is not installed by `agora agent install`, not on the node's `PATH`, and not an existing path, the same check that
+marks the kind `installed: false` in `AgentKinds`. Older nodes answered `internal`.
 
 The node canonicalizes and re-inspects before launch; a path or project ID mismatch is refused. It persists confirmed
 path/identity associations; changed metadata requires `accept_identity_change`. Metadata creation is explicit, uses
@@ -368,10 +388,25 @@ so it can be driven with no hub. Frames are the envelope above. `CommandRequest`
 `CommandResponse` comes back on stream 1 with kind 1, matched by `request_id`; a retry with the same
 `idempotency_key` gets the stored response (addressed to the retry) and repeats nothing. A terminal stream is
 opened by sending `TerminalSubscribe` on a dynamic stream id (3+) chosen by the client. After the response the
-node writes that terminal's frames on that stream: kind 1 snapshot (ANSI that repaints the screen, with its colours and
-attributes, then restores the program's bracketed-paste and application-cursor modes and its current style), each one followed by kind 2 with the size it was painted at, kind 0 raw
+node writes that terminal's frames on that stream. When the subscription asks for history (`history_lines`, ADR-0100 decision 2; 0
+or absent asks for none, and a client that knows nothing of the field never gets any), they start with kind 4 history frames: ANSI
+that puts the newest `min(history_lines, lines the node keeps)` scrollback lines (2000 kept today; at most 512 KiB, the oldest
+dropped past that) into the client's scrollback at the size of the snapshot that follows. A kind 4 frame is at most 16 KiB and
+is cut only between sequences and characters, never inside one; there are at most 32. Their shape: `CSI ? 1049 l`; full-screen
+margins (`CSI r`), origin and insert off, autowrap on, a plain pen and ASCII in G0; `CSI 2 J`, then `CSI 3 J`; each line from the top
+row with its colours and attributes (re-encoded from the node's cells; nothing the program printed is copied), a line the node holds
+as wrapped without a line break (the newest line always ends in one); then the bottom row and one line feed per replayed line still
+on the screen. Fed to an empty emulator of that size, its scrollback holds exactly the replayed lines and its screen is clear. No
+history is sent while the program is on the alternate screen, or when the node keeps none. A client holds the kind 4 frames with
+the snapshot and paints both once it has the size (the web window in one synchronized write, mode 2026), and never waits for
+history: when sent, it always comes before the kind 1 it belongs to. A client asks for history only when its terminal has none of its
+own: the web window asks for its history setting (1000 to 20 000 lines) on a first open, a reload or a remount and for 0 on a reconnect
+or after falling behind; the terminal client asks for its scrollback (2000) on a fresh pane and for 0 when it watches again, and never
+feeds history again when it feeds the last snapshot again on a resize (its full-screen terminal asks for none). History belongs to
+the subscription it came on: a client drops it when that subscription ends (the connection lost, the relay ended) before its kind 1,
+and never holds more than one replay. Then: kind 1 snapshot (ANSI that repaints the screen; ADR-0100 decision 1, in this order: the program's screen, `CSI ? 1049 h` or `l`; origin and insert off, a plain pen and ASCII in G0 shifted in (`ESC ( B`, SI); the screen cleared and every row drawn at an absolute position with its colours and attributes; every mode the node's emulator tracks as an explicit set or reset: mouse tracking 1000/1002/1003 (all reset, then the program's one), encodings 1005/1006 (the same), 1004, 1007, 2004, DECCKM, DECKPAM or DECKPNM, DECAWM, IRM, LNM and the kitty keyboard flags (`CSI < 32 u`, then `CSI = flags ; 1 u`; a client that writes the repaint to a user's own terminal, as `agora terminal attach` does, leaves that pop out, pushes an entry of its own and on detach pops it and the entries the program left pushed on the main screen); the cursor's position, visibility and shape (`CSI 0 SP q` when the program set none, keeping the window's own; mode 12 is never written); the program's current style last. Modes the node does not track (mouse 9, 1015, modifyOtherKeys, 47/1047, the scroll region) are left alone, and so is origin mode (DECOM) until the scroll region is tracked, though xterm.js switches 9 off on the 1000/1002/1003 resets; a client applies it all as ordinary ANSI), each one followed by kind 2 with the size it was painted at, kind 0 raw
 output, kind 2 resize (cols, rows as u16 LE), kind 3 exit (i32 LE; negative = signal). A client takes the size of the kind 2 frame that follows a snapshot before it paints the snapshot (a snapshot is made at the node's size; parsed at another width it wraps and scrolls its first rows away); the web window waits for that frame, at most 150 ms. A client that falls behind
-gets a fresh snapshot instead of the dropped output; it never slows the terminal. When the exit was among what it
+gets a fresh snapshot instead of the dropped output, never with history (a client that wants it subscribes again); it never slows the terminal. When the exit was among what it
 missed it still gets the exit frame, with `i32::MIN` (unknown) when the node no longer has the code. Input and resize are ordinary
 commands. Terminal ids are `t-<agent id>` (one terminal per agent). Implemented commands: `project.list`,
 `agent.start`, `agent.stop`, `agent.prompt`, `terminal.input`, `terminal.resize`, `terminal.subscribe`; the rest
@@ -940,8 +975,18 @@ forwards either to a node that did not offer it.
   `AgentPromptResult` (`CommandOk` field 29: `queued`, `queue_len`); a node without it, and every terminal agent, answers `empty`, read as
   sent. The node queues a prompt that arrives while the agent's turn is open (its adapter declared `turns`, a prompt was sent and no `idle`
   followed), at most 8 per agent (`agent.queue_full`, `limit` 8), and sends them one per `idle`, in order. A queued prompt is a user entry
-  with `queued` set until it is sent, then the same entry is sent again with `queued` unset. Prompts that will not be sent (the adapter
-  ended, or `AgentCancelTurn` with `drop_queue`) leave the transcript and a notice `adapter.queue_dropped` (`count`) says so: the
+  with `queued` set until it is sent, then the same entry is sent again with `queued` unset. Clarification (#908): `at_ms` is the
+  node's wall-clock time of the entry's event, never adjusted; for a queued prompt that event is its send, so the unqueued version
+  carries the time it was sent (the id stays: ids are never reused). A client places the person's entries by `at_ms`, ties and
+  out-of-order times broken by entry id, each just before the first other entry that is not older, and draws a prompt still waiting
+  after everything; a client that saw the entry become unqueued may place it after the newest agent entry it held at that moment
+  (times can tie within a millisecond). Otherwise two turns' answers read as one reply (RM-44). A tool call that is `pending` or
+  `in_progress` when its turn is over will not finish; ACP has no cancelled status and leaves marking such calls to the client, so the
+  window shows them as stopped once a later prompt was sent, or once the agent has been `idle` or finished for a moment (not while
+  `unknown`), and the node sends no invented status. Prompts that will not be sent (the adapter
+  ended, or `AgentCancelTurn` with `drop_queue`, or its send failed) leave the transcript and a notice `adapter.queue_dropped` (`count`,
+  and since #908 `entries`: the ids of exactly those entries joined by commas, so a client marks only them; a notice without it covers
+  every queued entry older than it) says so: the
   schema has no way to delete an entry, so a client that holds one clears its waiting mark when it sees that notice (a tombstone entry would
   need an ADR). The queue is node memory: it is lost when the node restarts (ADR-0089). A prompt that would wait is at most 64 KiB
   (`protocol.invalid_message`, `field` `text`); one sent at once is not bounded here. The turn is an explicit state, `Idle` or
@@ -1076,3 +1121,121 @@ forwards either to a node that did not offer it.
 - **Capability:** `usage.quota` is passed by the hub (`hubcli.rs`) and advertised by every node of this build (`uplink_client.rs`), which has the
   reader (manifest `[quota]`, `docs/specs/agent-manifest.md`; Codex only).
   Golden fixtures: `schema/fixtures/v1/agora.v1.AgentQuotaObserved.*` and `schema/fixtures/usage-quota/`.
+
+### Giving a task to an agent (ADR-0095)
+Schema step approved by the maintainer on 2026-11-21. Handled by every node of this build, which advertises `task.dispatch`; the hub
+passes it (`hubcli.rs`). To an older node without the capability the hub refuses `TaskDispatch` with `protocol.capability_missing`.
+- **`TaskDispatch`** (`CommandRequest` field 109, capability `task.dispatch`): `project_id` (1), `task_id` (2), `agent_id` (3, an agent
+  of the receiving node), `by_user` (4). The node claims the open task for that agent where the project's board is (its broker; for a
+  shared project the hub's board, as the agent's own `task_claim` would, ADR-0039), sends the agent one prompt built from the node's
+  template around the task's title and detail (`agora_mesh::dispatch::build_prompt`: a fenced block marked untrusted task data, cleaned and
+  cut to the mesh message limit), not typed over a running turn as far as the node can tell, and writes `TaskDispatched`.
+  A structured agent gets it as an `AgentPrompt` would (sent now, or queued behind the turn, `agent.queue_full` past 8). A terminal agent
+  has no queue, and its prompt always arrives as one bracketed paste (`ESC[200~` … `ESC[201~`, then Enter), so a line break in it never
+  submits part of it: a terminal program that has not turned on bracketed paste (DECSET 2004, as the node's terminal emulator sees it) is
+  refused with `protocol.capability_missing` (`capability`: `terminal.bracketed_paste`) before anything is claimed; the prompt holds no ESC
+  or other control character but line break and tab, so its text cannot end the paste. The agent's one slot is reserved
+  before the task is claimed, so a second dispatch meanwhile is `agent.queue_full` (`limit` 1) with nothing claimed. After the claim (which
+  may wait for the hub) the node looks at the agent's screen again and decides: its rules are run now on the live bottom of the buffer (never
+  the user-visible viewport, and never the paced detection's last result, which a screen no rule names, such as a dialog, leaves as it was;
+  a screen no rule matches is `unknown`). Between turns (idle or done, and nothing pasted into it in the last 5 seconds) it is pasted at
+  once; otherwise the node holds it. A held prompt is pasted only after the same fresh look says the agent is between turns, taken right
+  before the paste, for agents with a held prompt only and no more often than that agent's own detection looks at its screen
+  (its pacing interval). That look is separate from detection's own, so an agent with a held prompt may have its screen read up to
+  twice per interval (once by detection, once by this check) for as long as the prompt is held (at most 15 minutes). `unknown` counts as
+  between turns only for a kind whose manifest has no `[[rules]]` entry with `state = "idle"` or `"done"` (it never reaches either, and
+  would otherwise never get a held prompt): for such a kind the paste, and the Enter after it, may arrive while the program works or while
+  it shows a dialog (an Enter can answer it). A kind that can say idle or done and is `unknown` (starting, or a screen no rule names, such
+  as a startup dialog) is waited for. A prompt is held at most 15 minutes: an agent that stays busy, blocked or unknown longer gets it
+  dropped and its task on the node's broker given back, so a stuck agent does not keep the task and its slot. A program that turns
+  bracketed paste off after the check is refused the same way (`protocol.capability_missing`) when the prompt would be pasted at once,
+  and its held prompt is dropped (logged on the machine) with the task given back. A paste that
+  was written but whose Enter failed means the terminal is gone (a write fails only then), so no input box keeps the text; its task is given
+  back like any lost prompt.
+  A prompt that never reaches the agent gives its task on the node's broker back: a held one when the agent is no longer running (stopped
+  by a person or its parent, ended, crashed; checked every supervision round, so every stop path is covered), a paste that cannot start or
+  fails, a queued one that the adapter refused or dropped (the adapter ended or was stopped, by a person's `AgentStop` too, or `AgentCancelTurn` with `drop_queue`; a
+  queued prompt is settled only by the queue's own reports, so one reported sent keeps its claim even when the agent ends in the same
+  moment). Held prompts live in
+  memory: a node restart drops them and leaves their claims. For a shared project the node asks the hub's board as the agent (`task_list` with `task_id`, which answers that one task, for its text
+  and status, then `task_claim`; an older hub ignores `task_id` and answers the whole board, in which the node finds the task the same
+  way; a hub of this build answers a board result too big for one frame with the tool error `mesh.body_too_large` instead of sending
+  it, which a dispatch passes on as its refusal; an older hub still sends it, and one over the frame limit ends that node's connection
+  as an agent's own `task_list` of such a board always did)
+  and still builds the prompt itself; a project known to be shared with no hub link is `board.unavailable`. A prompt that cannot be sent gives a task on the node's own broker back; the shared board has no release yet, so
+  there the task stays claimed by that agent. Refusals: `mesh.recipient_unknown` (the agent is not of `project_id`, or the node has no mesh),
+  `task.not_found`, `task.blocked`, `task.not_open` (also a second dispatch of a claimed task), `agent.queue_full` (`limit` 8 behind a
+  structured agent's turn, 1 for a terminal agent's held dispatch), `agent.not_found` (the agent stopped while its task was being claimed or
+  pasted; the task is given back), `board.unavailable` (a shared project whose hub cannot be asked), `protocol.capability_missing`
+  (`capability`: `terminal.bracketed_paste`, a terminal program without bracketed paste). Not signed and not an approval: it changes no permission
+  of the agent, and every sensitive action the agent later asks for still needs the person (ADR-0020). Like `AgentPrompt` it needs the
+  sender's access to the agent (a viewer may not send it; a scoped window needs the project and the agent); on a node with limited
+  devices it is in the team default of `signed_commands` and a grant covers it by the agent's own project (ADR-0041).
+- **`by_user`** is written by the hub from the window's sign-in; whatever a client puts there is replaced. The node cannot tell a command
+  the hub carried from one sent on its own control socket (the uplink runs the hub's commands through that socket), so a local process
+  that can open the socket can write any `by_user`. The hub's audit row of the command is the record of who asked; the event carries
+  the node's copy, which is the sender's word.
+- **`TaskDispatchResult`** (`CommandOk` arm 31): `queued` (1) and `queue_len` (2) as in `AgentPromptResult`, `prompt_sha256` (3, lowercase
+  hex SHA-256 of the prompt's UTF-8 bytes).
+- **`TaskDispatched`** (`Event` arm 68): `project_id` (1), `task_id` (2), `agent_id` (3), `by_user` (4), `prompt_sha256` (5), `queued` (6),
+  `agent_skips_permissions` (7, the agent acts without asking as the node knows it at the dispatch: a launch option that skips permissions,
+  ADR-0059, or for a structured agent the mode or a config option in use that does, ADR-0058, ADR-0090 Amendment A). The prompt itself is not stored. The task's
+  move is its own `TaskChanged` as before. Names no machine (the agent is the producer's); a window sees it when it may see the agent.
+- **Limits:** at most 8 tries per minute per person, counted by the hub across all that person's windows and connections, every try that
+  passed the access check, also one the node then refuses (`task.dispatch_limited`, `limit`); one dispatch per task at a time follows from
+  the claim. A command sent on a node's own control socket is not counted (it never reaches the hub).
+- Golden fixtures: `schema/fixtures/v1/agora.v1.TaskDispatch*.*`, `agora.v1.TaskDispatched.*` and `schema/fixtures/task-dispatch/`.
+
+### Allowing a structured agent always for its session (ADR-0101)
+Schema step approved with ADR-0101 by the maintainer on 2026-11-22. Handled by every node of this build, which advertises `approval.always`;
+the hub passes it (`hubcli.rs`). The window does not branch on it: the evidence it uses is ALWAYS in a request's `scopes`, which only such a
+node sets. The window's button and the terminal client's key come with the next step; until then every client sends single answers.
+
+- **Enum** `ApprovalScope` (`common.proto`): `APPROVAL_SCOPE_UNSPECIFIED` (0, read as ONCE: what every decision meant before), `ONCE` (1),
+  `ALWAYS` (2: the agent remembers the answer, as the agent defines it, ACP `allow_always`). A value this build does not know is refused
+  (`protocol.invalid_message`, `field: scope`), never read as either.
+- **The offer.** `ApprovalRequested` / `ApprovalSnapshot` gain `scopes` (6), `always_label` (7) and `always_option_id` (8): the answers the
+  person may give after the node's policy (empty: ONCE only, as every node before said it), the agent's own name for its always option
+  (untrusted text, control and format characters removed, at most 120 characters) and that one option's exact id (never altered: an id
+  that is empty, longer than 128 bytes or holds such a character is never offered). The node takes them from the adapter's
+  `approval/request` (`docs/specs/adapter-protocol.md`), only from an adapter that declared `approval_scopes`.
+- **The decision.** `ApprovalResolve.scope` (7). UNSPECIFIED and ONCE are signed over `agora-approval-v1` exactly as before. ALWAYS, only
+  with `approved` and never on an `agent.` request, is signed over the domain `agora-approval-always-v1`, one NUL byte, then
+  `F(node_id) F(approval_id) F(verdict) F(agent_id) F(sha256(action)) F(sha256(detail)) F(always_label) F(always_option_id)`, where `F(x)` is
+  the decimal byte length of `x`, `:`, then `x` (canonical decimal, raw bytes); `verdict` is `1`; `agent_id` is the node's own id of the
+  agent (`ApprovalRequested.agent_id` as the node sent it; in an `ApprovalSnapshot` the part after `<node_id>/`); the hashes are of
+  `action` and `detail` exactly as announced, lowercase hex; the label and option id are as announced. Vectors:
+  `schema/fixtures/signing/approval-always-v1.json` (checked in `crates/agora-protocol/tests/approval_always_signing.rs` and by the node).
+- **The node checks, in order:** the shape (an unknown scope; ALWAYS with a denial, a grant or on an `agent.` request is
+  `approval.signature_invalid`); the signature against `trusted-devices`, over the bytes the decision's scope names, so a hub that turns
+  ONCE into ALWAYS or ALWAYS into ONCE fails here (`approval.signature_invalid`); the offer it stored (an Allow on a request that offers
+  only ALWAYS, or ALWAYS on one that does not offer it: `approval.scope_unavailable`; a Deny needs no offer); the policy as the node
+  read it at start, for the agent's own launch (`approval.scope_forbidden`); for an agent behind an ACP bridge that did not declare `approval_scopes` (one from before ADR-0101, kept
+  across a node update) a single Allow while the policy refuses ALWAYS (`approval.adapter_outdated`: that bridge may answer it with the
+  agent's remembered option); then expiry and single use. A refusal before expiry spends nothing: the card keeps waiting.
+- **Policy.** The existing `skip_permissions` line (ADR-0059), read from the node's policy file at node start: `forbid` refuses every
+  ALWAYS, `confined_only` refuses it for an agent whose process was not launched confined (one the holder runs never is; an unknown launch
+  is refused), `allow` permits it; a kind whose manifest says `[structured] allow_always = false` is never offered it. Under a refusing policy
+  the node leaves ALWAYS out of `scopes`. A request that offers only ALWAYS under such a policy gets no card: the node announces it and at
+  once `ApprovalResolved { approved: false }` with no signer, answers the adapter denied (the agent gets `reject_once` or `cancelled`) and
+  adds the conversation notice `approval.always_only_forbidden` (params `action`).
+- **The record.** `ApprovalResolved.scope` (6): ALWAYS for an always decision the adapter delivered, ONCE for any other person's decision,
+  UNSPECIFIED for one nobody decided. `ChatEntry.permission_always` (21) marks the permission entry of an approved ALWAYS. The new event
+  `AgentAlwaysAllowed` (`Event.body` 69, producer `node`: `agent_id`, `approval_id`, `action` cleaned and cut at 120 characters,
+  `signer_device_id`, `at_ms`) is written only after the adapter delivered the always answer to the agent (its `approval/resolve`
+  result says so: the ACP bridge answers once its writer wrote the answer to the agent's stdin; a refused or undelivered one records the
+  request cancelled, as before), and only while the run of the agent's process it was delivered to is still the agent's (a former
+  process's late result is audited in `ApprovalResolved` but marks no replacement). The node keeps an agent's always answers beside its kept session (`kept-<id>.pb`, at most 16) and says
+  them again after the `AgentStarted` it restates (a resync, or a node that takes a kept agent up); a new process of the agent, its end
+  and its interruption drop them, and a resumed agent's are not replayed.
+- **The hub** relays `scopes`, `always_label` and `always_option_id` into `ApprovalSnapshot`, and derives `AgentSnapshot.always_allowed` (45):
+  the actions of the agent's `AgentAlwaysAllowed`, newest last, at most 16, a repeated `approval_id` once; cleared by its `AgentExited`,
+  `AgentInterrupted` and every `AgentStarted` (the restated answers that follow a restated start bring them back). A window sees
+  `AgentAlwaysAllowed` when it may see the agent.
+- **Compatibility.** An old window sends no scope: single answers work as before, except an Allow on a request that offers only ALWAYS
+  (`approval.scope_unavailable`, the card stays; Deny works). A new window facing an old node sees no `scopes` and offers no always answer.
+  An old hub drops the new fields, so its windows offer single answers only; an ALWAYS that crossed it would arrive as ONCE and fail the
+  signature. An ACP bridge kept across a node update (ADR-0075, ADR-0093) until its agent restarts may still answer a single Allow with the
+  agent's remembered option when the agent offers no single one; under `allow` that residual is kept (named in ADR-0101), under `forbid`
+  or `confined_only` the node refuses such an Allow (`approval.adapter_outdated`).
+- Golden fixtures: `schema/fixtures/v1/agora.v1.AgentAlwaysAllowed.*` and `schema/fixtures/approval-always/`.

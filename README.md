@@ -55,8 +55,11 @@ For an SSH-only machine, the hub can maintain a reverse tunnel and install and e
   model, effort, and launch options in the web app. **Settings → Agents** shows which tools each machine
   reports. Run `agora doctor` on the machine for local diagnostics. [Agent manifests](manifests/agents/README.md)
 - **Coordinate across machines.** Agents use MCP to exchange messages, claim shared tasks and file leases,
-  and hand off work. The web app shows the project board in read-only Kanban columns. Agents can request a
-  helper on their own node with signed approval. [Mesh tools](docs/specs/mesh-tools.md)
+  and hand off work. From a Backlog card on the web board, give a task to a running agent in that project
+  or start a new agent for it. In the TUI, `b` opens the board and gives a Backlog task to a running agent.
+  Agents can request a helper on their own node with signed approval.
+  [Task board](docs/ux/task-board.md) · [Mesh tools](docs/specs/mesh-tools.md) ·
+  [Board and dispatch decision](docs/adr/0095-a-project-has-a-kanban-board-and-a-task-can-be-dispatched-to-an-agent.md)
 - **Reconnect to live agents.** Closing a client or losing the hub link leaves agent processes running.
   On Linux and macOS, unconfined terminal and structured agents launched through the background holder
   can also survive a node restart. Windows and confined agents rely on session resume when available.
@@ -82,12 +85,10 @@ tool calls, diffs, and approvals. See the [integration guide](docs/architecture.
 
 ## Project direction
 
-- **Agent setup.** The current source tree adds `agora agent install NAME --list FILE --root-key KEY` for a
+- **Agent setup.** Use `agora agent install NAME --list FILE --root-key KEY` to install a
   single executable from a signed package list, with confirmation at the local terminal. Terminal agent kinds
   can use the installed executable. Installation and updates from the web app are planned.
   [Agent package decision](docs/adr/0087-install-and-update-coding-agents-from-the-window.md)
-- **Task dispatch.** The plan is to let a person give a board task to an agent from the web app.
-  [Board and dispatch decision](docs/adr/0095-a-project-has-a-kanban-board-and-a-task-can-be-dispatched-to-an-agent.md)
 - **Session tools.** Persistent, paged chat history and a preview of an agent's local web server are planned.
   [Chat history decision](docs/adr/0089-the-chat-history-survives-the-node-and-is-read-in-pages.md) ·
   [Web preview decision](docs/adr/0088-preview-an-agents-local-web-server-in-the-window.md)
@@ -101,10 +102,11 @@ tasks with Linux, macOS, and Windows 11 nodes, including real Claude Code and Co
 
 ## Security and isolation
 
-The node verifies approvals signed by devices it trusts. The node's `signed_commands` policy determines
-which routed commands require grants. Under the default single-owner policy, legacy routed commands rely
-on hub authorization. Selected-folder inspection and launch use request-specific signatures. Browser and
-desktop signing keys depend on the integrity of the web app served by the hub. [Threat model](docs/security/threat-model.md)
+The node verifies approvals signed by devices it trusts. For routed actions that use grants, the node's
+`signed_commands` policy determines when to require one. Under the default single-owner policy, legacy
+routed commands rely on hub authorization. Selected-folder inspection and launch use request-specific
+signatures. Browser and desktop signing keys depend on the integrity of the web app served by the hub.
+[Threat model](docs/security/threat-model.md)
 
 Git worktrees separate working copies. Use node sandbox policy for process confinement where supported.
 Confinement is opt-in and its limits vary by platform. File leases coordinate cooperating agents and

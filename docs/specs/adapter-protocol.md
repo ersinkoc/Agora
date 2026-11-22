@@ -50,13 +50,13 @@ described before ADR-0090, byte for byte: the ACP bridge sends the new items onl
 | --- | --- | --- |
 | node → adapter | `session/prompt` | Send user or mesh input |
 | node → adapter | `session/cancel` | Interrupt current turn |
-| node → adapter | `approval/resolve` | Answer a permission request (carries the verified decision) |
+| node → adapter | `approval/resolve` | Answer a permission request (carries the verified decision). ADR-0101, only to an adapter that declared `approval_scopes`: `scope` (`APPROVAL_SCOPE_ONCE` or `APPROVAL_SCOPE_ALWAYS`, the latter only for a request that offered it). An adapter told ONCE must never answer the agent with an option the agent remembers; one that cannot pick exactly the answer named refuses with `-32602`, `data` `{code: "approval.scope_unavailable"}`, and sends the agent nothing. A result means the answer was given to the agent (the ACP bridge answers only once its writer wrote it to the agent's stdin and flushed it); one it could not give, or whose delivery it could not confirm within 5 s (the bridge then ends the agent before answering), is an error (`adapter.approval_undelivered`), and the node then records the request cancelled |
 | node → adapter | `mesh/deliver` | Deliver a mesh message |
 | node → adapter | `session/set_config` | ADR-0090, capability `config`: `{sessionId, configId, value}`, one of the ids and values the adapter reported in `session/config` (`value` is a choice id for a select, `"true"` or `"false"` for a boolean). Empty result once the agent took it; otherwise an error whose `data` is `{code: "adapter.option_refused", params: {id}}` |
 | node → adapter | `session/set_option` | ADR-0058: `{kind: SESSION_OPTION_KIND_MODE \| SESSION_OPTION_KIND_MODEL, id}`, one of the ids the adapter reported in `session/options`. Empty result once the agent took it; otherwise an error whose `data` is `{code: "adapter.option_refused", params: {id}}` |
 | adapter → node | `state/update` | `working`, `blocked`, `idle`, with optional message |
 | adapter → node | `chat/append` | Structured transcript items (text, tool call, plan, diff, and since ADR-0058 a notice: `{code, params}`, never text). ADR-0090: `{thought: {text}}`; a tool call `{toolCall: {callId, tool?, argumentsJson?, kind?, status?, locations?: [{path, line}], output?}}` where a later item with the same `callId` updates the call (a field it leaves out keeps its value, one it sends replaces it, as ACP's `tool_call_update` does); a plan `{plan: {steps, entries?: [{text, status, priority}]}}` that replaces the earlier plan |
-| adapter → node | `approval/request` | Ask permission; node routes to the approvals queue |
+| adapter → node | `approval/request` | Ask permission; node routes to the approvals queue. ADR-0101: `scopes` (the answers the agent offers: `APPROVAL_SCOPE_ONCE`, `APPROVAL_SCOPE_ALWAYS` for one it remembers; empty means ONCE only), `alwaysLabel` (the agent's own name for its always option) and `alwaysOptionId` (that one option's exact id). The node reads them only from an adapter that declared `approval_scopes`; from any other the request offers ONCE only |
 | adapter → node | `usage/report` | Model id, tokens, reported cost if known, quota status if known; since ADR-0058 `contextTokens` and `contextWindow`, the context's level and size now (0 when unknown) |
 | adapter → node | `session/options` | ADR-0058: `{modes[], models[], currentMode, currentModel}`, each option `{id, name, description, skipsPermissions}`. Sent at the start and whenever something in it changes; each replaces the last |
 | adapter → node | `session/config` | ADR-0090: `{options[]}`, each `{id, name, description, category, type: "select" \| "boolean", current, choices[] {id, name, description, skipsPermissions}, skipsPermissions}`; each report replaces the last |
@@ -99,7 +99,7 @@ described before ADR-0090, byte for byte: the ACP bridge sends the new items onl
 
 - Adapters never receive hub credentials or other agents' data; the node mediates everything.
 - Adapters must tolerate unknown fields and methods (ignore, do not crash).
-- A crashing adapter is restarted with backoff; the agent shows `unknown` until it recovers.
+- A crashing adapter is restarted with backoff; the agent shows `unknown` until it recovers, and ends with an error once the node gives up on it.
 - First-party adapters are the reference implementations and conformance test targets.
 
 ## Host implementation (`agora-adapters::host`)
@@ -114,7 +114,12 @@ stream with `Exited`; calls have timeouts. JSON uses the proto3 mapping (lowerCa
 as strings or numbers on input). `agora-fake-agent --adapter` is the reference fake adapter used in tests.
 The supervisor restarts a crashed adapter with the same backoff and budget as a crashed terminal agent (`RestartPolicy`): the
 agent is `unknown` meanwhile, the session is resumed with `resumeSessionId` when the adapter reported a native session id,
-and after the budget is spent the agent stays stopped (`GaveUp`). A user stop cancels a pending restart and ends the adapter process (`session/stop`, then `shutdown`, then kill). Not yet: the
+and after the budget is spent the agent stays stopped (`GaveUp`). #902 (RM-13): each restart is said in the agent's conversation (the node's
+own notice `adapter.restarting`, param `attempt`); giving up records `AgentExited` (and no `TerminalClosed`: it had no terminal) with
+the last adapter process's own non-zero exit code, a signal as a shell reports it (128 + the signal, so SIGKILL is 137: a window reads
+only crash signals as failures, and an agent given up on always failed), or exit code 1 when that is not known or was 0, so a window
+shows the agent ended with an error and takes no more prompts; the conversation, and the window's summary of the closed agent, say so
+(notice `adapter.gave_up`, params `restarts` and, only when the node knows it, `exit_code`). A user stop cancels a pending restart and ends the adapter process (`session/stop`, then `shutdown`, then kill). Not yet: the
 registry of installed adapters.
 
 ## L2: ACP agents through the bridge (`agora-adapters::acp`)
@@ -137,11 +142,22 @@ that is busy and not reading stdin therefore survives a burst of permission answ
 limit is hit, the bridge stops the agent and uses `adapter.agent_exited`. The node's adapter host reads bridge replies independently of its
 command writes.
 
+Every `chat/append` line the bridge makes from the agent's content stays within the node's 4 MiB line limit, measured on the
+complete serialized line (envelope and JSON escaping included; the caps in the table count decoded text, and a rich plan carries
+its text twice). A line that would be longer has every string of its item longer than 256 bytes (head and tail kept) and every
+list cut to half, repeatedly, until it fits; the session id is never cut. The item arrives shortened instead of being dropped
+whole by the node. Session ids are at most 1024 bytes: a `session/new` (`session/load`) answer with a longer id is refused like an
+agent error (`adapter.agent_refused`, `stage` `session`; the notice's `rpc_code` is `0` and its `detail` `session_id_too_long`), and
+a `session/start` whose `resumeSessionId` is longer is answered with JSON-RPC `-32602` and `data` `protocol.invalid_message`
+(`field` `resumeSessionId`) without asking the agent; an id is never cut, as that would name another session. With that, a cut
+item always fits; should one still not, the item is dropped and a `log` line says so (`adapter.line_too_long`, below) rather than
+an overlong line being sent.
+
 | ACP (agent → client) | Adapter protocol (bridge → node) |
 | --- | --- |
-| `session/update` `agent_message_chunk` | `chat/append` text, chunks joined for up to 150 ms (or 4 KiB). An explicit stop or the end of the node's request stream flushes buffered text while the reply stream remains open |
-| `session/update` `tool_call` (title, `rawInput`) | `chat/append` tool call; a `diff` in its content (or in `tool_call_update`) becomes a diff item (old and new text shown as a whole-file replacement) |
-| `session/update` `plan` | `chat/append` plan, one step per entry; with `chat.rich` also `entries` (`text`, `status`, `priority`) |
+| `session/update` `agent_message_chunk` | `chat/append` text, chunks joined for up to 150 ms (or 4 KiB; a chunk that would take the joined text past 4 KiB first sends what is buffered). An explicit stop or the end of the node's request stream flushes buffered text while the reply stream remains open |
+| `session/update` `tool_call` (title, `rawInput`) | `chat/append` tool call; a `diff` in its content (or in `tool_call_update`) becomes a diff item (old and new text shown as a whole-file replacement); the tool's arguments and the diff are each cut to 64 KiB (head and tail kept) |
+| `session/update` `plan` | `chat/append` plan, one step per entry; with `chat.rich` also `entries` (`text`, `status`, `priority`), at most 256 entries with text cut at 4 KiB and status and priority at 40 bytes |
 | `session/update` `agent_thought_chunk` | With `chat.rich`: `chat/append` `thought`, chunks joined like a message (150 ms, 4 KiB; a message and a thought never share an item); thinking does not count as the agent saying something (a turn of only thinking is still an empty turn). Otherwise dropped |
 | `session/update` `tool_call` and `tool_call_update` with `toolCallId` | With `chat.rich`: `chat/append` tool call with `callId`, `kind`, `status`, `locations` (at most 64) and `output`: the text blocks of `content`, or else `rawOutput`, cut to 64 KiB (head and tail kept) and with anything that looks like a secret replaced (the same removal as for a stderr tail); only the fields the update carries are sent. A `diff` in `content` still becomes a diff item. Without `chat.rich`, or without an id, as before |
 | `session/update` `available_commands_update` | With `chat.rich`: `session/commands` (at most 100) |
@@ -184,8 +200,17 @@ agent offered (anything else is refused by the bridge without asking the agent),
 `session/set_config` (`chat.rich` only) → ACP `session/set_config_option { sessionId, configId, value }` for an option and a value the bridge
 reported (a boolean as `{type: "boolean", value}`; anything else is refused by the bridge with `adapter.option_refused`), answered once the agent
 answered and followed by `session/config` from the agent's full reply;
-`approval/resolve` → the agent's own option (`allow_once`, else `allow_always`, else the first option for an approval;
-`reject_once`, else `reject_always`, else `cancelled` for a denial). A decision for an approval the bridge no longer holds (it
+`approval/resolve` → exactly one option the bridge captured when the agent asked (ADR-0101): an approval with scope ONCE (or none,
+from a node before ADR-0101) → the first `allow_once`, **never** `allow_always`; with scope ALWAYS → the one `allow_always`, never
+anything narrower or wider; a denial → `reject_once`, else `cancelled` (never `reject_always`: a remembered refusal is reserved). A
+decision whose answer the request did not offer is refused (`-32602`, `data` `{code: "approval.scope_unavailable"}`), a scope the bridge
+does not know or ALWAYS with a denial too (`data` `{code: "protocol.invalid_message", params: {field: "scope"}}`); the agent is sent
+nothing and the request stays held (answered again, or `cancelled` when the turn ends). An option of a kind ACP does not define is
+never selected. `session/request_permission` becomes an `approval/request` whose `scopes` hold ONCE when the agent offers `allow_once`
+and ALWAYS when it offers exactly one `allow_always` (two or more are ambiguous: ALWAYS is not offered), with that option's `name` as
+`alwaysLabel` and its `optionId` as `alwaysOptionId`. A request that offers neither raises no approval: the bridge answers it
+`reject_once` (else `cancelled`) and reports `adapter.permission_unanswerable` (params `action`) as a `log` line and a conversation
+notice. The bridge declares the capability `approval_scopes`. A decision for an approval the bridge no longer holds (it
 answered the request `cancelled` itself, by the rules above, or never knew it) is refused with a JSON-RPC error (`-32602`) and the
 agent is sent nothing; the node then marks the conversation's entry cancelled and publishes the approval as resolved, not approved
 and unsigned (as when a turn is cancelled), so the hub clears it. The bridge acknowledges the decision once it is queued for the
@@ -194,7 +219,7 @@ cancelled permission when its decision is refused, and clears it: telling it the
 → node notification (follow-up). The bridge offers no capabilities: `fs/*` and `terminal/*`
 requests from the agent are refused (the agent works in its own worktree), and mesh delivery to ACP agents goes through the mesh MCP
 endpoint like for any agent (the server the bridge passed in `session/new`). If the agent exits the bridge exits, which the node sees as the adapter exiting (restart policy as
-for L3); before that the bridge reports why (below). The bridge declares `usage`, `set_mode` and `set_model` among its capabilities, and to a node that said `chat.rich` also `thought`, `tool_status`, `plan_status`, `config`, `commands` and `turns`. The fake ACP agent (`agora-fake-agent --acp`) is the test double; real agents (Claude Code, Codex, WrongStack) need their
+for L3); before that the bridge reports why (below). The bridge declares `approval_scopes` (ADR-0101), `usage`, `set_mode` and `set_model` among its capabilities, and to a node that said `chat.rich` also `thought`, `tool_status`, `plan_status`, `config`, `commands` and `turns`. The fake ACP agent (`agora-fake-agent --acp`) is the test double; real agents (Claude Code, Codex, WrongStack) need their
 manifests and fixtures from real accounts (P2-09).
 
 ### Turn and exit reasons
@@ -209,8 +234,11 @@ The bridge never writes text for people. When something went wrong it gives a st
 | `adapter.turn_stopped` | `stop_reason` (`refusal`, `max_tokens`, `max_turn_requests`, ...; `other` for anything that is not a lowercase word) | The agent stopped the turn itself | same |
 | `adapter.turn_failed` | `rpc_code`, `stderr_tail` (as for `turn_empty`) | The agent answered `session/prompt` with a JSON-RPC error | same |
 | `adapter.agent_exited` | `stage` (`initialize`, `session`, `turn`, `idle`, `start`, `option`), `exit_code` (when it exited with one), `stderr_tail` | The agent's output ended. Every request the node still waits for (`initialize`, `session/start`, `session/set_option`) is answered with a JSON-RPC error whose `data` is `{code, params}` with the stage of that request. A `log` line (`LOG_LEVEL_ERROR`) and a `chat/append` notice carry the agent's stage, including `session` after successful initialization and before the first session opens. If the agent dies before opening a session, the bridge waits up to 2 s for a late request and answers it with the exit reason, using `initialize` or `session` for the corresponding request. Then the bridge exits | error `data` (`HostError::reason` on the node side), notice and `log` |
-| `adapter.agent_refused` | `stage` (`initialize`, `session`); the notice also `rpc_code` and `detail` (the agent's error message, scrubbed and cut like a stderr tail) | The agent answered its own `initialize` or `session/new` (`session/load`) with an error (opencode 2.x: -32603 `ServiceUnavailableError` without `opencode service`) | error `data` of the node's request (`stage` only) and a `chat/append` notice |
+| `adapter.agent_refused` | `stage` (`initialize`, `session`); the notice also `rpc_code` and `detail` (the agent's error message, scrubbed and cut like a stderr tail; `rpc_code` `0` and `detail` `session_id_too_long` when the agent's session id is over 1024 bytes) | The agent answered its own `initialize` or `session/new` (`session/load`) with an error (opencode 2.x: -32603 `ServiceUnavailableError` without `opencode service`) | error `data` of the node's request (`stage` only) and a `chat/append` notice |
+| `adapter.line_too_long` | `method`, `bytes` | A `chat/append` item could not be cut to fit the 4 MiB line limit (not reached while session ids are within their 1024-byte limit) and was dropped | a `log` line (`WARN`) |
 | `adapter.option_refused` | `id` | The id was not one the agent offered, or the agent answered `session/set_mode` / `session/set_model` / `session/set_config_option` with an error | error `data` of `session/set_option` and `session/set_config` |
+| `adapter.restarting` | `attempt` | #902: the adapter ended on its own and the node starts it again (`attempt` of the restart budget); the node's own notice, an adapter does not send it | a `CHAT_KIND_NOTICE` entry |
+| `adapter.gave_up` | `restarts`, `exit_code` (only when known) | #902: the adapter ended on its own once more after its restart budget was spent (or could not be started again), so the node gave up on it; `restarts` is how often it was started again, `exit_code` the value of the `AgentExited` it recorded, left out when the node could not read how the last process ended (that `AgentExited` then carries 1). The node's own notice | a `CHAT_KIND_NOTICE` entry |
 | `adapter.queue_dropped` | `count` | Prompts that waited behind a turn will not be sent: `AgentCancelTurn` with `drop_queue`, or the adapter ended (the node's own notice, ADR-0090; an adapter does not send it) | a `CHAT_KIND_NOTICE` entry; the dropped prompts' entries leave the transcript |
 
 For `turn_empty` and `turn_failed` the bridge waits 100 ms for the last lines and adds what the agent wrote to stderr during that turn,

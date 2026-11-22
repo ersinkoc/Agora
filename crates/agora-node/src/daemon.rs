@@ -274,6 +274,58 @@ fn config_option(o: &agora_adapters::host::ConfigOption) -> v1::SessionConfigOpt
     }
 }
 
+/// How a process's end is reported (`AgentExited.exit_code`): its exit code, or on Unix the signal that ended it as a negative number;
+/// -1 when neither is known.
+fn exit_code(status: &agora_platform::ExitStatus) -> i32 {
+    status
+        .code
+        .or_else(|| status.signal.map(|s| -s))
+        .unwrap_or(-1)
+}
+
+/// A chat agent (an adapter's or an ACP agent's, ADR-0038), not one in a terminal. By its level: `AgentView::terminal` says only whether
+/// a terminal is open now, which is false for a terminal agent that just ended too.
+fn is_chat(views: &[AgentView], agent: &AgentId) -> bool {
+    views.iter().any(|v| {
+        v.id == *agent
+            && matches!(
+                v.level,
+                agora_core::IntegrationLevel::L2Acp | agora_core::IntegrationLevel::L3Adapter
+            )
+    })
+}
+
+/// #902 (RM-13): a chat agent whose adapter ended on its own: its conversation says that the node starts it again (`adapter.restarting`,
+/// `attempt`), or that it gave up on it (`adapter.gave_up`, with `restarts`, and `exit_code` only when the node knows how the last
+/// process ended). Nothing for a terminal agent (its screen says it) or for any other event.
+fn restart_notice(
+    chat: &crate::chat::ChatBoard,
+    e: &SupervisorEvent,
+    views: &[AgentView],
+    now: u64,
+) {
+    match e {
+        SupervisorEvent::Restarting { agent, attempt, .. } if is_chat(views, agent) => {
+            chat.restart_notice(
+                agent,
+                "adapter.restarting",
+                &[("attempt", attempt.to_string())],
+                now,
+            );
+        }
+        SupervisorEvent::GaveUp { agent, exit_code } if is_chat(views, agent) => {
+            let restarts = views
+                .iter()
+                .find(|v| v.id == *agent)
+                .map_or(0, |v| v.restarts);
+            let mut params = vec![("restarts", restarts.to_string())];
+            params.extend(exit_code.map(|c| ("exit_code", c.to_string())));
+            chat.restart_notice(agent, "adapter.gave_up", &params, now);
+        }
+        _ => {}
+    }
+}
+
 fn state_word(s: AgentState) -> &'static str {
     match s {
         AgentState::Working => "working",
@@ -458,6 +510,13 @@ impl EventSink {
                 }
             }
             self.agent_up(v, known.sessions.get(id), false);
+            // `AgentStarted` leaves the hub with no session options: what an adapter agent last reported of its session follows it
+            // (#932: a kept agent's adapter does not report it again by itself).
+            if let Some(ledger) = self.ledger.get() {
+                for b in ledger.kept_session(id).bodies() {
+                    self.restate(b);
+                }
+            }
         }
         if how == Announce::Present {
             for r in known.resolved {
@@ -467,6 +526,14 @@ impl EventSink {
         for p in waiting {
             self.approval_requested(p);
         }
+    }
+
+    /// ADR-0079/0093: an agent the holder kept running, taken up by this node at its start. The node's `NodeOnline` told the hub that
+    /// everything it ran before is gone, so the agent is said up again after it (started, its state, its session if known, its terminal
+    /// if it has one), as an announcement says it. Re-stated: the ledger already holds the agent and took it back (`Ledger::reclaim`).
+    /// What an adapter agent last reported of its session follows from the supervisor (`Supervisor::session_events`, #932).
+    pub fn agent_taken_up(&self, view: &AgentView, session: Option<&String>) {
+        self.agent_up(view, session, false);
     }
 
     /// An agent in `view` is up: started, its state, its session if known, and its terminal if it has one. `learn` false: an
@@ -678,14 +745,14 @@ impl EventSink {
                 SupervisorEvent::Exited { agent, status } => {
                     self.record(Body::AgentExited(v1::AgentExited {
                         agent_id: agent.as_str().to_string(),
-                        exit_code: status
-                            .code
-                            .or_else(|| status.signal.map(|s| -s))
-                            .unwrap_or(-1),
+                        exit_code: exit_code(status),
                     }));
-                    self.record(Body::TerminalClosed(v1::TerminalClosed {
-                        terminal_id: crate::control::terminal_id_of(agent),
-                    }));
+                    // #902: a chat agent the node gave up on never had a terminal.
+                    if !is_chat(views, agent) {
+                        self.record(Body::TerminalClosed(v1::TerminalClosed {
+                            terminal_id: crate::control::terminal_id_of(agent),
+                        }));
+                    }
                 }
                 SupervisorEvent::Adapter { agent, event } => match event {
                     AdapterEvent::Usage {
@@ -780,11 +847,54 @@ impl EventSink {
             action: p.action.clone(),
             detail: p.detail.clone(),
             expires_at_ms: p.expires_ms,
+            scopes: p.offer.scopes(),
+            always_label: p
+                .offer
+                .always
+                .as_ref()
+                .map(|a| a.label.clone())
+                .unwrap_or_default(),
+            always_option_id: p
+                .offer
+                .always
+                .as_ref()
+                .map(|a| a.option_id.clone())
+                .unwrap_or_default(),
         }));
     }
 
     pub fn approval_resolved(&self, approval_id: &str, approved: bool, signer_device_id: &str) {
         self.start_resolved(approval_id, approved, signer_device_id, 0, false);
+    }
+
+    /// ADR-0101: a person's decision on an adapter's request was delivered "always": the audit record says so, and, when `holder` is
+    /// the agent whose current process was given it, the agent's `AgentAlwaysAllowed` follows (the hub derives the "Asks less" chip
+    /// from it; the session ledger keeps it for a kept agent). `None`: the process it was delivered to was replaced meanwhile (Codex
+    /// review of PR #1007), so nothing is said about the agent's current process.
+    pub fn approval_resolved_always(
+        &self,
+        holder: Option<&AgentId>,
+        approval_id: &str,
+        action: &str,
+        signer_device_id: &str,
+    ) {
+        self.record(Body::ApprovalResolved(v1::ApprovalResolved {
+            approval_id: approval_id.to_string(),
+            approved: true,
+            signer_device_id: signer_device_id.to_string(),
+            scope: v1::ApprovalScope::Always as i32,
+            ..Default::default()
+        }));
+        let Some(agent) = holder else {
+            return;
+        };
+        self.record(Body::AgentAlwaysAllowed(v1::AgentAlwaysAllowed {
+            agent_id: agent.as_str().to_string(),
+            approval_id: approval_id.to_string(),
+            action: crate::approvals::card_text(action, crate::approvals::MAX_ALWAYS_LABEL_CHARS),
+            signer_device_id: signer_device_id.to_string(),
+            at_ms: now_ms(),
+        }));
     }
 
     /// The decision on an `agent.start` request (ADR-0057), with the grant that was signed.
@@ -802,6 +912,12 @@ impl EventSink {
             signer_device_id: signer_device_id.to_string(),
             helper_grant,
             helpers_may_start,
+            // ADR-0101: a person's decision is a single answer here; a request nobody decided has no scope.
+            scope: if signer_device_id.is_empty() {
+                v1::ApprovalScope::Unspecified as i32
+            } else {
+                v1::ApprovalScope::Once as i32
+            },
         }));
     }
 
@@ -1563,6 +1679,9 @@ impl Node {
             agora_mesh::broker::Limits::default(),
         )?);
         mesh.set_remote_allowed(read_policy(&cfg.data_dir.join(POLICY_FILE)).mesh_remote);
+        // #965: ids never start over below what an agent kept across this restart still holds (its `inbox` cursor). A failed
+        // reservation does not stop the node: its agents run on, and messages are refused until the mesh's ticker reserves.
+        mesh.reserve_ids(&cfg.data_dir);
 
         let mut sup = Supervisor::new(SupervisorConfig {
             node: NodeId::new(cfg.node_id.clone()),
@@ -1572,6 +1691,7 @@ impl Node {
         });
         let mut sandbox = read_policy(&cfg.data_dir.join(POLICY_FILE)).sandbox;
         sandbox.protect = node_private_paths(cfg);
+        sandbox.data_dir = Some(cfg.data_dir.clone());
         // ADR-0082: where a confined agent could otherwise connect to the control socket (Linux), the socket needs a token the agent's
         // profile must not reach. Made here, written when the socket is bound.
         let control_token = if agora_platform::CONTROL_TOKEN_REQUIRED
@@ -1611,27 +1731,8 @@ impl Node {
             });
         }
 
-        // ADR-0079: agents the holder kept running while no node was there are this node's again, before anything is called
-        // interrupted. A holder that cannot be had changes nothing: every agent runs in the node.
-        if let Some(setup) = holder {
-            let hub = Arc::new(crate::holder::HolderHub::new(setup));
-            take_up_held(&hub, &mut sup, &ledger, cfg);
-            sup.set_holder(hub);
-        }
-        events.node_online(&cfg.node_id);
-        for p in &projects {
-            events.checkout_discovered(&cfg.node_id, &p.id, &p.root);
-        }
-        // ADR-0060: what was running when the node last stopped, offered again (Resume, or Start again in the same folder).
-        for e in ledger.interrupted() {
-            events.agent_interrupted(&e, !e.session_id.is_empty() && sup.resumable(&e.kind));
-        }
-        let known_checkouts: Vec<(String, PathBuf)> = projects
-            .iter()
-            .map(|p| (p.id.clone(), p.root.clone()))
-            .collect();
-
-        // Every agent that launches joins the mesh and, if its manifest has `[mcp]`, is handed its own endpoint.
+        // Every agent that launches joins the mesh and, if its manifest has `[mcp]`, is handed its own endpoint. Set before the holder's
+        // agents are taken up: each joins the mesh again at the same path through this hook, so its running bridge reconnects (#906).
         {
             let for_abort = Arc::clone(&mesh);
             let mesh = Arc::clone(&mesh);
@@ -1655,6 +1756,50 @@ impl Node {
             }));
             sup.set_abort_hook(Box::new(move |id| for_abort.unregister(id)));
         }
+
+        // ADR-0079: agents the holder kept running while no node was there are this node's again, before anything is called
+        // interrupted. A holder that cannot be had changes nothing: every agent runs in the node.
+        let mut taken_up = Vec::new();
+        if let Some(setup) = holder {
+            let hub = Arc::new(crate::holder::HolderHub::new(setup));
+            taken_up = take_up_held(&hub, &mut sup, &ledger, cfg);
+            sup.set_holder(hub);
+        }
+        // #932: only an agent just taken up has a session to show again; every other kept session is an earlier process's (also when
+        // there is no holder to attach to).
+        {
+            let keep: Vec<&str> = taken_up.iter().map(|(id, _)| id.as_str()).collect();
+            ledger.forget_kept_except(&keep);
+        }
+        events.node_online(&cfg.node_id);
+        for p in &projects {
+            events.checkout_discovered(&cfg.node_id, &p.id, &p.root);
+        }
+        // `NodeOnline` tells the hub that whatever this node ran before is gone; the agents taken up from the holder are not, so each is
+        // said up again after it, as an announcement does (#907).
+        if !taken_up.is_empty() {
+            let views = sup.list();
+            for (id, session) in &taken_up {
+                if let Some(v) = views.iter().find(|v| v.id == *id && v.running) {
+                    events.agent_taken_up(v, session.as_ref());
+                    // #932: its modes, settings and commands as the supervisor holds them, judged again as a report is, so what the
+                    // window shows matches `skips_permissions_now`.
+                    events.supervisor_events(&sup.session_events(id), &views);
+                    // ADR-0101: the kept process still holds its always answers; the hub cleared them on the `AgentStarted` above.
+                    for a in ledger.kept_session(id.as_str()).always {
+                        events.restate(Body::AgentAlwaysAllowed(a));
+                    }
+                }
+            }
+        }
+        // ADR-0060: what was running when the node last stopped, offered again (Resume, or Start again in the same folder).
+        for e in ledger.interrupted() {
+            events.agent_interrupted(&e, !e.session_id.is_empty() && sup.resumable(&e.kind));
+        }
+        let known_checkouts: Vec<(String, PathBuf)> = projects
+            .iter()
+            .map(|p| (p.id.clone(), p.root.clone()))
+            .collect();
 
         // Only devices the owner listed in `<data>/trusted-devices` (`agora node trust`) can answer an approval; with
         // none listed every request waits and expires as denied.
@@ -1847,6 +1992,9 @@ impl Node {
                     // ADR-0060: the process each agent runs as, as last written to the ledger.
                     let mut processes: std::collections::HashMap<AgentId, u32> = Default::default();
                     while !stop.load(Ordering::Acquire) {
+                        // ADR-0095: when the list below is taken (under the lock, after the tick): a dispatch made after this is not
+                        // dropped by a list that predates it.
+                        let views_at = Instant::now();
                         let (
                             events,
                             views,
@@ -1887,29 +2035,45 @@ impl Node {
                         }
                         // ADR-0060: a new process (a start, a restart, a resume) is written to the ledger with its start time, so one
                         // that outlives a crashed node is recognised at the next start. Read only when the pid changed.
+                        // #925: with when each process discovery waits for was spawned, so a node that takes it up from the holder later
+                        // reads its files from the same start.
+                        let starts: std::collections::HashMap<AgentId, u64> = session_targets
+                            .iter()
+                            .filter_map(|t| Some((t.agent.clone(), ms_after(t.started?))))
+                            .collect();
                         record_new_processes(
                             &ledger_tick,
                             &mut processes,
                             &pids,
+                            &starts,
                             agora_platform::process_identity,
                             now_ms(),
                         );
                         // ADR-0060: the session ids terminal agents write to their own files (`[session.file]`), read outside the lock.
-                        if !session_targets.is_empty() {
-                            let known = sup
+                        // Polled with no targets too, so what was kept for a process that ended is let go at once (#925).
+                        let known = if session_targets.is_empty() {
+                            Default::default()
+                        } else {
+                            sup.lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .known_sessions()
+                        };
+                        for (agent, id) in sessions.poll(Instant::now(), &session_targets, &known) {
+                            // #925: set only for the process it was found for (the lock was let go meanwhile; a restart or a resume
+                            // may have replaced it).
+                            let Some(launch) = session_targets
+                                .iter()
+                                .find(|t| t.agent == agent)
+                                .map(|t| t.launch)
+                            else {
+                                continue;
+                            };
+                            let set = sup
                                 .lock()
                                 .unwrap_or_else(|e| e.into_inner())
-                                .known_sessions();
-                            for (agent, id) in
-                                sessions.poll(Instant::now(), &session_targets, &known)
-                            {
-                                let set = sup
-                                    .lock()
-                                    .unwrap_or_else(|e| e.into_inner())
-                                    .report_session(&agent, &id);
-                                if set.is_ok() {
-                                    ev.session_reported(&agent, &id);
-                                }
+                                .report_found_session(&agent, launch, &id);
+                            if matches!(set, Ok(true)) {
+                                ev.session_reported(&agent, &id);
                             }
                         }
                         // Usage that terminal agents wrote to their own files (ADR-0042); the files are read outside the lock.
@@ -1953,14 +2117,14 @@ impl Node {
                                 SupervisorEvent::Exited { agent, status } if status.success() => {
                                     mesh.unregister_because(agent, "finished");
                                 }
-                                SupervisorEvent::GaveUp { agent } => {
+                                SupervisorEvent::GaveUp { agent, .. } => {
                                     mesh.unregister_because(agent, "crashed");
                                 }
                                 _ => {}
                             }
                             // ADR-0057: an agent's helper grants and waiting start end when it exits or is stopped.
                             if let SupervisorEvent::Exited { agent, .. }
-                            | SupervisorEvent::GaveUp { agent }
+                            | SupervisorEvent::GaveUp { agent, .. }
                             | SupervisorEvent::Stopped { agent } = e
                             {
                                 spawner.agent_ended(agent);
@@ -1968,13 +2132,46 @@ impl Node {
                             // ADR-0090 Amendment A: a card to switch an agent to a mode that skips permission questions names this agent's
                             // session; when it ends, crashes or is stopped, no decision may apply it later.
                             if let SupervisorEvent::Exited { agent, .. }
-                            | SupervisorEvent::GaveUp { agent }
+                            | SupervisorEvent::GaveUp { agent, .. }
                             | SupervisorEvent::Stopped { agent }
                             | SupervisorEvent::AdapterCrashed { agent } = e
                             {
                                 for id in approvals.withdraw_skips(agent, None) {
                                     ev.approval_resolved(&id, false, "");
                                 }
+                            }
+                        }
+                        // ADR-0095: every dispatch of an agent no longer running (stopped by a person or its parent, ended, crashed)
+                        // is dropped and its task on this node's broker given back; a held prompt of a terminal agent between turns
+                        // is pasted on a thread of its own (the paste pauses). A paste that cannot start, or that fails, gives the task
+                        // back too (the shared board has no release).
+                        if !mesh.dispatches().is_empty() {
+                            let seen: Vec<crate::task_dispatch::Seen> = views
+                                .iter()
+                                .map(|v| crate::task_dispatch::Seen {
+                                    id: v.id.clone(),
+                                    running: v.running,
+                                    terminal: v.terminal,
+                                })
+                                .collect();
+                            let back = mesh.dispatches().tick(
+                                &seen,
+                                views_at,
+                                Instant::now(),
+                                // ADR-0095: the live screen of an agent with a held prompt, read now, and paced like the agent's own
+                                // detection, so a held prompt adds no screen reads beyond it.
+                                |a| {
+                                    let s = sup.lock().unwrap_or_else(|e| e.into_inner());
+                                    let ready =
+                                        s.terminal_readiness(a).is_some_and(|(state, detects)| {
+                                            crate::task_dispatch::between_turns(state, detects)
+                                        });
+                                    (ready, s.detection_interval(a).unwrap_or(Duration::ZERO))
+                                },
+                                |h| deliver_held(&sup, &mesh, h),
+                            );
+                            for g in &back {
+                                mesh.give_back(g);
                             }
                         }
                         spawner.tick();
@@ -2007,13 +2204,74 @@ impl Node {
                                             approval_id,
                                             action,
                                             detail,
+                                            scopes,
+                                            always_label,
+                                            always_option_id,
                                             ..
                                         },
                                 } => {
                                     mesh.set_activity(agent, "asking the user");
-                                    if let Some(p) =
-                                        approvals.request(agent, approval_id, action, detail, now)
-                                    {
+                                    // ADR-0101: which answers the card offers, after the policy (read under the supervisor's lock,
+                                    // let go before the queue's is taken).
+                                    let terms = sup
+                                        .lock()
+                                        .unwrap_or_else(|e| e.into_inner())
+                                        .approval_raise_terms(agent);
+                                    let (strict, permitted) = terms.unwrap_or((false, false));
+                                    let raise = crate::approvals::raise_for(
+                                        strict,
+                                        scopes,
+                                        always_label,
+                                        always_option_id,
+                                        permitted,
+                                    );
+                                    let offer = match raise {
+                                        crate::approvals::Raise::Card(offer) => Some(offer),
+                                        refused => {
+                                            // No card a person could allow: the request is said and withdrawn at once (as one the
+                                            // agent stopped waiting for), the adapter is answered denied, and the person is told why.
+                                            if let Some(p) = approvals.request(
+                                                agent,
+                                                approval_id,
+                                                action,
+                                                detail,
+                                                now,
+                                            ) {
+                                                ev.approval_requested(&p);
+                                                approvals.withdraw(&p.id);
+                                                ev.approval_resolved(&p.id, false, "");
+                                            }
+                                            let call = sup
+                                                .lock()
+                                                .unwrap_or_else(|e| e.into_inner())
+                                                .prepare_resolve_approval(
+                                                    agent,
+                                                    approval_id,
+                                                    false,
+                                                );
+                                            let _ = call.and_then(|c| c.run());
+                                            let code = if refused
+                                                == crate::approvals::Raise::AlwaysOnlyForbidden
+                                            {
+                                                "approval.always_only_forbidden"
+                                            } else {
+                                                "adapter.permission_unanswerable"
+                                            };
+                                            chat.refused_request(agent, code, action, now);
+                                            None
+                                        }
+                                    };
+                                    let Some(offer) = offer else {
+                                        continue;
+                                    };
+                                    if let Some(p) = approvals.request_offered(
+                                        agent,
+                                        approval_id,
+                                        action,
+                                        detail,
+                                        now,
+                                        offer,
+                                    ) {
                                         // ADR-0090: the request also appears in the conversation. The entry points at the id the node
                                         // minted (`p.id`), never at the adapter's own.
                                         chat.push_permission(agent, &p.id, action, now);
@@ -2028,6 +2286,11 @@ impl Node {
                                         let _ = call.and_then(|c| c.run());
                                     }
                                 }
+                                // #908: a queued prompt became the turn: its entry takes the time it went (the wall clock now,
+                                // not the tick's, which is older than what this tick already said).
+                                SupervisorEvent::PromptSending { agent, tag } => {
+                                    chat.sending(agent, *tag, crate::daemon::now_ms());
+                                }
                                 // ADR-0090: a queued prompt went out (or could not), or was lost with its adapter.
                                 SupervisorEvent::PromptDequeued { agent, tag, sent } => {
                                     if *sent {
@@ -2035,12 +2298,24 @@ impl Node {
                                     } else {
                                         chat.drop_queued(agent, &[*tag], now);
                                     }
+                                    // ADR-0095: a dispatch prompt that could not be sent gives its task back.
+                                    if let Some(g) = mesh.dispatches().dequeued(agent, *tag, *sent)
+                                    {
+                                        mesh.give_back(&g);
+                                    }
                                 }
                                 SupervisorEvent::PromptsDropped { agent, tags } => {
                                     chat.drop_queued(agent, tags, now);
+                                    for g in mesh.dispatches().dropped(agent, tags) {
+                                        mesh.give_back(&g);
+                                    }
                                 }
                                 SupervisorEvent::OutputDropped { agent, bytes } => {
                                     chat.output_dropped(agent, *bytes, now);
+                                }
+                                SupervisorEvent::Restarting { .. }
+                                | SupervisorEvent::GaveUp { .. } => {
+                                    restart_notice(&chat, e, &views, now);
                                 }
                                 SupervisorEvent::Stopped { agent }
                                 | SupervisorEvent::AdapterCrashed { agent } => {
@@ -2350,9 +2625,47 @@ impl Drop for Node {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .shutdown();
-        // The agents' last states. They ended without an end in the ledger: at the next start they are interrupted (ADR-0060).
-        let _ = self.ledger.flush();
+        // The agents' last states. They ended without an end in the ledger: at the next start they are interrupted (ADR-0060). And
+        // what the kept agents last reported of their session (#932).
+        let _ = self.ledger.flush_all();
     }
+}
+
+/// ADR-0095: pastes a held dispatch prompt into its terminal agent on a thread of its own (the paste pauses); false when it cannot start
+/// (no terminal, or the program turned bracketed paste off since the prompt was held, which is logged). A paste that fails on its
+/// thread gives the task back there.
+fn deliver_held(
+    sup: &Mutex<Supervisor>,
+    mesh: &Arc<crate::mesh_server::MeshServer>,
+    h: &crate::task_dispatch::Held,
+) -> bool {
+    let control = {
+        let s = sup.lock().unwrap_or_else(|e| e.into_inner());
+        s.terminal(&h.given.agent)
+            .map(|t| (t.bracketed_paste(), t.input_handle().ok()))
+    };
+    let c = match control {
+        Some((true, Some(c))) => c,
+        Some((false, _)) => {
+            // Operational log, not UI text.
+            eprintln!(
+                "task dispatch: {} turned bracketed paste off; the held prompt for task {} is dropped and the task given back",
+                h.given.agent.as_str(),
+                h.given.task_id
+            );
+            return false;
+        }
+        _ => return false,
+    };
+    let (mesh, h) = (Arc::clone(mesh), h.clone());
+    std::thread::Builder::new()
+        .name("agora-dispatch-paste".into())
+        .spawn(move || {
+            if crate::task_dispatch::paste_prompt(&c, &h.prompt).is_err() {
+                mesh.give_back(&h.given);
+            }
+        })
+        .is_ok()
 }
 
 /// The node's agent kinds: the built-in manifests, then every `*.toml` in `dir` (a file there replaces the built-in kind of the same
@@ -2386,16 +2699,18 @@ fn ledger_state(word: &str) -> Option<agora_core::AgentState> {
 /// not take, so a running agent left like that would block on a full terminal for good. That is an agent that ended while no node was
 /// there (released; its entry stays interrupted, offered for resume), one the ledger does not know or names another holder, one whose
 /// folder or project is gone, and one that could not be taken up. When one cannot be ended the holder is not used for new agents.
+/// Returns the agents taken up, each with the session id the ledger knew, for the events that say them up again.
 fn take_up_held(
     hub: &crate::holder::HolderHub,
     sup: &mut Supervisor,
     ledger: &crate::ledger::Ledger,
     cfg: &NodeConfig,
-) {
+) -> Vec<(AgentId, Option<String>)> {
     use crate::holder_link::AgentState as Held;
     let Some((session, held, pipes)) = hub.attach_existing() else {
-        return;
+        return Vec::new();
     };
+    let mut taken_up = Vec::new();
     let mut ended = Vec::new();
     for h in held {
         let id = h.info.info.agent.clone();
@@ -2438,7 +2753,13 @@ fn take_up_held(
         };
         // A failed take-up consumes the terminal: the agent is ended by name below, like the others.
         if sup
-            .adopt_held(restore, h, &session, Instant::now())
+            .adopt_held(
+                restore,
+                h,
+                &session,
+                held_since(entry.process_since_ms),
+                Instant::now(),
+            )
             .is_err()
         {
             ended.push(crate::holder_link::Held {
@@ -2456,6 +2777,11 @@ fn take_up_held(
             continue;
         }
         sup.seed_reattached_state(&AgentId::new(id.clone()), ledger_state(&entry.last_state));
+        sup.set_kept_launch(
+            &AgentId::new(id.clone()),
+            &entry.launch_options,
+            entry.skips_permissions,
+        );
         if !entry.parent_agent_id.is_empty() {
             sup.set_parent(
                 &AgentId::new(id.clone()),
@@ -2463,6 +2789,8 @@ fn take_up_held(
             );
         }
         ledger.reclaim(&id, (session.pid, session.start), now_ms());
+        let known = (!entry.session_id.is_empty()).then(|| entry.session_id.clone());
+        taken_up.push((AgentId::new(id), known));
     }
     let mut ended_pipes = Vec::new();
     for p in pipes {
@@ -2513,10 +2841,15 @@ fn take_up_held(
             carry_on: false,
             private_config: None,
         };
+        let kept = ledger.kept_session(&id);
+        let (options, config, commands) = kept_session_parts(&kept);
         let reattach = crate::supervisor::Reattach {
             session_id: entry.adapter_session.clone(),
             capabilities: entry.adapter_capabilities.clone(),
             state: ledger_state(&entry.last_state),
+            options,
+            config,
+            commands,
         };
         if sup
             .adopt_held_pipe(restore, reattach, p, &session, Instant::now())
@@ -2525,6 +2858,11 @@ fn take_up_held(
             ended_pipes.push(gone(&id));
             continue;
         }
+        sup.set_kept_launch(
+            &AgentId::new(id.clone()),
+            &entry.launch_options,
+            entry.skips_permissions,
+        );
         if !entry.parent_agent_id.is_empty() {
             sup.set_parent(
                 &AgentId::new(id.clone()),
@@ -2532,10 +2870,99 @@ fn take_up_held(
             );
         }
         ledger.reclaim(&id, (session.pid, session.start), now_ms());
+        let known = (!entry.session_id.is_empty()).then(|| entry.session_id.clone());
+        taken_up.push((AgentId::new(id), known));
     }
     if !crate::holder::HolderHub::end_unadopted_all(&session, ended, ended_pipes) {
         hub.retire_session();
     }
+    taken_up
+}
+
+/// #932: a kept session as the supervisor holds it (the reverse of what the node records for an adapter's reports). A config option's
+/// category the protocol names only as custom comes back as `_custom`, which is judged the same way.
+fn kept_session_parts(
+    kept: &crate::ledger::KeptSession,
+) -> (
+    agora_adapters::host::SessionOptions,
+    Vec<agora_adapters::host::ConfigOption>,
+    Vec<agora_adapters::host::AdapterCommand>,
+) {
+    use agora_adapters::host::{AdapterCommand, ConfigOption, SessionOption, SessionOptions};
+    use v1::SessionConfigCategory as C;
+    let list = |l: &[v1::SessionOption]| -> Vec<SessionOption> {
+        l.iter()
+            .map(|o| SessionOption {
+                id: o.id.clone(),
+                name: o.name.clone(),
+                description: o.description.clone(),
+                skips_permissions: o.skips_permissions,
+            })
+            .collect()
+    };
+    let options = kept
+        .options
+        .as_ref()
+        .map(|o| SessionOptions {
+            modes: list(&o.modes),
+            models: list(&o.models),
+            current_mode: o.current_mode.clone(),
+            current_model: o.current_model.clone(),
+        })
+        .unwrap_or_default();
+    let config = kept
+        .config
+        .as_ref()
+        .map(|c| {
+            c.options
+                .iter()
+                .map(|o| ConfigOption {
+                    id: o.id.clone(),
+                    name: o.name.clone(),
+                    description: o.description.clone(),
+                    category: match C::try_from(o.category).unwrap_or(C::Unspecified) {
+                        C::Mode => "mode",
+                        C::Model => "model",
+                        C::ModelConfig => "model_config",
+                        C::ThoughtLevel => "thought_level",
+                        C::Custom => "_custom",
+                        C::Unspecified => "",
+                    }
+                    .to_string(),
+                    boolean: o.r#type == v1::SessionConfigType::Boolean as i32,
+                    current: o.current.clone(),
+                    choices: list(&o.choices),
+                    skips_permissions: o.skips_permissions,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let commands = kept
+        .commands
+        .as_ref()
+        .map(|c| {
+            c.commands
+                .iter()
+                .map(|c| AdapterCommand {
+                    name: c.name.clone(),
+                    description: c.description.clone(),
+                    input_hint: c.input_hint.clone(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    (options, config, commands)
+}
+
+/// #925: a time before an agent taken up from the holder started, as the earlier node recorded it (`Entry::process_since_ms`, 0: unknown).
+fn held_since(ms: u64) -> Option<SystemTime> {
+    (ms != 0).then(|| UNIX_EPOCH + Duration::from_millis(ms))
+}
+
+/// `t` in ms since the epoch, rounded up: never earlier than `t`, so a bound stays a bound.
+fn ms_after(t: SystemTime) -> u64 {
+    let d = t.duration_since(UNIX_EPOCH).unwrap_or_default();
+    u64::try_from(d.as_nanos().div_ceil(1_000_000)).unwrap_or(u64::MAX)
 }
 
 /// ADR-0060: writes the process of every agent whose pid is new to `recorded` into the ledger, and remembers it only once the ledger
@@ -2543,17 +2970,22 @@ fn take_up_held(
 /// is just starting), and the ledger has no entry for the agent (the supervisor starts the process and releases its lock before the
 /// node records `AgentStarted`, which makes the entry: a tick between the two used to remember the pid as written, so the ledger
 /// never got it and a survivor of a crashed node was not recognised; seen on slow macOS runners).
+/// #925: `starts` holds, per agent, a time before its process was spawned (ms, rounded up): written with the process in one write, so a
+/// node that takes the agent up from the holder never finds a later time recorded as its start. An agent not in it is recorded with
+/// none (0).
 fn record_new_processes(
     ledger: &crate::ledger::Ledger,
     recorded: &mut std::collections::HashMap<AgentId, u32>,
     pids: &[(AgentId, u32)],
+    starts: &std::collections::HashMap<AgentId, u64>,
     identity: impl Fn(u32) -> io::Result<agora_platform::ProcessIdentity>,
     now_ms: u64,
 ) {
     for (agent, pid) in pids {
         if recorded.get(agent) != Some(pid) {
             if let Ok(identity) = identity(*pid) {
-                if ledger.set_process(agent.as_str(), Some(identity), now_ms) {
+                let since = starts.get(agent).copied().unwrap_or(0);
+                if ledger.set_process(agent.as_str(), Some(identity), since, now_ms) {
                     recorded.insert(agent.clone(), *pid);
                 }
             }
@@ -2770,6 +3202,111 @@ mod announce_tests {
             .any(|b| matches!(b, Body::AgentExited(_) | Body::TerminalClosed(_))));
     }
 
+    /// #902: an adapter's agent the node gave up on is reported as exited without a `TerminalClosed` (it never had a terminal); a terminal
+    /// agent that just ended (its view no longer has a terminal open) still gets one.
+    #[test]
+    fn a_chat_agent_given_up_on_closes_no_terminal() {
+        let s = sink("gave-up-terminal");
+        let mut chat = view("chat", false, false);
+        chat.level = agora_core::IntegrationLevel::L3Adapter;
+        let views = [chat, view("term", false, true)];
+        let mark = s.next_seq() - 1;
+        let status = agora_platform::ExitStatus {
+            code: Some(137),
+            signal: None,
+        };
+        s.supervisor_events(
+            &[
+                SupervisorEvent::Exited {
+                    agent: AgentId::new("chat"),
+                    status,
+                },
+                SupervisorEvent::Exited {
+                    agent: AgentId::new("term"),
+                    status,
+                },
+            ],
+            &views,
+        );
+        let got: Vec<String> = said(&s, mark)
+            .iter()
+            .filter_map(|b| match b {
+                Body::AgentExited(x) => Some(format!("exited {} {}", x.agent_id, x.exit_code)),
+                Body::TerminalClosed(t) => Some(format!("closed {}", t.terminal_id)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(got, ["exited chat 137", "exited term 137", "closed t-term"]);
+    }
+
+    /// #902 (RM-13): the node's notices in a chat agent's conversation: a restart with its attempt, the give-up with the restarts and
+    /// the exit code only when it is known; nothing for a terminal agent or for another event.
+    #[test]
+    fn a_chat_agent_hears_of_its_restarts_and_of_the_give_up() {
+        let board = crate::chat::ChatBoard::new();
+        let mut chat = view("chat", false, false);
+        chat.level = agora_core::IntegrationLevel::L3Adapter;
+        chat.restarts = 5;
+        let mut acp = view("acp", false, false);
+        acp.level = agora_core::IntegrationLevel::L2Acp;
+        let views = [chat, acp, view("term", false, true)];
+        let id = |a: &str| AgentId::new(a);
+        for e in [
+            SupervisorEvent::Restarting {
+                agent: id("chat"),
+                attempt: 2,
+                after: std::time::Duration::from_secs(1),
+            },
+            SupervisorEvent::GaveUp {
+                agent: id("chat"),
+                exit_code: Some(3),
+            },
+            SupervisorEvent::GaveUp {
+                agent: id("acp"),
+                exit_code: None,
+            },
+            SupervisorEvent::Restarting {
+                agent: id("term"),
+                attempt: 1,
+                after: std::time::Duration::from_secs(1),
+            },
+            SupervisorEvent::GaveUp {
+                agent: id("term"),
+                exit_code: Some(1),
+            },
+            SupervisorEvent::Stopped { agent: id("chat") },
+        ] {
+            restart_notice(&board, &e, &views, 7);
+        }
+        let notices = |a: &str| -> Vec<(String, Vec<(String, String)>)> {
+            board
+                .snapshot(&id(a))
+                .into_iter()
+                .map(|e| {
+                    let mut p: Vec<_> = e.params.into_iter().collect();
+                    p.sort();
+                    (e.code, p)
+                })
+                .collect()
+        };
+        let kv = |k: &str, v: &str| (k.to_string(), v.to_string());
+        assert_eq!(
+            notices("chat"),
+            [
+                ("adapter.restarting".to_string(), vec![kv("attempt", "2")]),
+                (
+                    "adapter.gave_up".to_string(),
+                    vec![kv("exit_code", "3"), kv("restarts", "5")]
+                ),
+            ]
+        );
+        assert_eq!(
+            notices("acp"),
+            [("adapter.gave_up".to_string(), vec![kv("restarts", "0")])]
+        );
+        assert!(notices("term").is_empty());
+    }
+
     /// ADR-0055 section 2: the last 256 resolved approvals are said again, oldest first, so one answered inside the lost window
     /// does not stay listed as waiting. Saying them again does not change what is kept.
     #[test]
@@ -2972,7 +3509,7 @@ mod process_record_tests {
         let pids = vec![(agent.clone(), 4242)];
         let mut recorded = HashMap::new();
 
-        record_new_processes(&ledger, &mut recorded, &pids, identity, 2);
+        record_new_processes(&ledger, &mut recorded, &pids, &HashMap::new(), identity, 2);
         assert!(ledger.get("agent-1").is_none());
         assert!(
             recorded.is_empty(),
@@ -2991,15 +3528,85 @@ mod process_record_tests {
             }),
             3,
         );
-        record_new_processes(&ledger, &mut recorded, &pids, identity, 4);
+        record_new_processes(&ledger, &mut recorded, &pids, &HashMap::new(), identity, 4);
         assert_eq!(ledger.get("agent-1").unwrap().process().unwrap().pid, 4242);
         assert_eq!(recorded.get(&agent), Some(&4242));
 
         // Written once: a later tick with the same pid reads nothing again.
-        record_new_processes(&ledger, &mut recorded, &pids, |_| panic!("read again"), 5);
+        record_new_processes(
+            &ledger,
+            &mut recorded,
+            &pids,
+            &HashMap::new(),
+            |_| panic!("read again"),
+            5,
+        );
         // An agent that is gone is forgotten, so a new process of it is written.
-        record_new_processes(&ledger, &mut recorded, &[], identity, 6);
+        record_new_processes(&ledger, &mut recorded, &[], &HashMap::new(), identity, 6);
         assert!(recorded.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #925: the time before a process was spawned is written with the process, in one ledger write, so a node that ends right after it
+    /// leaves the bound for the node that takes the agent up from the holder, never a later time. A process whose start the node does
+    /// not know is recorded with none, not with the time it was seen; the next node's take-up does not change it.
+    #[test]
+    fn a_processs_start_bound_is_written_with_the_process_and_outlives_the_node() {
+        use super::{held_since, ms_after};
+        use std::time::{Duration, UNIX_EPOCH};
+        let dir = std::env::temp_dir().join(format!("agora-procsince-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let started = UNIX_EPOCH + Duration::from_nanos(1_700_000_000_123_400_001);
+        assert_eq!(ms_after(started), 1_700_000_000_124);
+        assert!(held_since(ms_after(started)).unwrap() >= started);
+        assert_eq!(held_since(0), None);
+        let (known, unknown) = (AgentId::new("agent-1"), AgentId::new("agent-2"));
+        let pids = vec![(known.clone(), 4242), (unknown.clone(), 4343)];
+        let starts: HashMap<AgentId, u64> = [(known.clone(), ms_after(started))].into();
+        {
+            let ledger = crate::ledger::Ledger::open(&dir, 1).unwrap();
+            for id in ["agent-1", "agent-2"] {
+                ledger.observe(
+                    &Body::AgentStarted(v1::AgentStarted {
+                        agent_id: id.into(),
+                        kind: "fake".into(),
+                        level: 2,
+                        ..Default::default()
+                    }),
+                    3,
+                );
+            }
+            let mut recorded = HashMap::new();
+            record_new_processes(
+                &ledger,
+                &mut recorded,
+                &pids,
+                &starts,
+                identity,
+                1_700_000_000_500,
+            );
+            // The node ends here, right after the one write.
+        }
+        let ledger = crate::ledger::Ledger::open(&dir, 1).unwrap();
+        let since = |id: &str| ledger.get(id).unwrap().process_since_ms;
+        assert_eq!(since("agent-1"), 1_700_000_000_124);
+        assert_eq!(
+            since("agent-2"),
+            0,
+            "a time the process was only seen at was kept as its start"
+        );
+        // The next node takes the same processes up: what was recorded stays.
+        let mut recorded = HashMap::new();
+        record_new_processes(
+            &ledger,
+            &mut recorded,
+            &pids,
+            &HashMap::new(),
+            identity,
+            1_700_000_009_000,
+        );
+        assert_eq!((since("agent-1"), since("agent-2")), (1_700_000_000_124, 0));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3016,6 +3623,7 @@ mod process_record_tests {
             &ledger,
             &mut recorded,
             &pids,
+            &HashMap::new(),
             |_| Err(std::io::Error::from(std::io::ErrorKind::NotFound)),
             2,
         );
@@ -3072,12 +3680,26 @@ mod process_record_tests {
             // The tick writes each new process the way it does in the node (#696).
             let mut recorded = HashMap::new();
             let pid = |p: u32| [(AgentId::new("agent-1"), p)];
-            record_new_processes(&ledger, &mut recorded, &pid(4242), identity, 2);
+            record_new_processes(
+                &ledger,
+                &mut recorded,
+                &pid(4242),
+                &HashMap::new(),
+                identity,
+                2,
+            );
             let copy = if restarted {
                 // Crashed, restart pending: copied now; the tick then restarts it with a new process.
                 let down = [view(false, AgentState::Unknown)];
                 sink.supervisor_events(&[exited(1)], &down);
-                record_new_processes(&ledger, &mut recorded, &pid(5151), identity, 3);
+                record_new_processes(
+                    &ledger,
+                    &mut recorded,
+                    &pid(5151),
+                    &HashMap::new(),
+                    identity,
+                    3,
+                );
                 sink.supervisor_events(std::slice::from_ref(&started), &up);
                 down.to_vec()
             } else {

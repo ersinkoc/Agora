@@ -72,8 +72,15 @@ impl std::fmt::Display for FilesError {
 impl std::error::Error for FilesError {}
 
 fn io_err(path: &str, e: &std::io::Error) -> FilesError {
-    if e.kind() == std::io::ErrorKind::NotFound {
+    // A file where the path needs a folder (`README.md/x`, or listing `README.md`) names nothing there either (audit F18).
+    if matches!(
+        e.kind(),
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+    ) {
         FilesError::NotFound(path.to_string())
+    } else if agora_platform::link_loop(e) {
+        // A link to itself or a ring of links never leads anywhere: refused as a link that cannot be resolved is (issue #924).
+        FilesError::OutsideRoot(path.to_string())
     } else {
         FilesError::Io(format!("{path}: {e}"))
     }
@@ -343,7 +350,14 @@ impl Files {
             return Err(FilesError::Secret(rel.to_string()));
         }
         // Without waiting: a FIFO swapped in for the file would block the open until something writes to it.
-        let file = agora_platform::open_read(&path).map_err(|e| io_err(rel, &e))?;
+        let file = agora_platform::open_read(&path).map_err(|e| {
+            // Something that is not a regular file and cannot be opened (a socket): not a file, as a folder or FIFO reads (audit F18).
+            if fs::metadata(&path).is_ok_and(|m| !m.is_file()) {
+                FilesError::NotFound(rel.to_string())
+            } else {
+                io_err(rel, &e)
+            }
+        })?;
         let real = agora_platform::opened_path(&file).map_err(|e| io_err(rel, &e))?;
         if !real.starts_with(&self.root) {
             return Err(FilesError::OutsideRoot(rel.to_string()));
@@ -711,6 +725,31 @@ mod tests {
     }
 
     #[test]
+    fn a_path_through_a_file_or_to_a_socket_is_not_found() {
+        // Audit F18: these answered `Io("Not a directory")` / `Io("No such device or address")`, shown as internal.
+        let (d, f) = setup();
+        assert_eq!(
+            f.read_file("README.md/x"),
+            Err(FilesError::NotFound("README.md/x".into()))
+        );
+        assert_eq!(
+            f.list("README.md"),
+            Err(FilesError::NotFound("README.md".into()))
+        );
+        #[cfg(unix)]
+        {
+            let _sock = std::os::unix::net::UnixListener::bind(d.join("wt/sock")).unwrap();
+            assert!(f.list("").unwrap().iter().any(|e| e.name == "sock"));
+            assert_eq!(
+                f.read_file("sock"),
+                Err(FilesError::NotFound("sock".into()))
+            );
+        }
+        #[cfg(not(unix))]
+        let _ = d;
+    }
+
+    #[test]
     fn large_files_are_refused_without_being_read() {
         let (d, _) = setup();
         let f = Files::open(&d.join("wt"), 4).unwrap();
@@ -937,6 +976,40 @@ mod tests {
         f.write("fresh/dir/y.txt", b"y", &agent, &leases, 0)
             .unwrap();
         assert_eq!(f.read("fresh/dir/y.txt").unwrap(), b"y");
+    }
+
+    #[test]
+    fn a_link_that_never_resolves_is_outside_the_root_not_an_internal_error() {
+        // Issue #924: a link to itself, or a ring of links, never leads anywhere; it answers as a link that cannot be resolved does.
+        let (d, f) = setup();
+        let root = d.join("wt");
+        if agora_platform::symlink(Path::new("self"), &root.join("self")).is_err() {
+            return; // no symbolic links here (Windows without the privilege)
+        }
+        agora_platform::symlink(Path::new("ring-b"), &root.join("ring-a")).unwrap();
+        agora_platform::symlink(Path::new("ring-a"), &root.join("ring-b")).unwrap();
+        let (agent, leases) = (AgentId::new("a"), LeaseTable::new());
+        for rel in ["self", "ring-a", "self/x.txt", "ring-b/x.txt"] {
+            let outside = |r: Result<(), FilesError>| matches!(r, Err(FilesError::OutsideRoot(p)) if p == rel);
+            assert!(
+                outside(f.read(rel).map(drop)),
+                "read {rel}: {:?}",
+                f.read(rel)
+            );
+            assert!(
+                outside(f.list(rel).map(drop)),
+                "list {rel}: {:?}",
+                f.list(rel)
+            );
+            let wrote = f.write(rel, b"x", &agent, &leases, 0);
+            assert!(outside(wrote.clone()), "write {rel}: {wrote:?}");
+        }
+        // The links themselves are untouched, and a diff still shows a link as its target.
+        assert_eq!(fs::read_link(root.join("self")).unwrap(), Path::new("self"));
+        assert_eq!(
+            f.untracked("self").unwrap(),
+            Untracked::Link(b"self".to_vec())
+        );
     }
 
     #[cfg(unix)]

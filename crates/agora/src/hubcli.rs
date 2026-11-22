@@ -42,8 +42,13 @@ const HUB_CAPABILITIES: &[&str] = &[
     "agent.commands",
     // ADR-0090 Amendment A: the hub relays the `agent.skip_permissions` approval and its decision like any other (it cannot sign one).
     "approval.skip_permissions",
+    // ADR-0101: the hub relays the answers an agent offers (`ApprovalSnapshot.scopes`) and derives `AgentSnapshot.always_allowed`; it
+    // cannot sign an "always" answer.
+    "approval.always",
     // ADR-0091: `AgentQuotaObserved` (the plan windows of a subscription tool) is relayed to windows; the hub keeps nothing of it yet.
     "usage.quota",
+    // ADR-0095: the hub stamps `TaskDispatch.by_user`, counts each person's dispatches and relays `TaskDispatched` (a node offers it).
+    "task.dispatch",
     // ADR-0060
     "agent.resume",
     // ADR-0059
@@ -2820,5 +2825,34 @@ mod notify_tests {
         assert!(load_or_create_token(&path).is_err());
         assert_eq!(std::fs::read(&path).unwrap(), [0xff, 0xfe]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod password_message_tests {
+    use super::*;
+    use agora_i18n::Catalog;
+
+    /// #946 (RM-55): `agora password set|clear` count the sessions they signed out with a plural form, so one reads as one.
+    #[test]
+    fn the_signed_out_count_is_singular_for_one_session_and_plural_for_more() {
+        let en = Say(Catalog::english());
+        let tr = Say(Catalog::turkish());
+        for id in [key!("cli-password-set"), key!("cli-password-cleared")] {
+            let one = en.text(id, &[("count", 1i64.into())]);
+            assert!(one.ends_with(" 1 open session was signed out."), "{one}");
+            let two = en.text(id, &[("count", 2i64.into())]);
+            assert!(two.ends_with(" 2 open sessions were signed out."), "{two}");
+            let zero = en.text(id, &[("count", 0i64.into())]);
+            assert!(
+                zero.ends_with(" 0 open sessions were signed out."),
+                "{zero}"
+            );
+            let one = tr.text(id, &[("count", 1i64.into())]);
+            assert!(one.ends_with(" Açık bir oturum kapatıldı."), "{one}");
+            let two = tr.text(id, &[("count", 2i64.into())]);
+            assert!(two.ends_with(" Açık 2 oturum kapatıldı."), "{two}");
+        }
     }
 }

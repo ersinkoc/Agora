@@ -6,6 +6,7 @@ import type { QuotaObs } from './quota';
 import { SKIP_ACTION, skipOf, type SkipRequest } from './skipApproval';
 import { AGENT_COLOUR_NAMES } from '../themes/tokens';
 import { detailLaunchOptions, type StartOption } from './approval';
+import { ALWAYS_LIST_MAX, alwaysOffer, type AlwaysOffer } from './always';
 import { type AgentTileModel, type CommandModel, type ConfigCategory, type ConfigOptionModel, type SessionModel, type SessionOptionModel, type UiState, uiState } from '../model';
 
 type Ev = agora.v1.Event.$Properties;
@@ -34,6 +35,8 @@ export interface AgentV {
   interrupted?: InterruptedV; // ADR-0060: it was running when its machine stopped; cleared by its next start
   skipsPermissions?: boolean; // ADR-0059: started with an option that skips permissions, for its whole life
   hidden?: boolean; // ADR-0073: still running when its machine was forgotten; shown again only if still running when it comes back
+  // ADR-0101: the "always" answers its process holds (`AgentAlwaysAllowed`; the snapshot names actions only), newest last, at most 16.
+  alwaysAllowed?: { id: string; action: string }[];
 }
 export interface InterruptedV { resumable: boolean; atMs: number; folder: string; stillRunning?: boolean }
 
@@ -73,11 +76,19 @@ function addUsage(a: AgentV, u: Record<string, any>): void {
   a.session = s;
 }
 export interface CheckoutV { nodeId: string; projectId: string; path: string }
-export interface ApprovalV { agentId: string; action: string; detail: string; expiresAtMs: number }
+// ADR-0101: `scopes`, `alwaysLabel` and `alwaysOptionId` as the machine announced them (after its policy).
+export interface ApprovalV { agentId: string; action: string; detail: string; expiresAtMs: number; scopes?: number[]; alwaysLabel?: string; alwaysOptionId?: string }
+
+// ADR-0101: the always fields of a request as they came (nothing trimmed: an always answer is signed over them exactly).
+const alwaysFields = (p: { scopes?: readonly (number | null)[] | null; alwaysLabel?: string | null; alwaysOptionId?: string | null }): Pick<ApprovalV, 'scopes' | 'alwaysLabel' | 'alwaysOptionId'> =>
+  p.scopes?.length ? { scopes: p.scopes.map((x) => Number(x ?? 0)), alwaysLabel: p.alwaysLabel ?? '', alwaysOptionId: p.alwaysOptionId ?? '' } : {};
 
 export interface TaskV { projectId: string; title: string; ownerId: string; done: boolean }
 export interface LeaseV { agentId: string; path: string; expiresAtMs: number }
-export interface MessageV { from: string; to: string; body: string; atMs: number }
+// `producer` is the machine that recorded it; `paired` marks a copy already matched with its twin (#905). `via` is the machine whose
+// word alone names the sender: a copy recorded by another machine than the sender's (a receiver's, or a forged one) that neither the
+// sender's machine nor the hub has confirmed.
+export interface MessageV { from: string; to: string; body: string; atMs: number; producer?: string; paired?: boolean; via?: string }
 
 export interface View {
   pos: number;
@@ -141,6 +152,9 @@ export function fromSnapshot(s: agora.v1.Snapshot.$Properties): View {
       parentId: a.parentAgentId || undefined,
       ...(a.interrupted ? { interrupted: { resumable: !!a.resumable, atMs: num(a.interruptedAtMs), folder: a.folder ?? '', stillRunning: !!a.stillRunning }, sinceMs: num(a.interruptedAtMs) } : {}),
       skipsPermissions: !!a.skipsPermissions,
+      // #902: how a closed agent ended (`AgentSnapshot.exit_code`), so a reloaded window still shows one that failed as failed.
+      ...(!a.running && a.exitCode !== undefined && a.exitCode !== null ? { exitCode: a.exitCode } : {}),
+      ...(a.running && a.alwaysAllowed?.length ? { alwaysAllowed: a.alwaysAllowed.slice(-ALWAYS_LIST_MAX).map((action) => ({ id: '', action })) } : {}),
     });
     const modes = optionsOf(a.modes, true), models = optionsOf(a.models, false);
     const reported = a.costMicros !== undefined && a.costMicros !== null && !!a.currency;
@@ -162,7 +176,7 @@ export function fromSnapshot(s: agora.v1.Snapshot.$Properties): View {
   }
   for (const p of s.approvals ?? []) {
     v.approvals.set(p.approvalId ?? '', {
-      agentId: p.agentId ?? '', action: p.action ?? '', detail: p.detail ?? '', expiresAtMs: num(p.expiresAtMs),
+      agentId: p.agentId ?? '', action: p.action ?? '', detail: p.detail ?? '', expiresAtMs: num(p.expiresAtMs), ...alwaysFields(p),
     });
   }
   return v;
@@ -193,7 +207,7 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
       const b = e.nodeOnline;
       // The node's process started: what it ran before is gone, and its waiting approvals are lost.
       // F1421: an ended agent can be asked nothing; its settings and commands go, as after `agentExited` (a later snapshot has none).
-      for (const a of v.agents.values()) if (a.nodeId === b.nodeId && a.running) { a.running = false; a.state = 4 /* done */; if (a.session) a.session = { ...a.session, config: undefined, commands: undefined }; }
+      for (const a of v.agents.values()) if (a.nodeId === b.nodeId && a.running) { a.running = false; a.state = 4 /* done */; a.alwaysAllowed = undefined; if (a.session) a.session = { ...a.session, config: undefined, commands: undefined }; }
       for (const k of [...v.approvals.keys()]) if (k.startsWith(`${b.nodeId}/`)) v.approvals.delete(k);
       for (const k of [...v.withTerminal]) if (k.startsWith(`${b.nodeId}/`)) v.withTerminal.delete(k);
       const was = v.nodes.get(b.nodeId);
@@ -364,6 +378,7 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
       };
       a.running = false;
       a.state = 4 /* done */;
+      a.alwaysAllowed = undefined; // ADR-0101: the hub clears it too
       a.sinceMs = num(b.interruptedAtMs) || at;
       a.interrupted = { resumable: !!b.resumable, atMs: num(b.interruptedAtMs), folder: b.folder ?? '', stillRunning: !!b.stillRunning };
       if (a.session) a.session = { ...a.session, config: undefined, commands: undefined }; // F1421: ended, as the hub drops them
@@ -376,9 +391,22 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
       const a = v.agents.get(q(e.agentExited.agentId));
       if (a) {
         a.running = false; a.state = 4 /* done */; a.sinceMs = at; a.exitCode = e.agentExited.exitCode ?? 0;
+        // ADR-0101: an always answer lives in the agent's process.
+        a.alwaysAllowed = undefined;
         // ADR-0090: an ended agent can be asked nothing; its settings and commands are gone (the hub drops them too).
         if (a.session) a.session = { ...a.session, config: undefined, commands: undefined };
       }
+      break;
+    }
+    // ADR-0101: an agent that runs holds one more "always" answer (one it holds already, said again after a restart, changes nothing).
+    case 'agentAlwaysAllowed': {
+      const b = e.agentAlwaysAllowed;
+      const a = v.agents.get(q(b.agentId));
+      if (!a?.running) break;
+      const held = a.alwaysAllowed ?? [];
+      const id = b.approvalId ?? '';
+      if (id && held.some((h) => h.id === id)) break;
+      a.alwaysAllowed = [...held, { id, action: b.action ?? '' }].slice(-ALWAYS_LIST_MAX);
       break;
     }
     case 'terminalOpened':
@@ -386,7 +414,7 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
       break;
     case 'approvalRequested': {
       const b = e.approvalRequested;
-      v.approvals.set(q(b.approvalId), { agentId: q(b.agentId), action: b.action ?? '', detail: b.detail ?? '', expiresAtMs: num(b.expiresAtMs) });
+      v.approvals.set(q(b.approvalId), { agentId: q(b.agentId), action: b.action ?? '', detail: b.detail ?? '', expiresAtMs: num(b.expiresAtMs), ...alwaysFields(b) });
       break;
     }
     case 'approvalResolved':
@@ -395,7 +423,24 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
     case 'messagePosted': {
       const b = e.messagePosted;
       const to = String(b.to ?? '');
-      v.messages.push({ from: q(b.fromAgentId), to: to.includes('/') || to.startsWith('#') ? to : q(to), body: b.body ?? '', atMs: at });
+      const from = String(b.fromAgentId ?? '');
+      // #905: a message between machines is recorded by both: the sender's node (`to` is `<node>/<agent>`) and the receiver's,
+      // whose `from` is already the hub-wide `<origin>/<agent>` (ADR-0031), so it is not qualified again. Message ids are per node
+      // (ADR-0074), so the two copies are matched by sender, recipient and text from two machines, one with one: a message sent
+      // twice stays two rows. A node may write any `from`: one that names another machine's agent is shown with the machine that
+      // said so until the sender's machine or the hub (the shared board, which writes hub-wide ids) records the same message.
+      const qualified = from.includes('/');
+      const sender = qualified ? from : q(from);
+      const vouched = !qualified || producer === 'hub' || producer === sender.split('/')[0];
+      const m: MessageV = { from: sender, to: to.includes('/') || to.startsWith('#') ? to : q(to), body: b.body ?? '', atMs: at, producer, ...(vouched ? {} : { via: producer }) };
+      // Two copies nobody confirmed (a receiver's and one some other node wrote) never vouch for each other.
+      const twin = v.messages.find((x) => !x.paired && x.producer !== producer && (vouched || !x.via) && x.from === m.from && x.to === m.to && x.body === m.body);
+      if (twin) {
+        twin.paired = true;
+        if (vouched) delete twin.via;
+        break;
+      }
+      v.messages.push(m);
       if (v.messages.length > MAX_MESSAGES) v.messages.shift();
       break;
     }
@@ -482,6 +527,7 @@ export function tiles(v: View): AgentTileModel[] {
       parentId: a.parentId,
       interrupted: a.interrupted ? { resumable: a.interrupted.resumable, stillRunning: !!a.interrupted.stillRunning } : undefined,
       skipsPermissions: !!a.skipsPermissions,
+      ...(a.running && a.alwaysAllowed?.length ? { alwaysAllowed: a.alwaysAllowed.map((h) => h.action) } : {}),
     } as AgentTileModel;
   });
   const names = new Map(list.map((t) => [t.id, t.name]));
@@ -506,6 +552,7 @@ export interface ApprovalModel {
   start?: StartRequest; // ADR-0057: what an `agent.start` request asks for
   skip?: SkipRequest; // ADR-0090 Amendment A: what an `agent.skip_permissions` request says, read strictly
   skipUnknown?: boolean; // the action is that kind but the card is not the shape this window expects: nothing is signed
+  always?: AlwaysOffer; // ADR-0101: the request offers an answer the agent remembers (and maybe only that)
 }
 
 // An agent's request to start another (ADR-0057), read from the approval's detail. Every field is the asking agent's text: shown, never
@@ -579,6 +626,7 @@ export function approvalList(v: View): ApprovalModel[] {
         detail: a.detail,
         expiresAtMs: a.expiresAtMs,
         start: startRequest(a.action, a.detail),
+        ...(a.scopes ? (() => { const o = alwaysOffer(a.action, a.scopes, a.alwaysLabel ?? '', a.alwaysOptionId ?? ''); return o ? { always: o } : {}; })() : {}),
         ...skipFields(skipOf(a.action, a.detail, at < 0 ? '' : id.slice(0, at), a.agentId)),
       };
     })
@@ -640,7 +688,10 @@ export function projectChoices(v: View): ProjectChoice[] {
   return [...choices.values()].sort((a, b) => a.label.localeCompare(b.label));
 }
 
-export interface MessageModel { from: string; to: string; body: string; atMs: number; crossMachine: boolean }
+// `via`: the machine whose word alone says who sent it, when that is not the sender's machine (see `MessageV.via`). It is the
+// machine's id, which the hub checked against its certificate, never the host name the machine reports for itself: a node could
+// call itself after the sender's machine.
+export interface MessageModel { from: string; to: string; body: string; atMs: number; crossMachine: boolean; via?: string }
 
 // The newest messages first, with agent names instead of ids. A message between two machines says so.
 export function recentMessages(v: View, limit = 5): MessageModel[] {
@@ -650,10 +701,12 @@ export function recentMessages(v: View, limit = 5): MessageModel[] {
   return v.messages.slice(-limit).reverse().map((m) => ({
     from: label(m.from), to: label(m.to), body: m.body, atMs: m.atMs,
     crossMachine: m.to.includes('/') && machine(m.from) !== machine(m.to),
+    ...(m.via ? { via: m.via } : {}),
   }));
 }
 
-export interface BoardTaskModel { id: string; title: string; status: 'open' | 'claimed' | 'done'; owner: string; ownerState?: UiState; ownerSkips?: boolean; held?: string[] }
+// `id` is the board's key (`<project>/<task>`); `taskId` is the id the board and the node know.
+export interface BoardTaskModel { id: string; taskId?: string; title: string; status: 'open' | 'claimed' | 'done'; owner: string; ownerState?: UiState; ownerSkips?: boolean; held?: string[] }
 export interface BoardLeaseModel { path: string; holder: string; expiresAtMs: number }
 export interface BoardFolderModel { nodeId: string; machine: string; path: string }
 export interface BoardModel { projectId: string; project: string; folders: BoardFolderModel[]; tasks: BoardTaskModel[]; leases: BoardLeaseModel[] }
@@ -686,7 +739,7 @@ export function boards(v: View): BoardModel[] {
   for (const l of v.leases.values()) { const list = heldBy.get(l.agentId); if (list) list.push(l.path); else heldBy.set(l.agentId, [l.path]); }
   for (const [id, t] of v.tasks) {
     const owner = t.ownerId ? agents.get(t.ownerId) : undefined;
-    board(t.projectId).tasks.push({ id, title: t.title, status: t.done ? 'done' : t.ownerId ? 'claimed' : 'open', owner: t.ownerId ? label(t.ownerId) : '', ownerState: owner?.state, ownerSkips: owner?.skipsPermissions, held: t.ownerId ? heldBy.get(t.ownerId) ?? [] : [] });
+    board(t.projectId).tasks.push({ id, taskId: id.slice(t.projectId.length + 1), title: t.title, status: t.done ? 'done' : t.ownerId ? 'claimed' : 'open', owner: t.ownerId ? label(t.ownerId) : '', ownerState: owner?.state, ownerSkips: owner?.skipsPermissions, held: t.ownerId ? heldBy.get(t.ownerId) ?? [] : [] });
   }
   // A lease belongs to its holder's project.
   for (const l of v.leases.values()) {

@@ -42,6 +42,8 @@ use windows_sys::Win32::System::Threading::{
 };
 use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 
+pub(crate) const NULL_DEVICE: &str = "NUL";
+
 /// Only the owner of the pipe and the system may open it; nobody else on the machine, and nobody over the network.
 const OWNER_ONLY: &str = "D:P(A;;GA;;;OW)(A;;GA;;;SY)";
 
@@ -101,8 +103,8 @@ fn owner_only_descriptor(inherit: bool) -> io::Result<Descriptor> {
 pub(crate) fn open_private(dir: &Path, path: &Path, append: bool) -> io::Result<std::fs::File> {
     use std::os::windows::fs::OpenOptionsExt;
     use windows_sys::Win32::Storage::FileSystem::{
-        FILE_APPEND_DATA, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, READ_CONTROL,
-        SYNCHRONIZE, WRITE_DAC,
+        FILE_APPEND_DATA, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, READ_CONTROL, SYNCHRONIZE, WRITE_DAC,
     };
     let refuse = || io::Error::new(io::ErrorKind::InvalidInput, "a link");
     let held = hold_dir(dir)?;
@@ -117,8 +119,17 @@ pub(crate) fn open_private(dir: &Path, path: &Path, append: bool) -> io::Result<
     } else {
         windows_sys::Win32::Foundation::GENERIC_READ | GENERIC_WRITE
     };
+    // A lock file is not shared for delete: while it is open it can be neither renamed nor removed, so a process that judges the
+    // lock by the file alone (an older install lock that takes over a lock it cannot read) cannot move it from under its holder
+    // (review of audit F100). Every opener of a lock file shares read and write, so they still open it side by side.
+    let share = if append {
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE
+    } else {
+        FILE_SHARE_READ | FILE_SHARE_WRITE
+    };
     let file = std::fs::OpenOptions::new()
         .access_mode(data | WRITE_DAC | READ_CONTROL | FILE_READ_ATTRIBUTES | SYNCHRONIZE)
+        .share_mode(share)
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
         .open(path)?;
     let (links, reparse) = link_facts(&file)?;
@@ -350,6 +361,15 @@ fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
+/// The name cannot be resolved (`ERROR_CANT_RESOLVE_FILENAME`: too many levels of symbolic links), or resolving it stopped at a
+/// link (`ERROR_STOPPED_ON_SYMLINK`).
+pub(crate) fn link_loop(e: &io::Error) -> bool {
+    use windows_sys::Win32::Foundation::{ERROR_CANT_RESOLVE_FILENAME, ERROR_STOPPED_ON_SYMLINK};
+    e.raw_os_error().is_some_and(|code| {
+        code == ERROR_CANT_RESOLVE_FILENAME as i32 || code == ERROR_STOPPED_ON_SYMLINK as i32
+    })
+}
+
 fn os_error(code: u32) -> io::Error {
     io::Error::from_raw_os_error(code as i32)
 }
@@ -568,16 +588,37 @@ impl Listener {
     }
 
     pub fn accept(&self) -> io::Result<Stream> {
+        let wait = if self.nonblocking.load(Ordering::Acquire) {
+            0
+        } else {
+            INFINITE
+        };
         // Clients that left before they were accepted are skipped, however many there were.
         loop {
-            if let Some(s) = self.accept_once()? {
+            if let Some(s) = self.accept_once(wait)? {
                 return Ok(s);
             }
         }
     }
 
-    /// One accept; `None` when the instance's client had already left (the instance is reset for the next one).
-    fn accept_once(&self) -> io::Result<Option<Stream>> {
+    /// Waits up to `timeout` for the next client and returns it as soon as it connects; `None` when none came (or the one that came
+    /// had already left). The connect started here stays pending between calls, so a client arriving between two of them is
+    /// picked up by the next one. Ignores [`Self::set_nonblocking`].
+    pub fn accept_timeout(&self, timeout: Duration) -> io::Result<Option<Stream>> {
+        // Rounded up, so a wait shorter than a millisecond still waits instead of spinning; below INFINITE, which never ends.
+        let ms = timeout
+            .as_nanos()
+            .div_ceil(1_000_000)
+            .min(u128::from(INFINITE - 1)) as u32;
+        match self.accept_once(ms) {
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => Ok(None),
+            r => r,
+        }
+    }
+
+    /// One accept, waiting up to `wait_ms` for a client (`WouldBlock` when none came); `None` when the instance's client had
+    /// already left (the instance is reset for the next one).
+    fn accept_once(&self, wait_ms: u32) -> io::Result<Option<Stream>> {
         let mut st = self
             .state
             .lock()
@@ -613,13 +654,8 @@ impl Listener {
             let Some(p) = st.pending.as_ref() else {
                 return Err(io::Error::other("no pending connection"));
             };
-            let ms = if self.nonblocking.load(Ordering::Acquire) {
-                0
-            } else {
-                INFINITE
-            };
             // SAFETY: a live event handle.
-            let w = unsafe { WaitForSingleObject(p.event.0 .0, ms) };
+            let w = unsafe { WaitForSingleObject(p.event.0 .0, wait_ms) };
             if w == WAIT_TIMEOUT {
                 return Err(io::Error::from(io::ErrorKind::WouldBlock));
             }
@@ -663,9 +699,12 @@ impl Drop for Listener {
     }
 }
 
+/// How long a client waits for a free pipe instance while every one is busy (#974).
+const CONNECT_BUSY_LIMIT: Duration = Duration::from_secs(5);
+
 pub fn connect(path: &Path) -> io::Result<Stream> {
     let name = pipe_name(path);
-    let mut waited = false;
+    let end = std::time::Instant::now() + CONNECT_BUSY_LIMIT;
     loop {
         // SAFETY: valid NUL-terminated name; no attributes or template.
         let h = unsafe {
@@ -683,11 +722,18 @@ pub fn connect(path: &Path) -> io::Result<Stream> {
             return Stream::from_handle(Handle(h));
         }
         match unsafe { GetLastError() } {
-            // Every instance is serving someone: wait (once) for a free one.
-            ERROR_PIPE_BUSY if !waited => {
-                waited = true;
+            // Every instance is serving someone: wait for a free one. Clients that wait together all wake when one comes free and
+            // only one of them gets it, so the others wait again, until the limit (#974: one wait let all but about two of
+            // several clients connecting at once fail).
+            ERROR_PIPE_BUSY => {
+                let left = end.saturating_duration_since(std::time::Instant::now());
+                if left.is_zero() {
+                    return Err(os_error(ERROR_PIPE_BUSY));
+                }
+                // At least 1 ms: 0 would mean the pipe's own default wait.
+                let ms = u32::try_from(left.as_millis()).unwrap_or(u32::MAX).max(1);
                 // SAFETY: valid name.
-                unsafe { WaitNamedPipeW(name.as_ptr(), 2000) };
+                unsafe { WaitNamedPipeW(name.as_ptr(), ms) };
             }
             ERROR_FILE_NOT_FOUND => return Err(io::Error::from(io::ErrorKind::NotFound)),
             e => return Err(os_error(e)),
@@ -1573,6 +1619,64 @@ mod tests {
         // Two different socket files still get two pipes.
         assert_ne!(pipe_name(&p), pipe_name(&path("other")));
         drop(l);
+    }
+
+    #[test]
+    fn many_clients_connecting_at_once_all_get_through() {
+        // #974: a pipe has one pending instance; clients that found it busy waited once, so when several connected at once
+        // (the node routing six terminal subscriptions together) all but about two failed with os error 231.
+        let p = path("many");
+        let l = listen(&p).unwrap();
+        const N: usize = 8;
+        let server = std::thread::spawn(move || {
+            for _ in 0..N {
+                let s = l.accept().unwrap();
+                // What a real accept loop does between two accepts (hand the connection off, ...).
+                std::thread::sleep(Duration::from_millis(100));
+                drop(s);
+            }
+            l
+        });
+        let go = Arc::new(std::sync::Barrier::new(N));
+        let clients: Vec<_> = (0..N)
+            .map(|_| {
+                let p = p.clone();
+                let go = Arc::clone(&go);
+                std::thread::spawn(move || {
+                    go.wait();
+                    connect(&p).map_err(|e| e.to_string())
+                })
+            })
+            .collect();
+        // Every client keeps its connection until the server has taken all of them (one that left first is skipped by accept).
+        let results: Vec<_> = clients.into_iter().map(|c| c.join().unwrap()).collect();
+        let failed: Vec<_> = results.iter().filter_map(|r| r.as_ref().err()).collect();
+        assert!(
+            failed.is_empty(),
+            "{} of {N} failed: {failed:?}",
+            failed.len()
+        );
+        let _l = server.join().unwrap();
+    }
+
+    #[test]
+    fn a_client_waits_for_a_free_instance_only_up_to_the_limit() {
+        // #974: the bound of that wait. The one pending instance is taken by a client the server never accepts, so the next
+        // client finds every instance busy for good and fails with os error 231 after `CONNECT_BUSY_LIMIT`, not sooner or later.
+        let p = path("bound");
+        let _l = listen(&p).unwrap();
+        let _first = connect(&p).unwrap();
+        let t0 = std::time::Instant::now();
+        let second = connect(&p);
+        let waited = t0.elapsed();
+        assert_eq!(
+            second.err().and_then(|e| e.raw_os_error()),
+            Some(ERROR_PIPE_BUSY as i32)
+        );
+        assert!(
+            waited >= CONNECT_BUSY_LIMIT && waited < CONNECT_BUSY_LIMIT + Duration::from_secs(2),
+            "{waited:?}"
+        );
     }
 
     #[test]

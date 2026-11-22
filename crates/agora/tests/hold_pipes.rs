@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use agora_node::holder_link::{
     read_frame, socket_path, write_frame, AgentState, Client, LinkError, PipeData, Refusal, Reply,
-    Request, StartPipeRequest, LINK_VERSION, LINK_VERSION_PIPES, MAX_FRAME,
+    Request, StartPipeRequest, LINK_VERSION, LINK_VERSION_PIPES, MAX_AGENT_ID, MAX_FRAME,
 };
 
 const AGORA: &str = env!("CARGO_BIN_EXE_agora");
@@ -32,6 +32,12 @@ fn temp_home(tag: &str) -> PathBuf {
 struct Rig {
     home: PathBuf,
     holder: Child,
+}
+
+/// The holder makes its socket file a moment before it listens on it: a connection in between is refused (macOS answers
+/// `ECONNREFUSED`, #830). The node's own path retries it the same way (`HolderHub::open`); the rig waits for the file only.
+fn not_listening_yet(e: &std::io::Error) -> bool {
+    e.kind() == std::io::ErrorKind::ConnectionRefused
 }
 
 impl Rig {
@@ -68,6 +74,9 @@ impl Rig {
                 Err(LinkError::Refused(Refusal::Busy, _)) if Instant::now() < end => {
                     std::thread::sleep(Duration::from_millis(25));
                 }
+                Err(LinkError::Io(e)) if not_listening_yet(&e) && Instant::now() < end => {
+                    std::thread::sleep(Duration::from_millis(25));
+                }
                 Err(e) => panic!("connect: {e}"),
             }
         }
@@ -80,6 +89,9 @@ impl Rig {
             match Client::connect_with_version(&socket_path(&self.home), LINK_VERSION) {
                 Ok(c) => return c,
                 Err(LinkError::Refused(Refusal::Busy, _)) if Instant::now() < end => {
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+                Err(LinkError::Io(e)) if not_listening_yet(&e) && Instant::now() < end => {
                     std::thread::sleep(Duration::from_millis(25));
                 }
                 Err(e) => panic!("connect: {e}"),
@@ -308,7 +320,14 @@ fn oversize_and_garbage_frames_are_refused_and_the_holder_keeps_serving() {
     let raw = |rig: &Rig| {
         let end = Instant::now() + Duration::from_secs(10);
         loop {
-            let mut s = agora_platform::local_connect(&socket_path(&rig.home)).expect("connect");
+            let mut s = match agora_platform::local_connect(&socket_path(&rig.home)) {
+                Ok(s) => s,
+                Err(e) if not_listening_yet(&e) && Instant::now() < end => {
+                    std::thread::sleep(Duration::from_millis(25));
+                    continue;
+                }
+                Err(e) => panic!("connect: {e:?}"),
+            };
             write_frame(
                 &mut s,
                 &Request::Hello {
@@ -618,4 +637,42 @@ fn a_new_node_falls_back_to_version_one_against_a_holder_that_only_speaks_it() {
         [LINK_VERSION_PIPES, LINK_VERSION]
     );
     let _ = std::fs::remove_dir_all(home);
+}
+
+/// #929: a pipe agent's id is bounded as a terminal agent's: a longer one is refused on `StartPipe` and nothing starts; one at the
+/// bound starts, is listed, and is handed over by `AttachPipes`.
+#[test]
+fn a_pipe_agent_id_longer_than_the_bound_is_refused_and_one_at_the_bound_is_handed_over() {
+    let rig = Rig::new("idlen");
+    let mut c = rig.connect();
+    assert!(c.attach().expect("attach").is_empty());
+    for long in ["p".repeat(MAX_AGENT_ID + 1), "p".repeat(3 << 20)] {
+        match c.start_pipe(&pipe(&long, "echo up; sleep 600")) {
+            Err(LinkError::Refused(Refusal::BadRequest, _)) => {}
+            Err(e) => panic!("refused for another reason: {e}"),
+            Ok(pid) => {
+                let _ = c.stop(&long, true);
+                panic!("an id of {} bytes was started (pid {pid})", long.len());
+            }
+        }
+    }
+    assert!(c.list().expect("list").is_empty(), "nothing started");
+
+    let at = "q".repeat(MAX_AGENT_ID);
+    let pid = c
+        .start_pipe(&pipe(&at, "echo up; sleep 600"))
+        .expect("start");
+    read_until(&mut c, &at, "up");
+    let listed = c.list().expect("list");
+    assert_eq!(
+        (listed[0].agent.as_str(), listed[0].pid),
+        (at.as_str(), pid)
+    );
+    drop(c);
+    let mut c = rig.connect();
+    assert!(c.attach().expect("attach").is_empty());
+    let held = c.attach_pipes().expect("attach pipes");
+    assert_eq!(held.len(), 1);
+    assert_eq!(held[0].info.agent, at);
+    c.stop(&at, true).expect("stop");
 }
