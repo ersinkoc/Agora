@@ -974,19 +974,8 @@ fn holder(text: &str) -> Holder {
 
 impl Lock {
     fn acquire(agents: &Path) -> Result<Self, InstallError> {
-        let path = agents.join(".lock");
-        let mut file = match agora_platform::open_lock_private(&path) {
-            Ok(f) => f,
-            // An older version that ended between putting a lock back (`hard_link`) and removing the name it had moved it to left
-            // `.lock` with a second name, which the open refuses (`InvalidInput`). That name is only ever a `.lock.stale-*` one: it
-            // goes and the open is tried once more (review of audit F100). A second name of any other kind is still refused.
-            Err(e)
-                if e.kind() == io::ErrorKind::InvalidInput && remove_stale_lock_names(agents) =>
-            {
-                agora_platform::open_lock_private(&path).map_err(|e| io_err(&e))?
-            }
-            Err(e) => return Err(io_err(&e)),
-        };
+        let mut file =
+            open_lock(agents, &agora_platform::open_lock_private).map_err(|e| io_err(&e))?;
         let end = Instant::now() + LOCK_WAIT;
         loop {
             match file.try_lock() {
@@ -1019,18 +1008,31 @@ impl Drop for Lock {
     }
 }
 
-/// Removes the `.lock.stale-*` names older versions left in the agents folder; whether there was any.
-fn remove_stale_lock_names(agents: &Path) -> bool {
-    let mut any = false;
+/// Opens `<agents>/.lock` with `open` (the private open). An older version that ended between putting a lock back (`hard_link`) and
+/// removing the name it had moved it to left `.lock` with a second name, which the open refuses (`InvalidInput`). That name is only
+/// ever a `.lock.stale-*` one: those go and the open is tried once more (review of audit F100), also when this caller removed
+/// nothing, since another caller may have removed the name first (Codex's re-review of #934). A second name of any other kind is
+/// still refused. Opening is not holding: the system lock taken afterwards still admits one holder.
+fn open_lock(agents: &Path, open: &dyn Fn(&Path) -> io::Result<File>) -> io::Result<File> {
+    let path = agents.join(".lock");
+    match open(&path) {
+        Err(e) if e.kind() == io::ErrorKind::InvalidInput => {
+            remove_stale_lock_names(agents);
+            open(&path)
+        }
+        r => r,
+    }
+}
+
+/// Removes the `.lock.stale-*` names older versions left in the agents folder.
+fn remove_stale_lock_names(agents: &Path) {
     for e in std::fs::read_dir(agents).into_iter().flatten().flatten() {
         if e.file_name().to_string_lossy().starts_with(".lock.stale-")
             && std::fs::symlink_metadata(e.path()).is_ok_and(|m| m.is_file())
-            && std::fs::remove_file(e.path()).is_ok()
         {
-            any = true;
+            let _ = std::fs::remove_file(e.path());
         }
     }
-    any
 }
 
 /// Removes what a crashed install left: `.tmp-*` and `.lock.stale-*` in the agents folder and half-made launchers in `bin`.
@@ -1395,4 +1397,33 @@ fn run_verify(
 
 fn scrubbed_path() -> String {
     agora_platform::safe_search_path()
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod lock_open_tests {
+    use super::*;
+
+    /// Codex's re-review of #934: two callers both find `.lock` with a second name; the other one removes the `.lock.stale-*` name
+    /// first, so this caller's cleanup removes nothing. It must still open the lock again rather than fail with its first refusal.
+    #[test]
+    fn a_caller_whose_cleanup_found_the_old_name_already_gone_still_opens_the_lock() {
+        let agents = std::env::temp_dir().join(format!("agora-lock-open-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&agents);
+        std::fs::create_dir_all(&agents).unwrap();
+        // `.lock` has one name again (the other caller removed `.lock.stale-*`); this caller's first open had been refused.
+        std::fs::write(agents.join(".lock"), "").unwrap();
+        let first = std::cell::Cell::new(true);
+        let open = |p: &Path| {
+            if first.replace(false) {
+                Err(io::Error::new(io::ErrorKind::InvalidInput, "a link"))
+            } else {
+                agora_platform::open_lock_private(p)
+            }
+        };
+        // The file is closed before the folder goes (Windows cannot remove a lock file while it is open).
+        let opened = open_lock(&agents, &open).map(drop);
+        let _ = std::fs::remove_dir_all(&agents);
+        assert!(opened.is_ok(), "{opened:?}");
+    }
 }
